@@ -27,8 +27,10 @@ use mago_span::Span;
 use mago_syntax::cst::Access;
 use mago_syntax::cst::Argument;
 use mago_syntax::cst::ArrayElement;
+use mago_syntax::cst::ArrowFunction;
 use mago_syntax::cst::Assignment;
 use mago_syntax::cst::AssignmentOperator;
+use mago_syntax::cst::AttributeList;
 use mago_syntax::cst::Binary;
 use mago_syntax::cst::BinaryOperator;
 use mago_syntax::cst::BinaryPattern;
@@ -40,6 +42,7 @@ use mago_syntax::cst::Class;
 use mago_syntax::cst::ClassLikeConstant;
 use mago_syntax::cst::ClassLikeMember;
 use mago_syntax::cst::ClassLikeMemberSelector;
+use mago_syntax::cst::Closure;
 use mago_syntax::cst::ComparisonPattern;
 use mago_syntax::cst::CompositeString;
 use mago_syntax::cst::Conditional;
@@ -207,11 +210,13 @@ const OBJECT: &[u8] = b"Object";
 ///   whose type arguments are a parameter's types. Any other type, a type parameter, `List`, `Map` and `Class`
 ///   included, is not supported yet.
 /// - Attributes: on a class, an interface, an enum, an enum case, an event, a constant, a method, an interface method, a
-///   field, a property, a parameter and a lambda with its parameters in parentheses, written `[Name]` or
-///   `[Name(arguments)]`, several in one list, as in `[Field("Name"), Searchable]`, or in several lists. An argument
-///   is positional or named, and is a constant expression as a parameter default is, list and map literals included,
-///   or a `new` of a class by its name whose arguments are such values, as `check_attribute_object` decides. Anything
-///   else is an error that names the rule. PHP's own check reports a spread argument. An attribute target, as in `[return: NotNull]`, is a parse error.
+///   field, a property, an accessor, a parameter and a lambda with its parameters in parentheses, written `[Name]` or
+///   `[Name(arguments)]`, several in one list, as in `[Field("Name"), Searchable]`, or in several lists. A list may
+///   open with a target, as in `[param: Trimmed]`, which `check_attribute_target` checks, and an accessor PHP holds no
+///   hook or method for takes none, as `check_accessors` decides. An argument is positional or named, and is a
+///   constant expression as a parameter default is, list and map literals included, or a `new` of a class by its name
+///   whose arguments are such values, as `check_attribute_object` decides. Anything else is an error that names the
+///   rule. PHP's own check reports a spread argument. An attribute on a type parameter is a parse error.
 /// - A constant: an optional `public`, `protected` or `private`, an optional type from the types below but `void`, one
 ///   name, and a value as a parameter default is. Several names in one declaration are an error.
 /// - A field: an optional `private` or `protected`, an optional `static`, a type, one name and an optional initial
@@ -732,7 +737,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         }
         // `check_struct_declaration` reports every modifier but `public`. A struct's members are a class's.
         (Node::Modifier(modifier), Place::Struct) => matches!(modifier, Modifier::Public(_)).then_some(Place::Struct),
-        (Node::AttributeList(_), Place::Struct) => Some(Attribute),
+        (Node::AttributeList(list), Place::Struct) => check_attribute_target(list, context),
         (Node::ClassLikeMember(_), Place::Struct) => enter(node, Class, context),
         // The walk checks a class's, an interface's, an enum's and an event's name in `check_class_name`.
         (Node::Interface(_), File) => Some(Interface),
@@ -961,10 +966,10 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             Signature,
         ) => Some(Signature),
         (
-            Node::AttributeList(_),
+            Node::AttributeList(list),
             Class | Interface | Enum | Place::Event | ClassConstant | Method | Signature | FieldOrProperty | Parameter
             | Lambda,
-        ) => Some(Attribute),
+        ) => check_attribute_target(list, context),
         (
             Node::Attribute(_)
             | Node::PartialArgumentList(_)
@@ -2289,6 +2294,92 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
     }
 }
 
+/// Spec section 1: an attribute list's target, as `return:` in `[return: NotNull]`, names a part of its declaration,
+/// as C# allows: `type:` on a type, `method:` and `return:` on a method, a lambda or an accessor, `param:` on a
+/// parameter and on `set` or `init`, `field:` on a field, a constant, an enum case and a property with storage,
+/// `property:` on a property, and `property:` and `field:` on a constructor parameter that declares one. PHP holds
+/// each part but a return value, where it keeps no attributes.
+fn check_attribute_target(list: &AttributeList, context: &mut Context<'_, '_, '_>) -> Option<Place> {
+    let Some(target) = &list.target else {
+        return Some(Place::Attribute);
+    };
+    // The declaration that holds the list. The walk keeps no member on its ancestors, so the file names it.
+    let holds = |lists: &Sequence<AttributeList>| lists.iter().any(|held| held.span() == list.span());
+    let declaration = Node::Program(context.program).filter_map(|node| -> Option<(&str, &[&str])> {
+        match node {
+            Node::Class(class) if holds(&class.attribute_lists) => Some(("a class", &["type"])),
+            Node::Interface(interface) if holds(&interface.attribute_lists) => Some(("an interface", &["type"])),
+            Node::Enum(r#enum) if holds(&r#enum.attribute_lists) => Some(("an enum", &["type"])),
+            Node::Struct(r#struct) if holds(&r#struct.attribute_lists) => Some(("a struct", &["type"])),
+            Node::Event(event) if holds(&event.attribute_lists) => Some(("an event", &["type"])),
+            Node::Method(method) if holds(&method.attribute_lists) => Some(("a method", &["method", "return"])),
+            Node::Closure(Closure { attribute_lists, .. })
+            | Node::ArrowFunction(ArrowFunction { attribute_lists, .. })
+                if holds(attribute_lists) =>
+            {
+                Some(("a lambda", &["method", "return"]))
+            }
+            Node::ClassLikeConstant(constant) if holds(&constant.attribute_lists) => Some(("a constant", &["field"])),
+            Node::EnumCase(case) if holds(&case.attribute_lists) => Some(("an enum case", &["field"])),
+            Node::Property(Property::Plain(field)) if holds(&field.attribute_lists) => Some(("a field", &["field"])),
+            Node::Property(Property::Hooked(property)) if holds(&property.attribute_lists) => Some(
+                if context.names.has_storage(&property.hook_list)
+                    && !property.modifiers.contains_abstract()
+                    && !is_in_interface(context.program, property.span())
+                {
+                    ("a property", &["property", "field"])
+                } else {
+                    ("a property without storage", &["property"])
+                },
+            ),
+            Node::Property(Property::Computed(property)) if holds(&property.attribute_lists) => {
+                Some(("a property without storage", &["property"]))
+            }
+            Node::FunctionLikeParameter(parameter) if holds(&parameter.attribute_lists) => {
+                Some(if parameter.is_promoted_property() {
+                    ("a parameter that declares a property", &["param", "property", "field"])
+                } else {
+                    ("a parameter", &["param"])
+                })
+            }
+            Node::PropertyHook(accessor) if holds(&accessor.attribute_lists) => Some(if accessor.is_setter() {
+                ("`set` and `init`", &["method", "param", "return"])
+            } else {
+                ("`get`", &["method", "return"])
+            }),
+            _ => None,
+        }
+    });
+    let Some((declaration, targets)) = declaration.into_iter().next() else {
+        unreachable!("an attribute list is on a declaration `enter` places");
+    };
+
+    let written = BytesDisplay(target.name.value);
+    if !targets.iter().any(|named| named.as_bytes() == target.name.value) {
+        let targets: Vec<String> = targets.iter().map(|named| format!("`{named}:`")).collect();
+        context.report(
+            Issue::error(format!(
+                "`{written}:` names no part of {declaration}, whose targets are {}.",
+                targets.join(", ")
+            ))
+            .with_annotation(Annotation::primary(target.span()).with_message("Written here.")),
+        );
+
+        return None;
+    }
+    if target.name.value == b"return" {
+        context.report(
+            Issue::error("PHP keeps no attributes on a return value, so `return:` has nowhere to put them.")
+                .with_annotation(Annotation::primary(target.span()).with_message("Written here."))
+                .with_help("Put them on the declaration itself, with no target."),
+        );
+
+        return None;
+    }
+
+    Some(Place::Attribute)
+}
+
 /// Spec section 1: an attribute argument may create an object of a class it names, from arguments that are constants or
 /// more such objects, as PHP and Java's nested annotations take, and PHP creates it each time it reads the attribute. A
 /// named constructor, an object initializer and a spread run code there. PHP creates the object with no PHP# code to
@@ -2959,15 +3050,15 @@ fn check_property_parameter(
 
 /// Whether the slice has an interface property: a type, a name and `{ get; }` or `{ get; set; }`, which PHP runs as a
 /// public interface property its classes give, as an event's parameters give `OrderEvent`'s `orderId`, spec section
-/// 15. A class gives one stated with `set` a `set` too, which the analyzer checks. An access modifier, on the property
-/// or on an accessor, keeps it in the slice, and `enter` reports the modifier where the walk reaches it.
+/// 15. A class gives one stated with `set` a `set` too, which the analyzer checks. Each accessor may take attributes,
+/// which PHP keeps on its abstract hook, spec section 1. An access modifier, on the property or on an accessor, keeps
+/// it in the slice, and `enter` reports the modifier where the walk reaches it.
 fn is_interface_property(property: &HookedProperty) -> bool {
     let is_access = |modifier: &Modifier| {
         matches!(modifier, Modifier::Public(_) | Modifier::Protected(_) | Modifier::Private(_) | Modifier::Internal(_))
     };
     let is_stated = |accessor: &PropertyHook, name: &[u8]| {
         accessor.name.value == name
-            && accessor.attribute_lists.is_empty()
             && accessor.ampersand.is_none()
             && accessor.modifiers.iter().all(is_access)
             && accessor.parameter_list.is_none()
@@ -3327,8 +3418,40 @@ fn check_accessors(
             report_not_supported(
                 accessor.span(),
                 "accessor",
-                "A PHP# property's accessors are `get` and `set` or `init`, each written `;`, `=> expr;` or with a block body, and `set` and `init` may take `private`, `protected` or `internal`. The observers `willSet` and `didSet` take a body.",
+                "A PHP# property's accessors are `get` and `set` or `init`, each with optional attributes and written `;`, `=> expr;` or with a block body, and `set` and `init` may take `private`, `protected` or `internal`. The observers `willSet` and `didSet` take a body.",
                 context,
+            );
+        } else if let (Some(first), Some(last)) = (accessor.attribute_lists.first(), accessor.attribute_lists.last())
+            && !modifiers.contains_abstract()
+            && !accessors.hooks.iter().any(|hook| matches!(hook.body, PropertyHookBody::Concrete(_)))
+            && (accessors.is_readonly() || modifiers.contains_static())
+        {
+            let (runs_as, help) = if modifiers.contains_static() {
+                (
+                    "a static auto-property runs as a plain PHP static, which has no accessors",
+                    "Put the attribute on the property, or give an accessor a body.",
+                )
+            } else {
+                (
+                    "a get-only auto-property runs as a PHP `readonly` property, which takes no hooks",
+                    "Put the attribute on the property, or give the property `set` or `init`.",
+                )
+            };
+            context.report(
+                Issue::error(format!("`{}` has no place for an attribute: {runs_as}.", BytesDisplay(name)))
+                    .with_annotation(Annotation::primary(first.span().join(last.span())).with_message("Written here."))
+                    .with_help(help),
+            );
+        } else if accessor.is_observer()
+            && let (Some(first), Some(last)) = (accessor.attribute_lists.first(), accessor.attribute_lists.last())
+        {
+            let observer = BytesDisplay(name);
+            context.report(
+                Issue::error(format!(
+                    "`{observer}` runs inside the `set` accessor, so it has no place of its own for an attribute."
+                ))
+                .with_annotation(Annotation::primary(first.span().join(last.span())).with_message("Written here."))
+                .with_help("Put the attribute on `set`."),
             );
         } else if accessor.is_observer() && !accessors.hooks.iter().any(|hook| hook.name.value == b"set") {
             let observer = BytesDisplay(name);
@@ -3377,11 +3500,10 @@ fn check_accessors(
 }
 
 /// Whether the slice has an accessor: `get`, `set` or `init`, or an observer with a body, `willSet` or `didSet`
-/// (spec section 6.2), without attributes, `&` or a parameter list, where only `set` and `init` take an access
+/// (spec section 6.2), with optional attributes and without `&` or a parameter list, where only `set` and `init` take an access
 /// modifier, `private`, `protected`, `internal` or `public`, which `check_accessors` compares with the property's.
 fn is_slice_accessor(accessor: &PropertyHook) -> bool {
-    accessor.attribute_lists.is_empty()
-        && accessor.ampersand.is_none()
+    accessor.ampersand.is_none()
         && accessor.parameter_list.is_none()
         && match accessor.modifiers.as_slice() {
             [] if accessor.is_observer() => matches!(accessor.body, PropertyHookBody::Concrete(_)),

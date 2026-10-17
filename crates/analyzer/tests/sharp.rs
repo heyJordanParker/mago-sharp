@@ -16528,6 +16528,29 @@ fn a_misplaced_or_repeated_attribute_is_named_as_sharp_writes_it() {
     );
 }
 
+/// Spec section 1: an attribute target picks the PHP declaration a list lands on, so a `param:` attribute on `set` or
+/// on a promoted parameter checks against a parameter, and repeats only beside another on the same declaration. A
+/// property's `property:` and `field:` both land on its one PHP property.
+#[test]
+fn an_attribute_target_picks_the_declaration_php_checks_it_on() {
+    let field = "<?php\n\nnamespace Lib;\n\n#[\\Attribute(\\Attribute::TARGET_PROPERTY | \\Attribute::TARGET_METHOD)]\nfinal class Field\n{\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Field;\n\nclass Report\n{\n    public int count { get; [param: Field] [Field] set; } = 0;\n\n    [property: Field]\n    [field: Field]\n    public int total { get; set; } = 0;\n\n    public Report([param: Field] [property: Field] public int id { get; }) { }\n}\n";
+
+    let attribute_issues: Vec<String> = worded(("src/Demo/Report.sharp", sharp), &[("src/Lib/Field.php", field)])
+        .into_iter()
+        .filter(|line| line.contains(" invalid-attribute-target") || line.contains(" attribute-not-repeatable"))
+        .collect();
+
+    assert_eq!(
+        attribute_issues,
+        [
+            "7:37 invalid-attribute-target Attribute `Field` cannot be used on a parameter. | This attribute is not allowed here | `Field` defined here | The definition of `Field` restricts its use to the following targets: methods, properties. | Remove the `[Field]` attribute from this location, or update the `#[Attribute]` declaration on the `Field` class to include `a parameter` as a valid target.",
+            "10:13 attribute-not-repeatable Attribute `Field` is not declared as repeatable and has already been used. | Duplicate use of non-repeatable attribute `Field` | Attribute `Field` was first used here | The attribute `Field` is not declared repeatable, so it applies once to a given target. | Remove this duplicate `Field` attribute, or declare the attribute class `Field` repeatable.",
+            "13:27 invalid-attribute-target Attribute `Field` cannot be used on a parameter. | This attribute is not allowed here | `Field` defined here | The definition of `Field` restricts its use to the following targets: methods, properties. | Remove the `[Field]` attribute from this location, or update the `#[Attribute]` declaration on the `Field` class to include `a parameter` as a valid target.",
+        ]
+    );
+}
+
 /// An arithmetic message names its operand's type as PHP# writes it: an object by its short name, `Order`, and a
 /// nullable `int` as `int?`. The PHP twin keeps upstream's `Demo\Order` and `int|null`.
 #[test]

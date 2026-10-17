@@ -37,7 +37,7 @@ use crate::resolver::class_name::report_missing_class;
 use crate::utils::names::display_class_like_name;
 use crate::visibility::check_method_visibility;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum AttributeTarget {
     ClassLike,
@@ -119,10 +119,13 @@ fn analyze_attribute_lists<'ctx, 'arena, A>(
 where
     A: Arena,
 {
-    let attributes = attribute_lists.iter().flat_map(|list| list.attributes.iter()).collect::<Vec<_>>();
+    let attributes = attribute_lists
+        .iter()
+        .flat_map(|list| list.attributes.iter().map(move |attribute| (attribute, list_target(list, target))))
+        .collect::<Vec<_>>();
 
     let mut used_attributes = HashMap::default();
-    for attribute in attributes {
+    for (attribute, target) in attributes {
         let attribute_name_bytes = context.resolved_names.get(&attribute.name);
         // PHP names the attribute as the file resolves it, before any lookup corrects its case.
         let attribute_name = if context.dialect.is_sharp() {
@@ -219,7 +222,7 @@ where
             continue;
         };
 
-        if let Some(first_usage_span) = used_attributes.get(&attribute_name_bytes)
+        if let Some(first_usage_span) = used_attributes.get(&(target, attribute_name_bytes))
             && !attribute_flags.is_repeatable()
         {
             // The attribute class may be written in either dialect, so a PHP# message names no PHP code to add to it.
@@ -260,7 +263,7 @@ where
             );
         }
 
-        used_attributes.insert(attribute_name_bytes, attribute.name.span());
+        used_attributes.insert((target, attribute_name_bytes), attribute.name.span());
 
         if context.dialect.is_sharp()
             && attribute_name_bytes.eq_ignore_ascii_case(b"Sharp\\Key")
@@ -296,6 +299,17 @@ where
     }
 
     Ok(())
+}
+
+/// What a list of attributes on `declared` lands on in PHP, spec section 1: a `param:` one on the value `set` takes,
+/// and a promoted parameter's `param:` one on the parameter and `property:` or `field:` one on the property. Each other
+/// target names the declaration itself.
+fn list_target(list: &AttributeList, declared: AttributeTarget) -> AttributeTarget {
+    match (list.target.as_ref().map(|target| target.name.value), declared) {
+        (Some(b"param"), _) => AttributeTarget::Parameter,
+        (Some(b"property" | b"field"), AttributeTarget::PromotedProperty) => AttributeTarget::Property,
+        _ => declared,
+    }
 }
 
 /// Whether an attribute on `target` is on a parameter of the main constructor of a type with the `parse` spec section

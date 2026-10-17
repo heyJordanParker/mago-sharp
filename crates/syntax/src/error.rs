@@ -133,6 +133,12 @@ pub enum ParseError {
     /// A class name in parentheses before a value, as in `(Admin) user`, with the class and the value when it is a
     /// dotted name, at the whole cast. Spec section 24: a class or an interface narrows only with `as`.
     ClassCastInSharp(Box<str>, Option<Box<str>>, Span),
+    /// A PHP# attribute target written after the first attribute in its brackets, as in `[Cached, return: NotNull]`, at
+    /// the target and its colon. Spec section 1: a target opens its brackets, as in C#.
+    LateAttributeTargetInSharp(Span),
+    /// Attributes written on a PHP# type parameter, as in `<[Marker] T>`, at the attribute lists. PHP erases a type
+    /// parameter, so it has no place for them.
+    TypeParameterAttributesInSharp(Span),
 }
 
 impl HasFileId for SyntaxError {
@@ -183,7 +189,9 @@ impl HasFileId for ParseError {
             | ParseError::StructHeaderTypeInSharp(span)
             | ParseError::NamedConstructorTypeParametersInSharp(_, _, span)
             | ParseError::MiscasedKeywordInSharp(_, span)
-            | ParseError::ClassCastInSharp(_, _, span) => span.file_id,
+            | ParseError::ClassCastInSharp(_, _, span)
+            | ParseError::LateAttributeTargetInSharp(span)
+            | ParseError::TypeParameterAttributesInSharp(span) => span.file_id,
         }
     }
 }
@@ -238,7 +246,9 @@ impl HasSpan for ParseError {
             | ParseError::StructHeaderTypeInSharp(span)
             | ParseError::NamedConstructorTypeParametersInSharp(_, _, span)
             | ParseError::MiscasedKeywordInSharp(_, span)
-            | ParseError::ClassCastInSharp(_, _, span) => *span,
+            | ParseError::ClassCastInSharp(_, _, span)
+            | ParseError::LateAttributeTargetInSharp(span)
+            | ParseError::TypeParameterAttributesInSharp(span) => *span,
         }
     }
 }
@@ -420,6 +430,14 @@ impl std::fmt::Display for ParseError {
             ParseError::ClassCastInSharp(class, None, _) => {
                 format!("PHP# has no class casts: write the value, then `as {class}`.")
             }
+            ParseError::LateAttributeTargetInSharp(_) => {
+                "An attribute target opens its brackets and names where all of them go, as in `[return: NotNull]`."
+                    .to_string()
+            }
+            ParseError::TypeParameterAttributesInSharp(_) => {
+                "PHP erases a type parameter, so an attribute on it has nowhere to go: put it on the declaration that declares the type parameter."
+                    .to_string()
+            }
         };
 
         write!(f, "{message}")
@@ -485,7 +503,9 @@ impl From<&ParseError> for Issue {
             | ParseError::PartialTypeInSharp(..)
             | ParseError::StructHeaderTypeInSharp(..)
             | ParseError::MiscasedKeywordInSharp(..)
-            | ParseError::ClassCastInSharp(..) => Issue::error(error.to_string())
+            | ParseError::ClassCastInSharp(..)
+            | ParseError::LateAttributeTargetInSharp(..)
+            | ParseError::TypeParameterAttributesInSharp(..) => Issue::error(error.to_string())
                 .with_code(PARSE_ERROR_CODE)
                 .with_annotation(Annotation::primary(error.span()).with_message("Written here.")),
             // A generic class's static method takes the class's type arguments, so its help declares none of its own.

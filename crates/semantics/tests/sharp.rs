@@ -3080,6 +3080,33 @@ fn attributes_on_an_interface_its_property_an_event_a_constant_and_a_lambda_are_
     assert_eq!(issues(class), Vec::<String>::new());
 }
 
+/// Spec section 1: an attribute target names a part of its declaration, as C# allows, and PHP holds each part but a
+/// return value. An accessor takes attributes, and an observer, which runs inside `set`, takes none.
+#[test]
+fn an_attribute_target_names_a_part_of_its_declaration_and_an_accessor_takes_attributes() {
+    let code = "namespace App.Tenant;\n\n[type: Note]\npublic class Report\n{\n    [field: Note]\n    public const int MAX = 3;\n\n    [field: Note]\n    private int seen = 0;\n\n    [property: Note]\n    [field: Note]\n    public int count { [method: Note] get; [param: Note] [Note] set; } = 0;\n\n    public int size { [Note] get => 1; }\n\n    public Report([property: Note] [param: Note] public int id { get; }) { }\n\n    [method: Note]\n    public int run([param: Note] int extra) => extra;\n}\n";
+    assert_eq!(issues(code), Vec::<String>::new());
+
+    let code =
+        "namespace App.Tenant;\n\npublic interface Sized\n{\n    int size { [Note] get; [param: Note] set; }\n}\n";
+    assert_eq!(issues(code), Vec::<String>::new());
+
+    let code = "namespace App.Tenant;\n\n[method: Note]\npublic class Report\n{\n    [return: Note]\n    public int run() => 1;\n\n    [field: Note]\n    public int size { get => 1; }\n\n    public int count { get; [return: Note] set; didSet => this.run(); } = 0;\n\n    public int total { get; set; [Note] willSet => this.run(); } = 0;\n\n    public int scale([property: Note] int extra) => extra;\n\n    public int id { [Note] get; }\n\n    public static int sum { [Note] get; set; } = 0;\n}\n";
+    assert_eq!(
+        issues(code),
+        [
+            "3:2 `method:` names no part of a class, whose targets are `type:`.",
+            "6:6 PHP keeps no attributes on a return value, so `return:` has nowhere to put them.",
+            "9:6 `field:` names no part of a property without storage, whose targets are `property:`.",
+            "12:30 PHP keeps no attributes on a return value, so `return:` has nowhere to put them.",
+            "14:34 `willSet` runs inside the `set` accessor, so it has no place of its own for an attribute.",
+            "16:23 `property:` names no part of a parameter, whose targets are `param:`.",
+            "18:21 `get` has no place for an attribute: a get-only auto-property runs as a PHP `readonly` property, which takes no hooks.",
+            "20:29 `get` has no place for an attribute: a static auto-property runs as a plain PHP static, which has no accessors.",
+        ]
+    );
+}
+
 /// Spec section 1: an attribute argument is a constant or a `new` of constants, as PHP and Java's nested annotations
 /// take, and PHP builds the object each time it reads the attribute. Anything that runs code is an error that names the
 /// rule.

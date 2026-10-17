@@ -20838,6 +20838,45 @@ fn a_new_in_an_attribute_argument_lowers_to_the_new_php_takes_there() {
     );
 }
 
+/// ```php
+/// public int $count = 0 { #[\Lib\Field("get")] get => $this->count; #[\Lib\Field("set")] set(#[\Lib\Field("value")] int $value) { $this->count = $value; } }
+/// ```
+///
+/// Spec section 1: an accessor's attributes go on its hook, and a `param:` one on the value `set` takes, which the hook
+/// then declares. An auto accessor with attributes is the hook over the storage. A static property's accessor carries
+/// them on its hidden method, and a promoted parameter's `param:` ones stay on the parameter, beside the property
+/// that takes its `property:` ones.
+#[test]
+fn an_accessor_carries_its_attributes_on_its_hook_and_a_target_picks_the_part() {
+    let files = lowered_each(
+        &[(
+            "src/App/Report.sharp",
+            "namespace App;\n\nimport Lib.Field;\n\npublic class Report\n{\n    public int count { [Field(\"get\")] get; [param: Field(\"value\")] [Field(\"set\")] set; } = 0;\n\n    public static int total { [Field(\"read\")] get => 1; }\n\n    public Report([param: Field(\"in\")] [property: Field(\"kept\")] public int id { get; }) { }\n}\n",
+        )],
+        &[common::FIELD],
+    );
+
+    let attribute = |text: &str| {
+        format!(
+            "ATTRIBUTE_LIST\n  ATTRIBUTE_GROUP\n    ATTRIBUTE\n      ZVAL \"Lib\\\\Field\"\n      ARG_LIST\n        ZVAL {text:?}\n"
+        )
+    };
+    let member = |path: &[u32]| member_in(&files, "Report", path);
+    let hooks = [0, 1, 0, 3];
+
+    assert_eq!(
+        member(&[hooks.as_slice(), &[0, 2]].concat()),
+        "PROPERTY_HOOK_SHORT_BODY\n  PROP\n    VAR\n      ZVAL \"this\"\n    ZVAL \"count\"\n"
+    );
+    assert_eq!(member(&[hooks.as_slice(), &[0, 4]].concat()), attribute("get"));
+    assert_eq!(member(&[hooks.as_slice(), &[1, 4]].concat()), attribute("set"));
+    assert_eq!(member(&[hooks.as_slice(), &[1, 0, 0, 0]].concat()), "ZVAL [1] \"int\"\n");
+    assert_eq!(member(&[hooks.as_slice(), &[1, 0, 0, 3]].concat()), attribute("value"));
+    assert_eq!(member(&[1, 4]), attribute("read"));
+    assert_eq!(member(&[2, 2]), attribute("kept"));
+    assert_eq!(member(&[3, 0, 0, 3]), attribute("in"));
+}
+
 /// Spec section 1: an interface method carries its attributes as a class method does, and so does the trait method
 /// that runs its default body.
 #[test]

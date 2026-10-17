@@ -1646,11 +1646,13 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     has_constructor = true;
                     let promoted =
                         || method.parameter_list.parameters.iter().filter(|parameter| parameter.is_promoted_property());
-                    // A superglobal's name runs hidden as a parameter, and stays its own as the property.
+                    // A superglobal's name runs hidden as a parameter, and stays its own as the property. PHP gives a
+                    // promoted parameter's attributes to both, so a target, as `[param: Trimmed]`, needs both apart.
                     self.promoted_beside = promoted().any(|parameter| {
                         collection_hint(parameter.hint.as_ref()).is_some()
                             || runs_its_accessors(parameter)
                             || SUPERGLOBALS.contains(&parameter.variable.name)
+                            || parameter.attribute_lists.iter().any(|list| list.target.is_some())
                     });
                     if self.promoted_beside {
                         for parameter in promoted() {
@@ -2194,7 +2196,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let line = self.line(variable);
         let hint = property.hint.as_ref().map_or(NULL, |hint| self.hint(hint));
         let name = self.string(0, line, variable.name);
-        let hooks = self.abstract_hooks(&property.hook_list);
+        let hooks = self.abstract_hooks(property);
         let element = self.node(SHARP_AST_PROP_ELEM, 0, line, &[name, NULL, NULL, hooks]);
         let declaration = self.node(SHARP_AST_PROP_DECL, 0, line, &[element]);
         let attributes = self.attributes(&property.attribute_lists, None, None);
@@ -3187,7 +3189,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         };
         let variadic_flag = if parameter.is_variadic() { ZEND_PARAM_VARIADIC } else { 0 };
         let service = service.map(|service| self.service_attribute(line, service));
-        let attributes = self.attributes(&parameter.attribute_lists, None, service);
+        // The property a promoted parameter declares beside it takes its `property:` and `field:` attributes.
+        let lists: Vec<&AttributeList> =
+            parameter.attribute_lists.iter().filter(|list| list.target.is_none() || targets_value(list)).collect();
+        let attributes = self.attributes_of(&lists, None, service);
 
         self.node(
             SHARP_AST_PARAM,
@@ -3313,7 +3318,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             unreachable!("semantics refuses a method parameter without a type");
         };
         let hooks = match (&parameter.hooks, &parameter.behaviors) {
-            (Some(accessors), Some(behaviors)) => self.behavior_hooks(&parameter.variable, accessors, behaviors),
+            (Some(accessors), Some(behaviors)) => self.behavior_hooks(&parameter.variable, hint, accessors, behaviors),
             (accessors, _) => self.hooks(&parameter.variable, accessors.as_ref(), Some(hint)),
         };
         let line = self.line(parameter.variable.span);
@@ -3323,7 +3328,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let element = self.node(SHARP_AST_PROP_ELEM, 0, line, &[name, NULL, NULL, hooks]);
         let declaration = self.node(SHARP_AST_PROP_DECL, 0, line, &[element]);
         let crossing = self.crossing_attribute(parameter.hint.as_ref());
-        let attributes = self.attributes(&parameter.attribute_lists, None, crossing);
+        let lists: Vec<&AttributeList> = parameter.attribute_lists.iter().filter(|list| !targets_value(list)).collect();
+        let attributes = self.attributes_of(&lists, None, crossing);
 
         self.node(SHARP_AST_PROP_GROUP, flags, self.line(parameter), &[hint, declaration, attributes])
     }
@@ -3343,16 +3349,16 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             Property::Hooked(hooked) if hooked.modifiers.contains_abstract() => {
                 let flags = accessor_flags(&hooked.modifiers, &hooked.hook_list, self.names) & !ZEND_ACC_READONLY;
 
-                (flags, &hooked.attribute_lists, self.abstract_hooks(&hooked.hook_list))
+                (flags, &hooked.attribute_lists, self.abstract_hooks(hooked))
             }
             // A static property's accessors are its class's hidden static methods, which alone reach its storage, so
             // the storage is private whatever the property's access level, and plain PHP reaches it only through a
             // method.
             Property::Hooked(hooked) if runs_static_accessors(property) => (0, &hooked.attribute_lists, NULL),
-            Property::Hooked(hooked @ HookedProperty { behaviors: Some(behaviors), .. }) => (
+            Property::Hooked(hooked @ HookedProperty { behaviors: Some(behaviors), hint: Some(hint), .. }) => (
                 accessor_flags(&hooked.modifiers, &hooked.hook_list, self.names),
                 &hooked.attribute_lists,
-                self.behavior_hooks(hooked.item.variable(), &hooked.hook_list, behaviors),
+                self.behavior_hooks(hooked.item.variable(), hint, &hooked.hook_list, behaviors),
             ),
             Property::Hooked(hooked) => (
                 accessor_flags(&hooked.modifiers, &hooked.hook_list, self.names),
@@ -3420,10 +3426,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// are no hooks of their own: they run inside the `set` hook, which an auto `set` beside one always has. The `set`
     /// hook of a `Map` or a `Set`, whose type `holds` names, also takes the PHP array plain PHP writes, and the body
     /// first crosses it, as a parameter's is.
+    /// Each hook carries its accessor's attributes, spec section 1, so an auto accessor with attributes is the hook
+    /// over the storage too.
     fn hooks(&mut self, variable: &DirectVariable, accessors: Option<&PropertyHookList>, holds: Option<&Hint>) -> u32 {
-        let Some(accessors) = accessors.filter(|accessors| {
-            accessors.hooks.iter().any(|accessor| matches!(accessor.body, PropertyHookBody::Concrete(_)))
-        }) else {
+        let Some(accessors) = accessors.filter(|accessors| has_hooks(accessors)) else {
             return NULL;
         };
 
@@ -3436,7 +3442,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 let observed = accessor.is_setter() && (will_set.is_some() || did_set.is_some());
                 let mut body = match &accessor.body {
                     PropertyHookBody::Concrete(body) => lowering.accessor_body(accessor.name.value, body),
-                    PropertyHookBody::Abstract(_) if uses_field && !observed => continue,
+                    PropertyHookBody::Abstract(_) if uses_field && !observed && accessor.attribute_lists.is_empty() => {
+                        continue;
+                    }
                     PropertyHookBody::Abstract(_) => lowering.storage_body(accessor),
                 };
                 if observed {
@@ -3445,24 +3453,20 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 let mut parameters = NULL;
                 if accessor.is_setter()
                     && let Some(hint) = holds
-                    && let Some(nullable) = collection_hint(holds)
                 {
-                    let (span, line) = (accessor.name.span, lowering.line(accessor));
-                    let lowered = lowering.hint(hint);
-                    let accepted = lowering.table_or_array(lowered, nullable);
-                    let value = lowering.string(0, line, b"value");
-                    let parameter = lowering.node(SHARP_AST_PARAM, 0, line, &[accepted, value, NULL, NULL, NULL, NULL]);
-                    parameters = lowering.node(SHARP_AST_PARAM_LIST, 0, line, &[parameter]);
-                    let r#type = lowering.hint_type(hint);
-                    let first = lowering.variable(span, b"value");
-                    let crossed = lowering.crossed(span, &r#type, b"value", first);
-                    let place = lowering.variable(span, b"value");
-                    let crossing = lowering.node(SHARP_AST_ASSIGN, 0, line, &[place, crossed]);
-                    body = lowering.node(SHARP_AST_STMT_LIST, 0, line, &[crossing, body]);
+                    let collection = collection_hint(holds);
+                    parameters = lowering.setter_parameters(accessor, variable, hint, collection);
+                    if collection.is_some() {
+                        let (span, line) = (accessor.name.span, lowering.line(accessor));
+                        let r#type = lowering.hint_type(hint);
+                        let first = lowering.variable(span, b"value");
+                        let crossed = lowering.crossed(span, &r#type, b"value", first);
+                        let place = lowering.variable(span, b"value");
+                        let crossing = lowering.node(SHARP_AST_ASSIGN, 0, line, &[place, crossed]);
+                        body = lowering.node(SHARP_AST_STMT_LIST, 0, line, &[crossing, body]);
+                    }
                 }
-                // An `init` body is the `set` hook, and the property's set visibility keeps it to object creation.
-                let name = if accessor.is_setter() { b"set".as_slice() } else { accessor.name.value };
-                hooks.push(lowering.hook(name, accessor.name, accessor, parameters, body));
+                hooks.push(lowering.accessor_hook(accessor, parameters, body));
             }
 
             lowering.node(SHARP_AST_STMT_LIST, 0, lowering.line(accessors), &hooks)
@@ -3471,14 +3475,77 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
     /// The hooks of an interface property or an abstract one: each accessor is a hook with no body, as php-src's
     /// grammar builds `{ get; set; }`. An `init` is the `set` hook, as it is on a property with a body.
-    fn abstract_hooks(&mut self, accessors: &PropertyHookList) -> u32 {
+    fn abstract_hooks(&mut self, property: &HookedProperty) -> u32 {
+        let Some(hint) = &property.hint else {
+            unreachable!("the PHP# parser gives every property its type");
+        };
         let mut hooks = Vec::new();
-        for accessor in &accessors.hooks {
-            let name = if accessor.is_setter() { b"set".as_slice() } else { accessor.name.value };
-            hooks.push(self.hook(name, accessor.name, accessor, NULL, NULL));
+        for accessor in &property.hook_list.hooks {
+            let parameters = if accessor.is_setter() {
+                self.setter_parameters(accessor, property.item.variable(), hint, None)
+            } else {
+                NULL
+            };
+            hooks.push(self.accessor_hook(accessor, parameters, NULL));
         }
 
-        self.node(SHARP_AST_STMT_LIST, 0, self.line(accessors), &hooks)
+        self.node(SHARP_AST_STMT_LIST, 0, self.line(&property.hook_list), &hooks)
+    }
+
+    /// The hook of `accessor` with `parameters` and `body`, which carries the accessor's attributes but those of its
+    /// `param:` target, [`Self::setter_parameters`]'s. An `init` is the `set` hook, and the property's set visibility
+    /// keeps it to object creation.
+    fn accessor_hook(&mut self, accessor: &PropertyHook, parameters: u32, body: u32) -> u32 {
+        let name = if accessor.is_setter() { b"set".as_slice() } else { accessor.name.value };
+        let attributes = self.accessor_attributes(accessor, false);
+
+        self.declaration(
+            SHARP_AST_PROPERTY_HOOK,
+            0,
+            accessor.name,
+            accessor,
+            name,
+            &[parameters, NULL, body, NULL, attributes],
+        )
+    }
+
+    /// The attributes of `accessor` that go on the value it takes, `param:` ones, when `of_value`, or else the rest,
+    /// which go on its hook or its method.
+    fn accessor_attributes(&mut self, accessor: &PropertyHook, of_value: bool) -> u32 {
+        let lists: Vec<&AttributeList> =
+            accessor.attribute_lists.iter().filter(|list| targets_value(list) == of_value).collect();
+
+        self.attributes_of(&lists, None, None)
+    }
+
+    /// The parameter list of the `set` hook of `setter`, the setter of the property `variable` written `hint`, or
+    /// null for the `$value` PHP gives it: a `Map` or a `Set`, which `collection` says is nullable or not, takes the
+    /// PHP array plain PHP writes too, and a `param:` attribute, as in `[param: Trimmed] set;`, goes on the parameter,
+    /// which takes the property's type.
+    fn setter_parameters(
+        &mut self,
+        setter: &PropertyHook,
+        variable: &DirectVariable,
+        hint: &Hint,
+        collection: Option<bool>,
+    ) -> u32 {
+        if !setter.attribute_lists.iter().any(targets_value) && collection.is_none() {
+            return NULL;
+        }
+
+        let line = self.line(setter);
+        let accepted = match collection {
+            Some(nullable) => {
+                let lowered = self.hint(hint);
+                self.table_or_array(lowered, nullable)
+            }
+            None => self.php_property_type(hint, variable.name, line),
+        };
+        let value = self.string(0, line, b"value");
+        let attributes = self.accessor_attributes(setter, true);
+        let parameter = self.node(SHARP_AST_PARAM, 0, line, &[accepted, value, NULL, attributes, NULL, NULL]);
+
+        self.node(SHARP_AST_PARAM_LIST, 0, line, &[parameter])
     }
 
     /// `lowered`, the lowered value, checked against the type text `text` once it enters PHP# from plain PHP, with
@@ -3668,6 +3735,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     fn behavior_hooks(
         &mut self,
         variable: &DirectVariable,
+        hint: &Hint,
         accessors: &PropertyHookList,
         behaviors: &PropertyBehaviorList,
     ) -> u32 {
@@ -3693,7 +3761,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 read = call(lowering, index, b"get", read);
             }
             let read = lowering.node(SHARP_AST_PROPERTY_HOOK_SHORT_BODY, 0, line, &[read]);
-            let get = lowering.hook(b"get", getter.name, getter, NULL, read);
+            let get = lowering.accessor_hook(getter, NULL, read);
 
             let mut written = lowering.variable(setter.name.span, b"value");
             for index in 0..count {
@@ -3702,7 +3770,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             let storage = lowering.storage(line, PlaceUse::Write);
             let store = lowering.node(SHARP_AST_ASSIGN, 0, line, &[storage, written]);
             let store = lowering.node(SHARP_AST_STMT_LIST, 0, line, &[store]);
-            let set = lowering.hook(b"set", setter.name, setter, NULL, store);
+            let parameters = lowering.setter_parameters(setter, variable, hint, None);
+            let set = lowering.accessor_hook(setter, parameters, store);
 
             lowering.node(SHARP_AST_STMT_LIST, 0, lowering.line(accessors), &[get, set])
         })
@@ -3775,6 +3844,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         r#override: Option<&Modifier>,
         added: Option<u32>,
     ) -> u32 {
+        self.attributes_of(&lists.iter().collect::<Vec<_>>(), r#override, added)
+    }
+
+    /// The attributes of `lists`, some of a declaration's, as [`Self::attributes`] lowers them all.
+    fn attributes_of(&mut self, lists: &[&AttributeList], r#override: Option<&Modifier>, added: Option<u32>) -> u32 {
         let line = match (lists.first(), r#override, added) {
             (Some(first), _, _) => self.line(first),
             (None, Some(r#override), _) => self.line(r#override),
@@ -3783,7 +3857,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         };
 
         let mut groups = Vec::new();
-        for list in lists {
+        for &list in lists {
             let mut attributes = Vec::new();
             for attribute in &list.attributes {
                 let line = self.line(attribute.name);
@@ -3954,8 +4028,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 }
             };
             let return_type = lowering.hint(hint);
+            let attributes = getter.map_or(NULL, |getter| lowering.accessor_attributes(getter, false));
 
-            lowering.accessor_method(variable, b"get", read_visibility, &[], body, return_type)
+            lowering.accessor_method(variable, b"get", read_visibility, &[], body, return_type, attributes)
         });
         members.push(get);
 
@@ -3985,9 +4060,12 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             };
             let accepted = lowering.hint(hint);
             let value = lowering.string(0, line, b"value");
-            let parameter = lowering.node(SHARP_AST_PARAM, 0, line, &[accepted, value, NULL, NULL, NULL, NULL]);
+            let value_attributes = lowering.accessor_attributes(setter, true);
+            let parameter =
+                lowering.node(SHARP_AST_PARAM, 0, line, &[accepted, value, NULL, value_attributes, NULL, NULL]);
+            let attributes = lowering.accessor_attributes(setter, false);
 
-            lowering.accessor_method(variable, b"set", write_visibility, &[parameter], body, NULL)
+            lowering.accessor_method(variable, b"set", write_visibility, &[parameter], body, NULL, attributes)
         });
         members.push(set);
         self.static_type_parameters = None;
@@ -4125,7 +4203,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// The hidden static method `name#get` or `name#set` of the static property `variable`, with the visibility
-    /// `visibility` and `parameters`, spanning the property's name. In a generic class its parameter list ends with
+    /// `visibility`, `parameters` and the accessor's `attributes`, spanning the property's name. In a generic class its parameter list ends with
     /// the class's bounds, as any static method of the class does.
     fn accessor_method(
         &mut self,
@@ -4135,6 +4213,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         parameters: &[u32],
         body: u32,
         return_type: u32,
+        attributes: u32,
     ) -> u32 {
         let line = self.line(variable);
         let mut parameters = parameters.to_vec();
@@ -4151,7 +4230,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             variable.span,
             variable.span,
             &name,
-            &[parameters, NULL, body, return_type, NULL],
+            &[parameters, NULL, body, return_type, attributes],
         )
     }
 
@@ -4318,12 +4397,18 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// checks each write against where PHP's type checks less. An override of a typed plain PHP property runs with the
     /// type the parent declares, spec section 6.1, and its text checks its own type.
     fn property_type(&mut self, hint: &Hint, property: &[u8], line: u32) -> u32 {
-        let php_type = match self.types.narrowed_root_type(self.class, property) {
-            Some(root) => self.declared_type(root, line),
-            None => self.hint(hint),
-        };
+        let php_type = self.php_property_type(hint, property, line);
 
         self.property_hint(php_type, property, line)
+    }
+
+    /// The PHP type of the property `property`, which PHP# declares with the type `hint`, the type the parent declares
+    /// for an override of a typed plain PHP property, as [`Self::property_type`] has it without its type text.
+    fn php_property_type(&mut self, hint: &Hint, property: &[u8], line: u32) -> u32 {
+        match self.types.narrowed_root_type(self.class, property) {
+            Some(root) => self.declared_type(root, line),
+            None => self.hint(hint),
+        }
     }
 
     /// The node of `r#type`, a type plain PHP declares, so it holds only PHP's own types: each as [`Self::php_type`]
@@ -8798,13 +8883,24 @@ fn holds_entries(r#type: &TUnion) -> bool {
     })
 }
 
-/// Whether the property a constructor parameter declares runs its writes through its accessors: an accessor body, an
-/// observer or a behavior, spec section 9, which the constructor's write of the argument runs.
+/// Whether the property a constructor parameter declares runs its writes through its accessors: a hook, an observer
+/// or a behavior, spec section 9, which the constructor's write of the argument runs.
 fn runs_its_accessors(parameter: &FunctionLikeParameter) -> bool {
-    parameter.behaviors.is_some()
-        || parameter.hooks.as_ref().is_some_and(|accessors| {
-            accessors.hooks.iter().any(|accessor| matches!(accessor.body, PropertyHookBody::Concrete(_)))
-        })
+    parameter.behaviors.is_some() || parameter.hooks.as_ref().is_some_and(has_hooks)
+}
+
+/// Whether an instance property with `accessors` has PHP hooks: an accessor with a body, which observers are, or with
+/// attributes, which PHP keeps on its hook, spec section 1.
+fn has_hooks(accessors: &PropertyHookList) -> bool {
+    accessors
+        .hooks
+        .iter()
+        .any(|accessor| matches!(accessor.body, PropertyHookBody::Concrete(_)) || !accessor.attribute_lists.is_empty())
+}
+
+/// Whether `list` targets the value a parameter or a `set` takes, as `param:` in `[param: Trimmed]`, spec section 1.
+fn targets_value(list: &AttributeList) -> bool {
+    list.target.as_ref().is_some_and(|target| target.name.value == b"param")
 }
 
 /// Whether `hint`, a parameter's or a property's type, is a `Map` or a `Set`, which plain PHP gives as a PHP array, as

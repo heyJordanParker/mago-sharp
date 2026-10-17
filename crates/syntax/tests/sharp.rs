@@ -3718,27 +3718,76 @@ fn php_attribute_syntax_is_a_parse_error_that_names_the_brackets() {
     assert_eq!(attribute_lists(CODE, Node::Program(program)), ["#[Marker]"; 3]);
 }
 
+/// Spec section 1: an accessor takes attributes, as in `{ [Pure] get; set; }`, where `[` never opens a type. A type
+/// parameter's attributes are a parse error that says PHP erases it.
 #[test]
-fn an_attribute_target_is_not_supported_yet() {
-    const CODE: &str = "class Report\n{\n    [return: NotNull]\n    public string run() { return \"\"; }\n}\n";
+fn an_accessor_takes_attributes_and_a_type_parameter_takes_none() {
+    const CODE: &str =
+        "class Report<[Marker] TItem>\n{\n    public int count { [Pure] get; [Logged, Checked] set; } = 0;\n}\n";
     let arena = LocalArena::new();
     let program = parse(&arena, "src/Report.sharp", CODE);
 
-    let [error] = program.errors else {
-        panic!("expected one error, got {:#?}", program.errors);
+    let messages: Vec<(String, &str)> =
+        program.errors.iter().map(|error| (error.to_string(), source(CODE, error))).collect();
+    assert_eq!(
+        messages,
+        [(
+            "PHP erases a type parameter, so an attribute on it has nowhere to go: put it on the declaration that declares the type parameter."
+                .to_owned(),
+            "[Marker]"
+        )]
+    );
+    let Some(ClassLikeMember::Property(Property::Hooked(count))) = class_members(program).first() else {
+        panic!("expected a property, got {:#?}", class_members(program));
     };
-    assert_eq!(error.to_string(), "An attribute target is not supported yet in PHP#.");
-    assert_eq!(source(CODE, error), "return:");
+    let accessors: Vec<(&str, Vec<&str>)> = count
+        .hook_list
+        .hooks
+        .iter()
+        .map(|accessor| {
+            (source(CODE, &accessor.name), accessor.attribute_lists.iter().map(|list| source(CODE, list)).collect())
+        })
+        .collect();
+    assert_eq!(accessors, [("get", vec!["[Pure]"]), ("set", vec!["[Logged, Checked]"])]);
+}
+
+/// Spec section 1: an attribute target, as C# writes it, opens its brackets and names where every attribute in them
+/// goes, as `return:` in `[return: NotNull, Pure]`. A target after the first attribute is a parse error, as in C#.
+#[test]
+fn an_attribute_target_opens_its_brackets() {
+    const CODE: &str = "class Report\n{\n    [return: NotNull, Pure]\n    [method: Logged]\n    [Cached]\n    public string run() { return \"\"; }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Report.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
     let Some(ClassLikeMember::Method(run)) = class_members(program).first() else {
         panic!("expected a method, got {:#?}", class_members(program));
     };
-    let names: Vec<&[u8]> = run
+    let lists: Vec<(Option<&str>, Vec<&str>)> = run
         .attribute_lists
         .iter()
-        .flat_map(|list| list.attributes.iter())
-        .map(|attribute| attribute.name.value())
+        .map(|list| {
+            let target = list.target.as_ref().map(|target| source(CODE, &target.name));
+            (target, list.attributes.iter().map(|attribute| source(CODE, attribute)).collect())
+        })
         .collect();
-    assert_eq!(names, [&b"NotNull"[..]]);
+    assert_eq!(
+        lists,
+        [(Some("return"), vec!["NotNull", "Pure"]), (Some("method"), vec!["Logged"]), (None, vec!["Cached"])]
+    );
+
+    const LATE: &str = "class Report\n{\n    [Cached, return: NotNull]\n    public string run() { return \"\"; }\n}\n";
+    let program = parse(&arena, "src/Report.sharp", LATE);
+    let messages: Vec<(String, &str)> =
+        program.errors.iter().map(|error| (error.to_string(), source(LATE, error))).collect();
+    assert_eq!(
+        messages,
+        [(
+            "An attribute target opens its brackets and names where all of them go, as in `[return: NotNull]`."
+                .to_owned(),
+            "return:"
+        )]
+    );
 }
 
 /// `typeof` takes any type, spec section 25: a class by its short name, a class value of a generic class with its type
