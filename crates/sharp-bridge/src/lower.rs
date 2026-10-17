@@ -4077,21 +4077,29 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
     /// The type `union`, a union or one type, with null added when `question_mark` is the `?` that adds it.
     fn union(&mut self, union: &Hint, question_mark: Option<Span>) -> u32 {
+        let members = union_members(union).into_iter().map(|member| (self.erase(member), self.line(member))).collect();
+        let null_line = question_mark.map(|question_mark| self.line(question_mark));
+
+        self.php_union(members, null_line)
+    }
+
+    /// The union of the PHP types `members`, each on its line, with null on `null_line` when it is set, as
+    /// [`Lowering::hint`] writes it.
+    fn php_union(&mut self, members: Vec<(PhpType, u32)>, null_line: Option<u32>) -> u32 {
         let mut types: Vec<(PhpType, u32)> = Vec::new();
-        for member in union_members(union) {
-            let php_type = self.erase(member);
+        for (php_type, line) in members {
             if types.iter().any(|(kept, _)| kept.holds(&php_type)) {
                 continue;
             }
 
             types.retain(|(kept, _)| !php_type.holds(kept));
-            types.push((php_type, self.line(member)));
+            types.push((php_type, line));
         }
 
         let mut nodes: Vec<u32> = types.iter().map(|(php_type, line)| self.php_type(php_type, *line)).collect();
-        let question_mark = question_mark.filter(|_| !matches!(types.as_slice(), [(PhpType::Mixed, _)]));
+        let null_line = null_line.filter(|_| !matches!(types.as_slice(), [(PhpType::Mixed, _)]));
         if let [single] = nodes[..] {
-            if question_mark.is_none() {
+            if null_line.is_none() {
                 return single;
             }
 
@@ -4102,8 +4110,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             }
         }
 
-        if let Some(question_mark) = question_mark {
-            nodes.push(self.string(ZEND_NAME_NOT_FQ, self.line(question_mark), b"null"));
+        if let Some(null_line) = null_line {
+            nodes.push(self.string(ZEND_NAME_NOT_FQ, null_line, b"null"));
         }
         let line = self.nodes[nodes[0] as usize].line;
 
@@ -6001,10 +6009,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
     /// The type PHP writes for a parameter of the PHP# type `r#type`, so a plain PHP library that reads a callback's
     /// parameter types sees them: `int`, `float`, `bool`, `string`, a class, or `\Closure` for a function type, and
-    /// unions and `?` of those. A type with any other part, such as a collection, which runs as an array or an object,
-    /// or `Any`, gets none, as a lambda's parameter that writes no type gets none.
+    /// unions and `?` of those, as [`Lowering::php_union`] writes a declared type. A type with any other part, such as
+    /// a collection, which runs as an array or an object, or `Any`, gets none, as a lambda's parameter that writes no
+    /// type gets none.
     fn parameter_type(&mut self, line: u32, r#type: &TUnion) -> u32 {
-        let mut types: Vec<PhpType> = Vec::new();
+        let mut members = Vec::new();
         for atomic in r#type.types.iter() {
             let php_type = match atomic {
                 TAtomic::Null => continue,
@@ -6016,28 +6025,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 TAtomic::Callable(_) => PhpType::Classes(vec![b"Closure"]),
                 _ => return NULL,
             };
-            if !types.iter().any(|kept| kept.holds(&php_type)) {
-                types.push(php_type);
-            }
+            members.push((php_type, line));
         }
 
-        let mut nodes: Vec<u32> = types.iter().map(|php_type| self.php_type(php_type, line)).collect();
-        match nodes.as_slice() {
-            [] => NULL,
-            [single] if !r#type.has_null() => *single,
-            [single] => {
-                self.nodes[*single as usize].attr |= ZEND_TYPE_NULLABLE;
-
-                *single
-            }
-            _ => {
-                if r#type.has_null() {
-                    nodes.push(self.string(ZEND_NAME_NOT_FQ, line, b"null"));
-                }
-
-                self.node(SHARP_AST_TYPE_UNION, 0, line, &nodes)
-            }
-        }
+        self.php_union(members, r#type.has_null().then_some(line))
     }
 
     /// The function value `value` reads that runs `body` on the hidden `$receiver`, `target` read once where the value

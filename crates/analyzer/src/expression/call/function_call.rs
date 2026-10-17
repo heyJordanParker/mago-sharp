@@ -239,9 +239,7 @@ where
     );
     if let Some(metadata) = target.as_ref().and_then(InvocationTarget::get_function_like_metadata) {
         check_function_use(context, block_context, metadata, function, call.method.span());
-        if context.dialect.is_sharp() {
-            report_argument_by_reference(context, call, function, metadata);
-        }
+        report_argument_by_reference(context, call, function, metadata);
     }
 
     let analyze = |context: &mut Context<'ctx, 'arena, A>| {
