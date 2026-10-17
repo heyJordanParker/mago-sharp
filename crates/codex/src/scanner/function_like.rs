@@ -407,7 +407,9 @@ where
     metadata.method_metadata =
         Some(MethodMetadata { is_constructor: true, visibility: Visibility::Public, ..MethodMetadata::default() });
 
-    for parameter in &metadata.parameters {
+    for parameter in &mut metadata.parameters {
+        // Each parameter declares a property, as a promoted one does.
+        parameter.flags |= MetadataFlags::PROMOTED_PROPERTY;
         let mut flags = MetadataFlags::PROMOTED_PROPERTY | MetadataFlags::READONLY;
         flags |= MetadataFlags::origin_flags(context.file.file_type);
         if parameter.flags.has_default() {

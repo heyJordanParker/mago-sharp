@@ -5287,12 +5287,32 @@ fn an_untyped_get_read_warns_in_php_sharp_words_in_a_sharp_file() {
         [
             "9:27 non-documented-property The type of `row.owner` is unknown, so the read is `Any?`. | State its type with `as`, as in `string? owner = row.owner as string;`, or with `is`, as in `if (row.owner is string owner)`.",
             "10:30 non-documented-property The type of `maybe?.other` is unknown, so the read is `Any?`. | State its type with `as`, as in `string? other = maybe?.other as string;`, or with `is`, as in `if (maybe?.other is string other)`.",
-            "11:13 non-documented-property The type of `row.note` is unknown, so it takes any value. | ",
         ]
     );
     assert_eq!(
         messages(("src/Demo/Report.php", php), &[("src/Lib/Row.php", row)]),
         ["Ambiguous property access: $owner on class `Lib\\Row`."]
+    );
+}
+
+/// Spec section 14.3: what `__get` gives back is `Any?`, whatever PHP# wrote through `__set`, and a declared property
+/// the reader cannot see is the `__get` property, as plain PHP reads it from outside, so a model's protected `table`
+/// reads as its column, typed by its `@property` line or `Any?`. A write to an `@property-read` one says what to do in
+/// PHP#.
+#[test]
+fn a_get_read_is_any_after_a_write_and_over_a_property_the_reader_cannot_see() {
+    let row = "<?php\n\nnamespace Lib;\n\n/** @property-read int $hidden */\nclass Row\n{\n    protected string $table = 'rows';\n\n    protected array $hidden = [];\n\n    public function __get(string $name): mixed\n    {\n        return $name;\n    }\n\n    public function __set(string $name, mixed $value): void\n    {\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Row;\n\nclass Report\n{\n    public string written(Row row)\n    {\n        row.count = \"7\";\n        return row.count;\n    }\n\n    public string? table(Row row) => row.table as string;\n\n    public int hidden(Row row) => row.hidden;\n\n    public void hide(Row row)\n    {\n        row.hidden = 5;\n    }\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Report.sharp", sharp), &[("src/Lib/Row.php", row)]),
+        ["10:20 non-documented-property", "10:16 mixed-return-statement", "19:13 invalid-property-write"]
+    );
+    assert_eq!(
+        refusals(("src/Demo/Report.sharp", sharp), &[("src/Lib/Row.php", row)]).last().map(String::as_str),
+        Some(
+            "19:13 invalid-property-write Cannot write to documented read-only property `Row.hidden`. | Remove the assignment: the property is only read."
+        )
     );
 }
 
@@ -6665,8 +6685,8 @@ fn a_named_argument_fills_a_plain_php_variadic_parameter_under_its_name() {
     );
 }
 
-/// Spec section 16: a PHP# `...` parameter is a `List`, which takes no names, and PHP refuses a name that matches no
-/// parameter of a function built into it.
+/// Spec section 16: a PHP# `...` parameter is a `List`, which takes no names, and a function built into PHP takes its
+/// `...` values by position.
 #[test]
 fn a_named_argument_never_fills_a_php_sharp_or_built_in_variadic_parameter() {
     let sharp = "namespace Demo;\n\nclass Report\n{\n    public static int sum(int ...values) => global.max(0, ...values);\n\n    public static int run()\n    {\n        const named = Report.sum(first: 1, second: 2);\n        const own = Report.sum(values: 1);\n        const after = Report.sum(1, values: 2);\n        return named + own + after + global.strlen(global.sprintf(\"%d\", 1, other: 2));\n    }\n}\n";
@@ -6681,18 +6701,21 @@ fn a_named_argument_never_fills_a_php_sharp_or_built_in_variadic_parameter() {
             "12:76 invalid-named-argument",
         ]
     );
-    let annotations: Vec<String> = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Report.sharp", sharp), &[])
-        .iter()
-        .filter_map(|issue| issue.primary_annotation()?.message.clone())
-        .collect();
+    let reported = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Report.sharp", sharp), &[]);
+    let annotations: Vec<String> =
+        reported.iter().filter_map(|issue| issue.primary_annotation()?.message.clone()).collect();
     assert_eq!(
         annotations,
         [
             "A PHP# `...` parameter takes no names",
             "A PHP# `...` parameter takes no names",
             "A PHP# `...` parameter takes no names",
-            "A `...` parameter built into PHP takes no names",
+            "Its `...` parameter takes values by position",
         ]
+    );
+    assert_eq!(
+        reported.last().and_then(|issue| issue.help.clone()).as_deref(),
+        Some("`global.sprintf` takes its `...values` by position: pass them without names.")
     );
     assert_eq!(issues(("src/Demo/Report.php", php), &[]), ["13:33 named-argument-after-positional"]);
 }
@@ -16497,8 +16520,8 @@ fn an_uninitialized_property_and_its_class_are_named_as_sharp_writes_them() {
     );
 }
 
-/// A misplaced or repeated attribute is named as PHP# writes it, `[Field]`. The attribute class keeps its PHP
-/// `#[Attribute]` declaration in its own file, and the PHP twin keeps upstream's wording.
+/// A misplaced or repeated attribute is named as PHP# writes it, `[Field]`, and its help names the `[Attribute(…)]`
+/// PHP# writes on the attribute class. The PHP twin keeps upstream's wording.
 #[test]
 fn a_misplaced_or_repeated_attribute_is_named_as_sharp_writes_it() {
     let field = "<?php\n\nnamespace Lib;\n\n#[\\Attribute(\\Attribute::TARGET_PROPERTY)]\nfinal class Field\n{\n}\n";
@@ -16522,7 +16545,7 @@ fn a_misplaced_or_repeated_attribute_is_named_as_sharp_writes_it() {
     assert_eq!(
         attribute_issues(("src/Demo/Report.sharp", sharp)),
         [
-            "5:2 invalid-attribute-target Attribute `Field` cannot be used on a class, interface, enum, or trait. | This attribute is not allowed here | `Field` defined here | The definition of `Field` restricts its use to the following targets: properties. | Remove the `[Field]` attribute from this location, or update the `#[Attribute]` declaration on the `Field` class to include `a class, interface, enum, or trait` as a valid target.",
+            "5:2 invalid-attribute-target Attribute `Field` cannot be used on a class, interface, enum, or trait. | This attribute is not allowed here | `Field` defined here | The definition of `Field` restricts its use to the following targets: properties. | Remove `[Field]` here, or add a class, interface, enum, or trait to the targets in the `[Attribute(…)]` of the `Field` class.",
             "9:6 attribute-not-repeatable Attribute `Field` is not declared as repeatable and has already been used. | Duplicate use of non-repeatable attribute `Field` | Attribute `Field` was first used here | The attribute `Field` is not declared repeatable, so it applies once to a given target. | Remove this duplicate `Field` attribute, or declare the attribute class `Field` repeatable.",
         ]
     );
@@ -16530,11 +16553,12 @@ fn a_misplaced_or_repeated_attribute_is_named_as_sharp_writes_it() {
 
 /// Spec section 1: an attribute target picks the PHP declaration a list lands on, so a `param:` attribute on `set` or
 /// on a promoted parameter checks against a parameter, and repeats only beside another on the same declaration. A
-/// property's `property:` and `field:` both land on its one PHP property.
+/// property's `property:` and `field:` both land on its one PHP property, and an untargeted list on a parameter that
+/// declares a property, a constructor's or an event's, lands on both the parameter and the property.
 #[test]
 fn an_attribute_target_picks_the_declaration_php_checks_it_on() {
     let field = "<?php\n\nnamespace Lib;\n\n#[\\Attribute(\\Attribute::TARGET_PROPERTY | \\Attribute::TARGET_METHOD)]\nfinal class Field\n{\n}\n";
-    let sharp = "namespace Demo;\n\nimport Lib.Field;\n\nclass Report\n{\n    public int count { get; [param: Field] [Field] set; } = 0;\n\n    [property: Field]\n    [field: Field]\n    public int total { get; set; } = 0;\n\n    public Report([param: Field] [property: Field] public int id { get; }) { }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Field;\n\nclass Report\n{\n    public int count { get; [param: Field] [Field] set; } = 0;\n\n    [property: Field]\n    [field: Field]\n    public int total { get; set; } = 0;\n\n    public Report([param: Field] [property: Field] public int id { get; }, [Field] [property: Field] public int other { get; }) { }\n}\n\npublic event Settled([property: Field] int amount, [Field] [field: Field] int fee);\n";
 
     let attribute_issues: Vec<String> = worded(("src/Demo/Report.sharp", sharp), &[("src/Lib/Field.php", field)])
         .into_iter()
@@ -16544,9 +16568,11 @@ fn an_attribute_target_picks_the_declaration_php_checks_it_on() {
     assert_eq!(
         attribute_issues,
         [
-            "7:37 invalid-attribute-target Attribute `Field` cannot be used on a parameter. | This attribute is not allowed here | `Field` defined here | The definition of `Field` restricts its use to the following targets: methods, properties. | Remove the `[Field]` attribute from this location, or update the `#[Attribute]` declaration on the `Field` class to include `a parameter` as a valid target.",
+            "7:37 invalid-attribute-target Attribute `Field` cannot be used on a parameter. | This attribute is not allowed here | `Field` defined here | The definition of `Field` restricts its use to the following targets: methods, properties. | Remove `[Field]` here, or add a parameter to the targets in the `[Attribute(…)]` of the `Field` class.",
             "10:13 attribute-not-repeatable Attribute `Field` is not declared as repeatable and has already been used. | Duplicate use of non-repeatable attribute `Field` | Attribute `Field` was first used here | The attribute `Field` is not declared repeatable, so it applies once to a given target. | Remove this duplicate `Field` attribute, or declare the attribute class `Field` repeatable.",
-            "13:27 invalid-attribute-target Attribute `Field` cannot be used on a parameter. | This attribute is not allowed here | `Field` defined here | The definition of `Field` restricts its use to the following targets: methods, properties. | Remove the `[Field]` attribute from this location, or update the `#[Attribute]` declaration on the `Field` class to include `a parameter` as a valid target.",
+            "13:27 invalid-attribute-target Attribute `Field` cannot be used on a parameter. | This attribute is not allowed here | `Field` defined here | The definition of `Field` restricts its use to the following targets: methods, properties. | Remove `[Field]` here, or add a parameter to the targets in the `[Attribute(…)]` of the `Field` class.",
+            "13:95 attribute-not-repeatable Attribute `Field` is not declared as repeatable and has already been used. | Duplicate use of non-repeatable attribute `Field` | Attribute `Field` was first used here | The attribute `Field` is not declared repeatable, so it applies once to a given target. | Remove this duplicate `Field` attribute, or declare the attribute class `Field` repeatable.",
+            "16:68 attribute-not-repeatable Attribute `Field` is not declared as repeatable and has already been used. | Duplicate use of non-repeatable attribute `Field` | Attribute `Field` was first used here | The attribute `Field` is not declared repeatable, so it applies once to a given target. | Remove this duplicate `Field` attribute, or declare the attribute class `Field` repeatable.",
         ]
     );
 }

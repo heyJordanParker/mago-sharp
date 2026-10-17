@@ -222,7 +222,13 @@ where
             continue;
         };
 
-        if let Some(first_usage_span) = used_attributes.get(&(target, attribute_name_bytes))
+        // An untargeted list on a promoted parameter lands on both the parameter and the property.
+        let places: &[AttributeTarget] = match target {
+            AttributeTarget::PromotedProperty => &[AttributeTarget::Parameter, AttributeTarget::Property],
+            _ => std::slice::from_ref(&target),
+        };
+        if let Some(first_usage_span) =
+            places.iter().find_map(|place| used_attributes.get(&(*place, attribute_name_bytes)))
             && !attribute_flags.is_repeatable()
         {
             // The attribute class may be written in either dialect, so a PHP# message names no PHP code to add to it.
@@ -263,7 +269,9 @@ where
             );
         }
 
-        used_attributes.insert((target, attribute_name_bytes), attribute.name.span());
+        for place in places {
+            used_attributes.insert((*place, attribute_name_bytes), attribute.name.span());
+        }
 
         if context.dialect.is_sharp()
             && attribute_name_bytes.eq_ignore_ascii_case(b"Sharp\\Key")
@@ -447,15 +455,26 @@ fn report_invalid_target<'ctx, 'arena, A>(
 {
     let attribute_name = display_class_like_name(context, metadata.original_name);
     let short_attribute_name = short_name(metadata.original_name);
-    // The analyzed file writes this attribute as `[Name]` in PHP#. The attribute class declares itself with
-    // `#[Attribute]` in its own PHP file.
-    let attribute_marker = if context.dialect.is_sharp() { "[" } else { "#[" };
     let allowed_targets = flags.get_target_names().join(", ");
+    // PHP# writes the attribute as `[Name]`, and an attribute class says where it goes in its own `[Attribute(…)]`.
+    let help = if context.dialect.is_sharp() {
+        format!(
+            "Remove `[{short_attribute_name}]` here, or add {} to the targets in the `[Attribute(…)]` of the `{attribute_name}` class.",
+            target.as_str()
+        )
+    } else {
+        format!(
+            "Remove the `#[{short_attribute_name}]` attribute from this location, or update the `#[Attribute]` declaration on the `{attribute_name}` class to include `{}` as a valid target.",
+            target.as_str()
+        )
+    };
 
     context.collector.report_with_code(
         IssueCode::InvalidAttributeTarget,
         Issue::error(format!("Attribute `{attribute_name}` cannot be used on {}.", target.as_str()))
-            .with_annotation(Annotation::primary(attribute.name.span()).with_message("This attribute is not allowed here"))
+            .with_annotation(
+                Annotation::primary(attribute.name.span()).with_message("This attribute is not allowed here"),
+            )
             .with_annotation(
                 Annotation::secondary(metadata.name_span.unwrap_or(metadata.span))
                     .with_message(format!("`{attribute_name}` defined here")),
@@ -463,9 +482,6 @@ fn report_invalid_target<'ctx, 'arena, A>(
             .with_note(format!(
                 "The definition of `{attribute_name}` restricts its use to the following targets: {allowed_targets}."
             ))
-            .with_help(format!(
-                "Remove the `{attribute_marker}{short_attribute_name}]` attribute from this location, or update the `#[Attribute]` declaration on the `{attribute_name}` class to include `{}` as a valid target.",
-                target.as_str()
-            ))
+            .with_help(help),
     );
 }

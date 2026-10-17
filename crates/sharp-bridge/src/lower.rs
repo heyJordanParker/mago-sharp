@@ -2231,7 +2231,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.class = self.names.get(&event.name);
         let line = self.line(&event.parameter_list);
         let mut members = self.trait_members(event.inheritance.as_ref(), event.parameter_list.span());
-        members.push(self.promoted_constructor(event.name.span, &event.parameter_list));
+        members.extend(self.promoted_constructor(event.name.span, &event.parameter_list));
         members.extend(self.string_conversion(&[], event.parameter_list.span(), event.terminator.span()));
         members.extend(self.class_metadata(self.class, self.line(event.name)));
         let members = self.node(SHARP_AST_STMT_LIST, 0, line, &members);
@@ -2248,31 +2248,64 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         )
     }
 
-    /// The public constructor of an event or a case that carries data, from `name` to the end of `parameters`, which
-    /// promotes each parameter to a `public readonly` property and has no statement.
-    fn promoted_constructor(&mut self, name: Span, parameter_list: &FunctionLikeParameterList) -> u32 {
+    /// The members of an event or a case that carries data that its parameters make: the public constructor, from
+    /// `name` to the end of `parameters`, which promotes each parameter to a `public readonly` property and has no
+    /// statement. PHP gives a promoted parameter's attributes to both the parameter and the property, so when a
+    /// parameter's attributes name a target, as `[param: Trimmed]`, each property is declared beside its parameter
+    /// with its own attributes, and the constructor sets it from the argument.
+    fn promoted_constructor(&mut self, name: Span, parameter_list: &FunctionLikeParameterList) -> Vec<u32> {
         self.enter(b"__construct");
+        let beside = parameter_list
+            .parameters
+            .iter()
+            .any(|parameter| parameter.attribute_lists.iter().any(|list| list.target.is_some()));
+        let mut members = Vec::new();
         let mut parameters = Vec::new();
+        let mut statements = Vec::new();
         for parameter in &parameter_list.parameters {
             let index = self.parameter(parameter, None);
-            self.nodes[index as usize].attr |= ZEND_ACC_PUBLIC | ZEND_ACC_READONLY;
+            if !beside {
+                self.nodes[index as usize].attr |= ZEND_ACC_PUBLIC | ZEND_ACC_READONLY;
+                parameters.push(index);
+                continue;
+            }
             parameters.push(index);
+            let Some(hint) = &parameter.hint else {
+                unreachable!("semantics refuses an event's or a case's parameter without a type");
+            };
+            let variable = &parameter.variable;
+            let line = self.line(variable.span);
+            let hint = self.property_type(hint, variable.name, line);
+            let property = self.string(0, line, variable.name);
+            let element = self.node(SHARP_AST_PROP_ELEM, 0, line, &[property, NULL, NULL, NULL]);
+            let declaration = self.node(SHARP_AST_PROP_DECL, 0, line, &[element]);
+            let lists: Vec<&AttributeList> =
+                parameter.attribute_lists.iter().filter(|list| !targets_value(list)).collect();
+            let attributes = self.attributes_of(&lists, None, None);
+            let flags = ZEND_ACC_PUBLIC | ZEND_ACC_READONLY;
+            members.push(self.node(SHARP_AST_PROP_GROUP, flags, line, &[hint, declaration, attributes]));
+            let this = self.variable(variable.span, b"this");
+            let property = self.string(0, line, variable.name);
+            let place = self.node(SHARP_AST_PROP, 0, line, &[this, property]);
+            let value = self.variable(variable.span, variable.name);
+            statements.push(self.node(SHARP_AST_ASSIGN, 0, line, &[place, value]));
         }
 
         let line = self.line(parameter_list);
         let metadata = self.types.method_metadata(self.class, b"__construct");
         parameters.extend(self.parameter_metadata(metadata, line));
         let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &parameters);
-        let body = self.node(SHARP_AST_STMT_LIST, 0, line, &[]);
-
-        self.declaration(
+        let body = self.node(SHARP_AST_STMT_LIST, 0, line, &statements);
+        members.push(self.declaration(
             SHARP_AST_METHOD,
             ZEND_ACC_PUBLIC,
             name,
             parameter_list,
             b"__construct",
             &[parameters, NULL, body, NULL, NULL],
-        )
+        ));
+
+        members
     }
 
     /// Spec section 20: an enum with a case that carries data is an abstract class, with the enum's header as its
@@ -2339,7 +2372,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             let line = self.line(name.span);
             let case_class = [enum_name, b"\\", name.value].concat();
             let mut members = match &case.item {
-                EnumCaseItem::Data(item) => vec![self.promoted_constructor(name.span, &item.parameter_list)],
+                EnumCaseItem::Data(item) => self.promoted_constructor(name.span, &item.parameter_list),
                 EnumCaseItem::Unit(_) | EnumCaseItem::Backed(_) => self.case_object(&case_class, name.span),
             };
             // A case of a generic enum passes its type arguments to the enum, as `Ok<T, TError>` to `Result<T, TError>`.
@@ -3429,7 +3462,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// Each hook carries its accessor's attributes, spec section 1, so an auto accessor with attributes is the hook
     /// over the storage too.
     fn hooks(&mut self, variable: &DirectVariable, accessors: Option<&PropertyHookList>, holds: Option<&Hint>) -> u32 {
-        let Some(accessors) = accessors.filter(|accessors| has_hooks(accessors)) else {
+        let Some(accessors) = accessors.filter(|accessors| accessors.has_hooks()) else {
             return NULL;
         };
 
@@ -8697,15 +8730,13 @@ fn super_alias(interface: Word, method: Word) -> Vec<u8> {
     [method.as_bytes(), b"@", interface.as_bytes()].concat()
 }
 
-/// Whether a static property runs accessors, decision 3: a computed one, or one with an accessor body or an observer.
-/// [`Lowering::static_accessors`] lowers it.
+/// Whether a static property runs accessors, decision 3: a computed one, or one whose accessors run as hooks, an
+/// accessor body, an observer or an accessor with attributes. [`Lowering::static_accessors`] lowers it.
 fn runs_static_accessors(property: &Property) -> bool {
     property.modifiers().contains_static()
         && match property {
             Property::Computed(_) => true,
-            Property::Hooked(hooked) => {
-                hooked.hook_list.hooks.iter().any(|accessor| matches!(accessor.body, PropertyHookBody::Concrete(_)))
-            }
+            Property::Hooked(hooked) => hooked.hook_list.has_hooks(),
             Property::Plain(_) => false,
         }
 }
@@ -8886,16 +8917,7 @@ fn holds_entries(r#type: &TUnion) -> bool {
 /// Whether the property a constructor parameter declares runs its writes through its accessors: a hook, an observer
 /// or a behavior, spec section 9, which the constructor's write of the argument runs.
 fn runs_its_accessors(parameter: &FunctionLikeParameter) -> bool {
-    parameter.behaviors.is_some() || parameter.hooks.as_ref().is_some_and(has_hooks)
-}
-
-/// Whether an instance property with `accessors` has PHP hooks: an accessor with a body, which observers are, or with
-/// attributes, which PHP keeps on its hook, spec section 1.
-fn has_hooks(accessors: &PropertyHookList) -> bool {
-    accessors
-        .hooks
-        .iter()
-        .any(|accessor| matches!(accessor.body, PropertyHookBody::Concrete(_)) || !accessor.attribute_lists.is_empty())
+    parameter.behaviors.is_some() || parameter.hooks.as_ref().is_some_and(PropertyHookList::has_hooks)
 }
 
 /// Whether `list` targets the value a parameter or a `set` takes, as `param:` in `[param: Trimmed]`, spec section 1.
@@ -8925,15 +8947,18 @@ fn without_readonly<'hint, 'arena>(hint: &'hint Hint<'arena>) -> &'hint Hint<'ar
 
 /// The flags a property's accessors add: `readonly` for a get-only auto-property, which spec section 6.1 sets in the
 /// constructor, or the set visibility php-src writes `private(set)` or `protected(set)` from the `set` or `init`
-/// accessor's access modifier, and `protected(set)` for an `init` without one. A get-only property whose body uses
-/// `field` takes `protected(set)`, the set visibility of `readonly`, and one without storage takes none, because PHP
+/// accessor's access modifier, and `protected(set)` for an `init` without one. A get-only property with storage and
+/// hooks, a body that uses `field` or a `get;` with attributes, takes `protected(set)`, the set visibility of
+/// `readonly`, since PHP refuses hooks on a `readonly` property, and one without storage takes none, because PHP
 /// refuses a set visibility on a read-only virtual property. PHP drops a set visibility equal to the property's own,
 /// so a private property, or a protected one with `protected(set)`, takes none, and the flags carry only what the
 /// engine keeps.
 fn accessor_flags(modifiers: &Sequence<Modifier>, accessors: &PropertyHookList, names: &ResolvedNames) -> u32 {
     // PHP has no `readonly` static, so a get-only static auto-property is `private(set)`, which its class's initializer
     // writes once, and the analyzer refuses every other write.
-    if accessors.is_readonly() && modifiers.contains_static() {
+    let auto_get_only = accessors.is_get_only()
+        && !accessors.hooks.iter().any(|hook| matches!(hook.body, PropertyHookBody::Concrete(_)));
+    if auto_get_only && modifiers.contains_static() {
         return if modifiers.contains_private() { 0 } else { ZEND_ACC_PRIVATE_SET };
     }
     if accessors.is_readonly() {
@@ -8941,7 +8966,7 @@ fn accessor_flags(modifiers: &Sequence<Modifier>, accessors: &PropertyHookList, 
     }
 
     let flags = match accessors.setter() {
-        None if names.uses_field(accessors) => ZEND_ACC_PROTECTED_SET,
+        None if names.has_storage(accessors) => ZEND_ACC_PROTECTED_SET,
         None => 0,
         Some(setter) => match setter.modifiers.first() {
             // `init` sets the property while the object is created, in the constructors of its class and its

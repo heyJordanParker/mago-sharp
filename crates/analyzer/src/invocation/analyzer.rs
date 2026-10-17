@@ -100,7 +100,7 @@ fn takes_php_sharp_types(target: &InvocationTarget<'_>) -> bool {
 }
 
 /// Whether the variadic parameter of `target` collects the named arguments that match no other parameter, as PHP's does
-/// in plain PHP code. A PHP# variadic is a `List`, and one built into PHP refuses them.
+/// in plain PHP code. A PHP# variadic is a `List`, and one built into PHP takes its values by position.
 fn collects_named_arguments(target: &InvocationTarget<'_>) -> bool {
     !takes_php_sharp_types(target)
         && !target.get_function_like_metadata().is_some_and(|function| function.flags.is_built_in())
@@ -1000,7 +1000,7 @@ where
                         if has_variadic_parameter && takes_php_sharp_types(&invocation.target) {
                             "A PHP# `...` parameter takes no names".to_string()
                         } else if has_variadic_parameter {
-                            "A `...` parameter built into PHP takes no names".to_string()
+                            "Its `...` parameter takes values by position".to_string()
                         } else {
                             format!("Unknown argument name `{argument_name}`")
                         },
@@ -1016,7 +1016,13 @@ where
                             "A PHP# `...` parameter is a `List`, and a `List` takes no names: pass its values by position."
                                 .to_string()
                         } else if has_variadic_parameter {
-                            format!("`{target_name_str}` is built into PHP, which refuses a name its parameters do not have: pass the values by position.")
+                            let variadic = invocation
+                                .target
+                                .get_parameter(invocation.target.parameter_count() - 1)
+                                .and_then(|parameter| parameter.get_name())
+                                .map(|name| BytesDisplay(trim_start_byte(name.0.as_bytes(), b'$')).to_string())
+                                .unwrap_or_default();
+                            format!("`{target_name_str}` takes its `...{variadic}` by position: pass them without names.")
                         } else if invocation.target.parameter_count() == 0 {
                             format!("The {target_kind_str} `{target_name_str}` has no parameters.")
                         } else {

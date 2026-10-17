@@ -20885,6 +20885,57 @@ fn an_accessor_carries_its_attributes_on_its_hook_and_a_target_picks_the_part() 
     assert_eq!(member_in(&files, "Sized", &[0, 1, 0, 3, 1, 0, 0, 3]), attribute("new size"));
 }
 
+/// Spec section 1: every accessor form takes attributes. A static auto-property's accessors with attributes run as its
+/// hidden methods over the storage, and a get-only auto-property's `get;` with attributes is a hook, so the property is
+/// `protected(set)`, as `readonly` takes no hooks. An event's and a data case's parameters declare properties, so a
+/// targeted list declares each property beside its parameter, which the constructor sets.
+#[test]
+fn every_accessor_form_takes_attributes_and_an_event_parameter_targets_its_part() {
+    let files = lowered_each(
+        &[
+            (
+                "src/App/Counter.sharp",
+                "namespace App;\n\nimport Lib.Field;\n\npublic class Counter\n{\n    public static int counter { [Field(\"counted\")] get; set; } = 0;\n\n    public string code { [Field(\"coded\")] get; }\n\n    public Counter()\n    {\n        this.code = \"c\";\n    }\n}\n",
+            ),
+            (
+                "src/App/Settled.sharp",
+                "namespace App;\n\nimport Lib.Field;\n\npublic event Settled([param: Field(\"order\")] int orderId, [property: Field(\"amount\")] int amount);\n",
+            ),
+            (
+                "src/App/Payment.sharp",
+                "namespace App;\n\nimport Lib.Field;\n\npublic enum Payment\n{\n    case Paid([param: Field(\"given\")] string id);\n    case Open;\n}\n",
+            ),
+        ],
+        &[common::FIELD],
+    );
+
+    let attribute = |text: &str| {
+        format!(
+            "ATTRIBUTE_LIST\n  ATTRIBUTE_GROUP\n    ATTRIBUTE\n      ZVAL \"Lib\\\\Field\"\n      ARG_LIST\n        ZVAL {text:?}\n"
+        )
+    };
+    let counter = |path: &[u32]| member_in(&files, "Counter", path);
+    let settled = |path: &[u32]| member_in(&files, "Settled", path);
+    let set_by_constructor = |name: &str| {
+        format!("ASSIGN\n  PROP\n    VAR\n      ZVAL \"this\"\n    ZVAL {name:?}\n  VAR\n    ZVAL {name:?}\n")
+    };
+
+    assert_eq!(counter(&[1, 4]), attribute("counted"));
+    assert!(counter(&[0]).starts_with("PROP_GROUP [20]\n"), "the storage is a private static");
+    assert!(counter(&[3]).starts_with("PROP_GROUP [2049]\n"), "a public protected(set) property, not readonly");
+    assert_eq!(counter(&[3, 1, 0, 3, 0, 4]), attribute("coded"));
+    assert_eq!(settled(&[0, 2]), "null\n");
+    assert_eq!(settled(&[1, 2]), attribute("amount"));
+    assert_eq!(settled(&[2, 0, 0, 3]), attribute("order"));
+    assert_eq!(settled(&[2, 0, 1, 3]), "null\n");
+    assert_eq!(settled(&[2, 2, 0]), set_by_constructor("orderId"));
+    assert_eq!(settled(&[2, 2, 1]), set_by_constructor("amount"));
+    let paid = |path: &[u32]| member_in(&files, "Payment\\Paid", path);
+    assert_eq!(paid(&[0, 2]), "null\n");
+    assert_eq!(paid(&[1, 0, 0, 3]), attribute("given"));
+    assert_eq!(paid(&[1, 2, 0]), set_by_constructor("id"));
+}
+
 /// Spec section 1: an interface method carries its attributes as a class method does, and so does the trait method
 /// that runs its default body.
 #[test]

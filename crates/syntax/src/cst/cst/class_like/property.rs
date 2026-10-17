@@ -406,14 +406,30 @@ impl<'arena> PropertyHookList<'arena> {
     }
 
     /// Returns `true` when a PHP# property with these accessors runs as `readonly`: a get-only auto-property, which
-    /// spec section 6.1 sets in the constructor. PHP refuses hooks on a `readonly` property.
+    /// spec section 6.1 sets in the constructor, and which has no hooks, since PHP refuses hooks on a `readonly`
+    /// property.
     #[must_use]
     pub fn is_readonly(&self) -> bool {
-        self.is_get_only() && !self.hooks.iter().any(|hook| matches!(hook.body, PropertyHookBody::Concrete(_)))
+        self.is_get_only() && !self.has_hooks()
+    }
+
+    /// Returns `true` when a PHP# property's accessors run as PHP hooks: one of them [runs as a
+    /// hook](PropertyHook::runs_as_hook).
+    #[must_use]
+    pub fn has_hooks(&self) -> bool {
+        self.hooks.iter().any(PropertyHook::runs_as_hook)
     }
 }
 
 impl PropertyHook<'_> {
+    /// Returns `true` when a PHP# accessor runs as a PHP hook: one with a body, as an observer has, or with
+    /// attributes, which PHP keeps on its hook (spec section 1). An auto accessor without either is the property's
+    /// storage.
+    #[must_use]
+    pub fn runs_as_hook(&self) -> bool {
+        matches!(self.body, PropertyHookBody::Concrete(_)) || !self.attribute_lists.is_empty()
+    }
+
     /// Returns `true` for the hook that writes the property: PHP's `set`, or a PHP# `init` accessor, which runs as the
     /// `set` hook and takes `value` as `set` does.
     #[must_use]

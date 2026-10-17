@@ -131,7 +131,8 @@ pub struct PropertyResolutionResult {
     pub encountered_null: bool,
     pub encountered_mixed: bool,
     pub has_possibly_defined_property: bool,
-    /// True when a successfully written extension property cannot subsequently be read.
+    /// True when a later read of a written property sees nothing the write gave it: an extension property that cannot
+    /// be read, or, in PHP#, a property `__get` serves, spec section 14.3.
     pub has_unreadable_property: bool,
     /// True if all resolved properties are non-nullable.
     /// When combined with `encountered_null` and nullsafe access, indicates
@@ -1055,6 +1056,23 @@ where
         true, // `instance_access`
         block_context.scope.get_class_like_name(),
     );
+    // Spec section 14.3: PHP reads a declared property the reader cannot see through `__get`, as an Eloquent model reads
+    // a column named `table`, so in PHP# that read is the `__get` property, `Any?` where no `@property` line types it.
+    if context.dialect.is_sharp()
+        && !for_assignment
+        && has_magic_method
+        && let Some(DeclaredProperty { declaring_class, property, kind: DeclaredPropertyKind::Real { .. } }) =
+            &resolution
+        && (property.flags.is_static()
+            || !is_visible_from_scope(
+                context.codebase,
+                property.read_visibility,
+                declaring_class.name.as_bytes(),
+                block_context.scope.get_class_like_name(),
+            ))
+    {
+        resolution = None;
+    }
     // Spec section 14.3: a class whose plain PHP code defines `__get`, itself or a parent, has the properties it reads,
     // `Any?` where no `@property` line types one. Only plain PHP defines `__get`.
     let property_type = match &resolution {
@@ -1229,6 +1247,8 @@ where
         }
 
         if has_magic_method {
+            // Spec section 14.3: what `__get` gives back is `Any?`, whatever PHP# wrote.
+            result.has_unreadable_property |= for_assignment && context.dialect.is_sharp();
             report_non_documented_property(
                 context,
                 object_expr.span(),
@@ -1460,6 +1480,9 @@ where
         for_assignment,
         selector.span(),
     );
+
+    // Spec section 14.3: a read of a property `__get` serves is what `__get` gives back, whatever PHP# wrote.
+    result.has_unreadable_property |= for_assignment && context.dialect.is_sharp() && resolution.is_magic();
 
     Some(ResolvedProperty {
         property_span: property_metadata.name_span.or(property_metadata.span),
@@ -2614,22 +2637,23 @@ pub(super) fn report_non_documented_property<A>(
         return;
     }
 
-    // Spec section 14.3: in PHP#, a property `__get` serves with no `@property` line to type it is `Any?`.
+    // Spec section 14.3: in PHP#, a property `__get` serves with no `@property` line to type it is `Any?`. A write of
+    // any value to a property of unknown type is safe, so only a read warns.
     if context.dialect.is_sharp() {
+        if for_assignment {
+            return;
+        }
         let access = quoted_source(context, obj_span.join(selector_span));
-        let issue = if for_assignment {
-            Issue::warning(format!("The type of `{access}` is unknown, so it takes any value."))
-                .with_annotation(Annotation::primary(selector_span).with_message("Written here."))
-        } else {
-            let name = trim_start_byte(property_name.as_bytes(), b'$');
-            let name = String::from_utf8_lossy(name);
+        let name = trim_start_byte(property_name.as_bytes(), b'$');
+        let name = String::from_utf8_lossy(name);
+        context.collector.report_with_code(
+            IssueCode::NonDocumentedProperty,
             Issue::warning(format!("The type of `{access}` is unknown, so the read is `Any?`."))
                 .with_annotation(Annotation::primary(selector_span).with_message("Read here."))
                 .with_help(format!(
                     "State its type with `as`, as in `string? {name} = {access} as string;`, or with `is`, as in `if ({access} is string {name})`."
-                ))
-        };
-        context.collector.report_with_code(IssueCode::NonDocumentedProperty, issue);
+                )),
+        );
 
         return;
     }

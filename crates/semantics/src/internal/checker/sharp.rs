@@ -52,6 +52,8 @@ use mago_syntax::cst::ConstructorInitializer;
 use mago_syntax::cst::Continue;
 use mago_syntax::cst::DeclareBody;
 use mago_syntax::cst::DirectVariable;
+use mago_syntax::cst::EnumCaseDataItem;
+use mago_syntax::cst::Event;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::Extension;
 use mago_syntax::cst::Extern;
@@ -212,8 +214,8 @@ const OBJECT: &[u8] = b"Object";
 /// - Attributes: on a class, an interface, an enum, an enum case, an event, a constant, a method, an interface method, a
 ///   field, a property, an accessor, a parameter and a lambda with its parameters in parentheses, written `[Name]` or
 ///   `[Name(arguments)]`, several in one list, as in `[Field("Name"), Searchable]`, or in several lists. A list may
-///   open with a target, as in `[param: Trimmed]`, which `check_attribute_target` checks, and an accessor PHP holds no
-///   hook or method for takes none, as `check_accessors` decides. An argument is positional or named, and is a
+///   open with a target, as in `[param: Trimmed]`, which `check_attribute_target` checks, and an observer, which runs
+///   inside `set`, takes none, as `check_accessors` decides. An argument is positional or named, and is a
 ///   constant expression as a parameter default is, list and map literals included, or a `new` of a class by its name
 ///   whose arguments are such values, as `check_attribute_object` decides. Anything else is an error that names the
 ///   rule. PHP's own check reports a spread argument. An attribute on a type parameter is a parse error.
@@ -2294,67 +2296,96 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
     }
 }
 
-/// Spec section 1: an attribute list's target, as `return:` in `[return: NotNull]`, names a part of its declaration,
-/// as C# allows: `type:` on a type, `method:` and `return:` on a method, a lambda or an accessor, `param:` on a
-/// parameter and on `set` or `init`, `field:` on a field, a constant, an enum case and a property with storage,
-/// `property:` on a property, and `property:` and `field:` on a constructor parameter that declares one. PHP holds
-/// each part but a return value, where it keeps no attributes.
+/// Spec section 1: an attribute list's target, as `param:` in `[param: Trimmed]`, names a part of its declaration, as
+/// C# allows: `type:` on a type, `event:` on an event, `method:` on a method, an operator, a named constructor, a lambda
+/// or an accessor, `param:` on a parameter and on `set` or `init`, `field:` on a field, a constant, an enum case and a
+/// property with storage, `property:` on a property, and `property:` and `field:` on a parameter that declares a
+/// property: a promoted one, an event's or a data case's. A return value takes no attributes.
 fn check_attribute_target(list: &AttributeList, context: &mut Context<'_, '_, '_>) -> Option<Place> {
+    /// The declaration a list is on, its targets, and, for one that returns a value, the name `return:` refers it to.
+    type Declaration = (&'static str, &'static [&'static str], Option<&'static str>);
+
     let Some(target) = &list.target else {
         return Some(Place::Attribute);
     };
+    let written = BytesDisplay(target.name.value);
     // The declaration that holds the list. The walk keeps no member on its ancestors, so the file names it.
     let holds = |lists: &Sequence<AttributeList>| lists.iter().any(|held| held.span() == list.span());
-    let declaration = Node::Program(context.program).filter_map(|node| -> Option<(&str, &[&str])> {
+    let declaration = Node::Program(context.program).filter_map(|node| -> Option<Declaration> {
         match node {
-            Node::Class(class) if holds(&class.attribute_lists) => Some(("a class", &["type"])),
-            Node::Interface(interface) if holds(&interface.attribute_lists) => Some(("an interface", &["type"])),
-            Node::Enum(r#enum) if holds(&r#enum.attribute_lists) => Some(("an enum", &["type"])),
-            Node::Struct(r#struct) if holds(&r#struct.attribute_lists) => Some(("a struct", &["type"])),
-            Node::Event(event) if holds(&event.attribute_lists) => Some(("an event", &["type"])),
-            Node::Method(method) if holds(&method.attribute_lists) => Some(("a method", &["method", "return"])),
+            Node::Class(class) if holds(&class.attribute_lists) => Some(("a class", &["type"], None)),
+            Node::Interface(interface) if holds(&interface.attribute_lists) => Some(("an interface", &["type"], None)),
+            Node::Enum(r#enum) if holds(&r#enum.attribute_lists) => Some(("an enum", &["type"], None)),
+            Node::Struct(r#struct) if holds(&r#struct.attribute_lists) => Some(("a struct", &["type"], None)),
+            Node::Event(event) if holds(&event.attribute_lists) => Some(("an event", &["type", "event"], None)),
+            Node::Method(method) if holds(&method.attribute_lists) => {
+                Some(("a method", &["method"], Some("the method")))
+            }
+            Node::Operator(operator) if holds(&operator.attribute_lists) => {
+                Some(("an operator", &["method"], Some("the operator")))
+            }
+            Node::NamedConstructor(constructor) if holds(&constructor.attribute_lists) => {
+                Some(("a named constructor", &["method"], None))
+            }
             Node::Closure(Closure { attribute_lists, .. })
             | Node::ArrowFunction(ArrowFunction { attribute_lists, .. })
                 if holds(attribute_lists) =>
             {
-                Some(("a lambda", &["method", "return"]))
+                Some(("a lambda", &["method"], Some("the lambda")))
             }
-            Node::ClassLikeConstant(constant) if holds(&constant.attribute_lists) => Some(("a constant", &["field"])),
-            Node::EnumCase(case) if holds(&case.attribute_lists) => Some(("an enum case", &["field"])),
-            Node::Property(Property::Plain(field)) if holds(&field.attribute_lists) => Some(("a field", &["field"])),
+            Node::ClassLikeConstant(constant) if holds(&constant.attribute_lists) => {
+                Some(("a constant", &["field"], None))
+            }
+            Node::EnumCase(case) if holds(&case.attribute_lists) => Some(("an enum case", &["field"], None)),
+            Node::Property(Property::Plain(field)) if holds(&field.attribute_lists) => {
+                Some(("a field", &["field"], None))
+            }
             Node::Property(Property::Hooked(property)) if holds(&property.attribute_lists) => Some(
                 if context.names.has_storage(&property.hook_list)
                     && !property.modifiers.contains_abstract()
                     && !is_in_interface(context.program, property.span())
                 {
-                    ("a property", &["property", "field"])
+                    ("a property", &["property", "field"], None)
                 } else {
-                    ("a property without storage", &["property"])
+                    ("a property without storage", &["property"], None)
                 },
             ),
             Node::Property(Property::Computed(property)) if holds(&property.attribute_lists) => {
-                Some(("a property without storage", &["property"]))
+                Some(("a property without storage", &["property"], None))
             }
             Node::FunctionLikeParameter(parameter) if holds(&parameter.attribute_lists) => {
-                Some(if parameter.is_promoted_property() {
-                    ("a parameter that declares a property", &["param", "property", "field"])
+                Some(if declares_property(parameter, context.program) {
+                    ("a parameter that declares a property", &["param", "property", "field"], None)
                 } else {
-                    ("a parameter", &["param"])
+                    ("a parameter", &["param"], None)
                 })
             }
             Node::PropertyHook(accessor) if holds(&accessor.attribute_lists) => Some(if accessor.is_setter() {
-                ("`set` and `init`", &["method", "param", "return"])
+                ("`set` and `init`", &["method", "param"], Some("the accessor"))
             } else {
-                ("`get`", &["method", "return"])
+                ("`get`", &["method"], Some("the accessor"))
             }),
             _ => None,
         }
     });
-    let Some((declaration, targets)) = declaration.into_iter().next() else {
-        unreachable!("an attribute list is on a declaration `enter` places");
+    let Some((declaration, targets, returns)) = declaration.into_iter().next() else {
+        context.report(
+            Issue::error(format!("`{written}:` names no part of this declaration."))
+                .with_annotation(Annotation::primary(target.span()).with_message("Written here."))
+                .with_help("Write the attribute with no target."),
+        );
+
+        return None;
     };
 
-    let written = BytesDisplay(target.name.value);
+    if let (b"return", Some(returns)) = (target.name.value, returns) {
+        context.report(
+            Issue::error(format!("A return value takes no attributes: put them on {returns}, with no target."))
+                .with_annotation(Annotation::primary(target.span()).with_message("Written here.")),
+        );
+
+        return None;
+    }
     if !targets.iter().any(|named| named.as_bytes() == target.name.value) {
         let targets: Vec<String> = targets.iter().map(|named| format!("`{named}:`")).collect();
         context.report(
@@ -2367,17 +2398,25 @@ fn check_attribute_target(list: &AttributeList, context: &mut Context<'_, '_, '_
 
         return None;
     }
-    if target.name.value == b"return" {
-        context.report(
-            Issue::error("PHP keeps no attributes on a return value, so `return:` has nowhere to put them.")
-                .with_annotation(Annotation::primary(target.span()).with_message("Written here."))
-                .with_help("Put them on the declaration itself, with no target."),
-        );
-
-        return None;
-    }
 
     Some(Place::Attribute)
+}
+
+/// Whether `parameter` declares a property as well: a promoted constructor parameter, or a parameter of an event or of
+/// a case that carries data, each of which is a public property of its class, spec sections 15 and 20.
+fn declares_property(parameter: &FunctionLikeParameter, program: &Program) -> bool {
+    let start = parameter.span().start;
+
+    parameter.is_promoted_property()
+        || !Node::Program(program)
+            .filter_map(|node| match node {
+                Node::Event(Event { parameter_list, .. })
+                | Node::EnumCaseDataItem(EnumCaseDataItem { parameter_list, .. }) => {
+                    parameter_list.span().contains(&start).then_some(())
+                }
+                _ => None,
+            })
+            .is_empty()
 }
 
 /// Spec section 1: an attribute argument may create an object of a class it names, from arguments that are constants or
@@ -2388,7 +2427,7 @@ fn check_attribute_object(instantiation: &Instantiation, context: &mut Context<'
     if let Some(type_arguments) = &instantiation.type_arguments {
         context.report(
             Issue::error(format!(
-                "An attribute argument cannot create an object of a generic class, as `{}` does: PHP creates it without its type arguments.",
+                "An attribute argument creates its objects without type arguments, so it cannot `new` a generic class, as `{}` does.",
                 BytesDisplay(context.get_code_snippet(instantiation))
             ))
             .with_annotation(Annotation::primary(type_arguments.span()).with_message("Written here.")),
@@ -3420,27 +3459,6 @@ fn check_accessors(
                 "accessor",
                 "A PHP# property's accessors are `get` and `set` or `init`, each with optional attributes and written `;`, `=> expr;` or with a block body, and `set` and `init` may take `private`, `protected` or `internal`. The observers `willSet` and `didSet` take a body.",
                 context,
-            );
-        } else if let (Some(first), Some(last)) = (accessor.attribute_lists.first(), accessor.attribute_lists.last())
-            && !modifiers.contains_abstract()
-            && !accessors.hooks.iter().any(|hook| matches!(hook.body, PropertyHookBody::Concrete(_)))
-            && (accessors.is_readonly() || modifiers.contains_static())
-        {
-            let (runs_as, help) = if modifiers.contains_static() {
-                (
-                    "a static auto-property runs as a plain PHP static, which has no accessors",
-                    "Put the attribute on the property, or give an accessor a body.",
-                )
-            } else {
-                (
-                    "a get-only auto-property runs as a PHP `readonly` property, which takes no hooks",
-                    "Put the attribute on the property, or give the property `set` or `init`.",
-                )
-            };
-            context.report(
-                Issue::error(format!("`{}` has no place for an attribute: {runs_as}.", BytesDisplay(name)))
-                    .with_annotation(Annotation::primary(first.span().join(last.span())).with_message("Written here."))
-                    .with_help(help),
             );
         } else if accessor.is_observer()
             && let (Some(first), Some(last)) = (accessor.attribute_lists.first(), accessor.attribute_lists.last())

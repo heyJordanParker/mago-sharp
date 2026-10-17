@@ -3093,22 +3093,34 @@ fn an_attribute_target_names_a_part_of_its_declaration_and_an_accessor_takes_att
         "namespace App.Tenant;\n\n[type: Note]\npublic struct Size { }\n",
         "namespace App.Tenant;\n\n[type: Note]\npublic event Paid(int orderId);\n",
         "namespace App.Tenant;\n\npublic class Doubler\n{\n    public Function<int(int)> twice() => [method: Note] (int n) => n * 2;\n\n    public Function<int(int)> thrice() => [method: Note] (int n) => { return n * 3; };\n}\n",
+        "namespace App.Tenant;\n\npublic class Counter\n{\n    public int id { [Note] get; }\n\n    public static int sum { [Note] get; [param: Note] set; } = 0;\n\n    public Counter(int id)\n    {\n        this.id = id;\n    }\n}\n",
+        "namespace App.Tenant;\n\npublic struct Amount\n{\n    public int cents { get; init; }\n\n    [method: Note]\n    public static Amount operator +(Amount a, Amount b) => new Amount { cents: a.cents + b.cents };\n}\n",
+        "namespace App.Tenant;\n\npublic class Artifact\n{\n    public Artifact(public string name { get; }) { }\n\n    [method: Note]\n    public Artifact.fromName([param: Note] string name) : this(name) { }\n}\n",
+        "namespace App.Tenant;\n\n[event: Note]\npublic event Settled([param: Note] int orderId, [property: Note] [field: Note] int amount);\n",
+        "namespace App.Tenant;\n\npublic enum Payment\n{\n    case Paid([param: Note] [property: Note] string transactionId);\n\n    case Open;\n}\n",
     ] {
         assert_eq!(issues(code), Vec::<String>::new(), "{code}");
     }
 
-    let code = "namespace App.Tenant;\n\n[method: Note]\npublic class Report\n{\n    [return: Note]\n    public int run() => 1;\n\n    [field: Note]\n    public int size { get => 1; }\n\n    public int count { get; [return: Note] set; didSet => this.run(); } = 0;\n\n    public int total { get; set; [Note] willSet => this.run(); } = 0;\n\n    public int scale([property: Note] int extra) => extra;\n\n    public int id { [Note] get; }\n\n    public static int sum { [Note] get; set; } = 0;\n}\n";
+    let code = "namespace App.Tenant;\n\n[method: Note]\npublic class Report\n{\n    [return: Note]\n    public int run() => 1;\n\n    [field: Note]\n    public int size { get => 1; }\n\n    public int count { get; [return: Note] set; didSet => this.run(); } = 0;\n\n    public int total { get; set; [Note] willSet => this.run(); } = 0;\n\n    public int scale([property: Note] int extra) => extra;\n\n    [module: Note]\n    public int one() => 1;\n}\n";
     assert_eq!(
         issues(code),
         [
             "3:2 `method:` names no part of a class, whose targets are `type:`.",
-            "6:6 PHP keeps no attributes on a return value, so `return:` has nowhere to put them.",
+            "6:6 A return value takes no attributes: put them on the method, with no target.",
             "9:6 `field:` names no part of a property without storage, whose targets are `property:`.",
-            "12:30 PHP keeps no attributes on a return value, so `return:` has nowhere to put them.",
+            "12:30 A return value takes no attributes: put them on the accessor, with no target.",
             "14:34 `willSet` runs inside the `set` accessor, so it has no place of its own for an attribute.",
             "16:23 `property:` names no part of a parameter, whose targets are `param:`.",
-            "18:21 `get` has no place for an attribute: a get-only auto-property runs as a PHP `readonly` property, which takes no hooks.",
-            "20:29 `get` has no place for an attribute: a static auto-property runs as a plain PHP static, which has no accessors.",
+            "18:6 `module:` names no part of a method, whose targets are `method:`.",
+        ]
+    );
+    // A declaration PHP# refuses has no part for a target to name.
+    assert_eq!(
+        issues("namespace App.Tenant;\n\n[method: Note]\nfunction helper() { }\n"),
+        [
+            "4:10 PHP# has no top-level functions: move `helper` into a class as a static method.",
+            "3:2 `method:` names no part of this declaration.",
         ]
     );
 }
@@ -3129,7 +3141,7 @@ fn an_attribute_argument_is_a_constant_or_a_new_of_constants() {
             "11:49 An attribute argument is a constant or a `new` of constants, and `...[1]` is neither.",
             "12:36 An attribute argument is a constant or a `new` of constants, and `new Throttle.hourly(1)` is neither.",
             "12:60 An attribute argument is a constant or a `new` of constants, and `new Throttle { perMinute: 1 }` is neither.",
-            "12:98 An attribute argument cannot create an object of a generic class, as `new Box<int>(1)` does: PHP creates it without its type arguments.",
+            "12:98 An attribute argument creates its objects without type arguments, so it cannot `new` a generic class, as `new Box<int>(1)` does.",
         ]
     );
 

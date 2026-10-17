@@ -60,13 +60,17 @@ where
     }
 
     /// Whether the `[…]` groups that start here are a lambda's attributes: the last is followed by a parenthesized list
-    /// and `=>`, as C# writes `[Pure] (int n) => n * 2`. A list literal is never followed by both.
+    /// and `=>`, as C# writes `[Pure] (int n) => n * 2`, or by a name and `=>`, which `parse_lambda` reports. A list
+    /// literal is never followed by either.
     fn is_at_attributed_lambda(&self) -> Result<bool, ParseError> {
         let mut tokens = self.stream.peek_tokens();
         loop {
             let (open, close) = match tokens.next().transpose()?.map(|token| token.kind) {
                 Some(T!["["]) => (T!["["], T!["]"]),
                 Some(T!["("]) => (T!["("], T![")"]),
+                Some(T![Identifier]) => {
+                    return Ok(tokens.next().transpose()?.is_some_and(|token| token.kind == T!["=>"]));
+                }
                 _ => return Ok(false),
             };
             let mut depth = 1usize;
@@ -118,6 +122,9 @@ where
         } else {
             let variable = self.parse_bare_variable()?;
             let span = variable.span;
+            if let Some(first) = attribute_lists.first() {
+                self.errors.push(ParseError::UnparenthesizedAttributedLambdaInSharp(first.span().join(span)));
+            }
             let parameter = FunctionLikeParameter {
                 attribute_lists: Sequence::empty(),
                 modifiers: Sequence::empty(),

@@ -3719,7 +3719,7 @@ fn php_attribute_syntax_is_a_parse_error_that_names_the_brackets() {
 }
 
 /// Spec section 1: an accessor takes attributes, as in `{ [Pure] get; set; }`, where `[` never opens a type. A type
-/// parameter's attributes are a parse error that says PHP erases it.
+/// parameter's attributes are a parse error that says where to put them.
 #[test]
 fn an_accessor_takes_attributes_and_a_type_parameter_takes_none() {
     const CODE: &str =
@@ -3732,8 +3732,7 @@ fn an_accessor_takes_attributes_and_a_type_parameter_takes_none() {
     assert_eq!(
         messages,
         [(
-            "PHP erases a type parameter, so an attribute on it has nowhere to go: put it on the declaration that declares the type parameter."
-                .to_owned(),
+            "A type parameter takes no attributes: put them on the declaration that declares it.".to_owned(),
             "[Marker]"
         )]
     );
@@ -3749,6 +3748,25 @@ fn an_accessor_takes_attributes_and_a_type_parameter_takes_none() {
         })
         .collect();
     assert_eq!(accessors, [("get", vec!["[Pure]"]), ("set", vec!["[Logged, Checked]"])]);
+}
+
+/// Spec section 1: a lambda with attributes puts its parameters in parentheses, as C# does, so one written without them
+/// is one error that names the form, and the lambda still parses.
+#[test]
+fn an_attributed_lambda_without_parentheses_is_one_error() {
+    const CODE: &str = "class Report\n{\n    public Function<int(int)> twice() => [Tag(\"bare\")] n => n * 2;\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Report.sharp", CODE);
+
+    let messages: Vec<(String, &str)> =
+        program.errors.iter().map(|error| (error.to_string(), source(CODE, error))).collect();
+    assert_eq!(
+        messages,
+        [(
+            "A lambda with attributes puts its parameters in parentheses, as in `[Pure] (n) => n * 2`.".to_owned(),
+            "[Tag(\"bare\")] n"
+        )]
+    );
 }
 
 /// Spec section 1: an attribute target, as C# writes it, opens its brackets and names where every attribute in them
@@ -3776,16 +3794,16 @@ fn an_attribute_target_opens_its_brackets() {
         [(Some("return"), vec!["NotNull", "Pure"]), (Some("method"), vec!["Logged"]), (None, vec!["Cached"])]
     );
 
-    const LATE: &str = "class Report\n{\n    [Cached, return: NotNull]\n    public string run() { return \"\"; }\n}\n";
+    const LATE: &str = "class Report\n{\n    [Cached, method: Logged]\n    public string run() { return \"\"; }\n}\n";
     let program = parse(&arena, "src/Report.sharp", LATE);
     let messages: Vec<(String, &str)> =
         program.errors.iter().map(|error| (error.to_string(), source(LATE, error))).collect();
     assert_eq!(
         messages,
         [(
-            "An attribute target opens its brackets and names where all of them go, as in `[return: NotNull]`."
+            "An attribute target opens its brackets and names where all of them go, as in `[param: Trimmed]`."
                 .to_owned(),
-            "return:"
+            "method:"
         )]
     );
 }
