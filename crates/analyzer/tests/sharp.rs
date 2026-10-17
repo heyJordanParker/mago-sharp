@@ -17858,6 +17858,22 @@ fn an_override_takes_on_effects_wherever_the_method_it_overrides_does() {
         "app/Holes/PureSetter.sharp",
         "namespace App.Holes;\n\npublic interface PureSetter : Rater\n{\n    void setRate(Function<int(int) uses none> rate);\n}\n",
     );
+    let hook = (
+        "app/Holes/Hook.sharp",
+        "namespace App.Holes;\n\npublic interface Hook\n{\n    void setHook(Function<int(int)>? hook);\n}\n",
+    );
+    let pure_hook = (
+        "app/Holes/PureHook.sharp",
+        "namespace App.Holes;\n\npublic class PureHook : Hook\n{\n    private Function<int(int)>? hook = null;\n\n    public void setHook(Function<int(int) uses none>? hook) => this.hook = hook;\n\n    public bool hooked() => this.hook != null;\n}\n",
+    );
+    let php_either = (
+        "src/Lib/PhpEither.php",
+        "<?php\n\nnamespace Lib;\n\ninterface PhpEither\n{\n    public function setRate(int|\\Closure $rate): void;\n}\n",
+    );
+    let either_rater = (
+        "app/Holes/EitherRater.sharp",
+        "namespace App.Holes;\n\nimport Lib.PhpEither;\n\npublic class EitherRater : PhpEither\n{\n    private Function<int(int)>|int rate = 0;\n\n    public void setRate(Function<int(int) uses none>|int rate) => this.rate = rate;\n\n    public Function<int(int)>|int current() => this.rate;\n}\n",
+    );
     let calling_rater = (
         "app/Holes/CallingRater.sharp",
         "namespace App.Holes;\n\npublic class CallingRater : Rater\n{\n    public void setRate(Function<int(int)> rate)\n    {\n        rate(1);\n    }\n}\n",
@@ -17882,6 +17898,8 @@ fn an_override_takes_on_effects_wherever_the_method_it_overrides_does() {
             worded(int_sink, &[sink]),
             worded(php_pure_rater, &[php_rater]),
             worded(pure_setter, &[rater]),
+            worded(pure_hook, &[hook]),
+            worded(either_rater, &[php_either]),
             worded(calling_rater, &[rater]),
         ]
         .concat(),
@@ -17920,6 +17938,15 @@ fn an_override_takes_on_effects_wherever_the_method_it_overrides_does() {
                 take_on("Rater", "setRate", "rate"),
                 state("Rater", "setRate", "rate", "Function<int(int) uses none>", "Function<int(int)>")
             ),
+            format!(
+                "7:25 incompatible-parameter-type `PureHook.setHook` can't take a `Function<int(int) uses none>?`: {} | {}",
+                take_on("Hook", "setHook", "hook"),
+                state("Hook", "setHook", "hook", "Function<int(int) uses none>?", "Function<int(int)>?")
+            ),
+            format!(
+                "9:25 incompatible-parameter-type `EitherRater.setRate` can't take a `int|Function<int(int) uses none>`: {} | Take a `int|Function<int(int)>` here and call it only inside `setRate`.",
+                take_on("PhpEither", "setRate", "rate")
+            ),
         ]
     );
 }
@@ -17952,7 +17979,7 @@ fn a_function_in_a_collection_is_held_to_the_collection_s_element_type() {
 fn a_function_value_refused_only_for_its_effects_is_named_with_them() {
     let rates = (
         "app/Shop/Rates.sharp",
-        "namespace App.Shop;\n\npublic class Rates\n{\n    private Function<int(int)> rate = (int n) => n;\n\n    private Function<int(int) uses none>|int either = 0;\n\n    public void setRate(Function<int(int) uses none> rate) => this.rate = rate;\n\n    public void setEither(Function<int(int) uses none>|int f) => this.either = f;\n\n    public void run(Function<int(int) uses Http> mailer)\n    {\n        this.setRate(mailer);\n        this.setEither((int n) => global.fetch(n));\n    }\n\n    public int price() => this.rate(1);\n\n    public Function<int(int) uses none>|int current() => this.either;\n}\n",
+        "namespace App.Shop;\n\npublic class Rates\n{\n    private Function<int(int)> rate = (int n) => n;\n\n    private Function<int(int) uses none>|int either = 0;\n\n    public void setRate(Function<int(int) uses none> rate) => this.rate = rate;\n\n    public void setEither(Function<int(int) uses none>|int f) => this.either = f;\n\n    public void run(Function<int(int) uses Http> mailer)\n    {\n        this.setRate(mailer);\n        this.setEither((int n) => global.fetch(n));\n    }\n\n    public int price() => this.rate(1);\n\n    public Function<int(int) uses none>|int current() => this.either;\n\n    public void http(Function<int(int) uses Http> rate)\n    {\n        rate(1);\n    }\n\n    public void both(Function<int(int) uses Http, Mail> both)\n    {\n        this.http(both);\n        this.setRate(both);\n    }\n}\n",
     );
 
     assert_eq!(
@@ -17960,7 +17987,11 @@ fn a_function_value_refused_only_for_its_effects_is_named_with_them() {
         (
             vec![
                 "15:22 invalid-argument `mailer` has the effect `Http`, so a pure `Function<int(int) uses none>` cannot hold it."
-                    .to_owned()
+                    .to_owned(),
+                "30:19 invalid-argument `both` has the effect `Mail`, so a `Function<int(int) uses Http>` cannot hold it."
+                    .to_owned(),
+                "31:22 invalid-argument `both` has the effects `Http` and `Mail`, so a pure `Function<int(int) uses none>` cannot hold it."
+                    .to_owned(),
             ],
             vec![
                 "app/Shop/Rates.sharp:16:24 invalid-argument: This lambda calls `global.fetch`, which has the effect `Http`, so the pure `Function<int(int) uses none>` of `int|Function<int(int) uses none>` cannot hold it."

@@ -4277,7 +4277,7 @@ fn report_signature_compatibility_issue<'ctx, A>(
         }
         SignatureCompatibilityIssue::TakesOnEffectsDropped { parameter_index, child_type } => {
             let Some(child_parameter) = child_method.parameters.get(parameter_index) else {
-                return;
+                unreachable!("the signature check found this parameter on the override");
             };
             // The overridden parameter as its own class declares it, before a type argument fills its type parameters.
             let Some(parent_parameter) = context
@@ -4285,7 +4285,7 @@ fn report_signature_compatibility_issue<'ctx, A>(
                 .get_declaring_method(parent_class.name.as_bytes(), method_name.as_bytes())
                 .and_then(|parent_method| parent_method.parameters.get(parameter_index))
             else {
-                return;
+                unreachable!("the signature check found this parameter on the method its class declares");
             };
             let parent_parameter_name = mago_bytes::trim_start_byte(parent_parameter.name.0.as_bytes(), b'$');
             let parent_parameter_name = String::from_utf8_lossy(parent_parameter_name);
