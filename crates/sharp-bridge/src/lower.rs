@@ -3295,8 +3295,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             (accessors, _) => self.hooks(&parameter.variable, accessors.as_ref(), Some(hint)),
         };
         let line = self.line(parameter.variable.span);
-        let hint = self.hint(hint);
-        let hint = self.property_hint(hint, parameter.variable.name, line);
+        let hint = self.property_type(hint, parameter.variable.name, line);
         let name = self.string(0, line, parameter.variable.name);
         let flags = self.member_flags(parameter);
         let element = self.node(SHARP_AST_PROP_ELEM, 0, line, &[name, NULL, NULL, hooks]);
@@ -3360,6 +3359,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         };
         let variable = property.first_variable();
         let r#override = property.modifiers().iter().find(|modifier| matches!(modifier, Modifier::Override(_)));
+        let line = self.line(variable);
         let hint = match (r#override, parent) {
             (Some(_), Some(parent))
                 if self.types.member_declaration(parent, variable.name).kind
@@ -3367,10 +3367,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             {
                 NULL
             }
-            _ => self.hint(hint),
+            _ => self.property_type(hint, variable.name, line),
         };
-        let line = self.line(variable);
-        let hint = self.property_hint(hint, variable.name, line);
         let name = self.string(0, line, variable.name);
         let default = match property.initial_value() {
             Some(value)
@@ -4282,6 +4280,57 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             Hint::Generic(_) | Hint::Tuple(_) => PhpType::Keyword(IS_ARRAY),
             Hint::Function(_) => PhpType::Classes(vec![b"Closure"]),
             _ => unreachable!("check_slice refuses the type `{hint}`"),
+        }
+    }
+
+    /// The PHP type of the property `property`, which PHP# declares with the type `hint`, with the type text the engine
+    /// checks each write against where PHP's type checks less. An override of a typed plain PHP property runs with the
+    /// type the parent declares, spec section 6.1, and its text checks its own type.
+    fn property_type(&mut self, hint: &Hint, property: &[u8], line: u32) -> u32 {
+        let php_type = match self.types.narrowed_root_type(self.class, property) {
+            Some(root) => self.declared_type(root, line),
+            None => self.hint(hint),
+        };
+
+        self.property_hint(php_type, property, line)
+    }
+
+    /// The node of `r#type`, a type plain PHP declares, so it holds only PHP's own types: each as [`Self::php_type`]
+    /// writes it, in a union when there are several.
+    fn declared_type(&mut self, r#type: &TUnion, line: u32) -> u32 {
+        let mut nodes = Vec::new();
+        for atomic in r#type.types.iter() {
+            let php_type = match atomic {
+                TAtomic::Null => PhpType::Named(b"null"),
+                TAtomic::Mixed(_) => PhpType::Mixed,
+                TAtomic::Array(_) => PhpType::Keyword(IS_ARRAY),
+                TAtomic::Iterable(_) => PhpType::Named(b"iterable"),
+                TAtomic::Object(TObject::Any) => PhpType::Named(b"object"),
+                TAtomic::Object(TObject::Enum(r#enum)) => PhpType::Classes(vec![r#enum.name.as_bytes()]),
+                TAtomic::Object(TObject::Named(object)) => PhpType::Classes(
+                    std::iter::once(object.name.as_bytes())
+                        .chain(object.get_intersection_types().unwrap_or_default().iter().filter_map(
+                            |part| match part {
+                                TAtomic::Object(TObject::Named(part)) => Some(part.name.as_bytes()),
+                                _ => None,
+                            },
+                        ))
+                        .collect(),
+                ),
+                TAtomic::Scalar(scalar) if scalar.is_true() => PhpType::Named(b"true"),
+                TAtomic::Scalar(scalar) if scalar.is_false() => PhpType::Named(b"false"),
+                TAtomic::Scalar(scalar) if scalar.is_general_bool() => PhpType::Named(b"bool"),
+                TAtomic::Scalar(scalar) if scalar.is_int() => PhpType::Named(b"int"),
+                TAtomic::Scalar(scalar) if scalar.is_float() => PhpType::Named(b"float"),
+                TAtomic::Scalar(scalar) if scalar.is_string() => PhpType::Named(b"string"),
+                _ => unreachable!("PHP declares no property of the type `{}`", atomic.get_id()),
+            };
+            nodes.push(self.php_type(&php_type, line));
+        }
+
+        match nodes[..] {
+            [single] => single,
+            _ => self.node(SHARP_AST_TYPE_UNION, 0, line, &nodes),
         }
     }
 

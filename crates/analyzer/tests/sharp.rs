@@ -1778,7 +1778,7 @@ const MODEL: &str = "<?php\n\nnamespace Lib;\n\ntrait HasTimestamps\n{\n    /** 
 /// parent has none, and the type of a typed parent, with the parent's access level, spec section 6.1.
 #[test]
 fn a_property_overrides_a_plain_php_property_with_a_type_that_fits_the_parent() {
-    let sharp = "namespace Demo;\n\nimport Lib.Model;\n\npublic class Order : Model\n{\n    protected override string? table { get; set; } = \"orders\";\n    protected override List<string> fillable { get; set; } = [\"number\", \"total\"];\n    protected override List<string> with { get => field; set => field = value; } = [\"customer\"];\n    public override bool timestamps { get; set; } = false;\n    protected override int perPage { get; set => field = value > 0 ? value : 15; } = 20;\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Model;\n\npublic class Order : Model\n{\n    protected override string? table { get; set; } = \"orders\";\n    protected override List<string> fillable { get; set; } = [\"number\", \"total\"];\n    protected override List<string> with { get => field; set => field = value; } = [\"customer\"];\n    public override bool timestamps { get; set; } = false;\n    protected override int perPage { get; set => field = value > 0 ? value : 15; } = 20;\n    protected override List<string> appends { get; set; } = [];\n}\n";
     let others = [("src/Lib/Model.php", MODEL)];
 
     assert_eq!(issues(("src/Demo/Order.sharp", sharp), &others), Vec::<String>::new());
@@ -1788,7 +1788,7 @@ fn a_property_overrides_a_plain_php_property_with_a_type_that_fits_the_parent() 
 /// or field that replaces a parent's property without `override`, is an error, spec section 6.1.
 #[test]
 fn an_override_that_does_not_match_the_plain_php_property_is_an_error() {
-    let sharp = "namespace Demo;\n\nimport Lib.Model;\n\npublic class Order : Model\n{\n    public override List<string> fillable { get; set; } = [\"number\"];\n    protected override string? table { get; set; } = 5;\n    public override int timestamps { get; set; } = 0;\n    protected override List<string> appends { get; set; } = [];\n    protected string with { get; set; } = \"customer\";\n    protected override string missing { get; set; } = \"none\";\n    protected override string secret { get; set; } = \"order\";\n    protected int perPage = 20;\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Model;\n\npublic class Order : Model\n{\n    public override List<string> fillable { get; set; } = [\"number\"];\n    protected override string? table { get; set; } = 5;\n    public override int timestamps { get; set; } = 0;\n    protected override string appends { get; set; } = \"\";\n    protected string with { get; set; } = \"customer\";\n    protected override string missing { get; set; } = \"none\";\n    protected override string secret { get; set; } = \"order\";\n    protected int perPage = 20;\n}\n";
 
     let issues =
         analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Order.sharp", sharp), &[("src/Lib/Model.php", MODEL)]);
@@ -1808,7 +1808,10 @@ fn an_override_that_does_not_match_the_plain_php_property_is_an_error() {
             "incompatible-property-type",
             "The override `Order.timestamps` has type `int`, which does not fit `bool`, the type of `Model.timestamps`.",
         ),
-        ("incompatible-property-type", "Property `Order.appends` has an incompatible type declaration."),
+        (
+            "incompatible-property-type",
+            "The override `Order.appends` has type `string`, which does not fit `Map<int|string, Any?>`, the type of `Model.appends`.",
+        ),
         ("missing-override-attribute", "Missing `override` modifier on overriding property `Order.with`."),
         ("invalid-override-attribute", "Invalid `override` modifier on `Order.missing`."),
         ("invalid-override-attribute", "Invalid `override` modifier on `Order.secret`."),

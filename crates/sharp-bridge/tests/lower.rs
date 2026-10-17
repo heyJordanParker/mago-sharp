@@ -12774,6 +12774,63 @@ fn an_override_of_a_property_with_no_type_has_no_type() {
 }
 
 /// ```php
+/// #[\Override] protected null|string $table = 'orders';   // with the type text "string"
+/// #[\Override] public int|float $level = 3;           // with the type text "int"
+/// ```
+///
+/// An override that narrows a typed plain PHP property, spec section 6.1, runs with the parent's PHP type, which PHP
+/// keeps through every override as the class links, and the engine checks its own type on each write.
+#[test]
+fn an_override_that_narrows_a_typed_property_runs_with_the_parent_type_and_checks_its_own() {
+    let lowered = Lowered::with(
+        "class Order : Model\n{\n    protected override string table { get; set; } = \"orders\";\n    public override int level { get; set; } = 3;\n}\n",
+        &[("src/Model.php", "<?php class Model { protected ?string $table = null; public int|float $level = 0; }")],
+    );
+    let class = lowered.child(lowered.root(), 1);
+
+    assert_eq!(
+        lowered.render(lowered.child(class, 2)),
+        indoc! {r#"
+            STMT_LIST
+              PROP_GROUP [2]
+                SHARP_TYPE_ARGS
+                  TYPE_UNION
+                    ZVAL [1] "null"
+                    ZVAL [1] "string"
+                  ZVAL "string"
+                PROP_DECL
+                  PROP_ELEM
+                    ZVAL "table"
+                    ZVAL "orders"
+                    null
+                    null
+                ATTRIBUTE_LIST
+                  ATTRIBUTE_GROUP
+                    ATTRIBUTE
+                      ZVAL "Override"
+                      null
+              PROP_GROUP [1]
+                SHARP_TYPE_ARGS
+                  TYPE_UNION
+                    ZVAL [1] "int"
+                    ZVAL [1] "float"
+                  ZVAL "int"
+                PROP_DECL
+                  PROP_ELEM
+                    ZVAL "level"
+                    ZVAL 3
+                    null
+                    null
+                ATTRIBUTE_LIST
+                  ATTRIBUTE_GROUP
+                    ATTRIBUTE
+                      ZVAL "Override"
+                      null
+        "#}
+    );
+}
+
+/// ```php
 /// #[\Override] protected $table = 'orders' { set { $this->table = \trim($value); } }
 /// abstract public string $kind { get; }
 /// ```

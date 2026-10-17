@@ -4491,6 +4491,40 @@ fn check_docblock_declared_members<A>(
 /// Reports a PHP# override of a plain PHP property that has no `set`, an `init`, or a `set` at another level than the
 /// parent's, spec section 6.1. The parent's own code writes the property at any time, which a get-only or an `init`
 /// property promises no code does, and line 287 makes the override's access level the parent's.
+/// Reports a PHP# override of a plain PHP property whose type `declaring_type` does not fit `parent_type`, the parent's
+/// type at `parent_span`, which `parent_label` names, as in "the parent's `@var` type", and `note` explains.
+fn report_unfit_override<A>(
+    context: &mut Context<'_, '_, A>,
+    (child_display, parent_display): (&str, &str),
+    declaring_type: &TypeMetadata,
+    (parent_type, parent_span): (&TUnion, Span),
+    parent_label: &str,
+    note: &'static str,
+) where
+    A: Arena,
+{
+    if is_type_compatible(context.codebase, &declaring_type.type_union, parent_type) {
+        return;
+    }
+
+    let declaring_type_id = display_type(context, &declaring_type.type_union);
+    let parent_type_id = display_type(context, parent_type);
+    context.collector.report_with_code(
+        IssueCode::IncompatiblePropertyType,
+        Issue::error(format!(
+            "The override `{child_display}` has type `{declaring_type_id}`, which does not fit `{parent_type_id}`, the type of `{parent_display}`."
+        ))
+        .with_annotation(
+            Annotation::primary(declaring_type.span).with_message(format!("`{declaring_type_id}` is written here.")),
+        )
+        .with_annotation(
+            Annotation::secondary(parent_span).with_message(format!("`{parent_type_id}` is {parent_label}.")),
+        )
+        .with_note(note)
+        .with_help(format!("Write a type that fits `{parent_type_id}`.")),
+    );
+}
+
 fn report_plain_php_override_set<A>(
     context: &mut Context<'_, '_, A>,
     property: &PropertyMetadata,
@@ -4893,6 +4927,29 @@ fn check_class_like_properties<'ctx, A>(
                 property_metadata.type_declaration_metadata.as_ref(),
                 parent_property.type_declaration_metadata.as_ref(),
             ) {
+                // Spec section 6.1: a PHP# override of a typed plain PHP property may narrow its type. The class links
+                // with the parent's PHP type, and the override's type checks each write, so it fits the parent's type,
+                // its `@var` type included.
+                (Some(declaring_type), Some(parent_declaration)) if plain_php_parent => {
+                    let parent_type = parent_property.type_metadata.as_ref().unwrap_or(parent_declaration);
+
+                    report_unfit_override(
+                        context,
+                        (&child_display, &parent_display),
+                        declaring_type,
+                        (
+                            &localize_parent_type(
+                                context.codebase,
+                                class_like_metadata,
+                                parent_metadata.name,
+                                &parent_type.type_union,
+                            ),
+                            parent_type.span,
+                        ),
+                        "the parent's type",
+                        "The parent's code reads this property as its own type, so the override's type must fit it.",
+                    );
+                }
                 (Some(declaring_type), Some(parent_type)) => {
                     // A PHP# declaration may name a type parameter, which the child's header or `@extends` fills.
                     let is_sharp = parent_metadata.flags.is_sharp() || class_like_metadata.flags.is_sharp();
@@ -4993,34 +5050,22 @@ fn check_class_like_properties<'ctx, A>(
                     // it fits the parent's `@var` type, or any type without one, spec section 6.1.
                     if context.dialect.is_sharp() {
                         if let Some(parent_type) = parent_property.type_metadata.as_ref().filter(|t| t.from_docblock) {
-                            let parent_type_union = localize_parent_type(
-                                context.codebase,
-                                class_like_metadata,
-                                parent_metadata.name,
-                                &parent_type.type_union,
+                            report_unfit_override(
+                                context,
+                                (&child_display, &parent_display),
+                                declaring_type,
+                                (
+                                    &localize_parent_type(
+                                        context.codebase,
+                                        class_like_metadata,
+                                        parent_metadata.name,
+                                        &parent_type.type_union,
+                                    ),
+                                    parent_type.span,
+                                ),
+                                "the parent's `@var` type",
+                                "PHP does not check this property's type, so the override's type must fit the one the parent's code relies on.",
                             );
-
-                            if !is_type_compatible(context.codebase, &declaring_type.type_union, &parent_type_union) {
-                                let declaring_type_id = display_type(context, &declaring_type.type_union);
-                                let parent_type_id = display_type(context, &parent_type_union);
-
-                                context.collector.report_with_code(
-                                    IssueCode::IncompatiblePropertyType,
-                                    Issue::error(format!(
-                                        "The override `{child_display}` has type `{declaring_type_id}`, which does not fit `{parent_type_id}`, the type of `{parent_display}`."
-                                    ))
-                                    .with_annotation(
-                                        Annotation::primary(declaring_type.span)
-                                            .with_message(format!("`{declaring_type_id}` is written here.")),
-                                    )
-                                    .with_annotation(
-                                        Annotation::secondary(parent_type.span)
-                                            .with_message(format!("`{parent_type_id}` is the parent's `@var` type.")),
-                                    )
-                                    .with_note("PHP does not check this property's type, so the override's type must fit the one the parent's code relies on.")
-                                    .with_help(format!("Write a type that fits `{parent_type_id}`.")),
-                                );
-                            }
                         }
 
                         continue;

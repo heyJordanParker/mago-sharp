@@ -24,6 +24,8 @@ use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::object::named::TNamedObject;
 use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeString;
+use mago_codex::ttype::comparator::ComparisonResult;
+use mago_codex::ttype::comparator::union_comparator;
 use mago_codex::ttype::comparator::union_comparator::can_expression_types_be_identical;
 use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::get_sharp_type;
@@ -827,10 +829,11 @@ impl<'analysis> Types<'analysis> {
         let r#type = &metadata.type_metadata.as_ref()?.type_union;
 
         // A property of a PHP enum, which only PHP# declares, a computed one, carries its type text always, which tells
-        // the engine the enum may hold it, spec section 31.
+        // the engine the enum may hold it, spec section 31, and so does one that runs with a wider plain PHP type.
         let is_enum = self.codebase.get_class_like(class).is_some_and(|class| class.kind.is_enum());
+        let always = is_enum || self.narrowed_root_type(class, property).is_some();
 
-        self.checked_text(r#type, true).or_else(|| is_enum.then(|| type_text(r#type, self.codebase)))
+        self.checked_text(r#type, true).or_else(|| always.then(|| type_text(r#type, self.codebase)))
     }
 
     /// `r#type` as the type text an entry check tests a value from plain PHP against, when part of it is an `Any`, which
@@ -1416,7 +1419,7 @@ impl<'analysis> Types<'analysis> {
             DeclarationKind::StaticProperty
         } else {
             DeclarationKind::Property {
-                typed: self.root_property(class, &variable).type_declaration_metadata.is_some(),
+                typed: self.root_property(class, &variable).1.type_declaration_metadata.is_some(),
             }
         };
 
@@ -1428,9 +1431,34 @@ impl<'analysis> Types<'analysis> {
         })
     }
 
-    /// The root declaration of the property `variable` that `class` declares or inherits: the one in the class whose
-    /// parent does not declare it.
-    fn root_property(&self, class: &[u8], variable: &[u8]) -> &'analysis PropertyMetadata {
+    /// The type the root declaration of the property `property` of the fully qualified class name `class` writes, when
+    /// that root is a typed plain PHP property and `class` declares the property with a narrower type, spec section
+    /// 6.1. PHP keeps a property's type through every override as the class links, so the property runs with it, and
+    /// its own type checks each write. None for any other property, which runs with the type it writes.
+    pub(crate) fn narrowed_root_type(&self, class: &[u8], property: &[u8]) -> Option<&'analysis TUnion> {
+        let variable = [b"$", property].concat();
+        let own =
+            &self.codebase.get_declaring_property(class, &variable)?.type_declaration_metadata.as_ref()?.type_union;
+        let (root_class, root) = self.root_property(class, &variable);
+        let root_type = &root.type_declaration_metadata.as_ref()?.type_union;
+        let is_plain = !self.codebase.get_class_like(root_class.as_bytes())?.flags.is_sharp();
+
+        (is_plain
+            && !union_comparator::is_contained_by(
+                self.codebase,
+                root_type,
+                own,
+                false,
+                false,
+                false,
+                &mut ComparisonResult::default(),
+            ))
+        .then_some(root_type)
+    }
+
+    /// The root declaration of the property `variable` that `class` declares or inherits, the one in the class whose
+    /// parent does not declare it, with that class.
+    fn root_property(&self, class: &[u8], variable: &[u8]) -> (Word, &'analysis PropertyMetadata) {
         let declaring = |class: &[u8]| self.codebase.get_declaring_property_class(class, variable);
         let mut root =
             declaring(class).unwrap_or_else(|| unreachable!("`{}` declares or inherits the property", word(class)));
@@ -1443,9 +1471,12 @@ impl<'analysis> Types<'analysis> {
             root = parent;
         }
 
-        self.codebase
+        let metadata = self
+            .codebase
             .get_declaring_property(root.as_bytes(), variable)
-            .unwrap_or_else(|| unreachable!("`{root}` declares the property"))
+            .unwrap_or_else(|| unreachable!("`{root}` declares the property"));
+
+        (root, metadata)
     }
 
     /// The class declaring the static method `name` a PHP# operator on operands of the types `operands` runs as, as the
