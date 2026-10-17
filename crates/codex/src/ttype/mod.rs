@@ -19,6 +19,7 @@ use crate::ttype::atomic::generic::TGenericParameter;
 use crate::ttype::atomic::iterable::TIterable;
 use crate::ttype::atomic::object::TObject;
 use crate::ttype::atomic::object::named::TNamedObject;
+use crate::ttype::atomic::reference::TReference;
 use crate::ttype::atomic::scalar::TScalar;
 use crate::ttype::atomic::scalar::class_like_string::TClassLikeString;
 use crate::ttype::atomic::scalar::class_like_string::TClassLikeStringKind;
@@ -1667,6 +1668,61 @@ pub fn get_backed_enum<'codebase>(
         TAtomic::Object(object) => backed_enum(object.get_name()?),
         _ => None,
     })
+}
+
+/// How the keys of a PHP# `Map` keyed by a type sit in a PHP array, spec section 12.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArrayKeyForm {
+    /// Each key is a PHP array key, and no two are one: the type is `int`, `string` or one backed enum's cases.
+    Distinct,
+    /// Each key is a PHP array key, and two can be one, as `5` and `"5"` are: `int|string`, a backed enum beside its
+    /// backing type or another enum, or `Any`.
+    Colliding,
+    /// Some key is no PHP array key: a class, a struct, a collection, an enum without backing values, or a `float`.
+    Unheld,
+}
+
+/// The [`ArrayKeyForm`] of a `Map` keyed by `key_type`. A type parameter's keys are its bound's, and an unbounded one's
+/// are decided when the code runs, as `Distinct`.
+#[must_use]
+pub fn get_array_key_form(key_type: &TUnion, codebase: &CodebaseMetadata) -> ArrayKeyForm {
+    #[derive(PartialEq)]
+    enum Holder {
+        Int,
+        String,
+        Enum(Word),
+    }
+
+    let mut holders: Vec<Holder> = Vec::new();
+    for atomic in key_type.types.iter() {
+        let holder = match atomic {
+            TAtomic::Never => continue,
+            TAtomic::Mixed(_) | TAtomic::Scalar(TScalar::ArrayKey) => return ArrayKeyForm::Colliding,
+            TAtomic::Scalar(TScalar::Integer(_)) => Holder::Int,
+            TAtomic::Scalar(TScalar::String(_) | TScalar::ClassLikeString(_)) => Holder::String,
+            TAtomic::GenericParameter(parameter) if parameter.constraint.is_mixed() => continue,
+            TAtomic::GenericParameter(parameter) => match get_array_key_form(&parameter.constraint, codebase) {
+                ArrayKeyForm::Distinct => continue,
+                form => return form,
+            },
+            TAtomic::Reference(TReference::Symbol { name, .. })
+                if codebase
+                    .get_class_like(name.as_bytes())
+                    .is_some_and(|class_like| class_like.kind.is_enum() && class_like.enum_type.is_some()) =>
+            {
+                Holder::Enum(*name)
+            }
+            atomic => match get_backed_enum(atomic, codebase, Dialect::Sharp) {
+                Some(backed) => Holder::Enum(backed.name),
+                None => return ArrayKeyForm::Unheld,
+            },
+        };
+        if !holders.contains(&holder) {
+            holders.push(holder);
+        }
+    }
+
+    if holders.len() > 1 { ArrayKeyForm::Colliding } else { ArrayKeyForm::Distinct }
 }
 
 /// The value of `input`, whose key is `key` and whose value is `value`, as the iterable `container` reads it.

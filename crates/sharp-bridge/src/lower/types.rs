@@ -13,6 +13,7 @@ use mago_codex::metadata::module::ModuleMetadata;
 use mago_codex::metadata::parameter::FunctionLikeParameterMetadata;
 use mago_codex::metadata::property::PropertyMetadata;
 use mago_codex::misc::GenericParent;
+use mago_codex::ttype::ArrayKeyForm;
 use mago_codex::ttype::SharpType;
 use mago_codex::ttype::TType;
 use mago_codex::ttype::add_optional_union_type;
@@ -28,6 +29,7 @@ use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeString;
 use mago_codex::ttype::comparator::ComparisonResult;
 use mago_codex::ttype::comparator::union_comparator;
 use mago_codex::ttype::comparator::union_comparator::can_expression_types_be_identical;
+use mago_codex::ttype::get_array_key_form;
 use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_sharp_type;
@@ -603,6 +605,19 @@ impl<'analysis> Types<'analysis> {
         }
 
         forwarded
+    }
+
+    /// The declared result type of the method `class::method`, with a type parameter as itself, or none without one.
+    pub(crate) fn declared_result(&self, class: &[u8], method: &[u8]) -> Option<&'analysis TUnion> {
+        Some(&self.codebase.get_method(class, method)?.return_type_metadata.as_ref()?.type_union)
+    }
+
+    /// The declared type of the property `property` of the class `class` declares or inherits, with a type parameter as
+    /// itself.
+    pub(crate) fn declared_property_type(&self, class: &[u8], property: &[u8]) -> Option<&'analysis TUnion> {
+        let metadata = self.codebase.get_declaring_property(class, &[b"$", property].concat())?;
+
+        Some(&metadata.type_metadata.as_ref()?.type_union)
     }
 
     /// The type text of the result of the method `class::method`, as [`FunctionType::result`] writes it.
@@ -1360,6 +1375,11 @@ impl<'analysis> Types<'analysis> {
     /// The key type and the element type of a collection.
     pub(crate) fn array_parameters(&self, array: &TArray) -> (TUnion, TUnion) {
         get_array_parameters(array, self.codebase)
+    }
+
+    /// How the keys of a `Map` keyed by `key_type` sit in a PHP array, as the codex gives it.
+    pub(crate) fn key_form(&self, key_type: &TUnion) -> ArrayKeyForm {
+        get_array_key_form(key_type, self.codebase)
     }
 
     /// The type of the elements a value of `r#type` holds, the `T` of a `List<T>`, leaving out `null`. The caller asks
