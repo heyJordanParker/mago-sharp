@@ -1951,24 +1951,19 @@ fn a_constant_or_an_enum_case_is_read_in_a_default_a_constant_value_and_an_initi
     assert_eq!(issues(code), Vec::<String>::new());
 }
 
+/// A constant value cannot read a static member or a member of one, and a parameter's default, which is any
+/// expression, can.
 #[test]
 fn a_static_member_read_in_a_constant_expression_is_an_error() {
-    let code = "namespace App.Tenant;\n\nclass Report\n{\n    private static int count = 0;\n    public const int MAX = Report.count;\n\n    public int run(int extra = Report.count)\n    {\n        return 1;\n    }\n}\n";
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    private static int count = 0;\n    public const int MAX = Report.count;\n    public const int CENTS = Calc.rate.cents;\n\n    public int run(int extra = Report.count, int cents = Calc.rate.cents)\n    {\n        return 1;\n    }\n}\n";
 
     assert_eq!(
         issues(code),
         [
             "6:28 `Report.count` is a static member, which a constant value cannot read.",
-            "8:32 `Report.count` is a static member, which a constant value cannot read."
+            "7:30 This expression is not supported yet in PHP#."
         ]
     );
-}
-
-#[test]
-fn a_member_chain_in_a_constant_expression_is_not_supported_yet() {
-    let code = leak(method("        return extra;\n").replace("int extra", "int extra = Calc.rate.cents"));
-
-    assert_eq!(issues(code), ["5:32 This expression is not supported yet in PHP#."]);
 }
 
 #[test]
@@ -4605,13 +4600,21 @@ fn a_void_parameter_reports_only_the_php_error() {
     assert_eq!(issues(code), ["3:21 Invalid parameter type: bottom type `void` cannot be used as a parameter type."]);
 }
 
+/// Spec section 9: a parameter's default is any expression: a call, a `new`, a cast, a ternary or a lambda. It runs
+/// before the method each time a call leaves the argument out, so it reads no `this`, member, `field` or other
+/// parameter, and a lambda in it reads its own parameters.
 #[test]
-fn a_parameter_default_is_a_constant_expression() {
-    let code = "class Report\n{\n    public int run(int a = -1 + 2 * PHP_INT_MAX, int b = a, int c = this.run(), bool d = !true)\n    {\n        return a;\n    }\n}\n";
+fn a_parameter_default_is_any_expression_that_reads_no_object_or_parameter() {
+    let code = "class Report\n{\n    private int size = 0;\n\n    public int run(\n        int a = -1 + 2 * PHP_INT_MAX,\n        int b = Report.make(),\n        Report c = new Report(),\n        int d = (int)1.5,\n        int e = true ? 1 : 2,\n        Function<int(int)> f = (int x) => x + 1,\n        int g = a,\n        int h = this.run(),\n        int i = size,\n    )\n    {\n        return a;\n    }\n\n    public static int make() => 1;\n}\n";
+    let message = |name: &str| format!("A parameter's default runs before the method, so `{name}` is not there yet.");
 
     assert_eq!(
         issues(code),
-        ["3:58 This expression is not supported yet in PHP#.", "3:69 This expression is not supported yet in PHP#.",]
+        [
+            format!("12:17 {}", message("a")),
+            format!("13:17 {}", message("this")),
+            "14:17 Write `this.size`: members of the same object are always written with `this.`.".to_owned(),
+        ]
     );
 }
 
@@ -5150,15 +5153,6 @@ fn an_interface_method_and_a_class_constant_take_any_and_never_mixed() {
     assert_eq!(issues(class), [format!("5:18 {mixed}")]);
 }
 
-#[test]
-fn a_cast_or_a_ternary_in_a_parameter_default_is_not_supported_yet() {
-    let cast = leak(method("        return extra;\n").replace("int extra", "int extra = (int)1.5"));
-    let ternary = leak(method("        return extra;\n").replace("int extra", "int extra = true ? 1 : 2"));
-
-    assert_eq!(issues(cast), ["5:32 This operator is not supported yet in PHP#."]);
-    assert_eq!(issues(ternary), ["5:32 This expression is not supported yet in PHP#."]);
-}
-
 /// Spec section 27: as a parameter's default, `Position.current()` gives the caller's position, which a PHP# call
 /// passes, of a method, a signature and a lambda alike. PHP compares method names ignoring case.
 #[test]
@@ -5206,16 +5200,16 @@ fn position_current_in_a_body_or_an_initial_value_is_in_the_slice() {
     assert_eq!(issues(code), Vec::<String>::new());
 }
 
-/// An imported or a declared `Position` is not the standard library's, so its `current()` default keeps the refusal
-/// of any call in a constant expression.
+/// An imported or a declared `Position` is not the standard library's, so its `current()` default is a call like any
+/// other, and no part of it is refused.
 #[test]
-fn a_current_default_of_an_imported_or_declared_position_keeps_the_constant_expression_refusal() {
-    let imported = "namespace App;\n\nimport App.Shared.Position;\n\nclass Reports\n{\n    public static void logSlow(Position caller = Position.current())\n    {\n    }\n}\n";
+fn a_current_default_of_an_imported_or_declared_position_is_a_call() {
+    let imported = "namespace App;\n\nimport App.Shared.Position;\n\nclass Reports\n{\n    public static void logSlow(Position caller = Position.current().next())\n    {\n    }\n}\n";
     // A file names the class it declares, so in `Position.sharp` a bare `Position` is that class.
-    let declared = "namespace App;\n\nclass Position\n{\n    public static void logSlow(Position caller = Position.current())\n    {\n    }\n}\n";
+    let declared = "namespace App;\n\nclass Position\n{\n    public static void logSlow(int line = Position.current().line)\n    {\n    }\n}\n";
 
-    assert_eq!(issues(imported), ["7:50 This expression is not supported yet in PHP#."]);
-    assert_eq!(issues(declared), ["5:50 This expression is not supported yet in PHP#."]);
+    assert_eq!(issues(imported), Vec::<String>::new());
+    assert_eq!(issues(declared), Vec::<String>::new());
 }
 
 /// A class constant's value and an enum case's value are constant expressions as a default is, and keep the refusal of
@@ -5576,8 +5570,8 @@ fn a_type_argument_is_read_in_a_body_and_never_in_a_constant() {
     assert_eq!(
         issues(code),
         [
-            "22:39 `typeof(TItem)` is not a constant: it reads the type argument the code runs with.",
-            "24:33 `TItem.LIMIT` is not a constant: it reads the type argument the code runs with.",
+            "22:46 A parameter's default runs before the method, so `TItem` is not there yet.",
+            "24:33 A parameter's default runs before the method, so `TItem` is not there yet.",
             "26:44 `TItem` already carries the type arguments of the type it stands for.",
             "28:36 A named constructor through a type parameter, as in `new TItem.of(…)`, is not supported yet in PHP#.",
         ]

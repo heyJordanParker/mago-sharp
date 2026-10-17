@@ -5287,20 +5287,10 @@ fn a_data_case_is_a_type_of_its_own() {
         ]
     );
 
-    // A plain case is an object, which a parameter's default cannot hold yet.
+    // A plain case is an object, which a parameter's default holds, as it runs each time a call leaves it out.
     let default =
         "namespace App;\n\nclass Till\n{\n    public bool open(CheckoutState state = CheckoutState.Open) => true;\n}\n";
-    let messages: Vec<String> =
-        analyze(&PLUGIN_REGISTRY, settings(), ("src/App/Till.sharp", default), &[CHECKOUT_STATE])
-            .into_iter()
-            .map(|issue| format!("{} {}", located(default, &issue), issue.message))
-            .collect();
-    assert_eq!(
-        messages,
-        [
-            "5:44 not-supported-yet Reading a case of an enum whose cases carry data, as `CheckoutState.Open`, in a constant expression is not supported yet in PHP#."
-        ]
-    );
+    assert_eq!(analyze(&PLUGIN_REGISTRY, settings(), ("src/App/Till.sharp", default), &[CHECKOUT_STATE]).len(), 0);
 }
 
 /// Spec sections 19 and 20: an enum compares by value, so `==` on two cases of an enum whose cases carry data compares
@@ -7482,6 +7472,20 @@ fn a_name_without_its_import_names_the_import_or_the_namespace() {
 
         assert!(worded.first().is_some_and(|first| first.ends_with(message)), "{code}: {worded:?}");
     }
+}
+
+/// Spec section 9: a parameter's default is any expression, so a call, a `new` and a static read check as a body's
+/// do, and the scan of a default that reads another parameter, which semantics refuses, adds no issue.
+#[test]
+fn a_parameter_default_is_analyzed_as_any_expression() {
+    let code = "namespace App;\n\nclass Report\n{\n    private static int seen = 0;\n\n    public static int next() => 1;\n\n    public int run(int a = Report.next(), Report b = new Report(), int c = Report.seen, int d = a + 1, string e = Report.next())\n    {\n        return a + c + d;\n    }\n}\n";
+
+    assert_eq!(
+        worded(("src/App/Report.sharp", code), &[]),
+        [
+            "9:115 invalid-parameter-default-value Default value for parameter `e` is not assignable to its declared type. | This default value has type `int` | Parameter `e` is declared with type `string` | A parameter's default value must be assignable to the parameter's declared type. | Change the default value to match the declared type, or widen the parameter type to accept the default."
+        ]
+    );
 }
 
 /// A missing class that is no keyword in another case, no full name and the short name of no class the file could

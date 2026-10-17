@@ -9307,6 +9307,39 @@ fn a_never_method_is_php_never() {
     assert_eq!(member_in(&[lowered], "Report", &[0, 3]), "ZVAL [1] \"never\"\n");
 }
 
+/// Spec section 9: a parameter's default is any expression. One PHP takes as a constant expression stays as written,
+/// and any other runs in a static closure the default calls, which the engine runs each time a call leaves the
+/// argument out.
+///
+/// ```php
+/// public function run(int $at = (static function () { return \time(); })(), int $step = 1 + 2): int
+/// ```
+#[test]
+fn a_parameter_default_that_is_no_constant_expression_runs_in_a_static_closure() {
+    let lowered = [Lowered::new(
+        "class Report\n{\n    public int run(int at = global.time(), int step = 1 + 2)\n    {\n        return at + step;\n    }\n}\n",
+    )];
+
+    assert_eq!(
+        member_in(&lowered, "Report", &[0, 0, 0, 2]),
+        indoc! {r#"
+            CALL
+              CLOSURE [16] "" @3-3
+                PARAM_LIST
+                null
+                STMT_LIST
+                  RETURN
+                    CALL
+                      ZVAL "time"
+                      ARG_LIST
+                null
+                null
+              ARG_LIST
+        "#}
+    );
+    assert_eq!(member_in(&lowered, "Report", &[0, 0, 1, 2]), "BINARY_OP [1]\n  ZVAL 1\n  ZVAL 2\n");
+}
+
 /// ```php
 /// public function run(): void
 /// {

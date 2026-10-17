@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use mago_bytes::BytesDisplay;
 use mago_casing::is_camel_case;
 use mago_casing::is_class_case;
@@ -1527,7 +1529,12 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
 
             None
         }
-        (Node::FunctionLikeParameterDefaultValue(_), Parameter) => Some(Constant),
+        // Spec section 9: a parameter's default is any expression, which runs each time a call leaves the argument out.
+        (Node::FunctionLikeParameterDefaultValue(default), Parameter) => {
+            check_default_reads(default.value, context);
+
+            Some(Body)
+        }
         // An interface method's body is its default body, spec section 22, checked as a class method's body.
         (Node::Block(_), Method | Signature | Body) => Some(Body),
         (Node::MethodExpressionBody(_), Method | Signature) => Some(Body),
@@ -6388,6 +6395,38 @@ fn check_iterator_returns(method: &Method, context: &mut Context<'_, '_, '_>) {
             Issue::error("A method that yields cannot return a value: write `return;` to end it.")
                 .with_annotation(Annotation::primary(span).with_message("Returns a value here."))
                 .with_note("A method that yields produces only the values it yields, as in C#."),
+        );
+    }
+}
+
+/// Reports each read of `this`, `field`, a parameter or a type parameter in `default`, a parameter's default, outside a
+/// lambda's own parameters. Spec section 9: the default runs before the method, each time a call leaves the argument
+/// out, so no object, argument or type argument is there yet. A bare member read already has its own error.
+fn check_default_reads(default: &Expression, context: &mut Context<'_, '_, '_>) {
+    // A name's binding is kept at its first byte, where the expressions it starts begin too, so the name is the
+    // smallest node there.
+    let mut reads = BTreeMap::<u32, Span>::new();
+    for span in Node::Expression(default).filter_map(|node| Some(node.span())) {
+        let unavailable = match context.names.binding(&span.start) {
+            Some(Binding::This | Binding::Field | Binding::TypeParameter { .. }) => true,
+            Some(Binding::Local(local)) => !default.span().contains(&local.declaration.start),
+            _ => false,
+        };
+        if unavailable {
+            let read = reads.entry(span.start.offset).or_insert(span);
+            if span.length() < read.length() {
+                *read = span;
+            }
+        }
+    }
+    for read in reads.into_values() {
+        context.report(
+            Issue::error(format!(
+                "A parameter's default runs before the method, so `{}` is not there yet.",
+                BytesDisplay(context.get_code_snippet(read))
+            ))
+            .with_annotation(Annotation::primary(read).with_message("Read here."))
+            .with_help("Compute the value in the method from a nullable parameter, as in `int? limit = null`."),
         );
     }
 }

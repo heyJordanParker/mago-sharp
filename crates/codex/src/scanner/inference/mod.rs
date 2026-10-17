@@ -731,12 +731,12 @@ fn infer_constant<'ctx, 'arena>(
     constant: &'ctx Identifier<'arena>,
     constants_map: Option<&WordMap<ConstantMetadata>>,
 ) -> Option<TUnion> {
-    let (short_name, fqn) = if names.is_imported(constant) {
-        (names.get(constant), names.get(constant))
-    } else if let Some(stripped) = constant.value().strip_prefix(b"\\") {
-        (stripped, names.get(constant))
+    // A PHP# name that binds as a local or as `this` has no resolved name, and no scan knows its value.
+    let fqn = names.resolve(constant)?;
+    let short_name = if names.is_imported(constant) {
+        fqn
     } else {
-        (constant.value(), names.get(constant))
+        constant.value().strip_prefix(b"\\").unwrap_or(constant.value())
     };
 
     if let Some(t) = get_literal_constant_type(short_name) {

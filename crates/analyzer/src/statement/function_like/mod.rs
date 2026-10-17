@@ -805,9 +805,14 @@ where
         )?;
 
         if let Some(default_value) = parameter_node.default_value.as_ref() {
-            block_context.in_constant_expression(|block_context| {
-                default_value.value.analyze(context, block_context, artifacts)
-            })?;
+            // Spec section 9: a PHP# default is any expression, which runs each time a call leaves the argument out.
+            if context.dialect.is_sharp() {
+                default_value.value.analyze(context, block_context, artifacts)?;
+            } else {
+                block_context.in_constant_expression(|block_context| {
+                    default_value.value.analyze(context, block_context, artifacts)
+                })?;
+            }
 
             // PHP# writes `mixed` as `Any`, which never holds null, so its default is checked too.
             if !parameter_metadata.flags.is_variadic()

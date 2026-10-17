@@ -173,6 +173,7 @@ use crate::sharp_kind::SHARP_AST_CONDITIONAL;
 use crate::sharp_kind::SHARP_AST_CONST;
 use crate::sharp_kind::SHARP_AST_CONST_DECL;
 use crate::sharp_kind::SHARP_AST_CONST_ELEM;
+use crate::sharp_kind::SHARP_AST_CONST_ENUM_INIT;
 use crate::sharp_kind::SHARP_AST_CONTINUE;
 use crate::sharp_kind::SHARP_AST_DECLARE;
 use crate::sharp_kind::SHARP_AST_DIM;
@@ -3151,7 +3152,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         };
         let line = self.line(parameter.variable.span);
         let name = self.string(0, line, parameter.variable.name);
-        let default = parameter.default_value.as_ref().map_or(NULL, |default| self.expression(default.value));
+        let default = parameter.default_value.as_ref().map_or(NULL, |default| self.default_value(default.value));
         let (member_flags, hint) = if parameter.is_promoted_property() && !self.promoted_beside {
             (self.member_flags(parameter), self.property_hint(hint, parameter.variable.name, line))
         } else {
@@ -3167,6 +3168,72 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             self.line(parameter),
             &[hint, name, default, attributes, NULL, NULL],
         )
+    }
+
+    /// A parameter's default, `value`. Spec section 9: it is any expression, which runs each time a call leaves the
+    /// argument out. PHP takes a constant expression as a default, so one that is not lowers to a static closure called
+    /// with no arguments, `(static function () { return \time(); })()`, which the engine runs as the default.
+    fn default_value(&mut self, value: &Expression) -> u32 {
+        let (lowered, _) = self.lambda_body(|lowering| lowering.expression(value));
+        if self.is_constant_expression(lowered) {
+            return lowered;
+        }
+        let line = self.line(value);
+        let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &[]);
+        let returned = self.node(SHARP_AST_RETURN, 0, line, &[lowered]);
+        let body = self.node(SHARP_AST_STMT_LIST, 0, line, &[returned]);
+        let closure = self.declaration(
+            SHARP_AST_CLOSURE,
+            ZEND_ACC_STATIC,
+            value,
+            value,
+            b"",
+            &[parameters, NULL, body, NULL, NULL],
+        );
+        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[]);
+
+        self.node(SHARP_AST_CALL, 0, line, &[closure, arguments])
+    }
+
+    /// Whether the lowered expression `node` is one PHP takes as a constant expression, as php-src's
+    /// `zend_is_allowed_in_const_expr` says, leaving out the closures and first-class callables a default never is.
+    fn is_constant_expression(&self, node: u32) -> bool {
+        if node == NULL {
+            return true;
+        }
+        let node = &self.nodes[node as usize];
+        let constant = matches!(
+            node.kind,
+            SHARP_AST_ZVAL
+                | SHARP_AST_BINARY_OP
+                | SHARP_AST_GREATER
+                | SHARP_AST_GREATER_EQUAL
+                | SHARP_AST_AND
+                | SHARP_AST_OR
+                | SHARP_AST_UNARY_OP
+                | SHARP_AST_UNARY_PLUS
+                | SHARP_AST_UNARY_MINUS
+                | SHARP_AST_CAST
+                | SHARP_AST_CONDITIONAL
+                | SHARP_AST_DIM
+                | SHARP_AST_ARRAY
+                | SHARP_AST_ARRAY_ELEM
+                | SHARP_AST_UNPACK
+                | SHARP_AST_CONST
+                | SHARP_AST_CLASS_CONST
+                | SHARP_AST_CLASS_NAME
+                | SHARP_AST_MAGIC_CONST
+                | SHARP_AST_COALESCE
+                | SHARP_AST_CONST_ENUM_INIT
+                | SHARP_AST_NEW
+                | SHARP_AST_ARG_LIST
+                | SHARP_AST_NAMED_ARG
+                | SHARP_AST_PROP
+                | SHARP_AST_NULLSAFE_PROP
+        );
+        let children = node.first_child as usize..(node.first_child + node.child_count) as usize;
+
+        constant && children.into_iter().all(|child| self.is_constant_expression(self.children[child]))
     }
 
     /// `\Sharp\Map|array`, or `\Sharp\Set|array`, of the lowered `Map` or `Set` type `hint`, with `null` when it is
