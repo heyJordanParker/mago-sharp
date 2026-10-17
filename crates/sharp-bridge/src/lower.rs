@@ -848,6 +848,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let mut members =
             self.class_members(&class.members, parent_name, class.class.span, class.left_brace, class.right_brace);
         members.extend(self.parse_methods(&class.members, class.name.span));
+        members.extend(self.string_conversion(&class.members, class.right_brace));
         if self.tested {
             members.extend(self.test_hooks(class));
         }
@@ -865,6 +866,35 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             class.name.value,
             &[parent, interfaces, members, attributes, NULL],
         )
+    }
+
+    /// Spec section 18: plain PHP converts an object of a class that declares `toString()` to the text a PHP#
+    /// template shows, so the class gets PHP's `__toString()`, which returns `$this->toString()`, as Java's and
+    /// Kotlin's string conversion calls `toString()`. PHP# refuses a member name that starts with `__`, so no member
+    /// of the class can take it. None for a class that declares no `toString()`, which inherits its parent's.
+    fn string_conversion(&mut self, members: &Sequence<ClassLikeMember>, right_brace: Span) -> Option<u32> {
+        let to_string = members.iter().find_map(|member| match member {
+            ClassLikeMember::Method(method) if method.name.value == b"toString" => Some(method),
+            _ => None,
+        })?;
+        let line = self.line(to_string.name.span);
+        let this = self.variable(to_string.name.span, b"this");
+        let method = self.string(0, line, b"toString");
+        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[]);
+        let call = self.node(SHARP_AST_METHOD_CALL, 0, line, &[this, method, arguments]);
+        let result = self.node(SHARP_AST_RETURN, 0, line, &[call]);
+        let body = self.node(SHARP_AST_STMT_LIST, 0, line, &[result]);
+        let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &[]);
+        let return_type = self.string(ZEND_NAME_NOT_FQ, line, b"string");
+
+        Some(self.declaration(
+            SHARP_AST_METHOD,
+            ZEND_ACC_PUBLIC,
+            to_string.name.span,
+            right_brace,
+            b"__toString",
+            &[parameters, NULL, body, return_type, NULL],
+        ))
     }
 
     /// A struct is a final class, spec section 10, whose members are a class's, with its header's interfaces and
@@ -889,6 +919,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             members.push(self.value_equality(r#struct.name.span, &[self.class]));
         }
         members.extend(self.parse_methods(&r#struct.members, r#struct.name.span));
+        members.extend(self.string_conversion(&r#struct.members, r#struct.right_brace));
         members.extend(self.generic_statics(&r#struct.name, &r#struct.members));
         members.extend(self.class_metadata(self.class, self.line(r#struct.name.span)));
         members.splice(0..0, self.trait_members(r#struct.inheritance.as_ref(), r#struct.left_brace));
@@ -6911,14 +6942,22 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// The value a template's `${…}` shows. Spec section 18 shows a `bool` as `true` or `false`, where PHP's string
     /// conversion gives `1` or nothing, so a `bool` is `["false", "true"][value]`: PHP indexes by `false` as 0 and
     /// `true` as 1, and the optimizer keeps the read as one `FETCH_DIM_R` of a constant array, where a conditional takes
-    /// four instructions. Any other value is itself.
+    /// four instructions. An object shows what its `toString()` returns, `$value->toString()`, which an enum case
+    /// needs, since PHP gives an enum no string conversion. Any other value is itself.
     fn template_value(&mut self, expression: &Expression) -> u32 {
         let value = self.expression(expression);
-        if !self.types.expression_type(expression).is_bool() {
+        let r#type = self.types.expression_type(expression);
+        let line = self.line(expression);
+        if !r#type.types.is_empty() && r#type.types.iter().all(TAtomic::is_object_type) {
+            let method = self.string(0, line, b"toString");
+            let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[]);
+
+            return self.node(SHARP_AST_METHOD_CALL, 0, line, &[value, method, arguments]);
+        }
+        if !r#type.is_bool() {
             return value;
         }
 
-        let line = self.line(expression);
         let texts = [b"false".as_slice(), b"true"].map(|text| {
             let text = self.string(0, line, text);
 

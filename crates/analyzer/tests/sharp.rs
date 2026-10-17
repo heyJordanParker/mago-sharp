@@ -7900,13 +7900,13 @@ fn a_template_refuses_every_type_but_int_float_string_and_bool() {
     assert_eq!(
         worded(("src/Demo/Receipt.sharp", sharp), &others),
         [
-            "11:53 invalid-operand A template shows `int`, `float`, `string` or `bool`, and `Status` is none of them. | This is `Status`. | Show a value taken from it instead, such as a property or the result of a method.",
-            "13:53 invalid-operand A template shows `int`, `float`, `string` or `bool`, and `List<int>` is none of them. | This is `List<int>`. | Show a value taken from it instead, such as a property or the result of a method.",
-            "15:49 invalid-operand A template shows `int`, `float`, `string` or `bool`, and `Order` is none of them. | This is `Order`. | Show a value taken from it instead, such as a property or the result of a method.",
-            "17:48 invalid-operand A template shows `int`, `float`, `string` or `bool`, and `int?` is none of them. | This is `int?`. | Test it with `!= null` first.",
-            "19:47 invalid-operand A template shows `int`, `float`, `string` or `bool`, and `Any` is none of them. | This is `Any`. | Check what the value is with `is`, `as` or `match` first.",
-            "21:48 invalid-operand A template shows `int`, `float`, `string` or `bool`, and `Any?` is none of them. | This is `Any?`. | Check what the value is with `is`, `as` or `match` first.",
-            "23:59 invalid-operand A template shows `int`, `float`, `string` or `bool`, and `Function<int(int)>` is none of them. | This is `Function<int(int)>`. | Show a value taken from it instead, such as a property or the result of a method.",
+            "11:53 invalid-operand A template shows `int`, `float`, `string`, `bool` or a type that declares `toString()`, and `Status` is none of them. | This is `Status`. | Show a value taken from it instead, such as a property or the result of a method.",
+            "13:53 invalid-operand A template shows `int`, `float`, `string`, `bool` or a type that declares `toString()`, and `List<int>` is none of them. | This is `List<int>`. | Show a value taken from it instead, such as a property or the result of a method.",
+            "15:49 invalid-operand A template shows `int`, `float`, `string`, `bool` or a type that declares `toString()`, and `Order` is none of them. | This is `Order`. | Declare `string toString()` on it, or show a value taken from it, such as a property.",
+            "17:48 invalid-operand A template shows `int`, `float`, `string`, `bool` or a type that declares `toString()`, and `int?` is none of them. | This is `int?`. | Test it with `!= null` first.",
+            "19:47 invalid-operand A template shows `int`, `float`, `string`, `bool` or a type that declares `toString()`, and `Any` is none of them. | This is `Any`. | Check what the value is with `is`, `as` or `match` first.",
+            "21:48 invalid-operand A template shows `int`, `float`, `string`, `bool` or a type that declares `toString()`, and `Any?` is none of them. | This is `Any?`. | Check what the value is with `is`, `as` or `match` first.",
+            "23:59 invalid-operand A template shows `int`, `float`, `string`, `bool` or a type that declares `toString()`, and `Function<int(int)>` is none of them. | This is `Function<int(int)>`. | Show a value taken from it instead, such as a property or the result of a method.",
         ]
     );
     assert_eq!(
@@ -7916,6 +7916,21 @@ fn a_template_refuses_every_type_but_int_float_string_and_bool() {
             "16:66 array-to-string-conversion",
             "18:66 invalid-type-cast",
             "24:66 invalid-type-cast"
+        ]
+    );
+}
+
+/// Spec section 18 also lets a template show any type that declares `string toString()`, by its own declaration, a
+/// parent's or an interface's, and a nullable one only once it is checked.
+#[test]
+fn a_template_shows_a_type_that_declares_to_string() {
+    let sharp = "namespace Demo;\n\ninterface Named\n{\n    string toString();\n}\n\nclass Sku\n{\n    public string toString() => \"A-12\";\n}\n\nclass Special : Sku\n{\n}\n\nclass Order\n{\n}\n\nclass Receipt\n{\n    public string sku(Sku sku) => `Sku: ${sku}`;\n\n    public string special(Special special) => `Special: ${special}`;\n\n    public string named(Named named) => `Named: ${named}`;\n\n    public string maybe(Sku? sku) => `Maybe: ${sku}`;\n\n    public string checked(Sku? sku) => sku != null ? `Checked: ${sku}` : \"\";\n\n    public string order(Order order) => `Order: ${order}`;\n}\n";
+
+    assert_eq!(
+        worded(("src/Demo/Receipt.sharp", sharp), &[]),
+        [
+            "29:46 invalid-operand A template shows `int`, `float`, `string`, `bool` or a type that declares `toString()`, and `Sku?` is none of them. | This is `Sku?`. | Test it with `!= null` first.",
+            "33:49 invalid-operand A template shows `int`, `float`, `string`, `bool` or a type that declares `toString()`, and `Order` is none of them. | This is `Order`. | Declare `string toString()` on it, or show a value taken from it, such as a property.",
         ]
     );
 }

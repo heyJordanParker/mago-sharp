@@ -18577,6 +18577,30 @@ fn a_template_is_an_encaps_list_of_its_text_and_interpolations() {
 /// return "Paid: {["false", "true"][$paid]} of {$extra} for {$name} {["false", "true"][true]}";
 /// ```
 ///
+/// Spec section 18 shows an object in a template by what its `toString()` returns, so the part calls it, which an enum
+/// case needs, since PHP gives an enum no string conversion.
+#[test]
+fn an_object_in_a_template_shows_what_its_to_string_returns() {
+    assert_eq!(
+        body_in(
+            "string run(Sku sku)",
+            "        return `Sku: ${sku}`;\n",
+            &[("src/App/Tenant/Sku.sharp", "namespace App.Tenant;\n\nclass Sku\n{\n    public string toString() => \"A-12\";\n}\n")]
+        ),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                ENCAPS_LIST
+                  ZVAL "Sku: "
+                  METHOD_CALL
+                    VAR
+                      ZVAL "sku"
+                    ZVAL "toString"
+                    ARG_LIST
+        "#}
+    );
+}
+
 /// Spec section 18 shows a `bool` in a template as `true` or `false`, where PHP's string conversion gives `1` or
 /// nothing, so a `bool` part reads its text from `["false", "true"]`, where PHP reads `false` as the index 0 and
 /// `true` as the index 1. The optimizer keeps the read as one `FETCH_DIM_R` of a constant array, where

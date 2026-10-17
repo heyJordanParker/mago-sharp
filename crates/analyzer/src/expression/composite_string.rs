@@ -1,9 +1,12 @@
 use mago_allocator::Arena;
+use mago_codex::metadata::CodebaseMetadata;
+use mago_codex::ttype::SharpType;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::atomic::scalar::string::TString;
 use mago_codex::ttype::atomic::scalar::string::TStringLiteral;
 use mago_codex::ttype::get_literal_string;
+use mago_codex::ttype::get_sharp_type;
 use mago_codex::ttype::get_never;
 use mago_codex::ttype::get_non_empty_string;
 use mago_codex::ttype::get_non_empty_unspecified_literal_string;
@@ -99,7 +102,8 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for CompositeString<'arena> {
                 continue;
             }
 
-            if context.dialect.is_sharp() && !part_type.is_never() && !is_shown(&part_type) {
+            let shows_its_text = context.dialect.is_sharp() && declares_to_string(context.codebase, &part_type);
+            if context.dialect.is_sharp() && !part_type.is_never() && !is_shown(&part_type) && !shows_its_text {
                 report_unshown(context, part, &part_type);
                 all_literals = false;
                 resulting_strings = None;
@@ -109,6 +113,8 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for CompositeString<'arena> {
 
             let casted_part_type = if context.dialect.is_sharp() && part_type.is_bool() {
                 bool_text(&part_type)
+            } else if shows_its_text {
+                get_string()
             } else {
                 cast_type_to_string(
                     &part_type,
@@ -234,23 +240,46 @@ fn is_shown(part_type: &TUnion) -> bool {
     part_type.is_int() || part_type.is_float() || part_type.is_string() || part_type.is_bool()
 }
 
+/// Whether each type `part_type` holds is a class, an interface or an enum that declares `toString()`, itself or
+/// through a parent or an interface, which a PHP# template shows by what it returns, spec section 18.
+fn declares_to_string(codebase: &CodebaseMetadata, part_type: &TUnion) -> bool {
+    !part_type.types.is_empty()
+        && part_type.types.iter().all(|atomic| match get_sharp_type(atomic) {
+            Some(SharpType::Class(name, _) | SharpType::Enum(name)) => {
+                codebase.get_declaring_method(name.as_bytes(), b"toString").is_some()
+            }
+            _ => false,
+        })
+}
+
 /// Refuses `part` of a PHP# template, whose type `part_type` the template does not show.
 fn report_unshown<A>(context: &mut Context<'_, '_, A>, part: &StringPart<'_>, part_type: &TUnion)
 where
     A: Arena,
 {
     let name = display_operand(context, part_type);
+    let checked_type = part_type.to_non_nullable();
     let help = if part_type.is_mixed() {
         "Check what the value is with `is`, `as` or `match` first."
-    } else if part_type.is_nullable() && is_shown(&part_type.to_non_nullable()) {
+    } else if part_type.is_nullable() && (is_shown(&checked_type) || declares_to_string(context.codebase, &checked_type))
+    {
         "Test it with `!= null` first."
+    } else if part_type.types.iter().all(|atomic| match get_sharp_type(atomic) {
+        Some(SharpType::Class(name, _) | SharpType::Enum(name)) => {
+            context.codebase.get_class_like(name.as_bytes()).is_some_and(|class| class.flags.is_sharp())
+        }
+        _ => false,
+    }) {
+        "Declare `string toString()` on it, or show a value taken from it, such as a property."
     } else {
         "Show a value taken from it instead, such as a property or the result of a method."
     };
 
     context.collector.report_with_code(
         IssueCode::InvalidOperand,
-        Issue::error(format!("A template shows `int`, `float`, `string` or `bool`, and `{name}` is none of them."))
+        Issue::error(format!(
+            "A template shows `int`, `float`, `string`, `bool` or a type that declares `toString()`, and `{name}` is none of them."
+        ))
             .with_annotation(Annotation::primary(part.span()).with_message(format!("This is `{name}`.")))
             .with_help(help),
     );
