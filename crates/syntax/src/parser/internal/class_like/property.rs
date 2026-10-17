@@ -237,8 +237,8 @@ where
     }
 
     /// Parses a PHP# constructor parameter's behaviors after its accessors, spec sections 6.4 and 9: `via` and types
-    /// separated by commas. A comma also ends the parameter, so a later behavior is a name followed by `,`, `)` or the
-    /// `=` of the parameter's default, since no parameter is a name alone.
+    /// separated by commas. A comma also ends the parameter, so a later behavior is a type alone followed by `,`, `)` or
+    /// the `=` of the parameter's default, as [`Self::is_at_parameter_behavior`] says, since no parameter is a type alone.
     pub(crate) fn parse_optional_parameter_behavior_list(
         &mut self,
     ) -> Result<Option<PropertyBehaviorList<'arena>>, ParseError> {
@@ -250,10 +250,7 @@ where
         let mut behaviors = self.new_vec();
         let mut commas = self.new_vec();
         behaviors.push(self.parse_type_hint()?);
-        while self.stream.is_at(T![","])?
-            && self.stream.peek_kind(1)? == Some(T![Identifier])
-            && matches!(self.stream.peek_kind(2)?, Some(T![","] | T![")"] | T!["="]))
-        {
+        while self.stream.is_at(T![","])? && self.is_at_parameter_behavior()? {
             commas.push(self.stream.consume()?);
             behaviors.push(self.parse_type_hint()?);
         }
@@ -263,6 +260,20 @@ where
             behaviors: TokenSeparatedSequence::new(behaviors, commas),
             semicolon: None,
         }))
+    }
+
+    /// Whether the token after the `,` the stream is at starts another behavior of a parameter: a class name, with type
+    /// arguments when it is generic, followed by `,`, `)` or `=`. The next parameter writes a name after its type.
+    fn is_at_parameter_behavior(&mut self) -> Result<bool, ParseError> {
+        if self.stream.peek_kind(1)? != Some(T![Identifier]) {
+            return Ok(false);
+        }
+        let after = match self.stream.peek_kind(2)? {
+            Some(T!["<"]) => self.stream.peek_kind_after_type_arguments(2)?,
+            kind => kind,
+        };
+
+        Ok(matches!(after, Some(T![","] | T![")"] | T!["="])))
     }
 
     pub(crate) fn parse_optional_property_hook_list(&mut self) -> Result<Option<PropertyHookList<'arena>>, ParseError> {

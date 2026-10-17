@@ -3291,13 +3291,14 @@ fn a_parameter_cannot_be_lazy() {
 /// `required` adds nothing to a parameter every call passes.
 #[test]
 fn a_parameter_property_takes_every_body_property_feature() {
-    let code = "namespace App.Tenant;\n\nclass Ledger\n{\n    public Ledger(\n        public required string kind { get; },\n        public int count { get => field; private set; },\n        public string code { get; init { field = value; } },\n        public int total { get; set; didSet { } },\n        public string slug { get; } via Trimmed,\n        public string name { get; set => field = value.trim(); } = \"\",\n        public string label { get; set; } via Trimmed = \"x\",\n    ) {}\n}\n";
+    let code = "namespace App.Tenant;\n\nclass Ledger\n{\n    public Ledger(\n        public required string kind { get; },\n        public int count { get => field; private set; },\n        public string code { get; init { field = value; } },\n        public int total { get; set; didSet { } },\n        public string slug { get; } via Trimmed,\n        public string name { get; set => field = value.trim(); } = \"\",\n        public string label { get; set; } via Trimmed = \"x\",\n    ) {}\n\n    public void method(required int x) { }\n}\n";
 
     assert_eq!(
         issues(code),
         [
-            "6:16 A constructor parameter is required unless it has a default: remove `required`.",
+            "6:16 A parameter is required unless it has a default: remove `required`.",
             "10:37 `via` goes on an auto-property with `get; set;`: its behaviors run around the storage.",
+            "15:24 A parameter is required unless it has a default: remove `required`.",
         ]
     );
 }
@@ -4594,6 +4595,16 @@ fn a_type_php_sharp_writes_another_way_is_an_error_that_names_its_form() {
         [
             "5:12 PHP# has no `never` type outside a return type.",
             "6:18 PHP# has no `never` type outside a return type."
+        ]
+    );
+    // `never` is a type only as the whole return type, so not as a return type's type argument, nested or not.
+    let arguments = "namespace App.Tenant;\n\ninterface Stops\n{\n    List<never> listed();\n\n    Map<string, List<never>> mapped();\n\n    List<int|never> joined();\n\n    List<Self> own();\n}\n";
+    assert_eq!(
+        issues(arguments),
+        [
+            "5:10 PHP# has no `never` type outside a return type.",
+            "7:22 PHP# has no `never` type outside a return type.",
+            "9:14 Type `never` cannot be part of a union."
         ]
     );
 }

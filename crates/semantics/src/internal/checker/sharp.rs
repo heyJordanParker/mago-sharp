@@ -1254,7 +1254,9 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         (Node::GenericHint(generic), FieldOrProperty | Method | Signature | Parameter | Body) => {
             check_generic(generic, place, context)
         }
-        // A generic type's type arguments, and those of `new` and of a method call, are never `void`.
+        // A generic type's type arguments, and those of `new` and of a method call, are never `void`. Nor are they
+        // `never` in a return type, which is a type only as the whole return type, spec section 7, and which
+        // `type_written_another_way` refuses everywhere else.
         (
             Node::TypeArgumentList(list),
             FieldOrProperty | Method | Signature | Parameter | Body | Instantiation,
@@ -1266,6 +1268,15 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
                 );
 
                 return None;
+            }
+            if matches!(place, Method | Signature) {
+                let nevers = list.arguments.iter().filter_map(|argument| match argument {
+                    Hint::Never(_) => type_written_another_way(argument, Parameter),
+                    _ => None,
+                });
+                for issue in nevers {
+                    context.report(issue);
+                }
             }
 
             Some(if place == Instantiation { Body } else { place })
@@ -1489,10 +1500,11 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         (Node::Hint(hint), FieldOrProperty | Method | Signature | Parameter | Body) if is_slice_type(hint) => {
             Some(place)
         }
-        // Spec section 9: every call passes a constructor parameter without a default, so `required` adds nothing.
+        // Spec section 9: every call passes a parameter without a default, a constructor's or a method's, so `required`
+        // adds nothing. It declares no member either, so it is this one error.
         (Node::Modifier(modifier @ Modifier::Required(_)), Parameter) => {
             context.report(
-                Issue::error("A constructor parameter is required unless it has a default: remove `required`.")
+                Issue::error("A parameter is required unless it has a default: remove `required`.")
                     .with_annotation(Annotation::primary(modifier.span()).with_message("Written here.")),
             );
 

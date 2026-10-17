@@ -103,6 +103,9 @@ pub enum ParseError {
     /// A PHP# parameter written as a computed property, as in `public string slug => "x"`, at its `=>`. A computed
     /// property has no incoming value to receive.
     ComputedParameterInSharp(Span),
+    /// A PHP# constructor parameter's default written before its accessors, as PHP orders a promoted property, as in
+    /// `public string raw = "" { get; }`, at the default. Spec section 9: the default comes last, after the accessors.
+    DefaultBeforeAccessorsInSharp(Span),
     /// Anything but `super(…)` or `this(…)` after a PHP# constructor's `:`, as in `: parent(row)`, `: super { }` or
     /// `: ?Type`, from the `:` up to the body.
     ConstructorInitializerInSharp(Span),
@@ -172,6 +175,7 @@ impl HasFileId for ParseError {
             | ParseError::ReadonlyNotLastInSharp(span)
             | ParseError::OtherMemberInSharpModule(span)
             | ParseError::ComputedParameterInSharp(span)
+            | ParseError::DefaultBeforeAccessorsInSharp(span)
             | ParseError::ConstructorInitializerInSharp(span)
             | ParseError::EventBodyInSharp(span)
             | ParseError::NestedTypeInSharp(_, _, span)
@@ -226,6 +230,7 @@ impl HasSpan for ParseError {
             | ParseError::ReadonlyNotLastInSharp(span)
             | ParseError::OtherMemberInSharpModule(span)
             | ParseError::ComputedParameterInSharp(span)
+            | ParseError::DefaultBeforeAccessorsInSharp(span)
             | ParseError::ConstructorInitializerInSharp(span)
             | ParseError::EventBodyInSharp(span)
             | ParseError::NestedTypeInSharp(_, _, span)
@@ -383,6 +388,10 @@ impl std::fmt::Display for ParseError {
             ParseError::ComputedParameterInSharp(_) => {
                 "A parameter cannot be a computed property: a computed property has no incoming value to receive.".to_string()
             }
+            ParseError::DefaultBeforeAccessorsInSharp(_) => {
+                "A parameter's default comes last: write it after the accessors, as in `public string raw { get; } = \"\"`."
+                    .to_string()
+            }
             ParseError::ConstructorInitializerInSharp(_) => {
                 "A constructor passes control to its base class with `: super(…)`, and a named constructor to the main one with `: this(…)`.".to_string()
             }
@@ -469,6 +478,7 @@ impl From<&ParseError> for Issue {
             | ParseError::ReadonlyNotLastInSharp(..)
             | ParseError::OtherMemberInSharpModule(..)
             | ParseError::ComputedParameterInSharp(..)
+            | ParseError::DefaultBeforeAccessorsInSharp(..)
             | ParseError::ConstructorInitializerInSharp(..)
             | ParseError::EventBodyInSharp(..)
             | ParseError::NestedTypeInSharp(..)

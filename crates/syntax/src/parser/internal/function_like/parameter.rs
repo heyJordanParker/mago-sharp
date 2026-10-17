@@ -8,6 +8,7 @@ use crate::cst::cst::Identifier;
 use crate::error::ParseError;
 use crate::parser::Parser;
 use mago_allocator::prelude::*;
+use mago_span::HasSpan;
 
 impl<'arena, A> Parser<'_, 'arena, A>
 where
@@ -105,10 +106,19 @@ where
         // PHP writes a promoted property's default before its hooks, and PHP# writes it last, after the accessors
         // and the behaviors, as a property in the class body does, spec section 9.
         let (default_value, hooks, behaviors) = if self.dialect.is_sharp() {
-            let hooks = self.parse_optional_property_hook_list()?;
+            let mut hooks = self.parse_optional_property_hook_list()?;
             let behaviors = if hooks.is_some() { self.parse_optional_parameter_behavior_list()? } else { None };
+            let default_value = self.parse_optional_function_like_parameter_default_value()?;
+            // PHP's order, the default before the accessors, is one error, and the accessors parse on.
+            if hooks.is_none()
+                && let Some(default_value) = &default_value
+                && self.stream.is_at(T!["{"])?
+            {
+                self.errors.push(ParseError::DefaultBeforeAccessorsInSharp(default_value.span()));
+                hooks = self.parse_optional_property_hook_list()?;
+            }
 
-            (self.parse_optional_function_like_parameter_default_value()?, hooks, behaviors)
+            (default_value, hooks, behaviors)
         } else {
             let default_value = self.parse_optional_function_like_parameter_default_value()?;
 

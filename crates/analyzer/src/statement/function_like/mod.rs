@@ -90,6 +90,7 @@ use crate::statement::analyze_statements;
 use crate::statement::attributes::AttributeTarget;
 use crate::statement::attributes::analyze_attributes;
 use crate::statement::class_like::method::analyze_constructor_initializer;
+use crate::statement::class_like::property::analyze_behaviors;
 use crate::statement::class_like::property::analyze_property_hook;
 use crate::statement::class_like::r#struct::report_class_held_by_key;
 use crate::statement::r#return::handle_return_value;
@@ -655,8 +656,9 @@ where
                 block_context.flags.set_inside_return(true);
                 value.analyze(context, block_context, &mut artifacts)?;
                 block_context.flags.set_inside_return(false);
-                if let Some(return_type) = return_type {
-                    check_sharp_literal_kind(context, Some(block_context), &artifacts, value, &return_type.type_union);
+                // A lambda's result is checked against the function type that takes it, as a declared return type is.
+                if let Some(declared) = &declared {
+                    check_sharp_literal_kind(context, Some(block_context), &artifacts, value, declared);
                 }
                 block_context.conditionally_referenced_variable_ids.clear();
 
@@ -693,7 +695,7 @@ where
             };
 
             if context.dialect.is_sharp() && expanded_type.is_never() {
-                report_never_returning(context, name, body.span());
+                report_never_returning(context, name, &body);
             } else {
                 report_missing_return(
                     context,
@@ -992,6 +994,9 @@ where
             for hook in &hook_list.hooks {
                 analyze_property_hook(hook, property_name, context, block_context, artifacts)?;
             }
+            if let Some(behaviors) = &parameter_node.behaviors {
+                analyze_behaviors(behaviors, property_name, context, block_context, artifacts);
+            }
         }
     }
 
@@ -1044,21 +1049,29 @@ pub(crate) fn report_missing_return<A>(
     );
 }
 
-/// Spec section 7: a PHP# `never` method whose body can reach its closing brace, `body`'s last byte, where it would
-/// return.
-fn report_never_returning<A>(context: &mut Context<'_, '_, A>, name: Word, body: Span)
+/// Spec section 7: a PHP# `never` method whose `body` can return: a block that reaches its closing brace, its last
+/// byte, or an expression body whose value it returns.
+fn report_never_returning<A>(context: &mut Context<'_, '_, A>, name: Word, body: &FunctionLikeBody<'_, '_>)
 where
     A: Arena,
 {
-    context.collector.report_with_code(
-        IssueCode::MissingReturnStatement,
-        Issue::error(format!("`{name}` is `never`, and it reaches its closing brace when no `throw` runs before it."))
-            .with_annotation(
-                Annotation::primary(body.from_start(body.end.backward(1)))
-                    .with_message("It returns here when no `throw` runs."),
-            )
-            .with_help("End every path with a `throw` or a call of a `never` method."),
-    );
+    let issue = match body {
+        FunctionLikeBody::Expression(value) | FunctionLikeBody::ExpressionStatement(value) => {
+            Issue::error(format!("`{name}` is `never`, and its body returns a value."))
+                .with_annotation(Annotation::primary(value.span()).with_message("Returned here."))
+                .with_help("Throw instead, as in `=> throw new ValueError(\"…\")`, or call a `never` method.")
+        }
+        FunctionLikeBody::Statements(_, body) => Issue::error(format!(
+            "`{name}` is `never`, and it reaches its closing brace when no `throw` runs before it."
+        ))
+        .with_annotation(
+            Annotation::primary(body.from_start(body.end.backward(1)))
+                .with_message("It returns here when no `throw` runs."),
+        )
+        .with_help("End every path with a `throw` or a call of a `never` method."),
+    };
+
+    context.collector.report_with_code(IssueCode::MissingReturnStatement, issue);
 }
 
 /// Checks if a type is a single unresolved template parameter with a mixed bound.

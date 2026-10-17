@@ -16,6 +16,7 @@ use mago_codex::ttype::union::TUnion;
 
 use mago_names::binding::MethodParts;
 use mago_names::binding::php_method_name;
+use mago_names::display_sharp_member;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_span::HasSpan;
@@ -47,6 +48,8 @@ use crate::effects::Body;
 use crate::effects::check::check_declaration_uses;
 use crate::error::AnalysisError;
 use crate::expression::call::static_method_call::analyze_static_method_call;
+use crate::expression::composite_string::TextMethodFault;
+use crate::expression::composite_string::text_method_fault;
 use crate::plugin::hook::StaticCall;
 use crate::statement::attributes::AttributeTarget;
 use crate::statement::attributes::analyze_attributes;
@@ -59,6 +62,7 @@ use crate::statement::function_like::unused_parameter::utils::is_variable_used_i
 use crate::utils::missing_type_hints;
 use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_missing_imports;
+use crate::utils::names::display_sharp_type;
 use crate::utils::names::display_type;
 
 impl<'ast, 'arena> Analyzable<'ast, 'arena> for Method<'arena> {
@@ -74,9 +78,66 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Method<'arena> {
         let method = MethodParts::of_method(self);
         check_method_name(self, context, block_context);
 
-        analyze_method(&method, self.initializer.as_ref(), word(self.name.value), context, block_context, artifacts)
-            .map(|_| ())
+        let class = analyze_method(
+            &method,
+            self.initializer.as_ref(),
+            word(self.name.value),
+            context,
+            block_context,
+            artifacts,
+        )?;
+        if let Some(class) = class
+            && context.dialect.is_sharp()
+            && self.name.value == b"toString"
+        {
+            check_to_string(context, class, self.name.span);
+        }
+
+        Ok(())
     }
+}
+
+/// Refuses a PHP# `toString()`, declared at `name` in `class`, that is not `string toString()`, spec section 18: an
+/// instance method with no required parameter that returns `string`. A template shows a value by the text it returns,
+/// and so does every conversion of the value to text, which calls it with no arguments.
+fn check_to_string<A>(context: &mut Context<'_, '_, A>, class: &ClassLikeMetadata, name: Span)
+where
+    A: Arena,
+{
+    let Some(method) = context.codebase.get_method(class.name.as_bytes(), b"tostring") else {
+        unreachable!("the codex scans each method the analyzer analyzes");
+    };
+    let Some(fault) = text_method_fault(method) else {
+        return;
+    };
+
+    let member = display_sharp_member(display_class_like_name(context, class.name), "toString()");
+    let (code, message) = match fault {
+        TextMethodFault::Static => (
+            IssueCode::IncompatibleStaticModifier,
+            format!("`{member}` is `static`, and PHP# shows a value as text by calling `toString()` on it."),
+        ),
+        TextMethodFault::Requires(parameter) => (
+            IssueCode::IncompatibleParameterCount,
+            format!(
+                "`{member}` needs `{}`, and PHP# shows a value as text by calling `toString()` with no arguments.",
+                mago_bytes::BytesDisplay(parameter)
+            ),
+        ),
+        TextMethodFault::Returns(returned) => (
+            IssueCode::IncompatibleReturnType,
+            format!(
+                "`{member}` returns `{}`, and PHP# shows a value as text by the `string` its `toString()` returns.",
+                display_sharp_type(context, returned)
+            ),
+        ),
+    };
+    context.collector.report_with_code(
+        code,
+        Issue::error(message).with_annotation(Annotation::primary(name).with_message("Declared here.")).with_help(
+            "Declare it as `string toString()`: an instance method with no required parameter that returns `string`.",
+        ),
+    );
 }
 
 /// Warns on a PHP# method named out of camel case, spec section 24, unless it keeps a parent's name: a plain PHP class's

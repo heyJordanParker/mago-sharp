@@ -27,6 +27,7 @@ use mago_syntax::cst::Hint;
 use mago_syntax::cst::HookedProperty;
 use mago_syntax::cst::PlainProperty;
 use mago_syntax::cst::Property;
+use mago_syntax::cst::PropertyBehaviorList;
 use mago_syntax::cst::PropertyHook;
 use mago_syntax::cst::PropertyHookBody;
 use mago_syntax::cst::PropertyHookConcreteBody;
@@ -277,14 +278,28 @@ where
         analyze_property_hook(hook, property_name, context, block_context, artifacts)?;
     }
     if let Some(behaviors) = &property.behaviors {
-        let mut classes = Vec::new();
-        for behavior in behaviors.behaviors.iter() {
-            classes.extend(check_behavior(behavior, property_name, context, block_context, artifacts));
-        }
-        effects::summary::record_behaviors(context, block_context, artifacts, property_name, &classes);
+        analyze_behaviors(behaviors, property_name, context, block_context, artifacts);
     }
 
     Ok(())
+}
+
+/// Checks each of `behaviors`, which run the property `property_name`, a property in the class body or one a
+/// constructor parameter declares, and records the accessors they run, spec sections 6.4 and 9.
+pub(crate) fn analyze_behaviors<A>(
+    behaviors: &PropertyBehaviorList<'_>,
+    property_name: Word,
+    context: &mut Context<'_, '_, A>,
+    block_context: &BlockContext<'_>,
+    artifacts: &mut AnalysisArtifacts,
+) where
+    A: Arena,
+{
+    let mut classes = Vec::new();
+    for behavior in behaviors.behaviors.iter() {
+        classes.extend(check_behavior(behavior, property_name, context, block_context, artifacts));
+    }
+    effects::summary::record_behaviors(context, block_context, artifacts, property_name, &classes);
 }
 
 /// Spec section 6.4: a behavior runs a property's `get` and `set`, so it is a class that implements

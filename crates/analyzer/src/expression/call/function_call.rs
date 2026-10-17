@@ -576,10 +576,10 @@ where
     (targets, encountered_invalid_targets)
 }
 
-/// What a `.sharp` file writes in place of a plain PHP function that PHP# replaces, decision 076.
+/// What a `.sharp` file writes in place of a plain PHP function or constant that PHP# replaces, decision 076.
 enum Replacement {
-    /// The standard library's methods that do the function's work, each by its class and name: a static method, an
-    /// extension member, or a member of an effect class.
+    /// The standard library's members that do the function's work, or give the constant's value, each by its class and
+    /// name: a static method, an extension member, a member of an effect class, or a class constant.
     Members(&'static [(&'static str, &'static str)]),
     /// The PHP# syntax for it: `is` (spec section 21), `(string)` and `/` on two ints (section 24), a spread literal
     /// (section 12) or `for … of` (section 17). `{x}` stands for the call's first argument, `{a}` and `{b}` for its
@@ -594,10 +594,11 @@ enum Replacement {
 /// Every kind of PHP# collection, spec section 12, for a method each of them has.
 const EVERY_COLLECTION: &[&str] = &["List", "Map", "Set"];
 
-/// Each plain PHP function PHP# replaces, with its replacement. A row that names a standard library member lands in
-/// the change that ships the member, and a test holds every row to the library. A name that ends in `*` is a family,
-/// every function whose name it begins, as `curl_*`, and a row of the function's whole name wins over it. A member named
-/// `__construct` is its class's constructor, and a member named with `$` is its class's property, as `$arguments`.
+/// Each plain PHP function and constant PHP# replaces, with its replacement. A row that names a standard library member
+/// lands in the change that ships the member, and a test holds every row to the library. A name that ends in `*` is a
+/// family, every function whose name it begins, as `curl_*`, and a row of the function's whole name wins over it. A
+/// member named `__construct` is its class's constructor, and a member named with `$` is its class's property, as
+/// `$arguments`. A constant's row is its uppercase name, and its member the class constant that gives its value.
 const REPLACEMENTS: &[(&str, Replacement)] = &[
     ("is_string", Replacement::Syntax("`{x} is string`")),
     ("is_int", Replacement::Syntax("`{x} is int`")),
@@ -825,6 +826,8 @@ const REPLACEMENTS: &[(&str, Replacement)] = &[
     ("putenv", Replacement::Members(&[("Sharp\\Environment", "setVariable")])),
     ("mt_srand", Replacement::Members(&[("Sharp\\Random", "__construct")])),
     ("srand", Replacement::Members(&[("Sharp\\Random", "__construct")])),
+    ("PHP_INT_MAX", Replacement::Members(&[("Sharp\\Int", "MAX")])),
+    ("PHP_INT_MIN", Replacement::Members(&[("Sharp\\Int", "MIN")])),
 ];
 
 /// Each PHP built-in class the standard library replaces, spec section 29, with the standard library members to write
@@ -972,6 +975,38 @@ where
     true
 }
 
+/// Spec sections 8 and 23: a read of a plain PHP constant the standard library replaces, `name` bare or through
+/// `global`, is refused at `span` with the member to write, as a call of a replaced function is. The standard library,
+/// whose members are made of those reads, keeps them, and a row matches the constant's whole name only, so a family of
+/// functions such as `curl_*` never takes PHP's `CURL_…` constants. Returns whether it reported one.
+pub(crate) fn report_replaced_constant<A>(
+    context: &mut Context<'_, '_, A>,
+    block_context: &BlockContext<'_>,
+    artifacts: &mut AnalysisArtifacts,
+    name: &[u8],
+    span: Span,
+) -> bool
+where
+    A: Arena,
+{
+    if context.source_file.is_standard_library {
+        return false;
+    }
+    let Some((_, replacement)) = REPLACEMENTS.iter().find(|(replaced, _)| replaced.as_bytes() == name) else {
+        return false;
+    };
+    let Some((code, message)) = replacement_refusal(context, block_context, artifacts, word(name), replacement, None)
+    else {
+        return false;
+    };
+    context.collector.report_with_code(
+        code,
+        Issue::error(message).with_annotation(Annotation::primary(span).with_message("Read here.")),
+    );
+
+    true
+}
+
 /// The refusal of a call or a read through `global` of `function`, outside the standard library, whose members are
 /// made of those calls, when the library replaces the function. A function PHP# syntax replaces keeps `global.`.
 fn replaced_global_refusal<A>(
@@ -1046,6 +1081,12 @@ where
                         class,
                         word(member.as_bytes()),
                     );
+                } else if context.codebase.class_constant_exists(class.as_bytes(), member.as_bytes()) {
+                    artifacts.symbol_references.add_reference_to_class_member(
+                        &block_context.scope,
+                        (class, word(member.as_bytes())),
+                        false,
+                    );
                 } else {
                     artifacts.symbol_references.add_reference_to_class_member(
                         &block_context.scope,
@@ -1097,6 +1138,12 @@ where
                 codebase.get_property(class.name.as_bytes(), member.as_bytes())?;
 
                 return Some(on_taken_object(property.to_owned()));
+            }
+            if codebase.class_constant_exists(class.name.as_bytes(), member.as_bytes()) {
+                return Some((
+                    Some(class.original_name),
+                    format!("`{}`", display_code_member(context, class.original_name, member)),
+                ));
             }
             let method = codebase.get_method(class.name.as_bytes(), member.as_bytes())?;
             let name = method.original_name;
@@ -1388,6 +1435,7 @@ mod tests {
                         codebase.get_property(class, member.as_bytes()).is_none()
                     } else {
                         codebase.get_method(class, member.as_bytes()).is_none()
+                            && !codebase.class_constant_exists(class, member.as_bytes())
                     }
                 })
             })

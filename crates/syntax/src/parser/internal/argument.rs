@@ -1,6 +1,7 @@
 use crate::T;
 use crate::cst::cst::Argument;
 use crate::cst::cst::ArgumentList;
+use crate::cst::cst::LocalIdentifier;
 use crate::cst::cst::NamedArgument;
 use crate::cst::cst::NamedPlaceholderArgument;
 use crate::cst::cst::PartialArgument;
@@ -31,7 +32,7 @@ where
         let current = self.stream.lookahead(0)?.ok_or_else(|| self.stream.unexpected(None, &[]))?;
         if current.kind.is_identifier_maybe_reserved() && matches!(self.stream.peek_kind(1)?, Some(T![":"])) {
             return Ok(Argument::Named(NamedArgument {
-                name: self.parse_local_identifier()?,
+                name: self.parse_argument_name()?,
                 colon: self.stream.consume_span()?,
                 value: self.parse_expression()?,
             }));
@@ -41,6 +42,17 @@ where
             ellipsis: if self.stream.is_at(T!["..."])? { Some(self.stream.eat_span(T!["..."])?) } else { None },
             value: self.parse_expression()?,
         }))
+    }
+
+    /// Parses a named argument's name. In PHP# a name before `:` is never the object a method runs on, so `this:` names
+    /// the parameter `@this`, as `class:` names the parameter `@class`, spec section 2.
+    fn parse_argument_name(&mut self) -> Result<LocalIdentifier<'arena>, ParseError> {
+        let mut name = self.parse_local_identifier()?;
+        if self.dialect.is_sharp() && name.value == b"this" {
+            name.value = b"@this";
+        }
+
+        Ok(name)
     }
 
     pub(crate) fn parse_optional_partial_argument_list(
@@ -83,7 +95,7 @@ where
         }
 
         if current.kind.is_identifier_maybe_reserved() && matches!(self.stream.peek_kind(1)?, Some(T![":"])) {
-            let name = self.parse_local_identifier()?;
+            let name = self.parse_argument_name()?;
             let colon = self.stream.consume_span()?;
 
             if self.stream.is_at(T!["?"])? {

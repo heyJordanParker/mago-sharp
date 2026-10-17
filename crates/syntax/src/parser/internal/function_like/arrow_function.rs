@@ -43,14 +43,16 @@ where
 
     /// Whether a PHP# lambda starts here: a bare name, or a parenthesized list, followed by `=>`. A lambda binds as
     /// loosely as assignment, as in C#, so it starts only where a whole value, an assignment's value or a branch of
-    /// `? :` goes. After any other operator, `=>` belongs to what holds the expression, such as a `match` arm.
+    /// `? :` goes. After any other operator, `=>` belongs to what holds the expression, such as a `match` arm. A keyword
+    /// other than a literal reads as the bare name too, which the checker refuses with a message that names it.
     pub(crate) fn is_at_lambda(&mut self, precedence: Precedence) -> Result<bool, ParseError> {
         if precedence > Precedence::ElvisOrConditional {
             return Ok(false);
         }
 
         Ok(match self.stream.peek_kind(0)? {
-            Some(T![Identifier]) => self.stream.peek_kind(1)? == Some(T!["=>"]),
+            Some(T!["true" | "false" | "null"]) => false,
+            Some(kind) if kind.is_identifier_maybe_reserved() => self.stream.peek_kind(1)? == Some(T!["=>"]),
             Some(T!["("]) => self.stream.peek_after_parentheses()?.is_some_and(|token| token.kind == T!["=>"]),
             _ => false,
         })

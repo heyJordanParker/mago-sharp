@@ -9564,22 +9564,43 @@ fn a_never_method_is_php_never() {
 
 /// Spec section 9: a parameter's default is any expression. One PHP takes as a constant expression stays as written,
 /// and any other runs in a static closure the default calls, which the engine runs each time a call leaves the
-/// argument out.
+/// argument out. PHP reads a property in a constant expression only of an enum case, so a property read runs in the
+/// closure too.
 ///
 /// ```php
 /// public function run(int $at = (static function () { return \levenshtein("a", "b"); })(), int $step = 1 + 2): int
+/// public function size(int $size = (static function () { return (new \Report())->count; })()): int
 /// ```
 #[test]
 fn a_parameter_default_that_is_no_constant_expression_runs_in_a_static_closure() {
     let lowered = [Lowered::new(
-        "class Report\n{\n    public int run(int at = global.levenshtein(\"a\", \"b\"), int step = 1 + 2)\n    {\n        return at + step;\n    }\n}\n",
+        "class Report\n{\n    public int count { get; } = 7;\n\n    public int run(int at = global.levenshtein(\"a\", \"b\"), int step = 1 + 2)\n    {\n        return at + step;\n    }\n\n    public int size(int size = new Report().count) => size;\n}\n",
     )];
-
     assert_eq!(
-        member_in(&lowered, "Report", &[0, 0, 0, 2]),
+        member_in(&lowered, "Report", &[2, 0, 0, 2]),
         indoc! {r#"
             CALL
-              CLOSURE [16] "" @3-3
+              CLOSURE [16] "" @10-10
+                PARAM_LIST
+                null
+                STMT_LIST
+                  RETURN
+                    PROP
+                      NEW
+                        ZVAL "Report"
+                        ARG_LIST
+                      ZVAL "count"
+                null
+                null
+              ARG_LIST
+        "#}
+    );
+
+    assert_eq!(
+        member_in(&lowered, "Report", &[1, 0, 0, 2]),
+        indoc! {r#"
+            CALL
+              CLOSURE [16] "" @5-5
                 PARAM_LIST
                 null
                 STMT_LIST
@@ -9594,7 +9615,7 @@ fn a_parameter_default_that_is_no_constant_expression_runs_in_a_static_closure()
               ARG_LIST
         "#}
     );
-    assert_eq!(member_in(&lowered, "Report", &[0, 0, 1, 2]), "BINARY_OP [1]\n  ZVAL 1\n  ZVAL 2\n");
+    assert_eq!(member_in(&lowered, "Report", &[1, 0, 1, 2]), "BINARY_OP [1]\n  ZVAL 1\n  ZVAL 2\n");
 }
 
 /// ```php
@@ -19847,6 +19868,115 @@ fn a_plain_php_int_keyed_array_is_renumbered_where_it_arrives() {
     );
 }
 
+/// ```php
+/// [$users->names = \is_array($renumbered#1 = $users->names) ? \array_values($renumbered#1) : $renumbered#1,
+///     $users->names->add('cy')][1];
+/// [$receiver#1 = \App\Tenant\Users::make(), $receiver#1->names = …, $receiver#1->names->add('x')][2];
+/// $users->names = ['p', 'q'];
+/// ```
+///
+/// Spec section 12: a plain PHP property PHP# reads as a `List` is a `List` everywhere, writes included. A change in
+/// place sets the renumbered list back first and then changes the property, through a method that changes the list, an
+/// index and `++`, whose object runs once. A write of the whole property sets it, and a method that reads the list
+/// reads it renumbered.
+#[test]
+fn a_write_through_a_plain_php_property_read_as_a_list_changes_it_renumbered() {
+    let users = (
+        "src/App/Tenant/Users.php",
+        "<?php namespace App\\Tenant; class Users { /** @var array<int, string> */ public array $names = []; /** @var array<int, int> */ public array $scores = []; /** @var array<int, string> */ public static array $tags = []; /** @var array<int, string>|null */ public ?array $aliases = null; public static function make(): Users { return new Users(); } }",
+    );
+    let lowered = |statements: &str| body_in("int run(Users users)", statements, &[users]);
+
+    assert_eq!(
+        lowered("        users.names.add(\"cy\");\n        return 1;\n"),
+        indoc! {r#"
+            STMT_LIST
+              DIM
+                ARRAY [3]
+                  ARRAY_ELEM
+                    ASSIGN
+                      PROP
+                        VAR
+                          ZVAL "users"
+                        ZVAL "names"
+                      CONDITIONAL
+                        CALL
+                          ZVAL "is_array"
+                          ARG_LIST
+                            ASSIGN
+                              VAR
+                                ZVAL "renumbered#1"
+                              PROP
+                                VAR
+                                  ZVAL "users"
+                                ZVAL "names"
+                        CALL
+                          ZVAL "array_values"
+                          ARG_LIST
+                            VAR
+                              ZVAL "renumbered#1"
+                        VAR
+                          ZVAL "renumbered#1"
+                    null
+                  ARRAY_ELEM
+                    METHOD_CALL
+                      PROP
+                        VAR
+                          ZVAL "users"
+                        ZVAL "names"
+                      ZVAL "add"
+                      ARG_LIST
+                        ZVAL "cy"
+                    null
+                ZVAL 1
+              RETURN
+                ZVAL 1
+        "#}
+    );
+    for (statement, place) in [
+        ("users.names.add(\"cy\")", "PROP"),
+        ("users.names[0] = \"zed\"", "PROP"),
+        ("users.scores[1]++", "PROP"),
+        ("users.names.remove(\"ada\")", "PROP"),
+        ("Users.tags.add(\"z\")", "STATIC_PROP"),
+        ("Users.make().names.add(\"x\")", "PROP"),
+        ("users.aliases?.add(\"al\")", "PROP"),
+    ] {
+        let body = lowered(&format!("        {statement};\n        return 1;\n"));
+        assert!(body.starts_with("STMT_LIST\n  DIM\n    ARRAY [3]\n"), "{statement}\n{body}");
+        assert!(body.contains(&format!("ASSIGN\n          {place}\n")), "{statement}\n{body}");
+        assert!(body.contains("ZVAL \"array_values\""), "{statement}\n{body}");
+    }
+    assert!(
+        lowered("        Users.make().names.add(\"x\");\n        return 1;\n")
+            .contains("ASSIGN\n          VAR\n            ZVAL \"receiver#1\"\n          STATIC_CALL\n")
+    );
+    assert_eq!(
+        lowered("        users.names = [\"p\", \"q\"];\n        return 1;\n"),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                PROP
+                  VAR
+                    ZVAL "users"
+                  ZVAL "names"
+                ARRAY [3]
+                  ARRAY_ELEM
+                    ZVAL "p"
+                    null
+                  ARRAY_ELEM
+                    ZVAL "q"
+                    null
+              RETURN
+                ZVAL 1
+        "#}
+    );
+    assert!(
+        lowered("        string? first = users.names.getOrNull(0);\n        return 1;\n")
+            .contains("COALESCE\n      DIM\n        CONDITIONAL\n")
+    );
+}
+
 /// Spec section 18 shows an object in a template by what its `toString()` returns, so the part calls it, which an enum
 /// case needs, since PHP gives an enum no string conversion.
 #[test]
@@ -19882,24 +20012,34 @@ fn an_object_in_a_template_shows_what_its_to_string_returns() {
 /// class gets PHP's `__toString()`, which calls it.
 #[test]
 fn a_class_that_declares_to_string_gets_php_s_string_conversion() {
+    let conversion = |lines: &str| {
+        format!(
+            "METHOD [1] \"__toString\" @{lines}\n  PARAM_LIST\n  null\n  STMT_LIST\n    RETURN\n      METHOD_CALL\n        VAR\n          ZVAL \"this\"\n        ZVAL \"toString\"\n        ARG_LIST\n  ZVAL [1] \"string\"\n  null\n"
+        )
+    };
     assert_eq!(
         Lowered::new("namespace App.Tenant;\n\nclass Sku\n{\n    public string toString() => \"A-12\";\n}\n")
             .declared("__toString"),
-        indoc! {r#"
-            METHOD [1] "__toString" @5-6
-              PARAM_LIST
-              null
-              STMT_LIST
-                RETURN
-                  METHOD_CALL
-                    VAR
-                      ZVAL "this"
-                    ZVAL "toString"
-                    ARG_LIST
-              ZVAL [1] "string"
-              null
-        "#}
+        conversion("5-6")
     );
+
+    // A class, or an event, that takes `toString()` from an interface's default body gets it too, from its body's start,
+    // and the trait of the body declares none.
+    let named = (
+        "src/App/Tenant/Named.sharp",
+        "namespace App.Tenant;\n\npublic interface Named\n{\n    string toString() => \"named\";\n}\n",
+    );
+    assert_eq!(
+        Lowered::with("namespace App.Tenant;\n\nclass Widget : Named\n{\n}\n", &[named]).declared("__toString"),
+        conversion("4-5")
+    );
+    assert_eq!(
+        Lowered::with("namespace App.Tenant;\n\npublic event Shipped(int order) : Named;\n", &[named])
+            .declared("__toString"),
+        conversion("3-3")
+    );
+    let interface = Lowered::named("src/App/Tenant/Named.sharp", named.1);
+    assert!(!interface.tree().contains("__toString"), "{}", interface.tree());
 }
 
 /// ```php

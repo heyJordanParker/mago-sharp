@@ -371,8 +371,8 @@ where
 }
 
 /// Reports the PHP# read `read` of `name.member` when `name` names no class, no namespace the file imports, and no
-/// namespace with a function or constant of that member's name, so the read reaches nothing. The read gets no type,
-/// as after an invalid call target.
+/// namespace with a function or constant of that member's name, so the read reaches nothing. The read is refused, so
+/// nothing that uses it reports again.
 fn report_unknown_class_read<A>(
     context: &mut Context<'_, '_, A>,
     artifacts: &mut AnalysisArtifacts,
@@ -381,7 +381,7 @@ fn report_unknown_class_read<A>(
 ) where
     A: Arena,
 {
-    artifacts.set_expression_type(read, get_mixed());
+    artifacts.set_expression_type(read, TUnion::from_atomic(TAtomic::Error));
     if report_unknown_sharp_class(context, context.resolved_names.get(name), name.span()) {
         return;
     }

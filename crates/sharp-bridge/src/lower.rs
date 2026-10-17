@@ -525,8 +525,11 @@ struct Lowering<'lowering, 'arena> {
     texts: Vec<u8>,
     /// How many hidden variables the pattern forms and null-safe chains being lowered hold.
     temporaries: u32,
-    /// The receivers of the null-safe chains being lowered that their hidden variable holds, by span, with its name.
-    null_safe_receivers: Vec<(Span, Vec<u8>)>,
+    /// The receivers being lowered that a hidden variable holds, by span, with its name: a null-safe chain's, and the
+    /// object of a plain PHP property a write renumbers first.
+    held_receivers: Vec<(Span, Vec<u8>)>,
+    /// The plain PHP properties a write being lowered renumbered first, so the write reaches each as its place.
+    renumbered_places: Vec<Span>,
     /// The null-safe links whose chain's conditional already tests the receiver, so each is its plain form.
     tested_links: Vec<Span>,
     /// The declaration offsets of the locals a lambda captures by reference: those code writes.
@@ -578,7 +581,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             children: Vec::new(),
             texts: Vec::new(),
             temporaries: 0,
-            null_safe_receivers: Vec::new(),
+            held_receivers: Vec::new(),
+            renumbered_places: Vec::new(),
             tested_links: Vec::new(),
             by_reference: HashSet::default(),
             loop_depth: 0,
@@ -858,7 +862,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let mut members =
             self.class_members(&class.members, parent_name, class.class.span, class.left_brace, class.right_brace);
         members.extend(self.parse_methods(&class.members, class.name.span));
-        members.extend(self.string_conversion(&class.members, class.right_brace));
+        members.extend(self.string_conversion(class.members.as_slice(), class.left_brace, class.right_brace));
         if self.tested {
             members.extend(self.test_hooks(class));
         }
@@ -881,14 +885,21 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// Spec section 18: plain PHP converts an object of a class that declares `toString()` to the text a PHP#
     /// template shows, so the class gets PHP's `__toString()`, which returns `$this->toString()`, as Java's and
     /// Kotlin's string conversion calls `toString()`. PHP# refuses a member name that starts with `__`, so no member
-    /// of the class can take it. None for a class that declares no `toString()`, which inherits its parent's.
-    fn string_conversion(&mut self, members: &Sequence<ClassLikeMember>, right_brace: Span) -> Option<u32> {
-        let to_string = members.iter().find_map(|member| match member {
-            ClassLikeMember::Method(method) if method.name.value == b"toString" => Some(method),
+    /// of the class can take it. A class, a struct or an event that takes `toString()` from an interface's default
+    /// body, spec section 22, gets it too, from `start`, and the trait of the body does not, so two bodies never
+    /// clash. None for one that has neither, which inherits its parent's.
+    fn string_conversion(&mut self, members: &[ClassLikeMember], start: Span, end: Span) -> Option<u32> {
+        let declared = members.iter().find_map(|member| match member {
+            ClassLikeMember::Method(method) if method.name.value == b"toString" => Some(method.name.span),
             _ => None,
+        });
+        let start = declared.or_else(|| {
+            let defaults = self.types.default_bodies(self.class);
+
+            defaults.iter().any(|(_, _, method, _)| method.as_bytes() == b"toString").then_some(start)
         })?;
-        let line = self.line(to_string.name.span);
-        let this = self.variable(to_string.name.span, b"this");
+        let line = self.line(start);
+        let this = self.variable(start, b"this");
         let method = self.string(0, line, b"toString");
         let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[]);
         let call = self.node(SHARP_AST_METHOD_CALL, 0, line, &[this, method, arguments]);
@@ -900,8 +911,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         Some(self.declaration(
             SHARP_AST_METHOD,
             ZEND_ACC_PUBLIC,
-            to_string.name.span,
-            right_brace,
+            start,
+            end,
             b"__toString",
             &[parameters, NULL, body, return_type, NULL],
         ))
@@ -929,7 +940,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             members.push(self.value_equality(r#struct.name.span, &[self.class]));
         }
         members.extend(self.parse_methods(&r#struct.members, r#struct.name.span));
-        members.extend(self.string_conversion(&r#struct.members, r#struct.right_brace));
+        members.extend(self.string_conversion(r#struct.members.as_slice(), r#struct.left_brace, r#struct.right_brace));
         members.extend(self.generic_statics(&r#struct.name, &r#struct.members));
         members.extend(self.class_metadata(self.class, self.line(r#struct.name.span)));
         members.splice(0..0, self.trait_members(r#struct.inheritance.as_ref(), r#struct.left_brace));
@@ -2217,6 +2228,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let line = self.line(&event.parameter_list);
         let mut members = self.trait_members(event.inheritance.as_ref(), event.parameter_list.span());
         members.push(self.promoted_constructor(event.name.span, &event.parameter_list));
+        members.extend(self.string_conversion(&[], event.parameter_list.span(), event.terminator.span()));
         members.extend(self.class_metadata(self.class, self.line(event.name)));
         let members = self.node(SHARP_AST_STMT_LIST, 0, line, &members);
         let header = event.inheritance.as_ref().map_or(NULL, |inheritance| self.name_list(inheritance));
@@ -3208,7 +3220,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// Whether the lowered expression `node` is one PHP takes as a constant expression, as php-src's
-    /// `zend_is_allowed_in_const_expr` says, leaving out the closures and first-class callables a default never is.
+    /// `zend_is_allowed_in_const_expr` says, leaving out the closures and first-class callables a default never is,
+    /// and the property reads PHP takes only of an enum case where it evaluates the default, as `new Box(7)->size` is
+    /// not.
     fn is_constant_expression(&self, node: u32) -> bool {
         if node == NULL {
             return true;
@@ -3240,8 +3254,6 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 | SHARP_AST_NEW
                 | SHARP_AST_ARG_LIST
                 | SHARP_AST_NAMED_ARG
-                | SHARP_AST_PROP
-                | SHARP_AST_NULLSAFE_PROP
         );
         let children = node.first_child as usize..(node.first_child + node.child_count) as usize;
 
@@ -4813,7 +4825,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// array the checker reads as a `List` goes elsewhere.
     fn arriving(&mut self, expression: &Expression, arrival: Arrival) -> u32 {
         let line = self.line(expression);
-        if let Some((_, name)) = self.null_safe_receivers.iter().find(|(span, _)| *span == expression.span()) {
+        if let Some((_, name)) = self.held_receivers.iter().find(|(span, _)| *span == expression.span()) {
             let name = name.clone();
 
             return self.variable(expression.span(), &name);
@@ -4823,7 +4835,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         }
 
         let lowered = self.unchecked_expression(line, expression);
-        let arrives_as_list = self.plain_value(expression) && self.types.arrives_as_list(expression);
+        let arrives_as_list = self.arrives_as_list(expression);
         let (lowered, check) = match arrival {
             Arrival::Read if arrives_as_list => {
                 (self.renumbered(expression, lowered), self.types.call_check(expression))
@@ -4836,6 +4848,79 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             Some((text, target)) => self.verified(line, lowered, &text, target.as_bytes()),
             None => lowered,
         }
+    }
+
+    /// Whether `value` is plain PHP's array the checker reads as a `List`, as [`Types::arrives_as_list`] says, that no
+    /// write being lowered renumbered first, so its read is renumbered.
+    fn arrives_as_list(&self, value: &Expression) -> bool {
+        self.plain_value(value)
+            && self.types.arrives_as_list(value)
+            && !self.renumbered_places.contains(&value.unparenthesized().span())
+    }
+
+    /// The plain PHP property, which the checker reads as a `List`, that `place` is or holds an element of, which a write
+    /// to `place` renumbers first, as [`Self::renumbered_first`] says. None for any other place.
+    fn renumbered_root<'place, 'ast>(
+        &self,
+        place: &'place Expression<'ast>,
+    ) -> Option<(&'place Expression<'ast>, &'place PropertyAccess<'ast>)> {
+        let mut root = place.unparenthesized();
+        while let Expression::ArrayAccess(access) = root {
+            root = access.array.unparenthesized();
+        }
+        let Expression::Access(Access::Property(access)) = root else {
+            return None;
+        };
+
+        self.arrives_as_list(root).then_some((root, access))
+    }
+
+    /// `write`, as `lower` lowers it, a change in place to the `List` `place` is or holds an element of, where that
+    /// `List` is a plain PHP property the checker reads as a `List`, spec section 12. The property is a `List`
+    /// everywhere, writes included, so a write gets the `List`, changes it and sets it back, as a value-type property's
+    /// does. The renumbered list is set back first, and the write then changes it where it lives, so a change through
+    /// the engine's `Sharp\Collection` reaches it as it reaches any `List` property:
+    ///
+    /// ```php
+    /// [$users->names = \is_array($renumbered#1 = $users->names) ? \array_values($renumbered#1) : $renumbered#1,
+    ///     $users->names->add('cy')][1]
+    /// ```
+    ///
+    /// The property's object is read once, into `$receiver#N` when it runs something. Any other write is `lower`'s.
+    fn renumbered_first(&mut self, place: &Expression, lower: impl FnOnce(&mut Self) -> u32) -> u32 {
+        let Some((root, access)) = self.renumbered_root(place) else {
+            return lower(self);
+        };
+        let line = self.line(root);
+        let taken = self.temporaries;
+        let mut steps = Vec::new();
+        let holds_object = self.names.static_property_class(access).is_none() && !self.is_pure(access.object);
+        if holds_object {
+            let name = self.hidden("receiver");
+            let variable = self.variable(access.object.span(), &name);
+            let object = self.expression(access.object);
+            let held = self.node(SHARP_AST_ASSIGN, 0, line, &[variable, object]);
+            steps.push(self.node(SHARP_AST_ARRAY_ELEM, 0, line, &[held, NULL]));
+            self.held_receivers.push((access.object.span(), name));
+        }
+        self.renumbered_places.push(root.span());
+        let place = self.target(root, PlaceUse::Write);
+        let read = self.expression(root);
+        let renumbered = self.renumbered(root, read);
+        let renumbered = self.node(SHARP_AST_ASSIGN, 0, line, &[place, renumbered]);
+        steps.push(self.node(SHARP_AST_ARRAY_ELEM, 0, line, &[renumbered, NULL]));
+        let write = lower(self);
+        let position = steps.len();
+        steps.push(self.node(SHARP_AST_ARRAY_ELEM, 0, line, &[write, NULL]));
+        self.renumbered_places.pop();
+        if holds_object {
+            self.held_receivers.pop();
+        }
+        self.temporaries = taken;
+        let steps = self.node(SHARP_AST_ARRAY, ZEND_ARRAY_SYNTAX_SHORT, line, &steps);
+        let position = self.zval(line, sharp_value::SHARP_LONG, |node| node.long_value = position as i64);
+
+        self.node(SHARP_AST_DIM, 0, line, &[steps, position])
     }
 
     /// `lowered`, the value of `value`, renumbered where plain PHP gives it and the checker reads it as a `List`, spec
@@ -4995,7 +5080,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 {
                     let decrement = matches!(unary.operator, UnaryPrefixOperator::PreDecrement(_));
 
-                    return self.list_write(line, access, ListWrite::Step { decrement, postfix: false });
+                    return self.renumbered_first(access.array, |this| {
+                        this.list_write(line, access, ListWrite::Step { decrement, postfix: false })
+                    });
                 }
                 if let UnaryPrefixOperator::PreIncrement(_) | UnaryPrefixOperator::PreDecrement(_) = unary.operator
                     && let Some((class, name)) = self.static_accessor(unary.operand)
@@ -5024,7 +5111,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 {
                     let decrement = matches!(unary.operator, UnaryPostfixOperator::PostDecrement(_));
 
-                    return self.list_write(line, access, ListWrite::Step { decrement, postfix: true });
+                    return self.renumbered_first(access.array, |this| {
+                        this.list_write(line, access, ListWrite::Step { decrement, postfix: true })
+                    });
                 }
                 if let Some((class, name)) = self.static_accessor(unary.operand) {
                     let operation = if matches!(unary.operator, UnaryPostfixOperator::PostIncrement(_)) {
@@ -5070,7 +5159,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 if let Expression::ArrayAccess(access) = assignment.lhs
                     && self.is_list(access.array)
                 {
-                    return self.list_write(line, access, ListWrite::Assignment(assignment));
+                    return self.renumbered_first(access.array, |this| {
+                        this.list_write(line, access, ListWrite::Assignment(assignment))
+                    });
                 }
                 if let Expression::ArrayAccess(access) = assignment.lhs
                     && match access.array.unparenthesized() {
@@ -5149,6 +5240,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                         self.node(kind, attr, line, &[lhs, rhs])
                     }
                 }
+            }
+            Expression::Call(Call::Method(call)) if self.types.changes_list(expression) => {
+                self.renumbered_first(call.object, |this| this.method_call(expression, call))
             }
             Expression::Call(Call::Method(call)) => self.method_call(expression, call),
             // `f?.(x)` whose conditional `null_safe_chain` built already tests `f`: the call of what `f` holds.
@@ -5252,6 +5346,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             },
             // A link whose chain's conditional tests the receiver, which `untested_link` found, is the static call
             // through a class value, the extension's member, the lazy operation, the property call, or the plain method call.
+            Expression::Call(Call::NullSafeMethod(call))
+                if self.types.changes_list(expression) && self.renumbered_root(call.object).is_some() =>
+            {
+                self.renumbered_first(call.object, |this| this.unchecked_expression(line, expression))
+            }
             Expression::Call(Call::NullSafeMethod(call)) => {
                 if let Some(lowered) = self.collection_call(expression, call.object, &call.argument_list, true) {
                     return lowered;
@@ -6311,7 +6410,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let mut link = chain;
         let mut below_php_call = false;
         loop {
-            if self.null_safe_receivers.iter().any(|(span, _)| *span == link.span()) {
+            if self.held_receivers.iter().any(|(span, _)| *span == link.span()) {
                 return None;
             }
 
@@ -6418,7 +6517,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             let name = format!("nullsafe#{}", self.temporaries).into_bytes();
             let variable = self.variable(receiver.span(), &name);
             let value = self.null_safe_object(receiver);
-            self.null_safe_receivers.push((receiver.span(), name));
+            self.held_receivers.push((receiver.span(), name));
 
             self.node(SHARP_AST_ASSIGN, 0, line, &[variable, value])
         };
@@ -6429,7 +6528,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let rest = self.expression(chain);
         self.tested_links.pop();
         if !is_local {
-            self.null_safe_receivers.pop();
+            self.held_receivers.pop();
             self.temporaries -= 1;
         }
 
@@ -7359,6 +7458,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         };
 
         match receiver {
+            // A method that reads a plain PHP property the checker reads as a `List` reads it renumbered. One that
+            // changes it renumbered it first, so the property is its place.
+            _ if self.renumbered_root(receiver).is_some() => CollectionReceiver::Value(hold(self, receiver)),
             Expression::ConstantAccess(name)
                 if matches!(self.names.binding(&name.name), Some(Binding::Local(_) | Binding::Field)) =>
             {
@@ -7550,7 +7652,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
                     self.static_property(target, class, &classes, name.value, property, line, place_use)
                 }
-                None => self.expression(target),
+                // A plain PHP property the checker reads as a `List` is written as itself.
+                None => self.arriving(target, Arrival::Plain),
             },
             Expression::ArrayAccess(access) => {
                 let value = self.target(access.array, place_use);
@@ -8663,7 +8766,7 @@ enum Arrival<'place> {
     Read,
     /// It enters a place that declares this `Map`, which makes a `Map` of its keys, and is checked as that `Map`.
     Map(&'place TUnion),
-    /// It is an argument of plain PHP, which takes it as plain PHP gave it.
+    /// It stays as plain PHP gave it: an argument of plain PHP, or the property a write sets.
     Plain,
 }
 

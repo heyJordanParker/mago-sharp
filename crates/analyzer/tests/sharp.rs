@@ -509,7 +509,7 @@ fn a_bare_constant_is_the_code_s_own_and_a_missing_one_is_refused_as_in_php() {
     assert_eq!(
         refusals(("src/Demo/Report.sharp", sharp), &[])[..2],
         [
-            "7:37 non-existent-constant Undefined constant: `MISSING`. | Check `MISSING` for typos. A bare name reads a constant of this file's namespace, declared in a `.php` file. A class constant is read through its class, as in `Limits.MAX`, and PHP's constant through its namespace, as in `global.PHP_EOL`.",
+            "7:37 non-existent-constant Undefined constant: `MISSING`. | Check `MISSING` for typos. A bare name reads a constant of this file's namespace, declared in a `.php` file. A class constant is read through its class, as in `Limits.MAX`, and PHP's constant through its namespace, as in `global.CURLOPT_TIMEOUT`.",
             "7:37 mixed-operand Right operand in binary operation has type `Any?`. | Check the right operand with `is` or `match` first, as in `if (value is int n)`, and use `n`.",
         ]
     );
@@ -2547,6 +2547,27 @@ fn a_plain_php_constant_is_read_through_its_namespace() {
     assert_eq!(issues(("src/Demo/Layout.php", php), &others), Vec::<String>::new());
 }
 
+/// Spec section 23: a value the standard library gives is read from it, so PHP's `int` bounds, bare or through
+/// `global`, are refused with `Int.MAX` and `Int.MIN`, through the table of what the library replaces. The library's own
+/// `Int` reads them, and `global.PHP_EOL` stays PHP's constant.
+#[test]
+fn the_int_bounds_are_read_from_the_standard_library() {
+    let int = (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Int.sharp",
+        "namespace Sharp;\n\npublic static class Int\n{\n    public const int MAX = global.PHP_INT_MAX;\n\n    public const int MIN = global.PHP_INT_MIN;\n}\n",
+    );
+    let sharp = "namespace Demo;\n\nclass Bounds\n{\n    public static int largest() => global.PHP_INT_MAX;\n    public static int smallest() => global.PHP_INT_MIN;\n    public static int bare() => PHP_INT_MAX - 1;\n    public static int own() => Int.MAX;\n    public static string line() => global.PHP_EOL;\n}\n";
+
+    assert_eq!(
+        worded(("src/Demo/Bounds.sharp", sharp), &[int]),
+        [
+            "5:36 wrapped-function `PHP_INT_MAX` is wrapped by the standard library: write `Int.MAX`. | Read here.",
+            "6:37 wrapped-function `PHP_INT_MIN` is wrapped by the standard library: write `Int.MIN`. | Read here.",
+            "7:33 wrapped-function `PHP_INT_MAX` is wrapped by the standard library: write `Int.MAX`. | Read here.",
+        ]
+    );
+}
+
 /// A `Name.member` read that reaches no constant is refused for what it names: `global.NOPE` and `Pdf.NOPE` name no
 /// constant, and the note names the namespace that lacks it. `global.strlen` and `Pdf.render` are functions, so each
 /// read is the function's value, spec section 14.3, and `Nope` names no class and no namespace. The checker accepted
@@ -2580,6 +2601,23 @@ fn a_read_through_a_name_that_reaches_no_constant_is_refused() {
         [
             vec!["PHP's root namespace declares no constant `NOPE`.".to_owned()],
             vec!["The namespace `Vendor.Pdf` declares no constant `NOPE`.".to_owned()],
+        ]
+    );
+}
+
+/// A static read or call through a name that names no class is that class's one error, by its PHP# name, and the
+/// read or call is refused, so what uses it reports nothing more: no return type the analysis could not infer, and no
+/// member of the missing class.
+#[test]
+fn a_static_member_of_a_missing_class_is_one_error() {
+    let sharp = "namespace Demo;\n\nclass Reads\n{\n    public static int read() => Gadget.LIMIT;\n    public static int called() => Gadget.count();\n    public static string chained() => Gadget.make().name;\n}\n";
+
+    assert_eq!(
+        worded(("src/Demo/Reads.sharp", sharp), &[]),
+        [
+            "5:33 non-existent-class-like `Gadget` names no class, and no namespace this file imports. | Names nothing here. | Check the spelling of `Gadget`, or import the class or the namespace whose member this reads.",
+            "6:35 non-existent-class-like Cannot find type `Demo.Gadget`. | No type of this name is declared. | Check the name's spelling, and import the type with `import` when another namespace declares it.",
+            "7:39 non-existent-class-like Cannot find type `Demo.Gadget`. | No type of this name is declared. | Check the name's spelling, and import the type with `import` when another namespace declares it.",
         ]
     );
 }
@@ -8559,12 +8597,13 @@ fn a_plain_php_int_keyed_array_arrives_as_a_list() {
 /// literal is, at a typed local, an argument, a return, a property and an expression body. Plain PHP's value is the
 /// exception: it still holds its keys, and the place makes a `Map` of them. That is the result of a plain PHP method or
 /// function and a read of a plain PHP class's property, and never a PHP# field's function or property, read directly
-/// or through a type parameter.
+/// or through a type parameter. A PHP# function value returns the `Map` its type writes, and a lambda's `List` result
+/// is refused where its function type returns a `Map`.
 #[test]
 fn a_list_value_where_a_map_is_declared_is_refused() {
     let users = "<?php\n\nnamespace App;\n\nfinal class Users\n{\n    /** @var list<Person> */\n    public array $people = [];\n\n    /** @return array<int, Person> */\n    public function all(): array { return []; }\n}\n";
     let person = "<?php\n\nnamespace App;\n\nfinal class Person\n{\n}\n";
-    let sharp = "namespace App;\n\nclass Index\n{\n    public Map<int, int> held = [:];\n\n    public Map<int, int> local(List<int> items)\n    {\n        Map<int, int> byPosition = items;\n        this.held = items;\n        this.take(items);\n        return items;\n    }\n\n    public Map<int, int> body(List<int> items) => items;\n\n    public Map<int, int> maybe(List<int>? items) => items ?? [:];\n\n    public Map<int, Person> plain(Users users) => users.all();\n\n    public void take(Map<int, int> map) { }\n\n    public Map<int, string> split(string text) => global.explode(\",\", text);\n\n    public Map<int, Person> people(Users users) => users.people;\n\n    private Function<List<int>()> make = () => [1];\n\n    public Map<int, int> made() => this.make();\n\n    public List<int> listed = [];\n\n    public Map<int, int> own() => this.listed;\n\n    public Map<int, int> bound<TIndex : Index>(TIndex index) => index.listed;\n}\n";
+    let sharp = "namespace App;\n\nclass Index\n{\n    public Map<int, int> held = [:];\n\n    public Map<int, int> local(List<int> items)\n    {\n        Map<int, int> byPosition = items;\n        this.held = items;\n        this.take(items);\n        return items;\n    }\n\n    public Map<int, int> body(List<int> items) => items;\n\n    public Map<int, int> maybe(List<int>? items) => items ?? [:];\n\n    public Map<int, Person> plain(Users users) => users.all();\n\n    public void take(Map<int, int> map) { }\n\n    public Map<int, string> split(string text) => global.explode(\",\", text);\n\n    public Map<int, Person> people(Users users) => users.people;\n\n    private Function<List<int>()> make = () => [1];\n\n    public Map<int, int> made() => this.make();\n\n    public List<int> listed = [];\n\n    public Map<int, int> own() => this.listed;\n\n    public Map<int, int> bound<TIndex : Index>(TIndex index) => index.listed;\n\n    public Map<int, int> called(Function<Map<int, int>()> make) => make();\n\n    public Function<Map<int, int>()> wrapped(List<int> items) => () => items;\n}\n";
 
     assert_eq!(
         worded(("src/App/Index.sharp", sharp), &[("src/App/Users.php", users), ("src/App/Person.php", person)])
@@ -8581,6 +8620,7 @@ fn a_list_value_where_a_map_is_declared_is_refused() {
             "29:36 invalid-array-element A `List` is not a `Map`: its keys are only its positions.",
             "33:35 invalid-array-element A `List` is not a `Map`: its keys are only its positions.",
             "35:65 invalid-array-element A `List` is not a `Map`: its keys are only its positions.",
+            "39:72 invalid-array-element A `List` is not a `Map`: its keys are only its positions.",
         ]
     );
 }
@@ -8590,7 +8630,7 @@ fn a_list_value_where_a_map_is_declared_is_refused() {
 /// an expression is `never`, so `??` gives the left side's type. An override returns `never` too.
 #[test]
 fn never_is_a_method_return_type() {
-    let errors = "namespace App.Probe;\n\npublic abstract class Errors\n{\n    public static never fail(string message) => throw new LogicException(message);\n\n    public static never stop(bool urgent)\n    {\n        if (urgent) {\n            throw new LogicException(\"stopped\");\n        }\n    }\n\n    public static never always()\n    {\n        throw new LogicException(\"always\");\n    }\n\n    public abstract never halt();\n}\n";
+    let errors = "namespace App.Probe;\n\npublic abstract class Errors\n{\n    public static never fail(string message) => throw new LogicException(message);\n\n    public static never stop(bool urgent)\n    {\n        if (urgent) {\n            throw new LogicException(\"stopped\");\n        }\n    }\n\n    public static never always()\n    {\n        throw new LogicException(\"always\");\n    }\n\n    public abstract never halt();\n\n    public static never returning() => 1;\n}\n";
     let soft = "namespace App.Probe;\n\npublic class Soft : Errors\n{\n    public override void halt() { }\n}\n";
     let uses = "namespace App.Probe;\n\npublic class Uses\n{\n    public string name(string? input)\n    {\n        string name = input ?? Errors.fail(\"name is required\");\n        return name;\n    }\n\n    public int ends() { Errors.fail(\"ends\"); }\n\n    public int after()\n    {\n        Errors.fail(\"after\");\n        return 0;\n    }\n\n    public int plain() { Legacy.halt(); }\n}\n";
     let legacy = "<?php\n\nnamespace App\\Probe;\n\nfinal class Legacy\n{\n    public static function halt(): never\n    {\n        exit(1);\n    }\n}\n";
@@ -8602,7 +8642,8 @@ fn never_is_a_method_return_type() {
     assert_eq!(
         worded(("src/App/Probe/Errors.sharp", errors), &imports),
         [
-            "12:5 missing-return-statement `Errors.stop` is `never`, and it reaches its closing brace when no `throw` runs before it. | It returns here when no `throw` runs. | End every path with a `throw` or a call of a `never` method."
+            "12:5 missing-return-statement `Errors.stop` is `never`, and it reaches its closing brace when no `throw` runs before it. | It returns here when no `throw` runs. | End every path with a `throw` or a call of a `never` method.",
+            "21:40 missing-return-statement `Errors.returning` is `never`, and its body returns a value. | Returned here. | Throw instead, as in `=> throw new ValueError(\"…\")`, or call a `never` method.",
         ]
     );
     assert_eq!(
@@ -8642,6 +8683,40 @@ fn a_template_shows_a_type_that_declares_to_string() {
         [
             "29:46 invalid-operand A template shows `int`, `float`, `string`, `bool` or a type that declares `toString()`, and `Sku?` is none of them. | This is `Sku?`. | Test it with `!= null` first.",
             "33:49 invalid-operand A template shows `int`, `float`, `string`, `bool` or a type that declares `toString()`, and `Order` is none of them. | This is `Order`. | Declare `string toString()` on it, or show a value taken from it, such as a property.",
+        ]
+    );
+}
+
+/// Spec section 18: a template and every conversion to text call `toString()` with no arguments and show the `string`
+/// it returns, so a PHP# `toString()` is `string toString()`, an instance method with no required parameter that
+/// returns `string`, where it is declared, in a class, an interface or an enum. A plain PHP class's other `toString()`
+/// is refused where a template shows it.
+#[test]
+fn to_string_is_an_instance_method_with_no_required_parameter_that_returns_string() {
+    let sharp = "namespace Demo;\n\nimport Lib.Legacy;\n\nclass OddStrings\n{\n    public int toString() => 5;\n}\n\nclass ArgStrings\n{\n    public string toString(string prefix) => prefix;\n}\n\nclass StaticStrings\n{\n    public static string toString() => \"static\";\n}\n\ninterface Labelled\n{\n    string? toString();\n}\n\nenum Level\n{\n    case Low;\n\n    public int toString() => 1;\n}\n\nclass Padded\n{\n    public string toString(int width = 0, string... rest) => \"padded\";\n}\n\nclass Receipt\n{\n    public string odd(OddStrings value) => `odd ${value}`;\n\n    public string padded(Padded value) => `padded ${value}`;\n\n    public string legacy(Legacy value) => `legacy ${value}`;\n}\n";
+    let legacy = "<?php\n\nnamespace Lib;\n\nfinal class Legacy\n{\n    public static function toString(): string\n    {\n        return 'legacy';\n    }\n}\n";
+    let help =
+        "Declare it as `string toString()`: an instance method with no required parameter that returns `string`.";
+
+    assert_eq!(
+        worded(("src/Demo/Receipt.sharp", sharp), &[("src/Lib/Legacy.php", legacy)]),
+        [
+            format!(
+                "7:16 incompatible-return-type `OddStrings.toString()` returns `int`, and PHP# shows a value as text by the `string` its `toString()` returns. | Declared here. | {help}"
+            ),
+            format!(
+                "12:19 incompatible-parameter-count `ArgStrings.toString()` needs `prefix`, and PHP# shows a value as text by calling `toString()` with no arguments. | Declared here. | {help}"
+            ),
+            format!(
+                "17:26 incompatible-static-modifier `StaticStrings.toString()` is `static`, and PHP# shows a value as text by calling `toString()` on it. | Declared here. | {help}"
+            ),
+            format!(
+                "22:13 incompatible-return-type `Labelled.toString()` returns `string?`, and PHP# shows a value as text by the `string` its `toString()` returns. | Declared here. | {help}"
+            ),
+            format!(
+                "29:16 incompatible-return-type `Level.toString()` returns `int`, and PHP# shows a value as text by the `string` its `toString()` returns. | Declared here. | {help}"
+            ),
+            "43:51 invalid-operand A template shows `Legacy` by the text its `toString()` returns, and its `toString()` is not `string toString()`. | This is `Legacy`. | Show a value taken from it instead, such as a property or the result of a method.".to_owned(),
         ]
     );
 }
@@ -19381,6 +19456,26 @@ fn a_behavior_implements_behavior_for_the_property_s_type() {
         ]
     );
 
+    // A constructor parameter's property is checked as one in the class body, spec section 9, and a later behavior
+    // may be generic.
+    let shouted = (
+        "src/Demo/Shouted.sharp",
+        "namespace Demo;\n\nimport Sharp.Behavior;\n\npublic class Shouted<T> : Behavior<string>\n{\n    public string get(string value) => value;\n\n    public string set(string value) => value;\n}\n",
+    );
+    let promoted = "namespace Demo;\n\nimport Sharp.Behavior;\n\npublic class Order\n{\n    public Order(\n        public string name { get; set; } via Trimmed, Shouted<int> = \"\",\n        public int count { get; set; } via Trimmed = 0,\n        public string code { get; set; } via Missing = \"\",\n        public string kind { get; set; } via Behavior = \"\",\n    ) { }\n}\n";
+    assert_eq!(
+        worded(("src/Demo/Order.sharp", promoted), &[behavior, behaviors, shouted]),
+        [
+            format!(
+                "9:44 invalid-property-behavior `Trimmed` is a `Behavior<string>`, and `count` is an `int`. | Named here. | {note} | Name a behavior that implements `Behavior<int>`, as `count` is an `int`."
+            ),
+            "10:46 non-existent-class-like Cannot find type `Demo.Missing`. | No type of this name is declared. | Check the name's spelling, and import the type with `import` when another namespace declares it.".to_owned(),
+            format!(
+                "11:46 invalid-property-behavior `Behavior` can't be created: PHP# creates each behavior with `new` for each object. | Named here. | {note} | Name a class that implements `Behavior` for the property's type, such as one that extends `Behavior`."
+            ),
+        ]
+    );
+
     // An untyped property is the parser's error, so its behaviors have no type to be checked against.
     let untyped = "namespace Demo;\n\npublic class Order\n{\n    public name { get; set; } via Trimmed = \"\";\n}\n";
     assert_eq!(issues(("src/Demo/Order.sharp", untyped), &[behavior, behaviors]), ["5:12 parse"]);
@@ -22102,7 +22197,7 @@ fn a_spread_of_readonly_values_goes_only_where_they_stay_readonly() {
 /// takes parameters is an ordinary method, which may change `this`.
 #[test]
 fn only_hash_and_to_string_without_parameters_are_readonly() {
-    let hasher = "namespace App;\n\npublic class Hasher\n{\n    public int calls { get; set; } = 0;\n\n    public string hash(string text)\n    {\n        this.calls = 1;\n        return text;\n    }\n\n    public string toString(int width)\n    {\n        this.calls = width;\n        return \"hasher\";\n    }\n}\n";
+    let hasher = "namespace App;\n\npublic class Hasher\n{\n    public int calls { get; set; } = 0;\n\n    public string hash(string text)\n    {\n        this.calls = 1;\n        return text;\n    }\n\n    public string toString(int width = 0)\n    {\n        this.calls = width;\n        return \"hasher\";\n    }\n}\n";
     let keyed = "namespace App;\n\npublic class Keyed\n{\n    public int calls { get; set; } = 0;\n\n    public int hash() => this.calls++;\n\n    public string toString()\n    {\n        this.calls = 2;\n        return \"keyed\";\n    }\n}\n";
 
     assert_eq!(messages(("src/Hasher.sharp", hasher), &[]), Vec::<String>::new());

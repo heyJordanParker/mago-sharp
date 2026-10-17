@@ -292,19 +292,26 @@ where
         get_mixed()
     };
 
+    // What plain PHP returns arrives in PHP# as PHP# reads it, and what PHP# returns reaches plain PHP as plain PHP reads
+    // it. A function value with no declaration, as a PHP# lambda, returns the PHP# type its function type writes.
     let function_like_metadata = invocation.target.get_function_like_metadata();
-    if function_like_metadata.is_some_and(|metadata| metadata.flags.is_sharp()) {
-        resulting_type = known_type_or_error(resulting_type);
-        if !context.dialect.is_sharp() {
-            resulting_type = get_php_received_type(&resulting_type, context.codebase);
+    match function_like_metadata {
+        Some(metadata) if metadata.flags.is_sharp() => {
+            resulting_type = known_type_or_error(resulting_type);
+            if !context.dialect.is_sharp() {
+                resulting_type = get_php_received_type(&resulting_type, context.codebase);
+            }
         }
-    } else if context.dialect.is_sharp()
-        && !matches!(
-            invocation.target.get_function_like_identifier(),
-            Some(FunctionLikeIdentifier::Method(class, _)) if is_prelude_stub(*class)
-        )
-    {
-        resulting_type = get_sharp_received_type(&resulting_type);
+        Some(_)
+            if context.dialect.is_sharp()
+                && !matches!(
+                    invocation.target.get_function_like_identifier(),
+                    Some(FunctionLikeIdentifier::Method(class, _)) if is_prelude_stub(*class)
+                ) =>
+        {
+            resulting_type = get_sharp_received_type(&resulting_type);
+        }
+        _ => {}
     }
 
     if function_like_metadata.is_some_and(|metadata| metadata.flags.is_by_reference()) {

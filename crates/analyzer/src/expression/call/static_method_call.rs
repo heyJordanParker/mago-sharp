@@ -6,6 +6,7 @@ use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::expander::StaticClassType;
 use mago_codex::ttype::get_sharp_type;
 use mago_codex::ttype::union::TUnion;
+use mago_names::binding::Binding;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_span::HasSpan;
@@ -39,6 +40,7 @@ use crate::plugin::ExpressionHookResult;
 use crate::plugin::context::HookContext;
 use crate::plugin::hook::StaticCall;
 use crate::resolver::class_name::generic_class_type;
+use crate::resolver::class_name::report_missing_class;
 use crate::resolver::class_name::statics_type_arguments;
 use crate::resolver::property::static_member_type_arguments;
 use crate::resolver::static_method::resolve_static_method_targets;
@@ -123,6 +125,19 @@ where
                 block_context.calls_parent_initializer = Some(method_name);
             }
         }
+    }
+
+    // A PHP# call on a name that names no class and no namespace the file imports, as `Gadget.count()`, is that
+    // class's one error, by its PHP# name, and the call is refused, so nothing that uses it reports again.
+    if let Expression::ConstantAccess(class) = call.class
+        && context.resolved_names.binding(&class.name) == Some(Binding::Class)
+        && !context.resolved_names.is_imported(&class.name)
+        && !context.codebase.class_like_exists(context.resolved_names.get(&class.name))
+        && report_missing_class(context, context.resolved_names.get(&class.name), class.span())
+    {
+        artifacts.set_expression_type(&call.span, TUnion::from_atomic(TAtomic::Error));
+
+        return Ok(());
     }
 
     let mut method_resolution = resolve_static_method_targets(

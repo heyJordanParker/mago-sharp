@@ -34,6 +34,7 @@ use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
+use crate::expression::call::function_call::report_replaced_constant;
 use crate::expression::call::function_call::report_replaced_function_value;
 use crate::expression::variable::read_variable;
 use crate::resolver::class_name::report_keyword_in_another_case;
@@ -105,6 +106,11 @@ impl<'arena> Analyzable<'_, 'arena> for ConstantAccess<'arena> {
             } else if context.dialect.is_sharp()
                 && let Some(global) = context.codebase.get_constant(unqualified_name)
             {
+                if report_replaced_constant(context, block_context, artifacts, unqualified_name, self.span()) {
+                    artifacts.set_expression_type(self, TUnion::from_atomic(TAtomic::Error));
+
+                    return Ok(());
+                }
                 context.collector.report_with_code(
                     IssueCode::NonExistentConstant,
                     Issue::error(format!(
@@ -144,7 +150,7 @@ impl<'arena> Analyzable<'_, 'arena> for ConstantAccess<'arena> {
                         )
                         .with_note("The constant might be misspelled or not defined.")
                         .with_help(format!(
-                            "Check `{written}` for typos. A bare name reads a constant of this file's namespace, declared in a `.php` file. A class constant is read through its class, as in `Limits.MAX`, and PHP's constant through its namespace, as in `global.PHP_EOL`."
+                            "Check `{written}` for typos. A bare name reads a constant of this file's namespace, declared in a `.php` file. A class constant is read through its class, as in `Limits.MAX`, and PHP's constant through its namespace, as in `global.CURLOPT_TIMEOUT`."
                         )),
                 );
             } else {
@@ -198,9 +204,16 @@ pub(crate) fn analyze_namespace_constant<A>(
 ) where
     A: Arena,
 {
+    // A refused read is refused once, so nothing that uses it reports again.
+    let refused = || TUnion::from_atomic(TAtomic::Error);
     // The name as the import and the read write it, which PHP finds as the codebase did: its namespace in any case.
     let full_name = namespace_member(namespace, member.value);
     if let Some(constant) = context.codebase.get_constant(full_name.as_bytes()) {
+        if report_replaced_constant(context, block_context, artifacts, full_name.as_bytes(), read.span()) {
+            artifacts.set_expression_type(read, refused());
+
+            return;
+        }
         let constant_type =
             read_constant(context, block_context, artifacts, constant, full_name.as_bytes(), read.span());
         artifacts.record_namespace_constant(read.span(), full_name);
@@ -209,8 +222,6 @@ pub(crate) fn analyze_namespace_constant<A>(
         return;
     }
 
-    // A refused read is refused once, so nothing that uses it reports again.
-    let refused = || TUnion::from_atomic(TAtomic::Error);
     let written = format!("{}.{}", BytesDisplay(namespace_name.value()), BytesDisplay(member.value));
     if let Some(function) = context.codebase.get_function(full_name.as_bytes()) {
         if report_replaced_function_value(context, block_context, artifacts, function, read.span()) {

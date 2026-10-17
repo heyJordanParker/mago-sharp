@@ -1374,6 +1374,18 @@ impl<'analysis> Types<'analysis> {
             .is_some_and(|metadata| metadata.flags.is_mutation_free())
     }
 
+    /// Whether the method call `call`, null-safe or not, runs a `List` method that changes its receiver, one
+    /// `Sharp\Internal\ListMethods` does not declare mutation-free, as `add` and `remove`.
+    pub(crate) fn changes_list(&self, call: &Expression) -> bool {
+        let Some(("List", method)) = self.collection_method(call) else {
+            return false;
+        };
+
+        self.codebase
+            .get_method(b"Sharp\\Internal\\ListMethods", &method)
+            .is_some_and(|metadata| !metadata.flags.is_mutation_free())
+    }
+
     /// Whether the method call `call`, null-safe or not, runs a lazy operation of a PHP# `Iterable<T>`, spec section 12,
     /// which `Sharp\Internal\IterableMethods` declares and the engine's `Sharp\Sequence` runs.
     pub(crate) fn is_lazy_operation(&self, call: &Expression) -> bool {
