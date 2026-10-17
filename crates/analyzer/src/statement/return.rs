@@ -55,6 +55,7 @@ use crate::utils::names::display_function_like_identifier;
 use crate::utils::names::display_member;
 use crate::utils::names::display_nullable_type;
 use crate::utils::names::display_sharp_accessor;
+use crate::utils::names::display_sharp_type;
 use crate::utils::names::display_type;
 use crate::utils::names::display_value_type;
 use crate::utils::quoted_source;
@@ -464,6 +465,7 @@ pub fn handle_return_value<'ctx, A>(
                 artifacts,
                 &inferred_return_type,
                 &expected_return_type,
+                display_sharp_type,
                 return_value.span(),
                 IssueCode::InvalidReturnStatement,
             );

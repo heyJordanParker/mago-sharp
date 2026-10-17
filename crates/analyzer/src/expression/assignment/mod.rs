@@ -76,6 +76,7 @@ use crate::utils::expression::get_root_expression_id;
 use crate::utils::expression::is_variable;
 use crate::utils::int_refused_for_float;
 use crate::utils::misc::unwrap_expression;
+use crate::utils::names::display_sharp_type;
 use crate::utils::names::display_type;
 use crate::utils::names::display_value_type;
 use crate::utils::names::display_variable_name;
@@ -875,6 +876,7 @@ pub fn analyze_assignment_to_variable<'ctx, 'arena, A>(
             artifacts,
             &assigned_type,
             local_type,
+            display_sharp_type,
             source_expression.map_or(variable_span, HasSpan::span),
             IssueCode::InvalidLocalAssignmentValue,
         );

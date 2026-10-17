@@ -65,6 +65,7 @@ use crate::invocation::InvocationTarget;
 use crate::invocation::InvocationTargetParameter;
 use crate::invocation::arguments::analyze_and_store_argument_type;
 use crate::invocation::arguments::check_array_crossing;
+use crate::invocation::arguments::display_for_parameter;
 use crate::invocation::arguments::get_unpacked_argument_type;
 use crate::invocation::arguments::report_non_list_spread;
 use crate::invocation::arguments::verify_argument_type;
@@ -948,6 +949,7 @@ where
                         artifacts,
                         &argument_value_type,
                         &final_parameter_type,
+                        display_for_parameter(Some(parameter_ref)),
                         argument_expression.span(),
                         IssueCode::InvalidArgument,
                     );

@@ -327,7 +327,7 @@ fn union_from_hint(
                 .collect(),
         )))),
         // Spec section 14.1: `Function<R(P)>` is PHP's `Closure(P): R`, the only function value PHP# makes, and spec
-        // section 29 gives it the effects its `uses` lists.
+        // section 29 gives it the effects its `uses` lists, which `uses none` writes empty.
         Hint::Function(function) => {
             let parameters = function
                 .parameters
@@ -339,6 +339,7 @@ fn union_from_hint(
                 .uses
                 .iter()
                 .flat_map(|uses| uses.names.iter())
+                .filter(|effect| effect.value != b"none")
                 .map(|effect| word(resolved_names.get(effect)))
                 .collect();
 

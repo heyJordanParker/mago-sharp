@@ -199,6 +199,7 @@ where
                     artifacts,
                     &value_type,
                     &declared_type,
+                    display_sharp_type,
                     value.span(),
                     IssueCode::InvalidPropertyDefaultValue,
                 );
