@@ -72,6 +72,18 @@ final class Map implements \ArrayAccess, \IteratorAggregate, \Countable, \JsonSe
     public function __construct(array $keysAndValues = []) {}
 
     /**
+     * @return list<mixed> each key, then its value.
+     */
+    public function __serialize(): array {}
+
+    /**
+     * Throws `ValueError` for data that is not each key followed by its value, and `Error` on a `Map` that holds entries.
+     *
+     * @param list<mixed> $data each key, then its value.
+     */
+    public function __unserialize(array $data): void {}
+
+    /**
      * @template TKey of array-key
      * @template TValue
      *
@@ -153,6 +165,18 @@ final class Set implements \ArrayAccess, \IteratorAggregate, \Countable, \JsonSe
     public function __construct(array $values = []) {}
 
     /**
+     * @return list<T>
+     */
+    public function __serialize(): array {}
+
+    /**
+     * Throws `ValueError` for data that is not a list, and `Error` on a `Set` that holds elements.
+     *
+     * @param list<T> $data
+     */
+    public function __unserialize(array $data): void {}
+
+    /**
      * @param T $offset
      */
     public function offsetExists(mixed $offset): bool {}
@@ -200,6 +224,29 @@ final class Set implements \ArrayAccess, \IteratorAggregate, \Countable, \JsonSe
      */
     public function toList(): array {}
 }
+
+/**
+ * The engine's container, which builds the services the app's modules bind. Plain PHP reaches it by name, as a
+ * framework's service provider does.
+ */
+final class Container
+{
+    /**
+     * The service `$id` names: a class name or a service id. Throws `ContainerError` when the container can't build it.
+     */
+    public function get(string $id): mixed {}
+
+    /**
+     * Whether a module binds `$id`.
+     */
+    public function has(string $id): bool {}
+}
+
+/**
+ * A failure of the container itself: the service no module binds, the class that needs itself, the parameter with no
+ * class type, or the bound class that isn't there.
+ */
+final class ContainerError extends \Error {}
 
 /**
  * The handle of a listener `Events.on` starts: the engine stops the listener when the handle is destroyed.
