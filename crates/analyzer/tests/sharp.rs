@@ -17675,77 +17675,85 @@ fn a_function_parameter_whose_type_states_no_effects_never_escapes() {
         "<?php\n\nnamespace Lib;\n\nfinal class Runner\n{\n    public static function run(\\Closure $body): int\n    {\n        return $body();\n    }\n}\n",
     );
     let stub = ("app/Stubs/Builtins.sharp", "namespace App.Stubs;\n\nextern global.call_user_func;\n");
+    let pure = "Take a `Function<int() uses none>`, whose type states that it is pure.";
+    let either = "Take a `Function<int() uses none>`, or state its effects in place of `none`.";
+    let stated = "whose type states the effects it may have.";
 
     assert_eq!(
         worded(keeper, &[holder, lib, stub]),
         [
-            ("15:56 invalid-property-assignment-value", "`f` can't be stored in a field", "Stored", "Function<int() uses …>"),
+            ("15:56 invalid-property-assignment-value", "`f` can't be stored in a field", "Stored", pure.to_owned()),
             (
                 "17:59 invalid-property-assignment-value",
                 "`f` can't be stored in a field",
                 "Stored",
-                "Function<int() uses Http>?",
+                format!("Take a `Function<int() uses Http>?`, {stated}"),
             ),
-            ("19:60 invalid-property-assignment-value", "`f` can't be stored in a field", "Stored", "Function<int() uses …>"),
+            ("19:60 invalid-property-assignment-value", "`f` can't be stored in a field", "Stored", either.to_owned()),
             (
                 "26:21 invalid-property-assignment-value",
                 "This local can't be stored in a field: it holds `f`, a function parameter whose type states no effects.",
                 "Stored",
-                "Function<int() uses …>",
+                pure.to_owned(),
             ),
-            ("30:64 invalid-array-element", "`f` can't be stored in a collection", "Stored", "Function<int() uses …>"),
-            ("32:91 invalid-array-element", "`f` can't be stored in a collection", "Stored", "Function<int() uses …>"),
+            ("30:64 invalid-array-element", "`f` can't be stored in a collection", "Stored", either.to_owned()),
+            ("32:91 invalid-array-element", "`f` can't be stored in a collection", "Stored", either.to_owned()),
+            ("34:80 invalid-argument", "`f` can't be passed to `List.add`, which may keep it", "Passed", either.to_owned()),
             (
-                "34:80 invalid-argument",
-                "`f` can't be passed to `List.add`, which may keep it",
+                "36:57 invalid-argument",
+                "`f` can't be stored in a new object",
                 "Passed",
-                "Function<int() uses …>",
+                format!("Take a `Function<int() uses Http>`, {stated}"),
             ),
-            ("36:57 invalid-argument", "`f` can't be stored in a new object", "Passed", "Function<int() uses Http>"),
-            ("38:59 invalid-return-statement", "`f` can't be returned", "Returned", "Function<int() uses …>"),
-            ("40:58 invalid-return-statement", "`f` can't be returned", "Returned", "Function<int() uses …>?"),
+            ("38:59 invalid-return-statement", "`f` can't be returned", "Returned", either.to_owned()),
+            (
+                "40:58 invalid-return-statement",
+                "`f` can't be returned",
+                "Returned",
+                "Take a `Function<int() uses none>?`, or state its effects in place of `none`.".to_owned(),
+            ),
             (
                 "42:58 invalid-return-statement",
                 "This lambda can't be returned: it captures `f`, a function parameter whose type states no effects.",
                 "Returned",
-                "Function<int() uses …>",
+                either.to_owned(),
             ),
             (
                 "44:63 invalid-return-statement",
                 "This lambda can't be returned: it captures `f`, a function parameter whose type states no effects.",
                 "Returned",
-                "Function<int() uses …>",
+                either.to_owned(),
             ),
             (
                 "46:60 invalid-argument",
                 "`f` can't be passed to `Keeper.capping`, which may keep it",
                 "Passed",
-                "Function<int() uses Http>",
+                format!("Take a `Function<int() uses Http>`, {stated}"),
             ),
             (
                 "50:59 invalid-argument",
                 "`f` can't be passed to `Keeper.handler`, which may keep it",
                 "Passed",
-                "Function<int() uses …>",
+                either.to_owned(),
             ),
             (
                 "52:85 invalid-argument",
                 "`f` can't be passed to a function value, which may keep it",
                 "Passed",
-                "Function<int() uses …>",
+                either.to_owned(),
             ),
             (
                 "63:18 invalid-argument",
                 "`f` can't be passed to a function value, which may keep it",
                 "Passed",
-                "Function<int() uses …>",
+                either.to_owned(),
             ),
         ]
-        .map(|(at, message, verb, take)| {
+        .map(|(at, message, verb, help)| {
             let message =
                 if message.ends_with('.') { message.to_owned() } else { format!("{message}: its type states no effects.") };
             format!(
-                "{at} {message} | {verb} here. | A method takes on the effects of each function it is given, so that function runs only inside the method's call. | Take a `{take}`, whose type states the effects it may have."
+                "{at} {message} | {verb} here. | A method takes on the effects of each function it is given, so that function runs only inside the method's call. | {help}"
             )
         })
     );
@@ -17766,6 +17774,35 @@ fn a_gap_in_a_collection_literal_holds_no_function_parameter() {
             "5:67 invalid-array-element Missing array element: skipping elements is only allowed in list assignments (destructuring).",
             "5:64 invalid-array-element `f` can't be stored in a collection: its type states no effects.",
             "5:69 invalid-array-element `f` can't be stored in a collection: its type states no effects.",
+        ]
+    );
+}
+
+#[test]
+fn a_function_parameter_typed_uses_none_takes_only_a_pure_function_and_may_escape() {
+    let rater = (
+        "app/Shop/Rater.sharp",
+        "namespace App.Shop;\n\npublic interface Rater\n{\n    void setRate(Function<int(int) uses none> rate);\n}\n",
+    );
+    let pricing = (
+        "app/Shop/Pricing.sharp",
+        "namespace App.Shop;\n\npublic class Pricing : Rater\n{\n    private Function<int(int)> rate = (int cents) => cents;\n\n    private Function<int(int) uses none> spare = (int cents) => cents;\n\n    public void setRate(Function<int(int) uses none> rate) => this.rate = rate;\n\n    public Function<int(int) uses none> passed(Function<int(int) uses none> rate) => rate;\n\n    public Function<int()> captured(Function<int(int) uses none> rate) => () => rate(1);\n\n    public void spared(Function<int(int)> rate) => this.spare = rate;\n\n    public int live(int cents) => global.fetch(cents);\n\n    public int price() => this.rate(1) + this.spare(1);\n\n    public void run(Rater rater)\n    {\n        this.setRate((int cents) => cents * 2);\n        this.setRate(this.live);\n        this.setRate((int cents) => global.fetch(cents));\n        rater.setRate((int cents) => global.fetch(cents));\n    }\n\n    public void mixed(Function<int(int) uses none, Http> rate) { }\n}\n",
+    );
+
+    assert_eq!(issues(rater, &[]), Vec::<String>::new());
+    assert_eq!(
+        worded(pricing, &[rater, FETCH, FETCH_STUB]),
+        [
+            "15:65 invalid-property-assignment-value `rate` can't be stored in a field: its type states no effects. | Stored here. | A method takes on the effects of each function it is given, so that function runs only inside the method's call. | Take a `Function<int(int) uses none>`, whose type states that it is pure.",
+            "29:46 invalid-effect `none` states that the function has no effect, so `uses` lists nothing beside it. | Written here. | Delete `none` to allow the other effects, or delete them to keep the function pure.",
+        ]
+    );
+    assert_eq!(
+        effect_issues(&[pricing, rater, FETCH, FETCH_STUB]),
+        [
+            "app/Shop/Pricing.sharp:24:22 invalid-argument: `Pricing.live` calls `global.fetch`, which has the effect `Http`, so a pure `Function<int(int)>` cannot hold it.",
+            "app/Shop/Pricing.sharp:25:22 invalid-argument: This lambda calls `global.fetch`, which has the effect `Http`, so a pure `Function<int(int)>` cannot hold it.",
+            "app/Shop/Pricing.sharp:26:23 invalid-argument: This lambda calls `global.fetch`, which has the effect `Http`, so a pure `Function<int(int)>` cannot hold it.",
         ]
     );
 }
@@ -18854,7 +18891,7 @@ fn a_lambda_with_an_effect_stored_in_a_pure_function_type_is_refused() {
     assert_eq!(
         effect_issues(&[pricing, FETCH, FETCH_STUB]),
         [
-            "app/Shop/Pricing.sharp:9:21 invalid-property-assignment-value: This lambda calls `global.fetch`, which has the effect `Http`, so a `Function<int(int)>` cannot hold it."
+            "app/Shop/Pricing.sharp:9:21 invalid-property-assignment-value: This lambda calls `global.fetch`, which has the effect `Http`, so a pure `Function<int(int)>` cannot hold it."
         ]
     );
 }
@@ -18872,8 +18909,8 @@ fn a_lambda_with_an_effect_returned_or_held_in_a_local_of_a_pure_function_type_i
     assert_eq!(
         effect_issues(&[pricing, FETCH, FETCH_STUB]),
         [
-            "app/Shop/Pricing.sharp:5:41 invalid-return-statement: This lambda calls `global.fetch`, which has the effect `Http`, so a `Function<int(int)>` cannot hold it.",
-            "app/Shop/Pricing.sharp:9:35 invalid-local-assignment-value: This lambda calls `global.fetch`, which has the effect `Http`, so a `Function<int(int)>` cannot hold it.",
+            "app/Shop/Pricing.sharp:5:41 invalid-return-statement: This lambda calls `global.fetch`, which has the effect `Http`, so a pure `Function<int(int)>` cannot hold it.",
+            "app/Shop/Pricing.sharp:9:35 invalid-local-assignment-value: This lambda calls `global.fetch`, which has the effect `Http`, so a pure `Function<int(int)>` cannot hold it.",
         ]
     );
 }
@@ -18999,7 +19036,7 @@ fn a_lambda_with_an_effect_in_either_branch_of_a_conditional_is_refused() {
     );
 
     assert_eq!(issues(branch, &[FETCH, FETCH_STUB]), Vec::<String>::new());
-    let message = "invalid-property-assignment-value: This lambda calls `global.fetch`, which has the effect `Http`, so a `Function<int(int)>` cannot hold it.";
+    let message = "invalid-property-assignment-value: This lambda calls `global.fetch`, which has the effect `Http`, so a pure `Function<int(int)>` cannot hold it.";
     assert_eq!(
         effect_issues(&[branch, FETCH, FETCH_STUB]),
         [
@@ -19177,7 +19214,7 @@ fn a_lambda_with_an_effect_as_the_initial_value_of_a_pure_function_type_is_refus
     assert_eq!(
         effect_issues(&[pricing, FETCH, FETCH_STUB]),
         [
-            "app/Shop/Pricing.sharp:5:39 invalid-property-default-value: This lambda calls `global.fetch`, which has the effect `Http`, so a `Function<int(int)>` cannot hold it."
+            "app/Shop/Pricing.sharp:5:39 invalid-property-default-value: This lambda calls `global.fetch`, which has the effect `Http`, so a pure `Function<int(int)>` cannot hold it."
         ]
     );
     assert_eq!(effect_issues(&[listed, FETCH, FETCH_STUB]), Vec::<String>::new());
@@ -19839,14 +19876,14 @@ fn a_foreign_class_s_members_have_its_effect_behind_an_interface_or_a_base_class
         effect_issues(&[quiet, store(" uses QuietStore"), quiet_reader]),
         [
             "app/Cache/QuietReader.sharp:11:40 impure-law: Law `counted` reaches `QuietReader.count`, which calls `Store.size` with the effect `QuietStore`. Laws hold only over pure code.",
-            "app/Cache/QuietReader.sharp:9:41 invalid-return-statement: This lambda calls `Store.size`, which has the effect `QuietStore`, so a `Function<int()>` cannot hold it.",
+            "app/Cache/QuietReader.sharp:9:41 invalid-return-statement: This lambda calls `Store.size`, which has the effect `QuietStore`, so a pure `Function<int()>` cannot hold it.",
         ]
     );
     assert_eq!(
         effect_issues(&[sneaky, plain, plain_reader]),
         [
             "app/Cache/PlainReader.sharp:11:40 impure-law: Law `counted` reaches `Sneaky.size`, a member of the `foreign` class `Sneaky`. Laws hold only over pure code.",
-            "app/Cache/PlainReader.sharp:9:41 invalid-return-statement: This lambda reaches `Sneaky.size`, a member of the `foreign` class `Sneaky`, so a `Function<int()>` cannot hold it.",
+            "app/Cache/PlainReader.sharp:9:41 invalid-return-statement: This lambda reaches `Sneaky.size`, a member of the `foreign` class `Sneaky`, so a pure `Function<int()>` cannot hold it.",
         ]
     );
 }
@@ -21129,7 +21166,7 @@ fn emit_has_the_effect_events() {
         [
             "app/Shop/Checkout.sharp:20:41 impure-law: Law `completes` reaches `Checkout.complete`, which emits `OrderPaid` with the effect `Events`. Laws hold only over pure code.",
             "app/Shop/Checkout.sharp:22:41 impure-law: Law `announces` reaches `Checkout.paid`, which emits `OrderPaid` with the effect `Events`. Laws hold only over pure code.",
-            "app/Shop/Checkout.sharp:7:39 invalid-property-default-value: This lambda emits `OrderPaid`, which has the effect `Events`, so a `Function<void()>` cannot hold it.",
+            "app/Shop/Checkout.sharp:7:39 invalid-property-default-value: This lambda emits `OrderPaid`, which has the effect `Events`, so a pure `Function<void()>` cannot hold it.",
         ]
     );
 }
