@@ -1058,12 +1058,13 @@ impl<'analysis> Types<'analysis> {
     /// The type of the first parameter of the function the method value `value` is, as the checker typed it. None for a
     /// function that takes none.
     pub(crate) fn value_parameter_type(&self, value: &Expression) -> Option<TUnion> {
-        self.expression_type(value).types.iter().find_map(|atomic| match atomic {
-            TAtomic::Callable(TCallable::Signature(signature)) => {
-                Some(signature.get_parameters().first()?.get_type_signature().cloned().unwrap_or_else(get_mixed))
-            }
-            _ => None,
-        })
+        let Some(TAtomic::Callable(TCallable::Signature(signature))) =
+            self.expression_type(value).types.iter().find(|atomic| atomic.is_callable())
+        else {
+            unreachable!("the analysis types a method value as its signature, not the value at {:?}", value.span());
+        };
+
+        Some(signature.get_parameters().first()?.get_type_signature().cloned().unwrap_or_else(get_mixed))
     }
 
     /// The full name of the plain PHP function the read `read` gives the value of, spec section 14.3, as

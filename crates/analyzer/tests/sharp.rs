@@ -4936,11 +4936,16 @@ fn a_method_value_passed_to_a_collection_method_types_its_result() {
 /// import, and a plain PHP function. Each value has its method's function type without the receiver.
 #[test]
 fn a_method_value_of_a_collection_an_extension_or_a_plain_php_function_has_its_function_type() {
-    let sharp = "namespace Demo;\n\nimport App.Shared.Text.TextExtensions;\n\nclass Report\n{\n    public int run(List<int> numbers, List<int> allowed, Map<string, int> prices, Set<int> seen, List<string> names, string title)\n    {\n        List<int> kept = numbers.filter(allowed.contains);\n        List<string> priced = names.filter(prices.has);\n        List<int> met = numbers.filter(seen.contains);\n        Function<int()> size = allowed.count;\n        Function<string()> tidy = title.trim;\n        Function<string(string)> slug = title.slug;\n        List<string> upper = names.map(global.strtoupper);\n        Function<int(string)> length = global.strlen;\n        Function<int(int)> wrongList = allowed.contains;\n        Function<int()> wrongExtension = title.trim;\n        Function<string(int)> wrongImported = title.slug;\n        Function<string(string)> wrongFunction = global.strlen;\n        const trimmed = title.trim;\n        const slugged = title.slug;\n        string wrongCall = slugged(1);\n        return kept.count() + priced.count() + met.count() + size() + global.strlen(tidy()) + global.strlen(slug(\"-\")) + upper.count() + length(\"x\") + global.strlen(trimmed()) + global.strlen(slugged(\"-\")) + global.strlen(wrongCall);\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport App.Shared.Text.TextExtensions;\n\nclass Report\n{\n    public int run(List<int> numbers, List<int> allowed, Map<string, int> prices, Set<int> seen, List<string> names, string title)\n    {\n        List<int> kept = numbers.filter(allowed.contains);\n        List<string> priced = names.filter(prices.has);\n        List<int> met = numbers.filter(seen.contains);\n        Function<int()> size = allowed.count;\n        Function<string()> tidy = title.trim;\n        Function<string(string)> slug = title.slug;\n        List<string> upper = names.map(global.strtoupper);\n        Function<int(string)> length = global.strlen;\n        Function<int(int)> wrongList = allowed.contains;\n        Function<int()> wrongExtension = title.trim;\n        Function<string(int)> wrongImported = title.slug;\n        Function<string(string)> wrongFunction = global.strlen;\n        const trimmed = title.trim;\n        const slugged = title.slug;\n        string wrongCall = slugged(1);\n        return kept.count() + priced.count() + met.count() + size() + global.strlen(tidy()) + global.strlen(slug(\"-\")) + upper.count() + length(\"x\") + global.strlen(trimmed()) + global.strlen(slugged(\"-\")) + global.strlen(wrongCall);\n    }\n\n    public int more(List<int> numbers, List<string> names, List<int>? maybe, Iterable<int> lazy, string title)\n    {\n        Function<int(int)> firstOr = numbers.firstOr;\n        Function<string(string)> wrongFirst = numbers.firstOr;\n        Function<int(int)> same = global.same_value;\n        Function<string(int)> wrongSame = global.same_value;\n        Function<Iterable<int>(int)> take = lazy.take;\n        const maybeHas = maybe.contains;\n        const total = names.total;\n        title.slug = \"x\";\n        return firstOr(1) + same(1) + take(1).toList().count();\n    }\n}\n";
     let text = "namespace Sharp.Text;\n\npublic static class Text\n{\n    extension(string text)\n    {\n        public string trim() => global.trim(text);\n    }\n}\n";
+    let rows = "namespace Demo;\n\npublic static class Rows\n{\n    extension<T>(List<T> items)\n    {\n        public T firstOr(T fallback) => items.count() > 0 ? items[0] : fallback;\n    }\n\n    extension<T : Order>(List<T> orders)\n    {\n        public int total() => orders.count();\n    }\n}\n";
+    let same = "<?php\n\n/**\n * @template T\n *\n * @param T $value\n *\n * @return T\n */\nfunction same_value(mixed $value): mixed\n{\n    return $value;\n}\n";
     let extensions = [
         ("src/App/Shared/Text/TextExtensions.sharp", TEXT_EXTENSIONS),
         ("vendor/heyjordanparker/php-sharp-composer/library/Sharp/Text/Text.sharp", text),
+        ("src/Demo/Rows.sharp", rows),
+        ("src/Demo/Order.sharp", "namespace Demo;\n\npublic class Order\n{\n}\n"),
+        ("src/functions.php", same),
     ];
 
     assert_eq!(
@@ -4951,7 +4956,19 @@ fn a_method_value_of_a_collection_an_extension_or_a_plain_php_function_has_its_f
             "19:47 invalid-local-assignment-value",
             "20:50 invalid-local-assignment-value",
             "23:36 invalid-argument",
+            "30:47 invalid-local-assignment-value",
+            "32:43 invalid-local-assignment-value",
+            "34:26 possibly-null-property-access",
+            "35:29 non-existent-method",
+            "35:15 impossible-assignment",
+            "36:15 invalid-property-write",
         ]
+    );
+    let messages = messages(("src/Demo/Report.sharp", sharp), &extensions);
+    assert_eq!(messages[8], "`string` is outside `T`'s bound `Order`, so `List<string>` has no `total`.");
+    assert_eq!(
+        messages[10],
+        "`slug` is a method an extension adds: it is called or read as a function value, never written."
     );
 }
 
@@ -4971,6 +4988,18 @@ fn a_method_value_of_a_collection_method_that_changes_the_collection_is_refused(
             "9:24 invalid-property-access: `prices.remove` changes the collection, and a function value holds a copy of it: write a lambda that calls it, as in `key => prices.remove(key)`.",
             "10:23 invalid-property-access: `seen.clear` changes the collection, and a function value holds a copy of it: write a lambda that calls it, as in `() => seen.clear()`.",
         ],
+    );
+}
+
+/// A plain PHP call that unpacks arguments into a function that takes none is refused, naming the function as PHP
+/// names it.
+#[test]
+fn unpacked_arguments_into_a_plain_php_function_that_takes_none_are_too_many() {
+    let php = "<?php\n\nnamespace Demo;\n\nfunction none(): void\n{\n}\n\nfunction run(array $values): void\n{\n    none(...$values);\n}\n";
+
+    assert_eq!(
+        messages(("src/Demo/run.php", php), &[]),
+        ["Cannot unpack arguments into function `Demo\\none` which expects no arguments."]
     );
 }
 
@@ -5006,22 +5035,22 @@ fn a_call_of_a_property_holding_a_function_is_checked_against_its_function_type(
 
 /// Spec section 14.3 calls a static field or property that holds a function as a static method, `Rates.round(x)`,
 /// when the class has no static method of that name, through the class and inside it, and checks the call against
-/// its function type. A generic class's static property holds the function of the type arguments the call writes, and
-/// a private one is read only inside its class.
+/// its function type. A generic class's static property holds the function of the type arguments the call writes, a
+/// call that writes none is refused, and a private one is read only inside its class.
 #[test]
 fn a_call_of_a_static_property_holding_a_function_is_checked_against_its_function_type() {
     let rates = "namespace Demo;\n\nclass Rates\n{\n    private static Function<int(int)> round = (int amount) => amount - 1;\n    public static Function<int(int)> scale { get; set; } = (int amount) => amount * 2;\n\n    public static int run(int extra) => Rates.round(extra) + Rates.scale(extra);\n}\n";
     let holder = "namespace Demo;\n\nclass Holder<T>\n{\n    public static Function<T(T)> step { get; set; } = (T value) => value;\n}\n";
-    let caller = "namespace Demo;\n\nclass Caller\n{\n    public int run() => Holder<int>.step(5) + Rates.scale(1);\n\n    public int wrong() => Holder<int>.step(\"x\") + Rates.round(1);\n}\n";
+    let caller = "namespace Demo;\n\nclass Caller\n{\n    public int run() => Holder<int>.step(5) + Rates.scale(1);\n\n    public int wrong() => Holder<int>.step(\"x\") + Rates.round(1);\n\n    public Any? bare() => Holder.step(5);\n}\n";
 
     let others = [("src/Demo/Rates.sharp", rates), ("src/Demo/Holder.sharp", holder)];
 
     assert_eq!(
         issues(("src/Demo/Caller.sharp", caller), &others),
-        ["7:44 invalid-argument", "7:57 invalid-property-read"]
+        ["7:44 invalid-argument", "7:57 invalid-property-read", "9:27 missing-template-parameter"]
     );
     assert_eq!(
-        messages(("src/Demo/Caller.sharp", caller), &others),
+        messages(("src/Demo/Caller.sharp", caller), &others)[..2],
         [
             "Invalid argument type for argument #1 of `Holder<int>.step`: expected `int`, but found `string`.",
             "Cannot read private property `Rates.round`.",
@@ -5086,17 +5115,17 @@ fn a_lambda_fits_a_function_type_only_with_its_parameters_and_its_void() {
 /// depth. A private member of an ancestor is no member the class sees.
 #[test]
 fn a_member_named_as_an_inherited_member_is_an_error() {
-    let base = "<?php\n\nnamespace Lib;\n\nclass Base\n{\n    public string $label = \"\";\n    private string $secret = \"\";\n\n    public function shout(): string\n    {\n        return \"\";\n    }\n}\n";
-    let sharp = "namespace Demo;\n\nimport Lib.Base;\n\npublic class Pricing\n{\n    public int discount(int amount) => amount;\n    protected Function<int(int)> markdown = (int amount) => amount;\n    public int rebate(int amount) => amount;\n}\n\npublic class Sale : Pricing\n{\n    protected Function<int(int)> discount = (int amount) => amount - 1;\n    public int markdown(int amount) => amount;\n}\n\npublic class Clearance : Sale\n{\n    public int rebate { get; } = 0;\n}\n\npublic class Banner : Base\n{\n    public string label() => \"\";\n    protected Function<string()> shout = () => \"\";\n    public string secret() => \"\";\n}\n";
+    let base = "<?php\n\nnamespace Lib;\n\nclass Base\n{\n    public string $label = \"\";\n    private string $secret = \"\";\n\n    public function shout(): string\n    {\n        return \"\";\n    }\n\n    private function hidden(): string\n    {\n        return \"\";\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Base;\n\npublic class Pricing\n{\n    public int discount(int amount) => amount;\n    protected Function<int(int)> markdown = (int amount) => amount;\n    public int rebate(int amount) => this.secretRate(amount);\n    private int secretRate(int amount) => amount;\n}\n\npublic class Sale : Pricing\n{\n    protected Function<int(int)> discount = (int amount) => amount - 1;\n    public int markdown(int amount) => amount;\n    protected Function<int(int)> secretRate = (int amount) => amount;\n}\n\npublic class Clearance : Sale\n{\n    public int rebate { get; } = 0;\n}\n\npublic class Banner : Base\n{\n    public string label() => \"\";\n    protected Function<string()> shout = () => \"\";\n    public string secret() => \"\";\n    protected Function<string()> hidden = () => \"\";\n}\n";
 
     assert_eq!(
         issues(("src/Demo/Pricing.sharp", sharp), &[("src/Lib/Base.php", base)]),
         [
-            "14:34 name-already-in-use",
-            "15:16 name-already-in-use",
-            "20:16 name-already-in-use",
-            "25:19 name-already-in-use",
-            "26:34 name-already-in-use"
+            "15:34 name-already-in-use",
+            "16:16 name-already-in-use",
+            "22:16 name-already-in-use",
+            "27:19 name-already-in-use",
+            "28:34 name-already-in-use"
         ]
     );
     assert_eq!(

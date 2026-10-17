@@ -105,7 +105,6 @@ use crate::utils::names::display_type;
 use crate::utils::names::sharp_method_declaration;
 use crate::utils::template::find_broken_marker;
 use crate::utils::template::find_template_uses;
-use crate::visibility::is_visible_from_scope;
 
 pub mod constant;
 pub mod enum_case;
@@ -1693,17 +1692,14 @@ where
 
 /// Reports each member of the PHP# class `class` named like a member of the other kind that it inherits and can see,
 /// spec section 14.3: `x.discount(…)` runs a method `discount` or the function a field or property `discount` holds, so
-/// a class has one or the other, from a PHP# ancestor or a plain PHP one. A private member of an ancestor is no member
-/// the class sees, and two members of one body are the semantics check's. Names compare ignoring case, as PHP calls a
+/// a class has one or the other, from a PHP# ancestor or a plain PHP one. An ancestor's private member is not among
+/// the members the class inherits, and two members of one body are the semantics check's. Names compare ignoring case, as PHP calls a
 /// method.
 fn report_members_named_like_inherited_members<A>(context: &mut Context<'_, '_, A>, class: &ClassLikeMetadata)
 where
     A: Arena,
 {
     let is_own = |declaring: Word| declaring.as_bytes().eq_ignore_ascii_case(class.name.as_bytes());
-    let visible = |visibility: Visibility, declaring: Word| {
-        is_own(declaring) || is_visible_from_scope(context.codebase, visibility, declaring.as_bytes(), Some(class.name))
-    };
 
     let mut clashes = vec![];
     for (property_name, &property_class) in &class.declaring_property_ids {
@@ -1716,18 +1712,13 @@ where
             continue;
         }
         let Some(declaring) = context.codebase.get_class_like(property_class.as_bytes()) else {
-            continue;
+            unreachable!("the class that declares a property the class inherits is in the codebase");
         };
         let (Some(method), Some(property)) =
             (context.codebase.get_method_by_id(method_id), declaring.properties.get(property_name))
         else {
-            continue;
+            unreachable!("the class that declares a member has it");
         };
-        let method_visibility =
-            method.method_metadata.as_ref().map_or(Visibility::Public, |metadata| metadata.visibility);
-        if !visible(method_visibility, method_class) || !visible(property.read_visibility, property_class) {
-            continue;
-        }
 
         // A plain PHP property without hooks is storage, as a PHP# field is.
         let is_field = property.flags.is_field() || (!declaring.flags.is_sharp() && property.hooks.is_empty());
@@ -1737,9 +1728,8 @@ where
         } else {
             (property.name_span, property_kind, "method", method_class)
         };
-        let Some(span) = span else {
-            continue;
-        };
+        // The class's own member is in its file, so it has a name.
+        let span = span.unwrap_or(class.span);
 
         clashes.push((span, declared, inherited, ancestor, BytesDisplay(name).to_string()));
     }

@@ -6791,10 +6791,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
                 self.collection_new(line, b"Sharp\\Set", Some(list))
             }
-            _ => unreachable!(
-                "INLINED_COLLECTION_METHODS names `({collection_name}, {})`, which has no PHP here",
-                String::from_utf8_lossy(method)
-            ),
+            _ => unreachable!("`{collection_name}.{}` has no PHP here", String::from_utf8_lossy(method)),
         }
     }
 
@@ -6823,6 +6820,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 &mut collection,
                 element,
             );
+            self.release_collection(collection);
 
             return self.receiver_closure_of(value, target, parameters, false, body);
         }

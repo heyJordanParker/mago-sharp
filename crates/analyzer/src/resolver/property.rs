@@ -2277,7 +2277,8 @@ where
             word(name.value),
             access_span,
             read_span,
-        )?;
+        )
+        .unwrap_or_else(|| unreachable!("a PHP# read of a method the collection's class declares is its value"));
         value = Some(add_optional_union_type(method_value, value.as_ref(), context.codebase));
     }
 

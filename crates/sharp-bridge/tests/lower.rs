@@ -14970,7 +14970,7 @@ fn a_method_value_of_a_method_that_is_not_generic_is_a_first_class_callable() {
 #[test]
 fn a_collection_method_value_is_a_closure_over_the_collection() {
     let lowered = Lowered::new(
-        "namespace App;\n\nclass Report\n{\n    private Map<string, int> prices = [\"tea\": 4];\n\n    public Function<bool(int)> allowed(List<int> ids) => ids.contains;\n\n    public Function<bool(string)> priced() => this.prices.has;\n\n    public Function<int()> size(List<int> ids) => ids.count;\n\n    public bool twice(List<int> ids)\n    {\n        const first = ids.contains;\n        return first(1) && [1].filter(ids.contains).count() > 0;\n    }\n}\n",
+        "namespace App;\n\nclass Report\n{\n    private Map<string, int> prices = [\"tea\": 4];\n\n    public Function<bool(int)> allowed(List<int> ids) => ids.contains;\n\n    public Function<bool(string)> priced() => this.prices.has;\n\n    public Function<int()> size(List<int> ids) => ids.count;\n\n    public bool twice(List<int> ids)\n    {\n        const first = ids.contains;\n        return first(1) && [1].filter(ids.contains).count() > 0;\n    }\n\n    public Function<bool(int)>? maybe(List<int>? ids) => ids?.contains;\n}\n",
     );
 
     assert_eq!(
@@ -15112,6 +15112,61 @@ fn a_collection_method_value_is_a_closure_over_the_collection() {
     // Each read of the same value is that value, the second one too.
     let twice = lowered.body_of("twice");
     assert_eq!(twice.matches(r#"ZVAL "in_array""#).count(), 2, "{twice}");
+    // Through `?.`, a null collection gives null, and any other gives the value.
+    assert_eq!(
+        lowered.body_of("maybe"),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                CONDITIONAL [1]
+                  BINARY_OP [16]
+                    VAR
+                      ZVAL "ids"
+                    ZVAL null
+                  ZVAL null
+                  CALL
+                    CLOSURE "" @19-19
+                      PARAM_LIST
+                        PARAM
+                          null
+                          ZVAL "receiver"
+                          null
+                          null
+                          null
+                          null
+                      null
+                      STMT_LIST
+                        RETURN
+                          CLOSURE "" @19-19
+                            PARAM_LIST
+                              PARAM
+                                null
+                                ZVAL "value"
+                                null
+                                null
+                                null
+                                null
+                            CLOSURE_USES
+                              ZVAL "receiver"
+                            STMT_LIST
+                              RETURN
+                                CALL
+                                  ZVAL "in_array"
+                                  ARG_LIST
+                                    VAR
+                                      ZVAL "value"
+                                    VAR
+                                      ZVAL "receiver"
+                                    ZVAL true
+                            null
+                            null
+                      null
+                      null
+                    ARG_LIST
+                      VAR
+                        ZVAL "ids"
+        "#}
+    );
 }
 
 /// ```php
