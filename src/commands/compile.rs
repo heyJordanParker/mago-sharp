@@ -4,10 +4,17 @@
 //! Every compiled file lives in one `.sharp` folder at the workspace root, at the real path of its source relative to
 //! the root, with `.sharp` replaced by `.sharpc`. The folder mirrors the accepted sources exactly: a refused, removed
 //! or renamed source loses its compiled file.
+//!
+//! Beside each of the project's own PHP# sources that declares a type, outside `vendor/` and `autoload-dev` folders, it
+//! also writes a PHP file of the type's name that loads the source, so PHP code that finds classes by listing `*.php`
+//! files finds PHP# classes too, spec section 27. A removed source loses its PHP file, and git's `info/exclude` keeps
+//! the files no `.gitignore` covers out of git.
 
 use std::collections::BTreeSet;
+use std::collections::HashMap;
 use std::collections::HashSet;
-use std::io::Write;
+use std::collections::hash_map::Entry;
+use std::io::Read;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -15,10 +22,12 @@ use std::process::ExitCode;
 use clap::ColorChoice;
 use clap::Parser;
 
+use mago_allocator::LocalArena;
 use mago_database::DatabaseReader;
 use mago_database::error::DatabaseError;
 use mago_database::file::File;
 use mago_database::file::FileType;
+use mago_database::file::FolderNamespace;
 use mago_orchestrator::service::incremental_analysis::compile::Compilation;
 use mago_orchestrator::service::incremental_analysis::compile::DispatcherModule;
 use mago_orchestrator::service::incremental_analysis::compile::Listener;
@@ -32,7 +41,9 @@ use mago_sharp_bridge::unit;
 use mago_sharp_lean::Lean;
 use mago_sharp_lean::PACKAGE_FOLDER;
 use mago_sharp_lean::rules_files;
+use mago_syntax::cst::Statement;
 use mago_syntax::dialect::Dialect;
+use mago_syntax::parser::parse_file;
 
 use crate::commands::analyze::analyze_the_whole_workspace_without_paths;
 use crate::commands::analyze::decode_prelude;
@@ -44,6 +55,8 @@ use crate::consts::PRELUDE_BYTES;
 use crate::error::Error;
 use crate::extensions::start_external_analyzer;
 use crate::utils::create_orchestrator;
+use crate::utils::git;
+use crate::utils::write_by_rename;
 
 /// The folder Composer installs packages into.
 const VENDOR: &[u8] = b"vendor/";
@@ -61,8 +74,9 @@ impl CompileCommand {
     /// Checks every PHP# file the analyzer loads, writes the compiled file of each accepted one, and deletes every
     /// other file in the `.sharp` folder.
     ///
-    /// Fails when a file is refused, when a source is a link to a file outside the workspace, or when a package in
-    /// `vendor/` holds a `.sharp` folder of its own. Every accepted file is written either way.
+    /// Fails when a file is refused, when a source is a link to a file outside the workspace, when a package in
+    /// `vendor/` holds a `.sharp` folder of its own, or when a PHP file someone wrote sits where a source's PHP file
+    /// goes. Every accepted file is written either way.
     pub fn execute(self, configuration: Configuration, color_choice: ColorChoice) -> Result<CommandOutcome, Error> {
         let mut orchestrator = create_orchestrator(&configuration, color_choice, false, true, false);
         analyze_the_whole_workspace_without_paths(&mut orchestrator);
@@ -93,9 +107,80 @@ impl CompileCommand {
                 host
             })
             .collect();
+        let included: HashSet<Vec<u8>> = packaged.iter().map(|file| file.name.to_vec()).collect();
         for file in packaged {
             database.add(file);
         }
+
+        // Written before the compile stamps its inputs, which hold the PHP file a default class's name could name in
+        // a file's folder, so a compiled file is current once it is written.
+        let mut failed = false;
+        let mut written_beside = BTreeSet::new();
+        let mut folders = BTreeSet::new();
+        let mut listings = HashMap::new();
+        for file in database.files().filter(|file| {
+            file.file_type == FileType::Host
+                && Dialect::of(file).is_sharp()
+                && !file.is_standard_library
+                && !file.name.starts_with(VENDOR)
+                && !included.contains(file.name.as_ref())
+        }) {
+            let source = root.join(String::from_utf8_lossy(&file.name).as_ref());
+            let folder = source.parent().unwrap_or(&root).to_path_buf();
+            folders.insert(folder.clone());
+            if file.folder_namespace == Some(FolderNamespace::Test) {
+                continue;
+            }
+            let Some((type_file, class)) = declared_type(&file) else {
+                continue;
+            };
+            let php = format!("{}.php", type_file.strip_suffix(".sharp").unwrap_or(&type_file));
+            let listing = match listings.entry(folder.clone()) {
+                Entry::Occupied(listing) => listing.into_mut(),
+                Entry::Vacant(listing) => listing.insert(file_names(&folder).map_err(DatabaseError::from)?),
+            };
+            // PHP names a class whatever its case, and a disk that ignores case opens `order.php` for `Order.php`.
+            let named: Vec<&String> = listing.iter().filter(|name| name.eq_ignore_ascii_case(&php)).collect();
+            let mut someone_wrote = None;
+            for name in &named {
+                if !written_by_compile(&folder.join(name)).map_err(DatabaseError::from)? {
+                    someone_wrote = Some(name);
+                    break;
+                }
+            }
+            if let Some(name) = someone_wrote {
+                let source = String::from_utf8_lossy(&file.name);
+                let written = format!("{}{name}", &source[..source.len() - type_file.len()]);
+                tracing::error!("{written} and {source} both name {class}. Delete {written}, or rename one of them.");
+                failed = true;
+                continue;
+            }
+            // A rename onto a file of another case keeps that file's name on a disk that ignores case.
+            for name in named.into_iter().filter(|name| **name != php) {
+                std::fs::remove_file(folder.join(name)).or_else(ignore_missing).map_err(DatabaseError::from)?;
+            }
+            let path = folder.join(&php);
+            let contents = beside(&type_file);
+            if !listing.contains(&php) || std::fs::read(&path).map_err(DatabaseError::from)? != contents.as_bytes() {
+                write_by_rename(&path, contents.as_bytes()).map_err(DatabaseError::from)?;
+            }
+            written_beside.insert(path);
+        }
+        // A removed source's PHP file is in a folder that holds a source, or held one at the last compile.
+        let compiled_folder = root.join(unit::COMPILED_FOLDER);
+        source_folders(&root, &compiled_folder, &compiled_folder, &mut folders).map_err(DatabaseError::from)?;
+        for folder in folders {
+            for name in file_names(&folder).map_err(DatabaseError::from)? {
+                let path = folder.join(&name);
+                if name.ends_with(".php")
+                    && !written_beside.contains(&path)
+                    && written_by_compile(&path).map_err(DatabaseError::from)?
+                {
+                    std::fs::remove_file(&path).or_else(ignore_missing).map_err(DatabaseError::from)?;
+                }
+            }
+        }
+        git::exclude(&root, "mago compile", &written_beside.into_iter().collect::<Vec<_>>())?;
 
         let mut server = Server::new(database.into_static(), decode_prelude, server_settings(&orchestrator));
         server.analyze()?;
@@ -112,7 +197,6 @@ impl CompileCommand {
         let mut refused = IssueCollection::default();
         let mut refused_files = 0;
         let mut packaged_refusals = Vec::new();
-        let mut failed = false;
         for (file_id, compilation) in compilations {
             let file = database.get_ref(&file_id)?;
             let name = String::from_utf8_lossy(&file.name);
@@ -144,7 +228,6 @@ impl CompileCommand {
             }
         }
 
-        let compiled_folder = root.join(unit::COMPILED_FOLDER);
         let listeners = server.listeners();
         let inputs = listener_inputs(&root, database)?;
         if !inputs.is_empty() {
@@ -190,18 +273,24 @@ impl CompileCommand {
             tracing::error!("{refusal}");
         }
 
-        match (accepted.len(), refused_files) {
-            (0, 0) => tracing::info!("No PHP# files found to compile."),
-            (compiled, 0) => tracing::info!("Compiled {} into .sharp/.", files(compiled)),
-            (compiled, refused) => tracing::error!(
+        let summary = match (accepted.len(), refused_files) {
+            (0, 0) => "No PHP# files found to compile.".to_string(),
+            (compiled, 0) => format!("Compiled {} into .sharp/.", files(compiled)),
+            (compiled, refused) => format!(
                 "Compiled {} into .sharp/. {} refused: fix {} errors and run vendor/bin/mago compile again.",
                 files(compiled),
                 if refused == 1 { "1 PHP# file was".to_string() } else { format!("{refused} PHP# files were") },
                 if refused == 1 { "its" } else { "their" },
             ),
-        }
+        };
+        if failed || refused_files > 0 {
+            tracing::error!("{summary}");
 
-        Ok(if failed || refused_files > 0 { ExitCode::FAILURE } else { ExitCode::SUCCESS }.into())
+            return Ok(ExitCode::FAILURE.into());
+        }
+        tracing::info!("{summary}");
+
+        Ok(ExitCode::SUCCESS.into())
     }
 }
 
@@ -285,27 +374,111 @@ fn quoted(table: &mut Vec<u8>, text: &[u8]) {
     table.push(b'\'');
 }
 
+/// The start of each PHP file `mago compile` writes beside a PHP# source, which tells it from a file someone wrote.
+const BESIDE: &str = "<?php\n\n// mago compile writes this file from ";
+
+/// The PHP file beside the PHP# source `type_file`, spec section 27, in `mago fmt`'s layout. PHP code that lists
+/// `*.php` files and names each class by its path finds the PHP# class through it, and Composer's PSR-4 loads it before
+/// the source. It loads the source through the engine, and on plain PHP it throws before any source can reach the
+/// output. Once the source is gone it declares nothing, as if it were not there, until the next compile deletes it.
+fn beside(type_file: &str) -> String {
+    format!(
+        "{BESIDE}{type_file}, so PHP code that lists *.php files finds its class.\n\ndeclare(strict_types=1);\n\nif (!is_file(__DIR__ . '/{type_file}')) {{\n    return;\n}}\n\nfunction_exists('Sharp\\Internal\\requireNative')\n    || throw new Error(\n        'This project needs the PHP# engine, and this is plain PHP. Install php-sharp, or run the ghcr.io/heyjordanparker/php-sharp image.',\n    );\n\nrequire_once __DIR__ . '/{type_file}';\n"
+    )
+}
+
+/// Whether the file at `path` is one `mago compile` wrote beside a source, which starts with [`BESIDE`].
+fn written_by_compile(path: &Path) -> std::io::Result<bool> {
+    let mut start = Vec::with_capacity(BESIDE.len());
+    match std::fs::File::open(path) {
+        Ok(file) => file.take(BESIDE.len() as u64).read_to_end(&mut start)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+
+    Ok(start == BESIDE.as_bytes())
+}
+
+/// The name of the PHP# source `file`, as `Order.sharp`, and the type it declares, as `App.Order`, when it declares a
+/// type named like it, spec section 27: a class, interface, enum, struct or event. A module's file and an `extern`
+/// declaration file declare none.
+fn declared_type(file: &File) -> Option<(String, String)> {
+    let name = String::from_utf8_lossy(&file.name);
+    let type_file = name.rsplit('/').next()?;
+    let stem = type_file.strip_suffix(".sharp")?;
+    let arena = LocalArena::new();
+    let program = parse_file(&arena, file);
+    let namespace = program.statements.iter().find_map(|statement| match statement {
+        Statement::Namespace(namespace) => Some(namespace),
+        _ => None,
+    });
+    let namespaced = namespace.map(|namespace| namespace.statements().iter());
+    let declares = program.statements.iter().chain(namespaced.into_iter().flatten()).any(|statement| match statement {
+        Statement::Class(class) => class.name.value == stem.as_bytes(),
+        Statement::Struct(r#struct) => r#struct.name.value == stem.as_bytes(),
+        Statement::Enum(r#enum) => r#enum.name.value == stem.as_bytes(),
+        Statement::Interface(interface) => interface.name.value == stem.as_bytes(),
+        Statement::Event(event) => event.name.value == stem.as_bytes(),
+        _ => false,
+    });
+    let class = match namespace.and_then(|namespace| namespace.name.as_ref()) {
+        Some(namespace) => format!("{}.{stem}", String::from_utf8_lossy(namespace.value()).replace('\\', ".")),
+        None => stem.to_string(),
+    };
+
+    declares.then(|| (type_file.to_string(), class))
+}
+
+/// The names of the files in `folder`, exactly as the folder holds them, or none when it is gone.
+fn file_names(folder: &Path) -> std::io::Result<Vec<String>> {
+    let entries = match std::fs::read_dir(folder) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    let mut names = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        if entry.file_type()?.is_file() {
+            names.push(entry.file_name().to_string_lossy().into_owned());
+        }
+    }
+
+    Ok(names)
+}
+
+/// Adds to `folders` the folder of the source of each compiled file under `folder` of the compiled folder `compiled`,
+/// outside `vendor/` and the folder the Lean step owns.
+fn source_folders(root: &Path, compiled: &Path, folder: &Path, folders: &mut BTreeSet<PathBuf>) -> std::io::Result<()> {
+    let entries = match std::fs::read_dir(folder) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        let relative = path.strip_prefix(compiled).unwrap_or(&path);
+        if entry.file_type()?.is_dir() {
+            if relative != Path::new(PACKAGE_FOLDER) && relative != Path::new("vendor") {
+                source_folders(root, compiled, &path, folders)?;
+            }
+        } else if path.extension().is_some_and(|extension| extension == "sharpc") {
+            folders.insert(root.join(relative.parent().unwrap_or(Path::new(""))));
+        }
+    }
+
+    Ok(())
+}
+
+/// Treats a file that is already gone as removed.
+fn ignore_missing(error: std::io::Error) -> std::io::Result<()> {
+    if error.kind() == std::io::ErrorKind::NotFound { Ok(()) } else { Err(error) }
+}
+
 /// `count` PHP# files, in words.
 fn files(count: usize) -> String {
     if count == 1 { "1 PHP# file".to_string() } else { format!("{count} PHP# files") }
-}
-
-/// Writes `bytes` to a new file beside `path` and renames it over `path`, so a reader sees the old file or the new
-/// one, never part of one.
-fn write_by_rename(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let folder = path.parent().unwrap_or(path);
-    std::fs::create_dir_all(folder)?;
-    let mut file = tempfile::NamedTempFile::new_in(folder)?;
-    file.write_all(bytes)?;
-    let (file, written) = file.keep().map_err(|error| error.error)?;
-    drop(file);
-
-    // `NamedTempFile::persist` renames with `MoveFileExW` alone, which fails on Windows while a reader holds the old
-    // file open. `std::fs::rename` then falls back to a POSIX rename, which replaces it when every reader opened it with
-    // `FILE_SHARE_DELETE`, as Rust's `File::open` does, and leaves each reader the old file.
-    std::fs::rename(&written, path).inspect_err(|_| {
-        let _ = std::fs::remove_file(&written);
-    })
 }
 
 /// Deletes every file under `folder` that is not in `kept` and not under the folder `owned`, which the Lean step owns,

@@ -17323,6 +17323,22 @@ fn plain_php_receives_a_map_or_a_set_as_the_object_it_runs_as() {
     );
 }
 
+/// Plain PHP reaches the engine's container by name, as a framework's service provider or a Composer script does, so
+/// the analyzer knows `Sharp\Container`, its methods, and `Sharp\ContainerError`, an `Error`.
+#[test]
+fn plain_php_knows_the_engine_s_container() {
+    let php = "<?php\n\nnamespace Demo;\n\nfinal class Boot\n{\n    public function run(): int\n    {\n        $container = new \\Sharp\\Container();\n        try {\n            return $container->has('demo\\\\greeting') ? 1 : $container->get('demo\\\\greeting');\n        } catch (\\Sharp\\ContainerError $error) {\n            return $error->getMessage();\n        }\n    }\n}\n";
+
+    assert_eq!(
+        messages(("src/Demo/Boot.php", php), &[]),
+        [
+            "Could not infer a precise return type for function `Demo\\Boot::run`. Saw type `mixed`.",
+            "Avoid catching 'Error' class instances.",
+            "Invalid return type for function `Demo\\Boot::run`: expected `int`, but found `string`.",
+        ]
+    );
+}
+
 /// A PHP caller checks its arguments against the PHP method a PHP# method runs as, whose `List<int>` and
 /// `Map<string, int>` parameters keep their element types, so a wrongly typed list or map is still reported. The `Map`
 /// takes a `Sharp\Map` or the PHP array PHP# turns into one.
