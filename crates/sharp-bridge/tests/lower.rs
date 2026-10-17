@@ -6138,16 +6138,17 @@ fn every_inlined_collection_method_lowers_to_php_on_the_array() {
 /// ```php
 /// $found = $sizes[$extra] ?? null;
 /// $unique = new \Sharp\Set($sizes);
+/// $copy = $sizes;
 /// ```
 ///
-/// Spec section 12: `getOrNull(i)` is the safe read, which gives null past either end, and `toSet()` is the `Set` a
-/// literal of the elements makes, each element once.
+/// Spec section 12: `getOrNull(i)` is the safe read, which gives null past either end, `toSet()` is the `Set` a
+/// literal of the elements makes, each element once, and `toList()` is the list itself, which PHP copies on a write.
 #[test]
-fn get_or_null_and_to_set_lower_to_php_on_the_array() {
+fn get_or_null_to_set_and_to_list_lower_to_php_on_the_array() {
     assert_eq!(
         body_in(
             "void run(List<int> sizes, int extra)",
-            "        let found = sizes.getOrNull(extra);\n        let unique = sizes.toSet();\n",
+            "        let found = sizes.getOrNull(extra);\n        let unique = sizes.toSet();\n        let copy = sizes.toList();\n",
             &[]
         ),
         indoc! {r#"
@@ -6170,6 +6171,11 @@ fn get_or_null_and_to_set_lower_to_php_on_the_array() {
                   ARG_LIST
                     VAR
                       ZVAL "sizes"
+              ASSIGN
+                VAR
+                  ZVAL "copy"
+                VAR
+                  ZVAL "sizes"
         "#}
     );
 }

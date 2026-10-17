@@ -7231,6 +7231,24 @@ fn a_call_of_a_function_an_extension_replaces_names_the_member_on_its_first_argu
     }
 }
 
+/// Spec sections 8 and 26: a function whose text is not its first argument names the extension member on the argument
+/// that holds the text, `explode`'s second and `str_replace`'s third, and `str_contains`' on its first.
+#[test]
+fn a_call_of_a_function_an_extension_replaces_names_the_member_on_the_argument_it_runs_on() {
+    let text = "namespace Sharp.Text;\n\npublic static class Text\n{\n    extension(string text)\n    {\n        public bool contains(string other) => global.str_contains(text, other);\n\n        public string replace(string old, string @new) => global.str_replace(old, @new, text);\n\n        public List<string> split(string delimiter) => global.explode(delimiter, text);\n    }\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Entity\n{\n    public bool held(string name) => global.str_contains(name, \"a\");\n    public string swapped(string name) => global.str_replace(\"a\", \"b\", name);\n    public List<string> parts(string line) => global.explode(\",\", line);\n}\n";
+
+    assert_messages(
+        sharp,
+        &[("vendor/heyjordanparker/php-sharp-composer/library/Sharp/Text/Text.sharp", text)],
+        &[
+            "5:38 wrapped-function: `str_contains` is wrapped by the standard library: write `name.contains(…)`.",
+            "6:43 wrapped-function: `str_replace` is wrapped by the standard library: write `name.replace(…)`.",
+            "7:47 wrapped-function: `explode` is wrapped by the standard library: write `line.split(…)`.",
+        ],
+    );
+}
+
 /// Spec section 26: the receiver's type picks among the imported extensions of one name, as in C# and Kotlin: the one
 /// whose receiver fits inside every other's runs, so `Two`'s on an `AuditedWallet` and `One`'s on a `Wallet`. Two that
 /// fit one receiver with neither inside the other are an error naming both classes. A receiver no extension of the name fits has no such member, and one
@@ -10286,15 +10304,16 @@ fn an_emptied_php_array_property_keeps_the_map_rules() {
     assert_eq!(issues(("src/Demo/Rows.sharp", sharp), &[STORE]), ["20:27 possibly-undefined-array-index"]);
 }
 
-/// A `List` has `add`, `getOrNull`, `entries()`, `contains`, `indexOf`, `last`, `insert`, `remove`, `clear` and
-/// `toSet`, and a `Map` has `get`, `has`, `keys`, `values`, `remove` and `filter`, each typed by the elements of the
-/// collection it is called on, as spec section 12 decides. `getOrNull` and `indexOf` give a nullable type, null when no
-/// element is there, `remove` gives `bool`, `keys()` gives a `List` of the key type, a backed enum included, `values()`
-/// a `List` of the value type, `toSet()` a `Set` of the element type, and a `Map`'s `filter` gives the `Map` it keeps.
-/// A `List` has no `get` or `set`: its index reads and writes it.
+/// A `List` has `add`, `getOrNull`, `entries()`, `contains`, `indexOf`, `last`, `insert`, `remove`, `clear`, `toSet`,
+/// `flatMap` and `toList`, and a `Map` has `get`, `has`, `keys`, `values`, `remove` and `filter`, each typed by the
+/// elements of the collection it is called on, as spec section 12 decides. `getOrNull` and `indexOf` give a nullable
+/// type, null when no element is there, `remove` gives `bool`, `keys()` gives a `List` of the key type, a backed enum
+/// included, `values()` a `List` of the value type, `toSet()` a `Set` of the element type, `flatMap` a `List` of the
+/// elements of the `Iterable` its function gives, `toList()` a `List` of the element type, a `Set`'s and a `List`'s
+/// alike, and a `Map`'s `filter` gives the `Map` it keeps. A `List` has no `get` or `set`: its index reads and writes it.
 #[test]
 fn collection_methods_take_and_give_the_types_of_their_elements() {
-    let sharp = "namespace Demo;\n\nclass Order\n{\n    public List<Line> lines { get; private set; } = [];\n    private Map<string, int> counts = [:];\n\n    public int total(Line line, List<Line> extra)\n    {\n        this.lines.add(line);\n        extra.add(line);\n        extra[0] = line;\n        this.counts.remove(\"a\");\n        let sum = (this.counts.get(\"b\") ?? 0) + (extra.getOrNull(0)?.cents ?? 0);\n        for (const [index, item] of extra.entries()) {\n            sum += index + item.cents;\n        }\n        return sum;\n    }\n\n    public void wrong(List<Line> extra, Map<string, int> counts)\n    {\n        extra.add(1);\n        extra.set(0, new Line(1));\n        counts.add(1);\n        extra.delete(0);\n        Line? got = extra.get(0);\n    }\n\n    public int read(List<int> sizes)\n    {\n        bool held = sizes.contains(2);\n        int? at = sizes.indexOf(2);\n        int last = sizes.last();\n        int index = sizes.indexOf(2);\n        bool text = sizes.contains(\"a\");\n        int other = sizes.last(1);\n        int? maybe = sizes.getOrNull(5);\n        bool notMaybe = sizes.getOrNull(5);\n        Set<int> unique = sizes.toSet();\n        List<int> notSet = sizes.toSet();\n        return (held ? 1 : 0) + (at ?? 0) + last + index + (text ? 1 : 0) + other + (maybe ?? 0) + (notMaybe ? 1 : 0) + unique.count() + notSet.count();\n    }\n\n    public int change(List<int> sizes)\n    {\n        sizes.insert(0, 1);\n        bool gone = sizes.remove(2);\n        sizes.clear();\n        sizes.insert(\"a\", 1);\n        sizes.insert(0, \"a\");\n        int removed = sizes.remove(1);\n        return removed + (gone ? 1 : 0);\n    }\n\n    public int keyed(Map<string, int> counts, Map<Status, int> tally)\n    {\n        bool had = counts.has(\"a\");\n        List<string> names = counts.keys();\n        List<Status> statuses = tally.keys();\n        Map<string, int> kept = counts.filter(c => c > 0);\n        bool gone = counts.remove(\"a\");\n        int flag = counts.has(\"a\");\n        List<int> numbered = counts.keys();\n        List<string> backing = tally.keys();\n        List<int> renumbered = counts.filter(c => c > 0);\n        int removed = counts.remove(\"a\");\n        List<int> values = counts.values();\n        List<string> notValues = counts.values();\n        return (had || gone ? 1 : 0) + names.count() + statuses.count() + kept.count() + flag + numbered.count() + backing.count() + renumbered.count() + removed + values.count() + notValues.count();\n    }\n}\n\nenum Status : string\n{\n    case Open = \"open\";\n}\n\nclass Line\n{\n    public Line(public int cents { get; })\n    {\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Order\n{\n    public List<Line> lines { get; private set; } = [];\n    private Map<string, int> counts = [:];\n\n    public int total(Line line, List<Line> extra)\n    {\n        this.lines.add(line);\n        extra.add(line);\n        extra[0] = line;\n        this.counts.remove(\"a\");\n        let sum = (this.counts.get(\"b\") ?? 0) + (extra.getOrNull(0)?.cents ?? 0);\n        for (const [index, item] of extra.entries()) {\n            sum += index + item.cents;\n        }\n        return sum;\n    }\n\n    public void wrong(List<Line> extra, Map<string, int> counts)\n    {\n        extra.add(1);\n        extra.set(0, new Line(1));\n        counts.add(1);\n        extra.delete(0);\n        Line? got = extra.get(0);\n    }\n\n    public int read(List<int> sizes)\n    {\n        bool held = sizes.contains(2);\n        int? at = sizes.indexOf(2);\n        int last = sizes.last();\n        int index = sizes.indexOf(2);\n        bool text = sizes.contains(\"a\");\n        int other = sizes.last(1);\n        int? maybe = sizes.getOrNull(5);\n        bool notMaybe = sizes.getOrNull(5);\n        Set<int> unique = sizes.toSet();\n        List<int> notSet = sizes.toSet();\n        return (held ? 1 : 0) + (at ?? 0) + last + index + (text ? 1 : 0) + other + (maybe ?? 0) + (notMaybe ? 1 : 0) + unique.count() + notSet.count();\n    }\n\n    public int change(List<int> sizes)\n    {\n        sizes.insert(0, 1);\n        bool gone = sizes.remove(2);\n        sizes.clear();\n        sizes.insert(\"a\", 1);\n        sizes.insert(0, \"a\");\n        int removed = sizes.remove(1);\n        return removed + (gone ? 1 : 0);\n    }\n\n    public int keyed(Map<string, int> counts, Map<Status, int> tally)\n    {\n        bool had = counts.has(\"a\");\n        List<string> names = counts.keys();\n        List<Status> statuses = tally.keys();\n        Map<string, int> kept = counts.filter(c => c > 0);\n        bool gone = counts.remove(\"a\");\n        int flag = counts.has(\"a\");\n        List<int> numbered = counts.keys();\n        List<string> backing = tally.keys();\n        List<int> renumbered = counts.filter(c => c > 0);\n        int removed = counts.remove(\"a\");\n        List<int> values = counts.values();\n        List<string> notValues = counts.values();\n        return (had || gone ? 1 : 0) + names.count() + statuses.count() + kept.count() + flag + numbered.count() + backing.count() + renumbered.count() + removed + values.count() + notValues.count();\n    }\n\n    public int flat(List<List<int>> rows, Set<string> tags, Map<string, int> counts)\n    {\n        List<int> cells = rows.flatMap(r => r);\n        List<string> listed = tags.toList();\n        List<int> values = counts.values().toList();\n        List<int> copy = cells.toList();\n        List<string> notCells = rows.flatMap(r => r);\n        List<int> notIterable = rows.flatMap(r => r.count());\n        Set<int> notList = cells.toList();\n        return cells.count() + listed.count() + values.count() + copy.count() + notCells.count() + notIterable.count() + notList.count();\n    }\n}\n\nenum Status : string\n{\n    case Open = \"open\";\n}\n\nclass Line\n{\n    public Line(public int cents { get; })\n    {\n    }\n}\n";
 
     assert_eq!(
         issues(("src/Demo/Order.sharp", sharp), &[]),
@@ -10317,7 +10336,10 @@ fn collection_methods_take_and_give_the_types_of_their_elements() {
             "65:32 invalid-local-assignment-value",
             "66:32 invalid-local-assignment-value",
             "67:23 invalid-local-assignment-value",
-            "69:34 invalid-local-assignment-value"
+            "69:34 invalid-local-assignment-value",
+            "79:33 invalid-local-assignment-value",
+            "80:46 invalid-argument",
+            "81:28 invalid-local-assignment-value"
         ]
     );
 }
