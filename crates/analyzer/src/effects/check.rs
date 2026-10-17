@@ -62,8 +62,8 @@ use crate::effects::Effect;
 use crate::effects::Effects;
 use crate::effects::Impurity;
 use crate::effects::Runs;
-use crate::effects::accepts_any_effect;
 use crate::effects::events;
+use crate::effects::holding_declaration;
 use crate::effects::is_effect;
 use crate::effects::summary::parameter_index;
 use crate::statement::function_like::FunctionLikeBody;
@@ -218,11 +218,7 @@ pub(crate) fn implementations_must_fit_their_declarations(
                 codebase.get_class_like(ancestor.as_bytes()).map_or(ancestor, |ancestor| ancestor.original_name);
             let declared = display_sharp_member(class_name(ancestor), declaration.original_name);
             let uses: Vec<String> = declaration.uses.iter().map(|effect| effect_name(*effect)).collect();
-            let allows = if uses.is_empty() {
-                format!("the pure `{declared}`")
-            } else {
-                format!("`uses {}` on `{declared}`", uses.join(", "))
-            };
+            let allows = allows(&declared, &uses);
 
             impure(
                 IssueCode::IncompatibleEffects,
@@ -243,28 +239,30 @@ pub(crate) fn implementations_must_fit_their_declarations(
         .collect()
 }
 
+/// What the declaration `declared` with the effects `uses` allows, as a message names it: "the pure `Pinger.ping`" or
+/// "`uses Http, Clock` on `Fetcher.fetch`".
+fn allows(declared: &str, uses: &[String]) -> String {
+    if uses.is_empty() {
+        format!("the pure `{declared}`")
+    } else {
+        format!("`uses {}` on `{declared}`", uses.join(", "))
+    }
+}
+
 /// Spec section 29: a declaration without a body is held to what each declaration it overrides allows, as an
 /// implementation is, so a sub-interface may narrow its parent's `uses` but never widen it. The refusal names the
-/// first ancestor whose declaration the `uses` goes past.
+/// first ancestor whose declaration the `uses` goes past, at `name_span`, the name of `own`.
 pub(crate) fn check_declaration_uses<A>(
     context: &mut Context<'_, '_, A>,
     class: &ClassLikeMetadata,
-    method: &Method<'_>,
+    own: &FunctionLikeMetadata,
+    name_span: Span,
 ) where
     A: Arena,
 {
     let codebase = context.codebase;
-    let Some(own) = codebase.get_method(class.name.as_bytes(), method.name.value) else {
-        return;
-    };
     let wider = class.all_parent_classes.iter().chain(&class.all_parent_interfaces).find_map(|ancestor| {
-        if accepts_any_effect(*ancestor, own.name) {
-            return None;
-        }
-        let declaration = codebase.get_method(ancestor.as_bytes(), method.name.value).filter(|declaration| {
-            declaration.flags.is_sharp()
-                && declaration.method_metadata.as_ref().is_some_and(|method| method.is_abstract)
-        })?;
+        let declaration = holding_declaration(codebase, *ancestor, own.name)?;
         let wider: Vec<Word> = own
             .uses
             .iter()
@@ -288,11 +286,7 @@ pub(crate) fn check_declaration_uses<A>(
         declaration.original_name,
     );
     let allowed: Vec<String> = declaration.uses.iter().map(|effect| effect_name(*effect)).collect();
-    let allows = if allowed.is_empty() {
-        format!("the pure `{declared}`")
-    } else {
-        format!("`uses {}` on `{declared}`", allowed.join(", "))
-    };
+    let allows = allows(&declared, &allowed);
     let wider: Vec<String> = wider.iter().map(|effect| format!("`{}`", effect_name(*effect))).collect();
 
     context.collector.report_with_code(
@@ -302,7 +296,7 @@ pub(crate) fn check_declaration_uses<A>(
             display_sharp_member(class_name(class.original_name), own.original_name),
             wider.join(", "),
         ))
-        .with_annotation(Annotation::primary(method.name.span).with_message("Declared here."))
+        .with_annotation(Annotation::primary(name_span).with_message("Declared here."))
         .with_annotation(Annotation::secondary(declaration.name_span.unwrap_or(declaration.span))),
     );
 }

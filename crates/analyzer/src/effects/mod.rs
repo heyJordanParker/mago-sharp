@@ -615,14 +615,7 @@ impl Effects {
                 let metadata = codebase.get_class_like(class.as_bytes())?;
 
                 metadata.all_parent_classes.iter().chain(&metadata.all_parent_interfaces).find_map(|ancestor| {
-                    if accepts_any_effect(*ancestor, method) {
-                        return None;
-                    }
-                    let declaration =
-                        codebase.get_method(ancestor.as_bytes(), method.as_bytes()).filter(|declaration| {
-                            declaration.flags.is_sharp()
-                                && declaration.method_metadata.as_ref().is_some_and(|method| method.is_abstract)
-                        })?;
+                    let declaration = holding_declaration(codebase, *ancestor, method)?;
                     let impurity = self.effect_outside(*body, &declaration.uses)?;
 
                     Some((
@@ -689,12 +682,28 @@ fn events() -> Word {
 /// it carries the implementation's effects: `Sharp\Dispatcher::dispatch`, which the engine calls with the listeners of
 /// every event (spec section 15), and `Sharp\Behavior`'s `get` and `set`, which run as the accessors of a property
 /// that names the behavior (spec section 6.4).
-pub(crate) fn accepts_any_effect(class: Word, method: Word) -> bool {
+fn accepts_any_effect(class: Word, method: Word) -> bool {
     let (class, method) = (class.as_bytes(), method.as_bytes());
 
     (class.eq_ignore_ascii_case(b"Sharp\\Dispatcher") && method.eq_ignore_ascii_case(b"dispatch"))
         || (class.eq_ignore_ascii_case(b"Sharp\\Behavior")
             && (method.eq_ignore_ascii_case(b"get") || method.eq_ignore_ascii_case(b"set")))
+}
+
+/// The PHP# declaration without a body of `method` in `ancestor`, which holds each method that overrides it to its
+/// `uses`, spec section 29, or `None` when there is none or it accepts any effect.
+pub(crate) fn holding_declaration(
+    codebase: &CodebaseMetadata,
+    ancestor: Word,
+    method: Word,
+) -> Option<&FunctionLikeMetadata> {
+    if accepts_any_effect(ancestor, method) {
+        return None;
+    }
+
+    codebase.get_method(ancestor.as_bytes(), method.as_bytes()).filter(|declaration| {
+        declaration.flags.is_sharp() && declaration.method_metadata.as_ref().is_some_and(|method| method.is_abstract)
+    })
 }
 
 /// Whether `name`, a class name as the binder resolves it, is an effect, spec section 29: a `foreign` class, the

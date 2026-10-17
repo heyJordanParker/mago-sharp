@@ -17671,6 +17671,19 @@ fn an_object_a_declared_call_returns_carries_its_effect() {
             "app/Shop/DeskSender.sharp:12:26 incompatible-effects: `DeskSender.open` calls `Session.send`, which has the effect `Mail`, so `uses Http` on `Opens.open` cannot accept it.",
         ]
     );
+    // A body that reaches the call, and a method value of it, name the declared call too.
+    let relay = (
+        "app/Shop/Relay.sharp",
+        "namespace App.Shop;\n\nimport Lib.Desk;\nimport Lib.Session;\n\npublic class Relay : Opens\n{\n    public void open() { this.send(Desk.open()); }\n\n    public void send(Session session) { session.send(); }\n\n    public void later(Function<void() uses Http> f) { f(); }\n\n    public void valued() { this.later(Desk.open().send); }\n}\n",
+    );
+    assert_eq!(
+        effect_issues(&[relay, desk, stub("extern Desk uses Mail;\n"), client, session, facade, desk_class]),
+        [
+            "app/Shop/Relay.sharp:14:39 invalid-argument: `Session.send` has the effect `Mail` that `Desk.open` declares for the `Session` it returns, so a `Function<void() uses Http>` cannot hold it. Help: An `extern` on `Session` overrides the effects it carries: write `extern Session uses Http;` in a .sharp file.",
+            "app/Shop/Relay.sharp:8:26 incompatible-effects: `Relay.open` reaches `Relay.send`, which calls `Session.send` with the effect `Mail` that `Desk.open` declares for the `Session` it returns, so `uses Http` on `Opens.open` cannot accept it. Help: An `extern` on `Session` overrides the effects it carries: write `extern Session uses Http;` in a .sharp file.",
+            "app/Shop/DeskSender.sharp:12:26 incompatible-effects: `DeskSender.open` calls `Session.send`, which has the effect `Mail` that `Desk.open` declares for the `Session` it returns, so `uses Http` on `Opens.open` cannot accept it. Help: An `extern` on `Session` overrides the effects it carries: write `extern Session uses Http;` in a .sharp file. Add `import Lib.Session;` to the file.",
+        ]
+    );
     // `Desk` returns a `Session` with `Mail`, and `Client` one with `Http`, so every `Session` has both. The message
     // names the declared call a carried effect comes from, and the help the `extern` on the class that overrides it.
     assert_eq!(
