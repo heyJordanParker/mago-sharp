@@ -20729,6 +20729,61 @@ fn attributes_are_attribute_lists_of_attribute_groups_on_their_declarations() {
 /// trait Labeled\Defaults { #[\Lib\Entity('shown in headings')] public function title(): string { … } }
 /// ```
 ///
+/// ```php
+/// #[\Lib\Field('sized')] interface Sized { #[\Lib\Field('size')] public int $size { get; } }
+/// #[\Lib\Field('paid')] final class Paid { … }
+/// final class Limits {
+///     #[\Lib\Field('max')] public const int MAX = 3;
+///     … #[\Lib\Field('twice')] static fn (int $n): int => $n * 2 …
+/// }
+/// ```
+///
+/// Spec section 1: an attribute on an interface, an interface property, an event, a constant or a lambda is where
+/// php-src's grammar holds it: the 4th child of a class, the 3rd of a property group, the 2nd of a constant group and
+/// the 5th of a closure.
+#[test]
+fn attributes_on_an_interface_its_property_an_event_a_constant_and_a_lambda_lower_where_php_holds_them() {
+    let files = lowered_each(
+        &[
+            (
+                "src/App/Sized.sharp",
+                "namespace App;\n\nimport Lib.Field;\n\n[Field(\"sized\")]\npublic interface Sized\n{\n    [Field(\"size\")]\n    int size { get; }\n}\n",
+            ),
+            (
+                "src/App/Paid.sharp",
+                "namespace App;\n\nimport Lib.Field;\n\n[Field(\"paid\")]\npublic event Paid(int orderId);\n",
+            ),
+            (
+                "src/App/Limits.sharp",
+                "namespace App;\n\nimport Lib.Field;\n\npublic class Limits\n{\n    [Field(\"max\")]\n    public const int MAX = 3;\n\n    public Function<int(int)> twice() => [Field(\"twice\")] (int n) => n * 2;\n}\n",
+            ),
+        ],
+        &[common::FIELD],
+    );
+    let attribute = |text: &str| {
+        format!(
+            "ATTRIBUTE_LIST\n  ATTRIBUTE_GROUP\n    ATTRIBUTE\n      ZVAL \"Lib\\\\Field\"\n      ARG_LIST\n        ZVAL {text:?}\n"
+        )
+    };
+    let class_attributes = |name: &str| {
+        let (lowered, class) = class_in(&files, name);
+
+        lowered.render(lowered.child(class, 3))
+    };
+    let (limits, _) = class_in(&files, "Limits");
+    let closure = limits
+        .nodes()
+        .iter()
+        .position(|node| node.kind == sharp_kind::SHARP_AST_CLOSURE || node.kind == sharp_kind::SHARP_AST_ARROW_FUNC)
+        .expect("Limits declares a lambda") as u32;
+
+    assert_eq!(class_attributes("Sized"), attribute("sized"));
+    assert_eq!(member_in(&files, "Sized", &[0, 2]), attribute("size"));
+    assert_eq!(class_attributes("Paid"), attribute("paid"));
+    assert_eq!(member_in(&files, "Limits", &[0, 1]), attribute("max"));
+    assert_eq!(limits.render(limits.child(closure, 4)), attribute("twice"));
+}
+
 /// Spec section 1: an interface method carries its attributes as a class method does, and so does the trait method
 /// that runs its default body.
 #[test]
@@ -20958,6 +21013,64 @@ fn a_plain_php_method_of_a_property_s_name_read_as_a_function_is_a_first_class_c
                     ZVAL "format"
             "#},
         ]
+    );
+}
+
+/// ```php
+/// $owner = $this->owner;
+/// $relation = $this->owner(...);
+/// ```
+///
+/// A PHP# class whose plain PHP parent defines `__get`, as a PHP# Eloquent model is, has the properties `__get` reads,
+/// spec section 14.3, so a read of its own method's name reads the property, and takes the method where the code takes
+/// a function.
+#[test]
+fn a_read_of_a_sharp_class_whose_plain_php_parent_defines_get_reads_the_property() {
+    let model = (
+        "src/Lib/Model.php",
+        "<?php\n\nnamespace Lib;\n\nabstract class Model\n{\n    public function __get(string $name): mixed\n    {\n        return $name;\n    }\n}\n",
+    );
+    let code = "namespace App.Tenant;\n\nimport Lib.Model;\n\nclass Row : Model\n{\n    public Row() : super() { }\n\n    public string owner() => \"relation\";\n\n    public int run()\n    {\n        const owner = this.owner;\n        Function<string()> relation = this.owner;\n        return global.strlen(relation()) + (owner is string ? 1 : 0);\n    }\n}\n";
+    let lowered = Lowered::with(code, &[model]);
+    let run = member_in(std::slice::from_ref(&lowered), "Row", &[2, 2]);
+
+    assert_eq!(
+        run,
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "owner"
+                PROP
+                  VAR
+                    ZVAL "this"
+                  ZVAL "owner"
+              ASSIGN
+                VAR
+                  ZVAL "relation"
+                METHOD_CALL
+                  VAR
+                    ZVAL "this"
+                  ZVAL "owner"
+                  CALLABLE_CONVERT
+              RETURN
+                BINARY_OP [1]
+                  CALL
+                    ZVAL "strlen"
+                    ARG_LIST
+                      CALL
+                        VAR
+                          ZVAL "relation"
+                        ARG_LIST
+                  CONDITIONAL [1]
+                    CALL
+                      ZVAL "is_string"
+                      ARG_LIST
+                        VAR
+                          ZVAL "owner"
+                    ZVAL 1
+                    ZVAL 0
+        "#}
     );
 }
 

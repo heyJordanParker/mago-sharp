@@ -1055,14 +1055,13 @@ where
         true, // `instance_access`
         block_context.scope.get_class_like_name(),
     );
-    // Spec section 14.3: a plain PHP class that defines `__get` has the properties it reads, `Any?` where no
-    // `@property` line types one.
-    let serves_property = has_magic_method && !class_metadata.flags.is_sharp();
+    // Spec section 14.3: a class whose plain PHP code defines `__get`, itself or a parent, has the properties it reads,
+    // `Any?` where no `@property` line types one. Only plain PHP defines `__get`.
     let property_type = match &resolution {
         Some(declared) => {
             (!declared.declaring_class.flags.is_sharp()).then(|| declared.declared_type(context.codebase))
         }
-        None => serves_property.then(get_mixed),
+        None => has_magic_method.then(get_mixed),
     };
     let reads_method = !for_assignment
         && property_type.is_some_and(|property_type| {
@@ -1085,7 +1084,7 @@ where
             _ => None,
         };
         if !for_assignment
-            && (reads_method || !serves_property)
+            && (reads_method || !has_magic_method)
             && let Some(method_type) = resolve_method_value(
                 context,
                 block_context,
@@ -2612,6 +2611,26 @@ pub(super) fn report_non_documented_property<A>(
 {
     if classname.as_bytes().eq_ignore_ascii_case(b"stdClass") {
         // Special case: we don't report undocumented properties on stdClass
+        return;
+    }
+
+    // Spec section 14.3: in PHP#, a property `__get` serves with no `@property` line to type it is `Any?`.
+    if context.dialect.is_sharp() {
+        let access = quoted_source(context, obj_span.join(selector_span));
+        let issue = if for_assignment {
+            Issue::warning(format!("The type of `{access}` is unknown, so it takes any value."))
+                .with_annotation(Annotation::primary(selector_span).with_message("Written here."))
+        } else {
+            let name = trim_start_byte(property_name.as_bytes(), b'$');
+            let name = String::from_utf8_lossy(name);
+            Issue::warning(format!("The type of `{access}` is unknown, so the read is `Any?`."))
+                .with_annotation(Annotation::primary(selector_span).with_message("Read here."))
+                .with_help(format!(
+                    "State its type with `as`, as in `string? {name} = {access} as string;`, or with `is`, as in `if ({access} is string {name})`."
+                ))
+        };
+        context.collector.report_with_code(IssueCode::NonDocumentedProperty, issue);
+
         return;
     }
 

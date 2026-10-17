@@ -2962,6 +2962,30 @@ fn a_lambda_with_a_block_body_is_a_closure_without_function_or_use() {
     );
 }
 
+/// Spec section 1: a lambda takes attributes before its parameters, which are then in parentheses, as in C#. A list
+/// literal that no parenthesized `=>` follows stays a list.
+#[test]
+fn attributes_before_a_lambda_s_parentheses_are_the_lambda_s() {
+    const CODE: &str = "class Report\n{\n    void run()\n    {\n        const twice = [Note(\"a\")] (int n) => n * 2;\n        const log = [Note(\"b\"), Retry(3)] [Searchable] () => { return 1; };\n        const list = [Note(\"c\")];\n        const called = [twice][0](2);\n    }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Report.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let Expression::ArrowFunction(twice) = statement_expression(program, 0) else {
+        panic!("expected a lambda, got {:#?}", method_body(program));
+    };
+    let Expression::Closure(log) = statement_expression(program, 1) else {
+        panic!("expected a block lambda, got {:#?}", method_body(program));
+    };
+    let lists = |lists: &Sequence<AttributeList>| lists.iter().map(|list| source(CODE, list)).collect::<Vec<_>>();
+
+    assert_eq!(lists(&twice.attribute_lists), ["[Note(\"a\")]"]);
+    assert_eq!(source(CODE, twice), "[Note(\"a\")] (int n) => n * 2");
+    assert_eq!(lists(&log.attribute_lists), ["[Note(\"b\"), Retry(3)]", "[Searchable]"]);
+    assert!(matches!(statement_expression(program, 2), Expression::Array(_)), "{:#?}", method_body(program));
+    assert!(matches!(statement_expression(program, 3), Expression::Call(_)), "{:#?}", method_body(program));
+}
+
 #[test]
 fn a_lambda_body_takes_the_whole_expression_and_stops_at_a_comma() {
     const CODE: &str =

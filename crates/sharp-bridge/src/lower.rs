@@ -2061,6 +2061,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         members.extend(self.class_metadata(self.class, self.line(interface.name)));
         let members = self.node(SHARP_AST_STMT_LIST, 0, self.line(interface.left_brace), &members);
         let header = interface.inheritance.as_ref().map_or(NULL, |inheritance| self.name_list(inheritance));
+        let attributes = self.attributes(&interface.attribute_lists, None, None);
 
         self.declaration(
             SHARP_AST_CLASS,
@@ -2068,7 +2069,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             interface.interface.span,
             interface.right_brace,
             interface.name.value,
-            &[NULL, header, members, NULL, NULL],
+            &[NULL, header, members, attributes, NULL],
         )
     }
 
@@ -2196,8 +2197,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let hooks = self.abstract_hooks(&property.hook_list);
         let element = self.node(SHARP_AST_PROP_ELEM, 0, line, &[name, NULL, NULL, hooks]);
         let declaration = self.node(SHARP_AST_PROP_DECL, 0, line, &[element]);
+        let attributes = self.attributes(&property.attribute_lists, None, None);
 
-        self.node(SHARP_AST_PROP_GROUP, ZEND_ACC_PUBLIC, line, &[hint, declaration, NULL])
+        self.node(SHARP_AST_PROP_GROUP, ZEND_ACC_PUBLIC, line, &[hint, declaration, attributes])
     }
 
     /// A computed property with a default body, spec section 22: in its interface, `public mixed $designKey { get; }`,
@@ -2232,6 +2234,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         members.extend(self.class_metadata(self.class, self.line(event.name)));
         let members = self.node(SHARP_AST_STMT_LIST, 0, line, &members);
         let header = event.inheritance.as_ref().map_or(NULL, |inheritance| self.name_list(inheritance));
+        let attributes = self.attributes(&event.attribute_lists, None, None);
 
         self.declaration(
             SHARP_AST_CLASS,
@@ -2239,7 +2242,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             event.event.span,
             event.terminator,
             event.name.value,
-            &[NULL, header, members, NULL, NULL],
+            &[NULL, header, members, attributes, NULL],
         )
     }
 
@@ -3834,7 +3837,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// A constant is a class constant group of one constant, as php-src's grammar builds `public const int MAX = 3;`:
-    /// the constant list, no attributes, then the type.
+    /// the constant list, the attributes, then the type.
     fn constant(&mut self, constant: &ClassLikeConstant) -> u32 {
         let item = constant.first_item();
         let line = self.line(item.name);
@@ -3842,13 +3845,14 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let value = self.expression(item.value);
         let element = self.node(SHARP_AST_CONST_ELEM, 0, line, &[name, value, NULL]);
         let declaration = self.node(SHARP_AST_CLASS_CONST_DECL, 0, line, &[element]);
+        let attributes = self.attributes(&constant.attribute_lists, None, None);
         let hint = constant.hint.as_ref().map_or(NULL, |hint| self.hint(hint));
 
         self.node(
             SHARP_AST_CLASS_CONST_GROUP,
             modifier_flags_or_private(&constant.modifiers),
             self.line(constant),
-            &[declaration, NULL, hint],
+            &[declaration, attributes, hint],
         )
     }
 
@@ -6571,6 +6575,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 lowering.lambda_type(lambda),
             )
         });
+        let attributes = self.attributes(&arrow_function.attribute_lists, None, None);
         if statements.is_empty()
             && !captures_type_arguments
             && !self.names.captures(&lambda).iter().any(|(_, local)| self.names.is_written(local))
@@ -6581,7 +6586,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 lambda,
                 arrow_function.expression,
                 b"",
-                &[parameters, NULL, value, return_type, NULL],
+                &[parameters, NULL, value, return_type, attributes],
             );
         }
 
@@ -6590,7 +6595,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         statements.push(self.node(SHARP_AST_RETURN, 0, line, &[value]));
         let body = self.node(SHARP_AST_STMT_LIST, 0, line, &statements);
 
-        self.declaration(SHARP_AST_CLOSURE, 0, lambda, lambda, b"", &[parameters, uses, body, return_type, NULL])
+        self.declaration(SHARP_AST_CLOSURE, 0, lambda, lambda, b"", &[parameters, uses, body, return_type, attributes])
     }
 
     /// A lambda with a block body is a `CLOSURE`, as php-src's grammar builds `function () use (…) { … }`, which makes
@@ -6610,8 +6615,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             )
         });
         let uses = self.closure_uses(lambda, captures_type_arguments);
+        let attributes = self.attributes(&closure.attribute_lists, None, None);
 
-        self.declaration(SHARP_AST_CLOSURE, 0, lambda, lambda, b"", &[parameters, uses, body, return_type, NULL])
+        self.declaration(SHARP_AST_CLOSURE, 0, lambda, lambda, b"", &[parameters, uses, body, return_type, attributes])
     }
 
     /// The result type of the lambda at `lambda`, which has no PHP type, with its whole type, as

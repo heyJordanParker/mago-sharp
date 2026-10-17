@@ -422,8 +422,8 @@ pub(crate) fn report_member_of_mixed_kinds<A>(
     };
 
     // The lowering's order: a read takes a property before a method, and a call a declared method before a property,
-    // with `__call` last. A plain PHP class that defines `__get` has the properties it reads, and a read the code takes
-    // as a function takes the method the analysis recorded over the property, spec section 14.3.
+    // with `__call` last. A class that has `__get`, which only plain PHP defines, has the properties it reads, and a
+    // read the code takes as a function takes the method the analysis recorded over the property, spec section 14.3.
     let codebase = context.codebase;
     let property = concat_word!("$", name.value);
     let read = object.span().join(name.span);
@@ -437,9 +437,7 @@ pub(crate) fn report_member_of_mixed_kinds<A>(
         let is_method = if is_call {
             declares_method || (!declares_property && codebase.method_exists(class.as_bytes(), b"__call"))
         } else {
-            let has_property = declares_property
-                || (codebase.method_exists(class.as_bytes(), b"__get")
-                    && codebase.get_class_like(class.as_bytes()).is_some_and(|metadata| !metadata.flags.is_sharp()));
+            let has_property = declares_property || codebase.method_exists(class.as_bytes(), b"__get");
             let reads_method = artifacts.get_callees(&read).any(|target| {
                 matches!(target, CallTarget::FunctionLike { callee: FunctionLikeIdentifier::Method(method_class, _), .. }
                     if *method_class == class)

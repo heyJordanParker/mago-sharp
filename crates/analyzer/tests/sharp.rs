@@ -5273,6 +5273,56 @@ fn a_plain_php_class_with_get_has_the_properties_it_reads() {
     assert_eq!(type_at("const called = row.owner();", "row.owner()").as_deref(), Some("Lib\\Contact"));
 }
 
+/// A read of a property a plain PHP class's `__get` serves, with no `@property` line to type it, is `Any?`, spec section
+/// 14.3. In a `.sharp` file the warning names the read as PHP# writes it and says how PHP# states the type; in a plain
+/// PHP file it stays PHP's.
+#[test]
+fn an_untyped_get_read_warns_in_php_sharp_words_in_a_sharp_file() {
+    let row = "<?php\n\nnamespace Lib;\n\nclass Row\n{\n    public function __get(string $name): mixed\n    {\n        return $name;\n    }\n\n    public function __set(string $name, mixed $value): void\n    {\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Row;\n\nclass Report\n{\n    public int run(Row row, Row? maybe)\n    {\n        const owner = row.owner;\n        const other = maybe?.other;\n        row.note = \"paid\";\n        const named = row.name as string;\n        const counted = (row.count) is int count ? count : match (maybe?.size) { int size => size, default => 0 };\n        return owner is string && other is string && named is string ? counted : 0;\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nuse Lib\\Row;\n\nclass Report\n{\n    public function run(Row $row): mixed\n    {\n        return $row->owner;\n    }\n}\n";
+
+    assert_eq!(
+        refusals(("src/Demo/Report.sharp", sharp), &[("src/Lib/Row.php", row)]),
+        [
+            "9:27 non-documented-property The type of `row.owner` is unknown, so the read is `Any?`. | State its type with `as`, as in `string? owner = row.owner as string;`, or with `is`, as in `if (row.owner is string owner)`.",
+            "10:30 non-documented-property The type of `maybe?.other` is unknown, so the read is `Any?`. | State its type with `as`, as in `string? other = maybe?.other as string;`, or with `is`, as in `if (maybe?.other is string other)`.",
+            "11:13 non-documented-property The type of `row.note` is unknown, so it takes any value. | ",
+        ]
+    );
+    assert_eq!(
+        messages(("src/Demo/Report.php", php), &[("src/Lib/Row.php", row)]),
+        ["Ambiguous property access: $owner on class `Lib\\Row`."]
+    );
+}
+
+/// Spec section 14.3: a PHP# class whose plain PHP parent defines `__get`, as a PHP# Eloquent model is, has the
+/// properties `__get` reads too, typed by its parents' `@property-read` lines and `Any?` otherwise, ahead of its own
+/// method of a property's name.
+#[test]
+fn a_sharp_class_whose_plain_php_parent_defines_get_has_the_properties_it_reads() {
+    let model = "<?php\n\nnamespace Lib;\n\n/** @property-read Contact $contact */\nabstract class Model\n{\n    public function __get(string $name): mixed\n    {\n        return new Contact($name);\n    }\n}\n";
+    let contact = "<?php\n\nnamespace Lib;\n\nfinal class Contact\n{\n    public function __construct(public string $name)\n    {\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Contact;\nimport Lib.Model;\n\npublic class Row : Model\n{\n    public Row() : super() { }\n\n    public Contact contact() => new Contact(\"relation\");\n\n    public Contact owner() => new Contact(\"relation\");\n\n    public int run(Row row)\n    {\n        const contact = row.contact;\n        const owner = this.owner;\n        Function<Contact()> relation = row.owner;\n        const called = row.owner();\n        const loaded = owner as Contact;\n        return global.strlen(contact.name + relation().name + called.name + (loaded?.name ?? \"\"));\n    }\n}\n";
+
+    let (issues, artifacts) = analyze_with_artifacts(
+        &PLUGIN_REGISTRY,
+        settings(),
+        ("src/Demo/Row.sharp", sharp),
+        &[("src/Lib/Model.php", model), ("src/Lib/Contact.php", contact)],
+    );
+    let type_at = |line: &str, read: &str| {
+        let start = (sharp.find(line).unwrap() + line.find(read).unwrap()) as u32;
+        artifacts.expression_types.get(&(start, start + read.len() as u32)).map(|r#type| r#type.get_id().to_string())
+    };
+
+    assert_eq!(issues.iter().map(|issue| located(sharp, issue)).collect::<Vec<_>>(), ["17:28 non-documented-property"]);
+    assert_eq!(type_at("const contact = row.contact;", "row.contact").as_deref(), Some("Lib\\Contact"));
+    assert_eq!(type_at("const owner = this.owner;", "this.owner").as_deref(), Some("mixed"));
+    assert_eq!(type_at("relation = row.owner;", "row.owner").as_deref(), Some("(closure(): Lib\\Contact)"));
+    assert_eq!(type_at("const called = row.owner();", "row.owner()").as_deref(), Some("Lib\\Contact"));
+}
+
 /// Spec section 14.3 with section 12: a method value holds the collection as it was when the value was made, so a
 /// method that changes the collection would change only that copy. As in Swift, which refuses a value of a `mutating`
 /// method, it is refused, with the lambda that changes the collection itself.
@@ -13733,7 +13783,7 @@ fn a_name_a_plain_php_class_s_get_serves_and_another_class_has_a_method_of_diffe
     assert_eq!(
         messages(("src/Demo/Report.sharp", sharp), &[("src/Lib/Order.php", library)]),
         [
-            "Ambiguous property access: $total on class `Row`.",
+            "The type of `doc.total` is unknown, so the read is `Any?`.",
             "`doc.total` is a method on `Order` but a property on `Row`, so PHP# cannot tell how to read it.",
         ]
     );

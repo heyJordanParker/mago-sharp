@@ -640,11 +640,16 @@ where
             })
     });
     let is_code = |issue: &Issue, code: IssueCode| issue.code.as_deref() == Some(code.as_str());
+    // The test states the type of the value it tests, so a read of a property whose type is unknown, spec section 14.3,
+    // needs no warning there: the warning's own help asks for this test.
+    let tested_read = tested_value(node).unparenthesized().span();
     let issues: Vec<Issue> = issues
         .into_iter()
         .filter(|issue| {
             let span = issue.primary_span();
             let called = span.and_then(pattern_call);
+            let reads_tested_value = is_code(issue, IssueCode::NonDocumentedProperty)
+                && span.is_some_and(|span| span.end == tested_read.end && span.start > tested_read.start);
             let redundant = is_code(issue, IssueCode::RedundantTypeComparison)
                 || is_code(issue, IssueCode::RedundantLogicalOperation);
             let always_true = redundant
@@ -653,6 +658,7 @@ where
 
             // PHP's report on `match (true)` names `true`, so a PHP# `match` reports what it misses itself.
             !is_code(issue, IssueCode::MatchNotExhaustive)
+                && !reads_tested_value
                 && (!is_code(issue, IssueCode::RedundantLogicalOperation)
                     || span.is_none_or(|span| !field_tests.iter().any(|test| test.start == span.start)))
                 && (!is_code(issue, IssueCode::MatchArmAlwaysTrue)

@@ -137,7 +137,7 @@ fn an_event_takes_only_public_or_internal_and_its_parameters_are_its_properties(
             "public event Tagged(Set<string> tags);",
             vec!["3:21 A `Set` parameter of an event is not supported yet in PHP#."],
         ),
-        ("[Logged] public event Noted(int id);", vec!["3:1 This construct is not supported yet in PHP#."]),
+        ("[Logged] public event Noted(int id);", vec![]),
         (
             "public event Tracked(int id { get; });",
             vec!["3:29 An event's parameter takes no accessors: it is a get-only property of the event."],
@@ -168,19 +168,6 @@ fn an_event_takes_only_public_or_internal_and_its_parameters_are_its_properties(
 
         assert_eq!(issues(code), expected, "{declaration}");
     }
-
-    let code = "namespace App.Shop;\n\n[Logged] public event Noted(int id);\n";
-    let construct_notes: Vec<Vec<String>> = check_in_type_file(code)
-        .into_iter()
-        .filter(|issue| issue.message == "This construct is not supported yet in PHP#.")
-        .map(|issue| issue.notes)
-        .collect();
-    assert_eq!(
-        construct_notes,
-        [[
-            "A PHP# event has an optional `public`, a name, parameters, each a type and a name with an optional default, and an optional `: Interface` header, as in `public event OrderPaid(int orderId) : OrderEvent;`."
-        ]]
-    );
 }
 
 /// Spec section 28: a law states a fact about the values of a class or an enum, and an interface has no values.
@@ -3078,6 +3065,19 @@ fn attributes_on_an_interface_method_are_in_the_slice() {
     let code = "namespace App.Tenant;\n\npublic interface Labeled\n{\n    [Note(\"shown in lists\"), Searchable]\n    string label();\n\n    [Note(\"shown in headings\")]\n    [Retry(3)]\n    string title([Field] int width) => \"Untitled\";\n}\n";
 
     assert_eq!(issues(code), Vec::<String>::new());
+}
+
+/// Spec section 1: attributes follow C#'s rules, which allow one on an interface, an interface property, a class an
+/// event runs as, a constant and a lambda with its parameters in parentheses.
+#[test]
+fn attributes_on_an_interface_its_property_an_event_a_constant_and_a_lambda_are_in_the_slice() {
+    let interface = "namespace App.Tenant;\n\n[Note(\"on the interface\")]\npublic interface Sized\n{\n    [Note(\"on its property\")]\n    int size { get; }\n}\n";
+    let event = "namespace App.Tenant;\n\n[Note(\"on the event\")]\npublic event Paid(int orderId);\n";
+    let class = "namespace App.Tenant;\n\npublic class Limits\n{\n    [Note(\"on a constant\")]\n    public const int MAX = 3;\n\n    public int run()\n    {\n        const twice = [Note(\"on a lambda\")] (int n) => n * 2;\n        const log = [Note(\"on a block lambda\"), Retry(3)] [Searchable] () => { return 1; };\n        return twice(Limits.MAX) + log();\n    }\n}\n";
+
+    assert_eq!(issues(interface), Vec::<String>::new());
+    assert_eq!(issues(event), Vec::<String>::new());
+    assert_eq!(issues(class), Vec::<String>::new());
 }
 
 #[test]
@@ -6530,8 +6530,18 @@ fn a_refusal_notes_what_php_sharp_has_where_it_is_written() {
     let class = "namespace App;\n\npublic class Order\n{\n    case Open;\n}\n";
     let body = leak(method("        const copy = clone this;\n        return extra;\n"));
     let pattern = leak(method("        const iterated = extra is iterable;\n        return extra;\n"));
+    let interface = "namespace App;\n\npublic interface Sized\n{\n    public const int MAX = 3;\n}\n";
+    let constant = "namespace App;\n\npublic class Limits\n{\n    final public const int MAX = 3;\n}\n";
 
     for (code, note) in [
+        (
+            interface,
+            "A PHP# interface has attributes, an optional `public`, a name, optional type parameters as in `<in TItem>`, an optional `: Interface` header, methods and get-only properties, as in `int orderId { get; }`, with no other modifiers, `extends`, constants or other properties.",
+        ),
+        (
+            constant,
+            "A PHP# constant has attributes, `public`, `protected` or `private`, an optional type of `int`, `float`, `bool`, `string`, `Any` or a class, nullable as in `int?` or not, or a union of them as in `int|string`, one name, and a constant value.",
+        ),
         (
             pattern,
             "A PHP# pattern is a type of `int`, `float`, `string`, `bool`, `Any`, a class, a collection as in `List<int>`, or a union of them as in `int|string`, with an optional name, as in `int count`, a case with its fields, as in `PaymentResult.Paid(string transactionId)`, a class with properties, as in `Paid { amount: > 0 } big`, a constant, a comparison such as `< 10`, a properties pattern such as `{ total: > 0 }`, a list pattern such as `[Line first, ...List<Line> rest]`, or patterns joined by `and`, `or` and `not`.",

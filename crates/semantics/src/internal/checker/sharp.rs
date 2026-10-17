@@ -176,8 +176,8 @@ const OBJECT: &[u8] = b"Object";
 /// - A static class, `public static class Text`, as spec sections 26 and 29 write it: `static` and an optional
 ///   `public`, no header and no constructor, and only constants and static members. The bridge lowers it to a final
 ///   PHP class.
-/// - An interface: an optional `public`, a name, optional type parameters, an optional `: Interface` header, methods
-///   and properties, with no attributes, other modifiers, `extends` or fields. An interface method has optional type
+/// - An interface: attributes, an optional `public`, a name, optional type parameters, an optional `: Interface` header,
+///   methods and properties, with no other modifiers, `extends` or fields. An interface method has optional type
 ///   parameters, parameters, a return type and no body, as spec section 29 writes `Money quote(Cart cart);`, or a
 ///   default body, a block or `=> expr;`, as spec section 22 writes `string designKey() => …;`, checked as a class
 ///   method's body. A property is written `int orderId { get; }` or `List<string> claims { get; set; }`. Every
@@ -206,7 +206,8 @@ const OBJECT: &[u8] = b"Object";
 ///   class and interface by its short name, and a generic one with its type arguments, as in `: PaginatedList<Order>`,
 ///   whose type arguments are a parameter's types. Any other type, a type parameter, `List`, `Map` and `Class`
 ///   included, is not supported yet.
-/// - Attributes: on a class, an enum, an enum case, a method, a field, a property and a parameter, written `[Name]` or
+/// - Attributes: on a class, an interface, an enum, an enum case, an event, a constant, a method, an interface method, a
+///   field, a property, a parameter and a lambda with its parameters in parentheses, written `[Name]` or
 ///   `[Name(arguments)]`, several in one list, as in `[Field("Name"), Searchable]`, or in several lists. An argument
 ///   is positional or named, and is a constant expression as a parameter default is, list and map literals included.
 ///   PHP's own check reports a spread argument. An attribute target, as in `[return: NotNull]`, is a parse error.
@@ -958,7 +959,11 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             Node::FunctionLikeReturnTypeHint(_) | Node::On(_) | Node::MethodBody(_) | Node::MethodAbstractBody(_),
             Signature,
         ) => Some(Signature),
-        (Node::AttributeList(_), Class | Enum | Method | Signature | FieldOrProperty | Parameter) => Some(Attribute),
+        (
+            Node::AttributeList(_),
+            Class | Interface | Enum | Place::Event | ClassConstant | Method | Signature | FieldOrProperty | Parameter
+            | Lambda,
+        ) => Some(Attribute),
         (
             Node::Attribute(_)
             | Node::PartialArgumentList(_)
@@ -2895,8 +2900,7 @@ fn is_interface_property(property: &HookedProperty) -> bool {
             && matches!(accessor.body, PropertyHookBody::Abstract(_))
     };
 
-    property.attribute_lists.is_empty()
-        && property.var.is_none()
+    property.var.is_none()
         && property.modifiers.iter().all(is_access)
         && property.hint.is_some()
         && matches!(property.item, PropertyItem::Abstract(_))
@@ -5435,7 +5439,7 @@ fn supported(place: Place) -> &'static str {
             "A PHP# class has attributes, an optional `public`, `abstract` or `final`, a name, optional type parameters as in `<out TItem : DatabaseEntity>`, an optional `: Base, Interface` header, constants, fields, properties, methods, named constructors, operators, laws and, in a static class, extensions, with no other modifiers, `extends` or `implements`."
         }
         Place::Interface => {
-            "A PHP# interface has an optional `public`, a name, optional type parameters as in `<in TItem>`, an optional `: Interface` header, methods and get-only properties, as in `int orderId { get; }`, with no attributes, other modifiers, `extends`, constants or other properties."
+            "A PHP# interface has attributes, an optional `public`, a name, optional type parameters as in `<in TItem>`, an optional `: Interface` header, methods and get-only properties, as in `int orderId { get; }`, with no other modifiers, `extends`, constants or other properties."
         }
         Place::Signature => {
             "A PHP# interface method has attributes, no modifier, optional type parameters, parameters, a return type of `int`, `float`, `bool`, `string`, `Any`, `void`, `never`, a class or a type parameter, a generic type as in `List<T>` or `PaginatedList<Order>`, or `Self`, each but `void` and `never` nullable as in `int?`, or a union of them but `void` and `never`, as in `int|string`, and no body or a default body."
@@ -5460,7 +5464,7 @@ fn supported(place: Place) -> &'static str {
             "A PHP# field is `private` or `protected`, and a property has the accessors `get` and an optional `set` or `init`, each `;`, `=> expr;` or a block. Both may be `static`, and have a type of `int`, `float`, `bool`, `string`, `Any`, a class or a type parameter, a generic type as in `List<T>` or `PaginatedList<Order>`, `Function<R(P)>`, or a tuple as in `[Money, int]`, nullable as in `int?` or not, or a union of them as in `int|string`, a name, and an optional initial value."
         }
         Place::ClassConstant => {
-            "A PHP# constant has `public`, `protected` or `private`, an optional type of `int`, `float`, `bool`, `string`, `Any` or a class, nullable as in `int?` or not, or a union of them as in `int|string`, one name, and a constant value."
+            "A PHP# constant has attributes, `public`, `protected` or `private`, an optional type of `int`, `float`, `bool`, `string`, `Any` or a class, nullable as in `int?` or not, or a union of them as in `int|string`, one name, and a constant value."
         }
         Place::Method => {
             "A PHP# method takes `public`, `protected`, `private`, `static`, `abstract`, `virtual` and `override`, a constructor also `required`, optional type parameters as in `<TItem : DatabaseEntity>`, parameters, and a return type of `int`, `float`, `bool`, `string`, `Any`, `void`, `never`, a class or a type parameter, a generic type as in `List<T>` or `PaginatedList<Order>`, `Function<R(P)>`, a tuple as in `[Money, int]` or `Self`, each but `void` and `never` nullable as in `int?`, or a union of them but `void` and `never`, as in `int|string`, and an optional `on` clause after the parameters, as in `on OrderPaid, OrderRefunded`."

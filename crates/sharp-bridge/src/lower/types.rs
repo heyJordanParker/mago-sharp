@@ -1007,16 +1007,13 @@ impl<'analysis> Types<'analysis> {
     }
 
     /// The member a read `object.member` of an object of the fully qualified class name `class` reaches, as
-    /// [`Self::declared_member`] finds it, except that a plain PHP class that defines `__get` has the properties it
-    /// reads, spec section 14.3: its `__get` serves a name the class declares a method of, or nothing of.
+    /// [`Self::declared_member`] finds it, except that a class whose plain PHP code defines `__get`, itself or a parent,
+    /// has the properties it reads, spec section 14.3: its `__get` serves a name the class declares a method of, or
+    /// nothing of.
     pub(crate) fn read_member(&self, class: &[u8], member: &[u8]) -> Option<Declaration> {
-        let declared = self.declared_member(class, member);
-        let serves_property = self.codebase.method_exists(class, b"__get")
-            && self.codebase.get_class_like(class).is_some_and(|metadata| !metadata.flags.is_sharp());
-
-        match declared {
+        match self.declared_member(class, member) {
             None | Some(Declaration { kind: DeclarationKind::Method { .. } | DeclarationKind::StaticMethod, .. })
-                if serves_property =>
+                if self.codebase.method_exists(class, b"__get") =>
             {
                 Some(Declaration {
                     kind: DeclarationKind::Property { typed: false },
