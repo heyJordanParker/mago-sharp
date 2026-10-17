@@ -14954,6 +14954,266 @@ fn a_method_value_of_a_method_that_is_not_generic_is_a_first_class_callable() {
 }
 
 /// ```php
+/// return (function ($receiver) {
+///     return function ($value) use ($receiver) { return \in_array($value, $receiver, true); };
+/// })($ids);
+/// return (function ($receiver) {
+///     return function (...$arguments) use ($receiver) { return $receiver->has(...$arguments); };
+/// })($this->prices);
+/// return (function ($receiver) { return function () use ($receiver) { return \count($receiver); }; })($ids);
+/// ```
+///
+/// Spec section 14.3: a collection method's value is a closure over the collection, read once where the value is read,
+/// so it holds the collection as it was then, as PHP copies an array into a parameter. A method the lowering writes as
+/// PHP on the array runs that PHP on it, with the method's parameter, and any other runs on `Sharp\Collection`, as its
+/// call does, with the arguments the value is called with.
+#[test]
+fn a_collection_method_value_is_a_closure_over_the_collection() {
+    let lowered = Lowered::new(
+        "namespace App;\n\nclass Report\n{\n    private Map<string, int> prices = [\"tea\": 4];\n\n    public Function<bool(int)> allowed(List<int> ids) => ids.contains;\n\n    public Function<bool(string)> priced() => this.prices.has;\n\n    public Function<int()> size(List<int> ids) => ids.count;\n\n    public bool twice(List<int> ids)\n    {\n        const first = ids.contains;\n        return first(1) && [1].filter(ids.contains).count() > 0;\n    }\n}\n",
+    );
+
+    assert_eq!(
+        lowered.body_of("allowed"),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                CALL
+                  CLOSURE "" @7-7
+                    PARAM_LIST
+                      PARAM
+                        null
+                        ZVAL "receiver"
+                        null
+                        null
+                        null
+                        null
+                    null
+                    STMT_LIST
+                      RETURN
+                        CLOSURE "" @7-7
+                          PARAM_LIST
+                            PARAM
+                              null
+                              ZVAL "value"
+                              null
+                              null
+                              null
+                              null
+                          CLOSURE_USES
+                            ZVAL "receiver"
+                          STMT_LIST
+                            RETURN
+                              CALL
+                                ZVAL "in_array"
+                                ARG_LIST
+                                  VAR
+                                    ZVAL "value"
+                                  VAR
+                                    ZVAL "receiver"
+                                  ZVAL true
+                          null
+                          null
+                    null
+                    null
+                  ARG_LIST
+                    VAR
+                      ZVAL "ids"
+        "#}
+    );
+    assert_eq!(
+        lowered.body_of("priced"),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                CALL
+                  CLOSURE "" @9-9
+                    PARAM_LIST
+                      PARAM
+                        null
+                        ZVAL "receiver"
+                        null
+                        null
+                        null
+                        null
+                    null
+                    STMT_LIST
+                      RETURN
+                        CLOSURE "" @9-9
+                          PARAM_LIST
+                            PARAM [16]
+                              null
+                              ZVAL "arguments"
+                              null
+                              null
+                              null
+                              null
+                          CLOSURE_USES
+                            ZVAL "receiver"
+                          STMT_LIST
+                            RETURN
+                              METHOD_CALL
+                                VAR
+                                  ZVAL "receiver"
+                                ZVAL "has"
+                                ARG_LIST
+                                  UNPACK
+                                    VAR
+                                      ZVAL "arguments"
+                          null
+                          null
+                    null
+                    null
+                  ARG_LIST
+                    PROP
+                      VAR
+                        ZVAL "this"
+                      ZVAL "prices"
+        "#}
+    );
+    assert_eq!(
+        lowered.body_of("size"),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                CALL
+                  CLOSURE "" @11-11
+                    PARAM_LIST
+                      PARAM
+                        null
+                        ZVAL "receiver"
+                        null
+                        null
+                        null
+                        null
+                    null
+                    STMT_LIST
+                      RETURN
+                        CLOSURE "" @11-11
+                          PARAM_LIST
+                          CLOSURE_USES
+                            ZVAL "receiver"
+                          STMT_LIST
+                            RETURN
+                              CALL
+                                ZVAL "count"
+                                ARG_LIST
+                                  VAR
+                                    ZVAL "receiver"
+                          null
+                          null
+                    null
+                    null
+                  ARG_LIST
+                    VAR
+                      ZVAL "ids"
+        "#}
+    );
+    // Each read of the same value is that value, the second one too.
+    let twice = lowered.body_of("twice");
+    assert_eq!(twice.matches(r#"ZVAL "in_array""#).count(), 2, "{twice}");
+}
+
+/// ```php
+/// return (function ($receiver) {
+///     return function (...$arguments) use ($receiver) {
+///         return \App\Shared\Text\TextExtensions::slug($receiver, ...$arguments);
+///     };
+/// })($title);
+/// return \strtoupper(...);
+/// return \Vendor\Pdf\render(...);
+/// ```
+///
+/// Spec section 14.3: an extension method's value is a closure over its receiver that calls the static method it runs
+/// as, with the receiver first, and a plain PHP function's value is PHP's first-class callable of it.
+#[test]
+fn an_extension_method_or_plain_php_function_value_calls_what_it_names() {
+    let lowered = Lowered::with(
+        "namespace App;\n\nimport App.Shared.Text.TextExtensions;\nimport Vendor.Pdf;\n\nclass Report\n{\n    public Function<string(string)> slugger(string title) => title.slug;\n\n    public Function<string(string)> upper() => global.strtoupper;\n\n    public Function<string(string)> renderer() => Pdf.render;\n}\n",
+        &[
+            (
+                "src/App/Shared/Text/TextExtensions.sharp",
+                "namespace App.Shared.Text;\n\npublic static class TextExtensions\n{\n    extension(string value)\n    {\n        public string slug(string separator) => value + separator;\n    }\n}\n",
+            ),
+            (
+                "src/Vendor/Pdf/functions.php",
+                "<?php\n\nnamespace Vendor\\Pdf;\n\nfunction render(string $html): string\n{\n    return $html;\n}\n",
+            ),
+        ],
+    );
+
+    assert_eq!(
+        lowered.body_of("slugger"),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                CALL
+                  CLOSURE "" @8-8
+                    PARAM_LIST
+                      PARAM
+                        null
+                        ZVAL "receiver"
+                        null
+                        null
+                        null
+                        null
+                    null
+                    STMT_LIST
+                      RETURN
+                        CLOSURE "" @8-8
+                          PARAM_LIST
+                            PARAM [16]
+                              null
+                              ZVAL "arguments"
+                              null
+                              null
+                              null
+                              null
+                          CLOSURE_USES
+                            ZVAL "receiver"
+                          STMT_LIST
+                            RETURN
+                              STATIC_CALL
+                                ZVAL "App\\Shared\\Text\\TextExtensions"
+                                ZVAL "slug"
+                                ARG_LIST
+                                  VAR
+                                    ZVAL "receiver"
+                                  UNPACK
+                                    VAR
+                                      ZVAL "arguments"
+                          null
+                          null
+                    null
+                    null
+                  ARG_LIST
+                    VAR
+                      ZVAL "title"
+        "#}
+    );
+    assert_eq!(
+        lowered.body_of("upper"),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                CALL
+                  ZVAL "strtoupper"
+                  CALLABLE_CONVERT
+        "#}
+    );
+    assert_eq!(
+        lowered.body_of("renderer"),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                CALL
+                  ZVAL "Vendor\\Pdf\\render"
+                  CALLABLE_CONVERT
+        "#}
+    );
+}
+
+/// ```php
 /// return \Lib\Shapes::named()->name;
 /// ```
 ///

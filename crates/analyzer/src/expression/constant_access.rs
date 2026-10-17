@@ -1,4 +1,5 @@
 use mago_allocator::Arena;
+use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::metadata::constant::ConstantMetadata;
 use mago_codex::scanner::inference::get_literal_constant_type;
 use mago_codex::scanner::inference::get_platform_constant_type;
@@ -27,12 +28,14 @@ use mago_word::word;
 
 use crate::analyzable::Analyzable;
 use crate::artifacts::AnalysisArtifacts;
+use crate::artifacts::CallTarget;
 use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
 use crate::expression::variable::read_variable;
 use crate::resolver::class_name::report_keyword_in_another_case;
+use crate::resolver::property::resolve_function_value;
 use crate::utils::expression::get_bare_name_variable_id;
 use crate::utils::names::namespace_member;
 use mago_bytes::BytesDisplay;
@@ -177,8 +180,8 @@ impl<'arena> Analyzable<'_, 'arena> for ConstantAccess<'arena> {
 
 /// Analyzes the PHP# read `read` of `namespace_name.member`, as `global.PHP_EOL`, or `Pdf.DEFAULT_DPI` after
 /// `import Vendor.Pdf;`, as a read of the plain PHP constant `member` of `namespace`, which [`member_namespace`] found
-/// (spec section 23). The read is refused when the namespace has a function of that name, which the code calls, or no
-/// constant of that name.
+/// (spec section 23). A read of a function of that name is the function's value, spec section 14.3, as
+/// `names.map(global.strtoupper)` passes it, and a read of neither is refused.
 ///
 /// [`member_namespace`]: crate::utils::names::member_namespace
 pub(crate) fn analyze_namespace_constant<A>(
@@ -204,24 +207,32 @@ pub(crate) fn analyze_namespace_constant<A>(
     }
 
     let written = format!("{}.{}", BytesDisplay(namespace_name.value()), BytesDisplay(member.value));
-    let issue = if context.codebase.function_exists(full_name.as_bytes()) {
-        Issue::error(format!("`{written}` is a plain PHP function, not a constant: call it, as in `{written}(…)`."))
-            .with_annotation(Annotation::primary(read.span()).with_message("Reads the function without calling it."))
-    } else {
-        let owner = if namespace.is_empty() {
-            "PHP's root namespace".to_owned()
-        } else {
-            format!("The namespace `{}`", String::from_utf8_lossy(namespace.as_bytes()).replace('\\', "."))
-        };
+    if let Some(function) = context.codebase.get_function(full_name.as_bytes()) {
+        let value =
+            resolve_function_value(context, block_context, artifacts, full_name, function, &written, read.span());
+        artifacts.record_call_target(
+            read.span(),
+            CallTarget::FunctionLike { callee: FunctionLikeIdentifier::Function(full_name), class: None },
+        );
+        artifacts.set_expression_type(read, value);
 
+        return;
+    }
+
+    let owner = if namespace.is_empty() {
+        "PHP's root namespace".to_owned()
+    } else {
+        format!("The namespace `{}`", String::from_utf8_lossy(namespace.as_bytes()).replace('\\', "."))
+    };
+    context.collector.report_with_code(
+        IssueCode::NonExistentConstant,
         Issue::error(format!("Undefined constant: `{written}`."))
             .with_annotation(
                 Annotation::primary(read.span()).with_message(format!("Constant `{written}` is not defined.")),
             )
             .with_note(format!("{owner} declares no constant `{}`.", BytesDisplay(member.value)))
-            .with_help(format!("Check `{}` for typos.", BytesDisplay(member.value)))
-    };
-    context.collector.report_with_code(IssueCode::NonExistentConstant, issue);
+            .with_help(format!("Check `{}` for typos.", BytesDisplay(member.value))),
+    );
     artifacts.set_expression_type(read, get_mixed());
 }
 

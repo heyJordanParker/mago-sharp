@@ -38,13 +38,15 @@ use crate::utils::names::imports_by_default;
 pub(crate) enum Extension {
     /// The static method of the extension member the access runs.
     Member(MethodIdentifier),
-    /// An extension member of the other kind, a method read as a property or a property called, already reported.
+    /// The static method of the extension method a read without `(…)` gives as a function value, spec section 14.3.
+    Value(MethodIdentifier),
+    /// A computed property called, or a member the receiver gives a type outside its block's bound, already reported.
     Refused,
 }
 
 /// The extension member that `name`, written on a value of type `receiver`, reaches in this file: a method when
-/// `flag` is [`MetadataFlags::EXTENSION_METHOD`], a computed property when it is [`MetadataFlags::EXTENSION_PROPERTY`],
-/// or `None` when the type declares or inherits a real member of that name or no extension of that name fits the
+/// `flag` is [`MetadataFlags::EXTENSION_METHOD`], a computed property when it is [`MetadataFlags::EXTENSION_PROPERTY`]
+/// or else the method a read gives as a value, or `None` when the type declares or inherits a real member of that name or no extension of that name fits the
 /// receiver. The receiver is the value that is not `null`: `?.` skips `null`, and the access reports a `.` on a
 /// receiver that may be `null` as it does for any member.
 ///
@@ -95,6 +97,18 @@ where
         in_scope.into_iter().partition(|(_, metadata)| metadata.flags.contains(flag));
     let in_scope = most_specific(context, in_scope);
     let elsewhere = elsewhere.into_iter().find(|(_, metadata)| metadata.flags.contains(flag));
+    // Spec section 14.3: a read that reaches no computed property in scope reaches the extension method of its name as
+    // a function value, which the receiver picks as it picks the method a call runs.
+    if flag == MetadataFlags::EXTENSION_PROPERTY
+        && in_scope.is_empty()
+        && (!other_kind.is_empty() || elsewhere.is_none())
+    {
+        match resolve_extension(context, receiver, name, MetadataFlags::EXTENSION_METHOD) {
+            Some(Extension::Member(method)) => return Some(Extension::Value(method)),
+            Some(Extension::Refused) => return Some(Extension::Refused),
+            Some(Extension::Value(_)) | None => {}
+        }
+    }
     let receiver_type = receiver;
     let receiver = display_type(context, receiver);
     let (code, access) = if flag == MetadataFlags::EXTENSION_METHOD {
@@ -121,13 +135,11 @@ where
 
             Some(Extension::Member(*method))
         }
+        // A read reaches a method as its value above, so only a call reaches the other kind.
         ([], Some((_, metadata)), _) => {
             let written = String::from_utf8_lossy(name.value);
-            let message = if flag == MetadataFlags::EXTENSION_METHOD {
-                format!("`{written}` is a computed property of `{receiver}`, not a method: read it without `(…)`.")
-            } else {
-                format!("`{written}` is a method of `{receiver}`, not a computed property: call it as `{written}(…)`.")
-            };
+            let message =
+                format!("`{written}` is a computed property of `{receiver}`, not a method: read it without `(…)`.");
             let declared = metadata.name_span.unwrap_or(metadata.span);
             context.collector.report_with_code(
                 code,

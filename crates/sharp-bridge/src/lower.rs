@@ -403,6 +403,8 @@ enum CollectionReceiver<'receiver, 'ast> {
     Index(Box<CollectionReceiver<'receiver, 'ast>>, Reread<'receiver, 'ast>),
     /// Any other value, which lives nowhere, so a change changes a copy.
     Value(Reread<'receiver, 'ast>),
+    /// The hidden `$receiver` that a method value at the span holds, spec section 14.3.
+    Hidden(Span),
 }
 
 /// A write to the element of a `List` at an index.
@@ -4960,6 +4962,14 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
                 self.node(SHARP_AST_CONST, 0, line, &[constant])
             }
+            // Spec section 14.3: `global.strtoupper` and `Pdf.render`, read without `(…)`, are the plain PHP
+            // function's first-class callable, `\strtoupper(...)`.
+            Expression::Access(Access::Property(_)) if let Some(function) = self.types.function_value(expression) => {
+                let function = self.string(ZEND_NAME_FQ, line, function.as_bytes());
+                let callable = self.node(SHARP_AST_CALLABLE_CONVERT, 0, line, &[]);
+
+                self.node(SHARP_AST_CALL, 0, line, &[function, callable])
+            }
             // Spec section 30: a named element of a tuple, which runs as a PHP list, is the index read of its position.
             Expression::Access(Access::Property(access))
                 if let Some(index) = self.types.tuple_element_index(access) =>
@@ -4979,6 +4989,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 }
                 None if let Some(extension) = self.types.extension(expression) => {
                     self.extension_access(expression, &extension, access.object, None)
+                }
+                None if self.is_collection_method_value(expression) => {
+                    self.collection_method_value(expression, access.object)
                 }
                 None => match self.class_value(access.object) {
                     Some((class, classes)) => self.static_member(expression, class, &classes, &access.property),
@@ -5071,6 +5084,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 let tested = self.tested_links.contains(&expression.span());
                 if tested && let Some(extension) = self.types.extension(expression) {
                     return self.extension_access(expression, &extension, access.object, None);
+                }
+                if tested && self.is_collection_method_value(expression) {
+                    return self.collection_method_value(expression, access.object);
                 }
                 if tested && let Some((class, classes)) = self.class_value(access.object) {
                     return self.static_member(expression, class, &classes, &access.property);
@@ -5281,6 +5297,12 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         }));
 
         matches!(kind, DeclarationKind::Method { .. } | DeclarationKind::StaticMethod)
+    }
+
+    /// Whether the read `read` gives the value of a method of a `List`, `Map`, `Set` or `Iterable`, spec section 14.3,
+    /// which the checker resolved as it resolves a call of it.
+    fn is_collection_method_value(&self, read: &Expression) -> bool {
+        self.types.collection_method(read).is_some() || self.types.is_lazy_operation(read)
     }
 
     /// Whether the method call `call` on `object` runs the function the property of that name holds.
@@ -5904,38 +5926,83 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             return self.node(call, 0, line, &[target, member, callable]);
         };
 
-        let names_method_type_arguments = type_arguments.contains('#');
-        let text = self.type_text(line, &type_arguments);
-        let type_arguments = self.node(SHARP_AST_SHARP_TYPE_ARGS, 0, line, &[NULL, text]);
+        self.receiver_closure(value, target, Some(&type_arguments), |this, receiver, arguments| {
+            let arguments = this.node(SHARP_AST_ARG_LIST, 0, line, arguments);
+
+            this.node(call, 0, line, &[receiver, member, arguments])
+        })
+    }
+
+    /// The function value `value` reads of a member of `target` that no first-class callable of PHP reaches, spec
+    /// section 14.3: `(function ($receiver) { return function (...$arguments) use ($receiver) { return <call>; };
+    /// })($target)`, where `call` writes the member's call on `$receiver` with the arguments it is given,
+    /// `...$arguments` and then the `type_arguments` the checker found, if any. `target` is read once, where the value
+    /// is read, and a collection is copied there, as PHP copies an array into a parameter. Type arguments that name the
+    /// method's own hidden local have both closures capture it.
+    fn receiver_closure(
+        &mut self,
+        value: &Expression,
+        target: u32,
+        type_arguments: Option<&str>,
+        call: impl FnOnce(&mut Self, u32, &[u32]) -> u32,
+    ) -> u32 {
+        let line = self.line(value);
+        let names_method_type_arguments = type_arguments.is_some_and(|type_arguments| type_arguments.contains('#'));
         let arguments = self.variable(value.span(), b"arguments");
-        let spread = self.node(SHARP_AST_UNPACK, 0, line, &[arguments]);
-        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[spread, type_arguments]);
+        let mut values = vec![self.node(SHARP_AST_UNPACK, 0, line, &[arguments])];
+        if let Some(type_arguments) = type_arguments {
+            let text = self.type_text(line, type_arguments);
+            values.push(self.node(SHARP_AST_SHARP_TYPE_ARGS, 0, line, &[NULL, text]));
+        }
         let receiver = self.variable(value.span(), b"receiver");
-        let method_call = self.node(call, 0, line, &[receiver, member, arguments]);
+        let body = call(self, receiver, &values);
+
+        self.receiver_closure_of(
+            value,
+            target,
+            &[(b"arguments", ZEND_PARAM_VARIADIC)],
+            names_method_type_arguments,
+            body,
+        )
+    }
+
+    /// The function value `value` reads that runs `body` on the hidden `$receiver`, `target` read once where the value
+    /// is read, as [`Self::receiver_closure`] writes it, with `parameters` and their flags for the inner closure's own.
+    fn receiver_closure_of(
+        &mut self,
+        value: &Expression,
+        target: u32,
+        parameters: &[(&[u8], u32)],
+        names_method_type_arguments: bool,
+        body: u32,
+    ) -> u32 {
+        let line = self.line(value);
         let captured: &[&[u8]] =
             if names_method_type_arguments { &[b"receiver", TYPE_ARGUMENTS] } else { &[b"receiver"] };
-        let caller = self.returning_closure(value, b"arguments", ZEND_PARAM_VARIADIC, captured, method_call);
+        let caller = self.returning_closure(value, parameters, captured, body);
         let captured: &[&[u8]] = if names_method_type_arguments { &[TYPE_ARGUMENTS] } else { &[] };
-        let reader = self.returning_closure(value, b"receiver", 0, captured, caller);
+        let reader = self.returning_closure(value, &[(b"receiver", 0)], captured, caller);
         let target = self.node(SHARP_AST_ARG_LIST, 0, line, &[target]);
 
         self.node(SHARP_AST_CALL, 0, line, &[reader, target])
     }
 
-    /// A `CLOSURE` the lowering writes, with the one parameter `parameter` and its `flags`, that captures each local
-    /// of `captured` by value and returns `value`.
+    /// A `CLOSURE` the lowering writes, with `parameters` and their flags, that captures each local of `captured` by
+    /// value and returns `value`.
     fn returning_closure(
         &mut self,
         span: impl HasSpan,
-        parameter: &[u8],
-        flags: u32,
+        parameters: &[(&[u8], u32)],
         captured: &[&[u8]],
         value: u32,
     ) -> u32 {
         let line = self.line(&span);
-        let name = self.string(0, line, parameter);
-        let parameter = self.node(SHARP_AST_PARAM, flags, line, &[NULL, name, NULL, NULL, NULL, NULL]);
-        let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &[parameter]);
+        let mut lowered = Vec::new();
+        for (parameter, flags) in parameters {
+            let name = self.string(0, line, parameter);
+            lowered.push(self.node(SHARP_AST_PARAM, *flags, line, &[NULL, name, NULL, NULL, NULL, NULL]));
+        }
+        let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &lowered);
         let mut uses = Vec::new();
         for captured in captured {
             uses.push(self.string(0, line, captured));
@@ -5966,7 +6033,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
             link = match link {
                 Expression::Access(Access::Property(access)) => {
-                    below_php_call = below_php_call || self.types.extension(link).is_some();
+                    below_php_call =
+                        below_php_call || self.types.extension(link).is_some() || self.is_collection_method_value(link);
 
                     access.object
                 }
@@ -5983,6 +6051,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     if !self.tested_links.contains(&link.span())
                         && (below_php_call
                             || self.types.extension(link).is_some()
+                            || self.is_collection_method_value(link)
                             || self.is_class_value(access.object)
                             || self.is_method_value(access.object, &access.property))
                     {
@@ -6615,13 +6684,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     ) -> Option<u32> {
         let (collection_name, method, reads_twice) = self.php_collection_method(call)?;
         let line = self.line(call);
-        let element = || {
-            arguments
-                .arguments
-                .first()
-                .map(Argument::value)
-                .unwrap_or_else(|| unreachable!("the checker refuses a collection method call without its element"))
-        };
+        let element = arguments.arguments.first().map(|argument| Side::Expression(argument.value()));
 
         let mut collection = self.collection_receiver(receiver, reads_twice || null_safe);
         let test = null_safe.then(|| {
@@ -6629,19 +6692,49 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
             self.is_null(line, receiver)
         });
-        let lowered = match (collection_name, method.as_slice()) {
+        let lowered =
+            self.inlined_collection_method(call.span(), receiver, (collection_name, &method), &mut collection, element);
+        self.release_collection(collection);
+
+        Some(match test {
+            Some(test) => {
+                let null = self.zval(line, sharp_value::SHARP_NULL, |_| {});
+
+                self.node(SHARP_AST_CONDITIONAL, ZEND_PARENTHESIZED_CONDITIONAL, line, &[test, null, lowered])
+            }
+            None => lowered,
+        })
+    }
+
+    /// The PHP the method `method` of `collection_name`, one of the [`INLINED_COLLECTION_METHODS`], runs on
+    /// `collection`, the collection `receiver` gives, with `element`, its argument, for a method that takes one. `at`
+    /// is the span of the call or the method value that runs it.
+    fn inlined_collection_method(
+        &mut self,
+        at: Span,
+        receiver: &Expression,
+        (collection_name, method): (&str, &[u8]),
+        collection: &mut CollectionReceiver,
+        element: Option<Side>,
+    ) -> u32 {
+        let line = self.line(at);
+        let element = move || {
+            element.unwrap_or_else(|| unreachable!("the checker refuses a collection method call without its element"))
+        };
+
+        match (collection_name, method) {
             ("List", b"contains" | b"indexof" | b"remove") => {
                 let element_type = self.types.element_type(self.types.expression_type(receiver));
-                let search = match method.as_slice() {
+                let search = match method {
                     b"contains" => Search::Contains,
                     b"indexof" => Search::IndexOf,
                     _ => Search::Remove,
                 };
 
-                self.element_search(call.span(), &mut collection, &element_type, element(), search)
+                self.element_search(at, collection, &element_type, element(), search)
             }
             ("List", b"last") => {
-                let list = self.read_collection(&mut collection, line, false);
+                let list = self.read_collection(collection, line, false);
                 let empty = self.node(SHARP_AST_ARRAY, ZEND_ARRAY_SYNTAX_SHORT, line, &[]);
                 let is_empty = self.node(SHARP_AST_BINARY_OP, ZEND_IS_IDENTICAL, line, &[list, empty]);
                 let class = self.string(ZEND_NAME_FQ, line, b"OutOfRangeException");
@@ -6649,7 +6742,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 let message = self.node(SHARP_AST_ARG_LIST, 0, line, &[message]);
                 let exception = self.node(SHARP_AST_NEW, 0, line, &[class, message]);
                 let throw = self.node(SHARP_AST_THROW, 0, line, &[exception]);
-                let list = self.read_collection(&mut collection, line, false);
+                let list = self.read_collection(collection, line, false);
                 let function = self.string(ZEND_NAME_FQ, line, b"array_last");
                 let list = self.node(SHARP_AST_ARG_LIST, 0, line, &[list]);
                 let element = self.node(SHARP_AST_CALL, 0, line, &[function, list]);
@@ -6657,10 +6750,13 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 self.node(SHARP_AST_CONDITIONAL, ZEND_PARENTHESIZED_CONDITIONAL, line, &[is_empty, throw, element])
             }
             ("List", b"clear") => {
-                let place = self.read_collection(&mut collection, line, false);
+                let place = self.read_collection(collection, line, false);
                 match collection {
                     CollectionReceiver::Value(_) => {
                         unreachable!("the checker refuses a change to a value with no place")
+                    }
+                    CollectionReceiver::Hidden(_) => {
+                        unreachable!("the checker refuses the value of a method that changes the collection")
                     }
                     CollectionReceiver::Index(..) => {
                         let clear = self.string(0, line, b"clear");
@@ -6676,14 +6772,14 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 }
             }
             ("List", b"count") => {
-                let list = self.read_collection(&mut collection, line, false);
+                let list = self.read_collection(collection, line, false);
 
                 self.global_call(line, b"count", &[list])
             }
             // `getOrNull(i)` is `($list[$i] ?? null)`, the read that gives null past either end.
             ("List", b"getornull") => {
-                let list = self.read_collection(&mut collection, line, false);
-                let index = self.expression(element());
+                let list = self.read_collection(collection, line, false);
+                let index = self.side(&element());
                 let read = self.node(SHARP_AST_DIM, 0, line, &[list, index]);
                 let null = self.zval(line, sharp_value::SHARP_NULL, |_| {});
 
@@ -6691,24 +6787,58 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             }
             // `toSet()` is the `Set` a literal of the elements makes.
             ("List", b"toset") => {
-                let list = self.read_collection(&mut collection, line, false);
+                let list = self.read_collection(collection, line, false);
 
                 self.collection_new(line, b"Sharp\\Set", Some(list))
             }
             _ => unreachable!(
                 "INLINED_COLLECTION_METHODS names `({collection_name}, {})`, which has no PHP here",
-                String::from_utf8_lossy(&method)
+                String::from_utf8_lossy(method)
             ),
+        }
+    }
+
+    /// Spec section 14.3: the value `value` reads of the method of a `List`, `Map`, `Set` or `Iterable` the checker
+    /// resolved it to, a function that runs the method on the collection `receiver` gave when the value was read, as
+    /// [`Self::receiver_closure`] holds it. One of the [`INLINED_COLLECTION_METHODS`] runs the PHP its call runs on the
+    /// array, with the method's parameter, if it has one, as `$value`. A lazy operation of an `Iterable` runs on
+    /// `\Sharp\Sequence::from($receiver)`, as its call does, and any other method runs on `Sharp\Collection`, as its
+    /// call does, each with the arguments the value is called with.
+    fn collection_method_value(&mut self, value: &Expression, receiver: &Expression) -> u32 {
+        let line = self.line(value);
+        let target = self.expression(receiver);
+        if let Some((collection_name, method, _)) = self.php_collection_method(value) {
+            let parameter_type = self.types.value_parameter_type(value);
+            let element = parameter_type.as_ref().map(|r#type| Side::Hidden {
+                span: value.span(),
+                name: b"value".to_vec(),
+                r#type,
+            });
+            let parameters: &[(&[u8], u32)] = if element.is_some() { &[(b"value", 0)] } else { &[] };
+            let mut collection = CollectionReceiver::Hidden(value.span());
+            let body = self.inlined_collection_method(
+                value.span(),
+                receiver,
+                (collection_name, &method),
+                &mut collection,
+                element,
+            );
+
+            return self.receiver_closure_of(value, target, parameters, false, body);
+        }
+
+        let (Expression::Access(Access::Property(PropertyAccess { property, .. }))
+        | Expression::Access(Access::NullSafeProperty(NullSafePropertyAccess { property, .. }))) = value
+        else {
+            unreachable!("a method value is a member read");
         };
-        self.release_collection(collection);
+        let member = self.member(property);
+        let lazy = self.types.is_lazy_operation(value);
+        self.receiver_closure(value, target, None, |this, receiver, arguments| {
+            let receiver = if lazy { this.sequence_from(line, receiver) } else { receiver };
+            let arguments = this.node(SHARP_AST_ARG_LIST, 0, line, arguments);
 
-        Some(match test {
-            Some(test) => {
-                let null = self.zval(line, sharp_value::SHARP_NULL, |_| {});
-
-                self.node(SHARP_AST_CONDITIONAL, ZEND_PARENTHESIZED_CONDITIONAL, line, &[test, null, lowered])
-            }
-            None => lowered,
+            this.node(SHARP_AST_METHOD_CALL, 0, line, &[receiver, member, arguments])
         })
     }
 
@@ -6727,18 +6857,18 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         call: Span,
         collection: &mut CollectionReceiver,
         element_type: &TUnion,
-        value: &Expression,
+        value: Side,
         search: Search,
     ) -> u32 {
         let line = self.line(call);
-        let value_type = self.types.expression_type(value);
+        let value_type = self.side_type(&value);
         // `\in_array` and `\array_search` read the value before the list, so they run only where neither side runs code.
         let strict = self.declared_equality(element_type, value_type).is_none()
             && !mixes_numbers(element_type, value_type)
             && self.compares_identically(element_type, value_type)
             && !holds_class_value(element_type)
             && !holds_class_value(value_type)
-            && self.is_pure(value)
+            && !matches!(value, Side::Expression(expression) if !self.is_pure(expression))
             && self.runs_nothing(collection);
         let hidden = (matches!(search, Search::Remove) || (strict && matches!(search, Search::IndexOf))).then(|| {
             self.temporaries += 1;
@@ -6746,7 +6876,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             format!("index#{}", self.temporaries).into_bytes()
         });
         let found = if strict {
-            let value = self.expression(value);
+            let value = self.side(&value);
             let list = self.read_collection(collection, line, false);
             let strict = self.zval(line, sharp_value::SHARP_TRUE, |_| {});
             let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[value, list, strict]);
@@ -6764,7 +6894,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             let equality = self.equality(line, element, held, false);
             let compare = self.hidden_arrow_function(call, &[&element_name], equality);
             let compare_with = self.hidden_arrow_function(call, &[&value_name], compare);
-            let value = self.expression(value);
+            let value = self.side(&value);
             let value = self.node(SHARP_AST_ARG_LIST, 0, line, &[value]);
             let predicate = self.node(SHARP_AST_CALL, 0, line, &[compare_with, value]);
             self.temporaries -= 2;
@@ -6814,7 +6944,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// or a value that [`Self::is_pure`] reads.
     fn runs_nothing(&self, collection: &CollectionReceiver) -> bool {
         match collection {
-            CollectionReceiver::Place(_) => true,
+            CollectionReceiver::Place(_) | CollectionReceiver::Hidden(_) => true,
             CollectionReceiver::Property(object, _) | CollectionReceiver::Value(object) => {
                 self.is_pure(object.expression)
             }
@@ -6908,6 +7038,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             }
             CollectionReceiver::Value(value) if null_safe => self.read_as(value, Self::null_safe_object),
             CollectionReceiver::Value(value) => self.read(value),
+            CollectionReceiver::Hidden(span) => self.variable(*span, b"receiver"),
         }
     }
 
@@ -6921,6 +7052,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 self.release_collection(*list);
             }
             CollectionReceiver::Value(value) => self.release(value),
+            CollectionReceiver::Hidden(_) => {}
         }
     }
 
@@ -7279,7 +7411,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// form of it, as `trim($name)` for `name.trim()`. The checker chose it from the type the code shows, so it runs
     /// on any value of that type, an object of a subclass with its own member of that name too. A call passes the
     /// caller's position, as [`Self::caller_positions`] says, and a generic member's call ends with its type
-    /// arguments, as any generic call does.
+    /// arguments, as any generic call does. A method read without `(…)` is its value, spec section 14.3, a closure over
+    /// the receiver, as [`Self::receiver_closure`] writes it, that calls the static method with no caller's position.
     fn extension_access(
         &mut self,
         access: &Expression,
@@ -7288,6 +7421,18 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         arguments: Option<&ArgumentList>,
     ) -> u32 {
         let line = self.line(access);
+        // Spec section 14.3: a read of an extension method is its value, which calls the static method with the
+        // receiver first and then the arguments the value is called with.
+        if arguments.is_none() && self.types.is_extension_method_value(access) {
+            let target = self.expression(receiver);
+            let type_arguments = self.types.extension_type_arguments(access);
+
+            return self.receiver_closure(access, target, type_arguments.as_deref(), |this, receiver, arguments| {
+                let values: Vec<u32> = std::iter::once(receiver).chain(arguments.iter().copied()).collect();
+
+                this.operator_call(line, extension.class, extension.name.as_bytes(), &values)
+            });
+        }
         if let Some(inlined) = self.inlined(extension, Some(receiver), arguments, line) {
             return inlined;
         }

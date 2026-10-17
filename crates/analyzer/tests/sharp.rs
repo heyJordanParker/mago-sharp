@@ -2475,8 +2475,9 @@ fn a_plain_php_constant_is_read_through_its_namespace() {
 }
 
 /// A `Name.member` read that reaches no constant is refused for what it names: `global.NOPE` and `Pdf.NOPE` name no
-/// constant, and the note names the namespace that lacks it. `global.strlen` and `Pdf.render` are functions the code
-/// calls, and `Nope` names no class and no namespace. The checker accepted each before, and the compile panicked on it.
+/// constant, and the note names the namespace that lacks it. `global.strlen` and `Pdf.render` are functions, so each
+/// read is the function's value, spec section 14.3, and `Nope` names no class and no namespace. The checker accepted
+/// each refused read before, and the compile panicked on it.
 #[test]
 fn a_read_through_a_name_that_reaches_no_constant_is_refused() {
     let pdf = (
@@ -2492,8 +2493,6 @@ fn a_read_through_a_name_that_reaches_no_constant_is_refused() {
         refusals(sharp, &[pdf]),
         [
             "7:37 non-existent-constant Undefined constant: `global.NOPE`. | Check `NOPE` for typos.",
-            "8:36 non-existent-constant `global.strlen` is a plain PHP function, not a constant: call it, as in `global.strlen(…)`. | ",
-            "9:36 non-existent-constant `Pdf.render` is a plain PHP function, not a constant: call it, as in `Pdf.render(…)`. | ",
             "10:34 non-existent-class-like `Nope` names no class, and no namespace this file imports. | Check the spelling of `Nope`, or import the class or the namespace whose member this reads.",
             "11:33 non-existent-constant Undefined constant: `Pdf.NOPE`. | Check `NOPE` for typos.",
         ]
@@ -4932,6 +4931,49 @@ fn a_method_value_passed_to_a_collection_method_types_its_result() {
     assert_eq!(codes(&issues(("src/Demo/Report.sharp", sharp), &[])), ["invalid-local-assignment-value"]);
 }
 
+/// Spec section 14.3: a method named without parentheses is a function value, whatever it is a method of: a `List`,
+/// `Map` or `Set` method that leaves the collection as it is, an extension method of the standard library or of an
+/// import, and a plain PHP function. Each value has its method's function type without the receiver.
+#[test]
+fn a_method_value_of_a_collection_an_extension_or_a_plain_php_function_has_its_function_type() {
+    let sharp = "namespace Demo;\n\nimport App.Shared.Text.TextExtensions;\n\nclass Report\n{\n    public int run(List<int> numbers, List<int> allowed, Map<string, int> prices, Set<int> seen, List<string> names, string title)\n    {\n        List<int> kept = numbers.filter(allowed.contains);\n        List<string> priced = names.filter(prices.has);\n        List<int> met = numbers.filter(seen.contains);\n        Function<int()> size = allowed.count;\n        Function<string()> tidy = title.trim;\n        Function<string(string)> slug = title.slug;\n        List<string> upper = names.map(global.strtoupper);\n        Function<int(string)> length = global.strlen;\n        Function<int(int)> wrongList = allowed.contains;\n        Function<int()> wrongExtension = title.trim;\n        Function<string(int)> wrongImported = title.slug;\n        Function<string(string)> wrongFunction = global.strlen;\n        const trimmed = title.trim;\n        const slugged = title.slug;\n        string wrongCall = slugged(1);\n        return kept.count() + priced.count() + met.count() + size() + global.strlen(tidy()) + global.strlen(slug(\"-\")) + upper.count() + length(\"x\") + global.strlen(trimmed()) + global.strlen(slugged(\"-\")) + global.strlen(wrongCall);\n    }\n}\n";
+    let text = "namespace Sharp.Text;\n\npublic static class Text\n{\n    extension(string text)\n    {\n        public string trim() => global.trim(text);\n    }\n}\n";
+    let extensions = [
+        ("src/App/Shared/Text/TextExtensions.sharp", TEXT_EXTENSIONS),
+        ("vendor/heyjordanparker/php-sharp-composer/library/Sharp/Text/Text.sharp", text),
+    ];
+
+    assert_eq!(
+        issues(("src/Demo/Report.sharp", sharp), &extensions),
+        [
+            "17:40 invalid-local-assignment-value",
+            "18:42 invalid-local-assignment-value",
+            "19:47 invalid-local-assignment-value",
+            "20:50 invalid-local-assignment-value",
+            "23:36 invalid-argument",
+        ]
+    );
+}
+
+/// Spec section 14.3 with section 12: a method value holds the collection as it was when the value was made, so a
+/// method that changes the collection would change only that copy. As in Swift, which refuses a value of a `mutating`
+/// method, it is refused, with the lambda that changes the collection itself.
+#[test]
+fn a_method_value_of_a_collection_method_that_changes_the_collection_is_refused() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public int run(List<int> allowed, Map<string, int> prices, Set<int> seen)\n    {\n        const add = allowed.add;\n        const insert = allowed.insert;\n        const remove = prices.remove;\n        const clear = seen.clear;\n        const kept = allowed.contains;\n        return kept(1) ? 1 : 0;\n    }\n}\n";
+
+    assert_messages(
+        sharp,
+        &[],
+        &[
+            "7:21 invalid-property-access: `allowed.add` changes the collection, and a function value holds a copy of it: write a lambda that calls it, as in `value => allowed.add(value)`.",
+            "8:24 invalid-property-access: `allowed.insert` changes the collection, and a function value holds a copy of it: write a lambda that calls it, as in `(index, value) => allowed.insert(index, value)`.",
+            "9:24 invalid-property-access: `prices.remove` changes the collection, and a function value holds a copy of it: write a lambda that calls it, as in `key => prices.remove(key)`.",
+            "10:23 invalid-property-access: `seen.clear` changes the collection, and a function value holds a copy of it: write a lambda that calls it, as in `() => seen.clear()`.",
+        ],
+    );
+}
+
 /// A lambda passed to a collection method is checked against the element type, as any argument is.
 #[test]
 fn a_collection_method_refuses_a_lambda_of_another_element_type() {
@@ -6519,8 +6561,8 @@ fn php_calls_an_extension_member_as_the_static_method_it_runs_as() {
 }
 
 /// Spec section 26: a file that imports an extension's class calls its methods and reads its computed properties as
-/// members of the receiver, checked against the static methods they run as. A method is called and a computed
-/// property is read, never written.
+/// members of the receiver, checked against the static methods they run as. A method is called, or read as its
+/// function value, spec section 14.3, and a computed property is read, never written.
 #[test]
 fn an_imported_extension_is_a_member_of_its_receiver() {
     let sharp = "namespace Demo;\n\nimport App.Shared.Text.TextExtensions;\n\npublic class Catalog\n{\n    public string handle(string title) => title.slug(\"-\");\n    public bool empty(string title) => title.isBlank;\n    public int count(string title) => title.slug(\"-\");\n    public string wrong(string title) => title.slug(1);\n    public bool none(string title) => title.isBlank(\"-\");\n    public string bare(string title) => title.slug;\n    public void write(string title)\n    {\n        title.isBlank = true;\n    }\n    public string few(string title) => title.slug();\n}\n";
@@ -6533,7 +6575,7 @@ fn an_imported_extension_is_a_member_of_its_receiver() {
             "10:53 invalid-argument: Invalid argument type for argument #2 of `TextExtensions.slug`: expected `string`, but found `int`.",
             "11:45 non-existent-method: `isBlank` is a computed property of `string`, not a method: read it without `(…)`.",
             "11:39 mixed-return-statement: Could not infer a precise return type for method `Catalog.none`. Saw type `Any?`.",
-            "12:47 non-existent-property: `slug` is a method of `string`, not a computed property: call it as `slug(…)`.",
+            "12:41 invalid-return-statement: Invalid return type for method `Catalog.bare`: expected `string`, but found `Function<string(string)>`.",
             "15:15 invalid-property-write: `isBlank` is a computed property an extension adds: it is read, never written.",
             "17:40 too-few-arguments: Too few arguments provided for method `TextExtensions.slug`.",
         ],
@@ -17103,6 +17145,36 @@ fn a_plain_php_method_value_has_its_extern_s_effects_where_it_runs() {
         [
             "app/Shop/Pricing.sharp:15:37 impure-law: Law `viaUses` reaches `Pricing.carriedRead`, which calls `Meter.read` with the effect `Clock`. Laws hold only over pure code.",
             "app/Shop/Pricing.sharp:17:38 impure-law: Law `viaPlain` reaches `Pricing.calledRead`, which calls `Meter.read` with the effect `Clock`. Laws hold only over pure code.",
+        ]
+    );
+}
+
+/// Spec section 14.3: a plain PHP function's value has the effects its `extern` declares wherever it runs, as a call of
+/// the function does, and an extension method's value has the effects of its body, passed to a function parameter, to
+/// a collection method, or to plain PHP. A function with no `extern` is refused where a function type lists effects.
+#[test]
+fn a_function_or_extension_method_value_has_its_effects_where_it_runs() {
+    let stub = (
+        "app/Stubs/Text.sharp",
+        "namespace App.Stubs;\n\nextern global.strtoupper uses Clock;\nextern global.call_user_func;\nextern global.time uses Clock;\n",
+    );
+    let stamps = (
+        "app/Shop/Stamps.sharp",
+        "namespace App.Shop;\n\npublic static class Stamps\n{\n    extension(string text)\n    {\n        public string stamped(string tail) => text + tail + `${global.time()}`;\n    }\n}\n",
+    );
+    let pricing = (
+        "app/Shop/Pricing.sharp",
+        "namespace App.Shop;\n\npublic class Pricing\n{\n    public static string carried(Function<string(string)> body) => body(\"a\");\n\n    public static string mailed(Function<string(string) uses Mail> body) => body(\"a\");\n\n    public string viaParameter => Pricing.carried(global.strtoupper);\n\n    public string viaPlain => global.call_user_func(global.strtoupper, \"a\");\n\n    public int viaCollection => [\"a\"].map(\"b\".stamped).count();\n\n    public string held => Pricing.mailed(global.strtolower);\n\n    law parameter(Pricing pricing) => pricing.viaParameter != \"\";\n\n    law plain(Pricing pricing) => pricing.viaPlain != \"\";\n\n    law collection(Pricing pricing) => pricing.viaCollection > 0;\n}\n",
+    );
+
+    assert_eq!(issues(pricing, &[stamps, stub]), Vec::<String>::new());
+    assert_eq!(
+        effect_issues(&[pricing, stamps, stub]),
+        [
+            "app/Shop/Pricing.sharp:17:39 impure-law: Law `parameter` reaches `Pricing.viaParameter`, which calls `global.strtoupper` with the effect `Clock`. Laws hold only over pure code.",
+            "app/Shop/Pricing.sharp:19:35 impure-law: Law `plain` reaches `Pricing.viaPlain`, which calls `global.strtoupper` with the effect `Clock`. Laws hold only over pure code.",
+            "app/Shop/Pricing.sharp:21:40 impure-law: Law `collection` reaches `Stamps.stamped`, which calls `global.time` with the effect `Clock`. Laws hold only over pure code.",
+            "app/Shop/Pricing.sharp:15:42 invalid-argument: `global.strtolower` has no `extern` declaration, so a `Function<string(string) uses Mail>` cannot hold it. Help: Declare it in a .sharp file: `extern global.strtolower;` when it has no effect, or name its effects after `uses`.",
         ]
     );
 }

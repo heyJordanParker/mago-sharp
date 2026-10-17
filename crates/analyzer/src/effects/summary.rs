@@ -186,11 +186,12 @@ pub(crate) fn record_function_values<A>(
 
     let codebase = context.codebase;
     for atomic in value.types.iter() {
-        // A method value of plain PHP has a signature PHP wrote, which lists no effects.
+        // A method or function value of plain PHP has a signature PHP wrote, which lists no effects.
         let source = match atomic {
-            TAtomic::Callable(TCallable::Signature(signature)) => signature
-                .source
-                .filter(|source| signature.effects.is_some() || matches!(source, FunctionLikeIdentifier::Method(..))),
+            TAtomic::Callable(TCallable::Signature(signature)) => signature.source.filter(|source| {
+                signature.effects.is_some()
+                    || matches!(source, FunctionLikeIdentifier::Method(..) | FunctionLikeIdentifier::Function(_))
+            }),
             TAtomic::Callable(TCallable::Alias(identifier)) => Some(*identifier),
             _ => None,
         };
@@ -199,7 +200,8 @@ pub(crate) fn record_function_values<A>(
             Some(FunctionLikeIdentifier::Method(class, method)) => {
                 method_value_runs(codebase, class, method.as_bytes())
             }
-            Some(FunctionLikeIdentifier::Function(_)) | None => None,
+            Some(FunctionLikeIdentifier::Function(function)) => Some(function_value_runs(codebase, function)),
+            None => None,
         };
         let Some(runs) = runs else {
             continue;
@@ -238,6 +240,14 @@ fn method_value_runs(codebase: &CodebaseMetadata, class: Word, method: &[u8]) ->
     } else {
         Runs::Foreign { callee, effects: plain_php_effects(extern_of(codebase, class, lowercase_method), callee) }
     })
+}
+
+/// What a value of the plain PHP function `function` runs wherever it is called, spec section 14.3: the effects its
+/// `extern` declares, as a call of the function has them.
+fn function_value_runs(codebase: &CodebaseMetadata, function: Word) -> Runs {
+    let (callee, declaration) = function_extern(codebase, function);
+
+    Runs::Foreign { callee, effects: plain_php_effects(declaration, callee) }
 }
 
 /// The summary of `body`, a body of the class `class`, and the summaries of the lambdas written in it.
@@ -773,19 +783,8 @@ where
         for target in targets {
             match *target {
                 CallTarget::FunctionLike { callee: FunctionLikeIdentifier::Function(function_name), .. } => {
-                    let name = self
-                        .codebase()
-                        .get_function(function_name.as_bytes())
-                        .map_or(function_name, |metadata| metadata.original_name);
-                    // A function of PHP's root namespace is named as the file calls it, `global.now`, spec section 23.
-                    let cause = if name.as_bytes().contains(&b'\\') {
-                        name
-                    } else {
-                        word([b"global.", name.as_bytes()].concat())
-                    };
-                    let declaration =
-                        extern_of(self.codebase(), empty_word(), ascii_lowercase_word(function_name.as_bytes()));
-                    self.plain_php(declaration, span, (empty_word(), cause));
+                    let (cause, declaration) = function_extern(self.codebase(), function_name);
+                    self.plain_php(declaration, span, cause);
                     self.callbacks(arguments);
                 }
                 CallTarget::FunctionLike {
@@ -1061,16 +1060,17 @@ where
         }
     }
 
-    /// A method value, such as `this.label` or `Job.ping`, passed to a call that runs it on `elements`: a call of each
-    /// method its type names the analysis resolved it to, with the object it is read from as the receiver, which has
-    /// the effects a call of the method has.
+    /// A method or function value, such as `this.label`, `Job.ping` or `global.trim`, passed to a call that runs it on
+    /// `elements`: a call of each method or function its type names the analysis resolved it to, with the object it is
+    /// read from as the receiver, which has the effects a call of it has. An extension method takes that object as its
+    /// first argument, spec section 26.
     fn method_value(&mut self, value: &'ast Expression<'arena>, span: Span, elements: &Roots) {
         let receiver = match value.unparenthesized() {
             Expression::Access(Access::Property(access)) => self.roots(access.object),
             _ => Roots::new(),
         };
         let codebase = self.codebase();
-        let runs: Vec<(Runs, usize)> = self
+        let runs: Vec<(Runs, &FunctionLikeMetadata)> = self
             .artifacts
             .get_expression_type(value)
             .into_iter()
@@ -1081,15 +1081,26 @@ where
                     ..
                 })) => Some((
                     method_value_runs(codebase, *class, method.as_bytes())?,
-                    codebase.get_declaring_method(class.as_bytes(), method.as_bytes())?.parameters.len(),
+                    codebase.get_declaring_method(class.as_bytes(), method.as_bytes())?,
                 )),
+                TAtomic::Callable(TCallable::Signature(TCallableSignature {
+                    source: Some(FunctionLikeIdentifier::Function(function)),
+                    ..
+                })) => Some((function_value_runs(codebase, *function), codebase.get_function(function.as_bytes())?)),
                 _ => None,
             })
             .collect();
-        for (runs, parameters) in runs {
+        for (runs, metadata) in runs {
             match runs {
+                Runs::Body(callee) if metadata.flags.is_extension_method() => {
+                    let others = metadata.parameters.len().saturating_sub(1);
+                    let arguments = std::iter::once(receiver.clone())
+                        .chain(std::iter::repeat_n(elements.clone(), others))
+                        .collect();
+                    self.summary.calls.push(Call { callee, span, receiver: Roots::new(), arguments });
+                }
                 Runs::Body(callee) => {
-                    let arguments = vec![elements.clone(); parameters];
+                    let arguments = vec![elements.clone(); metadata.parameters.len()];
                     self.summary.calls.push(Call { callee, span, receiver: receiver.clone(), arguments });
                 }
                 Runs::Foreign { callee, effects } => {
@@ -1280,6 +1291,16 @@ where
     ) {
         recorder.write(unary.operand, unary.span(), None);
     }
+}
+
+/// The plain PHP function `function` as the cause of its effects, with no class and the name the file calls it by, as
+/// `global.now` names one of PHP's root namespace, spec section 23, and the `extern` declaration a call of it falls
+/// under.
+fn function_extern(codebase: &CodebaseMetadata, function: Word) -> ((Word, Word), Option<&ExternMetadata>) {
+    let name = codebase.get_function(function.as_bytes()).map_or(function, |metadata| metadata.original_name);
+    let cause = if name.as_bytes().contains(&b'\\') { name } else { word([b"global.", name.as_bytes()].concat()) };
+
+    ((empty_word(), cause), extern_of(codebase, empty_word(), ascii_lowercase_word(function.as_bytes())))
 }
 
 /// The `extern` declaration a call of `member` (empty for a function's own name) on `class` (empty for a function)

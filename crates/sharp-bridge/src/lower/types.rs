@@ -26,6 +26,7 @@ use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeString;
 use mago_codex::ttype::comparator::union_comparator::can_expression_types_be_identical;
 use mago_codex::ttype::get_array_parameters;
+use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_sharp_type;
 use mago_codex::ttype::is_written_in_sharp;
 use mago_codex::ttype::template::variance::Variance;
@@ -1042,6 +1043,42 @@ impl<'analysis> Types<'analysis> {
         })
     }
 
+    /// Whether the read `access` is the value of the extension method it reaches, spec section 14.3, which the analysis
+    /// resolved as it resolves a call, and not a computed property.
+    pub(crate) fn is_extension_method_value(&self, access: &Expression) -> bool {
+        matches!(access, Expression::Access(_))
+            && matches!(
+                self.artifacts.get_callees(access).next(),
+                Some(CallTarget::FunctionLike { callee: FunctionLikeIdentifier::Method(class, method), .. })
+                    if self.codebase.get_method(class.as_bytes(), method.as_bytes())
+                        .is_some_and(|metadata| metadata.flags.is_extension_method())
+            )
+    }
+
+    /// The type of the first parameter of the function the method value `value` is, as the checker typed it. None for a
+    /// function that takes none.
+    pub(crate) fn value_parameter_type(&self, value: &Expression) -> Option<TUnion> {
+        self.expression_type(value).types.iter().find_map(|atomic| match atomic {
+            TAtomic::Callable(TCallable::Signature(signature)) => {
+                Some(signature.get_parameters().first()?.get_type_signature().cloned().unwrap_or_else(get_mixed))
+            }
+            _ => None,
+        })
+    }
+
+    /// The full name of the plain PHP function the read `read` gives the value of, spec section 14.3, as
+    /// `global.strtoupper` and `Pdf.render` read one, as the analysis resolved it. None for any other read.
+    pub(crate) fn function_value(&self, read: &Expression) -> Option<Word> {
+        match self.artifacts.get_callees(read).next() {
+            Some(CallTarget::FunctionLike { callee: FunctionLikeIdentifier::Function(function), .. })
+                if matches!(read, Expression::Access(_)) =>
+            {
+                Some(*function)
+            }
+            _ => None,
+        }
+    }
+
     /// The inline form of the standard library method `declaration` names, if it has one.
     pub(crate) fn inline_form(&self, declaration: &Declaration) -> Option<&'analysis InlineForm> {
         if !matches!(declaration.kind, DeclarationKind::Method { .. } | DeclarationKind::StaticMethod) {
@@ -1197,7 +1234,8 @@ impl<'analysis> Types<'analysis> {
     }
 
     /// The collection, `List`, `Map` or `Set`, and the name in lowercase of the collection method the analyzer checked
-    /// the method call `call` against, null-safe or not: a method of `Sharp\Internal\ListMethods`,
+    /// the method call `call` against, null-safe or not, or that the read `call` gives the value of, spec section
+    /// 14.3: a method of `Sharp\Internal\ListMethods`,
     /// `Sharp\Internal\MapMethods` or `Sharp\Internal\SetMethods`. None for a call of any other method.
     pub(crate) fn collection_method(&self, call: &Expression) -> Option<(&'static str, Vec<u8>)> {
         let mut callees = self.artifacts.get_callees(call);

@@ -444,7 +444,13 @@ where
         if let Some(callable) = cast_atomic_to_callable(atomic, context.codebase, Some(template_result)) {
             match callable.as_ref() {
                 TCallable::Signature(callable_signature) => {
+                    // An extension method's value takes the method's arguments after its receiver, spec section 14.3,
+                    // so its own signature checks the call.
                     if let Some(id) = callable_signature.get_source()
+                        && !context
+                            .codebase
+                            .get_function_like(&id)
+                            .is_some_and(|metadata| metadata.flags.is_extension_method())
                         && let Some(target) = get_function_like_target(
                             context,
                             id,
