@@ -5298,8 +5298,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
                 self.node(SHARP_AST_CONST, 0, line, &[constant])
             }
-            // Spec section 14.3: `global.strtoupper` and `Pdf.render`, read without `(…)`, are the plain PHP
-            // function's first-class callable, `\strtoupper(...)`.
+            // Spec section 14.3: `global.ucfirst` and `Pdf.render`, read without `(…)`, are the plain PHP
+            // function's first-class callable, `\ucfirst(...)`.
             Expression::Access(Access::Property(_)) if let Some(function) = self.types.function_value(expression) => {
                 let function = self.string(ZEND_NAME_FQ, line, function.as_bytes());
                 let callable = self.node(SHARP_AST_CALLABLE_CONVERT, 0, line, &[]);

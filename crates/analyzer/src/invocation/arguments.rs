@@ -13,6 +13,7 @@ use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::array::keyed::TKeyedArray;
 use mago_codex::ttype::atomic::array::list::TList;
 use mago_codex::ttype::atomic::callable::TCallable;
+use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::cast::cast_atomic_to_callable;
 use mago_codex::ttype::combiner::CombinerOptions;
@@ -25,6 +26,8 @@ use mago_codex::ttype::get_backed_enum;
 use mago_codex::ttype::get_iterable_value_parameter;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_never;
+use mago_codex::ttype::template::TemplateResult;
+use mago_codex::ttype::template::inferred_type_replacer;
 use mago_codex::ttype::union::TUnion;
 use mago_names::ResolvedNames;
 use mago_reporting::Annotation;
@@ -52,6 +55,7 @@ use crate::utils::names::display_nullable_type;
 use crate::utils::names::display_type;
 use crate::utils::names::display_value_type;
 use crate::utils::names::display_variable_name;
+use crate::utils::names::sharp_collection_name;
 use crate::utils::report_int_for_float;
 use crate::utils::template::explain_blocked_substitution;
 use crate::utils::with_function_fit_message;
@@ -131,7 +135,7 @@ where
     }
 
     let parameter = parameter.get_name().map_or_else(
-        || format!("argument #{}", argument_offset + 1),
+        || format!("argument #{}", invocation_target.argument_number(argument_offset)),
         |name| format!("parameter `{}`", display_variable_name(context, name.0.as_bytes())),
     );
     let target_kind = invocation_target.guess_kind(context);
@@ -229,7 +233,7 @@ where
         let target_kind_str = invocation_target.guess_kind(context);
         let target_name_str = invocation_target.guess_name(context);
         let parameter_label = invocation_target.get_effective_parameter_name(argument_offset).map_or_else(
-            || format!("#{}", argument_offset + 1),
+            || format!("#{}", invocation_target.argument_number(argument_offset)),
             |name| format!("`{}`", display_variable_name(context, name.as_bytes())),
         );
 
@@ -256,6 +260,33 @@ where
     Ok(())
 }
 
+/// `parameter_type` as an issue shows it. A type parameter of a PHP# collection method that the call left open, as `R`
+/// of `flatMap`, shows as its bound, as TypeScript shows `unknown`, since no code the user writes names it.
+fn shown_parameter_type<'parameter, A>(
+    context: &Context<'_, '_, A>,
+    invocation_target: &InvocationTarget<'_>,
+    parameter_type: &'parameter TUnion,
+) -> Cow<'parameter, TUnion>
+where
+    A: Arena,
+{
+    let (Some(FunctionLikeIdentifier::Method(class, _)), Some(metadata)) =
+        (invocation_target.get_function_like_identifier(), invocation_target.get_function_like_metadata())
+    else {
+        return Cow::Borrowed(parameter_type);
+    };
+    if metadata.template_types.is_empty() || sharp_collection_name(&TObject::new_named(*class)).is_none() {
+        return Cow::Borrowed(parameter_type);
+    }
+
+    let mut bounds = TemplateResult::default();
+    for (name, template) in &metadata.template_types {
+        bounds.add_lower_bound(*name, template.defining_entity, template.constraint.clone());
+    }
+
+    Cow::Owned(inferred_type_replacer::replace(parameter_type, &bounds, context.codebase))
+}
+
 /// Verifies an argument's type against the expected parameter type, and returns whether the argument fits it.
 pub fn verify_argument_type<'arena, A>(
     context: &mut Context<'_, 'arena, A>,
@@ -272,13 +303,14 @@ where
     let target_kind_str = invocation_target.guess_kind(context);
     let effective_parameter_name = invocation_target.get_effective_parameter_name(argument_offset);
     let argument_label = effective_parameter_name.map_or_else(
-        || format!("argument #{}", argument_offset + 1),
+        || format!("argument #{}", invocation_target.argument_number(argument_offset)),
         |name| format!("`{}`", display_variable_name(context, name.as_bytes())),
     );
     let argument_subject = effective_parameter_name.map_or_else(
-        || format!("Argument #{}", argument_offset + 1),
+        || format!("Argument #{}", invocation_target.argument_number(argument_offset)),
         |name| format!("Argument `{}`", display_variable_name(context, name.as_bytes())),
     );
+    let shown_parameter_type = shown_parameter_type(context, invocation_target, parameter_type);
 
     if input_type.is_never() {
         let target_name_str = invocation_target.guess_name(context);
@@ -310,9 +342,9 @@ where
     if !takes_null {
         if input_type.is_null() {
             let target_name_str = invocation_target.guess_name(context);
-            let parameter_type_str = display_type(context, parameter_type);
+            let parameter_type_str = display_type(context, &shown_parameter_type);
             let nullable_parameter_type_str =
-                display_nullable_type(context, parameter_type, format!("{parameter_type_str}|null"));
+                display_nullable_type(context, &shown_parameter_type, format!("{parameter_type_str}|null"));
             let call_site = Annotation::secondary(invocation_target.span())
                 .with_message(format!("Arguments to this {target_kind_str} are incorrect"));
             context.collector.report_with_code(
@@ -333,7 +365,7 @@ where
         if input_type.is_nullable() && !input_type.ignore_nullable_issues() {
             let target_name_str = invocation_target.guess_name(context);
             let input_type_str = display_value_type(context, input_type, parameter_type);
-            let parameter_type_str = display_type(context, parameter_type);
+            let parameter_type_str = display_type(context, &shown_parameter_type);
             let call_site = Annotation::secondary(invocation_target.span())
                 .with_message(format!("Arguments to this {target_kind_str} are incorrect"));
             context.collector.report_with_code(
@@ -354,7 +386,7 @@ where
     if !parameter_type.accepts_false() {
         if input_type.is_false() {
             let target_name_str = invocation_target.guess_name(context);
-            let parameter_type_str = display_type(context, parameter_type);
+            let parameter_type_str = display_type(context, &shown_parameter_type);
             let call_site = Annotation::secondary(invocation_target.span())
                 .with_message(format!("Arguments to this {target_kind_str} are incorrect"));
             // PHP# cannot write `int|false`, so its help asks only for another value.
@@ -381,7 +413,7 @@ where
         if input_type.is_falsable() && !input_type.ignore_falsable_issues() {
             let target_name_str = invocation_target.guess_name(context);
             let input_type_str = display_value_type(context, input_type, parameter_type);
-            let parameter_type_str = display_type(context, parameter_type);
+            let parameter_type_str = display_type(context, &shown_parameter_type);
             let call_site = Annotation::secondary(invocation_target.span())
                 .with_message(format!("Arguments to this {target_kind_str} are incorrect"));
             context.collector.report_with_code(
@@ -435,7 +467,7 @@ where
 
     let target_name_str = invocation_target.guess_name(context);
     let input_type_str = display_value_type(context, input_type, parameter_type);
-    let parameter_type_str = display_type(context, parameter_type);
+    let parameter_type_str = display_type(context, &shown_parameter_type);
     let call_site = Annotation::secondary(invocation_target.span())
         .with_message(format!("Arguments to this {target_kind_str} are incorrect"));
 

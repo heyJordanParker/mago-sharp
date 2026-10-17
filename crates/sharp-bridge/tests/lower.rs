@@ -314,13 +314,13 @@ const RUN: &str = "int run(int extra)";
 /// `Sharp\Text` at the standard library's path, with methods each inlining rule takes or leaves.
 const TEXT: (&str, &str) = (
     "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Text.sharp",
-    "namespace Sharp;\n\npublic class Text\n{\n    public static string shout(string text) => global.strtoupper(text);\n\n    public static string padded(string text, int width = 8) => global.str_pad(global.trim(text), width);\n\n    public static string twice(string text) => global.str_repeat(text, global.strlen(text));\n\n    public static string trimmed(string text)\n    {\n        const trimmed = global.trim(text);\n        return trimmed;\n    }\n\n    public static Text make() => new Text();\n\n    public string label() => \"text\";\n\n    public string wrapped(string format) => global.sprintf(format, this.label());\n\n    public string secret(string text) => this.hidden(text);\n\n    private string hidden(string text) => global.strtolower(text);\n\n    public static string quiet(string text) => Text.muted(text);\n\n    protected static string muted(string text) => global.strtolower(text);\n\n    public virtual string echoed(string text) => this.wrapped(text);\n\n    public static string again(string text) => Self.shout(text);\n}\n",
+    "namespace Sharp;\n\npublic class Text\n{\n    public static string capitalized(string text) => global.ucfirst(text);\n\n    public static string padded(string text, int width = 8) => global.str_pad(global.trim(text), width);\n\n    public static string twice(string text) => global.str_repeat(text, global.strlen(text));\n\n    public static string trimmed(string text)\n    {\n        const trimmed = global.trim(text);\n        return trimmed;\n    }\n\n    public static Text make() => new Text();\n\n    public string label() => \"text\";\n\n    public string wrapped(string format) => global.sprintf(format, this.label());\n\n    public string secret(string text) => this.hidden(text);\n\n    private string hidden(string text) => global.lcfirst(text);\n\n    public static string quiet(string text) => Text.muted(text);\n\n    protected static string muted(string text) => global.lcfirst(text);\n\n    public virtual string echoed(string text) => this.wrapped(text);\n\n    public static string again(string text) => Self.capitalized(text);\n}\n",
 );
 
 /// `Lib\Loud`, a project file with a method the inlining rule would take in the standard library.
 const LOUD: (&str, &str) = (
     "src/Lib/Loud.sharp",
-    "namespace Lib;\n\npublic class Loud\n{\n    public static string shout(string text) => global.strtoupper(text);\n}\n",
+    "namespace Lib;\n\npublic class Loud\n{\n    public static string capitalized(string text) => global.ucfirst(text);\n}\n",
 );
 
 /// The statements of `run`, declared with `signature` and holding `statements` in a class that imports `Sharp.Text`
@@ -15842,7 +15842,7 @@ fn a_collection_method_value_is_a_closure_over_the_collection() {
 ///         return \App\Shared\Text\TextExtensions::slug($receiver, $separator);
 ///     };
 /// })($title);
-/// return \strtoupper(...);
+/// return \ucfirst(...);
 /// return \Vendor\Pdf\render(...);
 /// ```
 ///
@@ -15851,7 +15851,7 @@ fn a_collection_method_value_is_a_closure_over_the_collection() {
 #[test]
 fn an_extension_method_or_plain_php_function_value_calls_what_it_names() {
     let lowered = Lowered::with(
-        "namespace App;\n\nimport App.Shared.Text.TextExtensions;\nimport Vendor.Pdf;\n\nclass Report\n{\n    public Function<string(string)> slugger(string title) => title.slug;\n\n    public Function<string(string)> upper() => global.strtoupper;\n\n    public Function<string(string)> renderer() => Pdf.render;\n}\n",
+        "namespace App;\n\nimport App.Shared.Text.TextExtensions;\nimport Vendor.Pdf;\n\nclass Report\n{\n    public Function<string(string)> slugger(string title) => title.slug;\n\n    public Function<string(string)> capitalizer() => global.ucfirst;\n\n    public Function<string(string)> renderer() => Pdf.render;\n}\n",
         &[
             (
                 "src/App/Shared/Text/TextExtensions.sharp",
@@ -15913,12 +15913,12 @@ fn an_extension_method_or_plain_php_function_value_calls_what_it_names() {
         "#}
     );
     assert_eq!(
-        lowered.body_of("upper"),
+        lowered.body_of("capitalizer"),
         indoc! {r#"
             STMT_LIST
               RETURN
                 CALL
-                  ZVAL "strtoupper"
+                  ZVAL "ucfirst"
                   CALLABLE_CONVERT
         "#}
     );
@@ -23323,7 +23323,7 @@ fn form_names((path, code): (&str, &str)) -> Vec<String> {
 /// `again` calls `Self`, which names the caller's class once copied there. `hidden` and `muted` are not public.
 #[test]
 fn a_method_whose_body_is_one_call_reading_each_slot_once_gives_an_inline_form() {
-    assert_eq!(form_names(TEXT), ["sharp\\text::shout", "sharp\\text::padded", "sharp\\text::wrapped"]);
+    assert_eq!(form_names(TEXT), ["sharp\\text::capitalized", "sharp\\text::padded", "sharp\\text::wrapped"]);
 }
 
 /// `Position.current()` in a standard library method is the position in the library's file, inside that method. Copied
@@ -23333,14 +23333,14 @@ fn a_method_that_runs_position_current_gives_no_inline_form() {
     assert_eq!(
         form_names((
             "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Here.sharp",
-            "namespace Sharp;\n\npublic class Here\n{\n    public static Position now() => Position.current();\n\n    public static string shout(string text) => global.strtoupper(text);\n}\n"
+            "namespace Sharp;\n\npublic class Here\n{\n    public static Position now() => Position.current();\n\n    public static string capitalized(string text) => global.ucfirst(text);\n}\n"
         )),
-        ["sharp\\here::shout"]
+        ["sharp\\here::capitalized"]
     );
 }
 
 /// ```php
-/// return \strtoupper($text->label());
+/// return \ucfirst($text->label());
 /// ```
 ///
 /// A form that reads every slot in order before its first call runs its arguments in the order the call would, so
@@ -23348,12 +23348,12 @@ fn a_method_that_runs_position_current_gives_no_inline_form() {
 #[test]
 fn a_form_that_reads_its_slots_in_order_first_inlines_with_any_arguments() {
     assert_eq!(
-        inlined_body("string run(Text text)", "        return Text.shout(text.label());\n"),
+        inlined_body("string run(Text text)", "        return Text.capitalized(text.label());\n"),
         indoc! {r#"
             STMT_LIST
               RETURN
                 CALL
-                  ZVAL "strtoupper"
+                  ZVAL "ucfirst"
                   ARG_LIST
                     METHOD_CALL
                       VAR
@@ -23595,11 +23595,11 @@ fn a_call_the_inlining_rule_does_not_take_keeps_its_call() {
     let name = "        VAR\n          ZVAL \"name\"\n";
     let named = "        NAMED_ARG\n          ZVAL \"text\"\n          VAR\n            ZVAL \"name\"\n";
     let cases = [
-        ("Text.shout(text: name)", static_call("Sharp\\\\Text", "shout", named)),
+        ("Text.capitalized(text: name)", static_call("Sharp\\\\Text", "capitalized", named)),
         ("Text.padded(name)", static_call("Sharp\\\\Text", "padded", name)),
         ("Text.twice(name)", static_call("Sharp\\\\Text", "twice", name)),
         ("Text.trimmed(name)", static_call("Sharp\\\\Text", "trimmed", name)),
-        ("Loud.shout(name)", static_call("Lib\\\\Loud", "shout", name)),
+        ("Loud.capitalized(name)", static_call("Lib\\\\Loud", "capitalized", name)),
         ("Text.quiet(name)", static_call("Sharp\\\\Text", "quiet", name)),
         ("Text.again(name)", static_call("Sharp\\\\Text", "again", name)),
         ("text.secret(name)", method_call("secret")),
@@ -23681,8 +23681,9 @@ fn a_call_of_a_variadic_native_body_keeps_its_static_call() {
 #[test]
 fn the_unit_names_each_form_it_inlines_with_its_fingerprint() {
     let forms = common::checked(TEXT.0, TEXT.1, &[], inline_forms).expect("the library file is checked");
-    let (_, shout) = forms.iter().find(|(name, _)| name == b"sharp\\text::shout").expect("shout has a form");
-    let code = "namespace App.Tenant;\n\nimport Sharp.Text;\n\nclass Report\n{\n    public string run(string name) => Text.shout(name) + Text.shout(name);\n}\n";
+    let (_, capitalized) =
+        forms.iter().find(|(name, _)| name == b"sharp\\text::capitalized").expect("capitalized has a form");
+    let code = "namespace App.Tenant;\n\nimport Sharp.Text;\n\nclass Report\n{\n    public string run(string name) => Text.capitalized(name) + Text.capitalized(name);\n}\n";
     let lowered = Lowered::inlining(code, &[], &[TEXT]);
     let inlined: Vec<(String, u64)> = lowered
         .unit()
@@ -23692,7 +23693,7 @@ fn the_unit_names_each_form_it_inlines_with_its_fingerprint() {
         .map(|read| (String::from_utf8_lossy(&read.name).into_owned(), read.fingerprint))
         .collect();
 
-    assert_eq!(inlined, [("sharp\\text::shout".to_owned(), shout.fingerprint())]);
+    assert_eq!(inlined, [("sharp\\text::capitalized".to_owned(), capitalized.fingerprint())]);
 }
 
 /// The unit names the function type of each method its file declares with the xxh3-64 of the type text `is` tests a
@@ -23750,13 +23751,13 @@ fn a_form_fingerprint_follows_its_body_and_not_its_lines() {
         common::checked(TEXT.0, code, &[], inline_forms)
             .expect("the library file is checked")
             .into_iter()
-            .find(|(name, _)| name == b"sharp\\text::shout")
+            .find(|(name, _)| name == b"sharp\\text::capitalized")
             .map(|(_, form)| form.fingerprint())
-            .expect("shout has a form")
+            .expect("capitalized has a form")
     };
 
     assert_eq!(fingerprint(&TEXT.1.replacen("{\n", "{\n\n\n", 1)), fingerprint(TEXT.1));
-    assert_ne!(fingerprint(&TEXT.1.replace("strtoupper", "strtolower")), fingerprint(TEXT.1));
+    assert_ne!(fingerprint(&TEXT.1.replace("ucfirst", "lcfirst")), fingerprint(TEXT.1));
 }
 
 /// `Money`, which declares `==`, `+`, unary `-` and `<=>` on lines 7, 9, 11 and 13.
@@ -28013,21 +28014,21 @@ fn an_extension_member_passes_a_named_argument_by_its_name() {
 }
 
 /// `Sharp\Text\TextExtensions` at the standard library's path, beside a constant: its extension on `string` wraps
-/// `trim` with a method, `strlen` with a computed property and `strtoupper` with a method whose block returns it.
+/// `trim` with a method, `strlen` with a computed property and `mb_strtoupper` with a method whose block returns it.
 const TEXT_EXTENSIONS: (&str, &str) = (
     "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Text/TextExtensions.sharp",
-    "namespace Sharp.Text;\n\npublic static class TextExtensions\n{\n    public const int LIMIT = 80;\n\n    extension(string text)\n    {\n        public string trim() => global.trim(text);\n\n        public int length => global.strlen(text);\n\n        public string upper()\n        {\n            return global.strtoupper(text);\n        }\n    }\n}\n",
+    "namespace Sharp.Text;\n\npublic static class TextExtensions\n{\n    public const int LIMIT = 80;\n\n    extension(string text)\n    {\n        public string trim() => global.trim(text);\n\n        public int length => global.strlen(text);\n\n        public string uppercase()\n        {\n            return global.mb_strtoupper(text, \"UTF-8\");\n        }\n    }\n}\n",
 );
 
 /// ```php
-/// return trim($name) . strlen(trim($name)) . strtoupper($name);
+/// return trim($name) . strlen(trim($name)) . mb_strtoupper($name, 'UTF-8');
 /// ```
 ///
 /// Spec section 8: a standard library extension member whose body is one call inlines as that call, so `name.trim()`
 /// runs as `trim($name)`, with no call of the library's method. Every file has the library's extensions.
 #[test]
 fn a_standard_library_extension_member_inlines_as_the_call_its_body_makes() {
-    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public string run(string name)\n    {\n        return name.trim() + (string) name.trim().length + name.upper();\n    }\n}\n";
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public string run(string name)\n    {\n        return name.trim() + (string) name.trim().length + name.uppercase();\n    }\n}\n";
 
     assert_eq!(
         Lowered::inlining(code, &[], &[TEXT_EXTENSIONS]).body(),
@@ -28051,10 +28052,11 @@ fn a_standard_library_extension_member_inlines_as_the_call_its_body_makes() {
                               VAR
                                 ZVAL "name"
                   CALL
-                    ZVAL "strtoupper"
+                    ZVAL "mb_strtoupper"
                     ARG_LIST
                       VAR
                         ZVAL "name"
+                      ZVAL "UTF-8"
         "#}
     );
 }

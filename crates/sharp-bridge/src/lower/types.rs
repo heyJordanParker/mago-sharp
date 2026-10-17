@@ -1150,7 +1150,7 @@ impl<'analysis> Types<'analysis> {
     }
 
     /// The full name of the plain PHP function the read `read` gives the value of, spec section 14.3, as
-    /// `global.strtoupper` and `Pdf.render` read one, as the analysis resolved it. None for any other read.
+    /// `global.ucfirst` and `Pdf.render` read one, as the analysis resolved it. None for any other read.
     pub(crate) fn function_value(&self, read: &Expression) -> Option<Word> {
         match self.artifacts.get_callees(read).next() {
             Some(CallTarget::FunctionLike { callee: FunctionLikeIdentifier::Function(function), .. })

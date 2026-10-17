@@ -145,6 +145,11 @@ final class Map implements \ArrayAccess, \IteratorAggregate, \Countable, \JsonSe
      * @return list<V>
      */
     public function values(): array {}
+
+    /**
+     * @return list<array{K, V}> each entry, `[key, value]`, in insertion order.
+     */
+    public function toList(): array {}
 }
 
 /**
@@ -528,6 +533,15 @@ final class MapMethods
      * @mutation-free
      */
     public function values(): array {}
+
+    /**
+     * The analyzer types the result `List<[K, V]>`, which a docblock cannot write.
+     *
+     * @return array<K, V> the entries, each the tuple `[key, value]`, in order.
+     *
+     * @mutation-free
+     */
+    public function toList(): array {}
 
     /**
      * @return int how many entries the map holds.
