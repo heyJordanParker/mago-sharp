@@ -1270,11 +1270,11 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
                 return None;
             }
             if matches!(place, Method | Signature) {
-                let nevers = list.arguments.iter().filter_map(|argument| match argument {
+                let refusals = list.arguments.iter().filter_map(|argument| match argument {
                     Hint::Never(_) => type_written_another_way(argument, Parameter),
                     _ => None,
                 });
-                for issue in nevers {
+                for issue in refusals {
                     context.report(issue);
                 }
             }
