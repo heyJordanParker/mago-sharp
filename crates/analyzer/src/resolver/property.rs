@@ -2312,18 +2312,19 @@ where
         &TypeExpansionOptions::default(),
     );
     signature.is_closure = true;
-    if !signature.parameters.is_empty() {
-        signature.parameters.remove(0);
-    }
+    signature.parameters = signature.parameters.into_iter().skip(1).collect();
     let value = TUnion::from_atomic(TAtomic::Callable(TCallable::Signature(signature)));
     if metadata.template_types.is_empty() {
         return value;
     }
 
     let mut template_result = unfixed_type_arguments(metadata);
-    if let Some(parameter) = metadata.parameters.first().and_then(|parameter| parameter.get_type_metadata()) {
-        infer_unfixed_templates(context, &parameter.type_union, receiver, &mut template_result);
-    }
+    let receiver_parameter = metadata
+        .parameters
+        .first()
+        .and_then(|parameter| parameter.get_type_metadata())
+        .map_or_else(get_mixed, |parameter| parameter.type_union.clone());
+    infer_unfixed_templates(context, &receiver_parameter, receiver, &mut template_result);
     let method_name = display_sharp_member(display_class_like_name(context, class), metadata.original_name);
 
     fix_type_arguments(context, artifacts, value, metadata, &method_name, read_span, template_result)
