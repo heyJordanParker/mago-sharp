@@ -216,7 +216,7 @@ where
 }
 
 /// Analyzes `Name.member(…)` as a call of the plain PHP function `function`, which
-/// [`crate::utils::names::namespace_function_name`] found.
+/// [`crate::utils::names::namespace_function_name`] found. Only a `.sharp` file writes the call.
 pub(super) fn analyze_namespace_function_call<'ctx, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
     block_context: &mut BlockContext<'ctx>,
@@ -237,9 +237,7 @@ where
     );
     if let Some(metadata) = target.as_ref().and_then(InvocationTarget::get_function_like_metadata) {
         check_function_use(context, block_context, metadata, function, call.method.span());
-        if context.dialect.is_sharp() {
-            report_replaced_global_call(context, block_context, artifacts, metadata, &call.argument_list, call.span());
-        }
+        report_replaced_global_call(context, block_context, artifacts, metadata, &call.argument_list, call.span());
     }
 
     let analyze = |context: &mut Context<'ctx, 'arena, A>| {
@@ -259,7 +257,7 @@ where
         )
     };
 
-    if !context.dialect.is_sharp() || !function.as_bytes().eq_ignore_ascii_case(b"die") {
+    if !function.as_bytes().eq_ignore_ascii_case(b"die") {
         return analyze(context);
     }
 
