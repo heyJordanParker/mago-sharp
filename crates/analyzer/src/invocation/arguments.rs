@@ -399,14 +399,13 @@ where
         }
     }
 
-    // Spec section 12: "Only a literal takes its collection type from where it lands." A PHP# method or lambda makes a
-    // `Set` of each parameter it declares `Set` before its body runs, so that parameter takes a list literal of its
-    // elements from PHP# code, where a `List` variable is refused, and any list from plain PHP. A call through a
-    // `Function` value, of plain PHP, or of a parameter whose `Set` comes from a template runs no such body.
+    // Spec section 12: "Only a literal takes its collection type from where it lands." A PHP# literal argument has the
+    // `Set` type its parameter gives it already, and a `List` variable is refused. A PHP# method or lambda makes a `Set`
+    // of each parameter it declares `Set` before its body runs, so that parameter takes any list from plain PHP.
     let list_accepting_parameter_type = invocation_target
         .get_function_like_metadata()
         .filter(|function| function.flags.is_sharp())
-        .filter(|_| !context.dialect.is_sharp() || matches!(input_expression.unparenthesized(), Expression::Array(_)))
+        .filter(|_| !context.dialect.is_sharp())
         .and_then(|_| invocation_target.get_parameter(adjust_offset_for_variadic(invocation_target, argument_offset)))
         .and_then(|parameter| parameter.get_type())
         .filter(|declared_type| is_declared_set(declared_type))

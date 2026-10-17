@@ -4827,18 +4827,19 @@ fn a_list_map_set_or_class_with_the_wrong_count_of_type_arguments_names_the_coun
     );
 }
 
-/// A `Set`'s element takes exactly what a `Map`'s key takes, a collection of such elements too (spec section 12). A
-/// named type may be an enum, a struct or a class that declares `operator ==`, which only the analyzer knows, so it
-/// passes here.
+/// A `Set`'s element takes exactly what a `Map`'s key takes, a collection of such elements too, a union of them
+/// included (spec section 12). A named type may be an enum, a struct or a class that declares `operator ==`, which
+/// only the analyzer knows, so it passes here.
 #[test]
 fn a_set_element_takes_what_a_map_key_takes() {
-    let code = "class Report\n{\n    public Set<string> run(Set<int> a, Set<Status> b, Set<float> c, Set<int?> d, Set<List<int>> e, Set<Any> f, Set<List<Any>> g)\n    {\n        return [];\n    }\n}\n";
+    let code = "class Report\n{\n    public Set<string> run(Set<int> a, Set<Status> b, Set<float> c, Set<int?> d, Set<List<int>> e, Set<Any> f, Set<List<Any>> g, Set<Set<int|string>> h, Map<List<int|Iterable<int>>, int> i)\n    {\n        return [];\n    }\n}\n";
 
     assert_eq!(
         issues(code),
         [
             "3:104 A `Set`'s element is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`.",
             "3:116 A `Set`'s element is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`.",
+            "3:158 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`.",
         ]
     );
 }

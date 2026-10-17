@@ -1016,6 +1016,12 @@ impl<'analysis> Types<'analysis> {
         .then_some(metadata.original_name)
     }
 
+    /// The full name the codebase declares the class `class` with, which outlives the lowering, as a case's class
+    /// `App\PaymentResult\Paid`. None for a class the codebase does not declare.
+    pub(crate) fn class_name(&self, class: &[u8]) -> Option<&'analysis [u8]> {
+        self.codebase.get_class_like(class).map(|metadata| metadata.original_name.as_bytes())
+    }
+
     /// The declaration the method call `call`, null-safe or not, runs, as the analysis resolved it when it checked the
     /// call: a method, a method the class's `__call` or `__callStatic` serves, or a property holding a function, as spec
     /// section 14 calls one. Every class the receiver can be has the same kind of member, and the declaration is the

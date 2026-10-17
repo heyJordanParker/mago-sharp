@@ -57,6 +57,7 @@ use crate::effects::summary::record_function_values;
 use crate::error::AnalysisError;
 use crate::expression::ancestor_type_arguments;
 use crate::expression::array::check_sharp_literal_kind;
+use crate::expression::array::get_set_literal_type;
 use crate::expression::is_refused_type;
 use crate::invocation::Invocation;
 use crate::invocation::InvocationArgument;
@@ -783,7 +784,7 @@ where
             continue;
         };
 
-        let (argument_value_type, _) = analyzed_argument_types
+        let (mut argument_value_type, _) = analyzed_argument_types
             .get(argument_offset)
             .cloned()
             .unwrap_or_else(|| (get_mixed(), argument_expression.span()));
@@ -891,9 +892,8 @@ where
             if !check_is_deferred_to_partial_invocation && !is_reported_by_its_bound {
                 // Only a type PHP# wrote is judged by PHP# literal rules. A plain PHP method's or closure's parameter
                 // takes either literal, whatever its docblock says.
-                let mut refused_crossing = false;
-                let mut passed_type = Cow::Borrowed(&argument_value_type);
-                if takes_php_sharp_types(&invocation.target) {
+                let takes_sharp_types = takes_php_sharp_types(&invocation.target);
+                if takes_sharp_types {
                     check_sharp_literal_kind(
                         context,
                         Some(block_context),
@@ -901,7 +901,17 @@ where
                         argument_expression,
                         &final_parameter_type,
                     );
-                } else if context.dialect.is_sharp() {
+                    // Spec section 12: a literal takes its collection type from the parameter it lands in, so a list
+                    // literal is a `Set` where the parameter declares one, at any depth.
+                    if let Some(literal_type) =
+                        get_set_literal_type(context, artifacts, argument_expression, &final_parameter_type)
+                    {
+                        argument_value_type = literal_type;
+                    }
+                }
+                let mut refused_crossing = false;
+                let mut passed_type = Cow::Borrowed(&argument_value_type);
+                if !takes_sharp_types && context.dialect.is_sharp() {
                     match check_array_crossing(
                         context,
                         &argument_value_type,

@@ -8209,8 +8209,8 @@ fn a_set_parameter_becomes_a_set_before_the_body_runs() {
 /// property, `[129]` `ZEND_ACC_PUBLIC | ZEND_ACC_READONLY`. A list literal or plain PHP passes a `Set` argument as a PHP
 /// array, and PHP sets a promoted property before the constructor's body runs, so where a parameter holds a `Map` or a
 /// `Set`, each parameter is a plain one beside the property it declares, and the constructor sets each property once
-/// the `Set` is made, as a class's constructor does. An event's property and parameters carry their type text, and a
-/// case's, which lowers in its enum's class, carry none, as they did before.
+/// the `Set` is made, as a class's constructor does. An event's property and parameters carry their type text, and so
+/// do a case's, which its own class declares, so plain PHP's elements are checked as an event's are.
 #[test]
 fn an_event_or_a_case_makes_its_set_argument_a_set_before_it_sets_the_property() {
     let event = Lowered::new("namespace App.Tenant;\n\npublic event Tagged(Set<string> tags, int id);\n");
@@ -8321,7 +8321,9 @@ fn an_event_or_a_case_makes_its_set_argument_a_set_before_it_sets_the_property()
         property_groups(&r#enum),
         [indoc! {r#"
             PROP_GROUP [129]
-              ZVAL "Sharp\\Set"
+              SHARP_TYPE_ARGS
+                ZVAL "Sharp\\Set"
+                ZVAL "Set<string>"
               PROP_DECL
                 PROP_ELEM
                   ZVAL "tags"
@@ -8356,6 +8358,9 @@ fn an_event_or_a_case_makes_its_set_argument_a_set_before_it_sets_the_property()
                   null
                   null
                   null
+                SHARP_TYPE_ARGS
+                  null
+                  ZVAL "Set<string>"
               null
               STMT_LIST
                 ASSIGN
@@ -8388,15 +8393,211 @@ fn an_event_or_a_case_makes_its_set_argument_a_set_before_it_sets_the_property()
 }
 
 /// ```php
+/// $rows = \is_array($rows) ? \array_map(fn ($element#1) => \is_array($element#1) ? new \Sharp\Set($element#1) : $element#1, $rows) : $rows;
+/// $this->id = $id;
+/// $this->rows = $rows;
+/// ```
+///
+/// An event's parameter, a case's field and a struct's property that hold a `Set` inside a `List` are each made a `List`
+/// of `Set` objects before the property is set, as a top-level `Set` is, since plain PHP passes nested PHP arrays.
+#[test]
+fn an_event_a_case_and_a_struct_make_each_nested_set_a_set_before_they_set_the_property() {
+    let event = Lowered::new("namespace App.Tenant;\n\npublic event Rows(int id, List<Set<int>> rows);\n");
+    let r#enum = Lowered::new("namespace App.Tenant;\n\nenum Shape\n{\n    case Grid(List<Set<int>> rows);\n}\n");
+    let r#struct = Lowered::new(
+        "namespace App.Tenant;\n\npublic struct Grid\n{\n    public Grid(public List<Set<int>> rows { get; }) { }\n}\n",
+    );
+    let body = |lowered: &Lowered| {
+        let constructor = lowered.render(lowered.method_named("__construct"));
+
+        constructor[constructor.find("STMT_LIST").expect("a constructor body")..].to_owned()
+    };
+
+    // Each property is declared beside its plain parameter, which PHP doesn't set before the body runs.
+    assert_eq!([&event, &r#enum, &r#struct].map(|lowered| property_groups(lowered).len()), [2, 1, 1]);
+    assert_eq!(
+        body(&event),
+        indoc! {r#"
+            STMT_LIST
+                ASSIGN
+                  VAR
+                    ZVAL "rows"
+                  CONDITIONAL
+                    CALL
+                      ZVAL "is_array"
+                      ARG_LIST
+                        VAR
+                          ZVAL "rows"
+                    CALL
+                      ZVAL "array_map"
+                      ARG_LIST
+                        ARROW_FUNC "" @3-3
+                          PARAM_LIST
+                            PARAM
+                              null
+                              ZVAL "element#1"
+                              null
+                              null
+                              null
+                              null
+                          null
+                          CONDITIONAL
+                            CALL
+                              ZVAL "is_array"
+                              ARG_LIST
+                                VAR
+                                  ZVAL "element#1"
+                            NEW
+                              ZVAL "Sharp\\Set"
+                              ARG_LIST
+                                VAR
+                                  ZVAL "element#1"
+                            VAR
+                              ZVAL "element#1"
+                          null
+                          null
+                        VAR
+                          ZVAL "rows"
+                    VAR
+                      ZVAL "rows"
+                ASSIGN
+                  PROP
+                    VAR
+                      ZVAL "this"
+                    ZVAL "id"
+                  VAR
+                    ZVAL "id"
+                ASSIGN
+                  PROP
+                    VAR
+                      ZVAL "this"
+                    ZVAL "rows"
+                  VAR
+                    ZVAL "rows"
+              null
+              null
+        "#}
+    );
+    assert_eq!(
+        body(&r#enum),
+        indoc! {r#"
+            STMT_LIST
+                ASSIGN
+                  VAR
+                    ZVAL "rows"
+                  CONDITIONAL
+                    CALL
+                      ZVAL "is_array"
+                      ARG_LIST
+                        VAR
+                          ZVAL "rows"
+                    CALL
+                      ZVAL "array_map"
+                      ARG_LIST
+                        ARROW_FUNC "" @5-5
+                          PARAM_LIST
+                            PARAM
+                              null
+                              ZVAL "element#1"
+                              null
+                              null
+                              null
+                              null
+                          null
+                          CONDITIONAL
+                            CALL
+                              ZVAL "is_array"
+                              ARG_LIST
+                                VAR
+                                  ZVAL "element#1"
+                            NEW
+                              ZVAL "Sharp\\Set"
+                              ARG_LIST
+                                VAR
+                                  ZVAL "element#1"
+                            VAR
+                              ZVAL "element#1"
+                          null
+                          null
+                        VAR
+                          ZVAL "rows"
+                    VAR
+                      ZVAL "rows"
+                ASSIGN
+                  PROP
+                    VAR
+                      ZVAL "this"
+                    ZVAL "rows"
+                  VAR
+                    ZVAL "rows"
+              null
+              null
+        "#}
+    );
+    assert_eq!(
+        body(&r#struct),
+        indoc! {r#"
+            STMT_LIST
+                ASSIGN
+                  PROP
+                    VAR
+                      ZVAL "this"
+                    ZVAL "rows"
+                  CONDITIONAL
+                    CALL
+                      ZVAL "is_array"
+                      ARG_LIST
+                        VAR
+                          ZVAL "rows"
+                    CALL
+                      ZVAL "array_map"
+                      ARG_LIST
+                        ARROW_FUNC "" @5-5
+                          PARAM_LIST
+                            PARAM
+                              null
+                              ZVAL "element#1"
+                              null
+                              null
+                              null
+                              null
+                          null
+                          CONDITIONAL
+                            CALL
+                              ZVAL "is_array"
+                              ARG_LIST
+                                VAR
+                                  ZVAL "element#1"
+                            NEW
+                              ZVAL "Sharp\\Set"
+                              ARG_LIST
+                                VAR
+                                  ZVAL "element#1"
+                            VAR
+                              ZVAL "element#1"
+                          null
+                          null
+                        VAR
+                          ZVAL "rows"
+                    VAR
+                      ZVAL "rows"
+              null
+              null
+        "#}
+    );
+}
+
+/// ```php
 /// $prefix = "v";
 /// $check = function (\Sharp\Set|array $tags) use ($prefix) { $tags = \is_array($tags) ? new \Sharp\Set($tags) : $tags; return $tags->contains($prefix); };
 /// $size = function (\Sharp\Set|array $tags) { $tags = \is_array($tags) ? new \Sharp\Set($tags) : $tags; return $tags->count(); };
-/// return $check(['a']) ? $size(['b']) : 0;
+/// return $check(new \Sharp\Set(['a'])) ? $size(new \Sharp\Set(['b'])) : 0;
 /// ```
 ///
-/// A call of a lambda that declares a parameter `Set` passes it a list literal too, so a lambda makes each `Set` parameter a
-/// `Set` object first, as a method does. PHP's `fn` has no statements before its expression, so a lambda with an
-/// expression body and a `Set` parameter is a `CLOSURE` whose `use` list captures what the binder says it captures.
+/// A list literal passed to a lambda's `Set` parameter is a `Set`, and plain PHP may pass a PHP array, so a lambda
+/// makes each `Set` parameter a `Set` object first, as a method does. PHP's `fn` has no statements before its
+/// expression, so a lambda with an expression body and a `Set` parameter is a `CLOSURE` whose `use` list captures what
+/// the binder says it captures.
 #[test]
 fn a_lambda_with_a_set_parameter_is_a_closure_that_makes_it_a_set_first() {
     assert_eq!(
@@ -8510,18 +8711,24 @@ fn a_lambda_with_a_set_parameter_is_a_closure_that_makes_it_a_set_first() {
                     VAR
                       ZVAL "check"
                     ARG_LIST
-                      ARRAY [3]
-                        ARRAY_ELEM
-                          ZVAL "a"
-                          null
+                      NEW
+                        ZVAL "Sharp\\Set"
+                        ARG_LIST
+                          ARRAY [3]
+                            ARRAY_ELEM
+                              ZVAL "a"
+                              null
                   CALL
                     VAR
                       ZVAL "size"
                     ARG_LIST
-                      ARRAY [3]
-                        ARRAY_ELEM
-                          ZVAL "b"
-                          null
+                      NEW
+                        ZVAL "Sharp\\Set"
+                        ARG_LIST
+                          ARRAY [3]
+                            ARRAY_ELEM
+                              ZVAL "b"
+                              null
                   ZVAL 0
         "#}
     );
@@ -17439,6 +17646,57 @@ fn equality_of_strings_ints_and_enums_is_identity() {
     );
 
     assert_eq!(assigned_values(&tree), ["BINARY_OP [16]", "BINARY_OP [17]", "BINARY_OP [16]", "BINARY_OP [16]"]);
+}
+
+/// ```php
+/// $b = \Sharp\Internal\equals($either, $tags); $b = !\Sharp\Internal\equals($either, 1);
+/// return \Sharp\Internal\equals($tuple, 1);
+/// ```
+///
+/// Spec section 19: a value that may be a collection or another type compares by what it holds, which only the running
+/// value tells, so `==` on it runs the engine's `\Sharp\Internal\equals`, and `!=` is its `!`.
+#[test]
+fn equality_of_a_union_that_holds_a_collection_compares_by_what_it_holds() {
+    let body = body_in(
+        "bool run(Set<int>|int either, Set<int> tags, int|[int, string] tuple)",
+        "        let b = either == tags;\n        b = either != 1;\n        return tuple == 1;\n",
+        &[],
+    );
+    let comparisons = &body[body.find("  ASSIGN\n    VAR\n      ZVAL \"b\"").expect("the comparisons")..];
+
+    assert_eq!(
+        format!("STMT_LIST\n{comparisons}"),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "b"
+                CALL
+                  ZVAL "Sharp\\Internal\\equals"
+                  ARG_LIST
+                    VAR
+                      ZVAL "either"
+                    VAR
+                      ZVAL "tags"
+              ASSIGN
+                VAR
+                  ZVAL "b"
+                UNARY_OP [14]
+                  CALL
+                    ZVAL "Sharp\\Internal\\equals"
+                    ARG_LIST
+                      VAR
+                        ZVAL "either"
+                      ZVAL 1
+              RETURN
+                CALL
+                  ZVAL "Sharp\\Internal\\equals"
+                  ARG_LIST
+                    VAR
+                      ZVAL "tuple"
+                    ZVAL 1
+        "#}
+    );
 }
 
 /// ```php

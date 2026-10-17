@@ -516,8 +516,8 @@ struct Lowering<'lowering, 'arena> {
     lines: &'lowering Lines,
     names: &'lowering ResolvedNames<'arena>,
     types: &'lowering Types<'lowering>,
-    /// The full name of the class-like being lowered, as PHP writes it.
-    class: &'arena [u8],
+    /// The full name of the class-like being lowered, as PHP writes it: a case's class while its members are lowered.
+    class: &'lowering [u8],
     /// The full dotted name of the method or property being lowered, which `Position.current()` gives as its `function`.
     function: Vec<u8>,
     nodes: Vec<sharp_node>,
@@ -555,8 +555,8 @@ struct Lowering<'lowering, 'arena> {
     /// The declared type of each typed local lowered so far, by the offset of its declaration, which a reference
     /// parameter's local crosses back into.
     local_types: HashMap<u32, TUnion>,
-    /// Whether the constructor being lowered promotes a `Map` or a `Set`, so it declares each property it promotes
-    /// beside it, in written order, and sets each one in its first statements.
+    /// Whether the constructor being lowered promotes a parameter that holds a `Map` or a `Set`, at any depth, so it
+    /// declares each property it promotes beside it, in written order, and sets each one in its first statements.
     promoted_beside: bool,
     /// The type PHP writes for each type parameter, by the offset of its declared name: its bound, or `mixed` without
     /// one.
@@ -1648,7 +1648,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                         || method.parameter_list.parameters.iter().filter(|parameter| parameter.is_promoted_property());
                     // A superglobal's name runs hidden as a parameter, and stays its own as the property.
                     self.promoted_beside = promoted().any(|parameter| {
-                        collection_hint(parameter.hint.as_ref()).is_some()
+                        self.crossing_type(parameter).is_some()
                             || runs_its_accessors(parameter)
                             || SUPERGLOBALS.contains(&parameter.variable.name)
                     });
@@ -2245,15 +2245,14 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
     /// The public constructor of an event or a case that carries data, from `name` to the end of `parameters`, which
     /// makes each parameter a `public readonly` property, with the properties it declares before it. It promotes each
-    /// one and has no statement, unless a parameter holds a `Map` or a `Set`: a list literal or plain PHP passes one
-    /// as a PHP array, and PHP sets a promoted property before the body runs, so each parameter is then a plain one
-    /// beside the property it declares, and the body sets each property once [`Self::collection_parameters`] made the
-    /// object, as a class's constructor does: `$tags = \is_array($tags) ? new \Sharp\Set($tags) : $tags;
+    /// one and has no statement, unless a parameter holds a `Map` or a `Set`, at any depth: plain PHP passes one as a
+    /// PHP array, and PHP sets a promoted property before the body runs, so each parameter is then a plain one beside
+    /// the property it declares, and the body sets each property once [`Self::collection_parameters`] made the object,
+    /// as a class's constructor does: `$tags = \is_array($tags) ? new \Sharp\Set($tags) : $tags;
     /// $this->tags = $tags;`.
     fn promoted_constructor(&mut self, name: Span, parameter_list: &FunctionLikeParameterList) -> Vec<u32> {
         self.enter(b"__construct");
-        let beside =
-            parameter_list.parameters.iter().any(|parameter| collection_hint(parameter.hint.as_ref()).is_some());
+        let beside = parameter_list.parameters.iter().any(|parameter| self.crossing_type(parameter).is_some());
         let mut members = Vec::new();
         let mut parameters = Vec::new();
         for parameter in &parameter_list.parameters {
@@ -2362,7 +2361,17 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             let line = self.line(name.span);
             let case_class = [enum_name, b"\\", name.value].concat();
             let mut members = match &case.item {
-                EnumCaseItem::Data(item) => self.promoted_constructor(name.span, &item.parameter_list),
+                // The case's class declares the constructor and its fields, so their checks are its own.
+                EnumCaseItem::Data(item) => {
+                    let Some(class) = self.types.class_name(&case_class) else {
+                        unreachable!("the codex declares a class for each case that carries data");
+                    };
+                    self.class = class;
+                    let constructor = self.promoted_constructor(name.span, &item.parameter_list);
+                    self.class = enum_name;
+
+                    constructor
+                }
                 EnumCaseItem::Unit(_) | EnumCaseItem::Backed(_) => self.case_object(&case_class, name.span),
             };
             // A case of a generic enum passes its type arguments to the enum, as `Ok<T, TError>` to `Result<T, TError>`.
@@ -3329,10 +3338,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
     /// The property a promoted parameter declares, with the visibility, accessors, accessor bodies, observers,
     /// behaviors and attributes it is written with, and no default. PHP sets a promoted property from the argument
-    /// before the constructor's body runs, and a get-only one only once, so a constructor that promotes a `Map` or a
-    /// `Set`, or a property whose writes run through its accessors, declares each property it promotes this way, in its
-    /// written order, and sets each from its argument once the behaviors exist, spec section 9: the `Map` or `Set` one
-    /// to the object of the argument, and each other through its `set`.
+    /// before the constructor's body runs, and a get-only one only once, so a constructor that promotes a value that
+    /// holds a `Map` or a `Set`, at any depth, or a property whose writes run through its accessors, declares each
+    /// property it promotes this way, in its written order, and sets each from its argument once the behaviors exist,
+    /// spec section 9: the one that holds a `Map` or a `Set` to the objects of the argument, and each other through its
+    /// `set`.
     fn promoted_property(&mut self, parameter: &FunctionLikeParameter) -> u32 {
         let Some(hint) = &parameter.hint else {
             unreachable!("semantics refuses a method parameter without a type");
@@ -5792,15 +5802,17 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
     /// `lhs == rhs`, or `lhs != rhs` when `negated`, as spec section 19 compares a value of `lhs`'s type with one of
     /// `rhs`'s: an unchecked `Any?` with a value [`compares_unchecked`] names, spec section 24, two class values by
-    /// their whole type, as C# compares two `Type`s, and a value of a type parameter by its type argument's `==`, spec
-    /// section 31, through `\Sharp\Internal\equals`, the `op_Equality` the class of an instance side declares, which
-    /// lifts a null side itself, an int and a float as two floats, and `===` otherwise. `== null` tests for null and runs
-    /// no operator. A collection search compares each element with its value through it, so a search never compares
-    /// differently from `==`.
+    /// their whole type, as C# compares two `Type`s, a value of a type parameter by its type argument's `==`, spec
+    /// section 31, and a value that may be a collection or another type by what it holds, through
+    /// `\Sharp\Internal\equals`, the `op_Equality` the class of an instance side declares, which lifts a null side
+    /// itself, an int and a float as two floats, and `===` otherwise. `== null` tests for null and runs no operator. A
+    /// collection search compares each element with its value through it, so a search never compares differently from
+    /// `==`.
     fn equality(&mut self, line: u32, lhs: Side, rhs: Side, negated: bool) -> u32 {
         let (lhs_type, rhs_type) = (self.side_type(&lhs), self.side_type(&rhs));
         if compares_unchecked(lhs_type, rhs_type)
             || compares_unchecked(rhs_type, lhs_type)
+            || compares_mixed_collection(lhs_type, rhs_type)
             || [lhs_type, rhs_type].into_iter().any(|r#type| holds_class_value(r#type) || holds_type_parameter(r#type))
         {
             let function = self.string(ZEND_NAME_FQ, line, b"Sharp\\Internal\\equals");
@@ -5864,9 +5876,12 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// Whether `==` on a value of `lhs_type` and one of `rhs_type` is PHP's `===`, spec section 19: true for every value
-    /// but a `List`, and for two lists whose elements compare so. Elements compared by an `op_Equality`, as floats, or
-    /// as `Map`s or `Set`s need their own `==`.
+    /// but a `List` or a value that may be a collection or another type, and for two lists whose elements compare so.
+    /// Elements compared by an `op_Equality`, as floats, or as `Map`s or `Set`s need their own `==`.
     fn compares_identically(&self, lhs_type: &TUnion, rhs_type: &TUnion) -> bool {
+        if compares_mixed_collection(lhs_type, rhs_type) {
+            return false;
+        }
         let (Some(lhs_lists), Some(rhs_lists)) = (collection_kind(lhs_type), collection_kind(rhs_type)) else {
             return true;
         };
@@ -8921,6 +8936,18 @@ fn mixes_numbers(lhs: &TUnion, rhs: &TUnion) -> bool {
 /// Whether a value of `union` may be a class value, which `==` compares by its whole type, type arguments included.
 fn holds_class_value(union: &TUnion) -> bool {
     union.types.iter().any(|atomic| matches!(atomic, TAtomic::Scalar(TScalar::ClassLikeString(_))))
+}
+
+/// Whether `==` compares a value of `lhs` with one of `rhs` where a side may be a collection or a value of another type,
+/// another collection included, which only the running value tells apart. `== null` tests for null alone.
+fn compares_mixed_collection(lhs: &TUnion, rhs: &TUnion) -> bool {
+    let mixes_collection = |union: &TUnion| {
+        let mut values = union.types.iter().filter(|atomic| !atomic.is_null());
+
+        values.clone().any(|atomic| matches!(atomic, TAtomic::Array(_))) && values.nth(1).is_some()
+    };
+
+    !lhs.is_null() && !rhs.is_null() && (mixes_collection(lhs) || mixes_collection(rhs))
 }
 
 /// Whether a value of `union` may be a value of a type parameter, whose own `==` only the running code knows.
