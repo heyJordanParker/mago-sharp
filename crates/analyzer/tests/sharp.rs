@@ -6649,8 +6649,26 @@ fn a_spread_of_a_value_that_is_not_iterable_is_one_invalid_argument() {
     );
 }
 
+/// Spec section 16: a named argument that matches no other parameter of a plain PHP method, static method,
+/// constructor, function or attribute fills its `...` parameter under its name, as PHP collects it, and the
+/// parameter's element type checks the value as it checks a positional one.
 #[test]
-fn a_named_argument_never_fills_a_variadic_parameter_of_a_method_or_a_php_function() {
+fn a_named_argument_fills_a_plain_php_variadic_parameter_under_its_name() {
+    let html = "<?php\n\nnamespace Lib;\n\nfinal class Html\n{\n    public static function tag(string $name, string ...$attributes): string\n    {\n        return $name;\n    }\n\n    public function open(string $name, string ...$attributes): string\n    {\n        return $name;\n    }\n}\n\nfinal class Element\n{\n    public function __construct(public string $name, int ...$sizes)\n    {\n    }\n}\n\n#[\\Attribute(\\Attribute::TARGET_ALL)]\nfinal class Generic\n{\n    public function __construct(string ...$types)\n    {\n    }\n}\n";
+    let helpers = "<?php\n\nfunction attrs(string $name, string ...$attributes): string\n{\n    return $name;\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Element;\nimport Lib.Generic;\nimport Lib.Html;\n\n[Generic(Item: typeof(Report))]\nclass Report\n{\n    public static string run(Html html)\n    {\n        const a = Html.tag(\"a\", href: \"/home\", title: \"Home\");\n        const b = html.open(\"a\", \"x\", href: \"/home\", attributes: \"own\");\n        const c = new Element(name: \"box\", width: 3, height: 4);\n        const d = global.attrs(\"a\", href: \"/home\");\n        const e = Html.tag(\"a\", href: 3, title: \"Home\", title: \"Again\");\n        return a + b + c.name + d + e;\n    }\n}\n";
+    let others = [("src/Lib/Html.php", html), ("src/helpers.php", helpers)];
+
+    assert_eq!(
+        issues(("src/Demo/Report.sharp", sharp), &others),
+        ["16:39 invalid-argument", "16:57 duplicate-named-argument"]
+    );
+}
+
+/// Spec section 16: a PHP# `...` parameter is a `List`, which takes no names, and PHP refuses a name that matches no
+/// parameter of a function built into it.
+#[test]
+fn a_named_argument_never_fills_a_php_sharp_or_built_in_variadic_parameter() {
     let sharp = "namespace Demo;\n\nclass Report\n{\n    public static int sum(int ...values) => global.max(0, ...values);\n\n    public static int run()\n    {\n        const named = Report.sum(first: 1, second: 2);\n        const own = Report.sum(values: 1);\n        const after = Report.sum(1, values: 2);\n        return named + own + after + global.strlen(global.sprintf(\"%d\", 1, other: 2));\n    }\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    public static function sum(int ...$values): int { return max(0, ...$values); }\n\n    public static function run(): int\n    {\n        $named = Report::sum(first: 1, second: 2);\n        $own = Report::sum(values: 1);\n        $after = Report::sum(1, values: 2);\n        return $named + $own + $after + strlen(sprintf(\"%d\", 1, other: 2));\n    }\n}\n";
 
@@ -6667,7 +6685,15 @@ fn a_named_argument_never_fills_a_variadic_parameter_of_a_method_or_a_php_functi
         .iter()
         .filter_map(|issue| issue.primary_annotation()?.message.clone())
         .collect();
-    assert_eq!(annotations, ["A variadic parameter takes no named argument in PHP#"; 4]);
+    assert_eq!(
+        annotations,
+        [
+            "A PHP# `...` parameter takes no names",
+            "A PHP# `...` parameter takes no names",
+            "A PHP# `...` parameter takes no names",
+            "A `...` parameter built into PHP takes no names",
+        ]
+    );
     assert_eq!(issues(("src/Demo/Report.php", php), &[]), ["13:33 named-argument-after-positional"]);
 }
 

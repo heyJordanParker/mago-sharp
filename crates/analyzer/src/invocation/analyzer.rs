@@ -99,6 +99,13 @@ fn takes_php_sharp_types(target: &InvocationTarget<'_>) -> bool {
         )
 }
 
+/// Whether the variadic parameter of `target` collects the named arguments that match no other parameter, as PHP's does
+/// in plain PHP code. A PHP# variadic is a `List`, and one built into PHP refuses them.
+fn collects_named_arguments(target: &InvocationTarget<'_>) -> bool {
+    !takes_php_sharp_types(target)
+        && !target.get_function_like_metadata().is_some_and(|function| function.flags.is_built_in())
+}
+
 /// Whether `parameter` is a PHP# function parameter whose type states no effects, or a collection method's function,
 /// spec section 29: a call takes on the effects of the function it passes there, so that function is held to no effect
 /// list.
@@ -788,10 +795,21 @@ where
             .cloned()
             .unwrap_or_else(|| (get_mixed(), argument_expression.span()));
 
-        // Spec section 16: a named argument never fills a PHP# variadic, which spec section 7 makes a list.
-        let parameter_ref =
-            get_parameter_of_argument(&invocation.target, argument, *argument_offset).filter(|(_, parameter)| {
-                !(context.dialect.is_sharp() && argument.get_named_argument().is_some() && parameter.is_variadic())
+        // Spec section 16: a named argument that matches no other parameter fills a plain PHP variadic under its name,
+        // as PHP collects it, and never a PHP# variadic, which spec section 7 makes a list.
+        let fills_variadic = context.dialect.is_sharp() && argument.get_named_argument().is_some();
+        let parameter_ref = get_parameter_of_argument(&invocation.target, argument, *argument_offset)
+            .or_else(|| {
+                let last = invocation.target.parameter_count().checked_sub(1)?;
+
+                invocation
+                    .target
+                    .get_parameter(last)
+                    .filter(|parameter| fills_variadic && parameter.is_variadic())
+                    .map(|parameter| (last, parameter))
+            })
+            .filter(|(_, parameter)| {
+                !(fills_variadic && parameter.is_variadic() && !collects_named_arguments(&invocation.target))
             });
         if let Some((parameter_offset, parameter_ref)) = parameter_ref {
             filled_parameter_offsets.insert(parameter_offset);
@@ -816,7 +834,9 @@ where
                         )
                         .with_help("Remove one of the duplicate named arguments."),
                     );
-                } else if let Some(previous_span) = assigned_parameters_by_position.get(&parameter_offset) {
+                } else if let Some(previous_span) = assigned_parameters_by_position.get(&parameter_offset)
+                    && !(fills_variadic && parameter_ref.is_variadic())
+                {
                     has_named_argument_anomaly = true;
                     let target_name_str = invocation.target.guess_name(context);
                     if parameter_ref.is_variadic() {
@@ -977,8 +997,10 @@ where
                         "Invalid named argument `{argument_name}` for {target_kind_str} `{target_name_str}`"
                     ))
                     .with_annotation(Annotation::primary(named_argument.name.span()).with_message(
-                        if has_variadic_parameter {
-                            "A variadic parameter takes no named argument in PHP#".to_string()
+                        if has_variadic_parameter && takes_php_sharp_types(&invocation.target) {
+                            "A PHP# `...` parameter takes no names".to_string()
+                        } else if has_variadic_parameter {
+                            "A `...` parameter built into PHP takes no names".to_string()
                         } else {
                             format!("Unknown argument name `{argument_name}`")
                         },
@@ -990,9 +1012,11 @@ where
                     .with_help({
                         if !invocation.target.allows_named_arguments() {
                             format!("The {target_kind_str} `{target_name_str}` does not support named arguments.")
-                        } else if has_variadic_parameter {
-                            "A named argument never fills a variadic parameter in PHP#: pass its values by position."
+                        } else if has_variadic_parameter && takes_php_sharp_types(&invocation.target) {
+                            "A PHP# `...` parameter is a `List`, and a `List` takes no names: pass its values by position."
                                 .to_string()
+                        } else if has_variadic_parameter {
+                            format!("`{target_name_str}` is built into PHP, which refuses a name its parameters do not have: pass the values by position.")
                         } else if invocation.target.parameter_count() == 0 {
                             format!("The {target_kind_str} `{target_name_str}` has no parameters.")
                         } else {

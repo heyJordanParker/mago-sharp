@@ -21029,6 +21029,40 @@ fn statements_at(code: &str, library: &[(&str, &str)], positions: std::ops::Rang
 }
 
 /// ```php
+/// \Lib\Calc::sum(\iterator_to_array($stock), extra: \iterator_to_array($stock));
+/// ```
+///
+/// Spec section 16: a named argument that matches no other parameter of a plain PHP method fills its `...` parameter,
+/// so a `Map` goes in under its name as its PHP array, as it goes in by position.
+#[test]
+fn a_map_named_into_a_plain_php_variadic_goes_in_as_its_php_array() {
+    let code = "namespace App.Tenant;\n\nimport Lib.Calc;\n\nclass Report\n{\n    public int run(int extra)\n    {\n        Map<string, int> stock = this.stock();\n        return Calc.sum(stock, extra: stock);\n    }\n\n    private Map<string, int> stock() => [:];\n}\n";
+
+    assert_eq!(
+        statements_at(code, &[], 1..2),
+        [indoc! {r#"
+            RETURN
+              STATIC_CALL
+                ZVAL "Lib\\Calc"
+                ZVAL "sum"
+                ARG_LIST
+                  CALL
+                    ZVAL "iterator_to_array"
+                    ARG_LIST
+                      VAR
+                        ZVAL "stock"
+                  NAMED_ARG
+                    ZVAL "extra"
+                    CALL
+                      ZVAL "iterator_to_array"
+                      ARG_LIST
+                        VAR
+                          ZVAL "stock"
+        "#}]
+    );
+}
+
+/// ```php
 /// $typed = $gadget->label(...);
 /// $held = $gadget->format;
 /// ```

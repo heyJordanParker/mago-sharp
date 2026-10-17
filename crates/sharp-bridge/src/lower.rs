@@ -8171,15 +8171,15 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 Argument::Positional(positional) => (positional.value, positional.ellipsis.is_some()),
                 Argument::Named(named) => (named.value, false),
             };
+            // A named argument that matches no other parameter fills the `...` parameter, spec section 16.
             let parameter = match argument {
-                Argument::Positional(_) => parameters
-                    .get(position)
-                    .or_else(|| parameters.last().filter(|parameter| parameter.is_variadic()))
-                    .copied(),
-                Argument::Named(named) => {
-                    parameters.iter().copied().find(|parameter| parameter.name() == Some(named.name.value))
-                }
-            };
+                Argument::Positional(_) => parameters.get(position),
+                Argument::Named(named) => parameters
+                    .iter()
+                    .find(|parameter| !parameter.is_variadic() && parameter.name() == Some(named.name.value)),
+            }
+            .or_else(|| parameters.last().filter(|parameter| parameter.is_variadic()))
+            .copied();
             let takes_array = parameter
                 .and_then(PlainParameter::declared_type)
                 .is_some_and(|declared| declared.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(_))));
