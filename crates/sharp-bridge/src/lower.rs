@@ -6555,6 +6555,47 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.types.backing_type(name).is_some().then_some(name)
     }
 
+    /// Whether `r#type` is a `Map` keyed by a backed enum, which reaches a plain PHP array with each case's backing value
+    /// as its key, spec section 12.
+    fn keyed_by_backed_enum(&self, r#type: &TUnion) -> bool {
+        r#type.types.iter().any(|atomic| match atomic {
+            TAtomic::Array(map @ TArray::Keyed(_)) => {
+                let (key_type, _) = self.types.array_parameters(map);
+
+                key_type.types.iter().all(|key| {
+                    matches!(key, TAtomic::Object(TObject::Enum(r#enum)) if self.types.backing_type(r#enum.name.as_bytes()).is_some())
+                })
+            }
+            _ => false,
+        })
+    }
+
+    /// The PHP array plain PHP takes for `value`, a `Map` keyed by a backed enum, with each case's backing value as its
+    /// key, or a PHP array or null as it is: `(fn ($map#N) => \is_object($map#N)
+    /// ? \array_combine(\array_column($map#N->keys(), 'value'), $map#N->values()) : $map#N)($value)`.
+    fn backed_key_array(&mut self, span: Span, value: u32) -> u32 {
+        let line = self.line(span);
+        let taken = self.temporaries;
+        let map = self.hidden("map");
+        let [tested, key_source, value_source, kept] = [(); 4].map(|()| self.variable(span, &map));
+        let is_object = self.global_call(line, b"is_object", &[tested]);
+        let [keys, values] = [(key_source, b"keys".as_slice()), (value_source, b"values")].map(|(map, method)| {
+            let method = self.string(0, line, method);
+            let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[]);
+
+            self.node(SHARP_AST_METHOD_CALL, 0, line, &[map, method, arguments])
+        });
+        let value_name = self.string(0, line, b"value");
+        let backing = self.global_call(line, b"array_column", &[keys, value_name]);
+        let array = self.global_call(line, b"array_combine", &[backing, values]);
+        let body = self.node(SHARP_AST_CONDITIONAL, 0, line, &[is_object, array, kept]);
+        let crossing = self.hidden_arrow_function(span, &[&map], body);
+        self.temporaries = taken;
+        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[value]);
+
+        self.node(SHARP_AST_CALL, 0, line, &[crossing, arguments])
+    }
+
     /// `\App\Status::from($value)`, its value cast to a `string` for a `string`-backed enum, as PHP holds an all-digit
     /// `string` key as an `int`.
     fn backed_case(&mut self, line: u32, class: &[u8], mut value: u32) -> u32 {
@@ -7621,8 +7662,15 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         for (span, name, declared, takes_array) in &written {
             let (span, name) = (*span, *name);
             if let Some(set) = table_kind(declared).filter(|_| *takes_array) {
-                let [first, second, third] = [(); 3].map(|()| self.variable(span, name));
-                let array = self.array_from(line, set, [first, second, third]);
+                let array = if self.keyed_by_backed_enum(declared) {
+                    let map = self.variable(span, name);
+
+                    self.backed_key_array(span, map)
+                } else {
+                    let [first, second, third] = [(); 3].map(|()| self.variable(span, name));
+
+                    self.array_from(line, set, [first, second, third])
+                };
                 let place = self.variable(span, name);
                 let before = self.node(SHARP_AST_ASSIGN, 0, line, &[place, array]);
                 steps.push(self.node(SHARP_AST_ARRAY_ELEM, 0, line, &[before, NULL]));
@@ -7685,8 +7733,12 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 (true, true, _) => self
                     .crossing_array(self.types.expression_type(value))
                     .map(|list| self.types.array_parameters(list).1)
-                    .and_then(|element| table_kind(&element))
-                    .map(|set| self.array_of_each(value, set)),
+                    .and_then(|element| self.array_of_each(value, &element)),
+                (true, false, _) if self.keyed_by_backed_enum(self.types.expression_type(value)) => {
+                    let map = self.expression(value);
+
+                    Some(self.backed_key_array(value.span(), map))
+                }
                 (true, false, _) => table_kind(self.types.expression_type(value)).map(|set| self.array_of(value, set)),
             };
             let value = crossed.unwrap_or_else(|| self.arriving(value, Arrival::Plain));
@@ -7734,20 +7786,28 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.array_from(line, set, reads)
     }
 
-    /// `\array_map(fn ($element#N) => …, $list)`, the list `value` gives with each `Map` or `Set` its PHP array, as
-    /// [`Self::call`] spreads it into plain PHP.
-    fn array_of_each(&mut self, value: &Expression, set: bool) -> u32 {
+    /// `\array_map(fn ($element#N) => …, $list)`, the list `value` gives with each `Map` or `Set` of `element_type` its
+    /// PHP array, as [`Self::call`] spreads it into plain PHP. None when `element_type` is no `Map` or `Set`.
+    fn array_of_each(&mut self, value: &Expression, element_type: &TUnion) -> Option<u32> {
+        let set = table_kind(element_type)?;
         let span = value.span();
         let line = self.line(span);
         let taken = self.temporaries;
         let element = self.hidden("element");
-        let reads = [(); 3].map(|()| self.variable(span, &element));
-        let each = self.array_from(line, set, reads);
+        let each = if self.keyed_by_backed_enum(element_type) {
+            let map = self.variable(span, &element);
+
+            self.backed_key_array(span, map)
+        } else {
+            let reads = [(); 3].map(|()| self.variable(span, &element));
+
+            self.array_from(line, set, reads)
+        };
         let each = self.hidden_arrow_function(span, &[&element], each);
         self.temporaries = taken;
         let list = self.expression(value);
 
-        self.global_call(line, b"array_map", &[each, list])
+        Some(self.global_call(line, b"array_map", &[each, list]))
     }
 
     /// `\is_object($m) ? \iterator_to_array($m) : $m` over the three reads of one value, and

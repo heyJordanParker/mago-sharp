@@ -86,6 +86,19 @@ use crate::utils::names::is_prelude_stub;
 use crate::utils::quoted_source;
 use crate::utils::report_dropped_readonly;
 
+/// Whether `target`'s parameter types are ones PHP# wrote, which PHP# literal rules judge: the parameter of a PHP#
+/// method or lambda, whatever class the call goes through, of a function value whose signature PHP# wrote, or of a
+/// `Sharp\` collection method, which PHP# declares as a plain PHP stub only to carry its templates. Any other target is
+/// plain PHP, whose `array` parameter a `Map` crosses into.
+fn takes_php_sharp_types(target: &InvocationTarget<'_>) -> bool {
+    matches!(target, InvocationTarget::Callable { signature, .. } if signature.effects.is_some())
+        || target.get_function_like_metadata().is_some_and(|function| function.flags.is_sharp())
+        || matches!(
+            target.get_function_like_identifier(),
+            Some(FunctionLikeIdentifier::Method(class, _)) if is_prelude_stub(*class)
+        )
+}
+
 /// Whether `parameter` is a PHP# function parameter whose type states no effects, spec section 29: a call takes on the
 /// effects of the function it passes there, so that function is held to no effect list.
 fn takes_on_effects(parameter: InvocationTargetParameter<'_>) -> bool {
@@ -875,18 +888,11 @@ where
                     && contains_parameter_variable(&final_parameter_type);
 
             if !check_is_deferred_to_partial_invocation && !is_reported_by_its_bound {
-                // Only a type PHP# wrote is judged by PHP# literal rules: the parameter of a PHP# method or lambda,
-                // whatever class the call goes through, of a function value whose signature PHP# wrote, or of a
-                // `Sharp\` collection method, which PHP# declares as a plain PHP stub only to carry its templates. A
-                // plain PHP method's or closure's parameter takes either literal, whatever its docblock says.
+                // Only a type PHP# wrote is judged by PHP# literal rules. A plain PHP method's or closure's parameter
+                // takes either literal, whatever its docblock says.
                 let mut refused_crossing = false;
-                if matches!(&invocation.target, InvocationTarget::Callable { signature, .. } if signature.effects.is_some())
-                    || invocation.target.get_function_like_metadata().is_some_and(|function| function.flags.is_sharp())
-                    || matches!(
-                        invocation.target.get_function_like_identifier(),
-                        Some(FunctionLikeIdentifier::Method(class, _)) if is_prelude_stub(*class)
-                    )
-                {
+                let mut passed_type = Cow::Borrowed(&argument_value_type);
+                if takes_php_sharp_types(&invocation.target) {
                     check_sharp_literal_kind(
                         context,
                         Some(block_context),
@@ -895,7 +901,7 @@ where
                         &final_parameter_type,
                     );
                 } else if context.dialect.is_sharp() {
-                    refused_crossing = check_array_crossing(
+                    match check_array_crossing(
                         context,
                         &argument_value_type,
                         parameter_ref,
@@ -903,7 +909,10 @@ where
                         *argument_offset,
                         argument_expression,
                         &invocation.target,
-                    );
+                    ) {
+                        Some(passed) => passed_type = passed,
+                        None => refused_crossing = true,
+                    }
                 }
 
                 if context.dialect.is_sharp()
@@ -925,7 +934,7 @@ where
                     && verify_argument_type(
                         context,
                         artifacts,
-                        &argument_value_type,
+                        &passed_type,
                         &effect_free_parameter_type(parameter_ref, &final_parameter_type),
                         *argument_offset,
                         argument_expression,
@@ -1347,15 +1356,31 @@ where
                             continue;
                         }
 
-                        verify_argument_type(
-                            context,
-                            artifacts,
-                            &unpacked_element_type,
-                            &final_variadic_parameter_type,
-                            last_parameter_offset,
-                            argument_expression,
-                            &invocation.target,
-                        );
+                        // Each spread `Map` crosses into a plain PHP array parameter as a passed one does.
+                        let passed = if context.dialect.is_sharp() && !takes_php_sharp_types(&invocation.target) {
+                            check_array_crossing(
+                                context,
+                                &unpacked_element_type,
+                                last_parameter_ref,
+                                &final_variadic_parameter_type,
+                                last_parameter_offset,
+                                argument_expression,
+                                &invocation.target,
+                            )
+                        } else {
+                            Some(Cow::Borrowed(&unpacked_element_type))
+                        };
+                        if let Some(passed) = passed {
+                            verify_argument_type(
+                                context,
+                                artifacts,
+                                &passed,
+                                &final_variadic_parameter_type,
+                                last_parameter_offset,
+                                argument_expression,
+                                &invocation.target,
+                            );
+                        }
                     }
                 }
             } else {

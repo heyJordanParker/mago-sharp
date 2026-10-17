@@ -10057,14 +10057,15 @@ fn map_get_has_and_remove_take_a_backed_enum_key_in_sharp_and_in_php() {
 }
 
 /// Spec section 12 passes a `Map` to a plain PHP parameter whose declared type names `array` as a PHP array, whose
-/// keys are `int` or `string`. A `Map` keyed by a backed enum, a struct or a `float` has no such array, so the call is
+/// keys are `int` or `string`. A `Map` keyed by a unit enum, a struct or a `float` has no such array, so the call is
 /// refused, naming the parameter and the key type, whether the parameter's type is native, from a stub as `count`'s,
 /// or from a docblock. A parameter of a plain PHP closure a local holds, which has no name, is named by its position.
-/// A `Map<string, int>` crosses, and a parameter typed `iterable`, `mixed` or nothing takes the `Map` itself, whose
-/// keys stay `Status`, so an `iterable<string, int>` takes `Map<string, int>` and refuses `Map<Status, int>`.
+/// A `Map<string, int>` crosses, and so does a `Map<Status, int>` of a backed enum, with each case's backing value as
+/// its key. A parameter typed `iterable`, `mixed` or nothing takes the `Map` itself, whose keys stay `Status`, so an
+/// `iterable<string, int>` takes `Map<string, int>` and refuses `Map<Status, int>`.
 #[test]
 fn a_map_keyed_by_an_object_is_refused_where_plain_php_takes_an_array() {
-    let sharp = "namespace Demo;\n\nimport Lib.Sink;\nimport Lib.Spot;\nimport Lib.Status;\n\nclass Tally\n{\n    public int total(Map<Status, int> counts, Map<Spot, int> spots, Map<string, int> named, Map<float, int> prices)\n    {\n        const counter = Sink.counter();\n        return Sink.plain(counts) + Sink.documented(spots) + global.count(spots) + Sink.plain(named) + Sink.each(counts) + Sink.anything(spots) + Sink.untyped(counts) + counter(spots) + Sink.keyed(named) + Sink.keyed(counts) + Sink.plain(prices);\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Pure;\nimport Lib.Sink;\nimport Lib.Spot;\nimport Lib.Status;\n\nclass Tally\n{\n    public int total(Map<Status, int> counts, Map<Spot, int> spots, Map<string, int> named, Map<float, int> prices, Map<Pure, int> pure)\n    {\n        const counter = Sink.counter();\n        return Sink.plain(counts) + Sink.documented(spots) + global.count(spots) + Sink.plain(named) + Sink.each(counts) + Sink.anything(spots) + Sink.untyped(counts) + counter(spots) + Sink.keyed(named) + Sink.keyed(counts) + Sink.plain(prices) + Sink.plain(pure);\n    }\n}\n";
     let sink = "<?php\n\nnamespace Lib;\n\nfinal class Sink\n{\n    public static function plain(array $counts): int\n    {\n        return count($counts);\n    }\n\n    /** @param array<string, int> $counts */\n    public static function documented($counts): int\n    {\n        return count($counts);\n    }\n\n    public static function each(iterable $counts): int\n    {\n        return iterator_count($counts);\n    }\n\n    /** @param iterable<string, int> $counts */\n    public static function keyed(iterable $counts): int\n    {\n        return iterator_count($counts);\n    }\n\n    public static function anything(mixed $counts): int\n    {\n        return 1;\n    }\n\n    public static function untyped($counts): int\n    {\n        return 1;\n    }\n\n    /** @return Closure(array): int */\n    public static function counter(): Closure\n    {\n        return static fn (array $counts): int => count($counts);\n    }\n}\n";
     let spot = "namespace Lib;\n\npublic struct Spot\n{\n    public Spot(public int x { get; }) { }\n}\n";
 
@@ -10079,12 +10080,12 @@ fn a_map_keyed_by_an_object_is_refused_where_plain_php_takes_an_array() {
         .map(|issue| format!("{} {}", located(sharp, issue), issue.message))
         .collect::<Vec<_>>(),
         [
-            "12:27 invalid-argument `Map<Status, int>` can't be passed to the parameter `counts` of method `Sink.plain`, which takes a PHP array: a PHP array's keys are `int` or `string`, and this `Map`'s keys are `Status`.",
-            "12:53 invalid-argument `Map<Spot, int>` can't be passed to the parameter `counts` of method `Sink.documented`, which takes a PHP array: a PHP array's keys are `int` or `string`, and this `Map`'s keys are `Spot`.",
-            "12:75 invalid-argument `Map<Spot, int>` can't be passed to the parameter `value` of function `global.count`, which takes a PHP array: a PHP array's keys are `int` or `string`, and this `Map`'s keys are `Spot`.",
-            "12:178 invalid-argument `Map<Spot, int>` can't be passed to the argument #1 of closure `Closure`, which takes a PHP array: a PHP array's keys are `int` or `string`, and this `Map`'s keys are `Spot`.",
-            "12:218 possibly-invalid-argument Possible argument type mismatch for argument #1 of `Sink.keyed`: expected `iterable<string, int>`, but possibly received `Map<Status, int>`.",
-            "12:239 invalid-argument `Map<float, int>` can't be passed to the parameter `counts` of method `Sink.plain`, which takes a PHP array: a PHP array's keys are `int` or `string`, and this `Map`'s keys are `float`.",
+            "13:53 invalid-argument `Map<Spot, int>` can't be passed to the parameter `counts` of method `Sink.documented`, which takes a PHP array: a PHP array's keys are `int` or `string`, and this `Map`'s keys are `Spot`.",
+            "13:75 invalid-argument `Map<Spot, int>` can't be passed to the parameter `value` of function `global.count`, which takes a PHP array: a PHP array's keys are `int` or `string`, and this `Map`'s keys are `Spot`.",
+            "13:178 invalid-argument `Map<Spot, int>` can't be passed to the argument #1 of closure `Closure`, which takes a PHP array: a PHP array's keys are `int` or `string`, and this `Map`'s keys are `Spot`.",
+            "13:218 possibly-invalid-argument Possible argument type mismatch for argument #1 of `Sink.keyed`: expected `iterable<string, int>`, but possibly received `Map<Status, int>`.",
+            "13:239 invalid-argument `Map<float, int>` can't be passed to the parameter `counts` of method `Sink.plain`, which takes a PHP array: a PHP array's keys are `int` or `string`, and this `Map`'s keys are `float`.",
+            "13:260 invalid-argument `Map<Pure, int>` can't be passed to the parameter `counts` of method `Sink.plain`, which takes a PHP array: a PHP array's keys are `int` or `string`, and this `Map`'s keys are `Pure`.",
         ]
     );
 }

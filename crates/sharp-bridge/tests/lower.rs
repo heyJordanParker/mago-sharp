@@ -19445,6 +19445,71 @@ fn statements_at(code: &str, library: &[(&str, &str)], positions: std::ops::Rang
 }
 
 /// ```php
+/// return \Lib\Calc::total((fn ($map#1) => \is_object($map#1)
+///     ? \array_combine(\array_column($map#1->keys(), 'value'), $map#1->values()) : $map#1)($stock));
+/// ```
+///
+/// A `Map` keyed by a backed enum goes into a plain PHP parameter that takes `array` with each case's backing value as
+/// its key, spec section 12, as the keys a PHP array holds.
+#[test]
+fn a_map_keyed_by_a_backed_enum_goes_into_a_plain_php_array_with_backing_values_as_keys() {
+    let level = ("src/Lib/Level.php", "<?php namespace Lib; enum Level: string { case Low = 'low'; }");
+    let code = "namespace App.Tenant;\n\nimport Lib.Calc;\nimport Lib.Level;\n\nclass Report\n{\n    public int run(int extra)\n    {\n        Map<Level, int> stock = this.stock();\n        return Calc.total(stock);\n    }\n\n    private Map<Level, int> stock() => [Level.Low: 1];\n}\n";
+
+    assert_eq!(
+        statements_at(code, &[level], 1..2),
+        [indoc! {r#"
+            RETURN
+              STATIC_CALL
+                ZVAL "Lib\\Calc"
+                ZVAL "total"
+                ARG_LIST
+                  CALL
+                    ARROW_FUNC "" @11-11
+                      PARAM_LIST
+                        PARAM
+                          null
+                          ZVAL "map#1"
+                          null
+                          null
+                          null
+                          null
+                      null
+                      CONDITIONAL
+                        CALL
+                          ZVAL "is_object"
+                          ARG_LIST
+                            VAR
+                              ZVAL "map#1"
+                        CALL
+                          ZVAL "array_combine"
+                          ARG_LIST
+                            CALL
+                              ZVAL "array_column"
+                              ARG_LIST
+                                METHOD_CALL
+                                  VAR
+                                    ZVAL "map#1"
+                                  ZVAL "keys"
+                                  ARG_LIST
+                                ZVAL "value"
+                            METHOD_CALL
+                              VAR
+                                ZVAL "map#1"
+                              ZVAL "values"
+                              ARG_LIST
+                        VAR
+                          ZVAL "map#1"
+                      null
+                      null
+                    ARG_LIST
+                      VAR
+                        ZVAL "stock"
+        "#}]
+    );
+}
+
+/// ```php
 /// \Lib\Calc::total(\iterator_to_array($stock));
 /// \Lib\Calc::total(\iterator_to_array($tags, false));
 /// \Lib\Calc::total(\is_object($spare) ? \iterator_to_array($spare) : $spare);

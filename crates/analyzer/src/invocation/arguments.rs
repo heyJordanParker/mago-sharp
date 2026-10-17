@@ -10,6 +10,7 @@ use mago_codex::ttype::TType;
 use mago_codex::ttype::add_union_type;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
+use mago_codex::ttype::atomic::array::keyed::TKeyedArray;
 use mago_codex::ttype::atomic::array::list::TList;
 use mago_codex::ttype::atomic::callable::TCallable;
 use mago_codex::ttype::atomic::scalar::TScalar;
@@ -20,6 +21,7 @@ use mago_codex::ttype::comparator::union_comparator::can_expression_types_be_ide
 use mago_codex::ttype::comparator::union_comparator::is_contained_by;
 use mago_codex::ttype::expander::get_signature_of_function_like_identifier;
 use mago_codex::ttype::get_array_parameters;
+use mago_codex::ttype::get_backed_enum;
 use mago_codex::ttype::get_iterable_value_parameter;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_never;
@@ -30,6 +32,7 @@ use mago_reporting::Issue;
 use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::Expression;
+use mago_syntax::dialect::Dialect;
 
 use crate::analyzable::Analyzable;
 use crate::artifacts::AnalysisArtifacts;
@@ -75,32 +78,55 @@ fn shareable_part(union: &TUnion, is_sharp: bool) -> Option<Cow<'_, TUnion>> {
 }
 
 /// Spec section 12 passes a `Map` to a plain PHP parameter whose declared type names `array` as a PHP array, whose
-/// keys are `int` or `string`. A `Map` keyed by anything else, as an enum, a struct or a `float`, has no such array,
-/// where PHP would cast or refuse each key, so its call is refused here rather than failing where it runs. Returns
-/// whether it refused the call.
-pub(super) fn check_array_crossing<A>(
+/// keys are `int` or `string`, and a backed enum's cases as their backing values. A `Map` keyed by anything else, as a
+/// unit enum, a struct or a `float`, has no such array, where PHP would cast or refuse each key, so its call is refused
+/// here rather than failing where it runs. Returns the type plain PHP receives, `input_type` with each backed enum key
+/// its backing type, or None when it refused the call.
+pub(super) fn check_array_crossing<'input, A>(
     context: &mut Context<'_, '_, A>,
-    input_type: &TUnion,
+    input_type: &'input TUnion,
     parameter: InvocationTargetParameter<'_>,
     parameter_type: &TUnion,
     argument_offset: usize,
     input_expression: &Expression<'_>,
     invocation_target: &InvocationTarget<'_>,
-) -> bool
+) -> Option<Cow<'input, TUnion>>
 where
     A: Arena,
 {
     if !parameter_type.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(_))) {
-        return false;
+        return Some(Cow::Borrowed(input_type));
     }
-    let Some(key_type) = input_type.types.iter().find_map(|atomic| match atomic {
-        TAtomic::Array(map @ TArray::Keyed(_)) => Some(get_array_parameters(map, context.codebase).0),
+    let Some((key_type, value_type)) = input_type.types.iter().find_map(|atomic| match atomic {
+        TAtomic::Array(map @ TArray::Keyed(_)) => Some(get_array_parameters(map, context.codebase)),
         _ => None,
     }) else {
-        return false;
+        return Some(Cow::Borrowed(input_type));
     };
     if key_type.is_always_array_key(true) {
-        return false;
+        return Some(Cow::Borrowed(input_type));
+    }
+    let backing_types: Option<Vec<TAtomic>> = key_type
+        .types
+        .iter()
+        .map(|atomic| get_backed_enum(atomic, context.codebase, Dialect::Sharp)?.enum_type.clone())
+        .collect();
+    if let Some(backing_types) = backing_types {
+        let crossed = TAtomic::Array(TArray::Keyed(TKeyedArray::new_with_parameters(
+            Arc::new(TUnion::from_vec(backing_types)),
+            Arc::new(value_type),
+        )));
+        let types = input_type
+            .types
+            .iter()
+            .map(
+                |atomic| {
+                    if matches!(atomic, TAtomic::Array(TArray::Keyed(_))) { crossed.clone() } else { atomic.clone() }
+                },
+            )
+            .collect();
+
+        return Some(Cow::Owned(input_type.clone_with_types(types)));
     }
 
     let parameter = parameter.get_name().map_or_else(
@@ -120,7 +146,7 @@ where
         .with_annotation(Annotation::secondary(invocation_target.span()).with_message("Plain PHP declares this call"))
         .with_help("Pass a `Map` keyed by `int` or `string`, such as one keyed by a field of each key."),
     );
-    true
+    None
 }
 
 /// Checks if an argument can be passed by reference.
