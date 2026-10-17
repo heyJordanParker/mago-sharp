@@ -4555,8 +4555,15 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.node(SHARP_AST_CATCH, 0, line, &[classes, variable, body])
     }
 
-    /// A call into plain PHP is checked as [`Types::call_check`] says, wherever its value goes.
+    /// A call into plain PHP is checked as [`Types::call_check`] says, wherever its value goes, and plain PHP's value is
+    /// renumbered where the checker reads it as a `List`, as [`Self::renumbered`] says.
     fn expression(&mut self, expression: &Expression) -> u32 {
+        self.arriving(expression, Arrival::Read)
+    }
+
+    /// `expression`, as [`Self::expression`] lowers it where PHP# reads it, and as `arrival` says where plain PHP's
+    /// array the checker reads as a `List` goes elsewhere.
+    fn arriving(&mut self, expression: &Expression, arrival: Arrival) -> u32 {
         let line = self.line(expression);
         if let Some((_, name)) = self.null_safe_receivers.iter().find(|(span, _)| *span == expression.span()) {
             let name = name.clone();
@@ -4568,10 +4575,43 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         }
 
         let lowered = self.unchecked_expression(line, expression);
-        match self.types.call_check(expression) {
+        let arrives_as_list = self.plain_value(expression) && self.types.arrives_as_list(expression);
+        let (lowered, check) = match arrival {
+            Arrival::Read if arrives_as_list => {
+                (self.renumbered(expression, lowered), self.types.call_check(expression))
+            }
+            Arrival::Map(map) if arrives_as_list => (lowered, self.types.call_check_as(expression, map)),
+            Arrival::Plain if arrives_as_list => (lowered, None),
+            _ => (lowered, self.types.call_check(expression)),
+        };
+        match check {
             Some((text, target)) => self.verified(line, lowered, &text, target.as_bytes()),
             None => lowered,
         }
+    }
+
+    /// `lowered`, the value of `value`, renumbered where plain PHP gives it and the checker reads it as a `List`, spec
+    /// section 12: plain PHP's `array<int, T>` arrives as a `List<T>`, as [`Types::arrives_as_list`] says, and its
+    /// keys may have gaps. `\array_values` returns a list without gaps as it is. A value plain PHP declares a list is
+    /// one already.
+    ///
+    /// ```php
+    /// \is_array($renumbered#1 = \App\Users::all()) ? \array_values($renumbered#1) : $renumbered#1
+    /// ```
+    fn renumbered(&mut self, value: &Expression, lowered: u32) -> u32 {
+        let span = value.span();
+        let line = self.line(span);
+        let taken = self.temporaries;
+        let name = self.hidden("renumbered");
+        let place = self.variable(span, &name);
+        let first = self.node(SHARP_AST_ASSIGN, 0, line, &[place, lowered]);
+        let is_array = self.global_call(line, b"is_array", &[first]);
+        let read = self.variable(span, &name);
+        let values = self.global_call(line, b"array_values", &[read]);
+        let itself = self.variable(span, &name);
+        self.temporaries = taken;
+
+        self.node(SHARP_AST_CONDITIONAL, 0, line, &[is_array, values, itself])
     }
 
     fn unchecked_expression(&mut self, line: u32, expression: &Expression) -> u32 {
@@ -7492,7 +7532,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     .map(|set| self.array_of_each(value, set)),
                 (true, false, _) => table_kind(self.types.expression_type(value)).map(|set| self.array_of(value, set)),
             };
-            let value = crossed.unwrap_or_else(|| self.expression(value));
+            let value = crossed.unwrap_or_else(|| self.arriving(value, Arrival::Plain));
             arguments.push(match argument {
                 Argument::Positional(_) if spread => self.node(SHARP_AST_UNPACK, 0, line, &[value]),
                 Argument::Positional(_) => value,
@@ -7603,7 +7643,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let taken = self.temporaries;
         let name = self.hidden("crossing");
         let place = self.variable(span, &name);
-        let lowered = self.expression(value);
+        let arrival = match self.crossing_array(r#type) {
+            Some(TArray::Keyed(_)) => Arrival::Map(r#type),
+            _ => Arrival::Read,
+        };
+        let lowered = self.arriving(value, arrival);
         let first = self.node(SHARP_AST_ASSIGN, 0, self.line(span), &[place, lowered]);
         let crossed = self.crossed(span, r#type, &name, first);
         self.temporaries = taken;
@@ -8037,6 +8081,17 @@ fn dropped_service(hint: &Hint, service: &FunctionLikeParameterMetadata) -> Opti
     let is_open = nodes.iter().any(|node| matches!(node, TypeRef::Atomic(TAtomic::GenericParameter(_))));
 
     (collection && of_objects && !is_open).then(|| service_id(r#type))
+}
+
+/// Where plain PHP's array, which the checker reads as a `List`, goes, as [`Lowering::arriving`] lowers it.
+#[derive(Clone, Copy)]
+enum Arrival<'place> {
+    /// PHP# reads it, so it is renumbered, spec section 12.
+    Read,
+    /// It enters a place that declares this `Map`, which makes a `Map` of its keys, and is checked as that `Map`.
+    Map(&'place TUnion),
+    /// It is an argument of plain PHP, which takes it as plain PHP gave it.
+    Plain,
 }
 
 /// Whether a value of `r#type` is a `Set`, true, or a `Map`, false, where it may be one.

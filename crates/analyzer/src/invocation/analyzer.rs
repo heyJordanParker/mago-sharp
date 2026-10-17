@@ -887,7 +887,13 @@ where
                         Some(FunctionLikeIdentifier::Method(class, _)) if is_prelude_stub(*class)
                     )
                 {
-                    check_sharp_literal_kind(context, argument_expression, &final_parameter_type);
+                    check_sharp_literal_kind(
+                        context,
+                        Some(block_context),
+                        artifacts,
+                        argument_expression,
+                        &final_parameter_type,
+                    );
                 } else if context.dialect.is_sharp() {
                     refused_crossing = check_array_crossing(
                         context,

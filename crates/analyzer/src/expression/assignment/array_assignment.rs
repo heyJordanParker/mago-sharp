@@ -124,7 +124,7 @@ where
                 })
         })
     {
-        check_sharp_literal_kind(context, value, &element);
+        check_sharp_literal_kind(context, Some(block_context), artifacts, value, &element);
         set_literal_type = get_set_literal_type(context, artifacts, value, &element);
     }
     let assign_value_type = set_literal_type.as_ref().unwrap_or(assign_value_type);

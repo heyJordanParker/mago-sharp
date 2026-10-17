@@ -125,7 +125,7 @@ where
     let mut literal_type = None;
     if let Some(declared_type) = &declared_type {
         if let Some(assigned_value) = assigned_value {
-            check_sharp_literal_kind(context, assigned_value, declared_type);
+            check_sharp_literal_kind(context, Some(block_context), artifacts, assigned_value, declared_type);
         }
         literal_type = get_written_literal_type(
             context,

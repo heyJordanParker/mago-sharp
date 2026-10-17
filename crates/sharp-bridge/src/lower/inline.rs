@@ -249,9 +249,9 @@ impl Lowering<'_, '_> {
             if node.kind == SHARP_AST_VAR {
                 let name = self.nodes[self.children[node.first_child as usize] as usize].text;
                 let name = &self.texts[name.offset as usize..(name.offset + name.len) as usize];
-                let slot = names.iter().position(|slot| *slot == name).unwrap_or_else(|| {
-                    unreachable!("a form reads only its slots, not `{}`", String::from_utf8_lossy(name))
-                });
+                // A body whose lowering holds a value in a variable of its own, as a plain PHP `List` renumbered
+                // where it arrives does, runs as a call, since a form reads only its slots.
+                let slot = names.iter().position(|slot| *slot == name)?;
                 slots[slot] = index as u32;
             }
         }

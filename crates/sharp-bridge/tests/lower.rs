@@ -17513,11 +17513,11 @@ fn a_typed_for_counter_is_the_assignment_of_its_value() {
 }
 
 /// ```php
-/// foreach (<check Map<int, int>>(\Lib\Calc::make(2)) as $key#1 => $value#2) {
+/// foreach (<check Map<int|string, int>>(\Lib\Calc::make(2)) as $key#1 => $value#2) {
 ///     $entry = [$key#1, $value#2];
 ///     $extra += $entry[1];
 /// }
-/// foreach (<check Map<int, int>>(\Lib\Calc::make(3)) as $key => $value) {
+/// foreach (<check Map<int|string, int>>(\Lib\Calc::make(3)) as $key => $value) {
 /// }
 /// ```
 ///
@@ -17531,7 +17531,7 @@ fn for_of_loops_are_foreach_nodes_with_the_value_before_the_key() {
             "        for (const entry of Calc.make(2)) {\n            extra += entry[1];\n        }\n        for (let [key, value] of Calc.make(3)) {\n        }\n        return extra;\n",
             &[(
                 "src/Lib/Calc.php",
-                "<?php namespace Lib; final class Calc { /** @return array<int, int> */ public static function make(int $n): array { return [$n => $n]; } }",
+                "<?php namespace Lib; final class Calc { /** @return array<int|string, int> */ public static function make(int $n): array { return [$n => $n]; } }",
             )]
         ),
         indoc! {r#"
@@ -17543,7 +17543,7 @@ fn for_of_loops_are_foreach_nodes_with_the_value_before_the_key() {
                     ZVAL "make"
                     ARG_LIST
                       ZVAL 2
-                  ZVAL "Map<int, int>"
+                  ZVAL "Map<int|string, int>"
                   ZVAL "Lib\\Calc::make()"
                 VAR
                   ZVAL "value#2"
@@ -17577,7 +17577,7 @@ fn for_of_loops_are_foreach_nodes_with_the_value_before_the_key() {
                     ZVAL "make"
                     ARG_LIST
                       ZVAL 3
-                  ZVAL "Map<int, int>"
+                  ZVAL "Map<int|string, int>"
                   ZVAL "Lib\\Calc::make()"
                 VAR
                   ZVAL "value"
@@ -18595,6 +18595,29 @@ fn a_template_is_an_encaps_list_of_its_text_and_interpolations() {
 /// return "Paid: {["false", "true"][$paid]} of {$extra} for {$name} {["false", "true"][true]}";
 /// ```
 ///
+/// Spec section 12: plain PHP's `array<int, T>` arrives as a `List<T>`, renumbered where PHP# reads it with
+/// `\array_values`. A `Map` place keeps its keys and makes the `Map` of them, an argument of plain PHP takes the array
+/// as plain PHP gave it, and a value plain PHP declares a list is one already.
+#[test]
+fn a_plain_php_int_keyed_array_is_renumbered_where_it_arrives() {
+    let ids = (
+        "src/App/Tenant/Ids.php",
+        "<?php namespace App\\Tenant; final class Ids { /** @return array<int, int> */ public static function all(): array { return [5 => 1]; } /** @return list<int> */ public static function listed(): array { return [1]; } }",
+    );
+    let lowered = |statements: &str| body_in(RUN, statements, &[ids]);
+
+    assert!(lowered("        List<int> all = Ids.all();\n        return all[0];\n").contains("ZVAL \"array_values\""));
+    assert!(
+        !lowered("        Map<int, int> byId = Ids.all();\n        return byId.count();\n")
+            .contains("ZVAL \"array_values\"")
+    );
+    assert!(!lowered("        return global.count(Ids.all());\n").contains("ZVAL \"array_values\""));
+    assert!(
+        !lowered("        List<int> listed = Ids.listed();\n        return listed[0];\n")
+            .contains("ZVAL \"array_values\"")
+    );
+}
+
 /// Spec section 18 shows an object in a template by what its `toString()` returns, so the part calls it, which an enum
 /// case needs, since PHP gives an enum no string conversion.
 #[test]
@@ -21383,7 +21406,7 @@ fn every_construct_of_the_slice_lowers_into_nodes_of_their_kinds_child_count() {
         &[
             (
                 "src/Lib/Calc.php",
-                "<?php namespace Lib; final class Money { public int $cents = 0; } final class Calc extends \\Exception { public const int MAX = 3; public static Money $standard; public ?float $rate = null; public Money $price; public function __construct(int|float|Calc $start = 0, int $rate = 1, int ...$more) {} public static function make(): Calc { return new Calc(); } public function add(int ...$amounts): Calc { return $this; } /** @return array<int, int> */ public static function values(): array { return []; } }",
+                "<?php namespace Lib; final class Money { public int $cents = 0; } final class Calc extends \\Exception { public const int MAX = 3; public static Money $standard; public ?float $rate = null; public Money $price; public function __construct(int|float|Calc $start = 0, int $rate = 1, int ...$more) {} public static function make(): Calc { return new Calc(); } public function add(int ...$amounts): Calc { return $this; } /** @return array<int|string, int> */ public static function values(): array { return []; } }",
             ),
             (
                 "src/App/Tenant/Access.php",

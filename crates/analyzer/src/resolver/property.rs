@@ -32,6 +32,7 @@ use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_never;
 use mago_codex::ttype::get_php_passed_type;
 use mago_codex::ttype::get_php_received_type;
+use mago_codex::ttype::get_sharp_received_type;
 use mago_codex::ttype::template::TemplateBound;
 use mago_codex::ttype::template::TemplateResult;
 use mago_codex::ttype::template::bounds::get_most_specific_type_from_bounds;
@@ -1243,6 +1244,8 @@ where
             get_php_received_type(&property_type, context.codebase)
         };
         read_type = read_type.map(|read_type| get_php_received_type(&read_type, context.codebase));
+    } else if context.dialect.is_sharp() && !for_assignment && !resolution.declaring_class.flags.is_sharp() {
+        property_type = get_sharp_received_type(&property_type);
     }
 
     let expand_and_localize = |ty: &mut TUnion| {

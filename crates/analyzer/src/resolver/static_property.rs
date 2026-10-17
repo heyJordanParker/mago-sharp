@@ -9,6 +9,7 @@ use mago_codex::ttype::expander::TypeExpansionOptions;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_php_passed_type;
 use mago_codex::ttype::get_php_received_type;
+use mago_codex::ttype::get_sharp_received_type;
 use mago_codex::ttype::union::TUnion;
 use mago_names::ResolvedNames;
 use mago_reporting::Annotation;
@@ -458,6 +459,8 @@ where
         } else {
             get_php_received_type(&property_type, context.codebase)
         };
+    } else if context.dialect.is_sharp() && !for_assignment && !declaring_class_metadata.flags.is_sharp() {
+        property_type = get_sharp_received_type(&property_type);
     }
 
     expander::expand_union(

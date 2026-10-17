@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use foldhash::HashSet;
 
+use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::array::key::ArrayKey;
@@ -38,8 +39,10 @@ use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_span::HasSpan;
 use mago_span::Span;
+use mago_syntax::cst::Access;
 use mago_syntax::cst::Array;
 use mago_syntax::cst::ArrayElement;
+use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::LegacyArray;
 use mago_syntax::cst::PatternMatchArmBody;
@@ -53,10 +56,12 @@ use mago_word::word;
 
 use crate::analyzable::Analyzable;
 use crate::artifacts::AnalysisArtifacts;
+use crate::artifacts::CallTarget;
 use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
+use crate::resolver::method::get_declared_type;
 use crate::statement::class_like::r#struct::report_class_held_by_key;
 use crate::statement::function_like::collection_key_error;
 use crate::utils::expression::get_block_expression_id;
@@ -763,8 +768,19 @@ fn report_sharp_literal_spreads<A>(
 /// reaches the place as `value` itself, or through the right side of `??`, either branch of `? :` or an arm of a
 /// `match`, at any depth. A literal of spreads names no collection of its own, and `report_sharp_literal_spreads`
 /// checks what it spreads.
-pub(crate) fn check_sharp_literal_kind<A>(context: &mut Context<'_, '_, A>, value: &Expression<'_>, declared: &TUnion)
-where
+///
+/// A `List` value that is no literal is refused the same way where only a `Map` is declared, once `artifacts` types
+/// it: its keys are only its positions. A local, a parameter or a property counts by its declared type, which
+/// `block_context` holds, so one declared a `Map` that a refused literal set is not refused again. Plain PHP's value is
+/// the exception, since it still holds the keys plain PHP gave it, as [`is_plain_php_value`] says, and the place makes
+/// a `Map` of them.
+pub(crate) fn check_sharp_literal_kind<'arena, A>(
+    context: &mut Context<'_, 'arena, A>,
+    block_context: Option<&BlockContext<'_>>,
+    artifacts: &AnalysisArtifacts,
+    value: &Expression<'arena>,
+    declared: &TUnion,
+) where
     A: Arena,
 {
     if !context.dialect.is_sharp() {
@@ -788,6 +804,7 @@ where
             Expression::Array(literal) => literal,
             Expression::Binary(binary) if binary.operator.is_null_coalesce() => {
                 values.push(binary.rhs);
+                values.push(binary.lhs);
                 continue;
             }
             Expression::Conditional(conditional) => {
@@ -802,7 +819,12 @@ where
                 }));
                 continue;
             }
-            _ => continue,
+            value => {
+                if takes_map_literal && !takes_list_literal {
+                    report_list_in_map_place(context, block_context, artifacts, value, declared);
+                }
+                continue;
+            }
         };
 
         let Some(is_map_literal) = is_map_literal(literal) else {
@@ -830,6 +852,85 @@ where
                 Annotation::primary(literal.span()).with_message(format!("Declared `{declared_str}`.")),
             ),
         );
+    }
+}
+
+/// Refuses `value`, a `List` that is no literal, where `declared` takes only a `Map`, spec section 12, unless plain PHP
+/// gives it.
+fn report_list_in_map_place<'arena, A>(
+    context: &mut Context<'_, 'arena, A>,
+    block_context: Option<&BlockContext<'_>>,
+    artifacts: &AnalysisArtifacts,
+    value: &Expression<'arena>,
+    declared: &TUnion,
+) where
+    A: Arena,
+{
+    let declared_type =
+        block_context.and_then(|block_context| get_declared_type(context, block_context, artifacts, value));
+    let Some(value_type) = declared_type.as_ref().or_else(|| artifacts.get_expression_type(value)) else {
+        return;
+    };
+    let is_list = |atomic: &TAtomic| matches!(atomic, TAtomic::Array(TArray::List(list)) if list.tuple_names.is_none());
+    if !value_type.types.iter().any(is_list)
+        || !value_type.types.iter().all(|atomic| is_list(atomic) || atomic.is_null())
+        || is_plain_php_value(context, artifacts, value)
+    {
+        return;
+    }
+
+    let declared_str = display_type(context, declared);
+    context.collector.report_with_code(
+        IssueCode::InvalidArrayElement,
+        Issue::error("A `List` is not a `Map`: its keys are only its positions.")
+            .with_annotation(Annotation::primary(value.span()).with_message(format!("Declared `{declared_str}`.")))
+            .with_help("Declare a `List`, or build the `Map` from it, as in `items.associateBy(item => item.id)`."),
+    );
+}
+
+/// Whether plain PHP gives `value`: the result of a call of a plain PHP function or method, or a read of a property a
+/// plain PHP class declares. The prelude's stubs of the engine's `Sharp` classes are PHP#'s own.
+pub(crate) fn is_plain_php_value<A>(
+    context: &Context<'_, '_, A>,
+    artifacts: &AnalysisArtifacts,
+    value: &Expression<'_>,
+) -> bool
+where
+    A: Arena,
+{
+    let is_plain_class = |class: &[u8]| {
+        !class.get(..6).is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"sharp\\"))
+            && context.codebase.get_class_like(class).is_some_and(|class| !class.flags.is_sharp())
+    };
+
+    match value.unparenthesized() {
+        Expression::Call(_) => artifacts.get_callees(value).any(|target| match target {
+            CallTarget::FunctionLike { callee, .. } => {
+                let owner = match callee {
+                    FunctionLikeIdentifier::Method(class, _) => class.as_bytes(),
+                    _ => b"",
+                };
+                context.codebase.get_function_like(callee).is_some_and(|function| !function.flags.is_sharp())
+                    && !owner.get(..6).is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"sharp\\"))
+            }
+            _ => false,
+        }),
+        Expression::Access(Access::Property(access)) => {
+            let ClassLikeMemberSelector::Identifier(name) = &access.property else {
+                return false;
+            };
+            let property = [b"$", name.value].concat();
+            artifacts.get_expression_type(access.object).is_some_and(|object_type| {
+                object_type.types.iter().any(|atomic| match atomic {
+                    TAtomic::Object(TObject::Named(object)) => context
+                        .codebase
+                        .get_declaring_property_class(object.name.as_bytes(), &property)
+                        .is_some_and(|declaring| is_plain_class(declaring.as_bytes())),
+                    _ => false,
+                })
+            })
+        }
+        _ => false,
     }
 }
 

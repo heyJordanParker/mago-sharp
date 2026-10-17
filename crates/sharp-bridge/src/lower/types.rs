@@ -138,6 +138,25 @@ impl<'analysis> Types<'analysis> {
         })
     }
 
+    /// Whether `value`, a call of plain PHP or a read of a property plain PHP declares, may be an `int`-keyed array
+    /// whose keys have gaps, which the analysis reads as a `List`, as `get_sharp_received_type` says: plain PHP declares
+    /// a keyed array, and the analysis types the value as a `List`. A node the lowering builds has no type.
+    pub(crate) fn arrives_as_list(&self, value: &Expression) -> bool {
+        let is_list =
+            |atomic: &TAtomic| matches!(atomic, TAtomic::Array(TArray::List(list)) if list.tuple_names.is_none());
+        let declared = match value.unparenthesized() {
+            Expression::Call(_) => self
+                .plain_php_call(value)
+                .and_then(|(_, metadata)| metadata.return_type_metadata.as_ref().map(|declared| &declared.type_union)),
+            Expression::Access(Access::Property(_)) => self.property_type(value),
+            _ => None,
+        };
+
+        declared.is_some_and(|declared| {
+            declared.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(TArray::Keyed(_))))
+        }) && self.artifacts.get_expression_type(value).is_some_and(|r#type| r#type.types.iter().any(is_list))
+    }
+
     /// Whether the collection `expression` may hold a `Map`, whose element a loop reads as its entry, spec section 17.
     pub(crate) fn holds_map(&self, expression: &Expression) -> bool {
         self.expression_type(expression).types.iter().any(|atomic| matches!(atomic, TAtomic::Array(TArray::Keyed(_))))
@@ -628,14 +647,18 @@ impl<'analysis> Types<'analysis> {
     /// result holds a `float`, an `Any` or an `Object`, spec section 24: plain PHP's `int` becomes the `float`, and its
     /// null or non-object is refused where it enters.
     pub(crate) fn call_check(&self, call: &Expression) -> Option<(String, String)> {
-        if let Some(name) = self.unchecked_result_call(call) {
-            let r#type = self.artifacts.get_expression_type(call)?;
+        self.call_check_as(call, self.artifacts.get_expression_type(call)?)
+    }
 
+    /// [`Self::call_check`], with the result checked as `r#type`: the `Map` a place declares, which keeps the keys of a
+    /// plain PHP array the checker reads as a `List`, as the place makes it a `Map` of them.
+    pub(crate) fn call_check_as(&self, call: &Expression, r#type: &TUnion) -> Option<(String, String)> {
+        if let Some(name) = self.unchecked_result_call(call) {
             return needs_result_check(r#type)
                 .then(|| (text(r#type, self.codebase, Parameter::Index), format!("{name}()")));
         }
         let (name, metadata) = self.plain_php_call(call)?;
-        let text = self.checked_text(self.artifacts.get_expression_type(call)?, metadata.flags.is_user_defined())?;
+        let text = self.checked_text(r#type, metadata.flags.is_user_defined())?;
 
         Some((text, name))
     }

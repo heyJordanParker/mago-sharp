@@ -103,13 +103,19 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Return<'arena> {
                 .map(|return_type| return_type.type_union.clone())
                 .or_else(|| artifacts.lambda_result.clone());
             expect_type(context, artifacts, return_value, declared.as_ref());
-            if let Some(return_type) = return_type {
-                check_sharp_literal_kind(context, return_value, &return_type.type_union);
-            }
 
             block_context.flags.set_inside_return(true);
             return_value.analyze(context, block_context, artifacts)?;
             block_context.flags.set_inside_return(false);
+            if let Some(return_type) = return_type {
+                check_sharp_literal_kind(
+                    context,
+                    Some(block_context),
+                    artifacts,
+                    return_value,
+                    &return_type.type_union,
+                );
+            }
 
             let inferred_return_type = artifacts.get_rc_expression_type(&return_value).cloned();
 

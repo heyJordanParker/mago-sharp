@@ -152,7 +152,7 @@ where
         && let Some(property_metadata) = class_metadata.properties.get(&php_variable_name(variable_name))
         && let Some(declared_type_metadata) = property_metadata.type_metadata.as_ref()
     {
-        check_sharp_literal_kind(context, value, &declared_type_metadata.type_union);
+        check_sharp_literal_kind(context, Some(block_context), artifacts, value, &declared_type_metadata.type_union);
 
         if (is_sharp
             || !(declared_type_metadata.type_union.is_mixed()

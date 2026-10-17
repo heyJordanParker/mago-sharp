@@ -697,9 +697,9 @@ fn a_parameter_read_only_by_a_for_counter_is_used() {
 
 #[test]
 fn for_of_loop_variables_have_the_key_and_value_types_as_in_php() {
-    let store = "<?php\n\nnamespace Demo;\n\nclass Store\n{\n    /** @return array<int, string> */\n    public static function names(): array\n    {\n        return ['a'];\n    }\n}\n";
-    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static int last()\n    {\n        let found = 0;\n        for (const [key, name] of Store.names()) {\n            found = key;\n            return name;\n        }\n        return found;\n    }\n}\n";
-    let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    public static function last(): int\n    {\n        $found = 0;\n        foreach (Store::names() as $key => $name) {\n            $found = $key;\n            return $name;\n        }\n        return $found;\n    }\n}\n";
+    let store = "<?php\n\nnamespace Demo;\n\nclass Store\n{\n    /** @return array<string, int> */\n    public static function names(): array\n    {\n        return ['a' => 1];\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static string last()\n    {\n        let found = \"\";\n        for (const [key, count] of Store.names()) {\n            found = key;\n            return count;\n        }\n        return found;\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    public static function last(): string\n    {\n        $found = '';\n        foreach (Store::names() as $key => $count) {\n            $found = $key;\n            return $count;\n        }\n        return $found;\n    }\n}\n";
 
     let sharp_issues = issues(("src/Demo/Report.sharp", sharp), &[("src/Demo/Store.php", store)]);
     let php_issues = issues(("src/Demo/Report.php", php), &[("src/Demo/Store.php", store)]);
@@ -7916,6 +7916,46 @@ fn a_template_refuses_every_type_but_int_float_string_and_bool() {
             "16:66 array-to-string-conversion",
             "18:66 invalid-type-cast",
             "24:66 invalid-type-cast"
+        ]
+    );
+}
+
+/// Spec section 12: plain PHP's `array<int, T>`, returned or held in a property, arrives as a `List<T>`, which PHP#
+/// renumbers where it arrives, and still makes a `Map<int, T>` of its keys. An array keyed by `string` or by
+/// `int|string`, and a shape, stay a `Map`.
+#[test]
+fn a_plain_php_int_keyed_array_arrives_as_a_list() {
+    let users = "<?php\n\nnamespace App;\n\nfinal class Users\n{\n    /** @var array<int, Person> */\n    public array $cached = [];\n\n    /** @return array<int, Person> */\n    public function all(): array { return []; }\n\n    /** @return non-empty-array<int, Person> */\n    public function some(): array { return [new Person()]; }\n\n    /** @return array<string, Person> */\n    public function byName(): array { return []; }\n\n    /** @return array<int|string, Person> */\n    public function mixed(): array { return []; }\n}\n";
+    let person = "<?php\n\nnamespace App;\n\nfinal class Person\n{\n    public string $name = '';\n}\n";
+    let sharp = "namespace App;\n\nclass Roster\n{\n    public string run(Users users)\n    {\n        for (const person of users.all()) {\n            if (person.name == \"\") {\n                return \"\";\n            }\n        }\n        List<Person> people = users.all();\n        List<Person> cached = users.cached;\n        List<Person> some = users.some();\n        Map<int, Person> byId = users.all();\n        List<Person> named = users.byName();\n        List<Person> either = users.mixed();\n        return people[0].name;\n    }\n}\n";
+
+    assert_eq!(
+        issues(("src/App/Roster.sharp", sharp), &[("src/App/Users.php", users), ("src/App/Person.php", person)]),
+        ["16:30 invalid-local-assignment-value", "17:31 invalid-local-assignment-value"]
+    );
+}
+
+/// Spec section 12: a `List` is not a `Map`, so a `List` value where only a `Map` is declared is refused, as a `List`
+/// literal is, at a typed local, an argument, a return, a property and an expression body. Plain PHP's value is the
+/// exception: it still holds its keys, and the place makes a `Map` of them.
+#[test]
+fn a_list_value_where_a_map_is_declared_is_refused() {
+    let users = "<?php\n\nnamespace App;\n\nfinal class Users\n{\n    /** @return array<int, Person> */\n    public function all(): array { return []; }\n}\n";
+    let person = "<?php\n\nnamespace App;\n\nfinal class Person\n{\n}\n";
+    let sharp = "namespace App;\n\nclass Index\n{\n    public Map<int, int> held = [:];\n\n    public Map<int, int> local(List<int> items)\n    {\n        Map<int, int> byPosition = items;\n        this.held = items;\n        this.take(items);\n        return items;\n    }\n\n    public Map<int, int> body(List<int> items) => items;\n\n    public Map<int, int> maybe(List<int>? items) => items ?? [:];\n\n    public Map<int, Person> plain(Users users) => users.all();\n\n    public void take(Map<int, int> map) { }\n}\n";
+
+    assert_eq!(
+        worded(("src/App/Index.sharp", sharp), &[("src/App/Users.php", users), ("src/App/Person.php", person)])
+            .iter()
+            .map(|issue| issue.split(" | ").next().unwrap_or_default().to_owned())
+            .collect::<Vec<_>>(),
+        [
+            "9:36 invalid-array-element A `List` is not a `Map`: its keys are only its positions.",
+            "10:21 invalid-array-element A `List` is not a `Map`: its keys are only its positions.",
+            "11:19 invalid-array-element A `List` is not a `Map`: its keys are only its positions.",
+            "12:16 invalid-array-element A `List` is not a `Map`: its keys are only its positions.",
+            "15:51 invalid-array-element A `List` is not a `Map`: its keys are only its positions.",
+            "17:53 invalid-array-element A `List` is not a `Map`: its keys are only its positions.",
         ]
     );
 }

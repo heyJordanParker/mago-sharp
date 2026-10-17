@@ -11,6 +11,7 @@ use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::get_list;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_php_received_type;
+use mago_codex::ttype::get_sharp_received_type;
 use mago_codex::ttype::is_key_type;
 use mago_codex::ttype::template::TemplateResult;
 use mago_codex::ttype::union::TUnion;
@@ -32,6 +33,7 @@ use crate::statement::class_like::r#struct::report_class_held_by_key;
 use crate::statement::function_like::collection_key_error;
 use crate::statement::function_like::known_type_or_error;
 use crate::utils::names::display_sharp_type;
+use crate::utils::names::is_prelude_stub;
 
 pub fn fetch_invocation_return_type<'ctx, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
@@ -296,6 +298,13 @@ where
         if !context.dialect.is_sharp() {
             resulting_type = get_php_received_type(&resulting_type, context.codebase);
         }
+    } else if context.dialect.is_sharp()
+        && !matches!(
+            invocation.target.get_function_like_identifier(),
+            Some(FunctionLikeIdentifier::Method(class, _)) if is_prelude_stub(*class)
+        )
+    {
+        resulting_type = get_sharp_received_type(&resulting_type);
     }
 
     if function_like_metadata.is_some_and(|metadata| metadata.flags.is_by_reference()) {

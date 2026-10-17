@@ -1606,6 +1606,32 @@ pub fn get_php_passed_type(r#type: &TUnion, codebase: &CodebaseMetadata) -> TUni
     received.clone_with_types(received.types.iter().cloned().chain(arrays).collect())
 }
 
+/// The type PHP# code receives where a plain PHP declaration gives `r#type`, the mirror of [`get_php_received_type`].
+///
+/// It is a return or a property read. An `array<int, T>` it is, or may be, is a `List<T>`, spec section 12: plain
+/// PHP's array keyed by `int` alone holds a list whose keys may have gaps, such as what `array_filter` returns, and
+/// PHP# renumbers it where it arrives. An array keyed by `string` or by `int|string`, one whose keys PHP declares as a
+/// shape, and an array inside a collection stay as they are, since PHP# renumbers only the value that arrives.
+#[must_use]
+pub fn get_sharp_received_type(r#type: &TUnion) -> TUnion {
+    let types = r#type.types.iter().map(|atomic| match atomic {
+        TAtomic::Array(TArray::Keyed(TKeyedArray {
+            known_items: None,
+            parameters: Some((key_type, value_type)),
+            non_empty,
+            ..
+        })) if !key_type.types.is_empty() && key_type.types.iter().all(TAtomic::is_int) => {
+            let mut list = TList::new(value_type.clone());
+            list.non_empty = *non_empty;
+
+            TAtomic::Array(TArray::List(list))
+        }
+        atomic => atomic.clone(),
+    });
+
+    r#type.clone_with_types(types.collect())
+}
+
 /// The backed enum whose cases every value of `atomic` is.
 ///
 /// In plain PHP that is the enum an enum type names, as upstream Mago reads it. In PHP# it is the backed enum among the

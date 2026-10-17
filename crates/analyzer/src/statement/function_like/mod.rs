@@ -516,13 +516,13 @@ where
                     .map(|return_type| return_type.type_union.clone())
                     .or_else(|| artifacts.lambda_result.clone());
                 expect_type(context, &mut artifacts, value, declared.as_ref());
-                if let Some(return_type) = return_type {
-                    check_sharp_literal_kind(context, value, &return_type.type_union);
-                }
 
                 block_context.flags.set_inside_return(true);
                 value.analyze(context, block_context, &mut artifacts)?;
                 block_context.flags.set_inside_return(false);
+                if let Some(return_type) = return_type {
+                    check_sharp_literal_kind(context, Some(block_context), &artifacts, value, &return_type.type_union);
+                }
                 block_context.conditionally_referenced_variable_ids.clear();
 
                 let value_type =
@@ -1843,7 +1843,7 @@ fn check_parameter_default_value<'ctx, 'arena, A>(
 ) where
     A: Arena,
 {
-    check_sharp_literal_kind(context, default_expression, declared_type);
+    check_sharp_literal_kind(context, None, artifacts, default_expression, declared_type);
 
     // A PHP# type holds null only when it is written with `?`, so its `Any` and its type parameters are checked and it
     // has no implicitly nullable parameter.

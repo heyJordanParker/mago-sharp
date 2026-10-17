@@ -334,7 +334,7 @@ where
         _ => None,
     };
     if let (Some(declared_type), Some(source_expression)) = (&declared_type, source_expression) {
-        check_sharp_literal_kind(context, source_expression, declared_type);
+        check_sharp_literal_kind(context, Some(block_context), artifacts, source_expression, declared_type);
     }
     let source_type = declared_type
         .and_then(|declared_type| {
