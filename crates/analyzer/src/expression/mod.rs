@@ -672,6 +672,7 @@ where
                             })
                     }))
         })
+        .map(|issue| reword_list_element_test(issue, &pattern_calls.list_elements, &list_reads, context, artifacts))
         .collect();
 
     // Spec section 21: a function value from plain PHP keeps no PHP# type while the code runs, so a function-type test
@@ -1190,6 +1191,56 @@ fn never_matches(pattern: Span) -> Issue {
 
 /// Each list pattern of `lists`, by its span and its `[`, with the value its PHP's first test, the `is List<Any?>` at
 /// the `[`, reads.
+/// `issue`, in PHP#'s words when it is the PHP's report that a list pattern's element, one of `elements`, can never be
+/// of its type: "`tail` is an `int` in a `List<int>`, so it is never a `string`." `list_reads` gives the value each
+/// list pattern tests.
+fn reword_list_element_test<A>(
+    issue: Issue,
+    elements: &[(Span, Span, Option<Span>)],
+    list_reads: &[(Span, &Expression<'_>)],
+    context: &Context<'_, '_, A>,
+    artifacts: &AnalysisArtifacts,
+) -> Issue
+where
+    A: Arena,
+{
+    let Some(span) =
+        issue.primary_span().filter(|_| issue.code.as_deref() == Some(IssueCode::ImpossibleTypeComparison.as_str()))
+    else {
+        return issue;
+    };
+    let Some((hint, list, variable)) = elements.iter().find(|(hint, ..)| hint.start == span.start) else {
+        return issue;
+    };
+    let Some(list_type) =
+        list_reads.iter().find(|(read, _)| read == list).and_then(|(_, value)| artifacts.get_expression_type(*value))
+    else {
+        return issue;
+    };
+    let Some(element_type) = list_type.types.iter().find_map(|atomic| match atomic {
+        TAtomic::Array(TArray::List(list)) => Some(list.element_type.as_ref().clone()),
+        _ => None,
+    }) else {
+        return issue;
+    };
+
+    let element = display_type(context, &element_type);
+    let list = display_type(context, list_type);
+    let tested = quoted_source(context, *hint);
+    let name = variable
+        .map_or_else(|| "This element".to_owned(), |variable| format!("`{}`", quoted_source(context, variable)));
+
+    Issue::error(format!(
+        "{name} is {} `{element}` in {} `{list}`, so it is never {} `{tested}`.",
+        article(&element),
+        article(&list),
+        article(&tested)
+    ))
+    .with_code(IssueCode::ImpossibleTypeComparison.as_str())
+    .with_annotation(Annotation::primary(*hint).with_message("Tested here."))
+    .with_help(format!("Test the element against a type {} `{element}` can be.", article(&element)))
+}
+
 fn list_reads<'ast, 'arena>(php: Node<'ast, 'arena>, lists: &[(Span, Span)]) -> Vec<(Span, &'ast Expression<'arena>)> {
     let mut reads = ListReads::default();
     match php {
@@ -1421,6 +1472,8 @@ struct PatternCalls {
     element_tests: Vec<Span>,
     lists: Vec<(Span, Span)>,
     case_patterns: Vec<u32>,
+    /// Each list pattern element with a type: its type, its list pattern, and the name it binds.
+    list_elements: Vec<(Span, Span, Option<Span>)>,
 }
 
 /// Collects the `PatternCalls` of a PHP# `is`, `as` or `match`.
@@ -1449,6 +1502,12 @@ impl<'ast, 'arena> Walker<'ast, 'arena, PatternCalls> for PatternCallWalker {
     fn walk_in_list_pattern(&self, list: &'ast ListPattern<'arena>, calls: &mut PatternCalls) {
         calls.calls.extend(called_functions(Node::ListPattern(list)));
         calls.lists.push((list.span(), list.left_bracket));
+        calls.list_elements.extend(list.elements.iter().filter_map(|element| match element {
+            ListPatternElement::Pattern(Pattern::Type(TypePattern { hint, variable, .. })) => {
+                Some((hint.span(), list.span(), variable.as_ref().map(HasSpan::span)))
+            }
+            _ => None,
+        }));
         calls.element_tests.extend(list.elements.iter().filter_map(|element| match element {
             ListPatternElement::Pattern(Pattern::Type(TypePattern { hint, .. })) => Some(hint.span()),
             ListPatternElement::Rest(rest) => rest.hint.map(HasSpan::span),

@@ -5524,6 +5524,16 @@ fn list_patterns_test_the_count_and_each_element() {
     let anywhere = "namespace Demo;\n\nimport Lib.Circle;\n\nclass Report\n{\n    public static float last(List<Circle> circles) => match (circles) {\n        [...List<Circle> before, Circle last] => last.radius + before.count(),\n        default => 0.0,\n    };\n\n    public static int ends(List<int> values)\n    {\n        if (values is [int first, ..., int last]) {\n            return first + last;\n        }\n        return 0;\n    }\n\n    public static int middle(List<int> values) => match (values) {\n        [1, ...List<int> inner, int end] => inner.count() + end,\n        [..., > 9] => 9,\n        default => 0,\n    };\n\n    public static int negated(List<int> values) => match (values) {\n        [] => 0,\n        not [] => 1,\n        default => 2,\n    };\n\n    public static int grouped(List<int> values) => match (values) {\n        [] => 0,\n        ([..., int end]) => end,\n        default => 2,\n    };\n}\n";
     assert_eq!(issues(("src/Demo/Report.sharp", anywhere), &[("src/Lib/Shapes.php", SHAPES)]), Vec::<String>::new());
 
+    // An element a list's element type can never be names the element, the list and the type, before or after a rest.
+    let never = "namespace Demo;\n\nclass Report\n{\n    public static bool tail(List<int> values) => values is [...List<int> before, string tail];\n\n    public static bool head(List<int> values) => values is [string, ...];\n}\n";
+    assert_eq!(
+        refusals(("src/Demo/Report.sharp", never), &[]),
+        [
+            "5:82 impossible-type-comparison `tail` is an `int` in a `List<int>`, so it is never a `string`. | Test the element against a type an `int` can be.",
+            "7:61 impossible-type-comparison This element is an `int` in a `List<int>`, so it is never a `string`. | Test the element against a type an `int` can be.",
+        ]
+    );
+
     // A value that holds no `List` never matches.
     let other = "namespace Demo;\n\nclass Report\n{\n    public static bool mapped(Map<string, int> entries) => entries is [int one];\n\n    public static bool text(string name) => name is [] or \"\";\n}\n";
     assert_eq!(
