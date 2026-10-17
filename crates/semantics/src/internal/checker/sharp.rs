@@ -5561,8 +5561,9 @@ const fn is_slice_assignment_operator(operator: &AssignmentOperator) -> bool {
 }
 
 /// Reports a node the slice does not have at its place. A form [`is_undecided`] names is not supported yet, a PHP form
-/// PHP# never has names what PHP# writes instead, as [`never_written`] gives it, and any other node is no PHP#
-/// construct. Each notes what PHP# has at the place.
+/// PHP# never has names what PHP# writes instead, as [`never_written`] gives it, any other expression in a constant
+/// value is not supported yet, as `new Report()` there, and any other node is no PHP# construct. Each notes what PHP#
+/// has at the place.
 fn report_unsupported(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) {
     let construct = match node {
         Node::Statement(_) => "statement",
@@ -5580,6 +5581,8 @@ fn report_unsupported(node: Node<'_, '_>, place: Place, context: &mut Context<'_
         context.report(not_supported_yet(node.span(), construct, supported(place)));
     } else if let Some(issue) = never_written(node, place, context) {
         context.report(issue);
+    } else if let (Node::Expression(_), Place::Constant) = (node, place) {
+        context.report(not_supported_yet(node.span(), construct, supported(place)));
     } else {
         report_not_supported(node.span(), construct, supported(place), context);
     }
@@ -5588,9 +5591,9 @@ fn report_unsupported(node: Node<'_, '_>, place: Place, context: &mut Context<'_
 /// Whether a node the slice does not have is a form PHP# has not decided, or that a later change builds, so it is not
 /// supported yet: `break` and `continue` with a level, an anonymous class, `|>`, a partial application, a member of
 /// `Self` read or written, as in `Self.count`, an interface's constants, property bodies and operators, an enum's
-/// operators, `? :`, an index, a template and a case's `value` or `name` in a constant value, an intersection type, a
-/// type with no test in a pattern, as a tuple or `Class<T>`, and a constant typed as a function, a tuple or a generic
-/// type, which the collections change builds.
+/// operators, an event's attributes, a case's `value` or `name` in a constant value, an intersection type, a type with
+/// no test in a pattern, as a tuple or `Class<T>`, and a constant typed as a function, a tuple or a generic type, which
+/// the collections change builds.
 fn is_undecided(node: Node<'_, '_>, place: Place, context: &Context<'_, '_, '_>) -> bool {
     match (node, place) {
         (
@@ -5615,15 +5618,8 @@ fn is_undecided(node: Node<'_, '_>, place: Place, context: &Context<'_, '_, '_>)
             ),
             Place::Interface,
         )
-        | (Node::ClassLikeMember(ClassLikeMember::Operator(_)), Place::Enum) => true,
-        (
-            Node::Expression(
-                Expression::Conditional(_)
-                | Expression::ArrayAccess(_)
-                | Expression::CompositeString(CompositeString::Interpolated(_)),
-            ),
-            Place::Constant,
-        ) => true,
+        | (Node::ClassLikeMember(ClassLikeMember::Operator(_)), Place::Enum)
+        | (Node::AttributeList(_), Place::Event) => true,
         (Node::Hint(Hint::Intersection(_)) | Node::IntersectionHint(_), _) => true,
         (Node::Hint(Hint::Parenthesized(parenthesized)), _) => matches!(parenthesized.hint, Hint::Intersection(_)),
         (Node::Hint(hint), Place::Pattern) => is_slice_type(hint) && !has_type_test(hint),
@@ -5844,11 +5840,6 @@ fn never_written(node: Node<'_, '_>, place: Place, context: &Context<'_, '_, '_>
         (Node::Expression(Expression::Self_(keyword)), Place::Body | Place::Constant) if is_sharp_self(keyword) => {
             error("`Self` is no value: write `typeof(Self)` for the class a static method is called on.".to_owned())
         }
-        (Node::Expression(_), Place::Constant) => error(format!(
-            "A constant value can't hold `{}`: it holds literals, constants and the operators on them.",
-            written(span)
-        ))
-        .with_note(supported(place)),
         _ => return None,
     })
 }

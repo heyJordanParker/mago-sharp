@@ -140,7 +140,7 @@ fn an_event_takes_only_public_or_internal_and_its_parameters_are_its_properties(
             "public event Tagged(Set<string> tags);",
             vec!["3:21 A `Set` parameter of an event is not supported yet in PHP#."],
         ),
-        ("[Logged] public event Noted(int id);", vec!["3:1 This construct is not part of PHP#."]),
+        ("[Logged] public event Noted(int id);", vec!["3:1 This construct is not supported yet in PHP#."]),
         (
             "public event Tracked(int id { get; });",
             vec!["3:29 An event's parameter takes no accessors: it is a get-only property of the event."],
@@ -175,7 +175,7 @@ fn an_event_takes_only_public_or_internal_and_its_parameters_are_its_properties(
     let code = "namespace App.Shop;\n\n[Logged] public event Noted(int id);\n";
     let construct_notes: Vec<Vec<String>> = check_in_type_file(code)
         .into_iter()
-        .filter(|issue| issue.message == "This construct is not part of PHP#.")
+        .filter(|issue| issue.message == "This construct is not supported yet in PHP#.")
         .map(|issue| issue.notes)
         .collect();
     assert_eq!(
@@ -3232,7 +3232,7 @@ fn attribute_arguments_outside_the_slice_are_an_error() {
         [
             "5:12 A constant value can't read `typeof(Report).name`: it holds literals, constants and the operators on them.",
             "7:13 A constant value can't call `this.run(…)`: it holds literals, constants and the operators on them.",
-            "8:19 A constant value can't hold `new Report()`: it holds literals, constants and the operators on them.",
+            "8:19 This expression is not supported yet in PHP#.",
         ]
     );
 
