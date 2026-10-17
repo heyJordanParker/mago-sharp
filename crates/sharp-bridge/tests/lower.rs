@@ -9290,6 +9290,24 @@ fn any_and_nullable_any_are_mixed() {
 }
 
 /// ```php
+/// public function run(int $extra): never
+/// {
+///     throw new \App\Tenant\Failure();
+/// }
+/// ```
+///
+/// Spec section 7: a `never` method is PHP's `never`, so PHP throws `TypeError` if it returns.
+#[test]
+fn a_never_method_is_php_never() {
+    let lowered = Lowered::with(
+        &method_with("never run(int extra)", "        throw new Failure();\n"),
+        &[("src/App/Tenant/Failure.php", "<?php namespace App\\Tenant; final class Failure extends \\Exception {}")],
+    );
+
+    assert_eq!(member_in(&[lowered], "Report", &[0, 3]), "ZVAL [1] \"never\"\n");
+}
+
+/// ```php
 /// public function run(): void
 /// {
 ///     return;
@@ -18585,7 +18603,10 @@ fn an_object_in_a_template_shows_what_its_to_string_returns() {
         body_in(
             "string run(Sku sku)",
             "        return `Sku: ${sku}`;\n",
-            &[("src/App/Tenant/Sku.sharp", "namespace App.Tenant;\n\nclass Sku\n{\n    public string toString() => \"A-12\";\n}\n")]
+            &[(
+                "src/App/Tenant/Sku.sharp",
+                "namespace App.Tenant;\n\nclass Sku\n{\n    public string toString() => \"A-12\";\n}\n"
+            )]
         ),
         indoc! {r#"
             STMT_LIST

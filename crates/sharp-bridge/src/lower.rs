@@ -4146,9 +4146,12 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         'arena: 'hint,
     {
         match hint {
-            Hint::Integer(name) | Hint::Float(name) | Hint::Bool(name) | Hint::String(name) | Hint::Void(name) => {
-                PhpType::Named(name.value)
-            }
+            Hint::Integer(name)
+            | Hint::Float(name)
+            | Hint::Bool(name)
+            | Hint::String(name)
+            | Hint::Void(name)
+            | Hint::Never(name) => PhpType::Named(name.value),
             Hint::Object(_) => PhpType::Named(b"object"),
             Hint::Mixed(_) => PhpType::Mixed,
             Hint::Identifier(name) => match self.names.binding(name) {

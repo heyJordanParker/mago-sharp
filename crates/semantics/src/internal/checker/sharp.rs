@@ -294,11 +294,11 @@ const OBJECT: &[u8] = b"Object";
 ///   checks. A type argument is any of
 ///   these types but `void`, and a type parameter takes none. A `Map`'s key is `int` or `string`, or a type the
 ///   analyzer finds an `int` or `string` backing value for. PHP's own check reports a `void` parameter and a `void`
-///   field. Each of them is nullable when written with `?` after it, as in `int?` or `Map<string, Any?>`, and PHP's
-///   own check reports `void?`. PHP's `mixed` is an error, because spec section 24 writes it `Any?`. A union of them but
+///   field. `never` is a method's return type alone, spec section 7. Each of them is nullable when written with `?`
+///   after it, as in `int?` or `Map<string, Any?>`, and PHP's own check reports `void?` and `never?`. PHP's `mixed` is an error, because spec section 24 writes it `Any?`. A union of them but
 ///   `void`, written inline as spec section 24 writes it, as in `int|string` or `List<int>|string`, goes wherever a
-///   type goes, and each member takes the type arguments it takes outside a union. PHP's own check reports `void` and
-///   a nullable type, as in `int?|string`, in a union, and `check_union` reports a type written twice, which the
+///   type goes, and each member takes the type arguments it takes outside a union. PHP's own check reports `void`,
+///   `never` and a nullable type, as in `int?|string`, in a union, and `check_union` reports a type written twice, which the
 ///   engine refuses. A union holds null only when written in parentheses with `?` after it, as in `(int|string)?`,
 ///   which the engine compiles as `int|string|null`.
 ///   `check_union` reports `null` written in a union, as in `int|null`, as not supported yet. PHP's own check reports
@@ -1454,6 +1454,9 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         (Node::Hint(hint), FieldOrProperty | Method | Signature | Parameter | Body) if is_slice_type(hint) => {
             Some(place)
         }
+        // Spec section 7: `never` is a method's return type, which `type_written_another_way` refuses elsewhere, and
+        // PHP's own check reports `never?` and `never` in a union.
+        (Node::Hint(Hint::Never(_)), Method | Signature) => Some(place),
         (Node::Hint(Hint::Union(union)), FieldOrProperty | ClassConstant | Method | Signature | Parameter | Body) => {
             check_union(union, place, context);
 
@@ -4100,8 +4103,8 @@ fn is_slice_type(hint: &Hint) -> bool {
 
 /// The error for a type PHP# writes another way, spec section 24: the built-in types are lowercase, every other type is
 /// capitalized, and PHP's `mixed`, `object`, `array`, `callable`, `true`, `false` and a lone `null` each have a PHP#
-/// form. `never` is a type only as a method's return type, at `place` [`Place::Method`], which keeps PHP's handling.
-/// `None` for a type written as PHP# writes it.
+/// form. `never` is a type only as a method's return type, spec section 7, at `place` [`Place::Method`] or
+/// [`Place::Signature`]. `None` for a type written as PHP# writes it.
 fn type_written_another_way(hint: &Hint, place: Place) -> Option<Issue> {
     let written = match hint {
         Hint::Identifier(Identifier::Local(name)) => name.value,
@@ -4117,7 +4120,7 @@ fn type_written_another_way(hint: &Hint, place: Place) -> Option<Issue> {
         | Hint::False(keyword)
         | Hint::Array(keyword)
         | Hint::Callable(keyword) => keyword.value,
-        Hint::Never(keyword) if !matches!(place, Place::Method) => keyword.value,
+        Hint::Never(keyword) if !matches!(place, Place::Method | Place::Signature) => keyword.value,
         _ => return None,
     };
     let lowercase = written.to_ascii_lowercase();
@@ -4439,7 +4442,7 @@ fn check_union(union: &UnionHint, place: Place, context: &mut Context<'_, '_, '_
 
                 false
             }
-            Hint::Void(_) | Hint::Nullable(_) => false,
+            Hint::Void(_) | Hint::Never(_) | Hint::Nullable(_) => false,
             Hint::Self_(keyword) => check_self_type(keyword, place, context),
             Hint::Static(keyword) => {
                 report_php_static(keyword, context);
@@ -5314,7 +5317,7 @@ fn supported(place: Place) -> &'static str {
             "A PHP# interface has an optional `public`, a name, optional type parameters as in `<in TItem>`, an optional `: Interface` header, methods and get-only properties, as in `int orderId { get; }`, with no attributes, other modifiers, `extends`, constants or other properties."
         }
         Place::Signature => {
-            "A PHP# interface method has no modifier, optional type parameters, parameters, a return type of `int`, `float`, `bool`, `string`, `Any`, `void`, a class or a type parameter, a generic type as in `List<T>` or `PaginatedList<Order>`, or `Self`, each but `void` nullable as in `int?`, or a union of them but `void`, as in `int|string`, and no body or a default body."
+            "A PHP# interface method has no modifier, optional type parameters, parameters, a return type of `int`, `float`, `bool`, `string`, `Any`, `void`, `never`, a class or a type parameter, a generic type as in `List<T>` or `PaginatedList<Order>`, or `Self`, each but `void` and `never` nullable as in `int?`, or a union of them but `void` and `never`, as in `int|string`, and no body or a default body."
         }
         Place::Enum => {
             "A PHP# enum has attributes, an optional `public`, a name, optional type parameters as in `<T, TError : Error>` when it has no backing type, an optional `: string, Interface` header whose `int` or `string` comes first, constants, cases, computed properties, methods and laws, with no other modifiers or `implements`. A case of a backed enum has a value, as in `case None = \"none\";`, and a case of any other enum may carry data, as in `case Paid(string transactionId);`."
@@ -5339,7 +5342,7 @@ fn supported(place: Place) -> &'static str {
             "A PHP# constant has `public`, `protected` or `private`, an optional type of `int`, `float`, `bool`, `string`, `Any` or a class, nullable as in `int?` or not, or a union of them as in `int|string`, one name, and a constant value."
         }
         Place::Method => {
-            "A PHP# method takes `public`, `protected`, `private`, `static`, `abstract`, `virtual` and `override`, a constructor also `required`, optional type parameters as in `<TItem : DatabaseEntity>`, parameters, and a return type of `int`, `float`, `bool`, `string`, `Any`, `void`, a class or a type parameter, a generic type as in `List<T>` or `PaginatedList<Order>`, `Function<R(P)>`, a tuple as in `[Money, int]` or `Self`, each but `void` nullable as in `int?`, or a union of them but `void`, as in `int|string`, and an optional `on` clause after the parameters, as in `on OrderPaid, OrderRefunded`."
+            "A PHP# method takes `public`, `protected`, `private`, `static`, `abstract`, `virtual` and `override`, a constructor also `required`, optional type parameters as in `<TItem : DatabaseEntity>`, parameters, and a return type of `int`, `float`, `bool`, `string`, `Any`, `void`, `never`, a class or a type parameter, a generic type as in `List<T>` or `PaginatedList<Order>`, `Function<R(P)>`, a tuple as in `[Money, int]` or `Self`, each but `void` and `never` nullable as in `int?`, or a union of them but `void` and `never`, as in `int|string`, and an optional `on` clause after the parameters, as in `on OrderPaid, OrderRefunded`."
         }
         Place::Parameter => {
             "A PHP# parameter has a type of `int`, `float`, `bool`, `string`, `Any`, a class or a type parameter, a generic type as in `List<T>` or `PaginatedList<Order>`, `Function<R(P)>`, or a tuple as in `[Money, int]`, nullable as in `int?` or not, or a union of them as in `int|string`, a name, and an optional default. The last parameter can be variadic, as in `int ...values`."

@@ -6,10 +6,10 @@ use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::atomic::scalar::string::TString;
 use mago_codex::ttype::atomic::scalar::string::TStringLiteral;
 use mago_codex::ttype::get_literal_string;
-use mago_codex::ttype::get_sharp_type;
 use mago_codex::ttype::get_never;
 use mago_codex::ttype::get_non_empty_string;
 use mago_codex::ttype::get_non_empty_unspecified_literal_string;
+use mago_codex::ttype::get_sharp_type;
 use mago_codex::ttype::get_string;
 use mago_codex::ttype::get_unspecified_literal_string;
 use mago_codex::ttype::union::TUnion;
@@ -261,7 +261,8 @@ where
     let checked_type = part_type.to_non_nullable();
     let help = if part_type.is_mixed() {
         "Check what the value is with `is`, `as` or `match` first."
-    } else if part_type.is_nullable() && (is_shown(&checked_type) || declares_to_string(context.codebase, &checked_type))
+    } else if part_type.is_nullable()
+        && (is_shown(&checked_type) || declares_to_string(context.codebase, &checked_type))
     {
         "Test it with `!= null` first."
     } else if part_type.types.iter().all(|atomic| match get_sharp_type(atomic) {

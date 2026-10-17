@@ -7920,6 +7920,39 @@ fn a_template_refuses_every_type_but_int_float_string_and_bool() {
     );
 }
 
+/// Spec section 7: a `never` method never returns. Its body ends in a `throw` on every path, or the error stands on its
+/// closing brace. A call of one, PHP#'s or a plain PHP `: never` function's, ends the block it is in, and its type in
+/// an expression is `never`, so `??` gives the left side's type. An override returns `never` too.
+#[test]
+fn never_is_a_method_return_type() {
+    let errors = "namespace App.Probe;\n\npublic abstract class Errors\n{\n    public static never fail(string message) => throw new LogicException(message);\n\n    public static never stop(bool urgent)\n    {\n        if (urgent) {\n            throw new LogicException(\"stopped\");\n        }\n    }\n\n    public static never always()\n    {\n        throw new LogicException(\"always\");\n    }\n\n    public abstract never halt();\n}\n";
+    let soft = "namespace App.Probe;\n\npublic class Soft : Errors\n{\n    public override void halt() { }\n}\n";
+    let uses = "namespace App.Probe;\n\npublic class Uses\n{\n    public string name(string? input)\n    {\n        string name = input ?? Errors.fail(\"name is required\");\n        return name;\n    }\n\n    public int ends() { Errors.fail(\"ends\"); }\n\n    public int after()\n    {\n        Errors.fail(\"after\");\n        return 0;\n    }\n\n    public int plain() { Legacy.halt(); }\n}\n";
+    let legacy = "<?php\n\nnamespace App\\Probe;\n\nfinal class Legacy\n{\n    public static function halt(): never\n    {\n        exit(1);\n    }\n}\n";
+    let imports = [(
+        "src/App/Probe/LogicException.php",
+        "<?php\n\nnamespace App\\Probe;\n\nclass LogicException extends \\LogicException\n{\n}\n",
+    )];
+
+    assert_eq!(
+        worded(("src/App/Probe/Errors.sharp", errors), &imports),
+        [
+            "12:5 missing-return-statement `Errors.stop` is `never`, and it reaches its closing brace when no `throw` runs before it. | It returns here when no `throw` runs. | End every path with a `throw` or a call of a `never` method."
+        ]
+    );
+    assert_eq!(
+        issues(("src/App/Probe/Soft.sharp", soft), &[("src/App/Probe/Errors.sharp", errors), imports[0]]),
+        ["5:26 incompatible-return-type"]
+    );
+    assert_eq!(
+        issues(
+            ("src/App/Probe/Uses.sharp", uses),
+            &[("src/App/Probe/Errors.sharp", errors), ("src/App/Probe/Legacy.php", legacy), imports[0]]
+        ),
+        ["16:9 unevaluated-code"]
+    );
+}
+
 /// Spec section 18 also lets a template show any type that declares `string toString()`, by its own declaration, a
 /// parent's or an interface's, and a nullable one only once it is checked.
 #[test]
@@ -9036,7 +9069,7 @@ fn a_sharp_message_names_a_function_type_with_its_effects_inside_its_brackets() 
     assert_eq!(
         worded(("src/Demo/Receipt.sharp", sharp), &[payments]),
         [
-            "8:84 invalid-operand A template shows `int`, `float`, `string` or `bool`, and `Function<int(int) uses Http, Post, Billing>` is none of them. | This is `Function<int(int) uses Http, Post, Billing>`. | Show a value taken from it instead, such as a property or the result of a method.",
+            "8:84 invalid-operand A template shows `int`, `float`, `string`, `bool` or a type that declares `toString()`, and `Function<int(int) uses Http, Post, Billing>` is none of them. | This is `Function<int(int) uses Http, Post, Billing>`. | Show a value taken from it instead, such as a property or the result of a method.",
         ]
     );
 }

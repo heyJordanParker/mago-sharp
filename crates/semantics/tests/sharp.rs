@@ -1770,7 +1770,7 @@ fn a_type_an_interface_method_cannot_take_names_what_it_has() {
     assert_eq!(
         check_in_type_file(code).into_iter().map(|issue| issue.notes).collect::<Vec<_>>(),
         [[
-            "A PHP# interface method has no modifier, optional type parameters, parameters, a return type of `int`, `float`, `bool`, `string`, `Any`, `void`, a class or a type parameter, a generic type as in `List<T>` or `PaginatedList<Order>`, or `Self`, each but `void` nullable as in `int?`, or a union of them but `void`, as in `int|string`, and no body or a default body."
+            "A PHP# interface method has no modifier, optional type parameters, parameters, a return type of `int`, `float`, `bool`, `string`, `Any`, `void`, `never`, a class or a type parameter, a generic type as in `List<T>` or `PaginatedList<Order>`, or `Self`, each but `void` and `never` nullable as in `int?`, or a union of them but `void` and `never`, as in `int|string`, and no body or a default body."
         ]]
     );
 }
@@ -4492,18 +4492,28 @@ fn a_type_php_sharp_writes_another_way_is_an_error_that_names_its_form() {
         );
     }
 
-    // `never` keeps its handling as a return type, and is a type PHP# doesn't have anywhere else.
+    // Spec section 7: `never` is a method's return type, and a type PHP# doesn't have anywhere else, each refused once.
     let never = leak(method("        never local = extra;\n        return 1;\n").replace("int extra", "never extra"));
     assert_eq!(
         issues(never),
-        [
-            "5:20 Invalid parameter type: bottom type `never` cannot be used as a parameter type.",
-            "5:20 PHP# has no `never` type outside a return type.",
-            "7:9 PHP# has no `never` type outside a return type.",
-        ]
+        ["5:20 PHP# has no `never` type outside a return type.", "7:9 PHP# has no `never` type outside a return type."]
     );
     let returned = leak(method("        throw new Error();\n").replace("public int run", "public never run"));
-    assert_eq!(issues(returned), ["5:12 This type is not supported yet in PHP#."]);
+    assert_eq!(issues(returned), Vec::<String>::new());
+    let signature = "namespace App.Tenant;\n\ninterface Stops\n{\n    never stop();\n}\n";
+    assert_eq!(issues(signature), Vec::<String>::new());
+    let nullable = leak(method("        throw new Error();\n").replace("public int run", "public never? run"));
+    let union = leak(method("        throw new Error();\n").replace("public int run", "public int|never run"));
+    assert_eq!(issues(nullable), ["5:12 Type `never` cannot be nullable."]);
+    assert_eq!(issues(union), ["5:16 Type `never` cannot be part of a union."]);
+    let property = "namespace App.Tenant;\n\nclass Report\n{\n    public never value { get; set; }\n    private List<never> items = [];\n}\n";
+    assert_eq!(
+        issues(property),
+        [
+            "5:12 PHP# has no `never` type outside a return type.",
+            "6:18 PHP# has no `never` type outside a return type."
+        ]
+    );
 }
 
 #[test]

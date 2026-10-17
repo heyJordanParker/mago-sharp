@@ -5,6 +5,7 @@ use mago_reporting::Issue;
 use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::FunctionLikeParameterList;
+use mago_syntax::cst::Hint;
 use mago_syntax::cst::Modifier;
 
 use crate::internal::context::Context;
@@ -185,7 +186,8 @@ pub fn check_parameter_list(
         }
 
         if let Some(hint) = &parameter.hint {
-            if hint.is_bottom() {
+            // `check_slice` refuses a `.sharp` file's `never` with its PHP# error.
+            if hint.is_bottom() && !(context.program.dialect.is_sharp() && matches!(hint, Hint::Never(_))) {
                 let hint_name = BytesDisplay(context.get_code_snippet(hint));
 
                 context.report(

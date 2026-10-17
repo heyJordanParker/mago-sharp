@@ -557,14 +557,18 @@ where
                 _ => ("function", function_metadata.name),
             };
 
-            report_missing_return(
-                context,
-                kind,
-                name,
-                function_metadata.name_span.unwrap_or(function_metadata.span),
-                body.span(),
-                &expanded_type,
-            );
+            if context.dialect.is_sharp() && expanded_type.is_never() {
+                report_never_returning(context, name, body.span());
+            } else {
+                report_missing_return(
+                    context,
+                    kind,
+                    name,
+                    function_metadata.name_span.unwrap_or(function_metadata.span),
+                    body.span(),
+                    &expanded_type,
+                );
+            }
         }
     }
 
@@ -897,6 +901,23 @@ pub(crate) fn report_missing_return<A>(
             )
             .with_note(format!("A {kind} that does not explicitly return a value will implicitly return `null`."))
             .with_help(help_message),
+    );
+}
+
+/// Spec section 7: a PHP# `never` method whose body can reach its closing brace, `body`'s last byte, where it would
+/// return.
+fn report_never_returning<A>(context: &mut Context<'_, '_, A>, name: Word, body: Span)
+where
+    A: Arena,
+{
+    context.collector.report_with_code(
+        IssueCode::MissingReturnStatement,
+        Issue::error(format!("`{name}` is `never`, and it reaches its closing brace when no `throw` runs before it."))
+            .with_annotation(
+                Annotation::primary(body.from_start(body.end.backward(1)))
+                    .with_message("It returns here when no `throw` runs."),
+            )
+            .with_help("End every path with a `throw` or a call of a `never` method."),
     );
 }
 
