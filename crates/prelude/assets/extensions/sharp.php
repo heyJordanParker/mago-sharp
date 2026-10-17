@@ -72,6 +72,18 @@ final class Map implements \ArrayAccess, \IteratorAggregate, \Countable, \JsonSe
     public function __construct(array $keysAndValues = []) {}
 
     /**
+     * @return list<mixed> each key, then its value.
+     */
+    public function __serialize(): array {}
+
+    /**
+     * Throws `ValueError` for data that is not each key followed by its value, and `Error` on a `Map` that holds entries.
+     *
+     * @param list<mixed> $data each key, then its value.
+     */
+    public function __unserialize(array $data): void {}
+
+    /**
      * @template TKey of array-key
      * @template TValue
      *
@@ -151,6 +163,18 @@ final class Set implements \ArrayAccess, \IteratorAggregate, \Countable, \JsonSe
      * @param list<T> $values
      */
     public function __construct(array $values = []) {}
+
+    /**
+     * @return list<T>
+     */
+    public function __serialize(): array {}
+
+    /**
+     * Throws `ValueError` for data that is not a list, and `Error` on a `Set` that holds elements.
+     *
+     * @param list<T> $data
+     */
+    public function __unserialize(array $data): void {}
 
     /**
      * @param T $offset
