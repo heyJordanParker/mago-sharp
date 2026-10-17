@@ -4324,12 +4324,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 TAtomic::Object(TObject::Enum(r#enum)) => PhpType::Classes(vec![r#enum.name.as_bytes()]),
                 TAtomic::Object(TObject::Named(object)) => PhpType::Classes(
                     std::iter::once(object.name.as_bytes())
-                        .chain(object.get_intersection_types().unwrap_or_default().iter().filter_map(
-                            |part| match part {
-                                TAtomic::Object(TObject::Named(part)) => Some(part.name.as_bytes()),
-                                _ => None,
-                            },
-                        ))
+                        .chain(object.get_intersection_types().unwrap_or_default().iter().map(|part| match part {
+                            TAtomic::Object(TObject::Named(part)) => part.name.as_bytes(),
+                            _ => unreachable!("PHP intersects only classes, not `{}`", part.get_id()),
+                        }))
                         .collect(),
                 ),
                 TAtomic::Scalar(scalar) if scalar.is_true() => PhpType::Named(b"true"),
@@ -8025,15 +8023,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         for (span, name, declared, takes_array) in &written {
             let (span, name) = (*span, *name);
             if let Some(set) = table_kind(declared).filter(|_| *takes_array) {
-                let array = if self.keyed_by_backed_enum(declared) {
-                    let map = self.variable(span, name);
-
-                    self.backed_key_array(span, map)
-                } else {
-                    let [first, second, third] = [(); 3].map(|()| self.variable(span, name));
-
-                    self.array_from(line, set, [first, second, third])
-                };
+                let [first, second, third] = [(); 3].map(|()| self.variable(span, name));
+                let array = self.array_from(line, set, [first, second, third]);
                 let place = self.variable(span, name);
                 let before = self.node(SHARP_AST_ASSIGN, 0, line, &[place, array]);
                 steps.push(self.node(SHARP_AST_ARRAY_ELEM, 0, line, &[before, NULL]));

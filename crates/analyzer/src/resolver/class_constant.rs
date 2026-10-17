@@ -32,7 +32,6 @@ use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
 use crate::resolver::class_name::ResolutionOrigin;
 use crate::resolver::class_name::ResolvedClassname;
-use crate::resolver::class_name::report_missing_class;
 use crate::resolver::class_name::resolve_classnames_from_expression;
 use crate::resolver::selector::ResolvedSelector;
 use crate::resolver::selector::resolve_constant_selector;
@@ -414,7 +413,6 @@ where
     None
 }
 
-/// Reports an error for a class-like that cannot be found in the codebase.
 /// The type a read of `constant` gives. Its docblock type (`@var`) reflects the type the user intends, so it comes first.
 /// The type its value is inferred to have is more specific than the declared type, which it is copied from, so it comes
 /// next.
@@ -433,13 +431,11 @@ fn read_type(constant: &ClassLikeConstantMetadata) -> TUnion {
         .unwrap_or_else(get_mixed)
 }
 
+/// Reports an error for a class-like that cannot be found in the codebase.
 fn report_non_existent_class<A>(context: &mut Context<'_, '_, A>, classname: Word, class_span: Span)
 where
     A: Arena,
 {
-    if report_missing_class(context, classname.as_bytes(), class_span) {
-        return;
-    }
     let classname = display_class_like_name(context, classname);
 
     context.collector.report_with_code(

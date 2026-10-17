@@ -151,7 +151,7 @@ impl<'analysis> Types<'analysis> {
                 .plain_php_call(value)
                 .and_then(|(_, metadata)| metadata.return_type_metadata.as_ref().map(|declared| &declared.type_union)),
             Expression::Access(Access::Property(_)) => self.property_type(value),
-            _ => None,
+            _ => unreachable!("the lowering asks this only of a plain PHP call or property read"),
         };
 
         declared.is_some_and(|declared| {

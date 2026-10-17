@@ -8065,14 +8065,17 @@ fn a_parameter_default_is_analyzed_as_any_expression() {
 /// import is one error wherever the code names it, "Cannot find type" with its PHP# name, so no message on a `.sharp`
 /// file names a PHP class form. So is a name the file imports, as `Log` after `import Log;`, and a class directly in
 /// `Sharp` that a newer standard library declares, which the file already names by default. A name one `Error` or
-/// `Exception` ending away from a class the file reaches by its bare name gets that class suggested.
+/// `Exception` ending away from a class the file reaches by its bare name, plain PHP's or the standard library's, gets
+/// that class suggested.
 #[test]
 fn a_missing_class_is_one_error_that_names_it_as_php_sharp_does() {
     const FRESH: &str = "namespace Sharp;\n\npublic static class Fresh\n{\n    public static int make() => 1;\n}\n";
     const HIDDEN: &str = "namespace Sharp.Internal;\n\npublic class Hidden\n{\n}\n";
+    const STALE: &str = "namespace Sharp;\n\npublic class StaleError\n{\n}\n";
     let others = [
         ("vendor/heyjordanparker/php-sharp-composer/library/Sharp/Fresh.sharp", FRESH),
         ("vendor/heyjordanparker/php-sharp-composer/library/Sharp/Internal/Hidden.sharp", HIDDEN),
+        ("vendor/heyjordanparker/php-sharp-composer/library/Sharp/StaleError.sharp", STALE),
     ];
     let missing = |at: &str, name: &str| {
         format!(
@@ -8098,6 +8101,28 @@ fn a_missing_class_is_one_error_that_names_it_as_php_sharp_does() {
             vec![
                 "7:24 non-existent-class-like Cannot find type `App.OutOfRangeError`. | No type of this name is declared. | Did you mean `OutOfRangeException`?"
                     .to_owned(),
+            ],
+        ),
+        (
+            "namespace App;\n\nclass Report\n{\n    public void run(StaleException stale, ThereError there)\n    {\n    }\n}\n",
+            vec![
+                "5:21 non-existent-class-like Cannot find type `App.StaleException`. | No type of this name is declared. | Did you mean `StaleError`?"
+                    .to_owned(),
+                missing("5:43", "App.ThereError"),
+            ],
+        ),
+        (
+            "namespace App;\n\nclass Report\n{\n    public bool run() => Missing.LIMIT == 1;\n}\n",
+            vec![
+                "5:26 non-existent-class-like `Missing` names no class, and no namespace this file imports. | Names nothing here. | Check the spelling of `Missing`, or import the class or the namespace whose member this reads.".to_owned(),
+            ],
+        ),
+        // A `use` in a class body is PHP syntax, and the class it names is still missing in PHP#'s words.
+        (
+            "namespace App;\n\nclass Report\n{\n    use Missing;\n}\n",
+            vec![
+                "5:5 parse `use` is PHP syntax: PHP# imports a class with `import` | Written here.".to_owned(),
+                missing("5:9", "App.Missing"),
             ],
         ),
         (
@@ -8532,12 +8557,14 @@ fn a_plain_php_int_keyed_array_arrives_as_a_list() {
 
 /// Spec section 12: a `List` is not a `Map`, so a `List` value where only a `Map` is declared is refused, as a `List`
 /// literal is, at a typed local, an argument, a return, a property and an expression body. Plain PHP's value is the
-/// exception: it still holds its keys, and the place makes a `Map` of them.
+/// exception: it still holds its keys, and the place makes a `Map` of them. That is the result of a plain PHP method or
+/// function and a read of a plain PHP class's property, and never a PHP# field's function or property, read directly
+/// or through a type parameter.
 #[test]
 fn a_list_value_where_a_map_is_declared_is_refused() {
-    let users = "<?php\n\nnamespace App;\n\nfinal class Users\n{\n    /** @return array<int, Person> */\n    public function all(): array { return []; }\n}\n";
+    let users = "<?php\n\nnamespace App;\n\nfinal class Users\n{\n    /** @var list<Person> */\n    public array $people = [];\n\n    /** @return array<int, Person> */\n    public function all(): array { return []; }\n}\n";
     let person = "<?php\n\nnamespace App;\n\nfinal class Person\n{\n}\n";
-    let sharp = "namespace App;\n\nclass Index\n{\n    public Map<int, int> held = [:];\n\n    public Map<int, int> local(List<int> items)\n    {\n        Map<int, int> byPosition = items;\n        this.held = items;\n        this.take(items);\n        return items;\n    }\n\n    public Map<int, int> body(List<int> items) => items;\n\n    public Map<int, int> maybe(List<int>? items) => items ?? [:];\n\n    public Map<int, Person> plain(Users users) => users.all();\n\n    public void take(Map<int, int> map) { }\n}\n";
+    let sharp = "namespace App;\n\nclass Index\n{\n    public Map<int, int> held = [:];\n\n    public Map<int, int> local(List<int> items)\n    {\n        Map<int, int> byPosition = items;\n        this.held = items;\n        this.take(items);\n        return items;\n    }\n\n    public Map<int, int> body(List<int> items) => items;\n\n    public Map<int, int> maybe(List<int>? items) => items ?? [:];\n\n    public Map<int, Person> plain(Users users) => users.all();\n\n    public void take(Map<int, int> map) { }\n\n    public Map<int, string> split(string text) => global.explode(\",\", text);\n\n    public Map<int, Person> people(Users users) => users.people;\n\n    private Function<List<int>()> make = () => [1];\n\n    public Map<int, int> made() => this.make();\n\n    public List<int> listed = [];\n\n    public Map<int, int> own() => this.listed;\n\n    public Map<int, int> bound<TIndex : Index>(TIndex index) => index.listed;\n}\n";
 
     assert_eq!(
         worded(("src/App/Index.sharp", sharp), &[("src/App/Users.php", users), ("src/App/Person.php", person)])
@@ -8551,6 +8578,9 @@ fn a_list_value_where_a_map_is_declared_is_refused() {
             "12:16 invalid-array-element A `List` is not a `Map`: its keys are only its positions.",
             "15:51 invalid-array-element A `List` is not a `Map`: its keys are only its positions.",
             "17:53 invalid-array-element A `List` is not a `Map`: its keys are only its positions.",
+            "29:36 invalid-array-element A `List` is not a `Map`: its keys are only its positions.",
+            "33:35 invalid-array-element A `List` is not a `Map`: its keys are only its positions.",
+            "35:65 invalid-array-element A `List` is not a `Map`: its keys are only its positions.",
         ]
     );
 }
@@ -10603,13 +10633,13 @@ fn map_get_has_and_remove_take_a_backed_enum_key_in_sharp_and_in_php() {
 /// keys are `int` or `string`. A `Map` keyed by a unit enum, a struct or a `float` has no such array, so the call is
 /// refused, naming the parameter and the key type, whether the parameter's type is native, from a stub as `array_sum`'s,
 /// or from a docblock. A parameter of a plain PHP closure a local holds, which has no name, is named by its position.
-/// A `Map<string, int>` crosses, and so does a `Map<Status, int>` of a backed enum, with each case's backing value as
+/// A spread into a variadic parameter is refused as each `Map` it passes would be. A `Map<string, int>` crosses, and so does a `Map<Status, int>` of a backed enum, with each case's backing value as
 /// its key. A parameter typed `iterable`, `mixed` or nothing takes the `Map` itself, whose keys stay `Status`, so an
 /// `iterable<string, int>` takes `Map<string, int>` and refuses `Map<Status, int>`.
 #[test]
 fn a_map_keyed_by_an_object_is_refused_where_plain_php_takes_an_array() {
-    let sharp = "namespace Demo;\n\nimport Lib.Pure;\nimport Lib.Sink;\nimport Lib.Spot;\nimport Lib.Status;\n\nclass Tally\n{\n    public int total(Map<Status, int> counts, Map<Spot, int> spots, Map<string, int> named, Map<float, int> prices, Map<Pure, int> pure)\n    {\n        const counter = Sink.counter();\n        return Sink.plain(counts) + Sink.documented(spots) + (int)global.array_sum(spots) + Sink.plain(named) + Sink.each(counts) + Sink.anything(spots) + Sink.untyped(counts) + counter(spots) + Sink.keyed(named) + Sink.keyed(counts) + Sink.plain(prices) + Sink.plain(pure);\n    }\n}\n";
-    let sink = "<?php\n\nnamespace Lib;\n\nfinal class Sink\n{\n    public static function plain(array $counts): int\n    {\n        return count($counts);\n    }\n\n    /** @param array<string, int> $counts */\n    public static function documented($counts): int\n    {\n        return count($counts);\n    }\n\n    public static function each(iterable $counts): int\n    {\n        return iterator_count($counts);\n    }\n\n    /** @param iterable<string, int> $counts */\n    public static function keyed(iterable $counts): int\n    {\n        return iterator_count($counts);\n    }\n\n    public static function anything(mixed $counts): int\n    {\n        return 1;\n    }\n\n    public static function untyped($counts): int\n    {\n        return 1;\n    }\n\n    /** @return Closure(array): int */\n    public static function counter(): Closure\n    {\n        return static fn (array $counts): int => count($counts);\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Pure;\nimport Lib.Sink;\nimport Lib.Spot;\nimport Lib.Status;\n\nclass Tally\n{\n    public int total(Map<Status, int> counts, Map<Spot, int> spots, Map<string, int> named, Map<float, int> prices, Map<Pure, int> pure, List<Map<Spot, int>> many)\n    {\n        const counter = Sink.counter();\n        return Sink.plain(counts) + Sink.documented(spots) + (int)global.array_sum(spots) + Sink.plain(named) + Sink.each(counts) + Sink.anything(spots) + Sink.untyped(counts) + counter(spots) + Sink.keyed(named) + Sink.keyed(counts) + Sink.plain(prices) + Sink.plain(pure) + Sink.merged(...many);\n    }\n}\n";
+    let sink = "<?php\n\nnamespace Lib;\n\nfinal class Sink\n{\n    public static function plain(array $counts): int\n    {\n        return count($counts);\n    }\n\n    /** @param array<string, int> $counts */\n    public static function documented($counts): int\n    {\n        return count($counts);\n    }\n\n    public static function each(iterable $counts): int\n    {\n        return iterator_count($counts);\n    }\n\n    /** @param iterable<string, int> $counts */\n    public static function keyed(iterable $counts): int\n    {\n        return iterator_count($counts);\n    }\n\n    public static function anything(mixed $counts): int\n    {\n        return 1;\n    }\n\n    public static function untyped($counts): int\n    {\n        return 1;\n    }\n\n    public static function merged(array ...$counts): int\n    {\n        return count($counts);\n    }\n\n    /** @return Closure(array): int */\n    public static function counter(): Closure\n    {\n        return static fn (array $counts): int => count($counts);\n    }\n}\n";
     let spot = "namespace Lib;\n\npublic struct Spot\n{\n    public Spot(public int x { get; }) { }\n}\n";
 
     assert_eq!(
@@ -10629,6 +10659,7 @@ fn a_map_keyed_by_an_object_is_refused_where_plain_php_takes_an_array() {
             "13:227 possibly-invalid-argument Possible argument type mismatch for argument #1 of `Sink.keyed`: expected `iterable<string, int>`, but possibly received `Map<Status, int>`.",
             "13:248 invalid-argument `Map<float, int>` can't be passed to the parameter `counts` of method `Sink.plain`, which takes a PHP array: a PHP array's keys are `int` or `string`, and this `Map`'s keys are `float`.",
             "13:269 invalid-argument `Map<Pure, int>` can't be passed to the parameter `counts` of method `Sink.plain`, which takes a PHP array: a PHP array's keys are `int` or `string`, and this `Map`'s keys are `Pure`.",
+            "13:292 invalid-argument `Map<Spot, int>` can't be passed to the parameter `counts` of method `Sink.merged`, which takes a PHP array: a PHP array's keys are `int` or `string`, and this `Map`'s keys are `Spot`.",
         ]
     );
 }

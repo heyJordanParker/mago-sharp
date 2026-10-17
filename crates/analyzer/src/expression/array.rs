@@ -46,6 +46,7 @@ use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::LegacyArray;
 use mago_syntax::cst::PatternMatchArmBody;
+use mago_syntax::cst::PropertyAccess;
 use mago_syntax::cst::UnaryPrefix;
 use mago_syntax::cst::UnaryPrefixOperator;
 use mago_syntax::cst::VariadicArrayElement;
@@ -885,14 +886,13 @@ fn report_list_in_map_place<'arena, A>(
 {
     let declared_type =
         block_context.and_then(|block_context| get_declared_type(context, block_context, artifacts, value));
-    let Some(value_type) = declared_type.as_ref().or_else(|| artifacts.get_expression_type(value)) else {
-        return;
-    };
     let is_list = |atomic: &TAtomic| matches!(atomic, TAtomic::Array(TArray::List(list)) if list.tuple_names.is_none());
-    if !value_type.types.iter().any(is_list)
-        || !value_type.types.iter().all(|atomic| is_list(atomic) || atomic.is_null())
-        || is_plain_php_value(context, artifacts, value)
-    {
+    let is_list_value =
+        declared_type.as_ref().or_else(|| artifacts.get_expression_type(value)).is_some_and(|value_type| {
+            value_type.types.iter().any(is_list)
+                && value_type.types.iter().all(|atomic| is_list(atomic) || atomic.is_null())
+        });
+    if !is_list_value || is_plain_php_value(context, artifacts, value) {
         return;
     }
 
@@ -932,12 +932,13 @@ where
             }
             _ => false,
         }),
-        Expression::Access(Access::Property(access)) => {
-            let ClassLikeMemberSelector::Identifier(name) = &access.property else {
-                return false;
-            };
+        Expression::Access(Access::Property(PropertyAccess {
+            object,
+            property: ClassLikeMemberSelector::Identifier(name),
+            ..
+        })) => {
             let property = [b"$", name.value].concat();
-            artifacts.get_expression_type(access.object).is_some_and(|object_type| {
+            artifacts.get_expression_type(object).is_some_and(|object_type| {
                 object_type.types.iter().any(|atomic| match atomic {
                     TAtomic::Object(TObject::Named(object)) => context
                         .codebase

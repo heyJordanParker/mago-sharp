@@ -4549,9 +4549,6 @@ fn check_docblock_declared_members<A>(
     }
 }
 
-/// Reports a PHP# override of a plain PHP property that has no `set`, an `init`, or a `set` at another level than the
-/// parent's, spec section 6.1. The parent's own code writes the property at any time, which a get-only or an `init`
-/// property promises no code does, and line 287 makes the override's access level the parent's.
 /// Reports a PHP# override of a plain PHP property whose type `declaring_type` does not fit `parent_type`, the parent's
 /// type at `parent_span`, which `parent_label` names, as in "the parent's `@var` type", and `note` explains.
 fn report_unfit_override<A>(
@@ -4586,6 +4583,9 @@ fn report_unfit_override<A>(
     );
 }
 
+/// Reports a PHP# override of a plain PHP property that has no `set`, an `init`, or a `set` at another level than the
+/// parent's, spec section 6.1. The parent's own code writes the property at any time, which a get-only or an `init`
+/// property promises no code does, and line 287 makes the override's access level the parent's.
 fn report_plain_php_override_set<A>(
     context: &mut Context<'_, '_, A>,
     property: &PropertyMetadata,

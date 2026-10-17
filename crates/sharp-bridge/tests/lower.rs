@@ -2792,6 +2792,117 @@ fn behaviors_are_hidden_slots_the_hooks_call_in_order() {
 }
 
 /// ```php
+/// public function __construct(string $name) {
+///     $this->{'name#via0'} = new \App\Trimmed();
+///     $this->name = $name;
+/// }
+/// ```
+///
+/// Spec sections 6.4 and 9: a promoted parameter's behavior is a hidden slot as a property's is. The constructor fills
+/// it with `new` before it sets the property from the argument through the hooks.
+#[test]
+fn a_promoted_parameter_s_behaviors_are_filled_before_its_argument_is_set() {
+    let behavior = (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Behavior.sharp",
+        "namespace Sharp;\n\npublic interface Behavior<T>\n{\n    T get(T value);\n\n    T set(T value);\n}\n",
+    );
+    let trimmed = (
+        "src/Trimmed.sharp",
+        "namespace App;\n\nimport Sharp.Behavior;\n\npublic class Trimmed : Behavior<string>\n{\n    public string get(string value) => value;\n\n    public string set(string value) => global.trim(value);\n}\n",
+    );
+    let lowered = Lowered::with(
+        "namespace App;\n\npublic class Report\n{\n    public Report(public string name { get; set; } via Trimmed) { }\n}\n",
+        &[behavior, trimmed],
+    );
+
+    assert_eq!(
+        property_groups(&lowered),
+        [
+            indoc! {r#"
+                PROP_GROUP [1]
+                  ZVAL [1] "string"
+                  PROP_DECL
+                    PROP_ELEM
+                      ZVAL "name"
+                      null
+                      null
+                      STMT_LIST
+                        PROPERTY_HOOK "get" @5-5
+                          null
+                          null
+                          PROPERTY_HOOK_SHORT_BODY
+                            METHOD_CALL
+                              PROP
+                                VAR
+                                  ZVAL "this"
+                                ZVAL "name#via0"
+                              ZVAL "get"
+                              ARG_LIST
+                                PROP
+                                  VAR
+                                    ZVAL "this"
+                                  ZVAL "name"
+                          null
+                          null
+                        PROPERTY_HOOK "set" @5-5
+                          null
+                          null
+                          STMT_LIST
+                            ASSIGN
+                              PROP
+                                VAR
+                                  ZVAL "this"
+                                ZVAL "name"
+                              METHOD_CALL
+                                PROP
+                                  VAR
+                                    ZVAL "this"
+                                  ZVAL "name#via0"
+                                ZVAL "set"
+                                ARG_LIST
+                                  VAR
+                                    ZVAL "value"
+                          null
+                          null
+                  null
+            "#},
+            indoc! {r#"
+                PROP_GROUP [4]
+                  ZVAL "App\\Trimmed"
+                  PROP_DECL
+                    PROP_ELEM
+                      ZVAL "name#via0"
+                      null
+                      null
+                      null
+                  null
+            "#},
+        ]
+    );
+    assert_eq!(
+        lowered.body_of("__construct"),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                PROP
+                  VAR
+                    ZVAL "this"
+                  ZVAL "name#via0"
+                NEW
+                  ZVAL "App\\Trimmed"
+                  ARG_LIST
+              ASSIGN
+                PROP
+                  VAR
+                    ZVAL "this"
+                  ZVAL "name"
+                VAR
+                  ZVAL "name"
+        "#}
+    );
+}
+
+/// ```php
 /// public function __clone(): void
 /// {
 ///     if (\method_exists(parent::class, '__clone')) { parent::__clone(); }
@@ -12976,6 +13087,72 @@ fn an_override_that_narrows_a_typed_property_runs_with_the_parent_type_and_check
     );
 }
 
+/// Spec section 6.1: an override that narrows a typed plain PHP property runs with whichever PHP type the parent
+/// declares, a single type, `mixed`, `array`, `iterable`, `object`, an enum, a class or an intersection of classes.
+#[test]
+fn an_override_runs_with_each_php_type_its_plain_php_parent_declares() {
+    let model = "<?php enum Level: string { case Low = 'low'; } final class Box implements Countable, ArrayAccess { public function count(): int { return 0; } public function offsetExists(mixed $o): bool { return false; } public function offsetGet(mixed $o): mixed { return null; } public function offsetSet(mixed $o, mixed $v): void {} public function offsetUnset(mixed $o): void {} } class Model { public mixed $anything = null; public ?array $items = null; public ?iterable $each = null; public ?object $owner = null; public ?Level $level = null; public (Countable&ArrayAccess)|null $box = null; }";
+    let lowered = Lowered::with(
+        "class Order : Model\n{\n    public override string anything { get; set; } = \"\";\n    public override List<int> items { get; set; } = [];\n    public override List<int> each { get; set; } = [];\n    public override Box owner { get; set; } = new Box();\n    public override Level level { get; set; } = Level.Low;\n    public override Box box { get; set; } = new Box();\n}\n",
+        &[("src/Model.php", model)],
+    );
+    let types: Vec<String> = lowered
+        .nodes()
+        .iter()
+        .enumerate()
+        .filter(|(_, node)| node.kind == sharp_kind::SHARP_AST_PROP_GROUP)
+        .map(|(group, _)| lowered.render(lowered.child(group as u32, 0)))
+        .collect();
+
+    assert_eq!(
+        types,
+        [
+            indoc! {r#"
+                SHARP_TYPE_ARGS
+                  ZVAL [1] "mixed"
+                  ZVAL "string"
+            "#},
+            indoc! {r#"
+                SHARP_TYPE_ARGS
+                  TYPE_UNION
+                    TYPE [7]
+                    ZVAL [1] "null"
+                  ZVAL "List<int>"
+            "#},
+            indoc! {r#"
+                SHARP_TYPE_ARGS
+                  TYPE_UNION
+                    ZVAL [1] "iterable"
+                    ZVAL [1] "null"
+                  ZVAL "List<int>"
+            "#},
+            indoc! {r#"
+                SHARP_TYPE_ARGS
+                  TYPE_UNION
+                    ZVAL [1] "null"
+                    ZVAL [1] "object"
+                  ZVAL "Box"
+            "#},
+            indoc! {r#"
+                SHARP_TYPE_ARGS
+                  TYPE_UNION
+                    ZVAL "Level"
+                    ZVAL [1] "null"
+                  ZVAL "Level"
+            "#},
+            indoc! {r#"
+                SHARP_TYPE_ARGS
+                  TYPE_UNION
+                    TYPE_INTERSECTION
+                      ZVAL "Countable"
+                      ZVAL "ArrayAccess"
+                    ZVAL [1] "null"
+                  ZVAL "Box"
+            "#},
+        ]
+    );
+}
+
 /// ```php
 /// #[\Override] protected $table = 'orders' { set { $this->table = \trim($value); } }
 /// abstract public string $kind { get; }
@@ -19643,22 +19820,22 @@ fn a_template_is_an_encaps_list_of_its_text_and_interpolations() {
     );
 }
 
-/// ```php
-/// return "Paid: {["false", "true"][$paid]} of {$extra} for {$name} {["false", "true"][true]}";
-/// ```
-///
 /// Spec section 12: plain PHP's `array<int, T>` arrives as a `List<T>`, renumbered where PHP# reads it with
-/// `\array_values`. A `Map` place keeps its keys and makes the `Map` of them, an argument of plain PHP takes the array
-/// as plain PHP gave it, and a value plain PHP declares a list is one already.
+/// `\array_values`, a `List` of `Map`s too. A `Map` place keeps its keys and makes the `Map` of them, an argument of
+/// plain PHP takes the array as plain PHP gave it, and a value plain PHP declares a list is one already.
 #[test]
 fn a_plain_php_int_keyed_array_is_renumbered_where_it_arrives() {
     let ids = (
         "src/App/Tenant/Ids.php",
-        "<?php namespace App\\Tenant; final class Ids { /** @return array<int, int> */ public static function all(): array { return [5 => 1]; } /** @return list<int> */ public static function listed(): array { return [1]; } }",
+        "<?php namespace App\\Tenant; final class Ids { /** @return array<int, int> */ public static function all(): array { return [5 => 1]; } /** @return list<int> */ public static function listed(): array { return [1]; } /** @return array<int, array<string, int>> */ public static function rows(): array { return []; } }",
     );
     let lowered = |statements: &str| body_in(RUN, statements, &[ids]);
 
     assert!(lowered("        List<int> all = Ids.all();\n        return all[0];\n").contains("ZVAL \"array_values\""));
+    assert!(
+        lowered("        List<Map<string, int>> rows = Ids.rows();\n        return rows.count();\n")
+            .contains("ZVAL \"array_values\"")
+    );
     assert!(
         !lowered("        Map<int, int> byId = Ids.all();\n        return byId.count();\n")
             .contains("ZVAL \"array_values\"")
@@ -19697,6 +19874,38 @@ fn an_object_in_a_template_shows_what_its_to_string_returns() {
     );
 }
 
+/// ```php
+/// public function __toString(): string { return $this->toString(); }
+/// ```
+///
+/// Spec section 18: plain PHP converts an object of a class that declares `toString()` to the text it returns, so the
+/// class gets PHP's `__toString()`, which calls it.
+#[test]
+fn a_class_that_declares_to_string_gets_php_s_string_conversion() {
+    assert_eq!(
+        Lowered::new("namespace App.Tenant;\n\nclass Sku\n{\n    public string toString() => \"A-12\";\n}\n")
+            .declared("__toString"),
+        indoc! {r#"
+            METHOD [1] "__toString" @5-6
+              PARAM_LIST
+              null
+              STMT_LIST
+                RETURN
+                  METHOD_CALL
+                    VAR
+                      ZVAL "this"
+                    ZVAL "toString"
+                    ARG_LIST
+              ZVAL [1] "string"
+              null
+        "#}
+    );
+}
+
+/// ```php
+/// return "Paid: {["false", "true"][$paid]} of {$extra} for {$name} {["false", "true"][true]}";
+/// ```
+///
 /// Spec section 18 shows a `bool` in a template as `true` or `false`, where PHP's string conversion gives `1` or
 /// nothing, so a `bool` part reads its text from `["false", "true"]`, where PHP reads `false` as the index 0 and
 /// `true` as the index 1. The optimizer keeps the read as one `FETCH_DIM_R` of a constant array, where
@@ -20569,10 +20778,12 @@ fn a_plain_php_method_of_a_property_s_name_read_as_a_function_is_a_first_class_c
 /// ```php
 /// return \Lib\Calc::total((fn ($map#1) => \is_object($map#1)
 ///     ? \array_combine(\array_column($map#1->keys(), 'value'), $map#1->values()) : $map#1)($stock));
+/// return \Lib\Calc::sum(...\array_map(fn ($element#1) => (fn ($map#2) => \is_object($map#2)
+///     ? \array_combine(\array_column($map#2->keys(), 'value'), $map#2->values()) : $map#2)($element#1), [$stock]));
 /// ```
 ///
 /// A `Map` keyed by a backed enum goes into a plain PHP parameter that takes `array` with each case's backing value as
-/// its key, spec section 12, as the keys a PHP array holds.
+/// its key, spec section 12, as the keys a PHP array holds, and so does each `Map` a spread passes.
 #[test]
 fn a_map_keyed_by_a_backed_enum_goes_into_a_plain_php_array_with_backing_values_as_keys() {
     let level = ("src/Lib/Level.php", "<?php namespace Lib; enum Level: string { case Low = 'low'; }");
@@ -20627,6 +20838,78 @@ fn a_map_keyed_by_a_backed_enum_goes_into_a_plain_php_array_with_backing_values_
                     ARG_LIST
                       VAR
                         ZVAL "stock"
+        "#}]
+    );
+    assert_eq!(
+        statements_at(&code.replace("Calc.total(stock)", "Calc.sum(...[stock])"), &[level], 1..2),
+        [indoc! {r#"
+            RETURN
+              STATIC_CALL
+                ZVAL "Lib\\Calc"
+                ZVAL "sum"
+                ARG_LIST
+                  UNPACK
+                    CALL
+                      ZVAL "array_map"
+                      ARG_LIST
+                        ARROW_FUNC "" @11-11
+                          PARAM_LIST
+                            PARAM
+                              null
+                              ZVAL "element#1"
+                              null
+                              null
+                              null
+                              null
+                          null
+                          CALL
+                            ARROW_FUNC "" @11-11
+                              PARAM_LIST
+                                PARAM
+                                  null
+                                  ZVAL "map#2"
+                                  null
+                                  null
+                                  null
+                                  null
+                              null
+                              CONDITIONAL
+                                CALL
+                                  ZVAL "is_object"
+                                  ARG_LIST
+                                    VAR
+                                      ZVAL "map#2"
+                                CALL
+                                  ZVAL "array_combine"
+                                  ARG_LIST
+                                    CALL
+                                      ZVAL "array_column"
+                                      ARG_LIST
+                                        METHOD_CALL
+                                          VAR
+                                            ZVAL "map#2"
+                                          ZVAL "keys"
+                                          ARG_LIST
+                                        ZVAL "value"
+                                    METHOD_CALL
+                                      VAR
+                                        ZVAL "map#2"
+                                      ZVAL "values"
+                                      ARG_LIST
+                                VAR
+                                  ZVAL "map#2"
+                              null
+                              null
+                            ARG_LIST
+                              VAR
+                                ZVAL "element#1"
+                          null
+                          null
+                        ARRAY [3]
+                          ARRAY_ELEM
+                            VAR
+                              ZVAL "stock"
+                            null
         "#}]
     );
 }

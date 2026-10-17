@@ -1191,8 +1191,6 @@ fn never_matches(pattern: Span) -> Issue {
         .with_help("Remove the pattern, or test a value that can match it.")
 }
 
-/// Each list pattern of `lists`, by its span and its `[`, with the value its PHP's first test, the `is List<Any?>` at
-/// the `[`, reads.
 /// `issue`, in PHP#'s words when it is the PHP's report that a list pattern's element, one of `elements`, can never be
 /// of its type: "`tail` is an `int` in a `List<int>`, so it is never a `string`." `list_reads` gives the value each
 /// list pattern tests.
@@ -1206,27 +1204,21 @@ fn reword_list_element_test<A>(
 where
     A: Arena,
 {
-    let Some(span) =
-        issue.primary_span().filter(|_| issue.code.as_deref() == Some(IssueCode::ImpossibleTypeComparison.as_str()))
+    let Some((hint, variable, list_type, element_type)) = issue
+        .primary_span()
+        .filter(|_| issue.code.as_deref() == Some(IssueCode::ImpossibleTypeComparison.as_str()))
+        .and_then(|span| elements.iter().find(|(hint, ..)| hint.start == span.start))
+        .and_then(|(hint, list, variable)| {
+            let (_, value) = list_reads.iter().find(|(read, _)| read == list)?;
+            let list_type = artifacts.get_expression_type(*value)?;
+            let element_type = list_type.types.iter().find_map(TAtomic::get_list_element_type)?;
+            Some((hint, variable, list_type, element_type))
+        })
     else {
-        return issue;
-    };
-    let Some((hint, list, variable)) = elements.iter().find(|(hint, ..)| hint.start == span.start) else {
-        return issue;
-    };
-    let Some(list_type) =
-        list_reads.iter().find(|(read, _)| read == list).and_then(|(_, value)| artifacts.get_expression_type(*value))
-    else {
-        return issue;
-    };
-    let Some(element_type) = list_type.types.iter().find_map(|atomic| match atomic {
-        TAtomic::Array(TArray::List(list)) => Some(list.element_type.as_ref().clone()),
-        _ => None,
-    }) else {
         return issue;
     };
 
-    let element = display_type(context, &element_type);
+    let element = display_type(context, element_type);
     let list = display_type(context, list_type);
     let tested = quoted_source(context, *hint);
     let name = variable
@@ -1243,6 +1235,8 @@ where
     .with_help(format!("Test the element against a type {} `{element}` can be.", article(&element)))
 }
 
+/// Each list pattern of `lists`, by its span and its `[`, with the value its PHP's first test, the `is List<Any?>` at
+/// the `[`, reads.
 fn list_reads<'ast, 'arena>(php: Node<'ast, 'arena>, lists: &[(Span, Span)]) -> Vec<(Span, &'ast Expression<'arena>)> {
     let mut reads = ListReads::default();
     match php {

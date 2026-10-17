@@ -39,7 +39,18 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Continue<'arena> {
 
         let available_levels = block_context.break_types.len() as u64;
         if available_levels == 0 {
-            report_outside_loop(self, context);
+            // A `.sharp` file has no `switch`, so its message names only a loop, in the words `break` gets.
+            let message = if context.dialect.is_sharp() {
+                "A `continue` stands only inside a loop."
+            } else {
+                "Continue statement used outside of loop."
+            };
+            context.collector.report_with_code(
+                IssueCode::InvalidContinue,
+                Issue::error(message).with_annotation(
+                    Annotation::primary(self.span()).with_message("Continue statement must be inside a loop."),
+                ),
+            );
 
             block_context.flags.set_has_returned(true);
 
@@ -132,11 +143,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Continue<'arena> {
             }
 
             let Some(loop_scope) = loop_scope_ref else {
-                report_outside_loop(self, context);
-
-                block_context.flags.set_has_returned(true);
-
-                return Ok(());
+                unreachable!("each part of a loop runs with its scope, so a `continue` finds the loop it targets")
             };
 
             loop_scope.final_actions.insert(ControlAction::Continue);
@@ -211,22 +218,4 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Continue<'arena> {
 
         Ok(())
     }
-}
-
-/// Reports `r#continue`, which stands outside every loop, in the words `break` gets: a `.sharp` file has no `switch`.
-fn report_outside_loop<A>(r#continue: &Continue<'_>, context: &mut Context<'_, '_, A>)
-where
-    A: Arena,
-{
-    let message = if context.dialect.is_sharp() {
-        "A `continue` stands only inside a loop."
-    } else {
-        "Continue statement used outside of loop."
-    };
-    context.collector.report_with_code(
-        IssueCode::InvalidContinue,
-        Issue::error(message).with_annotation(
-            Annotation::primary(r#continue.span()).with_message("Continue statement must be inside a loop."),
-        ),
-    );
 }

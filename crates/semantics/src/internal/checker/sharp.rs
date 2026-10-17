@@ -6521,8 +6521,8 @@ fn check_iterator_returns(method: &Method, context: &mut Context<'_, '_, '_>) {
 /// lambda's own parameters. Spec section 9: the default runs before the method, each time a call leaves the argument
 /// out, so no object, argument or type argument is there yet. A bare member read already has its own error.
 fn check_default_reads(default: &Expression, context: &mut Context<'_, '_, '_>) {
-    // A name's binding is kept at its first byte, where the expressions it starts begin too, so the name is the
-    // smallest node there.
+    // A name's binding is kept at its first byte, where the expressions it starts begin too. The walk gives a node's
+    // children before it, so the first node at that byte is the smallest, the name.
     let mut reads = BTreeMap::<u32, Span>::new();
     for span in Node::Expression(default).filter_map(|node| Some(node.span())) {
         let unavailable = match context.names.binding(&span.start) {
@@ -6531,10 +6531,7 @@ fn check_default_reads(default: &Expression, context: &mut Context<'_, '_, '_>) 
             _ => false,
         };
         if unavailable {
-            let read = reads.entry(span.start.offset).or_insert(span);
-            if span.length() < read.length() {
-                *read = span;
-            }
+            reads.entry(span.start.offset).or_insert(span);
         }
     }
     for read in reads.into_values() {

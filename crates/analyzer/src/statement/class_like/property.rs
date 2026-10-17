@@ -310,21 +310,8 @@ where
         _ => return None,
     };
     let Some(class) = context.codebase.get_class_like(name.as_bytes()) else {
-        if report_missing_class(context, name.as_bytes(), behavior.span()) {
-            return None;
-        }
-        let missing = display_class_like_name(context, name);
-        context.collector.report_with_code(
-            IssueCode::NonExistentClass,
-            Issue::error(format!("Class `{missing}` not found."))
-                .with_annotation(
-                    Annotation::primary(behavior.span())
-                        .with_message(format!("`{missing}` is not defined or cannot be autoloaded")),
-                )
-                .with_help(
-                    "Ensure the name is correct, including its namespace, and that it's properly defined and autoloadable.",
-                ),
-        );
+        // Only a `.sharp` file has behaviors, so the missing class is reported by its PHP# name.
+        report_missing_class(context, name.as_bytes(), behavior.span());
         return None;
     };
     let behavior_type = get_type_from_hint(context, block_context, artifacts, behavior);
