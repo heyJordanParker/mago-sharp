@@ -531,6 +531,33 @@ fn a_member_form_php_sharp_never_has_names_what_to_write() {
     );
 }
 
+/// A modifier a class doesn't take, a `public(set)` and a `static` local each name what PHP# writes, and what they
+/// name compiles.
+#[test]
+fn a_class_form_php_sharp_never_has_names_a_form_that_compiles() {
+    let virtual_class = "namespace App.Tenant;\n\npublic virtual class Report\n{\n}\n";
+    let required_class = "namespace App.Tenant;\n\npublic required class Report\n{\n}\n";
+    let members = "namespace App.Tenant;\n\nclass Report\n{\n    public public(set) int views { get; set; } = 0;\n    public const List<int> LIST = [];\n\n    public int run(int extra)\n    {\n        static $calls = 0;\n        let a = 0;\n        let b = 0;\n        [a, b] = [1, 2];\n        eval(\"return 1;\");\n        [, a] = [1, 2];\n        return extra;\n    }\n}\n";
+    let written = "namespace App.Tenant;\n\npublic class Report\n{\n    private static int calls = 0;\n\n    public int views { get; set; } = 0;\n\n    public int run(int extra)\n    {\n        Report.calls++;\n        const [a, b] = this.pair();\n        return extra + a + b;\n    }\n\n    private [int, int] pair() => [1, 2];\n}\n";
+
+    assert_eq!(
+        [issues(virtual_class), issues(required_class), issues(members), issues(written)],
+        [
+            vec!["3:8 A class takes no `virtual`: remove it."],
+            vec!["3:8 A class takes no `required`: remove it."],
+            vec![
+                "5:12 PHP# has no `public(set)`: give the property `{ get; set; }`.",
+                "6:18 This construct is not supported yet in PHP#.",
+                "10:9 A local keeps no value between calls: keep it in a `private static` field of the class.",
+                "13:9 `[a, b]` can't be written to: unpack a tuple into new locals with `const [a, b] = …`.",
+                "14:9 PHP# has no `eval`: write the code as a method, and call it.",
+                "15:9 `[, a]` can't be written to.",
+            ],
+            vec![],
+        ]
+    );
+}
+
 /// A form PHP# has not decided, or that a later change builds, stays not supported yet, while every other refusal says
 /// what PHP# writes instead.
 #[test]
@@ -590,12 +617,25 @@ fn switch_and_or_and_xor_are_errors_that_name_their_replacement() {
 #[test]
 fn a_parent_type_and_a_self_type_are_errors_that_name_the_class() {
     let code = "namespace App.Tenant;\n\nimport Lib.Entity;\n\nclass Report : Entity\n{\n    public parent copy(self other)\n    {\n        return other;\n    }\n}\n";
+    let listed = "namespace App.Tenant;\n\nimport Lib.Entity;\nimport Lib.Linkable;\n\nclass Report : Entity, Linkable\n{\n    public parent copy() => null;\n}\n";
+    let unlisted = "namespace App.Tenant;\n\nclass Report\n{\n    public parent copy() => null;\n}\n";
+    let written = "namespace App.Tenant;\n\nimport Lib.Entity;\n\nclass Report : Entity\n{\n    public Entity copy(Report other)\n    {\n        return other;\n    }\n}\n";
 
     assert_eq!(
         issues(code),
         [
-            "7:12 PHP# has no `parent` type: write the base class's name.",
+            "7:12 PHP# has no `parent` type: write `Entity`, the class's base class.",
             "7:24 PHP# has no `self`: write the class's own name, `Report`, for the declaring class.",
+        ]
+    );
+    assert_eq!(
+        [issues(listed), issues(unlisted), issues(written)],
+        [
+            vec![
+                "8:12 PHP# has no `parent` type: write the base class's name, the class among `Entity`, `Linkable` in the header."
+            ],
+            vec!["5:12 PHP# has no `parent` type: this class has no base class, as its header lists none."],
+            vec![],
         ]
     );
 }
@@ -2102,16 +2142,18 @@ fn a_constant_or_an_enum_case_is_read_in_a_default_a_constant_value_and_an_initi
 }
 
 /// A constant value cannot read a static member or a member of one, and a parameter's default, which is any
-/// expression, can.
+/// expression, can. A case's `value` or `name` in a constant value is not supported yet.
 #[test]
 fn a_static_member_read_in_a_constant_expression_is_an_error() {
-    let code = "namespace App.Tenant;\n\nclass Report\n{\n    private static int count = 0;\n    public const int MAX = Report.count;\n    public const int CENTS = Calc.rate.cents;\n\n    public int run(int extra = Report.count, int cents = Calc.rate.cents)\n    {\n        return 1;\n    }\n}\n";
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    private static int count = 0;\n    public const int MAX = Report.count;\n    public const int CENTS = Calc.rate.cents;\n    public const string VALUE = Status.Active.value;\n    public const string NAME = Status.Active.name;\n\n    public int run(int extra = Report.count, int cents = Calc.rate.cents)\n    {\n        return 1;\n    }\n}\n";
 
     assert_eq!(
         issues(code),
         [
             "6:28 `Report.count` is a static member, which a constant value cannot read.",
-            "7:30 This expression is not part of PHP#."
+            "7:30 A constant value can't read `Calc.rate.cents`: it holds literals, constants and the operators on them.",
+            "8:33 This expression is not supported yet in PHP#.",
+            "9:32 This expression is not supported yet in PHP#.",
         ]
     );
 }
@@ -2935,7 +2977,8 @@ fn a_declared_double_underscore_name_is_an_error_that_names_position() {
             format!("21:20 PHP# has no `__v__`: {position}"),
             format!("24:26 PHP# has no `__e__`: {position}"),
             format!("26:24 PHP# has no `__x__`: {position}"),
-            "30:16 A method name can't start with `__`: write `get`.".to_owned(),
+            "30:16 A method name can't start with `__`: PHP# never calls it for you: give it a camelCase name and call it."
+                .to_owned(),
         ]
     );
 }
@@ -2978,7 +3021,10 @@ fn a_member_refused_at_part_of_its_declaration_has_the_rest_checked() {
 
     assert_eq!(
         issues(interface),
-        ["5:10 A method name can't start with `__`: write `get`.", "5:30 PHP# has no superglobals; take a Request"]
+        [
+            "5:10 A method name can't start with `__`: PHP# never calls it for you: give it a camelCase name and call it.",
+            "5:30 PHP# has no superglobals; take a Request"
+        ]
     );
     assert_eq!(
         issues(r#enum),
@@ -3184,9 +3230,9 @@ fn attribute_arguments_outside_the_slice_are_an_error() {
     assert_eq!(
         issues(code),
         [
-            "5:12 This expression is not part of PHP#.",
+            "5:12 A constant value can't read `typeof(Report).name`: it holds literals, constants and the operators on them.",
             "7:13 A constant value can't call `this.run(…)`: it holds literals, constants and the operators on them.",
-            "8:19 This expression is not part of PHP#.",
+            "8:19 A constant value can't hold `new Report()`: it holds literals, constants and the operators on them.",
         ]
     );
 
@@ -3262,19 +3308,32 @@ fn final_marks_only_an_override_and_a_modifier_that_cant_matter_is_an_error() {
     );
 }
 
+/// A method name that starts with `__` names what PHP# writes for the job PHP gives it, and a name PHP never calls by
+/// itself loses its underscores only when the rest is camelCase. Each named replacement compiles.
 #[test]
 fn a_method_name_starting_with_two_underscores_is_an_error_that_names_the_name_to_write() {
-    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public void __clone() { }\n    public int __get(string name) { return 1; }\n    public int __invoke() { return 1; }\n    public string __toString() { return \"report\"; }\n}\n";
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public void __clone() { }\n    public int __get(string name) { return 1; }\n    public int __invoke() { return 1; }\n    public string __toString() { return \"report\"; }\n    public void __construct() { }\n    public int __sleep() { return 1; }\n    public int __total() { return 1; }\n    public int __1st() { return 1; }\n    public int __Report() { return 1; }\n}\n";
+    let written = "namespace App.Tenant;\n\nclass Report\n{\n    public Report()\n    {\n    }\n\n    public string toString() => \"report\";\n\n    public int total() => 1;\n\n    public Report copy() => this with { };\n}\n";
+    let invented = "PHP# never calls it for you: give it a camelCase name and call it.";
 
     assert_eq!(
         issues(code),
         [
-            "5:17 A method name can't start with `__`: write `clone`.",
-            "6:16 A method name can't start with `__`: write `get`.",
-            "7:16 A method name can't start with `__`: write `invoke`.",
-            "8:19 A method name can't start with `__`: write `toString`.",
+            "9:12 Magic method `Report.__construct` cannot have a return type hint.".to_owned(),
+            "5:17 A method name can't start with `__`: copy with `with`, as in `this with { … }`.".to_owned(),
+            format!("6:16 A method name can't start with `__`: {invented}"),
+            format!("7:16 A method name can't start with `__`: {invented}"),
+            "8:19 A method name can't start with `__`: write `toString`, which every conversion to text calls."
+                .to_owned(),
+            "9:17 A method name can't start with `__`: the constructor is named after its class, as in `public Report(…)`."
+                .to_owned(),
+            format!("10:16 A method name can't start with `__`: {invented}"),
+            "11:16 A method name can't start with `__`: write `total`.".to_owned(),
+            "12:16 A method name can't start with `__`: give it a camelCase name, as in `toString`.".to_owned(),
+            "13:16 A method name can't start with `__`: give it a camelCase name, as in `toString`.".to_owned(),
         ]
     );
+    assert_eq!(issues(written), Vec::<String>::new());
 }
 
 /// Spec section 5: a member without an access modifier is `private`, as `void reserve(string sku, int count)` in
@@ -4071,7 +4130,7 @@ fn a_class_constant_outside_the_slice_is_an_error() {
             "6:5 A constant declares one name: declare each constant on its own line.",
             "7:5 A constant takes no `final`: remove it.",
             "8:24 PHP# has no `<>`: write `!=`.",
-            "9:18 PHP# has no `iterable`: write `Iterable<T>`, as in `Iterable<Order>`.",
+            "9:18 PHP# has no `iterable`: give the constant a type it holds.",
         ]
     );
 }
@@ -4106,7 +4165,7 @@ fn a_union_typed_class_constant_follows_the_union_rules() {
         issues(code),
         [
             "5:22 A type that holds null is written `int?`.",
-            "6:22 PHP# has no `iterable`: write `Iterable<T>`, as in `Iterable<Order>`.",
+            "6:22 PHP# has no `iterable`: give the constant a type it holds.",
             "7:29 Duplicate type `int` is redundant.",
         ]
     );
@@ -5566,7 +5625,12 @@ fn a_header_naming_an_interface_twice_or_an_enum_header_naming_unit_enum_is_an_e
 fn a_header_names_a_class_or_a_generic_class_type_and_any_other_type_is_an_error() {
     for (declaration, expected) in [
         ("public class OrderPage : PaginatedList<Order>, Comparable<OrderPage> { }", vec![]),
-        ("class Card : int { }", vec!["5:14 A header names classes and interfaces, and `int` is neither."]),
+        (
+            "class Card : int { }",
+            vec![
+                "5:14 A header names classes and interfaces, and `int` is neither: list a class or an interface, as in `: DatabaseEntity, Linkable`.",
+            ],
+        ),
         (
             "public class Bad : PaginatedList<void> { }",
             vec!["5:34 A type argument cannot be `void`: `void` is only a return type."],
@@ -5574,9 +5638,9 @@ fn a_header_names_a_class_or_a_generic_class_type_and_any_other_type_is_an_error
         (
             "public class Worse<TItem, TOther> : TItem, Lines<Self>, List<int>, TOther<Order> { }",
             vec![
-                "5:37 A header names classes and interfaces, and `TItem` is neither.",
+                "5:37 A header names classes and interfaces, and `TItem` is neither: list a class or an interface, as in `: DatabaseEntity, Linkable`.",
                 "5:50 `Self` is only a return type in PHP#.",
-                "5:57 A header names classes and interfaces, and `List<int>` is neither.",
+                "5:57 A header names classes and interfaces, and `List<int>` is neither: list a class or an interface, as in `: DatabaseEntity, Linkable`.",
                 "5:68 A type parameter takes no type arguments: write `TOther`.",
             ],
         ),

@@ -386,7 +386,7 @@ fn a_const_local_reassigned_returns_one_compile_error_and_no_nodes() {
 fn php_syntax_returns_a_parse_error_and_no_nodes() {
     let lowered = Lowered::new(&method("        return this->run(1);\n"));
 
-    assert_eq!(lowered.diagnostics(), ["9:20 parse error: `->` is PHP syntax: PHP# writes member access with `.`"]);
+    assert_eq!(lowered.diagnostics(), ["9:20 parse error: PHP# has no `->`: write member access with `.`."]);
     assert_eq!(lowered.nodes().len(), 0);
 }
 
@@ -23436,7 +23436,7 @@ fn a_fully_qualified_null_true_or_false_in_a_library_body_is_refused() {
             .expect_err("PHP# refuses a `\\` name in a library body");
 
         assert_eq!(refusal.len(), 1, "{refusal:?}");
-        assert!(refusal[0].contains("parse error: A `\\` name is PHP syntax"), "{refusal:?}");
+        assert!(refusal[0].contains("parse error: PHP# has no `\\` names"), "{refusal:?}");
     }
 }
 

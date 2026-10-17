@@ -906,7 +906,7 @@ where
             if array_target.get_index().is_none() {
                 context.collector.report_with_code(
                     IssueCode::InvalidArrayAccess,
-                    Issue::error("A `List` grows with `add`: `list[] = value` is PHP syntax.")
+                    Issue::error("PHP# has no `list[] = value`: a `List` grows with `add`.")
                         .with_annotation(
                             Annotation::primary(array_target.span()).with_message("This appends to a `List`."),
                         )
@@ -934,7 +934,7 @@ where
             // one on a `Set`, which has no index.
             context.collector.report_with_code(
                 IssueCode::InvalidArrayAccess,
-                Issue::error("A `Map` writes a key with `map[key] = value`: `map[] = value` is PHP syntax.")
+                Issue::error("PHP# has no `map[] = value`: a `Map` writes a key with `map[key] = value`.")
                     .with_annotation(Annotation::primary(array_target.span()).with_message("This appends to a `Map`.")),
             );
             array_target_index_type =

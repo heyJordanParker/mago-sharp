@@ -74,9 +74,9 @@ pub enum ParseError {
     /// `required` written on a PHP# method or operator, at the `required`. Spec section 25 keeps it to the constructor,
     /// which `new Self(…)` calls, and section 6.1 to a property.
     RequiredMethodInSharp(Span),
-    /// PHP's `use` of a trait inside a PHP# class, at the `use`. Spec section 22 lists a plain PHP trait in the class
-    /// header.
-    TraitUseInSharp(Span),
+    /// PHP's `use` of a trait inside a PHP# class, with the trait names as written, at the `use`. Spec section 22 lists
+    /// a plain PHP trait in the class header.
+    TraitUseInSharp(Box<str>, Span),
     /// An escape JavaScript refuses in a PHP# template, such as `\1` or `\x4`, at its backslash and next character.
     InvalidTemplateEscapeInSharp(Span),
     /// A PHP `fn` arrow function or `function` closure written in a PHP# file, at its keyword.
@@ -171,7 +171,7 @@ impl HasFileId for ParseError {
             | ParseError::ForInInSharp(span)
             | ParseError::NotSupportedYetInSharp(_, span)
             | ParseError::RequiredMethodInSharp(span)
-            | ParseError::TraitUseInSharp(span)
+            | ParseError::TraitUseInSharp(_, span)
             | ParseError::InvalidTemplateEscapeInSharp(span)
             | ParseError::PhpLambdaInSharp(span)
             | ParseError::LambdaAfterOperatorInSharp(span)
@@ -228,7 +228,7 @@ impl HasSpan for ParseError {
             | ParseError::ForInInSharp(span)
             | ParseError::NotSupportedYetInSharp(_, span)
             | ParseError::RequiredMethodInSharp(span)
-            | ParseError::TraitUseInSharp(span)
+            | ParseError::TraitUseInSharp(_, span)
             | ParseError::InvalidTemplateEscapeInSharp(span)
             | ParseError::PhpLambdaInSharp(span)
             | ParseError::LambdaAfterOperatorInSharp(span)
@@ -304,44 +304,42 @@ impl std::fmt::Display for ParseError {
             },
             ParseError::RecursionLimitExceeded(_) => "Maximum recursion depth exceeded".to_string(),
             ParseError::PhpSyntaxInSharp(kind, _) => match kind {
-                T!["->"] => "`->` is PHP syntax: PHP# writes member access with `.`".to_string(),
-                T!["?->"] => "`?->` is PHP syntax: PHP# writes null-safe member access with `?.`".to_string(),
-                T!["?"] => "`?` before a type is PHP syntax: PHP# writes it after the type, as in `int?`".to_string(),
-                T!["::"] => "`::` is PHP syntax: PHP# writes static access with `.`".to_string(),
-                T![".="] => "`.=` is PHP syntax: PHP# appends to a string with `+=`".to_string(),
-                T!["function"] => "`function` is PHP syntax: a PHP# method starts with its return type".to_string(),
-                T!["$variable"] => "A `$` variable is PHP syntax: PHP# names have no `$`".to_string(),
-                T!["use"] => "`use` is PHP syntax: PHP# imports a class with `import`".to_string(),
-                T!["foreach"] => "`foreach` is PHP syntax: PHP# loops over a collection with `for … of`".to_string(),
+                T!["->"] => "PHP# has no `->`: write member access with `.`.".to_string(),
+                T!["?->"] => "PHP# has no `?->`: write null-safe member access with `?.`.".to_string(),
+                T!["?"] => "PHP# has no `?` before a type: write it after the type, as in `int?`.".to_string(),
+                T!["::"] => "PHP# has no `::`: write static access with `.`.".to_string(),
+                T![".="] => "PHP# has no `.=`: append with `+=`.".to_string(),
+                T!["function"] => "PHP# has no `function`: start a method with its return type.".to_string(),
+                T!["$variable"] => "PHP# has no `$` variables: write the name without `$`.".to_string(),
+                T!["use"] => "PHP# has no `use`: import a class with `import`.".to_string(),
+                T!["foreach"] => "PHP# has no `foreach`: loop over a collection with `for … of`.".to_string(),
                 T!["=>"] => "PHP# writes a `Map` entry as `key: value`: `=>` is the lambda arrow".to_string(),
-                T!["<?php"] => "`<?php` is PHP syntax: a `.sharp` file has no opening tag, so delete it".to_string(),
-                T!["<?"] => "`<?` is PHP syntax: a `.sharp` file has no opening tag, so delete it".to_string(),
+                T!["<?php"] => "PHP# has no `<?php`: a `.sharp` file has no opening tag, so delete it.".to_string(),
+                T!["<?"] => "PHP# has no `<?`: a `.sharp` file has no opening tag, so delete it.".to_string(),
                 T!["<?="] => {
-                    "`<?=` is PHP syntax: a `.sharp` file has no tags, and writes output with `global.printf`".to_string()
+                    "PHP# has no `<?=`: a `.sharp` file has no tags, and writes output with `global.printf`.".to_string()
                 }
-                T!["?>"] => "`?>` is PHP syntax: a `.sharp` file has no closing tag, so delete it".to_string(),
-                T!["#["] => {
-                    "`#[` is PHP syntax: PHP# writes attributes in square brackets, as in `[Searchable]`".to_string()
-                }
-                kind => format!("`{kind}` is PHP syntax that PHP# does not have"),
+                T!["?>"] => "PHP# has no `?>`: a `.sharp` file has no closing tag, so delete it.".to_string(),
+                T!["#["] => "PHP# has no `#[`: write an attribute in square brackets, as in `[Searchable]`.".to_string(),
+                kind => format!("PHP# has no `{kind}`."),
             },
             // Spec section 24 capitalizes every type but the built-in ones, so a name whose last part is lowercase is a
             // value, and a class is written by its short name.
             ParseError::ClassNameConstantInSharp(name, _) => {
                 let class = name.rsplit('.').next().unwrap_or(name);
                 if class.starts_with(|first: char| first.is_ascii_uppercase()) {
-                    format!("`{name}::class` is PHP syntax: PHP# writes `typeof({class})`")
+                    format!("PHP# has no `{name}::class`: write `typeof({class})`.")
                 } else {
-                    format!("`{name}::class` is PHP syntax: PHP# writes `Class.of({name})`")
+                    format!("PHP# has no `{name}::class`: write `Class.of({name})`.")
                 }
             }
             ParseError::QualifiedNameInSharp(name, _) => {
                 match ["null", "true", "false"].into_iter().find(|keyword| name.eq_ignore_ascii_case(keyword)) {
-                    Some(keyword) => format!("A `\\` name is PHP syntax: write `{keyword}`"),
+                    Some(keyword) => format!("PHP# has no `\\` names: write `{keyword}`."),
                     None => {
                         let short_name = name.rsplit('.').next().unwrap_or(name);
 
-                        format!("A `\\` name is PHP syntax: add `import {name};` and write `{short_name}`")
+                        format!("PHP# has no `\\` names: add `import {name};` and write `{short_name}`.")
                     }
                 }
             }
@@ -363,12 +361,10 @@ impl std::fmt::Display for ParseError {
             }
             ParseError::NotSupportedYetInSharp(construct, _) => format!("{construct} is not supported yet in PHP#."),
             ParseError::RequiredMethodInSharp(_) => {
-                "Only the constructor is `required`, which keeps `new Self(…)` callable on every subclass: remove it here."
-                    .to_string()
+                "`required` goes on the constructor or a property, never on a method: remove it here.".to_string()
             }
-            ParseError::TraitUseInSharp(_) => {
-                "`use` in a class is PHP syntax: PHP# lists a trait in the class header, as in `class Order : Model, HasFactory`"
-                    .to_string()
+            ParseError::TraitUseInSharp(traits, _) => {
+                format!("PHP# has no `use` in a class: list `{traits}` in the header after `:`.")
             }
             ParseError::InvalidTemplateEscapeInSharp(_) => {
                 "A template takes JavaScript's escapes, as in `\\n`, `\\x41` or `\\u{1F600}`.".to_string()

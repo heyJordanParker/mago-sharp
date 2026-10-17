@@ -108,6 +108,7 @@ use mago_syntax::cst::PatternMatchArmBody;
 use mago_syntax::cst::Program;
 use mago_syntax::cst::PropertiesPattern;
 use mago_syntax::cst::Property;
+use mago_syntax::cst::PropertyAccess;
 use mago_syntax::cst::PropertyBehaviorList;
 use mago_syntax::cst::PropertyHook;
 use mago_syntax::cst::PropertyHookBody;
@@ -425,7 +426,7 @@ const OBJECT: &[u8] = b"Object";
 /// superglobals, read or written, magic constants and other `__Something__` names, `(array)` and `(object)`. A
 /// `__Something__` name is an error when it is declared too, as a class, interface, enum, enum case, method, property,
 /// constant, parameter or local. A method name that starts but does not end with `__`, as PHP's magic methods do, is
-/// an error that names it without the underscores. Any other node outside this list is a form `is_undecided` names,
+/// an error that names what PHP# writes for the magic method's job, or the name without its underscores. Any other node outside this list is a form `is_undecided` names,
 /// which is not supported yet, a PHP form `never_written` names with what PHP# writes instead, or no PHP# construct.
 ///
 /// Twenty-two more refusals need inferred types or the codebase, so the analyzer makes them as its part of this
@@ -582,6 +583,19 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
                 Expression::List(list) => report_removed_construct(list.list.value, target.span(), context),
                 Expression::Access(Access::NullSafeProperty(_)) => {
                     context.report(not_supported_yet(target.span(), "write target", targets));
+                }
+                // A tuple unpacks into new locals, each element named, spec section 30.
+                Expression::Array(array)
+                    if !array.elements.iter().any(|element| matches!(element, ArrayElement::Missing(_))) =>
+                {
+                    let written = BytesDisplay(context.get_code_snippet(target));
+                    context.report(
+                        Issue::error(format!(
+                            "`{written}` can't be written to: unpack a tuple into new locals with `const {written} = …`."
+                        ))
+                        .with_annotation(Annotation::primary(target.span()).with_message("Written here."))
+                        .with_note(targets),
+                    );
                 }
                 _ => context.report(
                     Issue::error(format!("`{}` can't be written to.", BytesDisplay(context.get_code_snippet(target))))
@@ -1243,7 +1257,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             FieldOrProperty,
         ) => Some(FieldOrProperty),
         (Node::Hint(hint), FieldOrProperty | ClassConstant | Method | Signature | Parameter | Body | Place::Pattern)
-            if let Some(issue) = type_written_another_way(hint, place) =>
+            if let Some(issue) = type_written_another_way(hint, place, context) =>
         {
             context.report(issue);
 
@@ -1283,10 +1297,14 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
                 return None;
             }
             if matches!(place, Method | Signature) {
-                let refusals = list.arguments.iter().filter_map(|argument| match argument {
-                    Hint::Never(_) => type_written_another_way(argument, Parameter),
-                    _ => None,
-                });
+                let refusals: Vec<Issue> = list
+                    .arguments
+                    .iter()
+                    .filter_map(|argument| match argument {
+                        Hint::Never(_) => type_written_another_way(argument, Parameter, context),
+                        _ => None,
+                    })
+                    .collect();
                 for issue in refusals {
                     context.report(issue);
                 }
@@ -2324,8 +2342,10 @@ fn is_slice_method(method: &Method, program: &Program) -> Result<(), Box<Issue>>
     }
 }
 
-/// The refusal of a method name that starts but does not end with `__`, which names what to write: the name without
-/// its underscores, as `toString` for `__toString`.
+/// The refusal of a method name that starts but does not end with `__`, which names what to write. PHP calls its magic
+/// methods by themselves, so each names what PHP# writes for its job: `toString` for `__toString`, the constructor for
+/// `__construct` and `with` for `__clone`, and any other is a method PHP# never calls by itself. Any other name is the
+/// rest of it when that is camelCase.
 fn double_underscore_name(method: &Method) -> Option<Issue> {
     let name = method.name.value;
     if !name.starts_with(b"__") || is_magic_name(name) {
@@ -2333,8 +2353,19 @@ fn double_underscore_name(method: &Method) -> Option<Issue> {
     }
 
     let rest = &name[name.iter().take_while(|byte| **byte == b'_').count()..];
-    let instead =
-        if rest.is_empty() { "start it with a letter".to_owned() } else { format!("write `{}`", BytesDisplay(rest)) };
+    let instead = match name.to_ascii_lowercase().as_slice() {
+        b"__tostring" => "write `toString`, which every conversion to text calls".to_owned(),
+        b"__construct" => "the constructor is named after its class, as in `public Report(…)`".to_owned(),
+        b"__clone" => "copy with `with`, as in `this with { … }`".to_owned(),
+        b"__get" | b"__set" | b"__isset" | b"__unset" | b"__call" | b"__callstatic" | b"__invoke" | b"__destruct"
+        | b"__serialize" | b"__unserialize" | b"__sleep" | b"__wakeup" | b"__set_state" | b"__debuginfo" => {
+            "PHP# never calls it for you: give it a camelCase name and call it".to_owned()
+        }
+        _ if rest.first().is_some_and(u8::is_ascii_lowercase) && is_camel_case(rest) => {
+            format!("write `{}`", BytesDisplay(rest))
+        }
+        _ => "give it a camelCase name, as in `toString`".to_owned(),
+    };
 
     Some(
         Issue::error(format!("A method name can't start with `__`: {instead}."))
@@ -3351,7 +3382,7 @@ fn is_slice_accessor(accessor: &PropertyHook) -> bool {
 }
 
 /// Reports an accessor `is_slice_accessor` refuses, naming what PHP# writes instead. An accessor of any other name is no
-/// PHP# accessor. The parser refuses an attribute on an accessor.
+/// PHP# accessor.
 fn report_accessor(accessor: &PropertyHook, context: &mut Context<'_, '_, '_>) {
     const ACCESSORS: &str = "A PHP# property's accessors are `get` and `set` or `init`, each written `;`, `=> expr;` or with a block body, and `set` and `init` may take `private`, `protected` or `internal`. The observers `willSet` and `didSet` take a body.";
 
@@ -4231,9 +4262,10 @@ fn is_slice_type(hint: &Hint) -> bool {
 
 /// The error for a type PHP# writes another way, spec section 24: the built-in types are lowercase, every other type is
 /// capitalized, and PHP's `mixed`, `object`, `array`, `callable`, `iterable`, `parent`, `true`, `false` and a lone
-/// `null` each have a PHP# form. `never` is a type only as a method's return type, spec section 7, at `place` [`Place::Method`] or
-/// [`Place::Signature`]. `None` for a type written as PHP# writes it.
-fn type_written_another_way(hint: &Hint, place: Place) -> Option<Issue> {
+/// `null` each have a PHP# form. `never` is a type only as a method's return type, spec section 7, at `place`
+/// [`Place::Method`] or [`Place::Signature`]. A constant holds no collection, so its `iterable` names the types a
+/// constant takes, and `parent` names the class's header. `None` for a type written as PHP# writes it.
+fn type_written_another_way(hint: &Hint, place: Place, context: &Context<'_, '_, '_>) -> Option<Issue> {
     let written = match hint {
         Hint::Identifier(Identifier::Local(name)) => name.value,
         Hint::Void(name)
@@ -4269,11 +4301,15 @@ fn type_written_another_way(hint: &Hint, place: Place) -> Option<Issue> {
         b"array" => ("PHP# has no `array`: write `List<T>` or `Map<TKey, TValue>`.".to_owned(), None),
         b"callable" => ("PHP# has no `callable`: write `Function<R(P)>`.".to_owned(), None),
         b"never" => ("PHP# has no `never` type outside a return type.".to_owned(), None),
+        b"iterable" if written == b"iterable" && place == Place::ClassConstant => (
+            "PHP# has no `iterable`: give the constant a type it holds.".to_owned(),
+            Some(supported(Place::ClassConstant)),
+        ),
         b"iterable" if written == b"iterable" => {
             ("PHP# has no `iterable`: write `Iterable<T>`, as in `Iterable<Order>`.".to_owned(), None)
         }
         b"iterable" => ("`Iterable` takes 1 type argument: the element.".to_owned(), None),
-        b"parent" => ("PHP# has no `parent` type: write the base class's name.".to_owned(), None),
+        b"parent" => (format!("PHP# has no `parent` type: {}", parent_instead(hint.span(), context)), None),
         _ => return None,
     };
 
@@ -4586,7 +4622,7 @@ fn check_union(union: &UnionHint, place: Place, context: &mut Context<'_, '_, '_
             }
             _ if is_slice_type(member) => true,
             _ => {
-                match type_written_another_way(member, place) {
+                match type_written_another_way(member, place, context) {
                     Some(issue) => context.report(issue),
                     None => report_unsupported(Node::Hint(member), place, context),
                 }
@@ -4747,6 +4783,24 @@ fn report_php_self(keyword: &Keyword, self_fits: bool, context: &mut Context<'_,
         ))
         .with_annotation(Annotation::primary(keyword.span).with_message("Written here.")),
     );
+}
+
+/// What PHP# writes for PHP's `parent` type at `span`: the base class's name. One file can't tell a class from an
+/// interface, so a header of one name names it, and a longer one names the names it lists.
+fn parent_instead(span: Span, context: &Context<'_, '_, '_>) -> String {
+    let names: Vec<String> = file_statements(context.program)
+        .find_map(|statement| match statement {
+            Statement::Class(class) if class.span().contains(&span.start) => class.inheritance.as_ref(),
+            _ => None,
+        })
+        .map(|inheritance| inheritance.names().map(|name| BytesDisplay(name.value()).to_string()).collect())
+        .unwrap_or_default();
+
+    match names.as_slice() {
+        [name] => format!("write `{name}`, the class's base class."),
+        [] => "this class has no base class, as its header lists none.".to_owned(),
+        names => format!("write the base class's name, the class among `{}` in the header.", names.join("`, `")),
+    }
 }
 
 /// Reports PHP's `static`, which spec section 25 writes `Self`.
@@ -5139,8 +5193,24 @@ fn check_cast(unary_prefix: &UnaryPrefix, place: Place, context: &mut Context<'_
         UnaryPrefixOperator::IntCast(..) | UnaryPrefixOperator::FloatCast(..) | UnaryPrefixOperator::StringCast(..) => {
             return context.report(not_supported_yet(operator.span(), "operator", supported(place)));
         }
-        UnaryPrefixOperator::UnsetCast(..) => ("(unset)", "write `null`."),
-        UnaryPrefixOperator::VoidCast(..) => ("(void)", "write the call as a statement of its own."),
+        UnaryPrefixOperator::UnsetCast(..) => {
+            return report_removed(
+                operator.span(),
+                b"(unset)",
+                "write `null`.",
+                "`null` is the value that holds nothing.",
+                context,
+            );
+        }
+        UnaryPrefixOperator::VoidCast(..) => {
+            return report_removed(
+                operator.span(),
+                b"(void)",
+                "write the call as a statement of its own.",
+                "A call written as a statement runs, and its value is dropped.",
+                context,
+            );
+        }
         UnaryPrefixOperator::BoolCast(..) => ("(bool)", compare),
         UnaryPrefixOperator::BooleanCast(..) => ("(boolean)", compare),
         UnaryPrefixOperator::ArrayCast(..) => {
@@ -5177,7 +5247,7 @@ fn check_cast(unary_prefix: &UnaryPrefix, place: Place, context: &mut Context<'_
         operator.span(),
         cast.as_bytes(),
         instead,
-        "PHP# keeps `(int)`, `(float)` and `(string)` between numbers, and removes PHP's other casts and its cast aliases.",
+        "PHP# casts an `int` or a `float` with `(int)`, `(float)` or `(string)`.",
         context,
     );
 }
@@ -5220,10 +5290,11 @@ fn report_first_class_callable(application: &PartialApplication, context: &mut C
     );
 }
 
-/// The PHP constructs spec sections 2, 8 and 29 remove that start with a word: the word, what PHP# writes instead,
-/// and why. A `.sharp` file reads the word as a plain name, so the construct written as a call, or a bare `die`,
+/// The PHP constructs spec sections 2, 8 and 29 remove that start with a word, and `eval`: the word, what PHP# writes
+/// instead, and why. A `.sharp` file reads the word as a plain name, so the construct written as a call, or a bare `die`,
 /// reaches the checker as a call of a function, or a read of a constant, that no code declares.
-const REMOVED_CONSTRUCTS: [(&[u8], &str, &str); 8] = [
+const REMOVED_CONSTRUCTS: [(&[u8], &str, &str); 9] = [
+    (b"eval", "write the code as a method, and call it.", "PHP# runs only the code it compiles."),
     (
         b"echo",
         "write `console.write(text)` on the `Console` your constructor takes.",
@@ -5507,8 +5578,9 @@ fn report_unsupported(node: Node<'_, '_>, place: Place, context: &mut Context<'_
 /// Whether a node the slice does not have is a form PHP# has not decided, or that a later change builds, so it is not
 /// supported yet: `break` and `continue` with a level, an anonymous class, `|>`, a partial application, a member of
 /// `Self` read or written, as in `Self.count`, an interface's constants, property bodies and operators, an enum's
-/// operators, `? :`, an index and a template in a constant value, an intersection type, a type with no test in a
-/// pattern, as a tuple or `Class<T>`, and a constant typed as a function, a tuple or an `Iterable`.
+/// operators, `? :`, an index, a template and a case's `value` or `name` in a constant value, an intersection type, a
+/// type with no test in a pattern, as a tuple or `Class<T>`, and a constant typed as a function, a tuple or a generic
+/// type, which the collections change builds.
 fn is_undecided(node: Node<'_, '_>, place: Place, context: &Context<'_, '_, '_>) -> bool {
     match (node, place) {
         (
@@ -5545,8 +5617,20 @@ fn is_undecided(node: Node<'_, '_>, place: Place, context: &Context<'_, '_, '_>)
         (Node::Hint(Hint::Intersection(_)) | Node::IntersectionHint(_), _) => true,
         (Node::Hint(Hint::Parenthesized(parenthesized)), _) => matches!(parenthesized.hint, Hint::Intersection(_)),
         (Node::Hint(hint), Place::Pattern) => is_slice_type(hint) && !has_type_test(hint),
-        (Node::FunctionHint(_) | Node::TupleHint(_), Place::ClassConstant) => true,
-        (Node::GenericHint(generic), Place::ClassConstant) => generic.name.value == b"Iterable",
+        (Node::FunctionHint(_) | Node::TupleHint(_) | Node::GenericHint(_), Place::ClassConstant) => true,
+        // A case is capitalized, as in `Status.Active`, where a static member is camelCase, as in `Calc.rate`.
+        (
+            Node::Expression(Expression::Access(Access::Property(PropertyAccess {
+                object:
+                    Expression::Access(Access::Property(PropertyAccess {
+                        property: ClassLikeMemberSelector::Identifier(case),
+                        ..
+                    })),
+                property: ClassLikeMemberSelector::Identifier(member),
+                ..
+            }))),
+            Place::Constant,
+        ) => case.value.first().is_some_and(u8::is_ascii_uppercase) && matches!(member.value, b"value" | b"name"),
         _ => false,
     }
 }
@@ -5588,16 +5672,21 @@ fn never_written(node: Node<'_, '_>, place: Place, context: &Context<'_, '_, '_>
         }
         (Node::Modifier(Modifier::PublicSet(_) | Modifier::ProtectedSet(_) | Modifier::PrivateSet(_)), _) => {
             let form = written(span);
+            let instead = match form.trim_end_matches("(set)") {
+                "public" => "give the property `{ get; set; }`.".to_owned(),
+                level => format!("give the property `{{ get; {level} set; }}`."),
+            };
             removed(
                 span,
                 form.as_bytes(),
-                &format!("give the property `{{ get; {} set; }}`.", form.trim_end_matches("(set)")),
+                &instead,
                 "Only `set` and `init` take an access level of their own, narrower than the property's.",
             )
         }
         (
             Node::Modifier(modifier),
-            Place::Interface
+            Place::Class
+            | Place::Interface
             | Place::Enum
             | Place::ClassConstant
             | Place::FieldOrProperty
@@ -5605,6 +5694,7 @@ fn never_written(node: Node<'_, '_>, place: Place, context: &Context<'_, '_, '_>
             | Place::Parameter,
         ) => {
             let owner = match place {
+                Place::Class => "A class",
                 Place::Interface => "An interface",
                 Place::Enum => "An enum",
                 Place::ClassConstant => "A constant",
@@ -5620,16 +5710,23 @@ fn never_written(node: Node<'_, '_>, place: Place, context: &Context<'_, '_, '_>
             "Write `{}` without parentheses: they go only around a union before `?`, as in `(int|string)?`.",
             written(parenthesized.hint.span())
         )),
-        (Node::Hint(hint), Place::Header) => {
-            error(format!("A header names classes and interfaces, and `{}` is neither.", written(hint.span())))
-                .with_note(supported(place))
-        }
+        (Node::Hint(hint), Place::Header) => error(format!(
+            "A header names classes and interfaces, and `{}` is neither: list a class or an interface, as in `: DatabaseEntity, Linkable`.",
+            written(hint.span())
+        ))
+        .with_note(supported(place)),
         (Node::BinaryOperator(BinaryOperator::AngledNotEqual(_)), _) => {
             removed(span, b"<>", "write `!=`.", "PHP# compares with `==`, `!=`, `<`, `<=`, `>`, `>=` and `<=>`.")
         }
-        (Node::UnaryPrefixOperator(UnaryPrefixOperator::Reference(_)), _) => {
-            removed(span, b"&", "write the value itself.", "Every PHP# argument is passed by value.")
-        }
+        (Node::UnaryPrefixOperator(UnaryPrefixOperator::Reference(_)), _) => removed(
+            span,
+            b"&",
+            "write the value itself.",
+            "PHP# passes and assigns each value itself, and an object stays the one object wherever it is held.",
+        ),
+        (Node::Statement(Statement::Static(_)), Place::Body) => error(
+            "A local keeps no value between calls: keep it in a `private static` field of the class.".to_owned(),
+        ),
         (Node::Expression(Expression::CompositeString(CompositeString::Document(document))), _) => {
             let label = BytesDisplay(document.label);
             let form = match document.kind {
@@ -5711,6 +5808,11 @@ fn never_written(node: Node<'_, '_>, place: Place, context: &Context<'_, '_, '_>
             ))
             .with_note(supported(place))
         }
+        (Node::Expression(Expression::Access(Access::Property(_))), Place::Constant) => error(format!(
+            "A constant value can't read `{}`: it holds literals, constants and the operators on them.",
+            written(span)
+        ))
+        .with_note(supported(place)),
         (Node::ClassLikeMember(ClassLikeMember::Law(law)), Place::Interface) => error(format!(
             "An interface has no laws: state `{}` in a class or an enum, whose values it is about.",
             BytesDisplay(law.name.value)
@@ -5732,6 +5834,11 @@ fn never_written(node: Node<'_, '_>, place: Place, context: &Context<'_, '_, '_>
         (Node::Expression(Expression::Self_(keyword)), Place::Body | Place::Constant) if is_sharp_self(keyword) => {
             error("`Self` is no value: write `typeof(Self)` for the class a static method is called on.".to_owned())
         }
+        (Node::Expression(_), Place::Constant) => error(format!(
+            "A constant value can't hold `{}`: it holds literals, constants and the operators on them.",
+            written(span)
+        ))
+        .with_note(supported(place)),
         _ => return None,
     })
 }
