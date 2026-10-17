@@ -4,6 +4,11 @@
 //! Every compiled file lives in one `.sharp` folder at the workspace root, at the real path of its source relative to
 //! the root, with `.sharp` replaced by `.sharpc`. The folder mirrors the accepted sources exactly: a refused, removed
 //! or renamed source loses its compiled file.
+//!
+//! Beside each of the project's own PHP# sources that declares a type, outside `vendor/` and `autoload-dev` folders, it
+//! also writes a PHP file of the type's name that loads the source, so PHP code that finds classes by listing `*.php`
+//! files finds PHP# classes too, spec section 27. A removed source loses its PHP file, and git's `info/exclude` keeps
+//! the files out of git.
 
 use std::collections::BTreeSet;
 use std::collections::HashSet;
@@ -15,10 +20,12 @@ use std::process::ExitCode;
 use clap::ColorChoice;
 use clap::Parser;
 
+use mago_allocator::LocalArena;
 use mago_database::DatabaseReader;
 use mago_database::error::DatabaseError;
 use mago_database::file::File;
 use mago_database::file::FileType;
+use mago_database::file::FolderNamespace;
 use mago_orchestrator::service::incremental_analysis::compile::Compilation;
 use mago_orchestrator::service::incremental_analysis::compile::DispatcherModule;
 use mago_orchestrator::service::incremental_analysis::compile::Listener;
@@ -32,7 +39,9 @@ use mago_sharp_bridge::unit;
 use mago_sharp_lean::Lean;
 use mago_sharp_lean::PACKAGE_FOLDER;
 use mago_sharp_lean::rules_files;
+use mago_syntax::cst::Statement;
 use mago_syntax::dialect::Dialect;
+use mago_syntax::parser::parse_file;
 
 use crate::commands::analyze::analyze_the_whole_workspace_without_paths;
 use crate::commands::analyze::decode_prelude;
@@ -44,6 +53,7 @@ use crate::consts::PRELUDE_BYTES;
 use crate::error::Error;
 use crate::extensions::start_external_analyzer;
 use crate::utils::create_orchestrator;
+use crate::utils::git;
 
 /// The folder Composer installs packages into.
 const VENDOR: &[u8] = b"vendor/";
@@ -61,8 +71,9 @@ impl CompileCommand {
     /// Checks every PHP# file the analyzer loads, writes the compiled file of each accepted one, and deletes every
     /// other file in the `.sharp` folder.
     ///
-    /// Fails when a file is refused, when a source is a link to a file outside the workspace, or when a package in
-    /// `vendor/` holds a `.sharp` folder of its own. Every accepted file is written either way.
+    /// Fails when a file is refused, when a source is a link to a file outside the workspace, when a package in
+    /// `vendor/` holds a `.sharp` folder of its own, or when a PHP file someone wrote sits where a source's PHP file
+    /// goes. Every accepted file is written either way.
     pub fn execute(self, configuration: Configuration, color_choice: ColorChoice) -> Result<CommandOutcome, Error> {
         let mut orchestrator = create_orchestrator(&configuration, color_choice, false, true, false);
         analyze_the_whole_workspace_without_paths(&mut orchestrator);
@@ -93,9 +104,53 @@ impl CompileCommand {
                 host
             })
             .collect();
+        let included: HashSet<Vec<u8>> = packaged.iter().map(|file| file.name.to_vec()).collect();
         for file in packaged {
             database.add(file);
         }
+
+        // Written before the compile stamps its inputs, which hold the PHP file a default class's name could name in
+        // a file's folder, so a compiled file is current once it is written.
+        let mut failed = false;
+        let mut written_beside = BTreeSet::new();
+        for file in database.files().filter(|file| {
+            file.file_type == FileType::Host
+                && Dialect::of(file).is_sharp()
+                && !file.is_standard_library
+                && file.folder_namespace != Some(FolderNamespace::Test)
+                && !included.contains(file.name.as_ref())
+        }) {
+            let Some(type_file) = type_file_name(&file) else {
+                continue;
+            };
+            let path = root.join(String::from_utf8_lossy(&file.name).as_ref()).with_extension("php");
+            let contents = beside(&type_file);
+            match std::fs::read(&path) {
+                Ok(existing) if existing == contents.as_bytes() => {}
+                Ok(existing) if !existing.starts_with(BESIDE.as_bytes()) => {
+                    let name = String::from_utf8_lossy(&file.name);
+                    let php = name.strip_suffix(".sharp").unwrap_or(&name);
+                    tracing::error!(
+                        "{php}.php is a PHP file beside {name}, so PHP loads it instead of the PHP# class. Delete {php}.php, or rename one of the two files."
+                    );
+                    failed = true;
+                    continue;
+                }
+                _ => write_by_rename(&path, contents.as_bytes()).map_err(DatabaseError::from)?,
+            }
+            written_beside.insert(path);
+        }
+        for file in database.files().filter(|file| {
+            file.file_type == FileType::Host
+                && file.name.ends_with(b".php")
+                && file.contents.starts_with(BESIDE.as_bytes())
+        }) {
+            let path = root.join(String::from_utf8_lossy(&file.name).as_ref());
+            if !written_beside.contains(&path) {
+                std::fs::remove_file(&path).or_else(ignore_missing).map_err(DatabaseError::from)?;
+            }
+        }
+        git::exclude(&root, "mago compile", &written_beside.into_iter().collect::<Vec<_>>())?;
 
         let mut server = Server::new(database.into_static(), decode_prelude, server_settings(&orchestrator));
         server.analyze()?;
@@ -112,7 +167,6 @@ impl CompileCommand {
         let mut refused = IssueCollection::default();
         let mut refused_files = 0;
         let mut packaged_refusals = Vec::new();
-        let mut failed = false;
         for (file_id, compilation) in compilations {
             let file = database.get_ref(&file_id)?;
             let name = String::from_utf8_lossy(&file.name);
@@ -283,6 +337,47 @@ fn quoted(table: &mut Vec<u8>, text: &[u8]) {
         table.push(*byte);
     }
     table.push(b'\'');
+}
+
+/// The start of each PHP file `mago compile` writes beside a PHP# source, which tells it from a file someone wrote.
+const BESIDE: &str = "<?php\n\n// mago compile writes this file from ";
+
+/// The PHP file beside the PHP# source `type_file`, spec section 27. PHP code that lists `*.php` files and names each
+/// class by its path finds the PHP# class through it, and Composer's PSR-4 loads it before the source. It loads the
+/// source through the engine, and on plain PHP it throws before any source can reach the output.
+fn beside(type_file: &str) -> String {
+    format!(
+        "{BESIDE}{type_file}, so PHP code that lists *.php files finds its class.\n\ndeclare(strict_types=1);\n\nfunction_exists('Sharp\\Internal\\requireNative') || throw new Error('This project needs the PHP# engine, and this is plain PHP. Install php-sharp, or run the ghcr.io/heyjordanparker/php-sharp image.');\n\nrequire_once __DIR__ . '/{type_file}';\n"
+    )
+}
+
+/// The name of the PHP# source `file`, as `Order.sharp`, when it declares a type named like it, spec section 27: a
+/// class, interface, enum, struct or event. A module's file and an `extern` declaration file declare none.
+fn type_file_name(file: &File) -> Option<String> {
+    let name = String::from_utf8_lossy(&file.name);
+    let type_file = name.rsplit('/').next()?;
+    let stem = type_file.strip_suffix(".sharp")?.as_bytes();
+    let arena = LocalArena::new();
+    let program = parse_file(&arena, file);
+    let namespaced = program.statements.iter().find_map(|statement| match statement {
+        Statement::Namespace(namespace) => Some(namespace.statements().iter()),
+        _ => None,
+    });
+    let declares = program.statements.iter().chain(namespaced.into_iter().flatten()).any(|statement| match statement {
+        Statement::Class(class) => class.name.value == stem,
+        Statement::Struct(r#struct) => r#struct.name.value == stem,
+        Statement::Enum(r#enum) => r#enum.name.value == stem,
+        Statement::Interface(interface) => interface.name.value == stem,
+        Statement::Event(event) => event.name.value == stem,
+        _ => false,
+    });
+
+    declares.then(|| type_file.to_string())
+}
+
+/// Treats a file that is already gone as removed.
+fn ignore_missing(error: std::io::Error) -> std::io::Result<()> {
+    if error.kind() == std::io::ErrorKind::NotFound { Ok(()) } else { Err(error) }
 }
 
 /// `count` PHP# files, in words.

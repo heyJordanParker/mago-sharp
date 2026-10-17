@@ -164,6 +164,93 @@ where
     Ok(())
 }
 
+/// Keeps `paths`, each a file under `workspace`, out of git: they become the block of the repository's `info/exclude`
+/// that `owner` holds for `workspace`, and every other line of the file stays as it is. No path removes the block.
+///
+/// `git rev-parse --git-path info/exclude` names the file, so a worktree and a submodule write the one git reads for
+/// them. The worktrees of a repository share that file, so each workspace keeps a block of its own, named by its path,
+/// and one worktree's compile never drops another's paths. A workspace outside a git repository, or with no `git` to
+/// run, writes nothing.
+pub fn exclude(workspace: &Path, owner: &str, paths: &[PathBuf]) -> Result<(), Error> {
+    let Ok(output) = Command::new("git")
+        .args(["rev-parse", "--show-toplevel", "--git-path", "info/exclude"])
+        .current_dir(workspace)
+        .output()
+    else {
+        return Ok(());
+    };
+    let printed = String::from_utf8_lossy(&output.stdout);
+    let mut lines = printed.lines();
+    let (true, Some(top), Some(file)) = (output.status.success(), lines.next(), lines.next()) else {
+        return Ok(());
+    };
+    let top = Path::new(top).canonicalize().unwrap_or_else(|_| PathBuf::from(top));
+    let top = top.as_path();
+    let file = workspace.join(file);
+    let begin = format!("# {owner}: the files it writes in {}", workspace.display());
+    let end = format!("# {owner}: end");
+
+    let before = match std::fs::read_to_string(&file) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(Error::Database(DatabaseError::IOError(error))),
+    };
+    if paths.is_empty() && !before.lines().any(|line| line == begin) {
+        return Ok(());
+    }
+    let mut after = String::new();
+    let mut inside = false;
+    for line in before.lines() {
+        if line == begin {
+            inside = true;
+        } else if inside {
+            inside = line != end;
+        } else {
+            after.push_str(line);
+            after.push('\n');
+        }
+    }
+    if !paths.is_empty() {
+        after.push_str(&begin);
+        after.push('\n');
+        for path in paths {
+            if let Ok(relative) = path.strip_prefix(top) {
+                after.push_str(&pattern(relative));
+                after.push('\n');
+            }
+        }
+        after.push_str(&end);
+        after.push('\n');
+    }
+    if after == before {
+        return Ok(());
+    }
+
+    std::fs::create_dir_all(file.parent().unwrap_or(top))
+        .and_then(|()| std::fs::write(&file, after))
+        .map_err(|e| Error::Database(DatabaseError::IOError(e)))
+}
+
+/// The gitignore pattern that names exactly the path `relative` to the repository's top folder: anchored with `/`,
+/// with `\` before each character a pattern reads as a wildcard and before a trailing space.
+fn pattern(relative: &Path) -> String {
+    let mut pattern = String::new();
+    for part in relative.components() {
+        pattern.push('/');
+        for character in part.as_os_str().to_string_lossy().chars() {
+            if matches!(character, '\\' | '*' | '?' | '[') {
+                pattern.push('\\');
+            }
+            pattern.push(character);
+        }
+    }
+    if pattern.ends_with(' ') {
+        pattern.insert(pattern.len() - 1, '\\');
+    }
+
+    pattern
+}
+
 /// Check if we're inside a git repository.
 ///
 /// This function runs `git rev-parse --git-dir` to determine if the given
