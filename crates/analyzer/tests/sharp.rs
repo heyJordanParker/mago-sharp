@@ -2625,9 +2625,11 @@ fn a_bare_call_of_a_plain_php_function_names_the_call_to_write() {
 }
 
 /// Spec sections 8 and 23: a call through `global` of a function the standard library replaces is refused as its bare
-/// call is, naming the member to write, so PHP# code never reaches around the library. A function the library has no
-/// member for, a function PHP# syntax replaces, and a call inside the standard library itself, whose members are made
-/// of those calls, still go through `global`.
+/// call is, naming the member to write, so PHP# code never reaches around the library. That holds for the functions
+/// the effect classes of section 29 replace, so output, exit, the clock and files go through `Console`, `Process`,
+/// `Clock` and `Files`, and an exit with a message names `process.exit` as a bare `exit` does. A function the library
+/// has no member for, a function PHP# syntax replaces, and a call inside the standard library itself, whose members
+/// are made of those calls, still go through `global`.
 #[test]
 fn a_global_call_of_a_function_the_library_replaces_names_the_member_to_write() {
     let math = "namespace Sharp.Math;\n\npublic static class Math\n{\n    public static int max(int first, int ...rest) => global.max([first, ...rest]);\n}\n";
@@ -2636,28 +2638,70 @@ fn a_global_call_of_a_function_the_library_replaces_names_the_member_to_write() 
         ("vendor/heyjordanparker/php-sharp-composer/library/Sharp/Math/Math.sharp", math),
         ("vendor/heyjordanparker/php-sharp-composer/library/Sharp/Text/Text.sharp", text),
     ];
-    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static string label(string name) => global.trim(name);\n    public static int larger(int a, int b) => global.max(a, b);\n    public static int counted(List<int> items) => global.count(items);\n    public static bool holds(List<int> items, int item) => global.in_array(item, items);\n    public static int distance(string a, string b) => global.levenshtein(a, b);\n    public static string shown(int value) => global.strval(value);\n}\n";
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static string label(string name) => global.trim(name);\n    public static int larger(int a, int b) => global.max(a, b);\n    public static int counted(List<int> items) => global.count(items);\n    public static bool holds(List<int> items, int item) => global.in_array(item, items);\n    public static int distance(string a, string b) => global.levenshtein(a, b);\n    public static string shown(int value) => global.strval(value);\n    public static void say() { global.printf(\"x\"); }\n    public static void stop() { global.exit(1); }\n    public static void fail() { global.exit(\"failed\"); }\n    public static int started() => global.time();\n    public static void save(string path, string text) { global.file_put_contents(path, text); }\n}\n";
+    let effects = [
+        "11:32 wrapped-function `printf` is wrapped by the standard library: write `console.write(…)` on the `Console` your constructor takes. | ",
+        "12:33 wrapped-function `exit` is wrapped by the standard library: write `process.exit(…)` on the `Process` your constructor takes. | ",
+        "13:33 wrapped-function `exit` is wrapped by the standard library: write `process.exit(…)` on the `Process` your constructor takes. | ",
+        "14:36 wrapped-function `time` is wrapped by the standard library: write `clock.now()` on the `Clock` your constructor takes. | ",
+        "15:57 wrapped-function `file_put_contents` is wrapped by the standard library: write `files.write(…)` or `files.append(…)` on the `Files` your constructor takes. | ",
+    ];
+    let collections = [
+        "7:51 wrapped-function `count` is wrapped by the standard library: write `items.count()`. | ",
+        "8:60 wrapped-function `in_array` is wrapped by the standard library: write `items.contains(item)` on a `List`. | ",
+    ];
 
     assert_eq!(
         refusals(("src/Demo/Report.sharp", sharp), &library),
         [
-            "5:48 wrapped-function `trim` is wrapped by the standard library: write `name.trim()`. | ",
-            "6:47 wrapped-function `max` is wrapped by the standard library: write `Math.max(…)`. Add `import Sharp.Math.Math;` to the file. | ",
-            "7:51 wrapped-function `count` is wrapped by the standard library: write `items.count()`. | ",
-            "8:60 wrapped-function `in_array` is wrapped by the standard library: write `items.contains(item)` on a `List`. | ",
+            &[
+                "5:48 wrapped-function `trim` is wrapped by the standard library: write `name.trim()`. | ",
+                "6:47 wrapped-function `max` is wrapped by the standard library: write `Math.max(…)`. Add `import Sharp.Math.Math;` to the file. | ",
+            ][..],
+            &collections,
+            &effects,
         ]
+        .concat()
     );
     // Without the library's members, `global` is the only way to reach `trim` and `max`. The collection methods are
-    // declared with the collection types, so `count` and `in_array` stay refused.
-    assert_eq!(
-        refusals(("src/Demo/Report.sharp", sharp), &[]),
-        [
-            "7:51 wrapped-function `count` is wrapped by the standard library: write `items.count()`. | ",
-            "8:60 wrapped-function `in_array` is wrapped by the standard library: write `items.contains(item)` on a `List`. | ",
-        ]
-    );
+    // declared with the collection types and the effect classes come with PHP#, so their functions stay refused.
+    assert_eq!(refusals(("src/Demo/Report.sharp", sharp), &[]), [&collections[..], &effects].concat());
     assert_eq!(refusals(library[0], &library[1..]), Vec::<String>::new());
     assert_eq!(refusals(library[1], &library[..1]), Vec::<String>::new());
+}
+
+/// Spec section 29: `Environment` replaces `getenv()` and PHP's other environment functions, so a call of each, bare
+/// or through `global`, names the member that does its work. `getopt` names the `arguments` property, and `getenv`
+/// names both the read of one variable and the read of them all.
+#[test]
+fn each_environment_function_names_the_environment_member_that_replaces_it() {
+    let mut differing = Vec::new();
+    for (call, form) in [
+        ("getenv(name)", "`environment.variable(…)` or `environment.variables()`"),
+        ("getenv()", "`environment.variable(…)` or `environment.variables()`"),
+        ("apache_getenv(name)", "`environment.variable(…)`"),
+        ("putenv(name)", "`environment.setVariable(…)`"),
+        ("apache_setenv(name, name)", "`environment.setVariable(…)`"),
+        ("getopt(name)", "`environment.arguments`"),
+        ("getcwd()", "`environment.currentDirectory()`"),
+        ("chdir(name)", "`environment.changeDirectory(…)`"),
+    ] {
+        for written in [call.to_owned(), format!("global.{call}")] {
+            let sharp = leak(format!(
+                "namespace Demo;\n\nclass Shell\n{{\n    public static Any? run(string name) => {written};\n}}\n"
+            ));
+            let function = &call[..call.find('(').expect("a call")];
+            let expected = format!(
+                "5:44 wrapped-function `{function}` is wrapped by the standard library: write {form} on the `Environment` your constructor takes. | "
+            );
+            let found = refusals(("src/Demo/Shell.sharp", sharp), &[]);
+            if found != [expected] {
+                differing.push(format!("{written}: {found:?}"));
+            }
+        }
+    }
+
+    assert_eq!(differing, Vec::<String>::new());
 }
 
 /// Spec section 29: each family of functions an effect class replaces names its member. Every `curl_*` function names
@@ -2726,26 +2770,29 @@ fn an_import_of_one_function_is_refused_with_the_namespace_to_import() {
 /// Spec section 31 makes an exception a bug and an expected failure a `Result`, so PHP# declares no thrown exceptions.
 #[test]
 fn check_throws_skips_sharp_files_and_keeps_reporting_in_php() {
-    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static string token()\n    {\n        return global.random_bytes(16);\n    }\n}\n";
-    let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    public static function token(): string\n    {\n        return random_bytes(16);\n    }\n}\n";
+    let vault = "<?php\n\nnamespace Lib;\n\nfinal class Vault\n{\n    /** @throws \\RuntimeException */\n    public static function seal(string $text): string\n    {\n        throw new \\RuntimeException($text);\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Vault;\n\nclass Report\n{\n    public static string token()\n    {\n        return Vault.seal(\"a\");\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nuse Lib\\Vault;\n\nclass Report\n{\n    public static function token(): string\n    {\n        return Vault::seal('a');\n    }\n}\n";
+    let others = [("src/Lib/Vault.php", vault)];
 
-    assert_eq!(issues(("src/Demo/Report.sharp", sharp), &[]), Vec::<String>::new());
-    assert_eq!(issues(("src/Demo/Report.php", php), &[]), ["9:16 unhandled-thrown-type"]);
+    assert_eq!(issues(("src/Demo/Report.sharp", sharp), &others), Vec::<String>::new());
+    assert_eq!(issues(("src/Demo/Report.php", php), &others), ["11:16 unhandled-thrown-type"]);
 }
 
-/// Spec section 7 refuses a statement that can never run, as Java and Zig do: one after `return`, `throw`,
-/// `global.exit(…)`, `break` or `continue` in its block, one after an `if` whose every branch ends the block, one after
+/// Spec section 7 refuses a statement that can never run, as Java and Zig do: one after `return`, `throw`, a call that
+/// never returns, `break` or `continue` in its block, one after an `if` whose every branch ends the block, one after
 /// a loop that never ends, and a block after a condition that never finishes, which is refused at the condition. The
 /// first statement that never runs is refused once for its block, naming the line that ends the block, and a bare call
 /// that never runs is refused for that alone. `finally`, a `catch`, and code after a loop that breaks or an `if` with no
 /// `else` all run. A `.php` file keeps Mago's help.
 #[test]
 fn a_statement_that_can_never_run_is_refused() {
-    let sharp = "namespace Demo;\n\nimport RuntimeException;\n\nclass Flow\n{\n    public static int afterReturn()\n    {\n        return 1;\n        return 2;\n    }\n\n    public static int afterThrow()\n    {\n        throw new RuntimeException(\"no\");\n        return 3;\n    }\n\n    public static void afterExit()\n    {\n        global.exit(1);\n        return;\n    }\n\n    public static void afterBreak()\n    {\n        while (true) {\n            break;\n            global.printf(\"never\");\n        }\n    }\n\n    public static void afterContinue(List<int> items)\n    {\n        for (const item of items) {\n            continue;\n            global.printf(\"%d\", item);\n        }\n    }\n\n    public static int bareCall()\n    {\n        return 4;\n        strlen(\"never\");\n    }\n\n    public static int afterEveryBranch(bool up)\n    {\n        if (up) {\n            return 5;\n        } else {\n            return 6;\n        }\n        return 7;\n    }\n\n    public static void conditionNeverFinishes()\n    {\n        if (global.exit(1)) {\n            global.printf(\"never\");\n        }\n    }\n\n    public static int afterReturnThree()\n    {\n        return 8;\n        global.printf(\"one\");\n        global.printf(\"two\");\n        global.printf(\"three\");\n    }\n\n    public static int doNeverEnds(bool again)\n    {\n        do {\n            return 9;\n        } while (again);\n        return 10;\n    }\n\n    public static int loopNeverEnds()\n    {\n        while (true) {\n            global.printf(\"again\");\n        }\n        return 11;\n    }\n\n    public static int finallyAfterReturn()\n    {\n        try {\n            return 12;\n        } finally {\n            global.printf(\"done\");\n        }\n    }\n\n    public static int afterLoopWithBreak()\n    {\n        while (true) {\n            break;\n        }\n        return 13;\n    }\n\n    public static int afterIfWithoutElse(bool up)\n    {\n        if (up) {\n            return 14;\n        }\n        return 15;\n    }\n\n    public static int catchAfterReturningTry()\n    {\n        try {\n            return 16;\n        } catch (RuntimeException failure) {\n            return 17;\n        }\n    }\n\n    public static int doThatBreaks(bool stop, bool again)\n    {\n        do {\n            if (stop) {\n                break;\n            }\n            return 18;\n        } while (again);\n        return 19;\n    }\n\n    public static void conditionNeverFinishesWithElse()\n    {\n        if (global.exit(1)) {\n            global.printf(\"never\");\n        } else {\n            global.printf(\"never either\");\n        }\n    }\n\n    public static void iterableNeverFinishes()\n    {\n        for (const item of global.exit(1)) {\n            global.printf(\"never\");\n        }\n    }\n\n    public static void whileConditionNeverFinishes()\n    {\n        while (global.exit(1)) {\n            global.printf(\"never\");\n        }\n        global.printf(\"after\");\n    }\n\n    public static void forConditionNeverFinishes()\n    {\n        for (int step = 0; global.exit(1); step++) {\n            global.printf(\"never\");\n        }\n        global.printf(\"after\");\n    }\n\n    public static void exitInForOfBody(List<int> items)\n    {\n        for (const item of items) {\n            global.exit(1);\n            global.printf(\"%d\", item);\n        }\n    }\n\n    public static void exitInWhileBody(bool again)\n    {\n        while (again) {\n            global.exit(1);\n            global.printf(\"never\");\n        }\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport RuntimeException;\n\nclass Flow\n{\n    public static int afterReturn()\n    {\n        return 1;\n        return 2;\n    }\n\n    public static int afterThrow()\n    {\n        throw new RuntimeException(\"no\");\n        return 3;\n    }\n\n    public static void afterNever()\n    {\n        Halt.now();\n        return;\n    }\n\n    public static void afterBreak()\n    {\n        while (true) {\n            break;\n            Halt.note(\"never\");\n        }\n    }\n\n    public static void afterContinue(List<int> items)\n    {\n        for (const item of items) {\n            continue;\n            Halt.note(item);\n        }\n    }\n\n    public static int bareCall()\n    {\n        return 4;\n        strlen(\"never\");\n    }\n\n    public static int afterEveryBranch(bool up)\n    {\n        if (up) {\n            return 5;\n        } else {\n            return 6;\n        }\n        return 7;\n    }\n\n    public static void conditionNeverFinishes()\n    {\n        if (Halt.now()) {\n            Halt.note(\"never\");\n        }\n    }\n\n    public static int afterReturnThree()\n    {\n        return 8;\n        Halt.note(\"one\");\n        Halt.note(\"two\");\n        Halt.note(\"three\");\n    }\n\n    public static int doNeverEnds(bool again)\n    {\n        do {\n            return 9;\n        } while (again);\n        return 10;\n    }\n\n    public static int loopNeverEnds()\n    {\n        while (true) {\n            Halt.note(\"again\");\n        }\n        return 11;\n    }\n\n    public static int finallyAfterReturn()\n    {\n        try {\n            return 12;\n        } finally {\n            Halt.note(\"done\");\n        }\n    }\n\n    public static int afterLoopWithBreak()\n    {\n        while (true) {\n            break;\n        }\n        return 13;\n    }\n\n    public static int afterIfWithoutElse(bool up)\n    {\n        if (up) {\n            return 14;\n        }\n        return 15;\n    }\n\n    public static int catchAfterReturningTry()\n    {\n        try {\n            return 16;\n        } catch (RuntimeException failure) {\n            return 17;\n        }\n    }\n\n    public static int doThatBreaks(bool stop, bool again)\n    {\n        do {\n            if (stop) {\n                break;\n            }\n            return 18;\n        } while (again);\n        return 19;\n    }\n\n    public static void conditionNeverFinishesWithElse()\n    {\n        if (Halt.now()) {\n            Halt.note(\"never\");\n        } else {\n            Halt.note(\"never either\");\n        }\n    }\n\n    public static void iterableNeverFinishes()\n    {\n        for (const item of Halt.now()) {\n            Halt.note(\"never\");\n        }\n    }\n\n    public static void whileConditionNeverFinishes()\n    {\n        while (Halt.now()) {\n            Halt.note(\"never\");\n        }\n        Halt.note(\"after\");\n    }\n\n    public static void forConditionNeverFinishes()\n    {\n        for (int step = 0; Halt.now(); step++) {\n            Halt.note(\"never\");\n        }\n        Halt.note(\"after\");\n    }\n\n    public static void neverInForOfBody(List<int> items)\n    {\n        for (const item of items) {\n            Halt.now();\n            Halt.note(item);\n        }\n    }\n\n    public static void neverInWhileBody(bool again)\n    {\n        while (again) {\n            Halt.now();\n            Halt.note(\"never\");\n        }\n    }\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nclass Flow\n{\n    public static function afterReturn(): int\n    {\n        return 1;\n        return 2;\n    }\n}\n";
+    let halt = "<?php\n\nnamespace Demo;\n\nfinal class Halt\n{\n    public static function now(): never\n    {\n        exit(1);\n    }\n\n    public static function note(int|string $value): void\n    {\n    }\n}\n";
 
     assert_eq!(
-        refusals(("src/Demo/Flow.sharp", sharp), &[]),
+        refusals(("src/Demo/Flow.sharp", sharp), &[("src/Demo/Halt.php", halt)]),
         [
             "10:9 unevaluated-code This statement never runs, because line 9 ends the block. | Delete it, or move it above line 9.",
             "16:9 unevaluated-code This statement never runs, because line 15 ends the block. | Delete it, or move it above line 15.",
@@ -2754,15 +2801,15 @@ fn a_statement_that_can_never_run_is_refused() {
             "37:13 unevaluated-code This statement never runs, because line 36 ends the block. | Delete it, or move it above line 36.",
             "44:9 unevaluated-code This statement never runs, because line 43 ends the block. | Delete it, or move it above line 43.",
             "54:9 unevaluated-code This statement never runs, because line 49 ends the block. | Delete it, or move it above line 49.",
-            "59:13 unevaluated-code This condition never finishes, so its block never runs. | Write `global.exit(1);` as its own statement, and delete the `if`.",
+            "59:13 unevaluated-code This condition never finishes, so its block never runs. | Write `Halt.now();` as its own statement, and delete the `if`.",
             "67:9 unevaluated-code This statement never runs, because line 66 ends the block. | Delete it, or move it above line 66.",
             "77:9 unevaluated-code This statement never runs, because line 74 ends the block. | Delete it, or move it above line 74.",
             "85:9 unevaluated-code This statement never runs, because line 82 ends the block. | Delete it, or move it above line 82.",
-            "135:13 unevaluated-code This condition never finishes, so its block never runs. | Write `global.exit(1);` as its own statement, and delete the `if`.",
-            "144:28 unevaluated-code This condition never finishes, so its block never runs. | Write `global.exit(1);` as its own statement, and delete the `for`.",
-            "151:16 unevaluated-code This condition never finishes, so its block never runs. | Write `global.exit(1);` as its own statement, and delete the `while`.",
+            "135:13 unevaluated-code This condition never finishes, so its block never runs. | Write `Halt.now();` as its own statement, and delete the `if`.",
+            "144:28 unevaluated-code This condition never finishes, so its block never runs. | Write `Halt.now();` as its own statement, and delete the `for`.",
+            "151:16 unevaluated-code This condition never finishes, so its block never runs. | Write `Halt.now();` as its own statement, and delete the `while`.",
             "154:9 unevaluated-code This statement never runs, because line 151 ends the block. | Delete it, or move it above line 151.",
-            "159:28 unevaluated-code This condition never finishes, so its block never runs. | Write `global.exit(1);` as its own statement, and delete the `for`.",
+            "159:28 unevaluated-code This condition never finishes, so its block never runs. | Write `Halt.now();` as its own statement, and delete the `for`.",
             "162:9 unevaluated-code This statement never runs, because line 159 ends the block. | Delete it, or move it above line 159.",
             "169:13 unevaluated-code This statement never runs, because line 168 ends the block. | Delete it, or move it above line 168.",
             "177:13 unevaluated-code This statement never runs, because line 176 ends the block. | Delete it, or move it above line 176.",
@@ -3694,89 +3741,6 @@ fn a_cast_of_a_value_that_is_not_a_number_is_an_invalid_operand() {
     );
 }
 
-#[test]
-fn exit_with_a_never_value_has_the_issues_of_its_php_twin() {
-    let halt = "<?php\n\nnamespace Lib;\n\nfinal class Halt\n{\n    public static function now(): never\n    {\n        exit(1);\n    }\n}\n";
-    let sharp = "namespace Demo;\n\nimport Lib.Halt;\n\nclass Shutdown\n{\n    public void stop()\n    {\n        global.exit(Halt.now());\n    }\n}\n";
-    let php = "<?php\n\nnamespace Demo;\n\nuse Lib\\Halt;\n\nclass Shutdown\n{\n    public function stop(): void\n    {\n        exit(Halt::now());\n    }\n}\n";
-    let others = [("src/Lib/Halt.php", halt)];
-
-    let sharp_issues = issues(("src/Demo/Shutdown.sharp", sharp), &others);
-    let php_issues = issues(("src/Demo/Shutdown.php", php), &others);
-
-    assert_eq!(sharp_issues, ["9:21 no-value"]);
-    assert_eq!(codes(&sharp_issues), codes(&php_issues));
-}
-
-/// In a `.sharp` file, a `global.exit` argument that can hold a string gets the `die` message, because
-/// `global.exit("…")` prints the message and exits with status 0, which reports success (spec section 8). A `.php` file
-/// still takes it.
-#[test]
-fn exit_with_a_value_that_is_not_an_int_names_the_message_to_write_and_exit_1() {
-    let any = "<?php\n\nnamespace Lib;\n\nfinal class Any\n{\n    public static function value(): mixed\n    {\n        return 1;\n    }\n}\n";
-    let sharp = "namespace Demo;\n\nimport Lib.Any;\n\nclass Shutdown\n{\n    public void reason(string reason)\n    {\n        global.exit(reason);\n    }\n\n    public void either(int|string status)\n    {\n        global.exit(status);\n    }\n\n    public void any()\n    {\n        global.exit(Any.value());\n    }\n\n    public void named(string reason)\n    {\n        global.exit(status: reason);\n    }\n}\n";
-    let php = "<?php\n\nnamespace Demo;\n\nclass Shutdown\n{\n    public function reason(string $reason): void\n    {\n        exit($reason);\n    }\n\n    public function either(int|string $status): void\n    {\n        exit($status);\n    }\n}\n";
-    let others = [("src/Lib/Any.php", any)];
-
-    assert_eq!(
-        issues(("src/Demo/Shutdown.sharp", sharp), &others),
-        ["9:9 invalid-argument", "14:9 invalid-argument", "19:9 invalid-argument", "24:9 invalid-argument"]
-    );
-    let refusals = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Shutdown.sharp", sharp), &others);
-    for refusal in &refusals {
-        assert_eq!(
-            refusal.message,
-            "PHP# has no `die`: write the message with `console.writeError(text)`, then `process.exit(1)`."
-        );
-        assert_eq!(
-            refusal.notes,
-            [
-                "`global.die(\"…\")` and `global.exit(\"…\")` print the message and exit with status 0, which reports success."
-            ]
-        );
-    }
-    let annotations: Vec<String> =
-        refusals.iter().filter_map(|issue| issue.primary_annotation()?.message.clone()).collect();
-    assert_eq!(
-        annotations,
-        [
-            "This is `string`, not an `int`.",
-            "This is `int|string`, not an `int`.",
-            "This is `Any?`, not an `int`.",
-            "This is `string`, not an `int`.",
-        ]
-    );
-    assert_eq!(issues(("src/Demo/Shutdown.php", php), &[]), Vec::<String>::new());
-}
-
-/// A `global.exit` argument that cannot hold a string is no message, so it names the `int` status `global.exit` takes.
-#[test]
-fn exit_with_a_value_that_cannot_be_a_message_names_the_int_status() {
-    let sharp = "namespace Demo;\n\nclass Shutdown\n{\n    public void maybe(int? code)\n    {\n        global.exit(code);\n    }\n\n    public void fraction(float code)\n    {\n        global.exit(code);\n    }\n\n    public void flag(bool done)\n    {\n        global.exit(done);\n    }\n\n    public void listed(List<int> codes)\n    {\n        global.exit(codes);\n    }\n}\n";
-
-    let refusals = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Shutdown.sharp", sharp), &[]);
-    assert_eq!(
-        refusals.iter().map(|issue| located(sharp, issue)).collect::<Vec<_>>(),
-        ["7:9 invalid-argument", "12:9 invalid-argument", "17:9 invalid-argument", "22:9 invalid-argument"]
-    );
-    assert_eq!(
-        refusals.iter().map(|issue| issue.message.as_str()).collect::<Vec<_>>(),
-        [
-            "`global.exit` takes an `int` status: this is `int?`.",
-            "`global.exit` takes an `int` status: this is `float`.",
-            "`global.exit` takes an `int` status: this is `bool`.",
-            "`global.exit` takes an `int` status: this is `List<int>`.",
-        ]
-    );
-    for refusal in &refusals {
-        assert_eq!(
-            refusal.primary_annotation().and_then(|annotation| annotation.message.as_deref()),
-            Some("This status is not an `int`.")
-        );
-        assert!(refusal.notes.is_empty(), "{:?}", refusal.notes);
-    }
-}
-
 /// `global.die("…")` prints its message and exits with status 0, which reports success, so spec section 8 removes
 /// `die` in every form.
 #[test]
@@ -3791,23 +3755,12 @@ fn die_in_every_form_is_an_error_that_names_write_error_and_exit() {
             "17:9 invalid-argument PHP# has no `die`: write the message with `console.writeError(text)`, then `process.exit(1)`. | ",
         ]
     );
-}
-
-/// `global.exit("…")` prints its message and exits with status 0, as `global.die("…")` does, in every way a string
-/// literal or a template reaches it.
-#[test]
-fn exit_with_a_string_literal_is_an_error_as_die_is() {
-    let sharp = "namespace Demo;\n\nclass Shutdown\n{\n    public void literal()\n    {\n        global.exit(\"failed\");\n    }\n\n    public void named()\n    {\n        global.exit(status: \"failed\");\n    }\n\n    public void template()\n    {\n        global.exit(`failed`);\n    }\n\n    public void parenthesized()\n    {\n        global.exit((\"failed\"));\n    }\n}\n";
-
-    assert_eq!(
-        refusals(("src/Demo/Shutdown.sharp", sharp), &[]),
-        [
-            "7:9 invalid-argument PHP# has no `die`: write the message with `console.writeError(text)`, then `process.exit(1)`. | ",
-            "12:9 invalid-argument PHP# has no `die`: write the message with `console.writeError(text)`, then `process.exit(1)`. | ",
-            "17:9 invalid-argument PHP# has no `die`: write the message with `console.writeError(text)`, then `process.exit(1)`. | ",
-            "22:9 invalid-argument PHP# has no `die`: write the message with `console.writeError(text)`, then `process.exit(1)`. | ",
-        ]
-    );
+    for refusal in analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Shutdown.sharp", sharp), &[]) {
+        assert_eq!(
+            refusal.notes,
+            ["`global.die(\"…\")` prints the message and exits with status 0, which reports success."]
+        );
+    }
 }
 
 /// The standard library's `Int` and `Float`, with the library's signatures, which a project reads from `vendor/`.
@@ -5464,13 +5417,17 @@ fn a_data_case_compares_by_value() {
 /// Spec section 21: a `match` statement runs one arm, so one with a `default` whose every arm returns, continues or
 /// breaks leaves the code around it: an `if` around it narrows what follows, and a method needs no return after it. A
 /// `break` in an arm leaves the loop, so a method whose loop it ends still needs its return. An expression arm leaves
-/// when its expression never returns, as `global.exit(1)`.
+/// when its expression never returns, as a call of a method declared `never` does.
 #[test]
 fn a_match_statement_whose_every_arm_leaves_leaves_the_code_around_it() {
-    let code = "namespace App;\n\nclass Shows\n{\n    public int size(string? s, int k)\n    {\n        if (s == null) {\n            match (k) {\n                0 => {\n                    return 0;\n                },\n                default => {\n                    return 1;\n                },\n            }\n        }\n\n        return this.take(s);\n    }\n\n    public int sum(List<string?> values, int k)\n    {\n        let total = 0;\n        for (const value of values) {\n            if (value == null) {\n                match (k) {\n                    0 => {\n                        continue;\n                    },\n                    default => {\n                        break;\n                    },\n                }\n            }\n            total += this.take(value);\n        }\n\n        return total;\n    }\n\n    public int pick(Any? value)\n    {\n        match (value) {\n            int n => {\n                return n;\n            },\n            default => {\n                return 0;\n            },\n        }\n    }\n\n    public int never(int x)\n    {\n        while (true) {\n            match (x) {\n                0 => {\n                    break;\n                },\n                default => { },\n            }\n        }\n    }\n\n    public int exited(string? s, int k)\n    {\n        if (s == null) {\n            match (k) {\n                0 => global.exit(1),\n                default => {\n                    return 1;\n                },\n            }\n        }\n\n        return this.take(s);\n    }\n\n    public int shown(string? s, int k)\n    {\n        if (s == null) {\n            match (k) {\n                0 => this.take(\"a\"),\n                default => {\n                    return 1;\n                },\n            }\n        }\n\n        return this.take(s);\n    }\n\n    private int take(string s) => 1;\n}\n";
+    let halt = "<?php\n\nnamespace App;\n\nfinal class Halt\n{\n    public static function now(): never\n    {\n        exit(1);\n    }\n}\n";
+    let code = "namespace App;\n\nclass Shows\n{\n    public int size(string? s, int k)\n    {\n        if (s == null) {\n            match (k) {\n                0 => {\n                    return 0;\n                },\n                default => {\n                    return 1;\n                },\n            }\n        }\n\n        return this.take(s);\n    }\n\n    public int sum(List<string?> values, int k)\n    {\n        let total = 0;\n        for (const value of values) {\n            if (value == null) {\n                match (k) {\n                    0 => {\n                        continue;\n                    },\n                    default => {\n                        break;\n                    },\n                }\n            }\n            total += this.take(value);\n        }\n\n        return total;\n    }\n\n    public int pick(Any? value)\n    {\n        match (value) {\n            int n => {\n                return n;\n            },\n            default => {\n                return 0;\n            },\n        }\n    }\n\n    public int never(int x)\n    {\n        while (true) {\n            match (x) {\n                0 => {\n                    break;\n                },\n                default => { },\n            }\n        }\n    }\n\n    public int exited(string? s, int k)\n    {\n        if (s == null) {\n            match (k) {\n                0 => Halt.now(),\n                default => {\n                    return 1;\n                },\n            }\n        }\n\n        return this.take(s);\n    }\n\n    public int shown(string? s, int k)\n    {\n        if (s == null) {\n            match (k) {\n                0 => this.take(\"a\"),\n                default => {\n                    return 1;\n                },\n            }\n        }\n\n        return this.take(s);\n    }\n\n    private int take(string s) => 1;\n}\n";
 
     assert_eq!(
-        written(code, &analyze(&PLUGIN_REGISTRY, settings(), ("src/App/Shows.sharp", code), &[])),
+        written(
+            code,
+            &analyze(&PLUGIN_REGISTRY, settings(), ("src/App/Shows.sharp", code), &[("src/App/Halt.php", halt)])
+        ),
         [
             "53:16 missing-return-statement Missing return statement in method `Shows.never`",
             "90:26 possibly-null-argument Argument #1 of method `Shows.take` is possibly `null`, but parameter type `string` does not accept it.",
@@ -5981,7 +5938,7 @@ fn a_case_pattern_on_no_case_reports_only_that() {
 #[test]
 fn an_expression_the_parser_refuses_reports_only_its_parse_error() {
     let store = "<?php\n\nnamespace Demo;\n\nfinal class Store\n{\n    public static function name(): string\n    {\n        return 'a';\n    }\n\n    public static function maybe(): ?string\n    {\n        return null;\n    }\n\n    public static function keep(mixed $value): void\n    {\n    }\n}\n";
-    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static void run(Store store)\n    {\n        string? text = Store.maybe();\n        text .= Store.name();\n        int wrong = \"a\";\n        global.printf(text ?? \"\");\n        global.printf(store->missing());\n        global.printf(Store::missing());\n        global.printf(store?->missing());\n        Store.keep(fn(int x) => x.missing());\n        Store.keep(function(int x) { return x.missing(); });\n        Store.keep([\"a\" => Store.missing()]);\n        Store.keep(match (store) { Store found when found == store ? true : Store.missing() => 1, default => 2 });\n        let found = store->missing();\n        global.printf(found);\n        Map<string, int> counts = [\"a\" => 1];\n        Store.keep(wrong);\n        Store.keep(counts);\n        let report = new Report();\n        report.label = store->missing();\n        global.printf(report.label);\n        Store.keep(found + 1);\n        Store.keep(found.missing());\n        Store.keep(found.name);\n        int either = Store.maybe() ?? found;\n    }\n\n    public static Map<string, int> made() => [\"a\" => 1, \"b\" => 2];\n\n    public static int counted(Store store)\n    {\n        let found = store->missing();\n        return found;\n    }\n\n    public static void used(Store store, List<int> items)\n    {\n        let found = store->missing();\n        Store.keep(found - 1);\n        Store.keep(found < 1);\n        Store.keep(found == 1);\n        Store.keep(found && found);\n        Store.keep(!found);\n        Store.keep(-found);\n        Store.keep(found[0]);\n        Store.keep(`a ${found}`);\n        if (found) { Store.keep(1); }\n        while (found) { break; }\n        Store.keep(found ? 1 : 2);\n        Store.keep(match (found) { 1 => 2, default => 3 });\n        Store.keep(found is Store);\n        for (const value of found) { Store.keep(value); }\n        Store.keep(found?.name);\n        Store.keep(found ?? 1);\n        int number = found;\n        number += found;\n        Store.keep(found.missing().other());\n        Store.keep(items[found]);\n        Store.keep(found(1));\n        int called = found(1);\n        Store.keep(found + \"a\");\n        found.name = \"a\";\n        found[0] = 1;\n        throw found;\n    }\n\n    private string label = \"\";\n}\n";
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static void run(Store store)\n    {\n        string? text = Store.maybe();\n        text .= Store.name();\n        int wrong = \"a\";\n        Store.keep(text ?? \"\");\n        Store.keep(store->missing());\n        Store.keep(Store::missing());\n        Store.keep(store?->missing());\n        Store.keep(fn(int x) => x.missing());\n        Store.keep(function(int x) { return x.missing(); });\n        Store.keep([\"a\" => Store.missing()]);\n        Store.keep(match (store) { Store found when found == store ? true : Store.missing() => 1, default => 2 });\n        let found = store->missing();\n        Store.keep(found);\n        Map<string, int> counts = [\"a\" => 1];\n        Store.keep(wrong);\n        Store.keep(counts);\n        let report = new Report();\n        report.label = store->missing();\n        Store.keep(report.label);\n        Store.keep(found + 1);\n        Store.keep(found.missing());\n        Store.keep(found.name);\n        int either = Store.maybe() ?? found;\n    }\n\n    public static Map<string, int> made() => [\"a\" => 1, \"b\" => 2];\n\n    public static int counted(Store store)\n    {\n        let found = store->missing();\n        return found;\n    }\n\n    public static void used(Store store, List<int> items)\n    {\n        let found = store->missing();\n        Store.keep(found - 1);\n        Store.keep(found < 1);\n        Store.keep(found == 1);\n        Store.keep(found && found);\n        Store.keep(!found);\n        Store.keep(-found);\n        Store.keep(found[0]);\n        Store.keep(`a ${found}`);\n        if (found) { Store.keep(1); }\n        while (found) { break; }\n        Store.keep(found ? 1 : 2);\n        Store.keep(match (found) { 1 => 2, default => 3 });\n        Store.keep(found is Store);\n        for (const value of found) { Store.keep(value); }\n        Store.keep(found?.name);\n        Store.keep(found ?? 1);\n        int number = found;\n        number += found;\n        Store.keep(found.missing().other());\n        Store.keep(items[found]);\n        Store.keep(found(1));\n        int called = found(1);\n        Store.keep(found + \"a\");\n        found.name = \"a\";\n        found[0] = 1;\n        throw found;\n    }\n\n    private string label = \"\";\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    public static function run(Store $store): void\n    {\n        $text = Store::maybe();\n        $text .= Store::name();\n        printf($text ?? '');\n        printf($store->missing());\n        printf(Store::missing());\n        printf($store?->missing());\n        Store::keep(fn(int $x) => $x->missing());\n        Store::keep(function (int $x) { return $x->missing(); });\n        Store::keep(['a' => Store::missing()]);\n    }\n}\n";
     let reports = |analyzed: (&'static str, &'static str)| -> Vec<String> {
         analyze(&PLUGIN_REGISTRY, settings(), analyzed, &[("src/Demo/Store.php", store)])
@@ -6010,9 +5967,9 @@ fn an_expression_the_parser_refuses_reports_only_its_parse_error() {
         reports(("src/Demo/Report.sharp", sharp)),
         [
             "8:14 parse `.=` is PHP syntax: in PHP# `.` is member access",
-            "11:28 parse `->` is PHP syntax: PHP# writes member access with `.`",
-            "12:28 parse `::` is PHP syntax: PHP# writes static access with `.`",
-            "13:28 parse `?->` is PHP syntax: PHP# writes null-safe member access with `?.`",
+            "11:25 parse `->` is PHP syntax: PHP# writes member access with `.`",
+            "12:25 parse `::` is PHP syntax: PHP# writes static access with `.`",
+            "13:25 parse `?->` is PHP syntax: PHP# writes null-safe member access with `?.`",
             "14:20 parse PHP# writes a lambda as a bare arrow without `fn` or `function`, as in `x => x.id` or `(a, b) => { … }`",
             "15:20 parse PHP# writes a lambda as a bare arrow without `fn` or `function`, as in `x => x.id` or `(a, b) => { … }`",
             "16:25 parse PHP# writes a `Map` entry as `key: value`: `=>` is the lambda arrow",

@@ -5995,7 +5995,10 @@ pub fn check_global(global: &Global, context: &mut Context<'_, '_, '_>) {
 
 fn check_variable(variable: &Variable, context: &mut Context<'_, '_, '_>) {
     match variable {
-        Variable::Direct(direct) => report_dollar_variable(direct.name, direct.span, context),
+        Variable::Direct(direct) => match COMMAND_LINE_VARIABLES.iter().find(|(name, _)| *name == direct.name) {
+            Some((_, member)) => report_command_line_variable(direct.name, member, direct.span, context),
+            None => report_dollar_variable(direct.name, direct.span, context),
+        },
         Variable::Indirect(_) | Variable::Nested(_) => context.report(
             Issue::error("Variable variables are not part of PHP#.")
                 .with_annotation(Annotation::primary(variable.span()).with_message("Used here."))
@@ -6213,6 +6216,29 @@ fn names_class(full_name: &[u8], namespace: Option<&[u8]>, class_name: &[u8]) ->
 
     import_class.eq_ignore_ascii_case(class_name)
         && import_namespace.eq_ignore_ascii_case(namespace.unwrap_or_default())
+}
+
+/// PHP's command-line variables, which spec section 29 gives `Environment`, each with the member that reads it.
+const COMMAND_LINE_VARIABLES: [(&[u8], &str); 2] = [(b"$argv", "arguments"), (b"$argc", "arguments.count()")];
+
+/// Reports a read of PHP's `$argv` or `$argc`, naming the `Environment` member that reads it.
+fn report_command_line_variable(name: &[u8], member: &str, span: Span, context: &mut Context<'_, '_, '_>) {
+    let (environment, after) = standard_class("Environment", context);
+    let object = format!(
+        "{}{}",
+        environment.get(..1).unwrap_or_default().to_lowercase(),
+        environment.get(1..).unwrap_or_default()
+    );
+
+    report_removed(
+        span,
+        name,
+        &format!("write `{object}.{member}` on the `{environment}` your constructor takes{after}."),
+        &format!(
+            "The command-line arguments arrive as `{environment}`'s `arguments`, starting with the script's name."
+        ),
+        context,
+    );
 }
 
 fn report_dollar_variable(name: &[u8], span: Span, context: &mut Context<'_, '_, '_>) {

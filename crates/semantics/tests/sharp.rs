@@ -2607,6 +2607,35 @@ fn an_environment_superglobal_is_an_error_that_names_environment() {
     );
 }
 
+/// Spec section 29: PHP's `$argv` and `$argc` hold the command-line arguments, so a read of either names the
+/// `Environment` member that reads them. A parameter of that name declares a local and reads nothing, so it gets the
+/// `$` error.
+#[test]
+fn a_command_line_variable_is_an_error_that_names_the_environment_member() {
+    let code = leak(method("        Store.keep($argv, $argc);\n        return extra;\n"));
+    let parameter = "class Report\n{\n    public int run(int $argv) { return 1; }\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "7:20 PHP# has no `$argv`: write `environment.arguments` on the `Environment` your constructor takes.",
+            "7:27 PHP# has no `$argc`: write `environment.arguments.count()` on the `Environment` your constructor takes.",
+        ]
+    );
+    assert_eq!(issues(parameter), ["3:24 PHP# variables have no `$`: write `argv`."]);
+    // A file whose import takes the short name `Environment` is told the aliased import to write.
+    let shadowed = leak(
+        method("        Store.keep($argv);\n        return extra;\n")
+            .replace("namespace App.Tenant;\n", "namespace App.Tenant;\n\nimport App.Shared.Environment;\n"),
+    );
+    assert_eq!(
+        issues(shadowed),
+        [
+            "9:20 PHP# has no `$argv`: write `sharpEnvironment.arguments` on the `SharpEnvironment` your constructor takes after `import Sharp.Environment as SharpEnvironment;`."
+        ]
+    );
+}
+
 /// A write to a superglobal's element names the request as a read does, not the write target.
 #[test]
 fn a_write_to_a_superglobal_is_an_error_that_names_a_request() {

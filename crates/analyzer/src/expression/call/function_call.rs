@@ -54,7 +54,6 @@ use crate::utils::names::display_atomic;
 use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_code_member;
 use crate::utils::names::display_missing_imports;
-use crate::utils::names::display_type;
 use crate::utils::names::sharp_code_class_name;
 
 impl<'ast, 'arena> Analyzable<'ast, 'arena> for FunctionCall<'arena> {
@@ -260,63 +259,24 @@ where
         )
     };
 
-    let name = function.as_bytes();
-    if !context.dialect.is_sharp() || !(name.eq_ignore_ascii_case(b"exit") || name.eq_ignore_ascii_case(b"die")) {
+    if !context.dialect.is_sharp() || !function.as_bytes().eq_ignore_ascii_case(b"die") {
         return analyze(context);
     }
 
-    // Spec section 8: `global.exit` takes an `int` status, and `global.die` is removed. A refused status replaces the
-    // signature's report on the same argument, so the call gets one refusal.
+    // Spec section 8 removes `die` in every form, because `die("…")` prints its message and exits with status 0, which
+    // reports success. The refusal replaces the signature's report on its message, so the call gets one refusal.
     let (result, recorded) = context.record(analyze);
     result?;
-    let status = call.argument_list.arguments.first().map(|argument| argument.value());
-    match exit_status_refusal(context, artifacts, call, function, status) {
-        Some(refusal) => {
-            let status_span = status.map(HasSpan::span);
-            context.collector.extend(recorded.into_iter().filter(|issue| issue.primary_span() != status_span));
-            context.collector.report_with_code(IssueCode::InvalidArgument, refusal);
-        }
-        None => context.collector.extend(recorded),
-    }
+    let message = call.argument_list.arguments.first().map(|argument| argument.value().span());
+    context.collector.extend(recorded.into_iter().filter(|issue| issue.primary_span() != message));
+    context.collector.report_with_code(
+        IssueCode::InvalidArgument,
+        Issue::error("PHP# has no `die`: write the message with `console.writeError(text)`, then `process.exit(1)`.")
+            .with_annotation(Annotation::primary(call.span()))
+            .with_note("`global.die(\"…\")` prints the message and exits with status 0, which reports success."),
+    );
 
     Ok(())
-}
-
-/// The refusal of `global.exit(status)` or `global.die(…)` in a `.sharp` file: `die` in every form, and `exit` with a
-/// status that can hold a string, print their message and exit with status 0, which reports success. Any other status
-/// that is not an `int` is refused for the `int` it must be.
-fn exit_status_refusal<A>(
-    context: &Context<'_, '_, A>,
-    artifacts: &AnalysisArtifacts,
-    call: &MethodCall<'_>,
-    function: Word,
-    status: Option<&Expression<'_>>,
-) -> Option<Issue>
-where
-    A: Arena,
-{
-    let status_type = status.and_then(|status| artifacts.get_expression_type(status));
-    let message = || {
-        Issue::error("PHP# has no `die`: write the message with `console.writeError(text)`, then `process.exit(1)`.").with_note(
-            "`global.die(\"…\")` and `global.exit(\"…\")` print the message and exit with status 0, which reports success.",
-        )
-    };
-
-    if function.as_bytes().eq_ignore_ascii_case(b"die") {
-        return Some(message().with_annotation(Annotation::primary(call.span())));
-    }
-
-    let status_type = status_type.filter(|status_type| !status_type.is_int() && !status_type.is_never())?;
-    let status_type_str = display_type(context, status_type);
-
-    Some(if status_type.has_string() || status_type.has_mixed() {
-        message().with_annotation(
-            Annotation::primary(call.span()).with_message(format!("This is `{status_type_str}`, not an `int`.")),
-        )
-    } else {
-        Issue::error(format!("`global.exit` takes an `int` status: this is `{status_type_str}`."))
-            .with_annotation(Annotation::primary(call.span()).with_message("This status is not an `int`."))
-    })
 }
 
 pub(super) fn resolve_targets<'ctx, 'arena, A>(
@@ -534,7 +494,7 @@ enum Replacement {
 /// Each plain PHP function PHP# replaces, with its replacement. A row that names a standard library member lands in
 /// the change that ships the member, and a test holds every row to the library. A name that ends in `*` is a family,
 /// every function whose name it begins, as `curl_*`, and a row of the function's whole name wins over it. A member named
-/// `__construct` is its class's constructor.
+/// `__construct` is its class's constructor, and a member named with `$` is its class's property, as `$arguments`.
 const REPLACEMENTS: &[(&str, Replacement)] = &[
     ("is_string", Replacement::Syntax("`{x} is string`")),
     ("is_int", Replacement::Syntax("`{x} is int`")),
@@ -629,7 +589,10 @@ const REPLACEMENTS: &[(&str, Replacement)] = &[
     ("gmdate", Replacement::Members(&[("Sharp\\Time\\Date", "format")])),
     ("strtotime", Replacement::Members(&[("Sharp\\Time\\Date", "parse")])),
     ("timezone_identifiers_list", Replacement::Members(&[("Sharp\\Time\\TimeZone", "names")])),
-    ("getenv", Replacement::Members(&[("Sharp\\Environment", "variable")])),
+    ("getenv", Replacement::Members(&[("Sharp\\Environment", "variable"), ("Sharp\\Environment", "variables")])),
+    ("apache_getenv", Replacement::Members(&[("Sharp\\Environment", "variable")])),
+    ("apache_setenv", Replacement::Members(&[("Sharp\\Environment", "setVariable")])),
+    ("getopt", Replacement::Members(&[("Sharp\\Environment", "$arguments")])),
     ("getcwd", Replacement::Members(&[("Sharp\\Environment", "currentDirectory")])),
     ("chdir", Replacement::Members(&[("Sharp\\Environment", "changeDirectory")])),
     ("time", Replacement::Members(&[("Sharp\\Clock", "now")])),
@@ -920,12 +883,21 @@ where
         )),
         Replacement::CollectionMethod(form) => Some(wrapped(format!("{}.", syntax_form(context, form, arguments)))),
         Replacement::Members(members) => {
-            for (class, method) in *members {
-                artifacts.symbol_references.add_reference_to_class_member(
-                    &block_context.scope,
-                    (ascii_lowercase_word(class.as_bytes()), ascii_lowercase_word(method.as_bytes())),
-                    false,
-                );
+            for (class, member) in *members {
+                let class = ascii_lowercase_word(class.as_bytes());
+                if member.starts_with('$') {
+                    artifacts.symbol_references.add_reference_for_property_read(
+                        &block_context.scope,
+                        class,
+                        word(member.as_bytes()),
+                    );
+                } else {
+                    artifacts.symbol_references.add_reference_to_class_member(
+                        &block_context.scope,
+                        (class, ascii_lowercase_word(member.as_bytes())),
+                        false,
+                    );
+                }
             }
 
             member_form(context, members, arguments).map(wrapped)
@@ -936,7 +908,8 @@ where
 /// The standard library members `members` names, as a `.sharp` file writes them, with the imports the file lacks. An
 /// extension's member, spec section 26, is written on the call's first argument from `arguments`, and needs an import
 /// only where the file lacks its extensions by default. An effect class's member, spec section 29, is written on the
-/// object of that class a constructor takes, as in `clock.now()`. None when the codebase declares none of them.
+/// object of that class a constructor takes, as in `clock.now()`, and a member named with `$` is its property, as in
+/// `environment.arguments`. None when the codebase declares none of them.
 fn member_form<A>(
     context: &Context<'_, '_, A>,
     members: &[(&str, &str)],
@@ -953,9 +926,24 @@ where
     let mut taken: Vec<String> = Vec::new();
     let (classes, methods): (Vec<Option<Word>>, Vec<String>) = members
         .iter()
-        .filter_map(|(class, method)| {
+        .filter_map(|(class, member)| {
             let class = codebase.get_class_like(class.as_bytes())?;
-            let method = codebase.get_method(class.name.as_bytes(), method.as_bytes())?;
+            let mut on_taken_object = |member: String| {
+                let class_name = sharp_code_class_name(codebase, &context.imported_names, &context.scope, class.name);
+                let object = lower_first(class_name.rsplit('.').next().unwrap_or_default());
+                let held = format!("`{class_name}`");
+                if !taken.contains(&held) {
+                    taken.push(held);
+                }
+
+                (Some(class.original_name), format!("`{object}.{member}`"))
+            };
+            if let Some(property) = member.strip_prefix('$') {
+                codebase.get_property(class.name.as_bytes(), member.as_bytes())?;
+
+                return Some(on_taken_object(property.to_owned()));
+            }
+            let method = codebase.get_method(class.name.as_bytes(), member.as_bytes())?;
             let name = method.original_name;
             let import = (!is_imported_by_default(context, class.name, method)).then_some(class.original_name);
             let arguments = |taken_first: usize| if method.parameters.len() > taken_first { "…" } else { "" };
@@ -973,14 +961,7 @@ where
             } else if method.method_metadata.as_ref().is_none_or(|metadata| metadata.is_static) {
                 (Some(class.original_name), format!("`{}(…)`", display_code_member(context, class.original_name, name)))
             } else {
-                let class_name = sharp_code_class_name(codebase, &context.imported_names, &context.scope, class.name);
-                let object = lower_first(class_name.rsplit('.').next().unwrap_or_default());
-                let held = format!("`{class_name}`");
-                if !taken.contains(&held) {
-                    taken.push(held);
-                }
-
-                (Some(class.original_name), format!("`{object}.{name}({})`", arguments(0)))
+                on_taken_object(format!("{name}({})", arguments(0)))
             })
         })
         .unzip();
@@ -1173,11 +1154,15 @@ mod tests {
                 Replacement::Syntax(_) | Replacement::CollectionMethod(_) => Vec::new(),
             })
             .chain(WRAPPED_CLASSES.iter().flat_map(|(class, members)| members.iter().map(|member| (*class, *member))))
-            .filter(|(_, (class, method))| {
-                codebase
-                    .get_class_like(class.as_bytes())
-                    .and_then(|metadata| codebase.get_method(metadata.name.as_bytes(), method.as_bytes()))
-                    .is_none()
+            .filter(|(_, (class, member))| {
+                codebase.get_class_like(class.as_bytes()).is_none_or(|metadata| {
+                    let class = metadata.name.as_bytes();
+                    if member.starts_with('$') {
+                        codebase.get_property(class, member.as_bytes()).is_none()
+                    } else {
+                        codebase.get_method(class, member.as_bytes()).is_none()
+                    }
+                })
             })
             .map(|(function, (class, method))| format!("{function}: {class}.{method}"))
             .collect();

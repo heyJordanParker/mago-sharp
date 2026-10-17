@@ -18655,11 +18655,14 @@ fn a_global_call_named_like_a_method_of_its_class_is_a_call_of_the_global_functi
 /// ```
 ///
 /// PHP 8.4 makes `exit` a function, so `global.exit(…)` is a call of the global function `exit`, named with
-/// `ZEND_NAME_FQ`, which is 0, as php-src's grammar builds `exit(…)`.
+/// `ZEND_NAME_FQ`, which is 0, as php-src's grammar builds `exit(…)`. Only the standard library calls it, as
+/// `Process.exit` does.
 #[test]
 fn exit_is_a_call_of_the_global_function_exit() {
+    let halt = "namespace Sharp;\n\npublic class Halt\n{\n    public void run(int extra)\n    {\n        global.exit(extra);\n    }\n}\n";
+
     assert_eq!(
-        body("        global.exit(extra);\n"),
+        Lowered::named("vendor/heyjordanparker/php-sharp-composer/library/Sharp/Halt.sharp", halt).body(),
         indoc! {r#"
             STMT_LIST
               CALL

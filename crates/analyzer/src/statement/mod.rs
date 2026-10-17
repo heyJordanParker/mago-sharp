@@ -871,8 +871,8 @@ fn report_statement_that_never_runs<A>(
     );
 }
 
-/// Refuses, in a `.sharp` file, the `condition` of an `if` or a `for … of` that never finishes, as `global.exit(1)`
-/// does, so the block it guards never runs (spec section 7). `block_context` is the context once the condition is
+/// Refuses, in a `.sharp` file, the `condition` of an `if` or a `for … of` that never finishes, as a `throw` does,
+/// so the block it guards never runs (spec section 7). `block_context` is the context once the condition is
 /// analyzed. The help replaces the whole statement, which never gets past its condition, with the condition. Returns
 /// whether it refused, and the caller then reads no statement of the block, as `analyze_statements` reads none after a
 /// statement that ends its block.
