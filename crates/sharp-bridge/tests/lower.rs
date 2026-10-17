@@ -22117,6 +22117,21 @@ fn a_test_of_a_function_type_is_the_engine_test_of_its_type_text() {
     );
 }
 
+#[test]
+fn a_test_of_a_function_type_that_uses_none_is_the_engine_test_of_the_pure_type_text() {
+    assert_eq!(
+        body_in("bool run(Any? extra)", "        return extra is Function<int(int) uses none>;\n", &[]),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                SHARP_IS_TYPE
+                  VAR
+                    ZVAL "extra"
+                  ZVAL "Function<int(int)>"
+        "#}
+    );
+}
+
 /// A plain PHP class's objects carry no type arguments while the code runs, so `is` and `as` that give one type
 /// arguments are refused before the lowering would test the class alone. The class alone is its `instanceof`.
 #[test]
