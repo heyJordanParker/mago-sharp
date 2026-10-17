@@ -5083,6 +5083,20 @@ fn a_method_value_of_a_collection_an_extension_or_a_plain_php_function_has_its_f
     );
 }
 
+/// Spec section 14.3: a plain PHP class may declare a property and a method of one name. `gadget.label` reads the
+/// property, unless the code takes it as a function the property's type does not fit: passed, declared or read with
+/// `?.`, it is the method's value there. A property whose type fits keeps the read, as does every write.
+#[test]
+fn a_plain_php_method_of_a_property_s_name_is_its_value_where_a_function_is_taken() {
+    let gadget = "<?php\n\nnamespace Lib;\n\nfinal class Gadget\n{\n    public string $label = 'gadget';\n\n    /** @var Closure(string): string */\n    public \\Closure $format;\n\n    public function label(string $prefix): string\n    {\n        return $prefix . $this->label;\n    }\n\n    public function format(string $text): string\n    {\n        return $text;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Gadget;\nextern Gadget.label;\n\nclass Labels\n{\n    public int run(Gadget gadget, Gadget? maybe)\n    {\n        string read = gadget.label;\n        List<string> mapped = [\"a\"].map(gadget.label);\n        Function<string(string)> typed = gadget.label;\n        Function<string(string)>? nullSafe = maybe?.label;\n        Function<int(string)> wrong = gadget.label;\n        gadget.label = \"b\";\n        Function<string(string)> held = gadget.format;\n        return global.strlen(read) + mapped.count() + global.strlen(typed(\"c\")) + wrong(\"d\") + global.strlen(held(\"e\"));\n    }\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Labels.sharp", sharp), &[("src/Lib/Gadget.php", gadget)]),
+        ["14:39 invalid-local-assignment-value"]
+    );
+}
+
 /// Spec section 14.3 with section 12: a method value holds the collection as it was when the value was made, so a
 /// method that changes the collection would change only that copy. As in Swift, which refuses a value of a `mutating`
 /// method, it is refused, with the lambda that changes the collection itself.

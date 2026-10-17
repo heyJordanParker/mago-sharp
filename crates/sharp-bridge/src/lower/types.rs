@@ -1138,6 +1138,17 @@ impl<'analysis> Types<'analysis> {
             .collect()
     }
 
+    /// Whether the read `read` of a plain PHP class's member gives the value of its method where the class also
+    /// declares a property of that name, spec section 14.3, as the analysis resolved it where the code takes the read
+    /// as a function the property's type does not fit.
+    pub(crate) fn reads_method_over_property(&self, read: &Expression) -> bool {
+        matches!(read, Expression::Access(_))
+            && matches!(
+                self.artifacts.get_callees(read).next(),
+                Some(CallTarget::FunctionLike { callee: FunctionLikeIdentifier::Method(..), .. })
+            )
+    }
+
     /// The full name of the plain PHP function the read `read` gives the value of, spec section 14.3, as
     /// `global.strtoupper` and `Pdf.render` read one, as the analysis resolved it. None for any other read.
     pub(crate) fn function_value(&self, read: &Expression) -> Option<Word> {

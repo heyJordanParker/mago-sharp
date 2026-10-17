@@ -465,10 +465,11 @@ pub fn takes_declared_type(expression: &Expression<'_>) -> bool {
     ) || is_member_read(expression)
 }
 
-/// Whether `expression` reads a member, `x.m` or `Class.m`, which in PHP# is a method value when the class declares
-/// no property `m` (spec section 14.3).
+/// Whether `expression` reads a member, `x.m`, `x?.m` or `Class.m`, which in PHP# is a method value when the class
+/// declares no property `m`, or when the code takes it as a function the property's type does not fit (spec section
+/// 14.3).
 pub fn is_member_read(expression: &Expression<'_>) -> bool {
-    matches!(expression.unparenthesized(), Expression::Access(Access::Property(_)))
+    matches!(expression.unparenthesized(), Expression::Access(Access::Property(_) | Access::NullSafeProperty(_)))
 }
 
 /// Joins the type each variable a closure captured by reference has at the end of the closure into its type in the

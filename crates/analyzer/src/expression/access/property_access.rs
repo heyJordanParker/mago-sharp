@@ -104,7 +104,9 @@ where
         Some(context.codebase),
     );
 
+    // A read the code takes as a function may be a method's value, spec section 14.3, so it is resolved again.
     if context.settings.memoize_properties
+        && !artifacts.get_expected_type(&span).is_some_and(|expected| expected.to_non_nullable().is_callable())
         && let Some(property_access_id) = &property_access_id
         && let Some(existing_type) = block_context.locals.get(property_access_id).cloned()
     {

@@ -5240,7 +5240,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 None => match self.class_value(access.object) {
                     Some((class, classes)) => self.static_member(expression, class, &classes, &access.property),
                     None => {
-                        let is_method = self.is_method_value(access.object, &access.property);
+                        let is_method = self.is_method_value(expression, access.object, &access.property);
                         let object = self.expression(access.object);
                         let member = self.member(&access.property);
 
@@ -5336,7 +5336,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     return self.static_member(expression, class, &classes, &access.property);
                 }
 
-                let is_method = tested && self.is_method_value(access.object, &access.property);
+                let is_method = tested && self.is_method_value(expression, access.object, &access.property);
                 let object = if tested { self.expression(access.object) } else { self.null_safe_object(access.object) };
                 let member = self.member(&access.property);
 
@@ -5523,10 +5523,14 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         class_value_classes(self.types.expression_type(object)).is_some()
     }
 
-    /// Whether `object.member` reads a method, which the read takes as a first-class callable. The member is the same
-    /// kind on every class the receiver can be. A class intersected with others takes the member the first of them
-    /// declares, as the checker's `resolve_method_value` does.
-    fn is_method_value(&self, object: &Expression, member: &ClassLikeMemberSelector) -> bool {
+    /// Whether the read `read`, `object.member`, reads a method, which the read takes as a first-class callable. The
+    /// member is the same kind on every class the receiver can be. A class intersected with others takes the member the
+    /// first of them declares, as the checker's `resolve_method_value` does. A plain PHP class's method reads over its
+    /// property of that name where the checker took the read as the method's value.
+    fn is_method_value(&self, read: &Expression, object: &Expression, member: &ClassLikeMemberSelector) -> bool {
+        if self.types.reads_method_over_property(read) {
+            return true;
+        }
         let (Some(receivers), ClassLikeMemberSelector::Identifier(name)) =
             (receiver_intersections(self.types.expression_type(object)), member)
         else {
@@ -6335,7 +6339,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                             || self.types.extension(link).is_some()
                             || self.is_collection_method_value(link)
                             || self.is_class_value(access.object)
-                            || self.is_method_value(access.object, &access.property))
+                            || self.is_method_value(link, access.object, &access.property))
                     {
                         return Some((link, access.object));
                     }

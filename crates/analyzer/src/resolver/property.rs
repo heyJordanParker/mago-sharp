@@ -1046,18 +1046,29 @@ where
         return None;
     };
 
-    let resolution = resolve_declared_property(
+    let method_name = word(trim_start_byte(prop_name.as_bytes(), b'$'));
+    let read_span = object_expr.span().join(selector.span());
+    let mut resolution = resolve_declared_property(
         context.codebase,
         class_metadata,
         prop_name,
         true, // `instance_access`
         block_context.scope.get_class_like_name(),
     );
+    if !for_assignment
+        && let Some(declared) = &resolution
+        && reads_method_over_property(context, artifacts, declared, class_id, method_name, read_span)
+    {
+        // The lowering takes the read as the method's value, where the engine would read the property.
+        artifacts.record_call_target(
+            read_span,
+            CallTarget::FunctionLike { callee: FunctionLikeIdentifier::Method(class_id, method_name), class: None },
+        );
+        resolution = None;
+    }
 
     let Some(resolution) = resolution else {
         // A PHP# read of a declared method is its closure, ahead of anything the class serves through `__get`.
-        let method_name = word(trim_start_byte(prop_name.as_bytes(), b'$'));
-        let read_span = object_expr.span().join(selector.span());
         let self_parameter = match written_atomic {
             TAtomic::GenericParameter(parameter) => Some(parameter),
             _ => None,
@@ -2109,6 +2120,37 @@ fn report_possibly_non_existent_property<A>(
                 "To avoid this, ensure the property is defined on the object or check for its existence before accessing it.",
             ),
     );
+}
+
+/// Spec section 14.3: a plain PHP class may declare a property and a method of one name, as PHP keeps the two apart.
+/// The PHP# read `x.name` is the property's, as in PHP, unless the code takes it as a function the property's type does
+/// not fit, where the property's value would be an error: there it is the value of the method `name`.
+fn reads_method_over_property<A>(
+    context: &Context<'_, '_, A>,
+    artifacts: &AnalysisArtifacts,
+    declared: &DeclaredProperty<'_>,
+    class_id: Word,
+    method_name: Word,
+    read_span: Span,
+) -> bool
+where
+    A: Arena,
+{
+    context.dialect.is_sharp()
+        && !declared.declaring_class.flags.is_sharp()
+        && context.codebase.method_exists(class_id.as_bytes(), method_name.as_bytes())
+        && artifacts.get_expected_type(&read_span).is_some_and(|expected| {
+            expected.to_non_nullable().is_callable()
+                && !union_comparator::is_contained_by(
+                    context.codebase,
+                    &declared.declared_type(context.codebase),
+                    expected,
+                    false,
+                    false,
+                    false,
+                    &mut ComparisonResult::for_dialect(context.dialect),
+                )
+        })
 }
 
 /// Spec section 14.3: a PHP# read `x.name` of a class with no property `name` gives its method `name` as a closure,

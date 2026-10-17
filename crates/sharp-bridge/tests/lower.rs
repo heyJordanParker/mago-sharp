@@ -20365,6 +20365,48 @@ fn statements_at(code: &str, library: &[(&str, &str)], positions: std::ops::Rang
 }
 
 /// ```php
+/// $typed = $gadget->label(...);
+/// $held = $gadget->format;
+/// ```
+///
+/// A plain PHP class's method is the value of a read of its name, where the class also declares a property of that
+/// name, when the code takes the read as a function the property's type does not fit, spec section 14.3. The engine
+/// would read the property, so the read is PHP's first-class callable. A property whose type fits keeps the read.
+#[test]
+fn a_plain_php_method_of_a_property_s_name_read_as_a_function_is_a_first_class_callable() {
+    let gadget = (
+        "src/Lib/Gadget.php",
+        "<?php\n\nnamespace Lib;\n\nfinal class Gadget\n{\n    public string $label = 'gadget';\n\n    /** @var Closure(string): string */\n    public \\Closure $format;\n\n    public function label(string $prefix): string\n    {\n        return $prefix . $this->label;\n    }\n\n    public function format(string $text): string\n    {\n        return $text;\n    }\n}\n",
+    );
+    let code = "namespace App.Tenant;\n\nimport Lib.Gadget;\nextern Gadget.label;\n\nclass Report\n{\n    public int run(Gadget gadget)\n    {\n        Function<string(string)> typed = gadget.label;\n        Function<string(string)> held = gadget.format;\n        return global.strlen(typed(\"a\") + held(\"b\"));\n    }\n}\n";
+
+    assert_eq!(
+        statements_at(code, &[gadget], 0..2),
+        [
+            indoc! {r#"
+                ASSIGN
+                  VAR
+                    ZVAL "typed"
+                  METHOD_CALL
+                    VAR
+                      ZVAL "gadget"
+                    ZVAL "label"
+                    CALLABLE_CONVERT
+            "#},
+            indoc! {r#"
+                ASSIGN
+                  VAR
+                    ZVAL "held"
+                  PROP
+                    VAR
+                      ZVAL "gadget"
+                    ZVAL "format"
+            "#},
+        ]
+    );
+}
+
+/// ```php
 /// return \Lib\Calc::total((fn ($map#1) => \is_object($map#1)
 ///     ? \array_combine(\array_column($map#1->keys(), 'value'), $map#1->values()) : $map#1)($stock));
 /// ```
