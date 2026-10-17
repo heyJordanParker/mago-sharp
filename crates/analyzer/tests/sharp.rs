@@ -11655,10 +11655,11 @@ fn a_list_literal_is_a_set_wherever_a_set_is_expected_at_any_depth() {
 
 /// Spec section 12: at `==`, `[]` is an empty `List` and `[:]` an empty `Map`, so each is refused beside the other
 /// collection, as at a place, and no message names PHP's empty array. A list literal beside a `Map`, and a map literal
-/// beside a `List` or a `Set`, are refused the same way.
+/// beside a `List` or a `Set`, are refused the same way. A list literal beside a `List` stays a `List`, and one beside a
+/// value that holds no collection keeps its own type, which is never that value's.
 #[test]
 fn an_empty_literal_at_a_comparison_is_the_collection_the_spec_names() {
-    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static bool empty(Map<string, int> named, List<int> listed) => named == [] || listed == [:] || named == [:] || listed == [];\n\n    public static bool kinds(Map<string, int> named, List<int> listed, Set<int> items) => named == [1, 2] || listed == [\"a\": 1] || items == [\"a\": 1];\n}\n";
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static bool empty(Map<string, int> named, List<int> listed) => named == [] || listed == [:] || named == [:] || listed == [];\n\n    public static bool kinds(Map<string, int> named, List<int> listed, Set<int> items) => named == [1, 2] || listed == [\"a\": 1] || items == [\"a\": 1];\n\n    public static bool own(List<int> listed, int count) => listed == [1, 2] || [1, 2] == count;\n}\n";
 
     assert_eq!(
         refusals(("src/Demo/Report.sharp", sharp), &[]),
@@ -11668,6 +11669,7 @@ fn an_empty_literal_at_a_comparison_is_the_collection_the_spec_names() {
             "7:100 invalid-array-element A Map literal is written `[key: value]`. | ",
             "7:120 invalid-array-element A List literal is written `[a, b]`. | ",
             "7:141 invalid-array-element A Set literal is written `[a, b]`. | ",
+            "9:80 invalid-operand `==` cannot compare `List<int>` with `int`. | Convert one side so both sides have the same type.",
         ]
     );
 }

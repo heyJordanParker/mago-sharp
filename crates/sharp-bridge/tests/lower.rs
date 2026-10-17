@@ -17697,6 +17697,61 @@ fn equality_of_a_union_that_holds_a_collection_compares_by_what_it_holds() {
                     ZVAL 1
         "#}
     );
+    // A search compares each element as `==` does, never with `\in_array`'s `===`.
+    let search = body_in(
+        "bool run(List<Set<int>|int> rows, Set<int>|int either)",
+        "        return rows.contains(either);\n",
+        &[],
+    );
+    assert_eq!(
+        format!("STMT_LIST\n{}", &search[search.find("  RETURN").expect("the search")..]),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                BINARY_OP [17]
+                  CALL
+                    ZVAL "array_find_key"
+                    ARG_LIST
+                      VAR
+                        ZVAL "rows"
+                      CALL
+                        ARROW_FUNC "" @9-9
+                          PARAM_LIST
+                            PARAM
+                              null
+                              ZVAL "value#1"
+                              null
+                              null
+                              null
+                              null
+                          null
+                          ARROW_FUNC "" @9-9
+                            PARAM_LIST
+                              PARAM
+                                null
+                                ZVAL "element#2"
+                                null
+                                null
+                                null
+                                null
+                            null
+                            CALL
+                              ZVAL "Sharp\\Internal\\equals"
+                              ARG_LIST
+                                VAR
+                                  ZVAL "element#2"
+                                VAR
+                                  ZVAL "value#1"
+                            null
+                            null
+                          null
+                          null
+                        ARG_LIST
+                          VAR
+                            ZVAL "either"
+                  ZVAL null
+        "#}
+    );
 }
 
 /// ```php
