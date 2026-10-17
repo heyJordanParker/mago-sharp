@@ -507,6 +507,30 @@ fn a_php_form_php_sharp_never_has_names_what_to_write() {
     );
 }
 
+/// A member written in a form PHP# never has is an error that names what PHP# writes, or that the form is no PHP#
+/// construct.
+#[test]
+fn a_member_form_php_sharp_never_has_names_what_to_write() {
+    let class = "namespace App.Tenant;\n\nclass Report\n{\n    public foreign int run(override int x) => x;\n    public int d { get(int x); set; }\n    private Iterable items;\n}\n";
+    let accessor = "namespace App.Tenant;\n\nclass Report\n{\n    public int e { fetch; set; }\n}\n";
+    let interface = "namespace App.Tenant;\n\ninterface Shape\n{\n    area();\n}\n";
+
+    assert_eq!(
+        [issues(class), issues(accessor), issues(interface)],
+        [
+            vec![
+                "5:28 Promoted properties are not allowed outside of constructors.",
+                "5:12 A method takes no `foreign`: remove it.",
+                "5:28 A parameter takes no `override`: remove it.",
+                "6:20 `get` takes no parameter list.",
+                "7:13 `Iterable` takes 1 type argument: the element.",
+            ],
+            vec!["5:20 This accessor is not part of PHP#.", "5:16 A PHP# property needs a `get` accessor."],
+            vec!["5:5 An interface method needs a return type in PHP#."],
+        ]
+    );
+}
+
 /// A form PHP# has not decided, or that a later change builds, stays not supported yet, while every other refusal says
 /// what PHP# writes instead.
 #[test]

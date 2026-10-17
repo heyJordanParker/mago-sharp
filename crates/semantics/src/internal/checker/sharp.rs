@@ -50,6 +50,8 @@ use mago_syntax::cst::Continue;
 use mago_syntax::cst::DeclareBody;
 use mago_syntax::cst::DirectVariable;
 use mago_syntax::cst::DocumentKind;
+use mago_syntax::cst::Enum;
+use mago_syntax::cst::Event;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::Extends;
 use mago_syntax::cst::Extension;
@@ -69,8 +71,11 @@ use mago_syntax::cst::Identifier;
 use mago_syntax::cst::If;
 use mago_syntax::cst::IfBody;
 use mago_syntax::cst::Implements;
+use mago_syntax::cst::IncludeConstruct;
+use mago_syntax::cst::IncludeOnceConstruct;
 use mago_syntax::cst::Inheritance;
 use mago_syntax::cst::Instantiation;
+use mago_syntax::cst::Interface;
 use mago_syntax::cst::Keyword;
 use mago_syntax::cst::Leave;
 use mago_syntax::cst::ListPatternElement;
@@ -110,12 +115,15 @@ use mago_syntax::cst::PropertyHookConcreteBody;
 use mago_syntax::cst::PropertyHookList;
 use mago_syntax::cst::PropertyItem;
 use mago_syntax::cst::ReadonlyHint;
+use mago_syntax::cst::RequireConstruct;
+use mago_syntax::cst::RequireOnceConstruct;
 use mago_syntax::cst::Return;
 use mago_syntax::cst::Sequence;
 use mago_syntax::cst::Statement;
 use mago_syntax::cst::StringPart;
 use mago_syntax::cst::Struct;
 use mago_syntax::cst::Terminator;
+use mago_syntax::cst::Trait;
 use mago_syntax::cst::TryCatchClause;
 use mago_syntax::cst::TryFinallyClause;
 use mago_syntax::cst::TupleHint;
@@ -5578,32 +5586,31 @@ fn never_written(node: Node<'_, '_>, place: Place, context: &Context<'_, '_, '_>
                 "A header lists the base class and the interfaces after `:`, as in `class Page : DatabaseEntity, Linkable`.",
             )
         }
-        (
-            Node::Modifier(modifier @ (Modifier::PublicSet(_) | Modifier::ProtectedSet(_) | Modifier::PrivateSet(_))),
-            _,
-        ) => {
-            let level = match modifier {
-                Modifier::PublicSet(_) => "public",
-                Modifier::ProtectedSet(_) => "protected",
-                _ => "private",
-            };
+        (Node::Modifier(Modifier::PublicSet(_) | Modifier::ProtectedSet(_) | Modifier::PrivateSet(_)), _) => {
+            let form = written(span);
             removed(
                 span,
-                written(span).as_bytes(),
-                &format!("give the property `{{ get; {level} set; }}`."),
+                form.as_bytes(),
+                &format!("give the property `{{ get; {} set; }}`.", form.trim_end_matches("(set)")),
                 "Only `set` and `init` take an access level of their own, narrower than the property's.",
             )
         }
-        (Node::Modifier(modifier), _) => {
+        (
+            Node::Modifier(modifier),
+            Place::Interface
+            | Place::Enum
+            | Place::ClassConstant
+            | Place::FieldOrProperty
+            | Place::Method
+            | Place::Parameter,
+        ) => {
             let owner = match place {
-                Place::Class => "A class",
                 Place::Interface => "An interface",
                 Place::Enum => "An enum",
                 Place::ClassConstant => "A constant",
                 Place::FieldOrProperty => "A field or property",
-                Place::Method | Place::Signature => "A method",
-                Place::Parameter => "A parameter",
-                _ => return None,
+                Place::Method => "A method",
+                _ => "A parameter",
             };
 
             error(format!("{owner} takes no `{}`: remove it.", BytesDisplay(modifier.get_keyword().value)))
@@ -5652,31 +5659,40 @@ fn never_written(node: Node<'_, '_>, place: Place, context: &Context<'_, '_, '_>
         (Node::Statement(Statement::Use(_)), Place::Body) => {
             error("An `import` goes at the top of the file, after the namespace: move it out of the method.".to_owned())
         }
-        (Node::Statement(statement), Place::Body) if let Some(name) = declared_type_name(statement) => {
-            error(format!("A method can't declare a type inside it: declare `{}` in its own file.", BytesDisplay(name)))
-        }
+        (
+            Node::Statement(
+                Statement::Class(Class { name, .. })
+                | Statement::Interface(Interface { name, .. })
+                | Statement::Trait(Trait { name, .. })
+                | Statement::Enum(Enum { name, .. })
+                | Statement::Event(Event { name, .. })
+                | Statement::Struct(Struct { name, .. }),
+            ),
+            Place::Body,
+        ) => error(format!(
+            "A method can't declare a type inside it: declare `{}` in its own file.",
+            BytesDisplay(name.value)
+        )),
         (Node::Expression(Expression::Clone(clone)), _) => removed(
             span,
             b"clone",
             &format!("write `{} with {{ … }}`, naming each property the copy changes.", written(clone.object.span())),
             "`with` copies an object and sets the properties its braces name.",
         ),
-        (Node::Expression(Expression::Construct(construct)), _) => {
-            let form: &[u8] = match construct {
-                Construct::Include(_) => b"include",
-                Construct::IncludeOnce(_) => b"include_once",
-                Construct::Require(_) => b"require",
-                Construct::RequireOnce(_) => b"require_once",
-                _ => return None,
-            };
-
-            removed(
-                span,
-                form,
-                "import the class the file declares, as in `import App.Shop.Order;`.",
-                "A class loads the first time code uses it.",
-            )
-        }
+        (
+            Node::Expression(Expression::Construct(
+                Construct::Include(IncludeConstruct { include: keyword, .. })
+                | Construct::IncludeOnce(IncludeOnceConstruct { include_once: keyword, .. })
+                | Construct::Require(RequireConstruct { require: keyword, .. })
+                | Construct::RequireOnce(RequireOnceConstruct { require_once: keyword, .. }),
+            )),
+            _,
+        ) => removed(
+            span,
+            keyword.value,
+            "import the class the file declares, as in `import App.Shop.Order;`.",
+            "A class loads the first time code uses it.",
+        ),
         (Node::Expression(Expression::Instantiation(instantiation)), Place::Body)
             if !matches!(instantiation.class, Expression::Identifier(_)) =>
         {
@@ -5718,19 +5734,6 @@ fn never_written(node: Node<'_, '_>, place: Place, context: &Context<'_, '_, '_>
         }
         _ => return None,
     })
-}
-
-/// The name of the type a statement declares, a class, an interface, a trait, an enum, an event or a struct.
-fn declared_type_name<'arena>(statement: &Statement<'arena>) -> Option<&'arena [u8]> {
-    match statement {
-        Statement::Class(class) => Some(class.name.value),
-        Statement::Interface(interface) => Some(interface.name.value),
-        Statement::Trait(r#trait) => Some(r#trait.name.value),
-        Statement::Enum(r#enum) => Some(r#enum.name.value),
-        Statement::Event(event) => Some(event.name.value),
-        Statement::Struct(r#struct) => Some(r#struct.name.value),
-        _ => None,
-    }
 }
 
 /// What the slice has at a place, as the note of a refusal there.
