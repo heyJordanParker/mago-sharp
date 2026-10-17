@@ -470,16 +470,21 @@ where
         is_refused |= report_hint_type_arguments(context, block_context, artifacts, hint, HintPlace::TypeTest);
         is_refused |= report_erased_type_test(context, hint);
 
-        // A test of a type parameter, of a generic class with its type arguments, of a collection, of `Any`, of a
-        // function type or of a union is `instanceof` a name spanning the whole type, and narrows to the type written,
-        // which the analysis records as the type the test reads. So is a test of a plain PHP trait, spec section 22,
-        // since no value is `instanceof` one.
+        // A test of a type parameter, of a generic class with its type arguments, of a collection, of a class value, of
+        // `Any`, of `Object`, of a tuple, of a function type or of a union is `instanceof` a name spanning the whole
+        // type, and narrows to the type written, which the analysis records as the type the test reads. So is a test of
+        // a plain PHP trait, spec section 22, since no value is `instanceof` one.
         let reads_type_arguments = match hint {
             Hint::Identifier(name) => {
                 context.resolved_names.is_type_parameter(name)
                     || context.codebase.get_trait(context.resolved_names.get(name)).is_some()
             }
-            Hint::Generic(_) | Hint::Mixed(_) | Hint::Function(_) | Hint::Union(_) => has_type_test(hint),
+            Hint::Generic(_)
+            | Hint::Mixed(_)
+            | Hint::Object(_)
+            | Hint::Tuple(_)
+            | Hint::Function(_)
+            | Hint::Union(_) => has_type_test(hint),
             _ => false,
         };
         if reads_type_arguments {

@@ -6161,16 +6161,28 @@ fn a_function_type_is_tested_like_any_type() {
     assert_eq!(issues(code), Vec::<String>::new());
 }
 
-/// A class value is a string with no test, so `as` refuses its type and names every type it converts to.
+/// Spec section 21: a tuple, a class value and `Object` are tested as any type is, alone or in a union. A tuple in a
+/// pattern is a member of a union, since a pattern that starts with `[` is a list pattern.
+#[test]
+fn a_tuple_a_class_value_and_object_are_tested_like_any_type() {
+    let code = leak(method(
+        "        const a = extra as [int, string];\n        const b = extra is int|[int, string] pair;\n        const c = match (extra) { string|[int, string] t => 1, default => 2 };\n        const d = extra as [int, string]|int;\n        const e = extra is Class<Report>;\n        const f = extra as Class<Report>;\n        const g = match (extra) { Class<Report> type => 1, default => 2 };\n        const h = extra is int|Class<Report>;\n        const i = extra is Object;\n        const j = extra as Object;\n        return extra;\n",
+    ));
+
+    assert_eq!(issues(code), Vec::<String>::new());
+}
+
+/// A union that holds a type with no test, as `int|null` does, is refused, and the note names every type `as`
+/// converts to.
 #[test]
 fn an_as_to_a_type_without_a_test_names_the_types_as_converts_to() {
-    let code = leak(method("        const a = extra as Class<Report>;\n        return extra;\n"));
+    let code = leak(method("        const a = extra as int|null;\n        return extra;\n"));
 
     let notes: Vec<_> = check_in_type_file(code).into_iter().flat_map(|issue| issue.notes).collect();
     assert_eq!(
         notes,
         [
-            "`as` converts to `int`, `float`, `string`, `bool`, `Any`, a class, a collection as in `List<int>`, or a union of them as in `int|string`."
+            "`as` converts to `int`, `float`, `string`, `bool`, `Any`, `Object`, a class, a collection as in `List<int>`, a class value as in `Class<Order>`, a tuple as in `[int, string]`, a function type as in `Function<int(int)>`, or a union of them as in `int|string`."
         ]
     );
 }
@@ -6525,7 +6537,7 @@ fn a_refusal_notes_what_php_sharp_has_where_it_is_written() {
     for (code, note) in [
         (
             pattern,
-            "A PHP# pattern is a type of `int`, `float`, `string`, `bool`, `Any`, a class, a collection as in `List<int>`, or a union of them as in `int|string`, with an optional name, as in `int count`, a case with its fields, as in `PaymentResult.Paid(string transactionId)`, a class with properties, as in `Paid { amount: > 0 } big`, a constant, a comparison such as `< 10`, a properties pattern such as `{ total: > 0 }`, a list pattern such as `[Line first, ...List<Line> rest]`, or patterns joined by `and`, `or` and `not`.",
+            "A PHP# pattern is a type of `int`, `float`, `string`, `bool`, `Any`, `Object`, a class, a collection as in `List<int>`, a class value as in `Class<Order>`, a function type as in `Function<int(int)>`, or a union of them, a tuple among them, as in `int|[int, string]`, with an optional name, as in `int count`, a case with its fields, as in `PaymentResult.Paid(string transactionId)`, a class with properties, as in `Paid { amount: > 0 } big`, a constant, a comparison such as `< 10`, a properties pattern such as `{ total: > 0 }`, a list pattern such as `[Line first, ...List<Line> rest]`, or patterns joined by `and`, `or` and `not`.",
         ),
         (
             class,

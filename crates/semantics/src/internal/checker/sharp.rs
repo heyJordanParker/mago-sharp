@@ -1736,12 +1736,13 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
 
                 None
             }
-            // A type outside the slice, and `Self`, are refused by the walk, as anywhere in a body.
-            hint if !has_type_test(hint) && (is_slice_type(hint) || matches!(hint, Hint::Union(_))) => {
+            // Every type in the slice has a test. A type outside the slice, and `Self`, are refused by the walk, as
+            // anywhere in a body, and a union that holds one, as `int|null` does, is refused here.
+            hint @ Hint::Union(_) if !has_type_test(hint) => {
                 report_not_supported(
                     hint.span(),
                     "type",
-                    "`as` converts to `int`, `float`, `string`, `bool`, `Any`, a class, a collection as in `List<int>`, or a union of them as in `int|string`.",
+                    "`as` converts to `int`, `float`, `string`, `bool`, `Any`, `Object`, a class, a collection as in `List<int>`, a class value as in `Class<Order>`, a tuple as in `[int, string]`, a function type as in `Function<int(int)>`, or a union of them as in `int|string`.",
                     context,
                 );
 
@@ -5487,7 +5488,7 @@ fn supported(place: Place) -> &'static str {
             "A parameter default, an attribute argument, a constant's value, an enum case's value or a pattern's value is a literal, a constant, `typeof(Class)`, a list or map literal, or arithmetic, comparison, logical and `??` operators on them."
         }
         Place::Pattern => {
-            "A PHP# pattern is a type of `int`, `float`, `string`, `bool`, `Any`, a class, a collection as in `List<int>`, or a union of them as in `int|string`, with an optional name, as in `int count`, a case with its fields, as in `PaymentResult.Paid(string transactionId)`, a class with properties, as in `Paid { amount: > 0 } big`, a constant, a comparison such as `< 10`, a properties pattern such as `{ total: > 0 }`, a list pattern such as `[Line first, ...List<Line> rest]`, or patterns joined by `and`, `or` and `not`."
+            "A PHP# pattern is a type of `int`, `float`, `string`, `bool`, `Any`, `Object`, a class, a collection as in `List<int>`, a class value as in `Class<Order>`, a function type as in `Function<int(int)>`, or a union of them, a tuple among them, as in `int|[int, string]`, with an optional name, as in `int count`, a case with its fields, as in `PaymentResult.Paid(string transactionId)`, a class with properties, as in `Paid { amount: > 0 } big`, a constant, a comparison such as `< 10`, a properties pattern such as `{ total: > 0 }`, a list pattern such as `[Line first, ...List<Line> rest]`, or patterns joined by `and`, `or` and `not`."
         }
     }
 }

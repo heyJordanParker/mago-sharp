@@ -21754,6 +21754,53 @@ fn is_and_as_of_any_or_a_union_are_the_engine_test_of_its_type() {
 }
 
 /// ```php
+/// $pair = <is [int, string]>($extra) ? $extra : null;
+/// $type = <is Class<App.Tenant.Report>>($extra);
+/// $object = <is Object|int>($extra);
+/// ```
+///
+/// `is` and `as` of a tuple, of a class value and of `Object` are the engine's test of the type, as a collection's are,
+/// which checks a tuple's count and each element and finds the class a class value names.
+#[test]
+fn is_and_as_of_a_tuple_a_class_value_or_object_are_the_engine_test_of_its_type() {
+    assert_eq!(
+        body_in(
+            "void run(Any? extra)",
+            "        const pair = extra as [int, string];\n        const type = extra is Class<Report>;\n        const object = extra is int|Object;\n",
+            &[]
+        ),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "pair"
+                CONDITIONAL
+                  SHARP_IS_TYPE
+                    VAR
+                      ZVAL "extra"
+                    ZVAL "[int, string]"
+                  VAR
+                    ZVAL "extra"
+                  ZVAL null
+              ASSIGN
+                VAR
+                  ZVAL "type"
+                SHARP_IS_TYPE
+                  VAR
+                    ZVAL "extra"
+                  ZVAL "Class<App.Tenant.Report>"
+              ASSIGN
+                VAR
+                  ZVAL "object"
+                SHARP_IS_TYPE
+                  VAR
+                    ZVAL "extra"
+                  ZVAL "Object|int"
+        "#}
+    );
+}
+
+/// ```php
 /// $numbers = <is List<int>>($extra);
 /// $kept = \is_array($crossing#1 = <is Map<string, int>>($extra) ? $extra : null) ? new \Sharp\Map(…) : $crossing#1;
 /// $tags = <is Set<string>>($extra);

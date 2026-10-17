@@ -13128,7 +13128,7 @@ fn a_missing_class_with_type_arguments_is_reported() {
 /// more than the refusal.
 #[test]
 fn a_refused_type_test_still_declares_its_name() {
-    let sharp = "namespace Demo;\n\npublic class Box<TItem>\n{\n    public TItem? first() => null;\n}\n\npublic class Report\n{\n    public static Any? kind(Any value) => value is Class<Box<int>> type ? type : null;\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Box<TItem>\n{\n    public TItem? first() => null;\n}\n\npublic class Report\n{\n    public static Any? kind(Any value) => value is Class<Box<int>>|null type ? type : null;\n}\n";
 
     assert_eq!(explained(("src/Demo/Report.sharp", sharp), &[]), Vec::<String>::new());
 }
@@ -13137,7 +13137,7 @@ fn a_refused_type_test_still_declares_its_name() {
 /// refusal.
 #[test]
 fn new_of_a_refused_value_reports_nothing_more() {
-    let sharp = "namespace Demo;\n\npublic class Report\n{\n    public static Any make(Any value)\n    {\n        const type = value as Class<Report>;\n        return new (type)();\n    }\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Report\n{\n    public static Any make(Any value)\n    {\n        const type = value as Class<Report>|null;\n        return new (type)();\n    }\n}\n";
 
     assert_eq!(explained(("src/Demo/Report.sharp", sharp), &[]), Vec::<String>::new());
 }
@@ -13205,6 +13205,19 @@ fn a_type_test_of_any_or_a_union_narrows_to_the_type_written() {
     let sharp = "namespace Demo;\n\npublic class Report\n{\n    public static int scalar(Any? item) => item is int|string value ? 1 : 0;\n\n    public static (int|string)? kept(Any? item) => item as int|string;\n\n    public static Any present(Any? item) => item as Any ?? 0;\n\n    public static int sorted(Any? item) => match (item) { int|string value => 1, Any other => 2, default => 0 };\n\n    public static int wrong(Any? item) => item is int|string value ? value : 0;\n}\n";
 
     assert_eq!(issues(("src/Demo/Report.sharp", sharp), &[]), ["13:43 invalid-return-statement"]);
+}
+
+/// `is`, `as` and a `match` arm of a tuple, a class value or `Object` test the type written while the code runs, so
+/// the value they narrow has that type: a value tested `is int|[int, string]` is no `int`, and a value `as Class<Order>`
+/// is no `Class<Report>`.
+#[test]
+fn a_type_test_of_a_tuple_a_class_value_or_object_narrows_to_the_type_written() {
+    let sharp = "namespace Demo;\n\npublic class Order\n{\n}\n\npublic class Report\n{\n    public static [int, string]? pair(Any? item) => item as [int, string];\n\n    public static Class<Order>? type(Any? item) => item as Class<Order>;\n\n    public static Object? object(Any? item) => item as Object;\n\n    public static int sorted(Any? item) => match (item) { int|[int, string] value => 1, Class<Order> type => 2, default => 0 };\n\n    public static int wrong(Any? item) => item is int|[int, string] value ? value : 0;\n\n    public static Class<Report>? other(Any? item) => item as Class<Order>;\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Report.sharp", sharp), &[]),
+        ["17:43 invalid-return-statement", "19:54 invalid-return-statement"]
+    );
 }
 
 /// An `as` or an `is` of a type the value always has tests nothing, and PHP# says so in the words the code writes, for
@@ -15396,11 +15409,11 @@ fn a_named_constructor_of_a_generic_class_takes_the_type_arguments_of_its_new() 
 /// `Map<string, int>`, as the literal `["k": [1]]` is `Map<string, List<int>>`, `non-empty-string` is `string`,
 /// `positive-int` is `int` and `class-string` is `Class<Object>`. A written type argument the value fits compiles. A
 /// `new` infers none, so it needs its type argument written. An argument the checker refuses, as it does
-/// `Pager.class() as Class<Object>`, adds no refusal of the type argument it fixes.
+/// `Pager.class() as Class<Object>|null`, adds no refusal of the type argument it fixes.
 #[test]
 fn a_type_argument_php_sharp_cant_write_is_refused() {
     let php = "<?php\n\nnamespace Lib;\n\nfinal class Pager\n{\n    /** @return array{a: int} */\n    public static function shape(): array\n    {\n        return ['a' => 1];\n    }\n\n    /** @return array-key */\n    public static function key(): int|string\n    {\n        return 1;\n    }\n\n    /** @return scalar */\n    public static function scalar(): int|float|string|bool\n    {\n        return 1;\n    }\n\n    /** @return numeric */\n    public static function numeric(): int|float|string\n    {\n        return 1;\n    }\n\n    /** @return resource */\n    public static function resource(): mixed\n    {\n        return STDIN;\n    }\n\n    /** @return list<int> */\n    public static function list(): array\n    {\n        return [1];\n    }\n\n    /** @return non-empty-string */\n    public static function text(): string\n    {\n        return 'a';\n    }\n\n    /** @return positive-int */\n    public static function count(): int\n    {\n        return 1;\n    }\n\n    /** @return class-string */\n    public static function class(): string\n    {\n        return self::class;\n    }\n}\n";
-    let sharp = "namespace Demo;\n\nimport Lib.Pager;\n\npublic class Registry\n{\n    public static T keep<T>(T value) => value;\n\n    public T hold<T>(T value) => value;\n\n    public void run()\n    {\n        Registry.keep(Pager.shape());\n        Registry.keep(Pager.key());\n        Registry.keep(Pager.scalar());\n        Registry.keep(Pager.numeric());\n        this.hold(Pager.resource());\n        Registry.keep(Pager.list());\n        Registry.keep(Pager.text());\n        Registry.keep(Pager.count());\n        this.hold(Pager.class());\n        Registry.keep<Map<string, int>>(Pager.shape());\n        Registry.keep<int|string>(Pager.key());\n        Crate<Map<string, int>> crate = new Crate<Map<string, int>>(Pager.shape());\n        let inferred = new Crate(Pager.shape());\n        Registry.keep([1, 2]);\n        Registry.keep([\"k\": [1]]);\n        Registry.keep(Pager.class() as Class<Object>);\n    }\n}\n\npublic class Crate<T>\n{\n    public Crate(public T value) { }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Pager;\n\npublic class Registry\n{\n    public static T keep<T>(T value) => value;\n\n    public T hold<T>(T value) => value;\n\n    public void run()\n    {\n        Registry.keep(Pager.shape());\n        Registry.keep(Pager.key());\n        Registry.keep(Pager.scalar());\n        Registry.keep(Pager.numeric());\n        this.hold(Pager.resource());\n        Registry.keep(Pager.list());\n        Registry.keep(Pager.text());\n        Registry.keep(Pager.count());\n        this.hold(Pager.class());\n        Registry.keep<Map<string, int>>(Pager.shape());\n        Registry.keep<int|string>(Pager.key());\n        Crate<Map<string, int>> crate = new Crate<Map<string, int>>(Pager.shape());\n        let inferred = new Crate(Pager.shape());\n        Registry.keep([1, 2]);\n        Registry.keep([\"k\": [1]]);\n        Registry.keep(Pager.class() as Class<Object>|null);\n    }\n}\n\npublic class Crate<T>\n{\n    public Crate(public T value) { }\n}\n";
     let refused = |line: u32, column: u32, method: &str, written: &str| {
         format!(
             "{line}:{column} missing-template-parameter The type argument `T` of the call to `{method}` would be `{written}`, which PHP# can't write. | `{method}` is called here | A PHP docblock type has no PHP# spelling, and the engine carries a type argument as one. | Write the type argument on the call."
