@@ -289,10 +289,11 @@ where
     if let Some(new) = new
         && !reported
     {
+        let written = BytesDisplay(&context.source_file.contents[new.span().to_range_usize()]);
         context.collector.report_with_code(
-            IssueCode::NotSupportedYet,
-            Issue::error("This `new` without arguments is not supported yet in PHP#.")
-                .with_annotation(Annotation::primary(new.span()).with_message("Not supported yet."))
+            IssueCode::ReplacedBySyntax,
+            Issue::error(format!("`{written}` needs parentheses: write `{written}()`."))
+                .with_annotation(Annotation::primary(new.span()).with_message("Written here."))
                 .with_note("PHP# creates an object with `new Class(arguments)`, parentheses included, or with an object initializer, as in `new Class { name: value }`."),
         );
 

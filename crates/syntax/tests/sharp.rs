@@ -529,10 +529,10 @@ fn a_parameter_default_follows_its_accessors_and_behaviors() {
     assert_eq!(written(parameters[3].variable.span()), "other");
 }
 
-/// `required` on a method is spec syntax outside the slice: a single error where it starts, and the class around it
+/// `required` on a method is a single error where it starts, which keeps it to the constructor, and the class around it
 /// still parses.
 #[test]
-fn spec_syntax_outside_the_slice_is_one_not_supported_error_where_it_starts() {
+fn required_on_a_method_is_one_error_where_it_starts() {
     let arena = LocalArena::new();
     let code =
         "class Report\n{\n    public required int count() { return 1; }\n\n    public int run() { return 1; }\n}\n";
@@ -541,7 +541,10 @@ fn spec_syntax_outside_the_slice_is_one_not_supported_error_where_it_starts() {
     let [error] = program.errors else {
         panic!("expected one error, got {:#?}", program.errors);
     };
-    assert_eq!(error.to_string(), "`required` is not supported yet in PHP#.");
+    assert_eq!(
+        error.to_string(),
+        "Only the constructor is `required`, which keeps `new Self(…)` callable on every subclass: remove it here."
+    );
     assert_eq!(source(code, error), "required");
     let Some(Statement::Class(class)) = program.statements.first() else {
         panic!("expected a class, got {:#?}", program.statements);
@@ -906,7 +909,7 @@ fn a_sharp_parse_error_shows_its_message_as_the_issue_title() {
         ("class Report\n{\n    private count = 0;\n}\n", "A PHP# field needs a type, as in `private int count = 0;`."),
         (
             "class Report\n{\n    public required int count() { return 1; }\n}\n",
-            "`required` is not supported yet in PHP#.",
+            "Only the constructor is `required`, which keeps `new Self(…)` callable on every subclass: remove it here.",
         ),
         (
             "struct Username : string\n{\n}\n",
@@ -3043,7 +3046,7 @@ fn php_member_access_and_concatenating_assignment_are_parse_errors_that_name_the
         ("Demo.Calc::class", "`Demo.Calc::class` is PHP syntax: PHP# writes `typeof(Calc)`"),
         ("this.calc::class", "`this.calc::class` is PHP syntax: PHP# writes `Class.of(this.calc)`"),
         ("make()::class", "`::` is PHP syntax: PHP# writes static access with `.`"),
-        ("label .= \"x\"", "`.=` is PHP syntax: in PHP# `.` is member access"),
+        ("label .= \"x\"", "`.=` is PHP syntax: PHP# appends to a string with `+=`"),
     ] {
         let source = format!("class Report\n{{\n    void run()\n    {{\n        {code};\n    }}\n}}\n");
         let arena = LocalArena::new();
@@ -3064,24 +3067,29 @@ fn a_php_operator_is_reported_once_where_it_is_consumed() {
     );
 
     let messages: Vec<String> = program.errors.iter().map(ToString::to_string).collect();
-    assert_eq!(messages, ["`.=` is PHP syntax: in PHP# `.` is member access"]);
+    assert_eq!(messages, ["`.=` is PHP syntax: PHP# appends to a string with `+=`"]);
 }
 
+/// `use` is a parse error in every form: an import names `import`, and a trait's `use` in a class names the class
+/// header, spec section 22.
 #[test]
 fn the_use_keyword_is_a_parse_error_in_every_form() {
-    for code in [
-        "use Calc;\n",
-        "use Lib\\Calc as Adder;\n",
-        "use Lib\\{Calc, Money};\n",
-        "use function Lib\\{make, total};\n",
-        "class Report\n{\n    use Shared;\n}\n",
-        "class Report\n{\n    use Lib\\Shared { Lib\\Shared::run as start; }\n}\n",
+    let import = "`use` is PHP syntax: PHP# imports a class with `import`";
+    let r#trait = "`use` in a class is PHP syntax: PHP# lists a trait in the class header, as in `class Order : Model, HasFactory`";
+
+    for (code, message) in [
+        ("use Calc;\n", import),
+        ("use Lib\\Calc as Adder;\n", import),
+        ("use Lib\\{Calc, Money};\n", import),
+        ("use function Lib\\{make, total};\n", import),
+        ("class Report\n{\n    use Shared;\n}\n", r#trait),
+        ("class Report\n{\n    use Lib\\Shared { Lib\\Shared::run as start; }\n}\n", r#trait),
     ] {
         let arena = LocalArena::new();
         let program = parse(&arena, "src/Report.sharp", code);
 
         let messages: Vec<String> = program.errors.iter().map(ToString::to_string).collect();
-        assert_eq!(messages, ["`use` is PHP syntax: PHP# imports a class with `import`"], "{code}");
+        assert_eq!(messages, [message], "{code}");
     }
 }
 
@@ -4098,7 +4106,7 @@ fn a_named_argument_this_names_the_parameter_at_this() {
 }
 
 /// `required` on a constructor is a modifier, spec section 25, and stays a name elsewhere. The parser keeps its own
-/// "not supported yet" error for `required` on any other member.
+/// error for `required` on a method or an operator.
 #[test]
 fn required_is_a_constructor_modifier_and_stays_a_name_elsewhere() {
     const CODE: &str = "class Entity\n{\n    public required Entity(Row row)\n    {\n        required(row);\n    }\n\n    required Entity(int count) {}\n}\n";
@@ -4125,7 +4133,7 @@ fn required_is_a_constructor_modifier_and_stays_a_name_elsewhere() {
 }
 
 #[test]
-fn required_on_a_method_with_a_return_type_is_not_supported_yet() {
+fn required_on_a_method_with_a_return_type_is_an_error() {
     for member in ["public required int run() { return 1; }", "public required static int make() { return 1; }"] {
         let arena = LocalArena::new();
         let code: &'static str = Box::leak(
@@ -4136,7 +4144,11 @@ fn required_on_a_method_with_a_return_type_is_not_supported_yet() {
         let [error] = program.errors else {
             panic!("expected one error for `{member}`, got {:#?}", program.errors);
         };
-        assert_eq!(error.to_string(), "`required` is not supported yet in PHP#.", "{member}");
+        assert_eq!(
+            error.to_string(),
+            "Only the constructor is `required`, which keeps `new Self(…)` callable on every subclass: remove it here.",
+            "{member}"
+        );
         assert_eq!(source(code, error), "required", "{member}");
     }
 }

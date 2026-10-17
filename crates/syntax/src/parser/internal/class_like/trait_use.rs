@@ -18,9 +18,16 @@ impl<'arena, A> Parser<'_, 'arena, A>
 where
     A: Arena,
 {
+    /// Parses PHP's `use` of traits in a class body. A PHP# class lists a trait in its header, spec section 22, so the
+    /// `use` is an error that names the header.
     pub(crate) fn parse_trait_use(&mut self) -> Result<TraitUse<'arena>, ParseError> {
+        let r#use = self.expect_keyword(T!["use"])?;
+        if self.dialect.is_sharp() {
+            self.errors.push(ParseError::TraitUseInSharp(r#use.span));
+        }
+
         Ok(TraitUse {
-            r#use: self.expect_php_keyword(T!["use"])?,
+            r#use,
             trait_names: {
                 let mut traits = self.new_vec();
                 let mut commas = self.new_vec();

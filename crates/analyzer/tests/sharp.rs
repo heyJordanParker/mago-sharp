@@ -6477,7 +6477,7 @@ fn an_expression_the_parser_refuses_reports_only_its_parse_error() {
     assert_eq!(
         reports(("src/Demo/Report.sharp", sharp)),
         [
-            "8:14 parse `.=` is PHP syntax: in PHP# `.` is member access",
+            "8:14 parse `.=` is PHP syntax: PHP# appends to a string with `+=`",
             "11:25 parse `->` is PHP syntax: PHP# writes member access with `.`",
             "12:25 parse `::` is PHP syntax: PHP# writes static access with `.`",
             "13:25 parse `?->` is PHP syntax: PHP# writes null-safe member access with `?.`",
@@ -8006,7 +8006,7 @@ fn a_full_name_anywhere_in_code_names_the_import_to_add() {
     let through_new = "namespace App.Tenant;\n\nclass Report\n{\n    public Any make() => new Report.of.total;\n}\n";
     assert_eq!(
         compile_errors(("src/App/Tenant/Report.sharp", through_new), &[]),
-        ["This `new` without arguments is not supported yet in PHP#."]
+        ["`new Report.of` needs parentheses: write `new Report.of()`."]
     );
 }
 
@@ -8159,7 +8159,7 @@ fn a_missing_class_is_one_error_that_names_it_as_php_sharp_does() {
         (
             "namespace App;\n\nclass Report\n{\n    use Missing;\n}\n",
             vec![
-                "5:5 parse `use` is PHP syntax: PHP# imports a class with `import` | Written here.".to_owned(),
+                "5:5 parse `use` in a class is PHP syntax: PHP# lists a trait in the class header, as in `class Order : Model, HasFactory` | Written here.".to_owned(),
                 missing("5:9", "App.Missing"),
             ],
         ),

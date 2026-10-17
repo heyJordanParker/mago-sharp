@@ -69,8 +69,14 @@ pub enum ParseError {
     NestingTooDeepInSharp(Span),
     /// TypeScript's `in` written in a PHP# `for … of` loop, at the `in`.
     ForInInSharp(Span),
-    /// PHP# syntax the engine cannot run yet, such as `required` or a named constructor, where it starts.
+    /// PHP# syntax the engine cannot run yet, such as an attribute target or a generic event, where it starts.
     NotSupportedYetInSharp(&'static str, Span),
+    /// `required` written on a PHP# method or operator, at the `required`. Spec section 25 keeps it to the constructor,
+    /// which `new Self(…)` calls, and section 6.1 to a property.
+    RequiredMethodInSharp(Span),
+    /// PHP's `use` of a trait inside a PHP# class, at the `use`. Spec section 22 lists a plain PHP trait in the class
+    /// header.
+    TraitUseInSharp(Span),
     /// An escape JavaScript refuses in a PHP# template, such as `\1` or `\x4`, at its backslash and next character.
     InvalidTemplateEscapeInSharp(Span),
     /// A PHP `fn` arrow function or `function` closure written in a PHP# file, at its keyword.
@@ -164,6 +170,8 @@ impl HasFileId for ParseError {
             | ParseError::NestingTooDeepInSharp(span)
             | ParseError::ForInInSharp(span)
             | ParseError::NotSupportedYetInSharp(_, span)
+            | ParseError::RequiredMethodInSharp(span)
+            | ParseError::TraitUseInSharp(span)
             | ParseError::InvalidTemplateEscapeInSharp(span)
             | ParseError::PhpLambdaInSharp(span)
             | ParseError::LambdaAfterOperatorInSharp(span)
@@ -219,6 +227,8 @@ impl HasSpan for ParseError {
             | ParseError::NestingTooDeepInSharp(span)
             | ParseError::ForInInSharp(span)
             | ParseError::NotSupportedYetInSharp(_, span)
+            | ParseError::RequiredMethodInSharp(span)
+            | ParseError::TraitUseInSharp(span)
             | ParseError::InvalidTemplateEscapeInSharp(span)
             | ParseError::PhpLambdaInSharp(span)
             | ParseError::LambdaAfterOperatorInSharp(span)
@@ -298,7 +308,7 @@ impl std::fmt::Display for ParseError {
                 T!["?->"] => "`?->` is PHP syntax: PHP# writes null-safe member access with `?.`".to_string(),
                 T!["?"] => "`?` before a type is PHP syntax: PHP# writes it after the type, as in `int?`".to_string(),
                 T!["::"] => "`::` is PHP syntax: PHP# writes static access with `.`".to_string(),
-                T![".="] => "`.=` is PHP syntax: in PHP# `.` is member access".to_string(),
+                T![".="] => "`.=` is PHP syntax: PHP# appends to a string with `+=`".to_string(),
                 T!["function"] => "`function` is PHP syntax: a PHP# method starts with its return type".to_string(),
                 T!["$variable"] => "A `$` variable is PHP syntax: PHP# names have no `$`".to_string(),
                 T!["use"] => "`use` is PHP syntax: PHP# imports a class with `import`".to_string(),
@@ -352,6 +362,14 @@ impl std::fmt::Display for ParseError {
                 "PHP# loops over a collection with `of`, as in `for (const line of lines)`.".to_string()
             }
             ParseError::NotSupportedYetInSharp(construct, _) => format!("{construct} is not supported yet in PHP#."),
+            ParseError::RequiredMethodInSharp(_) => {
+                "Only the constructor is `required`, which keeps `new Self(…)` callable on every subclass: remove it here."
+                    .to_string()
+            }
+            ParseError::TraitUseInSharp(_) => {
+                "`use` in a class is PHP syntax: PHP# lists a trait in the class header, as in `class Order : Model, HasFactory`"
+                    .to_string()
+            }
             ParseError::InvalidTemplateEscapeInSharp(_) => {
                 "A template takes JavaScript's escapes, as in `\\n`, `\\x41` or `\\u{1F600}`.".to_string()
             }
@@ -460,6 +478,8 @@ impl From<&ParseError> for Issue {
             ParseError::SyntaxError(syntax_error) => syntax_error.into(),
             // A PHP# parse error names the rule it breaks, so its message is the title.
             ParseError::PhpSyntaxInSharp(..)
+            | ParseError::RequiredMethodInSharp(..)
+            | ParseError::TraitUseInSharp(..)
             | ParseError::ClassNameConstantInSharp(..)
             | ParseError::QualifiedNameInSharp(..)
             | ParseError::UntypedParameterInSharp(..)
