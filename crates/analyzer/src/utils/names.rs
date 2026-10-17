@@ -62,7 +62,11 @@ pub(crate) fn sharp_class_like_name(
     short_name_counts: &OnceCell<HashMap<String, u32>>,
     name: Word,
 ) -> String {
-    let name = codebase.get_class_like(name.as_bytes()).map_or(name, |m| m.original_name);
+    // Spec section 22: the trait that holds an interface's default bodies is named by the interface, which PHP# code
+    // writes, as in `HasLabel.label`.
+    let name = codebase
+        .get_class_like(name.as_bytes())
+        .map_or(name, |class_like| codebase.get_defaults_interface(class_like).unwrap_or(class_like).original_name);
     let full_name = mago_bytes::trim_start_byte(name.as_bytes(), b'\\');
 
     if let Some(imported_name) = imported_names.get(&ascii_lowercase_word(full_name)) {

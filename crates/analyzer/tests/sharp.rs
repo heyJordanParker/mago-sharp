@@ -1680,6 +1680,30 @@ fn super_of_an_interface_reuses_its_default_body_in_a_class_that_implements_it()
     );
 }
 
+/// Spec section 21: an arm that binds a data case's fields, as `ChargeError.Declined(string reason)`, tests the case and
+/// binds each field, whose test is always true, so it reports no redundant `&&`.
+#[test]
+fn a_data_case_arm_that_binds_its_fields_reports_no_redundant_test() {
+    let code = "namespace App;\n\npublic enum ChargeError\n{\n    case Declined(string reason);\n    case Timeout;\n\n    public string message => match (this) {\n        ChargeError.Declined(string reason) => `declined: ${reason}`,\n        ChargeError.Timeout => \"timeout\",\n    };\n\n    public string explain(ChargeError failure) => match (failure) {\n        ChargeError.Declined(string reason) => reason,\n        ChargeError.Timeout => \"timeout\",\n    };\n\n    public bool declined => this is ChargeError.Declined(string reason) && reason != \"\";\n}\n";
+
+    assert_eq!(issues(("src/App/ChargeError.sharp", code), &[]), Vec::<String>::new());
+}
+
+/// Spec section 22: a call of a default body names the method by its interface, which PHP# code writes, and never by
+/// the trait that holds the body.
+#[test]
+fn a_default_body_call_names_the_method_by_its_interface() {
+    let sharp = "namespace Demo;\n\npublic interface HasLabel\n{\n    string label() => \"label\";\n    int size(int by) => by;\n}\n\npublic class Tag : HasLabel\n{\n    public string again() => super<HasLabel>.label(5);\n    public int measured(Tag tag) => tag.size(\"y\");\n}\n";
+
+    assert_eq!(
+        messages(("src/Demo/HasLabel.sharp", sharp), &[]),
+        [
+            "Too many arguments provided for method `HasLabel.label`.",
+            "Invalid argument type for argument #1 of `HasLabel.size`: expected `int`, but found `string`.",
+        ]
+    );
+}
+
 /// A generic type in a header links its class by the name before its type arguments, so the class calls the base's
 /// methods, a type argument the base has no template for is reported as `@extends` reports it, and a missing generic
 /// base is reported where it is named.
@@ -5459,11 +5483,14 @@ fn leave_on_null_leaves_the_method_or_the_loop() {
         ["5:60 invalid-return-statement", "7:55 invalid-continue", "9:43 redundant-null-coalesce"]
     );
 
-    // PHP# has no `switch`, so a `break` outside a loop names only the loop.
-    let outside = "namespace Demo;\n\nclass Report\n{\n    public static int stop(int? price) => price ?? break;\n}\n";
+    // PHP# has no `switch`, so a `break` or a `continue` outside a loop names only the loop.
+    let outside = "namespace Demo;\n\nclass Report\n{\n    public static int stop(int? price) => price ?? break;\n\n    public static int skip(int? price) => price ?? continue;\n}\n";
     assert_eq!(
         refusals(("src/Demo/Report.sharp", outside), &[]),
-        ["5:52 invalid-break A `break` stands only inside a loop. | "]
+        [
+            "5:52 invalid-break A `break` stands only inside a loop. | ",
+            "7:52 invalid-continue A `continue` stands only inside a loop. | "
+        ]
     );
 
     // A loop's condition or increment leaves that loop, as the engine runs it: its `?? break` ends the loop, and its

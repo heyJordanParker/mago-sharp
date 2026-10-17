@@ -594,6 +594,29 @@ where
         }
         _ => None,
     };
+    // A type pattern with fields tests the type and then each field, whose test the type makes always true, as
+    // `ChargeError.Declined(string reason)` binds a field that is always a `string`, so its `&&` is the pattern's shape.
+    let tested_patterns: Vec<&Pattern> = match node {
+        Node::Expression(Expression::PatternMatch(pattern_match))
+        | Node::Statement(Statement::PatternMatch(pattern_match)) => pattern_match
+            .arms
+            .iter()
+            .filter_map(|arm| match arm {
+                PatternMatchArm::Pattern(arm) => Some(arm.pattern),
+                PatternMatchArm::Default(_) => None,
+            })
+            .collect(),
+        Node::Expression(Expression::Is(is)) => vec![is.pattern],
+        _ => Vec::new(),
+    };
+    let field_tests: Vec<Span> = tested_patterns
+        .into_iter()
+        .filter(|pattern| matches!(pattern, Pattern::Type(TypePattern { fields: Some(_), .. })))
+        .filter_map(|pattern| tests.iter().find(|(tested, _)| *tested == pattern.span()))
+        // A field test that can never hold is the user's mistake, which its `&&` reports too.
+        .filter(|(_, test)| artifacts.get_rc_expression_type(*test).is_none_or(|test| !test.is_false()))
+        .map(|(_, test)| test.span())
+        .collect();
     // An `as`, or an `is` of a type, whose value is always of the type tests nothing. PHP# says so in the words the user
     // wrote, in place of PHP's report on the conditional it runs as. A type with fields or properties tests them too,
     // and each reports its own redundant test.
@@ -630,6 +653,8 @@ where
 
             // PHP's report on `match (true)` names `true`, so a PHP# `match` reports what it misses itself.
             !is_code(issue, IssueCode::MatchNotExhaustive)
+                && (!is_code(issue, IssueCode::RedundantLogicalOperation)
+                    || span.is_none_or(|span| !field_tests.iter().any(|test| test.start == span.start)))
                 && (!is_code(issue, IssueCode::MatchArmAlwaysTrue)
                     || span.is_none_or(|span| Some(span.start.offset) != covering_list_arm))
                 && (!(is_code(issue, IssueCode::ReplacedBySyntax) || is_code(issue, IssueCode::BareFunctionCall))
