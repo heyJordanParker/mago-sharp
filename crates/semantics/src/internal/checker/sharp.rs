@@ -5808,9 +5808,7 @@ fn supported(place: Place) -> &'static str {
         Place::TypeParameter => {
             "A PHP# type parameter is an optional `in` or `out`, a name that starts with `T`, and an optional bound of `Object`, of another type parameter, or of classes and interfaces joined with `&`, as in `<out TItem : DatabaseEntity & Shareable>`."
         }
-        Place::Event => {
-            "A PHP# event has an optional `public`, a name, optional type parameters as in `<T : DatabaseEntity>`, parameters, each a type and a name with an optional default, and an optional `: Interface` header, as in `public event OrderPaid(int orderId) : OrderEvent;`."
-        }
+        Place::Event => unreachable!("`enter` places every part of an event, and its parameters are parameters"),
         Place::Struct => unreachable!("the walk enters every part of a struct"),
         Place::Module => unreachable!("a module holds only its header, bindings and laws, and `enter` takes each one"),
         Place::Extension => unreachable!("`enter` places an extension's keyword, receiver and every member of it"),

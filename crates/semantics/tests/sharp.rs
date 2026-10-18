@@ -635,7 +635,7 @@ fn a_sharp_file_gets_no_php_version_error_under_any_php_version() {
 /// is written `(A & B)?`, as Swift writes `(A & B)?`, and a member that is no class or interface is an error.
 #[test]
 fn an_intersection_joins_classes_and_interfaces_wherever_a_type_goes() {
-    let declarations = "namespace App.Tenant;\n\nclass Report\n{\n    private Lib & Other b;\n\n    public (Lib & Other)? c { get; set; }\n\n    public Lib & Other run(Lib & Other item)\n    {\n        Lib & Other local = item;\n        if (local is Lib & Other both) { return both; }\n        return item;\n    }\n\n    private int & string d;\n\n    private Lib & Other? e;\n}\n";
+    let declarations = "namespace App.Tenant;\n\nclass Report\n{\n    private Lib & Other b;\n\n    public (Lib & Other)? c { get; set; }\n\n    public Lib & Other run(Lib & Other item)\n    {\n        Lib & Other local = item;\n        if (local is Lib & Other both) { return both; }\n        return item;\n    }\n\n    private int & string d;\n\n    private Lib & Other? e;\n\n    private Lib & Other & Third f;\n\n    public void keep(Lib item)\n    {\n        int & Lib bad = item;\n    }\n}\n";
 
     assert_eq!(
         issues(declarations),
@@ -643,7 +643,17 @@ fn an_intersection_joins_classes_and_interfaces_wherever_a_type_goes() {
             "16:13 `&` joins classes and interfaces only, and `int` is neither.",
             "16:19 `&` joins classes and interfaces only, and `string` is neither.",
             "18:19 An intersection that holds null is written `(Lib & Other)?`.",
+            "24:9 `&` joins classes and interfaces only, and `int` is neither.",
         ]
+    );
+    // Parentheses around one member get the parentheses error, never the error that the member is no class.
+    let parenthesized = issues("namespace App.Tenant;\n\nclass Report\n{\n    private (Lib) & Other g;\n}\n");
+    assert!(parenthesized.contains(&"5:13 Write `Lib` without parentheses: they go only around a union or an intersection before `?`, as in `(int|string)?`.".to_owned()), "{parenthesized:?}");
+    assert!(!parenthesized.iter().any(|issue| issue.contains("joins")), "{parenthesized:?}");
+    // A plain PHP file keeps PHP's own rule on what an intersection joins.
+    assert_eq!(
+        issues_in("src/Report.php", "<?php\n\nfunction run(int&string $item): void {}\n"),
+        ["3:14 Type `int` cannot be part of an intersection.", "3:18 Type `string` cannot be part of an intersection."]
     );
 }
 
@@ -6791,7 +6801,6 @@ fn a_refusal_notes_what_php_sharp_has_where_it_is_written() {
     let pattern = leak(method("        const both = extra is int & Report;\n        return extra;\n"));
     let interface = "namespace App;\n\npublic interface Sized\n{\n    int max { get; init; }\n}\n";
     let constant = "namespace App;\n\npublic class Limits\n{\n    final public const int MAX = 3;\n}\n";
-
     for (code, note) in [
         (
             interface,

@@ -106,10 +106,8 @@ fn check_listed_events<'arena, A>(
     let events = method.on.iter().flat_map(|on| on.events.iter());
     for (event, listed) in events.zip(&method_metadata.listens) {
         let name = listed_name(event);
-        let listed_class =
-            listed.get_single_named_object().map(|named| (named, codebase.get_class_like(named.name.as_bytes())));
-        let message = match listed_class {
-            Some((_, Some(class_like))) => match unheard_class(context, class_like, &listener) {
+        let message = match listed_class(codebase, listed) {
+            Some(class_like) => match unheard_class(context, class_like, &listener) {
                 Some(message) => message,
                 None => {
                     report_invalid_template_arguments(
@@ -121,13 +119,8 @@ fn check_listed_events<'arena, A>(
                     continue;
                 }
             },
-            _ if BUILT_IN_TYPES.iter().any(|built_in| built_in.eq_ignore_ascii_case(name)) => {
+            None if BUILT_IN_TYPES.iter().any(|built_in| built_in.eq_ignore_ascii_case(name)) => {
                 format!("`{}` is not an event.", BytesDisplay(name))
-            }
-            Some((named, None)) => {
-                report_undefined_type(context, named.name, event.span());
-
-                continue;
             }
             // A name no file declares stays a reference.
             None if let [TAtomic::Reference(TReference::Symbol { name, .. })] = listed.types.as_ref() => {
