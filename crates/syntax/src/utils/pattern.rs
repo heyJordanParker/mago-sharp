@@ -163,11 +163,11 @@ pub fn called_functions(node: Node<'_, '_>) -> impl Iterator<Item = LocalIdentif
 /// Whether a type pattern or an `as` has PHP that tests a value against `hint`.
 ///
 /// A scalar type has `is_int`, `is_float`, `is_string` or `is_bool`, and a class or a type parameter has `instanceof`.
-/// `Any`, a generic class with its type arguments, a `List`, `Map` or `Set` with its element types, and a union of
-/// types with a test have `instanceof` a name that spans the type. The analyzer records the type each
-/// stands for, and the bridge lowers that test to the engine's, which reads the type arguments the code runs with and
-/// walks a collection's elements. `php_shape` builds no PHP for a form that tests any other type, so the semantic check
-/// refuses it.
+/// `Any`, `Object`, a generic class with its type arguments, a `List`, `Map` or `Set` with its element types, a
+/// `Class<T>`, a tuple, a function type, and a union of types with a test have `instanceof` a name that spans the type.
+/// The analyzer records the type each stands for, and the bridge lowers that test to the engine's, which reads the type
+/// arguments the code runs with, walks a collection's or a tuple's elements, and finds the class a class value names.
+/// `php_shape` builds no PHP for a form that tests any other type, so the semantic check refuses it.
 #[must_use]
 pub fn has_type_test(hint: &Hint<'_>) -> bool {
     type_test_of(hint).is_some()
@@ -177,9 +177,8 @@ pub fn has_type_test(hint: &Hint<'_>) -> bool {
 enum TypeTest<'arena> {
     /// A call to the function that tests a scalar type.
     Scalar(LocalIdentifier<'static>),
-    /// `instanceof` the class. For a type parameter, a generic class with its type arguments and a collection, the
-    /// name spans the whole type, where the analyzer records the type the test reads and the bridge lowers the engine's
-    /// test of it.
+    /// `instanceof` the class. For a type the engine tests, the name spans the whole type, where the analyzer records
+    /// the type the test reads and the bridge lowers the engine's test of it.
     Class(Identifier<'arena>),
 }
 
@@ -188,7 +187,7 @@ enum TypeTest<'arena> {
 fn type_test_of<'arena>(hint: &Hint<'arena>) -> Option<TypeTest<'arena>> {
     match hint {
         Hint::Identifier(class) => Some(TypeTest::Class(*class)),
-        Hint::Generic(generic) if is_engine_tested(hint) => {
+        Hint::Generic(generic) => {
             Some(TypeTest::Class(Identifier::Local(LocalIdentifier { span: hint.span(), value: generic.name.value })))
         }
         hint if is_engine_tested(hint) => {
@@ -198,13 +197,12 @@ fn type_test_of<'arena>(hint: &Hint<'arena>) -> Option<TypeTest<'arena>> {
     }
 }
 
-/// Whether the engine's test of the type the analyzer records tests `hint`: `Any`, a generic class or a collection
-/// with its type arguments, a function type, and a union whose every member has a test. A class value is a string with no test, and a
-/// union with `null` is nullable, which no type pattern is.
+/// Whether the engine's test of the type the analyzer records tests `hint`: `Any`, `Object`, a generic class or a
+/// collection with its type arguments, a `Class<T>`, whose value is the string that names a class, a tuple, a function
+/// type, and a union whose every member has a test. A union with `null` is nullable, which no type pattern is.
 fn is_engine_tested(hint: &Hint<'_>) -> bool {
     match hint {
-        Hint::Mixed(_) | Hint::Function(_) => true,
-        Hint::Generic(generic) => generic.name.value != b"Class",
+        Hint::Mixed(_) | Hint::Object(_) | Hint::Generic(_) | Hint::Tuple(_) | Hint::Function(_) => true,
         Hint::Union(union) => is_tested_member(union.left) && is_tested_member(union.right),
         _ => false,
     }

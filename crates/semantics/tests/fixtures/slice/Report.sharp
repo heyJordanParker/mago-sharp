@@ -21,7 +21,7 @@ public class Report
     public string name { get; set; }
     public int id { get; }
     private Calc calc = new Calc(Calc.make(), rate: 2);
-    public string slug => global.strtolower(this.name);
+    public string slug => global.ucfirst(this.name);
     private int|Calc|string key = 1;
     private (int|string)? code = null;
     public Calc? owner { get; set; } = null;

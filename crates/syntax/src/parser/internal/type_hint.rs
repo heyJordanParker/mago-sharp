@@ -22,8 +22,10 @@ use crate::cst::cst::TypeParameterList;
 use crate::cst::cst::UnionHint;
 use crate::cst::sequence::TokenSeparatedSequence;
 use crate::error::ParseError;
+use crate::error::SyntaxError;
 use crate::parser::Parser;
 use crate::token::Token;
+use crate::token::TokenKind;
 use mago_allocator::prelude::*;
 use mago_syntax_core::stack::ensure_sufficient_stack;
 
@@ -302,9 +304,43 @@ where
         }
     }
 
-    /// The name after the PHP# tuple type that may start here, and the token after that name: a `[` whose closing `]`,
-    /// and an optional `?` written right after it, are followed by a name.
+    /// The name after the PHP# tuple type that may start here, and the token after that name: the type, as
+    /// [`Self::peek_after_tuple_type`] reads it, is followed by a name.
     fn peek_after_tuple_hint(&self) -> Result<Option<(Token<'_>, Token<'_>)>, ParseError> {
+        let Some(TupleTypeEnd { after: name, mut tokens, .. }) = self.peek_after_tuple_type()? else {
+            return Ok(None);
+        };
+        if !name.kind.is_identifier_maybe_reserved() {
+            return Ok(None);
+        }
+
+        Ok(tokens.next().transpose()?.map(|after| (name, after)))
+    }
+
+    /// Whether a PHP# type pattern that starts with a tuple type starts here: the type, as
+    /// [`Self::peek_after_tuple_type`] reads it, is a union, as in `[int, string]|int`, or a name follows it, as in
+    /// `[int, string] pair`. Any other `[` starts a list pattern.
+    pub(crate) fn is_at_tuple_type_pattern(&self) -> Result<bool, ParseError> {
+        let Some(TupleTypeEnd { after, union, mut tokens }) = self.peek_after_tuple_type()? else {
+            return Ok(false);
+        };
+        if union {
+            return Ok(true);
+        }
+
+        Ok(match after.value {
+            b"when" | b"and" | b"or" => false,
+            b"is" => matches!(tokens.next().transpose()?.map(|token| token.kind), Some(T![")" | "=>" | ";" | ","])),
+            _ => after.kind.is_identifier_maybe_reserved(),
+        })
+    }
+
+    /// The token after the PHP# type that may start here with a tuple type, which PHP# writes in the brackets that also
+    /// open an attribute list, a list and a list pattern: a `[` and its closing `]`, an optional `?` written right after
+    /// it, then each `|` of a union and the type after it, whose brackets and angle brackets it skips whole.
+    fn peek_after_tuple_type(
+        &self,
+    ) -> Result<Option<TupleTypeEnd<'_, impl Iterator<Item = Result<Token<'_>, SyntaxError>>>>, ParseError> {
         if !self.dialect.is_sharp() {
             return Ok(None);
         }
@@ -313,39 +349,58 @@ where
         if !matches!(tokens.next().transpose()?, Some(token) if token.kind == T!["["]) {
             return Ok(None);
         }
-        let mut depth = 1usize;
-        let mut closing = None;
-        for token in tokens.by_ref() {
-            let token = token?;
-            match token.kind {
-                T!["["] => depth += 1,
-                T!["]"] => {
-                    depth -= 1;
-                    if depth == 0 {
-                        closing = Some(token);
-                        break;
-                    }
-                }
-                T![";" | "{" | "}"] => return Ok(None),
-                _ => {}
+        let Some(mut last) = skip_to_close(&mut tokens, T!["["], T!["]"])? else {
+            return Ok(None);
+        };
+        let mut union = false;
+        let mut next = tokens.next().transpose()?;
+        loop {
+            if let Some(question_mark) = next
+                && question_mark.kind == T!["?"]
+                && question_mark.start.offset == last.start.offset + last.value.len() as u32
+            {
+                next = tokens.next().transpose()?;
+            }
+            if next.is_none_or(|token| token.kind != T!["|"]) {
+                break;
+            }
+
+            union = true;
+            let Some(member) = tokens.next().transpose()? else {
+                return Ok(None);
+            };
+            if member.kind == T!["["] {
+                let Some(close) = skip_to_close(&mut tokens, T!["["], T!["]"])? else {
+                    return Ok(None);
+                };
+                last = close;
+                next = tokens.next().transpose()?;
+                continue;
+            }
+            if !member.kind.is_identifier_maybe_reserved() {
+                return Ok(None);
+            }
+
+            last = member;
+            next = tokens.next().transpose()?;
+            while next.is_some_and(|token| token.kind == T!["."]) {
+                let Some(part) = tokens.next().transpose()?.filter(|part| part.kind.is_identifier_maybe_reserved())
+                else {
+                    return Ok(None);
+                };
+                last = part;
+                next = tokens.next().transpose()?;
+            }
+            if next.is_some_and(|token| token.kind == T!["<"]) {
+                let Some(close) = skip_to_close(&mut tokens, T!["<"], T![">"])? else {
+                    return Ok(None);
+                };
+                last = close;
+                next = tokens.next().transpose()?;
             }
         }
-        let Some(closing) = closing else {
-            return Ok(None);
-        };
 
-        let mut name = tokens.next().transpose()?;
-        if let Some(question_mark) = name
-            && question_mark.kind == T!["?"]
-            && question_mark.start.offset == closing.start.offset + 1
-        {
-            name = tokens.next().transpose()?;
-        }
-        let Some(name) = name.filter(|name| name.kind.is_identifier_maybe_reserved()) else {
-            return Ok(None);
-        };
-
-        Ok(tokens.next().transpose()?.map(|after| (name, after)))
+        Ok(next.map(|after| TupleTypeEnd { after, union, tokens }))
     }
 
     /// Parses a PHP# tuple type, spec section 30: element types in brackets, each followed by its optional name, as in
@@ -474,6 +529,12 @@ where
     /// Parses one PHP# type parameter. `in` and `out` are names the lexer reads as identifiers, so one is the variance
     /// only when another name follows it, as `of` is read in a `for … of` loop.
     fn parse_type_parameter(&mut self) -> Result<TypeParameter<'arena>, ParseError> {
+        // C# writes an attribute on a type parameter, as in `<[Marker] T>`, which PHP# refuses, spec section 1.
+        let attribute_lists = self.parse_typeless_attribute_list_sequence()?;
+        if let (Some(first), Some(last)) = (attribute_lists.first(), attribute_lists.last()) {
+            self.errors.push(ParseError::TypeParameterAttributesInSharp(first.span().join(last.span())));
+        }
+
         let variance = match self.stream.lookahead(0)? {
             Some(token)
                 if token.kind == T![Identifier]
@@ -593,4 +654,41 @@ where
 
         Ok(ParenthesizedHint { left_parenthesis, hint: self.arena.alloc(hint), right_parenthesis })
     }
+}
+
+/// Where a PHP# type that starts with a tuple type ends: the token after it, whether the type is a union, and the
+/// tokens after that one.
+struct TupleTypeEnd<'token, I> {
+    after: Token<'token>,
+    union: bool,
+    tokens: I,
+}
+
+/// Reads `tokens` up to the `close` that closes the `open` read just before them, and returns that `close`. A `>>`
+/// closes two angle brackets. None when the file, a statement or a block ends first.
+fn skip_to_close<'token>(
+    tokens: &mut impl Iterator<Item = Result<Token<'token>, SyntaxError>>,
+    open: TokenKind,
+    close: TokenKind,
+) -> Result<Option<Token<'token>>, ParseError> {
+    let mut depth = 1usize;
+    for token in tokens {
+        let token = token?;
+        let closes = match token.kind {
+            kind if kind == open => {
+                depth += 1;
+                0
+            }
+            kind if kind == close => 1,
+            T![">>"] if open == T!["<"] => 2,
+            T![";" | "{" | "}"] => return Ok(None),
+            _ => 0,
+        };
+        if closes >= depth {
+            return Ok(Some(token));
+        }
+        depth -= closes;
+    }
+
+    Ok(None)
 }

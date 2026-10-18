@@ -92,6 +92,9 @@ pub enum MethodInvocationKind {
     Instance,
     /// A static method invocation such as `ClassName::method()`.
     Static,
+    /// A PHP# extension member called on its receiver, spec section 26, as `name.contains("a")`, which runs as the
+    /// static method `contains($name, 'a')`, the receiver its first argument.
+    Extension,
 }
 
 /// The target of an invocation (function, method, or callable).
@@ -231,6 +234,15 @@ impl<'ctx> InvocationTarget<'ctx> {
         }
 
         if let InvocationTarget::FunctionLike {
+            metadata,
+            method_context: Some(MethodTargetContext { invocation_kind: MethodInvocationKind::Extension, .. }),
+            ..
+        } = self
+        {
+            return crate::utils::names::display_extension_member(context, metadata);
+        }
+
+        if let InvocationTarget::FunctionLike {
             identifier: FunctionLikeIdentifier::Method(class_name, method_name),
             method_context: Some(MethodTargetContext { class_type: StaticClassType::Object(receiver), .. }),
             ..
@@ -286,6 +298,24 @@ impl<'ctx> InvocationTarget<'ctx> {
 
     pub const fn is_method_call(&self) -> bool {
         matches!(self.get_function_like_identifier(), Some(FunctionLikeIdentifier::Method(_, _)))
+    }
+
+    /// How many of the call's arguments the code writes before the member's name instead of inside `(…)`: one for a
+    /// PHP# extension member, whose receiver is its first argument, spec section 26, and none for any other call.
+    pub fn receiver_argument_count(&self) -> usize {
+        usize::from(matches!(
+            self,
+            InvocationTarget::FunctionLike {
+                method_context: Some(MethodTargetContext { invocation_kind: MethodInvocationKind::Extension, .. }),
+                ..
+            }
+        ))
+    }
+
+    /// The number an issue gives the argument at `offset`, counted from the first argument the code writes inside
+    /// `(…)`.
+    pub fn argument_number(&self, offset: usize) -> usize {
+        (offset + 1).saturating_sub(self.receiver_argument_count())
     }
 
     pub const fn is_pure_or_mutation_free(&self) -> bool {

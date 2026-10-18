@@ -131,7 +131,8 @@ pub struct PropertyResolutionResult {
     pub encountered_null: bool,
     pub encountered_mixed: bool,
     pub has_possibly_defined_property: bool,
-    /// True when a successfully written extension property cannot subsequently be read.
+    /// True when a later read of a written property sees nothing the write gave it: an extension property that cannot
+    /// be read, or, in PHP#, a property `__get` serves, spec section 14.3.
     pub has_unreadable_property: bool,
     /// True if all resolved properties are non-nullable.
     /// When combined with `encountered_null` and nullsafe access, indicates
@@ -1055,10 +1056,36 @@ where
         true, // `instance_access`
         block_context.scope.get_class_like_name(),
     );
-    if !for_assignment
-        && let Some(declared) = &resolution
-        && reads_method_over_property(context, artifacts, declared, class_id, method_name, read_span)
+    // Spec section 14.3: PHP reads a declared property the reader cannot see through `__get`, as an Eloquent model reads
+    // a column named `table`, so in PHP# that read is the `__get` property, `Any?` where no `@property` line types it.
+    if context.dialect.is_sharp()
+        && !for_assignment
+        && has_magic_method
+        && let Some(DeclaredProperty { declaring_class, property, kind: DeclaredPropertyKind::Real { .. } }) =
+            &resolution
+        && (property.flags.is_static()
+            || !is_visible_from_scope(
+                context.codebase,
+                property.read_visibility,
+                declaring_class.name.as_bytes(),
+                block_context.scope.get_class_like_name(),
+            ))
     {
+        resolution = None;
+    }
+    // Spec section 14.3: a class whose plain PHP code defines `__get`, itself or a parent, has the properties it reads,
+    // `Any?` where no `@property` line types one. Only plain PHP defines `__get`.
+    let property_type = match &resolution {
+        Some(declared) => {
+            (!declared.declaring_class.flags.is_sharp()).then(|| declared.declared_type(context.codebase))
+        }
+        None => has_magic_method.then(get_mixed),
+    };
+    let reads_method = !for_assignment
+        && property_type.is_some_and(|property_type| {
+            reads_method_over_property(context, artifacts, &property_type, class_id, method_name, read_span)
+        });
+    if reads_method {
         // The lowering takes the read as the method's value, where the engine would read the property.
         artifacts.record_call_target(
             read_span,
@@ -1068,12 +1095,14 @@ where
     }
 
     let Some(resolution) = resolution else {
-        // A PHP# read of a declared method is its closure, ahead of anything the class serves through `__get`.
+        // A PHP# read of a method is its closure where the class has no property of the name, or where the code takes
+        // the method over the property.
         let self_parameter = match written_atomic {
             TAtomic::GenericParameter(parameter) => Some(parameter),
             _ => None,
         };
         if !for_assignment
+            && (reads_method || !has_magic_method)
             && let Some(method_type) = resolve_method_value(
                 context,
                 block_context,
@@ -1218,6 +1247,8 @@ where
         }
 
         if has_magic_method {
+            // Spec section 14.3: what `__get` gives back is `Any?`, whatever PHP# wrote.
+            result.has_unreadable_property |= for_assignment && context.dialect.is_sharp();
             report_non_documented_property(
                 context,
                 object_expr.span(),
@@ -1449,6 +1480,9 @@ where
         for_assignment,
         selector.span(),
     );
+
+    // Spec section 14.3: a read of a property `__get` serves is what `__get` gives back, whatever PHP# wrote.
+    result.has_unreadable_property |= for_assignment && context.dialect.is_sharp() && resolution.is_magic();
 
     Some(ResolvedProperty {
         property_span: property_metadata.name_span.or(property_metadata.span),
@@ -2122,13 +2156,14 @@ fn report_possibly_non_existent_property<A>(
     );
 }
 
-/// Spec section 14.3: a plain PHP class may declare a property and a method of one name, as PHP keeps the two apart.
-/// The PHP# read `x.name` is the property's, as in PHP, unless the code takes it as a function the property's type does
-/// not fit, where the property's value would be an error: there it is the value of the method `name`.
+/// Spec section 14.3: a plain PHP class may have a property and a method of one name, as PHP keeps the two apart. The
+/// PHP# read `x.name` is the property's, of `property_type`, as in PHP, unless the code takes it as a function the
+/// property's type does not fit, where the property's value would be an error: there it is the value of the method
+/// `name`.
 fn reads_method_over_property<A>(
     context: &Context<'_, '_, A>,
     artifacts: &AnalysisArtifacts,
-    declared: &DeclaredProperty<'_>,
+    property_type: &TUnion,
     class_id: Word,
     method_name: Word,
     read_span: Span,
@@ -2137,13 +2172,12 @@ where
     A: Arena,
 {
     context.dialect.is_sharp()
-        && !declared.declaring_class.flags.is_sharp()
         && context.codebase.method_exists(class_id.as_bytes(), method_name.as_bytes())
         && artifacts.get_expected_type(&read_span).is_some_and(|expected| {
             expected.to_non_nullable().is_callable()
                 && !union_comparator::is_contained_by(
                     context.codebase,
-                    &declared.declared_type(context.codebase),
+                    property_type,
                     expected,
                     false,
                     false,
@@ -2381,7 +2415,7 @@ const READS_CALLER_VARIABLES: [&[u8]; 6] =
     [b"compact", b"extract", b"get_defined_vars", b"func_get_args", b"func_get_arg", b"func_num_args"];
 
 /// Spec section 14.3: the value a read without `(…)` at `read_span`, written `written`, gives of the plain PHP function
-/// `function` of the full name `name`, as `global.strtoupper` does: the closure PHP's `strtoupper(...)` makes, typed
+/// `function` of the full name `name`, as `global.ucfirst` does: the closure PHP's `ucfirst(...)` makes, typed
 /// by the function's signature, with the type arguments of a `@template` function from the function type the read goes
 /// into, as [`fix_type_arguments`] fixes a generic method's. A function that changes a variable it is given, as
 /// `global.sort` does, is no value, since PHP# passes every argument by value, and neither is one that reads the
@@ -2600,6 +2634,27 @@ pub(super) fn report_non_documented_property<A>(
 {
     if classname.as_bytes().eq_ignore_ascii_case(b"stdClass") {
         // Special case: we don't report undocumented properties on stdClass
+        return;
+    }
+
+    // Spec section 14.3: in PHP#, a property `__get` serves with no `@property` line to type it is `Any?`. A write of
+    // any value to a property of unknown type is safe, so only a read warns.
+    if context.dialect.is_sharp() {
+        if for_assignment {
+            return;
+        }
+        let access = quoted_source(context, obj_span.join(selector_span));
+        let name = trim_start_byte(property_name.as_bytes(), b'$');
+        let name = String::from_utf8_lossy(name);
+        context.collector.report_with_code(
+            IssueCode::NonDocumentedProperty,
+            Issue::warning(format!("The type of `{access}` is unknown, so the read is `Any?`."))
+                .with_annotation(Annotation::primary(selector_span).with_message("Read here."))
+                .with_help(format!(
+                    "State its type with `as`, as in `string? {name} = {access} as string;`, or with `is`, as in `if ({access} is string {name})`."
+                )),
+        );
+
         return;
     }
 

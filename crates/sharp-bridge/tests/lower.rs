@@ -27,6 +27,7 @@ use mago_sharp_bridge::sharp_kind;
 use mago_sharp_bridge::sharp_node;
 use mago_sharp_bridge::sharp_str;
 use mago_sharp_bridge::sharp_value;
+use mago_sharp_bridge::unit::Library;
 use mago_sharp_bridge::unit::encode;
 use xxhash_rust::xxh3::xxh3_64;
 
@@ -314,13 +315,13 @@ const RUN: &str = "int run(int extra)";
 /// `Sharp\Text` at the standard library's path, with methods each inlining rule takes or leaves.
 const TEXT: (&str, &str) = (
     "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Text.sharp",
-    "namespace Sharp;\n\npublic class Text\n{\n    public static string shout(string text) => global.strtoupper(text);\n\n    public static string padded(string text, int width = 8) => global.str_pad(global.trim(text), width);\n\n    public static string twice(string text) => global.str_repeat(text, global.strlen(text));\n\n    public static string trimmed(string text)\n    {\n        const trimmed = global.trim(text);\n        return trimmed;\n    }\n\n    public static Text make() => new Text();\n\n    public string label() => \"text\";\n\n    public string wrapped(string format) => global.sprintf(format, this.label());\n\n    public string secret(string text) => this.hidden(text);\n\n    private string hidden(string text) => global.strtolower(text);\n\n    public static string quiet(string text) => Text.muted(text);\n\n    protected static string muted(string text) => global.strtolower(text);\n\n    public virtual string echoed(string text) => this.wrapped(text);\n\n    public static string again(string text) => Self.shout(text);\n}\n",
+    "namespace Sharp;\n\npublic class Text\n{\n    public static string capitalized(string text) => global.ucfirst(text);\n\n    public static string padded(string text, int width = 8) => global.str_pad(global.trim(text), width);\n\n    public static string twice(string text) => global.str_repeat(text, global.strlen(text));\n\n    public static string trimmed(string text)\n    {\n        const trimmed = global.trim(text);\n        return trimmed;\n    }\n\n    public static Text make() => new Text();\n\n    public string label() => \"text\";\n\n    public string wrapped(string format) => global.sprintf(format, this.label());\n\n    public string secret(string text) => this.hidden(text);\n\n    private string hidden(string text) => global.lcfirst(text);\n\n    public static string quiet(string text) => Text.muted(text);\n\n    protected static string muted(string text) => global.lcfirst(text);\n\n    public virtual string echoed(string text) => this.wrapped(text);\n\n    public static string again(string text) => Self.capitalized(text);\n}\n",
 );
 
 /// `Lib\Loud`, a project file with a method the inlining rule would take in the standard library.
 const LOUD: (&str, &str) = (
     "src/Lib/Loud.sharp",
-    "namespace Lib;\n\npublic class Loud\n{\n    public static string shout(string text) => global.strtoupper(text);\n}\n",
+    "namespace Lib;\n\npublic class Loud\n{\n    public static string capitalized(string text) => global.ucfirst(text);\n}\n",
 );
 
 /// The statements of `run`, declared with `signature` and holding `statements` in a class that imports `Sharp.Text`
@@ -4876,13 +4877,14 @@ fn a_nullable_type_is_its_type_with_the_nullable_flag() {
 }
 
 /// ```php
-/// public function group(array $items, \Sharp\Map|array|null $sizes = new \Sharp\Map(['a', 1])): ?\Sharp\Map { return null; }
+/// public function group(array $items, \Sharp\Map|array|null $sizes = new \Sharp\Map(['a', 1])): \Sharp\Map|array|null { return null; }
 /// ```
 ///
 /// A `List` is a PHP array, so its type is `array`: a `TYPE` with `IS_ARRAY`, which is 7, as php-src's grammar builds
 /// it. A `Map` is a `\Sharp\Map`, and a parameter takes plain PHP's array too, so its type is the union
-/// `\Sharp\Map|array|null`. Neither type checks an element, so the parameter list ends with the type texts a call
-/// from plain PHP checks each argument's elements against.
+/// `\Sharp\Map|array|null`. A result gives plain PHP its array, spec section 12, so its type is that union too, and
+/// `[1]`, `ZEND_SHARP_RESULT_CROSSES`, makes each return give it. Neither type checks an element, so the parameter list
+/// ends with the type texts a call from plain PHP checks each argument's elements against.
 #[test]
 fn a_list_type_is_the_array_type_and_a_map_type_its_class() {
     let lowered = Lowered::new(
@@ -4928,19 +4930,22 @@ fn a_list_type_is_the_array_type_and_a_map_type_its_class() {
     assert_eq!(
         lowered.render(lowered.child(method as u32, 3)),
         indoc! {r#"
-            SHARP_TYPE_ARGS
-              ZVAL [256] "Sharp\\Map"
+            SHARP_TYPE_ARGS [1]
+              TYPE_UNION
+                ZVAL "Sharp\\Map"
+                TYPE [7]
+                ZVAL [1] "null"
               ZVAL "Function<Map<string, List<int>>?(List<int>, Map<string, int>?)>"
         "#}
     );
 }
 
 /// ```php
-/// public function group(array $sizes, \Sharp\Map|array $calcs, array $keys): ?\Sharp\Map { return null; }
+/// public function group(array $sizes, \Sharp\Map|array $calcs, array $keys): \Sharp\Map|array|null { return null; }
 /// ```
 ///
 /// A nullable type argument lowers as any other, so each `List` is `array`, a `TYPE` with `IS_ARRAY`, which is 7, and
-/// each `Map` its class, and `[256]` adds `ZEND_TYPE_NULLABLE` to the collection itself.
+/// each `Map` its class beside `array`, and a nullable collection adds `null`.
 #[test]
 fn a_collection_with_a_nullable_type_argument_is_the_type_of_the_collection() {
     let lowered = Lowered::with(
@@ -4984,8 +4989,11 @@ fn a_collection_with_a_nullable_type_argument_is_the_type_of_the_collection() {
     assert_eq!(
         lowered.render(lowered.child(method as u32, 3)),
         indoc! {r#"
-            SHARP_TYPE_ARGS
-              ZVAL [256] "Sharp\\Map"
+            SHARP_TYPE_ARGS [1]
+              TYPE_UNION
+                ZVAL "Sharp\\Map"
+                TYPE [7]
+                ZVAL [1] "null"
               ZVAL "Function<Map<string, Any?>?(List<int?>, Map<string, List<Lib.Calc?>>, List<(int|string)?>)>"
         "#}
     );
@@ -6138,16 +6146,17 @@ fn every_inlined_collection_method_lowers_to_php_on_the_array() {
 /// ```php
 /// $found = $sizes[$extra] ?? null;
 /// $unique = new \Sharp\Set($sizes);
+/// $copy = $sizes;
 /// ```
 ///
-/// Spec section 12: `getOrNull(i)` is the safe read, which gives null past either end, and `toSet()` is the `Set` a
-/// literal of the elements makes, each element once.
+/// Spec section 12: `getOrNull(i)` is the safe read, which gives null past either end, `toSet()` is the `Set` a
+/// literal of the elements makes, each element once, and `toList()` is the list itself, which PHP copies on a write.
 #[test]
-fn get_or_null_and_to_set_lower_to_php_on_the_array() {
+fn get_or_null_to_set_and_to_list_lower_to_php_on_the_array() {
     assert_eq!(
         body_in(
             "void run(List<int> sizes, int extra)",
-            "        let found = sizes.getOrNull(extra);\n        let unique = sizes.toSet();\n",
+            "        let found = sizes.getOrNull(extra);\n        let unique = sizes.toSet();\n        let copy = sizes.toList();\n",
             &[]
         ),
         indoc! {r#"
@@ -6170,6 +6179,11 @@ fn get_or_null_and_to_set_lower_to_php_on_the_array() {
                   ARG_LIST
                     VAR
                       ZVAL "sizes"
+              ASSIGN
+                VAR
+                  ZVAL "copy"
+                VAR
+                  ZVAL "sizes"
         "#}
     );
 }
@@ -8194,15 +8208,410 @@ fn a_set_parameter_becomes_a_set_before_the_body_runs() {
 }
 
 /// ```php
+/// #[\Sharp\Crossing(['set', null])]
+/// public readonly \Sharp\Set $tags;
+/// public readonly int $id;
+/// public function __construct(\Sharp\Set|array $tags, int $id)
+/// {
+///     $tags = \is_array($tags) ? new \Sharp\Set($tags) : $tags;
+///     $this->tags = $tags;
+///     $this->id = $id;
+/// }
+/// ```
+///
+/// Spec sections 15 and 20: an event's parameter, and a field of a case that carries data, is a public get-only
+/// property, `[129]` `ZEND_ACC_PUBLIC | ZEND_ACC_READONLY`. A list literal or plain PHP passes a `Set` argument as a PHP
+/// array, and PHP sets a promoted property before the constructor's body runs, so where a parameter holds a `Map` or a
+/// `Set`, each parameter is a plain one beside the property it declares, and the constructor sets each property once
+/// the `Set` is made, as a class's constructor does. An event's property and parameters carry their type text, and so
+/// do a case's, which its own class declares, so plain PHP's elements are checked as an event's are.
+#[test]
+fn an_event_or_a_case_makes_its_set_argument_a_set_before_it_sets_the_property() {
+    let event = Lowered::new("namespace App.Tenant;\n\npublic event Tagged(Set<string> tags, int id);\n");
+    let r#enum = Lowered::new("namespace App.Tenant;\n\nenum Label\n{\n    case Tagged(Set<string> tags);\n}\n");
+    let constructor = |lowered: &Lowered| lowered.render(lowered.method_named("__construct"));
+
+    assert_eq!(
+        property_groups(&event),
+        [
+            indoc! {r#"
+                PROP_GROUP [129]
+                  SHARP_TYPE_ARGS
+                    ZVAL "Sharp\\Set"
+                    ZVAL "Set<string>"
+                  PROP_DECL
+                    PROP_ELEM
+                      ZVAL "tags"
+                      null
+                      null
+                      null
+                  ATTRIBUTE_LIST
+                    ATTRIBUTE_GROUP
+                      ATTRIBUTE
+                        ZVAL "Sharp\\Crossing"
+                        ARG_LIST
+                          ARRAY [3]
+                            ARRAY_ELEM
+                              ZVAL "set"
+                              null
+                            ARRAY_ELEM
+                              ZVAL null
+                              null
+            "#},
+            indoc! {r#"
+                PROP_GROUP [129]
+                  ZVAL [1] "int"
+                  PROP_DECL
+                    PROP_ELEM
+                      ZVAL "id"
+                      null
+                      null
+                      null
+                  null
+            "#},
+        ]
+    );
+    assert_eq!(
+        constructor(&event),
+        indoc! {r#"
+            METHOD [1] "__construct" @3-3
+              PARAM_LIST
+                PARAM
+                  TYPE_UNION
+                    ZVAL "Sharp\\Set"
+                    TYPE [7]
+                  ZVAL "tags"
+                  null
+                  null
+                  null
+                  null
+                PARAM
+                  ZVAL [1] "int"
+                  ZVAL "id"
+                  null
+                  null
+                  null
+                  null
+                SHARP_TYPE_ARGS
+                  null
+                  ZVAL "Set<string>, Any?"
+              null
+              STMT_LIST
+                ASSIGN
+                  VAR
+                    ZVAL "tags"
+                  CONDITIONAL
+                    CALL
+                      ZVAL "is_array"
+                      ARG_LIST
+                        VAR
+                          ZVAL "tags"
+                    NEW
+                      ZVAL "Sharp\\Set"
+                      ARG_LIST
+                        VAR
+                          ZVAL "tags"
+                    VAR
+                      ZVAL "tags"
+                ASSIGN
+                  PROP
+                    VAR
+                      ZVAL "this"
+                    ZVAL "tags"
+                  VAR
+                    ZVAL "tags"
+                ASSIGN
+                  PROP
+                    VAR
+                      ZVAL "this"
+                    ZVAL "id"
+                  VAR
+                    ZVAL "id"
+              null
+              null
+        "#}
+    );
+    assert_eq!(
+        property_groups(&r#enum),
+        [indoc! {r#"
+            PROP_GROUP [129]
+              SHARP_TYPE_ARGS
+                ZVAL "Sharp\\Set"
+                ZVAL "Set<string>"
+              PROP_DECL
+                PROP_ELEM
+                  ZVAL "tags"
+                  null
+                  null
+                  null
+              ATTRIBUTE_LIST
+                ATTRIBUTE_GROUP
+                  ATTRIBUTE
+                    ZVAL "Sharp\\Crossing"
+                    ARG_LIST
+                      ARRAY [3]
+                        ARRAY_ELEM
+                          ZVAL "set"
+                          null
+                        ARRAY_ELEM
+                          ZVAL null
+                          null
+        "#}]
+    );
+    assert_eq!(
+        constructor(&r#enum),
+        indoc! {r#"
+            METHOD [1] "__construct" @5-5
+              PARAM_LIST
+                PARAM
+                  TYPE_UNION
+                    ZVAL "Sharp\\Set"
+                    TYPE [7]
+                  ZVAL "tags"
+                  null
+                  null
+                  null
+                  null
+                SHARP_TYPE_ARGS
+                  null
+                  ZVAL "Set<string>"
+              null
+              STMT_LIST
+                ASSIGN
+                  VAR
+                    ZVAL "tags"
+                  CONDITIONAL
+                    CALL
+                      ZVAL "is_array"
+                      ARG_LIST
+                        VAR
+                          ZVAL "tags"
+                    NEW
+                      ZVAL "Sharp\\Set"
+                      ARG_LIST
+                        VAR
+                          ZVAL "tags"
+                    VAR
+                      ZVAL "tags"
+                ASSIGN
+                  PROP
+                    VAR
+                      ZVAL "this"
+                    ZVAL "tags"
+                  VAR
+                    ZVAL "tags"
+              null
+              null
+        "#}
+    );
+}
+
+/// ```php
+/// $rows = \is_array($rows) ? \array_map(fn ($element#1) => \is_array($element#1) ? new \Sharp\Set($element#1) : $element#1, $rows) : $rows;
+/// $this->id = $id;
+/// $this->rows = $rows;
+/// ```
+///
+/// An event's parameter, a case's field and a struct's property that hold a `Set` inside a `List` are each made a `List`
+/// of `Set` objects before the property is set, as a top-level `Set` is, since plain PHP passes nested PHP arrays.
+#[test]
+fn an_event_a_case_and_a_struct_make_each_nested_set_a_set_before_they_set_the_property() {
+    let event = Lowered::new("namespace App.Tenant;\n\npublic event Rows(int id, List<Set<int>> rows);\n");
+    let r#enum = Lowered::new("namespace App.Tenant;\n\nenum Shape\n{\n    case Grid(List<Set<int>> rows);\n}\n");
+    let r#struct = Lowered::new(
+        "namespace App.Tenant;\n\npublic struct Grid\n{\n    public Grid(public List<Set<int>> rows { get; }) { }\n}\n",
+    );
+    let body = |lowered: &Lowered| {
+        let constructor = lowered.render(lowered.method_named("__construct"));
+
+        constructor[constructor.find("STMT_LIST").expect("a constructor body")..].to_owned()
+    };
+
+    // Each property is declared beside its plain parameter, which PHP doesn't set before the body runs.
+    assert_eq!([&event, &r#enum, &r#struct].map(|lowered| property_groups(lowered).len()), [2, 1, 1]);
+    assert_eq!(
+        body(&event),
+        indoc! {r#"
+            STMT_LIST
+                ASSIGN
+                  VAR
+                    ZVAL "rows"
+                  CONDITIONAL
+                    CALL
+                      ZVAL "is_array"
+                      ARG_LIST
+                        VAR
+                          ZVAL "rows"
+                    CALL
+                      ZVAL "array_map"
+                      ARG_LIST
+                        ARROW_FUNC "" @3-3
+                          PARAM_LIST
+                            PARAM
+                              null
+                              ZVAL "element#1"
+                              null
+                              null
+                              null
+                              null
+                          null
+                          CONDITIONAL
+                            CALL
+                              ZVAL "is_array"
+                              ARG_LIST
+                                VAR
+                                  ZVAL "element#1"
+                            NEW
+                              ZVAL "Sharp\\Set"
+                              ARG_LIST
+                                VAR
+                                  ZVAL "element#1"
+                            VAR
+                              ZVAL "element#1"
+                          null
+                          null
+                        VAR
+                          ZVAL "rows"
+                    VAR
+                      ZVAL "rows"
+                ASSIGN
+                  PROP
+                    VAR
+                      ZVAL "this"
+                    ZVAL "id"
+                  VAR
+                    ZVAL "id"
+                ASSIGN
+                  PROP
+                    VAR
+                      ZVAL "this"
+                    ZVAL "rows"
+                  VAR
+                    ZVAL "rows"
+              null
+              null
+        "#}
+    );
+    assert_eq!(
+        body(&r#enum),
+        indoc! {r#"
+            STMT_LIST
+                ASSIGN
+                  VAR
+                    ZVAL "rows"
+                  CONDITIONAL
+                    CALL
+                      ZVAL "is_array"
+                      ARG_LIST
+                        VAR
+                          ZVAL "rows"
+                    CALL
+                      ZVAL "array_map"
+                      ARG_LIST
+                        ARROW_FUNC "" @5-5
+                          PARAM_LIST
+                            PARAM
+                              null
+                              ZVAL "element#1"
+                              null
+                              null
+                              null
+                              null
+                          null
+                          CONDITIONAL
+                            CALL
+                              ZVAL "is_array"
+                              ARG_LIST
+                                VAR
+                                  ZVAL "element#1"
+                            NEW
+                              ZVAL "Sharp\\Set"
+                              ARG_LIST
+                                VAR
+                                  ZVAL "element#1"
+                            VAR
+                              ZVAL "element#1"
+                          null
+                          null
+                        VAR
+                          ZVAL "rows"
+                    VAR
+                      ZVAL "rows"
+                ASSIGN
+                  PROP
+                    VAR
+                      ZVAL "this"
+                    ZVAL "rows"
+                  VAR
+                    ZVAL "rows"
+              null
+              null
+        "#}
+    );
+    assert_eq!(
+        body(&r#struct),
+        indoc! {r#"
+            STMT_LIST
+                ASSIGN
+                  PROP
+                    VAR
+                      ZVAL "this"
+                    ZVAL "rows"
+                  CONDITIONAL
+                    CALL
+                      ZVAL "is_array"
+                      ARG_LIST
+                        VAR
+                          ZVAL "rows"
+                    CALL
+                      ZVAL "array_map"
+                      ARG_LIST
+                        ARROW_FUNC "" @5-5
+                          PARAM_LIST
+                            PARAM
+                              null
+                              ZVAL "element#1"
+                              null
+                              null
+                              null
+                              null
+                          null
+                          CONDITIONAL
+                            CALL
+                              ZVAL "is_array"
+                              ARG_LIST
+                                VAR
+                                  ZVAL "element#1"
+                            NEW
+                              ZVAL "Sharp\\Set"
+                              ARG_LIST
+                                VAR
+                                  ZVAL "element#1"
+                            VAR
+                              ZVAL "element#1"
+                          null
+                          null
+                        VAR
+                          ZVAL "rows"
+                    VAR
+                      ZVAL "rows"
+              null
+              null
+        "#}
+    );
+}
+
+/// ```php
 /// $prefix = "v";
 /// $check = function (\Sharp\Set|array $tags) use ($prefix) { $tags = \is_array($tags) ? new \Sharp\Set($tags) : $tags; return $tags->contains($prefix); };
 /// $size = function (\Sharp\Set|array $tags) { $tags = \is_array($tags) ? new \Sharp\Set($tags) : $tags; return $tags->count(); };
-/// return $check(['a']) ? $size(['b']) : 0;
+/// return $check(new \Sharp\Set(['a'])) ? $size(new \Sharp\Set(['b'])) : 0;
 /// ```
 ///
-/// A call of a lambda that declares a parameter `Set` passes it a list literal too, so a lambda makes each `Set` parameter a
-/// `Set` object first, as a method does. PHP's `fn` has no statements before its expression, so a lambda with an
-/// expression body and a `Set` parameter is a `CLOSURE` whose `use` list captures what the binder says it captures.
+/// A list literal passed to a lambda's `Set` parameter is a `Set`, and plain PHP may pass a PHP array, so a lambda
+/// makes each `Set` parameter a `Set` object first, as a method does. PHP's `fn` has no statements before its
+/// expression, so a lambda with an expression body and a `Set` parameter is a `CLOSURE` whose `use` list captures what
+/// the binder says it captures.
 #[test]
 fn a_lambda_with_a_set_parameter_is_a_closure_that_makes_it_a_set_first() {
     assert_eq!(
@@ -8316,18 +8725,24 @@ fn a_lambda_with_a_set_parameter_is_a_closure_that_makes_it_a_set_first() {
                     VAR
                       ZVAL "check"
                     ARG_LIST
-                      ARRAY [3]
-                        ARRAY_ELEM
-                          ZVAL "a"
-                          null
+                      NEW
+                        ZVAL "Sharp\\Set"
+                        ARG_LIST
+                          ARRAY [3]
+                            ARRAY_ELEM
+                              ZVAL "a"
+                              null
                   CALL
                     VAR
                       ZVAL "size"
                     ARG_LIST
-                      ARRAY [3]
-                        ARRAY_ELEM
-                          ZVAL "b"
-                          null
+                      NEW
+                        ZVAL "Sharp\\Set"
+                        ARG_LIST
+                          ARRAY [3]
+                            ARRAY_ELEM
+                              ZVAL "b"
+                              null
                   ZVAL 0
         "#}
     );
@@ -9055,15 +9470,16 @@ fn a_type_parameter_is_its_bound_and_its_list_lowers_to_nothing() {
 
 /// ```php
 /// /** @template T */
-/// public function first(array $items): mixed { return $items[0]; }
+/// public function first(array $items) { return $items[0]; }
 /// /** @template T */
-/// public function maybe(): mixed { return null; }
+/// public function maybe() { return null; }
 /// /** @template T */
-/// public function pick(mixed $a): mixed { return $a; }
+/// public function pick(mixed $a) { return $a; }
 /// ```
 ///
 /// A type parameter without a bound is `mixed`. PHP refuses `?mixed` and `mixed` in a union, and `mixed` already holds
-/// null and every other type, so `T?` and a union that holds `T` are `mixed` too.
+/// null and every other type, so `T?` and a union that holds `T` are `mixed` too. A result of `mixed` declares no PHP
+/// type, so a plain PHP method without one fits it.
 #[test]
 fn a_type_parameter_without_a_bound_is_mixed_alone_nullable_or_in_a_union() {
     let lowered = Lowered::new(indoc! {"
@@ -9102,7 +9518,7 @@ fn a_type_parameter_without_a_bound_is_mixed_alone_nullable_or_in_a_union() {
               SHARP_TYPE_ARGS
                 ZVAL "Any?"
                 null
-            ZVAL [1] "mixed"
+            null
         "#}
     );
     assert_eq!(
@@ -9112,7 +9528,7 @@ fn a_type_parameter_without_a_bound_is_mixed_alone_nullable_or_in_a_union() {
               SHARP_TYPE_ARGS
                 ZVAL "Any?"
                 null
-            ZVAL [1] "mixed"
+            null
         "#}
     );
     assert_eq!(
@@ -9129,7 +9545,7 @@ fn a_type_parameter_without_a_bound_is_mixed_alone_nullable_or_in_a_union() {
               SHARP_TYPE_ARGS
                 ZVAL "Any?"
                 null
-            ZVAL [1] "mixed"
+            null
         "##}
     );
 }
@@ -9484,12 +9900,14 @@ fn literals_are_short_arrays_and_an_index_is_a_dim() {
 }
 
 /// ```php
-/// public function run(mixed $value, mixed $maybe): mixed { $held = $maybe; return $value; }
+/// public function run(mixed $value, mixed $maybe) { $held = $maybe; return $value; }
 /// ```
 ///
 /// `Any` and `Any?` are both PHP's `mixed`, which already holds null and refuses `?`, so neither carries
 /// `ZEND_TYPE_NULLABLE`. `[1]` is `ZEND_NAME_NOT_FQ`. An `Any` refuses null, spec section 24, so the parameter list
-/// ends with the type texts a call from plain PHP is checked against, as for a generic class.
+/// ends with the type texts a call from plain PHP is checked against, as for a generic class. A result of `mixed`
+/// declares no PHP type, so a plain PHP method without one fits it, and it can hold a `Map` or a `Set`, so `[1]`,
+/// `ZEND_SHARP_RESULT_CROSSES`, gives plain PHP the PHP array of one, spec section 12.
 #[test]
 fn any_and_nullable_any_are_mixed() {
     let lowered = Lowered::new(
@@ -9523,8 +9941,8 @@ fn any_and_nullable_any_are_mixed() {
     assert_eq!(
         lowered.render(lowered.child(method as u32, 3)),
         indoc! {r#"
-            SHARP_TYPE_ARGS
-              ZVAL [1] "mixed"
+            SHARP_TYPE_ARGS [1]
+              null
               ZVAL "Function<Any(Any, Any?)>"
         "#}
     );
@@ -10451,7 +10869,7 @@ fn a_generic_call_carries_its_type_arguments_and_a_generic_method_its_metadata()
                                 SHARP_TYPE_ARGS
                                   null
                                   ZVAL "#0"
-                        SHARP_TYPE_ARGS
+                        SHARP_TYPE_ARGS [1]
                           null
                           ZVAL "Function<List<#0>()>"
                         null
@@ -14071,6 +14489,400 @@ fn a_union_typed_class_constant_has_its_type_union() {
 }
 
 /// ```php
+/// public const array LIMITS = ['card' => 100];
+/// public const array LEVELS = [\App\Tenant\Level::Low->value => 1];
+/// public const array CODES = ['a', 'b'];
+/// public const ?array SPARE = null;
+/// public const array NAMES = [...\App\Tenant\Report::CODES_LIST, 'c'];
+/// public const array CODES_LIST = ['a'];
+/// ```
+///
+/// A class constant can hold no `new`, so a `Map` or a `Set` constant is the PHP array plain PHP reads, spec section
+/// 12, typed `array`: a `Map` of its entries, with a backed enum key as its backing value, and a `Set` of its
+/// elements. PHP# reads the constant as any PHP array that may hold a `Map`, and makes the object of it there. A
+/// spread in a constant's collection literal stays PHP's spread.
+#[test]
+fn a_map_or_a_set_constant_is_its_php_array() {
+    let lowered = Lowered::with(
+        "namespace App.Tenant;\n\nclass Report\n{\n    public const Map<string, int> LIMITS = [\"card\": 100];\n    public const Map<Level, int> LEVELS = [Level.Low: 1];\n    public const Set<string> CODES = [\"a\", \"b\"];\n    public const Map<string, int>? SPARE = null;\n    public const List<string> NAMES = [...Report.CODES_LIST, \"c\"];\n    public const List<string> CODES_LIST = [\"a\"];\n}\n",
+        &[("src/App/Tenant/Level.php", "<?php namespace App\\Tenant; enum Level: string { case Low = 'low'; }")],
+    );
+    let class = lowered.child(lowered.root(), 2);
+
+    assert_eq!(
+        lowered.render(lowered.child(class, 2)),
+        indoc! {r#"
+            STMT_LIST
+              CLASS_CONST_GROUP [1]
+                CLASS_CONST_DECL
+                  CONST_ELEM
+                    ZVAL "LIMITS"
+                    ARRAY [3]
+                      ARRAY_ELEM
+                        ZVAL 100
+                        ZVAL "card"
+                    null
+                null
+                TYPE [7]
+              CLASS_CONST_GROUP [1]
+                CLASS_CONST_DECL
+                  CONST_ELEM
+                    ZVAL "LEVELS"
+                    ARRAY [3]
+                      ARRAY_ELEM
+                        ZVAL 1
+                        PROP
+                          CLASS_CONST
+                            ZVAL "App\\Tenant\\Level"
+                            ZVAL "Low"
+                          ZVAL "value"
+                    null
+                null
+                TYPE [7]
+              CLASS_CONST_GROUP [1]
+                CLASS_CONST_DECL
+                  CONST_ELEM
+                    ZVAL "CODES"
+                    ARRAY [3]
+                      ARRAY_ELEM
+                        ZVAL "a"
+                        null
+                      ARRAY_ELEM
+                        ZVAL "b"
+                        null
+                    null
+                null
+                TYPE [7]
+              CLASS_CONST_GROUP [1]
+                CLASS_CONST_DECL
+                  CONST_ELEM
+                    ZVAL "SPARE"
+                    ZVAL null
+                    null
+                null
+                TYPE [263]
+              CLASS_CONST_GROUP [1]
+                CLASS_CONST_DECL
+                  CONST_ELEM
+                    ZVAL "NAMES"
+                    ARRAY [3]
+                      UNPACK
+                        CLASS_CONST
+                          ZVAL "App\\Tenant\\Report"
+                          ZVAL "CODES_LIST"
+                      ARRAY_ELEM
+                        ZVAL "c"
+                        null
+                    null
+                null
+                TYPE [7]
+              CLASS_CONST_GROUP [1]
+                CLASS_CONST_DECL
+                  CONST_ELEM
+                    ZVAL "CODES_LIST"
+                    ARRAY [3]
+                      ARRAY_ELEM
+                        ZVAL "a"
+                        null
+                    null
+                null
+                TYPE [7]
+        "#}
+    );
+}
+
+/// ```php
+/// return \Sharp\Internal\keep('App\Tenant\Report::CODES#constant')
+///     ?? \Sharp\Internal\keep('App\Tenant\Report::CODES#constant', static fn () =>
+///         \is_array($crossing#1 = \App\Tenant\Report::CODES) ? new \Sharp\Set($crossing#1) : $crossing#1);
+/// ```
+///
+/// A class constant holds no object, so the first read of a `Set` or a `Map` constant makes its PHP array the object
+/// again, spec section 12, and keeps it under the constant's own key. Every later read shares that object, without a
+/// closure. A read through a type parameter, whose class is known only when the code runs, makes the object each time.
+#[test]
+fn a_read_of_a_set_constant_makes_the_set_of_its_array() {
+    let generic = Lowered::new(
+        "namespace App.Tenant;\n\nclass Report\n{\n    public const Set<string> CODES = [\"a\", \"b\"];\n\n    public static int counted<T : Report>() => T.CODES.count();\n}\n",
+    );
+    let counted = generic.body_of("counted");
+    assert!(!counted.contains("Sharp\\\\Internal\\\\keep") && counted.contains("ZVAL \"Sharp\\\\Set\""), "{counted}");
+
+    let lowered = Lowered::new(
+        "namespace App.Tenant;\n\nclass Report\n{\n    public const Set<string> CODES = [\"a\", \"b\"];\n\n    public Set<string> codes() => Report.CODES;\n}\n",
+    );
+
+    assert_eq!(
+        lowered.body_of("codes"),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                COALESCE
+                  CALL
+                    ZVAL "Sharp\\Internal\\keep"
+                    ARG_LIST
+                      ZVAL "App\\Tenant\\Report::CODES#constant"
+                  CALL
+                    ZVAL "Sharp\\Internal\\keep"
+                    ARG_LIST
+                      ZVAL "App\\Tenant\\Report::CODES#constant"
+                      ARROW_FUNC [16] "" @7-7
+                        PARAM_LIST
+                        null
+                        CONDITIONAL
+                          CALL
+                            ZVAL "is_array"
+                            ARG_LIST
+                              ASSIGN
+                                VAR
+                                  ZVAL "crossing#1"
+                                CLASS_CONST
+                                  ZVAL "App\\Tenant\\Report"
+                                  ZVAL "CODES"
+                          NEW
+                            ZVAL "Sharp\\Set"
+                            ARG_LIST
+                              VAR
+                                ZVAL "crossing#1"
+                          VAR
+                            ZVAL "crossing#1"
+                        null
+                        null
+        "#}
+    );
+}
+
+/// ```php
+/// public const array COPY = \App\Tenant\Report::LIMITS;
+/// public const array NESTED = ['inner' => \App\Tenant\Report::LIMITS];
+/// #[\Sharp\Crossing(['map', 'string', null])] private \Sharp\Map $limits = \App\Tenant\Report::LIMITS;
+/// public function sized(\Sharp\Map|array $given = \App\Tenant\Report::LIMITS) …
+/// ```
+///
+/// PHP evaluates a constant's value, an attribute's arguments and a default as a constant expression, which takes no
+/// call, so a `Map` constant's read there is the bare constant, its PHP array. The property's crossing and the
+/// parameter's make the object of it, spec section 12.
+#[test]
+fn a_map_constant_read_in_a_constant_expression_is_the_bare_constant() {
+    let lowered = Lowered::new(
+        "namespace App.Tenant;\n\nclass Report\n{\n    public const Map<string, int> LIMITS = [\"card\": 100];\n\n    public const Map<string, int> COPY = Report.LIMITS;\n\n    public const Map<string, Map<string, int>> NESTED = [\"inner\": Report.LIMITS];\n\n    private Map<string, int> limits = Report.LIMITS;\n\n    public int sized(Map<string, int> given = Report.LIMITS) => given.count();\n}\n",
+    );
+
+    assert_eq!(lowered.diagnostics(), Vec::<String>::new());
+    let bare_reads = lowered
+        .nodes()
+        .iter()
+        .enumerate()
+        .filter(|(index, node)| {
+            node.kind == sharp_kind::SHARP_AST_CLASS_CONST
+                && lowered.text(lowered.nodes()[lowered.child(*index as u32, 1) as usize].text) == "LIMITS"
+        })
+        .count();
+    let kept_reads = lowered
+        .nodes()
+        .iter()
+        .filter(|node| node.kind == sharp_kind::SHARP_AST_ZVAL && lowered.text(node.text).ends_with("#constant"))
+        .count();
+    assert_eq!((bare_reads, kept_reads), (4, 0));
+}
+
+/// ```php
+/// public const iterable STEPS = [1, 2];
+/// public const array PAIR = [1, 'a'];
+/// ```
+///
+/// A constant's value is known before the code runs, spec section 2, so an `Iterable` holds a list literal and a tuple
+/// holds a list literal of constants. PHP types the one `iterable` and the other `array`.
+#[test]
+fn an_iterable_or_a_tuple_constant_holds_its_list_literal() {
+    let lowered = Lowered::new(
+        "namespace App.Tenant;\n\nclass Report\n{\n    public const Iterable<int> STEPS = [1, 2];\n    public const [int, string] PAIR = [1, \"a\"];\n}\n",
+    );
+    let class = lowered.child(lowered.root(), 2);
+
+    assert_eq!(
+        lowered.render(lowered.child(class, 2)),
+        indoc! {r#"
+            STMT_LIST
+              CLASS_CONST_GROUP [1]
+                CLASS_CONST_DECL
+                  CONST_ELEM
+                    ZVAL "STEPS"
+                    ARRAY [3]
+                      ARRAY_ELEM
+                        ZVAL 1
+                        null
+                      ARRAY_ELEM
+                        ZVAL 2
+                        null
+                    null
+                null
+                ZVAL [1] "iterable"
+              CLASS_CONST_GROUP [1]
+                CLASS_CONST_DECL
+                  CONST_ELEM
+                    ZVAL "PAIR"
+                    ARRAY [3]
+                      ARRAY_ELEM
+                        ZVAL 1
+                        null
+                      ARRAY_ELEM
+                        ZVAL "a"
+                        null
+                    null
+                null
+                TYPE [7]
+        "#}
+    );
+}
+
+/// ```php
+/// class Bill extends \App\Record implements \App\Morphable
+/// {
+///     public function getMorphClass(...$arguments): string { return parent::getMorphClass(...$arguments); }
+/// }
+/// ```
+///
+/// A method a PHP# interface requires, which the class takes from a plain PHP parent declaring no return type, is the
+/// parent's method with the interface's return type, so PHP takes it as the implementation, spec section 22. A
+/// result PHP# types as `Any?` declares no PHP type, so `getKey` needs no such method. A method two interfaces require
+/// is forwarded once.
+#[test]
+fn a_method_an_interface_types_and_a_plain_parent_leaves_untyped_is_forwarded_with_the_type() {
+    let lowered = Lowered::with(
+        "namespace App;\n\npublic class Bill : Record, Morphable, Named\n{\n}\n",
+        &[
+            (
+                "src/App/Record.php",
+                "<?php namespace App; class Record { public function getKey() { return 7; } public function getMorphClass() { return 'record'; } }",
+            ),
+            (
+                "src/App/Morphable.sharp",
+                "namespace App;\n\npublic interface Morphable\n{\n    Any? getKey();\n\n    string getMorphClass();\n}\n",
+            ),
+            ("src/App/Named.sharp", "namespace App;\n\npublic interface Named\n{\n    string getMorphClass();\n}\n"),
+        ],
+    );
+    let forwarders = lowered
+        .nodes()
+        .iter()
+        .filter(|node| node.kind == sharp_kind::SHARP_AST_METHOD && lowered.text(node.text) == "getMorphClass")
+        .count();
+    assert_eq!(forwarders, 1);
+
+    assert_eq!(
+        lowered.declared("getMorphClass"),
+        indoc! {r#"
+            METHOD [1] "getMorphClass" @4-5
+              PARAM_LIST
+                PARAM [16]
+                  null
+                  ZVAL "arguments"
+                  null
+                  null
+                  null
+                  null
+              null
+              STMT_LIST
+                RETURN
+                  STATIC_CALL
+                    ZVAL [1] "parent"
+                    ZVAL "getMorphClass"
+                    ARG_LIST
+                      UNPACK
+                        VAR
+                          ZVAL "arguments"
+              ZVAL [1] "string"
+              null
+        "#}
+    );
+    assert!(lowered.nodes().iter().all(|node| lowered.text(node.text) != "getKey"));
+}
+
+/// ```php
+/// public function shape(): mixed { return null; }
+/// public function raw() { return null; }
+/// ```
+///
+/// A result PHP# types as `Any?` erases to `mixed` and declares no PHP type, so a plain PHP parent's untyped method
+/// fits it. An override of a plain PHP method that declares a type, as `JsonSerializable::jsonSerialize(): mixed`,
+/// declares `mixed`, which PHP requires of it. Each carries the function type the engine reads for its method value,
+/// and `[1]`, `ZEND_SHARP_RESULT_CROSSES`, since an `Any?` can hold a `Map` or a `Set`, spec section 12.
+#[test]
+fn an_any_result_declares_mixed_only_where_a_typed_plain_php_method_requires_it() {
+    let lowered = Lowered::with(
+        "namespace App;\n\npublic class Report : Shaped\n{\n    public override Any? shape() => null;\n\n    public Any? raw() => null;\n}\n",
+        &[(
+            "src/App/Shaped.php",
+            "<?php namespace App; abstract class Shaped { abstract public function shape(): mixed; }",
+        )],
+    );
+
+    assert_eq!(
+        lowered.render(lowered.child(lowered.method_named("shape"), 3)),
+        "SHARP_TYPE_ARGS [1]\n  ZVAL [1] \"mixed\"\n  ZVAL \"Function<Any?()>\"\n"
+    );
+    assert_eq!(
+        lowered.render(lowered.child(lowered.method_named("raw"), 3)),
+        "SHARP_TYPE_ARGS [1]\n  null\n  ZVAL \"Function<Any?()>\"\n"
+    );
+}
+
+/// A forwarded method declares the PHP type the interface's own method declares: a `Map` is `\Sharp\Map|array` and a
+/// `Set` `\Sharp\Set|array`, since plain PHP gets either as its PHP array, a `List` `array`, an `Iterable` `iterable`
+/// and a function type `\Closure`. `[257]` on `string?` is
+/// `ZEND_TYPE_NULLABLE | ZEND_NAME_NOT_FQ`, PHP's `?string`. A `void` result calls the parent without `return`.
+#[test]
+fn a_forwarded_method_declares_the_php_type_of_the_interface_method() {
+    let names = ["label", "touch", "owner", "level", "record", "sizes", "tags", "ids", "stream", "make"];
+    let lowered = Lowered::with(
+        "namespace App;\n\npublic class Bill : Record, Shelved\n{\n}\n",
+        &[
+            (
+                "src/App/Record.php",
+                "<?php namespace App; class Record { public function label() {} public function touch() {} public function owner() {} public function level() {} public function record() {} public function sizes() {} public function tags() {} public function ids() {} public function stream() {} public function make() {} }",
+            ),
+            ("src/App/Level.php", "<?php namespace App; enum Level: string { case Low = 'low'; }"),
+            (
+                "src/App/Shelved.sharp",
+                "namespace App;\n\npublic interface Shelved\n{\n    string? label();\n    void touch();\n    Object owner();\n    Level level();\n    Record record();\n    Map<string, int> sizes();\n    Set<string> tags();\n    List<int> ids();\n    Iterable<int> stream();\n    Function<int()> make();\n}\n",
+            ),
+        ],
+    );
+
+    let declared: Vec<String> =
+        names.iter().map(|name| lowered.render(lowered.child(lowered.method_named(name), 3))).collect();
+    assert_eq!(
+        declared,
+        [
+            "ZVAL [257] \"string\"\n",
+            "ZVAL [1] \"void\"\n",
+            "ZVAL [1] \"object\"\n",
+            "ZVAL \"App\\\\Level\"\n",
+            "ZVAL \"App\\\\Record\"\n",
+            "TYPE_UNION\n  ZVAL \"Sharp\\\\Map\"\n  TYPE [7]\n",
+            "TYPE_UNION\n  ZVAL \"Sharp\\\\Set\"\n  TYPE [7]\n",
+            "TYPE [7]\n",
+            "ZVAL [1] \"iterable\"\n",
+            "ZVAL \"Closure\"\n",
+        ]
+    );
+    assert_eq!(
+        lowered.render(lowered.child(lowered.method_named("touch"), 2)),
+        indoc! {r#"
+            STMT_LIST
+              STATIC_CALL
+                ZVAL [1] "parent"
+                ZVAL "touch"
+                ARG_LIST
+                  UNPACK
+                    VAR
+                      ZVAL "arguments"
+        "#}
+    );
+}
+
+/// ```php
 /// private static int $made = 0;
 /// public private(set) static string $last = "none";
 /// ```
@@ -15836,7 +16648,7 @@ fn a_collection_method_value_is_a_closure_over_the_collection() {
 ///         return \App\Shared\Text\TextExtensions::slug($receiver, $separator);
 ///     };
 /// })($title);
-/// return \strtoupper(...);
+/// return \ucfirst(...);
 /// return \Vendor\Pdf\render(...);
 /// ```
 ///
@@ -15845,7 +16657,7 @@ fn a_collection_method_value_is_a_closure_over_the_collection() {
 #[test]
 fn an_extension_method_or_plain_php_function_value_calls_what_it_names() {
     let lowered = Lowered::with(
-        "namespace App;\n\nimport App.Shared.Text.TextExtensions;\nimport Vendor.Pdf;\n\nclass Report\n{\n    public Function<string(string)> slugger(string title) => title.slug;\n\n    public Function<string(string)> upper() => global.strtoupper;\n\n    public Function<string(string)> renderer() => Pdf.render;\n}\n",
+        "namespace App;\n\nimport App.Shared.Text.TextExtensions;\nimport Vendor.Pdf;\n\nclass Report\n{\n    public Function<string(string)> slugger(string title) => title.slug;\n\n    public Function<string(string)> capitalizer() => global.ucfirst;\n\n    public Function<string(string)> renderer() => Pdf.render;\n}\n",
         &[
             (
                 "src/App/Shared/Text/TextExtensions.sharp",
@@ -15907,12 +16719,12 @@ fn an_extension_method_or_plain_php_function_value_calls_what_it_names() {
         "#}
     );
     assert_eq!(
-        lowered.body_of("upper"),
+        lowered.body_of("capitalizer"),
         indoc! {r#"
             STMT_LIST
               RETURN
                 CALL
-                  ZVAL "strtoupper"
+                  ZVAL "ucfirst"
                   CALLABLE_CONVERT
         "#}
     );
@@ -16941,7 +17753,7 @@ fn a_file_lowers_to_the_same_bytes_from_any_workspace_root_and_names_no_path() {
             "no text names the file"
         );
 
-        encode(&unit, &file.contents, [0; 16], &[], &[])
+        encode(&unit, &file.contents, [0; 16], &[], &[], &Library::default())
     });
 
     assert_eq!(encoded[0], encoded[1]);
@@ -17245,6 +18057,112 @@ fn equality_of_strings_ints_and_enums_is_identity() {
     );
 
     assert_eq!(assigned_values(&tree), ["BINARY_OP [16]", "BINARY_OP [17]", "BINARY_OP [16]", "BINARY_OP [16]"]);
+}
+
+/// ```php
+/// $b = \Sharp\Internal\equals($either, $tags); $b = !\Sharp\Internal\equals($either, 1);
+/// return \Sharp\Internal\equals($tuple, 1);
+/// ```
+///
+/// Spec section 19: a value that may be a collection or another type compares by what it holds, which only the running
+/// value tells, so `==` on it runs the engine's `\Sharp\Internal\equals`, and `!=` is its `!`.
+#[test]
+fn equality_of_a_union_that_holds_a_collection_compares_by_what_it_holds() {
+    let body = body_in(
+        "bool run(Set<int>|int either, Set<int> tags, int|[int, string] tuple)",
+        "        let b = either == tags;\n        b = either != 1;\n        return tuple == 1;\n",
+        &[],
+    );
+    let comparisons = &body[body.find("  ASSIGN\n    VAR\n      ZVAL \"b\"").expect("the comparisons")..];
+
+    assert_eq!(
+        format!("STMT_LIST\n{comparisons}"),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "b"
+                CALL
+                  ZVAL "Sharp\\Internal\\equals"
+                  ARG_LIST
+                    VAR
+                      ZVAL "either"
+                    VAR
+                      ZVAL "tags"
+              ASSIGN
+                VAR
+                  ZVAL "b"
+                UNARY_OP [14]
+                  CALL
+                    ZVAL "Sharp\\Internal\\equals"
+                    ARG_LIST
+                      VAR
+                        ZVAL "either"
+                      ZVAL 1
+              RETURN
+                CALL
+                  ZVAL "Sharp\\Internal\\equals"
+                  ARG_LIST
+                    VAR
+                      ZVAL "tuple"
+                    ZVAL 1
+        "#}
+    );
+    // A search compares each element as `==` does, never with `\in_array`'s `===`.
+    let search = body_in(
+        "bool run(List<Set<int>|int> rows, Set<int>|int either)",
+        "        return rows.contains(either);\n",
+        &[],
+    );
+    assert_eq!(
+        format!("STMT_LIST\n{}", &search[search.find("  RETURN").expect("the search")..]),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                BINARY_OP [17]
+                  CALL
+                    ZVAL "array_find_key"
+                    ARG_LIST
+                      VAR
+                        ZVAL "rows"
+                      CALL
+                        ARROW_FUNC "" @9-9
+                          PARAM_LIST
+                            PARAM
+                              null
+                              ZVAL "value#1"
+                              null
+                              null
+                              null
+                              null
+                          null
+                          ARROW_FUNC "" @9-9
+                            PARAM_LIST
+                              PARAM
+                                null
+                                ZVAL "element#2"
+                                null
+                                null
+                                null
+                                null
+                            null
+                            CALL
+                              ZVAL "Sharp\\Internal\\equals"
+                              ARG_LIST
+                                VAR
+                                  ZVAL "element#2"
+                                VAR
+                                  ZVAL "value#1"
+                            null
+                            null
+                          null
+                          null
+                        ARG_LIST
+                          VAR
+                            ZVAL "either"
+                  ZVAL null
+        "#}
+    );
 }
 
 /// ```php
@@ -19285,6 +20203,66 @@ fn a_method_that_yields_is_a_generator() {
     assert_eq!(methods, ["lines [16777217]", "all [16777217]", "kept [1]", "parse [17]", "tryParse [17]"]);
 }
 
+/// A function whose result can hold a `Map` or a `Set`, at any depth, as `Any`, a type parameter or an `Iterable` can,
+/// carries `ZEND_SHARP_RESULT_CROSSES`, `1`, as the attr of its result's type, so each of its returns and yields emits
+/// the `ZEND_SHARP_RETURN_ARRAY` that gives a plain PHP caller the PHP array, spec section 12, and its PHP type takes
+/// `array` beside the class. A lambda carries it by its result as the analysis gives it. A result of any other type, as
+/// `List<int>` or a function, carries none, nor does one that holds a `Map` keyed by a type no PHP array holds, as
+/// `List<int>`, which plain PHP gets as the object. A `Map` keyed by `int|string` crosses, and throws when it runs if
+/// two of its keys are one PHP array key.
+#[test]
+fn a_function_whose_result_holds_a_map_or_a_set_gives_plain_php_its_array() {
+    let lowered = Lowered::new(
+        "namespace App.Tenant;\n\nclass Shelf\n{\n    public Map<string, int> sizes() => [:];\n\n    public Set<string> tags() => [];\n\n    public List<Map<string, int>> rows() => [];\n\n    public List<int> counts() => [];\n\n    public Function<Map<string, int>()> sizer() => () => [:];\n\n    public Any? anything() => null;\n\n    public T held<T>(T value) => value;\n\n    public Iterable<Map<string, int>> streamed(List<Map<string, int>> rows) => rows;\n\n    public Map<int|string, int> mixed() => [:];\n\n    public List<Map<List<int>, int>> listed() => [];\n}\n",
+    );
+
+    assert_eq!(lowered.diagnostics(), Vec::<String>::new());
+    let results: Vec<String> = lowered
+        .nodes()
+        .iter()
+        .enumerate()
+        .filter(|(index, node)| {
+            node.kind == sharp_kind::SHARP_AST_METHOD && !lowered.generated().contains(&(*index as u32))
+        })
+        .map(|(index, node)| {
+            let mut result = lowered.child(index as u32, 3);
+            let mut crosses = false;
+            if lowered
+                .nodes()
+                .get(result as usize)
+                .is_some_and(|node| node.kind == sharp_kind::SHARP_AST_SHARP_TYPE_ARGS)
+            {
+                crosses = lowered.nodes()[result as usize].attr == 1;
+                result = lowered.child(result, 0);
+            }
+            let php_type = lowered.render(result);
+            format!(
+                "{} {}: {}",
+                lowered.text(node.text),
+                crosses,
+                php_type.lines().map(str::trim).collect::<Vec<_>>().join(" ")
+            )
+        })
+        .collect();
+    assert_eq!(
+        results,
+        [
+            "sizes true: TYPE_UNION ZVAL \"Sharp\\\\Map\" TYPE [7]",
+            "tags true: TYPE_UNION ZVAL \"Sharp\\\\Set\" TYPE [7]",
+            "rows true: TYPE [7]",
+            "counts false: TYPE [7]",
+            "sizer false: ZVAL \"Closure\"",
+            "anything true: null",
+            "held true: null",
+            "streamed true: ZVAL [1] \"iterable\"",
+            "mixed true: TYPE_UNION ZVAL \"Sharp\\\\Map\" TYPE [7]",
+            "listed false: TYPE [7]",
+        ]
+    );
+    // The lambda declares no PHP result type, and its result crosses as a method's does.
+    assert!(lowered.body_of("sizer").contains("    SHARP_TYPE_ARGS [1]\n"), "{}", lowered.body_of("sizer"));
+}
+
 /// ```php
 /// $code = $extra > 0 ? $extra : throw new \App\Tenant\Failure(0);
 /// throw new \App\Tenant\Failure($code);
@@ -20722,6 +21700,270 @@ fn attributes_are_attribute_lists_of_attribute_groups_on_their_declarations() {
 }
 
 /// ```php
+/// interface Labeled {
+///     #[\Lib\Field('shown in lists')] public function label(): string;
+///     #[\Lib\Entity('shown in headings')] public function title(): string;
+/// }
+/// trait Labeled\Defaults { #[\Lib\Entity('shown in headings')] public function title(): string { … } }
+/// ```
+///
+/// ```php
+/// #[\Lib\Field('sized')] interface Sized { #[\Lib\Field('size')] public int $size { get; } }
+/// #[\Lib\Field('paid')] final class Paid { … }
+/// final class Limits {
+///     #[\Lib\Field('max')] public const int MAX = 3;
+///     … #[\Lib\Field('twice')] static fn (int $n): int => $n * 2 …
+/// }
+/// ```
+///
+/// Spec section 1: an attribute on an interface, an interface property, an event, a constant or a lambda is where
+/// php-src's grammar holds it: the 4th child of a class, the 3rd of a property group, the 2nd of a constant group and
+/// the 5th of a closure.
+#[test]
+fn attributes_on_an_interface_its_property_an_event_a_constant_and_a_lambda_lower_where_php_holds_them() {
+    let files = lowered_each(
+        &[
+            (
+                "src/App/Sized.sharp",
+                "namespace App;\n\nimport Lib.Field;\n\n[Field(\"sized\")]\npublic interface Sized\n{\n    [Field(\"size\")]\n    int size { get; }\n}\n",
+            ),
+            (
+                "src/App/Paid.sharp",
+                "namespace App;\n\nimport Lib.Field;\n\n[Field(\"paid\")]\npublic event Paid(int orderId);\n",
+            ),
+            (
+                "src/App/Limits.sharp",
+                "namespace App;\n\nimport Lib.Field;\n\npublic class Limits\n{\n    [Field(\"max\")]\n    public const int MAX = 3;\n\n    public Function<int(int)> twice() => [Field(\"twice\")] (int n) => n * 2;\n}\n",
+            ),
+        ],
+        &[common::FIELD],
+    );
+    let attribute = |text: &str| {
+        format!(
+            "ATTRIBUTE_LIST\n  ATTRIBUTE_GROUP\n    ATTRIBUTE\n      ZVAL \"Lib\\\\Field\"\n      ARG_LIST\n        ZVAL {text:?}\n"
+        )
+    };
+    let class_attributes = |name: &str| {
+        let (lowered, class) = class_in(&files, name);
+
+        lowered.render(lowered.child(class, 3))
+    };
+    let (limits, _) = class_in(&files, "Limits");
+    let closure = limits
+        .nodes()
+        .iter()
+        .position(|node| node.kind == sharp_kind::SHARP_AST_CLOSURE || node.kind == sharp_kind::SHARP_AST_ARROW_FUNC)
+        .expect("Limits declares a lambda") as u32;
+
+    assert_eq!(class_attributes("Sized"), attribute("sized"));
+    assert_eq!(member_in(&files, "Sized", &[0, 2]), attribute("size"));
+    assert_eq!(class_attributes("Paid"), attribute("paid"));
+    assert_eq!(member_in(&files, "Limits", &[0, 1]), attribute("max"));
+    assert_eq!(limits.render(limits.child(closure, 4)), attribute("twice"));
+}
+
+/// ```php
+/// #[\Lib\Field([new \Lib\Throttle(perMinute: 60, window: new \App\Window(5))])]
+/// ```
+///
+/// Spec section 1: an attribute argument may `new` an object from constants, which lowers to the `NEW` php-src's
+/// grammar builds in a constant expression, so PHP creates the object each time it reads the attribute.
+#[test]
+fn a_new_in_an_attribute_argument_lowers_to_the_new_php_takes_there() {
+    let throttle = (
+        "src/Lib/Throttle.php",
+        "<?php namespace Lib; final class Throttle { public function __construct(public int $perMinute, public ?object $window = null) {} }",
+    );
+    let files = lowered_each(
+        &[
+            (
+                "src/App/Window.sharp",
+                "namespace App;\n\npublic class Window\n{\n    public Window(public int seconds { get; }) { }\n}\n",
+            ),
+            (
+                "src/App/Orders.sharp",
+                "namespace App;\n\nimport Lib.Field;\nimport Lib.Throttle;\n\n[Field([new Throttle(perMinute: 60, window: new Window(5))])]\npublic class Orders\n{\n}\n",
+            ),
+        ],
+        &[common::FIELD, throttle],
+    );
+    let (lowered, class) = class_in(&files, "Orders");
+
+    assert_eq!(
+        lowered.render(lowered.child(class, 3)),
+        indoc! {r#"
+            ATTRIBUTE_LIST
+              ATTRIBUTE_GROUP
+                ATTRIBUTE
+                  ZVAL "Lib\\Field"
+                  ARG_LIST
+                    ARRAY [3]
+                      ARRAY_ELEM
+                        NEW
+                          ZVAL "Lib\\Throttle"
+                          ARG_LIST
+                            NAMED_ARG
+                              ZVAL "perMinute"
+                              ZVAL 60
+                            NAMED_ARG
+                              ZVAL "window"
+                              NEW
+                                ZVAL "App\\Window"
+                                ARG_LIST
+                                  ZVAL 5
+                        null
+        "#}
+    );
+}
+
+/// ```php
+/// public int $count = 0 { #[\Lib\Field("get")] get => $this->count; #[\Lib\Field("set")] set(#[\Lib\Field("value")] int $value) { $this->count = $value; } }
+/// ```
+///
+/// Spec section 1: an accessor's attributes go on its hook, and a `param:` one on the value `set` takes, which the hook
+/// then declares. An auto accessor with attributes is the hook over the storage. A static property's accessor carries
+/// them on its hidden method, and a promoted parameter's `param:` ones stay on the parameter, beside the property
+/// that takes its `property:` ones.
+#[test]
+fn an_accessor_carries_its_attributes_on_its_hook_and_a_target_picks_the_part() {
+    let files = lowered_each(
+        &[
+            (
+                "src/App/Report.sharp",
+                "namespace App;\n\nimport Lib.Field;\n\npublic class Report\n{\n    public int count { [Field(\"get\")] get; [param: Field(\"value\")] [Field(\"set\")] set; } = 0;\n\n    public static int total { [Field(\"read\")] get => 1; }\n\n    public Report([param: Field(\"in\")] [property: Field(\"kept\")] public int id { get; }) { }\n}\n",
+            ),
+            (
+                "src/App/Sized.sharp",
+                "namespace App;\n\nimport Lib.Field;\n\npublic interface Sized\n{\n    int size { [Field(\"measured\")] get; [param: Field(\"new size\")] set; }\n}\n",
+            ),
+        ],
+        &[common::FIELD],
+    );
+
+    let attribute = |text: &str| {
+        format!(
+            "ATTRIBUTE_LIST\n  ATTRIBUTE_GROUP\n    ATTRIBUTE\n      ZVAL \"Lib\\\\Field\"\n      ARG_LIST\n        ZVAL {text:?}\n"
+        )
+    };
+    let member = |path: &[u32]| member_in(&files, "Report", path);
+    let hooks = [0, 1, 0, 3];
+
+    assert_eq!(
+        member(&[hooks.as_slice(), &[0, 2]].concat()),
+        "PROPERTY_HOOK_SHORT_BODY\n  PROP\n    VAR\n      ZVAL \"this\"\n    ZVAL \"count\"\n"
+    );
+    assert_eq!(member(&[hooks.as_slice(), &[0, 4]].concat()), attribute("get"));
+    assert_eq!(member(&[hooks.as_slice(), &[1, 4]].concat()), attribute("set"));
+    assert_eq!(member(&[hooks.as_slice(), &[1, 0, 0, 0]].concat()), "ZVAL [1] \"int\"\n");
+    assert_eq!(member(&[hooks.as_slice(), &[1, 0, 0, 3]].concat()), attribute("value"));
+    assert_eq!(member(&[1, 4]), attribute("read"));
+    assert_eq!(member(&[2, 2]), attribute("kept"));
+    assert_eq!(member(&[3, 0, 0, 3]), attribute("in"));
+    assert_eq!(member_in(&files, "Sized", &[0, 1, 0, 3, 0, 4]), attribute("measured"));
+    assert_eq!(member_in(&files, "Sized", &[0, 1, 0, 3, 1, 0, 0, 3]), attribute("new size"));
+}
+
+/// Spec section 1: every accessor form takes attributes. A static auto-property's accessors with attributes run as its
+/// hidden methods over the storage, and a get-only auto-property's `get;` with attributes is a hook, so the property is
+/// `protected(set)`, as `readonly` takes no hooks. An event's and a data case's parameters declare properties, so a
+/// targeted list declares each property beside its parameter, which the constructor sets.
+#[test]
+fn every_accessor_form_takes_attributes_and_an_event_parameter_targets_its_part() {
+    let files = lowered_each(
+        &[
+            (
+                "src/App/Counter.sharp",
+                "namespace App;\n\nimport Lib.Field;\n\npublic class Counter\n{\n    public static int counter { [Field(\"counted\")] get; set; } = 0;\n\n    public string code { [Field(\"coded\")] get; }\n\n    public Counter()\n    {\n        this.code = \"c\";\n    }\n}\n",
+            ),
+            (
+                "src/App/Settled.sharp",
+                "namespace App;\n\nimport Lib.Field;\n\npublic event Settled([param: Field(\"order\")] int orderId, [property: Field(\"amount\")] int amount);\n",
+            ),
+            (
+                "src/App/Payment.sharp",
+                "namespace App;\n\nimport Lib.Field;\n\npublic enum Payment\n{\n    case Paid([param: Field(\"given\")] string id);\n    case Open;\n}\n",
+            ),
+            (
+                "src/App/Tagged.sharp",
+                "namespace App;\n\nimport Lib.Field;\n\npublic event Tagged([param: Field(\"tags\")] Set<string> tags);\n",
+            ),
+        ],
+        &[common::FIELD],
+    );
+
+    let attribute = |text: &str| {
+        format!(
+            "ATTRIBUTE_LIST\n  ATTRIBUTE_GROUP\n    ATTRIBUTE\n      ZVAL \"Lib\\\\Field\"\n      ARG_LIST\n        ZVAL {text:?}\n"
+        )
+    };
+    let counter = |path: &[u32]| member_in(&files, "Counter", path);
+    let settled = |path: &[u32]| member_in(&files, "Settled", path);
+    let set_by_constructor = |name: &str| {
+        format!("ASSIGN\n  PROP\n    VAR\n      ZVAL \"this\"\n    ZVAL {name:?}\n  VAR\n    ZVAL {name:?}\n")
+    };
+
+    assert_eq!(counter(&[1, 4]), attribute("counted"));
+    assert!(counter(&[0]).starts_with("PROP_GROUP [20]\n"), "the storage is a private static");
+    assert!(counter(&[3]).starts_with("PROP_GROUP [2049]\n"), "a public protected(set) property, not readonly");
+    assert_eq!(counter(&[3, 1, 0, 3, 0, 4]), attribute("coded"));
+    assert_eq!(settled(&[0, 2]), "null\n");
+    assert_eq!(settled(&[1, 2]), attribute("amount"));
+    assert_eq!(settled(&[2, 0, 0, 3]), attribute("order"));
+    assert_eq!(settled(&[2, 0, 1, 3]), "null\n");
+    assert_eq!(settled(&[2, 2, 0]), set_by_constructor("orderId"));
+    assert_eq!(settled(&[2, 2, 1]), set_by_constructor("amount"));
+    let paid = |path: &[u32]| member_in(&files, "Payment\\Paid", path);
+    assert_eq!(paid(&[0, 2]), "null\n");
+    assert_eq!(paid(&[1, 0, 0, 3]), attribute("given"));
+    assert_eq!(paid(&[1, 2, 0]), set_by_constructor("id"));
+    let tagged = |path: &[u32]| member_in(&files, "Tagged", path);
+    assert_eq!(tagged(&[1, 0, 0, 3]), attribute("tags"));
+    assert_eq!(
+        tagged(&[1, 2, 0]),
+        "ASSIGN\n  VAR\n    ZVAL \"tags\"\n  CONDITIONAL\n    CALL\n      ZVAL \"is_array\"\n      ARG_LIST\n        VAR\n          ZVAL \"tags\"\n    NEW\n      ZVAL \"Sharp\\\\Set\"\n      ARG_LIST\n        VAR\n          ZVAL \"tags\"\n    VAR\n      ZVAL \"tags\"\n"
+    );
+    assert_eq!(tagged(&[1, 2, 1]), set_by_constructor("tags"));
+}
+
+/// Spec section 1: an interface method carries its attributes as a class method does, and so does the trait method
+/// that runs its default body.
+#[test]
+fn an_interface_method_carries_its_attributes() {
+    let files = lowered_each(
+        &[(
+            "src/App/Labeled.sharp",
+            "namespace App;\n\nimport Lib.Field;\nimport Lib.Entity;\n\npublic interface Labeled\n{\n    [Field(\"shown in lists\")]\n    string label();\n\n    [Entity(\"shown in headings\")]\n    string title() => \"Untitled\";\n}\n",
+        )],
+        &[common::FIELD, common::ENTITY],
+    );
+    let member = |name: &str, path: &[u32]| member_in(&files, name, path);
+
+    assert_eq!(
+        [member("Labeled", &[0, 4]), member("Labeled", &[1, 4]), member("Labeled\\Defaults", &[0, 4])].concat(),
+        indoc! {r#"
+            ATTRIBUTE_LIST
+              ATTRIBUTE_GROUP
+                ATTRIBUTE
+                  ZVAL "Lib\\Field"
+                  ARG_LIST
+                    ZVAL "shown in lists"
+            ATTRIBUTE_LIST
+              ATTRIBUTE_GROUP
+                ATTRIBUTE
+                  ZVAL "Lib\\Entity"
+                  ARG_LIST
+                    ZVAL "shown in headings"
+            ATTRIBUTE_LIST
+              ATTRIBUTE_GROUP
+                ATTRIBUTE
+                  ZVAL "Lib\\Entity"
+                  ARG_LIST
+                    ZVAL "shown in headings"
+        "#}
+    );
+}
+
+/// ```php
 /// public \Sharp\Map $stock;    #[\Sharp\Crossing(['map', 'string', null])]
 /// public \Sharp\Map $names;    #[\Sharp\Crossing(['map', null, null])]
 /// public \Sharp\Map $counts;   #[\Sharp\Crossing(['map', 'App\Tenant\Status', null])]
@@ -20844,6 +22086,67 @@ fn a_map_or_set_property_carries_the_plan_a_php_array_crosses_by() {
     );
 }
 
+/// ```php
+/// ```php
+/// public \Sharp\Map $mixed;   #[\Sharp\Crossing(['map', null, null])]
+/// public \Sharp\Map $listed;  #[\Sharp\Crossing(['map', null, null], false)]
+/// public mixed $loose;        #[\Sharp\Crossing(null)]
+/// public iterable $shelved;   #[\Sharp\Crossing(null)]
+/// public mixed $held;         #[\Sharp\Crossing(null)]
+/// ```
+///
+/// Plain PHP reads a property whose type can hold a `Map` or a `Set` with each one as its PHP array, spec section 12, so
+/// an `Any?`, an `Iterable` or a type parameter carries `#[\Sharp\Crossing]` with no plan, since nothing it holds
+/// crosses back. A `Map` keyed by `int|string` reads as its PHP array too, which throws when it runs if two of its keys
+/// are one PHP array key. A `Map` keyed by a type no PHP array holds, as `List<int>`, crosses in by its plan, and its
+/// `false` keeps it the object plain PHP reads.
+#[test]
+fn a_property_that_can_hold_a_map_carries_whether_plain_php_reads_its_array() {
+    let lowered = Lowered::new(
+        "namespace App.Tenant;\n\nclass Ledger<T>\n{\n    public Map<int|string, int> mixed { get; set; } = [:];\n    public Map<List<int>, int> listed { get; set; } = [:];\n    public Any? loose { get; set; } = null;\n    public Iterable<Map<string, int>> shelved { get; set; } = [[\"s\": 1]];\n    public T? held { get; set; } = null;\n}\n",
+    );
+    let attributes: Vec<String> = lowered
+        .nodes()
+        .iter()
+        .enumerate()
+        .filter(|(_, node)| node.kind == sharp_kind::SHARP_AST_PROP_GROUP)
+        .map(|(index, _)| lowered.render(lowered.child(index as u32, 2)))
+        .collect();
+
+    // The attribute list of `#[\Sharp\Crossing(arguments)]`, with the arguments' rendering indented under its `ARG_LIST`.
+    let crossing = |arguments: &str| {
+        let mut attribute = String::from(
+            "ATTRIBUTE_LIST\n  ATTRIBUTE_GROUP\n    ATTRIBUTE\n      ZVAL \"Sharp\\\\Crossing\"\n      ARG_LIST\n",
+        );
+        for line in arguments.lines() {
+            attribute.push_str("        ");
+            attribute.push_str(line);
+            attribute.push('\n');
+        }
+
+        attribute
+    };
+    let unplanned = crossing("ZVAL null\n");
+    let keyed = indoc! {r#"
+        ARRAY [3]
+          ARRAY_ELEM
+            ZVAL "map"
+            null
+          ARRAY_ELEM
+            ZVAL null
+            null
+          ARRAY_ELEM
+            ZVAL null
+            null
+    "#};
+
+    assert_eq!(lowered.diagnostics(), Vec::<String>::new(), "the source lowers");
+    assert_eq!(
+        attributes,
+        [crossing(keyed), crossing(&format!("{keyed}ZVAL false\n")), unplanned.clone(), unplanned.clone(), unplanned,]
+    );
+}
+
 /// `Lib\Calc`, a plain PHP class whose methods take and give PHP arrays and closures that take them.
 const ARRAYS: (&str, &str) = (
     "src/Lib/Calc.php",
@@ -20871,6 +22174,40 @@ fn statements_at(code: &str, library: &[(&str, &str)], positions: std::ops::Rang
     let body = lowered.child(lowered.method_named("run"), 2);
 
     positions.map(|position| lowered.render(lowered.child(body, position))).collect()
+}
+
+/// ```php
+/// \Lib\Calc::sum(\Sharp\Internal\arrayOf($stock), extra: \Sharp\Internal\arrayOf($stock));
+/// ```
+///
+/// Spec section 16: a named argument that matches no other parameter of a plain PHP method fills its `...` parameter,
+/// so a `Map` goes in under its name as its PHP array, as it goes in by position.
+#[test]
+fn a_map_named_into_a_plain_php_variadic_goes_in_as_its_php_array() {
+    let code = "namespace App.Tenant;\n\nimport Lib.Calc;\n\nclass Report\n{\n    public int run(int extra)\n    {\n        Map<string, int> stock = this.stock();\n        return Calc.sum(stock, extra: stock);\n    }\n\n    private Map<string, int> stock() => [:];\n}\n";
+
+    assert_eq!(
+        statements_at(code, &[], 1..2),
+        [indoc! {r#"
+            RETURN
+              STATIC_CALL
+                ZVAL "Lib\\Calc"
+                ZVAL "sum"
+                ARG_LIST
+                  CALL
+                    ZVAL "Sharp\\Internal\\arrayOf"
+                    ARG_LIST
+                      VAR
+                        ZVAL "stock"
+                  NAMED_ARG
+                    ZVAL "extra"
+                    CALL
+                      ZVAL "Sharp\\Internal\\arrayOf"
+                      ARG_LIST
+                        VAR
+                          ZVAL "stock"
+        "#}]
+    );
 }
 
 /// ```php
@@ -20916,14 +22253,135 @@ fn a_plain_php_method_of_a_property_s_name_read_as_a_function_is_a_first_class_c
 }
 
 /// ```php
-/// return \Lib\Calc::total((fn ($map#1) => \is_object($map#1)
-///     ? \array_combine(\array_column($map#1->keys(), 'value'), $map#1->values()) : $map#1)($stock));
-/// return \Lib\Calc::sum(...\array_map(fn ($element#1) => (fn ($map#2) => \is_object($map#2)
-///     ? \array_combine(\array_column($map#2->keys(), 'value'), $map#2->values()) : $map#2)($element#1), [$stock]));
+/// $owner = $this->owner;
+/// $relation = $this->owner(...);
 /// ```
 ///
-/// A `Map` keyed by a backed enum goes into a plain PHP parameter that takes `array` with each case's backing value as
-/// its key, spec section 12, as the keys a PHP array holds, and so does each `Map` a spread passes.
+/// A PHP# class whose plain PHP parent defines `__get`, as a PHP# Eloquent model is, has the properties `__get` reads,
+/// spec section 14.3, so a read of its own method's name reads the property, and takes the method where the code takes
+/// a function.
+#[test]
+fn a_read_of_a_sharp_class_whose_plain_php_parent_defines_get_reads_the_property() {
+    let model = (
+        "src/Lib/Model.php",
+        "<?php\n\nnamespace Lib;\n\nabstract class Model\n{\n    public function __get(string $name): mixed\n    {\n        return $name;\n    }\n}\n",
+    );
+    let code = "namespace App.Tenant;\n\nimport Lib.Model;\n\nclass Row : Model\n{\n    public Row() : super() { }\n\n    public string owner() => \"relation\";\n\n    public int run()\n    {\n        const owner = this.owner;\n        Function<string()> relation = this.owner;\n        return global.strlen(relation()) + (owner is string ? 1 : 0);\n    }\n}\n";
+    let lowered = Lowered::with(code, &[model]);
+    let run = member_in(std::slice::from_ref(&lowered), "Row", &[2, 2]);
+
+    assert_eq!(
+        run,
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "owner"
+                PROP
+                  VAR
+                    ZVAL "this"
+                  ZVAL "owner"
+              ASSIGN
+                VAR
+                  ZVAL "relation"
+                METHOD_CALL
+                  VAR
+                    ZVAL "this"
+                  ZVAL "owner"
+                  CALLABLE_CONVERT
+              RETURN
+                BINARY_OP [1]
+                  CALL
+                    ZVAL "strlen"
+                    ARG_LIST
+                      CALL
+                        VAR
+                          ZVAL "relation"
+                        ARG_LIST
+                  CONDITIONAL [1]
+                    CALL
+                      ZVAL "is_string"
+                      ARG_LIST
+                        VAR
+                          ZVAL "owner"
+                    ZVAL 1
+                    ZVAL 0
+        "#}
+    );
+}
+
+/// ```php
+/// $contact = $row->contact;
+/// $owner = $row->owner;
+/// $relation = $row->owner(...);
+/// $called = $row->owner();
+/// ```
+///
+/// A plain PHP class that defines `__get` has the properties it reads, spec section 14.3, so a read of a name it also
+/// has a method of reads the property, typed by an `@property-read` line or not. The method is the value where the code
+/// takes a function, and a call calls it.
+#[test]
+fn a_read_of_a_plain_php_class_with_get_reads_the_property_and_takes_the_method_as_a_function() {
+    let row = (
+        "src/Lib/Row.php",
+        "<?php\n\nnamespace Lib;\n\n/** @property-read Contact $contact */\nclass Row\n{\n    public function contact(): Contact\n    {\n        return new Contact();\n    }\n\n    public function owner(): Contact\n    {\n        return new Contact();\n    }\n\n    public function __get(string $name): mixed\n    {\n        return new Contact();\n    }\n}\n",
+    );
+    let contact = ("src/Lib/Contact.php", "<?php\n\nnamespace Lib;\n\nfinal class Contact\n{\n}\n");
+    let code = "namespace App.Tenant;\n\nimport Lib.Contact;\nimport Lib.Row;\nextern Row.owner;\n\nclass Report\n{\n    public int run(Row row)\n    {\n        const contact = row.contact;\n        const owner = row.owner;\n        Function<Contact()> relation = row.owner;\n        const called = row.owner();\n        return [contact, relation(), called].count() + (owner is Contact ? 1 : 0);\n    }\n}\n";
+
+    assert_eq!(
+        statements_at(code, &[row, contact], 0..4),
+        [
+            indoc! {r#"
+                ASSIGN
+                  VAR
+                    ZVAL "contact"
+                  PROP
+                    VAR
+                      ZVAL "row"
+                    ZVAL "contact"
+            "#},
+            indoc! {r#"
+                ASSIGN
+                  VAR
+                    ZVAL "owner"
+                  PROP
+                    VAR
+                      ZVAL "row"
+                    ZVAL "owner"
+            "#},
+            indoc! {r#"
+                ASSIGN
+                  VAR
+                    ZVAL "relation"
+                  METHOD_CALL
+                    VAR
+                      ZVAL "row"
+                    ZVAL "owner"
+                    CALLABLE_CONVERT
+            "#},
+            indoc! {r#"
+                ASSIGN
+                  VAR
+                    ZVAL "called"
+                  METHOD_CALL
+                    VAR
+                      ZVAL "row"
+                    ZVAL "owner"
+                    ARG_LIST
+            "#},
+        ]
+    );
+}
+
+/// ```php
+/// return \Lib\Calc::total(\Sharp\Internal\arrayOf($stock));
+/// return \Lib\Calc::sum(...\Sharp\Internal\arrayOf([$stock]));
+/// ```
+///
+/// A `Map` keyed by a backed enum goes into a plain PHP parameter that takes `array` through
+/// `\Sharp\Internal\arrayOf`, which keys it by each case's backing value, spec section 12, as the keys a PHP array
+/// holds, and so does each `Map` a spread passes.
 #[test]
 fn a_map_keyed_by_a_backed_enum_goes_into_a_plain_php_array_with_backing_values_as_keys() {
     let level = ("src/Lib/Level.php", "<?php namespace Lib; enum Level: string { case Low = 'low'; }");
@@ -20938,43 +22396,7 @@ fn a_map_keyed_by_a_backed_enum_goes_into_a_plain_php_array_with_backing_values_
                 ZVAL "total"
                 ARG_LIST
                   CALL
-                    ARROW_FUNC "" @11-11
-                      PARAM_LIST
-                        PARAM
-                          null
-                          ZVAL "map#1"
-                          null
-                          null
-                          null
-                          null
-                      null
-                      CONDITIONAL
-                        CALL
-                          ZVAL "is_object"
-                          ARG_LIST
-                            VAR
-                              ZVAL "map#1"
-                        CALL
-                          ZVAL "array_combine"
-                          ARG_LIST
-                            CALL
-                              ZVAL "array_column"
-                              ARG_LIST
-                                METHOD_CALL
-                                  VAR
-                                    ZVAL "map#1"
-                                  ZVAL "keys"
-                                  ARG_LIST
-                                ZVAL "value"
-                            METHOD_CALL
-                              VAR
-                                ZVAL "map#1"
-                              ZVAL "values"
-                              ARG_LIST
-                        VAR
-                          ZVAL "map#1"
-                      null
-                      null
+                    ZVAL "Sharp\\Internal\\arrayOf"
                     ARG_LIST
                       VAR
                         ZVAL "stock"
@@ -20990,61 +22412,8 @@ fn a_map_keyed_by_a_backed_enum_goes_into_a_plain_php_array_with_backing_values_
                 ARG_LIST
                   UNPACK
                     CALL
-                      ZVAL "array_map"
+                      ZVAL "Sharp\\Internal\\arrayOf"
                       ARG_LIST
-                        ARROW_FUNC "" @11-11
-                          PARAM_LIST
-                            PARAM
-                              null
-                              ZVAL "element#1"
-                              null
-                              null
-                              null
-                              null
-                          null
-                          CALL
-                            ARROW_FUNC "" @11-11
-                              PARAM_LIST
-                                PARAM
-                                  null
-                                  ZVAL "map#2"
-                                  null
-                                  null
-                                  null
-                                  null
-                              null
-                              CONDITIONAL
-                                CALL
-                                  ZVAL "is_object"
-                                  ARG_LIST
-                                    VAR
-                                      ZVAL "map#2"
-                                CALL
-                                  ZVAL "array_combine"
-                                  ARG_LIST
-                                    CALL
-                                      ZVAL "array_column"
-                                      ARG_LIST
-                                        METHOD_CALL
-                                          VAR
-                                            ZVAL "map#2"
-                                          ZVAL "keys"
-                                          ARG_LIST
-                                        ZVAL "value"
-                                    METHOD_CALL
-                                      VAR
-                                        ZVAL "map#2"
-                                      ZVAL "values"
-                                      ARG_LIST
-                                VAR
-                                  ZVAL "map#2"
-                              null
-                              null
-                            ARG_LIST
-                              VAR
-                                ZVAL "element#1"
-                          null
-                          null
                         ARRAY [3]
                           ARRAY_ELEM
                             VAR
@@ -21055,17 +22424,18 @@ fn a_map_keyed_by_a_backed_enum_goes_into_a_plain_php_array_with_backing_values_
 }
 
 /// ```php
-/// \Lib\Calc::total(\iterator_to_array($stock));
-/// \Lib\Calc::total(\iterator_to_array($tags, false));
-/// \Lib\Calc::total(\is_object($spare) ? \iterator_to_array($spare) : $spare);
-/// \Lib\Calc::sum(...\array_map(fn ($element#1) => \is_object($element#1) ? \iterator_to_array($element#1) : $element#1, $shelves));
-/// \implode(",", \iterator_to_array($tags, false));
-/// return \Lib\Calc::total(items: \iterator_to_array($stock));
+/// \Lib\Calc::total(\Sharp\Internal\arrayOf($stock));
+/// \Lib\Calc::total(\Sharp\Internal\arrayOf($tags));
+/// \Lib\Calc::total(\Sharp\Internal\arrayOf($spare));
+/// \Lib\Calc::sum(...\Sharp\Internal\arrayOf($shelves));
+/// \implode(",", \Sharp\Internal\arrayOf($tags));
+/// return \Lib\Calc::total(items: \Sharp\Internal\arrayOf($stock));
 /// ```
 ///
 /// A `Map` or a `Set` goes into a plain PHP parameter that takes `array` as its PHP array, spec section 12, and a `Set`
-/// without its positions, whether a method or a function called through its namespace takes it. A value that may be
-/// null goes in as it is when it is null, and each `Map` of a spread `List` goes in as its PHP array.
+/// as the list of its elements, whether a method or a function called through its namespace takes it, as
+/// `\Sharp\Internal\arrayOf` gives them. A value that is null goes in as it is, and each `Map` of a spread `List` goes
+/// in as its PHP array.
 #[test]
 fn a_map_or_set_goes_into_a_plain_php_array_parameter_as_its_php_array() {
     let code = "namespace App.Tenant;\n\nimport Lib.Calc;\n\nclass Report\n{\n    public int run(int extra)\n    {\n        Map<string, int> stock = this.stock();\n        Set<string> tags = this.tags();\n        Map<string, int>? spare = this.spare();\n        List<Map<string, int>> shelves = this.shelves();\n        Calc.total(stock);\n        Calc.total(tags);\n        Calc.total(spare);\n        Calc.sum(...shelves);\n        global.implode(\",\", tags);\n        return Calc.total(items: stock);\n    }\n\n    private Map<string, int> stock() => [:];\n\n    private Set<string> tags() => [];\n\n    private Map<string, int>? spare() => null;\n\n    private List<Map<string, int>> shelves() => [];\n}\n";
@@ -21079,7 +22449,7 @@ fn a_map_or_set_goes_into_a_plain_php_array_parameter_as_its_php_array() {
                   ZVAL "total"
                   ARG_LIST
                     CALL
-                      ZVAL "iterator_to_array"
+                      ZVAL "Sharp\\Internal\\arrayOf"
                       ARG_LIST
                         VAR
                           ZVAL "stock"
@@ -21090,30 +22460,21 @@ fn a_map_or_set_goes_into_a_plain_php_array_parameter_as_its_php_array() {
                   ZVAL "total"
                   ARG_LIST
                     CALL
-                      ZVAL "iterator_to_array"
+                      ZVAL "Sharp\\Internal\\arrayOf"
                       ARG_LIST
                         VAR
                           ZVAL "tags"
-                        ZVAL false
             "#},
             indoc! {r#"
                 STATIC_CALL
                   ZVAL "Lib\\Calc"
                   ZVAL "total"
                   ARG_LIST
-                    CONDITIONAL
-                      CALL
-                        ZVAL "is_object"
-                        ARG_LIST
-                          VAR
-                            ZVAL "spare"
-                      CALL
-                        ZVAL "iterator_to_array"
-                        ARG_LIST
-                          VAR
-                            ZVAL "spare"
-                      VAR
-                        ZVAL "spare"
+                    CALL
+                      ZVAL "Sharp\\Internal\\arrayOf"
+                      ARG_LIST
+                        VAR
+                          ZVAL "spare"
             "#},
             indoc! {r#"
                 STATIC_CALL
@@ -21122,33 +22483,8 @@ fn a_map_or_set_goes_into_a_plain_php_array_parameter_as_its_php_array() {
                   ARG_LIST
                     UNPACK
                       CALL
-                        ZVAL "array_map"
+                        ZVAL "Sharp\\Internal\\arrayOf"
                         ARG_LIST
-                          ARROW_FUNC "" @16-16
-                            PARAM_LIST
-                              PARAM
-                                null
-                                ZVAL "element#1"
-                                null
-                                null
-                                null
-                                null
-                            null
-                            CONDITIONAL
-                              CALL
-                                ZVAL "is_object"
-                                ARG_LIST
-                                  VAR
-                                    ZVAL "element#1"
-                              CALL
-                                ZVAL "iterator_to_array"
-                                ARG_LIST
-                                  VAR
-                                    ZVAL "element#1"
-                              VAR
-                                ZVAL "element#1"
-                            null
-                            null
                           VAR
                             ZVAL "shelves"
             "#},
@@ -21158,11 +22494,10 @@ fn a_map_or_set_goes_into_a_plain_php_array_parameter_as_its_php_array() {
                   ARG_LIST
                     ZVAL ","
                     CALL
-                      ZVAL "iterator_to_array"
+                      ZVAL "Sharp\\Internal\\arrayOf"
                       ARG_LIST
                         VAR
                           ZVAL "tags"
-                        ZVAL false
             "#},
             indoc! {r#"
                 RETURN
@@ -21173,7 +22508,7 @@ fn a_map_or_set_goes_into_a_plain_php_array_parameter_as_its_php_array() {
                       NAMED_ARG
                         ZVAL "items"
                         CALL
-                          ZVAL "iterator_to_array"
+                          ZVAL "Sharp\\Internal\\arrayOf"
                           ARG_LIST
                             VAR
                               ZVAL "stock"
@@ -21183,14 +22518,14 @@ fn a_map_or_set_goes_into_a_plain_php_array_parameter_as_its_php_array() {
 }
 
 /// ```php
-/// [$sorted = \is_object($sorted) ? \iterator_to_array($sorted) : $sorted, \Lib\Calc::sort($sorted), $sorted = \is_array($sorted) ? \Sharp\Map::from($sorted) : $sorted][1];
-/// [\Lib\Calc::fill($filled), $filled = \is_array($filled) ? \Sharp\Map::from($filled) : $filled][0];
+/// [$sorted = \Sharp\Internal\arrayOf($sorted), \Lib\Calc::sort($sorted), $sorted = \is_array($sorted) ? \Sharp\Map::from($sorted) : $sorted][1];
+/// [$filled = \Sharp\Internal\arrayOf($filled), \Lib\Calc::fill($filled), $filled = \is_array($filled) ? \Sharp\Map::from($filled) : $filled][1];
 /// \Lib\Calc::bump($count);
 /// ```
 ///
 /// A typed local that holds a `Map` or a `Set` goes into a plain PHP reference parameter and comes back as the object
-/// of what plain PHP wrote there: as its PHP array first where the parameter takes `array`, and as itself otherwise.
-/// A local of any other type goes in as it is.
+/// of what plain PHP wrote there: as its PHP array first where the parameter takes an array, as `array` and an
+/// untyped one do, and as itself otherwise. A local of any other type goes in as it is.
 #[test]
 fn a_typed_local_crosses_into_and_back_from_a_plain_php_reference_parameter() {
     let code = "namespace App.Tenant;\n\nimport Lib.Calc;\n\nclass Report\n{\n    public int run(int extra)\n    {\n        Map<int, string> sorted = this.names();\n        Map<int, string> filled = this.names();\n        int count = 0;\n        Calc.sort(sorted);\n        Calc.fill(filled);\n        Calc.bump(count);\n        return count;\n    }\n\n    private Map<int, string> names() => [:];\n}\n";
@@ -21205,19 +22540,11 @@ fn a_typed_local_crosses_into_and_back_from_a_plain_php_reference_parameter() {
                       ASSIGN
                         VAR
                           ZVAL "sorted"
-                        CONDITIONAL
-                          CALL
-                            ZVAL "is_object"
-                            ARG_LIST
-                              VAR
-                                ZVAL "sorted"
-                          CALL
-                            ZVAL "iterator_to_array"
-                            ARG_LIST
-                              VAR
-                                ZVAL "sorted"
-                          VAR
-                            ZVAL "sorted"
+                        CALL
+                          ZVAL "Sharp\\Internal\\arrayOf"
+                          ARG_LIST
+                            VAR
+                              ZVAL "sorted"
                       null
                     ARRAY_ELEM
                       STATIC_CALL
@@ -21252,6 +22579,16 @@ fn a_typed_local_crosses_into_and_back_from_a_plain_php_reference_parameter() {
                 DIM
                   ARRAY [3]
                     ARRAY_ELEM
+                      ASSIGN
+                        VAR
+                          ZVAL "filled"
+                        CALL
+                          ZVAL "Sharp\\Internal\\arrayOf"
+                          ARG_LIST
+                            VAR
+                              ZVAL "filled"
+                      null
+                    ARRAY_ELEM
                       STATIC_CALL
                         ZVAL "Lib\\Calc"
                         ZVAL "fill"
@@ -21278,7 +22615,7 @@ fn a_typed_local_crosses_into_and_back_from_a_plain_php_reference_parameter() {
                           VAR
                             ZVAL "filled"
                       null
-                  ZVAL 0
+                  ZVAL 1
             "#},
             indoc! {r#"
                 STATIC_CALL
@@ -21293,15 +22630,16 @@ fn a_typed_local_crosses_into_and_back_from_a_plain_php_reference_parameter() {
 }
 
 /// ```php
-/// $count(\iterator_to_array($names), \iterator_to_array($names), \iterator_to_array($names));
-/// $count(items: \iterator_to_array($names));
-/// $plain($names);
-/// $doubler(\iterator_to_array($names));
+/// $count(\Sharp\Internal\arrayOf($names, $count), \Sharp\Internal\arrayOf($names, $count), \Sharp\Internal\arrayOf($names, $count));
+/// $count(items: \Sharp\Internal\arrayOf($names, $count));
+/// $plain(\Sharp\Internal\arrayOf($names, $plain));
+/// $doubler(\Sharp\Internal\arrayOf($names));
 /// ```
 ///
-/// A call of a plain PHP closure a local holds crosses each `Map` by the parameters of the closure's signature, as a
-/// call of a plain PHP method does: by position, by name and into its variadic parameter. A closure whose signature
-/// its type doesn't give takes the object, and a plain PHP object a local holds crosses each by its `__invoke`.
+/// A call of a closure a local holds crosses each `Map` by the parameters of the closure's signature, as a call of a
+/// plain PHP method does: by position, by name and into its variadic parameter, and a closure whose signature its type
+/// doesn't give takes any value. `\Sharp\Internal\arrayOf` reads the closure, and keeps the object for a closure of
+/// PHP#, spec section 12. A plain PHP object a local holds crosses each by its `__invoke`.
 #[test]
 fn a_call_of_a_plain_php_callable_a_local_holds_crosses_each_map_by_its_parameters() {
     let code = "namespace App.Tenant;\n\nimport Lib.Calc;\nimport Lib.Doubler;\n\nclass Report\n{\n    public int run(int extra)\n    {\n        Map<int, string> names = this.names();\n        const count = Calc.counter();\n        const plain = Calc.plain();\n        const doubler = new Doubler();\n        count(names, names, names);\n        count(items: names);\n        plain(names);\n        doubler(names);\n        return 0;\n    }\n\n    private Map<int, string> names() => [:];\n}\n";
@@ -21309,14 +22647,13 @@ fn a_call_of_a_plain_php_callable_a_local_holds_crosses_each_map_by_its_paramete
         "src/Lib/Doubler.php",
         "<?php namespace Lib; final class Doubler { public function __invoke(array $items): int { return 0; } }",
     );
-    let crossed = indoc! {r#"
-        CALL
-          ZVAL "iterator_to_array"
-          ARG_LIST
-            VAR
-              ZVAL "names"
-    "#};
-    let passed = "VAR\n  ZVAL \"names\"\n";
+    // The tree of `\Sharp\Internal\arrayOf($names, $local)`, or of `\Sharp\Internal\arrayOf($names)` without a local.
+    let crossed = |local: Option<&str>| {
+        let receiver = local.map_or(String::new(), |local| format!("    VAR\n      ZVAL \"{local}\"\n"));
+
+        format!("CALL\n  ZVAL \"Sharp\\\\Internal\\\\arrayOf\"\n  ARG_LIST\n    VAR\n      ZVAL \"names\"\n{receiver}")
+    };
+    let counted = crossed(Some("count"));
     // The tree of `$local(…)` with `arguments`, each a rendered node, below its `ARG_LIST`.
     let called = |local: &str, arguments: &[&str]| {
         let mut call = format!("CALL\n  VAR\n    ZVAL \"{local}\"\n  ARG_LIST\n");
@@ -21326,16 +22663,49 @@ fn a_call_of_a_plain_php_callable_a_local_holds_crosses_each_map_by_its_paramete
 
         call
     };
-    let named = format!("NAMED_ARG\n  ZVAL \"items\"\n{}", nested(crossed, 1));
+    let named = format!("NAMED_ARG\n  ZVAL \"items\"\n{}", nested(&counted, 1));
 
     assert_eq!(
         statements_at(code, &[doubler], 4..8),
         [
-            called("count", &[crossed, crossed, crossed]),
+            called("count", &[&counted, &counted, &counted]),
             called("count", &[named.as_str()]),
-            called("plain", &[passed]),
-            called("doubler", &[crossed]),
+            called("plain", &[&crossed(Some("plain"))]),
+            called("doubler", &[&crossed(None)]),
         ]
+    );
+}
+
+/// ```php
+/// ($function#1 = \Lib\Calc::counter())(\Sharp\Internal\arrayOf($names, $function#1));
+/// ```
+///
+/// A call of any other expression that gives a closure holds the closure first, so `\Sharp\Internal\arrayOf` reads it
+/// as it reads a closure a local holds, spec section 12.
+#[test]
+fn a_call_of_a_closure_an_expression_gives_holds_it_for_each_map_it_crosses() {
+    let code = "namespace App.Tenant;\n\nimport Lib.Calc;\n\nclass Report\n{\n    public int run(int extra)\n    {\n        Map<int, string> names = this.names();\n        Calc.counter()(names);\n        return 0;\n    }\n\n    private Map<int, string> names() => [:];\n}\n";
+
+    assert_eq!(
+        statements_at(code, &[], 1..2),
+        [indoc! {r#"
+            CALL
+              ASSIGN
+                VAR
+                  ZVAL "function#1"
+                STATIC_CALL
+                  ZVAL "Lib\\Calc"
+                  ZVAL "counter"
+                  ARG_LIST
+              ARG_LIST
+                CALL
+                  ZVAL "Sharp\\Internal\\arrayOf"
+                  ARG_LIST
+                    VAR
+                      ZVAL "names"
+                    VAR
+                      ZVAL "function#1"
+        "#}]
     );
 }
 
@@ -21764,6 +23134,70 @@ fn is_and_as_of_any_or_a_union_are_the_engine_test_of_its_type() {
                   VAR
                     ZVAL "extra"
                   ZVAL null
+        "#}
+    );
+}
+
+/// ```php
+/// $pair = <is [int, string]>($extra) ? $extra : null;
+/// $type = <is Class<App.Tenant.Report>>($extra);
+/// $object = <is Object|int>($extra);
+/// $boxed = <is Class<App.Tenant.Box<int>>>($extra);
+/// $box = <is Class<App.Tenant.Box>>($extra);
+/// ```
+///
+/// `is` and `as` of a tuple, of a class value and of `Object` are the engine's test of the type, as a collection's are,
+/// which checks a tuple's count and each element and finds the class a class value names. A generic class written
+/// without type arguments in `Class<Box>` is the class alone, which takes it with any type arguments.
+#[test]
+fn is_and_as_of_a_tuple_a_class_value_or_object_are_the_engine_test_of_its_type() {
+    assert_eq!(
+        body_in(
+            "void run(Any? extra)",
+            "        const pair = extra as [int, string];\n        const type = extra is Class<Report>;\n        const object = extra is int|Object;\n        const boxed = extra is Class<Box<int>>;\n        const box = extra is Class<Box>;\n",
+            &[("src/App/Tenant/Box.sharp", "namespace App.Tenant;\n\npublic class Box<TItem>\n{\n}\n")]
+        ),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "pair"
+                CONDITIONAL
+                  SHARP_IS_TYPE
+                    VAR
+                      ZVAL "extra"
+                    ZVAL "[int, string]"
+                  VAR
+                    ZVAL "extra"
+                  ZVAL null
+              ASSIGN
+                VAR
+                  ZVAL "type"
+                SHARP_IS_TYPE
+                  VAR
+                    ZVAL "extra"
+                  ZVAL "Class<App.Tenant.Report>"
+              ASSIGN
+                VAR
+                  ZVAL "object"
+                SHARP_IS_TYPE
+                  VAR
+                    ZVAL "extra"
+                  ZVAL "Object|int"
+              ASSIGN
+                VAR
+                  ZVAL "boxed"
+                SHARP_IS_TYPE
+                  VAR
+                    ZVAL "extra"
+                  ZVAL "Class<App.Tenant.Box<int>>"
+              ASSIGN
+                VAR
+                  ZVAL "box"
+                SHARP_IS_TYPE
+                  VAR
+                    ZVAL "extra"
+                  ZVAL "Class<App.Tenant.Box>"
         "#}
     );
 }
@@ -23332,7 +24766,7 @@ fn form_names((path, code): (&str, &str)) -> Vec<String> {
 /// `again` calls `Self`, which names the caller's class once copied there. `hidden` and `muted` are not public.
 #[test]
 fn a_method_whose_body_is_one_call_reading_each_slot_once_gives_an_inline_form() {
-    assert_eq!(form_names(TEXT), ["sharp\\text::shout", "sharp\\text::padded", "sharp\\text::wrapped"]);
+    assert_eq!(form_names(TEXT), ["sharp\\text::capitalized", "sharp\\text::padded", "sharp\\text::wrapped"]);
 }
 
 /// `Position.current()` in a standard library method is the position in the library's file, inside that method. Copied
@@ -23342,14 +24776,14 @@ fn a_method_that_runs_position_current_gives_no_inline_form() {
     assert_eq!(
         form_names((
             "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Here.sharp",
-            "namespace Sharp;\n\npublic class Here\n{\n    public static Position now() => Position.current();\n\n    public static string shout(string text) => global.strtoupper(text);\n}\n"
+            "namespace Sharp;\n\npublic class Here\n{\n    public static Position now() => Position.current();\n\n    public static string capitalized(string text) => global.ucfirst(text);\n}\n"
         )),
-        ["sharp\\here::shout"]
+        ["sharp\\here::capitalized"]
     );
 }
 
 /// ```php
-/// return \strtoupper($text->label());
+/// return \ucfirst($text->label());
 /// ```
 ///
 /// A form that reads every slot in order before its first call runs its arguments in the order the call would, so
@@ -23357,12 +24791,12 @@ fn a_method_that_runs_position_current_gives_no_inline_form() {
 #[test]
 fn a_form_that_reads_its_slots_in_order_first_inlines_with_any_arguments() {
     assert_eq!(
-        inlined_body("string run(Text text)", "        return Text.shout(text.label());\n"),
+        inlined_body("string run(Text text)", "        return Text.capitalized(text.label());\n"),
         indoc! {r#"
             STMT_LIST
               RETURN
                 CALL
-                  ZVAL "strtoupper"
+                  ZVAL "ucfirst"
                   ARG_LIST
                     METHOD_CALL
                       VAR
@@ -23604,11 +25038,11 @@ fn a_call_the_inlining_rule_does_not_take_keeps_its_call() {
     let name = "        VAR\n          ZVAL \"name\"\n";
     let named = "        NAMED_ARG\n          ZVAL \"text\"\n          VAR\n            ZVAL \"name\"\n";
     let cases = [
-        ("Text.shout(text: name)", static_call("Sharp\\\\Text", "shout", named)),
+        ("Text.capitalized(text: name)", static_call("Sharp\\\\Text", "capitalized", named)),
         ("Text.padded(name)", static_call("Sharp\\\\Text", "padded", name)),
         ("Text.twice(name)", static_call("Sharp\\\\Text", "twice", name)),
         ("Text.trimmed(name)", static_call("Sharp\\\\Text", "trimmed", name)),
-        ("Loud.shout(name)", static_call("Lib\\\\Loud", "shout", name)),
+        ("Loud.capitalized(name)", static_call("Lib\\\\Loud", "capitalized", name)),
         ("Text.quiet(name)", static_call("Sharp\\\\Text", "quiet", name)),
         ("Text.again(name)", static_call("Sharp\\\\Text", "again", name)),
         ("text.secret(name)", method_call("secret")),
@@ -23690,8 +25124,9 @@ fn a_call_of_a_variadic_native_body_keeps_its_static_call() {
 #[test]
 fn the_unit_names_each_form_it_inlines_with_its_fingerprint() {
     let forms = common::checked(TEXT.0, TEXT.1, &[], inline_forms).expect("the library file is checked");
-    let (_, shout) = forms.iter().find(|(name, _)| name == b"sharp\\text::shout").expect("shout has a form");
-    let code = "namespace App.Tenant;\n\nimport Sharp.Text;\n\nclass Report\n{\n    public string run(string name) => Text.shout(name) + Text.shout(name);\n}\n";
+    let (_, capitalized) =
+        forms.iter().find(|(name, _)| name == b"sharp\\text::capitalized").expect("capitalized has a form");
+    let code = "namespace App.Tenant;\n\nimport Sharp.Text;\n\nclass Report\n{\n    public string run(string name) => Text.capitalized(name) + Text.capitalized(name);\n}\n";
     let lowered = Lowered::inlining(code, &[], &[TEXT]);
     let inlined: Vec<(String, u64)> = lowered
         .unit()
@@ -23701,7 +25136,7 @@ fn the_unit_names_each_form_it_inlines_with_its_fingerprint() {
         .map(|read| (String::from_utf8_lossy(&read.name).into_owned(), read.fingerprint))
         .collect();
 
-    assert_eq!(inlined, [("sharp\\text::shout".to_owned(), shout.fingerprint())]);
+    assert_eq!(inlined, [("sharp\\text::capitalized".to_owned(), capitalized.fingerprint())]);
 }
 
 /// The unit names the function type of each method its file declares with the xxh3-64 of the type text `is` tests a
@@ -23759,13 +25194,13 @@ fn a_form_fingerprint_follows_its_body_and_not_its_lines() {
         common::checked(TEXT.0, code, &[], inline_forms)
             .expect("the library file is checked")
             .into_iter()
-            .find(|(name, _)| name == b"sharp\\text::shout")
+            .find(|(name, _)| name == b"sharp\\text::capitalized")
             .map(|(_, form)| form.fingerprint())
-            .expect("shout has a form")
+            .expect("capitalized has a form")
     };
 
     assert_eq!(fingerprint(&TEXT.1.replacen("{\n", "{\n\n\n", 1)), fingerprint(TEXT.1));
-    assert_ne!(fingerprint(&TEXT.1.replace("strtoupper", "strtolower")), fingerprint(TEXT.1));
+    assert_ne!(fingerprint(&TEXT.1.replace("ucfirst", "lcfirst")), fingerprint(TEXT.1));
 }
 
 /// `Money`, which declares `==`, `+`, unary `-` and `<=>` on lines 7, 9, 11 and 13.
@@ -24563,7 +25998,8 @@ fn an_extension_member_is_the_static_method_that_takes_the_receiver_first() {
 
 /// Spec section 26: a member of `extension<T>(List<T> items)` runs as a generic static method whose type parameters
 /// are the block's and then its own, so its parameter list ends with their metadata, as any generic method's does. A
-/// call passes the type arguments the checker inferred from the receiver, and those the member names after them.
+/// call passes the type arguments the checker inferred from the receiver, and those the member names after them. A
+/// `List<TOut>` can hold a `Map`, so `[1]`, `ZEND_SHARP_RESULT_CROSSES`, gives plain PHP the PHP array of each one.
 #[test]
 fn a_generic_extension_member_takes_the_type_arguments_of_its_block_and_its_own() {
     let lowered = Lowered::with(
@@ -24640,7 +26076,7 @@ fn a_generic_extension_member_takes_the_type_arguments_of_its_block_and_its_own(
               STMT_LIST
                 RETURN
                   ARRAY [3]
-              SHARP_TYPE_ARGS
+              SHARP_TYPE_ARGS [1]
                 TYPE [7]
                 ZVAL "List<#1>"
               null
@@ -28022,21 +29458,21 @@ fn an_extension_member_passes_a_named_argument_by_its_name() {
 }
 
 /// `Sharp\Text\TextExtensions` at the standard library's path, beside a constant: its extension on `string` wraps
-/// `trim` with a method, `strlen` with a computed property and `strtoupper` with a method whose block returns it.
+/// `trim` with a method, `strlen` with a computed property and `mb_strtoupper` with a method whose block returns it.
 const TEXT_EXTENSIONS: (&str, &str) = (
     "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Text/TextExtensions.sharp",
-    "namespace Sharp.Text;\n\npublic static class TextExtensions\n{\n    public const int LIMIT = 80;\n\n    extension(string text)\n    {\n        public string trim() => global.trim(text);\n\n        public int length => global.strlen(text);\n\n        public string upper()\n        {\n            return global.strtoupper(text);\n        }\n    }\n}\n",
+    "namespace Sharp.Text;\n\npublic static class TextExtensions\n{\n    public const int LIMIT = 80;\n\n    extension(string text)\n    {\n        public string trim() => global.trim(text);\n\n        public int length => global.strlen(text);\n\n        public string uppercase()\n        {\n            return global.mb_strtoupper(text, \"UTF-8\");\n        }\n    }\n}\n",
 );
 
 /// ```php
-/// return trim($name) . strlen(trim($name)) . strtoupper($name);
+/// return trim($name) . strlen(trim($name)) . mb_strtoupper($name, 'UTF-8');
 /// ```
 ///
 /// Spec section 8: a standard library extension member whose body is one call inlines as that call, so `name.trim()`
 /// runs as `trim($name)`, with no call of the library's method. Every file has the library's extensions.
 #[test]
 fn a_standard_library_extension_member_inlines_as_the_call_its_body_makes() {
-    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public string run(string name)\n    {\n        return name.trim() + (string) name.trim().length + name.upper();\n    }\n}\n";
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public string run(string name)\n    {\n        return name.trim() + (string) name.trim().length + name.uppercase();\n    }\n}\n";
 
     assert_eq!(
         Lowered::inlining(code, &[], &[TEXT_EXTENSIONS]).body(),
@@ -28060,10 +29496,11 @@ fn a_standard_library_extension_member_inlines_as_the_call_its_body_makes() {
                               VAR
                                 ZVAL "name"
                   CALL
-                    ZVAL "strtoupper"
+                    ZVAL "mb_strtoupper"
                     ARG_LIST
                       VAR
                         ZVAL "name"
+                      ZVAL "UTF-8"
         "#}
     );
 }

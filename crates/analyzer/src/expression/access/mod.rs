@@ -1,5 +1,6 @@
 use mago_allocator::Arena;
 use mago_bytes::BytesDisplay;
+use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::ttype::add_optional_union_type;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::object::TObject;
@@ -27,6 +28,7 @@ use mago_word::word;
 
 use crate::analyzable::Analyzable;
 use crate::artifacts::AnalysisArtifacts;
+use crate::artifacts::CallTarget;
 use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
@@ -420,10 +422,12 @@ pub(crate) fn report_member_of_mixed_kinds<A>(
         return;
     };
 
-    // The lowering's order: a read takes a declared property before a method, and a call a declared method before a
-    // property, with `__call` last.
+    // The lowering's order: a read takes a property before a method, and a call a declared method before a property,
+    // with `__call` last. A class that has `__get`, which only plain PHP defines, has the properties it reads, and a
+    // read the code takes as a function takes the method the analysis recorded over the property, spec section 14.3.
     let codebase = context.codebase;
     let property = concat_word!("$", name.value);
+    let read = object.span().join(name.span);
     let mut kinds = Vec::new();
     for atomic in receiver.types.iter().filter(|atomic| !atomic.is_null()) {
         let Some(class) = atomic.get_object_or_enum_name() else {
@@ -434,7 +438,13 @@ pub(crate) fn report_member_of_mixed_kinds<A>(
         let is_method = if is_call {
             declares_method || (!declares_property && codebase.method_exists(class.as_bytes(), b"__call"))
         } else {
-            declares_method && !declares_property
+            let has_property = declares_property || codebase.method_exists(class.as_bytes(), b"__get");
+            let reads_method = artifacts.get_callees(&read).any(|target| {
+                matches!(target, CallTarget::FunctionLike { callee: FunctionLikeIdentifier::Method(method_class, _), .. }
+                    if *method_class == class)
+            });
+
+            declares_method && (!has_property || reads_method)
         };
         kinds.push((usize::from(!is_method), class));
     }

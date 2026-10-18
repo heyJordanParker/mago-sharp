@@ -9,6 +9,7 @@ use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::metadata::function_like::FunctionLikeKind;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
+use mago_codex::ttype::SharpType;
 use mago_codex::ttype::TType;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
@@ -18,6 +19,7 @@ use mago_codex::ttype::atomic::reference::TReference;
 use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeString;
 use mago_codex::ttype::get_array_parameters;
+use mago_codex::ttype::get_sharp_type;
 use mago_codex::ttype::union::TUnion;
 use mago_names::ResolvedNames;
 use mago_names::STANDARD_EXCEPTIONS;
@@ -390,6 +392,33 @@ where
     let parameters = parameters.iter().map(|parameter| display_sharp_type(context, parameter)).collect::<Vec<_>>();
 
     Some(format!("{collection}<{}>", parameters.join(", ")))
+}
+
+/// The name an issue gives the PHP# extension member `metadata`, spec section 26: the member on the type it extends,
+/// with no type arguments, as a call of it is written, such as `string.contains`, `List.firstOr` for an extension on
+/// `List<T>` or `Class.attributes` for one on `Class<T>`, never on the static class that declares it.
+#[must_use]
+pub(crate) fn display_extension_member<A>(context: &Context<'_, '_, A>, metadata: &FunctionLikeMetadata) -> String
+where
+    A: Arena,
+{
+    let Some(receiver) = metadata.parameters.first().and_then(|receiver| receiver.get_type_metadata()) else {
+        unreachable!("a call reaches an extension member only when its receiver has a type the value fits");
+    };
+    let extended = match receiver.type_union.types.as_ref() {
+        [atomic] => match get_sharp_type(atomic) {
+            Some(SharpType::List(_)) => "List".to_owned(),
+            Some(SharpType::Set(_)) => "Set".to_owned(),
+            Some(SharpType::Map(..)) => "Map".to_owned(),
+            Some(SharpType::Iterable(_)) => "Iterable".to_owned(),
+            Some(SharpType::ClassValue(_)) => "Class".to_owned(),
+            Some(SharpType::Class(name, _)) => display_class_like_name(context, name).to_string(),
+            _ => display_type(context, &receiver.type_union),
+        },
+        _ => display_type(context, &receiver.type_union),
+    };
+
+    format!("{extended}.{}", metadata.original_name)
 }
 
 /// Returns `union` as the analyzed file writes types: as PHP# writes it in a `.sharp` file, and by its Mago type id in

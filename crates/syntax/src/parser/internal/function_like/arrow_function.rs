@@ -54,8 +54,38 @@ where
             Some(T!["true" | "false" | "null"]) => false,
             Some(kind) if kind.is_identifier_maybe_reserved() => self.stream.peek_kind(1)? == Some(T!["=>"]),
             Some(T!["("]) => self.stream.peek_after_parentheses()?.is_some_and(|token| token.kind == T!["=>"]),
+            Some(T!["["]) => self.is_at_attributed_lambda()?,
             _ => false,
         })
+    }
+
+    /// Whether the `[…]` groups that start here are a lambda's attributes: the last is followed by a parenthesized list
+    /// and `=>`, as C# writes `[Pure] (int n) => n * 2`, or by a name and `=>`, which `parse_lambda` reports. A list
+    /// literal is never followed by either.
+    fn is_at_attributed_lambda(&self) -> Result<bool, ParseError> {
+        let mut tokens = self.stream.peek_tokens();
+        loop {
+            let (open, close) = match tokens.next().transpose()?.map(|token| token.kind) {
+                Some(T!["["]) => (T!["["], T!["]"]),
+                Some(T!["("]) => (T!["("], T![")"]),
+                Some(T![Identifier]) => {
+                    return Ok(tokens.next().transpose()?.is_some_and(|token| token.kind == T!["=>"]));
+                }
+                _ => return Ok(false),
+            };
+            let mut depth = 1usize;
+            while depth > 0 {
+                match tokens.next().transpose()?.map(|token| token.kind) {
+                    Some(kind) if kind == open => depth += 1,
+                    Some(kind) if kind == close => depth -= 1,
+                    Some(_) => {}
+                    None => return Ok(false),
+                }
+            }
+            if open == T!["("] {
+                return Ok(tokens.next().transpose()?.is_some_and(|token| token.kind == T!["=>"]));
+            }
+        }
     }
 
     /// Reads a PHP# lambda written right after an operator, as in `handler ?? item => item.ready`: a `=>` after a
@@ -83,14 +113,18 @@ where
     }
 
     /// Parses a PHP# lambda: an [`ArrowFunction`] without `fn` when its body is an expression, and a [`Closure`]
-    /// without `function` or `use` when its body is a block. A lone parameter has no parentheses, so its list's
-    /// parentheses are empty spans at its start and end.
+    /// without `function` or `use` when its body is a block, each with the attributes before it. A lone parameter has
+    /// no parentheses, so its list's parentheses are empty spans at its start and end.
     pub(crate) fn parse_lambda(&mut self) -> Result<&'arena Expression<'arena>, ParseError> {
+        let attribute_lists = self.parse_attribute_list_sequence()?;
         let parameter_list = if self.stream.is_at(T!["("])? {
             self.parse_lambda_parameter_list()?
         } else {
             let variable = self.parse_bare_variable()?;
             let span = variable.span;
+            if let Some(first) = attribute_lists.first() {
+                self.errors.push(ParseError::UnparenthesizedAttributedLambdaInSharp(first.span().join(span)));
+            }
             let parameter = FunctionLikeParameter {
                 attribute_lists: Sequence::empty(),
                 modifiers: Sequence::empty(),
@@ -113,7 +147,7 @@ where
 
         Ok(self.arena.alloc(if self.stream.is_at(T!["{"])? {
             Expression::Closure(Closure {
-                attribute_lists: Sequence::empty(),
+                attribute_lists,
                 r#static: None,
                 function: None,
                 ampersand: None,
@@ -125,7 +159,7 @@ where
             })
         } else {
             Expression::ArrowFunction(ArrowFunction {
-                attribute_lists: Sequence::empty(),
+                attribute_lists,
                 r#static: None,
                 r#fn: None,
                 ampersand: None,

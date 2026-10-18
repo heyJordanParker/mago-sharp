@@ -40,7 +40,7 @@ pub const CHANGING_COLLECTION_METHODS: [&str; 4] = ["add", "insert", "remove", "
 /// Each lowers to PHP functions or operators on the array. A `List` is a PHP array, which has no methods, so the
 /// checker refuses one on a value that can also be an object, whose own method would not run. A `Map` and a `Set` are
 /// engine objects, whose every method runs on `Sharp\Collection`.
-pub const INLINED_COLLECTION_METHODS: [(&str, &str); 10] = [
+pub const INLINED_COLLECTION_METHODS: [(&str, &str); 11] = [
     ("List", "count"),
     ("List", "getOrNull"),
     ("List", "contains"),
@@ -51,6 +51,7 @@ pub const INLINED_COLLECTION_METHODS: [(&str, &str); 10] = [
     ("List", "remove"),
     ("List", "clear"),
     ("List", "toSet"),
+    ("List", "toList"),
 ];
 
 /// The exception classes in PHP's root namespace that the standard library's `Builtins.sharp` declares, which a bare

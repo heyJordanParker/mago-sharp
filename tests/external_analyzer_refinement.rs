@@ -21,6 +21,7 @@ use mago_orchestrator::service::incremental_analysis::IncrementalAnalysisService
 use mago_orchestrator::service::incremental_analysis::compile::Compilation;
 use mago_php_version::PHPVersion;
 use mago_reporting::IssueCollection;
+use mago_sharp_bridge::unit::Library;
 use mago_sharp_bridge::unit::header;
 use mago_syntax::settings::ParserSettings;
 
@@ -322,6 +323,7 @@ fn compiled_consumer(
             },
             |_| Ok(Vec::new()),
             |_, _| Ok(Default::default()),
+            &Library::default(),
         )
         .expect("the compile runs");
     let [(_, Compilation::Accepted(bytes))] = compiled.as_slice() else {

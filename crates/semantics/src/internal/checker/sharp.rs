@@ -27,8 +27,10 @@ use mago_span::Span;
 use mago_syntax::cst::Access;
 use mago_syntax::cst::Argument;
 use mago_syntax::cst::ArrayElement;
+use mago_syntax::cst::ArrowFunction;
 use mago_syntax::cst::Assignment;
 use mago_syntax::cst::AssignmentOperator;
+use mago_syntax::cst::AttributeList;
 use mago_syntax::cst::Binary;
 use mago_syntax::cst::BinaryOperator;
 use mago_syntax::cst::BinaryPattern;
@@ -40,6 +42,7 @@ use mago_syntax::cst::Class;
 use mago_syntax::cst::ClassLikeConstant;
 use mago_syntax::cst::ClassLikeMember;
 use mago_syntax::cst::ClassLikeMemberSelector;
+use mago_syntax::cst::Closure;
 use mago_syntax::cst::ComparisonPattern;
 use mago_syntax::cst::CompositeString;
 use mago_syntax::cst::Conditional;
@@ -51,6 +54,7 @@ use mago_syntax::cst::DeclareBody;
 use mago_syntax::cst::DirectVariable;
 use mago_syntax::cst::DocumentKind;
 use mago_syntax::cst::Enum;
+use mago_syntax::cst::EnumCaseDataItem;
 use mago_syntax::cst::Event;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::Extends;
@@ -188,8 +192,8 @@ const OBJECT: &[u8] = b"Object";
 /// - A static class, `public static class Text`, as spec sections 26 and 29 write it: `static` and an optional
 ///   `public`, no header and no constructor, and only constants and static members. The bridge lowers it to a final
 ///   PHP class.
-/// - An interface: an optional `public`, a name, optional type parameters, an optional `: Interface` header, methods
-///   and properties, with no attributes, other modifiers, `extends` or fields. An interface method has optional type
+/// - An interface: attributes, an optional `public`, a name, optional type parameters, an optional `: Interface` header,
+///   methods and properties, with no other modifiers, `extends` or fields. An interface method has optional type
 ///   parameters, parameters, a return type and no body, as spec section 29 writes `Money quote(Cart cart);`, or a
 ///   default body, a block or `=> expr;`, as spec section 22 writes `string designKey() => …;`, checked as a class
 ///   method's body. A property is written `int orderId { get; }` or `List<string> claims { get; set; }`. Every
@@ -218,10 +222,14 @@ const OBJECT: &[u8] = b"Object";
 ///   class and interface by its short name, and a generic one with its type arguments, as in `: PaginatedList<Order>`,
 ///   whose type arguments are a parameter's types. Any other type, a type parameter, `List`, `Map` and `Class`
 ///   included, is an error that says a header names classes and interfaces.
-/// - Attributes: on a class, an enum, an enum case, a method, a field, a property and a parameter, written `[Name]` or
-///   `[Name(arguments)]`, several in one list, as in `[Field("Name"), Searchable]`, or in several lists. An argument
-///   is positional or named, and is a constant expression as a parameter default is, list and map literals included.
-///   PHP's own check reports a spread argument. An attribute target, as in `[return: NotNull]`, is a parse error.
+/// - Attributes: on a class, an interface, an enum, an enum case, an event, a constant, a method, an interface method, a
+///   field, a property, an accessor, a parameter and a lambda with its parameters in parentheses, written `[Name]` or
+///   `[Name(arguments)]`, several in one list, as in `[Field("Name"), Searchable]`, or in several lists. A list may
+///   open with a target, as in `[param: Trimmed]`, which `check_attribute_target` checks, and an observer, which runs
+///   inside `set`, takes none, as `check_accessors` decides. An argument is positional or named, and is a
+///   constant expression as a parameter default is, list and map literals included, or a `new` of a class by its name
+///   whose arguments are such values, as `check_attribute_object` decides. Anything else is an error that names the
+///   rule. PHP's own check reports a spread argument. An attribute on a type parameter is a parse error.
 /// - A constant: an optional `public`, `protected` or `private`, an optional type from the types below but `void`, one
 ///   name, and a value as a parameter default is. Several names in one declaration are an error.
 /// - A field: an optional `private` or `protected`, an optional `static`, a type, one name and an optional initial
@@ -764,7 +772,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         }
         // `check_struct_declaration` reports every modifier but `public`. A struct's members are a class's.
         (Node::Modifier(modifier), Place::Struct) => matches!(modifier, Modifier::Public(_)).then_some(Place::Struct),
-        (Node::AttributeList(_), Place::Struct) => Some(Attribute),
+        (Node::AttributeList(list), Place::Struct) => check_attribute_target(list, context),
         (Node::ClassLikeMember(_), Place::Struct) => enter(node, Class, context),
         // The walk checks a class's, an interface's, an enum's and an event's name in `check_class_name`.
         (Node::Interface(_), File) => Some(Interface),
@@ -985,16 +993,33 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             Node::FunctionLikeReturnTypeHint(_) | Node::On(_) | Node::MethodBody(_) | Node::MethodAbstractBody(_),
             Signature,
         ) => Some(Signature),
-        (Node::AttributeList(_), Class | Enum | Method | FieldOrProperty | Parameter) => Some(Attribute),
+        (
+            Node::AttributeList(list),
+            Class | Interface | Enum | Place::Event | ClassConstant | Method | Signature | FieldOrProperty | Parameter
+            | Lambda,
+        ) => check_attribute_target(list, context),
         (
             Node::Attribute(_)
             | Node::PartialArgumentList(_)
             | Node::PartialArgument(PartialArgument::Positional(_) | PartialArgument::Named(_)),
             Attribute,
         ) => Some(Attribute),
-        // PHP refuses a spread in attribute arguments, and `check_attribute_list` reports it.
+        // PHP refuses a spread in attribute arguments, and `check_attribute_list` reports it, as `check_attribute_object`
+        // does in a `new`'s arguments.
         (Node::PositionalArgument(argument), Attribute) => argument.ellipsis.is_none().then_some(Constant),
         (Node::NamedArgument(_), Attribute) => Some(Constant),
+        (Node::Expression(Expression::Instantiation(instantiation)), Constant)
+            if context.slice_places.contains(&Some(Attribute)) =>
+        {
+            check_attribute_object(instantiation, context)
+        }
+        (
+            Node::Instantiation(_)
+            | Node::Expression(Expression::Identifier(Identifier::Local(_)))
+            | Node::ArgumentList(_)
+            | Node::Argument(_),
+            Attribute,
+        ) => Some(Attribute),
 
         (Node::ClassLikeMember(ClassLikeMember::Method(_) | ClassLikeMember::Law(_)), Class | Enum) => Some(place),
         (Node::ClassLikeMember(ClassLikeMember::Extension(extension)), Class | Interface | Enum) => {
@@ -1281,12 +1306,18 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         (Node::GenericHint(generic), FieldOrProperty | Method | Signature | Parameter | Body) => {
             check_generic(generic, place, context)
         }
+        // Spec section 2: a constant's value is known before the code runs, and a collection literal is.
+        (Node::GenericHint(generic), ClassConstant)
+            if matches!(generic.name.value, b"List" | b"Map" | b"Set" | b"Iterable") =>
+        {
+            check_generic(generic, place, context)
+        }
         // A generic type's type arguments, and those of `new` and of a method call, are never `void`. Nor are they
         // `never` in a return type, which is a type only as the whole return type, spec section 7, and which
         // `type_written_another_way` refuses everywhere else.
         (
             Node::TypeArgumentList(list),
-            FieldOrProperty | Method | Signature | Parameter | Body | Instantiation,
+            FieldOrProperty | ClassConstant | Method | Signature | Parameter | Body | Instantiation,
         ) => {
             if let Some(void) = list.arguments.iter().find(|argument| matches!(argument, Hint::Void(_))) {
                 context.report(
@@ -1328,7 +1359,9 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             Some(Parameter)
         }
         // A tuple's element types are checked as a parameter's type is, so `Self` in one is an error.
-        (Node::TupleHint(tuple), FieldOrProperty | Method | Signature | Parameter | Body) => check_tuple(tuple, context),
+        (Node::TupleHint(tuple), FieldOrProperty | ClassConstant | Method | Signature | Parameter | Body) => {
+            check_tuple(tuple, context)
+        }
         (Node::TupleElementHint(_), Parameter) => Some(Parameter),
         // The effects an `extern`, a function type or a method without a body lists, spec section 29, which the
         // analyzer's `check_uses` decides, because an effect is a `foreign` class any file may declare.
@@ -1502,10 +1535,14 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
 
             None
         }
-        (Node::Hint(Hint::Self_(keyword)), FieldOrProperty | ClassConstant | Method | Signature | Parameter | Body) => {
-            check_self_type(keyword, place, context).then_some(place)
-        }
-        (Node::Hint(Hint::Static(keyword)), FieldOrProperty | ClassConstant | Method | Signature | Parameter | Body) => {
+        (
+            Node::Hint(Hint::Self_(keyword)),
+            FieldOrProperty | ClassConstant | Method | Signature | Parameter | Body | Place::Pattern,
+        ) => check_self_type(keyword, place, context).then_some(place),
+        (
+            Node::Hint(Hint::Static(keyword)),
+            FieldOrProperty | ClassConstant | Method | Signature | Parameter | Body | Place::Pattern,
+        ) => {
             report_php_static(keyword, context);
 
             None
@@ -1744,32 +1781,26 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
 
                 None
             }
+            // Spec section 14.4: a `?` that cannot matter is an error, and the help names the type without it. A union
+            // with `null` is a nullable type written another way, as `int|null` is `int?`.
             Hint::Nullable(_) | Hint::Void(_) => {
-                let issue = Issue::error("`as` converts to a type that is not nullable or `void`.")
-                    .with_annotation(Annotation::primary(r#as.hint.span()).with_message("Written here."))
-                    .with_note("`as T` already gives `T?`: the value as a `T`, or null when it is not one.");
-                // Spec section 14.4: a `?` that cannot matter is an error, and the help names the type without it.
-                let issue = match r#as.hint {
-                    Hint::Nullable(nullable) => issue.with_help(format!(
-                        "Write `as {}`.",
-                        BytesDisplay(context.get_code_snippet(nullable.hint.span()))
-                    )),
-                    _ => issue,
+                let without = match r#as.hint {
+                    Hint::Nullable(nullable) => {
+                        Some(BytesDisplay(context.get_code_snippet(nullable.hint.span())).to_string())
+                    }
+                    _ => None,
                 };
-                context.report(issue);
+                report_nullable_as(r#as.hint, without, context);
 
                 None
             }
-            // A type outside the slice, and `Self`, are refused by the walk, as anywhere in a body.
-            hint if !has_type_test(hint) && (is_slice_type(hint) || matches!(hint, Hint::Union(_))) => {
-                context.report(not_supported_yet(
-                    hint.span(),
-                    "type",
-                    "`as` converts to `int`, `float`, `string`, `bool`, `Any`, a class, a collection as in `List<int>`, or a union of them as in `int|string`.",
-                ));
+            Hint::Union(union) if let Some(without) = written_without_null(union, context) => {
+                report_nullable_as(r#as.hint, Some(without), context);
 
                 None
             }
+            // Every type in the slice has a test. The walk refuses a type outside it, and `Self`, as anywhere in a
+            // body, and in a union too, as `check_union` checks each member.
             _ => Some(Body),
         },
         (
@@ -1812,11 +1843,22 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
 
             Some(Place::Pattern)
         }
-        (Node::Hint(Hint::Nullable(_)), Place::Pattern) => {
+        // A union with `null` is a nullable type written another way, as `int|null` is `int?`.
+        (Node::Hint(hint @ (Hint::Nullable(_) | Hint::Union(_))), Place::Pattern)
+            if !matches!(hint, Hint::Union(union) if written_without_null(union, context).is_none()) =>
+        {
             context.report(
                 Issue::error("A type pattern is never nullable: null never matches a type.")
                     .with_annotation(Annotation::primary(node.span()).with_message("Written here."))
                     .with_help("Test for null with `x == null`, or join both with `or`, as in `x is int or null`."),
+            );
+
+            None
+        }
+        (Node::Hint(Hint::Void(_)), Place::Pattern) => {
+            context.report(
+                Issue::error("A pattern's type is never `void`: `void` is only a return type.")
+                    .with_annotation(Annotation::primary(node.span()).with_message("Written here.")),
             );
 
             None
@@ -2295,12 +2337,195 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         ) => Some(FunctionCall),
         (Node::ArgumentList(_), FunctionCall) => Some(Body),
 
+        (Node::Expression(_), Constant) if context.slice_places.contains(&Some(Attribute)) => {
+            report_attribute_argument(node.span(), context);
+
+            None
+        }
         _ => {
             report_unsupported(node, place, context);
 
             None
         }
     }
+}
+
+/// Spec section 1: an attribute list's target, as `param:` in `[param: Trimmed]`, names a part of its declaration, as
+/// C# allows: `type:` on a type, `event:` on an event, `method:` on a method, an operator, a named constructor, a lambda
+/// or an accessor, `param:` on a parameter and on `set` or `init`, `field:` on a field, a constant, an enum case and a
+/// property with storage, `property:` on a property, and `property:` and `field:` on a parameter that declares a
+/// property: a promoted one, an event's or a data case's. A return value takes no attributes.
+fn check_attribute_target(list: &AttributeList, context: &mut Context<'_, '_, '_>) -> Option<Place> {
+    /// The declaration a list is on, its targets, and, for one that returns a value, the name `return:` refers it to.
+    type Declaration = (&'static str, &'static [&'static str], Option<&'static str>);
+
+    let Some(target) = &list.target else {
+        return Some(Place::Attribute);
+    };
+    let written = BytesDisplay(target.name.value);
+    // The declaration that holds the list. The walk keeps no member on its ancestors, so the file names it.
+    let holds = |lists: &Sequence<AttributeList>| lists.iter().any(|held| held.span() == list.span());
+    let declaration = Node::Program(context.program).filter_map(|node| -> Option<Declaration> {
+        match node {
+            Node::Class(class) if holds(&class.attribute_lists) => Some(("a class", &["type"], None)),
+            Node::Interface(interface) if holds(&interface.attribute_lists) => Some(("an interface", &["type"], None)),
+            Node::Enum(r#enum) if holds(&r#enum.attribute_lists) => Some(("an enum", &["type"], None)),
+            Node::Struct(r#struct) if holds(&r#struct.attribute_lists) => Some(("a struct", &["type"], None)),
+            Node::Event(event) if holds(&event.attribute_lists) => Some(("an event", &["type", "event"], None)),
+            Node::Method(method) if holds(&method.attribute_lists) => {
+                Some(("a method", &["method"], Some("the method")))
+            }
+            Node::Operator(operator) if holds(&operator.attribute_lists) => {
+                Some(("an operator", &["method"], Some("the operator")))
+            }
+            Node::NamedConstructor(constructor) if holds(&constructor.attribute_lists) => {
+                Some(("a named constructor", &["method"], None))
+            }
+            Node::Closure(Closure { attribute_lists, .. })
+            | Node::ArrowFunction(ArrowFunction { attribute_lists, .. })
+                if holds(attribute_lists) =>
+            {
+                Some(("a lambda", &["method"], Some("the lambda")))
+            }
+            Node::ClassLikeConstant(constant) if holds(&constant.attribute_lists) => {
+                Some(("a constant", &["field"], None))
+            }
+            Node::EnumCase(case) if holds(&case.attribute_lists) => Some(("an enum case", &["field"], None)),
+            Node::Property(Property::Plain(field)) if holds(&field.attribute_lists) => {
+                Some(("a field", &["field"], None))
+            }
+            Node::Property(Property::Hooked(property)) if holds(&property.attribute_lists) => Some(
+                if context.names.has_storage(&property.hook_list)
+                    && !property.modifiers.contains_abstract()
+                    && !is_in_interface(context.program, property.span())
+                {
+                    ("a property", &["property", "field"], None)
+                } else {
+                    ("a property without storage", &["property"], None)
+                },
+            ),
+            Node::Property(Property::Computed(property)) if holds(&property.attribute_lists) => {
+                Some(("a property without storage", &["property"], None))
+            }
+            Node::FunctionLikeParameter(parameter) if holds(&parameter.attribute_lists) => {
+                Some(if declares_property(parameter, context.program) {
+                    ("a parameter that declares a property", &["param", "property", "field"], None)
+                } else {
+                    ("a parameter", &["param"], None)
+                })
+            }
+            Node::PropertyHook(accessor) if holds(&accessor.attribute_lists) => Some(if accessor.is_setter() {
+                ("`set` and `init`", &["method", "param"], Some("the accessor"))
+            } else {
+                ("`get`", &["method"], Some("the accessor"))
+            }),
+            _ => None,
+        }
+    });
+    let Some((declaration, targets, returns)) = declaration.into_iter().next() else {
+        context.report(
+            Issue::error(format!("`{written}:` names no part of this declaration."))
+                .with_annotation(Annotation::primary(target.span()).with_message("Written here."))
+                .with_help("Write the attribute with no target."),
+        );
+
+        return None;
+    };
+
+    if let (b"return", Some(returns)) = (target.name.value, returns) {
+        context.report(
+            Issue::error(format!("A return value takes no attributes: put them on {returns}, with no target."))
+                .with_annotation(Annotation::primary(target.span()).with_message("Written here.")),
+        );
+
+        return None;
+    }
+    if !targets.iter().any(|named| named.as_bytes() == target.name.value) {
+        let targets: Vec<String> = targets.iter().map(|named| format!("`{named}:`")).collect();
+        context.report(
+            Issue::error(format!(
+                "`{written}:` names no part of {declaration}, whose targets are {}.",
+                targets.join(", ")
+            ))
+            .with_annotation(Annotation::primary(target.span()).with_message("Written here.")),
+        );
+
+        return None;
+    }
+
+    Some(Place::Attribute)
+}
+
+/// Whether `parameter` declares a property as well: a promoted constructor parameter, or a parameter of an event or of
+/// a case that carries data, each of which is a public property of its class, spec sections 15 and 20.
+fn declares_property(parameter: &FunctionLikeParameter, program: &Program) -> bool {
+    let start = parameter.span().start;
+
+    parameter.is_promoted_property()
+        || !Node::Program(program)
+            .filter_map(|node| match node {
+                Node::Event(Event { parameter_list, .. })
+                | Node::EnumCaseDataItem(EnumCaseDataItem { parameter_list, .. }) => {
+                    parameter_list.span().contains(&start).then_some(())
+                }
+                _ => None,
+            })
+            .is_empty()
+}
+
+/// Spec section 1: an attribute argument may create an object of a class it names, from arguments that are constants or
+/// more such objects, as PHP and Java's nested annotations take, and PHP creates it each time it reads the attribute. A
+/// named constructor, an object initializer and a spread run code there. PHP creates the object with no PHP# code to
+/// give it type arguments, so a generic class's object is an error.
+fn check_attribute_object(instantiation: &Instantiation, context: &mut Context<'_, '_, '_>) -> Option<Place> {
+    if let Some(type_arguments) = &instantiation.type_arguments {
+        context.report(
+            Issue::error(format!(
+                "An attribute argument creates its objects without type arguments, so it cannot `new` a generic class, as `{}` does.",
+                BytesDisplay(context.get_code_snippet(instantiation))
+            ))
+            .with_annotation(Annotation::primary(type_arguments.span()).with_message("Written here.")),
+        );
+
+        return None;
+    }
+
+    let names_class = matches!(instantiation.class, Expression::Identifier(Identifier::Local(class))
+        if !context.names.is_type_parameter(class));
+    if !names_class
+        || instantiation.constructor.is_some()
+        || instantiation.initializer.is_some()
+        || instantiation.argument_list.is_none()
+    {
+        report_attribute_argument(instantiation.span(), context);
+
+        return None;
+    }
+
+    let spreads: Vec<Span> = instantiation
+        .argument_list
+        .iter()
+        .flat_map(|list| list.arguments.iter())
+        .filter_map(|argument| match argument {
+            Argument::Positional(positional) if positional.ellipsis.is_some() => Some(positional.span()),
+            _ => None,
+        })
+        .collect();
+    for spread in &spreads {
+        report_attribute_argument(*spread, context);
+    }
+
+    spreads.is_empty().then_some(Place::Attribute)
+}
+
+fn report_attribute_argument(span: Span, context: &mut Context<'_, '_, '_>) {
+    context.report(
+        Issue::error(format!(
+            "An attribute argument is a constant or a `new` of constants, and `{}` is neither.",
+            BytesDisplay(context.get_code_snippet(span))
+        ))
+        .with_annotation(Annotation::primary(span).with_message("Written here.")),
+    );
 }
 
 /// Whether the slice has a method, with the refusal at its name when it does not. The constructor of spec section 9 is
@@ -2929,11 +3154,8 @@ fn check_property_parameter(
     place: Place,
     context: &mut Context<'_, '_, '_>,
 ) -> Option<Place> {
-    let (part, word, owner, an_owner) = if place == Place::Case {
-        ("A case's field", "field", "case", "a case")
-    } else {
-        ("An event's parameter", "parameter", "event", "an event")
-    };
+    let (part, owner) =
+        if place == Place::Case { ("A case's field", "case") } else { ("An event's parameter", "event") };
     let remove = |span: Span, message: String| {
         Issue::error(message).with_annotation(Annotation::primary(span).with_message("Remove this."))
     };
@@ -2949,13 +3171,6 @@ fn check_property_parameter(
         remove(accessors.span(), format!("{part} takes no accessors: it is a get-only property of the {owner}."))
     } else if let Some(ellipsis) = parameter.ellipsis {
         remove(ellipsis, format!("{part} cannot be variadic: it is one property of the {owner}."))
-    } else if let Some(Hint::Generic(set) | Hint::Nullable(NullableHint { hint: Hint::Generic(set), .. })) =
-        &parameter.hint
-        && set.name.value == b"Set"
-    {
-        Issue::error(format!("A `Set` {word} of {an_owner} is not supported yet in PHP#."))
-            .with_annotation(Annotation::primary(set.span()).with_message("Not supported yet."))
-            .with_note(format!("{part} is its property, and {an_owner} cannot yet make its argument a `Set`."))
     } else {
         return enter(Node::FunctionLikeParameter(parameter), Place::Method, context);
     };
@@ -2965,23 +3180,22 @@ fn check_property_parameter(
 
 /// Whether the slice has an interface property: a type, a name and `{ get; }` or `{ get; set; }`, which PHP runs as a
 /// public interface property its classes give, as an event's parameters give `OrderEvent`'s `orderId`, spec section
-/// 15. A class gives one stated with `set` a `set` too, which the analyzer checks. An access modifier, on the property
-/// or on an accessor, keeps it in the slice, and `enter` reports the modifier where the walk reaches it.
+/// 15. A class gives one stated with `set` a `set` too, which the analyzer checks. Each accessor may take attributes,
+/// which PHP keeps on its abstract hook, spec section 1. An access modifier, on the property or on an accessor, keeps
+/// it in the slice, and `enter` reports the modifier where the walk reaches it.
 fn is_interface_property(property: &HookedProperty) -> bool {
     let is_access = |modifier: &Modifier| {
         matches!(modifier, Modifier::Public(_) | Modifier::Protected(_) | Modifier::Private(_) | Modifier::Internal(_))
     };
     let is_stated = |accessor: &PropertyHook, name: &[u8]| {
         accessor.name.value == name
-            && accessor.attribute_lists.is_empty()
             && accessor.ampersand.is_none()
             && accessor.modifiers.iter().all(is_access)
             && accessor.parameter_list.is_none()
             && matches!(accessor.body, PropertyHookBody::Abstract(_))
     };
 
-    property.attribute_lists.is_empty()
-        && property.var.is_none()
+    property.var.is_none()
         && property.modifiers.iter().all(is_access)
         && property.hint.is_some()
         && matches!(property.item, PropertyItem::Abstract(_))
@@ -3328,6 +3542,17 @@ fn check_accessors(
             );
         } else if !is_slice_accessor(accessor) {
             report_accessor(accessor, context);
+        } else if accessor.is_observer()
+            && let (Some(first), Some(last)) = (accessor.attribute_lists.first(), accessor.attribute_lists.last())
+        {
+            let observer = BytesDisplay(name);
+            context.report(
+                Issue::error(format!(
+                    "`{observer}` runs inside the `set` accessor, so it has no place of its own for an attribute."
+                ))
+                .with_annotation(Annotation::primary(first.span().join(last.span())).with_message("Written here."))
+                .with_help("Put the attribute on `set`."),
+            );
         } else if accessor.is_observer() && !accessors.hooks.iter().any(|hook| hook.name.value == b"set") {
             let observer = BytesDisplay(name);
             context.report(
@@ -3375,11 +3600,10 @@ fn check_accessors(
 }
 
 /// Whether the slice has an accessor: `get`, `set` or `init`, or an observer with a body, `willSet` or `didSet`
-/// (spec section 6.2), without attributes, `&` or a parameter list, where only `set` and `init` take an access
+/// (spec section 6.2), with optional attributes and without `&` or a parameter list, where only `set` and `init` take an access
 /// modifier, `private`, `protected`, `internal` or `public`, which `check_accessors` compares with the property's.
 fn is_slice_accessor(accessor: &PropertyHook) -> bool {
-    accessor.attribute_lists.is_empty()
-        && accessor.ampersand.is_none()
+    accessor.ampersand.is_none()
         && accessor.parameter_list.is_none()
         && match accessor.modifiers.as_slice() {
             [] if accessor.is_observer() => matches!(accessor.body, PropertyHookBody::Concrete(_)),
@@ -3394,7 +3618,7 @@ fn is_slice_accessor(accessor: &PropertyHook) -> bool {
 /// Reports an accessor `is_slice_accessor` refuses, naming what PHP# writes instead. An accessor of any other name is no
 /// PHP# accessor.
 fn report_accessor(accessor: &PropertyHook, context: &mut Context<'_, '_, '_>) {
-    const ACCESSORS: &str = "A PHP# property's accessors are `get` and `set` or `init`, each written `;`, `=> expr;` or with a block body, and `set` and `init` may take `private`, `protected` or `internal`. The observers `willSet` and `didSet` take a body.";
+    const ACCESSORS: &str = "A PHP# property's accessors are `get` and `set` or `init`, each with optional attributes and written `;`, `=> expr;` or with a block body, and `set` and `init` may take `private`, `protected` or `internal`. The observers `willSet` and `didSet` take a body.";
 
     let name = BytesDisplay(accessor.name.value);
     let other_modifier = accessor.modifiers.iter().find(|modifier| {
@@ -4231,12 +4455,14 @@ fn is_slice_target(target: &Expression, context: &Context<'_, '_, '_>) -> bool {
 }
 
 /// Whether `hint` keys a `Map` and is a `Set`'s element by its kind alone, spec section 12: a type with `==` and
-/// `hash()` with no code, a collection of such types, or a named type, which the analyzer accepts when it is an enum, a
-/// struct, a class that declares `operator ==`, or a type parameter bounded by one.
+/// `hash()` with no code, a collection of such types, a union of them, or a named type, which the analyzer accepts when
+/// it is an enum, a struct, a class that declares `operator ==`, or a type parameter bounded by one.
 fn is_key_hint(hint: &Hint) -> bool {
     match hint {
         Hint::Integer(_) | Hint::Float(_) | Hint::Bool(_) | Hint::String(_) | Hint::Identifier(_) => true,
         Hint::Nullable(nullable) => is_key_hint(nullable.hint),
+        // Spec section 19 compares a union by the type of the value it holds, so each of its types gives it both.
+        Hint::Union(union) => is_key_hint(union.left) && is_key_hint(union.right),
         // Spec section 19 compares two collections by their elements, which `sharp_hash` hashes, so a collection whose
         // every type argument has `==` and `hash()` has them too.
         Hint::Generic(collection) if matches!(collection.name.value, b"List" | b"Set" | b"Map") => {
@@ -4696,6 +4922,36 @@ fn report_null_in_union(null: &Hint, members: &[&Hint], context: &mut Context<'_
 
     context
         .report(Issue::error(message).with_annotation(Annotation::primary(null.span()).with_message("Written here.")));
+}
+
+/// The union `union` written without its `null`, as `int|string` for `int|string|null`, or None when it holds no `null`.
+fn written_without_null(union: &UnionHint, context: &Context<'_, '_, '_>) -> Option<String> {
+    let mut members = Vec::new();
+    union_members(union, &mut members);
+    if !members.iter().any(|member| matches!(member, Hint::Null(_))) {
+        return None;
+    }
+
+    let rest: Vec<String> = members
+        .iter()
+        .filter(|member| !matches!(member, Hint::Null(_)))
+        .map(|member| BytesDisplay(context.get_code_snippet(*member)).to_string())
+        .collect();
+
+    Some(rest.join("|"))
+}
+
+/// Reports `as` to `hint`, a nullable type or `void`, spec section 14.4: `as T` already gives `T?`. `without` is the
+/// type written without its `?` or `null`, which the help names.
+fn report_nullable_as(hint: &Hint, without: Option<String>, context: &mut Context<'_, '_, '_>) {
+    let issue = Issue::error("`as` converts to a type that is not nullable or `void`.")
+        .with_annotation(Annotation::primary(hint.span()).with_message("Written here."))
+        .with_note("`as T` already gives `T?`: the value as a `T`, or null when it is not one.");
+
+    context.report(match without {
+        Some(without) => issue.with_help(format!("Write `as {without}`.")),
+        None => issue,
+    });
 }
 
 /// How two members of a union overlap, so the union is refused.
@@ -5587,9 +5843,8 @@ fn report_unsupported(node: Node<'_, '_>, place: Place, context: &mut Context<'_
 /// Whether a node the slice does not have is a form PHP# has not decided, or that a later change builds, so it is not
 /// supported yet: `break` and `continue` with a level, an anonymous class, `|>`, a partial application, a member of
 /// `Self` read or written, as in `Self.count`, an interface's constants, property bodies and operators, an enum's
-/// operators, attributes on a declaration the slice gives none, as an event or an interface, a case's `value` or
-/// `name` in a constant value, an intersection type, a type with no test in a pattern, as a tuple or `Class<T>`, and a
-/// constant typed as a function, a tuple or a generic type, which the collections change builds.
+/// operators, a case's `value` or `name` in a constant value, an intersection type, and a constant typed as a function
+/// or a generic class, as `Class<Report>`.
 fn is_undecided(node: Node<'_, '_>, place: Place, context: &Context<'_, '_, '_>) -> bool {
     match (node, place) {
         (
@@ -5614,12 +5869,10 @@ fn is_undecided(node: Node<'_, '_>, place: Place, context: &Context<'_, '_, '_>)
             ),
             Place::Interface,
         )
-        | (Node::ClassLikeMember(ClassLikeMember::Operator(_)), Place::Enum)
-        | (Node::AttributeList(_), _) => true,
+        | (Node::ClassLikeMember(ClassLikeMember::Operator(_)), Place::Enum) => true,
         (Node::Hint(Hint::Intersection(_)) | Node::IntersectionHint(_), _) => true,
         (Node::Hint(Hint::Parenthesized(parenthesized)), _) => matches!(parenthesized.hint, Hint::Intersection(_)),
-        (Node::Hint(hint), Place::Pattern) => is_slice_type(hint) && !has_type_test(hint),
-        (Node::FunctionHint(_) | Node::TupleHint(_) | Node::GenericHint(_), Place::ClassConstant) => true,
+        (Node::FunctionHint(_) | Node::GenericHint(_), Place::ClassConstant) => true,
         // A case is capitalized, as in `Status.Active`, where a static member is camelCase, as in `Calc.rate`.
         (
             Node::Expression(Expression::Access(Access::Property(PropertyAccess {
@@ -5850,10 +6103,10 @@ fn supported(place: Place) -> &'static str {
             "A PHP# class has attributes, an optional `public`, `abstract` or `final`, a name, optional type parameters as in `<out TItem : DatabaseEntity>`, an optional `: Base, Interface` header, constants, fields, properties, methods, named constructors, operators, laws and, in a static class, extensions, with no other modifiers, `extends` or `implements`."
         }
         Place::Interface => {
-            "A PHP# interface has an optional `public`, a name, optional type parameters as in `<in TItem>`, an optional `: Interface` header, methods and get-only properties, as in `int orderId { get; }`, with no attributes, other modifiers, `extends`, constants or other properties."
+            "A PHP# interface has attributes, an optional `public`, a name, optional type parameters as in `<in TItem>`, an optional `: Interface` header, methods and get-only properties, as in `int orderId { get; }`, with no other modifiers, `extends`, constants or other properties."
         }
         Place::Signature => {
-            "A PHP# interface method has no modifier, optional type parameters, parameters, a return type of `int`, `float`, `bool`, `string`, `Any`, `void`, `never`, a class or a type parameter, a generic type as in `List<T>` or `PaginatedList<Order>`, or `Self`, each but `void` and `never` nullable as in `int?`, or a union of them but `void` and `never`, as in `int|string`, and no body or a default body."
+            "A PHP# interface method has attributes, no modifier, optional type parameters, parameters, a return type of `int`, `float`, `bool`, `string`, `Any`, `void`, `never`, a class or a type parameter, a generic type as in `List<T>` or `PaginatedList<Order>`, or `Self`, each but `void` and `never` nullable as in `int?`, or a union of them but `void` and `never`, as in `int|string`, and no body or a default body."
         }
         Place::Enum => {
             "A PHP# enum has attributes, an optional `public`, a name, optional type parameters as in `<T, TError : Error>` when it has no backing type, an optional `: string, Interface` header whose `int` or `string` comes first, constants, cases, computed properties, methods and laws, with no other modifiers or `implements`. A case of a backed enum has a value, as in `case None = \"none\";`, and a case of any other enum may carry data, as in `case Paid(string transactionId);`."
@@ -5875,7 +6128,7 @@ fn supported(place: Place) -> &'static str {
             "A PHP# field is `private` or `protected`, and a property has the accessors `get` and an optional `set` or `init`, each `;`, `=> expr;` or a block. Both may be `static`, and have a type of `int`, `float`, `bool`, `string`, `Any`, a class or a type parameter, a generic type as in `List<T>` or `PaginatedList<Order>`, `Function<R(P)>`, or a tuple as in `[Money, int]`, nullable as in `int?` or not, or a union of them as in `int|string`, a name, and an optional initial value."
         }
         Place::ClassConstant => {
-            "A PHP# constant has `public`, `protected` or `private`, an optional type of `int`, `float`, `bool`, `string`, `Any` or a class, nullable as in `int?` or not, or a union of them as in `int|string`, one name, and a constant value."
+            "A PHP# constant has attributes, `public`, `protected` or `private`, an optional type of `int`, `float`, `bool`, `string`, `Any`, a class, a collection as in `Map<string, int>`, `Iterable<T>` or a tuple as in `[int, string]`, nullable as in `int?` or not, or a union of them as in `int|string`, one name, and a constant value."
         }
         Place::Method => {
             "A PHP# method takes `public`, `protected`, `private`, `static`, `abstract`, `virtual` and `override`, a constructor also `required`, optional type parameters as in `<TItem : DatabaseEntity>`, parameters, and a return type of `int`, `float`, `bool`, `string`, `Any`, `void`, `never`, a class or a type parameter, a generic type as in `List<T>` or `PaginatedList<Order>`, `Function<R(P)>`, a tuple as in `[Money, int]` or `Self`, each but `void` and `never` nullable as in `int?`, or a union of them but `void` and `never`, as in `int|string`, and an optional `on` clause after the parameters, as in `on OrderPaid, OrderRefunded`."
@@ -5899,10 +6152,10 @@ fn supported(place: Place) -> &'static str {
             "A PHP# attribute is a class name with optional positional and named arguments, as in `[Field(\"Name\", searchable: true)]`."
         }
         Place::Constant => {
-            "A parameter default, an attribute argument, a constant's value, an enum case's value or a pattern's value is a literal, a constant, `typeof(Class)`, a list or map literal, or arithmetic, comparison, logical and `??` operators on them."
+            "A parameter default, a constant's value, an enum case's value or a pattern's value is a literal, a constant, `typeof(Class)`, a list or map literal, or arithmetic, comparison, logical and `??` operators on them."
         }
         Place::Pattern => {
-            "A PHP# pattern is a type of `int`, `float`, `string`, `bool`, `Any`, a class, a collection as in `List<int>`, or a union of them as in `int|string`, with an optional name, as in `int count`, a case with its fields, as in `PaymentResult.Paid(string transactionId)`, a class with properties, as in `Paid { amount: > 0 } big`, a constant, a comparison such as `< 10`, a properties pattern such as `{ total: > 0 }`, a list pattern such as `[Line first, ...List<Line> rest]`, or patterns joined by `and`, `or` and `not`."
+            "A PHP# pattern is a type of `int`, `float`, `string`, `bool`, `Any`, `Object`, a class, a collection as in `List<int>`, a class value as in `Class<Order>`, a function type as in `Function<int(int)>`, or a union of them, a tuple among them, as in `int|[int, string]`, with an optional name, as in `int count`, a case with its fields, as in `PaymentResult.Paid(string transactionId)`, a class with properties, as in `Paid { amount: > 0 } big`, a constant, a comparison such as `< 10`, a properties pattern such as `{ total: > 0 }`, a list pattern such as `[Line first, ...List<Line> rest]`, or patterns joined by `and`, `or` and `not`."
         }
     }
 }

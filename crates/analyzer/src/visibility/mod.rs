@@ -420,13 +420,20 @@ where
     if matches!(kind, DeclaredPropertyKind::Magic) {
         if property_metadata.flags.is_readonly() {
             let property = display_member(context, declaring_class_metadata.original_name, property_name);
+            // A `.sharp` file cannot change the plain PHP class's documentation, so its help says only what to write.
+            let help = if context.dialect.is_sharp() {
+                "Remove the assignment: the property is only read."
+            } else {
+                "Remove the assignment or change the property documentation to `@property` if writes are supported."
+            };
             context.collector.report_with_code(
                 IssueCode::InvalidPropertyWrite,
                 Issue::error(format!("Cannot write to documented read-only property `{property}`."))
                     .with_annotation(
-                        Annotation::primary(member_span.unwrap_or(access_span)).with_message("This property is read-only"),
+                        Annotation::primary(member_span.unwrap_or(access_span))
+                            .with_message("This property is read-only"),
                     )
-                    .with_help("Remove the assignment or change the property documentation to `@property` if writes are supported."),
+                    .with_help(help),
             );
         }
 

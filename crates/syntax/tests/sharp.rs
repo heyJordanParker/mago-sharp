@@ -2964,6 +2964,30 @@ fn a_lambda_with_a_block_body_is_a_closure_without_function_or_use() {
     );
 }
 
+/// Spec section 1: a lambda takes attributes before its parameters, which are then in parentheses, as in C#. A list
+/// literal that no parenthesized `=>` follows stays a list.
+#[test]
+fn attributes_before_a_lambda_s_parentheses_are_the_lambda_s() {
+    const CODE: &str = "class Report\n{\n    void run()\n    {\n        const twice = [Note(\"a\")] (int n) => n * 2;\n        const log = [Note(\"b\"), Retry(3)] [Searchable] () => { return 1; };\n        const list = [Note(\"c\")];\n        const called = [twice][0](2);\n    }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Report.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let Expression::ArrowFunction(twice) = statement_expression(program, 0) else {
+        panic!("expected a lambda, got {:#?}", method_body(program));
+    };
+    let Expression::Closure(log) = statement_expression(program, 1) else {
+        panic!("expected a block lambda, got {:#?}", method_body(program));
+    };
+    let lists = |lists: &Sequence<AttributeList>| lists.iter().map(|list| source(CODE, list)).collect::<Vec<_>>();
+
+    assert_eq!(lists(&twice.attribute_lists), ["[Note(\"a\")]"]);
+    assert_eq!(source(CODE, twice), "[Note(\"a\")] (int n) => n * 2");
+    assert_eq!(lists(&log.attribute_lists), ["[Note(\"b\"), Retry(3)]", "[Searchable]"]);
+    assert!(matches!(statement_expression(program, 2), Expression::Array(_)), "{:#?}", method_body(program));
+    assert!(matches!(statement_expression(program, 3), Expression::Call(_)), "{:#?}", method_body(program));
+}
+
 #[test]
 fn a_lambda_body_takes_the_whole_expression_and_stops_at_a_comma() {
     const CODE: &str =
@@ -3710,27 +3734,94 @@ fn php_attribute_syntax_is_a_parse_error_that_names_the_brackets() {
     assert_eq!(attribute_lists(CODE, Node::Program(program)), ["#[Marker]"; 3]);
 }
 
+/// Spec section 1: an accessor takes attributes, as in `{ [Pure] get; set; }`, where `[` never opens a type. A type
+/// parameter's attributes are a parse error that says where to put them.
 #[test]
-fn an_attribute_target_is_not_supported_yet() {
-    const CODE: &str = "class Report\n{\n    [return: NotNull]\n    public string run() { return \"\"; }\n}\n";
+fn an_accessor_takes_attributes_and_a_type_parameter_takes_none() {
+    const CODE: &str =
+        "class Report<[Marker] TItem>\n{\n    public int count { [Pure] get; [Logged, Checked] set; } = 0;\n}\n";
     let arena = LocalArena::new();
     let program = parse(&arena, "src/Report.sharp", CODE);
 
-    let [error] = program.errors else {
-        panic!("expected one error, got {:#?}", program.errors);
+    let messages: Vec<(String, &str)> =
+        program.errors.iter().map(|error| (error.to_string(), source(CODE, error))).collect();
+    assert_eq!(
+        messages,
+        [(
+            "A type parameter takes no attributes: put them on the declaration that declares it.".to_owned(),
+            "[Marker]"
+        )]
+    );
+    let Some(ClassLikeMember::Property(Property::Hooked(count))) = class_members(program).first() else {
+        panic!("expected a property, got {:#?}", class_members(program));
     };
-    assert_eq!(error.to_string(), "An attribute target is not supported yet in PHP#.");
-    assert_eq!(source(CODE, error), "return:");
+    let accessors: Vec<(&str, Vec<&str>)> = count
+        .hook_list
+        .hooks
+        .iter()
+        .map(|accessor| {
+            (source(CODE, &accessor.name), accessor.attribute_lists.iter().map(|list| source(CODE, list)).collect())
+        })
+        .collect();
+    assert_eq!(accessors, [("get", vec!["[Pure]"]), ("set", vec!["[Logged, Checked]"])]);
+}
+
+/// Spec section 1: a lambda with attributes puts its parameters in parentheses, as C# does, so one written without them
+/// is one error that names the form, and the lambda still parses.
+#[test]
+fn an_attributed_lambda_without_parentheses_is_one_error() {
+    const CODE: &str = "class Report\n{\n    public Function<int(int)> twice() => [Tag(\"bare\")] n => n * 2;\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Report.sharp", CODE);
+
+    let messages: Vec<(String, &str)> =
+        program.errors.iter().map(|error| (error.to_string(), source(CODE, error))).collect();
+    assert_eq!(
+        messages,
+        [(
+            "A lambda with attributes puts its parameters in parentheses, as in `[Pure] (n) => n * 2`.".to_owned(),
+            "[Tag(\"bare\")] n"
+        )]
+    );
+}
+
+/// Spec section 1: an attribute target, as C# writes it, opens its brackets and names where every attribute in them
+/// goes, as `return:` in `[return: NotNull, Pure]`. A target after the first attribute is a parse error, as in C#.
+#[test]
+fn an_attribute_target_opens_its_brackets() {
+    const CODE: &str = "class Report\n{\n    [return: NotNull, Pure]\n    [method: Logged]\n    [Cached]\n    public string run() { return \"\"; }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Report.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
     let Some(ClassLikeMember::Method(run)) = class_members(program).first() else {
         panic!("expected a method, got {:#?}", class_members(program));
     };
-    let names: Vec<&[u8]> = run
+    let lists: Vec<(Option<&str>, Vec<&str>)> = run
         .attribute_lists
         .iter()
-        .flat_map(|list| list.attributes.iter())
-        .map(|attribute| attribute.name.value())
+        .map(|list| {
+            let target = list.target.as_ref().map(|target| source(CODE, &target.name));
+            (target, list.attributes.iter().map(|attribute| source(CODE, attribute)).collect())
+        })
         .collect();
-    assert_eq!(names, [&b"NotNull"[..]]);
+    assert_eq!(
+        lists,
+        [(Some("return"), vec!["NotNull", "Pure"]), (Some("method"), vec!["Logged"]), (None, vec!["Cached"])]
+    );
+
+    const LATE: &str = "class Report\n{\n    [Cached, method: Logged]\n    public string run() { return \"\"; }\n}\n";
+    let program = parse(&arena, "src/Report.sharp", LATE);
+    let messages: Vec<(String, &str)> =
+        program.errors.iter().map(|error| (error.to_string(), source(LATE, error))).collect();
+    assert_eq!(
+        messages,
+        [(
+            "An attribute target opens its brackets and names where all of them go, as in `[param: Trimmed]`."
+                .to_owned(),
+            "method:"
+        )]
+    );
 }
 
 /// `typeof` takes any type, spec section 25: a class by its short name, a class value of a generic class with its type

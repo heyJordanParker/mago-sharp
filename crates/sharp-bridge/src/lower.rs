@@ -285,6 +285,7 @@ const ZEND_ACC_FIELD: u32 = 1 << 15;
 const ZEND_ACC_GENERATOR: u32 = 1 << 24;
 const ZEND_ACC_ENUM: u32 = 1 << 28;
 const ZEND_ACC_SHARP_HIDDEN: u32 = 1 << 13;
+const ZEND_SHARP_RESULT_CROSSES: u32 = 1;
 const ZEND_SHARP_TYPE_OF_LIST: u32 = 1;
 const ZEND_SHARP_NEW_CLASS_VALUE: u32 = 1;
 const ZEND_TYPE_NULLABLE: u32 = 1 << 8;
@@ -516,8 +517,8 @@ struct Lowering<'lowering, 'arena> {
     lines: &'lowering Lines,
     names: &'lowering ResolvedNames<'arena>,
     types: &'lowering Types<'lowering>,
-    /// The full name of the class-like being lowered, as PHP writes it.
-    class: &'arena [u8],
+    /// The full name of the class-like being lowered, as PHP writes it: a case's class while its members are lowered.
+    class: &'lowering [u8],
     /// The full dotted name of the method or property being lowered, which `Position.current()` gives as its `function`.
     function: Vec<u8>,
     nodes: Vec<sharp_node>,
@@ -555,14 +556,17 @@ struct Lowering<'lowering, 'arena> {
     /// The declared type of each typed local lowered so far, by the offset of its declaration, which a reference
     /// parameter's local crosses back into.
     local_types: HashMap<u32, TUnion>,
-    /// Whether the constructor being lowered promotes a `Map` or a `Set`, so it declares each property it promotes
-    /// beside it, in written order, and sets each one in its first statements.
+    /// Whether the constructor being lowered promotes a parameter that holds a `Map` or a `Set`, at any depth, so it
+    /// declares each property it promotes beside it, in written order, and sets each one in its first statements.
     promoted_beside: bool,
     /// The type PHP writes for each type parameter, by the offset of its declared name: its bound, or `mixed` without
     /// one.
     type_parameters: HashMap<u32, PhpType<'arena>>,
     /// Whether the file declares a test module, so each of its classes starts and ends its tests.
     tested: bool,
+    /// Whether the expression being lowered is one PHP evaluates as a constant expression, where a `Map` or a `Set`
+    /// constant's read is the PHP array the constant holds, as [`Self::constant_expression`] lowers it.
+    in_constant_expression: bool,
 }
 
 impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
@@ -597,6 +601,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             promoted_beside: false,
             type_parameters: HashMap::default(),
             tested: false,
+            in_constant_expression: false,
         }
     }
 
@@ -863,6 +868,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             self.class_members(&class.members, parent_name, class.class.span, class.left_brace, class.right_brace);
         members.extend(self.parse_methods(&class.members, class.name.span));
         members.extend(self.string_conversion(class.members.as_slice(), class.left_brace, class.right_brace));
+        members.extend(self.forwarders(class.left_brace, class.right_brace));
         if self.tested {
             members.extend(self.test_hooks(class));
         }
@@ -916,6 +922,88 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             b"__toString",
             &[parameters, NULL, body, return_type, NULL],
         ))
+    }
+
+    /// Spec section 22: a method a PHP# interface requires, which the class takes from a plain PHP parent declaring no
+    /// return type, is the parent's method with the interface's type, so PHP takes it as the implementation:
+    /// `public function getMorphClass(...$arguments): string { return parent::getMorphClass(...$arguments); }`. PHP
+    /// checks the parent's result against that type, as `strict_types` does. A result PHP# types as `mixed` needs none.
+    fn forwarders(&mut self, start: Span, end: Span) -> Vec<u32> {
+        let line = self.line(start);
+        let mut forwarders = Vec::new();
+        for (name, result) in self.types.forwarded_methods(self.class) {
+            let Some(return_type) = self.forwarded_type(result, line) else {
+                continue;
+            };
+            let parameter_name = self.local_name(0, line, b"arguments");
+            let parameter =
+                self.node(SHARP_AST_PARAM, ZEND_PARAM_VARIADIC, line, &[NULL, parameter_name, NULL, NULL, NULL, NULL]);
+            let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &[parameter]);
+            let arguments = self.variable(start, b"arguments");
+            let arguments = self.node(SHARP_AST_UNPACK, 0, line, &[arguments]);
+            let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[arguments]);
+            let parent = self.string(ZEND_NAME_NOT_FQ, line, b"parent");
+            let method = self.string(0, line, name.as_bytes());
+            let call = self.node(SHARP_AST_STATIC_CALL, 0, line, &[parent, method, arguments]);
+            let returns = !result.types.iter().all(|atomic| matches!(atomic, TAtomic::Void));
+            let statement = if returns { self.node(SHARP_AST_RETURN, 0, line, &[call]) } else { call };
+            let body = self.node(SHARP_AST_STMT_LIST, 0, line, &[statement]);
+
+            forwarders.push(self.declaration(
+                SHARP_AST_METHOD,
+                ZEND_ACC_PUBLIC,
+                start,
+                end,
+                name.as_bytes(),
+                &[parameters, NULL, body, return_type, NULL],
+            ));
+        }
+
+        forwarders
+    }
+
+    /// The PHP type the bridge declares for the PHP# result `r#type`, as [`Self::result_hint`] lowers it: a `Map` is
+    /// `\Sharp\Map`, a `Set` `\Sharp\Set`, each with `array` where a plain PHP caller gets its PHP array, any other
+    /// collection `array`, and a function type `\Closure`. None for a result PHP declares no type for, as `mixed`, or
+    /// that holds a type parameter.
+    fn forwarded_type(&mut self, r#type: &TUnion, line: u32) -> Option<u32> {
+        let mut members = Vec::new();
+        let mut null_line = None;
+        for atomic in r#type.types.iter() {
+            let php_type = match atomic {
+                TAtomic::Null => {
+                    null_line = Some(line);
+                    continue;
+                }
+                TAtomic::Void => PhpType::Named(b"void"),
+                TAtomic::Scalar(scalar) if scalar.is_true() => PhpType::Named(b"true"),
+                TAtomic::Scalar(scalar) if scalar.is_false() => PhpType::Named(b"false"),
+                TAtomic::Scalar(scalar) if scalar.is_general_bool() => PhpType::Named(b"bool"),
+                TAtomic::Scalar(scalar) if scalar.is_int() => PhpType::Named(b"int"),
+                TAtomic::Scalar(scalar) if scalar.is_float() => PhpType::Named(b"float"),
+                TAtomic::Scalar(scalar) if scalar.is_string() => PhpType::Named(b"string"),
+                TAtomic::Object(TObject::Any) => PhpType::Named(b"object"),
+                TAtomic::Object(TObject::Enum(r#enum)) => PhpType::Classes(vec![r#enum.name.as_bytes()]),
+                TAtomic::Object(TObject::Named(object)) if object.get_intersection_types().is_none() => {
+                    PhpType::Classes(vec![object.name.as_bytes()])
+                }
+                TAtomic::Array(TArray::Keyed(_)) => PhpType::Classes(vec![b"Sharp\\Map"]),
+                TAtomic::Array(TArray::Set(_)) => PhpType::Classes(vec![b"Sharp\\Set"]),
+                TAtomic::Array(_) => PhpType::Keyword(IS_ARRAY),
+                TAtomic::Iterable(_) => PhpType::Named(b"iterable"),
+                TAtomic::Callable(_) => PhpType::Classes(vec![b"Closure"]),
+                _ => return None,
+            };
+            members.push((php_type, line));
+        }
+        // A plain PHP caller gets a `Map`'s or a `Set`'s PHP array, as `Self::result_hint` declares it.
+        if self.crosses_outward(r#type)
+            && r#type.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(TArray::Keyed(_) | TArray::Set(_))))
+        {
+            members.push((PhpType::Keyword(IS_ARRAY), line));
+        }
+
+        (!members.is_empty()).then(|| self.php_union(members, null_line))
     }
 
     /// A struct is a final class, spec section 10, whose members are a class's, with its header's interfaces and
@@ -1646,11 +1734,13 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     has_constructor = true;
                     let promoted =
                         || method.parameter_list.parameters.iter().filter(|parameter| parameter.is_promoted_property());
-                    // A superglobal's name runs hidden as a parameter, and stays its own as the property.
+                    // A superglobal's name runs hidden as a parameter, and stays its own as the property. PHP gives a
+                    // promoted parameter's attributes to both, so a target, as `[param: Trimmed]`, needs both apart.
                     self.promoted_beside = promoted().any(|parameter| {
-                        collection_hint(parameter.hint.as_ref()).is_some()
+                        self.crossing_type(parameter).is_some()
                             || runs_its_accessors(parameter)
                             || SUPERGLOBALS.contains(&parameter.variable.name)
+                            || parameter.attribute_lists.iter().any(|list| list.target.is_some())
                     });
                     if self.promoted_beside {
                         for parameter in promoted() {
@@ -2061,6 +2151,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         members.extend(self.class_metadata(self.class, self.line(interface.name)));
         let members = self.node(SHARP_AST_STMT_LIST, 0, self.line(interface.left_brace), &members);
         let header = interface.inheritance.as_ref().map_or(NULL, |inheritance| self.name_list(inheritance));
+        let attributes = self.attributes(&interface.attribute_lists, None, None);
 
         self.declaration(
             SHARP_AST_CLASS,
@@ -2068,7 +2159,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             interface.interface.span,
             interface.right_brace,
             interface.name.value,
-            &[NULL, header, members, NULL, NULL],
+            &[NULL, header, members, attributes, NULL],
         )
     }
 
@@ -2193,11 +2284,12 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let line = self.line(variable);
         let hint = property.hint.as_ref().map_or(NULL, |hint| self.hint(hint));
         let name = self.string(0, line, variable.name);
-        let hooks = self.abstract_hooks(&property.hook_list);
+        let hooks = self.abstract_hooks(property);
         let element = self.node(SHARP_AST_PROP_ELEM, 0, line, &[name, NULL, NULL, hooks]);
         let declaration = self.node(SHARP_AST_PROP_DECL, 0, line, &[element]);
+        let attributes = self.attributes(&property.attribute_lists, None, None);
 
-        self.node(SHARP_AST_PROP_GROUP, ZEND_ACC_PUBLIC, line, &[hint, declaration, NULL])
+        self.node(SHARP_AST_PROP_GROUP, ZEND_ACC_PUBLIC, line, &[hint, declaration, attributes])
     }
 
     /// A computed property with a default body, spec section 22: in its interface, `public mixed $designKey { get; }`,
@@ -2227,11 +2319,12 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.class = self.names.get(&event.name);
         let line = self.line(&event.parameter_list);
         let mut members = self.trait_members(event.inheritance.as_ref(), event.parameter_list.span());
-        members.push(self.promoted_constructor(event.name.span, &event.parameter_list));
+        members.extend(self.promoted_constructor(event.name.span, &event.parameter_list));
         members.extend(self.string_conversion(&[], event.parameter_list.span(), event.terminator.span()));
         members.extend(self.class_metadata(self.class, self.line(event.name)));
         let members = self.node(SHARP_AST_STMT_LIST, 0, line, &members);
         let header = event.inheritance.as_ref().map_or(NULL, |inheritance| self.name_list(inheritance));
+        let attributes = self.attributes(&event.attribute_lists, None, None);
 
         self.declaration(
             SHARP_AST_CLASS,
@@ -2239,18 +2332,35 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             event.event.span,
             event.terminator,
             event.name.value,
-            &[NULL, header, members, NULL, NULL],
+            &[NULL, header, members, attributes, NULL],
         )
     }
 
     /// The public constructor of an event or a case that carries data, from `name` to the end of `parameters`, which
-    /// promotes each parameter to a `public readonly` property and has no statement.
-    fn promoted_constructor(&mut self, name: Span, parameter_list: &FunctionLikeParameterList) -> u32 {
+    /// makes each parameter a `public readonly` property, with the properties it declares before it. It promotes each
+    /// one and has no statement, unless a parameter holds a `Map` or a `Set`, at any depth, or its attributes name a
+    /// target, as `[param: Trimmed]`. Plain PHP passes a collection as a PHP array, PHP sets a promoted property before
+    /// the body runs, and PHP gives a promoted parameter's attributes to both the parameter and the property. So each
+    /// parameter is then a plain one beside the property it declares with its own attributes, and the body sets each
+    /// property once [`Self::collection_parameters`] made the object, as a class's constructor does:
+    /// `$tags = \is_array($tags) ? new \Sharp\Set($tags) : $tags; $this->tags = $tags;`.
+    fn promoted_constructor(&mut self, name: Span, parameter_list: &FunctionLikeParameterList) -> Vec<u32> {
         self.enter(b"__construct");
+        let beside = parameter_list.parameters.iter().any(|parameter| {
+            self.crossing_type(parameter).is_some()
+                || parameter.attribute_lists.iter().any(|list| list.target.is_some())
+        });
+        let mut members = Vec::new();
         let mut parameters = Vec::new();
         for parameter in &parameter_list.parameters {
             let index = self.parameter(parameter, None);
-            self.nodes[index as usize].attr |= ZEND_ACC_PUBLIC | ZEND_ACC_READONLY;
+            if beside {
+                let property = self.promoted_property(parameter);
+                self.nodes[property as usize].attr = ZEND_ACC_PUBLIC | ZEND_ACC_READONLY;
+                members.push(property);
+            } else {
+                self.nodes[index as usize].attr |= ZEND_ACC_PUBLIC | ZEND_ACC_READONLY;
+            }
             parameters.push(index);
         }
 
@@ -2258,16 +2368,30 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let metadata = self.types.method_metadata(self.class, b"__construct");
         parameters.extend(self.parameter_metadata(metadata, line));
         let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &parameters);
-        let body = self.node(SHARP_AST_STMT_LIST, 0, line, &[]);
+        let mut statements = Vec::new();
+        if beside {
+            statements.extend(self.collection_parameters(&parameter_list.parameters));
+            for parameter in &parameter_list.parameters {
+                let line = self.line(parameter);
+                let this = self.variable(parameter.variable.span, b"this");
+                let property = self.string(0, line, parameter.variable.name);
+                let place = self.node(SHARP_AST_PROP, 0, line, &[this, property]);
+                let value = self.variable(parameter.variable.span, parameter.variable.name);
+                statements.push(self.node(SHARP_AST_ASSIGN, 0, line, &[place, value]));
+            }
+        }
+        let body = self.node(SHARP_AST_STMT_LIST, 0, line, &statements);
 
-        self.declaration(
+        members.push(self.declaration(
             SHARP_AST_METHOD,
             ZEND_ACC_PUBLIC,
             name,
             parameter_list,
             b"__construct",
             &[parameters, NULL, body, NULL, NULL],
-        )
+        ));
+
+        members
     }
 
     /// Spec section 20: an enum with a case that carries data is an abstract class, with the enum's header as its
@@ -2334,7 +2458,17 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             let line = self.line(name.span);
             let case_class = [enum_name, b"\\", name.value].concat();
             let mut members = match &case.item {
-                EnumCaseItem::Data(item) => vec![self.promoted_constructor(name.span, &item.parameter_list)],
+                // The case's class declares the constructor and its fields, so their checks are its own.
+                EnumCaseItem::Data(item) => {
+                    let Some(class) = self.types.class_name(&case_class) else {
+                        unreachable!("the codex declares a class for each case that carries data");
+                    };
+                    self.class = class;
+                    let constructor = self.promoted_constructor(name.span, &item.parameter_list);
+                    self.class = enum_name;
+
+                    constructor
+                }
                 EnumCaseItem::Unit(_) | EnumCaseItem::Backed(_) => self.case_object(&case_class, name.span),
             };
             // A case of a generic enum passes its type arguments to the enum, as `Ok<T, TError>` to `Result<T, TError>`.
@@ -2565,8 +2699,14 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 body
             }
         };
+        let crossing = self.crossing_result(
+            php_method_name(method),
+            method.return_type_hint.as_ref().map(|return_type| &return_type.hint),
+        );
         let (start, return_type) = match &method.return_type_hint {
-            Some(return_type_hint) => (return_type_hint.span(), self.hint(&return_type_hint.hint)),
+            Some(return_type_hint) => {
+                (return_type_hint.span(), self.return_hint(php_method_name(method), &return_type_hint.hint, crossing))
+            }
             None => (method.name.span, NULL),
         };
         // Spec section 14.3: a method named without parentheses is a function value, a closure of the method.
@@ -2575,7 +2715,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         } else {
             let function_type = self.types.method_type(self.class, php_method_name(method));
 
-            self.function_type(return_type, function_type, self.line(start))
+            self.function_type(return_type, function_type, crossing, self.line(start))
         };
         self.static_type_parameters = None;
         // A sub-interface's body that replaces its parent's default body runs as a method of its trait of default
@@ -2715,14 +2855,20 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     std::iter::once(receiver).chain(&method.parameter_list.parameters),
                 );
                 let body = self.method_body(&method.body, method.returns_value(), statements);
+                let crossing = self.crossing_result(
+                    method.name.value,
+                    method.return_type_hint.as_ref().map(|return_type| &return_type.hint),
+                );
                 let (start, return_type) = match &method.return_type_hint {
-                    Some(return_type_hint) => (return_type_hint.span(), self.hint(&return_type_hint.hint)),
+                    Some(return_type_hint) => {
+                        (return_type_hint.span(), self.result_hint(&return_type_hint.hint, crossing))
+                    }
                     None => unreachable!("semantics refuses an extension method without a return type"),
                 };
                 // An extension member carries its result type, which a generator's elements are read from, spec
                 // section 12, and no function type, since no function value names it.
                 let result = self.types.method_result(self.class, method.name.value);
-                let return_type = self.carried_type(return_type, result, self.line(start));
+                let return_type = self.carried_type(return_type, result, crossing, self.line(start));
                 let attributes = self.attributes(&method.attribute_lists, None, None);
 
                 self.declaration(
@@ -3171,7 +3317,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// holds.
     fn parameter_of_type(&mut self, parameter: &FunctionLikeParameter, hint: u32, service: Option<Word>) -> u32 {
         let hint = match collection_hint(parameter.hint.as_ref()) {
-            Some(nullable) if hint != NULL => self.table_or_array(hint, nullable),
+            Some(nullable) if hint != NULL && self.crossing_type(parameter).is_some() => {
+                self.table_or_array(hint, nullable)
+            }
             _ => hint,
         };
         let line = self.line(parameter.variable.span);
@@ -3184,7 +3332,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         };
         let variadic_flag = if parameter.is_variadic() { ZEND_PARAM_VARIADIC } else { 0 };
         let service = service.map(|service| self.service_attribute(line, service));
-        let attributes = self.attributes(&parameter.attribute_lists, None, service);
+        // The property a promoted parameter declares beside it takes its `property:` and `field:` attributes.
+        let lists: Vec<&AttributeList> =
+            parameter.attribute_lists.iter().filter(|list| list.target.is_none() || targets_value(list)).collect();
+        let attributes = self.attributes_of(&lists, None, service);
 
         self.node(
             SHARP_AST_PARAM,
@@ -3198,7 +3349,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// argument out. PHP takes a constant expression as a default, so one that is not lowers to a static closure called
     /// with no arguments, `(static function () { return \time(); })()`, which the engine runs as the default.
     fn default_value(&mut self, value: &Expression) -> u32 {
-        let (lowered, _) = self.lambda_body(|lowering| lowering.expression(value));
+        let (lowered, _) = self.lambda_body(|lowering| lowering.default_expression(value));
         if self.is_constant_expression(lowered) {
             return lowered;
         }
@@ -3301,16 +3452,17 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
     /// The property a promoted parameter declares, with the visibility, accessors, accessor bodies, observers,
     /// behaviors and attributes it is written with, and no default. PHP sets a promoted property from the argument
-    /// before the constructor's body runs, and a get-only one only once, so a constructor that promotes a `Map` or a
-    /// `Set`, or a property whose writes run through its accessors, declares each property it promotes this way, in its
-    /// written order, and sets each from its argument once the behaviors exist, spec section 9: the `Map` or `Set` one
-    /// to the object of the argument, and each other through its `set`.
+    /// before the constructor's body runs, and a get-only one only once, so a constructor that promotes a value that
+    /// holds a `Map` or a `Set`, at any depth, or a property whose writes run through its accessors, declares each
+    /// property it promotes this way, in its written order, and sets each from its argument once the behaviors exist,
+    /// spec section 9: the one that holds a `Map` or a `Set` to the objects of the argument, and each other through its
+    /// `set`.
     fn promoted_property(&mut self, parameter: &FunctionLikeParameter) -> u32 {
         let Some(hint) = &parameter.hint else {
             unreachable!("semantics refuses a method parameter without a type");
         };
         let hooks = match (&parameter.hooks, &parameter.behaviors) {
-            (Some(accessors), Some(behaviors)) => self.behavior_hooks(&parameter.variable, accessors, behaviors),
+            (Some(accessors), Some(behaviors)) => self.behavior_hooks(&parameter.variable, hint, accessors, behaviors),
             (accessors, _) => self.hooks(&parameter.variable, accessors.as_ref(), Some(hint)),
         };
         let line = self.line(parameter.variable.span);
@@ -3319,8 +3471,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let flags = self.member_flags(parameter);
         let element = self.node(SHARP_AST_PROP_ELEM, 0, line, &[name, NULL, NULL, hooks]);
         let declaration = self.node(SHARP_AST_PROP_DECL, 0, line, &[element]);
-        let crossing = self.crossing_attribute(parameter.hint.as_ref());
-        let attributes = self.attributes(&parameter.attribute_lists, None, crossing);
+        let crossing = self.crossing_attribute(parameter.variable.name, parameter.hint.as_ref());
+        let lists: Vec<&AttributeList> = parameter.attribute_lists.iter().filter(|list| !targets_value(list)).collect();
+        let attributes = self.attributes_of(&lists, None, crossing);
 
         self.node(SHARP_AST_PROP_GROUP, flags, self.line(parameter), &[hint, declaration, attributes])
     }
@@ -3340,16 +3493,16 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             Property::Hooked(hooked) if hooked.modifiers.contains_abstract() => {
                 let flags = accessor_flags(&hooked.modifiers, &hooked.hook_list, self.names) & !ZEND_ACC_READONLY;
 
-                (flags, &hooked.attribute_lists, self.abstract_hooks(&hooked.hook_list))
+                (flags, &hooked.attribute_lists, self.abstract_hooks(hooked))
             }
             // A static property's accessors are its class's hidden static methods, which alone reach its storage, so
             // the storage is private whatever the property's access level, and plain PHP reaches it only through a
             // method.
             Property::Hooked(hooked) if runs_static_accessors(property) => (0, &hooked.attribute_lists, NULL),
-            Property::Hooked(hooked @ HookedProperty { behaviors: Some(behaviors), .. }) => (
+            Property::Hooked(hooked @ HookedProperty { behaviors: Some(behaviors), hint: Some(hint), .. }) => (
                 accessor_flags(&hooked.modifiers, &hooked.hook_list, self.names),
                 &hooked.attribute_lists,
-                self.behavior_hooks(hooked.item.variable(), &hooked.hook_list, behaviors),
+                self.behavior_hooks(hooked.item.variable(), hint, &hooked.hook_list, behaviors),
             ),
             Property::Hooked(hooked) => (
                 accessor_flags(&hooked.modifiers, &hooked.hook_list, self.names),
@@ -3393,7 +3546,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             Some(value)
                 if !property.initial_value_runs_in_constructor() && !property.initial_value_runs_after_class() =>
             {
-                self.expression(value)
+                self.default_expression(value)
             }
             _ => NULL,
         };
@@ -3405,7 +3558,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         // A member with no access modifier is private, spec section 5.
         let access = if flags & access_flags == 0 { ZEND_ACC_PRIVATE } else { 0 };
         let flags = flags | access;
-        let crossing = self.crossing_attribute(property.hint());
+        let crossing = self.crossing_attribute(variable.name, property.hint());
         let attributes = self.attributes(attribute_lists, r#override, crossing);
 
         self.node(SHARP_AST_PROP_GROUP, flags, self.line(property), &[hint, declaration, attributes])
@@ -3417,10 +3570,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// are no hooks of their own: they run inside the `set` hook, which an auto `set` beside one always has. The `set`
     /// hook of a `Map` or a `Set`, whose type `holds` names, also takes the PHP array plain PHP writes, and the body
     /// first crosses it, as a parameter's is.
+    /// Each hook carries its accessor's attributes, spec section 1, so an auto accessor with attributes is the hook
+    /// over the storage too.
     fn hooks(&mut self, variable: &DirectVariable, accessors: Option<&PropertyHookList>, holds: Option<&Hint>) -> u32 {
-        let Some(accessors) = accessors.filter(|accessors| {
-            accessors.hooks.iter().any(|accessor| matches!(accessor.body, PropertyHookBody::Concrete(_)))
-        }) else {
+        let Some(accessors) = accessors.filter(|accessors| accessors.has_hooks()) else {
             return NULL;
         };
 
@@ -3433,7 +3586,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 let observed = accessor.is_setter() && (will_set.is_some() || did_set.is_some());
                 let mut body = match &accessor.body {
                     PropertyHookBody::Concrete(body) => lowering.accessor_body(accessor.name.value, body),
-                    PropertyHookBody::Abstract(_) if uses_field && !observed => continue,
+                    PropertyHookBody::Abstract(_) if uses_field && !observed && accessor.attribute_lists.is_empty() => {
+                        continue;
+                    }
                     PropertyHookBody::Abstract(_) => lowering.storage_body(accessor),
                 };
                 if observed {
@@ -3442,24 +3597,20 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 let mut parameters = NULL;
                 if accessor.is_setter()
                     && let Some(hint) = holds
-                    && let Some(nullable) = collection_hint(holds)
                 {
-                    let (span, line) = (accessor.name.span, lowering.line(accessor));
-                    let lowered = lowering.hint(hint);
-                    let accepted = lowering.table_or_array(lowered, nullable);
-                    let value = lowering.string(0, line, b"value");
-                    let parameter = lowering.node(SHARP_AST_PARAM, 0, line, &[accepted, value, NULL, NULL, NULL, NULL]);
-                    parameters = lowering.node(SHARP_AST_PARAM_LIST, 0, line, &[parameter]);
                     let r#type = lowering.hint_type(hint);
-                    let first = lowering.variable(span, b"value");
-                    let crossed = lowering.crossed(span, &r#type, b"value", first);
-                    let place = lowering.variable(span, b"value");
-                    let crossing = lowering.node(SHARP_AST_ASSIGN, 0, line, &[place, crossed]);
-                    body = lowering.node(SHARP_AST_STMT_LIST, 0, line, &[crossing, body]);
+                    let collection = collection_hint(holds).filter(|_| lowering.crossing_array(&r#type).is_some());
+                    parameters = lowering.setter_parameters(accessor, variable, hint, collection);
+                    if collection.is_some() {
+                        let (span, line) = (accessor.name.span, lowering.line(accessor));
+                        let first = lowering.variable(span, b"value");
+                        let crossed = lowering.crossed(span, &r#type, b"value", first);
+                        let place = lowering.variable(span, b"value");
+                        let crossing = lowering.node(SHARP_AST_ASSIGN, 0, line, &[place, crossed]);
+                        body = lowering.node(SHARP_AST_STMT_LIST, 0, line, &[crossing, body]);
+                    }
                 }
-                // An `init` body is the `set` hook, and the property's set visibility keeps it to object creation.
-                let name = if accessor.is_setter() { b"set".as_slice() } else { accessor.name.value };
-                hooks.push(lowering.hook(name, accessor.name, accessor, parameters, body));
+                hooks.push(lowering.accessor_hook(accessor, parameters, body));
             }
 
             lowering.node(SHARP_AST_STMT_LIST, 0, lowering.line(accessors), &hooks)
@@ -3468,14 +3619,77 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
     /// The hooks of an interface property or an abstract one: each accessor is a hook with no body, as php-src's
     /// grammar builds `{ get; set; }`. An `init` is the `set` hook, as it is on a property with a body.
-    fn abstract_hooks(&mut self, accessors: &PropertyHookList) -> u32 {
+    fn abstract_hooks(&mut self, property: &HookedProperty) -> u32 {
+        let Some(hint) = &property.hint else {
+            unreachable!("the PHP# parser gives every property its type");
+        };
         let mut hooks = Vec::new();
-        for accessor in &accessors.hooks {
-            let name = if accessor.is_setter() { b"set".as_slice() } else { accessor.name.value };
-            hooks.push(self.hook(name, accessor.name, accessor, NULL, NULL));
+        for accessor in &property.hook_list.hooks {
+            let parameters = if accessor.is_setter() {
+                self.setter_parameters(accessor, property.item.variable(), hint, None)
+            } else {
+                NULL
+            };
+            hooks.push(self.accessor_hook(accessor, parameters, NULL));
         }
 
-        self.node(SHARP_AST_STMT_LIST, 0, self.line(accessors), &hooks)
+        self.node(SHARP_AST_STMT_LIST, 0, self.line(&property.hook_list), &hooks)
+    }
+
+    /// The hook of `accessor` with `parameters` and `body`, which carries the accessor's attributes but those of its
+    /// `param:` target, [`Self::setter_parameters`]'s. An `init` is the `set` hook, and the property's set visibility
+    /// keeps it to object creation.
+    fn accessor_hook(&mut self, accessor: &PropertyHook, parameters: u32, body: u32) -> u32 {
+        let name = if accessor.is_setter() { b"set".as_slice() } else { accessor.name.value };
+        let attributes = self.accessor_attributes(accessor, false);
+
+        self.declaration(
+            SHARP_AST_PROPERTY_HOOK,
+            0,
+            accessor.name,
+            accessor,
+            name,
+            &[parameters, NULL, body, NULL, attributes],
+        )
+    }
+
+    /// The attributes of `accessor` that go on the value it takes, `param:` ones, when `of_value`, or else the rest,
+    /// which go on its hook or its method.
+    fn accessor_attributes(&mut self, accessor: &PropertyHook, of_value: bool) -> u32 {
+        let lists: Vec<&AttributeList> =
+            accessor.attribute_lists.iter().filter(|list| targets_value(list) == of_value).collect();
+
+        self.attributes_of(&lists, None, None)
+    }
+
+    /// The parameter list of the `set` hook of `setter`, the setter of the property `variable` written `hint`, or
+    /// null for the `$value` PHP gives it: a `Map` or a `Set`, which `collection` says is nullable or not, takes the
+    /// PHP array plain PHP writes too, and a `param:` attribute, as in `[param: Trimmed] set;`, goes on the parameter,
+    /// which takes the property's type.
+    fn setter_parameters(
+        &mut self,
+        setter: &PropertyHook,
+        variable: &DirectVariable,
+        hint: &Hint,
+        collection: Option<bool>,
+    ) -> u32 {
+        if !setter.attribute_lists.iter().any(targets_value) && collection.is_none() {
+            return NULL;
+        }
+
+        let line = self.line(setter);
+        let accepted = match collection {
+            Some(nullable) => {
+                let lowered = self.hint(hint);
+                self.table_or_array(lowered, nullable)
+            }
+            None => self.php_property_type(hint, variable.name, line),
+        };
+        let value = self.string(0, line, b"value");
+        let attributes = self.accessor_attributes(setter, true);
+        let parameter = self.node(SHARP_AST_PARAM, 0, line, &[accepted, value, NULL, attributes, NULL, NULL]);
+
+        self.node(SHARP_AST_PARAM_LIST, 0, line, &[parameter])
     }
 
     /// `lowered`, the lowered value, checked against the type text `text` once it enters PHP# from plain PHP, with
@@ -3665,6 +3879,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     fn behavior_hooks(
         &mut self,
         variable: &DirectVariable,
+        hint: &Hint,
         accessors: &PropertyHookList,
         behaviors: &PropertyBehaviorList,
     ) -> u32 {
@@ -3690,7 +3905,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 read = call(lowering, index, b"get", read);
             }
             let read = lowering.node(SHARP_AST_PROPERTY_HOOK_SHORT_BODY, 0, line, &[read]);
-            let get = lowering.hook(b"get", getter.name, getter, NULL, read);
+            let get = lowering.accessor_hook(getter, NULL, read);
 
             let mut written = lowering.variable(setter.name.span, b"value");
             for index in 0..count {
@@ -3699,7 +3914,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             let storage = lowering.storage(line, PlaceUse::Write);
             let store = lowering.node(SHARP_AST_ASSIGN, 0, line, &[storage, written]);
             let store = lowering.node(SHARP_AST_STMT_LIST, 0, line, &[store]);
-            let set = lowering.hook(b"set", setter.name, setter, NULL, store);
+            let parameters = lowering.setter_parameters(setter, variable, hint, None);
+            let set = lowering.accessor_hook(setter, parameters, store);
 
             lowering.node(SHARP_AST_STMT_LIST, 0, lowering.line(accessors), &[get, set])
         })
@@ -3772,6 +3988,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         r#override: Option<&Modifier>,
         added: Option<u32>,
     ) -> u32 {
+        self.attributes_of(&lists.iter().collect::<Vec<_>>(), r#override, added)
+    }
+
+    /// The attributes of `lists`, some of a declaration's, as [`Self::attributes`] lowers them all.
+    fn attributes_of(&mut self, lists: &[&AttributeList], r#override: Option<&Modifier>, added: Option<u32>) -> u32 {
         let line = match (lists.first(), r#override, added) {
             (Some(first), _, _) => self.line(first),
             (None, Some(r#override), _) => self.line(r#override),
@@ -3780,7 +4001,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         };
 
         let mut groups = Vec::new();
-        for list in lists {
+        for &list in lists {
             let mut attributes = Vec::new();
             for attribute in &list.attributes {
                 let line = self.line(attribute.name);
@@ -3804,16 +4025,26 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.node(SHARP_AST_ATTRIBUTE_LIST, 0, line, &groups)
     }
 
-    /// The `#[\Sharp\Crossing(plan)]` group of a property of a `Map` or a `Set` written `hint`, with the plan
-    /// [`Self::crossing_plan`] gives it, by which the engine crosses a PHP array plain PHP writes there. None for a
-    /// property of any other type.
-    fn crossing_attribute(&mut self, hint: Option<&Hint>) -> Option<u32> {
-        let hint = hint.filter(|hint| collection_hint(Some(hint)).is_some())?;
+    /// The `#[\Sharp\Crossing(plan)]` group of a property written `hint` whose type holds a `Map` or a `Set`, at any
+    /// depth, or can when it runs, with the plan [`Self::crossing_plan`] gives it, by which the engine crosses a PHP
+    /// array plain PHP writes there, and gives plain PHP the PHP array of each `Map` and `Set` it reads there, as
+    /// [`Self::crosses_outward`] says. A property whose `Map` plain PHP reads as the object, as one keyed by an enum
+    /// without backing values, takes `#[\Sharp\Crossing(plan, false)]`. None for a property of any other type. The property is `property` of the
+    /// class being lowered, whose declared type says what it can hold, a type parameter included.
+    fn crossing_attribute(&mut self, property: &[u8], hint: Option<&Hint>) -> Option<u32> {
+        let hint = hint?;
         let r#type = self.hint_type(hint);
+        let outward = self.crosses_outward(self.types.declared_property_type(self.class, property).unwrap_or(&r#type));
+        if !outward && self.crossing_array(&r#type).is_none() {
+            return None;
+        }
         let line = self.line(hint);
-        let plan = self.crossing_plan(line, &r#type);
+        let mut arguments = vec![self.crossing_plan(line, &r#type)];
+        if !outward {
+            arguments.push(self.zval(line, sharp_value::SHARP_FALSE, |_| {}));
+        }
 
-        Some(self.attribute_group(line, b"Sharp\\Crossing", plan))
+        Some(self.attribute_group(line, b"Sharp\\Crossing", &arguments))
     }
 
     /// The `#[\Sharp\Internal\Service('…')]` group, on line `line`, of a parameter the container fills whose PHP type
@@ -3821,34 +4052,44 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     fn service_attribute(&mut self, line: u32, id: Word) -> u32 {
         let id = self.string(0, line, id.as_bytes());
 
-        self.attribute_group(line, b"Sharp\\Internal\\Service", id)
+        self.attribute_group(line, b"Sharp\\Internal\\Service", &[id])
     }
 
-    /// `#[\Class(argument)]`, a group of one attribute of the class `class` with one argument.
-    fn attribute_group(&mut self, line: u32, class: &[u8], argument: u32) -> u32 {
+    /// `#[\Class(arguments)]`, a group of one attribute of the class `class`.
+    fn attribute_group(&mut self, line: u32, class: &[u8], arguments: &[u32]) -> u32 {
         let name = self.string(ZEND_NAME_FQ, line, class);
-        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[argument]);
+        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, arguments);
         let attribute = self.node(SHARP_AST_ATTRIBUTE, 0, line, &[name, arguments]);
 
         self.node(SHARP_AST_ATTRIBUTE_GROUP, 0, line, &[attribute])
     }
 
     /// A constant is a class constant group of one constant, as php-src's grammar builds `public const int MAX = 3;`:
-    /// the constant list, no attributes, then the type.
+    /// the constant list, the attributes, then the type.
     fn constant(&mut self, constant: &ClassLikeConstant) -> u32 {
         let item = constant.first_item();
         let line = self.line(item.name);
         let name = self.string(0, line, item.name.value);
-        let value = self.expression(item.value);
+        let value = self.constant_value(item.value);
         let element = self.node(SHARP_AST_CONST_ELEM, 0, line, &[name, value, NULL]);
         let declaration = self.node(SHARP_AST_CLASS_CONST_DECL, 0, line, &[element]);
-        let hint = constant.hint.as_ref().map_or(NULL, |hint| self.hint(hint));
+        let attributes = self.attributes(&constant.attribute_lists, None, None);
+        // A `Map` or `Set` constant holds the PHP array of its value, as `constant_value` writes it.
+        let hint = match constant.hint.as_ref() {
+            Some(hint) => match collection_hint(Some(hint)) {
+                Some(nullable) => {
+                    self.node(SHARP_AST_TYPE, IS_ARRAY | if nullable { ZEND_TYPE_NULLABLE } else { 0 }, line, &[])
+                }
+                None => self.hint(hint),
+            },
+            None => NULL,
+        };
 
         self.node(
             SHARP_AST_CLASS_CONST_GROUP,
             modifier_flags_or_private(&constant.modifiers),
             self.line(constant),
-            &[declaration, NULL, hint],
+            &[declaration, attributes, hint],
         )
     }
 
@@ -3950,8 +4191,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 }
             };
             let return_type = lowering.hint(hint);
+            let attributes = getter.map_or(NULL, |getter| lowering.accessor_attributes(getter, false));
 
-            lowering.accessor_method(variable, b"get", read_visibility, &[], body, return_type)
+            lowering.accessor_method(variable, b"get", read_visibility, &[], body, return_type, attributes)
         });
         members.push(get);
 
@@ -3981,9 +4223,12 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             };
             let accepted = lowering.hint(hint);
             let value = lowering.string(0, line, b"value");
-            let parameter = lowering.node(SHARP_AST_PARAM, 0, line, &[accepted, value, NULL, NULL, NULL, NULL]);
+            let value_attributes = lowering.accessor_attributes(setter, true);
+            let parameter =
+                lowering.node(SHARP_AST_PARAM, 0, line, &[accepted, value, NULL, value_attributes, NULL, NULL]);
+            let attributes = lowering.accessor_attributes(setter, false);
 
-            lowering.accessor_method(variable, b"set", write_visibility, &[parameter], body, NULL)
+            lowering.accessor_method(variable, b"set", write_visibility, &[parameter], body, NULL, attributes)
         });
         members.push(set);
         self.static_type_parameters = None;
@@ -4121,7 +4366,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// The hidden static method `name#get` or `name#set` of the static property `variable`, with the visibility
-    /// `visibility` and `parameters`, spanning the property's name. In a generic class its parameter list ends with
+    /// `visibility`, `parameters` and the accessor's `attributes`, spanning the property's name. In a generic class its parameter list ends with
     /// the class's bounds, as any static method of the class does.
     fn accessor_method(
         &mut self,
@@ -4131,6 +4376,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         parameters: &[u32],
         body: u32,
         return_type: u32,
+        attributes: u32,
     ) -> u32 {
         let line = self.line(variable);
         let mut parameters = parameters.to_vec();
@@ -4147,7 +4393,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             variable.span,
             variable.span,
             &name,
-            &[parameters, NULL, body, return_type, NULL],
+            &[parameters, NULL, body, return_type, attributes],
         )
     }
 
@@ -4194,6 +4440,13 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// refuses after `?`, or several types end the `TYPE_UNION` list with the name `null` on the line of the `?`, as
     /// php-src builds `int|string|null` and the DNF type `(A&B)|null`.
     fn hint(&mut self, hint: &Hint) -> u32 {
+        self.result_hint(hint, false)
+    }
+
+    /// [`Self::hint`] of a function's result `hint`, with `array` beside the `\Sharp\Map` or `\Sharp\Set` it names when
+    /// a plain PHP caller gets the result's PHP array, `crossing`, so a plain PHP class that implements or overrides the
+    /// method declares `array`, as a parameter that takes a `Map` takes a PHP array.
+    fn result_hint(&mut self, hint: &Hint, crossing: bool) -> u32 {
         // Spec section 13: the checker keeps a readonly value read only, so the engine runs its type.
         let hint = without_readonly(hint);
         let (union, question_mark) = match hint {
@@ -4203,8 +4456,36 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             Hint::Nullable(nullable) => (nullable.hint, Some(nullable.question_mark)),
             _ => (hint, None),
         };
+        let mut members: Vec<(PhpType, u32)> =
+            union_members(union).into_iter().map(|member| (self.erase(member), self.line(member))).collect();
+        let table = members.iter().find(|(php_type, _)| {
+            matches!(php_type, PhpType::Classes(classes) if matches!(classes.as_slice(), [b"Sharp\\Map" | b"Sharp\\Set"]))
+        });
+        if crossing && let Some(&(_, line)) = table {
+            members.push((PhpType::Keyword(IS_ARRAY), line));
+        }
+        let null_line = question_mark.map(|question_mark| self.line(question_mark));
 
-        self.union(union, question_mark)
+        self.php_union(members, null_line)
+    }
+
+    /// The PHP return type of the method `method`, which returns `hint`, or none where PHP's would be `mixed`, as for
+    /// `Any`, `Any?` and a type parameter without a bound, so a plain PHP implementation without a return type fits
+    /// it. PHP# checks the result itself. An override of a plain PHP method that declares a return type keeps `mixed`,
+    /// which PHP requires of it. A result plain PHP gets the PHP array of, `crossing`, is [`Self::result_hint`]'s.
+    fn return_hint(&mut self, method: &[u8], hint: &Hint, crossing: bool) -> u32 {
+        let union = match without_readonly(hint) {
+            Hint::Nullable(NullableHint { hint: Hint::Parenthesized(parenthesized), .. }) => parenthesized.hint,
+            Hint::Nullable(nullable) => nullable.hint,
+            hint => hint,
+        };
+        if union_members(union).into_iter().any(|member| matches!(self.erase(member), PhpType::Mixed))
+            && !self.types.overrides_typed_result(self.class, method)
+        {
+            return NULL;
+        }
+
+        self.result_hint(hint, crossing)
     }
 
     /// The type `union`, a union or one type, with null added when `question_mark` is the `?` that adds it.
@@ -4314,12 +4595,18 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// checks each write against where PHP's type checks less. An override of a typed plain PHP property runs with the
     /// type the parent declares, spec section 6.1, and its text checks its own type.
     fn property_type(&mut self, hint: &Hint, property: &[u8], line: u32) -> u32 {
-        let php_type = match self.types.narrowed_root_type(self.class, property) {
-            Some(root) => self.declared_type(root, line),
-            None => self.hint(hint),
-        };
+        let php_type = self.php_property_type(hint, property, line);
 
         self.property_hint(php_type, property, line)
+    }
+
+    /// The PHP type of the property `property`, which PHP# declares with the type `hint`, the type the parent declares
+    /// for an override of a typed plain PHP property, as [`Self::property_type`] has it without its type text.
+    fn php_property_type(&mut self, hint: &Hint, property: &[u8], line: u32) -> u32 {
+        match self.types.narrowed_root_type(self.class, property) {
+            Some(root) => self.declared_type(root, line),
+            None => self.hint(hint),
+        }
     }
 
     /// The node of `r#type`, a type plain PHP declares, so it holds only PHP's own types: each as [`Self::php_type`]
@@ -5259,29 +5546,45 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 // A local holds a function, so `f(x)` calls it as PHP's `$f($x)`, with the parameters of the closure
                 // it holds, or of the `__invoke` of the object it holds. Any other name is the PHP function a pattern's
                 // PHP shape calls, such as `is_string`, since the checker refuses a bare call in code.
-                let (function, parameters) = match self.names.binding(function) {
-                    Some(Binding::Local(_)) => (
-                        self.variable(function.span(), function.value()),
-                        self.types.closure_parameters(call_function).or_else(|| self.types.call_parameters(expression)),
-                    ),
-                    _ => (self.string(ZEND_NAME_FQ, self.line(function), function.value()), None),
+                let (function, parameters, receiver) = match self.names.binding(function) {
+                    Some(Binding::Local(_)) => {
+                        let closure = self.types.closure_parameters(call_function);
+                        let receiver = closure.is_some().then(|| (function.span(), function.value()));
+
+                        (
+                            self.variable(function.span(), function.value()),
+                            closure.or_else(|| self.types.call_parameters(expression)),
+                            receiver,
+                        )
+                    }
+                    _ => (self.string(ZEND_NAME_FQ, self.line(function), function.value()), None, None),
                 };
 
                 // A call through a function value passes no caller's position, spec section 27, as a function type
                 // has no parameter for it.
                 let callee = self.types.sharp_callee(expression);
-                self.call(None, argument_list, None, parameters, callee, |this, arguments| {
+                self.value_call(None, argument_list, None, parameters, callee, receiver, |this, arguments| {
                     this.node(SHARP_AST_CALL, 0, line, &[function, arguments])
                 })
             }
             // Spec section 14: any other expression that gives a function, as `steps[0](x)` or `this.make()(x)`, is
             // called as PHP's `($steps[0])($x)`, with the parameters of the closure it gives, and no caller's position.
-            Expression::Call(Call::Function(FunctionCall { function, argument_list })) => {
-                let parameters = self.types.closure_parameters(function);
-                let function = self.expression(function);
+            // A `Map` or a `Set` it takes crosses through the function held first, `($function#N = $steps[0])($x)`,
+            // as [`Self::value_call`] says.
+            Expression::Call(Call::Function(FunctionCall { function: function_value, argument_list })) => {
                 let callee = self.types.sharp_callee(expression);
+                let parameters = self.types.closure_parameters(function_value);
+                let mut function = self.expression(function_value);
+                let held = (callee.is_none()
+                    && parameters.as_ref().is_some_and(|parameters| self.arguments_cross(argument_list, parameters)))
+                .then(|| self.hidden("function"));
+                if let Some(held) = &held {
+                    let place = self.variable(function_value.span(), held);
+                    function = self.node(SHARP_AST_ASSIGN, 0, line, &[place, function]);
+                }
+                let receiver = held.as_deref().map(|held| (function_value.span(), held));
 
-                self.call(None, argument_list, None, parameters, callee, |this, arguments| {
+                self.value_call(None, argument_list, None, parameters, callee, receiver, |this, arguments| {
                     this.node(SHARP_AST_CALL, 0, line, &[function, arguments])
                 })
             }
@@ -5298,8 +5601,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
                 self.node(SHARP_AST_CONST, 0, line, &[constant])
             }
-            // Spec section 14.3: `global.strtoupper` and `Pdf.render`, read without `(…)`, are the plain PHP
-            // function's first-class callable, `\strtoupper(...)`.
+            // Spec section 14.3: `global.ucfirst` and `Pdf.render`, read without `(…)`, are the plain PHP
+            // function's first-class callable, `\ucfirst(...)`.
             Expression::Access(Access::Property(_)) if let Some(function) = self.types.function_value(expression) => {
                 let function = self.string(ZEND_NAME_FQ, line, function.as_bytes());
                 let callable = self.node(SHARP_AST_CALLABLE_CONVERT, 0, line, &[]);
@@ -5542,6 +5845,13 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let member = self.member(member);
 
         match kind {
+            // A class constant holds no object, so a `Map` or a `Set` constant is its PHP array, which the read makes
+            // the object again, spec section 12, except where PHP evaluates a constant expression.
+            DeclarationKind::Constant
+                if !self.in_constant_expression && self.crossing_array(self.types.expression_type(read)).is_some() =>
+            {
+                self.constant_object(read, classes, name.value, class, member)
+            }
             DeclarationKind::Constant | DeclarationKind::EnumCase => {
                 self.node(SHARP_AST_CLASS_CONST, 0, line, &[class, member])
             }
@@ -5551,6 +5861,39 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             DeclarationKind::StaticMethod => self.method_value(read, SHARP_AST_STATIC_CALL, class, member),
             kind => unreachable!("a class's member read names a static member, not a {kind:?}"),
         }
+    }
+
+    /// The `Map` or `Set` the read `read` makes of the constant `name` of `class`, whose node is `class` and whose
+    /// possible classes are `classes`. A constant holds the PHP array of its value, so the read of a class it names
+    /// makes the object once and keeps it, as a `static lazy` property keeps its value, under the constant's own key,
+    /// and every read shares it as it shares any `Map`. A read after the first makes no closure:
+    /// `\Sharp\Internal\keep('App\Report::LIMITS#constant') ?? \Sharp\Internal\keep('App\Report::LIMITS#constant',
+    /// static fn () => \Sharp\Map::from(\App\Report::LIMITS))`. A read through a class value, which can be any of several
+    /// classes, makes the object each time.
+    fn constant_object(&mut self, read: &Expression, classes: &[&[u8]], name: &[u8], class: u32, member: u32) -> u32 {
+        let r#type = self.types.expression_type(read).clone();
+        let line = self.line(read);
+        let object =
+            self.crossed_from(read.span(), &r#type, |this| this.node(SHARP_AST_CLASS_CONST, 0, line, &[class, member]));
+        let ([class_name], SHARP_AST_ZVAL) = (classes, self.nodes[class as usize].kind) else {
+            return object;
+        };
+        let key = [*class_name, b"::", name, b"#constant"].concat();
+        let kept_key = self.string(0, line, &key);
+        let kept = self.global_call(line, b"Sharp\\Internal\\keep", &[kept_key]);
+        let key = self.string(0, line, &key);
+        let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &[]);
+        let compute = self.declaration(
+            SHARP_AST_ARROW_FUNC,
+            ZEND_ACC_STATIC,
+            read,
+            read,
+            b"",
+            &[parameters, NULL, object, NULL, NULL],
+        );
+        let made = self.global_call(line, b"Sharp\\Internal\\keep", &[key, compute]);
+
+        self.node(SHARP_AST_COALESCE, 0, line, &[kept, made])
     }
 
     /// The static property `name` of `class`, whose node is `class` and whose possible classes are `classes`, that the
@@ -5622,7 +5965,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
     /// Whether the read `read`, `object.member`, reads a method, which the read takes as a first-class callable. The
     /// member is the same kind on every class the receiver can be. A class intersected with others takes the member the
-    /// first of them declares, as the checker's `resolve_method_value` does. A plain PHP class's method reads over its
+    /// first of them has, as the checker's `resolve_method_value` does. A plain PHP class's method reads over its
     /// property of that name where the checker took the read as the method's value.
     fn is_method_value(&self, read: &Expression, object: &Expression, member: &ClassLikeMemberSelector) -> bool {
         if self.types.reads_method_over_property(read) {
@@ -5636,7 +5979,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let kind = agreed_kind(receivers.into_iter().map(|classes| {
             classes
                 .iter()
-                .find_map(|class| self.types.declared_member(class, name.value))
+                .find_map(|class| self.types.read_member(class, name.value))
                 .unwrap_or_else(|| self.types.member_declaration(classes[0], name.value))
                 .kind
         }));
@@ -5764,15 +6107,17 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
     /// `lhs == rhs`, or `lhs != rhs` when `negated`, as spec section 19 compares a value of `lhs`'s type with one of
     /// `rhs`'s: an unchecked `Any?` with a value [`compares_unchecked`] names, spec section 24, two class values by
-    /// their whole type, as C# compares two `Type`s, and a value of a type parameter by its type argument's `==`, spec
-    /// section 31, through `\Sharp\Internal\equals`, the `op_Equality` the class of an instance side declares, which
-    /// lifts a null side itself, an int and a float as two floats, and `===` otherwise. `== null` tests for null and runs
-    /// no operator. A collection search compares each element with its value through it, so a search never compares
-    /// differently from `==`.
+    /// their whole type, as C# compares two `Type`s, a value of a type parameter by its type argument's `==`, spec
+    /// section 31, and a value that may be a collection or another type by what it holds, through
+    /// `\Sharp\Internal\equals`, the `op_Equality` the class of an instance side declares, which lifts a null side
+    /// itself, an int and a float as two floats, and `===` otherwise. `== null` tests for null and runs no operator. A
+    /// collection search compares each element with its value through it, so a search never compares differently from
+    /// `==`.
     fn equality(&mut self, line: u32, lhs: Side, rhs: Side, negated: bool) -> u32 {
         let (lhs_type, rhs_type) = (self.side_type(&lhs), self.side_type(&rhs));
         if compares_unchecked(lhs_type, rhs_type)
             || compares_unchecked(rhs_type, lhs_type)
+            || compares_mixed_collection(lhs_type, rhs_type)
             || [lhs_type, rhs_type].into_iter().any(|r#type| holds_class_value(r#type) || holds_type_parameter(r#type))
         {
             let function = self.string(ZEND_NAME_FQ, line, b"Sharp\\Internal\\equals");
@@ -5836,9 +6181,12 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// Whether `==` on a value of `lhs_type` and one of `rhs_type` is PHP's `===`, spec section 19: true for every value
-    /// but a `List`, and for two lists whose elements compare so. Elements compared by an `op_Equality`, as floats, or
-    /// as `Map`s or `Set`s need their own `==`.
+    /// but a `List` or a value that may be a collection or another type, and for two lists whose elements compare so.
+    /// Elements compared by an `op_Equality`, as floats, or as `Map`s or `Set`s need their own `==`.
     fn compares_identically(&self, lhs_type: &TUnion, rhs_type: &TUnion) -> bool {
+        if compares_mixed_collection(lhs_type, rhs_type) {
+            return false;
+        }
         let (Some(lhs_lists), Some(rhs_lists)) = (collection_kind(lhs_type), collection_kind(rhs_type)) else {
             return true;
         };
@@ -6571,6 +6919,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 lowering.lambda_type(lambda),
             )
         });
+        let attributes = self.attributes(&arrow_function.attribute_lists, None, None);
         if statements.is_empty()
             && !captures_type_arguments
             && !self.names.captures(&lambda).iter().any(|(_, local)| self.names.is_written(local))
@@ -6581,7 +6930,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 lambda,
                 arrow_function.expression,
                 b"",
-                &[parameters, NULL, value, return_type, NULL],
+                &[parameters, NULL, value, return_type, attributes],
             );
         }
 
@@ -6590,7 +6939,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         statements.push(self.node(SHARP_AST_RETURN, 0, line, &[value]));
         let body = self.node(SHARP_AST_STMT_LIST, 0, line, &statements);
 
-        self.declaration(SHARP_AST_CLOSURE, 0, lambda, lambda, b"", &[parameters, uses, body, return_type, NULL])
+        self.declaration(SHARP_AST_CLOSURE, 0, lambda, lambda, b"", &[parameters, uses, body, return_type, attributes])
     }
 
     /// A lambda with a block body is a `CLOSURE`, as php-src's grammar builds `function () use (…) { … }`, which makes
@@ -6610,8 +6959,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             )
         });
         let uses = self.closure_uses(lambda, captures_type_arguments);
+        let attributes = self.attributes(&closure.attribute_lists, None, None);
 
-        self.declaration(SHARP_AST_CLOSURE, 0, lambda, lambda, b"", &[parameters, uses, body, return_type, NULL])
+        self.declaration(SHARP_AST_CLOSURE, 0, lambda, lambda, b"", &[parameters, uses, body, return_type, attributes])
     }
 
     /// The result type of the lambda at `lambda`, which has no PHP type, with its whole type, as
@@ -6619,15 +6969,16 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// capture the method's type arguments, as its body's would.
     fn lambda_type(&mut self, lambda: Span) -> u32 {
         let function_type = self.types.lambda_type(lambda);
+        let crossing = self.types.lambda_result(lambda).is_some_and(|result| self.crosses_outward(result));
 
-        self.function_type(NULL, function_type, self.line(lambda))
+        self.function_type(NULL, function_type, crossing, self.line(lambda))
     }
 
     /// The result type of a PHP# method or lambda declaration: a `SHARP_TYPE_ARGS` of `php_type` and `function_type`'s
     /// text, which `is` tests a closure of it by, or of its result type alone when no function type takes a closure of
-    /// it, or `php_type` alone when PHP# can't write either. The unit lists the function type's fingerprint, or zero
-    /// without one, since its effects come from other files' bodies.
-    fn function_type(&mut self, php_type: u32, function_type: FunctionType, line: u32) -> u32 {
+    /// it, or `php_type` alone when PHP# can't write either, as [`Self::carried_type`] gives it with `crossing`. The
+    /// unit lists the function type's fingerprint, or zero without one, since its effects come from other files' bodies.
+    fn function_type(&mut self, php_type: u32, function_type: FunctionType, crossing: bool, line: u32) -> u32 {
         let FunctionType { name, text, result } = function_type;
         self.function_types.push(Read {
             name: name.into_bytes(),
@@ -6635,17 +6986,22 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         });
         // A function whose effects no function type can say carries its result type alone, which a generator's
         // elements and a map stage's are read from, spec section 12.
-        self.carried_type(php_type, text.or(result), line)
+        self.carried_type(php_type, text.or(result), crossing, line)
     }
 
-    /// A `SHARP_TYPE_ARGS` of `php_type` and the type text `carried`, or `php_type` alone without one.
-    fn carried_type(&mut self, php_type: u32, carried: Option<String>, line: u32) -> u32 {
-        let Some(carried) = carried else {
-            return php_type;
+    /// A `SHARP_TYPE_ARGS` of `php_type` and the type text `carried`, or `php_type` alone without one. A result plain PHP
+    /// gets with each `Map` and `Set` in it as its PHP array, `crossing`, as [`Self::crosses_outward`] says, takes
+    /// `ZEND_SHARP_RESULT_CROSSES` as its attr, without a text when it has none, and each of its returns and yields gives
+    /// a plain PHP caller that array, spec section 12.
+    fn carried_type(&mut self, php_type: u32, carried: Option<String>, crossing: bool, line: u32) -> u32 {
+        let text = match carried {
+            Some(carried) => self.type_text(line, &carried),
+            None if crossing => NULL,
+            None => return php_type,
         };
-        let text = self.type_text(line, &carried);
+        let attr = if crossing { ZEND_SHARP_RESULT_CROSSES } else { 0 };
 
-        self.node(SHARP_AST_SHARP_TYPE_ARGS, 0, line, &[php_type, text])
+        self.node(SHARP_AST_SHARP_TYPE_ARGS, attr, line, &[php_type, text])
     }
 
     /// The parameters of the lambda at `lambda`, each with its type or a null type, as PHP writes a parameter without
@@ -6769,6 +7125,82 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.collection_new(line, b"Sharp\\Map", Some(keys_and_values))
     }
 
+    /// `value` where PHP evaluates a constant expression, a constant's value or an attribute's argument, which holds no
+    /// object, so a collection literal is the PHP array plain PHP receives for it, spec section 12: a `Map` literal is
+    /// `['variant' => 'success']`, a backed enum key `\App\Status::Paid->value`, and a `Set` literal a list.
+    fn constant_value(&mut self, value: &Expression) -> u32 {
+        let Expression::Array(array) = value.unparenthesized() else {
+            return self.constant_expression(value);
+        };
+
+        let mut elements = Vec::new();
+        for element in &array.elements {
+            let line = self.line(element);
+            elements.push(match element {
+                ArrayElement::KeyValue(entry) => {
+                    let mut key = self.constant_expression(entry.key);
+                    if self.backed_enum(self.types.expression_type(entry.key)).is_some() {
+                        let backing = self.string(0, line, b"value");
+                        key = self.node(SHARP_AST_PROP, 0, line, &[key, backing]);
+                    }
+                    let value = self.constant_value(entry.value);
+
+                    self.node(SHARP_AST_ARRAY_ELEM, 0, line, &[value, key])
+                }
+                ArrayElement::Value(element) => {
+                    let value = self.constant_value(element.value);
+
+                    self.node(SHARP_AST_ARRAY_ELEM, 0, line, &[value, NULL])
+                }
+                ArrayElement::Variadic(spread) => {
+                    let value = self.constant_expression(spread.value);
+
+                    self.node(SHARP_AST_UNPACK, 0, line, &[value])
+                }
+                _ => unreachable!("the checker refuses a missing element in a collection literal"),
+            });
+        }
+
+        self.node(SHARP_AST_ARRAY, ZEND_ARRAY_SYNTAX_SHORT, self.line(array), &elements)
+    }
+
+    /// `value` lowered as PHP evaluates a constant expression, where a `Map` or a `Set` constant's read is the bare
+    /// `\App\Report::LIMITS`, the PHP array the constant holds, which PHP takes there as it takes no call.
+    fn constant_expression(&mut self, value: &Expression) -> u32 {
+        let outer = std::mem::replace(&mut self.in_constant_expression, true);
+        let lowered = self.expression(value);
+        self.in_constant_expression = outer;
+
+        lowered
+    }
+
+    /// The default `value` of a property, a static or a parameter, which PHP evaluates as a constant expression. A
+    /// `Map` or a `Set` constant's read is the PHP array the constant holds, which the property's crossing and the
+    /// parameter's make the object, as [`Self::constant_expression`] lowers it. A read inside another expression is the
+    /// object, as everywhere else.
+    fn default_expression(&mut self, value: &Expression) -> u32 {
+        if self.reads_collection_constant(value) { self.constant_expression(value) } else { self.expression(value) }
+    }
+
+    /// Whether `value` is the read of a class constant whose type holds a `Map` or a `Set`, `Report.LIMITS`.
+    fn reads_collection_constant(&self, value: &Expression) -> bool {
+        let Expression::Access(Access::Property(
+            access @ PropertyAccess { property: ClassLikeMemberSelector::Identifier(name), .. },
+        )) = value.unparenthesized()
+        else {
+            return false;
+        };
+        let Some(class) = self.names.static_property_class(access) else {
+            return false;
+        };
+
+        self.crossing_array(self.types.expression_type(value)).is_some()
+            && self
+                .types
+                .declared_member(self.names.get(&class.name), name.value)
+                .is_some_and(|member| member.kind == DeclarationKind::Constant)
+    }
+
     /// `new \Sharp\Map(argument)` or `new \Sharp\Set(argument)`, as `class` names it, or without an argument.
     fn collection_new(&mut self, line: u32, class: &[u8], argument: Option<u32>) -> u32 {
         let class = self.string(ZEND_NAME_FQ, line, class);
@@ -6882,47 +7314,6 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.types.backing_type(name).is_some().then_some(name)
     }
 
-    /// Whether `r#type` is a `Map` keyed by a backed enum, which reaches a plain PHP array with each case's backing value
-    /// as its key, spec section 12.
-    fn keyed_by_backed_enum(&self, r#type: &TUnion) -> bool {
-        r#type.types.iter().any(|atomic| match atomic {
-            TAtomic::Array(map @ TArray::Keyed(_)) => {
-                let (key_type, _) = self.types.array_parameters(map);
-
-                key_type.types.iter().all(|key| {
-                    matches!(key, TAtomic::Object(TObject::Enum(r#enum)) if self.types.backing_type(r#enum.name.as_bytes()).is_some())
-                })
-            }
-            _ => false,
-        })
-    }
-
-    /// The PHP array plain PHP takes for `value`, a `Map` keyed by a backed enum, with each case's backing value as its
-    /// key, or a PHP array or null as it is: `(fn ($map#N) => \is_object($map#N)
-    /// ? \array_combine(\array_column($map#N->keys(), 'value'), $map#N->values()) : $map#N)($value)`.
-    fn backed_key_array(&mut self, span: Span, value: u32) -> u32 {
-        let line = self.line(span);
-        let taken = self.temporaries;
-        let map = self.hidden("map");
-        let [tested, key_source, value_source, kept] = [(); 4].map(|()| self.variable(span, &map));
-        let is_object = self.global_call(line, b"is_object", &[tested]);
-        let [keys, values] = [(key_source, b"keys".as_slice()), (value_source, b"values")].map(|(map, method)| {
-            let method = self.string(0, line, method);
-            let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[]);
-
-            self.node(SHARP_AST_METHOD_CALL, 0, line, &[map, method, arguments])
-        });
-        let value_name = self.string(0, line, b"value");
-        let backing = self.global_call(line, b"array_column", &[keys, value_name]);
-        let array = self.global_call(line, b"array_combine", &[backing, values]);
-        let body = self.node(SHARP_AST_CONDITIONAL, 0, line, &[is_object, array, kept]);
-        let crossing = self.hidden_arrow_function(span, &[&map], body);
-        self.temporaries = taken;
-        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[value]);
-
-        self.node(SHARP_AST_CALL, 0, line, &[crossing, arguments])
-    }
-
     /// `\App\Status::from($value)`, its value cast to a `string` for a `string`-backed enum, as PHP holds an all-digit
     /// `string` key as an `int`.
     fn backed_case(&mut self, line: u32, class: &[u8], mut value: u32) -> u32 {
@@ -6934,6 +7325,46 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[value]);
 
         self.node(SHARP_AST_STATIC_CALL, 0, line, &[name, method, arguments])
+    }
+
+    /// Whether plain PHP gets a value of `r#type` with each `Map` and `Set` in it as its PHP array, spec section 12: a
+    /// value that holds one at any depth, or can when it runs, as `Any`, an unbounded type parameter and an `Iterable` of
+    /// them can, where a PHP array holds each key of every `Map` the type names. Any other `Map` reaches plain PHP as the
+    /// object, and so does whatever holds it.
+    fn crosses_outward(&self, r#type: &TUnion) -> bool {
+        self.keys_hold_in_array(r#type) && self.may_hold_collection(r#type)
+    }
+
+    /// Whether a value of `r#type` can hold a `Map` or a `Set` at any depth.
+    fn may_hold_collection(&self, r#type: &TUnion) -> bool {
+        r#type.types.iter().any(|atomic| match atomic {
+            TAtomic::Array(list @ TArray::List(_)) => self.may_hold_collection(&self.types.array_parameters(list).1),
+            TAtomic::Array(_) | TAtomic::Mixed(_) => true,
+            TAtomic::GenericParameter(parameter) => self.may_hold_collection(&parameter.constraint),
+            TAtomic::Iterable(iterable) => self.may_hold_collection(iterable.get_value_type()),
+            _ => false,
+        })
+    }
+
+    /// Whether a PHP array holds each key of every `Map` in `r#type`, at any depth, as a type without a `Map` does.
+    fn keys_hold_in_array(&self, r#type: &TUnion) -> bool {
+        r#type.types.iter().all(|atomic| match atomic {
+            TAtomic::Array(array) => {
+                let (key_type, element_type) = self.types.array_parameters(array);
+
+                (!matches!(array, TArray::Keyed(_)) || self.types.keys_hold_in_array(&key_type))
+                    && self.keys_hold_in_array(&element_type)
+            }
+            TAtomic::Iterable(iterable) => self.keys_hold_in_array(iterable.get_value_type()),
+            _ => true,
+        })
+    }
+
+    /// Whether plain PHP gets the result of the method `method` of the class being lowered, whose result type `hint`
+    /// writes, as [`Self::crosses_outward`] says of its declared type, a type parameter in it included.
+    fn crossing_result(&self, method: &[u8], hint: Option<&Hint>) -> bool {
+        hint.is_some()
+            && self.types.declared_result(self.class, method).is_some_and(|result| self.crosses_outward(result))
     }
 
     /// The declared type of `parameter` where it holds a `Map` or a `Set`, at any depth, which
@@ -7251,6 +7682,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
                 self.collection_new(line, b"Sharp\\Set", Some(list))
             }
+            ("List", b"tolist") => self.read_collection(collection, line, false),
             _ => unreachable!("`{collection_name}.{}` has no PHP here", String::from_utf8_lossy(method)),
         }
     }
@@ -8089,15 +8521,15 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// The call `call` builds from its lowered arguments, which starts at `site`, or none for a call through a function
-    /// value, where `parameters` are the parameters of the plain PHP function, method or constructor it runs, or none
-    /// for a PHP# one, and `type_arguments` the type arguments of a
-    /// generic method, which go last, as [`Self::type_arguments_argument`] writes them. A `Map` or a `Set` crosses into
-    /// a plain PHP parameter whose declared type names `array` as a PHP array, spec section 12, and a `Set` without its
-    /// positions: `\is_object($m) ? \iterator_to_array($m) : $m`, so null and a PHP array pass as they are. Any other
-    /// parameter, such as `mixed`, `iterable`, `object` or an interface, takes the object, and so does any parameter
-    /// when the value is itself what plain PHP gave. A local passed to a reference parameter crosses back after the
-    /// call, and before it too when the parameter names `array`, `[$m = …, \parse_str($query, $m), $m = …][1]`, as
-    /// [`Self::crossed`] makes the object of what plain PHP wrote.
+    /// value, where `callee` is the PHP# function, method or constructor it runs, when the analysis knows one, and
+    /// otherwise `parameters` are the parameters of the plain PHP one, and `type_arguments` the type arguments of a
+    /// generic method, which go last, as [`Self::type_arguments_argument`] writes them. A value that holds a `Map` or a
+    /// `Set`, or can, crosses into a plain PHP parameter whose type takes an array, such as `array`, `iterable`, `mixed`
+    /// or none, as its PHP array, spec section 12, as [`Self::array_of`] gives it and [`Self::argument_crosses`] says. A
+    /// parameter whose type takes no array, such as `object` or an interface, takes the object, and so does any
+    /// parameter when the value is itself what plain PHP gave or its `Map` has no PHP array. A local passed to a reference
+    /// parameter crosses back after the call, and before it too when the parameter takes an array,
+    /// `[$m = …, \parse_str($query, $m), $m = …][1]`, as [`Self::crossed`] makes the object of what plain PHP wrote.
     fn call(
         &mut self,
         site: Option<Span>,
@@ -8107,10 +8539,27 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         callee: Option<&FunctionLikeMetadata>,
         call: impl FnOnce(&mut Self, u32) -> u32,
     ) -> u32 {
+        self.value_call(site, list, type_arguments, parameters, callee, None, call)
+    }
+
+    /// [`Self::call`] through the function value the local `receiver` holds, where each `Map` and `Set` crosses as
+    /// `\Sharp\Internal\arrayOf($value, $receiver)` gives it, which keeps the object for a PHP# function, spec section
+    /// 12: the parameters of a function type say nothing of the code behind it.
+    #[allow(clippy::too_many_arguments)]
+    fn value_call(
+        &mut self,
+        site: Option<Span>,
+        list: &ArgumentList,
+        type_arguments: Option<String>,
+        parameters: Option<Vec<PlainParameter>>,
+        callee: Option<&FunctionLikeMetadata>,
+        receiver: Option<(Span, &[u8])>,
+        call: impl FnOnce(&mut Self, u32) -> u32,
+    ) -> u32 {
         let line = self.line(list);
         let (mut arguments, written) = match (parameters, callee) {
-            (Some(parameters), _) => self.crossing_arguments(list, &parameters),
-            (None, Some(callee)) => (self.sharp_arguments(site, list, callee), Vec::new()),
+            (_, Some(callee)) => (self.sharp_arguments(site, list, callee), Vec::new()),
+            (Some(parameters), None) => self.crossing_arguments(list, &parameters, receiver),
             (None, None) => (self.argument_nodes(list), Vec::new()),
         };
         if let Some(type_arguments) = type_arguments {
@@ -8123,11 +8572,12 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         }
 
         let mut steps = Vec::new();
-        for (span, name, declared, takes_array) in &written {
+        for (span, name, _, takes_array) in &written {
             let (span, name) = (*span, *name);
-            if let Some(set) = table_kind(declared).filter(|_| *takes_array) {
-                let [first, second, third] = [(); 3].map(|()| self.variable(span, name));
-                let array = self.array_from(line, set, [first, second, third]);
+            if *takes_array {
+                let read = self.variable(span, name);
+                let receiver = receiver.map(|(span, name)| self.variable(span, name));
+                let array = self.array_of(line, read, receiver);
                 let place = self.variable(span, name);
                 let before = self.node(SHARP_AST_ASSIGN, 0, line, &[place, array]);
                 steps.push(self.node(SHARP_AST_ARRAY_ELEM, 0, line, &[before, NULL]));
@@ -8149,13 +8599,15 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// The arguments of `list` as a call of plain PHP whose parameters are `parameters` takes them, each `Map` or `Set`
-    /// crossed as [`Self::call`] says, with each typed local a reference parameter writes: its span, its name, its
-    /// declared type, and whether the parameter names `array`.
+    /// crossed as [`Self::call`] says, with each typed local a reference parameter writes, whose type holds a `Map` or a
+    /// `Set` that plain PHP's array crosses back into: its span, its name, its declared type, and whether the parameter
+    /// takes an array, as [`PlainParameter::takes_array`] says.
     #[allow(clippy::type_complexity)]
     fn crossing_arguments<'value>(
         &mut self,
         list: &ArgumentList<'value>,
         parameters: &[PlainParameter],
+        receiver: Option<(Span, &[u8])>,
     ) -> (Vec<u32>, Vec<(Span, &'value [u8], TUnion, bool)>) {
         let line = self.line(list);
         let mut arguments = Vec::new();
@@ -8165,38 +8617,23 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 Argument::Positional(positional) => (positional.value, positional.ellipsis.is_some()),
                 Argument::Named(named) => (named.value, false),
             };
-            let parameter = match argument {
-                Argument::Positional(_) => parameters
-                    .get(position)
-                    .or_else(|| parameters.last().filter(|parameter| parameter.is_variadic()))
-                    .copied(),
-                Argument::Named(named) => {
-                    parameters.iter().copied().find(|parameter| parameter.name() == Some(named.name.value))
-                }
-            };
-            let takes_array = parameter
-                .and_then(PlainParameter::declared_type)
-                .is_some_and(|declared| declared.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(_))));
-            let crossed = match (takes_array, spread, self.typed_local(value)) {
-                (_, false, Some((name, declared))) if parameter.is_some_and(PlainParameter::is_by_reference) => {
+            let parameter = argument_parameter(argument, position, parameters);
+            let takes_array = parameter.is_some_and(PlainParameter::takes_array);
+            let crossed = match (spread, self.typed_local(value)) {
+                (false, Some((name, declared))) if parameter.is_some_and(PlainParameter::is_by_reference) => {
                     if self.crossing_array(&declared).is_some() {
                         written.push((value.span(), name, declared, takes_array));
                     }
 
                     None
                 }
-                (false, _, _) => None,
-                (true, _, _) if self.plain_value(value) => None,
-                (true, true, _) => self
-                    .crossing_array(self.types.expression_type(value))
-                    .map(|list| self.types.array_parameters(list).1)
-                    .and_then(|element| self.array_of_each(value, &element)),
-                (true, false, _) if self.keyed_by_backed_enum(self.types.expression_type(value)) => {
-                    let map = self.expression(value);
+                _ if self.argument_crosses(value, parameter) => {
+                    let collection = self.expression(value);
+                    let receiver = receiver.map(|(span, name)| self.variable(span, name));
 
-                    Some(self.backed_key_array(value.span(), map))
+                    Some(self.array_of(line, collection, receiver))
                 }
-                (true, false, _) => table_kind(self.types.expression_type(value)).map(|set| self.array_of(value, set)),
+                _ => None,
             };
             let value = crossed.unwrap_or_else(|| self.arriving(value, Arrival::Plain));
             arguments.push(match argument {
@@ -8213,6 +8650,25 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         (arguments, written)
     }
 
+    /// Whether `value`, passed to `parameter` of plain PHP, crosses as its PHP array: the parameter takes an array and
+    /// the value's type holds a `Map` or a `Set` that plain PHP did not itself give, each with a PHP array, as
+    /// [`Self::keys_hold_in_array`] says. A value whose type says nothing of what it holds, as `Any`, passes as it is.
+    fn argument_crosses(&self, value: &Expression, parameter: Option<PlainParameter>) -> bool {
+        let r#type = self.types.expression_type(value);
+
+        parameter.is_some_and(PlainParameter::takes_array)
+            && !self.plain_value(value)
+            && self.crossing_array(r#type).is_some()
+            && self.keys_hold_in_array(r#type)
+    }
+
+    /// Whether a value of `list` crosses into `parameters` as [`Self::argument_crosses`] says.
+    fn arguments_cross(&self, list: &ArgumentList, parameters: &[PlainParameter]) -> bool {
+        list.arguments.iter().enumerate().any(|(position, argument)| {
+            self.argument_crosses(argument.value(), argument_parameter(argument, position, parameters))
+        })
+    }
+
     /// The name and the declared type of the typed local `value` reads, where it reads one.
     fn typed_local<'value>(&self, value: &Expression<'value>) -> Option<(&'value [u8], TUnion)> {
         let Expression::ConstantAccess(access) = value.unparenthesized() else {
@@ -8225,66 +8681,14 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         Some((access.name.value(), self.local_types.get(&local.declaration.start.offset)?.clone()))
     }
 
-    /// The PHP array of the `Map` or `Set` `value` gives, as [`Self::call`] passes it to plain PHP. `\iterator_to_array`
-    /// takes a PHP array too, so only a value that may be null reads itself more than once, as an inline form, which
-    /// reads each parameter once, needs.
-    fn array_of(&mut self, value: &Expression, set: bool) -> u32 {
-        let line = self.line(value);
-        if !self.types.expression_type(value).is_nullable() {
-            let value = self.expression(value);
+    /// `\Sharp\Internal\arrayOf($value)`, the PHP array plain PHP receives for the lowered `value`, spec section 12: a
+    /// `Map` keyed by its keys, a backed enum's by its backing values, a `Set` as a list, and each collection inside the
+    /// same way. A null and a PHP array that holds no `Map` or `Set` pass as they are. Through a function value,
+    /// `receiver` is the closure, and a PHP# one takes the value as it is.
+    fn array_of(&mut self, line: u32, value: u32, receiver: Option<u32>) -> u32 {
+        let arguments: Vec<u32> = std::iter::once(value).chain(receiver).collect();
 
-            return self.iterator_to_array(line, set, value);
-        }
-
-        let mut value = self.reread(value, "argument");
-        let reads = [self.read(&mut value), self.read(&mut value), self.read(&mut value)];
-        self.release(value);
-
-        self.array_from(line, set, reads)
-    }
-
-    /// `\array_map(fn ($element#N) => …, $list)`, the list `value` gives with each `Map` or `Set` of `element_type` its
-    /// PHP array, as [`Self::call`] spreads it into plain PHP. None when `element_type` is no `Map` or `Set`.
-    fn array_of_each(&mut self, value: &Expression, element_type: &TUnion) -> Option<u32> {
-        let set = table_kind(element_type)?;
-        let span = value.span();
-        let line = self.line(span);
-        let taken = self.temporaries;
-        let element = self.hidden("element");
-        let each = if self.keyed_by_backed_enum(element_type) {
-            let map = self.variable(span, &element);
-
-            self.backed_key_array(span, map)
-        } else {
-            let reads = [(); 3].map(|()| self.variable(span, &element));
-
-            self.array_from(line, set, reads)
-        };
-        let each = self.hidden_arrow_function(span, &[&element], each);
-        self.temporaries = taken;
-        let list = self.expression(value);
-
-        Some(self.global_call(line, b"array_map", &[each, list]))
-    }
-
-    /// `\is_object($m) ? \iterator_to_array($m) : $m` over the three reads of one value, and
-    /// `\iterator_to_array($s, false)` for a `Set`, whose positions are no keys.
-    fn array_from(&mut self, line: u32, set: bool, [first, second, third]: [u32; 3]) -> u32 {
-        let is_object = self.global_call(line, b"is_object", &[first]);
-        let array = self.iterator_to_array(line, set, second);
-
-        self.node(SHARP_AST_CONDITIONAL, 0, line, &[is_object, array, third])
-    }
-
-    /// `\iterator_to_array($value)`, and `\iterator_to_array($value, false)` for a `Set`.
-    fn iterator_to_array(&mut self, line: u32, set: bool, value: u32) -> u32 {
-        if !set {
-            return self.global_call(line, b"iterator_to_array", &[value]);
-        }
-
-        let renumbered = self.zval(line, sharp_value::SHARP_FALSE, |_| {});
-
-        self.global_call(line, b"iterator_to_array", &[value, renumbered])
+        self.global_call(line, b"Sharp\\Internal\\arrayOf", &arguments)
     }
 
     /// `value` as it enters a place of the type `declared`, a method's return, a typed local or a typed property, with
@@ -8313,15 +8717,22 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             return self.expression(value);
         };
 
-        let span = value.span();
-        let taken = self.temporaries;
-        let name = self.hidden("crossing");
-        let place = self.variable(span, &name);
         let arrival = match self.crossing_array(r#type) {
             Some(TArray::Keyed(_)) => Arrival::Map(r#type),
             _ => Arrival::Read,
         };
-        let lowered = self.arriving(value, arrival);
+
+        self.crossed_from(value.span(), r#type, |this| this.arriving(value, arrival))
+    }
+
+    /// The value `lower` lowers, of `r#type`, which may be a PHP array, with each `Map` and `Set` the type holds made the
+    /// object, as [`Self::crossed`] makes it of a hidden variable the value is assigned to:
+    /// `\is_array($crossing#N = value) ? \Sharp\Map::from($crossing#N) : $crossing#N`.
+    fn crossed_from(&mut self, span: Span, r#type: &TUnion, lower: impl FnOnce(&mut Self) -> u32) -> u32 {
+        let taken = self.temporaries;
+        let name = self.hidden("crossing");
+        let place = self.variable(span, &name);
+        let lowered = lower(self);
         let first = self.node(SHARP_AST_ASSIGN, 0, self.line(span), &[place, lowered]);
         let crossed = self.crossed(span, r#type, &name, first);
         self.temporaries = taken;
@@ -8375,8 +8786,17 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let mut arguments = Vec::new();
         for argument in &list.arguments {
             arguments.push(match argument {
+                PartialArgument::Positional(positional) if positional.ellipsis.is_none() => {
+                    self.constant_value(positional.value)
+                }
                 PartialArgument::Positional(positional) => self.positional_argument(positional),
-                PartialArgument::Named(named) => self.named_argument(named),
+                PartialArgument::Named(named) => {
+                    let line = self.line(named.name.span);
+                    let name = self.local_name(0, line, named.name.value);
+                    let value = self.constant_value(named.value);
+
+                    self.node(SHARP_AST_NAMED_ARG, 0, line, &[name, value])
+                }
                 _ => unreachable!("check_slice refuses a placeholder argument"),
             });
         }
@@ -8606,15 +9026,13 @@ fn super_alias(interface: Word, method: Word) -> Vec<u8> {
     [method.as_bytes(), b"@", interface.as_bytes()].concat()
 }
 
-/// Whether a static property runs accessors, decision 3: a computed one, or one with an accessor body or an observer.
-/// [`Lowering::static_accessors`] lowers it.
+/// Whether a static property runs accessors, decision 3: a computed one, or one whose accessors run as hooks, an
+/// accessor body, an observer or an accessor with attributes. [`Lowering::static_accessors`] lowers it.
 fn runs_static_accessors(property: &Property) -> bool {
     property.modifiers().contains_static()
         && match property {
             Property::Computed(_) => true,
-            Property::Hooked(hooked) => {
-                hooked.hook_list.hooks.iter().any(|accessor| matches!(accessor.body, PropertyHookBody::Concrete(_)))
-            }
+            Property::Hooked(hooked) => hooked.hook_list.has_hooks(),
             Property::Plain(_) => false,
         }
 }
@@ -8792,13 +9210,33 @@ fn holds_entries(r#type: &TUnion) -> bool {
     })
 }
 
-/// Whether the property a constructor parameter declares runs its writes through its accessors: an accessor body, an
-/// observer or a behavior, spec section 9, which the constructor's write of the argument runs.
+/// Whether the property a constructor parameter declares runs its writes through its accessors: a hook, an observer
+/// or a behavior, spec section 9, which the constructor's write of the argument runs.
 fn runs_its_accessors(parameter: &FunctionLikeParameter) -> bool {
-    parameter.behaviors.is_some()
-        || parameter.hooks.as_ref().is_some_and(|accessors| {
-            accessors.hooks.iter().any(|accessor| matches!(accessor.body, PropertyHookBody::Concrete(_)))
-        })
+    parameter.behaviors.is_some() || parameter.hooks.as_ref().is_some_and(PropertyHookList::has_hooks)
+}
+
+/// Whether `list` targets the value a parameter or a `set` takes, as `param:` in `[param: Trimmed]`, spec section 1.
+fn targets_value(list: &AttributeList) -> bool {
+    list.target.as_ref().is_some_and(|target| target.name.value == b"param")
+}
+
+/// The parameter of `parameters` that `argument`, at `position` of its call, is passed to: the one at its position or
+/// the one a named argument names, or else the variadic one last, which a named argument that matches no other
+/// parameter fills, spec section 16.
+fn argument_parameter<'analysis>(
+    argument: &Argument,
+    position: usize,
+    parameters: &[PlainParameter<'analysis>],
+) -> Option<PlainParameter<'analysis>> {
+    match argument {
+        Argument::Positional(_) => parameters.get(position),
+        Argument::Named(named) => {
+            parameters.iter().find(|parameter| !parameter.is_variadic() && parameter.name() == Some(named.name.value))
+        }
+    }
+    .or_else(|| parameters.last().filter(|parameter| parameter.is_variadic()))
+    .copied()
 }
 
 /// Whether `hint`, a parameter's or a property's type, is a `Map` or a `Set`, which plain PHP gives as a PHP array, as
@@ -8823,15 +9261,18 @@ fn without_readonly<'hint, 'arena>(hint: &'hint Hint<'arena>) -> &'hint Hint<'ar
 
 /// The flags a property's accessors add: `readonly` for a get-only auto-property, which spec section 6.1 sets in the
 /// constructor, or the set visibility php-src writes `private(set)` or `protected(set)` from the `set` or `init`
-/// accessor's access modifier, and `protected(set)` for an `init` without one. A get-only property whose body uses
-/// `field` takes `protected(set)`, the set visibility of `readonly`, and one without storage takes none, because PHP
+/// accessor's access modifier, and `protected(set)` for an `init` without one. A get-only property with storage and
+/// hooks, a body that uses `field` or a `get;` with attributes, takes `protected(set)`, the set visibility of
+/// `readonly`, since PHP refuses hooks on a `readonly` property, and one without storage takes none, because PHP
 /// refuses a set visibility on a read-only virtual property. PHP drops a set visibility equal to the property's own,
 /// so a private property, or a protected one with `protected(set)`, takes none, and the flags carry only what the
 /// engine keeps.
 fn accessor_flags(modifiers: &Sequence<Modifier>, accessors: &PropertyHookList, names: &ResolvedNames) -> u32 {
     // PHP has no `readonly` static, so a get-only static auto-property is `private(set)`, which its class's initializer
     // writes once, and the analyzer refuses every other write.
-    if accessors.is_readonly() && modifiers.contains_static() {
+    let auto_get_only = accessors.is_get_only()
+        && !accessors.hooks.iter().any(|hook| matches!(hook.body, PropertyHookBody::Concrete(_)));
+    if auto_get_only && modifiers.contains_static() {
         return if modifiers.contains_private() { 0 } else { ZEND_ACC_PRIVATE_SET };
     }
     if accessors.is_readonly() {
@@ -8839,7 +9280,7 @@ fn accessor_flags(modifiers: &Sequence<Modifier>, accessors: &PropertyHookList, 
     }
 
     let flags = match accessors.setter() {
-        None if names.uses_field(accessors) => ZEND_ACC_PROTECTED_SET,
+        None if names.has_storage(accessors) => ZEND_ACC_PROTECTED_SET,
         None => 0,
         Some(setter) => match setter.modifiers.first() {
             // `init` sets the property while the object is created, in the constructors of its class and its
@@ -8893,6 +9334,18 @@ fn mixes_numbers(lhs: &TUnion, rhs: &TUnion) -> bool {
 /// Whether a value of `union` may be a class value, which `==` compares by its whole type, type arguments included.
 fn holds_class_value(union: &TUnion) -> bool {
     union.types.iter().any(|atomic| matches!(atomic, TAtomic::Scalar(TScalar::ClassLikeString(_))))
+}
+
+/// Whether `==` compares a value of `lhs` with one of `rhs` where a side may be a collection or a value of another type,
+/// another collection included, which only the running value tells apart. `== null` tests for null alone.
+fn compares_mixed_collection(lhs: &TUnion, rhs: &TUnion) -> bool {
+    let mixes_collection = |union: &TUnion| {
+        let mut values = union.types.iter().filter(|atomic| !atomic.is_null());
+
+        values.clone().any(|atomic| matches!(atomic, TAtomic::Array(_))) && values.nth(1).is_some()
+    };
+
+    !lhs.is_null() && !rhs.is_null() && (mixes_collection(lhs) || mixes_collection(rhs))
 }
 
 /// Whether a value of `union` may be a value of a type parameter, whose own `==` only the running code knows.

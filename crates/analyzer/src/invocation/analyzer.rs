@@ -57,6 +57,7 @@ use crate::effects::summary::record_function_values;
 use crate::error::AnalysisError;
 use crate::expression::ancestor_type_arguments;
 use crate::expression::array::check_sharp_literal_kind;
+use crate::expression::array::get_set_literal_type;
 use crate::expression::is_refused_type;
 use crate::invocation::Invocation;
 use crate::invocation::InvocationArgument;
@@ -98,6 +99,13 @@ fn takes_php_sharp_types(target: &InvocationTarget<'_>) -> bool {
             target.get_function_like_identifier(),
             Some(FunctionLikeIdentifier::Method(class, _)) if is_prelude_stub(*class)
         )
+}
+
+/// Whether the variadic parameter of `target` collects the named arguments that match no other parameter, as PHP's does
+/// in plain PHP code. A PHP# variadic is a `List`, and one built into PHP takes its values by position.
+fn collects_named_arguments(target: &InvocationTarget<'_>) -> bool {
+    !takes_php_sharp_types(target)
+        && !target.get_function_like_metadata().is_some_and(|function| function.flags.is_built_in())
 }
 
 /// Whether `parameter` is a PHP# function parameter whose type states no effects, or a collection method's function,
@@ -784,15 +792,26 @@ where
             continue;
         };
 
-        let (argument_value_type, _) = analyzed_argument_types
+        let (mut argument_value_type, _) = analyzed_argument_types
             .get(argument_offset)
             .cloned()
             .unwrap_or_else(|| (get_mixed(), argument_expression.span()));
 
-        // Spec section 16: a named argument never fills a PHP# variadic, which spec section 7 makes a list.
-        let parameter_ref =
-            get_parameter_of_argument(&invocation.target, argument, *argument_offset).filter(|(_, parameter)| {
-                !(context.dialect.is_sharp() && argument.get_named_argument().is_some() && parameter.is_variadic())
+        // Spec section 16: a named argument that matches no other parameter fills a plain PHP variadic under its name,
+        // as PHP collects it, and never a PHP# variadic, which spec section 7 makes a list.
+        let fills_variadic = context.dialect.is_sharp() && argument.get_named_argument().is_some();
+        let parameter_ref = get_parameter_of_argument(&invocation.target, argument, *argument_offset)
+            .or_else(|| {
+                let last = invocation.target.parameter_count().checked_sub(1)?;
+
+                invocation
+                    .target
+                    .get_parameter(last)
+                    .filter(|parameter| fills_variadic && parameter.is_variadic())
+                    .map(|parameter| (last, parameter))
+            })
+            .filter(|(_, parameter)| {
+                !(fills_variadic && parameter.is_variadic() && !collects_named_arguments(&invocation.target))
             });
         if let Some((parameter_offset, parameter_ref)) = parameter_ref {
             filled_parameter_offsets.insert(parameter_offset);
@@ -817,7 +836,9 @@ where
                         )
                         .with_help("Remove one of the duplicate named arguments."),
                     );
-                } else if let Some(previous_span) = assigned_parameters_by_position.get(&parameter_offset) {
+                } else if let Some(previous_span) = assigned_parameters_by_position.get(&parameter_offset)
+                    && !(fills_variadic && parameter_ref.is_variadic())
+                {
                     has_named_argument_anomaly = true;
                     let target_name_str = invocation.target.guess_name(context);
                     if parameter_ref.is_variadic() {
@@ -892,9 +913,8 @@ where
             if !check_is_deferred_to_partial_invocation && !is_reported_by_its_bound {
                 // Only a type PHP# wrote is judged by PHP# literal rules. A plain PHP method's or closure's parameter
                 // takes either literal, whatever its docblock says.
-                let mut refused_crossing = false;
-                let mut passed_type = Cow::Borrowed(&argument_value_type);
-                if takes_php_sharp_types(&invocation.target) {
+                let takes_sharp_types = takes_php_sharp_types(&invocation.target);
+                if takes_sharp_types {
                     check_sharp_literal_kind(
                         context,
                         Some(block_context),
@@ -902,7 +922,17 @@ where
                         argument_expression,
                         &final_parameter_type,
                     );
-                } else if context.dialect.is_sharp() {
+                    // Spec section 12: a literal takes its collection type from the parameter it lands in, so a list
+                    // literal is a `Set` where the parameter declares one, at any depth.
+                    if let Some(literal_type) =
+                        get_set_literal_type(context, artifacts, argument_expression, &final_parameter_type)
+                    {
+                        argument_value_type = literal_type;
+                    }
+                }
+                let mut refused_crossing = false;
+                let mut passed_type = Cow::Borrowed(&argument_value_type);
+                if !takes_sharp_types && context.dialect.is_sharp() {
                     match check_array_crossing(
                         context,
                         &argument_value_type,
@@ -979,8 +1009,10 @@ where
                         "Invalid named argument `{argument_name}` for {target_kind_str} `{target_name_str}`"
                     ))
                     .with_annotation(Annotation::primary(named_argument.name.span()).with_message(
-                        if has_variadic_parameter {
-                            "A variadic parameter takes no named argument in PHP#".to_string()
+                        if has_variadic_parameter && takes_php_sharp_types(&invocation.target) {
+                            "A PHP# `...` parameter takes no names".to_string()
+                        } else if has_variadic_parameter {
+                            "Its `...` parameter takes values by position".to_string()
                         } else {
                             format!("Unknown argument name `{argument_name}`")
                         },
@@ -992,9 +1024,17 @@ where
                     .with_help({
                         if !invocation.target.allows_named_arguments() {
                             format!("The {target_kind_str} `{target_name_str}` does not support named arguments.")
-                        } else if has_variadic_parameter {
-                            "A named argument never fills a variadic parameter in PHP#: pass its values by position."
+                        } else if has_variadic_parameter && takes_php_sharp_types(&invocation.target) {
+                            "A PHP# `...` parameter is a `List`, and a `List` takes no names: pass its values by position."
                                 .to_string()
+                        } else if has_variadic_parameter {
+                            let variadic = invocation
+                                .target
+                                .get_parameter(invocation.target.parameter_count() - 1)
+                                .and_then(|parameter| parameter.get_name())
+                                .map(|name| BytesDisplay(trim_start_byte(name.0.as_bytes(), b'$')).to_string())
+                                .unwrap_or_default();
+                            format!("`{target_name_str}` takes its `...{variadic}` by position: pass them without names.")
                         } else if invocation.target.parameter_count() == 0 {
                             format!("The {target_kind_str} `{target_name_str}` has no parameters.")
                         } else {
@@ -1542,17 +1582,21 @@ where
         };
 
         let total_positions = non_closure_arguments.len() + closure_arguments.len();
+        // An extension member's receiver is no argument the code writes inside `(…)`, so neither count holds it.
+        let receiver = invocation.target.receiver_argument_count();
         let mut issue = Issue::error(main_message)
             .with_annotation(Annotation::primary(primary_annotation_span).with_message("More arguments expected here"))
             .with_note(format!(
-                "Expected at least {number_of_required_parameters} argument(s) for non-optional parameters, but received {}.",
-                if matches!(invocation.arguments_source, InvocationArgumentsSource::PartialArgumentList(_)) {
+                "Expected at least {} argument(s) for non-optional parameters, but received {}.",
+                number_of_required_parameters.saturating_sub(receiver),
+                (if matches!(invocation.arguments_source, InvocationArgumentsSource::PartialArgumentList(_)) {
                     total_positions
                 } else if has_unpacked_arguments || has_named_argument_anomaly {
                     number_of_provided_parameters
                 } else {
                     number_of_satisfied_required_parameters
-                }
+                })
+                .saturating_sub(receiver)
             ));
 
         issue = match invocation.arguments_source {
@@ -1620,8 +1664,14 @@ where
             ),
         };
 
+        // An extension member's receiver is no argument the code writes inside `(…)`, so neither count holds it.
+        let receiver = invocation.target.receiver_argument_count();
         issue = issue
-            .with_note(format!("Expected {max_params} argument(s), but received {number_of_provided_parameters}."))
+            .with_note(format!(
+                "Expected {} argument(s), but received {}.",
+                max_params.saturating_sub(receiver),
+                number_of_provided_parameters.saturating_sub(receiver)
+            ))
             .with_help("Remove the extra argument(s).");
 
         context.collector.report_with_code(IssueCode::TooManyArguments, issue);

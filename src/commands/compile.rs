@@ -182,6 +182,14 @@ impl CompileCommand {
         }
         git::exclude(&root, "mago compile", &written_beside.into_iter().collect::<Vec<_>>())?;
 
+        let library = match standard_library(&root, &database) {
+            Ok(library) => library,
+            Err(refusal) => {
+                tracing::error!("{refusal}");
+
+                return Ok(ExitCode::FAILURE.into());
+            }
+        };
         let mut server = Server::new(database.into_static(), decode_prelude, server_settings(&orchestrator));
         server.analyze()?;
         let lean = Lean::new(&root);
@@ -189,6 +197,7 @@ impl CompileCommand {
             |path| unit::stamp(&root, path),
             |name| rules_files(&root, name),
             |translations, namespaces| lean.check(translations, namespaces),
+            &library,
         )?;
         let database = server.database();
 
@@ -292,6 +301,61 @@ impl CompileCommand {
 
         Ok(ExitCode::SUCCESS.into())
     }
+}
+
+/// The standard library's package name, as its `composer.json` and Composer's `installed.json` give it.
+const STANDARD_LIBRARY_PACKAGE: &str = "heyjordanparker/php-sharp-composer";
+
+/// The standard library the project's files compile against: the native fingerprint its package's `native.php` gives,
+/// which the engine compares with its own, and the version the `installed.json` of the `vendor/` folder that holds the
+/// package lists, which the engine's refusal names, or none outside `vendor/`. A project without the standard library,
+/// or whose library declares no native bodies in a `native.php`, compiles against none, an all-zero fingerprint.
+///
+/// Fails when the package's `native.php` gives no fingerprint, so no compiled file names a library it was not checked
+/// against.
+fn standard_library(root: &Path, database: &impl DatabaseReader) -> Result<unit::Library, String> {
+    let Some(file) = database.files().find(|file| file.is_standard_library) else {
+        return Ok(unit::Library::default());
+    };
+    let source = file.path.clone().unwrap_or_else(|| root.join(String::from_utf8_lossy(&file.name).as_ref()));
+    let Some(package) = source.ancestors().skip(1).find(|folder| folder.join("composer.json").is_file()) else {
+        return Err(format!(
+            "{} belongs to no Composer package. Reinstall {STANDARD_LIBRARY_PACKAGE}.",
+            source.display()
+        ));
+    };
+
+    let native = package.join("native.php");
+    if !native.exists() {
+        return Ok(unit::Library::default());
+    }
+    let fingerprint = std::fs::read_to_string(&native).ok().and_then(|code| {
+        let hex = code.split_once("'fingerprint' => '")?.1.get(..32)?;
+        let mut fingerprint = [0; 16];
+        for (byte, pair) in fingerprint.iter_mut().zip(hex.as_bytes().chunks(2)) {
+            *byte = u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()?;
+        }
+
+        Some(fingerprint)
+    });
+    let Some(native_fingerprint) = fingerprint else {
+        return Err(format!("{} gives no native fingerprint. Reinstall {STANDARD_LIBRARY_PACKAGE}.", native.display()));
+    };
+
+    let installed = package.parent().and_then(Path::parent).map(|vendor| vendor.join("composer/installed.json"));
+    let version = installed
+        .and_then(|installed| std::fs::read(installed).ok())
+        .and_then(|installed| serde_json::from_slice::<serde_json::Value>(&installed).ok())
+        .and_then(|installed| {
+            let packages = installed.get("packages").unwrap_or(&installed).as_array()?.clone();
+            packages
+                .into_iter()
+                .find(|entry| entry.get("name").and_then(serde_json::Value::as_str) == Some(STANDARD_LIBRARY_PACKAGE))
+        })
+        .and_then(|entry| entry.get("version").and_then(serde_json::Value::as_str).map(str::to_owned))
+        .unwrap_or_default();
+
+    Ok(unit::Library { native_fingerprint, version: version.into_bytes() })
 }
 
 /// The inputs of the listener table, stamped as the engine reads them, which it checks only while it compiles on

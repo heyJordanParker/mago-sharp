@@ -14,6 +14,7 @@ use mago_codex::metadata::function_like::FunctionLikeKind;
 use mago_codex::misc::GenericParent;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
+use mago_codex::ttype::atomic::array::list::TList;
 use mago_codex::ttype::atomic::callable::TCallable;
 use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::object::r#enum::TEnum;
@@ -470,16 +471,21 @@ where
         is_refused |= report_hint_type_arguments(context, block_context, artifacts, hint, HintPlace::TypeTest);
         is_refused |= report_erased_type_test(context, hint);
 
-        // A test of a type parameter, of a generic class with its type arguments, of a collection, of `Any`, of a
-        // function type or of a union is `instanceof` a name spanning the whole type, and narrows to the type written,
-        // which the analysis records as the type the test reads. So is a test of a plain PHP trait, spec section 22,
-        // since no value is `instanceof` one.
+        // A test of a type parameter, of a generic class with its type arguments, of a collection, of a class value, of
+        // `Any`, of `Object`, of a tuple, of a function type or of a union is `instanceof` a name spanning the whole
+        // type, and narrows to the type written, which the analysis records as the type the test reads. So is a test of
+        // a plain PHP trait, spec section 22, since no value is `instanceof` one.
         let reads_type_arguments = match hint {
             Hint::Identifier(name) => {
                 context.resolved_names.is_type_parameter(name)
                     || context.codebase.get_trait(context.resolved_names.get(name)).is_some()
             }
-            Hint::Generic(_) | Hint::Mixed(_) | Hint::Function(_) | Hint::Union(_) => has_type_test(hint),
+            Hint::Generic(_)
+            | Hint::Mixed(_)
+            | Hint::Object(_)
+            | Hint::Tuple(_)
+            | Hint::Function(_)
+            | Hint::Union(_) => has_type_test(hint),
             _ => false,
         };
         if reads_type_arguments {
@@ -487,12 +493,34 @@ where
             artifacts.record_tested_type(hint, tested);
         }
     }
-    // A list pattern's first test is `instanceof` a name spanning its `[`, which reads `List<Any?>`.
-    for left_bracket in node.filter_map(|node| match node {
-        Node::ListPattern(list) => Some(list.left_bracket),
+    // A list pattern's first test is `instanceof` a name spanning its `[`, which reads `List<Any?>`. A list pattern of
+    // types alone, as `[int, string]`, matches the values of that tuple, so once its PHP is analyzed, the code after
+    // the pattern narrows to the tuple. Its PHP itself narrows to `List<Any?>`, so an element that is never of its
+    // type reports in PHP#'s words, and the elements after it report nothing more. A loop analyzes its body again, so
+    // the tuple an earlier pass recorded is forgotten first.
+    let mut tuples = Vec::new();
+    for list in node.filter_map(|node| match node {
+        Node::ListPattern(list) => Some(*list),
         _ => None,
     }) {
-        artifacts.record_tested_type(&left_bracket, get_mixed_list());
+        artifacts.record_tested_type(&list.left_bracket, get_mixed_list());
+        artifacts.record_list_pattern_tuple(&list.left_bracket, None);
+        let element_types: Option<Vec<(TUnion, Option<Word>)>> = list
+            .elements
+            .iter()
+            .map(|element| match element {
+                ListPatternElement::Pattern(Pattern::Type(TypePattern {
+                    hint,
+                    fields: None,
+                    properties: None,
+                    variable: None,
+                })) => Some((get_type_from_hint(context, block_context, artifacts, hint), None)),
+                _ => None,
+            })
+            .collect();
+        if let Some(element_types) = element_types.filter(|element_types| !element_types.is_empty()) {
+            tuples.push((list.left_bracket, wrap_atomic(TAtomic::Array(TArray::List(TList::tuple(element_types))))));
+        }
     }
 
     // Whether the index a pattern tests reads quietly depends on what it indexes, as the analysis types it, so that
@@ -542,6 +570,9 @@ where
     });
     context.temporaries -= temporaries;
     context.patterns.truncate(patterns);
+    for (left_bracket, tuple) in tuples {
+        artifacts.record_list_pattern_tuple(&left_bracket, Some(tuple));
+    }
 
     // The PHP of a pattern calls a type test that no source the user wrote calls. It is the PHP# syntax itself, so it is
     // never a bare call to refuse. Some calls are the shape of the pattern, which no source the user wrote can drop, so
@@ -640,11 +671,16 @@ where
             })
     });
     let is_code = |issue: &Issue, code: IssueCode| issue.code.as_deref() == Some(code.as_str());
+    // The test states the type of the value it tests, so a read of a property whose type is unknown, spec section 14.3,
+    // needs no warning there: the warning's own help asks for this test.
+    let tested_read = tested_value(node).unparenthesized().span();
     let issues: Vec<Issue> = issues
         .into_iter()
         .filter(|issue| {
             let span = issue.primary_span();
             let called = span.and_then(pattern_call);
+            let reads_tested_value = is_code(issue, IssueCode::NonDocumentedProperty)
+                && span.is_some_and(|span| span.end == tested_read.end && span.start > tested_read.start);
             let redundant = is_code(issue, IssueCode::RedundantTypeComparison)
                 || is_code(issue, IssueCode::RedundantLogicalOperation);
             let always_true = redundant
@@ -653,6 +689,7 @@ where
 
             // PHP's report on `match (true)` names `true`, so a PHP# `match` reports what it misses itself.
             !is_code(issue, IssueCode::MatchNotExhaustive)
+                && !reads_tested_value
                 && (!is_code(issue, IssueCode::RedundantLogicalOperation)
                     || span.is_none_or(|span| !field_tests.iter().any(|test| test.start == span.start)))
                 && (!is_code(issue, IssueCode::MatchArmAlwaysTrue)
@@ -1193,10 +1230,10 @@ fn never_matches(pattern: Span) -> Issue {
 
 /// `issue`, in PHP#'s words when it is the PHP's report that a list pattern's element, one of `elements`, can never be
 /// of its type: "`tail` is an `int` in a `List<int>`, so it is never a `string`." `list_reads` gives the value each
-/// list pattern tests.
+/// list pattern tests. The element of a tuple is the tuple's element at its index.
 fn reword_list_element_test<A>(
     issue: Issue,
-    elements: &[(Span, Span, Option<Span>)],
+    elements: &[(Span, Span, Option<Span>, Option<usize>)],
     list_reads: &[(Span, &Expression<'_>)],
     context: &Context<'_, '_, A>,
     artifacts: &AnalysisArtifacts,
@@ -1208,12 +1245,19 @@ where
         .primary_span()
         .filter(|_| issue.code.as_deref() == Some(IssueCode::ImpossibleTypeComparison.as_str()))
         .and_then(|span| elements.iter().find(|(hint, ..)| hint.start == span.start))
-        .and_then(|(hint, list, variable)| {
+        .and_then(|(hint, list, variable, index)| {
             let (_, value) = list_reads.iter().find(|(read, _)| read == list)?;
             let list_type = artifacts.get_expression_type(*value)?;
-            let element_type = list_type.types.iter().find_map(TAtomic::get_list_element_type)?;
+            let element_type = list_type.types.iter().find_map(|atomic| match atomic {
+                TAtomic::Array(TArray::List(TList { known_elements: Some(known), .. })) if let Some(index) = index => {
+                    known.get(index).map(|(_, element)| element)
+                }
+                _ => atomic.get_list_element_type(),
+            })?;
             Some((hint, variable, list_type, element_type))
         })
+        // A tuple's element after a rest has no one type to name.
+        .filter(|(.., element_type)| !element_type.is_never())
     else {
         return issue;
     };
@@ -1468,8 +1512,9 @@ struct PatternCalls {
     element_tests: Vec<Span>,
     lists: Vec<(Span, Span)>,
     case_patterns: Vec<u32>,
-    /// Each list pattern element with a type: its type, its list pattern, and the name it binds.
-    list_elements: Vec<(Span, Span, Option<Span>)>,
+    /// Each list pattern element with a type: its type, its list pattern, the name it binds, and its index when no
+    /// rest comes before it.
+    list_elements: Vec<(Span, Span, Option<Span>, Option<usize>)>,
 }
 
 /// Collects the `PatternCalls` of a PHP# `is`, `as` or `match`.
@@ -1498,10 +1543,15 @@ impl<'ast, 'arena> Walker<'ast, 'arena, PatternCalls> for PatternCallWalker {
     fn walk_in_list_pattern(&self, list: &'ast ListPattern<'arena>, calls: &mut PatternCalls) {
         calls.calls.extend(called_functions(Node::ListPattern(list)));
         calls.lists.push((list.span(), list.left_bracket));
-        calls.list_elements.extend(list.elements.iter().filter_map(|element| match element {
-            ListPatternElement::Pattern(Pattern::Type(TypePattern { hint, variable, .. })) => {
-                Some((hint.span(), list.span(), variable.as_ref().map(HasSpan::span)))
-            }
+        // An element after a rest has no index from the start.
+        let before_rest = list.elements.iter().position(|element| matches!(element, ListPatternElement::Rest(_)));
+        calls.list_elements.extend(list.elements.iter().enumerate().filter_map(|(index, element)| match element {
+            ListPatternElement::Pattern(Pattern::Type(TypePattern { hint, variable, .. })) => Some((
+                hint.span(),
+                list.span(),
+                variable.as_ref().map(HasSpan::span),
+                before_rest.is_none_or(|rest| index < rest).then_some(index),
+            )),
             _ => None,
         }));
         calls.element_tests.extend(list.elements.iter().filter_map(|element| match element {
