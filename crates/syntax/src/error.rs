@@ -5,11 +5,14 @@ use mago_reporting::Issue;
 use mago_span::HasSpan;
 use mago_span::Position;
 use mago_span::Span;
+use mago_syntax_core::input::Input;
 
 use crate::T;
 use crate::cst::LiteralStringKind;
 use crate::cst::Operator;
+use crate::lexer::Lexer;
 use crate::parser::MAX_RECURSION_DEPTH;
+use crate::settings::LexerSettings;
 use crate::token::TokenKind;
 
 const SYNTAX_ERROR_CODE: &str = "syntax";
@@ -461,6 +464,31 @@ impl std::fmt::Display for ParseError {
         };
 
         write!(f, "{message}")
+    }
+}
+
+impl ParseError {
+    /// The error a typo gives at the first token from `offset` of a PHP# file's `code`, as `asdf` does in
+    /// `public asdf#($@`: that token is unexpected. Every form outside the PHP# grammar fails with it, whichever
+    /// language it comes from.
+    #[must_use]
+    pub fn unexpected_in_sharp(file_id: FileId, code: &[u8], offset: u32) -> ParseError {
+        let start = Position::new(offset);
+        let mut lexer =
+            Lexer::sharp(Input::anchored_at(file_id, &code[offset as usize..], start), LexerSettings::default());
+
+        loop {
+            match lexer.advance() {
+                Some(Ok(token)) if token.kind.is_trivia() => {}
+                Some(Ok(token)) => {
+                    return ParseError::UnexpectedToken(Expected::OneOf(&[]), token.kind, token.span_for(file_id));
+                }
+                Some(Err(error)) => return ParseError::SyntaxError(error),
+                None => {
+                    return ParseError::UnexpectedEndOfFile(Expected::OneOf(&[]), file_id, lexer.current_position());
+                }
+            }
+        }
     }
 }
 
