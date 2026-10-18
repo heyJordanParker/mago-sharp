@@ -371,8 +371,8 @@ fn analyze_fix_refuses_a_fix_that_would_edit_a_sharp_file() {
 }
 
 /// The standard library's `Text`, with a native body, spec section 29, and its extension on `string`, spec section 26,
-/// whose `trim` the checker names in place of PHP's.
-const TEXT: &str = "namespace Sharp.Text;\n\npublic static class Text\n{\n    public static extern string slug(string title);\n\n    public static string shout(string title) => global.strtoupper(title);\n\n    extension(string text)\n    {\n        public string trim() => global.trim(text);\n    }\n}\n";
+/// whose `trim` the checker names in place of PHP's, and whose `split` the library's `Http` calls.
+const TEXT: &str = "namespace Sharp.Text;\n\npublic static class Text\n{\n    public static extern string slug(string title);\n\n    public static string capitalized(string title) => global.ucfirst(title);\n\n    extension(string text)\n    {\n        public string trim() => global.trim(text);\n\n        public List<string> split(string delimiter, int limit = 0) => global.explode(delimiter, text, limit == 0 ? global.PHP_INT_MAX : limit);\n    }\n}\n";
 
 /// The standard library's `Int`, `Float` and `Bool`, spec section 24, with the library's signatures. Their names are
 /// reserved, and only the standard library declares them.
@@ -498,11 +498,11 @@ fn compile_accepts_extern_methods_in_the_vendored_standard_library() {
 }
 
 /// `mago compile` lowers the vendored library first, and a project file runs the library's one-call method as its
-/// body: `Text.shout(name)` compiles to `strtoupper($name)`.
+/// body: `Text.capitalized(name)` compiles to `ucfirst($name)`.
 #[test]
 fn compile_inlines_a_vendored_library_form_into_a_project_caller() {
     let directory = library_workspace(
-        "namespace App;\n\nimport Sharp.Text.Text;\n\npublic class Page\n{\n    public string title(string name) => Text.shout(name);\n}\n",
+        "namespace App;\n\nimport Sharp.Text.Text;\n\npublic class Page\n{\n    public string title(string name) => Text.capitalized(name);\n}\n",
     );
 
     let output = run(directory.path(), "compile", &[]);
@@ -510,7 +510,7 @@ fn compile_inlines_a_vendored_library_form_into_a_project_caller() {
 
     assert!(output.status.success(), "{printed}");
     let page = std::fs::read(directory.path().join(".sharp/src/App/Page.sharpc")).unwrap();
-    assert!(page.windows(b"strtoupper".len()).any(|window| window == b"strtoupper"), "the form is inlined");
+    assert!(page.windows(b"ucfirst".len()).any(|window| window == b"ucfirst"), "the form is inlined");
 }
 
 /// In the standard library's own repository, whose root `composer.json` names the package, `library/Sharp/` is the
@@ -526,7 +526,7 @@ fn compile_treats_the_repository_of_the_standard_library_as_the_library() {
     write(
         root,
         "example/App/Title.sharp",
-        "namespace App;\n\nimport Sharp.Text.Text;\n\npublic class Title\n{\n    public string of(string name) => Text.shout(name);\n}\n",
+        "namespace App;\n\nimport Sharp.Text.Text;\n\npublic class Title\n{\n    public string of(string name) => Text.capitalized(name);\n}\n",
     );
     write(
         root,
@@ -542,7 +542,7 @@ fn compile_treats_the_repository_of_the_standard_library_as_the_library() {
     assert!(root.join(".sharp/library/Sharp/Text/Text.sharpc").is_file(), "{printed}");
     assert!(root.join(".sharp/library/Sharp/Environment.sharpc").is_file(), "{printed}");
     let title = std::fs::read(root.join(".sharp/example/App/Title.sharpc")).unwrap();
-    assert!(title.windows(b"strtoupper".len()).any(|window| window == b"strtoupper"), "the form is inlined");
+    assert!(title.windows(b"ucfirst".len()).any(|window| window == b"ucfirst"), "the form is inlined");
     assert!(!root.join(".sharp/example/App/Native.sharpc").exists(), "{printed}");
     assert!(printed.contains("native-body-outside-library"), "{printed}");
 }

@@ -189,7 +189,7 @@ impl<'arena> Analyzable<'_, 'arena> for ConstantAccess<'arena> {
 /// Analyzes the PHP# read `read` of `namespace_name.member`, as `global.PHP_EOL`, or `Pdf.DEFAULT_DPI` after
 /// `import Vendor.Pdf;`, as a read of the plain PHP constant `member` of `namespace`, which [`member_namespace`] found
 /// (spec section 23). A read of a function of that name is the function's value, spec section 14.3, as
-/// `names.map(global.strtoupper)` passes it, unless the standard library replaces the function, when the read names
+/// `names.map(global.ucfirst)` passes it, unless the standard library replaces the function, when the read names
 /// the member to write. A read of neither is refused.
 ///
 /// [`member_namespace`]: crate::utils::names::member_namespace

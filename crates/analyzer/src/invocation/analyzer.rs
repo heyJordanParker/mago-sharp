@@ -1542,17 +1542,21 @@ where
         };
 
         let total_positions = non_closure_arguments.len() + closure_arguments.len();
+        // An extension member's receiver is no argument the code writes inside `(…)`, so neither count holds it.
+        let receiver = invocation.target.receiver_argument_count();
         let mut issue = Issue::error(main_message)
             .with_annotation(Annotation::primary(primary_annotation_span).with_message("More arguments expected here"))
             .with_note(format!(
-                "Expected at least {number_of_required_parameters} argument(s) for non-optional parameters, but received {}.",
-                if matches!(invocation.arguments_source, InvocationArgumentsSource::PartialArgumentList(_)) {
+                "Expected at least {} argument(s) for non-optional parameters, but received {}.",
+                number_of_required_parameters.saturating_sub(receiver),
+                (if matches!(invocation.arguments_source, InvocationArgumentsSource::PartialArgumentList(_)) {
                     total_positions
                 } else if has_unpacked_arguments || has_named_argument_anomaly {
                     number_of_provided_parameters
                 } else {
                     number_of_satisfied_required_parameters
-                }
+                })
+                .saturating_sub(receiver)
             ));
 
         issue = match invocation.arguments_source {
@@ -1620,8 +1624,14 @@ where
             ),
         };
 
+        // An extension member's receiver is no argument the code writes inside `(…)`, so neither count holds it.
+        let receiver = invocation.target.receiver_argument_count();
         issue = issue
-            .with_note(format!("Expected {max_params} argument(s), but received {number_of_provided_parameters}."))
+            .with_note(format!(
+                "Expected {} argument(s), but received {}.",
+                max_params.saturating_sub(receiver),
+                number_of_provided_parameters.saturating_sub(receiver)
+            ))
             .with_help("Remove the extra argument(s).");
 
         context.collector.report_with_code(IssueCode::TooManyArguments, issue);

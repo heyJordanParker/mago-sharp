@@ -476,7 +476,6 @@ where
             block_context,
             artifacts,
             type_arguments,
-            class,
             metadata,
             &mut template_result,
         );
@@ -489,7 +488,7 @@ where
         inferred_return_type: None,
         effective_signature: None,
         method_context: Some(MethodTargetContext {
-            invocation_kind: MethodInvocationKind::Static,
+            invocation_kind: MethodInvocationKind::Extension,
             declaring_method_id: Some(extension),
             class_like_metadata,
             class_type: StaticClassType::Name(class),

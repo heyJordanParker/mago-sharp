@@ -730,8 +730,9 @@ pub(crate) fn class_type_arguments(class: &ClassLikeMetadata, type_arguments: &[
 
 /// The type argument PHP# takes from a value of type `union`, a type PHP# writes, as C#, Kotlin and Swift have no
 /// literal types and TypeScript widens the literal it infers: each scalar its general type, as `int` for `5` or for a
-/// list's key, each enum case its enum, and each array, and each array inside one, the `List`, `Map` or `Set` of its
-/// key and value types, as `List<int>` for `[1, 2]` and `Map<string, int>` for `["k": 1]`.
+/// list's key, each enum case its enum, each tuple the tuple of its elements' types, as `[string, int]` for a `Map`'s
+/// entry, and each array, and each array inside one, the `List`, `Map` or `Set` of its key and value types, as
+/// `List<int>` for `[1, 2]` and `Map<string, int>` for `["k": 1]`.
 pub(crate) fn written_type_argument(union: &TUnion, codebase: &CodebaseMetadata) -> TUnion {
     let mut type_argument = written_type(union, codebase);
     type_argument.widen_scalars();
@@ -739,14 +740,19 @@ pub(crate) fn written_type_argument(union: &TUnion, codebase: &CodebaseMetadata)
     TUnion::from_vec(combine(type_argument.types.into_owned(), codebase, CombinerOptions::default()))
 }
 
-/// `union` with each enum case in it as its enum, and each array as the `List`, `Map` or `Set` of its key and value
-/// types, the arrays inside one too.
+/// `union` with each enum case in it as its enum, each tuple as the tuple of its elements' written types, spec section
+/// 30, and each other array as the `List`, `Map` or `Set` of its key and value types, the arrays inside one too.
 fn written_type(union: &TUnion, codebase: &CodebaseMetadata) -> TUnion {
     TUnion::from_vec(
         union
             .types
             .iter()
             .map(|atomic| match atomic {
+                TAtomic::Array(TArray::List(list)) if let Some(elements) = list.tuple_elements() => {
+                    TAtomic::Array(TArray::List(TList::tuple(
+                        elements.into_iter().map(|(element, name)| (written_type(element, codebase), name)).collect(),
+                    )))
+                }
                 TAtomic::Array(array) => {
                     let (key, value) = get_array_parameters(array, codebase);
                     let value = Arc::new(written_type(&value, codebase));

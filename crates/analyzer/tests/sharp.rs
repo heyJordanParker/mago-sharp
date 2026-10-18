@@ -5194,7 +5194,7 @@ fn a_method_value_passed_to_a_collection_method_types_its_result() {
 /// import, and a plain PHP function. Each value has its method's function type without the receiver.
 #[test]
 fn a_method_value_of_a_collection_an_extension_or_a_plain_php_function_has_its_function_type() {
-    let sharp = "namespace Demo;\n\nimport App.Shared.Text.TextExtensions;\n\nclass Report\n{\n    public int run(List<int> numbers, List<int> allowed, Map<string, int> prices, Set<int> seen, List<string> names, string title)\n    {\n        List<int> kept = numbers.filter(allowed.contains);\n        List<string> priced = names.filter(prices.has);\n        List<int> met = numbers.filter(seen.contains);\n        Function<int()> size = allowed.count;\n        Function<string()> tidy = title.trim;\n        Function<string(string)> slug = title.slug;\n        List<string> upper = names.map(global.strtoupper);\n        Function<int(string)> length = global.strlen;\n        Function<int(int)> wrongList = allowed.contains;\n        Function<int()> wrongExtension = title.trim;\n        Function<string(int)> wrongImported = title.slug;\n        Function<string(string)> wrongFunction = global.strlen;\n        const trimmed = title.trim;\n        const slugged = title.slug;\n        string wrongCall = slugged(1);\n        return kept.count() + priced.count() + met.count() + size() + global.strlen(tidy()) + global.strlen(slug(\"-\")) + upper.count() + length(\"x\") + global.strlen(trimmed()) + global.strlen(slugged(\"-\")) + global.strlen(wrongCall);\n    }\n\n    public int more(List<int> numbers, List<string> names, List<int>? maybe, Iterable<int> lazy, string title)\n    {\n        Function<int(int)> firstOr = numbers.firstOr;\n        Function<string(string)> wrongFirst = numbers.firstOr;\n        Function<int(int)> same = global.same_value;\n        Function<string(int)> wrongSame = global.same_value;\n        Function<Iterable<int>(int)> take = lazy.take;\n        const maybeHas = maybe.contains;\n        const total = names.total;\n        title.slug = \"x\";\n        const nope = numbers.missing;\n        return firstOr(1) + same(1) + take(1).toList().count();\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport App.Shared.Text.TextExtensions;\n\nclass Report\n{\n    public int run(List<int> numbers, List<int> allowed, Map<string, int> prices, Set<int> seen, List<string> names, string title)\n    {\n        List<int> kept = numbers.filter(allowed.contains);\n        List<string> priced = names.filter(prices.has);\n        List<int> met = numbers.filter(seen.contains);\n        Function<int()> size = allowed.count;\n        Function<string()> tidy = title.trim;\n        Function<string(string)> slug = title.slug;\n        List<string> capitalized = names.map(global.ucfirst);\n        Function<int(string)> length = global.strlen;\n        Function<int(int)> wrongList = allowed.contains;\n        Function<int()> wrongExtension = title.trim;\n        Function<string(int)> wrongImported = title.slug;\n        Function<string(string)> wrongFunction = global.strlen;\n        const trimmed = title.trim;\n        const slugged = title.slug;\n        string wrongCall = slugged(1);\n        return kept.count() + priced.count() + met.count() + size() + global.strlen(tidy()) + global.strlen(slug(\"-\")) + capitalized.count() + length(\"x\") + global.strlen(trimmed()) + global.strlen(slugged(\"-\")) + global.strlen(wrongCall);\n    }\n\n    public int more(List<int> numbers, List<string> names, List<int>? maybe, Iterable<int> lazy, string title)\n    {\n        Function<int(int)> firstOr = numbers.firstOr;\n        Function<string(string)> wrongFirst = numbers.firstOr;\n        Function<int(int)> same = global.same_value;\n        Function<string(int)> wrongSame = global.same_value;\n        Function<Iterable<int>(int)> take = lazy.take;\n        const maybeHas = maybe.contains;\n        const total = names.total;\n        title.slug = \"x\";\n        const nope = numbers.missing;\n        return firstOr(1) + same(1) + take(1).toList().count();\n    }\n}\n";
     let text = "namespace Sharp.Text;\n\npublic static class Text\n{\n    extension(string text)\n    {\n        public string trim() => global.trim(text);\n    }\n}\n";
     let rows = "namespace Demo;\n\npublic static class Rows\n{\n    extension<T>(List<T> items)\n    {\n        public T firstOr(T fallback) => items.count() > 0 ? items[0] : fallback;\n    }\n\n    extension<T : Order>(List<T> orders)\n    {\n        public int total() => orders.count();\n    }\n}\n";
     let same = "<?php\n\n/**\n * @template T\n *\n * @param T $value\n *\n * @return T\n */\nfunction same_value(mixed $value): mixed\n{\n    return $value;\n}\n";
@@ -6992,12 +6992,12 @@ fn an_imported_extension_is_a_member_of_its_receiver() {
         &[("src/App/Shared/Text/TextExtensions.sharp", TEXT_EXTENSIONS)],
         &[
             "9:39 invalid-return-statement: Invalid return type for method `Catalog.count`: expected `int`, but found `string`.",
-            "10:53 invalid-argument: Invalid argument type for argument #2 of `TextExtensions.slug`: expected `string`, but found `int`.",
+            "10:53 invalid-argument: Invalid argument type for argument #1 of `string.slug`: expected `string`, but found `int`.",
             "11:45 non-existent-method: `isBlank` is a computed property of `string`, not a method: read it without `(…)`.",
             "11:39 mixed-return-statement: Could not infer a precise return type for method `Catalog.none`. Saw type `Any?`.",
             "12:41 invalid-return-statement: Invalid return type for method `Catalog.bare`: expected `string`, but found `Function<string(string)>`.",
             "15:15 invalid-property-write: `isBlank` is a computed property an extension adds: it is read, never written.",
-            "17:40 too-few-arguments: Too few arguments provided for method `TextExtensions.slug`.",
+            "17:40 too-few-arguments: Too few arguments provided for method `string.slug`.",
         ],
     );
 }
@@ -7231,6 +7231,93 @@ fn a_call_of_a_function_an_extension_replaces_names_the_member_on_its_first_argu
     }
 }
 
+/// Spec sections 8 and 26: a function whose text is not its first argument names the extension member on the argument
+/// that holds the text, `explode`'s second and `str_replace`'s third, and `str_contains`' on its first.
+#[test]
+fn a_call_of_a_function_an_extension_replaces_names_the_member_on_the_argument_it_runs_on() {
+    let text = "namespace Sharp.Text;\n\npublic static class Text\n{\n    extension(string text)\n    {\n        public bool contains(string other) => global.str_contains(text, other);\n\n        public string replace(string old, string @new) => global.str_replace(old, @new, text);\n\n        public List<string> split(string delimiter) => global.explode(delimiter, text);\n    }\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Entity\n{\n    public bool held(string name) => global.str_contains(name, \"a\");\n    public string swapped(string name) => global.str_replace(\"a\", \"b\", name);\n    public List<string> parts(string line) => global.explode(\",\", line);\n}\n";
+
+    assert_messages(
+        sharp,
+        &[("vendor/heyjordanparker/php-sharp-composer/library/Sharp/Text/Text.sharp", text)],
+        &[
+            "5:38 wrapped-function: `str_contains` is wrapped by the standard library: write `name.contains(…)`.",
+            "6:43 wrapped-function: `str_replace` is wrapped by the standard library: write `name.replace(…)`.",
+            "7:47 wrapped-function: `explode` is wrapped by the standard library: write `line.split(…)`.",
+        ],
+    );
+}
+
+/// Spec section 26: an issue on a call of an extension member names the member on the type it extends, as the code
+/// calls it, and never on the static class that declares it. It counts the arguments from the first one the code
+/// writes inside `(…)`, so the receiver, which runs as the first argument, counts none.
+#[test]
+fn an_issue_on_an_extension_call_names_the_member_on_its_type_and_counts_the_arguments_written() {
+    let text = "namespace Sharp.Text;\n\npublic static class Text\n{\n    extension(string text)\n    {\n        public string trim() => global.trim(text);\n\n        public bool contains(string other) => global.str_contains(text, other);\n\n        public string replace(string old, string @new) => global.str_replace(old, @new, text);\n    }\n}\n";
+    let rows = "namespace Demo;\n\npublic static class Rows\n{\n    extension<TItem>(List<TItem> items)\n    {\n        public int countFrom(int start) => start + items.count();\n    }\n\n    extension<TItem>(Set<TItem> items)\n    {\n        public int setFrom(int start) => start + items.count();\n    }\n\n    extension<TKey, TValue>(Map<TKey, TValue> entries)\n    {\n        public int mapFrom(int start) => start + entries.count();\n    }\n\n    extension<TItem>(Iterable<TItem> items)\n    {\n        public int lazyFrom(int start) => start;\n    }\n\n    extension(int|string key)\n    {\n        public int keyFrom(int start) => start;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Entity\n{\n    public bool held(string name) => name.contains(1);\n    public string swapped(string name) => name.replace(\"a\", 2);\n    public string trimmed(string name) => name.trim(1);\n    public string half(string name) => name.replace(\"a\");\n    public int first(List<int> numbers) => numbers.countFrom(\"a\");\n    public int tagged(Set<int> tags) => tags.setFrom(\"a\");\n    public int stocked(Map<string, int> stock) => stock.mapFrom(\"a\");\n    public int lazy(Iterable<int> items) => items.lazyFrom(\"a\");\n    public int keyed(int key) => key.keyFrom(\"a\");\n}\n";
+
+    assert_messages(
+        sharp,
+        &[
+            ("vendor/heyjordanparker/php-sharp-composer/library/Sharp/Text/Text.sharp", text),
+            ("src/Demo/Rows.sharp", rows),
+        ],
+        &[
+            "5:52 invalid-argument: Invalid argument type for argument #1 of `string.contains`: expected `string`, but found `int`.",
+            "6:61 invalid-argument: Invalid argument type for argument #2 of `string.replace`: expected `string`, but found `int`.",
+            "7:53 too-many-arguments: Too many arguments provided for method `string.trim`.",
+            "8:40 too-few-arguments: Too few arguments provided for method `string.replace`.",
+            "9:62 invalid-argument: Invalid argument type for argument #1 of `List.countFrom`: expected `int`, but found `string`.",
+            "10:54 invalid-argument: Invalid argument type for argument #1 of `Set.setFrom`: expected `int`, but found `string`.",
+            "11:65 invalid-argument: Invalid argument type for argument #1 of `Map.mapFrom`: expected `int`, but found `string`.",
+            "12:60 invalid-argument: Invalid argument type for argument #1 of `Iterable.lazyFrom`: expected `int`, but found `string`.",
+            "13:46 invalid-argument: Invalid argument type for argument #1 of `int|string.keyFrom`: expected `int`, but found `string`.",
+        ],
+    );
+}
+
+/// Spec section 26: a `string`, an `int`, a `float` or a `bool` has the members the extensions in scope add to it, so
+/// a call of one it lacks is an error that lists them, as a collection's lists its methods, and that names the type.
+#[test]
+fn a_method_a_string_or_a_number_lacks_is_an_error_that_lists_the_methods_it_has() {
+    let text = "namespace Sharp.Text;\n\npublic static class Text\n{\n    extension(string text)\n    {\n        public string trim() => global.trim(text);\n\n        public bool contains(string other) => global.str_contains(text, other);\n    }\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Entity\n{\n    public int compared(string name) => name.shuffled(\"a\");\n    public int counted(int n) => n.missing();\n    public float rounded(float x) => x.round();\n    public bool flipped(bool flag) => flag.negate();\n}\n";
+
+    assert_eq!(
+        refusals(
+            ("src/Demo/Entity.sharp", sharp),
+            &[("vendor/heyjordanparker/php-sharp-composer/library/Sharp/Text/Text.sharp", text)]
+        ),
+        [
+            "5:46 non-existent-method Method `shuffled` does not exist on `string`. | A `string` has the methods `contains`, `trim`.",
+            "6:36 non-existent-method Method `missing` does not exist on `int`. | An `int` has no methods.",
+            "7:40 non-existent-method Method `round` does not exist on `float`. | A `float` has no methods.",
+            "8:44 non-existent-method Method `negate` does not exist on `bool`. | A `bool` has no methods.",
+        ]
+    );
+}
+
+/// Spec section 12: a `Map` is an `Iterable` of its `[key, value]` entries, so `flatMap` over `Map`s gives a `List` of
+/// the entries, as a loop over a `Map` reads them, and so does a `Map`'s `toList()`. A type parameter a tuple fixes is
+/// that tuple. A `flatMap` whose function gives no `Iterable` shows the function type it takes with no type parameter
+/// the code never wrote.
+#[test]
+fn flat_map_over_maps_and_a_maps_to_list_give_its_entries() {
+    let sharp = "namespace Demo;\n\npublic class Entity\n{\n    public int stock(List<Map<string, int>> shelves, Map<string, int> counts, [string, int] pair)\n    {\n        List<[string, int]> entries = shelves.flatMap(shelf => shelf);\n        List<[string, int]> listed = counts.toList();\n        List<int> values = shelves.flatMap(shelf => shelf.values());\n        [string, int] same = Entity.same(pair);\n        List<int> notEntries = shelves.flatMap(shelf => shelf);\n        List<string> notKeys = counts.toList();\n        List<int> notIterable = values.flatMap(value => value);\n        const [label, size] = same;\n        let total = size + global.strlen(label);\n        for (const [name, count] of entries) {\n            total += count + global.strlen(name);\n        }\n        return total + listed.count() + notEntries.count() + notKeys.count() + notIterable.count();\n    }\n\n    public static TItem same<TItem>(TItem item) => item;\n}\n";
+
+    assert_messages(
+        sharp,
+        &[],
+        &[
+            "11:32 invalid-local-assignment-value: Invalid assignment to `notEntries`: it is declared as `List<int>`.",
+            "12:32 invalid-local-assignment-value: Invalid assignment to `notKeys`: it is declared as `List<string>`.",
+            "13:48 invalid-argument: Invalid argument type for argument #1 of `List<int>.flatMap`: expected `Function<Iterable<Any?>(int)>`, but found `Function<int(int)>`.",
+        ],
+    );
+}
+
 /// Spec section 26: the receiver's type picks among the imported extensions of one name, as in C# and Kotlin: the one
 /// whose receiver fits inside every other's runs, so `Two`'s on an `AuditedWallet` and `One`'s on a `Wallet`. Two that
 /// fit one receiver with neither inside the other are an error naming both classes. A receiver no extension of the name fits has no such member, and one
@@ -7253,8 +7340,7 @@ fn the_receiver_type_picks_among_imported_extensions_of_one_name() {
         &others,
         &[
             "10:45 invalid-return-statement: Invalid return type for method `Report.wrong`: expected `string`, but found `int`.",
-            "11:48 invalid-method-access: Attempting to access a method on a non-object type (`string`).",
-            "11:42 mixed-return-statement: Could not infer a precise return type for method `Report.title`. Saw type `Any?`.",
+            "11:48 non-existent-method: Method `total` does not exist on `string`.",
         ],
     );
     assert_messages(
@@ -7361,8 +7447,8 @@ fn an_extension_block_infers_its_type_parameters_from_the_receiver() {
             "Invalid return type for method `Report.newest`: expected `int`, but found `RushOrder?`.",
             "`int` is outside `T`'s bound `Order`, so `List<int>` has no `newest`.",
             "Invalid return type for method `Report.blank`: expected `List<int>`, but found `List<string>`.",
-            "Too many type arguments for `ListExtensions.blank`: expected 1, but found 2.",
-            "Nothing fixes the type argument `TOut` of the call to `ListExtensions.blank`.",
+            "Too many type arguments for `List.blank`: expected 1, but found 2.",
+            "Nothing fixes the type argument `TOut` of the call to `List.blank`.",
             "`string` is outside `T`'s bound `Order`, so `List<string>` has no `saved`.",
             "Method `Pair.swapped` does not exist.",
         ]
@@ -10286,15 +10372,16 @@ fn an_emptied_php_array_property_keeps_the_map_rules() {
     assert_eq!(issues(("src/Demo/Rows.sharp", sharp), &[STORE]), ["20:27 possibly-undefined-array-index"]);
 }
 
-/// A `List` has `add`, `getOrNull`, `entries()`, `contains`, `indexOf`, `last`, `insert`, `remove`, `clear` and
-/// `toSet`, and a `Map` has `get`, `has`, `keys`, `values`, `remove` and `filter`, each typed by the elements of the
-/// collection it is called on, as spec section 12 decides. `getOrNull` and `indexOf` give a nullable type, null when no
-/// element is there, `remove` gives `bool`, `keys()` gives a `List` of the key type, a backed enum included, `values()`
-/// a `List` of the value type, `toSet()` a `Set` of the element type, and a `Map`'s `filter` gives the `Map` it keeps.
-/// A `List` has no `get` or `set`: its index reads and writes it.
+/// A `List` has `add`, `getOrNull`, `entries()`, `contains`, `indexOf`, `last`, `insert`, `remove`, `clear`, `toSet`,
+/// `flatMap` and `toList`, and a `Map` has `get`, `has`, `keys`, `values`, `remove` and `filter`, each typed by the
+/// elements of the collection it is called on, as spec section 12 decides. `getOrNull` and `indexOf` give a nullable
+/// type, null when no element is there, `remove` gives `bool`, `keys()` gives a `List` of the key type, a backed enum
+/// included, `values()` a `List` of the value type, `toSet()` a `Set` of the element type, `flatMap` a `List` of the
+/// elements of the `Iterable` its function gives, `toList()` a `List` of the element type, a `Set`'s and a `List`'s
+/// alike, and a `Map`'s `filter` gives the `Map` it keeps. A `List` has no `get` or `set`: its index reads and writes it.
 #[test]
 fn collection_methods_take_and_give_the_types_of_their_elements() {
-    let sharp = "namespace Demo;\n\nclass Order\n{\n    public List<Line> lines { get; private set; } = [];\n    private Map<string, int> counts = [:];\n\n    public int total(Line line, List<Line> extra)\n    {\n        this.lines.add(line);\n        extra.add(line);\n        extra[0] = line;\n        this.counts.remove(\"a\");\n        let sum = (this.counts.get(\"b\") ?? 0) + (extra.getOrNull(0)?.cents ?? 0);\n        for (const [index, item] of extra.entries()) {\n            sum += index + item.cents;\n        }\n        return sum;\n    }\n\n    public void wrong(List<Line> extra, Map<string, int> counts)\n    {\n        extra.add(1);\n        extra.set(0, new Line(1));\n        counts.add(1);\n        extra.delete(0);\n        Line? got = extra.get(0);\n    }\n\n    public int read(List<int> sizes)\n    {\n        bool held = sizes.contains(2);\n        int? at = sizes.indexOf(2);\n        int last = sizes.last();\n        int index = sizes.indexOf(2);\n        bool text = sizes.contains(\"a\");\n        int other = sizes.last(1);\n        int? maybe = sizes.getOrNull(5);\n        bool notMaybe = sizes.getOrNull(5);\n        Set<int> unique = sizes.toSet();\n        List<int> notSet = sizes.toSet();\n        return (held ? 1 : 0) + (at ?? 0) + last + index + (text ? 1 : 0) + other + (maybe ?? 0) + (notMaybe ? 1 : 0) + unique.count() + notSet.count();\n    }\n\n    public int change(List<int> sizes)\n    {\n        sizes.insert(0, 1);\n        bool gone = sizes.remove(2);\n        sizes.clear();\n        sizes.insert(\"a\", 1);\n        sizes.insert(0, \"a\");\n        int removed = sizes.remove(1);\n        return removed + (gone ? 1 : 0);\n    }\n\n    public int keyed(Map<string, int> counts, Map<Status, int> tally)\n    {\n        bool had = counts.has(\"a\");\n        List<string> names = counts.keys();\n        List<Status> statuses = tally.keys();\n        Map<string, int> kept = counts.filter(c => c > 0);\n        bool gone = counts.remove(\"a\");\n        int flag = counts.has(\"a\");\n        List<int> numbered = counts.keys();\n        List<string> backing = tally.keys();\n        List<int> renumbered = counts.filter(c => c > 0);\n        int removed = counts.remove(\"a\");\n        List<int> values = counts.values();\n        List<string> notValues = counts.values();\n        return (had || gone ? 1 : 0) + names.count() + statuses.count() + kept.count() + flag + numbered.count() + backing.count() + renumbered.count() + removed + values.count() + notValues.count();\n    }\n}\n\nenum Status : string\n{\n    case Open = \"open\";\n}\n\nclass Line\n{\n    public Line(public int cents { get; })\n    {\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Order\n{\n    public List<Line> lines { get; private set; } = [];\n    private Map<string, int> counts = [:];\n\n    public int total(Line line, List<Line> extra)\n    {\n        this.lines.add(line);\n        extra.add(line);\n        extra[0] = line;\n        this.counts.remove(\"a\");\n        let sum = (this.counts.get(\"b\") ?? 0) + (extra.getOrNull(0)?.cents ?? 0);\n        for (const [index, item] of extra.entries()) {\n            sum += index + item.cents;\n        }\n        return sum;\n    }\n\n    public void wrong(List<Line> extra, Map<string, int> counts)\n    {\n        extra.add(1);\n        extra.set(0, new Line(1));\n        counts.add(1);\n        extra.delete(0);\n        Line? got = extra.get(0);\n    }\n\n    public int read(List<int> sizes)\n    {\n        bool held = sizes.contains(2);\n        int? at = sizes.indexOf(2);\n        int last = sizes.last();\n        int index = sizes.indexOf(2);\n        bool text = sizes.contains(\"a\");\n        int other = sizes.last(1);\n        int? maybe = sizes.getOrNull(5);\n        bool notMaybe = sizes.getOrNull(5);\n        Set<int> unique = sizes.toSet();\n        List<int> notSet = sizes.toSet();\n        return (held ? 1 : 0) + (at ?? 0) + last + index + (text ? 1 : 0) + other + (maybe ?? 0) + (notMaybe ? 1 : 0) + unique.count() + notSet.count();\n    }\n\n    public int change(List<int> sizes)\n    {\n        sizes.insert(0, 1);\n        bool gone = sizes.remove(2);\n        sizes.clear();\n        sizes.insert(\"a\", 1);\n        sizes.insert(0, \"a\");\n        int removed = sizes.remove(1);\n        return removed + (gone ? 1 : 0);\n    }\n\n    public int keyed(Map<string, int> counts, Map<Status, int> tally)\n    {\n        bool had = counts.has(\"a\");\n        List<string> names = counts.keys();\n        List<Status> statuses = tally.keys();\n        Map<string, int> kept = counts.filter(c => c > 0);\n        bool gone = counts.remove(\"a\");\n        int flag = counts.has(\"a\");\n        List<int> numbered = counts.keys();\n        List<string> backing = tally.keys();\n        List<int> renumbered = counts.filter(c => c > 0);\n        int removed = counts.remove(\"a\");\n        List<int> values = counts.values();\n        List<string> notValues = counts.values();\n        return (had || gone ? 1 : 0) + names.count() + statuses.count() + kept.count() + flag + numbered.count() + backing.count() + renumbered.count() + removed + values.count() + notValues.count();\n    }\n\n    public int flat(List<List<int>> rows, Set<string> tags, Map<string, int> counts)\n    {\n        List<int> cells = rows.flatMap(r => r);\n        List<string> listed = tags.toList();\n        List<int> values = counts.values().toList();\n        List<int> copy = cells.toList();\n        List<string> notCells = rows.flatMap(r => r);\n        List<int> notIterable = rows.flatMap(r => r.count());\n        Set<int> notList = cells.toList();\n        return cells.count() + listed.count() + values.count() + copy.count() + notCells.count() + notIterable.count() + notList.count();\n    }\n}\n\nenum Status : string\n{\n    case Open = \"open\";\n}\n\nclass Line\n{\n    public Line(public int cents { get; })\n    {\n    }\n}\n";
 
     assert_eq!(
         issues(("src/Demo/Order.sharp", sharp), &[]),
@@ -10317,7 +10404,10 @@ fn collection_methods_take_and_give_the_types_of_their_elements() {
             "65:32 invalid-local-assignment-value",
             "66:32 invalid-local-assignment-value",
             "67:23 invalid-local-assignment-value",
-            "69:34 invalid-local-assignment-value"
+            "69:34 invalid-local-assignment-value",
+            "79:33 invalid-local-assignment-value",
+            "80:46 invalid-argument",
+            "81:28 invalid-local-assignment-value"
         ]
     );
 }
@@ -13151,7 +13241,7 @@ fn a_missing_class_with_type_arguments_is_reported() {
 /// more than the refusal.
 #[test]
 fn a_refused_type_test_still_declares_its_name() {
-    let sharp = "namespace Demo;\n\npublic class Box<TItem>\n{\n    public TItem? first() => null;\n}\n\npublic class Report\n{\n    public static Any? kind(Any value) => value is Class<Box<int>> type ? type : null;\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Box<TItem>\n{\n    public TItem? first() => null;\n}\n\npublic class Report\n{\n    public static Any? kind(Any value) => value is Class<Box<int>>|null type ? type : null;\n}\n";
 
     assert_eq!(explained(("src/Demo/Report.sharp", sharp), &[]), Vec::<String>::new());
 }
@@ -13160,7 +13250,7 @@ fn a_refused_type_test_still_declares_its_name() {
 /// refusal.
 #[test]
 fn new_of_a_refused_value_reports_nothing_more() {
-    let sharp = "namespace Demo;\n\npublic class Report\n{\n    public static Any make(Any value)\n    {\n        const type = value as Class<Report>;\n        return new (type)();\n    }\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Report\n{\n    public static Any make(Any value)\n    {\n        const type = value as Class<Report>|null;\n        return new (type)();\n    }\n}\n";
 
     assert_eq!(explained(("src/Demo/Report.sharp", sharp), &[]), Vec::<String>::new());
 }
@@ -13228,6 +13318,46 @@ fn a_type_test_of_any_or_a_union_narrows_to_the_type_written() {
     let sharp = "namespace Demo;\n\npublic class Report\n{\n    public static int scalar(Any? item) => item is int|string value ? 1 : 0;\n\n    public static (int|string)? kept(Any? item) => item as int|string;\n\n    public static Any present(Any? item) => item as Any ?? 0;\n\n    public static int sorted(Any? item) => match (item) { int|string value => 1, Any other => 2, default => 0 };\n\n    public static int wrong(Any? item) => item is int|string value ? value : 0;\n}\n";
 
     assert_eq!(issues(("src/Demo/Report.sharp", sharp), &[]), ["13:43 invalid-return-statement"]);
+}
+
+/// `is`, `as` and a `match` arm of a tuple, a class value or `Object` test the type written while the code runs, so
+/// the value they narrow has that type: a value tested `is int|[int, string]` is no `int`, and a value `as Class<Order>`
+/// is no `Class<Report>`.
+#[test]
+fn a_type_test_of_a_tuple_a_class_value_or_object_narrows_to_the_type_written() {
+    let sharp = "namespace Demo;\n\npublic class Order\n{\n}\n\npublic class Report\n{\n    public static [int, string]? pair(Any? item) => item as [int, string];\n\n    public static Class<Order>? type(Any? item) => item as Class<Order>;\n\n    public static Object? object(Any? item) => item as Object;\n\n    public static int sorted(Any? item) => match (item) { int|[int, string] value => 1, Class<Order> type => 2, default => 0 };\n\n    public static int wrong(Any? item) => item is int|[int, string] value ? value : 0;\n\n    public static Class<Report>? other(Any? item) => item as Class<Order>;\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Report.sharp", sharp), &[]),
+        ["17:43 invalid-return-statement", "19:54 invalid-return-statement"]
+    );
+}
+
+/// A list pattern of types alone, as `[int, string]`, matches the values of that tuple, so the value it narrows is the
+/// tuple, which unpacks and returns as one. A list pattern with a name or a rest narrows to a `List`, and a parameter's
+/// type may start with a tuple.
+#[test]
+fn a_list_pattern_of_types_alone_narrows_to_the_tuple() {
+    let sharp = "namespace Demo;\n\npublic class Report\n{\n    public static string unpacked(Any? pair)\n    {\n        if (pair is [int, string]) {\n            const [count, label] = pair;\n            return label;\n        }\n        return \"\";\n    }\n\n    public static [int, string]? kept(Any? pair) => pair is [int, string] ? pair : null;\n\n    public static [int, string]? named(Any? pair) => pair is [int count, string] ? pair : null;\n\n    public static bool held([int, string]|int|string held) => held is [int, string]|int;\n}\n";
+
+    assert_eq!(issues(("src/Demo/Report.sharp", sharp), &[]), ["16:54 invalid-return-statement"]);
+}
+
+/// A list pattern's element a tuple's element can never be reports the tuple's element at its index, once, in a loop
+/// too.
+#[test]
+fn a_list_pattern_element_a_tuple_never_holds_names_the_tuple_element() {
+    let sharp = "namespace Demo;\n\npublic class Report\n{\n    public static bool pair([int, string] value) => value is [int, int];\n\n    public static bool named([int, string] value) => value is [string first, ...List<Any?> rest];\n\n    public static bool looped(List<[int, string]> pairs)\n    {\n        for (const pair of pairs) {\n            if (pair is [int, int]) {\n                return true;\n            }\n        }\n        return false;\n    }\n}\n";
+
+    assert_eq!(
+        explained(("src/Demo/Report.sharp", sharp), &[]),
+        [
+            "5:68 impossible-type-comparison This element is a `string` in a `[int, string]`, so it is never an `int`. Test the element against a type a `string` can be.",
+            "7:64 impossible-type-comparison `first` is an `int` in a `[int, string]`, so it is never a `string`. Test the element against a type an `int` can be.",
+            "12:31 impossible-type-comparison This element is a `string` in a `[int, string]`, so it is never an `int`. Test the element against a type a `string` can be.",
+            "12:17 impossible-condition This condition (type `false`) will always evaluate to `false`. Check the logic of this expression. If the code block is intended to be unreachable, consider removing it. Otherwise, revise the condition.",
+        ]
+    );
 }
 
 /// An `as` or an `is` of a type the value always has tests nothing, and PHP# says so in the words the code writes, for
@@ -14508,7 +14638,7 @@ fn a_member_of_class_wins_over_a_static_of_the_held_class() {
             "Invalid return type for method `Report.typed`: expected `int`, but found `List<Listen>`.",
             "Invalid return type for method `Report.inferred`: expected `int`, but found `List<Listen>`.",
             "Invalid return type for method `Report.tag`: expected `int`, but found `string`.",
-            "Attempting to access a method on a non-object type (`string`).",
+            "Method `attributes` does not exist on `string`.",
         ]
     );
 }
@@ -14556,7 +14686,7 @@ fn an_object_bound_takes_any_object_and_nothing_else() {
         [
             "12:21 template-constraint-violation `int` does not satisfy the bound `Object` of type parameter `TValue`. | This argument has type `int`, which is not compatible with the required bound `Object`. | Type parameter `TValue` is bounded by `Object`. | Ensure the argument's type satisfies the bound.",
             "13:20 template-constraint-violation Type argument `int` does not satisfy `Report.keep<TValue>`'s `TValue`. | `int` is supplied for `TValue` here... | ...but `TValue` is bounded by `Object`. | Supply a type contained by `Object`.",
-            "18:60 template-constraint-violation Type argument `int` does not satisfy `ClassMembers.attributes<TAttribute>`'s `TAttribute`. | `int` is supplied for `TAttribute` here... | ...but `TAttribute` is bounded by `Object`. | Supply a type contained by `Object`.",
+            "18:60 template-constraint-violation Type argument `int` does not satisfy `Class.attributes<TAttribute>`'s `TAttribute`. | `int` is supplied for `TAttribute` here... | ...but `TAttribute` is bounded by `Object`. | Supply a type contained by `Object`.",
         ]
     );
 }
@@ -15419,11 +15549,11 @@ fn a_named_constructor_of_a_generic_class_takes_the_type_arguments_of_its_new() 
 /// `Map<string, int>`, as the literal `["k": [1]]` is `Map<string, List<int>>`, `non-empty-string` is `string`,
 /// `positive-int` is `int` and `class-string` is `Class<Object>`. A written type argument the value fits compiles. A
 /// `new` infers none, so it needs its type argument written. An argument the checker refuses, as it does
-/// `Pager.class() as Class<Object>`, adds no refusal of the type argument it fixes.
+/// `Pager.class() as Class<Object>|null`, adds no refusal of the type argument it fixes.
 #[test]
 fn a_type_argument_php_sharp_cant_write_is_refused() {
     let php = "<?php\n\nnamespace Lib;\n\nfinal class Pager\n{\n    /** @return array{a: int} */\n    public static function shape(): array\n    {\n        return ['a' => 1];\n    }\n\n    /** @return array-key */\n    public static function key(): int|string\n    {\n        return 1;\n    }\n\n    /** @return scalar */\n    public static function scalar(): int|float|string|bool\n    {\n        return 1;\n    }\n\n    /** @return numeric */\n    public static function numeric(): int|float|string\n    {\n        return 1;\n    }\n\n    /** @return resource */\n    public static function resource(): mixed\n    {\n        return STDIN;\n    }\n\n    /** @return list<int> */\n    public static function list(): array\n    {\n        return [1];\n    }\n\n    /** @return non-empty-string */\n    public static function text(): string\n    {\n        return 'a';\n    }\n\n    /** @return positive-int */\n    public static function count(): int\n    {\n        return 1;\n    }\n\n    /** @return class-string */\n    public static function class(): string\n    {\n        return self::class;\n    }\n}\n";
-    let sharp = "namespace Demo;\n\nimport Lib.Pager;\n\npublic class Registry\n{\n    public static T keep<T>(T value) => value;\n\n    public T hold<T>(T value) => value;\n\n    public void run()\n    {\n        Registry.keep(Pager.shape());\n        Registry.keep(Pager.key());\n        Registry.keep(Pager.scalar());\n        Registry.keep(Pager.numeric());\n        this.hold(Pager.resource());\n        Registry.keep(Pager.list());\n        Registry.keep(Pager.text());\n        Registry.keep(Pager.count());\n        this.hold(Pager.class());\n        Registry.keep<Map<string, int>>(Pager.shape());\n        Registry.keep<int|string>(Pager.key());\n        Crate<Map<string, int>> crate = new Crate<Map<string, int>>(Pager.shape());\n        let inferred = new Crate(Pager.shape());\n        Registry.keep([1, 2]);\n        Registry.keep([\"k\": [1]]);\n        Registry.keep(Pager.class() as Class<Object>);\n    }\n}\n\npublic class Crate<T>\n{\n    public Crate(public T value) { }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Pager;\n\npublic class Registry\n{\n    public static T keep<T>(T value) => value;\n\n    public T hold<T>(T value) => value;\n\n    public void run()\n    {\n        Registry.keep(Pager.shape());\n        Registry.keep(Pager.key());\n        Registry.keep(Pager.scalar());\n        Registry.keep(Pager.numeric());\n        this.hold(Pager.resource());\n        Registry.keep(Pager.list());\n        Registry.keep(Pager.text());\n        Registry.keep(Pager.count());\n        this.hold(Pager.class());\n        Registry.keep<Map<string, int>>(Pager.shape());\n        Registry.keep<int|string>(Pager.key());\n        Crate<Map<string, int>> crate = new Crate<Map<string, int>>(Pager.shape());\n        let inferred = new Crate(Pager.shape());\n        Registry.keep([1, 2]);\n        Registry.keep([\"k\": [1]]);\n        Registry.keep(Pager.class() as Class<Object>|null);\n    }\n}\n\npublic class Crate<T>\n{\n    public Crate(public T value) { }\n}\n";
     let refused = |line: u32, column: u32, method: &str, written: &str| {
         format!(
             "{line}:{column} missing-template-parameter The type argument `T` of the call to `{method}` would be `{written}`, which PHP# can't write. | `{method}` is called here | A PHP docblock type has no PHP# spelling, and the engine carries a type argument as one. | Write the type argument on the call."

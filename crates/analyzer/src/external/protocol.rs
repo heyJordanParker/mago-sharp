@@ -935,7 +935,8 @@ pub(super) fn encode_provider_request<'type_info>(
             receiver_type = Some(get_method_receiver_type(context)?);
             let kind = match context.invocation_kind {
                 MethodInvocationKind::Instance => INVOCATION_INSTANCE_METHOD,
-                MethodInvocationKind::Static => INVOCATION_STATIC_METHOD,
+                // An extension member runs as its class's static method, the receiver its first argument.
+                MethodInvocationKind::Static | MethodInvocationKind::Extension => INVOCATION_STATIC_METHOD,
             };
             (kind, Some(class), method)
         }

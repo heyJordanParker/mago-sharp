@@ -210,6 +210,32 @@ where
     }
 }
 
+/// The extension methods a call on a value of type `receiver` reaches in this file, each written as `` `name` ``, in
+/// order and once each: those of the file's namespace, its imports and the standard library's on the types every file
+/// has them for, whose receiver fits.
+pub(crate) fn extension_methods<A>(context: &Context<'_, '_, A>, receiver: &TUnion) -> Vec<String>
+where
+    A: Arena,
+{
+    let codebase = context.codebase;
+    let mut methods: Vec<String> = codebase
+        .extensions
+        .values()
+        .flatten()
+        .filter_map(|(_, method)| Some((method.get_class_name(), codebase.get_method_by_id(method)?)))
+        .filter(|(class, metadata)| {
+            metadata.flags.contains(MetadataFlags::EXTENSION_METHOD)
+                && (is_imported_or_in_namespace(context, *class) || is_imported_by_default(context, *class, metadata))
+                && fits(context, receiver, metadata)
+        })
+        .map(|(_, metadata)| format!("`{}`", metadata.original_name))
+        .collect();
+    methods.sort();
+    methods.dedup();
+
+    methods
+}
+
 /// Whether a value of type `receiver` fits the receiver of the extension member `metadata`, its first parameter, as
 /// [`fit`] decides it.
 fn fits<A>(context: &Context<'_, '_, A>, receiver: &TUnion, metadata: &FunctionLikeMetadata) -> bool

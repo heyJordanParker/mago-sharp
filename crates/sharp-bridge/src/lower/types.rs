@@ -1226,7 +1226,7 @@ impl<'analysis> Types<'analysis> {
     }
 
     /// The full name of the plain PHP function the read `read` gives the value of, spec section 14.3, as
-    /// `global.strtoupper` and `Pdf.render` read one, as the analysis resolved it. None for any other read.
+    /// `global.ucfirst` and `Pdf.render` read one, as the analysis resolved it. None for any other read.
     pub(crate) fn function_value(&self, read: &Expression) -> Option<Word> {
         match self.artifacts.get_callees(read).next() {
             Some(CallTarget::FunctionLike { callee: FunctionLikeIdentifier::Function(function), .. })
@@ -2009,6 +2009,11 @@ fn atomic_text(atomic: &TAtomic, codebase: &CodebaseMetadata, parameter: Paramet
         SharpType::Void => "void".to_owned(),
         SharpType::Object => "Object".to_owned(),
         SharpType::Enum(name) | SharpType::Class(name, []) => class_text(name, codebase),
+        // A generic class written without type arguments, as `Class<Box>` names it, gets the ones the analysis fills in
+        // from its bounds, and its text is the class alone, which takes the class with any type arguments.
+        SharpType::Class(name, arguments) if arguments.iter().all(TUnion::from_unspecified_template) => {
+            class_text(name, codebase)
+        }
         SharpType::Class(name, arguments) => format!("{}<{}>", class_text(name, codebase), list(&mut arguments.iter())),
         SharpType::List(element_type) => format!("List<{}>", type_text(element_type)),
         SharpType::Set(element_type) => format!("Set<{}>", type_text(element_type)),
