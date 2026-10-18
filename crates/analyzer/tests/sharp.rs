@@ -4471,10 +4471,10 @@ fn equality_of_a_class_instance_is_refused_until_the_class_declares_operator_equ
 /// Spec section 19: two lists compare element by element and two maps entry by entry, each element with its own `==`,
 /// so a list of a class compares only where the class declares `operator ==`, and a list never equals a map. `Any?`
 /// against a collection compares by value, spec section 24. The refusal names why the elements can't compare, through
-/// nested lists: a class with no `operator ==`, a `Set`, or element types that never match.
+/// nested lists: a class with no `operator ==`, or element types that never match.
 #[test]
 fn collections_compare_by_value() {
-    let sharp = "namespace Demo;\n\nimport App.Money;\n\nclass Report\n{\n    public static bool a(List<int> items, List<int> others) => items == others;\n\n    public static bool b(Any? value, List<int> items) => value != items;\n\n    public static bool c(Map<string, int> a, Map<string, int> b, List<Money> m, List<Money> n, List<List<int>> d, List<List<int>> e) => a == b && m != n && d == e && d.contains(Report.items(1));\n\n    public static bool f(List<Cart> carts, List<Cart> others, List<int> items, Map<string, int> counts) => carts == others || items == counts;\n\n    public static bool g(List<List<Cart>> nested, List<List<Cart>> again, List<Set<int>> sets, List<Set<int>> others, List<int> numbers, List<string> words) => nested == again || sets == others || numbers == words;\n\n    public static List<int> items(int count) => [count];\n}\n";
+    let sharp = "namespace Demo;\n\nimport App.Money;\n\nclass Report\n{\n    public static bool a(List<int> items, List<int> others) => items == others;\n\n    public static bool b(Any? value, List<int> items) => value != items;\n\n    public static bool c(Map<string, int> a, Map<string, int> b, List<Money> m, List<Money> n, List<List<int>> d, List<List<int>> e) => a == b && m != n && d == e && d.contains(Report.items(1));\n\n    public static bool f(List<Cart> carts, List<Cart> others, List<int> items, Map<string, int> counts) => carts == others || items == counts;\n\n    public static bool g(List<List<Cart>> nested, List<List<Cart>> again, List<int> numbers, List<string> words) => nested == again || numbers == words;\n\n    public static List<int> items(int count) => [count];\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    /** @param list<int> $items @param list<int> $others */\n    public static function a(array $items, array $others): bool { return $items == $others; }\n\n    /** @param list<int> $items */\n    public static function b(mixed $value, array $items): bool { return $value != $items; }\n}\n";
 
     assert_eq!(issues(("src/Demo/Report.php", php), &[]), ["11:73 mixed-operand"]);
@@ -4483,9 +4483,8 @@ fn collections_compare_by_value() {
         [
             "13:108 invalid-operand `==` compares `List<Cart>` with `List<Cart>` element by element, and `Cart` declares no `operator ==`. | ",
             "13:127 invalid-operand `==` cannot compare `List<int>` with `Map<string, int>`. | Convert one side so both sides have the same type.",
-            "15:161 invalid-operand `==` compares `List<List<Cart>>` with `List<List<Cart>>` element by element, and `Cart` declares no `operator ==`. | ",
-            "15:180 invalid-operand `==` compares `List<Set<int>>` with `List<Set<int>>` element by element, and `==` on `Set<int>` is not supported yet. | ",
-            "15:198 invalid-operand `==` compares `List<int>` with `List<string>` element by element, and `int` never equals `string`. | ",
+            "15:117 invalid-operand `==` compares `List<List<Cart>>` with `List<List<Cart>>` element by element, and `Cart` declares no `operator ==`. | ",
+            "15:136 invalid-operand `==` compares `List<int>` with `List<string>` element by element, and `int` never equals `string`. | ",
         ]
     );
 }
@@ -11115,7 +11114,8 @@ fn a_struct_inherits_nothing_implements_interfaces_and_is_declared_once() {
 
 /// Spec section 10: `==` on a struct compares each property with its own `==`, so a struct with a property `==` can't
 /// compare is refused at the `==`, naming the property and why: a class with no `operator ==` or one that takes no two
-/// of it, `Any`, a `Set`, a `List` of such, or a struct that can't compare, also as a list's element or beside `Any?`.
+/// of it, `Any`, a `List` of such, or a struct that can't compare, also as a list's element or beside `Any?`. A `Set`
+/// property compares by its elements.
 /// A struct equals only the same struct, and `===` is refused with its fix. A struct that holds itself, also in a
 /// `List`, compares by the rest, a struct compares with an `Any?`, and `!=` and the fix compile. A function has no
 /// equality, so a struct that holds one has none. A struct that declares no `operator <=>` has no order, for `<`, `<=>`
@@ -11135,7 +11135,6 @@ fn a_struct_compares_by_value() {
             "81:56 invalid-operand `==` compares `List<Order>` with `List<Order>` element by element, and `Order` can't compare by value: `plan` is a `Plan`, which declares no `operator ==`.",
             "85:39 invalid-operand `Bag` can't compare by value: `data` is an `Any`, which compares by value only with a string, a number, a `bool`, an enum case, a struct or a collection.",
             "87:42 invalid-operand `Pair` can't compare by value: `order` is an `Order`, which can't compare by value.",
-            "89:47 invalid-operand `Tagged` can't compare by value: `tags` is a `Set<int>`, and `==` on a collection is not supported yet.",
             "91:48 invalid-operand `Basket` can't compare by value: `plans` is a `List<Plan>`, whose elements `==` cannot compare.",
             "93:45 invalid-operand `Purse` can't compare by value: `coin` is a `Coin`, which `==` cannot compare with another of its type.",
             "97:47 invalid-operand `Moving` can't be compared: `onMove` is a function.",
@@ -11829,22 +11828,120 @@ fn a_read_refused_by_its_key_or_a_set_still_gives_the_value_of_its_collection() 
     );
 }
 
-/// A `Set` is a collection, which `==` cannot compare by value yet. PHP keeps comparing its arrays.
+/// `==` on an `Iterable` is not supported yet, so it is refused, as the element of a list, in a search of a list of
+/// them, and as a struct's property. Each refusal names the `Iterable`, and says that `==` compares a `List`, a `Map`
+/// or a `Set`, and an `Iterable` is none of them. A type parameter bound by a collection is not supported yet either.
 #[test]
-fn equality_of_a_set_is_not_supported_yet() {
-    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static bool same(Set<int> items, Set<int> others) => items == others;\n}\n";
+fn equality_of_an_iterable_is_not_supported_yet() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static bool same(Iterable<int> items, Iterable<int> others) => items == others;\n\n    public static bool rows(List<Iterable<int>> rows, List<Iterable<int>> others, Iterable<int> row) => rows == others || rows.contains(row);\n\n    public static bool streamed(Streamed a, Streamed b) => a == b;\n\n    public static bool bound<T : List<int>>(T items, List<int> others) => items == others;\n}\n\nstruct Streamed\n{\n    public Streamed(public Iterable<int> items { get; }) { }\n}\n";
+    let issues = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Report.sharp", sharp), &[]);
+    let notes: Vec<_> = issues.iter().map(|issue| issue.notes.last().map(String::as_str).unwrap_or_default()).collect();
+    let iterable = "`==` compares a `List`, a `Map` or a `Set`, and an `Iterable` is none of them.";
 
     assert_eq!(
         refusals(("src/Demo/Report.sharp", sharp), &[]),
         [
-            "5:65 not-supported-yet `==` on a collection is not supported yet, so it cannot compare `Set<int>` with `Set<int>`. | Compare the elements one by one."
+            "5:75 not-supported-yet `==` on `Iterable<int>` is not supported yet, so it cannot compare `Iterable<int>` with `Iterable<int>`. | Compare the elements one by one.",
+            "7:105 invalid-operand `==` compares `List<Iterable<int>>` with `List<Iterable<int>>` element by element, and `==` on `Iterable<int>` is not supported yet. | ",
+            "7:137 not-supported-yet `contains` on `List<Iterable<int>>` is not supported yet: `==` on `Iterable<int>` is not supported yet. | Compare the elements one by one.",
+            "9:60 invalid-operand `Streamed` can't compare by value: `items` is an `Iterable<int>`, and `==` on it is not supported yet. | ",
+            "11:75 not-supported-yet `==` on `T` is not supported yet, so it cannot compare `T` with `List<int>`. | Compare the elements one by one.",
+        ]
+    );
+    assert_eq!(
+        notes,
+        [
+            iterable,
+            "Two lists are equal when their elements are, in order, two maps when they hold equal values under the same keys, and two sets when they hold equal elements, in any order.",
+            iterable,
+            iterable,
+            "`==` compares a `List`, a `Map` or a `Set`, and `T` may be another type.",
         ]
     );
 }
 
+/// Spec section 19: a value whose type is a union that holds a collection beside another type compares as each of its
+/// types does, so it compares with `==`, in a search, inside a struct and as a tuple. Where no two of the types meet,
+/// the sides are of different types, a collection beside an `int` included, and where two that meet cannot compare,
+/// the comparison is refused with their reason.
+#[test]
+fn a_union_that_holds_a_collection_compares_as_each_of_its_types_does() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static bool union(Set<int> tags, Set<int>|int either, List<Set<int>|int> rows, Pair pair, int|[int, string] tuple) => tags == either || either == 1 || rows.contains(either) || pair == pair || tuple == 1;\n\n    public static bool apart(Set<int>|int either, List<int> listed, Set<int> tags, int count) => either == listed || tags == count;\n\n    public static bool refused(int|List<Cart> carts, List<Cart> others) => carts == others;\n}\n\nstruct Pair\n{\n    public Pair(public Set<int>|int value { get; }) { }\n}\n\nclass Cart\n{\n}\n";
+
+    assert_eq!(
+        refusals(("src/Demo/Report.sharp", sharp), &[]),
+        [
+            "7:98 invalid-operand `==` cannot compare `int|Set<int>` with `List<int>`. | Convert one side so both sides have the same type.",
+            "7:118 invalid-operand `==` cannot compare `Set<int>` with `int`. | Convert one side so both sides have the same type.",
+            "9:76 invalid-operand `==` compares `List<Cart>|int` with `List<Cart>` element by element, and `Cart` declares no `operator ==`. | ",
+        ]
+    );
+}
+
+/// Spec section 19: two sets are `==` when they hold equal elements, in any order, each compared with its own `==`, so
+/// a `Set` compares with `==` and `!=`, nullable or not, inside a `List`, a `Map`, a `Set` and a struct, and a `List`
+/// of sets searches with `contains`, `indexOf` and `remove`. Sets of elements that never match are refused with the
+/// elements' reason, and a set never equals a list or a map. A list literal compared with a set is a set, `[]` the
+/// empty one, and `[:]` is an empty `Map`, which is refused. A set of sets of `int|string` compares too.
+#[test]
+fn sets_compare_by_their_elements_in_any_order() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static bool same(Set<int> items, Set<int> others, Set<int>? maybe) => items == others && items != maybe;\n\n    public static bool nested(List<Set<int>> rows, List<Set<int>> others, Map<string, Set<int>> named, Map<string, Set<int>> again, Set<Set<int>> groups, Set<Set<int>> more) => rows == others && named == again && groups == more;\n\n    public static int search(List<Set<int>> rows, Set<int> row) => (rows.contains(row) && rows.remove(row) ? 1 : 0) + (rows.indexOf(row) ?? 0);\n\n    public static bool tagged(Tagged a, Tagged b) => a == b;\n\n    public static bool wrong(Set<int> items, Set<string> words, List<int> listed, Map<int, int> mapped) => items == words || items == listed || items == mapped;\n\n    public static bool literal(Set<int> items) => items == [] || items == [2, 1] || items == [:];\n\n    public static bool mixed(Set<Set<int|string>> a, Set<Set<int|string>> b) => a == b;\n}\n\nstruct Tagged\n{\n    public Tagged(public Set<int> tags { get; }) { }\n}\n";
+
+    assert_eq!(
+        refusals(("src/Demo/Report.sharp", sharp), &[]),
+        [
+            "13:108 invalid-operand `==` compares `Set<int>` with `Set<string>` element by element, and `int` never equals `string`. | ",
+            "13:126 invalid-operand `==` cannot compare `Set<int>` with `List<int>`. | Convert one side so both sides have the same type.",
+            "13:145 invalid-operand `==` cannot compare `Set<int>` with `Map<int, int>`. | Convert one side so both sides have the same type.",
+            "15:94 invalid-array-element `[:]` is an empty Map. An empty Set is written `[]`. | ",
+        ]
+    );
+}
+
+/// Spec section 12: a literal takes its collection type from where it lands, so a list literal is a `Set` wherever a
+/// `Set` is expected, at any depth: in a declaration, as an argument of a method, an event and a collection method, and
+/// as a side of `==` beside a collection of sets.
+#[test]
+fn a_list_literal_is_a_set_wherever_a_set_is_expected_at_any_depth() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static bool rows(List<Set<int>> a, List<Set<int>> b) => a == b;\n\n    public static bool called() => Report.rows([[1, 2], [3]], [[2, 1], [3]]);\n\n    public static bool search(List<Set<int>> rows) => rows.contains([2, 1]) && rows == [[2, 1]];\n\n    public static int groups()\n    {\n        Set<Set<int>> groups = [[1, 2], [2, 1]];\n        Set<int|string> mixed = [1, \"1\"];\n        Set<Set<int|string>> sets = [mixed, [\"2\", 2]];\n\n        return groups.count() + sets.count() + new Grid(1, [[1, 2]]).rows.count();\n    }\n}\n";
+    let grid = "namespace Demo;\n\npublic event Grid(int id, List<Set<int>> rows);\n";
+
+    assert_eq!(refusals(("src/Demo/Report.sharp", sharp), &[("src/Demo/Grid.sharp", grid)]), Vec::<String>::new());
+}
+
+/// Spec section 12: at `==`, `[]` is an empty `List` and `[:]` an empty `Map`, so each is refused beside the other
+/// collection, as at a place, and no message names PHP's empty array. A list literal beside a `Map`, and a map literal
+/// beside a `List` or a `Set`, are refused the same way. A list literal beside a `List` stays a `List`, and one beside a
+/// value that holds no collection keeps its own type, which is never that value's.
+#[test]
+fn an_empty_literal_at_a_comparison_is_the_collection_the_spec_names() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static bool empty(Map<string, int> named, List<int> listed) => named == [] || listed == [:] || named == [:] || listed == [];\n\n    public static bool kinds(Map<string, int> named, List<int> listed, Set<int> items) => named == [1, 2] || listed == [\"a\": 1] || items == [\"a\": 1];\n\n    public static bool own(List<int> listed, int count) => listed == [1, 2] || [1, 2] == count;\n}\n";
+
+    assert_eq!(
+        refusals(("src/Demo/Report.sharp", sharp), &[]),
+        [
+            "5:84 invalid-array-element `[]` is an empty List. An empty Map is written `[:]`. | ",
+            "5:100 invalid-array-element `[:]` is an empty Map. An empty List is written `[]`. | ",
+            "7:100 invalid-array-element A Map literal is written `[key: value]`. | ",
+            "7:120 invalid-array-element A List literal is written `[a, b]`. | ",
+            "7:141 invalid-array-element A Set literal is written `[a, b]`. | ",
+            "9:80 invalid-operand `==` cannot compare `List<int>` with `int`. | Convert one side so both sides have the same type.",
+        ]
+    );
+}
+
+/// Two collections compare by value, element by element, so `==` on them narrows neither side, and the other branch of
+/// an `||` is never called impossible.
+#[test]
+fn equality_of_two_collections_narrows_nothing() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static bool lists(List<int> s, List<int> o, bool x) => s == o || x;\n\n    public static bool maps(Map<string, int> s, Map<string, int> o, bool x) => s == o || x;\n\n    public static bool sets(Set<int> s, Set<int> o, bool x) => s != o || x;\n}\n";
+
+    assert_eq!(refusals(("src/Demo/Report.sharp", sharp), &[]), Vec::<String>::new());
+}
+
 /// Spec section 12: "Only a literal takes its collection type from where it lands." A list literal passed where a
-/// `Set` is expected becomes one, which the receiving method makes, and a `List` variable is refused. A `Map` is never
-/// a `Set`, and a `Set` is never a `Map` or a `List`. A plain PHP caller passes a list.
+/// `Set` is expected becomes one, and a `List` variable is refused. A `Map` is never a `Set`, and a `Set` is never a
+/// `Map` or a `List`. A plain PHP caller passes a list.
 #[test]
 fn a_list_literal_is_passed_where_a_set_is_expected_and_a_list_or_a_map_is_not() {
     let sharp = "namespace Demo;\n\nclass Tags\n{\n    public void take(Set<string> tags)\n    {\n    }\n\n    public void keep(Map<string, string> named, List<string> listed)\n    {\n    }\n\n    public void run(List<string> names, Map<string, string> named, Set<string> tags)\n    {\n        this.take(names);\n        this.take([\"vip\", \"new\"]);\n        this.take(tags);\n        this.take(named);\n        this.keep(tags, names);\n        this.keep(named, tags);\n        Set<string> fromList = names;\n        Set<string> fromMap = named;\n    }\n}\n";
@@ -11864,27 +11961,18 @@ fn a_list_literal_is_passed_where_a_set_is_expected_and_a_list_or_a_map_is_not()
     assert_eq!(issues(("src/Demo/Caller.php", php), &[("src/Demo/Tags.sharp", sharp)]), Vec::<String>::new());
 }
 
-/// A list literal becomes a `Set` only in the body of the PHP# method or lambda that declares the parameter `Set`, so
-/// only a call of one takes a list literal there, each element of a variadic one too, and a lambda a local holds is
-/// one, while a `List` variable is refused everywhere. Neither
-/// `Sharp\Internal\ListMethods.add` of a `List<Set<string>>`, whose `Set` comes from its template, nor a call through a
-/// `Function` value runs such a body, so each takes only a `Set`. A plain PHP caller still passes a list to a PHP#
-/// method.
+/// Spec section 12: a list literal argument is the `Set` its parameter declares, wherever the call goes: a PHP# method,
+/// each element of a variadic one, a lambda a local holds, `Sharp\Internal\ListMethods.add` of a `List<Set<string>>`,
+/// whose `Set` comes from its template, and a call through a `Function` value. A `List` variable is refused everywhere.
+/// A plain PHP caller still passes a list to a PHP# method, which makes it a `Set` before its body runs.
 #[test]
-fn a_list_is_passed_as_a_set_only_to_a_body_that_makes_it_one() {
+fn a_list_literal_argument_is_the_set_its_parameter_declares_and_a_list_variable_is_refused() {
     let sharp = "namespace Demo;\n\nclass Tags\n{\n    public void take(Set<string> tags)\n    {\n    }\n\n    public void many(Set<string> ...tags)\n    {\n    }\n\n    public void run(List<string> names, List<Set<string>> all, Function<bool(Set<string>)> check)\n    {\n        this.take(names);\n        this.many(names, [\"vip\"]);\n        all.add([\"vip\"]);\n        all.add(names);\n        check([\"vip\"]);\n        const typed = (Set<string> tags) => tags.contains(\"vip\");\n        typed([\"vip\"]);\n        Function<bool(Set<string>)> inferred = tags => tags.contains(\"vip\");\n        inferred(names);\n    }\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nfinal class Caller\n{\n    public function run(Tags $tags): void\n    {\n        $tags->take(['vip']);\n        $tags->many(['vip'], ['new']);\n    }\n}\n";
 
     assert_eq!(
         issues(("src/Demo/Tags.sharp", sharp), &[]),
-        [
-            "15:19 invalid-argument",
-            "16:19 invalid-argument",
-            "17:17 invalid-argument",
-            "18:17 invalid-argument",
-            "19:15 invalid-argument",
-            "23:18 invalid-argument",
-        ]
+        ["15:19 invalid-argument", "16:19 invalid-argument", "18:17 invalid-argument", "23:18 invalid-argument"]
     );
     assert_eq!(issues(("src/Demo/Caller.php", php), &[("src/Demo/Tags.sharp", sharp)]), Vec::<String>::new());
 }

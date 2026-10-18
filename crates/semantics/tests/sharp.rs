@@ -119,8 +119,9 @@ fn an_extern_event_names_a_class() {
 }
 
 /// Spec section 15: an event runs as a final class whose parameters are its public get-only properties. It takes only
-/// `public` or `internal`, spec section 5, and each parameter is a type, a name and an optional default. An event is a
-/// class, so any capitalized word but a reserved type name names one, as `Print` and `Exit` do, and `Self` is refused.
+/// `public` or `internal`, spec section 5, and each parameter is a type, a `Set` among them, a name and an optional
+/// default. An event is a class, so any capitalized word but a reserved type name names one, as `Print` and `Exit` do,
+/// and `Self` is refused.
 #[test]
 fn an_event_takes_only_public_or_internal_and_its_parameters_are_its_properties() {
     for (declaration, expected) in [
@@ -133,19 +134,13 @@ fn an_event_takes_only_public_or_internal_and_its_parameters_are_its_properties(
                 "3:39 An event's parameter cannot be variadic: it is one property of the event.",
             ],
         ),
-        (
-            "public event Tagged(Set<string> tags);",
-            vec!["3:21 A `Set` parameter of an event is not supported yet in PHP#."],
-        ),
+        ("public event Tagged(Set<string> tags);", vec![]),
         ("[Logged] public event Noted(int id);", vec![]),
         (
             "public event Tracked(int id { get; });",
             vec!["3:29 An event's parameter takes no accessors: it is a get-only property of the event."],
         ),
-        (
-            "public event Maybe(int id, Set<int>? tags);",
-            vec!["3:28 A `Set` parameter of an event is not supported yet in PHP#."],
-        ),
+        ("public event Maybe(int id, Set<int>? tags);", vec![]),
         ("public event Paid(int orderId, string note = \"\") : Placed;", vec![]),
         ("event Moved(int id);", vec![]),
         ("interface Placed { }", vec![]),
@@ -4902,18 +4897,19 @@ fn a_list_map_set_or_class_with_the_wrong_count_of_type_arguments_names_the_coun
     );
 }
 
-/// A `Set`'s element takes exactly what a `Map`'s key takes, a collection of such elements too (spec section 12). A
-/// named type may be an enum, a struct or a class that declares `operator ==`, which only the analyzer knows, so it
-/// passes here.
+/// A `Set`'s element takes exactly what a `Map`'s key takes, a collection of such elements too, a union of them
+/// included (spec section 12). A named type may be an enum, a struct or a class that declares `operator ==`, which
+/// only the analyzer knows, so it passes here.
 #[test]
 fn a_set_element_takes_what_a_map_key_takes() {
-    let code = "class Report\n{\n    public Set<string> run(Set<int> a, Set<Status> b, Set<float> c, Set<int?> d, Set<List<int>> e, Set<Any> f, Set<List<Any>> g)\n    {\n        return [];\n    }\n}\n";
+    let code = "class Report\n{\n    public Set<string> run(Set<int> a, Set<Status> b, Set<float> c, Set<int?> d, Set<List<int>> e, Set<Any> f, Set<List<Any>> g, Set<Set<int|string>> h, Map<List<int|Iterable<int>>, int> i)\n    {\n        return [];\n    }\n}\n";
 
     assert_eq!(
         issues(code),
         [
             "3:104 A `Set`'s element is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`.",
             "3:116 A `Set`'s element is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`.",
+            "3:158 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`.",
         ]
     );
 }
@@ -5958,7 +5954,6 @@ fn enum_shapes_are_backed_or_not() {
         [
             "5:15 A case's field takes no modifier: it is a public get-only property of the case.",
             "6:26 A case's field cannot be variadic: it is one property of the case.",
-            "7:17 A `Set` field of a case is not supported yet in PHP#.",
             "8:29 A case's field takes no accessors: it is a get-only property of the case.",
         ]
     );

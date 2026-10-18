@@ -19,6 +19,7 @@ use mago_orchestrator::service::incremental_analysis::compile::Listener;
 use mago_reporting::Issue;
 use mago_reporting::IssueCollection;
 use mago_sharp_bridge::unit::Input;
+use mago_sharp_bridge::unit::Library;
 use mago_sharp_lean::Translation;
 
 use crate::error::ServerError;
@@ -116,7 +117,8 @@ impl Server {
     /// none when no file is there. `rules` gives the workspace-relative Lean files whose structure rules may judge the
     /// `.sharp` file at a workspace-relative path. `check` gets the Lean translation of every accepted file and the
     /// namespace of every PHP# class-like, and returns the issues of each file whose law is not proved or that breaks a
-    /// structure rule.
+    /// structure rule. Each compiled file's header names `standard_library`, the standard library the workspace
+    /// compiles against.
     ///
     /// # Errors
     ///
@@ -127,8 +129,9 @@ impl Server {
         stamp: impl FnMut(&[u8]) -> std::io::Result<Option<Input>>,
         rules: impl FnMut(&[u8]) -> std::io::Result<Vec<Vec<u8>>>,
         check: impl FnOnce(Vec<Translation>, &[String]) -> std::io::Result<HashMap<FileId, IssueCollection>>,
+        standard_library: &Library,
     ) -> Result<Vec<(FileId, Compilation)>, ServerError> {
-        self.service.compile(stamp, rules, check).map_err(ServerError::from)
+        self.service.compile(stamp, rules, check, standard_library).map_err(ServerError::from)
     }
 
     /// Every PHP# listener of the last analysis, in the order the engine runs them.

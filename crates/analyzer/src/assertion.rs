@@ -52,6 +52,7 @@ use mago_word::word;
 
 use crate::artifacts::AnalysisArtifacts;
 use crate::context::assertion::AssertionContext;
+use crate::expression::binary::comparison::compares_collections;
 use crate::expression::binary::comparison::get_comparison_method;
 use crate::expression::binary::comparison::mixes_numbers;
 use crate::expression::binary::comparison::sharp_refusal;
@@ -87,14 +88,16 @@ where
     }
 
     // A comparison a PHP# file refuses narrows nothing, so its refusal is the one report on it. An int with a float
-    // compares as two floats, which `===` narrowing would call impossible, and instances compare by the operator their
-    // class declares, which is no identity, so neither narrows anything.
+    // compares as two floats, which `===` narrowing would call impossible, two collections compare by value, element
+    // by element, and instances compare by the operator their class declares, so none is an identity to narrow by.
     if let Expression::Binary(binary) = expression
         && assertion_context.dialect.is_sharp()
         && let (Some(lhs_type), Some(rhs_type)) =
             (artifacts.get_expression_type(binary.lhs), artifacts.get_expression_type(binary.rhs))
         && (sharp_refusal(&binary.operator, lhs_type, rhs_type, assertion_context.codebase).is_some()
-            || (binary.operator.is_equality() && mixes_numbers(lhs_type, rhs_type, assertion_context.codebase))
+            || (binary.operator.is_equality()
+                && (mixes_numbers(lhs_type, rhs_type, assertion_context.codebase)
+                    || compares_collections(lhs_type, rhs_type, assertion_context.codebase)))
             || get_comparison_method(&binary.operator, lhs_type, rhs_type, assertion_context.codebase).is_some())
     {
         return vec![];

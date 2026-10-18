@@ -3078,11 +3078,8 @@ fn check_property_parameter(
     place: Place,
     context: &mut Context<'_, '_, '_>,
 ) -> Option<Place> {
-    let (part, word, owner, an_owner) = if place == Place::Case {
-        ("A case's field", "field", "case", "a case")
-    } else {
-        ("An event's parameter", "parameter", "event", "an event")
-    };
+    let (part, owner) =
+        if place == Place::Case { ("A case's field", "case") } else { ("An event's parameter", "event") };
     let remove = |span: Span, message: String| {
         Issue::error(message).with_annotation(Annotation::primary(span).with_message("Remove this."))
     };
@@ -3099,13 +3096,6 @@ fn check_property_parameter(
         remove(accessors.span(), format!("{part} takes no accessors: it is a get-only property of the {owner}."))
     } else if let Some(ellipsis) = parameter.ellipsis {
         remove(ellipsis, format!("{part} cannot be variadic: it is one property of the {owner}."))
-    } else if let Some(Hint::Generic(set) | Hint::Nullable(NullableHint { hint: Hint::Generic(set), .. })) =
-        &parameter.hint
-        && set.name.value == b"Set"
-    {
-        Issue::error(format!("A `Set` {word} of {an_owner} is not supported yet in PHP#."))
-            .with_annotation(Annotation::primary(set.span()).with_message("Not supported yet."))
-            .with_note(format!("{part} is its property, and {an_owner} cannot yet make its argument a `Set`."))
     } else {
         return enter(Node::FunctionLikeParameter(parameter), Place::Method, context);
     };
@@ -4367,12 +4357,14 @@ fn is_slice_target(target: &Expression, context: &Context<'_, '_, '_>) -> bool {
 }
 
 /// Whether `hint` keys a `Map` and is a `Set`'s element by its kind alone, spec section 12: a type with `==` and
-/// `hash()` with no code, a collection of such types, or a named type, which the analyzer accepts when it is an enum, a
-/// struct, a class that declares `operator ==`, or a type parameter bounded by one.
+/// `hash()` with no code, a collection of such types, a union of them, or a named type, which the analyzer accepts when
+/// it is an enum, a struct, a class that declares `operator ==`, or a type parameter bounded by one.
 fn is_key_hint(hint: &Hint) -> bool {
     match hint {
         Hint::Integer(_) | Hint::Float(_) | Hint::Bool(_) | Hint::String(_) | Hint::Identifier(_) => true,
         Hint::Nullable(nullable) => is_key_hint(nullable.hint),
+        // Spec section 19 compares a union by the type of the value it holds, so each of its types gives it both.
+        Hint::Union(union) => is_key_hint(union.left) && is_key_hint(union.right),
         // Spec section 19 compares two collections by their elements, which `sharp_hash` hashes, so a collection whose
         // every type argument has `==` and `hash()` has them too.
         Hint::Generic(collection) if matches!(collection.name.value, b"List" | b"Set" | b"Map") => {
