@@ -3282,8 +3282,8 @@ fn a_named_break_or_continue_leaves_or_continues_the_loop_it_names() {
     );
 
     // A plain PHP level that is no integer literal says nothing about which loop the jump leaves, so the code after
-    // the inner loop still runs.
-    let php = "<?php\n\nnamespace Demo;\n\nfinal class Levels\n{\n    public static function run(int $levels): int\n    {\n        while ($levels > 0) {\n            while ($levels > 1) {\n                break $levels;\n            }\n            $levels--;\n        }\n        return $levels;\n    }\n}\n";
+    // the inner `foreach` still runs.
+    let php = "<?php\n\nnamespace Demo;\n\nfinal class Levels\n{\n    public static function run(int $levels): int\n    {\n        while ($levels > 0) {\n            foreach ([1, 2] as $step) {\n                break $levels;\n            }\n            $levels--;\n        }\n        return $levels;\n    }\n}\n";
     assert_eq!(issues(("src/Demo/Levels.php", php), &[]), ["11:23 invalid-break"]);
 }
 
