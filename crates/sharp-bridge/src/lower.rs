@@ -1737,7 +1737,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     // A superglobal's name runs hidden as a parameter, and stays its own as the property. PHP gives a
                     // promoted parameter's attributes to both, so a target, as `[param: Trimmed]`, needs both apart.
                     self.promoted_beside = promoted().any(|parameter| {
-                        self.names_table(parameter)
+                        parameter.hint.as_ref().is_some_and(|hint| self.takes_php_array(hint))
                             || runs_its_accessors(parameter)
                             || SUPERGLOBALS.contains(&parameter.variable.name)
                             || parameter.attribute_lists.iter().any(|list| list.target.is_some())
@@ -3308,7 +3308,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// is a plain parameter, beside the property [`Self::promoted_property`] declares, when [`Self::promoted_beside`]
     /// holds.
     fn parameter_of_type(&mut self, parameter: &FunctionLikeParameter, hint: u32, service: Option<Word>) -> u32 {
-        let hint = if hint != NULL && self.names_table(parameter) {
+        let hint = if hint != NULL && parameter.hint.as_ref().is_some_and(|hint| self.takes_php_array(hint)) {
             self.table_or_array(hint, collection_hint(parameter.hint.as_ref()).unwrap_or(false))
         } else {
             hint
@@ -3402,9 +3402,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         constant && children.into_iter().all(|child| self.is_constant_expression(self.children[child]))
     }
 
-    fn names_table(&self, parameter: &FunctionLikeParameter) -> bool {
-        self.crossing_type(parameter)
-            .is_some_and(|r#type| !matches!(self.crossing_array(&r#type), Some(TArray::List(_))))
+    fn takes_php_array(&self, hint: &Hint) -> bool {
+        self.crossing_array(&self.hint_type(hint)).is_some_and(|array| !matches!(array, TArray::List(_)))
     }
 
     /// `\Sharp\Map|array`, or `\Sharp\Set|array`, of the lowered `Map` or `Set` type `hint`, with `null` when it is
@@ -3577,7 +3576,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// over the storage too.
     fn hooks(&mut self, variable: &DirectVariable, accessors: Option<&PropertyHookList>, holds: Option<&Hint>) -> u32 {
         let Some(accessors) = accessors.filter(|accessors| {
-            accessors.hooks.iter().any(|accessor| accessor.runs_as_hook() && !self.is_plain_getter(accessor))
+            accessors
+                .hooks
+                .iter()
+                .any(|accessor| accessor.runs_as_hook() && !self.is_plain_getter(accessor, variable.name))
         }) else {
             return NULL;
         };
@@ -3604,7 +3606,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     && let Some(hint) = holds
                 {
                     let r#type = lowering.hint_type(hint);
-                    let collection = collection_hint(holds).filter(|_| lowering.crossing_array(&r#type).is_some());
+                    let collection = lowering.takes_php_array(hint).then(|| collection_hint(holds).unwrap_or(false));
                     parameters = lowering.setter_parameters(accessor, variable, hint, collection);
                     if collection.is_some() {
                         let (span, line) = (accessor.name.span, lowering.line(accessor));
@@ -3622,15 +3624,23 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         })
     }
 
-    fn is_plain_getter(&self, accessor: &PropertyHook) -> bool {
-        let PropertyHookBody::Concrete(PropertyHookConcreteBody::Expression(body)) = &accessor.body else {
-            return false;
+    fn is_plain_getter(&self, accessor: &PropertyHook, property: &[u8]) -> bool {
+        let returned = match &accessor.body {
+            PropertyHookBody::Concrete(PropertyHookConcreteBody::Expression(body)) => body.expression,
+            PropertyHookBody::Concrete(PropertyHookConcreteBody::Block(block)) if block.statements.len() == 1 => {
+                match block.statements.first() {
+                    Some(Statement::Return(Return { value: Some(value), .. })) => value,
+                    _ => return false,
+                }
+            }
+            _ => return false,
         };
 
         accessor.name.value == b"get"
             && accessor.attribute_lists.is_empty()
-            && matches!(body.expression.unparenthesized(), Expression::ConstantAccess(access)
+            && matches!(returned.unparenthesized(), Expression::ConstantAccess(access)
                 if self.names.binding(&access.name) == Some(Binding::Field))
+            && !self.types.inherits_getter(self.class, property)
     }
 
     /// The hooks of an interface property or an abstract one: each accessor is a hook with no body, as php-src's
@@ -7500,14 +7510,19 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// The plan `#[\Sharp\Crossing]` gives the engine, so a PHP array plain PHP writes to a `Map` or `Set` property of
     /// `r#type` crosses as [`Self::crossed`] crosses a parameter: `['map', key, values]`, `['set', elements]` or
     /// `['list', elements]`. The key is null for a key as PHP holds it, `'string'` for an `int` key back as its
-    /// `string`, or the backed enum whose case each backing value is, and an inner plan is null where that part holds
-    /// no `Map` or `Set`.
+    /// `string`, or the backed enum whose case each backing value is. An inner plan is null where that part holds no
+    /// `Map` or `Set`, and false where it may hold one no plan rebuilds, as `Any` may, so the engine turns no slot
+    /// of such a property into the array form a reference takes.
     fn crossing_plan(&mut self, line: u32, r#type: &TUnion) -> u32 {
         let Some(array) = self.crossing_array(r#type) else {
             return self.zval(line, sharp_value::SHARP_NULL, |_| {});
         };
         let (key_type, element_type) = self.types.array_parameters(array);
-        let inner = self.crossing_plan(line, &element_type);
+        let inner = if self.crossing_array(&element_type).is_none() && self.may_hold_collection(&element_type) {
+            self.zval(line, sharp_value::SHARP_FALSE, |_| {})
+        } else {
+            self.crossing_plan(line, &element_type)
+        };
         let mut parts = match array {
             TArray::List(_) => vec![self.string(0, line, b"list")],
             TArray::Set(_) => vec![self.string(0, line, b"set")],
