@@ -3316,11 +3316,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// is a plain parameter, beside the property [`Self::promoted_property`] declares, when [`Self::promoted_beside`]
     /// holds.
     fn parameter_of_type(&mut self, parameter: &FunctionLikeParameter, hint: u32, service: Option<Word>) -> u32 {
-        let hint = match collection_hint(parameter.hint.as_ref()) {
-            Some(nullable) if hint != NULL && self.crossing_type(parameter).is_some() => {
-                self.table_or_array(hint, nullable)
-            }
-            _ => hint,
+        let hint = if hint != NULL && parameter.hint.as_ref().is_some_and(|hint| self.takes_php_array(hint)) {
+            self.table_or_array(hint, collection_hint(parameter.hint.as_ref()).unwrap_or(false))
+        } else {
+            hint
         };
         let line = self.line(parameter.variable.span);
         let name = self.local_name(0, line, parameter.variable.name);
@@ -3411,12 +3410,23 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         constant && children.into_iter().all(|child| self.is_constant_expression(self.children[child]))
     }
 
+    fn takes_php_array(&self, hint: &Hint) -> bool {
+        self.crossing_array(&self.hint_type(hint)).is_some_and(|array| !matches!(array, TArray::List(_)))
+    }
+
     /// `\Sharp\Map|array`, or `\Sharp\Set|array`, of the lowered `Map` or `Set` type `hint`, with `null` when it is
-    /// nullable: what a parameter takes where plain PHP passes a PHP array.
+    /// nullable, and a lowered union that names one with `array` among its types, as `\Sharp\Set|int|array`: what a
+    /// parameter takes where plain PHP passes a PHP array.
     fn table_or_array(&mut self, hint: u32, nullable: bool) -> u32 {
-        self.nodes[hint as usize].attr &= !ZEND_TYPE_NULLABLE;
-        let line = self.nodes[hint as usize].line;
-        let mut types = vec![hint, self.node(SHARP_AST_TYPE, IS_ARRAY, line, &[])];
+        let lowered = &mut self.nodes[hint as usize];
+        lowered.attr &= !ZEND_TYPE_NULLABLE;
+        let (kind, line, first, count) = (lowered.kind, lowered.line, lowered.first_child, lowered.child_count);
+        let mut types = if kind == SHARP_AST_TYPE_UNION {
+            self.children[first as usize..(first + count) as usize].to_vec()
+        } else {
+            vec![hint]
+        };
+        types.push(self.node(SHARP_AST_TYPE, IS_ARRAY, line, &[]));
         if nullable {
             types.push(self.string(ZEND_NAME_NOT_FQ, line, b"null"));
         }
@@ -3564,7 +3574,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.node(SHARP_AST_PROP_GROUP, flags, self.line(property), &[hint, declaration, attributes])
     }
 
-    /// A property's hook list, or null when it needs none: an auto-property is plain storage. Each body is a hook. An
+    /// A property's hook list, or null when it needs none: an auto-property, and one whose only body is `get => field`
+    /// without attributes, is plain storage, so plain PHP changes the array it holds in place. Each body is a hook. An
     /// auto accessor beside a body that uses `field` is PHP's backing store, so it is no hook, and beside bodies that
     /// never use `field` it is the hook over the storage, so PHP keeps the property backed, as C# does. The observers
     /// are no hooks of their own: they run inside the `set` hook, which an auto `set` beside one always has. The `set`
@@ -3573,7 +3584,12 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// Each hook carries its accessor's attributes, spec section 1, so an auto accessor with attributes is the hook
     /// over the storage too.
     fn hooks(&mut self, variable: &DirectVariable, accessors: Option<&PropertyHookList>, holds: Option<&Hint>) -> u32 {
-        let Some(accessors) = accessors.filter(|accessors| accessors.has_hooks()) else {
+        let Some(accessors) = accessors.filter(|accessors| {
+            accessors
+                .hooks
+                .iter()
+                .any(|accessor| accessor.runs_as_hook() && !self.is_plain_getter(accessor, variable.name))
+        }) else {
             return NULL;
         };
 
@@ -3599,7 +3615,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     && let Some(hint) = holds
                 {
                     let r#type = lowering.hint_type(hint);
-                    let collection = collection_hint(holds).filter(|_| lowering.crossing_array(&r#type).is_some());
+                    let collection = lowering.takes_php_array(hint).then(|| collection_hint(holds).unwrap_or(false));
                     parameters = lowering.setter_parameters(accessor, variable, hint, collection);
                     if collection.is_some() {
                         let (span, line) = (accessor.name.span, lowering.line(accessor));
@@ -3615,6 +3631,25 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
             lowering.node(SHARP_AST_STMT_LIST, 0, lowering.line(accessors), &hooks)
         })
+    }
+
+    fn is_plain_getter(&self, accessor: &PropertyHook, property: &[u8]) -> bool {
+        let returned = match &accessor.body {
+            PropertyHookBody::Concrete(PropertyHookConcreteBody::Expression(body)) => body.expression,
+            PropertyHookBody::Concrete(PropertyHookConcreteBody::Block(block)) if block.statements.len() == 1 => {
+                match block.statements.first() {
+                    Some(Statement::Return(Return { value: Some(value), .. })) => value,
+                    _ => return false,
+                }
+            }
+            _ => return false,
+        };
+
+        accessor.name.value == b"get"
+            && accessor.attribute_lists.is_empty()
+            && matches!(returned.unparenthesized(), Expression::ConstantAccess(access)
+                if self.names.binding(&access.name) == Some(Binding::Field))
+            && !self.types.inherits_getter(self.class, property)
     }
 
     /// The hooks of an interface property or an abstract one: each accessor is a hook with no body, as php-src's
@@ -7489,14 +7524,19 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// The plan `#[\Sharp\Crossing]` gives the engine, so a PHP array plain PHP writes to a `Map` or `Set` property of
     /// `r#type` crosses as [`Self::crossed`] crosses a parameter: `['map', key, values]`, `['set', elements]` or
     /// `['list', elements]`. The key is null for a key as PHP holds it, `'string'` for an `int` key back as its
-    /// `string`, or the backed enum whose case each backing value is, and an inner plan is null where that part holds
-    /// no `Map` or `Set`.
+    /// `string`, or the backed enum whose case each backing value is. An inner plan is null where that part holds no
+    /// `Map` or `Set`, and false where it may hold one no plan rebuilds, as `Any` may, so the engine turns no slot
+    /// of such a property into the array form a reference takes.
     fn crossing_plan(&mut self, line: u32, r#type: &TUnion) -> u32 {
         let Some(array) = self.crossing_array(r#type) else {
             return self.zval(line, sharp_value::SHARP_NULL, |_| {});
         };
         let (key_type, element_type) = self.types.array_parameters(array);
-        let inner = self.crossing_plan(line, &element_type);
+        let inner = if self.crossing_array(&element_type).is_none() && self.may_hold_collection(&element_type) {
+            self.zval(line, sharp_value::SHARP_FALSE, |_| {})
+        } else {
+            self.crossing_plan(line, &element_type)
+        };
         let mut parts = match array {
             TArray::List(_) => vec![self.string(0, line, b"list")],
             TArray::Set(_) => vec![self.string(0, line, b"set")],
