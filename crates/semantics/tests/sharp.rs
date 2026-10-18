@@ -493,10 +493,10 @@ fn a_php_form_php_sharp_never_has_fails_as_a_typo_does() {
     );
 }
 
-/// A member written in a form PHP# never has is an error that names what PHP# writes, or that the form is no PHP#
-/// construct.
+/// A member that breaks a rule of its place is an error that names the rule, and an accessor PHP# never has, as
+/// `fetch`, fails as a typo does.
 #[test]
-fn a_member_form_php_sharp_never_has_names_what_to_write() {
+fn a_member_that_breaks_a_rule_names_it_and_an_unknown_accessor_fails_as_a_typo_does() {
     let class = "namespace App.Tenant;\n\nclass Report\n{\n    public foreign int run(override int x) => x;\n    public int d { get(int x); set; }\n    private Iterable items;\n}\n";
     let accessor = "namespace App.Tenant;\n\nclass Report\n{\n    public int e { fetch; set; }\n}\n";
     let interface = "namespace App.Tenant;\n\ninterface Shape\n{\n    area();\n}\n";
@@ -517,10 +517,10 @@ fn a_member_form_php_sharp_never_has_names_what_to_write() {
     );
 }
 
-/// A modifier a class doesn't take, a `public(set)` and a `static` local each name what PHP# writes, and what they
-/// name compiles.
+/// A modifier a class doesn't take and a list written to break a rule of their place, so each names the rule. A
+/// `public(set)` and a `static` local are no PHP# syntax, so each fails as a typo does. The PHP# forms compile.
 #[test]
-fn a_class_form_php_sharp_never_has_names_a_form_that_compiles() {
+fn a_class_form_php_sharp_never_has_fails_as_a_typo_does_or_names_the_rule_it_breaks() {
     let virtual_class = "namespace App.Tenant;\n\npublic virtual class Report\n{\n}\n";
     let required_class = "namespace App.Tenant;\n\npublic required class Report\n{\n}\n";
     let members = "namespace App.Tenant;\n\nclass Report\n{\n    public public(set) int views { get; set; } = 0;\n\n    public int run(int extra)\n    {\n        static $calls = 0;\n        let a = 0;\n        let b = 0;\n        [a, b] = [1, 2];\n        eval(\"return 1;\");\n        [, a] = [1, 2];\n        return extra;\n    }\n}\n";
@@ -618,10 +618,10 @@ fn an_undecided_form_is_not_supported_yet() {
     );
 }
 
-/// Spec section 21 removes `switch` for `match`, and PHP's `and`, `or` and `xor` for `&&`, `||` and `!`. Each is an
-/// error that names what to write, never "not supported yet", which would say a later version adds it.
+/// Spec section 21 removes `switch` for `match`, and PHP's `and`, `or` and `xor` for `&&`, `||` and `!`. Each fails as
+/// a typo does, never "not supported yet", which would say a later version adds it.
 #[test]
-fn switch_and_or_and_xor_are_errors_that_name_their_replacement() {
+fn switch_and_or_and_xor_fail_as_a_typo_does() {
     let code = leak(method(
         "        switch (extra) {\n            default: return 1;\n        }\n        let a = extra > 0;\n        a = a and true;\n        a = a or true;\n        a = a xor true;\n        return extra;\n",
     ));
@@ -800,7 +800,7 @@ fn every_body_is_written_in_braces() {
 }
 
 #[test]
-fn elseif_is_an_error_that_names_else_if() {
+fn elseif_fails_as_a_typo_does() {
     let code = leak(method(
         "        if (extra > 1) {\n            return 1;\n        } elseif (extra > 2) {\n            return 2;\n        }\n        return extra;\n",
     ));
@@ -2691,21 +2691,20 @@ fn a_local_or_parameter_named_after_a_superglobal_is_a_name_like_any_other() {
     );
 }
 
-/// Spec section 29 removes every superglobal, written with `$` or bare as in `_SERVER["HTTP_HOST"]`. Only `_ENV` names
-/// `Environment`, and `GLOBALS`, which holds no request data, names a parameter.
+/// Spec section 29 removes every superglobal, written with `$` or bare as in `_SERVER["HTTP_HOST"]`, and PHP's `$argv`
+/// and `$argc`. Each fails as a typo does, at its name.
 #[test]
-fn a_superglobal_with_or_without_dollar_is_an_error_that_names_a_request() {
+fn a_superglobal_with_or_without_dollar_fails_as_a_typo_does() {
     let code = leak(method(
-        "        Store.keep(GLOBALS[\"a\"], $GLOBALS);\n        Store.keep(_SERVER[\"a\"], $_SERVER);\n        Store.keep(_GET[\"a\"], $_GET);\n        Store.keep(_POST[\"a\"], $_POST);\n        Store.keep(_FILES[\"a\"], $_FILES);\n        Store.keep(_COOKIE[\"a\"], $_COOKIE);\n        Store.keep(_SESSION[\"a\"], $_SESSION);\n        Store.keep(_REQUEST[\"a\"], $_REQUEST);\n        Store.keep(_ENV[\"a\"], $_ENV);\n        return extra;\n",
+        "        Store.keep(GLOBALS[\"a\"], $GLOBALS);\n        Store.keep(_SERVER[\"a\"], $_SERVER);\n        Store.keep(_GET[\"a\"], $_GET);\n        Store.keep(_POST[\"a\"], $_POST);\n        Store.keep(_FILES[\"a\"], $_FILES);\n        Store.keep(_COOKIE[\"a\"], $_COOKIE);\n        Store.keep(_SESSION[\"a\"], $_SESSION);\n        Store.keep(_REQUEST[\"a\"], $_REQUEST);\n        Store.keep(_ENV[\"a\"], $_ENV);\n        Store.keep($argv, $argc);\n        return extra;\n",
     ));
     let message = "Parse error encountered during parsing";
-    let globals = "Parse error encountered during parsing";
 
     assert_eq!(
         issues(code),
         [
-            format!("7:20 {globals}"),
-            format!("7:34 {globals}"),
+            format!("7:20 {message}"),
+            format!("7:34 {message}"),
             format!("8:20 {message}"),
             format!("8:34 {message}"),
             format!("9:20 {message}"),
@@ -2720,65 +2719,17 @@ fn a_superglobal_with_or_without_dollar_is_an_error_that_names_a_request() {
             format!("13:35 {message}"),
             format!("14:20 {message}"),
             format!("14:35 {message}"),
-            "15:20 Parse error encountered during parsing".to_owned(),
-            "15:31 Parse error encountered during parsing".to_owned(),
+            format!("15:20 {message}"),
+            format!("15:31 {message}"),
+            format!("16:20 {message}"),
+            format!("16:27 {message}"),
         ]
     );
 }
 
-/// Spec section 29: for the environment and the command-line arguments the error names `Environment`, so `_ENV` and a
-/// read of `_SERVER`'s `"argv"` or `"argc"` do, with or without `$`, and every other read of `_SERVER` names a request.
+/// A write to a superglobal's element fails as a read does, at the superglobal, not at the write target.
 #[test]
-fn an_environment_superglobal_is_an_error_that_names_environment() {
-    let code = leak(method(
-        "        Store.keep(_ENV[\"HOME\"], $_ENV);\n        Store.keep(_SERVER[\"argv\"], $_SERVER[\"argc\"]);\n        Store.keep(_SERVER[\"HTTP_HOST\"], _SERVER[extra]);\n        return extra;\n",
-    ));
-    let environment = "Parse error encountered during parsing";
-    let request = "Parse error encountered during parsing";
-
-    assert_eq!(
-        issues(code),
-        [
-            format!("7:20 {environment}"),
-            format!("7:34 {environment}"),
-            format!("8:20 {environment}"),
-            format!("8:37 {environment}"),
-            format!("9:20 {request}"),
-            format!("9:42 {request}"),
-        ]
-    );
-    // A file whose import takes the short name `Environment` is told the aliased import to write.
-    let shadowed = leak(
-        method("        Store.keep(_ENV);\n        return extra;\n")
-            .replace("namespace App.Tenant;\n", "namespace App.Tenant;\n\nimport App.Shared.Environment;\n"),
-    );
-    assert_eq!(issues(shadowed), ["9:20 Parse error encountered during parsing"]);
-}
-
-/// Spec section 29: PHP's `$argv` and `$argc` hold the command-line arguments, so a read of either names the
-/// `Environment` member that reads them. A parameter of that name declares a local and reads nothing, so it gets the
-/// `$` error.
-#[test]
-fn a_command_line_variable_is_an_error_that_names_the_environment_member() {
-    let code = leak(method("        Store.keep($argv, $argc);\n        return extra;\n"));
-    let parameter = "class Report\n{\n    public int run(int $argv) { return 1; }\n}\n";
-
-    assert_eq!(
-        issues(code),
-        ["7:20 Parse error encountered during parsing", "7:27 Parse error encountered during parsing"]
-    );
-    assert_eq!(issues(parameter), ["3:24 Parse error encountered during parsing"]);
-    // A file whose import takes the short name `Environment` is told the aliased import to write.
-    let shadowed = leak(
-        method("        Store.keep($argv);\n        return extra;\n")
-            .replace("namespace App.Tenant;\n", "namespace App.Tenant;\n\nimport App.Shared.Environment;\n"),
-    );
-    assert_eq!(issues(shadowed), ["9:20 Parse error encountered during parsing"]);
-}
-
-/// A write to a superglobal's element names the request as a read does, not the write target.
-#[test]
-fn a_write_to_a_superglobal_is_an_error_that_names_a_request() {
+fn a_write_to_a_superglobal_fails_as_a_typo_does() {
     let code = leak(method(
         "        _SESSION[\"user\"] = extra;\n        $_SESSION[\"user\"] = extra;\n        _GET[\"n\"]++;\n        return extra;\n",
     ));
@@ -2787,10 +2738,10 @@ fn a_write_to_a_superglobal_is_an_error_that_names_a_request() {
     assert_eq!(issues(code), [format!("7:9 {message}"), format!("8:9 {message}"), format!("9:9 {message}")]);
 }
 
-/// A constant expression that reads a superglobal, or a member of one or of a `__Something__` name, names the
-/// replacement, as a method body does: a parameter default, an attribute argument and a constant's value.
+/// A constant expression that reads a superglobal, or a member of one or of a `__Something__` name, fails as a typo
+/// does, as a method body does: a parameter default, an attribute argument and a constant's value.
 #[test]
-fn a_superglobal_in_a_constant_expression_is_an_error_that_names_a_request() {
+fn a_superglobal_in_a_constant_expression_fails_as_a_typo_does() {
     let code = leak(
         method("        return 1;\n")
             .replace("{\n    public int run", "{\n    public const int A = __Foo__.bar;\n    [Field(_SERVER.x)]\n    public int run")
@@ -2800,49 +2751,47 @@ fn a_superglobal_in_a_constant_expression_is_an_error_that_names_a_request() {
             ),
     );
     let message = "Parse error encountered during parsing";
-    let magic = "Parse error encountered during parsing";
 
     assert_eq!(
         issues(code),
         [
-            format!("5:26 {magic}"),
+            format!("5:26 {message}"),
             format!("6:12 {message}"),
             format!("7:34 {message}"),
             format!("7:71 {message}"),
             format!("7:110 {message}"),
-            format!("7:140 {magic}"),
+            format!("7:140 {message}"),
         ]
     );
 }
 
-/// A superglobal or a `__Something__` name before `.` or `?.` binds as a class, and is refused as its bare form is. A
+/// A superglobal or a `__Something__` name before `.` or `?.` binds as a class, and fails as its bare form does. A
 /// class whose name only starts with `_` is read as a class.
 #[test]
-fn a_superglobal_or_a_double_underscore_name_before_a_member_is_an_error() {
+fn a_superglobal_or_a_double_underscore_name_before_a_member_fails_as_a_typo_does() {
     let code = leak(method(
         "        Store.keep(_SERVER.x);\n        Store.keep(GLOBALS.x);\n        _SERVER.read();\n        _SERVER.x = 1;\n        Store.keep(__Foo__.bar);\n        __Foo__.bar();\n        Store.keep(_SERVER?.x);\n        Store.keep(_Helper.x);\n        return extra;\n",
     ));
-    let superglobal = "Parse error encountered during parsing";
-    let magic = "Parse error encountered during parsing";
+    let message = "Parse error encountered during parsing";
 
     assert_eq!(
         issues(code),
         [
-            format!("7:20 {superglobal}"),
-            "8:20 Parse error encountered during parsing".to_owned(),
-            format!("9:9 {superglobal}"),
-            format!("10:9 {superglobal}"),
-            format!("11:20 {magic}"),
-            format!("12:9 {magic}"),
-            format!("13:20 {superglobal}"),
+            format!("7:20 {message}"),
+            format!("8:20 {message}"),
+            format!("9:9 {message}"),
+            format!("10:9 {message}"),
+            format!("11:20 {message}"),
+            format!("12:9 {message}"),
+            format!("13:20 {message}"),
         ]
     );
 }
 
 /// Spec section 27 removes PHP's magic constants and every other `__Something__` name, in a body and in a constant
-/// expression, and `Position` says where code sits. Each error names the magic constant as written.
+/// expression, and `Position` says where code sits. Each fails as a typo does, at its name.
 #[test]
-fn a_magic_constant_or_another_double_underscore_name_is_an_error_that_names_position() {
+fn a_magic_constant_or_another_double_underscore_name_fails_as_a_typo_does() {
     let code = leak(
         method(
             "        Store.keep(__DIR__);\n        Store.keep(__FILE__);\n        Store.keep(__LINE__);\n        Store.keep(__FUNCTION__);\n        Store.keep(__METHOD__);\n        Store.keep(__CLASS__);\n        Store.keep(__NAMESPACE__);\n        Store.keep(__TRAIT__);\n        Store.keep(__PROPERTY__);\n        Store.keep(__COMPILER_HALT_OFFSET__);\n        Store.keep(__dir__);\n        Store.keep(____, __Version);\n        return extra;\n",
@@ -2869,10 +2818,10 @@ fn a_magic_constant_or_another_double_underscore_name_is_an_error_that_names_pos
     );
 }
 
-/// A declared `__Something__` name is refused as a read of one is, in every kind of declaration. A method named as
-/// PHP's magic methods are, starting but not ending with `__`, keeps its own error.
+/// A declared `__Something__` name fails as a read of one does, in every kind of declaration, and so does a method
+/// named as PHP's magic methods are, starting but not ending with `__`.
 #[test]
-fn a_declared_double_underscore_name_is_an_error_that_names_position() {
+fn a_declared_double_underscore_name_fails_as_a_typo_does() {
     let class = "namespace App.Tenant;\n\nclass __Shape__\n{\n}\n";
     let interface = "namespace App.Tenant;\n\ninterface __Named__\n{\n    int __area__(int __side__);\n}\n";
     let r#enum = "namespace App.Tenant;\n\nenum __Suit__\n{\n    case __Hearts__;\n}\n";
@@ -3124,7 +3073,7 @@ fn a_bare_call_named_like_a_method_of_its_class_compiles_as_the_global_function(
 }
 
 #[test]
-fn extends_is_an_error_that_names_the_header() {
+fn extends_fails_as_a_typo_does() {
     let base = "namespace App.Tenant;\n\nclass Base\n{\n}\n";
     let code = "namespace App.Tenant;\n\nclass Report extends Base\n{\n}\n";
 
@@ -3133,7 +3082,7 @@ fn extends_is_an_error_that_names_the_header() {
 }
 
 #[test]
-fn implements_is_an_error_that_names_the_header() {
+fn implements_fails_as_a_typo_does() {
     let code = "namespace App.Tenant;\n\nimport Lib.Shape;\n\nclass Report implements Shape\n{\n}\n";
 
     assert_eq!(issues(code), ["5:14 Parse error encountered during parsing"]);
@@ -3302,28 +3251,30 @@ fn final_marks_only_an_override_and_a_modifier_that_cant_matter_is_an_error() {
     );
 }
 
-/// A method name that starts with `__` names what PHP# writes for the job PHP gives it, and a name PHP never calls by
-/// itself loses its underscores only when the rest is camelCase. Each named replacement compiles.
+/// A method name that starts with `__` fails as a typo does, with none of PHP's magic method rules, in a class and in an
+/// enum. The PHP# forms for those jobs compile.
 #[test]
-fn a_method_name_starting_with_two_underscores_is_an_error_that_names_the_name_to_write() {
+fn a_method_name_starting_with_two_underscores_fails_as_a_typo_does() {
     let code = "namespace App.Tenant;\n\nclass Report\n{\n    public void __clone() { }\n    public int __get(string name) { return 1; }\n    public int __invoke() { return 1; }\n    public string __toString() { return \"report\"; }\n    public void __construct() { }\n    public int __sleep() { return 1; }\n    public int __total() { return 1; }\n    public int __1st() { return 1; }\n    public int __Report() { return 1; }\n}\n";
+    let r#enum = "namespace App.Tenant;\n\nenum Suit\n{\n    case Hearts;\n\n    public int __get(string name) { return 1; }\n}\n";
     let written = "namespace App.Tenant;\n\nclass Report\n{\n    public Report()\n    {\n    }\n\n    public string toString() => \"report\";\n\n    public int total() => 1;\n\n    public Report copy() => this with { };\n}\n";
+    let message = "Parse error encountered during parsing";
 
     assert_eq!(
         issues(code),
         [
-            "9:12 Magic method `Report.__construct` cannot have a return type hint.".to_owned(),
-            "5:17 Parse error encountered during parsing".to_owned(),
-            "6:16 Parse error encountered during parsing".to_owned(),
-            "7:16 Parse error encountered during parsing".to_owned(),
-            "8:19 Parse error encountered during parsing".to_owned(),
-            "9:17 Parse error encountered during parsing".to_owned(),
-            "10:16 Parse error encountered during parsing".to_owned(),
-            "11:16 Parse error encountered during parsing".to_owned(),
-            "12:16 Parse error encountered during parsing".to_owned(),
-            "13:16 Parse error encountered during parsing".to_owned(),
+            format!("5:17 {message}"),
+            format!("6:16 {message}"),
+            format!("7:16 {message}"),
+            format!("8:19 {message}"),
+            format!("9:17 {message}"),
+            format!("10:16 {message}"),
+            format!("11:16 {message}"),
+            format!("12:16 {message}"),
+            format!("13:16 {message}"),
         ]
     );
+    assert_eq!(issues_in("src/Suit.sharp", r#enum), [format!("7:16 {message}")]);
     assert_eq!(issues(written), Vec::<String>::new());
 }
 
@@ -4656,10 +4607,11 @@ fn a_member_name_written_as_an_expression_is_an_error() {
     assert_eq!(issues(code), ["7:21 Parse error encountered during parsing"]);
 }
 
-/// Spec section 24: the built-in types are lowercase, every other type is capitalized, and each PHP type PHP# writes
-/// another way is an error that names the PHP# form, wherever a type is written.
+/// Spec section 24: the built-in types are lowercase, every other type is capitalized, and a PHP# type written in
+/// another case is an error that names its PHP# spelling, wherever a type is written. A PHP type PHP# never writes, as
+/// `mixed` or `array`, fails as a typo does.
 #[test]
-fn a_type_php_sharp_writes_another_way_is_an_error_that_names_its_form() {
+fn a_type_written_in_another_case_names_its_spelling_and_a_php_type_fails_as_a_typo_does() {
     let rows = [
         ("Int", "PHP# writes the type `int`."),
         ("Float", "PHP# writes the type `float`."),
@@ -4832,9 +4784,9 @@ fn a_nullable_void_reports_only_the_php_error() {
     assert_eq!(issues(code), ["3:12 Type `void` cannot be nullable."]);
 }
 
-/// PHP# has no by-reference parameter: a method returns the new value.
+/// PHP# has no by-reference parameter, so `&` before one fails as a typo does.
 #[test]
-fn a_method_parameter_by_reference_is_an_error_that_names_the_sharp_way() {
+fn a_method_parameter_by_reference_fails_as_a_typo_does() {
     let code = leak(method("        return 1;\n").replace("int extra", "&extra"));
 
     assert_eq!(issues(code), ["5:20 Parse error encountered during parsing"]);
@@ -5343,10 +5295,10 @@ fn bool_array_and_object_casts_do_not_exist_in_php_sharp() {
     );
 }
 
-/// Spec section 24 replaces `(array)` with a struct's `parse` for an object and `List.wrap` for a value, and names a
-/// bare operand, as its `(array)row` does.
+/// Spec section 24 replaces `(array)` with a struct's `parse` for an object and `List.wrap` for a value, so `(array)`
+/// fails as a typo does, at the cast, and a superglobal or `__Something__` operand fails at its own name too.
 #[test]
-fn an_array_cast_is_an_error_that_names_parse_and_list_wrap() {
+fn an_array_cast_fails_as_a_typo_does() {
     let code = leak(
         method(
             "        const data = (array)row;\n        const items = (array)this.list();\n        const server = (array)_SERVER;\n        const version = (array)__VERSION__;\n        return 1;\n",
@@ -5368,7 +5320,7 @@ fn an_array_cast_is_an_error_that_names_parse_and_list_wrap() {
 }
 
 #[test]
-fn an_object_cast_is_an_error_that_names_a_map_literal_and_a_struct() {
+fn an_object_cast_fails_as_a_typo_does() {
     let code = leak(method("        const row = (object)extra;\n        return 1;\n"));
 
     assert_eq!(issues(code), ["7:21 Parse error encountered during parsing"]);
@@ -6540,9 +6492,9 @@ fn a_property_named_as_its_class_is_no_clash_with_the_constructor() {
     assert_eq!(issues(parameter), Vec::<String>::new());
 }
 
-/// PHP# has no by-reference parameter: a lambda changes a variable it captures, and a method returns the new value.
+/// PHP# has no by-reference parameter, so `&` before a lambda's parameter fails as a typo does.
 #[test]
-fn a_lambda_parameter_by_reference_is_an_error_that_names_the_sharp_way() {
+fn a_lambda_parameter_by_reference_fails_as_a_typo_does() {
     let code = leak(method(
         "        const changed = (&value) => value;\n        const marked = (readonly int value) => value;\n        const typed = (int &value, string label) => value;\n        return extra;\n",
     ));

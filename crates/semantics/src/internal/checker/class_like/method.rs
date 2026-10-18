@@ -209,9 +209,10 @@ pub fn check_method<'ast, 'arena>(
         }
     }
 
+    // A PHP# method name never starts with `__`, which fails as a typo does, so no magic method rule applies.
     for (magic_method, parameter_count, must_be_public, must_be_static, can_have_return_type) in MAGIC_METHOD_SEMANTICS
     {
-        if method_name_bytes.eq_ignore_ascii_case(magic_method) {
+        if !context.program.dialect.is_sharp() && method_name_bytes.eq_ignore_ascii_case(magic_method) {
             if let Some(count) = parameter_count {
                 let mut found_count = 0;
                 let mut found_variadic = false;

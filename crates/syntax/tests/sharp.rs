@@ -2620,7 +2620,7 @@ fn a_catch_clause_names_its_variable_without_a_dollar() {
 }
 
 #[test]
-fn a_dollar_catch_variable_is_a_php_syntax_error() {
+fn a_dollar_catch_variable_fails_as_a_typo_does() {
     const CODE: &str = "class Report\n{\n    void run()\n    {\n        try {\n        } catch (Missing $failure) {\n        }\n    }\n}\n";
     let arena = LocalArena::new();
     let program = parse(&arena, "src/Report.sharp", CODE);
@@ -2630,7 +2630,7 @@ fn a_dollar_catch_variable_is_a_php_syntax_error() {
 }
 
 #[test]
-fn for_in_is_a_parse_error_that_names_of() {
+fn for_in_fails_as_a_typo_does() {
     let arena = LocalArena::new();
     let program = parse(
         &arena,
@@ -2642,10 +2642,10 @@ fn for_in_is_a_parse_error_that_names_of() {
     assert_eq!(messages, ["Unexpected token `Identifier`"]);
 }
 
-/// TypeScript's `for (x in y)` declares no loop variable, and it is the same one error that names `of`, while the
+/// TypeScript's `for (x in y)` declares no loop variable, and it fails as a typo does, at the `in`, while the
 /// statements after it still parse.
 #[test]
-fn for_in_without_const_is_the_parse_error_that_names_of() {
+fn for_in_without_const_fails_as_a_typo_does_and_the_statements_after_it_parse() {
     const CODE: &str = "class Report\n{\n    void run()\n    {\n        for (line in lines) {\n            const kept = 1;\n        }\n        const after = 2;\n    }\n}\n";
     let arena = LocalArena::new();
     let program = parse(&arena, "src/Report.sharp", CODE);
@@ -2657,7 +2657,7 @@ fn for_in_without_const_is_the_parse_error_that_names_of() {
 }
 
 #[test]
-fn foreach_is_a_php_syntax_error() {
+fn foreach_fails_as_a_typo_does() {
     let arena = LocalArena::new();
     let program = parse(
         &arena,
@@ -2671,7 +2671,7 @@ fn foreach_is_a_php_syntax_error() {
 
 /// Spec section 27: a `.sharp` file starts in code, so an opening tag is one error, and the file parses on.
 #[test]
-fn an_opening_tag_is_a_php_syntax_error() {
+fn an_opening_tag_fails_as_a_typo_does() {
     const CODE: &str = "<?php\nnamespace App;\n\nclass Report\n{\n}\n";
     let arena = LocalArena::new();
     let program = parse(&arena, "src/App/Report.sharp", CODE);
@@ -3214,8 +3214,8 @@ fn a_php_keyword_reads_as_its_construct_only_where_the_construct_follows() {
 /// wherever its construct follows and the name could not stand, as rustc's `eat_keyword_case` reads `Fn`: at a
 /// statement's or an expression's head, after a `try` or an `if` statement's body, where only the keyword can stand,
 /// among a declaration's modifiers, before a file's type, as `is` or `as` after a value, and as `case` in an enum. A
-/// PHP keyword PHP# doesn't use reads as its construct, whose own error names the PHP# form, and a word that can be a
-/// name stays one, as `Case` does in a class.
+/// PHP keyword PHP# doesn't use reads as its construct, which fails as a typo does, and a word that can be a name stays
+/// one, as `Case` does in a class.
 #[test]
 fn a_keyword_written_in_another_case_is_one_error_wherever_the_keyword_stands() {
     let method = |body: &str| -> &'static str {
@@ -3657,7 +3657,7 @@ fn a_statement_starting_with_a_list_is_not_an_attribute() {
 }
 
 #[test]
-fn php_attribute_syntax_is_a_parse_error_that_names_the_brackets() {
+fn php_attribute_syntax_fails_as_a_typo_does() {
     const CODE: &str = "#[Marker]\nclass Report\n{\n    #[Marker]\n    public void run(#[Marker] int page) {}\n}\n";
     let arena = LocalArena::new();
     let program = parse(&arena, "src/Report.sharp", CODE);
