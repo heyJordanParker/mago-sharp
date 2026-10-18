@@ -5245,6 +5245,103 @@ fn a_plain_php_method_of_a_property_s_name_is_its_value_where_a_function_is_take
     );
 }
 
+/// Spec section 14.3: a plain PHP class that defines `__get` has the properties it reads, typed by its `@property` and
+/// `@property-read` lines and `Any?` otherwise. `row.owner` reads the property `__get` serves, as `$row->owner` does in
+/// PHP, and the method `owner` is the value only where the code takes a function. `row.owner()` calls the method.
+#[test]
+fn a_plain_php_class_with_get_has_the_properties_it_reads() {
+    let row = "<?php\n\nnamespace Lib;\n\n/** @property-read Contact $contact */\nclass Row\n{\n    public function contact(): Contact\n    {\n        return new Contact('relation');\n    }\n\n    public function owner(): Contact\n    {\n        return new Contact('relation');\n    }\n\n    public function __get(string $name): mixed\n    {\n        return new Contact($name);\n    }\n}\n";
+    let contact = "<?php\n\nnamespace Lib;\n\nfinal class Contact\n{\n    public function __construct(public string $name)\n    {\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Contact;\nimport Lib.Row;\nextern Row.owner;\n\nclass Report\n{\n    public int run(Row row)\n    {\n        const contact = row.contact;\n        const owner = row.owner;\n        Function<Contact()> relation = row.owner;\n        const called = row.owner();\n        const loaded = owner as Contact;\n        return global.strlen(contact.name + relation().name + called.name + (loaded?.name ?? \"\"));\n    }\n}\n";
+
+    let (issues, artifacts) = analyze_with_artifacts(
+        &PLUGIN_REGISTRY,
+        settings(),
+        ("src/Demo/Report.sharp", sharp),
+        &[("src/Lib/Row.php", row), ("src/Lib/Contact.php", contact)],
+    );
+    let type_at = |line: &str, read: &str| {
+        let start = (sharp.find(line).unwrap() + line.find(read).unwrap()) as u32;
+        artifacts.expression_types.get(&(start, start + read.len() as u32)).map(|r#type| r#type.get_id().to_string())
+    };
+
+    assert_eq!(issues.iter().map(|issue| located(sharp, issue)).collect::<Vec<_>>(), ["12:27 non-documented-property"]);
+    assert_eq!(type_at("const contact = row.contact;", "row.contact").as_deref(), Some("Lib\\Contact"));
+    assert_eq!(type_at("const owner = row.owner;", "row.owner").as_deref(), Some("mixed"));
+    assert_eq!(type_at("relation = row.owner;", "row.owner").as_deref(), Some("(closure(): Lib\\Contact)"));
+    assert_eq!(type_at("const called = row.owner();", "row.owner()").as_deref(), Some("Lib\\Contact"));
+}
+
+/// A read of a property a plain PHP class's `__get` serves, with no `@property` line to type it, is `Any?`, spec section
+/// 14.3. In a `.sharp` file the warning names the read as PHP# writes it and says how PHP# states the type; in a plain
+/// PHP file it stays PHP's.
+#[test]
+fn an_untyped_get_read_warns_in_php_sharp_words_in_a_sharp_file() {
+    let row = "<?php\n\nnamespace Lib;\n\nclass Row\n{\n    public function __get(string $name): mixed\n    {\n        return $name;\n    }\n\n    public function __set(string $name, mixed $value): void\n    {\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Row;\n\nclass Report\n{\n    public int run(Row row, Row? maybe)\n    {\n        const owner = row.owner;\n        const other = maybe?.other;\n        row.note = \"paid\";\n        const named = row.name as string;\n        const counted = (row.count) is int count ? count : match (maybe?.size) { int size => size, default => 0 };\n        return owner is string && other is string && named is string ? counted : 0;\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nuse Lib\\Row;\n\nclass Report\n{\n    public function run(Row $row): mixed\n    {\n        return $row->owner;\n    }\n}\n";
+
+    assert_eq!(
+        refusals(("src/Demo/Report.sharp", sharp), &[("src/Lib/Row.php", row)]),
+        [
+            "9:27 non-documented-property The type of `row.owner` is unknown, so the read is `Any?`. | State its type with `as`, as in `string? owner = row.owner as string;`, or with `is`, as in `if (row.owner is string owner)`.",
+            "10:30 non-documented-property The type of `maybe?.other` is unknown, so the read is `Any?`. | State its type with `as`, as in `string? other = maybe?.other as string;`, or with `is`, as in `if (maybe?.other is string other)`.",
+        ]
+    );
+    assert_eq!(
+        messages(("src/Demo/Report.php", php), &[("src/Lib/Row.php", row)]),
+        ["Ambiguous property access: $owner on class `Lib\\Row`."]
+    );
+}
+
+/// Spec section 14.3: what `__get` gives back is `Any?`, whatever PHP# wrote through `__set`, and a declared property
+/// the reader cannot see is the `__get` property, as plain PHP reads it from outside, so a model's protected `table`
+/// reads as its column, typed by its `@property` line or `Any?`. A write to an `@property-read` one says what to do in
+/// PHP#.
+#[test]
+fn a_get_read_is_any_after_a_write_and_over_a_property_the_reader_cannot_see() {
+    let row = "<?php\n\nnamespace Lib;\n\n/** @property-read int $hidden */\nclass Row\n{\n    protected string $table = 'rows';\n\n    protected array $hidden = [];\n\n    public function __get(string $name): mixed\n    {\n        return $name;\n    }\n\n    public function __set(string $name, mixed $value): void\n    {\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Row;\n\nclass Report\n{\n    public string written(Row row)\n    {\n        row.count = \"7\";\n        return row.count;\n    }\n\n    public string? table(Row row) => row.table as string;\n\n    public int hidden(Row row) => row.hidden;\n\n    public void hide(Row row)\n    {\n        row.hidden = 5;\n    }\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Report.sharp", sharp), &[("src/Lib/Row.php", row)]),
+        ["10:20 non-documented-property", "10:16 mixed-return-statement", "19:13 invalid-property-write"]
+    );
+    assert_eq!(
+        refusals(("src/Demo/Report.sharp", sharp), &[("src/Lib/Row.php", row)]).last().map(String::as_str),
+        Some(
+            "19:13 invalid-property-write Cannot write to documented read-only property `Row.hidden`. | Remove the assignment: the property is only read."
+        )
+    );
+}
+
+/// Spec section 14.3: a PHP# class whose plain PHP parent defines `__get`, as a PHP# Eloquent model is, has the
+/// properties `__get` reads too, typed by its parents' `@property-read` lines and `Any?` otherwise, ahead of its own
+/// method of a property's name.
+#[test]
+fn a_sharp_class_whose_plain_php_parent_defines_get_has_the_properties_it_reads() {
+    let model = "<?php\n\nnamespace Lib;\n\n/** @property-read Contact $contact */\nabstract class Model\n{\n    public function __get(string $name): mixed\n    {\n        return new Contact($name);\n    }\n}\n";
+    let contact = "<?php\n\nnamespace Lib;\n\nfinal class Contact\n{\n    public function __construct(public string $name)\n    {\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Contact;\nimport Lib.Model;\n\npublic class Row : Model\n{\n    public Row() : super() { }\n\n    public Contact contact() => new Contact(\"relation\");\n\n    public Contact owner() => new Contact(\"relation\");\n\n    public int run(Row row)\n    {\n        const contact = row.contact;\n        const owner = this.owner;\n        Function<Contact()> relation = row.owner;\n        const called = row.owner();\n        const loaded = owner as Contact;\n        return global.strlen(contact.name + relation().name + called.name + (loaded?.name ?? \"\"));\n    }\n}\n";
+
+    let (issues, artifacts) = analyze_with_artifacts(
+        &PLUGIN_REGISTRY,
+        settings(),
+        ("src/Demo/Row.sharp", sharp),
+        &[("src/Lib/Model.php", model), ("src/Lib/Contact.php", contact)],
+    );
+    let type_at = |line: &str, read: &str| {
+        let start = (sharp.find(line).unwrap() + line.find(read).unwrap()) as u32;
+        artifacts.expression_types.get(&(start, start + read.len() as u32)).map(|r#type| r#type.get_id().to_string())
+    };
+
+    assert_eq!(issues.iter().map(|issue| located(sharp, issue)).collect::<Vec<_>>(), ["17:28 non-documented-property"]);
+    assert_eq!(type_at("const contact = row.contact;", "row.contact").as_deref(), Some("Lib\\Contact"));
+    assert_eq!(type_at("const owner = this.owner;", "this.owner").as_deref(), Some("mixed"));
+    assert_eq!(type_at("relation = row.owner;", "row.owner").as_deref(), Some("(closure(): Lib\\Contact)"));
+    assert_eq!(type_at("const called = row.owner();", "row.owner()").as_deref(), Some("Lib\\Contact"));
+}
+
 /// Spec section 14.3 with section 12: a method value holds the collection as it was when the value was made, so a
 /// method that changes the collection would change only that copy. As in Swift, which refuses a value of a `mutating`
 /// method, it is refused, with the lambda that changes the collection itself.
@@ -5521,6 +5618,23 @@ fn attribute_arguments_are_checked_against_the_attribute_constructor_as_in_php()
     assert_eq!(
         sharp_issues,
         ["8:19 invalid-argument", "10:26 invalid-argument", "11:26 too-few-arguments", "11:67 too-many-arguments"]
+    );
+    assert_eq!(codes(&sharp_issues), codes(&php_issues));
+}
+
+/// Spec section 1: a `new` in an attribute argument is checked against the constructor it calls, as PHP checks it.
+#[test]
+fn a_new_in_an_attribute_argument_is_checked_against_its_constructor_as_in_php() {
+    let route = "<?php\n\nnamespace Lib;\n\n#[\\Attribute(\\Attribute::TARGET_ALL)]\nfinal class Route\n{\n    public function __construct(public string $path, public array $middleware = [])\n    {\n    }\n}\n\nfinal class Throttle\n{\n    public function __construct(public int $perMinute)\n    {\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Route;\nimport Lib.Throttle;\n\n[Route(\"/a\", middleware: [new Throttle(perMinute: 60), new Throttle(\"sixty\")])]\nclass Report\n{\n    [Route(\"/b\", middleware: [new Throttle(), new Throttle(1, speed: 2)])]\n    public int run() => 1;\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nuse Lib\\Route;\nuse Lib\\Throttle;\n\n#[Route(\"/a\", middleware: [new Throttle(perMinute: 60), new Throttle(\"sixty\")])]\nclass Report\n{\n    #[Route(\"/b\", middleware: [new Throttle(), new Throttle(1, speed: 2)])]\n    public function run(): int\n    {\n        return 1;\n    }\n}\n";
+
+    let sharp_issues = issues(("src/Demo/Report.sharp", sharp), &[("src/Lib/Route.php", route)]);
+    let php_issues = issues(("src/Demo/Report.php", php), &[("src/Lib/Route.php", route)]);
+
+    assert_eq!(
+        sharp_issues,
+        ["6:69 invalid-argument", "9:43 too-few-arguments", "9:63 invalid-named-argument", "9:63 too-many-arguments"]
     );
     assert_eq!(codes(&sharp_issues), codes(&php_issues));
 }
@@ -6554,8 +6668,26 @@ fn a_spread_of_a_value_that_is_not_iterable_is_one_invalid_argument() {
     );
 }
 
+/// Spec section 16: a named argument that matches no other parameter of a plain PHP method, static method,
+/// constructor, function or attribute fills its `...` parameter under its name, as PHP collects it, and the
+/// parameter's element type checks the value as it checks a positional one.
 #[test]
-fn a_named_argument_never_fills_a_variadic_parameter_of_a_method_or_a_php_function() {
+fn a_named_argument_fills_a_plain_php_variadic_parameter_under_its_name() {
+    let html = "<?php\n\nnamespace Lib;\n\nfinal class Html\n{\n    public static function tag(string $name, string ...$attributes): string\n    {\n        return $name;\n    }\n\n    public function open(string $name, string ...$attributes): string\n    {\n        return $name;\n    }\n}\n\nfinal class Element\n{\n    public function __construct(public string $name, int ...$sizes)\n    {\n    }\n}\n\n#[\\Attribute(\\Attribute::TARGET_ALL)]\nfinal class Generic\n{\n    public function __construct(string ...$types)\n    {\n    }\n}\n";
+    let helpers = "<?php\n\nfunction attrs(string $name, string ...$attributes): string\n{\n    return $name;\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Element;\nimport Lib.Generic;\nimport Lib.Html;\n\n[Generic(Item: typeof(Report))]\nclass Report\n{\n    public static string run(Html html)\n    {\n        const a = Html.tag(\"a\", href: \"/home\", title: \"Home\");\n        const b = html.open(\"a\", \"x\", href: \"/home\", attributes: \"own\");\n        const c = new Element(name: \"box\", width: 3, height: 4);\n        const d = global.attrs(\"a\", href: \"/home\");\n        const e = Html.tag(\"a\", href: 3, title: \"Home\", title: \"Again\");\n        return a + b + c.name + d + e;\n    }\n}\n";
+    let others = [("src/Lib/Html.php", html), ("src/helpers.php", helpers)];
+
+    assert_eq!(
+        issues(("src/Demo/Report.sharp", sharp), &others),
+        ["16:39 invalid-argument", "16:57 duplicate-named-argument"]
+    );
+}
+
+/// Spec section 16: a PHP# `...` parameter is a `List`, which takes no names, and a function built into PHP takes its
+/// `...` values by position.
+#[test]
+fn a_named_argument_never_fills_a_php_sharp_or_built_in_variadic_parameter() {
     let sharp = "namespace Demo;\n\nclass Report\n{\n    public static int sum(int ...values) => global.max(0, ...values);\n\n    public static int run()\n    {\n        const named = Report.sum(first: 1, second: 2);\n        const own = Report.sum(values: 1);\n        const after = Report.sum(1, values: 2);\n        return named + own + after + global.strlen(global.sprintf(\"%d\", 1, other: 2));\n    }\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    public static function sum(int ...$values): int { return max(0, ...$values); }\n\n    public static function run(): int\n    {\n        $named = Report::sum(first: 1, second: 2);\n        $own = Report::sum(values: 1);\n        $after = Report::sum(1, values: 2);\n        return $named + $own + $after + strlen(sprintf(\"%d\", 1, other: 2));\n    }\n}\n";
 
@@ -6568,11 +6700,22 @@ fn a_named_argument_never_fills_a_variadic_parameter_of_a_method_or_a_php_functi
             "12:76 invalid-named-argument",
         ]
     );
-    let annotations: Vec<String> = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Report.sharp", sharp), &[])
-        .iter()
-        .filter_map(|issue| issue.primary_annotation()?.message.clone())
-        .collect();
-    assert_eq!(annotations, ["A variadic parameter takes no named argument in PHP#"; 4]);
+    let reported = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Report.sharp", sharp), &[]);
+    let annotations: Vec<String> =
+        reported.iter().filter_map(|issue| issue.primary_annotation()?.message.clone()).collect();
+    assert_eq!(
+        annotations,
+        [
+            "A PHP# `...` parameter takes no names",
+            "A PHP# `...` parameter takes no names",
+            "A PHP# `...` parameter takes no names",
+            "Its `...` parameter takes values by position",
+        ]
+    );
+    assert_eq!(
+        reported.last().and_then(|issue| issue.help.clone()).as_deref(),
+        Some("`global.sprintf` takes its `...values` by position: pass them without names.")
+    );
     assert_eq!(issues(("src/Demo/Report.php", php), &[]), ["13:33 named-argument-after-positional"]);
 }
 
@@ -13936,6 +14079,23 @@ fn a_member_whose_kind_differs_across_the_receivers_classes_is_an_error() {
     );
 }
 
+/// A plain PHP class that defines `__get` has the properties it reads, spec section 14.3, so its method's name read
+/// through a receiver that can also be a class with only the method is a property on one and a method on the other. Where
+/// the code takes a function, the read is the method on both.
+#[test]
+fn a_name_a_plain_php_class_s_get_serves_and_another_class_has_a_method_of_differs_in_kind() {
+    let sharp = "namespace Demo;\n\nimport Lib.Order;\nimport Lib.Row;\nextern Order.total;\nextern Row.total;\n\nclass Report\n{\n    public int run(Order|Row doc)\n    {\n        const read = doc.total;\n        Function<int()> total = doc.total;\n        return total() + doc.total();\n    }\n}\n";
+    let library = "<?php\n\nnamespace Lib;\n\nfinal class Order\n{\n    public function total(): int\n    {\n        return 1;\n    }\n}\n\nfinal class Row\n{\n    public function total(): int\n    {\n        return 2;\n    }\n\n    public function __get(string $name): mixed\n    {\n        return 3;\n    }\n}\n";
+
+    assert_eq!(
+        messages(("src/Demo/Report.sharp", sharp), &[("src/Lib/Order.php", library)]),
+        [
+            "The type of `doc.total` is unknown, so the read is `Any?`.",
+            "`doc.total` is a method on `Order` but a property on `Row`, so PHP# cannot tell how to read it.",
+        ]
+    );
+}
+
 /// What the analysis recorded that each call of `calls` in the analyzed file runs, with `others` beside it.
 fn recorded_callees(
     analyzed: (&'static str, &'static str),
@@ -16620,8 +16780,8 @@ fn an_uninitialized_property_and_its_class_are_named_as_sharp_writes_them() {
     );
 }
 
-/// A misplaced or repeated attribute is named as PHP# writes it, `[Field]`. The attribute class keeps its PHP
-/// `#[Attribute]` declaration in its own file, and the PHP twin keeps upstream's wording.
+/// A misplaced or repeated attribute is named as PHP# writes it, `[Field]`, and its help names the `[Attribute(…)]`
+/// PHP# writes on the attribute class. The PHP twin keeps upstream's wording.
 #[test]
 fn a_misplaced_or_repeated_attribute_is_named_as_sharp_writes_it() {
     let field = "<?php\n\nnamespace Lib;\n\n#[\\Attribute(\\Attribute::TARGET_PROPERTY)]\nfinal class Field\n{\n}\n";
@@ -16645,8 +16805,34 @@ fn a_misplaced_or_repeated_attribute_is_named_as_sharp_writes_it() {
     assert_eq!(
         attribute_issues(("src/Demo/Report.sharp", sharp)),
         [
-            "5:2 invalid-attribute-target Attribute `Field` cannot be used on a class, interface, enum, or trait. | This attribute is not allowed here | `Field` defined here | The definition of `Field` restricts its use to the following targets: properties. | Remove the `[Field]` attribute from this location, or update the `#[Attribute]` declaration on the `Field` class to include `a class, interface, enum, or trait` as a valid target.",
+            "5:2 invalid-attribute-target Attribute `Field` cannot be used on a class, interface, enum, or trait. | This attribute is not allowed here | `Field` defined here | The definition of `Field` restricts its use to the following targets: properties. | Remove `[Field]` here, or add a class, interface, enum, or trait to the targets in the `[Attribute(…)]` of the `Field` class.",
             "9:6 attribute-not-repeatable Attribute `Field` is not declared as repeatable and has already been used. | Duplicate use of non-repeatable attribute `Field` | Attribute `Field` was first used here | The attribute `Field` is not declared repeatable, so it applies once to a given target. | Remove this duplicate `Field` attribute, or declare the attribute class `Field` repeatable.",
+        ]
+    );
+}
+
+/// Spec section 1: an attribute target picks the PHP declaration a list lands on, so a `param:` attribute on `set` or
+/// on a promoted parameter checks against a parameter, and repeats only beside another on the same declaration. A
+/// property's `property:` and `field:` both land on its one PHP property, and an untargeted list on a parameter that
+/// declares a property, a constructor's or an event's, lands on both the parameter and the property.
+#[test]
+fn an_attribute_target_picks_the_declaration_php_checks_it_on() {
+    let field = "<?php\n\nnamespace Lib;\n\n#[\\Attribute(\\Attribute::TARGET_PROPERTY | \\Attribute::TARGET_METHOD)]\nfinal class Field\n{\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Field;\n\nclass Report\n{\n    public int count { get; [param: Field] [Field] set; } = 0;\n\n    [property: Field]\n    [field: Field]\n    public int total { get; set; } = 0;\n\n    public Report([param: Field] [property: Field] public int id { get; }, [Field] [property: Field] public int other { get; }) { }\n}\n\npublic event Settled([property: Field] int amount, [Field] [field: Field] int fee);\n";
+
+    let attribute_issues: Vec<String> = worded(("src/Demo/Report.sharp", sharp), &[("src/Lib/Field.php", field)])
+        .into_iter()
+        .filter(|line| line.contains(" invalid-attribute-target") || line.contains(" attribute-not-repeatable"))
+        .collect();
+
+    assert_eq!(
+        attribute_issues,
+        [
+            "7:37 invalid-attribute-target Attribute `Field` cannot be used on a parameter. | This attribute is not allowed here | `Field` defined here | The definition of `Field` restricts its use to the following targets: methods, properties. | Remove `[Field]` here, or add a parameter to the targets in the `[Attribute(…)]` of the `Field` class.",
+            "10:13 attribute-not-repeatable Attribute `Field` is not declared as repeatable and has already been used. | Duplicate use of non-repeatable attribute `Field` | Attribute `Field` was first used here | The attribute `Field` is not declared repeatable, so it applies once to a given target. | Remove this duplicate `Field` attribute, or declare the attribute class `Field` repeatable.",
+            "13:27 invalid-attribute-target Attribute `Field` cannot be used on a parameter. | This attribute is not allowed here | `Field` defined here | The definition of `Field` restricts its use to the following targets: methods, properties. | Remove `[Field]` here, or add a parameter to the targets in the `[Attribute(…)]` of the `Field` class.",
+            "13:95 attribute-not-repeatable Attribute `Field` is not declared as repeatable and has already been used. | Duplicate use of non-repeatable attribute `Field` | Attribute `Field` was first used here | The attribute `Field` is not declared repeatable, so it applies once to a given target. | Remove this duplicate `Field` attribute, or declare the attribute class `Field` repeatable.",
+            "16:68 attribute-not-repeatable Attribute `Field` is not declared as repeatable and has already been used. | Duplicate use of non-repeatable attribute `Field` | Attribute `Field` was first used here | The attribute `Field` is not declared repeatable, so it applies once to a given target. | Remove this duplicate `Field` attribute, or declare the attribute class `Field` repeatable.",
         ]
     );
 }

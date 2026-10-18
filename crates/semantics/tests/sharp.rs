@@ -135,7 +135,7 @@ fn an_event_takes_only_public_or_internal_and_its_parameters_are_its_properties(
             ],
         ),
         ("public event Tagged(Set<string> tags);", vec![]),
-        ("[Logged] public event Noted(int id);", vec!["3:1 This construct is not supported yet in PHP#."]),
+        ("[Logged] public event Noted(int id);", vec![]),
         (
             "public event Tracked(int id { get; });",
             vec!["3:29 An event's parameter takes no accessors: it is a get-only property of the event."],
@@ -163,19 +163,6 @@ fn an_event_takes_only_public_or_internal_and_its_parameters_are_its_properties(
 
         assert_eq!(issues(code), expected, "{declaration}");
     }
-
-    let code = "namespace App.Shop;\n\n[Logged] public event Noted(int id);\n";
-    let construct_notes: Vec<Vec<String>> = check_in_type_file(code)
-        .into_iter()
-        .filter(|issue| issue.message == "This construct is not supported yet in PHP#.")
-        .map(|issue| issue.notes)
-        .collect();
-    assert_eq!(
-        construct_notes,
-        [[
-            "A PHP# event has an optional `public`, a name, parameters, each a type and a name with an optional default, and an optional `: Interface` header, as in `public event OrderPaid(int orderId) : OrderEvent;`."
-        ]]
-    );
 }
 
 /// Spec section 28: a law states a fact about the values of a class or an enum, and an interface has no values.
@@ -1809,7 +1796,7 @@ fn a_type_an_interface_method_cannot_take_names_what_it_has() {
     assert_eq!(
         check_in_type_file(code).into_iter().map(|issue| issue.notes).collect::<Vec<_>>(),
         [[
-            "A PHP# interface method has no modifier, optional type parameters, parameters, a return type of `int`, `float`, `bool`, `string`, `Any`, `void`, `never`, a class or a type parameter, a generic type as in `List<T>` or `PaginatedList<Order>`, or `Self`, each but `void` and `never` nullable as in `int?`, or a union of them but `void` and `never`, as in `int|string`, and no body or a default body."
+            "A PHP# interface method has attributes, no modifier, optional type parameters, parameters, a return type of `int`, `float`, `bool`, `string`, `Any`, `void`, `never`, a class or a type parameter, a generic type as in `List<T>` or `PaginatedList<Order>`, or `Self`, each but `void` and `never` nullable as in `int?`, or a union of them but `void` and `never`, as in `int|string`, and no body or a default body."
         ]]
     );
 }
@@ -3066,16 +3053,90 @@ fn attributes_on_a_class_its_members_and_their_parameters_are_in_the_slice() {
     assert_eq!(issues(code), Vec::<String>::new());
 }
 
+/// Spec section 1: attributes follow C#'s rules, which allow one on an interface method, with or without a default
+/// body.
 #[test]
-fn attribute_arguments_outside_the_slice_are_not_supported_yet() {
-    let code = "namespace App.Tenant;\n\nclass Report\n{\n    [Field(typeof(Report).name)]\n    [Field(Mode.Write)]\n    [Field([this.run(1)])]\n    [Field(label: new Report())]\n    public int run(int extra)\n    {\n        return extra;\n    }\n}\n";
+fn attributes_on_an_interface_method_are_in_the_slice() {
+    let code = "namespace App.Tenant;\n\npublic interface Labeled\n{\n    [Note(\"shown in lists\"), Searchable]\n    string label();\n\n    [Note(\"shown in headings\")]\n    [Retry(3)]\n    string title([Field] int width) => \"Untitled\";\n}\n";
+
+    assert_eq!(issues(code), Vec::<String>::new());
+}
+
+/// Spec section 1: attributes follow C#'s rules, which allow one on an interface, an interface property, a class an
+/// event runs as, a constant and a lambda with its parameters in parentheses.
+#[test]
+fn attributes_on_an_interface_its_property_an_event_a_constant_and_a_lambda_are_in_the_slice() {
+    let interface = "namespace App.Tenant;\n\n[Note(\"on the interface\")]\npublic interface Sized\n{\n    [Note(\"on its property\")]\n    int size { get; }\n}\n";
+    let event = "namespace App.Tenant;\n\n[Note(\"on the event\")]\npublic event Paid(int orderId);\n";
+    let class = "namespace App.Tenant;\n\npublic class Limits\n{\n    [Note(\"on a constant\")]\n    public const int MAX = 3;\n\n    public int run()\n    {\n        const twice = [Note(\"on a lambda\")] (int n) => n * 2;\n        const log = [Note(\"on a block lambda\"), Retry(3)] [Searchable] () => { return 1; };\n        return twice(Limits.MAX) + log();\n    }\n}\n";
+
+    assert_eq!(issues(interface), Vec::<String>::new());
+    assert_eq!(issues(event), Vec::<String>::new());
+    assert_eq!(issues(class), Vec::<String>::new());
+}
+
+/// Spec section 1: an attribute target names a part of its declaration, as C# allows, and PHP holds each part but a
+/// return value. An accessor takes attributes, and an observer, which runs inside `set`, takes none.
+#[test]
+fn an_attribute_target_names_a_part_of_its_declaration_and_an_accessor_takes_attributes() {
+    let code = "namespace App.Tenant;\n\n[type: Note]\npublic class Report\n{\n    [field: Note]\n    public const int MAX = 3;\n\n    [field: Note]\n    private int seen = 0;\n\n    [property: Note]\n    [field: Note]\n    public int count { [method: Note] get; [param: Note] [Note] set; } = 0;\n\n    public int size { [Note] get => 1; }\n\n    public Report([property: Note] [param: Note] public int id { get; }) { }\n\n    [method: Note]\n    public int run([param: Note] int extra) => extra;\n}\n";
+    assert_eq!(issues(code), Vec::<String>::new());
+
+    for code in [
+        "namespace App.Tenant;\n\npublic interface Sized\n{\n    int size { [Note] get; [param: Note] set; }\n}\n",
+        "namespace App.Tenant;\n\n[type: Note]\npublic enum Mode\n{\n    [field: Note]\n    case Read;\n\n    [property: Note]\n    public string label => \"read\";\n}\n",
+        "namespace App.Tenant;\n\n[type: Note]\npublic struct Size { }\n",
+        "namespace App.Tenant;\n\n[type: Note]\npublic event Paid(int orderId);\n",
+        "namespace App.Tenant;\n\npublic class Doubler\n{\n    public Function<int(int)> twice() => [method: Note] (int n) => n * 2;\n\n    public Function<int(int)> thrice() => [method: Note] (int n) => { return n * 3; };\n}\n",
+        "namespace App.Tenant;\n\npublic class Counter\n{\n    public int id { [Note] get; }\n\n    public static int sum { [Note] get; [param: Note] set; } = 0;\n\n    public Counter(int id)\n    {\n        this.id = id;\n    }\n}\n",
+        "namespace App.Tenant;\n\npublic struct Amount\n{\n    public int cents { get; init; }\n\n    [method: Note]\n    public static Amount operator +(Amount a, Amount b) => new Amount { cents: a.cents + b.cents };\n}\n",
+        "namespace App.Tenant;\n\npublic class Artifact\n{\n    public Artifact(public string name { get; }) { }\n\n    [method: Note]\n    public Artifact.fromName([param: Note] string name) : this(name) { }\n}\n",
+        "namespace App.Tenant;\n\n[event: Note]\npublic event Settled([param: Note] int orderId, [property: Note] [field: Note] int amount);\n",
+        "namespace App.Tenant;\n\npublic enum Payment\n{\n    case Paid([param: Note] [property: Note] string transactionId);\n\n    case Open;\n}\n",
+    ] {
+        assert_eq!(issues(code), Vec::<String>::new(), "{code}");
+    }
+
+    let code = "namespace App.Tenant;\n\n[method: Note]\npublic class Report\n{\n    [return: Note]\n    public int run() => 1;\n\n    [field: Note]\n    public int size { get => 1; }\n\n    public int count { get; [return: Note] set; didSet => this.run(); } = 0;\n\n    public int total { get; set; [Note] willSet => this.run(); } = 0;\n\n    public int scale([property: Note] int extra) => extra;\n\n    [module: Note]\n    public int one() => 1;\n}\n";
+    assert_eq!(
+        issues(code),
+        [
+            "3:2 `method:` names no part of a class, whose targets are `type:`.",
+            "6:6 A return value takes no attributes: put them on the method, with no target.",
+            "9:6 `field:` names no part of a property without storage, whose targets are `property:`.",
+            "12:30 A return value takes no attributes: put them on the accessor, with no target.",
+            "14:34 `willSet` runs inside the `set` accessor, so it has no place of its own for an attribute.",
+            "16:23 `property:` names no part of a parameter, whose targets are `param:`.",
+            "18:6 `module:` names no part of a method, whose targets are `method:`.",
+        ]
+    );
+    // A declaration PHP# refuses has no part for a target to name.
+    assert_eq!(
+        issues("namespace App.Tenant;\n\n[method: Note]\nfunction helper() { }\n"),
+        [
+            "4:10 PHP# has no top-level functions: move `helper` into a class as a static method.",
+            "3:2 `method:` names no part of this declaration.",
+        ]
+    );
+}
+
+/// Spec section 1: an attribute argument is a constant or a `new` of constants, as PHP and Java's nested annotations
+/// take, and PHP builds the object each time it reads the attribute. Anything that runs code is an error that names the
+/// rule.
+#[test]
+fn an_attribute_argument_is_a_constant_or_a_new_of_constants() {
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    [Field(typeof(Report).name)]\n    [Field(Mode.Write)]\n    [Field([this.run(1)])]\n    [Field(label: new Report())]\n    [Route(\"/orders\", middleware: [new Throttle(perMinute: 60, window: new Window(typeof(Report), [1, 2], [\"a\": 1]))])]\n    [Route(\"/orders\", middleware: [new Throttle(this.run(1))])]\n    [Route(\"/orders\", middleware: [new Throttle(...[1])])]\n    [Route(\"/orders\", middleware: [new Throttle.hourly(1), new Throttle { perMinute: 1 }, new Box<int>(1)])]\n    public int run(int extra)\n    {\n        return extra;\n    }\n}\n";
 
     assert_eq!(
         issues(code),
         [
-            "5:12 This expression is not supported yet in PHP#.",
-            "7:13 This expression is not supported yet in PHP#.",
-            "8:19 This expression is not supported yet in PHP#.",
+            "5:12 An attribute argument is a constant or a `new` of constants, and `typeof(Report).name` is neither.",
+            "7:13 An attribute argument is a constant or a `new` of constants, and `this.run(1)` is neither.",
+            "10:49 An attribute argument is a constant or a `new` of constants, and `this.run(1)` is neither.",
+            "11:49 An attribute argument is a constant or a `new` of constants, and `...[1]` is neither.",
+            "12:36 An attribute argument is a constant or a `new` of constants, and `new Throttle.hourly(1)` is neither.",
+            "12:60 An attribute argument is a constant or a `new` of constants, and `new Throttle { perMinute: 1 }` is neither.",
+            "12:98 An attribute argument creates its objects without type arguments, so it cannot `new` a generic class, as `new Box<int>(1)` does.",
         ]
     );
 
@@ -6546,8 +6607,18 @@ fn a_refusal_notes_what_php_sharp_has_where_it_is_written() {
     let class = "namespace App;\n\npublic class Order\n{\n    case Open;\n}\n";
     let body = leak(method("        const copy = clone this;\n        return extra;\n"));
     let pattern = leak(method("        const iterated = extra is iterable;\n        return extra;\n"));
+    let interface = "namespace App;\n\npublic interface Sized\n{\n    public const int MAX = 3;\n}\n";
+    let constant = "namespace App;\n\npublic class Limits\n{\n    final public const int MAX = 3;\n}\n";
 
     for (code, note) in [
+        (
+            interface,
+            "A PHP# interface has attributes, an optional `public`, a name, optional type parameters as in `<in TItem>`, an optional `: Interface` header, methods and get-only properties, as in `int orderId { get; }`, with no other modifiers, `extends`, constants or other properties.",
+        ),
+        (
+            constant,
+            "A PHP# constant has attributes, `public`, `protected` or `private`, an optional type of `int`, `float`, `bool`, `string`, `Any`, a class, a collection as in `Map<string, int>`, `Iterable<T>` or a tuple as in `[int, string]`, nullable as in `int?` or not, or a union of them as in `int|string`, one name, and a constant value.",
+        ),
         (
             pattern,
             "A PHP# pattern is a type of `int`, `float`, `string`, `bool`, `Any`, `Object`, a class, a collection as in `List<int>`, a class value as in `Class<Order>`, a function type as in `Function<int(int)>`, or a union of them, a tuple among them, as in `int|[int, string]`, with an optional name, as in `int count`, a case with its fields, as in `PaymentResult.Paid(string transactionId)`, a class with properties, as in `Paid { amount: > 0 } big`, a constant, a comparison such as `< 10`, a properties pattern such as `{ total: > 0 }`, a list pattern such as `[Line first, ...List<Line> rest]`, or patterns joined by `and`, `or` and `not`.",

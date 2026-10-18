@@ -27,6 +27,7 @@ pub use crate::cst::cst::assignment::Assignment;
 pub use crate::cst::cst::assignment::AssignmentOperator;
 pub use crate::cst::cst::attribute::Attribute;
 pub use crate::cst::cst::attribute::AttributeList;
+pub use crate::cst::cst::attribute::AttributeTarget;
 pub use crate::cst::cst::binary::Binary;
 pub use crate::cst::cst::binary::BinaryOperator;
 pub use crate::cst::cst::block::Block;

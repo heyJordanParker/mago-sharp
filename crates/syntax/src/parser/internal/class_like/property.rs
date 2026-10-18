@@ -305,7 +305,7 @@ where
 
     fn parse_property_hook(&mut self) -> Result<PropertyHook<'arena>, ParseError> {
         Ok(PropertyHook {
-            attribute_lists: self.parse_attribute_list_sequence()?,
+            attribute_lists: self.parse_typeless_attribute_list_sequence()?,
             ampersand: if self.stream.is_at(T!["&"])? { Some(self.stream.eat_span(T!["&"])?) } else { None },
             modifiers: self.parse_modifier_sequence()?,
             name: self.parse_local_identifier()?,

@@ -15,6 +15,9 @@ impl Fingerprintable for AttributeList<'_> {
     ) where
         H: std::hash::Hasher,
     {
+        if let Some(target) = &self.target {
+            target.name.value.hash(hasher);
+        }
         for attribute in &self.attributes {
             attribute.fingerprint_with_hasher(hasher, resolved_names, options);
         }
