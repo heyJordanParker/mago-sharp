@@ -1688,12 +1688,13 @@ fn property_groups(lowered: &Lowered) -> Vec<String> {
 /// public int $total { get { return $this->count; } }
 /// public int $size { get => $this->size; set { $this->resize($value); } }
 /// public protected(set) int $kept = 3 { get => $this->kept * 2; }
-/// protected int $guarded { get => $this->guarded; }
+/// protected int $guarded;
 /// public protected(set) int $slug { set { $this->slug = $value * 2; } }
 /// ```
 ///
 /// Each accessor body is a hook: `get => expr;` keeps PHP's short body, and a block or `set => expr;` is a statement
-/// list, because PHP stores the result of a short `set` body. An `init` body is the `set` hook, under
+/// list, because PHP stores the result of a short `set` body. A property whose only body is `get => field` is plain
+/// storage, as an auto-property is, so plain PHP appends to the array it holds in place. An `init` body is the `set` hook, under
 /// `protected(set)`. `field` is `$this->name` and `value` is `$value`. An auto
 /// accessor beside a body that uses `field` is PHP's backing store, so it lowers to nothing, and otherwise it is the
 /// hook over the storage, so the property stays backed. A public get-only property whose body uses `field` takes
@@ -1857,17 +1858,7 @@ fn accessor_bodies_are_property_hooks() {
                       ZVAL "guarded"
                       null
                       null
-                      STMT_LIST
-                        PROPERTY_HOOK "get" @8-8
-                          null
-                          null
-                          PROPERTY_HOOK_SHORT_BODY
-                            PROP
-                              VAR
-                                ZVAL "this"
-                              ZVAL "guarded"
-                          null
-                          null
+                      null
                   null
             "#},
             indoc! {r#"
@@ -4935,6 +4926,59 @@ fn a_list_type_is_the_array_type_and_a_map_type_its_class() {
                 TYPE [7]
                 ZVAL [1] "null"
               ZVAL "Function<Map<string, List<int>>?(List<int>, Map<string, int>?)>"
+        "#}
+    );
+}
+
+/// ```php
+/// public function run(\Sharp\Set|int|array $tags, \Sharp\Map|int|array $sizes, array|int $counts): int { return 1; }
+/// ```
+///
+/// A union that holds a `Set` or a `Map` takes plain PHP's array too, so `array` joins the union's own types, as it
+/// joins a lone `Set` or `Map`. A `List` is a PHP array already, so a union that holds one is the union as written.
+#[test]
+fn a_union_that_holds_a_set_or_a_map_takes_a_php_array_too() {
+    let lowered = Lowered::new(
+        "namespace App.Tenant;\n\nclass Report\n{\n    public int run(Set<string>|int tags, Map<string, int>|int sizes, List<int>|int counts) => 1;\n}\n",
+    );
+    let method = lowered.nodes().iter().position(|node| node.kind == sharp_kind::SHARP_AST_METHOD).expect("a method");
+
+    assert_eq!(
+        lowered.render(lowered.child(method as u32, 0)),
+        indoc! {r#"
+            PARAM_LIST
+              PARAM
+                TYPE_UNION
+                  ZVAL "Sharp\\Set"
+                  ZVAL [1] "int"
+                  TYPE [7]
+                ZVAL "tags"
+                null
+                null
+                null
+                null
+              PARAM
+                TYPE_UNION
+                  ZVAL "Sharp\\Map"
+                  ZVAL [1] "int"
+                  TYPE [7]
+                ZVAL "sizes"
+                null
+                null
+                null
+                null
+              PARAM
+                TYPE_UNION
+                  TYPE [7]
+                  ZVAL [1] "int"
+                ZVAL "counts"
+                null
+                null
+                null
+                null
+              SHARP_TYPE_ARGS
+                null
+                ZVAL "Set<string>|int, Map<string, int>|int, List<int>|int"
         "#}
     );
 }
