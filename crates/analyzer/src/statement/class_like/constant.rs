@@ -17,6 +17,7 @@ use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
+use crate::expression::array::get_set_literal_type;
 use crate::statement::attributes::AttributeTarget;
 use crate::statement::attributes::analyze_attributes;
 use crate::utils::int_refused_for_float;
@@ -85,7 +86,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for ClassLikeConstantItem<'arena> {
                         .with_note("The checker could not determine a value for this constant from its initializer."),
                 );
             } else if let Some(declared_type_metadata) = constant_metadata.type_metadata.as_ref()
-                && let Some(value_type) = artifacts.get_expression_type(&self.value)
+                && let Some(value_type) = artifacts.get_expression_type(&self.value).cloned()
                 && !value_type.is_never()
                 && (is_sharp || !declared_type_metadata.type_union.is_mixed())
                 && !declared_type_metadata.type_union.has_template_types()
@@ -102,6 +103,9 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for ClassLikeConstantItem<'arena> {
                     },
                 );
 
+                // Spec section 12: a list literal where a `Set` is declared becomes one.
+                let value_type =
+                    &get_set_literal_type(context, artifacts, self.value, &declared_type).unwrap_or(value_type);
                 let mut comparison_result = ComparisonResult::for_dialect(context.dialect);
                 if !union_comparator::is_contained_by(
                     context.codebase,

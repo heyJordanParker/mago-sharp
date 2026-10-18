@@ -65,6 +65,13 @@ pub enum SignatureCompatibilityIssue {
         child_type: TUnion,
         parent_type: TUnion,
     },
+    /// Spec section 29: the parent's function parameter takes on each caller's effects, a plain PHP `callable` or
+    /// `Closure` included, so a call through the parent may pass a function with any effect, and the child's parameter,
+    /// of `child_type`, states the effects it takes.
+    TakesOnEffectsDropped {
+        parameter_index: usize,
+        child_type: TUnion,
+    },
     IncompatibleReturnType {
         child_type: TUnion,
         parent_type: TUnion,
@@ -261,6 +268,22 @@ pub fn validate_method_signature_compatibility(
             Some(t) => &t.type_union,
             None => continue,
         };
+
+        // Parameters are contravariant in their effects too: an override takes each function the overridden method
+        // takes, and that method's parameter that takes on effects takes a function with any.
+        if dialect.is_sharp()
+            && !child_param.flags.takes_on_effects()
+            && child_param_type.has_callable()
+            && (parent_param.flags.takes_on_effects()
+                || (!parent_method.flags.is_sharp() && parent_param_type.has_callable()))
+        {
+            issues.push(SignatureCompatibilityIssue::TakesOnEffectsDropped {
+                parameter_index: index,
+                child_type: child_param_type.clone(),
+            });
+
+            return issues;
+        }
 
         let mut expanded_parent_param_type = parent_param_type.clone();
         let mut expanded_child_param_type = child_param_type.clone();

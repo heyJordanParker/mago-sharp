@@ -79,6 +79,7 @@ use crate::scanner::ttype::scan_type_parameters;
 use crate::scanner::typing_error_issue;
 use crate::scanner::version_claim::evaluate_version_attributes;
 use crate::ttype::atomic::TAtomic;
+use crate::ttype::atomic::callable::TCallable;
 use crate::ttype::builder;
 use crate::ttype::get_bool;
 use crate::ttype::get_mixed;
@@ -245,6 +246,14 @@ where
         scope,
     );
 
+    if is_collection_class(class_like_metadata) {
+        for parameter in &mut metadata.parameters {
+            if let Some(type_metadata) = &mut parameter.type_metadata {
+                hold_map_entries(&mut type_metadata.type_union);
+            }
+        }
+    }
+
     match method.body {
         MethodBody::Concrete(block) => infer_assertions_from_block_body(block, &mut metadata, context.resolved_names),
         MethodBody::Expression(body) if method.returns_value => {
@@ -272,6 +281,13 @@ where
 /// whose type states no effects does. The prelude declares the collection methods on `Sharp\Internal\ListMethods`,
 /// `MapMethods`, `SetMethods` and `IterableMethods`, each taking its function as a `\Closure`.
 fn runs_inside_collection_method(class: &ClassLikeMetadata, parameter: &FunctionLikeParameterMetadata) -> bool {
+    is_collection_class(class)
+        && parameter.type_metadata.as_ref().is_some_and(|declared| declared.type_union.has_callable())
+}
+
+/// Whether `class` is one of the prelude's `Sharp\Internal\ListMethods`, `MapMethods`, `SetMethods` and
+/// `IterableMethods`, which declare the methods of PHP#'s collections.
+fn is_collection_class(class: &ClassLikeMetadata) -> bool {
     [
         "Sharp\\Internal\\ListMethods",
         "Sharp\\Internal\\MapMethods",
@@ -280,7 +296,23 @@ fn runs_inside_collection_method(class: &ClassLikeMetadata, parameter: &Function
     ]
     .iter()
     .any(|collection| collection.as_bytes().eq_ignore_ascii_case(class.name.as_bytes()))
-        && parameter.type_metadata.as_ref().is_some_and(|declared| declared.type_union.has_callable())
+}
+
+/// Spec section 12: makes each `iterable<T>` a collection method takes, or its function gives, as `flatMap`'s does, the
+/// PHP# `Iterable<T>` the engine runs it as, which holds a `Map` by its `[key, value]` entries. A docblock writes only
+/// PHP's `iterable<T>`, which holds an array by its values.
+fn hold_map_entries(union: &mut TUnion) {
+    for atomic in union.types.to_mut() {
+        match atomic {
+            TAtomic::Iterable(iterable) => iterable.holds_map_entries = true,
+            TAtomic::Callable(TCallable::Signature(signature)) => {
+                if let Some(given) = signature.get_return_type_mut() {
+                    hold_map_entries(given);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Scans a PHP# law, spec section 28, as a static method that returns `bool`, so its body is analyzed as one.

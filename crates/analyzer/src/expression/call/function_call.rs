@@ -581,6 +581,9 @@ enum Replacement {
     /// The standard library's members that do the function's work, or give the constant's value, each by its class and
     /// name: a static method, an extension member, a member of an effect class, or a class constant.
     Members(&'static [(&'static str, &'static str)]),
+    /// As [`Replacement::Members`], but an extension member is written on the call's argument at this index instead of
+    /// its first: `explode`'s second argument is the text `split` runs on.
+    MembersOn(usize, &'static [(&'static str, &'static str)]),
     /// The PHP# syntax for it: `is` (spec section 21), `(string)` and `/` on two ints (section 24), a spread literal
     /// (section 12) or `for … of` (section 17). `{x}` stands for the call's first argument, `{a}` and `{b}` for its
     /// first two, and `{...}` for every argument, each spread.
@@ -694,6 +697,15 @@ const REPLACEMENTS: &[(&str, Replacement)] = &[
     ("preg_quote", Replacement::Members(&[("Sharp\\Text\\Regex", "escape")])),
     ("chr", Replacement::Members(&[("Sharp\\Text\\Text", "fromByte")])),
     ("trim", Replacement::Members(&[("Sharp\\Text\\Text", "trim")])),
+    ("str_contains", Replacement::Members(&[("Sharp\\Text\\Text", "contains")])),
+    ("strtolower", Replacement::Members(&[("Sharp\\Text\\Text", "lowercase")])),
+    ("mb_strtolower", Replacement::Members(&[("Sharp\\Text\\Text", "lowercase")])),
+    ("strtoupper", Replacement::Members(&[("Sharp\\Text\\Text", "uppercase")])),
+    ("mb_strtoupper", Replacement::Members(&[("Sharp\\Text\\Text", "uppercase")])),
+    ("str_starts_with", Replacement::Members(&[("Sharp\\Text\\Text", "startsWith")])),
+    ("str_ends_with", Replacement::Members(&[("Sharp\\Text\\Text", "endsWith")])),
+    ("str_replace", Replacement::MembersOn(2, &[("Sharp\\Text\\Text", "replace")])),
+    ("explode", Replacement::MembersOn(1, &[("Sharp\\Text\\Text", "split")])),
     ("str_getcsv", Replacement::Members(&[("Sharp\\Text\\Text", "parseCsv")])),
     ("date", Replacement::Members(&[("Sharp\\Time\\Date", "format")])),
     ("gmdate", Replacement::Members(&[("Sharp\\Time\\Date", "format")])),
@@ -890,7 +902,7 @@ pub(crate) fn report_wrapped_class<A>(
         );
     }
     // A project without the standard library has no member to name, and creating one is refused all the same.
-    let form = member_form(context, members, None).map_or_else(|| ".".to_owned(), |form| format!(": write {form}"));
+    let form = member_form(context, members, 0, None).map_or_else(|| ".".to_owned(), |form| format!(": write {form}"));
     let name = display_class_like_name(context, class.original_name);
 
     context.collector.report_with_code(
@@ -1023,7 +1035,9 @@ where
         return None;
     }
     let name = function.original_name;
-    let replacement @ (Replacement::Members(_) | Replacement::CollectionMethod(_)) = replacement_of(name)? else {
+    let replacement @ (Replacement::Members(_) | Replacement::MembersOn(..) | Replacement::CollectionMethod(_)) =
+        replacement_of(name)?
+    else {
         return None;
     };
 
@@ -1072,7 +1086,7 @@ where
         Replacement::CollectionMethod(groups) => {
             Some(wrapped(format!("{}.", collection_form(context, artifacts, groups, arguments))))
         }
-        Replacement::Members(members) => {
+        Replacement::Members(members) | Replacement::MembersOn(_, members) => {
             for (class, member) in *members {
                 let class = ascii_lowercase_word(class.as_bytes());
                 if member.starts_with('$') {
@@ -1096,19 +1110,22 @@ where
                 }
             }
 
-            member_form(context, members, arguments).map(wrapped)
+            let receiver = if let Replacement::MembersOn(receiver, _) = replacement { *receiver } else { 0 };
+
+            member_form(context, members, receiver, arguments).map(wrapped)
         }
     }
 }
 
 /// The standard library members `members` names, as a `.sharp` file writes them, with the imports the file lacks. An
-/// extension's member, spec section 26, is written on the call's first argument from `arguments`, and needs an import
-/// only where the file lacks its extensions by default. An effect class's member, spec section 29, is written on the
-/// object of that class a constructor takes, as in `clock.now()`, and a member named with `$` is its property, as in
-/// `environment.arguments`. None when the codebase declares none of them.
+/// extension's member, spec section 26, is written on the call's argument at the index `receiver` from `arguments`, and
+/// needs an import only where the file lacks its extensions by default. An effect class's member, spec section 29, is
+/// written on the object of that class a constructor takes, as in `clock.now()`, and a member named with `$` is its
+/// property, as in `environment.arguments`. None when the codebase declares none of them.
 fn member_form<A>(
     context: &Context<'_, '_, A>,
     members: &[(&str, &str)],
+    receiver: usize,
     arguments: Option<&ArgumentList<'_>>,
 ) -> Option<String>
 where
@@ -1116,7 +1133,7 @@ where
 {
     let codebase = context.codebase;
     let receiver = arguments
-        .and_then(|arguments| arguments.arguments.first())
+        .and_then(|arguments| arguments.arguments.get(receiver))
         .and_then(|argument| argument_text(context, argument))
         .unwrap_or_else(|| "x".to_owned());
     let mut taken: Vec<String> = Vec::new();
@@ -1424,7 +1441,9 @@ mod tests {
         let missing: Vec<String> = REPLACEMENTS
             .iter()
             .flat_map(|(function, replacement)| match replacement {
-                Replacement::Members(members) => members.iter().map(|member| (*function, *member)).collect(),
+                Replacement::Members(members) | Replacement::MembersOn(_, members) => {
+                    members.iter().map(|member| (*function, *member)).collect()
+                }
                 Replacement::Syntax(_) | Replacement::CollectionMethod(_) => Vec::new(),
             })
             .chain(WRAPPED_CLASSES.iter().flat_map(|(class, members)| members.iter().map(|member| (*class, *member))))

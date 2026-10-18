@@ -108,6 +108,10 @@ pub struct AnalysisArtifacts {
     /// or a class with type arguments, keyed by the span of the type it writes. Apart from `expression_types`, because the `instanceof`
     /// a test runs as spans that type too when nothing the code writes stands before it.
     pub(crate) tested_types: HashMap<(u32, u32), TUnion>,
+    /// The tuple a list pattern of types alone, as `[int, string]`, narrows the value it tests to, keyed by the span of
+    /// its `[`. The test there reads `List<Any?>` while the code runs, and the count and element tests after it check
+    /// the rest of the tuple.
+    pub(crate) list_pattern_tuples: HashMap<(u32, u32), TUnion>,
     /// The full name of the plain PHP constant each PHP# read through a namespace reaches, keyed by the read's span.
     pub(crate) namespace_constants: HashMap<(u32, u32), Word>,
     /// The parameters of a PHP# method that erase to a narrower type than a parameter of a method it overrides or
@@ -162,6 +166,7 @@ impl AnalysisArtifacts {
             listings: HashSet::default(),
             call_targets: HashMap::default(),
             tested_types: HashMap::default(),
+            list_pattern_tuples: HashMap::default(),
             namespace_constants: HashMap::default(),
             widened_parameters: HashSet::default(),
             function_values: Vec::new(),
@@ -345,6 +350,22 @@ impl AnalysisArtifacts {
     /// class with type arguments. `None` for a class without type arguments.
     pub fn get_tested_type(&self, hint: &impl HasSpan) -> Option<&TUnion> {
         self.tested_types.get(&get_expression_range(hint))
+    }
+
+    /// Records that the list pattern whose `[` is `left_bracket` narrows the value it tests to `tuple`, or to the type
+    /// its test reads when `tuple` is `None`.
+    pub(crate) fn record_list_pattern_tuple(&mut self, left_bracket: &impl HasSpan, tuple: Option<TUnion>) {
+        let range = get_expression_range(left_bracket);
+        match tuple {
+            Some(tuple) => self.list_pattern_tuples.insert(range, tuple),
+            None => self.list_pattern_tuples.remove(&range),
+        };
+    }
+
+    /// The type the test that writes the type `hint` narrows its value to: the tuple of a list pattern of types alone
+    /// at its `[`, or else the type the test reads while the code runs.
+    pub(crate) fn get_narrowed_type(&self, hint: &impl HasSpan) -> Option<&TUnion> {
+        self.list_pattern_tuples.get(&get_expression_range(hint)).or_else(|| self.get_tested_type(hint))
     }
 
     /// The declared type the value of `expression` goes into, when the expression that set it is `expression` itself

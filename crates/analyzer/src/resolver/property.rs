@@ -2415,7 +2415,7 @@ const READS_CALLER_VARIABLES: [&[u8]; 6] =
     [b"compact", b"extract", b"get_defined_vars", b"func_get_args", b"func_get_arg", b"func_num_args"];
 
 /// Spec section 14.3: the value a read without `(…)` at `read_span`, written `written`, gives of the plain PHP function
-/// `function` of the full name `name`, as `global.strtoupper` does: the closure PHP's `strtoupper(...)` makes, typed
+/// `function` of the full name `name`, as `global.ucfirst` does: the closure PHP's `ucfirst(...)` makes, typed
 /// by the function's signature, with the type arguments of a `@template` function from the function type the read goes
 /// into, as [`fix_type_arguments`] fixes a generic method's. A function that changes a variable it is given, as
 /// `global.sort` does, is no value, since PHP# passes every argument by value, and neither is one that reads the

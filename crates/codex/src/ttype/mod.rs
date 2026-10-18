@@ -19,6 +19,7 @@ use crate::ttype::atomic::generic::TGenericParameter;
 use crate::ttype::atomic::iterable::TIterable;
 use crate::ttype::atomic::object::TObject;
 use crate::ttype::atomic::object::named::TNamedObject;
+use crate::ttype::atomic::reference::TReference;
 use crate::ttype::atomic::scalar::TScalar;
 use crate::ttype::atomic::scalar::class_like_string::TClassLikeString;
 use crate::ttype::atomic::scalar::class_like_string::TClassLikeStringKind;
@@ -1667,6 +1668,46 @@ pub fn get_backed_enum<'codebase>(
         TAtomic::Object(object) => backed_enum(object.get_name()?),
         _ => None,
     })
+}
+
+/// The key type of the PHP array a PHP# `Map` keyed by `key_type` gives plain PHP, spec section 12.
+///
+/// Each backed enum is its backing type, and each other key is as it is. None when a key has no PHP array form: a
+/// class, a struct, a collection, an enum without backing values or a `float`. A type parameter's keys are its
+/// bound's, and an unbounded one's are decided when the code runs.
+#[must_use]
+pub fn get_php_array_key_type<'key>(key_type: &'key TUnion, codebase: &CodebaseMetadata) -> Option<Cow<'key, TUnion>> {
+    let backing_type = |atomic: &TAtomic| match atomic {
+        TAtomic::Reference(TReference::Symbol { name, .. }) => codebase
+            .get_class_like(name.as_bytes())
+            .filter(|class_like| class_like.kind.is_enum())
+            .and_then(|class_like| class_like.enum_type.clone()),
+        atomic => get_backed_enum(atomic, codebase, Dialect::Sharp)?.enum_type.clone(),
+    };
+
+    let mut backed = false;
+    for atomic in key_type.types.iter() {
+        match atomic {
+            TAtomic::Never
+            | TAtomic::Error
+            | TAtomic::Mixed(_)
+            | TAtomic::Scalar(
+                TScalar::ArrayKey | TScalar::Integer(_) | TScalar::String(_) | TScalar::ClassLikeString(_),
+            ) => {}
+            atomic if backing_type(atomic).is_some() => backed = true,
+            TAtomic::GenericParameter(parameter)
+                if parameter.constraint.is_mixed()
+                    || get_php_array_key_type(&parameter.constraint, codebase).is_some() => {}
+            _ => return None,
+        }
+    }
+    if !backed {
+        return Some(Cow::Borrowed(key_type));
+    }
+
+    Some(Cow::Owned(TUnion::from_vec(
+        key_type.types.iter().map(|atomic| backing_type(atomic).unwrap_or_else(|| atomic.clone())).collect(),
+    )))
 }
 
 /// The value of `input`, whose key is `key` and whose value is `value`, as the iterable `container` reads it.
