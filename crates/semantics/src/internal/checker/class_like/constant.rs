@@ -119,6 +119,11 @@ pub fn check_class_like_constant<'ast, 'arena>(
         );
     }
 
+    // `check_slice` decides a `.sharp` file's constant values, which the bridge lowers to what PHP takes.
+    if context.program.dialect.is_sharp() {
+        return;
+    }
+
     for item in &class_like_constant.items {
         let item_display = context.display_member(class_like_name, BytesDisplay(item.name.value));
 

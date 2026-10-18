@@ -10,6 +10,7 @@ use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_reporting::Level;
 use mago_span::HasSpan;
+use mago_syntax::cst::Access;
 use mago_syntax::cst::ArrayAccess;
 use mago_syntax::cst::Expression;
 
@@ -22,10 +23,13 @@ use crate::error::AnalysisError;
 use crate::expression::is_refused_type;
 use crate::resolver::method::get_declared_collection;
 use crate::resolver::method::with_declared_kinds;
+use crate::resolver::static_property::StaticProperty;
+use crate::resolver::static_property::StaticPropertyName;
 use crate::utils::expression::array::get_array_target_type_given_index;
 use crate::utils::expression::expression_is_nullsafe;
 use crate::utils::expression::get_array_access_id;
 use crate::utils::expression::get_block_expression_id;
+use crate::utils::quoted_source;
 
 impl<'ast, 'arena> Analyzable<'ast, 'arena> for ArrayAccess<'arena> {
     fn analyze<'ctx, A>(
@@ -71,6 +75,8 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for ArrayAccess<'arena> {
         block_context.flags.set_inside_general_use(true);
         self.array.analyze(context, block_context, artifacts)?;
         block_context.flags.set_inside_general_use(was_inside_general_use);
+
+        check_constant_list_index(self, &index_type, context, block_context);
 
         // A PHP# place is indexed as every kind of collection it is declared as, whatever it holds. A `Set` has no
         // index, so a read of one is refused even where an earlier write of the index left its type behind.
@@ -157,6 +163,53 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for ArrayAccess<'arena> {
         }
 
         Ok(())
+    }
+}
+
+/// Refuses an index a PHP# constant value reads outside the list a constant holds, as `Billing.PLANS[5]` where `PLANS`
+/// holds 2 elements: a constant's value is known before the code runs, so its index is known to miss. An index the
+/// checker can't know throws `OutOfRangeException` when it runs, as in a method body.
+fn check_constant_list_index<A>(
+    access: &ArrayAccess<'_>,
+    index_type: &TUnion,
+    context: &mut Context<'_, '_, A>,
+    block_context: &BlockContext<'_>,
+) where
+    A: Arena,
+{
+    let span = access.span();
+    if context.dialect.is_sharp()
+        && (block_context.flags.inside_constant_expression()
+            || context.patterns.iter().any(|(_, pattern)| pattern.span().contains(&span.start)))
+        && let Some(index) = index_type.get_single_literal_int_value()
+        && let Expression::Access(Access::Property(read)) = access.array.unparenthesized()
+        && let Some(StaticProperty {
+            class: Expression::ConstantAccess(class),
+            name: StaticPropertyName::Identifier(name),
+            ..
+        }) = StaticProperty::from_property_access(read, context.resolved_names)
+        && let Some(TAtomic::Array(TArray::List(list))) = context
+            .codebase
+            .get_class_constant(context.resolved_names.get(&class.name), name.value)
+            .and_then(|constant| constant.inferred_type.as_ref())
+        && let Some(known) = list.known_elements.as_ref().filter(|_| list.element_type.is_never())
+        && !usize::try_from(index).is_ok_and(|index| known.contains_key(&index))
+    {
+        let size = known.len();
+        let elements = if size == 1 { "element" } else { "elements" };
+        let list = quoted_source(context, access.array.span());
+        context.collector.report_with_code(
+            IssueCode::MismatchedArrayIndex,
+            Issue::error(format!("`{list}` holds {size} {elements}, so it has no index {index}."))
+                .with_annotation(
+                    Annotation::primary(access.index.span()).with_message(format!("Index {index} is read here.")),
+                )
+                .with_help(if size == 0 {
+                    "Read an element only once the list holds one.".to_owned()
+                } else {
+                    format!("Read an index from 0 to {}.", size - 1)
+                }),
+        );
     }
 }
 

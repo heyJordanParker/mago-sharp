@@ -12,6 +12,7 @@ use crate::metadata::enum_case::EnumCaseMetadata;
 use crate::metadata::flags::MetadataFlags;
 use crate::scanner::Context;
 use crate::scanner::attribute::scan_attribute_lists;
+use crate::scanner::class_like_constant::read_constants;
 use crate::scanner::inference::infer_with_class_constants;
 use crate::scanner::version_claim::evaluate_version_attributes;
 
@@ -53,6 +54,9 @@ where
             meta.attributes = attributes;
             meta.value_type = infer_with_class_constants(context, scope, item.value, Some(enum_name), class_constants)
                 .map(TUnion::get_single_owned);
+            if context.program.dialect.is_sharp() {
+                meta.read_constants = read_constants(context.resolved_names, item.value);
+            }
             meta.version_constraint = verdict.constraint;
 
             meta
