@@ -202,8 +202,21 @@ where
         }
 
         let Some(attribute_flags) = &metadata.attribute_flags else {
-            context.collector.report_with_code(
-                IssueCode::ClassNotMarkedAsAttribute,
+            // A PHP# class is marked `[Attribute]`. A plain PHP class is the library's to mark, so PHP# names another.
+            let issue = if context.dialect.is_sharp() {
+                let instead = if metadata.flags.is_sharp() {
+                    "mark it `[Attribute]`"
+                } else {
+                    "attach an attribute class instead"
+                };
+
+                Issue::error(format!("`{attribute_name}` is no attribute class: {instead}."))
+                    .with_annotation(Annotation::primary(attribute.name.span()).with_message("Attached here."))
+                    .with_annotation(
+                        Annotation::secondary(metadata.name_span.unwrap_or(metadata.span))
+                            .with_message(format!("`{attribute_name}` is declared here.")),
+                    )
+            } else {
                 Issue::error(format!(
                     "Class `{attribute_name}` is used as an attribute but is not declared with `#[Attribute]`.",
                 ))
@@ -215,8 +228,9 @@ where
                         .with_message(format!("Class `{attribute_name}` defined here needs an `#[Attribute]` declaration")),
                 )
                 .with_note("To be used as a PHP attribute, a class must itself be decorated with the `#[\\Attribute]` system attribute.")
-                .with_help(format!("Add `#[\\Attribute]` to the definition of class `{attribute_name}` to declare it as an attribute, or use a different class that is a valid attribute.")),
-            );
+                .with_help(format!("Add `#[\\Attribute]` to the definition of class `{attribute_name}` to declare it as an attribute, or use a different class that is a valid attribute."))
+            };
+            context.collector.report_with_code(IssueCode::ClassNotMarkedAsAttribute, issue);
 
             analyze_attribute_argument_expressions(attribute, context, block_context, artifacts)?;
             continue;

@@ -387,7 +387,7 @@ fn a_const_local_reassigned_returns_one_compile_error_and_no_nodes() {
 fn php_syntax_returns_a_parse_error_and_no_nodes() {
     let lowered = Lowered::new(&method("        return this->run(1);\n"));
 
-    assert_eq!(lowered.diagnostics(), ["9:20 parse error: `->` is PHP syntax: PHP# writes member access with `.`"]);
+    assert_eq!(lowered.diagnostics(), ["9:20 parse error: PHP# has no `->`: write member access with `.`."]);
     assert_eq!(lowered.nodes().len(), 0);
 }
 
@@ -1689,12 +1689,13 @@ fn property_groups(lowered: &Lowered) -> Vec<String> {
 /// public int $total { get { return $this->count; } }
 /// public int $size { get => $this->size; set { $this->resize($value); } }
 /// public protected(set) int $kept = 3 { get => $this->kept * 2; }
-/// protected int $guarded { get => $this->guarded; }
+/// protected int $guarded;
 /// public protected(set) int $slug { set { $this->slug = $value * 2; } }
 /// ```
 ///
 /// Each accessor body is a hook: `get => expr;` keeps PHP's short body, and a block or `set => expr;` is a statement
-/// list, because PHP stores the result of a short `set` body. An `init` body is the `set` hook, under
+/// list, because PHP stores the result of a short `set` body. A property whose only body is `get => field` is plain
+/// storage, as an auto-property is, so plain PHP appends to the array it holds in place. An `init` body is the `set` hook, under
 /// `protected(set)`. `field` is `$this->name` and `value` is `$value`. An auto
 /// accessor beside a body that uses `field` is PHP's backing store, so it lowers to nothing, and otherwise it is the
 /// hook over the storage, so the property stays backed. A public get-only property whose body uses `field` takes
@@ -1858,17 +1859,7 @@ fn accessor_bodies_are_property_hooks() {
                       ZVAL "guarded"
                       null
                       null
-                      STMT_LIST
-                        PROPERTY_HOOK "get" @8-8
-                          null
-                          null
-                          PROPERTY_HOOK_SHORT_BODY
-                            PROP
-                              VAR
-                                ZVAL "this"
-                              ZVAL "guarded"
-                          null
-                          null
+                      null
                   null
             "#},
             indoc! {r#"
@@ -1895,6 +1886,67 @@ fn accessor_bodies_are_property_hooks() {
                                 ZVAL 2
                           null
                           null
+                  null
+            "#},
+        ]
+    );
+}
+
+/// ```php
+/// public string $word = 'b' { get => $this->word; }
+/// public int $kept = 1;
+/// ```
+///
+/// A property whose only body is `get => field`, or `get { return field; }`, is plain storage, as an auto-property is,
+/// unless a parent declares a `get` hook for it. PHP copies a parent's hook into a child that declares none, so over
+/// `Lib\Shouter`'s `get` hook the child keeps its own.
+#[test]
+fn a_field_getter_is_plain_storage_unless_a_parent_has_a_get_hook() {
+    let lowered = Lowered::with(
+        "namespace App.Tenant;\n\nimport Lib.Shouter;\n\nclass Report : Shouter\n{\n    public override string word { get => field; set; } = \"b\";\n    public int kept { get { return field; } set; } = 1;\n}\n",
+        &[(
+            "src/Lib/Shouter.php",
+            "<?php namespace Lib; class Shouter { public string $word = 'b' { get => strtoupper($this->word); } }",
+        )],
+    );
+
+    assert_eq!(
+        property_groups(&lowered),
+        [
+            indoc! {r#"
+                PROP_GROUP [1]
+                  ZVAL [1] "string"
+                  PROP_DECL
+                    PROP_ELEM
+                      ZVAL "word"
+                      ZVAL "b"
+                      null
+                      STMT_LIST
+                        PROPERTY_HOOK "get" @7-7
+                          null
+                          null
+                          PROPERTY_HOOK_SHORT_BODY
+                            PROP
+                              VAR
+                                ZVAL "this"
+                              ZVAL "word"
+                          null
+                          null
+                  ATTRIBUTE_LIST
+                    ATTRIBUTE_GROUP
+                      ATTRIBUTE
+                        ZVAL "Override"
+                        null
+            "#},
+            indoc! {r#"
+                PROP_GROUP [1]
+                  ZVAL [1] "int"
+                  PROP_DECL
+                    PROP_ELEM
+                      ZVAL "kept"
+                      ZVAL 1
+                      null
+                      null
                   null
             "#},
         ]
@@ -4937,6 +4989,142 @@ fn a_list_type_is_the_array_type_and_a_map_type_its_class() {
                 ZVAL [1] "null"
               ZVAL "Function<Map<string, List<int>>?(List<int>, Map<string, int>?)>"
         "#}
+    );
+}
+
+/// ```php
+/// public function run(\Sharp\Set|int|array $tags, \Sharp\Map|int|array $sizes, array|int $counts): int { return 1; }
+/// ```
+///
+/// A union that holds a `Set` or a `Map` takes plain PHP's array too, so `array` joins the union's own types, as it
+/// joins a lone `Set` or `Map`. A `List` is a PHP array already, so a union that holds one is the union as written.
+#[test]
+fn a_union_that_holds_a_set_or_a_map_takes_a_php_array_too() {
+    let lowered = Lowered::new(
+        "namespace App.Tenant;\n\nclass Report\n{\n    public int run(Set<string>|int tags, Map<string, int>|int sizes, List<int>|int counts) => 1;\n}\n",
+    );
+    let method = lowered.nodes().iter().position(|node| node.kind == sharp_kind::SHARP_AST_METHOD).expect("a method");
+
+    assert_eq!(
+        lowered.render(lowered.child(method as u32, 0)),
+        indoc! {r#"
+            PARAM_LIST
+              PARAM
+                TYPE_UNION
+                  ZVAL "Sharp\\Set"
+                  ZVAL [1] "int"
+                  TYPE [7]
+                ZVAL "tags"
+                null
+                null
+                null
+                null
+              PARAM
+                TYPE_UNION
+                  ZVAL "Sharp\\Map"
+                  ZVAL [1] "int"
+                  TYPE [7]
+                ZVAL "sizes"
+                null
+                null
+                null
+                null
+              PARAM
+                TYPE_UNION
+                  TYPE [7]
+                  ZVAL [1] "int"
+                ZVAL "counts"
+                null
+                null
+                null
+                null
+              SHARP_TYPE_ARGS
+                null
+                ZVAL "Set<string>|int, Map<string, int>|int, List<int>|int"
+        "#}
+    );
+}
+
+/// ```php
+/// public \Sharp\Set|int $picked = 0 { set(\Sharp\Set|int|array $value) { $value = \is_array($value) ? new \Sharp\Set($value) : $value; $this->picked = $value; } }
+/// ```
+///
+/// A `set` body on a property whose union type holds a `Set` takes plain PHP's array as a parameter of that type does,
+/// by the one rule `Lowering::takes_php_array` gives both, and makes the `Set` before the body runs.
+#[test]
+fn a_set_body_on_a_union_that_holds_a_set_takes_a_php_array_too() {
+    let lowered = Lowered::new(
+        "namespace App.Tenant;\n\nclass Report\n{\n    public Set<string>|int picked { get; set => field = value; } = 0;\n}\n",
+    );
+
+    assert_eq!(
+        property_groups(&lowered),
+        [indoc! {r#"
+            PROP_GROUP [1]
+              SHARP_TYPE_ARGS
+                TYPE_UNION
+                  ZVAL "Sharp\\Set"
+                  ZVAL [1] "int"
+                ZVAL "Set<string>|int"
+              PROP_DECL
+                PROP_ELEM
+                  ZVAL "picked"
+                  ZVAL 0
+                  null
+                  STMT_LIST
+                    PROPERTY_HOOK "set" @5-5
+                      PARAM_LIST
+                        PARAM
+                          TYPE_UNION
+                            ZVAL "Sharp\\Set"
+                            ZVAL [1] "int"
+                            TYPE [7]
+                          ZVAL "value"
+                          null
+                          null
+                          null
+                          null
+                      null
+                      STMT_LIST
+                        ASSIGN
+                          VAR
+                            ZVAL "value"
+                          CONDITIONAL
+                            CALL
+                              ZVAL "is_array"
+                              ARG_LIST
+                                VAR
+                                  ZVAL "value"
+                            NEW
+                              ZVAL "Sharp\\Set"
+                              ARG_LIST
+                                VAR
+                                  ZVAL "value"
+                            VAR
+                              ZVAL "value"
+                        STMT_LIST
+                          ASSIGN
+                            PROP
+                              VAR
+                                ZVAL "this"
+                              ZVAL "picked"
+                            VAR
+                              ZVAL "value"
+                      null
+                      null
+              ATTRIBUTE_LIST
+                ATTRIBUTE_GROUP
+                  ATTRIBUTE
+                    ZVAL "Sharp\\Crossing"
+                    ARG_LIST
+                      ARRAY [3]
+                        ARRAY_ELEM
+                          ZVAL "set"
+                          null
+                        ARRAY_ELEM
+                          ZVAL null
+                          null
+        "#}]
     );
 }
 
@@ -22093,17 +22281,19 @@ fn a_map_or_set_property_carries_the_plan_a_php_array_crosses_by() {
 /// public mixed $loose;        #[\Sharp\Crossing(null)]
 /// public iterable $shelved;   #[\Sharp\Crossing(null)]
 /// public mixed $held;         #[\Sharp\Crossing(null)]
+/// public \Sharp\Map $anyValues;  #[\Sharp\Crossing(['map', 'string', false])]
 /// ```
 ///
 /// Plain PHP reads a property whose type can hold a `Map` or a `Set` with each one as its PHP array, spec section 12, so
 /// an `Any?`, an `Iterable` or a type parameter carries `#[\Sharp\Crossing]` with no plan, since nothing it holds
 /// crosses back. A `Map` keyed by `int|string` reads as its PHP array too, which throws when it runs if two of its keys
 /// are one PHP array key. A `Map` keyed by a type no PHP array holds, as `List<int>`, crosses in by its plan, and its
-/// `false` keeps it the object plain PHP reads.
+/// `false` keeps it the object plain PHP reads. A plan's part that may hold a `Map` no plan rebuilds, as the values of a
+/// `Map<string, Any>` may, is false, so the engine keeps the object a plain PHP reference to the property holds.
 #[test]
 fn a_property_that_can_hold_a_map_carries_whether_plain_php_reads_its_array() {
     let lowered = Lowered::new(
-        "namespace App.Tenant;\n\nclass Ledger<T>\n{\n    public Map<int|string, int> mixed { get; set; } = [:];\n    public Map<List<int>, int> listed { get; set; } = [:];\n    public Any? loose { get; set; } = null;\n    public Iterable<Map<string, int>> shelved { get; set; } = [[\"s\": 1]];\n    public T? held { get; set; } = null;\n}\n",
+        "namespace App.Tenant;\n\nclass Ledger<T>\n{\n    public Map<int|string, int> mixed { get; set; } = [:];\n    public Map<List<int>, int> listed { get; set; } = [:];\n    public Any? loose { get; set; } = null;\n    public Iterable<Map<string, int>> shelved { get; set; } = [[\"s\": 1]];\n    public T? held { get; set; } = null;\n    public Map<string, Any> anyValues { get; set; } = [:];\n}\n",
     );
     let attributes: Vec<String> = lowered
         .nodes()
@@ -22143,7 +22333,25 @@ fn a_property_that_can_hold_a_map_carries_whether_plain_php_reads_its_array() {
     assert_eq!(lowered.diagnostics(), Vec::<String>::new(), "the source lowers");
     assert_eq!(
         attributes,
-        [crossing(keyed), crossing(&format!("{keyed}ZVAL false\n")), unplanned.clone(), unplanned.clone(), unplanned,]
+        [
+            crossing(keyed),
+            crossing(&format!("{keyed}ZVAL false\n")),
+            unplanned.clone(),
+            unplanned.clone(),
+            unplanned,
+            crossing(indoc! {r#"
+                ARRAY [3]
+                  ARRAY_ELEM
+                    ZVAL "map"
+                    null
+                  ARRAY_ELEM
+                    ZVAL "string"
+                    null
+                  ARRAY_ELEM
+                    ZVAL false
+                    null
+            "#}),
+        ]
     );
 }
 
@@ -24885,7 +25093,7 @@ fn a_fully_qualified_null_true_or_false_in_a_library_body_is_refused() {
             .expect_err("PHP# refuses a `\\` name in a library body");
 
         assert_eq!(refusal.len(), 1, "{refusal:?}");
-        assert!(refusal[0].contains("parse error: A `\\` name is PHP syntax"), "{refusal:?}");
+        assert!(refusal[0].contains("parse error: PHP# has no `\\` names"), "{refusal:?}");
     }
 }
 

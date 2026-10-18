@@ -856,16 +856,17 @@ fn unsupported_collection<'union>(
 }
 
 /// Why `==` does not compare `part`, which [`Refusal::Collection`] refuses, spec section 19: it compares a `List`, a
-/// `Map` or a `Set`, and an `Iterable` is none of them, while a type parameter bound by one may be another type.
-fn unsupported_collection_note<A>(context: &Context<'_, '_, A>, part: &TUnion) -> String
+/// `Map` or a `Set`, and an `Iterable` is none of them, while a type parameter bound by one may be another type. Each
+/// is an `Iterable`, whose `toList()` gives a `List` that `==` compares.
+fn collection_reason<A>(context: &Context<'_, '_, A>, part: &TUnion) -> String
 where
     A: Arena,
 {
     if part.has_iterable() {
-        "`==` compares a `List`, a `Map` or a `Set`, and an `Iterable` is none of them.".to_owned()
+        "`==` compares a `List`, a `Map` or a `Set`, and an `Iterable` is none of them".to_owned()
     } else {
         format!(
-            "`==` compares a `List`, a `Map` or a `Set`, and `{}` may be another type.",
+            "`==` compares a `List`, a `Map` or a `Set`, and `{}` may be another type",
             display_operand(context, part)
         )
     }
@@ -883,7 +884,7 @@ pub(crate) fn compares_collections(lhs_type: &TUnion, rhs_type: &TUnion, codebas
 /// map and a set never equal each other, or a value of another type. A local set to `[]` has PHP's type of an empty
 /// array, whose elements are `never`, which equals a list or a map, and a set equals only a set. A union that holds a
 /// collection beside another type compares as each of its types does. Any other value that holds a collection, such
-/// as an `Iterable`, is not supported yet.
+/// as an `Iterable`, compares only through its `toList()`.
 fn collection_refusal(
     operator: &BinaryOperator<'_>,
     lhs_type: &TUnion,
@@ -997,7 +998,7 @@ where
         Some(Refusal::StructProperty) => {
             struct_property_issue(context, &lhs, &rhs).message.trim_end_matches('.').to_owned()
         }
-        Some(Refusal::Collection) => format!("`==` on `{}` is not supported yet", display_operand(context, &lhs)),
+        Some(Refusal::Collection) => collection_reason(context, unsupported_collection(&lhs, &rhs, codebase)),
         _ => format!("`{}` never equals `{}`", display_operand(context, &lhs), display_operand(context, &rhs)),
     }
 }
@@ -1321,13 +1322,12 @@ pub(crate) fn report_sharp_refusal<A>(
             let part = unsupported_collection(lhs_type, rhs_type, context.codebase);
 
             (
-                IssueCode::NotSupportedYet,
+                IssueCode::InvalidOperand,
                 Issue::error(format!(
-                    "`{op}` on `{}` is not supported yet, so it cannot compare `{lhs_name}` with `{rhs_name}`.",
-                    display_operand(context, part)
+                    "{}: compare `a.toList() {equality} b.toList()`.",
+                    collection_reason(context, part)
                 ))
-                .with_note(unsupported_collection_note(context, part))
-                .with_help("Compare the elements one by one."),
+                .with_note(format!("{pair}.")),
             )
         }
         Refusal::Instance => {
@@ -1435,8 +1435,7 @@ where
 /// an element of `element_type` with it, as spec section 12 decides: "`contains`, a `List`'s `remove`, `indexOf` and
 /// `Set<T>` need `==` on the element type." A search refuses what `element == value` refuses, so it agrees with
 /// `any(element => element == value)`: a class that declares no `operator ==` is refused with the reason `==` gives, as
-/// is an element the operator's call does not always take, an `Iterable` element is not supported yet, as `==` on it
-/// is, and an `Any` element is refused unless the value is a string, a number or an enum case. A `null_safe` call's
+/// is an element the operator's call does not always take, an `Iterable` element is refused, as `==` on it is, and an `Any` element is refused unless the value is a string, a number or an enum case. A `null_safe` call's
 /// help keeps its `?.`.
 pub(crate) fn check_element_equality<A>(
     context: &mut Context<'_, '_, A>,
@@ -1527,13 +1526,12 @@ pub(crate) fn check_element_equality<A>(
             let part = unsupported_collection(element_type, value_type, context.codebase);
 
             (
-                IssueCode::NotSupportedYet,
+                IssueCode::InvalidArgument,
                 Issue::error(format!(
-                    "`{method}` on `List<{element_name}>` is not supported yet: `==` on `{}` is not supported yet.",
-                    display_operand(context, part)
+                    "`{method}` compares elements with `==`, and {}.",
+                    collection_reason(context, part)
                 ))
-                .with_note(unsupported_collection_note(context, part))
-                .with_help("Compare the elements one by one."),
+                .with_help("Compare each element's `toList()` with `==`, as in `a.toList() == b.toList()`."),
             )
         }
         // A struct equals only the same struct, and declares no operator to change that.
@@ -1682,7 +1680,7 @@ where
     let article = article(&r#type);
     let why = match reason {
         Some(Refusal::Instance) => "which declares no `operator ==`",
-        Some(Refusal::Collection) => "and `==` on it is not supported yet",
+        Some(Refusal::Collection) => "which `==` does not compare",
         Some(Refusal::CollectionElement) => "whose elements `==` cannot compare",
         Some(Refusal::StructProperty) => "which can't compare by value",
         Some(_) => "which `==` cannot compare with another of its type",
@@ -1700,7 +1698,7 @@ where
 
     match reason {
         Some(Refusal::Collection) => {
-            issue.with_note(unsupported_collection_note(context, &property_type.to_non_nullable()))
+            issue.with_note(format!("{}.", collection_reason(context, &property_type.to_non_nullable())))
         }
         _ => issue,
     }
