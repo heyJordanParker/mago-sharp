@@ -651,11 +651,6 @@ fn a_case_that_carries_data_parses_with_its_fields() {
         panic!("expected a PHP error, got none");
     };
     assert_eq!(source(php_code, php_error), "(");
-    assert!(
-        !php.errors.iter().any(|error| matches!(error, ParseError::NotSupportedYetInSharp(..))),
-        "{:#?}",
-        php.errors
-    );
 
     let program = parse(&arena, "src/PaymentResult.sharp", CODE);
     assert!(program.errors.is_empty(), "{:#?}", program.errors);
@@ -2426,6 +2421,36 @@ fn a_statement_starting_with_a_name_and_a_bar_is_a_typed_local_only_when_a_name_
             "expression (flags | 1)",
             "local int|string",
             "local Calc|List<int>|Report?",
+        ]
+    );
+}
+
+/// Spec section 24: a local's type may join classes and interfaces with `&`, as a field's does, and a statement that
+/// starts with a name and `&` stays the bitwise `&` unless a name follows the type.
+#[test]
+fn a_statement_starting_with_a_name_and_an_ampersand_is_a_typed_local_only_when_a_name_follows_the_type() {
+    const CODE: &str = "class Report\n{\n    void run()\n    {\n        flags & MASK;\n        a & b == c;\n        Shippable & Billable item = parcel;\n        (Shippable & Billable)? maybe = null;\n    }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Report.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let statements: Vec<String> = method_body(program)
+        .iter()
+        .map(|statement| match statement {
+            Statement::LocalDeclaration(local) => {
+                format!("local {}", source(CODE, local.hint.as_ref().expect("a type")))
+            }
+            Statement::Expression(statement) => format!("expression {}", grouping(CODE, statement.expression)),
+            _ => panic!("expected a local or an expression statement, got {statement:#?}"),
+        })
+        .collect();
+    assert_eq!(
+        statements,
+        [
+            "expression (flags & MASK)",
+            "expression ((a & b) == c)",
+            "local Shippable & Billable",
+            "local (Shippable & Billable)?",
         ]
     );
 }
@@ -6148,46 +6173,55 @@ fn an_event_declares_its_parameters_and_its_interfaces() {
     );
 }
 
-/// An event's parameters are its whole declaration, so a body after them is one error, and so are type parameters, not
-/// supported yet. The file parses on after either.
+/// An event's parameters are its whole declaration, so a body after them is one error. The file parses on after it.
 #[test]
-fn an_event_with_a_body_or_type_parameters_is_one_parse_error_and_the_file_parses_on() {
-    for (event, message, start) in [
-        (
-            "public event OrderPaid(int orderId) { }",
-            "An event declares no body: its parameters are its properties, as in `public event OrderPaid(int orderId);`.",
-            "{ }",
-        ),
-        ("public event Moved<TItem>(TItem item);", "A generic event is not supported yet in PHP#.", "<TItem>"),
-        (
-            "event Moved<TItem : Order>(TItem item) : Shipped;",
-            "A generic event is not supported yet in PHP#.",
-            "<TItem : Order>",
-        ),
+fn an_event_with_a_body_is_one_parse_error_and_the_file_parses_on() {
+    const CODE: &str =
+        "public event OrderPaid(int orderId) { }\n\npublic class Order\n{\n    public int run() { return 1; }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/OrderPaid.sharp", CODE);
+
+    let [error] = program.errors else {
+        panic!("expected one error, got {:#?}", program.errors);
+    };
+    assert_eq!(
+        error.to_string(),
+        "An event declares no body: its parameters are its properties, as in `public event OrderPaid(int orderId);`."
+    );
+    assert_eq!(source(CODE, error), "{ }");
+    let [.., Statement::Class(order)] = program.statements.as_slice() else {
+        panic!("expected the class `Order` last, got {:#?}", program.statements);
+    };
+    assert_eq!(order.name.value, b"Order");
+}
+
+/// Spec section 15: a generic event declares its type parameters after its name, as a class does, before its
+/// parameters, which read them.
+#[test]
+fn a_generic_event_declares_its_type_parameters_after_its_name() {
+    for (code, type_parameters) in [
+        ("public event Moved<TItem>(TItem item);", "<TItem>"),
+        ("public event Saved<T : DatabaseEntity>(T entity) : EntityEvent;", "<T : DatabaseEntity>"),
     ] {
         let arena = LocalArena::new();
-        let code: &'static str = Box::leak(
-            format!("{event}\n\npublic class Order\n{{\n    public int run() {{ return 1; }}\n}}\n").into_boxed_str(),
-        );
-        let program = parse(&arena, "src/OrderPaid.sharp", code);
+        let program = parse(&arena, "src/Saved.sharp", code);
 
-        let [error] = program.errors else {
-            panic!("expected one error for `{event}`, got {:#?}", program.errors);
+        assert!(program.errors.is_empty(), "{code}: {:#?}", program.errors);
+        let [Statement::Event(event)] = program.statements.as_slice() else {
+            panic!("expected one event for `{code}`, got {:#?}", program.statements);
         };
-        assert_eq!(error.to_string(), message, "{event}");
-        assert_eq!(source(code, error), start, "{event}");
-        let [.., Statement::Class(order)] = program.statements.as_slice() else {
-            panic!("expected the class `Order` last for `{event}`, got {:#?}", program.statements);
+        let Some(declared) = &event.type_parameters else {
+            panic!("expected type parameters for `{code}`");
         };
-        assert_eq!(order.name.value, b"Order", "{event}");
+        assert_eq!(source(code, declared), type_parameters, "{code}");
     }
 }
 
-/// Spec section 15: a trailing `on` clause after a method's parameters lists the events the method listens to, before
-/// its block, its `=>` body or its `;`.
+/// Spec section 15: a trailing `on` clause after a method's parameters lists the events the method listens to, a
+/// generic one with its type arguments, before its block, its `=>` body or its `;`.
 #[test]
 fn an_on_clause_lists_events_after_the_parameters() {
-    const CODE: &str = "class Notices\n{\n    public void refresh() on OrderPaid { }\n\n    public void send(OrderEvent e) on OrderPaid, OrderRefunded => this.log(e);\n\n    abstract void heard(OrderEvent e) on OrderEvent;\n\n    public void run() { }\n}\n";
+    const CODE: &str = "class Notices\n{\n    public void refresh() on OrderPaid { }\n\n    public void send(OrderEvent e) on OrderPaid, OrderRefunded => this.log(e);\n\n    abstract void heard(OrderEvent e) on OrderEvent;\n\n    public void deliver(Saved<Order> e) on Saved<Order>, Saved<Map<string, Order>> { }\n\n    public void run() { }\n}\n";
     let arena = LocalArena::new();
     let program = parse(&arena, "src/Notices.sharp", CODE);
 
@@ -6213,6 +6247,10 @@ fn an_on_clause_lists_events_after_the_parameters() {
             ("refresh", Some(("on OrderPaid", vec!["OrderPaid"]))),
             ("send", Some(("on OrderPaid, OrderRefunded", vec!["OrderPaid", "OrderRefunded"]))),
             ("heard", Some(("on OrderEvent", vec!["OrderEvent"]))),
+            (
+                "deliver",
+                Some(("on Saved<Order>, Saved<Map<string, Order>>", vec!["Saved<Order>", "Saved<Map<string, Order>>"]))
+            ),
             ("run", None),
         ]
     );

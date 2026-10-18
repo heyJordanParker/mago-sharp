@@ -73,7 +73,8 @@ impl<'ast, 'arena> StaticProperty<'ast, 'arena> {
     }
 
     /// Returns the static property a PHP# property access writes, `Class.name`, when
-    /// [`ResolvedNames::static_property_class`] finds its class, and `None` for an instance property.
+    /// [`ResolvedNames::static_property_class`] finds its class, or `Self.name`, which names the class the code is
+    /// called on, and `None` for an instance property.
     #[must_use]
     pub fn from_property_access(
         access: &'ast PropertyAccess<'arena>,
@@ -83,11 +84,8 @@ impl<'ast, 'arena> StaticProperty<'ast, 'arena> {
             return None;
         };
 
-        resolved_names.static_property_class(access).map(|_| Self {
-            class: access.object,
-            name: StaticPropertyName::Identifier(name),
-            span: access.span(),
-        })
+        (resolved_names.static_property_class(access).is_some() || matches!(access.object, Expression::Self_(_)))
+            .then(|| Self { class: access.object, name: StaticPropertyName::Identifier(name), span: access.span() })
     }
 }
 
@@ -139,14 +137,15 @@ where
     // `Counter<Order>.items` reads the statics of `Counter` with `Order` for its type parameter, spec section 11, and so
     // does `type.items` through a `Class<Counter<Order>>`. A bare `Counter.items` names none: once reported, it reads as
     // the bounds a plain PHP call of `Counter::reset()` runs with, so nothing reports again on what it reads.
-    let type_arguments: Option<Vec<TUnion>> = match statics_type_arguments(artifacts, class_expression) {
-        Some(type_arguments) => Some(type_arguments.to_vec()),
-        None => bare_generic_class(context, class_expression).map(|(class, bounds)| {
-            report_missing_type_arguments(context, class, class_expression.span());
+    let type_arguments: Option<Vec<TUnion>> =
+        match statics_type_arguments(context, block_context, artifacts, class_expression) {
+            Some(type_arguments) => Some(type_arguments),
+            None => bare_generic_class(context, class_expression).map(|(class, bounds)| {
+                report_missing_type_arguments(context, class, class_expression.span());
 
-            bounds
-        }),
-    };
+                bounds
+            }),
+        };
 
     let mut property_names = vec![];
 
@@ -284,14 +283,15 @@ where
         return None;
     }
 
-    let type_arguments: Option<Vec<TUnion>> = match statics_type_arguments(artifacts, class_expression) {
-        Some(type_arguments) => Some(type_arguments.to_vec()),
-        None => bare_generic_class(context, class_expression).map(|(generic, bounds)| {
-            report_missing_type_arguments(context, generic, class_expression.span());
+    let type_arguments: Option<Vec<TUnion>> =
+        match statics_type_arguments(context, block_context, artifacts, class_expression) {
+            Some(type_arguments) => Some(type_arguments),
+            None => bare_generic_class(context, class_expression).map(|(generic, bounds)| {
+                report_missing_type_arguments(context, generic, class_expression.span());
 
-            bounds
-        }),
-    };
+                bounds
+            }),
+        };
     let mut result = PropertyResolutionResult::default();
     let Some(property) = find_static_property_in_class(
         context,

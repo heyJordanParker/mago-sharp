@@ -393,9 +393,9 @@ fn php_syntax_returns_a_parse_error_and_no_nodes() {
 
 #[test]
 fn a_construct_outside_the_slice_returns_its_not_supported_error() {
-    let lowered = Lowered::new(&method_with("int run(Report & Report other)", "        return 1;\n"));
+    let lowered = Lowered::new("namespace App;\n\ninterface Sized\n{\n    public const int MAX = 3;\n}\n");
 
-    assert_eq!(lowered.diagnostics(), ["7:20 compile error: This type is not supported yet in PHP#."]);
+    assert_eq!(lowered.diagnostics(), ["5:5 compile error: This class member is not supported yet in PHP#."]);
 }
 
 /// Spec section 2: each of the 43 PHP keywords PHP# doesn't use is a plain name, and so is a word that means something
@@ -4253,6 +4253,116 @@ fn a_static_method_of_a_generic_class_takes_the_class_type_arguments_as_its_own(
                         ZVAL "App.Order"
                   ZVAL "count"
         "##}
+    );
+}
+
+/// ```php
+/// public static function bump(/* type args: bounds "Any?" */): int {
+///     \Sharp\Internal\statics(\App\Counter::class, /* the text of "#0" */)['count'] += 1;
+///     return \Sharp\Internal\statics(\App\Counter::class, /* the text of "#0" */)['count'];
+/// }
+/// ```
+///
+/// Spec sections 11 and 25: `Self.count` in a generic class reads the statics of the class with its own type
+/// parameters, as `Counter<TItem>.count` does, so each type argument keeps its own count.
+#[test]
+fn self_in_a_generic_class_reads_the_statics_of_its_own_type_arguments() {
+    let lowered = Lowered::new(
+        "namespace App;\n\nclass Counter<TItem>\n{\n    public static int count { get; set; } = 0;\n\n    public static int bump()\n    {\n        Self.count += 1;\n\n        return Self.count;\n    }\n}\n",
+    );
+    let bump = lowered.method_named("bump");
+
+    assert_eq!(
+        lowered.render(lowered.child(bump, 2)),
+        indoc! {r##"
+            STMT_LIST
+              ASSIGN_OP [1]
+                DIM
+                  CALL
+                    ZVAL "Sharp\\Internal\\statics"
+                    ARG_LIST
+                      CLASS_NAME
+                        ZVAL "App\\Counter"
+                      SHARP_TYPE_OF [1]
+                        ZVAL "#0"
+                  ZVAL "count"
+                ZVAL 1
+              RETURN
+                DIM
+                  CALL
+                    ZVAL "Sharp\\Internal\\statics"
+                    ARG_LIST
+                      CLASS_NAME
+                        ZVAL "App\\Counter"
+                      SHARP_TYPE_OF [1]
+                        ZVAL "#0"
+                  ZVAL "count"
+        "##}
+    );
+}
+
+/// ```php
+/// public function load($json): mixed {
+///     return /* the class value of "$0" */::fromJson($json);
+/// }
+/// ```
+///
+/// Spec section 11: `new TItem.fromJson(json)` calls the static method the named constructor runs as on the class of
+/// the type argument the code runs with, as `TItem.make()` calls a static method.
+#[test]
+fn new_of_a_type_parameter_with_a_named_constructor_calls_it_on_the_type_argument() {
+    let entity = (
+        "src/App/Entity.sharp",
+        "namespace App;\n\nclass Entity\n{\n    public Entity() { }\n\n    public required Entity.fromJson(string json) : this() { }\n}\n",
+    );
+    let lowered = Lowered::with(
+        "namespace App;\n\nclass Repository<TItem : Entity>\n{\n    public TItem load(string json) => new TItem.fromJson(json);\n}\n",
+        &[entity],
+    );
+    let load = lowered.method_named("load");
+
+    assert_eq!(
+        lowered.render(lowered.child(load, 2)),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                STATIC_CALL
+                  SHARP_TYPE_OF
+                    ZVAL "$0"
+                  ZVAL "fromJson"
+                  ARG_LIST
+                    VAR
+                      ZVAL "json"
+        "#}
+    );
+}
+
+/// ```php
+/// return /* $value is "App.Billable & App.Shippable" */;
+/// ```
+///
+/// Spec section 24: a pattern of an intersection tests every type it joins, which the engine reads from the type text,
+/// with its members sorted.
+#[test]
+fn a_pattern_of_an_intersection_tests_every_type_it_joins() {
+    let shippable = ("src/App/Shippable.sharp", "namespace App;\n\ninterface Shippable\n{\n}\n");
+    let billable = ("src/App/Billable.sharp", "namespace App;\n\ninterface Billable\n{\n}\n");
+    let lowered = Lowered::with(
+        "namespace App;\n\nclass Shipping\n{\n    public bool test(Any value) => value is Shippable & Billable;\n}\n",
+        &[shippable, billable],
+    );
+    let test = lowered.method_named("test");
+
+    assert_eq!(
+        lowered.render(lowered.child(test, 2)),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                SHARP_IS_TYPE
+                  VAR
+                    ZVAL "value"
+                  ZVAL "App.Billable & App.Shippable"
+        "#}
     );
 }
 

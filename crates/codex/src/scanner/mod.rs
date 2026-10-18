@@ -1114,6 +1114,11 @@ where
             method_metadata.assigned_properties =
                 function_like::definitely_assigned_properties(&named_constructor.body, context);
             method.flags |= MetadataFlags::NAMED_CONSTRUCTOR;
+            // A `required` named constructor is one every subclass declares, so `new TItem.fromJson(…)` can call it,
+            // spec section 11.
+            if parts.modifiers.iter().any(|modifier| matches!(modifier, Modifier::Required(_))) {
+                method.flags |= MetadataFlags::REQUIRED;
+            }
             let type_parameters = class_like::template_arguments(&class.template_types);
             let object = TNamedObject::new_with_type_parameters(
                 class.original_name,

@@ -334,7 +334,9 @@ where
     // declaration does, so its rules and elements stay. A list literal at a place declared a `Set` is that `Set`. An
     // instance property, written as `x.name` or as `field`, is judged where its write has analyzed its object.
     let writes_instance_property = match target_expression {
-        Expression::Access(Access::Property(access)) => context.resolved_names.static_property_class(access).is_none(),
+        Expression::Access(Access::Property(access)) => {
+            StaticProperty::from_property_access(access, context.resolved_names).is_none()
+        }
         Expression::ConstantAccess(field) => context.resolved_names.binding(&field.name) == Some(Binding::Field),
         _ => false,
     };

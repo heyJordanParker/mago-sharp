@@ -1679,21 +1679,30 @@ where
     let own = class_type_arguments(class, type_arguments);
 
     Some(
-        declaring_class
-            .template_types
+        type_parameters(declaring_class)
             .iter()
-            .map(|(name, template)| {
-                let parameter = wrap_atomic(TAtomic::GenericParameter(TGenericParameter::new(
-                    *name,
-                    Arc::new(template.constraint.clone()),
-                    template.defining_entity,
-                )));
-                let localized = localize_property_type(context, &parameter, type_arguments, class, declaring_class);
+            .map(|parameter| {
+                let localized = localize_property_type(context, parameter, type_arguments, class, declaring_class);
 
                 inferred_type_replacer::replace(&localized, &own, context.codebase)
             })
             .collect(),
     )
+}
+
+/// `class`'s type parameters, each as the type it stands for, as `Counter<T>` names them inside `Counter`.
+pub(crate) fn type_parameters(class: &ClassLikeMetadata) -> Vec<TUnion> {
+    class
+        .template_types
+        .iter()
+        .map(|(name, template)| {
+            wrap_atomic(TAtomic::GenericParameter(TGenericParameter::new(
+                *name,
+                Arc::new(template.constraint.clone()),
+                template.defining_entity,
+            )))
+        })
+        .collect()
 }
 
 /// The type arguments a receiver of `receiver_class` with `receiver_type_parameters` gives its class's type

@@ -3,8 +3,9 @@ use mago_bytes::BytesDisplay;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
+use mago_codex::metadata::ttype::TypeMetadata;
 use mago_codex::ttype::atomic::TAtomic;
-use mago_codex::ttype::atomic::object::TObject;
+use mago_codex::ttype::atomic::reference::TReference;
 use mago_codex::ttype::comparator::ComparisonResult;
 use mago_codex::ttype::comparator::union_comparator;
 use mago_codex::ttype::union::TUnion;
@@ -13,6 +14,7 @@ use mago_reporting::Issue;
 use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::ClassLikeMember;
+use mago_syntax::cst::Hint;
 use mago_syntax::cst::Method;
 use mago_syntax::cst::Modifier;
 use mago_word::Word;
@@ -20,6 +22,8 @@ use mago_word::Word;
 use crate::code::IssueCode;
 use crate::context::Context;
 use crate::expression::is_refused_type;
+use crate::statement::function_like::HintPlace;
+use crate::statement::function_like::report_invalid_template_arguments;
 use crate::statement::function_like::report_undefined_type;
 use crate::statement::is_event_class;
 use crate::statement::module::check_listener_services;
@@ -63,12 +67,13 @@ pub fn check_listener<'ctx, 'arena, A>(
             .with_annotation(Annotation::primary(first_on.span()).with_message(format!("`{first_name}` listens here."))),
         );
     }
-    if let Some(&event) = context
+    if let Some(event) = context
         .codebase
         .get_method(metadata.name.as_bytes(), first.name.value)
         .and_then(|method| method.listens.first())
+        .and_then(TUnion::get_single_named_object)
     {
-        check_listener_services(context, metadata, event);
+        check_listener_services(context, metadata, event.name);
     }
 
     for (method, on) in std::iter::once((first, first_on)).chain(listeners) {
@@ -86,8 +91,9 @@ pub fn check_listener<'ctx, 'arena, A>(
     }
 }
 
-/// Reports each name the `on` clause lists that names no event: an unknown type, a type that is not an event, a
-/// built-in type included, or an interface no event implements.
+/// Reports each type the `on` clause lists that names no event: an unknown type, a type that is not an event, a
+/// built-in type included, or an interface no event implements. A generic event names its type arguments, which fit
+/// its type parameters, as every type does, spec section 11, so `on Saved<Order>` hears only `Saved<Order>`.
 fn check_listed_events<'arena, A>(
     method: &Method<'arena>,
     method_metadata: &FunctionLikeMetadata,
@@ -99,19 +105,37 @@ fn check_listed_events<'arena, A>(
     let listener = format!("`{}`", BytesDisplay(method.name.value));
     let events = method.on.iter().flat_map(|on| on.events.iter());
     for (event, listed) in events.zip(&method_metadata.listens) {
-        let message = match codebase.get_class_like(listed.as_bytes()) {
-            Some(class_like) => match unheard_class(context, class_like, &listener) {
+        let name = listed_name(event);
+        let listed_class =
+            listed.get_single_named_object().map(|named| (named, codebase.get_class_like(named.name.as_bytes())));
+        let message = match listed_class {
+            Some((_, Some(class_like))) => match unheard_class(context, class_like, &listener) {
                 Some(message) => message,
-                None => continue,
+                None => {
+                    report_invalid_template_arguments(
+                        context,
+                        &TypeMetadata::new(listed.clone(), event.span()),
+                        HintPlace::Declaration,
+                    );
+
+                    continue;
+                }
             },
-            None if BUILT_IN_TYPES.iter().any(|built_in| built_in.eq_ignore_ascii_case(event.value())) => {
-                format!("`{}` is not an event.", BytesDisplay(event.value()))
+            _ if BUILT_IN_TYPES.iter().any(|built_in| built_in.eq_ignore_ascii_case(name)) => {
+                format!("`{}` is not an event.", BytesDisplay(name))
             }
-            None => {
-                report_undefined_type(context, *listed, event.span());
+            Some((named, None)) => {
+                report_undefined_type(context, named.name, event.span());
 
                 continue;
             }
+            // A name no file declares stays a reference.
+            None if let [TAtomic::Reference(TReference::Symbol { name, .. })] = listed.types.as_ref() => {
+                report_undefined_type(context, *name, event.span());
+
+                continue;
+            }
+            None => format!("`{}` is not an event.", display_sharp_type(context, listed)),
         };
 
         context.collector.report_with_code(
@@ -258,12 +282,11 @@ where
     let events = method.on.iter().flat_map(|on| on.events.iter());
     let unshared: Vec<_> = events
         .zip(&method_metadata.listens)
-        .filter_map(|(event, listed)| Some((event, codebase.get_class_like(listed.as_bytes())?)))
-        .filter(|(_, class_like)| {
-            is_heard(codebase, class_like)
+        .filter(|(_, listed)| {
+            listed_class(codebase, listed).is_some_and(|class_like| is_heard(codebase, class_like))
                 && !union_comparator::is_contained_by(
                     codebase,
-                    &TUnion::from_atomic(TAtomic::Object(TObject::new_named(class_like.original_name))),
+                    listed,
                     taken,
                     false,
                     false,
@@ -288,11 +311,11 @@ where
 
     unshared
         .into_iter()
-        .map(|(event, class_like)| {
+        .map(|(event, listed)| {
             Issue::error(format!(
                 "`{}` takes {article} `{taken}`, and it listens to `{}`, which is not one.",
                 BytesDisplay(method.name.value),
-                display_class_like_name(context, class_like.original_name),
+                display_sharp_type(context, listed),
             ))
             .with_annotation(Annotation::primary(event.span()).with_message("Listed here."))
             .with_annotation(Annotation::secondary(parameter).with_message("The event it takes."))
@@ -303,10 +326,10 @@ where
 
 /// The most specific interface every listed type is or implements: the one that extends the most others, then the
 /// first by name. None when there is no such interface, or a listed type names nothing.
-fn shared_interface(codebase: &CodebaseMetadata, listed: &[Word]) -> Option<Word> {
+fn shared_interface(codebase: &CodebaseMetadata, listed: &[TUnion]) -> Option<Word> {
     let mut shared: Option<Vec<&ClassLikeMetadata>> = None;
-    for name in listed {
-        let class_like = codebase.get_class_like(name.as_bytes())?;
+    for listed in listed {
+        let class_like = listed_class(codebase, listed)?;
         let interfaces: Vec<Word> = std::iter::once(class_like)
             .filter(|class_like| class_like.kind.is_interface())
             .map(|interface| interface.name)
@@ -348,6 +371,23 @@ const BUILT_IN_TYPES: [&[u8]; 18] = [
     b"void",
     b"Any",
 ];
+
+/// The class-like a type an `on` clause lists names, or None when it names none the codebase holds.
+fn listed_class<'codebase>(
+    codebase: &'codebase CodebaseMetadata,
+    listed: &TUnion,
+) -> Option<&'codebase ClassLikeMetadata> {
+    codebase.get_class_like(listed.get_single_named_object()?.name.as_bytes())
+}
+
+/// The name an `on` clause writes for a listed type, a generic event's without its type arguments.
+fn listed_name<'arena>(event: &Hint<'arena>) -> &'arena [u8] {
+    match event {
+        Hint::Generic(generic) => generic.name.value,
+        Hint::Identifier(identifier) => identifier.value(),
+        _ => unreachable!("the parser writes an `on` clause's types as names"),
+    }
+}
 
 /// Whether an `on` clause may list `class_like`: an event, or an interface an event implements.
 fn is_heard(codebase: &CodebaseMetadata, class_like: &ClassLikeMetadata) -> bool {

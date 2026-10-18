@@ -20,6 +20,7 @@ use crate::metadata::ttype::TypeMetadata;
 use crate::metadata::version_constraint::VersionConstraint;
 use crate::ttype::resolution::TypeResolutionContext;
 use crate::ttype::template::GenericTemplate;
+use crate::ttype::union::TUnion;
 use crate::visibility::Visibility;
 
 /// Contains metadata specific to methods defined within classes, interfaces, enums, or traits.
@@ -135,9 +136,10 @@ pub struct FunctionLikeMetadata {
     /// This is `Some` if `kind` is `FunctionLikeKind::Method`, `None` otherwise.
     pub method_metadata: Option<MethodMetadata>,
 
-    /// The fully qualified names a PHP# listener's `on` clause lists, spec section 15, in their written order. Empty
-    /// for every method that listens to nothing.
-    pub listens: Vec<Word>,
+    /// The types a PHP# listener's `on` clause lists, spec section 15, in their written order: each an event or an
+    /// interface by its fully qualified name, and a generic event with its type arguments, as `Saved<Order>`. Empty for
+    /// every method that listens to nothing.
+    pub listens: Vec<TUnion>,
 
     /// The fully qualified names a PHP# method without a body lists after `uses`, spec section 29: the effects its
     /// implementations may have. Empty for a pure declaration and for every method with a body.

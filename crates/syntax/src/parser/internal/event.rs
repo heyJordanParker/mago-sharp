@@ -29,9 +29,8 @@ where
             && matches!(self.stream.peek_kind(2)?, Some(T!["(" | "<"])))
     }
 
-    /// Parses a PHP# event, spec section 15: `event`, its name, its parameters and the interfaces after `:`. An event
-    /// written with a body parses whole and is left out, as a named constructor is, and so does a generic event, whose
-    /// type parameters nothing else declares.
+    /// Parses a PHP# event, spec section 15: `event`, its name, its type parameters, its parameters and the interfaces
+    /// after `:`. An event written with a body parses whole and is left out, as a named constructor is.
     pub(crate) fn parse_event_with_attributes_and_modifiers(
         &mut self,
         attributes: Sequence<'arena, AttributeList<'arena>>,
@@ -45,17 +44,13 @@ where
         if self.stream.is_at(T!["{"])? {
             return Err(ParseError::EventBodyInSharp(self.parse_block()?.span()));
         }
-        if let Some(type_parameters) = type_parameters {
-            self.parse_terminator()?;
-
-            return Err(ParseError::NotSupportedYetInSharp("A generic event", type_parameters.span()));
-        }
 
         Ok(Event {
             attribute_lists: attributes,
             modifiers,
             event,
             name,
+            type_parameters,
             parameter_list,
             inheritance,
             terminator: self.parse_terminator()?,

@@ -13110,6 +13110,60 @@ fn new_of_a_type_parameter_is_the_type_parameter_and_takes_its_bounds_required_c
     );
 }
 
+/// Spec section 11: `new TItem.fromJson(…)` calls the named constructor of the type argument the code runs with, so it
+/// has the type `TItem`, its arguments are checked against the bound's, and the bound marks it `required`, as Swift's
+/// `T(json:)` needs a `required init`. A subclass inherits no named constructor, so each subclass with objects of its
+/// own declares one that a `required` one above it names, and a non-`required` one is refused by its name.
+#[test]
+fn new_of_a_type_parameter_calls_its_bounds_required_named_constructor() {
+    let sharp = "namespace Demo;\n\npublic class Entity\n{\n    public Entity() { }\n\n    public required Entity.fromJson(string json) : this() { }\n\n    public Entity.blank() : this() { }\n}\n\npublic class Order : Entity\n{\n    public Order() : super() { }\n\n    public Order.fromJson(string json) : this() { }\n}\n\npublic class Invoice : Entity\n{\n    public Invoice() : super() { }\n}\n\npublic abstract class Draft : Entity\n{\n    public Draft() : super() { }\n}\n\npublic class Repository<TItem : Entity>\n{\n    public TItem load(string json) => new TItem.fromJson(json);\n\n    public TItem wrong() => new TItem.fromJson(1);\n\n    public int sized(string json) => new TItem.fromJson(json);\n\n    public TItem blank() => new TItem.blank();\n}\n";
+
+    assert_eq!(
+        messages(("src/Demo/Repository.sharp", sharp), &[]),
+        [
+            "`Invoice` must declare the named constructor `fromJson`: `Entity.fromJson` is `required`, so every subclass of `Entity` declares its own.",
+            "Invalid argument type for argument #1 of `Entity.fromJson`: expected `string`, but found `int`.",
+            "Invalid return type for method `Repository.sized`: expected `int`, but found `TItem`.",
+            "`new TItem.blank(…)` needs a `required` named constructor: `TItem` can be any subclass of `Entity`, so every subclass must declare a `blank` that `new TItem.blank(…)` can call.",
+        ]
+    );
+}
+
+/// Spec section 25: `Self.name` reads and writes a constant or a static member of the class the code is called on, as
+/// Swift's `Self.name` does, so a subclass's own constant answers when the call ran on the subclass.
+#[test]
+fn self_reads_and_writes_members_of_the_class_the_code_is_called_on() {
+    let sharp = "namespace Demo;\n\npublic class Store\n{\n    public const string TABLE = \"items\";\n    public static virtual int count { get; set; } = 0;\n\n    public static string table() => Self.TABLE;\n\n    public static int bump()\n    {\n        Self.count += 1;\n        Self.count = Self.count + 1;\n        return Self.count;\n    }\n\n    public static int wrong() => Self.TABLE;\n\n    public static string missing() => Self.NOPE;\n\n    public static string named() => Store.NOPE;\n}\n";
+
+    assert_eq!(
+        messages(("src/Demo/Store.sharp", sharp), &[]),
+        [
+            "Invalid return type for method `Store.wrong`: expected `int`, but found `string`.",
+            "`Store.NOPE` does not exist.",
+            "Invalid return type for method `Store.missing`: expected `string`, but found `null`.",
+            "`Store.NOPE` does not exist.",
+            "Invalid return type for method `Store.named`: expected `string`, but found `null`.",
+        ]
+    );
+}
+
+/// Spec section 24: `&` joins classes and interfaces, and a value is of the intersection only when it is of every type
+/// it joins, as in TypeScript and Swift, so a value of one of them is refused where the intersection goes, and a pattern
+/// narrows to the whole intersection.
+#[test]
+fn an_intersection_takes_a_value_of_every_type_it_joins() {
+    let sharp = "namespace Demo;\n\npublic interface Shippable\n{\n    int weight();\n}\n\npublic interface Billable\n{\n    int amount();\n}\n\npublic class Parcel : Shippable, Billable\n{\n    public int weight() => 1;\n\n    public int amount() => 2;\n}\n\npublic class Box : Shippable\n{\n    public int weight() => 3;\n}\n\npublic class Shipping\n{\n    public (Shippable & Billable)? held { get; set; } = null;\n\n    public int ship(Shippable & Billable item) => item.weight() + item.amount();\n\n    public Shippable & Billable keep(Shippable & Billable item) => item;\n\n    public int test(Any value) => value is Shippable & Billable both ? both.weight() + both.amount() : 0;\n\n    public void run()\n    {\n        this.ship(new Parcel());\n        this.held = new Parcel();\n        this.ship(new Box());\n        this.held = new Box();\n        Shippable & Billable local = new Box();\n    }\n}\n";
+
+    assert_eq!(
+        messages(("src/Demo/Shipping.sharp", sharp), &[]),
+        [
+            "Possible argument type mismatch for argument #1 of `Shipping.ship`: expected `Shippable & Billable`, but possibly received `Box`.",
+            "Invalid type for property `Shipping.held`: expected `(Shippable & Billable)?`, but got `Box`.",
+            "Invalid assignment to `local`: it is declared as `Shippable & Billable`.",
+        ]
+    );
+}
+
 /// `value is TItem`, `value as TItem` and a `match` arm of the type `TItem`, in an expression or in a statement, add no
 /// issue, and the other arms' types are checked as types anywhere: `Box<int>` is outside its bound.
 #[test]
@@ -19082,6 +19136,34 @@ fn an_on_clause_lists_events_or_interfaces_an_event_implements() {
             format!("9:34 invalid-event `string` is not an event. | Listed here. | {note}"),
             format!("11:26 invalid-event `Any` is not an event. | Listed here. | {note}"),
             format!("13:28 invalid-event `Level` is not an event. | Listed here. | {note}"),
+        ]
+    );
+}
+
+/// Spec section 15: an `on` clause names a generic event's type arguments, as every type does, spec section 11, so
+/// `on Saved<Order>` hears only a `Saved<Order>`, as C# subscribes to an `EventHandler<OrderSaved>`. A bare `on Saved`
+/// names none, and type arguments outside the bound or too many are refused as anywhere else. The parameter is a type
+/// every listed event is, the interface the event implements among them.
+#[test]
+fn an_on_clause_names_the_type_arguments_of_a_generic_event() {
+    let entity = ("app/Shop/Entity.sharp", "namespace App.Shop;\n\npublic class Entity\n{\n}\n");
+    let order = ("app/Shop/Order.sharp", "namespace App.Shop;\n\npublic class Order : Entity\n{\n}\n");
+    let invoice = ("app/Shop/Invoice.sharp", "namespace App.Shop;\n\npublic class Invoice : Entity\n{\n}\n");
+    let entity_event = ("app/Shop/EntityEvent.sharp", "namespace App.Shop;\n\npublic interface EntityEvent\n{\n}\n");
+    let saved =
+        ("app/Shop/Saved.sharp", "namespace App.Shop;\n\npublic event Saved<T : Entity>(T entity) : EntityEvent;\n");
+    let hears = (
+        "app/Shop/Hears.sharp",
+        "namespace App.Shop;\n\npublic class Hears\n{\n    public void orders(Saved<Order> e) on Saved<Order> { }\n\n    public void any(EntityEvent e) on Saved<Order>, Saved<Invoice> { }\n\n    public void bare() on Saved { }\n\n    public void wrong(Saved<Invoice> e) on Saved<Order> { }\n\n    public void unbound() on Saved<string> { }\n\n    public void many() on Saved<Order, Invoice> { }\n}\n",
+    );
+
+    assert_eq!(
+        worded(hears, &[entity, order, invoice, entity_event, saved]),
+        [
+            "9:27 missing-template-parameter `Saved` needs its type argument. | `Saved` has type parameters | A type, `new` and a static member name the type arguments of a generic class. | Write a type for its type parameter: `Saved<T>`.",
+            "11:44 invalid-event `wrong` takes a `Saved<Invoice>`, and it listens to `Saved<Order>`, which is not one. | Listed here. | The event it takes. | Take a type every listed event implements, such as `EntityEvent`, or take no parameter.",
+            "13:30 template-constraint-violation Type argument `string` does not satisfy `Saved`'s `T`. | `string` is supplied for `T` here... | ...but `T` is bounded by `Entity`. | Supply a type contained by `Entity`.",
+            "15:27 excess-template-parameter Too many type arguments for `Saved`: expected 1, but found 2. | `Saved` is applied here. | `Saved` declares 1 type parameter.",
         ]
     );
 }

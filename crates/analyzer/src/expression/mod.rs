@@ -283,11 +283,10 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Expression<'arena> {
                 | Expression::Access(_)
                 | Expression::Call(_)
                 | Expression::TypeOf(_)
-                | Expression::Instantiation(_)
                 | Expression::Is(_)
                 | Expression::As(_)
                 | Expression::PatternMatch(_)
-                    if is_refused(self, context) =>
+                    if is_refused(self) =>
                 {
                     if let Expression::Is(is) = self {
                         for (hint, variable) in Node::Pattern(is.pattern).filter_map(|node| match node {
@@ -478,9 +477,9 @@ where
         is_refused |= report_erased_type_test(context, hint);
 
         // A test of a type parameter, of a generic class with its type arguments, of a collection, of a class value, of
-        // `Any`, of `Object`, of a tuple, of a function type or of a union is `instanceof` a name spanning the whole
-        // type, and narrows to the type written, which the analysis records as the type the test reads. So is a test of
-        // a plain PHP trait, spec section 22, since no value is `instanceof` one.
+        // `Any`, of `Object`, of a tuple, of a function type, of a union or of an intersection is `instanceof` a name
+        // spanning the whole type, and narrows to the type written, which the analysis records as the type the test
+        // reads. So is a test of a plain PHP trait, spec section 22, since no value is `instanceof` one.
         let reads_type_arguments = match hint {
             Hint::Identifier(name) => {
                 context.resolved_names.is_type_parameter(name)
@@ -491,7 +490,8 @@ where
             | Hint::Object(_)
             | Hint::Tuple(_)
             | Hint::Function(_)
-            | Hint::Union(_) => has_type_test(hint),
+            | Hint::Union(_)
+            | Hint::Intersection(_) => has_type_test(hint),
             _ => false,
         };
         if reads_type_arguments {
@@ -1931,21 +1931,13 @@ pub(crate) fn with_type_arguments(
     inferred_type_replacer::replace(declared, &template_result, codebase)
 }
 
-/// Whether an error already refuses `expression`. `check_slice` refuses it when it failed to parse, it is `!x is T`, it
-/// calls a named constructor of a type parameter, or it tests or converts a value to a type with no
-/// [type test](mago_syntax::utils::pattern::has_type_test) in `is`, `as` or a `match` arm. Its type is the error type
-/// in PHP# and `never` in PHP, a variable its `is` pattern names holds the type written beside it, and it adds no other
-/// issue.
-pub(crate) fn is_refused<A>(expression: &Expression<'_>, context: &Context<'_, '_, A>) -> bool
-where
-    A: Arena,
-{
+/// Whether an error already refuses `expression`. `check_slice` refuses it when it failed to parse, it is `!x is T`, or
+/// it tests or converts a value to a type with no [type test](mago_syntax::utils::pattern::has_type_test) in `is`, `as`
+/// or a `match` arm. Its type is the error type in PHP# and `never` in PHP, a variable its `is` pattern names holds the
+/// type written beside it, and it adds no other issue.
+pub(crate) fn is_refused(expression: &Expression<'_>) -> bool {
     match expression {
         Expression::Error(_) => true,
-        Expression::Instantiation(instantiation) => {
-            instantiation.constructor.is_some()
-                && matches!(instantiation.class, Expression::Identifier(class) if context.resolved_names.is_type_parameter(class))
-        }
         Expression::Is(is) => {
             matches!(is.value, Expression::UnaryPrefix(prefix) if matches!(prefix.operator, UnaryPrefixOperator::Not(_)))
                 || type_pattern_hints(is.pattern).into_iter().any(|hint| !has_type_test(hint))

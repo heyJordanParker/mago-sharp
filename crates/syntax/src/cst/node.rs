@@ -1621,7 +1621,7 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
             Node::On(node) => {
                 f(Node::Keyword(&node.on));
                 for item in node.events.iter() {
-                    f(Node::Identifier(item));
+                    f(Node::Hint(item));
                 }
             }
             Node::ConstructorInitializer(node) => {
@@ -1691,6 +1691,9 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 }
                 f(Node::Keyword(&node.event));
                 f(Node::LocalIdentifier(&node.name));
+                for item in node.type_parameters.iter() {
+                    f(Node::TypeParameterList(item));
+                }
                 f(Node::FunctionLikeParameterList(&node.parameter_list));
                 if let Some(inheritance) = &node.inheritance {
                     f(Node::Inheritance(inheritance));

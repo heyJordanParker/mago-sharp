@@ -8,6 +8,7 @@ use crate::cst::cst::identifier::LocalIdentifier;
 use crate::cst::cst::keyword::Keyword;
 use crate::cst::cst::modifier::Modifier;
 use crate::cst::cst::terminator::Terminator;
+use crate::cst::cst::type_hint::TypeParameterList;
 use crate::cst::sequence::Sequence;
 
 /// Represents a PHP# event type, spec section 15: a class whose parameters become get-only properties.
@@ -18,6 +19,7 @@ use crate::cst::sequence::Sequence;
 ///
 /// ```csharp
 /// public event OrderPaid(int orderId, Money amount) : OrderEvent;
+/// public event Saved<T : DatabaseEntity>(T entity) : EntityEvent;
 /// ```
 #[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
@@ -26,6 +28,8 @@ pub struct Event<'arena> {
     pub modifiers: Sequence<'arena, Modifier<'arena>>,
     pub event: Keyword<'arena>,
     pub name: LocalIdentifier<'arena>,
+    /// The type parameters of a generic event, spec section 15, as a class declares them.
+    pub type_parameters: Option<TypeParameterList<'arena>>,
     pub parameter_list: FunctionLikeParameterList<'arena>,
     /// The `: Interface` header, which lists the interfaces the event implements.
     pub inheritance: Option<Inheritance<'arena>>,

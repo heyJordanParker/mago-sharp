@@ -13,8 +13,7 @@ pub(crate) fn lower_parse_error(error: &ParseError) -> Error {
         ParseError::SyntaxError(SyntaxError::UnexpectedEndOfFile(..)) => ErrorKind::UnexpectedEndOfFile,
         ParseError::SyntaxError(SyntaxError::RecursionLimitExceeded(..)) => ErrorKind::RecursionLimitExceeded,
         ParseError::UnexpectedEndOfFile(..) => ErrorKind::UnexpectedEndOfFile,
-        // A form outside the PHP# grammar, a PHP# parameter or field without its type, PHP# syntax not supported yet,
-        // `required` on a method, an escape a PHP# template refuses, an operator symbol a class cannot declare, effects
+        // A form outside the PHP# grammar, a PHP# parameter or field without its type, `required` on a method, an escape a PHP# template refuses, an operator symbol a class cannot declare, effects
         // after a function type's `>` or on an import, a module member that is no law, a computed property's body after
         // a parameter, anything but `super(…)` or `this(…)` after a constructor's `:`, a body after an event, a type
         // declared inside another, type parameters on a named constructor, a keyword in another case, a function
@@ -27,7 +26,6 @@ pub(crate) fn lower_parse_error(error: &ParseError) -> Error {
         | ParseError::UntypedParameterInSharp(..)
         | ParseError::UntypedFieldInSharp(..)
         | ParseError::UntypedPropertyInSharp(..)
-        | ParseError::NotSupportedYetInSharp(..)
         | ParseError::InvalidTemplateEscapeInSharp(..)
         | ParseError::UndeclarableOperatorInSharp(..)
         | ParseError::UsesAfterFunctionTypeInSharp(..)

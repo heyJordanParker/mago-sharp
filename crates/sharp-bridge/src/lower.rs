@@ -3027,7 +3027,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
     /// `new` on line `line`: `NEW` of the class by its full name, and `new Self(…)` is `new static(…)`, the name
     /// php-src's grammar writes with `ZEND_NAME_NOT_FQ`. `new Artifact.fromJson(…)` calls the static method the named
-    /// constructor runs as, spec section 9.1. An object initializer then sets its values on the new object, spec
+    /// constructor runs as, spec section 9.1, and `new TItem.fromJson(…)` calls it on the class of the type argument
+    /// the code runs with, as `TItem.make()` does, spec section 11. An object initializer then sets its values on the new object, spec
     /// section 16, and `new Point { x: 1 }` creates it with no arguments.
     ///
     /// A PHP# generic class's `new` carries the type arguments the checker found in a `SHARP_TYPE_ARGS` over the `NEW`,
@@ -3041,7 +3042,15 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             Expression::Identifier(class) if !self.names.is_type_parameter(class) => Some(self.names.get(class)),
             _ => None,
         };
-        let type_arguments = class_name.and_then(|name| self.types.type_arguments(name, instantiation.span()));
+        // `new TItem.fromJson(…)` calls the named constructor of the type argument the code runs with, checked against
+        // the one of `TItem`'s bound, as a static call through a type parameter is.
+        let constructor_class = match instantiation.class {
+            Expression::Identifier(class) if class_name.is_none() && instantiation.constructor.is_some() => {
+                self.types.type_parameter_classes(class).and_then(|classes| classes.first().copied())
+            }
+            _ => class_name,
+        };
+        let type_arguments = constructor_class.and_then(|name| self.types.type_arguments(name, instantiation.span()));
         let class_value = match instantiation.class {
             Expression::Parenthesized(value) => Some(self.expression(value.expression)),
             _ => None,
@@ -3055,7 +3064,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     self.call(Some(instantiation.span()), arguments, None, parameters, callee, |_, arguments| arguments)
                 }
                 (_, Some(constructor)) => {
-                    let callee = class_name.and_then(|name| self.types.sharp_method(name, constructor.name.value));
+                    let callee =
+                        constructor_class.and_then(|name| self.types.sharp_method(name, constructor.name.value));
 
                     self.call(
                         Some(instantiation.span()),
@@ -3072,7 +3082,18 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         };
         let created = match (instantiation.class, &instantiation.constructor) {
             (Expression::Identifier(class), Some(constructor)) => {
-                let class = self.string(ZEND_NAME_FQ, self.line(class), self.names.get(class));
+                let class = match class_name {
+                    Some(name) => self.string(ZEND_NAME_FQ, self.line(class), name),
+                    None => {
+                        let tested = self
+                            .types
+                            .tested_type(class)
+                            .unwrap_or_else(|| unreachable!("a type parameter's type is recorded"));
+                        let tested = self.type_text(line, &tested);
+
+                        self.node(SHARP_AST_SHARP_TYPE_OF, 0, line, &[tested])
+                    }
+                };
                 let method = self.string(0, self.line(constructor), constructor.name.value);
 
                 self.node(SHARP_AST_STATIC_CALL, 0, line, &[class, method, arguments])
@@ -4337,35 +4358,40 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.node(SHARP_AST_CALL, 0, line, &[function, arguments])
     }
 
-    /// The class and the name of `target` when it is `Class.name` for a static property that runs accessors, whose
-    /// reads and writes call its hidden methods, as [`Lowering::static_accessors`] writes them.
-    fn static_accessor<'ast>(&self, target: &Expression<'ast>) -> Option<(&'ast ConstantAccess<'ast>, &'ast [u8])> {
+    /// The access and the name of `target` when it is `Class.name` or `Self.name` for a static property that runs
+    /// accessors, whose reads and writes call its hidden methods, as [`Lowering::static_accessors`] writes them.
+    fn static_accessor<'place, 'ast>(
+        &self,
+        target: &'place Expression<'ast>,
+    ) -> Option<(&'place PropertyAccess<'ast>, &'ast [u8])> {
         let Expression::Access(Access::Property(
             access @ PropertyAccess { property: ClassLikeMemberSelector::Identifier(name), .. },
         )) = target.unparenthesized()
         else {
             return None;
         };
-        let class = self.names.static_property_class(access)?;
-        let classes =
-            self.types.type_parameter_classes(&class.name).unwrap_or_else(|| vec![self.names.get(&class.name)]);
 
-        classes.iter().any(|class| self.types.is_static_accessor(class, name.value)).then_some((class, name.value))
+        self.static_classes(access)?
+            .iter()
+            .any(|class| self.types.is_static_accessor(class, name.value))
+            .then_some((access, name.value))
     }
 
     /// `Class::{'name#get'}()` or `Class::{'name#set'}(value)`: the call of the hidden method `accessor` of the static
-    /// property `name` of `class`, which the access at `span` reaches, with `arguments`, and last the access's type
-    /// arguments when `class` is a generic PHP# class, whose type arguments each have their own static.
+    /// property `name` that `access` reaches, at `span`, with `arguments`, and last the access's type arguments when
+    /// its class is a generic PHP# class, whose type arguments each have their own static.
     fn accessor_call(
         &mut self,
-        class: &ConstantAccess,
+        access: &PropertyAccess,
         name: &[u8],
         accessor: &[u8],
         arguments: &[u32],
         span: Span,
     ) -> u32 {
-        let line = self.line(class);
-        let (class, _) = self.static_class(class);
+        let line = self.line(access.object);
+        let Some((class, _)) = self.static_member_class(access) else {
+            unreachable!("`static_accessor` found the static property's class");
+        };
         let method = self.string(0, line, &[name, b"#", accessor].concat());
         let mut arguments = arguments.to_vec();
         if let Some(type_arguments) = self.types.statics_type_arguments(&span) {
@@ -4376,39 +4402,46 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.node(SHARP_AST_STATIC_CALL, 0, line, &[class, method, arguments])
     }
 
-    /// A write of `value` to the static property `name` of `class`, which runs accessors, at `span`:
+    /// A write of `value` to the static property `name` that `access` reaches, which runs accessors, at `span`:
     /// `Class::{'name#set'}($value#N = value) ?? $value#N`. The hidden setter returns nothing, so the write's value is
     /// the value written, as an assignment's is.
-    fn accessor_write(&mut self, class: &ConstantAccess, name: &[u8], value: u32, span: Span) -> u32 {
+    fn accessor_write(&mut self, access: &PropertyAccess, name: &[u8], value: u32, span: Span) -> u32 {
         let line = self.line(span);
         let hidden = self.hidden("value");
         let variable = self.variable(span, &hidden);
         let held = self.node(SHARP_AST_ASSIGN, 0, line, &[variable, value]);
-        let call = self.accessor_call(class, name, b"set", &[held], span);
+        let call = self.accessor_call(access, name, b"set", &[held], span);
         let written = self.variable(span, &hidden);
         self.temporaries -= 1;
 
         self.node(SHARP_AST_COALESCE, 0, line, &[call, written])
     }
 
-    /// `++` or `--`, by `operation`, `ZEND_ADD` or `ZEND_SUB`, of the static property `name` of `class`, which runs
-    /// accessors, at `span`. A prefix one is the value written. A postfix one is the value read:
+    /// `++` or `--`, by `operation`, `ZEND_ADD` or `ZEND_SUB`, of the static property `name` that `access` reaches,
+    /// which runs accessors, at `span`. A prefix one is the value written. A postfix one is the value read:
     /// `Class::{'name#set'}(($old#N = Class::{'name#get'}()) + 1) ?? $old#N`.
-    fn accessor_step(&mut self, class: &ConstantAccess, name: &[u8], operation: u32, postfix: bool, span: Span) -> u32 {
+    fn accessor_step(
+        &mut self,
+        access: &PropertyAccess,
+        name: &[u8],
+        operation: u32,
+        postfix: bool,
+        span: Span,
+    ) -> u32 {
         let line = self.line(span);
         let one = self.zval(line, sharp_value::SHARP_LONG, |node| node.long_value = 1);
-        let read = self.accessor_call(class, name, b"get", &[], span);
+        let read = self.accessor_call(access, name, b"get", &[], span);
         if !postfix {
             let value = self.node(SHARP_AST_BINARY_OP, operation, line, &[read, one]);
 
-            return self.accessor_write(class, name, value, span);
+            return self.accessor_write(access, name, value, span);
         }
 
         let hidden = self.hidden("old");
         let old = self.variable(span, &hidden);
         let held = self.node(SHARP_AST_ASSIGN, 0, line, &[old, read]);
         let value = self.node(SHARP_AST_BINARY_OP, operation, line, &[held, one]);
-        let call = self.accessor_call(class, name, b"set", &[value], span);
+        let call = self.accessor_call(access, name, b"set", &[value], span);
         let old = self.variable(span, &hidden);
         self.temporaries -= 1;
 
@@ -5231,7 +5264,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let line = self.line(root);
         let taken = self.temporaries;
         let mut steps = Vec::new();
-        let holds_object = self.names.static_property_class(access).is_none() && !self.is_pure(access.object);
+        let holds_object = self.static_classes(access).is_none() && !self.is_pure(access.object);
         if holds_object {
             let name = self.hidden("receiver");
             let variable = self.variable(access.object.span(), &name);
@@ -5422,7 +5455,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     });
                 }
                 if let UnaryPrefixOperator::PreIncrement(_) | UnaryPrefixOperator::PreDecrement(_) = unary.operator
-                    && let Some((class, name)) = self.static_accessor(unary.operand)
+                    && let Some((access, name)) = self.static_accessor(unary.operand)
                 {
                     let operation = if matches!(unary.operator, UnaryPrefixOperator::PreIncrement(_)) {
                         ZEND_ADD
@@ -5430,7 +5463,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                         ZEND_SUB
                     };
 
-                    return self.accessor_step(class, name, operation, false, unary.operand.span());
+                    return self.accessor_step(access, name, operation, false, unary.operand.span());
                 }
 
                 let (kind, attr) = prefix_kind(&unary.operator);
@@ -5452,14 +5485,14 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                         this.list_write(line, access, ListWrite::Step { decrement, postfix: true })
                     });
                 }
-                if let Some((class, name)) = self.static_accessor(unary.operand) {
+                if let Some((access, name)) = self.static_accessor(unary.operand) {
                     let operation = if matches!(unary.operator, UnaryPostfixOperator::PostIncrement(_)) {
                         ZEND_ADD
                     } else {
                         ZEND_SUB
                     };
 
-                    return self.accessor_step(class, name, operation, true, unary.operand.span());
+                    return self.accessor_step(access, name, operation, true, unary.operand.span());
                 }
 
                 let kind = match unary.operator {
@@ -5472,19 +5505,19 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             }
             Expression::Assignment(assignment) => {
                 // A static that runs accessors is written through its hidden `name#set`.
-                if let Some((class, name)) = self.static_accessor(assignment.lhs) {
+                if let Some((access, name)) = self.static_accessor(assignment.lhs) {
                     let span = assignment.lhs.span();
                     match assignment.operator {
                         AssignmentOperator::Assign(_) => {
                             let declared = self.types.property_type(assignment.lhs).cloned();
                             let value = self.crossed_value(assignment.rhs, declared.as_ref());
 
-                            return self.accessor_write(class, name, value, span);
+                            return self.accessor_write(access, name, value, span);
                         }
                         AssignmentOperator::Coalesce(_) => {
-                            let read = self.accessor_call(class, name, b"get", &[], span);
+                            let read = self.accessor_call(access, name, b"get", &[], span);
                             let value = self.expression(assignment.rhs);
-                            let write = self.accessor_write(class, name, value, span);
+                            let write = self.accessor_write(access, name, value, span);
 
                             return self.node(SHARP_AST_COALESCE, 0, line, &[read, write]);
                         }
@@ -5511,7 +5544,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                                 property: ClassLikeMemberSelector::Identifier(name),
                                 ..
                             },
-                        )) if self.names.static_property_class(property).is_none() => {
+                        )) if self.static_classes(property).is_none() => {
                             self.types.property_has_hooks(self.types.expression_type(object), name.value)
                         }
                         // `object?.name`, whose conditional tests `object`, spec section 14.4.
@@ -5674,14 +5707,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
                 self.node(SHARP_AST_DIM, 0, line, &[object, index])
             }
-            // `Class.y`, and `y` read through a class value, is the fetch of the member the checker found on the class:
-            // a constant or enum case, a static property, or a static method as a first-class callable.
-            Expression::Access(Access::Property(access)) => match self.names.static_property_class(access) {
-                Some(class) => {
-                    let (class, classes) = self.static_class(class);
-
-                    self.static_member(expression, class, &classes, &access.property)
-                }
+            // `Class.y`, `Self.y`, and `y` read through a class value, is the fetch of the member the checker found on
+            // the class: a constant or enum case, a static property, or a static method as a first-class callable.
+            Expression::Access(Access::Property(access)) => match self.static_member_class(access) {
+                Some((class, classes)) => self.static_member(expression, class, &classes, &access.property),
                 None if let Some(extension) = self.types.extension(expression) => {
                     self.extension_access(expression, &extension, access.object, None)
                 }
@@ -6563,17 +6592,17 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         operation: impl FnOnce(&mut Self, u32, u32) -> u32,
     ) -> u32 {
         // A static that runs accessors reads through `name#get` and writes through `name#set`.
-        if let Some((class, name)) = self.static_accessor(assignment.lhs) {
-            let read = self.accessor_call(class, name, b"get", &[], assignment.lhs.span());
+        if let Some((access, name)) = self.static_accessor(assignment.lhs) {
+            let read = self.accessor_call(access, name, b"get", &[], assignment.lhs.span());
             let value = self.expression(assignment.rhs);
             let result = operation(self, read, value);
 
-            return self.accessor_write(class, name, result, assignment.lhs.span());
+            return self.accessor_write(access, name, result, assignment.lhs.span());
         }
 
         let receiver = match assignment.lhs {
             Expression::Access(Access::Property(access))
-                if self.names.static_property_class(access).is_none() && !self.is_local_or_this(access.object) =>
+                if self.static_classes(access).is_none() && !self.is_local_or_this(access.object) =>
             {
                 Some(access)
             }
@@ -7970,7 +7999,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             {
                 CollectionReceiver::Place(receiver)
             }
-            Expression::Access(Access::Property(access)) if self.names.static_property_class(access).is_some() => {
+            Expression::Access(Access::Property(access)) if self.static_classes(access).is_some() => {
                 CollectionReceiver::Place(receiver)
             }
             Expression::Access(Access::Property(PropertyAccess { object, property, .. }))
@@ -8145,13 +8174,12 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             }
             // The hidden variable of an `is`, `as` or `match`, which `php_shape` writes.
             Expression::Variable(Variable::Direct(_)) => self.expression(target),
-            Expression::Access(Access::Property(access)) => match self.names.static_property_class(access) {
-                Some(class) => {
+            Expression::Access(Access::Property(access)) => match self.static_member_class(access) {
+                Some((class, classes)) => {
                     let ClassLikeMemberSelector::Identifier(name) = &access.property else {
                         unreachable!("check_slice refuses the member name `{}`", access.property);
                     };
                     let line = self.line(target);
-                    let (class, classes) = self.static_class(class);
                     let property = self.member(&access.property);
 
                     self.static_property(target, class, &classes, name.value, property, line, place_use)
@@ -8347,7 +8375,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let is_static_field = matches!(
             object,
             Expression::Access(Access::Property(access))
-                if self.names.static_property_class(access).is_some() || self.is_class_value(access.object)
+                if self.static_classes(access).is_some() || self.is_class_value(access.object)
         );
         if !is_static_field || self.types.statics_type_arguments(object).is_none() {
             return lowered;
@@ -8357,6 +8385,30 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let variable = self.variable(object.span(), name.as_bytes());
 
         self.node(SHARP_AST_ASSIGN_REF, 0, self.line(object), &[variable, lowered])
+    }
+
+    /// The classes whose static member `access` reaches: the class `Class.name` names, the classes a type parameter's
+    /// bound holds, or, for `Self.name`, the class being lowered, which the class the code is called on is or extends.
+    /// `None` for an instance member.
+    fn static_classes(&self, access: &PropertyAccess) -> Option<Vec<&'lowering [u8]>> {
+        if let Expression::Self_(_) = access.object {
+            return Some(vec![self.class]);
+        }
+        let class = self.names.static_property_class(access)?;
+
+        Some(self.types.type_parameter_classes(&class.name).unwrap_or_else(|| vec![self.names.get(&class.name)]))
+    }
+
+    /// The class node of the static member `access` reaches and the classes it can be, as [`Self::static_class`] gives
+    /// them for a class or a type parameter, and `static` for `Self`, the class the code is called on, spec section 25.
+    /// `None` for an instance member.
+    fn static_member_class(&mut self, access: &PropertyAccess) -> Option<(u32, Vec<&'lowering [u8]>)> {
+        if let Expression::Self_(keyword) = access.object {
+            return Some((self.string(ZEND_NAME_NOT_FQ, self.line(keyword), b"static"), vec![self.class]));
+        }
+        let names = self.names;
+
+        names.static_property_class(access).map(|class| self.static_class(class))
     }
 
     /// The class node of `Class.member` and the classes it can be: the class's full name, or, for a type parameter, the

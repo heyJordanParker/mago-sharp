@@ -60,8 +60,6 @@ pub enum ParseError {
     UntypedPropertyInSharp(Span),
     /// A PHP# statement, expression or type nested more than [`MAX_RECURSION_DEPTH`] levels deep, at the innermost one.
     NestingTooDeepInSharp(Span),
-    /// PHP# syntax the engine cannot run yet, such as an attribute target or a generic event, where it starts.
-    NotSupportedYetInSharp(&'static str, Span),
     /// `required` written on a PHP# method or operator, at the `required`. Spec section 25 keeps it to the constructor,
     /// which `new Self(…)` calls, and section 6.1 to a property.
     RequiredMethodInSharp(Span),
@@ -147,7 +145,6 @@ impl HasFileId for ParseError {
             | ParseError::UntypedFieldInSharp(span)
             | ParseError::UntypedPropertyInSharp(span)
             | ParseError::NestingTooDeepInSharp(span)
-            | ParseError::NotSupportedYetInSharp(_, span)
             | ParseError::RequiredMethodInSharp(span)
             | ParseError::InvalidTemplateEscapeInSharp(span)
             | ParseError::LambdaAfterOperatorInSharp(span)
@@ -196,7 +193,6 @@ impl HasSpan for ParseError {
             | ParseError::UntypedFieldInSharp(span)
             | ParseError::UntypedPropertyInSharp(span)
             | ParseError::NestingTooDeepInSharp(span)
-            | ParseError::NotSupportedYetInSharp(_, span)
             | ParseError::RequiredMethodInSharp(span)
             | ParseError::InvalidTemplateEscapeInSharp(span)
             | ParseError::LambdaAfterOperatorInSharp(span)
@@ -280,7 +276,6 @@ impl std::fmt::Display for ParseError {
             ParseError::NestingTooDeepInSharp(_) => {
                 format!("PHP# nests statements, expressions and types at most {MAX_RECURSION_DEPTH} levels deep.")
             }
-            ParseError::NotSupportedYetInSharp(construct, _) => format!("{construct} is not supported yet in PHP#."),
             ParseError::RequiredMethodInSharp(_) => {
                 "`required` goes on the constructor or a property, never on a method: remove it here.".to_string()
             }
@@ -448,10 +443,6 @@ impl From<&ParseError> for Issue {
                         ),
                     })
             }
-            ParseError::NotSupportedYetInSharp(_, span) => Issue::error(error.to_string())
-                .with_code(PARSE_ERROR_CODE)
-                .with_annotation(Annotation::primary(*span).with_message("Not supported yet."))
-                .with_note("The PHP# engine cannot run this spec syntax yet."),
             _ => Issue::error("Parse error encountered during parsing")
                 .with_code(PARSE_ERROR_CODE)
                 .with_annotation(Annotation::primary(error.span()).with_message(error.to_string()))

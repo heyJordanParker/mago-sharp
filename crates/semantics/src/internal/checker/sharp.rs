@@ -75,6 +75,7 @@ use mago_syntax::cst::IfBody;
 use mago_syntax::cst::Inheritance;
 use mago_syntax::cst::Instantiation;
 use mago_syntax::cst::Interface;
+use mago_syntax::cst::IntersectionHint;
 use mago_syntax::cst::Keyword;
 use mago_syntax::cst::Leave;
 use mago_syntax::cst::ListPatternElement;
@@ -368,8 +369,9 @@ const OBJECT: &[u8] = b"Object";
 ///   short name, without a member read or called on it. `new` and each method call, `super.` and
 ///   `Self.` calls included, take type arguments, as in `new PaginatedList<Order>(rows)` and
 ///   `Json.decode<WebhookPayload>(body)`, each a method body's type but `void`. `new Self(...)` in an enum is an error,
-///   because an enum has no constructor. `Self.name` read or written is not supported yet, and `super`
-///   is only the object of a method call, spec section 22.
+///   because an enum has no constructor. `Self.name` reads and writes a constant, an enum case or a static member of
+///   the class the code is called on, as `Class.name` does, except in a constant expression, and `super` is only the
+///   object of a method call, spec section 22.
 ///   PHP's own check reports a positional argument after a spread and a spread after a named argument, and
 ///   `check_function_call` reports `assert` with a spread as its only argument, after which PHP adds a positional
 ///   description. `?.` never follows a class. A function is the global function of that name, PHP's own or one a
@@ -404,9 +406,9 @@ const OBJECT: &[u8] = b"Object";
 ///   `x is not T`, as decision 044 decides. A list pattern has one rest.
 /// - What reads a type argument while the code runs, which R3 compiles, passes this check: a type parameter in a
 ///   pattern, a `match` arm, `as` or a catch clause, `typeof` and `new` of a type parameter, a static member reached
-///   through a type parameter, as in `TItem.make()` and `TItem.LIMIT`, and a type with type arguments in a pattern or
-///   `as`, as in `value is List<int>`. The analyzer refuses what no test can read, as a plain PHP class's type
-///   arguments. A named constructor through a type parameter, as in `new TItem.from(…)`, is not supported yet.
+///   through a type parameter, as in `TItem.make()` and `TItem.LIMIT`, a named constructor through a type parameter,
+///   as in `new TItem.fromJson(…)`, and a type with type arguments in a pattern or `as`, as in `value is List<int>`.
+///   The analyzer refuses what no test can read, as a plain PHP class's type arguments.
 /// - Casts: `(int)`, `(float)` and `(string)` in a method body, as spec section 24 writes them. PHP's other casts and
 ///   its cast aliases, such as `(bool)` and `(integer)`, are errors. A cast is lowercase only, so the lexer reads
 ///   `(Int)` as the class `Int` in parentheses, as in `typeof(Int)`.
@@ -836,7 +838,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         {
             Some(Parameter)
         }
-        (Node::TypeParameterList(list), Class | Interface | Method | Signature | Place::Struct) => {
+        (Node::TypeParameterList(list), Class | Interface | Method | Signature | Place::Struct | Place::Event) => {
             check_type_parameters(list, place, context);
 
             Some(Place::TypeParameter)
@@ -849,7 +851,11 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         (Node::TypeParameter(_), Place::TypeParameter) => Some(Place::TypeParameter),
         (Node::TypeParameterBound(bound), Place::TypeParameter) => {
             if is_slice_bound(&bound.hint, context) {
-                return Some(Place::TypeParameter);
+                return match &bound.hint {
+                    Hint::Intersection(intersection) => check_intersection(intersection, Place::TypeParameter, context),
+                    _ => true,
+                }
+                .then_some(Place::TypeParameter);
             }
 
             let message = if matches!(bound.hint, Hint::Union(_)) {
@@ -1498,13 +1504,15 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
 
             None
         }
-        // `check_hint` reports a type in parentheses that is not a union.
+        // `check_hint` reports a type in parentheses that is neither a union nor an intersection.
         (
             Node::Hint(Hint::Nullable(NullableHint { hint: Hint::Parenthesized(parenthesized), .. })),
             FieldOrProperty | ClassConstant | Method | Signature | Parameter | Body,
         ) => {
-            if let Hint::Union(union) = parenthesized.hint {
-                check_union(union, place, context);
+            match parenthesized.hint {
+                Hint::Union(union) => check_union(union, place, context),
+                Hint::Intersection(_) => enter_tree(Node::Hint(parenthesized.hint), place, context),
+                _ => {}
             }
 
             None
@@ -1512,6 +1520,15 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         (Node::Hint(hint), FieldOrProperty | Method | Signature | Parameter | Body) if is_slice_type(hint) => {
             Some(place)
         }
+        // Spec section 24: `&` joins classes and interfaces wherever a type goes, and a pattern tests each of them.
+        (
+            Node::Hint(Hint::Intersection(intersection)),
+            FieldOrProperty | ClassConstant | Method | Signature | Parameter | Body | Place::Pattern,
+        ) => check_intersection(intersection, place, context).then_some(place),
+        (
+            Node::IntersectionHint(_),
+            FieldOrProperty | ClassConstant | Method | Signature | Parameter | Body | Place::Pattern,
+        ) => Some(place),
         // Spec section 9: every call passes a parameter without a default, a constructor's or a method's, so `required`
         // adds nothing. It declares no member either, so it is this one error.
         (Node::Modifier(modifier @ Modifier::Required(_)), Parameter) => {
@@ -2030,6 +2047,20 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         {
             Some(Constant)
         }
+        // `Self.y` reads the class the code is called on, which no constant knows.
+        (Node::Expression(Expression::Access(Access::Property(access))), Constant)
+            if matches!(access.object, Expression::Self_(keyword) if is_sharp_self(keyword)) =>
+        {
+            context.report(
+                Issue::error(format!(
+                    "`{}` is not a constant: it reads the class the code is called on.",
+                    BytesDisplay(context.get_code_snippet(access))
+                ))
+                .with_annotation(Annotation::primary(access.span()).with_message("Written here.")),
+            );
+
+            None
+        }
         // The object decides a member of PHP's `self` or `static`, and of a superglobal or a `__Something__` name,
         // which binds as a class before `.`.
         (Node::Expression(Expression::Access(Access::Property(access))), Constant)
@@ -2228,6 +2259,16 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             Some(SelfCall)
         }
         (Node::Expression(Expression::Parent(_)), SuperCall) | (Node::Expression(Expression::Self_(_)), SelfCall) => None,
+        // `Self.TABLE` reads a constant, an enum case or a static member of the class the code is called on, spec
+        // section 25, as `Class.TABLE` reads its class's. The check of an expression runs before the walk enters it, so
+        // the last ancestor is its parent.
+        (Node::Expression(Expression::Self_(keyword)), Body)
+            if is_sharp_self(keyword)
+                && matches!(context.ancestors.last(), Some(Node::Expression(Expression::Access(Access::Property(access))))
+                    if access.object.span() == keyword.span) =>
+        {
+            None
+        }
         (Node::ClassLikeMemberSelector(_) | Node::TypeArgumentList(_) | Node::ArgumentList(_), SuperCall | SelfCall) => {
             enter(node, Body, context)
         }
@@ -4696,6 +4737,58 @@ fn is_class_bound(hint: &Hint, context: &Context<'_, '_, '_>) -> bool {
     }
 }
 
+/// Decides each type an intersection joins with `&`, spec sections 11 and 24, as `Shippable & Billable` or the bound
+/// `<TItem : DatabaseEntity & Shareable>`: a class or an interface, written by its name and its type arguments. A bound
+/// at `place` [`Place::TypeParameter`] that joins `Object` is refused as `Object` alone, which holds any object, and
+/// `T?` among the types is the whole intersection with null, written `(A & B)?` as a union is. Returns whether every
+/// type is a class or an interface.
+fn check_intersection(intersection: &IntersectionHint, place: Place, context: &mut Context<'_, '_, '_>) -> bool {
+    let mut joined = true;
+    for member in [intersection.left, intersection.right] {
+        let message = match member {
+            Hint::Intersection(inner) => {
+                joined &= check_intersection(inner, place, context);
+
+                continue;
+            }
+            // The walk refuses parentheses around one type.
+            Hint::Parenthesized(_) => continue,
+            Hint::Identifier(name) if !context.names.is_type_parameter(name) => continue,
+            Hint::Generic(generic)
+                if built_in_generic_arity(generic.name.value).is_none()
+                    && !context.names.is_type_parameter(&generic.name) =>
+            {
+                continue;
+            }
+            Hint::Object(object) if place == Place::TypeParameter && object.value == OBJECT => {
+                "`Object` is a bound alone, as in `<TValue : Object>`: it joins no other bound with `&`.".to_owned()
+            }
+            Hint::Nullable(nullable) => {
+                let written = context.get_code_snippet(intersection);
+                let at = (nullable.question_mark.start.offset - intersection.span().start.offset) as usize;
+
+                format!(
+                    "An intersection that holds null is written `({}{})?`.",
+                    BytesDisplay(&written[..at]),
+                    BytesDisplay(&written[at + 1..])
+                )
+            }
+            member => format!(
+                "`&` joins classes and interfaces only, and `{}` is neither.",
+                BytesDisplay(context.get_code_snippet(member))
+            ),
+        };
+        context.report(
+            Issue::error(message)
+                .with_annotation(Annotation::primary(member.span()).with_message("Joined here."))
+                .with_note(supported(place)),
+        );
+        joined = false;
+    }
+
+    joined
+}
+
 /// Checks the type arguments a generic type's name takes: their count for `List`, `Set` and `Map`, spec section 12, and
 /// `Class<T>`, section 25, a `Map`'s key, `Class<T>`'s class, and none on a type parameter. The analyzer checks a
 /// generic class's arity and bounds. Returns the place of the type arguments, or none when the walk skips them.
@@ -4982,23 +5075,6 @@ fn check_instantiation(instantiation: &Instantiation, context: &mut Context<'_, 
 
             return Some(Place::Instantiation);
         }
-        // A named constructor through a type parameter reads the type argument while the code runs, which the engine
-        // can't do yet.
-        Expression::Identifier(class)
-            if context.names.is_type_parameter(class)
-                && let Some(constructor) = &instantiation.constructor =>
-        {
-            context.report(
-                Issue::error(format!(
-                    "A named constructor through a type parameter, as in `new {}.{}(…)`, is not supported yet in PHP#.",
-                    BytesDisplay(context.get_code_snippet(class)),
-                    BytesDisplay(constructor.name.value)
-                ))
-                .with_annotation(Annotation::primary(instantiation.span()).with_message("Not supported yet.")),
-            );
-
-            return None;
-        }
         Expression::Identifier(class)
             if context.names.is_type_parameter(class)
                 && let Some(type_arguments) = &instantiation.type_arguments =>
@@ -5170,12 +5246,15 @@ fn check_named_constructor(
         );
     }
 
-    // Spec section 5's `internal` is an access.
-    let is_access = |modifier: &Modifier| modifier.is_read_visibility() || matches!(modifier, Modifier::Internal(_));
-    for modifier in constructor.modifiers.iter().filter(|modifier| !is_access(modifier)) {
+    // Spec section 5's `internal` is an access. `required` makes every subclass keep the named constructor, so `new
+    // TItem.fromJson(…)` can call it, spec section 11.
+    let is_allowed = |modifier: &Modifier| {
+        modifier.is_read_visibility() || matches!(modifier, Modifier::Internal(_) | Modifier::Required(_))
+    };
+    for modifier in constructor.modifiers.iter().filter(|modifier| !is_allowed(modifier)) {
         report(
             format!(
-                "A named constructor takes only `public`, `protected` or `private`: remove `{}`.",
+                "A named constructor takes only `public`, `protected`, `private` or `required`: remove `{}`.",
                 BytesDisplay(modifier.get_keyword().value)
             ),
             modifier.span(),
@@ -5496,7 +5575,7 @@ fn report_unsupported(node: Node<'_, '_>, place: Place, context: &mut Context<'_
         _ => "construct",
     };
 
-    if is_undecided(node, place, context) {
+    if is_undecided(node, place) {
         context.report(not_supported_yet(node.span(), construct, supported(place)));
     } else if let Some(issue) = broken_rule(node, place, context) {
         context.report(issue);
@@ -5549,27 +5628,17 @@ fn unexpected_part(node: Node<'_, '_>) -> Option<Span> {
 }
 
 /// Whether a node the slice does not have is a form PHP# has not decided, or that a later change builds, so it is not
-/// supported yet: a member of `Self` read or written, as in `Self.count`, an interface's constants, property bodies and
-/// operators, an enum's operators, and an intersection type.
-fn is_undecided(node: Node<'_, '_>, place: Place, context: &Context<'_, '_, '_>) -> bool {
-    match (node, place) {
-        // The check of an expression runs before the walk enters it, so the last ancestor is its parent.
-        (Node::Expression(Expression::Self_(keyword)), _) => {
-            is_sharp_self(keyword)
-                && matches!(context.ancestors.last(), Some(Node::Expression(Expression::Access(Access::Property(access))))
-                    if access.object.span() == keyword.span)
-        }
+/// supported yet: an interface's constants, property bodies and operators, and an enum's operators.
+fn is_undecided(node: Node<'_, '_>, place: Place) -> bool {
+    matches!(
+        (node, place),
         (
             Node::ClassLikeMember(
                 ClassLikeMember::Constant(_) | ClassLikeMember::Property(_) | ClassLikeMember::Operator(_),
             ),
             Place::Interface,
-        )
-        | (Node::ClassLikeMember(ClassLikeMember::Operator(_)), Place::Enum) => true,
-        (Node::Hint(Hint::Intersection(_)) | Node::IntersectionHint(_), _) => true,
-        (Node::Hint(Hint::Parenthesized(parenthesized)), _) => matches!(parenthesized.hint, Hint::Intersection(_)),
-        _ => false,
-    }
+        ) | (Node::ClassLikeMember(ClassLikeMember::Operator(_)), Place::Enum)
+    )
 }
 
 /// The error for a PHP# form that breaks a rule of the place it is written at, as a modifier the declaration doesn't
@@ -5607,7 +5676,7 @@ fn broken_rule(node: Node<'_, '_>, place: Place, context: &Context<'_, '_, '_>) 
                 .with_note(supported(place))
         }
         (Node::Hint(Hint::Parenthesized(parenthesized)), _) => error(format!(
-            "Write `{}` without parentheses: they go only around a union before `?`, as in `(int|string)?`.",
+            "Write `{}` without parentheses: they go only around a union or an intersection before `?`, as in `(int|string)?`.",
             written(parenthesized.hint.span())
         )),
         (Node::Hint(hint), Place::Header) => error(format!(
@@ -5663,7 +5732,7 @@ fn supported(place: Place) -> &'static str {
             "A PHP# interface has attributes, an optional `public`, a name, optional type parameters as in `<in TItem>`, an optional `: Interface` header, methods and get-only properties, as in `int orderId { get; }`, with no other modifiers, `extends`, constants or other properties."
         }
         Place::Signature => {
-            "A PHP# interface method has attributes, no modifier, optional type parameters, parameters, a return type of `int`, `float`, `bool`, `string`, `Any`, `void`, `never`, a class or a type parameter, a generic type as in `List<T>` or `PaginatedList<Order>`, or `Self`, each but `void` and `never` nullable as in `int?`, or a union of them but `void` and `never`, as in `int|string`, and no body or a default body."
+            "A PHP# interface method has attributes, no modifier, optional type parameters, parameters, a return type of `int`, `float`, `bool`, `string`, `Any`, `void`, `never`, a class or a type parameter, a generic type as in `List<T>` or `PaginatedList<Order>`, or `Self`, each but `void` and `never` nullable as in `int?`, or a union of them but `void` and `never`, as in `int|string`, or classes and interfaces joined with `&`, as in `Shippable & Billable`, and no body or a default body."
         }
         Place::Enum => {
             "A PHP# enum has attributes, an optional `public`, a name, optional type parameters as in `<T, TError : Error>` when it has no backing type, an optional `: string, Interface` header whose `int` or `string` comes first, constants, cases, computed properties, methods and laws, with no other modifiers or `implements`. A case of a backed enum has a value, as in `case None = \"none\";`, and a case of any other enum may carry data, as in `case Paid(string transactionId);`."
@@ -5676,22 +5745,22 @@ fn supported(place: Place) -> &'static str {
             "A PHP# type parameter is an optional `in` or `out`, a name that starts with `T`, and an optional bound of `Object`, of another type parameter, or of classes and interfaces joined with `&`, as in `<out TItem : DatabaseEntity & Shareable>`."
         }
         Place::Event => {
-            "A PHP# event has an optional `public`, a name, parameters, each a type and a name with an optional default, and an optional `: Interface` header, as in `public event OrderPaid(int orderId) : OrderEvent;`."
+            "A PHP# event has an optional `public`, a name, optional type parameters as in `<T : DatabaseEntity>`, parameters, each a type and a name with an optional default, and an optional `: Interface` header, as in `public event OrderPaid(int orderId) : OrderEvent;`."
         }
         Place::Struct => unreachable!("the walk enters every part of a struct"),
         Place::Module => unreachable!("a module holds only its header, bindings and laws, and `enter` takes each one"),
         Place::Extension => unreachable!("`enter` places an extension's keyword, receiver and every member of it"),
         Place::FieldOrProperty => {
-            "A PHP# field is `private` or `protected`, and a property has the accessors `get` and an optional `set` or `init`, each `;`, `=> expr;` or a block. Both may be `static`, and have a type of `int`, `float`, `bool`, `string`, `Any`, a class or a type parameter, a generic type as in `List<T>` or `PaginatedList<Order>`, `Function<R(P)>`, or a tuple as in `[Money, int]`, nullable as in `int?` or not, or a union of them as in `int|string`, a name, and an optional initial value."
+            "A PHP# field is `private` or `protected`, and a property has the accessors `get` and an optional `set` or `init`, each `;`, `=> expr;` or a block. Both may be `static`, and have a type of `int`, `float`, `bool`, `string`, `Any`, a class or a type parameter, a generic type as in `List<T>` or `PaginatedList<Order>`, `Function<R(P)>`, or a tuple as in `[Money, int]`, nullable as in `int?` or not, or a union of them as in `int|string`, or classes and interfaces joined with `&` as in `Shippable & Billable`, a name, and an optional initial value."
         }
         Place::ClassConstant => {
             "A PHP# constant has attributes, `public`, `protected` or `private`, an optional type of `int`, `float`, `bool`, `string`, `Any`, a class, a generic type as in `Map<string, int>` or `Class<Report>`, a function type as in `Function<int(int)>` or a tuple as in `[int, string]`, nullable as in `int?` or not, or a union of them as in `int|string`, one name, and a constant value."
         }
         Place::Method => {
-            "A PHP# method takes `public`, `protected`, `private`, `static`, `abstract`, `virtual` and `override`, a constructor also `required`, optional type parameters as in `<TItem : DatabaseEntity>`, parameters, and a return type of `int`, `float`, `bool`, `string`, `Any`, `void`, `never`, a class or a type parameter, a generic type as in `List<T>` or `PaginatedList<Order>`, `Function<R(P)>`, a tuple as in `[Money, int]` or `Self`, each but `void` and `never` nullable as in `int?`, or a union of them but `void` and `never`, as in `int|string`, and an optional `on` clause after the parameters, as in `on OrderPaid, OrderRefunded`."
+            "A PHP# method takes `public`, `protected`, `private`, `static`, `abstract`, `virtual` and `override`, a constructor or a named constructor also `required`, optional type parameters as in `<TItem : DatabaseEntity>`, parameters, and a return type of `int`, `float`, `bool`, `string`, `Any`, `void`, `never`, a class or a type parameter, a generic type as in `List<T>` or `PaginatedList<Order>`, `Function<R(P)>`, a tuple as in `[Money, int]` or `Self`, each but `void` and `never` nullable as in `int?`, or a union of them but `void` and `never`, as in `int|string`, or classes and interfaces joined with `&`, as in `Shippable & Billable`, and an optional `on` clause after the parameters, as in `on OrderPaid, OrderRefunded` or `on Saved<Order>`."
         }
         Place::Parameter => {
-            "A PHP# parameter has a type of `int`, `float`, `bool`, `string`, `Any`, a class or a type parameter, a generic type as in `List<T>` or `PaginatedList<Order>`, `Function<R(P)>`, or a tuple as in `[Money, int]`, nullable as in `int?` or not, or a union of them as in `int|string`, a name, and an optional default. The last parameter can be variadic, as in `int ...values`."
+            "A PHP# parameter has a type of `int`, `float`, `bool`, `string`, `Any`, a class or a type parameter, a generic type as in `List<T>` or `PaginatedList<Order>`, `Function<R(P)>`, or a tuple as in `[Money, int]`, nullable as in `int?` or not, or a union of them as in `int|string`, or classes and interfaces joined with `&` as in `Shippable & Billable`, a name, and an optional default. The last parameter can be variadic, as in `int ...values`."
         }
         Place::Lambda => {
             "A PHP# lambda is a bare arrow after one name or parenthesized parameters, each with an optional type, and its body is an expression or a block, as in `(a, b) => a + b`. The last parameter can be variadic, as in `(int ...values) => count(values)`."
@@ -5703,7 +5772,7 @@ fn supported(place: Place) -> &'static str {
         | Place::SuperCall
         | Place::SelfCall
         | Place::RefusedPart(_) => {
-            "In a method body, PHP# supports blocks, expression statements, `return`, `let` and `const`, which may unpack a tuple, and typed locals, `if` with `else if` and `else`, `while`, `do … while`, `for`, `for … of`, `break` and `continue` without a level, `try` with `catch` and `finally`, and `yield value;` and `yield ...other;` in a method that returns `Iterable<T>`, with literals, list and map literals, index reads, templates, parentheses, bare names, assignment, arithmetic, comparison and logical operators, `??`, the ternary `c ? a : b`, `(int)`, `(float)` and `(string)`, `++` and `--`, method calls, with optional type arguments as in `Json.decode<WebhookPayload>(body)`, and property reads written with `.` or `?.`, lambdas as in `x => x.id`, `new Class(...)` with optional type arguments as in `new PaginatedList<Order>(rows)`, `new Class.name(...)` and, with a `required` constructor, `new Self(...)` and `new (type)(...)` of a class value, calls of global functions and of a local that holds a lambda, `super.method(...)` and `Self.method(...)`, each with positional, named and spread arguments as in `max(...prices)`, `throw`, `try` before a `Result`, `exit(code)`, `typeof(Class)`, `nameof(Class.property)`, `is`, `as` and `match`."
+            "In a method body, PHP# supports blocks, expression statements, `return`, `let` and `const`, which may unpack a tuple, and typed locals, `if` with `else if` and `else`, `while`, `do … while`, `for`, `for … of`, `break` and `continue` without a level, `try` with `catch` and `finally`, and `yield value;` and `yield ...other;` in a method that returns `Iterable<T>`, with literals, list and map literals, index reads, templates, parentheses, bare names, assignment, arithmetic, comparison and logical operators, `??`, the ternary `c ? a : b`, `(int)`, `(float)` and `(string)`, `++` and `--`, method calls, with optional type arguments as in `Json.decode<WebhookPayload>(body)`, and property reads written with `.` or `?.`, lambdas as in `x => x.id`, `new Class(...)` with optional type arguments as in `new PaginatedList<Order>(rows)`, `new Class.name(...)` and, with a `required` constructor, `new Self(...)`, `new TItem.name(...)` of a type parameter and `new (type)(...)` of a class value, calls of global functions and of a local that holds a lambda, `super.method(...)`, `Self.method(...)` and `Self.name`, each with positional, named and spread arguments as in `max(...prices)`, `throw`, `try` before a `Result`, `exit(code)`, `typeof(Class)`, `nameof(Class.property)`, `is`, `as` and `match`."
         }
         Place::Attribute => {
             "A PHP# attribute is a class name with optional positional and named arguments, as in `[Field(\"Name\", searchable: true)]`."
@@ -5712,7 +5781,7 @@ fn supported(place: Place) -> &'static str {
             "A constant's value, an attribute argument, an enum case's value or a pattern's value is built from constants: literals, constants, enum cases, a backed case's `value` and the `name` of a case of an enum whose cases carry no data, `typeof(Class)`, list and map literals, indexes, templates, the ternary `c ? a : b`, `match`, `(int)`, `(float)` and `(string)`, and arithmetic, comparison, logical and `??` operators. All but a pattern's value take lambdas that capture nothing, and an attribute argument takes `new` of a class with such arguments, as in `[Rule(new Range(1, 10))]`."
         }
         Place::Pattern => {
-            "A PHP# pattern is a type of `int`, `float`, `string`, `bool`, `Any`, `Object`, a class, a collection as in `List<int>`, a class value as in `Class<Order>`, a function type as in `Function<int(int)>`, or a union of them, a tuple among them, as in `int|[int, string]`, with an optional name, as in `int count`, a case with its fields, as in `PaymentResult.Paid(string transactionId)`, a class with properties, as in `Paid { amount: > 0 } big`, a constant, a comparison such as `< 10`, a properties pattern such as `{ total: > 0 }`, a list pattern such as `[Line first, ...List<Line> rest]`, or patterns joined by `and`, `or` and `not`."
+            "A PHP# pattern is a type of `int`, `float`, `string`, `bool`, `Any`, `Object`, a class, a collection as in `List<int>`, a class value as in `Class<Order>`, a function type as in `Function<int(int)>`, or a union of them, a tuple among them, as in `int|[int, string]`, or classes and interfaces joined with `&`, as in `Shippable & Billable`, with an optional name, as in `int count`, a case with its fields, as in `PaymentResult.Paid(string transactionId)`, a class with properties, as in `Paid { amount: > 0 } big`, a constant, a comparison such as `< 10`, a properties pattern such as `{ total: > 0 }`, a list pattern such as `[Line first, ...List<Line> rest]`, or patterns joined by `and`, `or` and `not`."
         }
     }
 }

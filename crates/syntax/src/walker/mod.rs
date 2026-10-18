@@ -998,6 +998,9 @@ generate_ast_walker! {
 
         walker.walk_keyword(&event.event, context);
         walker.walk_local_identifier(&event.name, context);
+        if let Some(type_parameters) = &event.type_parameters {
+            walker.walk_type_parameter_list(type_parameters, context);
+        }
         walker.walk_function_like_parameter_list(&event.parameter_list, context);
 
         if let Some(inheritance) = &event.inheritance {
@@ -1463,7 +1466,7 @@ generate_ast_walker! {
     'arena On as on => {
         walker.walk_keyword(&on.on, context);
         for event in &on.events {
-            walker.walk_identifier(event, context);
+            walker.walk_hint(event, context);
         }
     }
 

@@ -4,6 +4,7 @@ use crate::cst::cst::BinaryOperator;
 use crate::cst::cst::ClassLikeMember;
 use crate::cst::cst::ConstructorInitializer;
 use crate::cst::cst::FunctionLikeReturnTypeHint;
+use crate::cst::cst::GenericHint;
 use crate::cst::cst::Hint;
 use crate::cst::cst::Identifier;
 use crate::cst::cst::Keyword;
@@ -253,7 +254,8 @@ where
     }
 
     /// Parses an `on` clause when one starts here: `on`, which stays a name everywhere else, and the events it lists,
-    /// each a name, which the analyzer refuses as a full name when it is dotted.
+    /// each a name, which the analyzer refuses as a full name when it is dotted, or a generic event's name and its type
+    /// arguments, as in `Saved<Order>`.
     fn parse_optional_on(&mut self) -> Result<Option<On<'arena>>, ParseError> {
         if !self.stream.lookahead(0)?.is_some_and(|token| token.kind == T![Identifier] && token.value == b"on") {
             return Ok(None);
@@ -263,7 +265,12 @@ where
         let mut events = self.new_vec();
         let mut commas = self.new_vec();
         loop {
-            events.push(self.parse_dotted_identifier()?);
+            events.push(match self.parse_dotted_identifier()? {
+                Identifier::Local(name) if self.stream.is_at(T!["<"])? => {
+                    Hint::Generic(GenericHint { name, type_arguments: self.parse_type_argument_list()?, case: None })
+                }
+                name => Hint::Identifier(name),
+            });
 
             if let Some(T![","]) = self.stream.peek_kind(0)? {
                 commas.push(self.stream.consume()?);

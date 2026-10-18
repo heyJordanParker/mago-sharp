@@ -916,15 +916,35 @@ where
     // of the class, so the class keeps a constructor every subclass must keep, as `new Self(…)` needs, spec section 25.
     // That holds for every class value, `typeof(Loose)` included, as the spec writes the rule. A plain PHP class's own
     // constructor checks the call.
+    // `new TItem.fromJson(…)` calls the named constructor of the type argument, which a subclass declares again, as it
+    // inherits none, so it needs one marked `required`, which every subclass keeps, spec section 11.
     let through_class_value = context.dialect.is_sharp() && classname.is_from_class_string();
-    if has_inconsistent_constructor && through_class_value && metadata.flags.is_sharp() {
-        let written = String::from_utf8_lossy(&context.source_file.contents[class_expression_span.to_range_usize()]);
-        let holder = match &classname.origin {
-            ResolutionOrigin::SpecificClassLikeString(TClassLikeString::Generic { parameter_name, .. }) => {
-                format!("`{parameter_name}` can be")
-            }
-            _ => "a class value can hold".to_owned(),
-        };
+    let written = || String::from_utf8_lossy(&context.source_file.contents[class_expression_span.to_range_usize()]);
+    let holder = || match &classname.origin {
+        ResolutionOrigin::SpecificClassLikeString(TClassLikeString::Generic { parameter_name, .. }) => {
+            format!("`{parameter_name}` can be")
+        }
+        _ => "a class value can hold".to_owned(),
+    };
+    if through_class_value
+        && metadata.flags.is_sharp()
+        && let Some(constructor) = constructor
+    {
+        if !context.codebase.get_method_by_id(&constructor_id).is_some_and(|method| method.flags.is_required()) {
+            let (written, holder, name) = (written(), holder(), BytesDisplay(constructor.name.value));
+            context.collector.report_with_code(
+                IssueCode::UnsafeInstantiation,
+                Issue::error(format!(
+                    "`new {written}.{name}(…)` needs a `required` named constructor: {holder} any subclass of `{classname_str}`, so every subclass must declare a `{name}` that `new {written}.{name}(…)` can call.",
+                ))
+                .with_annotation(Annotation::primary(instantiation_span).with_message("Created here."))
+                .with_help(format!(
+                    "Declare `{classname_str}.{name}` `required`, as in `public required {classname_str}.{name}(…)`."
+                )),
+            );
+        }
+    } else if has_inconsistent_constructor && through_class_value && metadata.flags.is_sharp() {
+        let (written, holder) = (written(), holder());
         context.collector.report_with_code(
             IssueCode::UnsafeInstantiation,
             Issue::error(format!(

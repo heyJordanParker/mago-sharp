@@ -29,8 +29,18 @@ pub fn populate_function_like_metadata(
         add_class_reference(symbol_references, reference_source, attribute_metadata.name, Some(true));
     }
 
-    for class in metadata.listens.iter().chain(&metadata.uses) {
+    for class in &metadata.uses {
         add_class_reference(symbol_references, reference_source, *class, Some(true));
+    }
+
+    for listened in &mut metadata.listens {
+        populate_union_type(
+            listened,
+            codebase_symbols,
+            Some(reference_source),
+            symbol_references,
+            force_type_population,
+        );
     }
 
     for return_type in

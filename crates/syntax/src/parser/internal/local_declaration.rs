@@ -84,10 +84,11 @@ where
     }
 
     /// Returns `true` when the next tokens read as a type: a name and an optional `?` written right after it, then
-    /// another name and `=`, or a union type that a name and `=` follow, as in `int|string key = 1;` or
-    /// `(int|string)? key = null;`, or `(` and a type with type arguments, which starts a nullable union as in
-    /// `(List<int>|string)? items = null;`. A spaced `?` is the conditional operator, and a union without a name after
-    /// it is the bitwise `|`, as in `flags | MASK;` or `(flags | 1);`.
+    /// another name and `=`, or a union or an intersection type that a name and `=` follow, as in `int|string key = 1;`,
+    /// `(int|string)? key = null;` or `Shippable & Billable item = parcel;`, or `(` and a type with type arguments,
+    /// which starts a nullable union as in `(List<int>|string)? items = null;`. A spaced `?` is the conditional
+    /// operator, and a union or an intersection without a name after it is the bitwise `|` or `&`, as in `flags | MASK;`
+    /// or `(flags & 1);`.
     ///
     /// A capitalized name followed by `<` starts a type with type arguments, as in `List<Line> lines = [];`, because
     /// spec section 24 capitalizes every type but the built-in ones, unless a `.` follows the `>`, as in
@@ -111,7 +112,7 @@ where
             };
 
             return Ok(match self.stream.peek_kind(2)? {
-                Some(T!["|"]) => first.kind == T![Identifier] && self.is_at_union_typed_local()?,
+                Some(T!["|" | "&"]) => first.kind == T![Identifier] && self.is_at_union_typed_local()?,
                 Some(T!["<"]) => {
                     first.kind == T![Identifier] && first.value.first().is_some_and(u8::is_ascii_uppercase)
                 }
@@ -143,7 +144,7 @@ where
         };
 
         match self.stream.peek_kind(name)? {
-            Some(T!["|"]) => self.is_at_union_typed_local(),
+            Some(T!["|" | "&"]) => self.is_at_union_typed_local(),
             Some(kind) if kind.is_identifier_maybe_reserved() => {
                 Ok(matches!(self.stream.peek_kind(name + 1)?, Some(T!["="])))
             }
@@ -180,9 +181,10 @@ where
             && tokens.next().transpose()?.is_some_and(|equals| equals.kind == T!["="]))
     }
 
-    /// Returns `true` when the union type at the head of the stream is followed by a local's name and `=`. A type
-    /// holds names, `|`, a `?` written right after the token before it, and anything inside `<…>` or `(…)`, so the
-    /// first other token ends it. It reads past the token buffer, because a union can be longer than the buffer holds.
+    /// Returns `true` when the union or intersection type at the head of the stream is followed by a local's name and
+    /// `=`. A type holds names, `|`, `&`, a `?` written right after the token before it, and anything inside `<…>` or
+    /// `(…)`, so the first other token ends it. It reads past the token buffer, because a type can be longer than the
+    /// buffer holds.
     fn is_at_union_typed_local(&self) -> Result<bool, ParseError> {
         let ends_type = |token: &Token<'_>| {
             token.kind.is_identifier_maybe_reserved() || matches!(token.kind, T![">" | ">>" | ")" | "?"])
@@ -211,7 +213,7 @@ where
                     if previous.is_some_and(|previous| {
                         token.start.offset == previous.start.offset + previous.value.len() as u32
                     }) => {}
-                T!["|"] => {}
+                T!["|" | "&"] => {}
                 kind if kind.is_identifier_maybe_reserved() => {}
                 _ => return Ok(false),
             }

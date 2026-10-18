@@ -65,6 +65,7 @@ use crate::effects::FunctionValue;
 use crate::effects::Roots;
 use crate::effects::Runs;
 use crate::effects::member_of_foreign_class;
+use crate::resolver::static_property::StaticProperty;
 use crate::statement::function_like::FunctionLikeBody;
 use crate::utils::names::display_function_holder;
 use crate::utils::names::display_sharp_type;
@@ -427,7 +428,7 @@ where
             },
             Expression::Parent(_) => Roots::from([Changed::This]),
             Expression::Access(Access::Property(access)) => {
-                if self.context.resolved_names.static_property_class(access).is_some() {
+                if StaticProperty::from_property_access(access, self.context.resolved_names).is_some() {
                     Roots::from([Changed::Shared])
                 } else {
                     self.roots(access.object)
@@ -536,7 +537,7 @@ where
                 }
             }
             Expression::Access(Access::Property(access)) => {
-                if self.context.resolved_names.static_property_class(access).is_some() {
+                if StaticProperty::from_property_access(access, self.context.resolved_names).is_some() {
                     self.change(Roots::from([Changed::Shared]), span, place);
                     return;
                 }

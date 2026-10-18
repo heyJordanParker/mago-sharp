@@ -72,14 +72,16 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Access<'arena> {
                 Ok(())
             }
             // `TItem.y` reads `y` on the class of the type argument the code runs with, any class `TItem`'s bound holds,
-            // as a class value's member is read. The resolution reports a bound that holds a type that is no class.
+            // and `Self.y` on the class the code is called on, spec section 25, as a class value's member is read. The
+            // resolution reports a bound that holds a type that is no class.
             Access::Property(
-                access @ PropertyAccess {
-                    object: Expression::ConstantAccess(class),
-                    property: ClassLikeMemberSelector::Identifier(name),
-                    ..
-                },
-            ) if context.resolved_names.is_type_parameter(&class.name) => {
+                access @ PropertyAccess { object, property: ClassLikeMemberSelector::Identifier(name), .. },
+            ) if match object {
+                Expression::ConstantAccess(class) => context.resolved_names.is_type_parameter(&class.name),
+                Expression::Self_(_) => context.dialect.is_sharp(),
+                _ => false,
+            } =>
+            {
                 let classes: Vec<Word> =
                     resolve_classnames_from_expression(context, block_context, artifacts, access.object, false)?
                         .into_iter()
@@ -91,6 +93,9 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Access<'arena> {
                     return Ok(());
                 }
 
+                // `Self` is no value, so nothing before the member is analyzed.
+                let is_self = matches!(object, Expression::Self_(_));
+
                 analyze_class_value_member(
                     context,
                     block_context,
@@ -99,7 +104,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Access<'arena> {
                     name,
                     access.span(),
                     classes,
-                    false,
+                    is_self,
                 )
             }
             // PHP# writes both `Class::NAME` and `Class::$name` as `Class.name`, with a bare name bound to a class.

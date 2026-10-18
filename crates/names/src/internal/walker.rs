@@ -64,7 +64,6 @@ use mago_syntax::cst::Namespace;
 use mago_syntax::cst::Node;
 use mago_syntax::cst::NullSafeMethodCall;
 use mago_syntax::cst::NullSafePropertyAccess;
-use mago_syntax::cst::On;
 use mago_syntax::cst::Operator;
 use mago_syntax::cst::Pattern;
 use mago_syntax::cst::PatternMatchPatternArm;
@@ -755,16 +754,19 @@ where
         self.exit_type_parameters();
     }
 
-    /// An event is a class of its namespace, spec section 15, and its parameters are its constructor's.
+    /// An event is a class of its namespace, spec section 15, its parameters are its constructor's, and its type
+    /// parameters are a class's.
     fn walk_in_event(&mut self, event: &'ast Event<'arena>, context: &mut NameResolutionContext<'arena, A>) {
         let classlike = context.qualify_name(event.name.value);
 
         self.resolved_names.insert_at(event.name.span, classlike, false);
         self.locals.enter_method();
+        self.enter_type_parameters(event.type_parameters.as_ref());
     }
 
     fn walk_out_event(&mut self, _event: &'ast Event<'arena>, _context: &mut NameResolutionContext<'arena, A>) {
         self.locals.exit_method();
+        self.exit_type_parameters();
     }
 
     fn walk_in_method(&mut self, method: &'ast Method<'arena>, _context: &mut NameResolutionContext<'arena, A>) {
@@ -1461,15 +1463,7 @@ where
         }
     }
 
-    fn walk_in_on(&mut self, on: &'ast On<'arena>, context: &mut NameResolutionContext<'arena, A>) {
-        for event in &on.events {
-            let (event_classlike, imported) = self.resolve_class(context, arena_name(context, event));
-
-            self.resolved_names.insert_at(event.span(), event_classlike, imported);
-        }
-    }
-
-    /// Resolves the name every type is written with, a header's included. A name that names a type parameter in scope
+    /// Resolves the name every type is written with, a header's and an `on` clause's included. A name that names a type parameter in scope
     /// is that type parameter. A generic type, as in `PaginatedList<Order>`, names its class before its type arguments,
     /// and the names [`built_in_generic_arity`] knows name no class.
     fn walk_in_hint(&mut self, hint: &'ast Hint<'arena>, context: &mut NameResolutionContext<'arena, A>) {

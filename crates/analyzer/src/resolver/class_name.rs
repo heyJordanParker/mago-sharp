@@ -39,6 +39,7 @@ use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
 use crate::expression::is_refused_type;
+use crate::resolver::property::type_parameters;
 use crate::statement::get_type_from_hint;
 use crate::utils::expression::expression_is_nullsafe;
 use crate::utils::names::display_class_like_name;
@@ -451,11 +452,22 @@ pub(crate) fn generic_class_type<'artifacts>(
 /// The type arguments a static member read or called through `class_expression` takes its class's statics with:
 /// those of [`generic_class_type`], or for a type parameter those of its bound, as `Order` for `TCounter :
 /// Counter<Order>`, which the type argument the code runs with fits, as a class value takes those its type names, spec
-/// section 11.
-pub(crate) fn statics_type_arguments<'artifacts>(
-    artifacts: &'artifacts AnalysisArtifacts,
+/// section 11. PHP#'s `Self` takes its class's own type parameters, as `Counter<T>` names them inside `Counter`, spec
+/// section 25.
+pub(crate) fn statics_type_arguments<A>(
+    context: &Context<'_, '_, A>,
+    block_context: &BlockContext<'_>,
+    artifacts: &AnalysisArtifacts,
     class_expression: &Expression<'_>,
-) -> Option<&'artifacts [TUnion]> {
+) -> Option<Vec<TUnion>>
+where
+    A: Arena,
+{
+    if let Expression::Self_(_) = class_expression.unparenthesized()
+        && context.dialect.is_sharp()
+    {
+        return block_context.scope.get_class_like().map(type_parameters);
+    }
     // `resolve_type_parameter` records a type parameter written as a class as its tested type.
     let tested = artifacts.get_tested_type(class_expression.unparenthesized());
     let bound = match tested.map(|tested| tested.types.as_ref()) {
@@ -463,7 +475,10 @@ pub(crate) fn statics_type_arguments<'artifacts>(
         _ => None,
     };
 
-    bound.or_else(|| generic_class_type(artifacts, class_expression)).and_then(TNamedObject::get_type_parameters)
+    bound
+        .or_else(|| generic_class_type(artifacts, class_expression))
+        .and_then(TNamedObject::get_type_parameters)
+        .map(<[_]>::to_vec)
 }
 
 /// Resolves a CST `Expression` to one or more `ResolvedClassname` instances.

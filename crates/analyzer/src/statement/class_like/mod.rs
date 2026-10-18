@@ -1463,6 +1463,7 @@ where
     if class_like_metadata.flags.is_sharp() {
         check_sharp_template_variance(context, class_like_metadata, inheritance_ast);
         check_sharp_serializable(context, class_like_metadata);
+        check_required_named_constructors(context, class_like_metadata, name_span.unwrap_or(declaration_span));
     } else {
         // A PHP# class that reaches a generic class-like twice is refused whole by `check_sharp_reached_twice`.
         check_template_variance_positions(context, class_like_metadata);
@@ -3932,6 +3933,55 @@ where
     );
 
     true
+}
+
+/// Reports a PHP# class with objects of its own that inherits a `required` named constructor instead of declaring its
+/// own, spec section 11, as Swift requires each subclass to provide a `required init`. A named constructor is not
+/// inherited, and `new TItem.fromJson(…)` can create any class below the one that requires it.
+fn check_required_named_constructors<A>(
+    context: &mut Context<'_, '_, A>,
+    class_like_metadata: &ClassLikeMetadata,
+    span: Span,
+) where
+    A: Arena,
+{
+    if class_like_metadata.flags.is_abstract() {
+        return;
+    }
+
+    for (method_name, declaring_method_id) in &class_like_metadata.declaring_method_ids {
+        if declaring_method_id.get_class_name().as_bytes().eq_ignore_ascii_case(class_like_metadata.name.as_bytes()) {
+            continue;
+        }
+        let Some(requiring_class) = std::iter::successors(class_like_metadata.direct_parent_class, |class| {
+            context.codebase.get_class_like(class.as_bytes())?.direct_parent_class
+        })
+        .find_map(|class| {
+            let method = context.codebase.get_method(class.as_bytes(), method_name.as_bytes())?;
+
+            (method.flags.is_named_constructor() && method.flags.is_required())
+                .then(|| context.codebase.get_class_like(class.as_bytes()))
+                .flatten()
+        }) else {
+            continue;
+        };
+
+        let name = display_class_like_name(context, class_like_metadata.original_name);
+        let requiring = display_class_like_name(context, requiring_class.original_name);
+        let constructor = context
+            .codebase
+            .get_method(requiring_class.name.as_bytes(), method_name.as_bytes())
+            .map_or_else(|| method_name.to_string(), |method| method.original_name.to_string());
+        let required = display_sharp_member(requiring, &constructor);
+        context.collector.report_with_code(
+            IssueCode::MissingConstructor,
+            Issue::error(format!(
+                "`{name}` must declare the named constructor `{constructor}`: `{required}` is `required`, so every subclass of `{requiring}` declares its own."
+            ))
+            .with_annotation(Annotation::primary(span).with_message(format!("Declared without `{constructor}` here.")))
+            .with_help(format!("Declare `public {name}.{constructor}(…) : this(…) {{ }}`.")),
+        );
+    }
 }
 
 /// The class whose own constructor is written `required` nearest above the PHP# class `class_like_metadata`, when
