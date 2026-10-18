@@ -547,7 +547,7 @@ fn a_class_form_php_sharp_never_has_fails_as_a_typo_does_or_names_the_rule_it_br
 #[test]
 fn a_pipe_and_an_open_argument_fail_as_a_typo_does() {
     let code = leak(method(
-        "        const a = extra |> abs(...);\n        const b = max(?, 1);\n        const c = this.format(?, \"USD\");\n        const d = max(1, ...);\n        return extra;\n",
+        "        const a = extra |> abs(...);\n        const b = max(?, 1);\n        const c = this.format(?, \"USD\");\n        const d = max(1, ...);\n        const e = this.format(cents: ?);\n        return extra;\n",
     ));
 
     assert_eq!(
@@ -557,6 +557,7 @@ fn a_pipe_and_an_open_argument_fail_as_a_typo_does() {
             "8:23 Parse error encountered during parsing",
             "9:31 Parse error encountered during parsing",
             "10:26 Parse error encountered during parsing",
+            "11:38 Parse error encountered during parsing",
         ]
     );
 }
