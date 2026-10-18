@@ -453,10 +453,10 @@ fn every_construct_outside_the_slice_is_an_error() {
     );
 }
 
-/// A PHP form PHP# never has is an error that names the form as written and what PHP# writes instead, never "not
-/// supported yet", which would say a later version adds it.
+/// A PHP form PHP# never has fails as a typo does, with no message that names the form, never "not supported yet",
+/// which would say a later version adds it. A PHP# form at a place its rules refuse keeps the rule's error.
 #[test]
-fn a_php_form_php_sharp_never_has_names_what_to_write() {
+fn a_php_form_php_sharp_never_has_fails_as_a_typo_does() {
     let body = leak(method(
         "        const a = extra instanceof Report;\n        const b = (unset) extra;\n        (void) this.run(1);\n        const c = <<<'TEXT'\ntotal\nTEXT;\n        goto end;\n        end:\n        const d = clone this;\n        include \"x.php\";\n        require \"y.php\";\n        return extra;\n",
     ));
@@ -469,9 +469,7 @@ fn a_php_form_php_sharp_never_has_names_what_to_write() {
             vec![
                 "7:25 Parse error encountered during parsing",
                 "8:19 Parse error encountered during parsing",
-                "8:19 The `unset` cast is no longer supported in PHP 8.0 and later.",
                 "9:9 Parse error encountered during parsing",
-                "9:9 The `void` cast is only available in PHP 8.5 and later.",
                 "10:19 Parse error encountered during parsing",
                 "13:9 Parse error encountered during parsing",
                 "14:9 Parse error encountered during parsing",
@@ -556,13 +554,43 @@ fn a_pipe_and_an_open_argument_fail_as_a_typo_does() {
         issues(code),
         [
             "7:25 Parse error encountered during parsing",
-            "7:25 The pipe operator (`|>`) is not available in your configured PHP version (8.4.0).",
             "8:23 Parse error encountered during parsing",
-            "8:19 Partial function application is only available in PHP 8.6 and above.",
             "9:31 Parse error encountered during parsing",
-            "9:19 Partial function application is only available in PHP 8.6 and above.",
             "10:26 Parse error encountered during parsing",
-            "10:19 Partial function application is only available in PHP 8.6 and above.",
+        ]
+    );
+}
+
+/// A PHP version gates PHP's syntax, not PHP#'s, so a `.sharp` file gets none of mago's PHP version errors and no
+/// undefined `goto` label: each form fails as a typo does, once. The PHP twin keeps every error.
+#[test]
+fn a_php_version_error_and_a_goto_label_error_stay_out_of_a_sharp_file() {
+    let code = leak(method(
+        "        const a = extra |> abs(...);\n        const b = max(?, 1);\n        const c = (unset) extra;\n        (void) this.run(1);\n        goto end;\n        const d = clone(this, [\"x\": 1]);\n        return extra;\n",
+    ));
+    let php = leak(php_method(
+        "        $a = $extra |> abs(...);\n        $b = max(?, 1);\n        $c = (unset) $extra;\n        (void) $this->run(1);\n        goto end;\n        $d = clone($this, ['x' => 1]);\n        return $extra;\n",
+    ));
+
+    assert_eq!(
+        issues(code),
+        [
+            "7:25 Parse error encountered during parsing",
+            "8:23 Parse error encountered during parsing",
+            "9:19 Parse error encountered during parsing",
+            "10:9 Parse error encountered during parsing",
+            "11:9 Parse error encountered during parsing",
+        ]
+    );
+    assert_eq!(
+        issues_in("src/Report.php", php),
+        [
+            "7:21 The pipe operator (`|>`) is not available in your configured PHP version (8.4.0).",
+            "8:14 Partial function application is only available in PHP 8.6 and above.",
+            "9:14 The `unset` cast is no longer supported in PHP 8.0 and later.",
+            "10:9 The `void` cast is only available in PHP 8.5 and later.",
+            "11:14 Undefined `goto` label `end`.",
+            "12:14 Cloning with properties is only available in PHP 8.5 and above.",
         ]
     );
 }

@@ -190,11 +190,6 @@ pub struct ResolvedNames<'arena> {
     /// whether the namespace holds it or not. Empty for PHP.
     #[cfg_attr(feature = "serde", serde(skip_serializing_if = "foldhash::HashSet::is_empty"))]
     namespace_classes: foldhash::HashSet<&'arena [u8]>,
-
-    /// Each default class-like, as `Sharp\Position`, whose short name names another class-like in the file. Empty for
-    /// PHP.
-    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "foldhash::HashSet::is_empty"))]
-    shadowed_default_classes: foldhash::HashSet<&'static [u8]>,
 }
 
 impl<'arena> ResolvedNames<'arena> {
@@ -405,14 +400,6 @@ impl<'arena> ResolvedNames<'arena> {
         self.namespace_classes.iter().copied()
     }
 
-    /// Whether a bare short name of the default class-like `class`, as `Sharp\Position`, names another class-like in the
-    /// PHP# file: one the file imports or declares, or one of its namespace, spec section 23. The file then reaches
-    /// `class` only through an import of its own.
-    #[must_use]
-    pub fn shadows_default_class(&self, class: &[u8]) -> bool {
-        self.shadowed_default_classes.contains(class)
-    }
-
     pub(crate) fn bind(&mut self, span: Span, binding: Binding) {
         self.bindings.insert(span.start.offset, binding);
     }
@@ -430,10 +417,6 @@ impl<'arena> ResolvedNames<'arena> {
 
     pub(crate) fn add_namespace_class(&mut self, name: &'arena [u8]) {
         self.namespace_classes.insert(name);
-    }
-
-    pub(crate) fn shadow_default_class(&mut self, class: &'static [u8]) {
-        self.shadowed_default_classes.insert(class);
     }
 
     pub(crate) fn report_binding_error(&mut self, error: BindingError) {

@@ -81,7 +81,10 @@ impl<'ast, 'arena> Walker<'ast, 'arena, Context<'_, 'ast, 'arena>> for CheckingW
     fn walk_in_expression(&self, expression: &'ast Expression<'arena>, context: &mut Context<'_, 'ast, 'arena>) {
         context.ancestors.push(Node::Expression(expression));
 
-        checker::expression::check_for_clone_with(expression, context);
+        // A PHP version gates PHP's syntax. PHP# syntax is the PHP# grammar's, which fails a form outside it as a typo.
+        if !context.program.dialect.is_sharp() {
+            checker::expression::check_for_clone_with(expression, context);
+        }
     }
 
     #[inline]
@@ -303,7 +306,10 @@ impl<'ast, 'arena> Walker<'ast, 'arena, Context<'_, 'ast, 'arena>> for CheckingW
 
     #[inline]
     fn walk_in_goto(&self, goto: &'ast Goto<'arena>, context: &mut Context<'_, 'ast, 'arena>) {
-        checker::statement::check_goto(goto, context);
+        // A `.sharp` file has no `goto`, and the PHP# checker refuses it as a typo.
+        if !context.program.dialect.is_sharp() {
+            checker::statement::check_goto(goto, context);
+        }
     }
 
     #[inline]
@@ -372,7 +378,10 @@ impl<'ast, 'arena> Walker<'ast, 'arena, Context<'_, 'ast, 'arena>> for CheckingW
         partial_application: &'ast PartialApplication<'arena>,
         context: &mut Context<'_, 'ast, 'arena>,
     ) {
-        checker::partial_application::check_partial_application(partial_application, context);
+        // A PHP version gates PHP's syntax, and the PHP# checker refuses a partial application as a typo.
+        if !context.program.dialect.is_sharp() {
+            checker::partial_application::check_partial_application(partial_application, context);
+        }
     }
 
     #[inline]
@@ -395,7 +404,10 @@ impl<'ast, 'arena> Walker<'ast, 'arena, Context<'_, 'ast, 'arena>> for CheckingW
         unary_prefix_operator: &'ast UnaryPrefixOperator<'arena>,
         context: &mut Context<'_, 'ast, 'arena>,
     ) {
-        checker::expression::check_unary_prefix_operator(unary_prefix_operator, context);
+        // A PHP version gates PHP's casts, and the PHP# checker refuses each cast PHP# lacks as a typo.
+        if !context.program.dialect.is_sharp() {
+            checker::expression::check_unary_prefix_operator(unary_prefix_operator, context);
+        }
     }
 
     #[inline]
@@ -431,7 +443,10 @@ impl<'ast, 'arena> Walker<'ast, 'arena, Context<'_, 'ast, 'arena>> for CheckingW
     }
 
     fn walk_in_pipe(&self, pipe: &'ast Pipe<'arena>, context: &mut Context<'_, 'ast, 'arena>) {
-        checker::pipe::check_pipe(pipe, context);
+        // A `.sharp` file has no `|>`, and the PHP# checker refuses it as a typo.
+        if !context.program.dialect.is_sharp() {
+            checker::pipe::check_pipe(pipe, context);
+        }
     }
 }
 
