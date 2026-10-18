@@ -131,7 +131,9 @@ where
                     value: self.parse_expression_with_precedence(Precedence::SharpComparison)?,
                 })
             }
-            T!["["] => Pattern::List(self.parse_list_pattern()?),
+            // A tuple type in a union or with a name is a type pattern, as in `[int, string]|int` and
+            // `[int, string] pair`, and any other `[` a list pattern.
+            T!["["] if !self.is_at_tuple_type_pattern()? => Pattern::List(self.parse_list_pattern()?),
             T!["-" | "+"] => Pattern::Value(self.parse_expression_with_precedence(Precedence::SharpComparison)?),
             kind if kind.is_literal() => {
                 Pattern::Value(self.parse_expression_with_precedence(Precedence::SharpComparison)?)

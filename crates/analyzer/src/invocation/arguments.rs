@@ -13,6 +13,8 @@ use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::array::keyed::TKeyedArray;
 use mago_codex::ttype::atomic::array::list::TList;
 use mago_codex::ttype::atomic::callable::TCallable;
+use mago_codex::ttype::atomic::callable::TCallableSignature;
+use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::cast::cast_atomic_to_callable;
 use mago_codex::ttype::combiner::CombinerOptions;
@@ -21,10 +23,12 @@ use mago_codex::ttype::comparator::union_comparator::can_expression_types_be_ide
 use mago_codex::ttype::comparator::union_comparator::is_contained_by;
 use mago_codex::ttype::expander::get_signature_of_function_like_identifier;
 use mago_codex::ttype::get_array_parameters;
-use mago_codex::ttype::get_backed_enum;
 use mago_codex::ttype::get_iterable_value_parameter;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_never;
+use mago_codex::ttype::get_php_array_key_type;
+use mago_codex::ttype::template::TemplateResult;
+use mago_codex::ttype::template::inferred_type_replacer;
 use mago_codex::ttype::union::TUnion;
 use mago_names::ResolvedNames;
 use mago_reporting::Annotation;
@@ -33,6 +37,8 @@ use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::Expression;
 use mago_syntax::dialect::Dialect;
+use mago_word::Word;
+use mago_word::word;
 
 use crate::analyzable::Analyzable;
 use crate::artifacts::AnalysisArtifacts;
@@ -47,11 +53,18 @@ use crate::statement::function_like::rejected_nullable_parameter::writes_null;
 use crate::utils::expression::is_referenceable;
 use crate::utils::get_type_diff;
 use crate::utils::int_refused_for_float;
+use crate::utils::names::and_list;
 use crate::utils::names::display_atomic;
+use crate::utils::names::display_function_holder;
 use crate::utils::names::display_nullable_type;
+use crate::utils::names::display_sharp_parameter_type;
+use crate::utils::names::display_sharp_type;
 use crate::utils::names::display_type;
 use crate::utils::names::display_value_type;
 use crate::utils::names::display_variable_name;
+use crate::utils::names::sharp_collection_name;
+use crate::utils::names::sharp_effect_name;
+use crate::utils::quoted_source;
 use crate::utils::report_int_for_float;
 use crate::utils::template::explain_blocked_substitution;
 use crate::utils::with_function_fit_message;
@@ -81,8 +94,9 @@ fn shareable_part(union: &TUnion, is_sharp: bool) -> Option<Cow<'_, TUnion>> {
 /// Spec section 12 passes a `Map` to a plain PHP parameter whose declared type names `array` as a PHP array, whose
 /// keys are `int` or `string`, and a backed enum's cases as their backing values. A `Map` keyed by anything else, as a
 /// unit enum, a struct or a `float`, has no such array, where PHP would cast or refuse each key, so its call is refused
-/// here rather than failing where it runs. Returns the type plain PHP receives, `input_type` with each backed enum key
-/// its backing type, or None when it refused the call.
+/// here rather than failing where it runs. A `Map` whose two keys are one PHP array key, as `5` and `"5"` are, fails
+/// where it crosses, since only its data shows that. Returns the type plain PHP receives, `input_type` with each backed
+/// enum key its backing type, or None when it refused the call.
 pub(super) fn check_array_crossing<'input, A>(
     context: &mut Context<'_, '_, A>,
     input_type: &'input TUnion,
@@ -104,17 +118,14 @@ where
     }) else {
         return Some(Cow::Borrowed(input_type));
     };
-    if key_type.is_always_array_key(true) {
-        return Some(Cow::Borrowed(input_type));
-    }
-    let backing_types: Option<Vec<TAtomic>> = key_type
-        .types
-        .iter()
-        .map(|atomic| get_backed_enum(atomic, context.codebase, Dialect::Sharp)?.enum_type.clone())
-        .collect();
-    if let Some(backing_types) = backing_types {
+    let array_key_type = get_php_array_key_type(&key_type, context.codebase)
+        .filter(|array_key_type| array_key_type.is_always_array_key(true));
+    if let Some(array_key_type) = array_key_type {
+        if matches!(array_key_type, Cow::Borrowed(_)) {
+            return Some(Cow::Borrowed(input_type));
+        }
         let crossed = TAtomic::Array(TArray::Keyed(TKeyedArray::new_with_parameters(
-            Arc::new(TUnion::from_vec(backing_types)),
+            Arc::new(array_key_type.into_owned()),
             Arc::new(value_type),
         )));
         let types = input_type
@@ -131,7 +142,7 @@ where
     }
 
     let parameter = parameter.get_name().map_or_else(
-        || format!("argument #{}", argument_offset + 1),
+        || format!("argument #{}", invocation_target.argument_number(argument_offset)),
         |name| format!("parameter `{}`", display_variable_name(context, name.0.as_bytes())),
     );
     let target_kind = invocation_target.guess_kind(context);
@@ -229,7 +240,7 @@ where
         let target_kind_str = invocation_target.guess_kind(context);
         let target_name_str = invocation_target.guess_name(context);
         let parameter_label = invocation_target.get_effective_parameter_name(argument_offset).map_or_else(
-            || format!("#{}", argument_offset + 1),
+            || format!("#{}", invocation_target.argument_number(argument_offset)),
             |name| format!("`{}`", display_variable_name(context, name.as_bytes())),
         );
 
@@ -256,6 +267,33 @@ where
     Ok(())
 }
 
+/// `parameter_type` as an issue shows it. A type parameter of a PHP# collection method that the call left open, as `R`
+/// of `flatMap`, shows as its bound, as TypeScript shows `unknown`, since no code the user writes names it.
+fn shown_parameter_type<'parameter, A>(
+    context: &Context<'_, '_, A>,
+    invocation_target: &InvocationTarget<'_>,
+    parameter_type: &'parameter TUnion,
+) -> Cow<'parameter, TUnion>
+where
+    A: Arena,
+{
+    let (Some(FunctionLikeIdentifier::Method(class, _)), Some(metadata)) =
+        (invocation_target.get_function_like_identifier(), invocation_target.get_function_like_metadata())
+    else {
+        return Cow::Borrowed(parameter_type);
+    };
+    if metadata.template_types.is_empty() || sharp_collection_name(&TObject::new_named(*class)).is_none() {
+        return Cow::Borrowed(parameter_type);
+    }
+
+    let mut bounds = TemplateResult::default();
+    for (name, template) in &metadata.template_types {
+        bounds.add_lower_bound(*name, template.defining_entity, template.constraint.clone());
+    }
+
+    Cow::Owned(inferred_type_replacer::replace(parameter_type, &bounds, context.codebase))
+}
+
 /// Verifies an argument's type against the expected parameter type, and returns whether the argument fits it.
 pub fn verify_argument_type<'arena, A>(
     context: &mut Context<'_, 'arena, A>,
@@ -272,13 +310,14 @@ where
     let target_kind_str = invocation_target.guess_kind(context);
     let effective_parameter_name = invocation_target.get_effective_parameter_name(argument_offset);
     let argument_label = effective_parameter_name.map_or_else(
-        || format!("argument #{}", argument_offset + 1),
+        || format!("argument #{}", invocation_target.argument_number(argument_offset)),
         |name| format!("`{}`", display_variable_name(context, name.as_bytes())),
     );
     let argument_subject = effective_parameter_name.map_or_else(
-        || format!("Argument #{}", argument_offset + 1),
+        || format!("Argument #{}", invocation_target.argument_number(argument_offset)),
         |name| format!("Argument `{}`", display_variable_name(context, name.as_bytes())),
     );
+    let shown_parameter_type = shown_parameter_type(context, invocation_target, parameter_type);
 
     if input_type.is_never() {
         let target_name_str = invocation_target.guess_name(context);
@@ -310,9 +349,9 @@ where
     if !takes_null {
         if input_type.is_null() {
             let target_name_str = invocation_target.guess_name(context);
-            let parameter_type_str = display_type(context, parameter_type);
+            let parameter_type_str = display_type(context, &shown_parameter_type);
             let nullable_parameter_type_str =
-                display_nullable_type(context, parameter_type, format!("{parameter_type_str}|null"));
+                display_nullable_type(context, &shown_parameter_type, format!("{parameter_type_str}|null"));
             let call_site = Annotation::secondary(invocation_target.span())
                 .with_message(format!("Arguments to this {target_kind_str} are incorrect"));
             context.collector.report_with_code(
@@ -333,7 +372,7 @@ where
         if input_type.is_nullable() && !input_type.ignore_nullable_issues() {
             let target_name_str = invocation_target.guess_name(context);
             let input_type_str = display_value_type(context, input_type, parameter_type);
-            let parameter_type_str = display_type(context, parameter_type);
+            let parameter_type_str = display_type(context, &shown_parameter_type);
             let call_site = Annotation::secondary(invocation_target.span())
                 .with_message(format!("Arguments to this {target_kind_str} are incorrect"));
             context.collector.report_with_code(
@@ -354,7 +393,7 @@ where
     if !parameter_type.accepts_false() {
         if input_type.is_false() {
             let target_name_str = invocation_target.guess_name(context);
-            let parameter_type_str = display_type(context, parameter_type);
+            let parameter_type_str = display_type(context, &shown_parameter_type);
             let call_site = Annotation::secondary(invocation_target.span())
                 .with_message(format!("Arguments to this {target_kind_str} are incorrect"));
             // PHP# cannot write `int|false`, so its help asks only for another value.
@@ -381,7 +420,7 @@ where
         if input_type.is_falsable() && !input_type.ignore_falsable_issues() {
             let target_name_str = invocation_target.guess_name(context);
             let input_type_str = display_value_type(context, input_type, parameter_type);
-            let parameter_type_str = display_type(context, parameter_type);
+            let parameter_type_str = display_type(context, &shown_parameter_type);
             let call_site = Annotation::secondary(invocation_target.span())
                 .with_message(format!("Arguments to this {target_kind_str} are incorrect"));
             context.collector.report_with_code(
@@ -432,9 +471,37 @@ where
         return false;
     }
 
+    // Spec section 29: a function value whose type fits but for its effects is refused for those effects, as a lambda
+    // is, with the parameter's type as it is written.
+    if context.dialect.is_sharp()
+        && let Some(outside) = effects_outside(context.codebase, input_type, parameter_type)
+    {
+        let parameter = invocation_target.get_parameter(adjust_offset_for_variadic(invocation_target, argument_offset));
+        let display = display_for_parameter(parameter);
+        let effects: Vec<Word> = outside
+            .into_iter()
+            .map(|effect| {
+                word(sharp_effect_name(context.codebase, &context.imported_names, &context.short_name_counts, effect))
+            })
+            .collect();
+        let has = if effects.len() == 1 { "the effect" } else { "the effects" };
+        let holder = display_function_holder(parameter_type, &|union| display(context, union));
+        context.collector.report_with_code(
+            IssueCode::InvalidArgument,
+            Issue::error(format!(
+                "`{}` has {has} {}, so {holder} cannot hold it.",
+                quoted_source(context, input_expression.span()),
+                and_list(&effects)
+            ))
+            .with_annotation(Annotation::primary(input_expression.span())),
+        );
+
+        return false;
+    }
+
     let target_name_str = invocation_target.guess_name(context);
     let input_type_str = display_value_type(context, input_type, parameter_type);
-    let parameter_type_str = display_type(context, parameter_type);
+    let parameter_type_str = display_type(context, &shown_parameter_type);
     let call_site = Annotation::secondary(invocation_target.span())
         .with_message(format!("Arguments to this {target_kind_str} are incorrect"));
 
@@ -618,6 +685,74 @@ fn can_argument_be_identical(
                 false,
             )
     })
+}
+
+/// The effects a function value of `input_type` has that a function type of `parameter_type` does not list, when they
+/// are all that keep the value from `parameter_type`, spec section 29.
+fn effects_outside(codebase: &CodebaseMetadata, input_type: &TUnion, parameter_type: &TUnion) -> Option<Vec<Word>> {
+    let lists = |atomic: &TAtomic| match atomic {
+        TAtomic::Callable(TCallable::Signature(signature)) => signature.effects.clone(),
+        _ => None,
+    };
+    let allowed: Vec<Vec<Word>> = parameter_type.types.iter().filter_map(lists).collect();
+    let mut outside: Vec<Word> = Vec::new();
+    for effect in input_type.types.iter().filter_map(lists).flatten() {
+        let listed = allowed
+            .iter()
+            .all(|effects| effects.iter().any(|known| known.as_bytes().eq_ignore_ascii_case(effect.as_bytes())));
+        if !listed && !outside.contains(&effect) {
+            outside.push(effect);
+        }
+    }
+    if allowed.is_empty() || outside.is_empty() {
+        return None;
+    }
+
+    // The value's type with no effect list, as a plain PHP function's, fits every function type's effects.
+    let without_effects = TUnion::from_vec(
+        input_type
+            .types
+            .iter()
+            .map(|atomic| match atomic {
+                TAtomic::Callable(TCallable::Signature(signature)) => {
+                    TAtomic::Callable(TCallable::Signature(TCallableSignature { effects: None, ..signature.clone() }))
+                }
+                atomic => atomic.clone(),
+            })
+            .collect(),
+    );
+
+    is_contained_by(
+        codebase,
+        &without_effects,
+        parameter_type,
+        true,
+        true,
+        false,
+        &mut ComparisonResult::for_dialect(Dialect::Sharp),
+    )
+    .then_some(outside)
+}
+
+/// How a message writes the type of `parameter`, spec section 29: a PHP# parameter that writes a function type writes
+/// a pure one with `uses none`, since one without `uses` takes on each caller's effects, and a constructor parameter
+/// that declares a field writes it as the field does, pure without `uses`. A parameter written as a type parameter, as
+/// `List.add`'s `T item`, takes the type its type argument writes.
+pub(super) fn display_for_parameter<A>(
+    parameter: Option<InvocationTargetParameter<'_>>,
+) -> fn(&Context<'_, '_, A>, &TUnion) -> String
+where
+    A: Arena,
+{
+    match parameter {
+        Some(InvocationTargetParameter::FunctionLike(metadata))
+            if !metadata.flags.is_promoted_property()
+                && metadata.type_metadata.as_ref().is_some_and(|declared| declared.type_union.has_callable()) =>
+        {
+            display_sharp_parameter_type
+        }
+        _ => display_sharp_type,
+    }
 }
 
 /// Whether a parameter declared `declared_type` is written `Set<T>` or `Set<T>?`, the parameters the lowering converts.

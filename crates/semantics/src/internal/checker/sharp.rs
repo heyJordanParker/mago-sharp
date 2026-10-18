@@ -1254,12 +1254,18 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         (Node::GenericHint(generic), FieldOrProperty | Method | Signature | Parameter | Body) => {
             check_generic(generic, place, context)
         }
+        // Spec section 2: a constant's value is known before the code runs, and a collection literal is.
+        (Node::GenericHint(generic), ClassConstant)
+            if matches!(generic.name.value, b"List" | b"Map" | b"Set" | b"Iterable") =>
+        {
+            check_generic(generic, place, context)
+        }
         // A generic type's type arguments, and those of `new` and of a method call, are never `void`. Nor are they
         // `never` in a return type, which is a type only as the whole return type, spec section 7, and which
         // `type_written_another_way` refuses everywhere else.
         (
             Node::TypeArgumentList(list),
-            FieldOrProperty | Method | Signature | Parameter | Body | Instantiation,
+            FieldOrProperty | ClassConstant | Method | Signature | Parameter | Body | Instantiation,
         ) => {
             if let Some(void) = list.arguments.iter().find(|argument| matches!(argument, Hint::Void(_))) {
                 context.report(
@@ -1297,7 +1303,9 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             Some(Parameter)
         }
         // A tuple's element types are checked as a parameter's type is, so `Self` in one is an error.
-        (Node::TupleHint(tuple), FieldOrProperty | Method | Signature | Parameter | Body) => check_tuple(tuple, context),
+        (Node::TupleHint(tuple), FieldOrProperty | ClassConstant | Method | Signature | Parameter | Body) => {
+            check_tuple(tuple, context)
+        }
         (Node::TupleElementHint(_), Parameter) => Some(Parameter),
         // The effects an `extern`, a function type or a method without a body lists, spec section 29, which the
         // analyzer's `check_uses` decides, because an effect is a `foreign` class any file may declare.
@@ -1478,10 +1486,14 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
 
             None
         }
-        (Node::Hint(Hint::Self_(keyword)), FieldOrProperty | ClassConstant | Method | Signature | Parameter | Body) => {
-            check_self_type(keyword, place, context).then_some(place)
-        }
-        (Node::Hint(Hint::Static(keyword)), FieldOrProperty | ClassConstant | Method | Signature | Parameter | Body) => {
+        (
+            Node::Hint(Hint::Self_(keyword)),
+            FieldOrProperty | ClassConstant | Method | Signature | Parameter | Body | Place::Pattern,
+        ) => check_self_type(keyword, place, context).then_some(place),
+        (
+            Node::Hint(Hint::Static(keyword)),
+            FieldOrProperty | ClassConstant | Method | Signature | Parameter | Body | Place::Pattern,
+        ) => {
             report_php_static(keyword, context);
 
             None
@@ -1720,33 +1732,26 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
 
                 None
             }
+            // Spec section 14.4: a `?` that cannot matter is an error, and the help names the type without it. A union
+            // with `null` is a nullable type written another way, as `int|null` is `int?`.
             Hint::Nullable(_) | Hint::Void(_) => {
-                let issue = Issue::error("`as` converts to a type that is not nullable or `void`.")
-                    .with_annotation(Annotation::primary(r#as.hint.span()).with_message("Written here."))
-                    .with_note("`as T` already gives `T?`: the value as a `T`, or null when it is not one.");
-                // Spec section 14.4: a `?` that cannot matter is an error, and the help names the type without it.
-                let issue = match r#as.hint {
-                    Hint::Nullable(nullable) => issue.with_help(format!(
-                        "Write `as {}`.",
-                        BytesDisplay(context.get_code_snippet(nullable.hint.span()))
-                    )),
-                    _ => issue,
+                let without = match r#as.hint {
+                    Hint::Nullable(nullable) => {
+                        Some(BytesDisplay(context.get_code_snippet(nullable.hint.span())).to_string())
+                    }
+                    _ => None,
                 };
-                context.report(issue);
+                report_nullable_as(r#as.hint, without, context);
 
                 None
             }
-            // A type outside the slice, and `Self`, are refused by the walk, as anywhere in a body.
-            hint if !has_type_test(hint) && (is_slice_type(hint) || matches!(hint, Hint::Union(_))) => {
-                report_not_supported(
-                    hint.span(),
-                    "type",
-                    "`as` converts to `int`, `float`, `string`, `bool`, `Any`, a class, a collection as in `List<int>`, or a union of them as in `int|string`.",
-                    context,
-                );
+            Hint::Union(union) if let Some(without) = written_without_null(union, context) => {
+                report_nullable_as(r#as.hint, Some(without), context);
 
                 None
             }
+            // Every type in the slice has a test. The walk refuses a type outside it, and `Self`, as anywhere in a
+            // body, and in a union too, as `check_union` checks each member.
             _ => Some(Body),
         },
         (
@@ -1789,11 +1794,22 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
 
             Some(Place::Pattern)
         }
-        (Node::Hint(Hint::Nullable(_)), Place::Pattern) => {
+        // A union with `null` is a nullable type written another way, as `int|null` is `int?`.
+        (Node::Hint(hint @ (Hint::Nullable(_) | Hint::Union(_))), Place::Pattern)
+            if !matches!(hint, Hint::Union(union) if written_without_null(union, context).is_none()) =>
+        {
             context.report(
                 Issue::error("A type pattern is never nullable: null never matches a type.")
                     .with_annotation(Annotation::primary(node.span()).with_message("Written here."))
                     .with_help("Test for null with `x == null`, or join both with `or`, as in `x is int or null`."),
+            );
+
+            None
+        }
+        (Node::Hint(Hint::Void(_)), Place::Pattern) => {
+            context.report(
+                Issue::error("A pattern's type is never `void`: `void` is only a return type.")
+                    .with_annotation(Annotation::primary(node.span()).with_message("Written here.")),
             );
 
             None
@@ -2746,14 +2762,24 @@ fn is_extern(method: &Method) -> bool {
 }
 
 /// Refuses every name in the `uses` of a method with a body, spec section 29: the checker works a body's effects out
-/// from its code, so only a method without a body states the effects its implementations may have. A function
-/// parameter in `uses`, as the old `charge(…) uses prepare => …` wrote it, is the parser's error.
+/// from its code, so only a method without a body states the effects its implementations may have. A method is pure
+/// without `uses`, so its `none` says to delete it. A function parameter in `uses`, as the old
+/// `charge(…) uses prepare => …` wrote it, is the parser's error.
 fn check_method_uses(method: &Method, context: &mut Context<'_, '_, '_>) {
     if method.is_abstract() {
         return;
     }
 
     for name in MethodParts::of_method(method).uses_effects() {
+        if name.value == b"none" {
+            context.report(
+                Issue::error("A method without `uses` is pure already, so delete `uses none`.")
+                    .with_annotation(Annotation::primary(name.span).with_message("Written here.")),
+            );
+
+            continue;
+        }
+
         context.report(
             Issue::error(format!(
                 "A method with a body takes no effect in `uses`, and it names `{}`.",
@@ -4570,6 +4596,36 @@ fn report_null_in_union(null: &Hint, members: &[&Hint], context: &mut Context<'_
         .report(Issue::error(message).with_annotation(Annotation::primary(null.span()).with_message("Written here.")));
 }
 
+/// The union `union` written without its `null`, as `int|string` for `int|string|null`, or None when it holds no `null`.
+fn written_without_null(union: &UnionHint, context: &Context<'_, '_, '_>) -> Option<String> {
+    let mut members = Vec::new();
+    union_members(union, &mut members);
+    if !members.iter().any(|member| matches!(member, Hint::Null(_))) {
+        return None;
+    }
+
+    let rest: Vec<String> = members
+        .iter()
+        .filter(|member| !matches!(member, Hint::Null(_)))
+        .map(|member| BytesDisplay(context.get_code_snippet(*member)).to_string())
+        .collect();
+
+    Some(rest.join("|"))
+}
+
+/// Reports `as` to `hint`, a nullable type or `void`, spec section 14.4: `as T` already gives `T?`. `without` is the
+/// type written without its `?` or `null`, which the help names.
+fn report_nullable_as(hint: &Hint, without: Option<String>, context: &mut Context<'_, '_, '_>) {
+    let issue = Issue::error("`as` converts to a type that is not nullable or `void`.")
+        .with_annotation(Annotation::primary(hint.span()).with_message("Written here."))
+        .with_note("`as T` already gives `T?`: the value as a `T`, or null when it is not one.");
+
+    context.report(match without {
+        Some(without) => issue.with_help(format!("Write `as {without}`.")),
+        None => issue,
+    });
+}
+
 /// How two members of a union overlap, so the union is refused.
 enum Overlap<'hint, 'arena> {
     /// One type written twice.
@@ -5452,7 +5508,7 @@ fn supported(place: Place) -> &'static str {
             "A PHP# field is `private` or `protected`, and a property has the accessors `get` and an optional `set` or `init`, each `;`, `=> expr;` or a block. Both may be `static`, and have a type of `int`, `float`, `bool`, `string`, `Any`, a class or a type parameter, a generic type as in `List<T>` or `PaginatedList<Order>`, `Function<R(P)>`, or a tuple as in `[Money, int]`, nullable as in `int?` or not, or a union of them as in `int|string`, a name, and an optional initial value."
         }
         Place::ClassConstant => {
-            "A PHP# constant has `public`, `protected` or `private`, an optional type of `int`, `float`, `bool`, `string`, `Any` or a class, nullable as in `int?` or not, or a union of them as in `int|string`, one name, and a constant value."
+            "A PHP# constant has `public`, `protected` or `private`, an optional type of `int`, `float`, `bool`, `string`, `Any`, a class, a collection as in `Map<string, int>`, `Iterable<T>` or a tuple as in `[int, string]`, nullable as in `int?` or not, or a union of them as in `int|string`, one name, and a constant value."
         }
         Place::Method => {
             "A PHP# method takes `public`, `protected`, `private`, `static`, `abstract`, `virtual` and `override`, a constructor also `required`, optional type parameters as in `<TItem : DatabaseEntity>`, parameters, and a return type of `int`, `float`, `bool`, `string`, `Any`, `void`, `never`, a class or a type parameter, a generic type as in `List<T>` or `PaginatedList<Order>`, `Function<R(P)>`, a tuple as in `[Money, int]` or `Self`, each but `void` and `never` nullable as in `int?`, or a union of them but `void` and `never`, as in `int|string`, and an optional `on` clause after the parameters, as in `on OrderPaid, OrderRefunded`."
@@ -5479,7 +5535,7 @@ fn supported(place: Place) -> &'static str {
             "A parameter default, an attribute argument, a constant's value, an enum case's value or a pattern's value is a literal, a constant, `typeof(Class)`, a list or map literal, or arithmetic, comparison, logical and `??` operators on them."
         }
         Place::Pattern => {
-            "A PHP# pattern is a type of `int`, `float`, `string`, `bool`, `Any`, a class, a collection as in `List<int>`, or a union of them as in `int|string`, with an optional name, as in `int count`, a case with its fields, as in `PaymentResult.Paid(string transactionId)`, a class with properties, as in `Paid { amount: > 0 } big`, a constant, a comparison such as `< 10`, a properties pattern such as `{ total: > 0 }`, a list pattern such as `[Line first, ...List<Line> rest]`, or patterns joined by `and`, `or` and `not`."
+            "A PHP# pattern is a type of `int`, `float`, `string`, `bool`, `Any`, `Object`, a class, a collection as in `List<int>`, a class value as in `Class<Order>`, a function type as in `Function<int(int)>`, or a union of them, a tuple among them, as in `int|[int, string]`, with an optional name, as in `int count`, a case with its fields, as in `PaymentResult.Paid(string transactionId)`, a class with properties, as in `Paid { amount: > 0 } big`, a constant, a comparison such as `< 10`, a properties pattern such as `{ total: > 0 }`, a list pattern such as `[Line first, ...List<Line> rest]`, or patterns joined by `and`, `or` and `not`."
         }
     }
 }
