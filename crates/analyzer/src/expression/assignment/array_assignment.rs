@@ -30,8 +30,10 @@ use mago_codex::ttype::wrap_atomic;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_span::HasSpan;
+use mago_span::Span;
 use mago_syntax::cst::Access;
 use mago_syntax::cst::Expression;
+use mago_syntax::error::ParseError;
 use mago_word::Word;
 use mago_word::empty_word;
 use mago_word::word;
@@ -936,6 +938,7 @@ where
         let written_type = declared_type.as_ref().unwrap_or(&array_expression_type);
 
         let is_last = i == array_target_expressions.len() - 1;
+        let mut refused_append = false;
 
         // Spec section 12: `x[i] = v` replaces a `List` element, and throws past the end, so appending is `add`. A
         // write into an element changes it through the index, which a `List` takes and a `Map` refuses, and a write
@@ -947,63 +950,54 @@ where
             through_copy |= !check_change_through_index(access, context, block_context, artifacts);
         } else if context.dialect.is_sharp()
             && !through_copy
-            && written_type.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(TArray::List(_))))
+            && let ArrayTarget::Append(append) = array_target
+            && written_type.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(_)))
         {
-            if array_target.get_index().is_none() {
-                context.collector.report_with_code(
-                    IssueCode::InvalidArrayAccess,
-                    Issue::error("PHP# has no `list[] = value`: a `List` grows with `add`.")
-                        .with_annotation(
-                            Annotation::primary(array_target.span()).with_message("This appends to a `List`."),
-                        )
-                        .with_help("Append with `list.add(value)`, and replace an element with `list[i] = value`."),
-                );
-            } else if written_type.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(TArray::Keyed(_)))) {
-                context.collector.report_with_code(
-                    IssueCode::InvalidArrayAccess,
-                    Issue::error(
-                        "A place that may be a `List` or a `Map` is not written by index: a `List` replaces the element at the index, and a `Map` inserts the key.",
-                    )
-                    .with_annotation(
-                        Annotation::primary(array_target.span()).with_message("This may be a `List` or a `Map`."),
-                    )
-                    .with_help("Give the place one collection type."),
-                );
-            }
-        } else if context.dialect.is_sharp()
-            && !through_copy
-            && array_target.get_index().is_none()
-            && written_type.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(TArray::Keyed(_))))
-        {
-            // A `Map` takes the key it is written with, so an append is refused once, and is then read as a write of
-            // the `Map`'s own key type, which no second issue refuses. `get_array_target_type_given_index` refuses
-            // one on a `Set`, which has no index.
-            context.collector.report_with_code(
-                IssueCode::InvalidArrayAccess,
-                Issue::error("PHP# has no `map[] = value`: a `Map` writes a key with `map[key] = value`.")
-                    .with_annotation(Annotation::primary(array_target.span()).with_message("This appends to a `Map`.")),
-            );
+            // PHP's `x[] = v` is no PHP# syntax on any collection, so it fails as a typo does, as its only report, and is
+            // then read as a write of the collection's own key type.
+            report_append_in_sharp(context, append.left_bracket);
+            refused_append = true;
             array_target_index_type =
                 written_type.to_non_nullable().get_single_array().and_then(TArray::get_key_type).map(Rc::new);
+        } else if context.dialect.is_sharp()
+            && !through_copy
+            && written_type.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(TArray::List(_))))
+            && written_type.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(TArray::Keyed(_))))
+        {
+            context.collector.report_with_code(
+                IssueCode::InvalidArrayAccess,
+                Issue::error(
+                    "A place that may be a `List` or a `Map` is not written by index: a `List` replaces the element at the index, and a `Map` inserts the key.",
+                )
+                .with_annotation(
+                    Annotation::primary(array_target.span()).with_message("This may be a `List` or a `Map`."),
+                )
+                .with_help("Give the place one collection type."),
+            );
         }
 
         let new_index_type = array_target_index_type.unwrap_or(Rc::new(get_non_negative_int()));
 
         block_context.flags.set_inside_assignment(true);
 
-        let mut array_expr_type = get_array_target_type_given_index(
-            context,
-            block_context,
-            array_target.span(),
-            array_target.get_array().span(),
-            array_target.get_index().map(mago_span::HasSpan::span),
-            written_type,
-            &new_index_type,
-            true,
-            extended_var_id,
-            if is_last { Some(assign_value_type) } else { None },
-            false,
-        );
+        let (mut array_expr_type, issues) = context.record(|context| {
+            get_array_target_type_given_index(
+                context,
+                block_context,
+                array_target.span(),
+                array_target.get_array().span(),
+                array_target.get_index().map(mago_span::HasSpan::span),
+                written_type,
+                &new_index_type,
+                true,
+                extended_var_id,
+                if is_last { Some(assign_value_type) } else { None },
+                false,
+            )
+        });
+        if !refused_append {
+            context.collector.extend(issues);
+        }
 
         block_context.flags.set_inside_assignment(false);
         let array_expression_type_inner = (*array_expression_type).clone();
@@ -1151,4 +1145,14 @@ where
 
     let code = if possibly { IssueCode::PossiblyArrayAppendOverflow } else { IssueCode::ArrayAppendOverflow };
     context.collector.report_with_code(code, issue);
+}
+
+/// PHP's `[] = value` is no PHP# syntax, so it fails as a typo does, at its `[`.
+fn report_append_in_sharp<A>(context: &mut Context<'_, '_, A>, left_bracket: Span)
+where
+    A: Arena,
+{
+    let error =
+        ParseError::unexpected_in_sharp(left_bracket.file_id, &context.source_file.contents, left_bracket.start.offset);
+    context.collector.report(Issue::from(&error));
 }

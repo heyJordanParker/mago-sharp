@@ -93,7 +93,7 @@ where
                         let double_arrow = self.stream.consume_span()?;
                         let refused = self.dialect.is_sharp();
                         if refused {
-                            self.errors.push(ParseError::PhpSyntaxInSharp(T!["=>"], double_arrow));
+                            self.report_unexpected_in_sharp(double_arrow);
                         }
                         let value = self.parse_possibly_referenced_expression()?;
                         let (key, value) = if refused {

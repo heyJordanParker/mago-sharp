@@ -18,6 +18,7 @@ use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
 use crate::utils::names::imports_by_default;
+use crate::utils::names::is_php_closure;
 use crate::utils::names::is_sharp_internal;
 use mago_bytes::BytesDisplay;
 use mago_bytes::trim_start_byte;
@@ -84,13 +85,16 @@ where
 /// Spec section 23: the last part of a PHP# `import` is a class, or the namespace of a plain PHP library's functions
 /// and constants. A single function or constant is read through its namespace instead, a namespace of classes only is
 /// imported class by class, and an import that names nothing is refused. A capitalized last part names a class, as
-/// spec section 24 capitalizes every type, so `import Log;` never names PHP's `log()`.
+/// spec section 24 capitalizes every type, so `import Log;` never names PHP's `log()`, and PHP's `Closure` is no class
+/// it names.
 pub(crate) fn check_sharp_import<A>(context: &mut Context<'_, '_, A>, name: &Identifier<'_>)
 where
     A: Arena,
 {
     let fqn = php_name(name);
-    if context.codebase.class_like_exists(&fqn) || holds_function_or_constant(context.codebase, &fqn) {
+    if (context.codebase.class_like_exists(&fqn) && !is_php_closure(&fqn))
+        || holds_function_or_constant(context.codebase, &fqn)
+    {
         return;
     }
 

@@ -2627,55 +2627,26 @@ mod tests {
         );
     }
 
-    /// Spec section 23: once `App.Position` and `App.Environment` take the short names, the help of each refused magic
-    /// constant and superglobal names the standard class through an aliased import, and the help's fix compiles.
+    /// Spec section 23: once `App.Position` and `App.Environment` take the short names, a file reaches the standard
+    /// classes through an aliased import, and compiles.
     #[test]
-    fn a_help_names_a_standard_class_its_namespace_shadows_through_an_aliased_import() {
+    fn a_standard_class_its_namespace_shadows_compiles_through_an_aliased_import() {
         let position =
             "namespace App;\n\npublic class Position\n{\n    public Position(public string title { get; }) { }\n}\n";
         let environment = "namespace App;\n\npublic class Environment\n{\n    public int level() => 1;\n}\n";
-        let paths = "namespace App;\n\npublic class Paths\n{\n    public string here() => __DIR__;\n\n    public string file() => __FILE__;\n\n    public int line() => __LINE__;\n\n    public string caller() => __FUNCTION__;\n\n    public string space() => __NAMESPACE__;\n\n    public string held() => __TRAIT__;\n\n    public string home() => $_SERVER[\"HOME\"];\n}\n";
         let fixed = "namespace App;\n\nimport Sharp.Environment as SharpEnvironment;\nimport Sharp.Position as SharpPosition;\n\npublic class Fixed\n{\n    public string here() => SharpPosition.current().directory;\n\n    public string file() => SharpPosition.current().file;\n\n    public int line() => SharpPosition.current().line;\n\n    public string caller() => SharpPosition.current().function;\n\n    public string folder(SharpEnvironment environment) => environment.currentDirectory();\n\n    public string title(Position position) => position.title;\n\n    public int level(Environment environment) => environment.level();\n}\n";
         let database = project(&[
             ENVIRONMENT,
             ("app/App/Position.sharp", position),
             ("app/App/Environment.sharp", environment),
-            ("app/App/Paths.sharp", paths),
             ("app/App/Fixed.sharp", fixed),
         ]);
         let mut service = analyzed(&database);
-        let import = "after `import Sharp.Position as SharpPosition;`";
 
-        let issues = service.analyze_file(FileId::new(b"app/App/Paths.sharp"));
-        let removed: Vec<String> =
-            messages(&issues).into_iter().filter(|message| message.starts_with("PHP# has no")).collect();
-        assert_eq!(
-            removed,
-            [
-                format!("PHP# has no `__DIR__`: write `SharpPosition.current().directory` {import}."),
-                format!("PHP# has no `__FILE__`: write `SharpPosition.current().file` {import}."),
-                format!("PHP# has no `__FUNCTION__`: write `SharpPosition.current().function` {import}."),
-                format!("PHP# has no `__LINE__`: write `SharpPosition.current().line` {import}."),
-                format!(
-                    "PHP# has no `__NAMESPACE__`: write `SharpPosition.current().function` {import}, which starts with the namespace."
-                ),
-                format!(
-                    "PHP# has no `__TRAIT__`: `SharpPosition.current()` {import} gives the file, directory, line, column and function."
-                ),
-                "PHP# has no superglobals; take a Request".to_owned(),
-            ]
-        );
-        let superglobal = issues.iter().find(|issue| issue.message.starts_with("PHP# has no superglobals"));
-        assert_eq!(
-            superglobal.expect("the superglobal is refused").notes,
-            [
-                "Request data arrives as an object, such as a framework's `Request`, and the process environment as `SharpEnvironment` after `import Sharp.Environment as SharpEnvironment;`."
-            ]
-        );
-
+        assert_eq!(messages(&service.analyze_file(FileId::new(b"app/App/Fixed.sharp"))), Vec::<String>::new());
         let compiled = compile(&mut service, empty_stamp);
         let fixed = &outcomes(&compiled)["app/App/Fixed.sharp"];
-        assert!(fixed.is_ok(), "the help's fix compiles: {fixed:?}");
+        assert!(fixed.is_ok(), "the aliased imports compile: {fixed:?}");
     }
 
     /// Only a class named like a default class changes what a bare name means, so adding another class to `App`

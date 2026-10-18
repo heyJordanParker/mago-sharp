@@ -860,47 +860,6 @@ fn the_default_class_likes_are_generated_from_the_standard_library_and_the_prelu
     );
 }
 
-/// A help that names a standard class reads whether the file's bare short name names another class-like: one of its
-/// namespace, one it imports, or one it declares. `Sharp.Position` is the class-like of its own namespace, so a file in
-/// `Sharp` records no class-like of its namespace for it.
-#[test]
-fn a_file_records_each_default_class_its_short_name_no_longer_names() {
-    let namespace_classes = NamespaceClasses::new(["App\\Position", "Sharp\\Position"]);
-
-    for (code, shadowed) in [
-        ("namespace App;\n\nclass Paths\n{\n}\n", vec!["Sharp\\Position"]),
-        ("namespace App;\n\nimport Lib.Clock;\n\nclass Paths\n{\n}\n", vec!["Sharp\\Clock", "Sharp\\Position"]),
-        ("namespace Shop;\n\nclass Cache\n{\n}\n", vec!["Sharp\\Cache"]),
-        ("namespace Shop;\n\nclass Paths\n{\n}\n", vec![]),
-        ("namespace Sharp;\n\nclass Paths\n{\n    public string here() => Position.current().file;\n}\n", vec![]),
-    ] {
-        let file = File::ephemeral(Cow::Borrowed(FILE_NAME), Cow::Borrowed(code.as_bytes()));
-        let arena = LocalArena::new();
-        let names = NameResolver::new(&arena).resolve_in(parse_file(&arena, &file), &namespace_classes);
-
-        let mut recorded: Vec<&str> = [
-            "Sharp\\Database",
-            "Sharp\\Http",
-            "Sharp\\Files",
-            "Sharp\\Console",
-            "Sharp\\Process",
-            "Sharp\\Clock",
-            "Sharp\\Random",
-            "Sharp\\Cache",
-            "Sharp\\Mail",
-            "Sharp\\Environment",
-            "Sharp\\Events",
-            "Sharp\\Position",
-        ]
-        .into_iter()
-        .filter(|class| names.shadows_default_class(class.as_bytes()))
-        .collect();
-        recorded.sort_unstable();
-        assert_eq!(recorded, shadowed, "{code}");
-        assert_eq!(names.namespace_classes().count(), 0, "{code}");
-    }
-}
-
 /// Spec section 31: a bare `Error` in a `.sharp` file always names the standard library's interface, whatever the file
 /// declares or its namespace holds, while `Result` names the standard library's enum unless a class-like of the file's
 /// namespace wins over it, as the other default classes do. A case written through `Result` resolves under the enum.
@@ -927,7 +886,6 @@ fn error_always_names_the_standard_interface_and_result_is_a_default_class() {
         assert_eq!(String::from_utf8_lossy(resolved(&names, code, "Error e", 0)), error, "{code}");
         assert_eq!(String::from_utf8_lossy(resolved(&names, code, "Error>", 0)), error, "{code}");
         assert_eq!(String::from_utf8_lossy(resolved(&names, code, "Result<", 0)), result, "{code}");
-        assert_eq!(names.shadows_default_class(b"Sharp\\Result"), result != "Sharp\\Result", "{code}");
     }
 }
 

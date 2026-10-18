@@ -110,8 +110,6 @@ use crate::binding::BindingError;
 use crate::binding::Local;
 use crate::binding::LocalKind;
 use crate::default_class;
-use crate::default_classes;
-use crate::default_short_name;
 use crate::fixed_default_class;
 use crate::internal::context::NameResolutionContext;
 use crate::internal::locals::LocalScopes;
@@ -1692,20 +1690,7 @@ where
         }
     }
 
-    /// Records each default class-like whose short name names another class-like in the PHP# file, once the
-    /// namespace's imports and declarations are known, so a refusal's help names the default one in a form the file
-    /// can write. The class-like of the file's namespace is not recorded as one the file names: only a refused file's
-    /// help reads it, and a refused file is analyzed again on every run.
     fn walk_out_namespace(&mut self, _namespace: &Namespace<'arena>, context: &mut NameResolutionContext<'arena, A>) {
-        if self.sharp {
-            for class in default_classes() {
-                let ((meaning, _), _) = self.class_meaning(context, default_short_name(class));
-                if meaning != class.as_bytes() {
-                    self.resolved_names.shadow_default_class(class.as_bytes());
-                }
-            }
-        }
-
         context.exit_namespace();
     }
 }

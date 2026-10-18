@@ -252,57 +252,27 @@ where
         check_function_use(context, block_context, metadata, function, call.method.span());
     }
 
-    let analyze = |context: &mut Context<'ctx, 'arena, A>,
-                   block_context: &mut BlockContext<'ctx>,
-                   artifacts: &mut AnalysisArtifacts| {
-        analyze_invocation_targets(
-            context,
-            block_context,
-            artifacts,
-            TemplateResult::default(),
-            target.into_iter().collect(),
-            InvocationArgumentsSource::ArgumentList(&call.argument_list),
-            call.span(),
-            None,
-            false,
-            false,
-            false,
-            false,
-        )
-    };
-
-    if !function.as_bytes().eq_ignore_ascii_case(b"die") {
-        analyze(context, block_context, artifacts)?;
-        // A call of a function the standard library replaces is refused once, naming the member to write, whatever
-        // the function takes by reference.
-        if let Some(metadata) = metadata
-            && !report_replaced_global_call(
-                context,
-                block_context,
-                artifacts,
-                metadata,
-                &call.argument_list,
-                call.span(),
-            )
-        {
-            report_argument_by_reference(context, call, function, metadata);
-        }
-
-        return Ok(());
+    analyze_invocation_targets(
+        context,
+        block_context,
+        artifacts,
+        TemplateResult::default(),
+        target.into_iter().collect(),
+        InvocationArgumentsSource::ArgumentList(&call.argument_list),
+        call.span(),
+        None,
+        false,
+        false,
+        false,
+        false,
+    )?;
+    // A call of a function the standard library replaces is refused once, naming the member to write, whatever the
+    // function takes by reference.
+    if let Some(metadata) = metadata
+        && !report_replaced_global_call(context, block_context, artifacts, metadata, &call.argument_list, call.span())
+    {
+        report_argument_by_reference(context, call, function, metadata);
     }
-
-    // Spec section 8 removes `die` in every form, because `die("…")` prints its message and exits with status 0, which
-    // reports success. The refusal replaces the signature's report on its message, so the call gets one refusal.
-    let (result, recorded) = context.record(|context| analyze(context, block_context, artifacts));
-    result?;
-    let message = call.argument_list.arguments.first().map(|argument| argument.value().span());
-    context.collector.extend(recorded.into_iter().filter(|issue| issue.primary_span() != message));
-    context.collector.report_with_code(
-        IssueCode::WrappedFunction,
-        Issue::error("PHP# has no `die`: write the message with `console.writeError(text)`, then `process.exit(1)`.")
-            .with_annotation(Annotation::primary(call.span()).with_message("Called here."))
-            .with_note("`die(\"…\")` prints the message and exits with status 0, which reports success."),
-    );
 
     Ok(())
 }
@@ -592,17 +562,26 @@ enum Replacement {
     /// group of kinds with the method written on the call's collection, with the placeholders of
     /// [`Replacement::Syntax`]. The placeholder the method is written on, `{a}` or `{b}`, is the collection.
     CollectionMethod(&'static [(&'static [&'static str], &'static str)]),
+    /// Nothing, as PHP# has no counterpart of the function: what PHP# code does instead.
+    Removed(&'static str),
 }
 
 /// Every kind of PHP# collection, spec section 12, for a method each of them has.
 const EVERY_COLLECTION: &[&str] = &["List", "Map", "Set"];
 
-/// Each plain PHP function and constant PHP# replaces, with its replacement. A row that names a standard library member
-/// lands in the change that ships the member, and a test holds every row to the library. A name that ends in `*` is a
-/// family, every function whose name it begins, as `curl_*`, and a row of the function's whole name wins over it. A
-/// member named `__construct` is its class's constructor, and a member named with `$` is its class's property, as
-/// `$arguments`. A constant's row is its uppercase name, and its member the class constant that gives its value.
+/// Each plain PHP function and constant PHP# replaces or removes, with its replacement. A row that names a standard
+/// library member lands in the change that ships the member, and a test holds every row to the library. A name that
+/// ends in `*` is a family, every function whose name it begins, as `curl_*`, and a row of the function's whole name
+/// wins over it. A member named `__construct` is its class's constructor, and a member named with `$` is its class's
+/// property, as `$arguments`. A constant's row is its uppercase name, and its member the class constant that gives its
+/// value.
 const REPLACEMENTS: &[(&str, Replacement)] = &[
+    // Spec section 8: `die("…")` prints its message and exits with status 0, which reports success.
+    ("die", Replacement::Removed("write the message with `console.writeError(text)`, then `process.exit(1)`")),
+    ("compact", Replacement::Removed("PHP# code reads and writes a local only by its name")),
+    ("extract", Replacement::Removed("PHP# code reads and writes a local only by its name")),
+    // `clone` copies an object without running its constructor, and spec section 16 copies a value with `with`.
+    ("clone", Replacement::Removed("copy a value with `with`, as in `price with { amount: 400 }`")),
     ("is_string", Replacement::Syntax("`{x} is string`")),
     ("is_int", Replacement::Syntax("`{x} is int`")),
     ("is_float", Replacement::Syntax("`{x} is float`")),
@@ -977,12 +956,13 @@ where
     let Some((code, message)) = replaced_global_refusal(context, block_context, artifacts, function, None) else {
         return false;
     };
-    context.collector.report_with_code(
-        code,
-        Issue::error(message)
-            .with_annotation(Annotation::primary(span).with_message("Reads the function without calling it."))
-            .with_help("Pass a lambda that makes the call in its place."),
-    );
+    let mut issue = Issue::error(message)
+        .with_annotation(Annotation::primary(span).with_message("Reads the function without calling it."));
+    // A lambda that calls a removed function is refused as the read is.
+    if !matches!(replacement_of(function.original_name), Some(Replacement::Removed(_))) {
+        issue = issue.with_help("Pass a lambda that makes the call in its place.");
+    }
+    context.collector.report_with_code(code, issue);
 
     true
 }
@@ -1035,8 +1015,10 @@ where
         return None;
     }
     let name = function.original_name;
-    let replacement @ (Replacement::Members(_) | Replacement::MembersOn(..) | Replacement::CollectionMethod(_)) =
-        replacement_of(name)?
+    let replacement @ (Replacement::Members(_)
+    | Replacement::MembersOn(..)
+    | Replacement::CollectionMethod(_)
+    | Replacement::Removed(_)) = replacement_of(name)?
     else {
         return None;
     };
@@ -1085,6 +1067,9 @@ where
         )),
         Replacement::CollectionMethod(groups) => {
             Some(wrapped(format!("{}.", collection_form(context, artifacts, groups, arguments))))
+        }
+        Replacement::Removed(instead) => {
+            Some((IssueCode::WrappedFunction, format!("PHP# has no `{name}`: {instead}.")))
         }
         Replacement::Members(members) | Replacement::MembersOn(_, members) => {
             for (class, member) in *members {
@@ -1444,7 +1429,7 @@ mod tests {
                 Replacement::Members(members) | Replacement::MembersOn(_, members) => {
                     members.iter().map(|member| (*function, *member)).collect()
                 }
-                Replacement::Syntax(_) | Replacement::CollectionMethod(_) => Vec::new(),
+                Replacement::Syntax(_) | Replacement::CollectionMethod(_) | Replacement::Removed(_) => Vec::new(),
             })
             .chain(WRAPPED_CLASSES.iter().flat_map(|(class, members)| members.iter().map(|member| (*class, *member))))
             .filter(|(_, (class, member))| {

@@ -43,6 +43,7 @@ use crate::statement::get_type_from_hint;
 use crate::utils::expression::expression_is_nullsafe;
 use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_type;
+use crate::utils::names::is_php_closure;
 use crate::utils::names::is_sharp_internal;
 use crate::utils::names::sharp_missing_imports;
 
@@ -890,7 +891,8 @@ where
 ///
 /// - a keyword written in another case, as `THIS` (spec section 2),
 /// - a full name, which only an `import` line writes, as `App.Order` (spec section 23),
-/// - the short name of exactly one class-like the file doesn't import, as `Math` (spec section 23).
+/// - the short name of exactly one class-like the file doesn't import, as `Math` (spec section 23), which is never PHP's
+///   `Closure`, as [`is_php_closure`] says.
 pub(crate) fn report_unknown_sharp_class<A>(context: &mut Context<'_, '_, A>, name: &[u8], span: Span) -> bool
 where
     A: Arena,
@@ -912,19 +914,6 @@ where
         _ => name,
     };
 
-    // Spec section 14.1: one name covers every function type, so PHP's `Closure` gets the refusal of its import, written
-    // bare or through `global`.
-    if written.strip_prefix(b"global\\").unwrap_or(written).eq_ignore_ascii_case(b"Closure") {
-        context.collector.report_with_code(
-            IssueCode::NonExistentClassLike,
-            Issue::error("PHP# has no `Closure`: write `Function<R(P)>`.")
-                .with_annotation(Annotation::primary(span).with_message("Written here."))
-                .with_note("A function type names its return and parameter types, as in `Function<Money(Offer)>`, and plain PHP's closures arrive as function values."),
-        );
-
-        return true;
-    }
-
     if written.contains(&b'\\') {
         return context.codebase.class_like_exists(written) && report_full_class_name(context, written, span);
     }
@@ -934,7 +923,10 @@ where
         .codebase
         .class_likes
         .values()
-        .filter(|class| short_name(class.original_name).as_bytes().eq_ignore_ascii_case(written))
+        .filter(|class| {
+            short_name(class.original_name).as_bytes().eq_ignore_ascii_case(written)
+                && !is_php_closure(class.original_name.as_bytes())
+        })
         .map(|class| class.original_name)
         .collect();
     match classes.as_slice() {

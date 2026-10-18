@@ -95,7 +95,7 @@ where
             T!["?"] => {
                 let nullable = self.parse_nullable_type_hint()?;
                 if self.dialect.is_sharp() {
-                    self.errors.push(ParseError::PhpSyntaxInSharp(T!["?"], nullable.question_mark));
+                    self.report_unexpected_in_sharp(nullable.question_mark);
                 }
 
                 Hint::Nullable(nullable)
@@ -529,10 +529,10 @@ where
     /// Parses one PHP# type parameter. `in` and `out` are names the lexer reads as identifiers, so one is the variance
     /// only when another name follows it, as `of` is read in a `for … of` loop.
     fn parse_type_parameter(&mut self) -> Result<TypeParameter<'arena>, ParseError> {
-        // C# writes an attribute on a type parameter, as in `<[Marker] T>`, which PHP# refuses, spec section 1.
+        // C# writes an attribute on a type parameter, as in `<[Marker] T>`, which is no PHP# syntax, spec section 1.
         let attribute_lists = self.parse_typeless_attribute_list_sequence()?;
-        if let (Some(first), Some(last)) = (attribute_lists.first(), attribute_lists.last()) {
-            self.errors.push(ParseError::TypeParameterAttributesInSharp(first.span().join(last.span())));
+        if let Some(first) = attribute_lists.first() {
+            self.report_unexpected_in_sharp(first.span());
         }
 
         let variance = match self.stream.lookahead(0)? {

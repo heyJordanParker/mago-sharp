@@ -894,14 +894,6 @@ fn a_struct_header_lists_interfaces_only() {
 fn a_sharp_parse_error_shows_its_message_as_the_issue_title() {
     for (code, message) in [
         (
-            "class Report\n{\n    public int run() { return this->total; }\n}\n",
-            "PHP# has no `->`: write member access with `.`.",
-        ),
-        (
-            "class Report\n{\n    public int run() { return \\Lib\\Calc.make(); }\n}\n",
-            "PHP# has no `\\` names: add `import Lib.Calc;` and write `Calc`.",
-        ),
-        (
             "class Report\n{\n    public int run(extra) { return 1; }\n}\n",
             "A PHP# parameter needs a type, as in `int extra`.",
         ),
@@ -913,10 +905,6 @@ fn a_sharp_parse_error_shows_its_message_as_the_issue_title() {
         (
             "struct Username : string\n{\n}\n",
             "A struct's header lists the interfaces it implements: a struct keys a `Map` by its whole value.",
-        ),
-        (
-            "class Report\n{\n    public void run() { for (const line in lines) {} }\n}\n",
-            "PHP# loops over a collection with `of`, as in `for (const line of lines)`.",
         ),
         (
             "class Report\n{\n    public void run() { const check = handler ?? item => item.ready; }\n}\n",
@@ -991,21 +979,15 @@ fn a_field_without_a_type_is_a_parse_error_that_names_the_rule() {
 /// A property always has a type, an override of a plain PHP parent's property too, spec section 6.1. A bare name
 /// before `{` is the property's name, its accessors and initial value parse, and the class keeps parsing.
 #[test]
-fn internal_with_a_namespace_is_a_parse_error_that_names_the_rule() {
+fn internal_with_a_namespace_fails_as_a_typo_does_at_its_parentheses() {
     let code = "internal(App.Tenant) class Helper\n{\n    internal(App\\Tenant) int count() => 1;\n\n    public int run() => 1;\n}\n";
     let arena = LocalArena::new();
     let program = parse(&arena, "src/Helper.sharp", code);
 
     let messages: Vec<String> = program.errors.iter().map(ToString::to_string).collect();
-    assert_eq!(
-        messages,
-        [
-            "`internal` takes no namespace: move the shared helper to the parent namespace.",
-            "`internal` takes no namespace: move the shared helper to the parent namespace.",
-        ]
-    );
+    assert_eq!(messages, ["Unexpected token `LeftParenthesis`", "Unexpected token `LeftParenthesis`"]);
     let reaches: Vec<&str> = program.errors.iter().map(|error| source(code, error)).collect();
-    assert_eq!(reaches, ["(App.Tenant)", "(App\\Tenant)"]);
+    assert_eq!(reaches, ["(", "("]);
     assert_eq!(class_members(program).len(), 2);
 }
 
@@ -1946,15 +1928,14 @@ fn a_map_literal_writes_each_entry_as_key_colon_value() {
 }
 
 #[test]
-fn a_php_double_arrow_in_a_literal_is_a_php_syntax_error() {
+fn a_php_double_arrow_in_a_literal_fails_as_a_typo_does() {
     const CODE: &str = "class Report\n{\n    public void run()\n    {\n        [\"pro\" => pro];\n    }\n}\n";
     let arena = LocalArena::new();
     let program = parse(&arena, "src/Report.sharp", CODE);
 
-    let messages: Vec<String> = program.errors.iter().map(ToString::to_string).collect();
-    assert_eq!(messages, ["PHP# writes a `Map` entry as `key: value`: `=>` is the lambda arrow"]);
-    let Some(ParseError::PhpSyntaxInSharp(_, span)) = program.errors.first() else {
-        panic!("expected a PHP-syntax error, got {:#?}", program.errors);
+    assert_eq!(program.errors.len(), 1, "{:#?}", program.errors);
+    let Some(ParseError::UnexpectedToken(_, _, span)) = program.errors.first() else {
+        panic!("expected the typo error, got {:#?}", program.errors);
     };
     assert_eq!(source(CODE, span), "=>");
 }
@@ -2005,45 +1986,42 @@ fn any_in_a_php_file_is_a_class_name() {
 }
 
 #[test]
-fn a_question_mark_before_a_type_is_a_php_syntax_error_that_names_the_suffix() {
+fn a_question_mark_before_a_type_fails_as_a_typo_does() {
     const CODE: &str = "class Report\n{\n    public ?int find(?Calc calc) { return null; }\n}\n";
     let arena = LocalArena::new();
     let program = parse(&arena, "src/Report.sharp", CODE);
 
-    let messages: Vec<String> = program.errors.iter().map(ToString::to_string).collect();
-    assert_eq!(
-        messages,
-        [
-            "PHP# has no `?` before a type: write it after the type, as in `int?`.",
-            "PHP# has no `?` before a type: write it after the type, as in `int?`.",
-        ]
+    assert!(
+        program.errors.iter().all(|error| matches!(error, ParseError::UnexpectedToken(..))),
+        "{:#?}",
+        program.errors
     );
     let spans: Vec<&str> = program.errors.iter().map(|error| source(CODE, error)).collect();
     assert_eq!(spans, ["?", "?"]);
 }
 
 #[test]
-fn a_dollar_property_is_a_php_syntax_error() {
+fn a_dollar_property_fails_as_a_typo_does() {
     const CODE: &str = "class Report\n{\n    private int $count = 0;\n}\n";
     let arena = LocalArena::new();
     let program = parse(&arena, "src/Report.sharp", CODE);
 
     assert_eq!(program.errors.len(), 1, "{:#?}", program.errors);
-    let Some(ParseError::PhpSyntaxInSharp(_, span)) = program.errors.first() else {
-        panic!("expected a PHP-syntax error, got {:#?}", program.errors);
+    let Some(ParseError::UnexpectedToken(_, _, span)) = program.errors.first() else {
+        panic!("expected the typo error, got {:#?}", program.errors);
     };
     assert_eq!(source(CODE, span), "$count");
 }
 
 #[test]
-fn var_is_a_php_syntax_error() {
+fn var_fails_as_a_typo_does() {
     const CODE: &str = "class Report\n{\n    var int count;\n}\n";
     let arena = LocalArena::new();
     let program = parse(&arena, "src/Report.sharp", CODE);
 
     assert_eq!(program.errors.len(), 1, "{:#?}", program.errors);
-    let Some(ParseError::PhpSyntaxInSharp(_, span)) = program.errors.first() else {
-        panic!("expected a PHP-syntax error, got {:#?}", program.errors);
+    let Some(ParseError::UnexpectedToken(_, _, span)) = program.errors.first() else {
+        panic!("expected the typo error, got {:#?}", program.errors);
     };
     assert_eq!(source(CODE, span), "var");
 }
@@ -2642,7 +2620,7 @@ fn a_catch_clause_names_its_variable_without_a_dollar() {
 }
 
 #[test]
-fn a_dollar_catch_variable_is_a_php_syntax_error() {
+fn a_dollar_catch_variable_fails_as_a_typo_does() {
     const CODE: &str = "class Report\n{\n    void run()\n    {\n        try {\n        } catch (Missing $failure) {\n        }\n    }\n}\n";
     let arena = LocalArena::new();
     let program = parse(&arena, "src/Report.sharp", CODE);
@@ -2652,7 +2630,7 @@ fn a_dollar_catch_variable_is_a_php_syntax_error() {
 }
 
 #[test]
-fn for_in_is_a_parse_error_that_names_of() {
+fn for_in_fails_as_a_typo_does() {
     let arena = LocalArena::new();
     let program = parse(
         &arena,
@@ -2661,95 +2639,85 @@ fn for_in_is_a_parse_error_that_names_of() {
     );
 
     let messages: Vec<String> = program.errors.iter().map(ToString::to_string).collect();
-    assert_eq!(messages, ["PHP# loops over a collection with `of`, as in `for (const line of lines)`."]);
+    assert_eq!(messages, ["Unexpected token `Identifier`"]);
 }
 
-/// TypeScript's `for (x in y)` declares no loop variable, and it is the same one error that names `of`, while the
+/// TypeScript's `for (x in y)` declares no loop variable, and it fails as a typo does, at the `in`, while the
 /// statements after it still parse.
 #[test]
-fn for_in_without_const_is_the_parse_error_that_names_of() {
+fn for_in_without_const_fails_as_a_typo_does_and_the_statements_after_it_parse() {
     const CODE: &str = "class Report\n{\n    void run()\n    {\n        for (line in lines) {\n            const kept = 1;\n        }\n        const after = 2;\n    }\n}\n";
     let arena = LocalArena::new();
     let program = parse(&arena, "src/Report.sharp", CODE);
 
     let errors: Vec<(String, &str)> =
         program.errors.iter().map(|error| (error.to_string(), source(CODE, error))).collect();
-    assert_eq!(
-        errors,
-        [("PHP# loops over a collection with `of`, as in `for (const line of lines)`.".to_owned(), "in")]
-    );
+    assert_eq!(errors, [("Unexpected token `Identifier`".to_owned(), "in")]);
     assert_eq!(method_body(program).len(), 2, "{:#?}", method_body(program));
 }
 
+/// `foreach` fails as a typo does, once, at its keyword, with a braced body and with PHP's colon-delimited one.
 #[test]
-fn foreach_is_a_php_syntax_error() {
-    let arena = LocalArena::new();
-    let program = parse(
-        &arena,
-        "src/Report.sharp",
-        "class Report\n{\n    void run()\n    {\n        foreach (lines as line) {\n        }\n    }\n}\n",
-    );
+fn foreach_fails_as_a_typo_does() {
+    for body in ["foreach (lines as line) {\n        }", "foreach (lines as line):\n        endforeach;"] {
+        let code: &'static str = Box::leak(
+            format!("class Report\n{{\n    void run()\n    {{\n        {body}\n    }}\n}}\n").into_boxed_str(),
+        );
+        let arena = LocalArena::new();
+        let program = parse(&arena, "src/Report.sharp", code);
 
-    let messages: Vec<String> = program.errors.iter().map(ToString::to_string).collect();
-    assert_eq!(messages, ["PHP# has no `foreach`: loop over a collection with `for … of`."]);
+        let errors: Vec<(String, &str)> =
+            program.errors.iter().map(|error| (error.to_string(), source(code, error))).collect();
+        assert_eq!(errors, [("Unexpected token `Identifier`".to_owned(), "foreach")], "{body}");
+    }
 }
 
 /// Spec section 27: a `.sharp` file starts in code, so an opening tag is one error, and the file parses on.
 #[test]
-fn an_opening_tag_is_a_php_syntax_error() {
+fn an_opening_tag_fails_as_a_typo_does() {
     const CODE: &str = "<?php\nnamespace App;\n\nclass Report\n{\n}\n";
     let arena = LocalArena::new();
     let program = parse(&arena, "src/App/Report.sharp", CODE);
 
     let errors: Vec<(String, &str)> =
         program.errors.iter().map(|error| (error.to_string(), source(CODE, error))).collect();
-    assert_eq!(
-        errors,
-        [("PHP# has no `<?php`: a `.sharp` file has no opening tag, so delete it.".to_owned(), "<?php")]
-    );
+    assert_eq!(errors, [("Unexpected token `OpenTag`".to_owned(), "<?php")]);
     assert!(matches!(program.statements.get(1), Some(Statement::Namespace(_))), "{:#?}", program.statements);
 }
 
 /// Each other PHP tag is one error that names it, and the file parses on: a short opening tag, an echo tag and a
 /// closing tag, which a `.sharp` file lexes as `?` and `>` because they close a nullable type argument there.
 #[test]
-fn every_php_tag_is_a_php_syntax_error() {
-    for (code, message, tag) in [
-        (
-            "<?\nnamespace App;\n\nclass Report\n{\n}\n",
-            "PHP# has no `<?`: a `.sharp` file has no opening tag, so delete it.",
-            "<?",
-        ),
-        (
-            "namespace App;\n\nclass Report\n{\n}\n<?= 1;\n",
-            "PHP# has no `<?=`: a `.sharp` file has no tags, and writes output with `global.printf`.",
-            "<?=",
-        ),
-        (
-            "namespace App;\n\nclass Report\n{\n}\n?>\n",
-            "PHP# has no `?>`: a `.sharp` file has no closing tag, so delete it.",
-            "?>",
-        ),
+fn every_php_tag_fails_as_a_typo_does() {
+    for (code, tag) in [
+        ("<?\nnamespace App;\n\nclass Report\n{\n}\n", "<?"),
+        ("namespace App;\n\nclass Report\n{\n}\n<?= 1;\n", "<?="),
+        // A `.sharp` file lexes `?>` as `?` and `>`, so the typo is the `?`.
+        ("namespace App;\n\nclass Report\n{\n}\n?>\n", "?"),
     ] {
         let arena = LocalArena::new();
         let program = parse(&arena, "src/App/Report.sharp", code);
 
-        let errors: Vec<(String, &str)> =
-            program.errors.iter().map(|error| (error.to_string(), source(code, error))).collect();
-        assert_eq!(errors, [(message.to_owned(), tag)], "{code}");
+        let [error @ ParseError::UnexpectedToken(..)] = program.errors else {
+            panic!("expected the typo error for `{code}`, got {:#?}", program.errors);
+        };
+        assert_eq!(source(code, error), tag, "{code}");
     }
 
     // `<?` before a type is PHP's nullable type, and `?>` ends a nullable type argument.
     let arena = LocalArena::new();
     let nullable = "namespace App;\n\nclass Report\n{\n    List<?int> a = [];\n    List<int?> b = [];\n}\n";
     let program = parse(&arena, "src/App/Report.sharp", nullable);
-    let errors: Vec<String> = program.errors.iter().map(ToString::to_string).collect();
-    assert_eq!(errors, ["PHP# has no `?` before a type: write it after the type, as in `int?`."]);
+    let [error @ ParseError::UnexpectedToken(..)] = program.errors else {
+        panic!("expected the typo error, got {:#?}", program.errors);
+    };
+    assert_eq!(source(nullable, error), "?");
 }
 
-/// Spec section 27: a class lives in one file, so C#'s `partial` before a type is one error, and the type parses on.
+/// Spec section 27: a class lives in one file, so C#'s `partial` before a type fails as a typo does, once, and the type
+/// parses on.
 #[test]
-fn a_partial_type_is_an_error() {
+fn a_partial_type_fails_as_a_typo_does() {
     for code in [
         "namespace App;\n\npublic partial class Report { }\n",
         "namespace App;\n\npartial class Report { }\n",
@@ -2763,11 +2731,7 @@ fn a_partial_type_is_an_error() {
 
         let errors: Vec<(String, &str)> =
             program.errors.iter().map(|error| (error.to_string(), source(code, error))).collect();
-        assert_eq!(
-            errors,
-            [("PHP# has no partial classes: a class lives in one file.".to_owned(), "partial")],
-            "{code}"
-        );
+        assert_eq!(errors, [("Unexpected token `Identifier`".to_owned(), "partial")], "{code}");
     }
 
     // Everywhere else `partial` is a name.
@@ -3019,7 +2983,7 @@ fn a_parenthesized_expression_is_not_a_lambda() {
 }
 
 #[test]
-fn a_php_closure_or_arrow_function_is_php_syntax_that_names_the_lambda() {
+fn a_php_closure_or_arrow_function_fails_as_a_typo_does() {
     for (lambda, start) in [("fn (int x) => x", "fn"), ("function (int x) { return x; }", "function")] {
         let arena = LocalArena::new();
         let code: &'static str = Box::leak(
@@ -3031,11 +2995,7 @@ fn a_php_closure_or_arrow_function_is_php_syntax_that_names_the_lambda() {
         let [error] = program.errors else {
             panic!("expected one error for `{lambda}`, got {:#?}", program.errors);
         };
-        assert_eq!(
-            Issue::from(error).message,
-            format!("PHP# has no `{start}`: write the lambda as `(x) => x * 2`."),
-            "{lambda}"
-        );
+        assert_eq!(Issue::from(error).message, "Parse error encountered during parsing", "{lambda}");
         assert_eq!(source(code, error), start, "{lambda}");
     }
 }
@@ -3058,25 +3018,29 @@ fn a_question_mark_apart_from_the_dot_is_not_null_safe_access() {
 }
 
 #[test]
-fn php_member_access_and_concatenating_assignment_are_parse_errors_that_name_the_dot() {
-    for (code, message) in [
-        ("calc->add()", "PHP# has no `->`: write member access with `.`."),
-        ("calc?->add()", "PHP# has no `?->`: write null-safe member access with `?.`."),
-        ("Calc::make()", "PHP# has no `::`: write static access with `.`."),
-        ("Calc::class", "PHP# has no `Calc::class`: write `typeof(Calc)`."),
-        ("calc::class", "PHP# has no `calc::class`: write `Class.of(calc)`."),
-        ("Self::class", "PHP# has no `Self::class`: write `typeof(Self)`."),
-        ("Demo.Calc::class", "PHP# has no `Demo.Calc::class`: write `typeof(Calc)`."),
-        ("this.calc::class", "PHP# has no `this.calc::class`: write `Class.of(this.calc)`."),
-        ("make()::class", "PHP# has no `::`: write static access with `.`."),
-        ("label .= \"x\"", "PHP# has no `.=`: append with `+=`."),
+fn php_member_access_and_concatenating_assignment_fail_as_a_typo_does_at_the_operator() {
+    for (code, operator) in [
+        ("calc->add()", "->"),
+        ("calc?->add()", "?->"),
+        ("Calc::make()", "::"),
+        ("Calc::class", "::"),
+        ("calc::class", "::"),
+        ("Self::class", "::"),
+        ("Demo.Calc::class", "::"),
+        ("this.calc::class", "::"),
+        ("make()::class", "::"),
+        ("label .= \"x\"", ".="),
     ] {
-        let source = format!("class Report\n{{\n    void run()\n    {{\n        {code};\n    }}\n}}\n");
+        let code_line: &'static str = Box::leak(
+            format!("class Report\n{{\n    void run()\n    {{\n        {code};\n    }}\n}}\n").into_boxed_str(),
+        );
         let arena = LocalArena::new();
-        let program = parse(&arena, "src/Report.sharp", Box::leak(source.into_boxed_str()));
+        let program = parse(&arena, "src/Report.sharp", code_line);
 
-        let messages: Vec<String> = program.errors.iter().map(ToString::to_string).collect();
-        assert_eq!(messages, [message], "{code}");
+        let [error @ ParseError::UnexpectedToken(..)] = program.errors else {
+            panic!("expected the typo error for `{code}`, got {:#?}", program.errors);
+        };
+        assert_eq!(source(code_line, error), operator, "{code}");
     }
 }
 
@@ -3090,34 +3054,28 @@ fn a_php_operator_is_reported_once_where_it_is_consumed() {
     );
 
     let messages: Vec<String> = program.errors.iter().map(ToString::to_string).collect();
-    assert_eq!(messages, ["PHP# has no `.=`: append with `+=`."]);
+    assert_eq!(messages, ["Unexpected token `DotEqual`"]);
 }
 
-/// `use` is a parse error in every form: an import names `import`, and a trait's `use` in a class names the traits to
-/// list in the class header, spec section 22, which parses with no error.
+/// `use` fails as a typo does in every form, once, at the `use`: PHP# imports with `import`, and lists a trait in the
+/// class header, spec section 22, which parses with no error.
 #[test]
-fn the_use_keyword_is_a_parse_error_in_every_form() {
-    let import = "PHP# has no `use`: import a class with `import`.";
-
-    for (code, message) in [
-        ("use Calc;\n", import),
-        ("use Lib\\Calc as Adder;\n", import),
-        ("use Lib\\{Calc, Money};\n", import),
-        ("use function Lib\\{make, total};\n", import),
-        (
-            "class Report\n{\n    use Shared;\n}\n",
-            "PHP# has no `use` in a class: list `Shared` in the header after `:`.",
-        ),
-        (
-            "class Report\n{\n    use Lib\\Shared, Logs { Lib\\Shared::run as start; }\n}\n",
-            "PHP# has no `use` in a class: list `Shared, Logs` in the header after `:`.",
-        ),
+fn the_use_keyword_fails_as_a_typo_does_in_every_form() {
+    for code in [
+        "use Calc;\n",
+        "use Lib\\Calc as Adder;\n",
+        "use Lib\\{Calc, Money};\n",
+        "use function Lib\\{make, total};\n",
+        "class Report\n{\n    use Shared;\n}\n",
+        "class Report\n{\n    use Lib\\Shared, Logs { Lib\\Shared::run as start; }\n}\n",
     ] {
         let arena = LocalArena::new();
         let program = parse(&arena, "src/Report.sharp", code);
 
-        let messages: Vec<String> = program.errors.iter().map(ToString::to_string).collect();
-        assert_eq!(messages, [message], "{code}");
+        let [error @ ParseError::UnexpectedToken(..)] = program.errors else {
+            panic!("expected the typo error for `{code}`, got {:#?}", program.errors);
+        };
+        assert_eq!(source(code, error), "use", "{code}");
     }
 
     let arena = LocalArena::new();
@@ -3259,8 +3217,8 @@ fn a_php_keyword_reads_as_its_construct_only_where_the_construct_follows() {
 /// wherever its construct follows and the name could not stand, as rustc's `eat_keyword_case` reads `Fn`: at a
 /// statement's or an expression's head, after a `try` or an `if` statement's body, where only the keyword can stand,
 /// among a declaration's modifiers, before a file's type, as `is` or `as` after a value, and as `case` in an enum. A
-/// PHP keyword PHP# doesn't use reads as its construct, whose own error names the PHP# form, and a word that can be a
-/// name stays one, as `Case` does in a class.
+/// PHP keyword PHP# doesn't use reads as its construct, which fails as a typo does, and a word that can be a name stays
+/// one, as `Case` does in a class.
 #[test]
 fn a_keyword_written_in_another_case_is_one_error_wherever_the_keyword_stands() {
     let method = |body: &str| -> &'static str {
@@ -3361,43 +3319,26 @@ fn a_php_closure_reports_its_function_and_its_use_clause() {
     );
 
     let messages: Vec<String> = program.errors.iter().map(ToString::to_string).collect();
-    assert_eq!(
-        messages,
-        [
-            "PHP# has no `function`: write the lambda as `(x) => x * 2`.",
-            "PHP# has no `use`: import a class with `import`.",
-        ]
-    );
+    assert_eq!(messages, ["Unexpected token `Identifier`", "Unexpected token `Identifier`"]);
 }
 
+/// PHP# writes a full name only in an `import` line, so a `\` name anywhere else fails as a typo does, once, at the name.
 #[test]
-fn a_qualified_name_is_a_parse_error_that_names_the_import() {
-    for code in [
-        "class Report\n{\n    int run()\n    {\n        return \\Lib\\Calc.make();\n    }\n}\n",
-        "class Report\n{\n    int run()\n    {\n        return Lib\\Calc.make();\n    }\n}\n",
-        "class Report\n{\n    void run(\\Lib\\Calc calc)\n    {\n    }\n}\n",
+fn a_qualified_name_fails_as_a_typo_does() {
+    for (code, name) in [
+        ("class Report\n{\n    int run()\n    {\n        return \\Lib\\Calc.make();\n    }\n}\n", "\\Lib\\Calc"),
+        ("class Report\n{\n    int run()\n    {\n        return Lib\\Calc.make();\n    }\n}\n", "Lib\\Calc"),
+        ("class Report\n{\n    void run(\\Lib\\Calc calc)\n    {\n    }\n}\n", "\\Lib\\Calc"),
+        ("class Report\n{\n    Any? run()\n    {\n        return \\null;\n    }\n}\n", "\\null"),
+        ("class Report\n{\n    bool run()\n    {\n        return \\FALSE;\n    }\n}\n", "\\FALSE"),
     ] {
         let arena = LocalArena::new();
         let program = parse(&arena, "src/Report.sharp", code);
 
-        let messages: Vec<String> = program.errors.iter().map(ToString::to_string).collect();
-        assert_eq!(messages, ["PHP# has no `\\` names: add `import Lib.Calc;` and write `Calc`."], "{code}");
-    }
-}
-
-#[test]
-fn a_qualified_null_true_or_false_is_a_parse_error_that_names_the_keyword() {
-    for (code, keyword) in [
-        ("class Report\n{\n    Any? run()\n    {\n        return \\null;\n    }\n}\n", "null"),
-        ("class Report\n{\n    bool run()\n    {\n        return \\true;\n    }\n}\n", "true"),
-        ("class Report\n{\n    bool run()\n    {\n        return \\false;\n    }\n}\n", "false"),
-        ("class Report\n{\n    bool run()\n    {\n        return \\FALSE;\n    }\n}\n", "false"),
-    ] {
-        let arena = LocalArena::new();
-        let program = parse(&arena, "src/Report.sharp", code);
-
-        let messages: Vec<String> = program.errors.iter().map(ToString::to_string).collect();
-        assert_eq!(messages, [format!("PHP# has no `\\` names: write `{keyword}`.")], "{code}");
+        let [error @ ParseError::UnexpectedToken(..)] = program.errors else {
+            panic!("expected the typo error, got {:#?}", program.errors);
+        };
+        assert_eq!(source(code, error), name, "{code}");
     }
 }
 
@@ -3408,10 +3349,7 @@ fn a_method_written_with_function_is_a_parse_error() {
         parse(&arena, "src/Report.sharp", "class Report\n{\n    public function run(): int { return 1; }\n}\n");
 
     let messages: Vec<String> = program.errors.iter().map(ToString::to_string).collect();
-    assert_eq!(
-        messages.first().map(String::as_str),
-        Some("PHP# has no `function`: start a method with its return type.")
-    );
+    assert_eq!(messages.first().map(String::as_str), Some("Unexpected token `Identifier`"));
 }
 
 fn returned_template<'arena>(program: &'arena Program<'arena>) -> &'arena InterpolatedString<'arena> {
@@ -3722,20 +3660,20 @@ fn a_statement_starting_with_a_list_is_not_an_attribute() {
 }
 
 #[test]
-fn php_attribute_syntax_is_a_parse_error_that_names_the_brackets() {
+fn php_attribute_syntax_fails_as_a_typo_does() {
     const CODE: &str = "#[Marker]\nclass Report\n{\n    #[Marker]\n    public void run(#[Marker] int page) {}\n}\n";
     let arena = LocalArena::new();
     let program = parse(&arena, "src/Report.sharp", CODE);
 
     let messages: Vec<String> = program.errors.iter().map(ToString::to_string).collect();
-    assert_eq!(messages, ["PHP# has no `#[`: write an attribute in square brackets, as in `[Searchable]`."; 3]);
+    assert_eq!(messages, ["Unexpected token `HashLeftBracket`"; 3]);
     let spans: Vec<&str> = program.errors.iter().map(|error| source(CODE, error)).collect();
     assert_eq!(spans, ["#["; 3]);
     assert_eq!(attribute_lists(CODE, Node::Program(program)), ["#[Marker]"; 3]);
 }
 
-/// Spec section 1: an accessor takes attributes, as in `{ [Pure] get; set; }`, where `[` never opens a type. A type
-/// parameter's attributes are a parse error that says where to put them.
+/// Spec section 1: an accessor takes attributes, as in `{ [Pure] get; set; }`, where `[` never opens a type. An
+/// attribute always describes a declaration, so a type parameter's attributes fail as a typo does, at the first `[`.
 #[test]
 fn an_accessor_takes_attributes_and_a_type_parameter_takes_none() {
     const CODE: &str =
@@ -3745,13 +3683,7 @@ fn an_accessor_takes_attributes_and_a_type_parameter_takes_none() {
 
     let messages: Vec<(String, &str)> =
         program.errors.iter().map(|error| (error.to_string(), source(CODE, error))).collect();
-    assert_eq!(
-        messages,
-        [(
-            "A type parameter takes no attributes: put them on the declaration that declares it.".to_owned(),
-            "[Marker]"
-        )]
-    );
+    assert_eq!(messages, [("Unexpected token `LeftBracket`".to_owned(), "[")]);
     let Some(ClassLikeMember::Property(Property::Hooked(count))) = class_members(program).first() else {
         panic!("expected a property, got {:#?}", class_members(program));
     };
@@ -3786,7 +3718,9 @@ fn an_attributed_lambda_without_parentheses_is_one_error() {
 }
 
 /// Spec section 1: an attribute target, as C# writes it, opens its brackets and names where every attribute in them
-/// goes, as `return:` in `[return: NotNull, Pure]`. A target after the first attribute is a parse error, as in C#.
+/// goes, as `method:` in `[method: Logged]`. The parser reads any name there, `return:` included, which the checker
+/// refuses. A target after the first attribute is outside the grammar, as in C#, so it fails as a typo does, at the
+/// target's name.
 #[test]
 fn an_attribute_target_opens_its_brackets() {
     const CODE: &str = "class Report\n{\n    [return: NotNull, Pure]\n    [method: Logged]\n    [Cached]\n    public string run() { return \"\"; }\n}\n";
@@ -3814,14 +3748,7 @@ fn an_attribute_target_opens_its_brackets() {
     let program = parse(&arena, "src/Report.sharp", LATE);
     let messages: Vec<(String, &str)> =
         program.errors.iter().map(|error| (error.to_string(), source(LATE, error))).collect();
-    assert_eq!(
-        messages,
-        [(
-            "An attribute target opens its brackets and names where all of them go, as in `[param: Trimmed]`."
-                .to_owned(),
-            "method:"
-        )]
-    );
+    assert_eq!(messages, [("Unexpected token `Identifier`".to_owned(), "method")]);
 }
 
 /// `typeof` takes any type, spec section 25: a class by its short name, a class value of a generic class with its type
@@ -5067,14 +4994,14 @@ fn a_capitalized_type_in_parentheses_is_a_class_name_and_not_a_cast() {
 }
 
 /// Spec section 24: a class or an interface narrows only with `as`, so a class name in parentheses before a value is a
-/// class cast PHP# does not have, and its error names the `as` that replaces it, once, at the whole cast. A value
-/// longer than a dotted name is named by its place. A class name in parentheses before `is` or `with` is no cast.
+/// class cast PHP# does not have, which fails as a typo does, once, at its `(`. A class name in parentheses before `is`
+/// or `with` is no cast.
 #[test]
-fn a_class_cast_names_as() {
+fn a_class_cast_fails_as_a_typo_does() {
     for (code, messages) in [
-        ("const admin = (Admin) user;", &["PHP# has no class casts: write `user as Admin`."][..]),
-        ("const admin = (Admin) this.user;", &["PHP# has no class casts: write `this.user as Admin`."]),
-        ("const admin = (Admin) users.first();", &["PHP# has no class casts: write the value, then `as Admin`."]),
+        ("const admin = (Admin) user;", &["Unexpected token `LeftParenthesis`"][..]),
+        ("const admin = (Admin) this.user;", &["Unexpected token `LeftParenthesis`"]),
+        ("const admin = (Admin) users.first();", &["Unexpected token `LeftParenthesis`"]),
         ("const plan = (Plan) is Plan;", &[]),
     ] {
         let source = format!("class Report\n{{\n    void run()\n    {{\n        {code}\n    }}\n}}\n");
@@ -5953,7 +5880,7 @@ fn a_lambda_after_an_operator_needs_parentheses_as_in_csharp() {
                 "A lambda after an operator needs parentheses, as in `handler ?? (item => item.ready)`.".to_owned(),
                 "item =>"
             ),
-            ("PHP# has no `->`: write member access with `.`.".to_owned(), "->"),
+            ("Unexpected token `MinusGreaterThan`".to_owned(), "->"),
         ]
     );
 }
@@ -5976,7 +5903,7 @@ fn a_conditional_at_the_top_of_a_guard_needs_parentheses_as_in_csharp() {
                     .to_owned(),
                 "strict ? forced : ready"
             ),
-            ("PHP# has no `->`: write member access with `.`.".to_owned(), "->"),
+            ("Unexpected token `MinusGreaterThan`".to_owned(), "->"),
         ]
     );
 }

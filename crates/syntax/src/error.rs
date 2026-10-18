@@ -5,11 +5,13 @@ use mago_reporting::Issue;
 use mago_span::HasSpan;
 use mago_span::Position;
 use mago_span::Span;
+use mago_syntax_core::input::Input;
 
-use crate::T;
 use crate::cst::LiteralStringKind;
 use crate::cst::Operator;
+use crate::lexer::Lexer;
 use crate::parser::MAX_RECURSION_DEPTH;
+use crate::settings::LexerSettings;
 use crate::token::TokenKind;
 
 const SYNTAX_ERROR_CODE: &str = "syntax";
@@ -50,37 +52,21 @@ pub enum ParseError {
     UnexpectedToken(Expected, TokenKind, Span),
     UnclosedLiteralString(LiteralStringKind, Span),
     RecursionLimitExceeded(Span),
-    /// PHP syntax written in a PHP# file, such as `->` where PHP# writes `.`.
-    PhpSyntaxInSharp(TokenKind, Span),
-    /// PHP's `Order::class` written in a PHP# file, with the name before `::` as written, at the `::`.
-    ClassNameConstantInSharp(Box<str>, Span),
-    /// A `\` name written in a PHP# file, such as `\Lib\Calc`, with the dotted name its `import` line takes.
-    QualifiedNameInSharp(Box<str>, Span),
     /// A PHP# parameter written without its type, such as `run(extra)`, at its name.
     UntypedParameterInSharp(Span),
     /// A PHP# field written without its type, such as `protected override table = "orders";`, at its name.
     UntypedFieldInSharp(Span),
     /// A PHP# property written without its type, such as `protected override table { get; set; }`, at its name.
     UntypedPropertyInSharp(Span),
-    /// A namespace written after PHP#'s `internal`, as in `internal(App.Tenant)`, at the parentheses. Spec section 5
-    /// has no named reach.
-    NamedReachInSharp(Span),
     /// A PHP# statement, expression or type nested more than [`MAX_RECURSION_DEPTH`] levels deep, at the innermost one.
     NestingTooDeepInSharp(Span),
-    /// TypeScript's `in` written in a PHP# `for … of` loop, at the `in`.
-    ForInInSharp(Span),
     /// PHP# syntax the engine cannot run yet, such as an attribute target or a generic event, where it starts.
     NotSupportedYetInSharp(&'static str, Span),
     /// `required` written on a PHP# method or operator, at the `required`. Spec section 25 keeps it to the constructor,
     /// which `new Self(…)` calls, and section 6.1 to a property.
     RequiredMethodInSharp(Span),
-    /// PHP's `use` of a trait inside a PHP# class, with the trait names as written, at the `use`. Spec section 22 lists
-    /// a plain PHP trait in the class header.
-    TraitUseInSharp(Box<str>, Span),
     /// An escape JavaScript refuses in a PHP# template, such as `\1` or `\x4`, at its backslash and next character.
     InvalidTemplateEscapeInSharp(Span),
-    /// A PHP `fn` arrow function or `function` closure written in a PHP# file, with its keyword, at the keyword.
-    PhpLambdaInSharp(&'static str, Span),
     /// A PHP# lambda written right after an operator, such as `handler ?? item => item.ready`, at its parameters and
     /// arrow. A lambda binds as loosely as assignment, as in C#, so it needs parentheses there.
     LambdaAfterOperatorInSharp(Span),
@@ -122,9 +108,6 @@ pub enum ParseError {
     /// class-like as a message names it, `A class`, and the type's name, at the whole type. Every type, events and
     /// interfaces included, is declared in its own file.
     NestedTypeInSharp(&'static str, Box<str>, Span),
-    /// C#'s `partial` written before a PHP# type, as in `public partial class Order`, at the `partial`. A class lives
-    /// in one file, spec section 27.
-    PartialTypeInSharp(Span),
     /// A type other than an interface name in a PHP# struct's header, as in `struct Username : string`, at the type.
     /// Spec section 10: a struct implements interfaces, and keys a `Map` by its whole value.
     StructHeaderTypeInSharp(Span),
@@ -136,15 +119,6 @@ pub enum ParseError {
     /// PHP#'s keywords are lowercase and case-sensitive, as C#'s are, except `Self`. The analyzer reports it too, where
     /// a name that spells a keyword names nothing, as `THIS` does.
     MiscasedKeywordInSharp(&'static str, Span),
-    /// A class name in parentheses before a value, as in `(Admin) user`, with the class and the value when it is a
-    /// dotted name, at the whole cast. Spec section 24: a class or an interface narrows only with `as`.
-    ClassCastInSharp(Box<str>, Option<Box<str>>, Span),
-    /// A PHP# attribute target written after the first attribute in its brackets, as in `[Cached, param: Trimmed]`, at
-    /// the target and its colon. Spec section 1: a target opens its brackets, as in C#.
-    LateAttributeTargetInSharp(Span),
-    /// Attributes written on a PHP# type parameter, as in `<[Marker] T>`, at the attribute lists. A type parameter
-    /// takes none, spec section 1.
-    TypeParameterAttributesInSharp(Span),
     /// A PHP# lambda with attributes and a parameter without parentheses, as in `[Pure] n => n * 2`, from the first
     /// attribute list to the parameter. Spec section 1: a lambda with attributes puts its parameters in parentheses.
     UnparenthesizedAttributedLambdaInSharp(Span),
@@ -169,20 +143,13 @@ impl HasFileId for ParseError {
             ParseError::UnexpectedToken(_, _, span) => span.file_id,
             ParseError::UnclosedLiteralString(_, span) => span.file_id,
             ParseError::RecursionLimitExceeded(span) => span.file_id,
-            ParseError::PhpSyntaxInSharp(_, span)
-            | ParseError::ClassNameConstantInSharp(_, span)
-            | ParseError::QualifiedNameInSharp(_, span)
-            | ParseError::UntypedParameterInSharp(span)
+            ParseError::UntypedParameterInSharp(span)
             | ParseError::UntypedFieldInSharp(span)
             | ParseError::UntypedPropertyInSharp(span)
-            | ParseError::NamedReachInSharp(span)
             | ParseError::NestingTooDeepInSharp(span)
-            | ParseError::ForInInSharp(span)
             | ParseError::NotSupportedYetInSharp(_, span)
             | ParseError::RequiredMethodInSharp(span)
-            | ParseError::TraitUseInSharp(_, span)
             | ParseError::InvalidTemplateEscapeInSharp(span)
-            | ParseError::PhpLambdaInSharp(_, span)
             | ParseError::LambdaAfterOperatorInSharp(span)
             | ParseError::ConditionalInGuardInSharp(span)
             | ParseError::UndeclarableOperatorInSharp(_, span)
@@ -196,13 +163,9 @@ impl HasFileId for ParseError {
             | ParseError::ConstructorInitializerInSharp(span)
             | ParseError::EventBodyInSharp(span)
             | ParseError::NestedTypeInSharp(_, _, span)
-            | ParseError::PartialTypeInSharp(span)
             | ParseError::StructHeaderTypeInSharp(span)
             | ParseError::NamedConstructorTypeParametersInSharp(_, _, span)
             | ParseError::MiscasedKeywordInSharp(_, span)
-            | ParseError::ClassCastInSharp(_, _, span)
-            | ParseError::LateAttributeTargetInSharp(span)
-            | ParseError::TypeParameterAttributesInSharp(span)
             | ParseError::UnparenthesizedAttributedLambdaInSharp(span) => span.file_id,
         }
     }
@@ -229,20 +192,13 @@ impl HasSpan for ParseError {
             ParseError::UnexpectedToken(_, _, span) => *span,
             ParseError::UnclosedLiteralString(_, span) => *span,
             ParseError::RecursionLimitExceeded(span) => *span,
-            ParseError::PhpSyntaxInSharp(_, span)
-            | ParseError::ClassNameConstantInSharp(_, span)
-            | ParseError::QualifiedNameInSharp(_, span)
-            | ParseError::UntypedParameterInSharp(span)
+            ParseError::UntypedParameterInSharp(span)
             | ParseError::UntypedFieldInSharp(span)
             | ParseError::UntypedPropertyInSharp(span)
-            | ParseError::NamedReachInSharp(span)
             | ParseError::NestingTooDeepInSharp(span)
-            | ParseError::ForInInSharp(span)
             | ParseError::NotSupportedYetInSharp(_, span)
             | ParseError::RequiredMethodInSharp(span)
-            | ParseError::TraitUseInSharp(_, span)
             | ParseError::InvalidTemplateEscapeInSharp(span)
-            | ParseError::PhpLambdaInSharp(_, span)
             | ParseError::LambdaAfterOperatorInSharp(span)
             | ParseError::ConditionalInGuardInSharp(span)
             | ParseError::UndeclarableOperatorInSharp(_, span)
@@ -256,13 +212,9 @@ impl HasSpan for ParseError {
             | ParseError::ConstructorInitializerInSharp(span)
             | ParseError::EventBodyInSharp(span)
             | ParseError::NestedTypeInSharp(_, _, span)
-            | ParseError::PartialTypeInSharp(span)
             | ParseError::StructHeaderTypeInSharp(span)
             | ParseError::NamedConstructorTypeParametersInSharp(_, _, span)
             | ParseError::MiscasedKeywordInSharp(_, span)
-            | ParseError::ClassCastInSharp(_, _, span)
-            | ParseError::LateAttributeTargetInSharp(span)
-            | ParseError::TypeParameterAttributesInSharp(span)
             | ParseError::UnparenthesizedAttributedLambdaInSharp(span) => *span,
         }
     }
@@ -318,46 +270,6 @@ impl std::fmt::Display for ParseError {
                 LiteralStringKind::DoubleQuoted => "Unclosed double-quoted string".to_string(),
             },
             ParseError::RecursionLimitExceeded(_) => "Maximum recursion depth exceeded".to_string(),
-            ParseError::PhpSyntaxInSharp(kind, _) => match kind {
-                T!["->"] => "PHP# has no `->`: write member access with `.`.".to_string(),
-                T!["?->"] => "PHP# has no `?->`: write null-safe member access with `?.`.".to_string(),
-                T!["?"] => "PHP# has no `?` before a type: write it after the type, as in `int?`.".to_string(),
-                T!["::"] => "PHP# has no `::`: write static access with `.`.".to_string(),
-                T![".="] => "PHP# has no `.=`: append with `+=`.".to_string(),
-                T!["function"] => "PHP# has no `function`: start a method with its return type.".to_string(),
-                T!["$variable"] => "PHP# has no `$` variables: write the name without `$`.".to_string(),
-                T!["use"] => "PHP# has no `use`: import a class with `import`.".to_string(),
-                T!["foreach"] => "PHP# has no `foreach`: loop over a collection with `for … of`.".to_string(),
-                T!["=>"] => "PHP# writes a `Map` entry as `key: value`: `=>` is the lambda arrow".to_string(),
-                T!["<?php"] => "PHP# has no `<?php`: a `.sharp` file has no opening tag, so delete it.".to_string(),
-                T!["<?"] => "PHP# has no `<?`: a `.sharp` file has no opening tag, so delete it.".to_string(),
-                T!["<?="] => {
-                    "PHP# has no `<?=`: a `.sharp` file has no tags, and writes output with `global.printf`.".to_string()
-                }
-                T!["?>"] => "PHP# has no `?>`: a `.sharp` file has no closing tag, so delete it.".to_string(),
-                T!["#["] => "PHP# has no `#[`: write an attribute in square brackets, as in `[Searchable]`.".to_string(),
-                kind => format!("PHP# has no `{kind}`."),
-            },
-            // Spec section 24 capitalizes every type but the built-in ones, so a name whose last part is lowercase is a
-            // value, and a class is written by its short name.
-            ParseError::ClassNameConstantInSharp(name, _) => {
-                let class = name.rsplit('.').next().unwrap_or(name);
-                if class.starts_with(|first: char| first.is_ascii_uppercase()) {
-                    format!("PHP# has no `{name}::class`: write `typeof({class})`.")
-                } else {
-                    format!("PHP# has no `{name}::class`: write `Class.of({name})`.")
-                }
-            }
-            ParseError::QualifiedNameInSharp(name, _) => {
-                match ["null", "true", "false"].into_iter().find(|keyword| name.eq_ignore_ascii_case(keyword)) {
-                    Some(keyword) => format!("PHP# has no `\\` names: write `{keyword}`."),
-                    None => {
-                        let short_name = name.rsplit('.').next().unwrap_or(name);
-
-                        format!("PHP# has no `\\` names: add `import {name};` and write `{short_name}`.")
-                    }
-                }
-            }
             ParseError::UntypedParameterInSharp(_) => "A PHP# parameter needs a type, as in `int extra`.".to_string(),
             ParseError::UntypedFieldInSharp(_) => {
                 "A PHP# field needs a type, as in `private int count = 0;`.".to_string()
@@ -365,27 +277,15 @@ impl std::fmt::Display for ParseError {
             ParseError::UntypedPropertyInSharp(_) => {
                 "A PHP# property needs a type, as in `public int views { get; set; }`.".to_string()
             }
-            ParseError::NamedReachInSharp(_) => {
-                "`internal` takes no namespace: move the shared helper to the parent namespace.".to_string()
-            }
             ParseError::NestingTooDeepInSharp(_) => {
                 format!("PHP# nests statements, expressions and types at most {MAX_RECURSION_DEPTH} levels deep.")
-            }
-            ParseError::ForInInSharp(_) => {
-                "PHP# loops over a collection with `of`, as in `for (const line of lines)`.".to_string()
             }
             ParseError::NotSupportedYetInSharp(construct, _) => format!("{construct} is not supported yet in PHP#."),
             ParseError::RequiredMethodInSharp(_) => {
                 "`required` goes on the constructor or a property, never on a method: remove it here.".to_string()
             }
-            ParseError::TraitUseInSharp(traits, _) => {
-                format!("PHP# has no `use` in a class: list `{traits}` in the header after `:`.")
-            }
             ParseError::InvalidTemplateEscapeInSharp(_) => {
                 "A template takes JavaScript's escapes, as in `\\n`, `\\x41` or `\\u{1F600}`.".to_string()
-            }
-            ParseError::PhpLambdaInSharp(keyword, _) => {
-                format!("PHP# has no `{keyword}`: write the lambda as `(x) => x * 2`.")
             }
             ParseError::LambdaAfterOperatorInSharp(_) => {
                 "A lambda after an operator needs parentheses, as in `handler ?? (item => item.ready)`.".to_string()
@@ -430,7 +330,6 @@ impl std::fmt::Display for ParseError {
             ParseError::NestedTypeInSharp(owner, name, _) => {
                 format!("{owner} can't declare a type inside it: declare `{name}` in its own file.")
             }
-            ParseError::PartialTypeInSharp(_) => "PHP# has no partial classes: a class lives in one file.".to_string(),
             ParseError::StructHeaderTypeInSharp(_) => {
                 "A struct's header lists the interfaces it implements: a struct keys a `Map` by its whole value."
                     .to_string()
@@ -442,25 +341,37 @@ impl std::fmt::Display for ParseError {
                 "Write the keyword `Self` with a capital S and the rest in lowercase.".to_string()
             }
             ParseError::MiscasedKeywordInSharp(keyword, _) => format!("Write the keyword `{keyword}` in lowercase."),
-            ParseError::ClassCastInSharp(class, Some(value), _) => {
-                format!("PHP# has no class casts: write `{value} as {class}`.")
-            }
-            ParseError::ClassCastInSharp(class, None, _) => {
-                format!("PHP# has no class casts: write the value, then `as {class}`.")
-            }
-            ParseError::LateAttributeTargetInSharp(_) => {
-                "An attribute target opens its brackets and names where all of them go, as in `[param: Trimmed]`."
-                    .to_string()
-            }
-            ParseError::TypeParameterAttributesInSharp(_) => {
-                "A type parameter takes no attributes: put them on the declaration that declares it.".to_string()
-            }
             ParseError::UnparenthesizedAttributedLambdaInSharp(_) => {
                 "A lambda with attributes puts its parameters in parentheses, as in `[Pure] (n) => n * 2`.".to_string()
             }
         };
 
         write!(f, "{message}")
+    }
+}
+
+impl ParseError {
+    /// The error a typo gives at the first token from `offset` of a PHP# file's `code`, as `asdf` does in
+    /// `public asdf#($@`: that token is unexpected. Every form outside the PHP# grammar fails with it, whichever
+    /// language it comes from.
+    #[must_use]
+    pub fn unexpected_in_sharp(file_id: FileId, code: &[u8], offset: u32) -> ParseError {
+        let start = Position::new(offset);
+        let mut lexer =
+            Lexer::sharp(Input::anchored_at(file_id, &code[offset as usize..], start), LexerSettings::default());
+
+        loop {
+            match lexer.advance() {
+                Some(Ok(token)) if token.kind.is_trivia() => {}
+                Some(Ok(token)) => {
+                    return ParseError::UnexpectedToken(Expected::OneOf(&[]), token.kind, token.span_for(file_id));
+                }
+                Some(Err(error)) => return ParseError::SyntaxError(error),
+                None => {
+                    return ParseError::UnexpectedEndOfFile(Expected::OneOf(&[]), file_id, lexer.current_position());
+                }
+            }
+        }
     }
 }
 
@@ -497,18 +408,11 @@ impl From<&ParseError> for Issue {
         match error {
             ParseError::SyntaxError(syntax_error) => syntax_error.into(),
             // A PHP# parse error names the rule it breaks, so its message is the title.
-            ParseError::PhpSyntaxInSharp(..)
-            | ParseError::RequiredMethodInSharp(..)
-            | ParseError::TraitUseInSharp(..)
-            | ParseError::ClassNameConstantInSharp(..)
-            | ParseError::QualifiedNameInSharp(..)
+            ParseError::RequiredMethodInSharp(..)
             | ParseError::UntypedParameterInSharp(..)
             | ParseError::UntypedFieldInSharp(..)
             | ParseError::UntypedPropertyInSharp(..)
-            | ParseError::NamedReachInSharp(..)
-            | ParseError::ForInInSharp(..)
             | ParseError::InvalidTemplateEscapeInSharp(..)
-            | ParseError::PhpLambdaInSharp(..)
             | ParseError::LambdaAfterOperatorInSharp(..)
             | ParseError::ConditionalInGuardInSharp(..)
             | ParseError::UndeclarableOperatorInSharp(..)
@@ -522,12 +426,8 @@ impl From<&ParseError> for Issue {
             | ParseError::ConstructorInitializerInSharp(..)
             | ParseError::EventBodyInSharp(..)
             | ParseError::NestedTypeInSharp(..)
-            | ParseError::PartialTypeInSharp(..)
             | ParseError::StructHeaderTypeInSharp(..)
             | ParseError::MiscasedKeywordInSharp(..)
-            | ParseError::ClassCastInSharp(..)
-            | ParseError::LateAttributeTargetInSharp(..)
-            | ParseError::TypeParameterAttributesInSharp(..)
             | ParseError::UnparenthesizedAttributedLambdaInSharp(..) => Issue::error(error.to_string())
                 .with_code(PARSE_ERROR_CODE)
                 .with_annotation(Annotation::primary(error.span()).with_message("Written here.")),

@@ -64,6 +64,8 @@ where
 {
     pub(crate) arena: &'arena A,
     pub(crate) dialect: Dialect,
+    /// The source text, which a form outside the PHP# grammar is read from to fail as a typo does.
+    pub(crate) source: &'input [u8],
     pub(crate) state: State,
     pub(crate) stream: TokenStream<'input, 'arena, A>,
     pub(crate) errors: Vec<'arena, ParseError, A>,
@@ -104,7 +106,7 @@ where
         };
         let stream = TokenStream::new(arena, lexer);
 
-        Self { arena, dialect, state: State::default(), stream, errors: Vec::new_in(arena) }
+        Self { arena, dialect, source: content, state: State::default(), stream, errors: Vec::new_in(arena) }
     }
 
     /// Creates a new parser for the given file, in the dialect its name selects.
