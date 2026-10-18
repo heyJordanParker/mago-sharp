@@ -259,7 +259,8 @@ where
     pub(crate) fn expect_php_lambda_keyword(&mut self, kind: TokenKind) -> Result<Keyword<'arena>, ParseError> {
         let keyword = self.expect_keyword(kind)?;
         if self.dialect.is_sharp() {
-            self.errors.push(ParseError::PhpLambdaInSharp(keyword.span));
+            let written = if kind == T!["fn"] { "fn" } else { "function" };
+            self.errors.push(ParseError::PhpLambdaInSharp(written, keyword.span));
         }
 
         Ok(keyword)

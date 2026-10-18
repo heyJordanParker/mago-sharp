@@ -18,34 +18,47 @@ impl<'arena, A> Parser<'_, 'arena, A>
 where
     A: Arena,
 {
+    /// Parses PHP's `use` of traits in a class body. A PHP# class lists a trait in its header, spec section 22, so the
+    /// `use` is an error that names the traits to list there.
     pub(crate) fn parse_trait_use(&mut self) -> Result<TraitUse<'arena>, ParseError> {
-        Ok(TraitUse {
-            r#use: self.expect_php_keyword(T!["use"])?,
-            trait_names: {
-                let mut traits = self.new_vec();
-                let mut commas = self.new_vec();
-                loop {
-                    let next = self.stream.lookahead(0)?.ok_or_else(|| self.stream.unexpected(None, &[]))?;
-                    if matches!(next.kind, T!["{" | ";" | "?>"]) {
-                        break;
-                    }
-
-                    traits.push(self.parse_php_identifier()?);
-
-                    match self.stream.peek_kind(0)? {
-                        Some(T![","]) => {
-                            commas.push(self.stream.consume()?);
-                        }
-                        _ => {
-                            break;
-                        }
-                    }
+        let r#use = self.expect_keyword(T!["use"])?;
+        let trait_names = {
+            let mut traits = self.new_vec();
+            let mut commas = self.new_vec();
+            loop {
+                let next = self.stream.lookahead(0)?.ok_or_else(|| self.stream.unexpected(None, &[]))?;
+                if matches!(next.kind, T!["{" | ";" | "?>"]) {
+                    break;
                 }
 
-                TokenSeparatedSequence::new(traits, commas)
-            },
-            specification: self.parse_trait_use_specification()?,
-        })
+                traits.push(self.parse_php_identifier()?);
+
+                match self.stream.peek_kind(0)? {
+                    Some(T![","]) => {
+                        commas.push(self.stream.consume()?);
+                    }
+                    _ => {
+                        break;
+                    }
+                }
+            }
+
+            TokenSeparatedSequence::new(traits, commas)
+        };
+        if self.dialect.is_sharp() {
+            // A header names each class by its short name, spec section 23.
+            let traits: std::vec::Vec<String> = trait_names
+                .iter()
+                .map(|name| {
+                    let short_name = name.value().rsplit(|byte| *byte == b'\\').next().unwrap_or_default();
+
+                    String::from_utf8_lossy(short_name).into_owned()
+                })
+                .collect();
+            self.errors.push(ParseError::TraitUseInSharp(traits.join(", ").into_boxed_str(), r#use.span));
+        }
+
+        Ok(TraitUse { r#use, trait_names, specification: self.parse_trait_use_specification()? })
     }
 
     fn parse_trait_use_specification(&mut self) -> Result<TraitUseSpecification<'arena>, ParseError> {

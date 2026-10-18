@@ -529,19 +529,21 @@ fn a_parameter_default_follows_its_accessors_and_behaviors() {
     assert_eq!(written(parameters[3].variable.span()), "other");
 }
 
-/// `required` on a method is spec syntax outside the slice: a single error where it starts, and the class around it
-/// still parses.
+/// `required` on a method is a single error where it starts, which keeps it to the constructor and a property, and the
+/// class around it, whose `required` property is no error, still parses.
 #[test]
-fn spec_syntax_outside_the_slice_is_one_not_supported_error_where_it_starts() {
+fn required_on_a_method_is_one_error_where_it_starts() {
     let arena = LocalArena::new();
-    let code =
-        "class Report\n{\n    public required int count() { return 1; }\n\n    public int run() { return 1; }\n}\n";
+    let code = "class Report\n{\n    public required int count() { return 1; }\n\n    public required string name { get; init; }\n\n    public int run() { return 1; }\n}\n";
     let program = parse(&arena, "src/Report.sharp", code);
 
     let [error] = program.errors else {
         panic!("expected one error, got {:#?}", program.errors);
     };
-    assert_eq!(error.to_string(), "`required` is not supported yet in PHP#.");
+    assert_eq!(
+        error.to_string(),
+        "`required` goes on the constructor or a property, never on a method: remove it here."
+    );
     assert_eq!(source(code, error), "required");
     let Some(Statement::Class(class)) = program.statements.first() else {
         panic!("expected a class, got {:#?}", program.statements);
@@ -893,11 +895,11 @@ fn a_sharp_parse_error_shows_its_message_as_the_issue_title() {
     for (code, message) in [
         (
             "class Report\n{\n    public int run() { return this->total; }\n}\n",
-            "`->` is PHP syntax: PHP# writes member access with `.`",
+            "PHP# has no `->`: write member access with `.`.",
         ),
         (
             "class Report\n{\n    public int run() { return \\Lib\\Calc.make(); }\n}\n",
-            "A `\\` name is PHP syntax: add `import Lib.Calc;` and write `Calc`",
+            "PHP# has no `\\` names: add `import Lib.Calc;` and write `Calc`.",
         ),
         (
             "class Report\n{\n    public int run(extra) { return 1; }\n}\n",
@@ -906,7 +908,7 @@ fn a_sharp_parse_error_shows_its_message_as_the_issue_title() {
         ("class Report\n{\n    private count = 0;\n}\n", "A PHP# field needs a type, as in `private int count = 0;`."),
         (
             "class Report\n{\n    public required int count() { return 1; }\n}\n",
-            "`required` is not supported yet in PHP#.",
+            "`required` goes on the constructor or a property, never on a method: remove it here.",
         ),
         (
             "struct Username : string\n{\n}\n",
@@ -2012,8 +2014,8 @@ fn a_question_mark_before_a_type_is_a_php_syntax_error_that_names_the_suffix() {
     assert_eq!(
         messages,
         [
-            "`?` before a type is PHP syntax: PHP# writes it after the type, as in `int?`",
-            "`?` before a type is PHP syntax: PHP# writes it after the type, as in `int?`",
+            "PHP# has no `?` before a type: write it after the type, as in `int?`.",
+            "PHP# has no `?` before a type: write it after the type, as in `int?`.",
         ]
     );
     let spans: Vec<&str> = program.errors.iter().map(|error| source(CODE, error)).collect();
@@ -2689,7 +2691,7 @@ fn foreach_is_a_php_syntax_error() {
     );
 
     let messages: Vec<String> = program.errors.iter().map(ToString::to_string).collect();
-    assert_eq!(messages, ["`foreach` is PHP syntax: PHP# loops over a collection with `for … of`"]);
+    assert_eq!(messages, ["PHP# has no `foreach`: loop over a collection with `for … of`."]);
 }
 
 /// Spec section 27: a `.sharp` file starts in code, so an opening tag is one error, and the file parses on.
@@ -2703,7 +2705,7 @@ fn an_opening_tag_is_a_php_syntax_error() {
         program.errors.iter().map(|error| (error.to_string(), source(CODE, error))).collect();
     assert_eq!(
         errors,
-        [("`<?php` is PHP syntax: a `.sharp` file has no opening tag, so delete it".to_owned(), "<?php")]
+        [("PHP# has no `<?php`: a `.sharp` file has no opening tag, so delete it.".to_owned(), "<?php")]
     );
     assert!(matches!(program.statements.get(1), Some(Statement::Namespace(_))), "{:#?}", program.statements);
 }
@@ -2715,17 +2717,17 @@ fn every_php_tag_is_a_php_syntax_error() {
     for (code, message, tag) in [
         (
             "<?\nnamespace App;\n\nclass Report\n{\n}\n",
-            "`<?` is PHP syntax: a `.sharp` file has no opening tag, so delete it",
+            "PHP# has no `<?`: a `.sharp` file has no opening tag, so delete it.",
             "<?",
         ),
         (
             "namespace App;\n\nclass Report\n{\n}\n<?= 1;\n",
-            "`<?=` is PHP syntax: a `.sharp` file has no tags, and writes output with `global.printf`",
+            "PHP# has no `<?=`: a `.sharp` file has no tags, and writes output with `global.printf`.",
             "<?=",
         ),
         (
             "namespace App;\n\nclass Report\n{\n}\n?>\n",
-            "`?>` is PHP syntax: a `.sharp` file has no closing tag, so delete it",
+            "PHP# has no `?>`: a `.sharp` file has no closing tag, so delete it.",
             "?>",
         ),
     ] {
@@ -2742,7 +2744,7 @@ fn every_php_tag_is_a_php_syntax_error() {
     let nullable = "namespace App;\n\nclass Report\n{\n    List<?int> a = [];\n    List<int?> b = [];\n}\n";
     let program = parse(&arena, "src/App/Report.sharp", nullable);
     let errors: Vec<String> = program.errors.iter().map(ToString::to_string).collect();
-    assert_eq!(errors, ["`?` before a type is PHP syntax: PHP# writes it after the type, as in `int?`"]);
+    assert_eq!(errors, ["PHP# has no `?` before a type: write it after the type, as in `int?`."]);
 }
 
 /// Spec section 27: a class lives in one file, so C#'s `partial` before a type is one error, and the type parses on.
@@ -3031,7 +3033,7 @@ fn a_php_closure_or_arrow_function_is_php_syntax_that_names_the_lambda() {
         };
         assert_eq!(
             Issue::from(error).message,
-            "PHP# writes a lambda as a bare arrow without `fn` or `function`, as in `x => x.id` or `(a, b) => { … }`",
+            format!("PHP# has no `{start}`: write the lambda as `(x) => x * 2`."),
             "{lambda}"
         );
         assert_eq!(source(code, error), start, "{lambda}");
@@ -3058,16 +3060,16 @@ fn a_question_mark_apart_from_the_dot_is_not_null_safe_access() {
 #[test]
 fn php_member_access_and_concatenating_assignment_are_parse_errors_that_name_the_dot() {
     for (code, message) in [
-        ("calc->add()", "`->` is PHP syntax: PHP# writes member access with `.`"),
-        ("calc?->add()", "`?->` is PHP syntax: PHP# writes null-safe member access with `?.`"),
-        ("Calc::make()", "`::` is PHP syntax: PHP# writes static access with `.`"),
-        ("Calc::class", "`Calc::class` is PHP syntax: PHP# writes `typeof(Calc)`"),
-        ("calc::class", "`calc::class` is PHP syntax: PHP# writes `Class.of(calc)`"),
-        ("Self::class", "`Self::class` is PHP syntax: PHP# writes `typeof(Self)`"),
-        ("Demo.Calc::class", "`Demo.Calc::class` is PHP syntax: PHP# writes `typeof(Calc)`"),
-        ("this.calc::class", "`this.calc::class` is PHP syntax: PHP# writes `Class.of(this.calc)`"),
-        ("make()::class", "`::` is PHP syntax: PHP# writes static access with `.`"),
-        ("label .= \"x\"", "`.=` is PHP syntax: in PHP# `.` is member access"),
+        ("calc->add()", "PHP# has no `->`: write member access with `.`."),
+        ("calc?->add()", "PHP# has no `?->`: write null-safe member access with `?.`."),
+        ("Calc::make()", "PHP# has no `::`: write static access with `.`."),
+        ("Calc::class", "PHP# has no `Calc::class`: write `typeof(Calc)`."),
+        ("calc::class", "PHP# has no `calc::class`: write `Class.of(calc)`."),
+        ("Self::class", "PHP# has no `Self::class`: write `typeof(Self)`."),
+        ("Demo.Calc::class", "PHP# has no `Demo.Calc::class`: write `typeof(Calc)`."),
+        ("this.calc::class", "PHP# has no `this.calc::class`: write `Class.of(this.calc)`."),
+        ("make()::class", "PHP# has no `::`: write static access with `.`."),
+        ("label .= \"x\"", "PHP# has no `.=`: append with `+=`."),
     ] {
         let source = format!("class Report\n{{\n    void run()\n    {{\n        {code};\n    }}\n}}\n");
         let arena = LocalArena::new();
@@ -3088,25 +3090,39 @@ fn a_php_operator_is_reported_once_where_it_is_consumed() {
     );
 
     let messages: Vec<String> = program.errors.iter().map(ToString::to_string).collect();
-    assert_eq!(messages, ["`.=` is PHP syntax: in PHP# `.` is member access"]);
+    assert_eq!(messages, ["PHP# has no `.=`: append with `+=`."]);
 }
 
+/// `use` is a parse error in every form: an import names `import`, and a trait's `use` in a class names the traits to
+/// list in the class header, spec section 22, which parses with no error.
 #[test]
 fn the_use_keyword_is_a_parse_error_in_every_form() {
-    for code in [
-        "use Calc;\n",
-        "use Lib\\Calc as Adder;\n",
-        "use Lib\\{Calc, Money};\n",
-        "use function Lib\\{make, total};\n",
-        "class Report\n{\n    use Shared;\n}\n",
-        "class Report\n{\n    use Lib\\Shared { Lib\\Shared::run as start; }\n}\n",
+    let import = "PHP# has no `use`: import a class with `import`.";
+
+    for (code, message) in [
+        ("use Calc;\n", import),
+        ("use Lib\\Calc as Adder;\n", import),
+        ("use Lib\\{Calc, Money};\n", import),
+        ("use function Lib\\{make, total};\n", import),
+        (
+            "class Report\n{\n    use Shared;\n}\n",
+            "PHP# has no `use` in a class: list `Shared` in the header after `:`.",
+        ),
+        (
+            "class Report\n{\n    use Lib\\Shared, Logs { Lib\\Shared::run as start; }\n}\n",
+            "PHP# has no `use` in a class: list `Shared, Logs` in the header after `:`.",
+        ),
     ] {
         let arena = LocalArena::new();
         let program = parse(&arena, "src/Report.sharp", code);
 
         let messages: Vec<String> = program.errors.iter().map(ToString::to_string).collect();
-        assert_eq!(messages, ["`use` is PHP syntax: PHP# imports a class with `import`"], "{code}");
+        assert_eq!(messages, [message], "{code}");
     }
+
+    let arena = LocalArena::new();
+    let listed = parse(&arena, "src/Report.sharp", "class Report : Shared, Logs\n{\n}\n");
+    assert!(listed.errors.is_empty(), "{:#?}", listed.errors);
 }
 
 /// The places the program reads `word` as a name, each once. PHP's construct holds the word it starts as a keyword.
@@ -3348,8 +3364,8 @@ fn a_php_closure_reports_its_function_and_its_use_clause() {
     assert_eq!(
         messages,
         [
-            "PHP# writes a lambda as a bare arrow without `fn` or `function`, as in `x => x.id` or `(a, b) => { … }`",
-            "`use` is PHP syntax: PHP# imports a class with `import`",
+            "PHP# has no `function`: write the lambda as `(x) => x * 2`.",
+            "PHP# has no `use`: import a class with `import`.",
         ]
     );
 }
@@ -3365,7 +3381,7 @@ fn a_qualified_name_is_a_parse_error_that_names_the_import() {
         let program = parse(&arena, "src/Report.sharp", code);
 
         let messages: Vec<String> = program.errors.iter().map(ToString::to_string).collect();
-        assert_eq!(messages, ["A `\\` name is PHP syntax: add `import Lib.Calc;` and write `Calc`"], "{code}");
+        assert_eq!(messages, ["PHP# has no `\\` names: add `import Lib.Calc;` and write `Calc`."], "{code}");
     }
 }
 
@@ -3381,7 +3397,7 @@ fn a_qualified_null_true_or_false_is_a_parse_error_that_names_the_keyword() {
         let program = parse(&arena, "src/Report.sharp", code);
 
         let messages: Vec<String> = program.errors.iter().map(ToString::to_string).collect();
-        assert_eq!(messages, [format!("A `\\` name is PHP syntax: write `{keyword}`")], "{code}");
+        assert_eq!(messages, [format!("PHP# has no `\\` names: write `{keyword}`.")], "{code}");
     }
 }
 
@@ -3394,7 +3410,7 @@ fn a_method_written_with_function_is_a_parse_error() {
     let messages: Vec<String> = program.errors.iter().map(ToString::to_string).collect();
     assert_eq!(
         messages.first().map(String::as_str),
-        Some("`function` is PHP syntax: a PHP# method starts with its return type")
+        Some("PHP# has no `function`: start a method with its return type.")
     );
 }
 
@@ -3712,7 +3728,7 @@ fn php_attribute_syntax_is_a_parse_error_that_names_the_brackets() {
     let program = parse(&arena, "src/Report.sharp", CODE);
 
     let messages: Vec<String> = program.errors.iter().map(ToString::to_string).collect();
-    assert_eq!(messages, ["`#[` is PHP syntax: PHP# writes attributes in square brackets, as in `[Searchable]`"; 3]);
+    assert_eq!(messages, ["PHP# has no `#[`: write an attribute in square brackets, as in `[Searchable]`."; 3]);
     let spans: Vec<&str> = program.errors.iter().map(|error| source(CODE, error)).collect();
     assert_eq!(spans, ["#["; 3]);
     assert_eq!(attribute_lists(CODE, Node::Program(program)), ["#[Marker]"; 3]);
@@ -4189,7 +4205,7 @@ fn a_named_argument_this_names_the_parameter_at_this() {
 }
 
 /// `required` on a constructor is a modifier, spec section 25, and stays a name elsewhere. The parser keeps its own
-/// "not supported yet" error for `required` on any other member.
+/// error for `required` on a method or an operator.
 #[test]
 fn required_is_a_constructor_modifier_and_stays_a_name_elsewhere() {
     const CODE: &str = "class Entity\n{\n    public required Entity(Row row)\n    {\n        required(row);\n    }\n\n    required Entity(int count) {}\n}\n";
@@ -4216,7 +4232,7 @@ fn required_is_a_constructor_modifier_and_stays_a_name_elsewhere() {
 }
 
 #[test]
-fn required_on_a_method_with_a_return_type_is_not_supported_yet() {
+fn required_on_a_method_with_a_return_type_is_an_error() {
     for member in ["public required int run() { return 1; }", "public required static int make() { return 1; }"] {
         let arena = LocalArena::new();
         let code: &'static str = Box::leak(
@@ -4227,7 +4243,11 @@ fn required_on_a_method_with_a_return_type_is_not_supported_yet() {
         let [error] = program.errors else {
             panic!("expected one error for `{member}`, got {:#?}", program.errors);
         };
-        assert_eq!(error.to_string(), "`required` is not supported yet in PHP#.", "{member}");
+        assert_eq!(
+            error.to_string(),
+            "`required` goes on the constructor or a property, never on a method: remove it here.",
+            "{member}"
+        );
         assert_eq!(source(code, error), "required", "{member}");
     }
 }
@@ -5933,7 +5953,7 @@ fn a_lambda_after_an_operator_needs_parentheses_as_in_csharp() {
                 "A lambda after an operator needs parentheses, as in `handler ?? (item => item.ready)`.".to_owned(),
                 "item =>"
             ),
-            ("`->` is PHP syntax: PHP# writes member access with `.`".to_owned(), "->"),
+            ("PHP# has no `->`: write member access with `.`.".to_owned(), "->"),
         ]
     );
 }
@@ -5956,7 +5976,7 @@ fn a_conditional_at_the_top_of_a_guard_needs_parentheses_as_in_csharp() {
                     .to_owned(),
                 "strict ? forced : ready"
             ),
-            ("`->` is PHP syntax: PHP# writes member access with `.`".to_owned(), "->"),
+            ("PHP# has no `->`: write member access with `.`.".to_owned(), "->"),
         ]
     );
 }

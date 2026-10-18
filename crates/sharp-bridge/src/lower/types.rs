@@ -1709,6 +1709,25 @@ impl<'analysis> Types<'analysis> {
         .then_some(root_type)
     }
 
+    pub(crate) fn inherits_getter(&self, class: &[u8], property: &[u8]) -> bool {
+        let variable = [b"$", property].concat();
+        let parent_of =
+            |class: &[u8]| self.codebase.get_class_like(class).and_then(|metadata| metadata.direct_parent_class);
+        let mut parent = parent_of(class);
+        while let Some(ancestor) = parent {
+            if self
+                .codebase
+                .get_declaring_property(ancestor.as_bytes(), &variable)
+                .is_some_and(|metadata| metadata.hooks.values().any(|hook| hook.is_get() && !hook.is_abstract))
+            {
+                return true;
+            }
+            parent = parent_of(ancestor.as_bytes());
+        }
+
+        false
+    }
+
     /// The root declaration of the property `variable` that `class` declares or inherits, the one in the class whose
     /// parent does not declare it, with that class.
     fn root_property(&self, class: &[u8], variable: &[u8]) -> (Word, &'analysis PropertyMetadata) {

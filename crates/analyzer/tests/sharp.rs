@@ -6608,21 +6608,21 @@ fn an_expression_the_parser_refuses_reports_only_its_parse_error() {
     assert_eq!(
         reports(("src/Demo/Report.sharp", sharp)),
         [
-            "8:14 parse `.=` is PHP syntax: in PHP# `.` is member access",
-            "11:25 parse `->` is PHP syntax: PHP# writes member access with `.`",
-            "12:25 parse `::` is PHP syntax: PHP# writes static access with `.`",
-            "13:25 parse `?->` is PHP syntax: PHP# writes null-safe member access with `?.`",
-            "14:20 parse PHP# writes a lambda as a bare arrow without `fn` or `function`, as in `x => x.id` or `(a, b) => { … }`",
-            "15:20 parse PHP# writes a lambda as a bare arrow without `fn` or `function`, as in `x => x.id` or `(a, b) => { … }`",
+            "8:14 parse PHP# has no `.=`: append with `+=`.",
+            "11:25 parse PHP# has no `->`: write member access with `.`.",
+            "12:25 parse PHP# has no `::`: write static access with `.`.",
+            "13:25 parse PHP# has no `?->`: write null-safe member access with `?.`.",
+            "14:20 parse PHP# has no `fn`: write the lambda as `(x) => x * 2`.",
+            "15:20 parse PHP# has no `function`: write the lambda as `(x) => x * 2`.",
             "16:25 parse PHP# writes a `Map` entry as `key: value`: `=>` is the lambda arrow",
             "17:53 parse A `? :` in a `when` condition needs parentheses, as in `when (strict ? forced : ready) =>`.",
-            "18:26 parse `->` is PHP syntax: PHP# writes member access with `.`",
+            "18:26 parse PHP# has no `->`: write member access with `.`.",
             "20:40 parse PHP# writes a `Map` entry as `key: value`: `=>` is the lambda arrow",
-            "24:29 parse `->` is PHP syntax: PHP# writes member access with `.`",
+            "24:29 parse PHP# has no `->`: write member access with `.`.",
             "32:51 parse PHP# writes a `Map` entry as `key: value`: `=>` is the lambda arrow",
             "32:61 parse PHP# writes a `Map` entry as `key: value`: `=>` is the lambda arrow",
-            "36:26 parse `->` is PHP syntax: PHP# writes member access with `.`",
-            "42:26 parse `->` is PHP syntax: PHP# writes member access with `.`",
+            "36:26 parse PHP# has no `->`: write member access with `.`.",
+            "42:26 parse PHP# has no `->`: write member access with `.`.",
             "9:21 invalid-local-assignment-value Invalid assignment to `wrong`: it is declared as `int`.",
         ]
     );
@@ -8136,6 +8136,23 @@ fn a_member_read_through_a_full_name_names_the_import_to_add() {
     assert_eq!(issues(analyzed, &others), ["7:16 non-existent-class-like"]);
 }
 
+/// What the checker's refusals of PHP forms name compiles: a `private static` field for a `static` local, `{ get; set; }`
+/// for `public(set)`, the constructor for `__construct`, `toString` for `__toString`, `with` for `__clone`, the base
+/// class for `parent`, a tuple unpacked into `const [a, b]` for `[a, b] = …` and `list()`, a lambda as `(x) => x * 2`
+/// for `fn` and `function`, a Map built and read by its key for `compact()` and `extract()`, and a class marked
+/// `[Attribute]` for a class attached as an attribute.
+#[test]
+fn the_form_a_php_form_refusal_names_compiles() {
+    const BASE: &str = "namespace Demo;\n\npublic class Base\n{\n}\n";
+    const FIELD: &str = "namespace Demo;\n\nimport Attribute;\n\n[Attribute]\npublic class Field\n{\n}\n";
+    let named = "namespace Demo;\n\n[Field]\npublic class Named\n{\n    public int run(string name)\n    {\n        Function<int(int)> twice = (x) => x * 2;\n        Map<string, string> values = [\"name\": name];\n        return twice(values.get(\"name\") == name ? 1 : 0);\n    }\n}\n";
+
+    assert_eq!(issues(("src/Demo/Named.sharp", named), &[("src/Demo/Field.sharp", FIELD)]), Vec::<String>::new());
+    let written = "namespace Demo;\n\npublic class Written : Base\n{\n    private static int calls = 0;\n\n    public int views { get; set; } = 0;\n\n    public Written()\n    {\n    }\n\n    public int run(int extra)\n    {\n        Written.calls++;\n        const [a, b] = this.pair();\n        return extra + a + b;\n    }\n\n    public string toString() => \"written\";\n\n    public Base base() => this;\n\n    public Written copy() => this with { views: 1 };\n\n    private [int, int] pair() => [1, 2];\n}\n";
+
+    assert_eq!(issues(("src/Demo/Written.sharp", written), &[("src/Demo/Base.sharp", BASE)]), Vec::<String>::new());
+}
+
 /// Spec section 23 keeps full names in `import` lines wherever code writes one: a type, a local's type, `new`,
 /// `nameof`, `typeof`, an attribute, `catch`, a class header, an `is` test, a `match` type pattern, a bound, an `on`
 /// clause, a read, a call or an `extern` through a library's namespace, and a class through an imported namespace, in
@@ -8252,7 +8269,7 @@ fn a_full_name_anywhere_in_code_names_the_import_to_add() {
     let through_new = "namespace App.Tenant;\n\nclass Report\n{\n    public Any make() => new Report.of.total;\n}\n";
     assert_eq!(
         compile_errors(("src/App/Tenant/Report.sharp", through_new), &[]),
-        ["This `new` without arguments is not supported yet in PHP#."]
+        ["`new Report.of` needs parentheses: write `new Report.of()`."]
     );
 }
 
@@ -8401,11 +8418,11 @@ fn a_missing_class_is_one_error_that_names_it_as_php_sharp_does() {
                 "5:26 non-existent-class-like `Missing` names no class, and no namespace this file imports. | Names nothing here. | Check the spelling of `Missing`, or import the class or the namespace whose member this reads.".to_owned(),
             ],
         ),
-        // A `use` in a class body is PHP syntax, and the class it names is still missing in PHP#'s words.
+        // A `use` in a class body names the header, and the class it names is still missing in PHP#'s words.
         (
             "namespace App;\n\nclass Report\n{\n    use Missing;\n}\n",
             vec![
-                "5:5 parse `use` is PHP syntax: PHP# imports a class with `import` | Written here.".to_owned(),
+                "5:5 parse PHP# has no `use` in a class: list `Missing` in the header after `:`. | Written here.".to_owned(),
                 missing("5:9", "App.Missing"),
             ],
         ),
@@ -9087,8 +9104,8 @@ fn a_null_safe_access_on_an_index_reads_a_missing_key_as_null() {
 #[test]
 fn an_index_write_replaces_a_list_element_and_list_append_is_add() {
     let sharp = "namespace Demo;\n\nclass Sizes\n{\n    public List<int> held { get; private set; } = [];\n\n    public void change(List<int> sizes, List<List<int>> grid, Map<string, List<int>> groups, Set<int> tags, Map<int, string> names, Map<string, string>? maybe)\n    {\n        sizes[0] = 1;\n        sizes[0] += 1;\n        sizes[1]++;\n        --sizes[1];\n        grid[0][1] = 1;\n        this.held[0] = 2;\n        groups[\"b\"] = [1];\n        sizes[] = 3;\n        this.held[] = 4;\n        grid[0][] = 5;\n        groups[] = [1];\n        tags[] = 1;\n        names[] = \"a\";\n        maybe[] = \"b\";\n    }\n}\n";
-    let list = "A `List` grows with `add`: `list[] = value` is PHP syntax.";
-    let map = "A `Map` writes a key with `map[key] = value`: `map[] = value` is PHP syntax.";
+    let list = "PHP# has no `list[] = value`: a `List` grows with `add`.";
+    let map = "PHP# has no `map[] = value`: a `Map` writes a key with `map[key] = value`.";
 
     assert_eq!(
         analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Sizes.sharp", sharp), &[])
@@ -10576,8 +10593,8 @@ fn collection_methods_take_and_give_the_types_of_their_elements() {
 /// they are a compile error." A search compares each element with the value by `==`, so it refuses what
 /// `any(x => x == value)` refuses: a class element without `operator ==`, an element union the value's `operator ==`
 /// does not always take, an `operator ==` that does not take the element and the value, named by the value's class,
-/// and an `Any?` element compared with an `Any?` or an instance, while a collection element is not supported yet, as
-/// `==` on a collection is. An element `==` compares, a class that declares `operator ==`, nullable or not, a string,
+/// and an `Any?` element compared with an `Any?` or an instance, while an `Iterable` element is refused, as `==` on an
+/// `Iterable` is. An element `==` compares, a class that declares `operator ==`, nullable or not, a string,
 /// an `int|float` given an int and an `Any?` given a string, searches with no issue, as does the help's `any` with
 /// `===`, whose lambda names an element by its class's initial unless the call already uses that name, and which keeps
 /// a null-safe call's `?.`. A struct element compares by value, so one with a property `==` can't compare is refused
@@ -11846,34 +11863,38 @@ fn a_read_refused_by_its_key_or_a_set_still_gives_the_value_of_its_collection() 
     );
 }
 
-/// `==` on an `Iterable` is not supported yet, so it is refused, as the element of a list, in a search of a list of
-/// them, and as a struct's property. Each refusal names the `Iterable`, and says that `==` compares a `List`, a `Map`
-/// or a `Set`, and an `Iterable` is none of them. A type parameter bound by a collection is not supported yet either.
+/// `==` on an `Iterable` is refused, as the element of a list, in a search of a list of them, and as a struct's
+/// property. Each refusal says that `==` compares a `List`, a `Map` or a `Set`, and an `Iterable` is none of them, and
+/// a type parameter bound by a collection may be another type. Each is an `Iterable`, so `toList()` gives a `List` to
+/// compare, which the refusal names and which compiles.
 #[test]
-fn equality_of_an_iterable_is_not_supported_yet() {
+fn equality_of_an_iterable_names_its_to_list() {
+    let fixed = "namespace Demo;\n\nclass Report\n{\n    public static bool same(Iterable<int> items, Iterable<int> others) => items.toList() == others.toList();\n\n    public static bool bound<T : List<int>>(T items, List<int> others) => items.toList() == others.toList();\n}\n";
+    assert_eq!(refusals(("src/Demo/Report.sharp", fixed), &[]), Vec::<String>::new());
+
     let sharp = "namespace Demo;\n\nclass Report\n{\n    public static bool same(Iterable<int> items, Iterable<int> others) => items == others;\n\n    public static bool rows(List<Iterable<int>> rows, List<Iterable<int>> others, Iterable<int> row) => rows == others || rows.contains(row);\n\n    public static bool streamed(Streamed a, Streamed b) => a == b;\n\n    public static bool bound<T : List<int>>(T items, List<int> others) => items == others;\n}\n\nstruct Streamed\n{\n    public Streamed(public Iterable<int> items { get; }) { }\n}\n";
     let issues = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Report.sharp", sharp), &[]);
     let notes: Vec<_> = issues.iter().map(|issue| issue.notes.last().map(String::as_str).unwrap_or_default()).collect();
-    let iterable = "`==` compares a `List`, a `Map` or a `Set`, and an `Iterable` is none of them.";
+    let iterable = "`==` compares a `List`, a `Map` or a `Set`, and an `Iterable` is none of them";
 
     assert_eq!(
         refusals(("src/Demo/Report.sharp", sharp), &[]),
         [
-            "5:75 not-supported-yet `==` on `Iterable<int>` is not supported yet, so it cannot compare `Iterable<int>` with `Iterable<int>`. | Compare the elements one by one.",
-            "7:105 invalid-operand `==` compares `List<Iterable<int>>` with `List<Iterable<int>>` element by element, and `==` on `Iterable<int>` is not supported yet. | ",
-            "7:137 not-supported-yet `contains` on `List<Iterable<int>>` is not supported yet: `==` on `Iterable<int>` is not supported yet. | Compare the elements one by one.",
-            "9:60 invalid-operand `Streamed` can't compare by value: `items` is an `Iterable<int>`, and `==` on it is not supported yet. | ",
-            "11:75 not-supported-yet `==` on `T` is not supported yet, so it cannot compare `T` with `List<int>`. | Compare the elements one by one.",
+            format!("5:75 invalid-operand {iterable}: compare `a.toList() == b.toList()`. | "),
+            format!("7:105 invalid-operand `==` compares `List<Iterable<int>>` with `List<Iterable<int>>` element by element, and {iterable}. | "),
+            format!("7:137 invalid-argument `contains` compares elements with `==`, and {iterable}. | Compare each element's `toList()` with `==`, as in `a.toList() == b.toList()`."),
+            "9:60 invalid-operand `Streamed` can't compare by value: `items` is an `Iterable<int>`, which `==` does not compare. | ".to_owned(),
+            "11:75 invalid-operand `==` compares a `List`, a `Map` or a `Set`, and `T` may be another type: compare `a.toList() == b.toList()`. | ".to_owned(),
         ]
     );
     assert_eq!(
         notes,
         [
-            iterable,
-            "Two lists are equal when their elements are, in order, two maps when they hold equal values under the same keys, and two sets when they hold equal elements, in any order.",
-            iterable,
-            iterable,
-            "`==` compares a `List`, a `Map` or a `Set`, and `T` may be another type.",
+            "`==` cannot compare `Iterable<int>` with `Iterable<int>`.".to_owned(),
+            "Two lists are equal when their elements are, in order, two maps when they hold equal values under the same keys, and two sets when they hold equal elements, in any order.".to_owned(),
+            String::new(),
+            format!("{iterable}."),
+            "`==` cannot compare `T` with `List<int>`.".to_owned(),
         ]
     );
 }
@@ -16825,6 +16846,38 @@ fn a_misplaced_or_repeated_attribute_is_named_as_sharp_writes_it() {
         [
             "5:2 invalid-attribute-target Attribute `Field` cannot be used on a class, interface, enum, or trait. | This attribute is not allowed here | `Field` defined here | The definition of `Field` restricts its use to the following targets: properties. | Remove `[Field]` here, or add a class, interface, enum, or trait to the targets in the `[Attribute(…)]` of the `Field` class.",
             "9:6 attribute-not-repeatable Attribute `Field` is not declared as repeatable and has already been used. | Duplicate use of non-repeatable attribute `Field` | Attribute `Field` was first used here | The attribute `Field` is not declared repeatable, so it applies once to a given target. | Remove this duplicate `Field` attribute, or declare the attribute class `Field` repeatable.",
+        ]
+    );
+}
+
+/// A class attached as an attribute that is no attribute class is named as PHP# writes it. A PHP# class is marked
+/// `[Attribute]`, and a plain PHP class is its library's to mark, so PHP# attaches another. The PHP twin keeps
+/// upstream's wording.
+#[test]
+fn a_class_that_is_no_attribute_class_names_what_to_attach() {
+    let field = "namespace Demo;\n\npublic class Field\n{\n}\n";
+    let stamp = "<?php\n\nnamespace Lib;\n\nfinal class Stamp\n{\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Stamp;\n\n[Field]\npublic class Report\n{\n    [Stamp]\n    private int count = 0;\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\n#[\\Lib\\Stamp]\nclass Report\n{\n}\n";
+
+    let attribute_issues = |analyzed| -> Vec<String> {
+        worded(analyzed, &[("src/Demo/Field.sharp", field), ("src/Lib/Stamp.php", stamp)])
+            .into_iter()
+            .filter(|line| line.contains(" class-not-marked-as-attribute"))
+            .collect()
+    };
+
+    assert_eq!(
+        attribute_issues(("src/Demo/Report.sharp", sharp)),
+        [
+            "5:2 class-not-marked-as-attribute `Field` is no attribute class: mark it `[Attribute]`. | Attached here. | `Field` is declared here.",
+            "8:6 class-not-marked-as-attribute `Stamp` is no attribute class: attach an attribute class instead. | Attached here. | `Stamp` is declared here.",
+        ]
+    );
+    assert_eq!(
+        attribute_issues(("src/Demo/Report.php", php)),
+        [
+            "5:3 class-not-marked-as-attribute Class `Lib\\Stamp` is used as an attribute but is not declared with `#[Attribute]`. | `Lib\\Stamp` used as an attribute here | Class `Lib\\Stamp` defined here needs an `#[Attribute]` declaration | To be used as a PHP attribute, a class must itself be decorated with the `#[\\Attribute]` system attribute. | Add `#[\\Attribute]` to the definition of class `Lib\\Stamp` to declare it as an attribute, or use a different class that is a valid attribute.",
         ]
     );
 }
