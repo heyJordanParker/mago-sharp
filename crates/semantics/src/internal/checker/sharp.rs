@@ -358,11 +358,12 @@ const OBJECT: &[u8] = b"Object";
 ///   enum case's value or a pattern's value, reads only a constant or an enum case this way, as PHP does: a static
 ///   field or property there is an error when this file declares it, and the analyzer reports it otherwise. A
 ///   pattern's value reads no local, parameter or `this`, as spec section 21 says: their values are compared in `when`.
-/// - A constant expression is built from constants: literals, constants, enum cases and their `value` and `name`,
-///   `typeof(X)`, list and map literals, indexes, templates, the ternary, `(int)`, `(float)` and `(string)`, the
-///   operators below, and lambdas that capture nothing. A call runs code, so it is an error that says to use a static
-///   field, or `when` in a pattern, and a lambda that captures a local or `this` is an error that names what it
-///   captures.
+/// - A constant expression is built from constants: literals, constants, enum cases, a backed case's `value` and a
+///   plain case's `name`, `typeof(X)`, list and map literals, indexes, templates, the ternary, `match` with constant
+///   arms, `(int)`, `(float)` and `(string)`, the operators below, and lambdas that capture nothing. Any other
+///   expression runs code, as a call and `new` do, so it is an error that says to use a static field, or `when` in a
+///   pattern, and a lambda that captures a local or `this` is an error that names what it captures. An attribute
+///   argument also creates an object of constants.
 /// - In expressions: literals, list literals `[a, b]` and `[...a, b]`, map literals `["key": value]` and `[:]`, index reads
 ///   `value[key]`, templates, parentheses, bare names, assignment, the operators below, and method calls and property
 ///   reads written with `.` or `?.` and a member name, `new Class(...)` and `new Class.name(...)` on a class written by
@@ -1011,9 +1012,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         // does in a `new`'s arguments.
         (Node::PositionalArgument(argument), Attribute) => argument.ellipsis.is_none().then_some(Constant),
         (Node::NamedArgument(_), Attribute) => Some(Constant),
-        (Node::Expression(Expression::Instantiation(instantiation)), Constant)
-            if context.slice_places.contains(&Some(Attribute)) =>
-        {
+        (Node::Expression(Expression::Instantiation(instantiation)), Constant) if is_attribute_argument(context) => {
             check_attribute_object(instantiation, context)
         }
         (
@@ -1735,8 +1734,9 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         (Node::Statement(Statement::PatternMatch(pattern_match)), Body) => {
             check_pattern_match(pattern_match, false, context).then_some(Body)
         }
-        (Node::Expression(Expression::PatternMatch(pattern_match)), Body) => {
-            check_pattern_match(pattern_match, true, context).then_some(Body)
+        // A `match` on constants with constant arms is known before the code runs.
+        (Node::Expression(Expression::PatternMatch(pattern_match)), Body | Constant) => {
+            check_pattern_match(pattern_match, true, context).then_some(place)
         }
         (Node::Is(is), Body)
             if let Expression::UnaryPrefix(UnaryPrefix { operator: UnaryPrefixOperator::Not(_), operand }) = is.value =>
@@ -1754,7 +1754,9 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             None
         }
         (Node::Is(is), Body) if report_chained_pattern(is.span(), is.pattern, context) => None,
-        (Node::PatternMatchPatternArm(arm), Body) if report_chained_pattern(arm.pattern.span(), arm.pattern, context) => {
+        (Node::PatternMatchPatternArm(arm), Body | Constant)
+            if report_chained_pattern(arm.pattern.span(), arm.pattern, context) =>
+        {
             None
         }
         (Node::Is(is), Body) => {
@@ -1764,10 +1766,10 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
 
             Some(Body)
         }
-        (Node::PatternMatchPatternArm(arm), Body) => {
+        (Node::PatternMatchPatternArm(arm), Body | Constant) => {
             report_hidden_pattern_variables(arm.pattern, false, context);
 
-            Some(Body)
+            Some(place)
         }
         (Node::As(r#as), Body) => match r#as.hint {
             // Spec section 13: a conversion of a readonly value is readonly already, as a narrowing pattern is.
@@ -1811,6 +1813,14 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             | Node::PatternMatchArmBody(_),
             Body,
         ) => Some(Body),
+        (
+            Node::PatternMatch(_)
+            | Node::PatternMatchArm(_)
+            | Node::PatternMatchDefaultArm(_)
+            | Node::MatchGuard(_)
+            | Node::PatternMatchArmBody(_),
+            Constant,
+        ) => Some(Constant),
         // Spec section 21: a pattern takes types and constants only, and a local's value is compared in `when`, which
         // the analyzer's error writes with the value's type. The binder binds a bare name of a type pattern to the
         // local of that name. The value is no constant expression, so the walk stops here.
@@ -1821,15 +1831,17 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
                 properties: None,
                 variable: None,
             })),
-            Body | Place::Pattern,
+            Body | Constant | Place::Pattern,
         ) if reads_code(Node::Identifier(name), context) => None,
-        (Node::Pattern(Pattern::Value(value)), Body | Place::Pattern) if reads_code(Node::Expression(value), context) => {
+        (Node::Pattern(Pattern::Value(value)), Body | Constant | Place::Pattern)
+            if reads_code(Node::Expression(value), context) =>
+        {
             None
         }
         (Node::ComparisonPattern(comparison), Place::Pattern) if reads_code(Node::Expression(comparison.value), context) => {
             None
         }
-        (Node::Pattern(_), Body | Place::Pattern) => Some(Place::Pattern),
+        (Node::Pattern(_), Body | Constant | Place::Pattern) => Some(Place::Pattern),
         // Spec section 21: a pattern creates a variable only through a typed declaration. Its properties are still
         // checked.
         (Node::PropertiesPattern(PropertiesPattern { variable: Some(variable), .. }), Place::Pattern) => {
@@ -2057,6 +2069,16 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         {
             Some(Constant)
         }
+        // A `match` in a constant value binds its pattern's variables from constants, so they are constants too.
+        (Node::ConstantAccess(constant), Constant)
+            if let Some(Binding::Local(Local { declaration, .. })) = context.names.binding(&constant.name)
+                && context.ancestors.iter().any(|ancestor| {
+                    matches!(ancestor, Node::Expression(Expression::PatternMatch(pattern_match))
+                        if pattern_match.span().contains(&declaration.start))
+                }) =>
+        {
+            Some(Constant)
+        }
         // The object decides a member of PHP's `self` or `static`, and of a superglobal or a `__Something__` name,
         // which binds as a class before `.`.
         (Node::Expression(Expression::Access(Access::Property(access))), Constant)
@@ -2124,13 +2146,6 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             | Node::ClassLikeMemberSelector(ClassLikeMemberSelector::Identifier(_)),
             Constant,
         ) => Some(Constant),
-        // A constant's value is known before the code runs, so it calls nothing. An attribute argument names what it
-        // takes in `report_attribute_argument`.
-        (Node::Expression(call @ Expression::Call(_)), Constant) if !context.slice_places.contains(&Some(Attribute)) => {
-            report_call_in_constant(call, context);
-
-            None
-        }
         // Spec section 14.2: a lambda is a bare arrow, after one name or a parenthesized parameter list, and its body
         // is an expression or a block. The parser reads it into an arrow function or a closure without a keyword.
         (Node::Expression(Expression::ArrowFunction(_) | Expression::Closure(_)), Body) => Some(Body),
@@ -2377,7 +2392,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         ) => Some(FunctionCall),
         (Node::ArgumentList(_), FunctionCall) => Some(Body),
 
-        (Node::Expression(_), Constant) if context.slice_places.contains(&Some(Attribute)) => {
+        (Node::Expression(_), Constant) if is_attribute_argument(context) => {
             report_attribute_argument(node.span(), context);
 
             None
@@ -2556,6 +2571,18 @@ fn check_attribute_object(instantiation: &Instantiation, context: &mut Context<'
     }
 
     spreads.is_empty().then_some(Place::Attribute)
+}
+
+/// Whether the constant value the walk is in is an attribute argument itself, and not a pattern's value or a lambda's
+/// body inside one.
+fn is_attribute_argument(context: &Context<'_, '_, '_>) -> bool {
+    context
+        .slice_places
+        .iter()
+        .rev()
+        .flatten()
+        .find(|place| matches!(place, Place::Attribute | Place::Body | Place::Pattern))
+        == Some(&Place::Attribute)
 }
 
 fn report_attribute_argument(span: Span, context: &mut Context<'_, '_, '_>) {
@@ -3974,8 +4001,8 @@ fn report_lambda_capture(lambda: &Expression, context: &mut Context<'_, '_, '_>)
     !locals.is_empty() || this
 }
 
-/// Reports a call in a constant value, which runs code where the value is known before the code runs: a static field
-/// holds a value a call computes, and a pattern's `when` compares with one.
+/// Reports an expression in a constant value that runs code where the value is known before the code runs, as a call,
+/// a `new` and a property read do: a static field holds a value code computes, and a pattern's `when` compares with one.
 fn report_call_in_constant(call: &Expression, context: &mut Context<'_, '_, '_>) {
     let written = String::from_utf8_lossy(context.get_code_snippet(call)).into_owned();
     let instead = if context.slice_places.contains(&Some(Place::Pattern)) {
@@ -3986,7 +4013,7 @@ fn report_call_in_constant(call: &Expression, context: &mut Context<'_, '_, '_>)
 
     context.report(
         Issue::error(format!("A constant's value is known before the code runs, and `{written}` runs code: {instead}"))
-            .with_annotation(Annotation::primary(call.span()).with_message("Called here.")),
+            .with_annotation(Annotation::primary(call.span()).with_message("Runs code here.")),
     );
 }
 
@@ -5893,8 +5920,8 @@ const fn is_slice_assignment_operator(operator: &AssignmentOperator) -> bool {
 
 /// Reports a node the slice does not have at its place. A form [`is_undecided`] names is not supported yet, a PHP form
 /// PHP# never has names what PHP# writes instead, as [`never_written`] gives it, any other expression in a constant
-/// value is not supported yet, as `new Report()` there, and any other node is no PHP# construct. Each notes what PHP#
-/// has at the place.
+/// value runs code, as `new Money(5)` and `Rates.current()` do there, and any other node is no PHP# construct. Each
+/// notes what PHP# has at the place.
 fn report_unsupported(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) {
     let construct = match node {
         Node::Statement(_) => "statement",
@@ -5912,8 +5939,8 @@ fn report_unsupported(node: Node<'_, '_>, place: Place, context: &mut Context<'_
         context.report(not_supported_yet(node.span(), construct, supported(place)));
     } else if let Some(issue) = never_written(node, place, context) {
         context.report(issue);
-    } else if let (Node::Expression(_), Place::Constant) = (node, place) {
-        context.report(not_supported_yet(node.span(), construct, supported(place)));
+    } else if let (Node::Expression(expression), Place::Constant) = (node, place) {
+        report_call_in_constant(expression, context);
     } else {
         report_not_supported(node.span(), construct, supported(place), context);
     }
@@ -6130,11 +6157,6 @@ fn never_written(node: Node<'_, '_>, place: Place, context: &Context<'_, '_, '_>
                 written(instantiation.class.span())
             ))
         }
-        (Node::Expression(Expression::Access(Access::Property(_))), Place::Constant) => error(format!(
-            "A constant value can't read `{}`: it holds literals, constants and the operators on them.",
-            written(span)
-        ))
-        .with_note(supported(place)),
         (Node::ClassLikeMember(ClassLikeMember::Law(law)), Place::Interface) => error(format!(
             "An interface has no laws: state `{}` in a class or an enum, whose values it is about.",
             BytesDisplay(law.name.value)
@@ -6219,7 +6241,7 @@ fn supported(place: Place) -> &'static str {
             "A PHP# attribute is a class name with optional positional and named arguments, as in `[Field(\"Name\", searchable: true)]`."
         }
         Place::Constant => {
-            "A constant's value, an attribute argument, an enum case's value or a pattern's value is built from constants: literals, constants, enum cases and their `value` and `name`, `typeof(Class)`, list and map literals, indexes, templates, the ternary `c ? a : b`, `(int)`, `(float)` and `(string)`, lambdas that capture nothing, and arithmetic, comparison, logical and `??` operators."
+            "A constant's value, an attribute argument, an enum case's value or a pattern's value is built from constants: literals, constants, enum cases, a backed case's `value` and the `name` of a case of an enum whose cases carry no data, `typeof(Class)`, list and map literals, indexes, templates, the ternary `c ? a : b`, `match`, `(int)`, `(float)` and `(string)`, and arithmetic, comparison, logical and `??` operators. All but a pattern's value take lambdas that capture nothing, and an attribute argument takes `new` of a class with such arguments, as in `[Rule(new Range(1, 10))]`."
         }
         Place::Pattern => {
             "A PHP# pattern is a type of `int`, `float`, `string`, `bool`, `Any`, `Object`, a class, a collection as in `List<int>`, a class value as in `Class<Order>`, a function type as in `Function<int(int)>`, or a union of them, a tuple among them, as in `int|[int, string]`, with an optional name, as in `int count`, a case with its fields, as in `PaymentResult.Paid(string transactionId)`, a class with properties, as in `Paid { amount: > 0 } big`, a constant, a comparison such as `< 10`, a properties pattern such as `{ total: > 0 }`, a list pattern such as `[Line first, ...List<Line> rest]`, or patterns joined by `and`, `or` and `not`."

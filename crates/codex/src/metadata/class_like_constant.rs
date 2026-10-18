@@ -23,6 +23,9 @@ pub struct ClassLikeConstantMetadata {
     pub type_declaration: Option<TypeMetadata>,
     pub type_metadata: Option<TypeMetadata>,
     pub inferred_type: Option<TAtomic>,
+    /// The class constants a PHP# constant's value reads, each as its class's lowercase name and its own name, as
+    /// `Billing.TRIAL_DAYS` gives. A lambda in the value reads them only when it is called, so its reads are left out.
+    pub read_constants: Vec<(Word, Word)>,
     pub flags: MetadataFlags,
     pub version_constraint: VersionConstraint,
 }
@@ -38,6 +41,7 @@ impl ClassLikeConstantMetadata {
             type_declaration: None,
             type_metadata: None,
             inferred_type: None,
+            read_constants: Vec::new(),
             flags,
             version_constraint: VersionConstraint::unconstrained(),
         }

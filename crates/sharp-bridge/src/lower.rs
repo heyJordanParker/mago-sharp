@@ -3377,9 +3377,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// Whether the lowered expression `node` is one PHP takes as a constant expression, as php-src's
-    /// `zend_is_allowed_in_const_expr` says, leaving out the closures and first-class callables a default never is.
-    /// PHP reads a property there only of an enum case, so only a property of a class constant, `Plan::Free->value`,
-    /// is one, where `new Box(7)->size` is not.
+    /// `zend_is_allowed_in_const_expr` says, leaving out the closures and first-class callables a default never is, and
+    /// an index read, which a method body runs, as `Billing.PLANS[5]` throws `OutOfRangeException` there, where PHP's
+    /// constant expression warns and gives null. PHP reads a property there only of an enum case, so only a property of
+    /// a class constant, `Plan::Free->value`, is one, where `new Box(7)->size` is not.
     fn is_constant_expression(&self, node: u32) -> bool {
         if node == NULL {
             return true;
@@ -3401,7 +3402,6 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     | SHARP_AST_UNARY_MINUS
                     | SHARP_AST_CAST
                     | SHARP_AST_CONDITIONAL
-                    | SHARP_AST_DIM
                     | SHARP_AST_ARRAY
                     | SHARP_AST_ARRAY_ELEM
                     | SHARP_AST_UNPACK

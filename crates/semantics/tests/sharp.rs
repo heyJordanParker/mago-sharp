@@ -2117,8 +2117,8 @@ fn a_constant_or_an_enum_case_is_read_in_a_default_a_constant_value_and_an_initi
     assert_eq!(issues(code), Vec::<String>::new());
 }
 
-/// A constant value cannot read a static member or a member of one, and a parameter's default, which is any
-/// expression, can. A case's `value` and `name` are constants.
+/// A constant value cannot read a static member or a member of one, since a property read runs code, and a parameter's
+/// default, which is any expression, can. A case's `value` and `name` are constants.
 #[test]
 fn a_static_member_read_in_a_constant_expression_is_an_error() {
     let code = "namespace App.Tenant;\n\nclass Report\n{\n    private static int count = 0;\n    public const int MAX = Report.count;\n    public const int CENTS = Calc.rate.cents;\n    public const string VALUE = Status.Active.value;\n    public const string NAME = Status.Active.name;\n\n    public int run(int extra = Report.count, int cents = Calc.rate.cents)\n    {\n        return 1;\n    }\n}\n";
@@ -2127,7 +2127,26 @@ fn a_static_member_read_in_a_constant_expression_is_an_error() {
         issues(code),
         [
             "6:28 `Report.count` is a static member, which a constant value cannot read.",
-            "7:30 A constant value can't read `Calc.rate.cents`: it holds literals, constants and the operators on them.",
+            "7:30 A constant's value is known before the code runs, and `Calc.rate.cents` runs code: use a static field.",
+        ]
+    );
+}
+
+/// Spec section 2: a `match` on constants with constant arms is a constant value, and any other expression that is no
+/// constant form runs code, `new` among them, so it names the expression and the static field that holds its value. An
+/// attribute argument still creates an object of constants, and a pattern inside a lambda an attribute argument holds
+/// compares with a call's value in `when`.
+#[test]
+fn a_match_of_constants_is_a_constant_value_and_any_other_form_runs_code() {
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public const string MATCHED = match (Plan.Free) { Plan.Free => \"free\", default => \"other\" };\n    public const Money PRICE = new Money(5);\n    public const bool TESTED = Report.MATCHED is string;\n    public const string CALLED = match (Plan.Free) { Plan.Free => Rates.label(), default => \"other\" };\n    public const string BOUND = match (Report.MAX) { int n when n > 0 => `${n} left`, default => \"none\" };\n\n    [Rule(new Range(1, 10), (int x) => x is == Rates.top())]\n    public int run()\n    {\n        return 1;\n    }\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "6:32 A constant's value is known before the code runs, and `new Money(5)` runs code: use a static field.",
+            "7:32 A constant's value is known before the code runs, and `Report.MATCHED is string` runs code: use a static field.",
+            "8:67 A constant's value is known before the code runs, and `Rates.label()` runs code: use a static field.",
+            "11:48 A constant's value is known before the code runs, and `Rates.top()` runs code: compare with it in `when`.",
         ]
     );
 }

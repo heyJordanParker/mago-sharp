@@ -1724,6 +1724,96 @@ fn a_lambda_constant_has_its_function_type_and_a_constant_holds_a_plain_case_of_
     );
 }
 
+/// Spec section 2: a constant's value is known before the code runs, so a constant whose value reads its way back to
+/// it, through constants of its class or of another, is an error that names the constants on the way. A lambda reads
+/// a constant only when it is called.
+#[test]
+fn a_constant_whose_value_reads_back_to_it_is_an_error_that_names_the_cycle() {
+    let code = "namespace App;\n\npublic class Loop\n{\n    public const string A = `a${Loop.B}`;\n    public const string B = `b${Loop.A}`;\n    public const int C = Loop.D + 1;\n    public const int D = Loop.C + 1;\n    public const int E = Loop.E + 1;\n    public const int F = Other.G * 2;\n    public const int TOP = Loop.F + Loop.H;\n    public const int H = 1;\n    public const Function<int()> LATER = () => Loop.LATER_VALUE;\n    public const int LATER_VALUE = (Loop.LATER)();\n}\n";
+    let other = "namespace App;\n\npublic class Other\n{\n    public const int G = Loop.F + 1;\n}\n";
+
+    assert_eq!(
+        messages(("src/App/Loop.sharp", code), &[("src/App/Other.sharp", other)]),
+        [
+            "`Loop.A` refers back to itself through `Loop.B`.",
+            "`Loop.B` refers back to itself through `Loop.A`.",
+            "`Loop.C` refers back to itself through `Loop.D`.",
+            "`Loop.D` refers back to itself through `Loop.C`.",
+            "`Loop.E` refers back to itself.",
+            "`Loop.F` refers back to itself through `Other.G`.",
+        ]
+    );
+}
+
+/// Spec section 19: a function has no `==`, so a pattern compares no function, whether it names a function constant,
+/// as `is Ops.DOUBLE` and a `match` arm `Ops.DOUBLE`, or writes a lambda, with a parameter or without, and whatever the
+/// value it tests, an unchecked `Any?` included. Each is the error `is == Ops.DOUBLE` gives.
+#[test]
+fn a_pattern_that_compares_a_function_is_an_error_as_its_equality_is() {
+    let code = "namespace App;\n\npublic class Ops\n{\n    public const Function<int(int)> DOUBLE = (int x) => x * 2;\n\n    public static bool named(Function<int(int)> f) => f is Ops.DOUBLE;\n\n    public static bool compared(Function<int(int)> f) => f is == Ops.DOUBLE;\n\n    public static string arm(Function<int(int)> f) => match (f) {\n        Ops.DOUBLE => \"double\",\n        default => \"other\",\n    };\n\n    public static string withParameter(Function<int(int)> f) => match (f) {\n        == ((int x) => x) => \"same\",\n        default => \"other\",\n    };\n\n    public static string unchecked(Any? f) => match (f) {\n        == (() => 1) => \"one\",\n        default => \"other\",\n    };\n\n    public static bool none(Function<int(int)>? f) => f is null;\n}\n";
+    let refusal = |function: &str, other: &str| {
+        format!("`==` cannot compare `{function}` with `{other}`: `{other}` declares no `operator ==`.")
+    };
+
+    assert_eq!(
+        messages(("src/App/Ops.sharp", code), &[]),
+        [
+            refusal("Function<int(int)>", "Function<int(int)>"),
+            refusal("Function<int(int)>", "Function<int(int)>"),
+            refusal("Function<int(int)>", "Function<int(int)>"),
+            refusal("Function<int(int)>", "Function<int(int)>"),
+            refusal("Any?", "Function<1()>"),
+        ]
+    );
+}
+
+/// Spec section 2: a constant's value is known before the code runs, so an index outside the list a constant holds is
+/// an error that names the index and the list's size, in a constant's value, a template of one and a pattern's value. A
+/// method body's index runs, and throws `OutOfRangeException` when it misses.
+#[test]
+fn an_index_outside_a_constant_list_in_a_constant_value_is_an_error_that_names_the_size() {
+    let code = "namespace App;\n\npublic class Billing\n{\n    public const List<string> PLANS = [\"free\", \"pro\"];\n    public const string SECOND = Billing.PLANS[1];\n    public const string MISSING = Billing.PLANS[5];\n    public const string MISSING_IN_TEMPLATE = `${Billing.PLANS[2]}`;\n\n    public static bool first(string plan) => plan is == Billing.PLANS[3];\n\n    public static string body() => Billing.PLANS[5];\n}\n";
+
+    assert_eq!(
+        messages(("src/App/Billing.sharp", code), &[]),
+        [
+            "`Billing.PLANS` holds 2 elements, so it has no index 5.",
+            "`Billing.PLANS` holds 2 elements, so it has no index 2.",
+            "`Billing.PLANS` holds 2 elements, so it has no index 3.",
+        ]
+    );
+}
+
+/// Spec section 2: a template in a constant value shows `string`, `int`, `float` and `bool` constants, and one that
+/// shows an object runs its `toString()`, so it is an error in a constant's value, an enum case's value, an attribute
+/// argument and a pattern's value. A lambda's body runs when it is called, and a method's template as it runs.
+#[test]
+fn a_template_in_a_constant_value_that_shows_an_object_is_an_error_that_names_the_part() {
+    let tier = "namespace App;\n\npublic enum Tier\n{\n    case Free;\n    case Seats(int count);\n\n    public string toString() => \"tier\";\n}\n";
+    let code = "namespace App;\n\nimport Lib.Route;\n\npublic class Labels\n{\n    public const string TIER_LABEL = `tier: ${Tier.Free}`;\n    public const string SHOWN = `${1} ${1.5} ${true} ${Labels.TIER_LABEL}`;\n    public const Function<string()> LATER = () => `${Tier.Free}`;\n\n    public static bool pattern(string text) => text is == `${Tier.Free}`;\n\n    [Route(`/${Tier.Free}`)]\n    public static string page() => `${Tier.Free}`;\n}\n";
+    let r#enum = "namespace App;\n\npublic enum Kind : string\n{\n    case Tiered = `${Tier.Free}-kind`;\n}\n";
+    let route = (
+        "src/Lib/Route.php",
+        "<?php\n\nnamespace Lib;\n\n#[\\Attribute]\nfinal class Route\n{\n    public function __construct(public string $path) {}\n}\n",
+    );
+    let message = |part: &str, instead: &str| {
+        format!("A constant's value is known before the code runs, and `{part}` runs `toString()`: {instead}")
+    };
+
+    assert_eq!(
+        messages(("src/App/Labels.sharp", code), &[("src/App/Tier.sharp", tier), route]),
+        [
+            message("${Tier.Free}", "use a static field."),
+            message("${Tier.Free}", "compare with it in `when`."),
+            message("${Tier.Free}", "use a static field."),
+        ]
+    );
+    assert_eq!(
+        messages(("src/App/Kind.sharp", r#enum), &[("src/App/Tier.sharp", tier)]),
+        [message("${Tier.Free}", "use a static field.")]
+    );
+}
+
 /// Spec section 22: a call of a default body names the method by its interface, which PHP# code writes, and never by
 /// the trait that holds the body.
 #[test]
