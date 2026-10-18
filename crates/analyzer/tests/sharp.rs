@@ -1522,6 +1522,29 @@ fn an_operator_is_chosen_from_the_types_of_both_operands() {
     assert_eq!(issues(("src/App/Weighed.sharp", advised), &[]), Vec::<String>::new());
 }
 
+/// Spec section 19: two interfaces that each declare an operator for a class tie on every use that takes the class on
+/// both sides: `<`, `+`, `sortedBy` and `contains`, each one error that names the operator and both interfaces. An
+/// operand of a class the codebase does not hold declares no operator.
+#[test]
+fn every_use_of_two_tied_operators_is_one_error() {
+    let sharp = "namespace App;\n\npublic interface Weighed\n{\n    int grams { get; }\n    int hash();\n    static bool operator ==(Weighed a, Weighed b) => a.grams == b.grams;\n    static int operator <=>(Weighed a, Weighed b) => a.grams <=> b.grams;\n    static readonly Weighed operator +(Weighed a, Weighed b) => a;\n}\n\npublic interface Valued\n{\n    int cents { get; }\n    int hash();\n    static bool operator ==(Valued a, Valued b) => a.cents == b.cents;\n    static int operator <=>(Valued a, Valued b) => a.cents <=> b.cents;\n    static readonly Valued operator +(Valued a, Valued b) => a;\n}\n\npublic class Parcel : Valued, Weighed\n{\n    public int cents => 1;\n    public int grams => 2;\n    public int hash() => 0;\n}\n\npublic static class Uses\n{\n    public static bool lighter(Parcel a, Parcel b) => a < b;\n\n    public static readonly Parcel sum(Parcel a, Parcel b) => a + b;\n\n    public static List<Parcel> sorted(List<Parcel> parcels) => parcels.sortedBy(parcel => parcel);\n\n    public static bool held(List<Parcel> parcels, Parcel parcel) => parcels.contains(parcel);\n}\n";
+    let missing = "namespace App;\n\npublic static class Uses\n{\n    public static bool lighter(Missing a, Missing b) => a < b;\n}\n";
+
+    assert_eq!(
+        messages(("src/App/Weighed.sharp", sharp), &[]),
+        [
+            "`<` on `Parcel` and `Parcel` is ambiguous: `Valued` and `Weighed` each declare an `operator <=>` that takes them.",
+            "`+` on `Parcel` and `Parcel` is ambiguous: `Valued` and `Weighed` each declare an `operator +` that takes them.",
+            "`<=>` on `Parcel` and `Parcel` is ambiguous: `Valued` and `Weighed` each declare an `operator <=>` that takes them.",
+            "`==` on `Parcel` and `Parcel` is ambiguous: `Valued` and `Weighed` each declare an `operator ==` that takes them.",
+        ]
+    );
+    assert_eq!(
+        issues(("src/App/Uses.sharp", missing), &[]),
+        ["5:32 non-existent-class-like", "5:43 non-existent-class-like"]
+    );
+}
+
 /// Spec section 22: a constant that implements an interface's is public, as each interface member is, and an
 /// interface that declares `operator ==` states its `hash()` bare.
 #[test]

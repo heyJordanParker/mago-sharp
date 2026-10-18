@@ -295,10 +295,10 @@ pub(crate) fn report_tied_operator<A>(
     let mut owners: Vec<String> =
         tied.iter().map(|method| format!("`{}`", display_class_like_name(context, method.get_class_name()))).collect();
     owners.sort();
-    let owners = match owners.as_slice() {
-        [rest @ .., last] if !rest.is_empty() => format!("{} and {last}", rest.join(", ")),
-        _ => owners.join(""),
+    let Some((last, rest)) = owners.split_last() else {
+        unreachable!("a tie holds two operators or more");
     };
+    let owners = format!("{} and {last}", rest.join(", "));
     let returned = tied
         .first()
         .and_then(|method| codebase.get_method_by_id(method))

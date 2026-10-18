@@ -1765,7 +1765,7 @@ impl<'analysis> Types<'analysis> {
         let span = call.span();
         let [key] = self.artifacts.inferred_type_arguments.get(&(span.start.offset, span.end.offset))?.as_slice()
         else {
-            return None;
+            unreachable!("sortedBy takes one type argument, the type of its keys");
         };
         let key = key.to_non_nullable();
 

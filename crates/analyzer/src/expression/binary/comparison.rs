@@ -1294,11 +1294,12 @@ pub(crate) fn report_sharp_refusal<A>(
     let equality = if operator.is_negated_equality() { "!=" } else { "==" };
     if matches!(refusal, Refusal::Tied) {
         let operands = [&lhs_type.to_non_nullable(), &rhs_type.to_non_nullable()];
-        if let Some(DeclaredOperator::Tied(tied)) =
+        let Some(DeclaredOperator::Tied(tied)) =
             get_comparison_method(operator, operands[0], operands[1], context.codebase)
-        {
-            report_tied_operator(context, operator, &operands, &tied, binary.span());
-        }
+        else {
+            unreachable!("the refusal is a tie of these operands' operators");
+        };
+        report_tied_operator(context, operator, &operands, &tied, binary.span());
 
         return;
     }
@@ -1450,11 +1451,12 @@ where
         }
         Some(Refusal::Tied) => {
             let ordering = BinaryOperator::Spaceship(Span::zero());
-            if let Some(DeclaredOperator::Tied(tied)) =
+            let Some(DeclaredOperator::Tied(tied)) =
                 get_comparison_method(&ordering, &key_type, &key_type, context.codebase)
-            {
-                report_tied_operator(context, &ordering, &[&key_type, &key_type], &tied, selector.span());
-            }
+            else {
+                unreachable!("the refusal is a tie of the key type's operators");
+            };
+            report_tied_operator(context, &ordering, &[&key_type, &key_type], &tied, selector.span());
 
             return;
         }
@@ -1608,11 +1610,12 @@ pub(crate) fn check_element_equality<A>(
         }
         Some(Refusal::Tied) => {
             let operands = [&element_type.to_non_nullable(), &value_type.to_non_nullable()];
-            if let Some(DeclaredOperator::Tied(tied)) =
+            let Some(DeclaredOperator::Tied(tied)) =
                 get_comparison_method(&equality, operands[0], operands[1], context.codebase)
-            {
-                report_tied_operator(context, &equality, &operands, &tied, value.span());
-            }
+            else {
+                unreachable!("the refusal is a tie of the element's and the value's operators");
+            };
+            report_tied_operator(context, &equality, &operands, &tied, value.span());
 
             return;
         }

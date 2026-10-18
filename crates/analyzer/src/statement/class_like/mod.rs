@@ -1783,7 +1783,7 @@ where
             continue;
         }
         let Some(interface) = context.codebase.get_defaults_interface(defaults) else {
-            continue;
+            unreachable!("get_defaults_traits gives only the trait named after each interface");
         };
 
         let class = class_like_metadata.original_name;
