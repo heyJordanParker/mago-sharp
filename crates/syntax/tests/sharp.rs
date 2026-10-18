@@ -2071,6 +2071,77 @@ fn a_php_hooked_property_has_no_trailing_initial_value() {
     assert!(!program.errors.is_empty(), "expected a parse error");
 }
 
+/// The name a `break` or `continue` statement first in `block` gives its loop, and the level it writes, if any.
+fn jump_in<'arena>(block: &'arena Statement<'arena>) -> (Option<&'arena [u8]>, bool) {
+    let Statement::Block(block) = block else {
+        panic!("expected a block, got {block:#?}");
+    };
+
+    match block.statements.first() {
+        Some(Statement::Break(r#break)) => (r#break.label.map(|label| label.value), r#break.level.is_some()),
+        Some(Statement::Continue(r#continue)) => {
+            (r#continue.label.map(|label| label.value), r#continue.level.is_some())
+        }
+        statement => panic!("expected a `break` or a `continue`, got {statement:#?}"),
+    }
+}
+
+/// Spec section 17: a `for`, `for … of`, `while` or `do` loop takes an optional name, as `orders: for (…)`, which
+/// `break orders;` and `continue orders;` name, and the loop's span starts at it. A name before any other statement is
+/// PHP's `goto` label still, which the checker refuses, and `break 2;` keeps PHP's level for the checker to refuse. A PHP
+/// file reads `name:` before a loop as its own `goto` label.
+#[test]
+fn a_loop_takes_a_name_that_break_and_continue_name() {
+    const CODE: &str = "class Report\n{\n    void run()\n    {\n        orders: for (const order of orders) { continue orders; }\n        rows: for (let i = 0; i < 3; i++) { break rows; }\n        polling: while (running) { break polling; }\n        retries: do { continue retries; } while (failed);\n        end: done();\n        while (true) { break 2; }\n    }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Report.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let [
+        Statement::ForOf(for_of),
+        Statement::For(r#for),
+        Statement::While(r#while),
+        Statement::DoWhile(do_while),
+        Statement::Label(end),
+        Statement::Expression(_),
+        Statement::While(leveled),
+    ] = method_body(program)
+    else {
+        panic!("expected four named loops, a label, a call and a loop, got {:#?}", method_body(program));
+    };
+    let WhileBody::Statement(while_body) = r#while.body else {
+        panic!("expected a braced body, got {:#?}", r#while.body);
+    };
+    let ForBody::Statement(for_body) = r#for.body else {
+        panic!("expected a braced body, got {:#?}", r#for.body);
+    };
+    let WhileBody::Statement(leveled_body) = leveled.body else {
+        panic!("expected a braced body, got {:#?}", leveled.body);
+    };
+
+    assert_eq!(source(CODE, for_of), "orders: for (const order of orders) { continue orders; }");
+    assert_eq!(for_of.label.map(|label| label.name.value), Some(&b"orders"[..]));
+    assert_eq!(jump_in(for_of.body), (Some(&b"orders"[..]), false));
+    assert_eq!(source(CODE, r#for), "rows: for (let i = 0; i < 3; i++) { break rows; }");
+    assert_eq!(jump_in(for_body), (Some(&b"rows"[..]), false));
+    assert_eq!(source(CODE, r#while), "polling: while (running) { break polling; }");
+    assert_eq!(jump_in(while_body), (Some(&b"polling"[..]), false));
+    assert_eq!(source(CODE, do_while), "retries: do { continue retries; } while (failed);");
+    assert_eq!(jump_in(do_while.statement), (Some(&b"retries"[..]), false));
+    assert_eq!(end.name.value, b"end");
+    assert!(leveled.label.is_none());
+    assert_eq!(jump_in(leveled_body), (None, true));
+
+    let php = parse(&arena, "src/Report.php", "<?php\nrows: while (true) { break; }\n");
+    assert!(php.errors.is_empty(), "{:#?}", php.errors);
+    let [Statement::OpeningTag(_), Statement::Label(rows), Statement::While(php_while)] = php.statements.as_slice()
+    else {
+        panic!("expected PHP's label and its loop, got {:#?}", php.statements);
+    };
+    assert_eq!(rows.name.value, b"rows");
+    assert!(php_while.label.is_none());
+}
+
 #[test]
 fn let_and_const_declare_locals_with_an_initializer() {
     const CODE: &str =

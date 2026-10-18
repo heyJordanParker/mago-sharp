@@ -70,6 +70,7 @@ where
         target: ForOfTarget<'arena>,
     ) -> Result<ForOf<'arena>, ParseError> {
         Ok(ForOf {
+            label: None,
             r#for,
             left_parenthesis,
             keyword,

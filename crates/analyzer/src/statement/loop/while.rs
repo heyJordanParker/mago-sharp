@@ -39,6 +39,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for While<'arena> {
             &[],
             self.body.statements(),
             self.span(),
+            self.label,
             is_while_true,
             "while",
         )?;

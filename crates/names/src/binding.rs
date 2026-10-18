@@ -81,12 +81,19 @@ pub fn php_variable_name(name: &[u8]) -> Word {
     if name.starts_with(b"$") { word(name) } else { concat_word!(b"$", name) }
 }
 
-/// Returns the PHP method a method runs as. The PHP# constructor, the one method without `function` or a return type,
-/// runs as `__construct`, and every other method keeps its name.
+/// Returns the PHP method a method runs as.
+///
+/// The PHP# constructor, the method without `function` or a return type, runs as `__construct`. The static
+/// constructor, the same but `static`, runs as the hidden `#statics` that sets its class's statics. Every other method
+/// keeps its name.
 #[inline]
 #[must_use]
 pub fn php_method_name<'arena>(method: &Method<'arena>) -> &'arena [u8] {
-    if method.function.is_none() && method.return_type_hint.is_none() { b"__construct" } else { method.name.value }
+    match method.function.is_none() && method.return_type_hint.is_none() {
+        true if method.is_static() => b"#statics",
+        true => b"__construct",
+        false => method.name.value,
+    }
 }
 
 /// Returns the PHP static method a PHP# operator on `operands` operands runs as, named after .NET's operator method.

@@ -111,7 +111,7 @@ where
     let mut root_array_type = artifacts.get_expression_type(root_array_expression).cloned().unwrap_or_else(get_mixed);
 
     // Spec section 12: a write into a collection that may be null throws, as a read of it does, so it is refused as the
-    // read is. An append is refused as an append, which says what to write instead.
+    // read is. An append fails as a typo does, at its `[`.
     if context.dialect.is_sharp()
         && matches!(array_target_expressions.last(), Some(ArrayTarget::Access(_)))
         && !root_array_type.ignore_nullable_issues()

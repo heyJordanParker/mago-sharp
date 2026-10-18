@@ -13,6 +13,7 @@ where
 {
     pub(crate) fn parse_while(&mut self) -> Result<While<'arena>, ParseError> {
         Ok(While {
+            label: None,
             r#while: self.expect_keyword(T!["while"])?,
             left_parenthesis: self.stream.eat_span(T!["("])?,
             condition: self.arena.alloc(self.parse_expression()?),

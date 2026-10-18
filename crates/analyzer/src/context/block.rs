@@ -16,6 +16,7 @@ use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_never;
 use mago_codex::ttype::union::TUnion;
 use mago_span::Span;
+use mago_syntax::cst::Label;
 use mago_word::Word;
 use mago_word::WordMap;
 use mago_word::WordSet;
@@ -34,7 +35,8 @@ use mago_bytes::BytesDisplay;
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum BreakContext {
     Switch(Span),
-    Loop(Span),
+    /// A loop, with the PHP# name it is written with, if any, which `break` and `continue` may name.
+    Loop(Span, Option<Word>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -159,8 +161,20 @@ impl BreakContext {
     #[inline]
     pub const fn span(&self) -> Span {
         match self {
-            BreakContext::Switch(span) | BreakContext::Loop(span) => *span,
+            BreakContext::Switch(span) | BreakContext::Loop(span, _) => *span,
         }
+    }
+
+    /// The loop at `span`, written with the PHP# name `label`, if any.
+    #[inline]
+    pub fn of_loop(span: Span, label: Option<Label<'_>>) -> Self {
+        BreakContext::Loop(span, label.map(|label| word(label.name.value)))
+    }
+
+    /// Whether this is the loop written with the PHP# name `name`.
+    #[inline]
+    pub fn is_loop_named(&self, name: Word) -> bool {
+        matches!(self, BreakContext::Loop(_, Some(loop_name)) if *loop_name == name)
     }
 }
 

@@ -2,6 +2,7 @@ use mago_span::HasSpan;
 use mago_span::Span;
 
 use crate::cst::cst::expression::Expression;
+use crate::cst::cst::identifier::LocalIdentifier;
 use crate::cst::cst::keyword::Keyword;
 use crate::cst::cst::terminator::Terminator;
 
@@ -28,6 +29,8 @@ pub mod r#while;
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct Continue<'arena> {
     pub r#continue: Keyword<'arena>,
+    /// The PHP# name of the loop it continues, as `orders` in `continue orders;`. Always `None` in PHP.
+    pub label: Option<LocalIdentifier<'arena>>,
     pub level: Option<&'arena Expression<'arena>>,
     pub terminator: Terminator<'arena>,
 }
@@ -49,6 +52,8 @@ pub struct Continue<'arena> {
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct Break<'arena> {
     pub r#break: Keyword<'arena>,
+    /// The PHP# name of the loop it leaves, as `orders` in `break orders;`. Always `None` in PHP.
+    pub label: Option<LocalIdentifier<'arena>>,
     pub level: Option<&'arena Expression<'arena>>,
     pub terminator: Terminator<'arena>,
 }

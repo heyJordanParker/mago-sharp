@@ -38,6 +38,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for For<'arena> {
             self.increments.as_slice(),
             self.body.statements(),
             self.span(),
+            self.label,
             infinite_loop,
             "for",
         )?;

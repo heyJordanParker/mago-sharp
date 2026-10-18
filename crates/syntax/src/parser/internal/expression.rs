@@ -770,12 +770,12 @@ where
             Some(T!["continue"]) => {
                 let r#continue = self.expect_keyword(T!["continue"])?;
 
-                Leave::Continue(Continue { r#continue, level: None, terminator: end(r#continue.span) })
+                Leave::Continue(Continue { r#continue, label: None, level: None, terminator: end(r#continue.span) })
             }
             _ => {
                 let r#break = self.expect_keyword(T!["break"])?;
 
-                Leave::Break(Break { r#break, level: None, terminator: end(r#break.span) })
+                Leave::Break(Break { r#break, label: None, level: None, terminator: end(r#break.span) })
             }
         })
     }

@@ -52,8 +52,11 @@ use mago_syntax::cst::Construct;
 use mago_syntax::cst::ConstructorInitializer;
 use mago_syntax::cst::Continue;
 use mago_syntax::cst::DirectVariable;
+use mago_syntax::cst::DoWhile;
 use mago_syntax::cst::Enum;
+use mago_syntax::cst::EnumCase;
 use mago_syntax::cst::EnumCaseDataItem;
+use mago_syntax::cst::EnumCaseItem;
 use mago_syntax::cst::Event;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::Extension;
@@ -76,6 +79,7 @@ use mago_syntax::cst::Inheritance;
 use mago_syntax::cst::Instantiation;
 use mago_syntax::cst::Interface;
 use mago_syntax::cst::Keyword;
+use mago_syntax::cst::Label;
 use mago_syntax::cst::Leave;
 use mago_syntax::cst::ListPatternElement;
 use mago_syntax::cst::Literal;
@@ -182,8 +186,8 @@ const OBJECT: &[u8] = b"Object";
 ///   body. `check_members` refuses a default and a variadic parameter, because a law's parameters range over every
 ///   value.
 /// - A static class, `public static class Text`, as spec sections 26 and 29 write it: `static` and an optional
-///   `public`, no header and no constructor, and only constants and static members. The bridge lowers it to a final
-///   PHP class.
+///   `public`, no header and no constructor but a static one, and only constants and static members. The bridge
+///   lowers it to a final PHP class.
 /// - An interface: attributes, an optional `public`, a name, optional type parameters, an optional `: Interface` header,
 ///   constants, methods, properties and operators, with no other modifiers, `extends`, fields or laws. A constant
 ///   follows a class constant's rules. An interface method has optional type parameters, parameters, a return type
@@ -289,6 +293,9 @@ const OBJECT: &[u8] = b"Object";
 ///   because they run before the object exists, as C#'s CS0027 says. `: this(…)` belongs to a named constructor, so on
 ///   the main one it is an error. The analyzer checks the arguments against the base class's constructor. A
 ///   constructor runs once, when `new` creates the object, so a call of a member named `__construct` is an error.
+/// - The static constructor, spec section 6: `static`, its class's name, no parameters and a body, as in C#, in a class,
+///   a struct or a static class. `check_static_constructor` reports any other modifier and a parameter, and
+///   `check_members` a second one. The bridge runs it as the hidden `#statics`, right after the statics' initial values.
 /// - A parameter: always a type, a name and an optional default, and never by reference. The parser reports a
 ///   parameter written as a computed property, because a parameter receives its value. A default is any expression
 ///   a method body has, which runs each time a call leaves the argument out, spec section 7. A parameter written
@@ -330,7 +337,10 @@ const OBJECT: &[u8] = b"Object";
 ///   statement in a `void` method and the constructor, as in C#.
 /// - In a method body: blocks, expression statements, `return`, `let` and `const` declarations, `if` with `else if`
 ///   and `else`, `while`, `do … while`, `for` with a `let` or `const` counter or with expressions, `for … of` over a
-///   value or a key and value, `break` and `continue` without a level, and `try` with `catch` clauses and `finally`.
+///   value or a key and value, `break` and `continue`, and `try` with `catch` clauses and `finally`. A loop takes an
+///   optional name, as in `orders: for (…)`, which `break` and `continue` name from a loop inside it, as in
+///   `break orders;`, in the same method or lambda. A name no `break` or `continue` names is an error, and so is a
+///   name a loop around it has. PHP's level, as in `break 2;`, fails as a typo does.
 ///   The body of `if`, `else` and each loop is a block in braces, the guard clause
 ///   `if (!tenant.active) { throw new InactiveTenant(tenant); }` too. A catch clause names one or more classes separated
 ///   by `|`, and an optional variable written without `$`, which lives until the clause's block ends. A local
@@ -342,7 +352,7 @@ const OBJECT: &[u8] = b"Object";
 /// - `yield value;` and `yield ...other;`, spec section 12: statements of a method that returns `Iterable<T>` or
 ///   `Iterable<T>?`, which PHP compiles as a generator too, outside any lambda in it. `yield` gives no value back, so
 ///   any other use of it is an error, and so is `return value;` in a method that yields, as C#'s CS1622. PHP's
-///   `yield from`, `yield key => value` and bare `yield` are errors that name the PHP# form.
+///   `yield from`, `yield key => value` and bare `yield` fail as a typo does.
 /// - Writes: `=`, compound assignment, `++` and `--` write only a local, a parameter, a member written
 ///   `object.name` or `object?.name`, which spec section 14.4 writes only when every `?.` receiver on its left is not
 ///   null, or, when static, `Class.name`, or an index of one of them written `target[key]`. The analyzer,
@@ -751,6 +761,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         (Node::Interface(_), File) => Some(Interface),
         (Node::Enum(r#enum), File) => {
             check_case_class_names(r#enum, context);
+            check_case_fields_named_like_members(r#enum, context);
             // Spec section 20: a backed enum runs as a PHP enum, which carries no type arguments.
             if let (Some(list), Some(backing)) = (&r#enum.type_parameters, &r#enum.backing_type_hint) {
                 context.report(
@@ -1400,6 +1411,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         }
         (Node::Method(method), Class | Enum) => match is_slice_method(method, context.program) {
             Ok(()) => {
+                check_static_constructor(method, context);
                 check_method_name(method, context);
                 check_method_uses(method, context);
                 check_abstract_access(method, context);
@@ -1661,6 +1673,28 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
 
             None
         }
+        // Jordan's ruling of 10-18: a loop takes an optional name, which only `break` and `continue` read.
+        (
+            Node::For(For { label: Some(label), .. })
+            | Node::ForOf(ForOf { label: Some(label), .. })
+            | Node::While(While { label: Some(label), .. })
+            | Node::DoWhile(DoWhile { label: Some(label), .. }),
+            Body,
+        ) => {
+            check_loop_name(node, label, context);
+
+            Some(Body)
+        }
+        (Node::Break(Break { label: Some(name), .. }), Body) => {
+            check_jump_name(name, "break", context);
+
+            Some(Body)
+        }
+        (Node::Continue(Continue { label: Some(name), .. }), Body) => {
+            check_jump_name(name, "continue", context);
+
+            Some(Body)
+        }
         (
             Node::Statement(
                 Statement::Block(_)
@@ -1698,7 +1732,8 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             | Node::ForOf(_)
             | Node::ForOfTarget(_)
             | Node::ForOfUnpackTarget(_)
-            | Node::ForOfVariable(_),
+            | Node::ForOfVariable(_)
+            | Node::Label(_),
             Body,
         ) => Some(Body),
         // Spec section 8 makes output a function call, so PHP's `echo` and `print` are no PHP# syntax. `exit` is PHP's
@@ -2527,8 +2562,8 @@ fn report_attribute_argument(span: Span, context: &mut Context<'_, '_, '_>) {
     );
 }
 
-/// Whether the slice has a method, with the refusal at its name when it does not. The constructor of spec section 9 is
-/// the one method without a return type, named after its class, and a static constructor is not supported yet.
+/// Whether the slice has a method, with the refusal at its name when it does not. The constructor of spec section 9 and
+/// the static constructor of spec section 6 are the methods without a return type, named after their class.
 /// `enter` reports a `__Something__` name, which ends as well as starts with `__`.
 fn is_slice_method(method: &Method, program: &Program) -> Result<(), Box<Issue>> {
     let class_name = enclosing_class(program, method.span()).map(|class| class.name.value);
@@ -2545,12 +2580,6 @@ fn is_slice_method(method: &Method, program: &Program) -> Result<(), Box<Issue>>
             "A PHP# method needs a return type: only the constructor, named after its class, has none.".to_owned(),
             "A method is written `public int total()`, and the constructor `public Report()`.".to_owned(),
         )
-    } else if method.return_type_hint.is_none() && method.is_static() {
-        Err(Box::new(
-            Issue::error("A static constructor is not supported yet in PHP#.")
-                .with_annotation(Annotation::primary(method.name.span).with_message("Not supported yet."))
-                .with_note("The main constructor of a PHP# class is not `static`."),
-        ))
     } else if method.return_type_hint.is_some()
         && let Some(class_name) = class_name.filter(|class_name| class_name.eq_ignore_ascii_case(method.name.value))
     {
@@ -2564,11 +2593,48 @@ fn is_slice_method(method: &Method, program: &Program) -> Result<(), Box<Issue>>
     }
 }
 
+/// Whether `method` is a static constructor, spec section 6: `static Rates() { … }`, without a return type.
+fn is_static_constructor(method: &Method) -> bool {
+    php_method_name(method) == b"#statics"
+}
+
+/// Reports what a static constructor cannot take, spec section 6, as C# refuses them: a modifier but `static`, since
+/// the app runs it and no code calls it, and a parameter, since nothing passes one.
+fn check_static_constructor(method: &Method, context: &mut Context<'_, '_, '_>) {
+    if !is_static_constructor(method) {
+        return;
+    }
+
+    for modifier in method.modifiers.iter().filter(|modifier| !matches!(modifier, Modifier::Static(_))) {
+        context.report(
+            Issue::error(format!(
+                "A static constructor takes no modifier but `static`: remove `{}`.",
+                BytesDisplay(modifier.get_keyword().value)
+            ))
+            .with_annotation(Annotation::primary(modifier.span()).with_message("Written here."))
+            .with_note("The app runs it once, when it first uses the class's statics, and no code calls it."),
+        );
+    }
+
+    if let Some(parameter) = method.parameter_list.parameters.first() {
+        context.report(
+            Issue::error("A static constructor takes no parameters: no code calls it.")
+                .with_annotation(Annotation::primary(parameter.span()).with_message("Declared here."))
+                .with_help(format!("Write it `static {}() {{ … }}`.", BytesDisplay(method.name.value))),
+        );
+    }
+}
+
 /// Reports a method's `final` or `virtual` that can't change what a subclass may do, spec section 22. A PHP# method is
 /// closed unless it is `virtual`, so `final` marks only an override, and `virtual` is an error on a method no subclass
 /// replaces: a private method, a constructor, an abstract method or an override, which are open already, and every
-/// method of a class-like no class extends. `check_extension` reports every modifier of an extension member.
+/// method of a class-like no class extends. `check_extension` reports every modifier of an extension member, and
+/// `check_static_constructor` every modifier of a static constructor.
 fn check_method_modifiers(method: &Method, context: &mut Context<'_, '_, '_>) {
+    if is_static_constructor(method) {
+        return;
+    }
+
     let start = method.span().start;
     if enclosing_class(context.program, method.span()).is_some_and(|class| {
         class
@@ -2767,8 +2833,8 @@ fn is_class_type(hint: &Hint, class_fqcn: &[u8], names: &ResolvedNames) -> bool 
 }
 
 /// Reports what a static class cannot hold, as spec sections 26 and 29 write it: a modifier but `public` and `static`,
-/// a header, a constructor, or a member that is not static. A constant is static already, and `check_extern` decides
-/// an `extern` method.
+/// a header, a constructor, or a member that is not static. A constant and the static constructor are static already,
+/// and `check_extern` decides an `extern` method.
 fn check_static_class(class: &Class, context: &mut Context<'_, '_, '_>) {
     let mut report = |message: String, span: Span, written: &str| {
         context.report(Issue::error(message).with_annotation(Annotation::primary(span).with_message(written)));
@@ -2797,7 +2863,9 @@ fn check_static_class(class: &Class, context: &mut Context<'_, '_, '_>) {
     for member in &class.members {
         match member {
             ClassLikeMember::Method(method)
-                if method.return_type_hint.is_none() && method.name.value == class.name.value =>
+                if method.return_type_hint.is_none()
+                    && method.name.value == class.name.value
+                    && !is_static_constructor(method) =>
             {
                 report("A static class has no constructor.".to_owned(), method.name.span, "Declared here.");
             }
@@ -3476,8 +3544,9 @@ fn report_methods_named_as_properties(class: ClassLike, context: &mut Context<'_
         let ClassLikeMember::Method(method) = member else {
             continue;
         };
-        // A constructor is written with its class's name, and PHP names it `__construct`, so it shares no name.
-        if php_method_name(method) == b"__construct" {
+        // A constructor and the static constructor carry their class's name, and no method call names either, so
+        // neither shares a name.
+        if matches!(php_method_name(method), b"__construct" | b"#statics") {
             continue;
         }
 
@@ -4234,56 +4303,161 @@ fn report_jumps_out_of_finally(finally: &TryFinallyClause<'_>, context: &mut Con
     }
 }
 
-/// The jumps of a `finally` block that leave it, with how each is written, and how many loops, lambdas and classes
-/// inside the block hold the node the walk is at.
+/// The jumps of a `finally` block that leave it, with how each is written, and what inside the block holds the node
+/// the walk is at: how many lambdas and classes, which hold their own jumps, and the loops, each with its name.
 #[derive(Default)]
-struct FinallyJumps {
-    inner: usize,
+struct FinallyJumps<'arena> {
+    functions: usize,
+    loops: Vec<Option<&'arena [u8]>>,
     leaving: Vec<(Span, &'static str)>,
+}
+
+impl FinallyJumps<'_> {
+    /// Whether a jump at the node the walk is at, to the loop named `label` or else to the innermost one, leaves the
+    /// block.
+    fn leaves(&self, label: Option<&LocalIdentifier>) -> bool {
+        self.functions == 0
+            && match label {
+                Some(label) => !self.loops.contains(&Some(label.value)),
+                None => self.loops.is_empty(),
+            }
+    }
 }
 
 /// Collects the `FinallyJumps` of a `finally` block.
 struct FinallyJumpWalker;
 
 impl FinallyJumpWalker {
-    /// Whether `node` holds its own `break` and `continue`: a loop, a lambda or a class.
+    /// Whether `node` holds its own `break` and `continue` whatever their names: a lambda or a class.
     fn holds_jumps(node: Node<'_, '_>) -> bool {
-        matches!(
-            node,
-            Node::While(_)
-                | Node::DoWhile(_)
-                | Node::For(_)
-                | Node::ForOf(_)
-                | Node::Closure(_)
-                | Node::ArrowFunction(_)
-                | Node::AnonymousClass(_)
-        )
+        matches!(node, Node::Closure(_) | Node::ArrowFunction(_) | Node::AnonymousClass(_))
     }
 }
 
-impl<'ast, 'arena> Walker<'ast, 'arena, FinallyJumps> for FinallyJumpWalker {
-    fn walk_in_node(&self, node: Node<'ast, 'arena>, jumps: &mut FinallyJumps) {
+impl<'ast, 'arena> Walker<'ast, 'arena, FinallyJumps<'arena>> for FinallyJumpWalker {
+    fn walk_in_node(&self, node: Node<'ast, 'arena>, jumps: &mut FinallyJumps<'arena>) {
         if Self::holds_jumps(node) {
-            jumps.inner += 1;
-        }
-        if jumps.inner > 0 {
-            return;
+            jumps.functions += 1;
         }
 
         match node {
-            Node::Statement(Statement::Break(r#break)) => jumps.leaving.push((r#break.span(), "break")),
-            Node::Statement(Statement::Continue(r#continue)) => jumps.leaving.push((r#continue.span(), "continue")),
-            Node::Leave(Leave::Break(r#break)) => jumps.leaving.push((r#break.span(), "?? break")),
-            Node::Leave(Leave::Continue(r#continue)) => jumps.leaving.push((r#continue.span(), "?? continue")),
+            Node::Statement(statement) if is_loop(statement) => jumps.loops.push(loop_name(statement)),
+            Node::Statement(Statement::Break(r#break)) if jumps.leaves(r#break.label.as_ref()) => {
+                jumps.leaving.push((r#break.span(), "break"));
+            }
+            Node::Statement(Statement::Continue(r#continue)) if jumps.leaves(r#continue.label.as_ref()) => {
+                jumps.leaving.push((r#continue.span(), "continue"));
+            }
+            Node::Leave(Leave::Break(r#break)) if jumps.leaves(None) => {
+                jumps.leaving.push((r#break.span(), "?? break"));
+            }
+            Node::Leave(Leave::Continue(r#continue)) if jumps.leaves(None) => {
+                jumps.leaving.push((r#continue.span(), "?? continue"));
+            }
             _ => {}
         }
     }
 
-    fn walk_out_node(&self, node: Node<'ast, 'arena>, jumps: &mut FinallyJumps) {
+    fn walk_out_node(&self, node: Node<'ast, 'arena>, jumps: &mut FinallyJumps<'arena>) {
         if Self::holds_jumps(node) {
-            jumps.inner -= 1;
+            jumps.functions -= 1;
+        }
+        if matches!(node, Node::Statement(statement) if is_loop(statement)) {
+            jumps.loops.pop();
         }
     }
+}
+
+/// Whether `statement` is a PHP# loop.
+const fn is_loop(statement: &Statement) -> bool {
+    matches!(statement, Statement::For(_) | Statement::ForOf(_) | Statement::While(_) | Statement::DoWhile(_))
+}
+
+/// The name the loop `statement` is written with, as `orders` in `orders: for (…)`, or `None` for an unnamed loop and
+/// any other statement.
+fn loop_name<'arena>(statement: &Statement<'arena>) -> Option<&'arena [u8]> {
+    let label = match statement {
+        Statement::For(For { label, .. })
+        | Statement::ForOf(ForOf { label, .. })
+        | Statement::While(While { label, .. })
+        | Statement::DoWhile(DoWhile { label, .. }) => label,
+        _ => &None,
+    };
+
+    label.map(|label| label.name.value)
+}
+
+/// The named loops around the node the walk is at, innermost first, with the span of each, up to the lambda that
+/// holds the node: a lambda's `break` and `continue` leave only its own loops, as a method's do.
+fn named_loops_around<'context, 'arena>(
+    context: &'context Context<'_, '_, 'arena>,
+) -> impl Iterator<Item = (Span, &'arena [u8])> + 'context {
+    context
+        .ancestors
+        .iter()
+        .rev()
+        .take_while(|ancestor| {
+            !matches!(ancestor, Node::Expression(Expression::Closure(_) | Expression::ArrowFunction(_)))
+        })
+        .filter_map(|ancestor| match ancestor {
+            Node::Statement(statement) => loop_name(statement).map(|name| (statement.span(), name)),
+            _ => None,
+        })
+}
+
+/// Checks the name `label` gives the loop `node`, Jordan's ruling of 10-18 on loop names: a loop inside a loop of the
+/// same name is an error, as Java and TypeScript refuse a label already in use, so each name means one loop, and so is
+/// a name no `break` or `continue` in the loop names, as Go refuses a label it never jumps to.
+fn check_loop_name(node: Node<'_, '_>, label: &Label, context: &mut Context<'_, '_, '_>) {
+    let name = label.name.value;
+    let outer = named_loops_around(context).find(|(span, outer)| *span != node.span() && *outer == name);
+    if let Some((outer, _)) = outer {
+        context.report(
+            Issue::error(format!("A loop around this one is named `{}` already.", BytesDisplay(name)))
+                .with_annotation(Annotation::primary(label.name.span).with_message("Named here."))
+                .with_annotation(Annotation::secondary(outer).with_message("The loop around it."))
+                .with_help("Give each loop its own name."),
+        );
+    }
+
+    if !names_loop(node, name) {
+        context.report(
+            Issue::error(format!("No `break` or `continue` names the loop `{}`.", BytesDisplay(name)))
+                .with_annotation(Annotation::primary(label.name.span).with_message("Named here."))
+                .with_note("A loop's name is read only by `break` and `continue`.")
+                .with_help("Remove the name, or leave the loop with `break name;` from a loop inside it."),
+        );
+    }
+}
+
+/// Whether a `break` or `continue` in `node`, outside the lambdas in it, names the loop `name`.
+fn names_loop(node: Node<'_, '_>, name: &[u8]) -> bool {
+    match node {
+        Node::Break(Break { label: Some(label), .. }) | Node::Continue(Continue { label: Some(label), .. }) => {
+            label.value == name
+        }
+        Node::Closure(_) | Node::ArrowFunction(_) => false,
+        _ => {
+            let mut named = false;
+            ensure_sufficient_stack(|| node.visit_children(|child| named = named || names_loop(child, name)));
+
+            named
+        }
+    }
+}
+
+/// Checks the loop `name` a `break` or `continue`, written `keyword`, leaves or continues: a loop around it, in its own
+/// method or lambda, Jordan's ruling of 10-18 on loop names.
+fn check_jump_name(name: &LocalIdentifier, keyword: &str, context: &mut Context<'_, '_, '_>) {
+    if named_loops_around(context).any(|(_, outer)| outer == name.value) {
+        return;
+    }
+
+    context.report(
+        Issue::error(format!("No loop around this `{keyword}` is named `{}`.", BytesDisplay(name.value)))
+            .with_annotation(Annotation::primary(name.span).with_message("Named here."))
+            .with_help(format!("`{keyword}` names a loop that holds it, in its own method or lambda.")),
+    );
 }
 
 /// The first body of an `if`, `else` or loop that is not a block in braces, with the block to write in its place. An
@@ -4459,7 +4633,7 @@ fn is_slice_target(target: &Expression, context: &Context<'_, '_, '_>) -> bool {
         }
         Expression::Access(Access::Property(_) | Access::NullSafeProperty(_)) => true,
         Expression::ArrayAccess(access) => is_slice_target(access.array, context),
-        // The analyzer refuses `x[] = v` with the PHP# form for the collection it writes, as `add` for a `List`.
+        // The analyzer refuses `x[] = v` as a typo, at the `[`.
         Expression::ArrayAppend(append) => is_slice_target(append.array, context),
         _ => false,
     }
@@ -5768,7 +5942,7 @@ fn supported(place: Place) -> &'static str {
         | Place::SuperCall
         | Place::SelfCall
         | Place::RefusedPart(_) => {
-            "In a method body, PHP# supports blocks, expression statements, `return`, `let` and `const`, which may unpack a tuple, and typed locals, `if` with `else if` and `else`, `while`, `do … while`, `for`, `for … of`, `break` and `continue` without a level, `try` with `catch` and `finally`, and `yield value;` and `yield ...other;` in a method that returns `Iterable<T>`, with literals, list and map literals, index reads, templates, parentheses, bare names, assignment, arithmetic, comparison and logical operators, `??`, the ternary `c ? a : b`, `(int)`, `(float)` and `(string)`, `++` and `--`, method calls, with optional type arguments as in `Json.decode<WebhookPayload>(body)`, and property reads written with `.` or `?.`, lambdas as in `x => x.id`, `new Class(...)` with optional type arguments as in `new PaginatedList<Order>(rows)`, `new Class.name(...)` and, with a `required` constructor, `new Self(...)` and `new (type)(...)` of a class value, calls of global functions and of a local that holds a lambda, `super.method(...)` and `Self.method(...)`, each with positional, named and spread arguments as in `max(...prices)`, `throw`, `try` before a `Result`, `exit(code)`, `typeof(Class)`, `nameof(Class.property)`, `is`, `as` and `match`."
+            "In a method body, PHP# supports blocks, expression statements, `return`, `let` and `const`, which may unpack a tuple, and typed locals, `if` with `else if` and `else`, `while`, `do … while`, `for` and `for … of`, each with an optional name as in `orders: for (…)`, `break` and `continue` with an optional loop name as in `break orders;`, `try` with `catch` and `finally`, and `yield value;` and `yield ...other;` in a method that returns `Iterable<T>`, with literals, list and map literals, index reads, templates, parentheses, bare names, assignment, arithmetic, comparison and logical operators, `??`, the ternary `c ? a : b`, `(int)`, `(float)` and `(string)`, `++` and `--`, method calls, with optional type arguments as in `Json.decode<WebhookPayload>(body)`, and property reads written with `.` or `?.`, lambdas as in `x => x.id`, `new Class(...)` with optional type arguments as in `new PaginatedList<Order>(rows)`, `new Class.name(...)` and, with a `required` constructor, `new Self(...)` and `new (type)(...)` of a class value, calls of global functions and of a local that holds a lambda, `super.method(...)` and `Self.method(...)`, each with positional, named and spread arguments as in `max(...prices)`, `throw`, `try` before a `Result`, `exit(code)`, `typeof(Class)`, `nameof(Class.property)`, `is`, `as` and `match`."
         }
         Place::Attribute => {
             "A PHP# attribute is a class name with optional positional and named arguments, as in `[Field(\"Name\", searchable: true)]`."
@@ -6492,6 +6666,47 @@ fn check_case_class_names(r#enum: &mago_syntax::cst::Enum, context: &mut Context
                 .with_annotation(Annotation::primary(method.name.span).with_message("Method declared here."))
                 .with_annotation(Annotation::secondary(name.span).with_message("Case declared here."))
                 .with_help("Rename the method."),
+            );
+        }
+    }
+}
+
+/// Refuses a field of a case named like a property or a method of its enum, spec section 20: each case is its own type,
+/// with its fields and every member of its enum, so `some.cents` would read two members, as Kotlin refuses a property
+/// that hides one of its supertype's. A method compares ignoring case, as it is called.
+fn check_case_fields_named_like_members(r#enum: &Enum, context: &mut Context<'_, '_, '_>) {
+    let enum_name = BytesDisplay(r#enum.name.value);
+    for member in &r#enum.members {
+        let ClassLikeMember::EnumCase(EnumCase { item: EnumCaseItem::Data(case), .. }) = member else {
+            continue;
+        };
+        for field in &case.parameter_list.parameters {
+            let field = &field.variable;
+            let clash = r#enum.members.iter().find_map(|member| match member {
+                ClassLikeMember::Property(property) => property
+                    .variables()
+                    .into_iter()
+                    .find(|variable| variable.name == field.name)
+                    .map(|variable| ("property", "Property", variable.name, variable.span)),
+                ClassLikeMember::Method(method) if method.name.value.eq_ignore_ascii_case(field.name) => {
+                    Some(("method", "Method", method.name.value, method.name.span))
+                }
+                _ => None,
+            });
+            let Some((kind, title, name, span)) = clash else {
+                continue;
+            };
+
+            context.report(
+                Issue::error(format!(
+                    "The field `{}` of the case `{enum_name}.{}` shares its name with the {kind} `{enum_name}.{}`, which every case has.",
+                    BytesDisplay(field.name),
+                    BytesDisplay(case.name.value),
+                    BytesDisplay(name),
+                ))
+                .with_annotation(Annotation::primary(field.span).with_message("Field declared here."))
+                .with_annotation(Annotation::secondary(span).with_message(format!("{title} declared here.")))
+                .with_help("Rename one of them."),
             );
         }
     }

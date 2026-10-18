@@ -155,8 +155,9 @@ pub fn get_union_from_hint(
     classname: Option<Word>,
     resolved_names: &ResolvedNames<'_>,
     type_context: &TypeResolutionContext,
+    dialect: Dialect,
 ) -> TUnion {
-    union_from_hint(hint, classname, resolved_names, type_context, Dialect::Php)
+    union_from_hint(hint, classname, resolved_names, type_context, dialect)
 }
 
 /// `get_union_from_hint` for a type written in `dialect`. PHP#'s `Self` is PHP's `static`, spec section 25, and the
@@ -172,7 +173,9 @@ fn union_from_hint(
 
     match hint {
         Hint::Parenthesized(parenthesized_hint) => convert(parenthesized_hint.hint),
-        Hint::Identifier(identifier) => get_union_from_identifier_hint(identifier, resolved_names, type_context),
+        Hint::Identifier(identifier) => {
+            get_union_from_identifier_hint(identifier, resolved_names, type_context, dialect)
+        }
         // Spec section 13: `readonly` before a type makes the value readonly, and everything read through it.
         Hint::Readonly(readonly) => convert(readonly.hint).to_readonly(),
         Hint::Nullable(nullable_hint) => match nullable_hint.hint {
@@ -354,12 +357,14 @@ fn union_from_hint(
 }
 
 /// The type a name in a hint writes. A PHP# type parameter is the template of the same name in `type_context`, as a
-/// docblock's `@template` name is.
+/// docblock's `@template` name is. PHP's `Closure` is its function type, and a `dialect` PHP# file, whose function
+/// types all go by one name, spec section 14.1, reads it as the class it names, which is no PHP# type.
 #[inline]
 fn get_union_from_identifier_hint(
     identifier: &Identifier<'_>,
     resolved_names: &ResolvedNames<'_>,
     type_context: &TypeResolutionContext,
+    dialect: Dialect,
 ) -> TUnion {
     let name = resolved_names.get(identifier);
 
@@ -386,7 +391,7 @@ fn get_union_from_identifier_hint(
         )));
     }
 
-    if name.eq_ignore_ascii_case(b"Closure") {
+    if !dialect.is_sharp() && name.eq_ignore_ascii_case(b"Closure") {
         return wrap_atomic(TAtomic::Callable(TCallable::Signature(TCallableSignature::mixed(true))));
     }
 

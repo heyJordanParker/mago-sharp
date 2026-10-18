@@ -34,6 +34,7 @@ impl Fingerprintable for ForOf<'_> {
         H: std::hash::Hasher,
     {
         "for_of".hash(hasher);
+        self.label.fingerprint_with_hasher(hasher, resolved_names, options);
         self.keyword.fingerprint_with_hasher(hasher, resolved_names, options);
         match &self.target {
             ForOfTarget::Value(value) => value.fingerprint_with_hasher(hasher, resolved_names, options),
@@ -77,6 +78,7 @@ impl Fingerprintable for For<'_> {
         H: std::hash::Hasher,
     {
         "for".hash(hasher);
+        self.label.fingerprint_with_hasher(hasher, resolved_names, options);
         for init in &self.initializations {
             init.fingerprint_with_hasher(hasher, resolved_names, options);
         }
@@ -135,6 +137,7 @@ impl Fingerprintable for Foreach<'_> {
         H: std::hash::Hasher,
     {
         "foreach".hash(hasher);
+        self.label.fingerprint_with_hasher(hasher, resolved_names, options);
         self.expression.fingerprint_with_hasher(hasher, resolved_names, options);
         self.target.fingerprint_with_hasher(hasher, resolved_names, options);
         self.body.fingerprint_with_hasher(hasher, resolved_names, options);
@@ -234,6 +237,7 @@ impl Fingerprintable for While<'_> {
         H: std::hash::Hasher,
     {
         "while".hash(hasher);
+        self.label.fingerprint_with_hasher(hasher, resolved_names, options);
         self.condition.fingerprint_with_hasher(hasher, resolved_names, options);
         self.body.fingerprint_with_hasher(hasher, resolved_names, options);
     }
@@ -284,6 +288,7 @@ impl Fingerprintable for DoWhile<'_> {
         H: std::hash::Hasher,
     {
         "do_while".hash(hasher);
+        self.label.fingerprint_with_hasher(hasher, resolved_names, options);
         self.statement.fingerprint_with_hasher(hasher, resolved_names, options);
         self.condition.fingerprint_with_hasher(hasher, resolved_names, options);
     }
@@ -300,6 +305,7 @@ impl Fingerprintable for Continue<'_> {
         H: std::hash::Hasher,
     {
         "continue".hash(hasher);
+        self.label.fingerprint_with_hasher(hasher, resolved_names, options);
         self.level.fingerprint_with_hasher(hasher, resolved_names, options);
     }
 }
@@ -315,6 +321,7 @@ impl Fingerprintable for Break<'_> {
         H: std::hash::Hasher,
     {
         "break".hash(hasher);
+        self.label.fingerprint_with_hasher(hasher, resolved_names, options);
         self.level.fingerprint_with_hasher(hasher, resolved_names, options);
     }
 }

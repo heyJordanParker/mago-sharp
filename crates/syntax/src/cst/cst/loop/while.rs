@@ -4,6 +4,7 @@ use mago_span::HasSpan;
 use mago_span::Span;
 
 use crate::cst::cst::expression::Expression;
+use crate::cst::cst::goto::Label;
 use crate::cst::cst::keyword::Keyword;
 use crate::cst::cst::statement::Statement;
 use crate::cst::cst::terminator::Terminator;
@@ -25,6 +26,9 @@ use crate::cst::sequence::Sequence;
 #[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct While<'arena> {
+    /// The PHP# name the loop is written with, as `polling:` in `polling: while (running)`, which `break polling;`
+    /// and `continue polling;` name. Always `None` in PHP.
+    pub label: Option<Label<'arena>>,
     pub r#while: Keyword<'arena>,
     pub left_parenthesis: Span,
     pub condition: &'arena Expression<'arena>,
@@ -76,7 +80,7 @@ impl<'arena> WhileBody<'arena> {
 
 impl HasSpan for While<'_> {
     fn span(&self) -> Span {
-        self.r#while.span().join(self.body.span())
+        self.label.map_or_else(|| self.r#while.span(), |label| label.span()).join(self.body.span())
     }
 }
 

@@ -104,6 +104,7 @@ use crate::utils::names::display_sharp_type;
 use crate::utils::names::display_type;
 use crate::utils::names::display_value_type;
 use crate::utils::names::display_variable_name;
+use crate::utils::names::is_php_closure;
 use crate::utils::report_int_for_float;
 
 pub mod function;
@@ -2077,17 +2078,24 @@ where
     }
 }
 
-/// Reports each type `type_union`, written at `span`, names that no analyzed file or stub declares.
+/// Reports each type `type_union`, written at `span`, names that no analyzed file or stub declares, and in a `.sharp`
+/// file PHP's `Closure`, which is no PHP# type, as [`is_php_closure`] says.
 pub(crate) fn report_undefined_types<A>(context: &mut Context<'_, '_, A>, type_union: &TUnion, span: Span)
 where
     A: Arena,
 {
     for type_ref in type_union.get_all_child_nodes() {
-        let TypeRef::Atomic(TAtomic::Reference(TReference::Symbol { name, .. })) = type_ref else {
-            continue;
+        let name = match type_ref {
+            TypeRef::Atomic(TAtomic::Reference(TReference::Symbol { name, .. })) => *name,
+            TypeRef::Atomic(TAtomic::Object(TObject::Named(object)))
+                if context.dialect.is_sharp() && is_php_closure(object.name.as_bytes()) =>
+            {
+                object.name
+            }
+            _ => continue,
         };
 
-        report_undefined_type(context, *name, span);
+        report_undefined_type(context, name, span);
     }
 }
 

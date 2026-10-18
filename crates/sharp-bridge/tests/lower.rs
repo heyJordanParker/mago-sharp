@@ -2658,6 +2658,123 @@ fn a_static_initial_value_that_is_not_constant_runs_once_when_its_class_s_static
 }
 
 /// ```php
+/// final class Rates
+/// {
+///     private static \Sharp\Map $byCurrency = new \Sharp\Map();
+///     private static string $name;
+///     public static $"\0<sharp>\0static constructor" = true;
+///
+///     private static function #statics()
+///     {
+///         self::$name = trim(' a ');
+///         \App\Tenant\Rates::$byCurrency['USD'] = 100;
+///     }
+/// }
+/// ```
+///
+/// Spec section 6: the static constructor runs as the hidden `#statics`, `[20]` being
+/// `ZEND_ACC_PRIVATE | ZEND_ACC_STATIC`, after the writes of the initial values that aren't constant, so the engine
+/// runs both once, when the request first builds the class's statics. The hidden static beside it, `[8209]` being
+/// `ZEND_ACC_SHARP_HIDDEN | ZEND_ACC_STATIC | ZEND_ACC_PUBLIC`, starts true, and the engine keeps in it how the
+/// static constructor's run went.
+#[test]
+fn a_static_constructor_runs_as_the_statics_method_after_the_initial_values() {
+    let lowered = Lowered::with(
+        "namespace App.Tenant;\n\npublic static class Rates\n{\n    private static Map<string, int> byCurrency = [:];\n    private static string name = global.trim(\" a \");\n\n    static Rates()\n    {\n        Rates.byCurrency[\"USD\"] = 100;\n    }\n}\n",
+        &[],
+    );
+
+    assert_eq!(
+        lowered.render(lowered.root()),
+        indoc! {r##"
+            STMT_LIST
+              DECLARE
+                CONST_DECL
+                  CONST_ELEM
+                    ZVAL "strict_types"
+                    ZVAL 1
+                    null
+                null
+              NAMESPACE
+                ZVAL "App\\Tenant"
+                null
+              CLASS [32] "Rates" @3-12
+                null
+                null
+                STMT_LIST
+                  PROP_GROUP [32788]
+                    SHARP_TYPE_ARGS
+                      ZVAL "Sharp\\Map"
+                      ZVAL "Map<string, int>"
+                    PROP_DECL
+                      PROP_ELEM
+                        ZVAL "byCurrency"
+                        NEW
+                          ZVAL "Sharp\\Map"
+                          ARG_LIST
+                        null
+                        null
+                    ATTRIBUTE_LIST
+                      ATTRIBUTE_GROUP
+                        ATTRIBUTE
+                          ZVAL "Sharp\\Crossing"
+                          ARG_LIST
+                            ARRAY [3]
+                              ARRAY_ELEM
+                                ZVAL "map"
+                                null
+                              ARRAY_ELEM
+                                ZVAL "string"
+                                null
+                              ARRAY_ELEM
+                                ZVAL null
+                                null
+                  PROP_GROUP [32788]
+                    ZVAL [1] "string"
+                    PROP_DECL
+                      PROP_ELEM
+                        ZVAL "name"
+                        null
+                        null
+                        null
+                    null
+                  PROP_GROUP [8209]
+                    null
+                    PROP_DECL
+                      PROP_ELEM
+                        ZVAL "\0<sharp>\0static constructor"
+                        ZVAL true
+                        null
+                        null
+                    null
+                  METHOD [20] "#statics" @8-11
+                    PARAM_LIST
+                    null
+                    STMT_LIST
+                      ASSIGN
+                        STATIC_PROP
+                          ZVAL [1] "self"
+                          ZVAL "name"
+                        CALL
+                          ZVAL "trim"
+                          ARG_LIST
+                            ZVAL " a "
+                      ASSIGN
+                        DIM
+                          STATIC_PROP
+                            ZVAL "App\\Tenant\\Rates"
+                            ZVAL "byCurrency"
+                          ZVAL "USD"
+                        ZVAL 100
+                    null
+                    null
+                null
+                null
+        "##}
+    );
+}
+
+/// ```php
 /// public string $name { set { $this->log($value); $this->name = $value; $this->log($this->name); } }
 /// public int $count { set { $this->count = $value * 2; $this->log('count'); } }
 ///
@@ -19960,6 +20077,83 @@ fn break_and_continue_have_a_null_depth() {
 }
 
 /// ```php
+/// foreach ([1, 2] as $order) {
+///     while ($extra > 0) {
+///         if ($extra == 1) { continue 2; }
+///         if ($extra == 2) { break 2; }
+///         if ($extra == 3) { break; }
+///         $extra -= 1;
+///     }
+/// }
+/// ```
+///
+/// Spec section 17: a `break` or `continue` that names a loop leaves as many PHP loops as hold it inside that loop,
+/// and that loop, as PHP's level, so naming the innermost loop is a null depth. The name itself lowers to nothing.
+#[test]
+fn a_named_break_or_continue_has_the_depth_of_the_loop_it_names() {
+    assert_eq!(
+        body(
+            "        orders: for (const order of [1, 2]) {\n            rows: while (extra > 0) {\n                if (extra == 1) { continue orders; }\n                if (extra == 2) { break orders; }\n                if (extra == 3) { break rows; }\n                extra -= 1;\n            }\n        }\n        return extra;\n"
+        ),
+        indoc! {r#"
+            STMT_LIST
+              FOREACH
+                ARRAY [3]
+                  ARRAY_ELEM
+                    ZVAL 1
+                    null
+                  ARRAY_ELEM
+                    ZVAL 2
+                    null
+                VAR
+                  ZVAL "order"
+                null
+                STMT_LIST
+                  WHILE
+                    GREATER
+                      VAR
+                        ZVAL "extra"
+                      ZVAL 0
+                    STMT_LIST
+                      IF
+                        IF_ELEM
+                          BINARY_OP [16]
+                            VAR
+                              ZVAL "extra"
+                            ZVAL 1
+                          STMT_LIST
+                            CONTINUE
+                              ZVAL 2
+                      IF
+                        IF_ELEM
+                          BINARY_OP [16]
+                            VAR
+                              ZVAL "extra"
+                            ZVAL 2
+                          STMT_LIST
+                            BREAK
+                              ZVAL 2
+                      IF
+                        IF_ELEM
+                          BINARY_OP [16]
+                            VAR
+                              ZVAL "extra"
+                            ZVAL 3
+                          STMT_LIST
+                            BREAK
+                              null
+                      ASSIGN_OP [2]
+                        VAR
+                          ZVAL "extra"
+                        ZVAL 1
+              RETURN
+                VAR
+                  ZVAL "extra"
+        "#}
+    );
+}
+
+/// ```php
 /// for ($step = 0; $step < $extra; $step++, $extra--) {
 /// }
 /// for (;;) {
@@ -21793,6 +21987,106 @@ fn a_for_counter_a_lambda_captures_by_reference_is_fresh_in_each_pass() {
                         VAR
                           ZVAL "show"
                         CLOSURE "" @12-12
+                          PARAM_LIST
+                          CLOSURE_USES
+                            ZVAL [1] "step"
+                          STMT_LIST
+                            RETURN
+                              VAR
+                                ZVAL "step"
+                          SHARP_TYPE_ARGS
+                            null
+                            ZVAL "Function<int()>"
+                          null
+                    ZVAL false
+                  ASSIGN
+                    VAR
+                      ZVAL "step#1"
+                    VAR
+                      ZVAL "step"
+                  STMT_LIST
+                    UNSET
+                      VAR
+                        ZVAL "step"
+                  ASSIGN
+                    VAR
+                      ZVAL "step"
+                    VAR
+                      ZVAL "step#1"
+        "#}
+    );
+}
+
+/// ```php
+/// for ($step = 0; $step < $extra; $step++) {
+///     do { while ($extra > 2) { if ($step == 1) { continue 2; } if ($step == 3) { break 3; } $extra -= 1; } $show = function () use (&$step) { return $step; }; } while (false);
+///     $step#1 = $step; unset($step); $step = $step#1;
+/// }
+/// ```
+///
+/// A `for` whose counter moves into a fresh variable runs its body in a second PHP loop, so `continue steps;` from a
+/// loop inside it leaves that loop and continues the `do`, which reaches the move, and `break steps;` leaves all three.
+#[test]
+fn a_named_jump_to_a_for_with_a_fresh_counter_reaches_the_counter_move() {
+    assert_eq!(
+        body_in(
+            "void run(int extra)",
+            "        steps: for (let step = 0; step < extra; step++) {\n            while (extra > 2) {\n                if (step == 1) { continue steps; }\n                if (step == 3) { break steps; }\n                extra -= 1;\n            }\n            const show = () => step;\n        }\n",
+            &[],
+        ),
+        indoc! {r#"
+            STMT_LIST
+              FOR
+                EXPR_LIST
+                  ASSIGN
+                    VAR
+                      ZVAL "step"
+                    ZVAL 0
+                EXPR_LIST
+                  BINARY_OP [20]
+                    VAR
+                      ZVAL "step"
+                    VAR
+                      ZVAL "extra"
+                EXPR_LIST
+                  POST_INC
+                    VAR
+                      ZVAL "step"
+                STMT_LIST
+                  DO_WHILE
+                    STMT_LIST
+                      WHILE
+                        GREATER
+                          VAR
+                            ZVAL "extra"
+                          ZVAL 2
+                        STMT_LIST
+                          IF
+                            IF_ELEM
+                              BINARY_OP [16]
+                                VAR
+                                  ZVAL "step"
+                                ZVAL 1
+                              STMT_LIST
+                                CONTINUE
+                                  ZVAL 2
+                          IF
+                            IF_ELEM
+                              BINARY_OP [16]
+                                VAR
+                                  ZVAL "step"
+                                ZVAL 3
+                              STMT_LIST
+                                BREAK
+                                  ZVAL 3
+                          ASSIGN_OP [2]
+                            VAR
+                              ZVAL "extra"
+                            ZVAL 1
+                      ASSIGN
+                        VAR
+                          ZVAL "show"
+                        CLOSURE "" @15-15
                           PARAM_LIST
                           CLOSURE_USES
                             ZVAL [1] "step"

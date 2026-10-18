@@ -17,6 +17,7 @@ where
 {
     pub(crate) fn parse_foreach(&mut self) -> Result<Foreach<'arena>, ParseError> {
         Ok(Foreach {
+            label: None,
             foreach: self.expect_php_keyword(T!["foreach"])?,
             left_parenthesis: self.stream.eat_span(T!["("])?,
             // PHP#'s `as` operator binds as tightly as `<`, so the collection stops before it.

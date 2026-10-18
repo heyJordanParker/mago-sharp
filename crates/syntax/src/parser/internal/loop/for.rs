@@ -49,6 +49,7 @@ where
         };
 
         Ok(Statement::For(For {
+            label: None,
             r#for,
             left_parenthesis,
             initializations: {
