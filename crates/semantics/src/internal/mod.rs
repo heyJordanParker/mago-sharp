@@ -81,10 +81,7 @@ impl<'ast, 'arena> Walker<'ast, 'arena, Context<'_, 'ast, 'arena>> for CheckingW
     fn walk_in_expression(&self, expression: &'ast Expression<'arena>, context: &mut Context<'_, 'ast, 'arena>) {
         context.ancestors.push(Node::Expression(expression));
 
-        // A PHP version gates PHP's syntax. PHP# syntax is the PHP# grammar's, which fails a form outside it as a typo.
-        if !context.program.dialect.is_sharp() {
-            checker::expression::check_for_clone_with(expression, context);
-        }
+        checker::expression::check_for_clone_with(expression, context);
     }
 
     #[inline]

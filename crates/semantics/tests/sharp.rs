@@ -597,6 +597,33 @@ fn a_php_version_error_and_a_goto_label_error_stay_out_of_a_sharp_file() {
     );
 }
 
+/// Whatever PHP version a project names, a `.sharp` file gets none of mago's PHP version errors, as an enum under PHP
+/// 8.0, and its PHP twin keeps them.
+#[test]
+fn a_sharp_file_gets_no_php_version_error_under_any_php_version() {
+    let messages = |path: &'static str, code: &'static str| {
+        let arena = LocalArena::new();
+        let file = File::ephemeral(Cow::Borrowed(path.as_bytes()), Cow::Borrowed(code.as_bytes()));
+        let program = parse_file(&arena, &file);
+        let names = NameResolver::new(&arena).resolve(program);
+
+        SemanticsChecker::new(PHPVersion::new(8, 0, 0))
+            .check(&file, program, &names)
+            .into_iter()
+            .map(|issue| issue.message)
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(
+        messages("src/Suit.sharp", "public enum Suit\n{\n    case Hearts;\n    case Spades;\n}\n"),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        messages("src/Suit.php", "<?php\n\nenum Suit\n{\n    case Hearts;\n    case Spades;\n}\n"),
+        ["Enums are only available in PHP 8.1 and above."]
+    );
+}
+
 /// A form PHP# has not decided, or that a later change builds, stays not supported yet.
 #[test]
 fn an_undecided_form_is_not_supported_yet() {
@@ -647,14 +674,21 @@ fn a_parent_type_and_a_self_type_are_errors_that_name_the_class() {
     );
 }
 
+/// A final enum breaks a rule of PHP#'s enum, which names the modifier. A trait is no PHP# declaration, so it fails as a
+/// typo does at its `trait`, after any attributes and modifiers before it.
 #[test]
-fn a_final_enum_or_a_public_trait_is_an_error_where_it_starts() {
-    let code = "namespace App.Tenant;\n\nfinal enum Suit\n{\n}\n\npublic trait Tagged\n{\n}\n\ntrait Bare\n{\n}\n";
+fn a_final_enum_is_an_error_and_a_trait_fails_as_a_typo_does_at_its_keyword() {
+    let code = "namespace App.Tenant;\n\nfinal enum Suit\n{\n}\n\npublic trait Tagged\n{\n}\n\ntrait Bare\n{\n}\n\n[Deprecated]\ntrait Old\n{\n}\n";
     let r#trait = "Parse error encountered during parsing";
 
     assert_eq!(
         issues(code),
-        ["3:1 An enum takes no `final`: remove it.".to_owned(), format!("7:1 {trait}"), format!("11:1 {trait}"),]
+        [
+            "3:1 An enum takes no `final`: remove it.".to_owned(),
+            format!("7:8 {trait}"),
+            format!("11:1 {trait}"),
+            format!("16:1 {trait}"),
+        ]
     );
 }
 
@@ -1219,31 +1253,23 @@ fn a_php_first_class_callable_names_the_method_value() {
     );
 }
 
-/// Spec section 14.1: one name covers every function type, so PHP's `Closure` is no type a `.sharp` file imports, as
-/// `callable` is no type it writes.
+/// Spec section 14.1: one name covers every function type, so an import of PHP's `Closure` gets what an import of a name
+/// nothing declares gets, which the analyzer reports, and none here.
 #[test]
-fn an_import_of_closure_is_an_error_that_names_the_function_type() {
+fn an_import_of_closure_gets_no_error_of_its_own() {
     let code = "namespace App;\n\nimport Closure;\nimport Closure as Callback;\nimport Lib.Tools.Closure as Tool;\n\nclass Report\n{\n}\n";
 
-    assert_eq!(
-        issues(code),
-        ["3:8 PHP# has no `Closure`: write `Function<R(P)>`.", "4:8 PHP# has no `Closure`: write `Function<R(P)>`."]
-    );
+    assert_eq!(issues(code), Vec::<String>::new());
 }
 
+/// PHP's `global $x;` fails as a typo does. `compact` and `extract` are PHP functions, which the analyzer refuses as it
+/// refuses every function the standard library replaces.
 #[test]
-fn compact_extract_and_global_are_errors() {
+fn global_fails_as_a_typo_does_and_compact_and_extract_are_calls() {
     let code =
         leak(method("        compact(\"extra\");\n        extract([]);\n        global $config;\n        return 1;\n"));
 
-    assert_eq!(
-        issues(code),
-        [
-            "7:9 Parse error encountered during parsing",
-            "8:9 Parse error encountered during parsing",
-            "9:9 Parse error encountered during parsing",
-        ]
-    );
+    assert_eq!(issues(code), ["9:9 Parse error encountered during parsing"]);
 }
 
 /// Spec section 8 removes `echo` and `print`: output goes through the standard library's `Console`, so PHP's `echo`
@@ -4683,7 +4709,7 @@ fn a_type_written_in_another_case_names_its_spelling_and_a_php_type_fails_as_a_t
         ("String", "PHP# writes the type `string`."),
         ("INT", "PHP# writes the type `int`."),
         ("object", "Parse error encountered during parsing"),
-        ("OBJECT", "Parse error encountered during parsing"),
+        ("OBJECT", "PHP# writes `Object`."),
         ("any", "PHP# writes `Any`."),
         ("mixed", "Parse error encountered during parsing"),
         ("null", "A type holds null only with `?` after it: write the type, as in `int?`."),

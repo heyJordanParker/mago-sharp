@@ -692,17 +692,6 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
 
             Some(File)
         }
-        // Spec section 14.1: one name covers every function type, so PHP's `Closure`, like `callable`, is no PHP# type.
-        (Node::UseItem(item), File) if item.name.value().strip_prefix(b"\\").unwrap_or(item.name.value()) == b"Closure" => {
-            context.report(
-                Issue::error("PHP# has no `Closure`: write `Function<R(P)>`.")
-                    .with_annotation(Annotation::primary(item.name.span()).with_message("Written here."))
-                    .with_note("A function type names its return and parameter types, as in `Function<Money(Offer)>`, and plain PHP's closures arrive as function values."),
-            );
-
-            Some(File)
-        }
-
         (
             Node::Program(_)
             | Node::Statement(
@@ -2276,19 +2265,12 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
 
             None
         }
-        // PHP# never has top-level functions, `global`, `compact()` or `extract()`: `check_function`, `check_global` and
-        // `check_function_call` report them. A function, at file level or in a body, is reported at its name, so its
-        // parameters and body are checked as a method's. `global` holds only the names it declares, and `compact()`
-        // and `extract()` are reported over the whole call.
+        // PHP# never has top-level functions or `global`: `check_function` and `check_global` report them. A function,
+        // at file level or in a body, is reported at its name, so its parameters and body are checked as a method's.
+        // `global` holds only the names it declares.
         (Node::Statement(Statement::Function(_)), File | Body) => Some(File),
         (Node::Function(_), File) => Some(Method),
         (Node::Statement(Statement::Global(_)), Body) => None,
-        (Node::Expression(Expression::Call(Call::Function(function_call))), Body)
-            if let Expression::Identifier(name) = function_call.function
-                && is_compact_or_extract(name.last_segment()) =>
-        {
-            None
-        }
         // Spec sections 8 and 29: plain PHP functions are called by their bare names. The analyzer refuses a call
         // that resolves to a namespaced function. Spec section 14: a local holding a function is called the same way.
         (Node::Expression(Expression::Call(Call::Function(function_call))), Body)
@@ -4457,9 +4439,10 @@ fn is_slice_type(hint: &Hint) -> bool {
 }
 
 /// The error for a type PHP# writes another way, spec section 24: the built-in types are lowercase, every other type is
-/// capitalized, a lone `null` is written with `?` after a type, and PHP's `mixed`, `object`, `array`, `callable`,
-/// `iterable`, `parent`, `true` and `false` are no PHP# syntax. `never` is a type only as a method's return type, spec
-/// section 7, at `place` [`Place::Method`] or [`Place::Signature`]. `None` for a type written as PHP# writes it.
+/// capitalized, as `Any` and `Object`, a lone `null` is written with `?` after a type, and PHP's `mixed`, `object`,
+/// `array`, `callable`, `iterable`, `parent`, `true` and `false` are no PHP# syntax. `never` is a type only as a
+/// method's return type, spec section 7, at `place` [`Place::Method`] or [`Place::Signature`]. `None` for a type
+/// written as PHP# writes it.
 fn type_written_another_way(hint: &Hint, place: Place, context: &Context<'_, '_, '_>) -> Option<Issue> {
     let written = match hint {
         Hint::Identifier(Identifier::Local(name)) => name.value,
@@ -4485,6 +4468,8 @@ fn type_written_another_way(hint: &Hint, place: Place, context: &Context<'_, '_,
         b"int" | b"float" | b"bool" | b"string" | b"void" if written != lowercase.as_slice() => {
             format!("PHP# writes the type `{}`.", BytesDisplay(&lowercase))
         }
+        // PHP's `object` is lowercase, so another case is PHP#'s `Object`.
+        b"object" if written != OBJECT && written != b"object" => "PHP# writes `Object`.".to_owned(),
         b"object" | b"mixed" | b"true" | b"false" | b"array" | b"callable" | b"parent"
             if written != OBJECT || lowercase != b"object" =>
         {
@@ -5522,7 +5507,24 @@ fn report_unsupported(node: Node<'_, '_>, place: Place, context: &mut Context<'_
     } else if let (Node::Expression(_) | Node::ConstantAccess(_), Place::Constant) = (node, place) {
         report_call_in_constant(node.span(), context);
     } else {
-        report_unexpected(node.span(), context);
+        report_unexpected(first_unexpected_token(node), context);
+    }
+}
+
+/// Where a node PHP# never writes leaves the grammar: at its first token, or, for a declaration, at the first token
+/// after the attributes and modifiers PHP# writes before it, as `trait` in `[Deprecated] public trait Audit`.
+fn first_unexpected_token(node: Node<'_, '_>) -> Span {
+    let children = node.children();
+    match children.first() {
+        Some(Node::AttributeList(_) | Node::Modifier(_)) => children
+            .iter()
+            .find(|child| !matches!(child, Node::AttributeList(_) | Node::Modifier(_)))
+            .map_or_else(|| node.span(), HasSpan::span),
+        // A statement holds its declaration, which spans the same code.
+        Some(&declaration) if children.len() == 1 && declaration.span() == node.span() => {
+            first_unexpected_token(declaration)
+        }
+        _ => node.span(),
     }
 }
 
@@ -6230,10 +6232,7 @@ pub fn check_function_call(function_call: &FunctionCall, context: &mut Context<'
         return;
     };
 
-    let function = identifier.last_segment();
-    if is_compact_or_extract(function) {
-        report_unexpected(function_call.span(), context);
-    } else if function.eq_ignore_ascii_case(b"assert")
+    if identifier.last_segment().eq_ignore_ascii_case(b"assert")
         && let [Argument::Positional(argument)] = function_call.argument_list.arguments.as_slice()
         && argument.ellipsis.is_some()
     {
@@ -6246,10 +6245,6 @@ pub fn check_function_call(function_call: &FunctionCall, context: &mut Context<'
                 .with_help("Pass the condition without `...`, or pass the description by name after the spread."),
         );
     }
-}
-
-fn is_compact_or_extract(function: &[u8]) -> bool {
-    function.eq_ignore_ascii_case(b"compact") || function.eq_ignore_ascii_case(b"extract")
 }
 
 #[inline]

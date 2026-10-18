@@ -1452,7 +1452,7 @@ impl IncrementalAnalysisService {
             }
         };
 
-        let analyzer_issues = drop_follow_on_issues(&file, &semantic_issues, analysis_result.issues);
+        let analyzer_issues = drop_follow_on_issues(&file, program.errors, &semantic_issues, analysis_result.issues);
         if self.late_symbol_references.is_empty() {
             issues.extend(analyzer_issues);
         } else {
@@ -1497,7 +1497,7 @@ impl IncrementalAnalysisService {
             issues.push(Issue::error(format!("Analysis error: {err}")));
         }
 
-        let analyzer_issues = drop_follow_on_issues(&file, &semantic_issues, analysis_result.issues);
+        let analyzer_issues = drop_follow_on_issues(&file, program.errors, &semantic_issues, analysis_result.issues);
         if self.late_symbol_references.is_empty() {
             issues.extend(analyzer_issues);
         } else {
@@ -1684,7 +1684,8 @@ impl IncrementalAnalysisService {
                 let mut artifacts = if program.dialect.is_sharp() {
                     let artifacts = analyzer.analyze_with_artifacts(program, &mut analysis_result)?;
                     let analyzer_issues = std::mem::take(&mut analysis_result.issues);
-                    let analyzer_issues = drop_follow_on_issues(&source_file, &semantic_issues, analyzer_issues);
+                    let analyzer_issues =
+                        drop_follow_on_issues(&source_file, program.errors, &semantic_issues, analyzer_issues);
                     analysis_result.issues.extend(program.errors.iter().map(Issue::from));
                     analysis_result.issues.extend(semantic_issues);
                     analysis_result.issues.extend(analyzer_issues);

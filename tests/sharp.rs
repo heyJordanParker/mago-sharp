@@ -133,6 +133,34 @@ fn analyze_reports_only_the_parse_error_for_php_syntax() {
     assert!(errors[0].starts_with("src/Demo/Report.sharp:7:20:error - parse:"), "{stdout}");
 }
 
+/// A parse error stops a PHP# file from running, as a semantic error does, so an analyzer issue on its line adds
+/// nothing: a constructor that writes `: base(row)` or `: parent(row)` gets the parser's rule, and not a missing
+/// `: super(…)` too.
+#[test]
+fn analyze_reports_only_the_parse_error_on_its_line() {
+    let directory =
+        workspace("namespace Demo;\n\nclass Report : Base\n{\n    public Report(int row) : base(row) { }\n}\n");
+    write(
+        directory.path(),
+        "src/Demo/Base.sharp",
+        "namespace Demo;\n\nclass Base\n{\n    public Base(int row) { }\n}\n",
+    );
+    write(
+        directory.path(),
+        "src/Demo/Total.sharp",
+        "namespace Demo;\n\nclass Total : Base\n{\n    public Total(int row) : parent(row) { }\n}\n",
+    );
+
+    let output = run(directory.path(), "analyze", &["--reporting-format", "emacs"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert_eq!(
+        [issues_in(&stdout, "src/Demo/Report.sharp"), issues_in(&stdout, "src/Demo/Total.sharp")],
+        [["5:28 parse"], ["5:27 parse"]],
+        "{stdout}"
+    );
+}
+
 /// The issues `mago analyze --reporting-format emacs` printed for `file`, as `line:column code`.
 fn issues_in(stdout: &str, file: &str) -> Vec<String> {
     stdout

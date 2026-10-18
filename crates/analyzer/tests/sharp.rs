@@ -4051,27 +4051,30 @@ fn a_cast_of_a_value_that_is_not_a_number_is_an_invalid_operand() {
     );
 }
 
-/// `die("…")` prints its message and exits with status 0, which reports success, so spec section 8 removes `die` in
-/// every form, and `global.die` is refused as a `global.` call of any function the library replaces is.
+/// Spec section 8 removes `die`, because `die("…")` prints its message and exits with status 0, which reports success.
+/// `compact` and `extract` reach locals by their names in strings, and `clone` copies an object without its
+/// constructor, where spec section 16 copies a value with `with`. Each is refused as a function the standard library
+/// replaces is: called bare, called through `global` and read as a value.
 #[test]
-fn die_in_every_form_is_an_error_that_names_write_error_and_exit() {
-    let sharp = "namespace Demo;\n\nclass Shutdown\n{\n    public void stop()\n    {\n        global.die();\n    }\n\n    public void fail()\n    {\n        global.die(\"failed\");\n    }\n\n    public void code()\n    {\n        global.die(1);\n    }\n}\n";
+fn die_compact_extract_and_clone_are_functions_php_sharp_has_not() {
+    let sharp = "namespace Demo;\n\nclass Shutdown\n{\n    public void fail() { die(\"failed\"); }\n    public void code() { global.die(1); }\n    public Any pack() => compact(\"values\");\n    public void unpack(Map<string, int> values) { global.extract(values); }\n    public Shutdown copy() => global.clone(this);\n    public void read() { const stop = global.die; }\n    public Shutdown copied() => clone(this);\n}\n";
+    let die = "PHP# has no `die`: write the message with `console.writeError(text)`, then `process.exit(1)`.";
+    let compact = "PHP# has no `compact`: PHP# code reads and writes a local only by its name.";
+    let extract = "PHP# has no `extract`: PHP# code reads and writes a local only by its name.";
+    let clone = "PHP# has no `clone`: copy a value with `with`, as in `price with { amount: 400 }`.";
 
     assert_eq!(
-        refusals(("src/Demo/Shutdown.sharp", sharp), &[]),
+        worded(("src/Demo/Shutdown.sharp", sharp), &[]),
         [
-            "7:9 wrapped-function PHP# has no `die`: write the message with `console.writeError(text)`, then `process.exit(1)`. | ",
-            "12:9 wrapped-function PHP# has no `die`: write the message with `console.writeError(text)`, then `process.exit(1)`. | ",
-            "17:9 wrapped-function PHP# has no `die`: write the message with `console.writeError(text)`, then `process.exit(1)`. | ",
+            format!("5:26 wrapped-function {die} | Called here."),
+            format!("6:26 wrapped-function {die} | Called here."),
+            format!("7:26 wrapped-function {compact} | Called here."),
+            format!("8:51 wrapped-function {extract} | Called here."),
+            format!("9:31 wrapped-function {clone} | Called here."),
+            format!("10:39 wrapped-function {die} | Reads the function without calling it."),
+            format!("11:33 wrapped-function {clone} | Called here."),
         ]
     );
-    for refusal in analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Shutdown.sharp", sharp), &[]) {
-        let annotations: Vec<_> =
-            refusal.annotations.iter().map(|annotation| annotation.message.as_deref().unwrap_or_default()).collect();
-
-        assert_eq!(annotations, ["Called here."]);
-        assert_eq!(refusal.notes, ["`die(\"…\")` prints the message and exits with status 0, which reports success."]);
-    }
 }
 
 /// The standard library's `Int` and `Float`, with the library's signatures, which a project reads from `vendor/`.
@@ -5638,9 +5641,9 @@ fn a_plain_php_function_that_changes_or_reads_the_callers_variables_is_no_functi
         &[],
         &[
             "7:22 invalid-pass-by-reference: `global.sort` changes the variable it is given, and PHP# passes every argument by value, so it is no function value.",
-            "8:22 invalid-callable: `global.compact` reads the variables of the code that calls it, so it is no function value.",
+            "8:22 wrapped-function: PHP# has no `compact`: PHP# code reads and writes a local only by its name.",
             "9:22 invalid-callable: `global.func_get_args` reads the variables of the code that calls it, so it is no function value.",
-            "10:22 invalid-callable: `global.extract` reads the variables of the code that calls it, so it is no function value.",
+            "10:22 wrapped-function: PHP# has no `extract`: PHP# code reads and writes a local only by its name.",
             "11:21 invalid-pass-by-reference: `global.sort` changes the variable it is given, and PHP# passes every argument by value: write `numbers = numbers.sortedBy(…)`.",
             "12:9 wrapped-function: `array_push` is wrapped by the standard library: write `numbers.add(…)`.",
             "13:9 wrapped-function: `shuffle` is wrapped by the standard library: write `random.shuffle(…)` on the `Random` your constructor takes.",
@@ -5651,22 +5654,42 @@ fn a_plain_php_function_that_changes_or_reads_the_callers_variables_is_no_functi
     );
 }
 
-/// Spec sections 14.1 and 14.4 in PHP#'s words: a value that is no function is not called, a function that may be null
-/// is called with `?.(…)`, and PHP's `Closure` is no type, imported or not.
+/// Spec sections 14.1 and 14.4 in PHP#'s words: a value that is no function is not called, and a function that may be
+/// null is called with `?.(…)`.
 #[test]
-fn a_call_of_no_function_and_a_closure_type_are_refused_in_php_sharp_words() {
-    let sharp = "namespace Demo;\n\nclass Report\n{\n    private Function<int(int)>? maybe = null;\n\n    public int take(Closure f) => 1;\n\n    public int global(global.Closure f) => 1;\n\n    public void run()\n    {\n        (5)(1);\n        this.maybe(5);\n    }\n}\n";
+fn a_call_of_no_function_is_refused_in_php_sharp_words() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    private Function<int(int)>? maybe = null;\n\n    public void run()\n    {\n        (5)(1);\n        this.maybe(5);\n    }\n}\n";
 
     assert_messages(
         sharp,
         &[],
         &[
-            "7:21 non-existent-class-like: PHP# has no `Closure`: write `Function<R(P)>`.",
-            "9:23 non-existent-class-like: PHP# has no `Closure`: write `Function<R(P)>`.",
-            "13:9 invalid-callable: Only a function value is called with `(…)`, and `(5)` is `5`.",
-            "14:9 invalid-callable: `this.maybe` may be null: call it as `this.maybe?.(…)`.",
+            "9:9 invalid-callable: Only a function value is called with `(…)`, and `(5)` is `5`.",
+            "10:9 invalid-callable: `this.maybe` may be null: call it as `this.maybe?.(…)`.",
         ],
     );
+}
+
+/// Spec section 14.1: one name covers every function type, so PHP's `Closure` is no name a `.sharp` file knows. It gets
+/// exactly what a name nothing declares gets, as `Closur`, bare, through `global` and imported.
+#[test]
+fn closure_gets_what_an_unknown_class_name_gets() {
+    let written = |name: &str| -> &'static str {
+        Box::leak(
+            format!("namespace Demo;\n\nclass Report\n{{\n    public int take({name} f) => 1;\n\n    public int global(global.{name} f) => 1;\n}}\n")
+                .into_boxed_str(),
+        )
+    };
+    let imported = |name: &str| -> &'static str {
+        Box::leak(format!("namespace Demo;\n\nimport {name};\n\nclass Report\n{{\n}}\n").into_boxed_str())
+    };
+    let worded_as = |code: &'static str, name: &str| -> Vec<String> {
+        worded(("src/Demo/Report.sharp", code), &[]).into_iter().map(|issue| issue.replace(name, "NAME")).collect()
+    };
+
+    assert_eq!(worded_as(written("Closure"), "Closure"), worded_as(written("Closur"), "Closur"));
+    assert_eq!(worded_as(imported("Closure"), "Closure"), worded_as(imported("Closur"), "Closur"));
+    assert!(!worded_as(imported("Closur"), "Closur").is_empty());
 }
 
 /// A plain PHP library that takes a callback with no docblock takes any PHP# function value, as PHP does, in a
@@ -15298,24 +15321,23 @@ fn function_types_are_tested_like_any_type() {
     );
 }
 
-/// A plain PHP method named as a value, and a `Closure` written as a type or tested for, declare no PHP# type either, so
-/// a function-type test of them is `unknown-function-type`, and never always true, whatever types the analyzer knows. A
+/// A plain PHP method named as a value, and a `Closure` a plain PHP method returns, declare no PHP# type either, so a
+/// function-type test of them is `unknown-function-type`, and never always true, whatever types the analyzer knows. A
 /// PHP# lambda in a local keeps its type.
 #[test]
 fn a_function_type_test_of_a_plain_php_function_value_is_unknown() {
     let legacy = (
         "src/Lib/Legacy.php",
-        "<?php\n\nnamespace Lib;\n\nclass Legacy\n{\n    public static function twice(int $x): int\n    {\n        return $x * 2;\n    }\n}\n",
+        "<?php\n\nnamespace Lib;\n\nclass Legacy\n{\n    public static function twice(int $x): int\n    {\n        return $x * 2;\n    }\n\n    public static function doubler(): \\Closure\n    {\n        return fn($x) => $x * 2;\n    }\n}\n",
     );
-    let code = "namespace App;\n\nimport Closure;\nimport Lib.Legacy;\n\npublic class Shows\n{\n    public bool named(Closure closure) => closure is Function<int(int)>;\n\n    public bool method() => Legacy.twice is Function<int(int)>;\n\n    public bool narrowed(Any? value) => value is Closure tested && tested is Function<int(int)>;\n\n    public bool local()\n    {\n        let doubled = (int x) => x * 2;\n        return doubled is Function<int(int)>;\n    }\n}\n";
+    let code = "namespace App;\n\nimport Lib.Legacy;\n\npublic class Shows\n{\n    public bool returned() => Legacy.doubler() is Function<int(int)>;\n\n    public bool method() => Legacy.twice is Function<int(int)>;\n\n    public bool local()\n    {\n        let doubled = (int x) => x * 2;\n        return doubled is Function<int(int)>;\n    }\n}\n";
 
     assert_eq!(
         written(code, &analyze(&PLUGIN_REGISTRY, settings(), ("src/App/Shows.sharp", code), &[legacy])),
         [
-            "8:43 unknown-function-type The type of `closure`'s function is unknown: its source declares no parameter or result types.",
-            "10:29 unknown-function-type The type of `Legacy.twice`'s function is unknown: its source declares no parameter or result types.",
-            "12:68 unknown-function-type The type of `tested`'s function is unknown: its source declares no parameter or result types.",
-            "17:24 redundant-type-comparison `doubled` is already a `Function<int(int)>`, so `is Function<int(int)>` is always true.",
+            "7:31 unknown-function-type The type of `Legacy.doubler()`'s function is unknown: its source declares no parameter or result types.",
+            "9:29 unknown-function-type The type of `Legacy.twice`'s function is unknown: its source declares no parameter or result types.",
+            "14:24 redundant-type-comparison `doubled` is already a `Function<int(int)>`, so `is Function<int(int)>` is always true.",
         ]
     );
 }

@@ -178,7 +178,7 @@ impl AnalysisService {
 
         let artifacts = analyzer.analyze_with_artifacts(program, &mut analysis_result)?;
         analysis_result.issues =
-            drop_follow_on_issues(&file, &semantic_issues, std::mem::take(&mut analysis_result.issues));
+            drop_follow_on_issues(&file, program.errors, &semantic_issues, std::mem::take(&mut analysis_result.issues));
         analysis_result
             .issues
             .extend(Effects::solve(&self.codebase, &artifacts.effect_summaries).issues(&self.codebase));
