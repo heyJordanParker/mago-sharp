@@ -2105,19 +2105,45 @@ fn another_modifier_on_an_interface_method_is_an_error() {
 }
 
 #[test]
-fn an_interface_constant_is_not_supported_yet_and_another_interface_modifier_is_an_error() {
+fn another_interface_modifier_is_an_error() {
     let code = "namespace App.Tenant;\n\nabstract interface Measured\n{\n    const int SIDES = 4;\n}\n";
+
+    assert_eq!(issues(code), ["3:1 An interface takes no `abstract`: remove it."]);
+}
+
+/// Spec section 22: an interface constant follows a class constant's rules, and is public, written bare, as every
+/// interface member is.
+#[test]
+fn an_interface_constant_is_a_class_constant_written_bare() {
+    let code = "namespace App.Tenant;\n\ninterface Measured\n{\n    const int SIDES = 4;\n    private const int MAX = 9;\n    const int A = 1, B = 2;\n}\n";
 
     assert_eq!(
         issues(code),
-        ["3:1 An interface takes no `abstract`: remove it.", "5:5 This class member is not supported yet in PHP#."]
+        [
+            "6:5 An interface member is always public, so it takes no access modifier.",
+            "7:5 A constant declares one name: declare each constant on its own line.",
+        ]
+    );
+}
+
+/// Spec section 22: an interface holds no storage, so a property it states takes no initial value, and its default
+/// body is a computed property's expression, as in `string label => …;`.
+#[test]
+fn an_interface_property_takes_no_initial_value_and_no_accessor_body() {
+    let code = "namespace App.Tenant;\n\ninterface Priced\n{\n    int count { get; } = 0;\n    string label => \"label\";\n}\n";
+    let helps: Vec<Option<String>> = check_in_type_file(code).into_iter().map(|issue| issue.help).collect();
+
+    assert_eq!(issues(code), ["5:24 An interface holds no storage, so it gives no initial value."]);
+    assert_eq!(
+        helps,
+        [Some("Remove it, and give `count` its value in each class that implements the interface.".to_owned())]
     );
 }
 
 /// An interface states a property its classes give, `{ get; }` as `OrderEvent` states the `orderId` its events give,
 /// spec section 15, or `{ get; set; }`, spec section 6.1. An interface member is always public, spec section 5, so an
-/// access modifier on an accessor is the error an access modifier on any interface member is. An accessor body is
-/// not supported yet.
+/// access modifier on an accessor is the error an access modifier on any interface member is. An accessor body is an
+/// error that writes the computed property, whose expression is the default body, spec section 22.
 #[test]
 fn an_interface_property_is_get_only_or_settable() {
     let code = "namespace App.Tenant;\n\ninterface Named\n{\n    string name { get; }\n    string label { get => \"label\"; }\n    string title { get; set; }\n    string tag { get; private set; }\n    string code { protected get; set; }\n    string kind { get; set; init; }\n}\n";
@@ -2125,15 +2151,14 @@ fn an_interface_property_is_get_only_or_settable() {
     assert_eq!(
         issues(code),
         [
-            "6:24 Interface virtual property `Named.label` must be abstract.",
-            "6:5 This class member is not supported yet in PHP#.",
+            "6:20 An interface property's default body is an expression: write `string label => …;`.",
             "8:23 An interface member is always public, so it takes no access modifier.",
             "9:19 An interface member is always public, so it takes no access modifier.",
             "10:5 This class member is not supported yet in PHP#."
         ]
     );
     let helps: Vec<Option<String>> =
-        check_in_type_file(code).into_iter().skip(2).take(2).map(|issue| issue.help).collect();
+        check_in_type_file(code).into_iter().skip(1).take(2).map(|issue| issue.help).collect();
     assert_eq!(
         helps,
         [
@@ -6764,13 +6789,13 @@ fn a_member_defined_twice_and_its_class_are_named_as_sharp_writes_them() {
 fn a_refusal_notes_what_php_sharp_has_where_it_is_written() {
     let class = "namespace App;\n\npublic class Order\n{\n    case Open;\n}\n";
     let pattern = leak(method("        const both = extra is int & Report;\n        return extra;\n"));
-    let interface = "namespace App;\n\npublic interface Sized\n{\n    public const int MAX = 3;\n}\n";
+    let interface = "namespace App;\n\npublic interface Sized\n{\n    int max { get; init; }\n}\n";
     let constant = "namespace App;\n\npublic class Limits\n{\n    final public const int MAX = 3;\n}\n";
 
     for (code, note) in [
         (
             interface,
-            "A PHP# interface has attributes, an optional `public`, a name, optional type parameters as in `<in TItem>`, an optional `: Interface` header, methods and get-only properties, as in `int orderId { get; }`, with no other modifiers, `extends`, constants or other properties.",
+            "A PHP# interface has attributes, an optional `public`, a name, optional type parameters as in `<in TItem>`, an optional `: Interface` header, constants, methods, properties as in `int orderId { get; }` and `string label => …;`, and operators as in `static int operator <=>(Priced a, Priced b)`, with no other modifiers or `extends`.",
         ),
         (
             constant,
@@ -6959,14 +6984,26 @@ fn an_operator_body_is_a_method_body() {
     assert_eq!(issues_in("src/Money.sharp", code), ["7:9 Parse error encountered during parsing"]);
 }
 
+/// Spec section 19: an enum declares an operator as a class does, also after an import, and an interface writes it
+/// `static` alone, as it writes every member bare.
 #[test]
-fn an_interface_or_an_enum_declares_no_operator() {
-    let interface =
-        "namespace App;\n\npublic interface Priced\n{\n    static int operator +(Priced a, Priced b) => 0;\n}\n";
-    let r#enum = "namespace App;\n\npublic enum Suit\n{\n    case Hearts;\n\n    public static int operator +(Suit a, Suit b) => 0;\n}\n";
+fn an_interface_and_an_enum_declare_operators() {
+    let interface = "namespace App;\n\npublic interface Priced\n{\n    static int operator <=>(Priced a, Priced b) => 0;\n    public static int operator +(Priced a, Priced b) => 0;\n    int operator -(Priced a, Priced b) => 0;\n    static int operator *(int a, int b) => 0;\n    static int operator <=>(Priced a, Priced b) => 1;\n}\n";
+    let r#enum = "namespace App;\n\nimport App.Shared.Money;\n\npublic enum Suit\n{\n    case Hearts;\n\n    public static int operator <=>(Suit a, Suit b) => 0;\n    static int operator +(Suit a, Suit b) => 0;\n}\n";
 
-    assert_eq!(issues_in("src/Priced.sharp", interface), ["5:5 This class member is not supported yet in PHP#."]);
-    assert_eq!(issues_in("src/Suit.sharp", r#enum), ["7:5 This class member is not supported yet in PHP#."]);
+    assert_eq!(
+        issues_in("src/Priced.sharp", interface),
+        [
+            "6:5 An interface member is always public, so it takes no access modifier.",
+            "7:9 An interface operator is `static`, as in `static Priced operator +(Priced a, Priced b)`.",
+            "8:26 One parameter of `operator *` is `Priced`, the interface that declares it.",
+            "9:16 `operator <=>` is declared twice in `Priced`.",
+        ]
+    );
+    assert_eq!(
+        issues_in("src/Suit.sharp", r#enum),
+        ["10:16 An operator is `public static`, as in `public static Suit operator +(Suit a, Suit b)`."]
+    );
 }
 
 /// Spec section 13: `readonly` goes before any type PHP# checks, a value's, and after a method's parameters, `this`'s.

@@ -142,6 +142,9 @@ pub fn validate_method_signature_compatibility(
         // The child method is not user-defined; skip validation.
         return Vec::new();
     }
+    if are_operators(child_method, parent_method) {
+        return Vec::new();
+    }
 
     let (child_method, changed_bound) = if dialect.is_sharp() {
         match with_parent_type_parameters(codebase, child_method, parent_method) {
@@ -521,6 +524,13 @@ fn generic_method_name(method: &FunctionLikeMetadata) -> String {
     format!("{}<{}>", method.original_name, templates.join(", "))
 }
 
+/// Whether `child_method` and `parent_method` are both PHP# operators, spec section 19. An operator runs by the types
+/// of its operands, so a class's own replaces no other and links against none: a parent class's is refused by
+/// `check_inherited_operators`, and an interface's runs on operands of the interface, from the interface's trait.
+fn are_operators(child_method: &FunctionLikeMetadata, parent_method: &FunctionLikeMetadata) -> bool {
+    child_method.flags.is_operator() && parent_method.flags.is_operator()
+}
+
 /// Adds to `issues` the parameter of a PHP# method that no longer links against the method it overrides or implements
 /// once generics are erased, as the engine links the class PHP# compiles to: each parameter takes at least the type the
 /// parent's parameter erases to. The engine links the erased declarations whenever `child_class` or `parent_class` is
@@ -541,6 +551,7 @@ pub fn validate_erased_signature_compatibility(
 ) {
     if !(child_class.flags.is_sharp() || parent_class.flags.is_sharp())
         || !issues.iter().all(|issue| matches!(issue, SignatureCompatibilityIssue::ParameterNameMismatch { .. }))
+        || are_operators(child_method, parent_method)
     {
         return;
     }

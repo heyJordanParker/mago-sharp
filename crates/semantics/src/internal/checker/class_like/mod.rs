@@ -668,8 +668,11 @@ pub fn check_interface<'ast, 'arena>(interface: &'ast Interface<'arena>, context
                             );
                         }
 
+                        // `check_slice` refuses an accessor body of a PHP# interface property, naming the computed form.
                         for hook in &hooked_property.hook_list.hooks {
-                            if let PropertyHookBody::Concrete(property_hook_concrete_body) = &hook.body {
+                            if let PropertyHookBody::Concrete(property_hook_concrete_body) = &hook.body
+                                && !context.program.dialect.is_sharp()
+                            {
                                 context.report(
                                     Issue::error(format!(
                                         "Interface virtual property `{property_display}` must be abstract."
@@ -730,9 +733,12 @@ pub fn check_interface<'ast, 'arena>(interface: &'ast Interface<'arena>, context
                 );
             }
             ClassLikeMember::Constant(class_like_constant) => {
+                // A PHP# interface member is public, written bare, and `check_slice` refuses any access modifier on it.
                 let mut non_public_read_visibility = vec![];
                 for modifier in &class_like_constant.modifiers {
-                    if matches!(modifier, Modifier::Private(_) | Modifier::Protected(_)) {
+                    if matches!(modifier, Modifier::Private(_) | Modifier::Protected(_))
+                        && !context.program.dialect.is_sharp()
+                    {
                         non_public_read_visibility.push(modifier);
                     }
                 }
@@ -767,7 +773,7 @@ pub fn check_interface<'ast, 'arena>(interface: &'ast Interface<'arena>, context
                 );
             }
             // Only a PHP# file declares an operator, a law, a named constructor or an extension, and `check_slice`
-            // refuses each in an interface.
+            // decides each in an interface.
             ClassLikeMember::Operator(_)
             | ClassLikeMember::Law(_)
             | ClassLikeMember::NamedConstructor(_)

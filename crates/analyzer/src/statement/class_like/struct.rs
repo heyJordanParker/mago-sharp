@@ -15,6 +15,7 @@ use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_span::HasSpan;
 use mago_span::Span;
+use mago_syntax::cst::BinaryOperator;
 use mago_syntax::cst::Struct;
 
 use crate::analyzable::Analyzable;
@@ -23,6 +24,10 @@ use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
+use crate::expression::binary::utils::DeclaredOperator;
+use crate::expression::binary::utils::chosen_operator;
+use crate::expression::binary::utils::get_operator_method;
+use crate::expression::binary::utils::report_tied_operator;
 use crate::statement::attributes::analyze_class_like_attributes;
 use crate::statement::class_like::analyze_class_like;
 use crate::statement::class_like::override_attribute;
@@ -266,9 +271,10 @@ pub(crate) fn data_cases<'codebase>(
 /// Reports each struct or enum case in `key_type` that holds a class instance without `==` and `hash()` at any depth,
 /// spec sections 10 and 20: a `Map` finds such a key, and a `Set` such an element, by a hash of its fields and their
 /// `==`, and a class instance has neither unless its class declares `operator ==`. A struct that declares
-/// `operator ==` is held through it and its `hash()`, so it holds what it likes. A class key is `map_key_error`'s to
-/// report. Precedent: Rust's `HashMap` needs `Hash` on every field, and Swift's `Dictionary` needs `Hashable`. `in_set`
-/// names a `Set` element. Returns whether it reported one.
+/// `operator ==` is held through it and its `hash()`, so it holds what it likes. A class key without `==` is
+/// `map_key_error`'s to report, and one whose two values two interfaces' `operator ==` tie on, spec section 19, is
+/// reported here, as `==` on two of them is. Precedent: Rust's `HashMap` needs `Hash` on every field, and Swift's
+/// `Dictionary` needs `Hashable`. `in_set` names a `Set` element. Returns whether it reported one.
 pub(crate) fn report_class_held_by_key<A>(
     context: &mut Context<'_, '_, A>,
     key_type: &TUnion,
@@ -279,13 +285,20 @@ where
     A: Arena,
 {
     let codebase = context.codebase;
+    let mut reported = false;
+    for atomic in key_type.types.iter().filter(|atomic| matches!(atomic, TAtomic::Object(TObject::Named(_)))) {
+        let value = TUnion::from_atomic(atomic.clone());
+        if let Some(DeclaredOperator::Tied(tied)) = get_operator_method(codebase, b"op_Equality", &[&value, &value]) {
+            report_tied_operator(context, &BinaryOperator::Equal(span), &[&value, &value], &tied, span);
+            reported = true;
+        }
+    }
     let structs = key_type.types.iter().filter_map(|atomic| match atomic {
         TAtomic::Object(TObject::Named(object)) if !declares_equality(codebase, object.name) => codebase
             .get_class_like(object.name.as_bytes())
             .filter(|class_like| value_properties(codebase, class_like).is_some()),
         _ => None,
     });
-    let mut reported = false;
     for r#struct in structs {
         let Some((property, held, is_direct)) = held_class(codebase, r#struct, &mut vec![r#struct.name]) else {
             continue;
@@ -355,15 +368,17 @@ fn held_class(
 }
 
 /// The part of `r#type` that can be a class instance without `==` and `hash()`, or none when every value of it has
-/// them. A struct that declares `operator ==` has them whatever it holds, and so does a class that declares or inherits
-/// `operator ==`, which the checker requires `hash()` beside. A struct or an enum case has them when its fields do.
+/// them. A struct that declares `operator ==` has them whatever it holds, and so does a class whose two values `==`
+/// chooses an `operator ==` for, spec section 19, which the checker requires `hash()` beside. A class that two
+/// interfaces' operators tie on has none. A struct or an enum case has them when its fields do.
 fn class_part(codebase: &CodebaseMetadata, r#type: &TUnion, visiting: &mut Vec<Word>) -> Option<TAtomic> {
     r#type.types.iter().find_map(|atomic| match atomic {
         TAtomic::Object(TObject::Named(object)) => {
             // A type that names no class is reported where it is written.
             let class_like = codebase.get_class_like(object.name.as_bytes())?;
             if value_properties(codebase, class_like).is_none() {
-                let has_equality = codebase.get_declaring_method(object.name.as_bytes(), b"op_Equality").is_some();
+                let value = TUnion::from_atomic(atomic.clone());
+                let has_equality = chosen_operator(codebase, b"op_Equality", &[&value, &value]).is_some();
 
                 return (!has_equality).then(|| atomic.clone());
             }

@@ -393,7 +393,7 @@ fn php_syntax_returns_a_parse_error_and_no_nodes() {
 
 #[test]
 fn a_construct_outside_the_slice_returns_its_not_supported_error() {
-    let lowered = Lowered::new("namespace App;\n\ninterface Sized\n{\n    public const int MAX = 3;\n}\n");
+    let lowered = Lowered::new("namespace App;\n\ninterface Sized\n{\n    int max { get; init; }\n}\n");
 
     assert_eq!(lowered.diagnostics(), ["5:5 compile error: This class member is not supported yet in PHP#."]);
 }
@@ -26002,6 +26002,310 @@ fn ordering_instances_compares_op_comparison_with_zero() {
                             ZVAL "b"
               RETURN
                 ZVAL 0
+        "#}
+    );
+}
+
+/// ```php
+/// interface Priced { public const string CURRENCY = 'USD'; public mixed $label { get; } }
+/// trait Priced\Defaults {
+///     public static function 'op_Comparison@App\Priced'(\App\Priced $a, \App\Priced $b): int { return $a->cents <=> $b->cents; }
+/// }
+/// return \App\Priced\Defaults::{'op_Comparison@App\Priced'}($a, $b) < 0;
+/// return \App\Priced\Defaults::{'op_Comparison@App\Priced'}($a, $b) < 0;
+/// return \App\Size::op_Comparison(\App\Size::Small, \App\Size::Large) < 0;
+/// return $books->sortedBy(…, \App\Priced\Defaults::{'op_Comparison@App\Priced'}(...));
+/// ```
+///
+/// Spec sections 19 and 22: an interface's constant is `[1]` `ZEND_ACC_PUBLIC`, and its operator is one `[17]` public
+/// static method of its trait of default bodies, named after its interface. The operator is chosen from the static
+/// types of both operands, so two values of the interface and two `Book`s, which declares none, call it on the trait
+/// itself, and no class or operand order changes which one runs. An enum that declares one runs it as a class does.
+/// `sortedBy` passes the engine the operator `<` on two of its keys runs, as a first-class callable.
+#[test]
+fn an_interface_operator_runs_from_its_trait_as_the_types_of_the_operands_choose_it() {
+    let files = lowered_each(
+        &[
+            (
+                "src/App/Priced.sharp",
+                "namespace App;\n\npublic interface Priced\n{\n    const string CURRENCY = \"USD\";\n    int cents { get; }\n    static int operator <=>(Priced a, Priced b) => a.cents <=> b.cents;\n}\n",
+            ),
+            (
+                "src/App/Book.sharp",
+                "namespace App;\n\npublic class Book : Priced\n{\n    public int cents { get; }\n    public Book(int cents) { this.cents = cents; }\n}\n",
+            ),
+            (
+                "src/App/Size.sharp",
+                "namespace App;\n\npublic enum Size : int\n{\n    case Small = 1;\n    case Large = 3;\n\n    public static int operator <=>(Size a, Size b) => a.value <=> b.value;\n}\n",
+            ),
+            (
+                "src/App/Uses.sharp",
+                "namespace App;\n\npublic static class Uses\n{\n    public static bool priced(Priced a, Priced b) => a < b;\n\n    public static bool books(Book a, Book b) => a < b;\n\n    public static bool sizes() => Size.Small < Size.Large;\n\n    public static List<Book> sorted(List<Book> books) => books.sortedBy(book => book);\n}\n",
+            ),
+        ],
+        &[],
+    );
+    let member = |name: &str, path: &[u32]| member_in(&files, name, path);
+
+    assert_eq!(
+        [
+            member("Priced", &[0]),
+            member("Priced\\Defaults", &[]),
+            member("Uses", &[0, 2]),
+            member("Uses", &[1, 2]),
+            member("Uses", &[2, 2]),
+            member("Uses", &[3, 2, 0, 0, 2, 1]),
+        ]
+        .concat(),
+        indoc! {r#"
+            CLASS_CONST_GROUP [1]
+              CLASS_CONST_DECL
+                CONST_ELEM
+                  ZVAL "CURRENCY"
+                  ZVAL "USD"
+                  null
+              null
+              ZVAL [1] "string"
+            STMT_LIST
+              METHOD [17] "op_Comparison@App\\Priced" @7-7
+                PARAM_LIST
+                  PARAM
+                    ZVAL "App\\Priced"
+                    ZVAL "a"
+                    null
+                    null
+                    null
+                    null
+                  PARAM
+                    ZVAL "App\\Priced"
+                    ZVAL "b"
+                    null
+                    null
+                    null
+                    null
+                null
+                STMT_LIST
+                  RETURN
+                    BINARY_OP [170]
+                      PROP
+                        VAR
+                          ZVAL "a"
+                        ZVAL "cents"
+                      PROP
+                        VAR
+                          ZVAL "b"
+                        ZVAL "cents"
+                ZVAL [1] "int"
+                null
+            STMT_LIST
+              RETURN
+                BINARY_OP [20]
+                  STATIC_CALL
+                    ZVAL "App\\Priced\\Defaults"
+                    ZVAL "op_Comparison@App\\Priced"
+                    ARG_LIST
+                      VAR
+                        ZVAL "a"
+                      VAR
+                        ZVAL "b"
+                  ZVAL 0
+            STMT_LIST
+              RETURN
+                BINARY_OP [20]
+                  STATIC_CALL
+                    ZVAL "App\\Priced\\Defaults"
+                    ZVAL "op_Comparison@App\\Priced"
+                    ARG_LIST
+                      VAR
+                        ZVAL "a"
+                      VAR
+                        ZVAL "b"
+                  ZVAL 0
+            STMT_LIST
+              RETURN
+                BINARY_OP [20]
+                  STATIC_CALL
+                    ZVAL "App\\Size"
+                    ZVAL "op_Comparison"
+                    ARG_LIST
+                      CLASS_CONST
+                        ZVAL "App\\Size"
+                        ZVAL "Small"
+                      CLASS_CONST
+                        ZVAL "App\\Size"
+                        ZVAL "Large"
+                  ZVAL 0
+            STATIC_CALL
+              ZVAL "App\\Priced\\Defaults"
+              ZVAL "op_Comparison@App\\Priced"
+              CALLABLE_CONVERT
+        "#}
+    );
+}
+
+/// ```php
+/// return \App\Measure\Defaults::{'op_Equality@App\Measure'}($a, $b);
+/// enum Coin {
+///     public function hash(): int { return 1; }
+///     public static function op_Equality(?\App\Coin $a, ?\App\Coin $b): bool { if ($a === null || $b === null) { return $a === $b; } … }
+/// }
+/// ```
+///
+/// Spec sections 19 and 20: `==` on two values of an interface that may be null calls the interface's operator on its
+/// trait, whose body lifts null over them as each `operator ==` does, so null equals only null. An enum with data
+/// that declares `==` compares its cases by it, so it gets no value equality.
+#[test]
+fn interface_equality_runs_on_its_trait_and_an_enum_compares_its_cases_by_its_own_equality() {
+    let files = lowered_each(
+        &[
+            (
+                "src/App/Measure.sharp",
+                "namespace App;\n\npublic interface Measure\n{\n    int grams { get; }\n    int hash() => this.grams;\n    static bool operator ==(Measure a, Measure b) => a.grams == b.grams;\n}\n",
+            ),
+            (
+                "src/App/Coin.sharp",
+                "namespace App;\n\npublic enum Coin\n{\n    case Gold(int grams);\n    case Copper;\n\n    public int hash() => 1;\n\n    public static bool operator ==(Coin a, Coin b) => true;\n}\n",
+            ),
+            (
+                "src/App/Uses.sharp",
+                "namespace App;\n\npublic static class Uses\n{\n    public static bool same(Measure? a, Measure? b) => a == b;\n}\n",
+            ),
+        ],
+        &[],
+    );
+    let member = |name: &str, path: &[u32]| member_in(&files, name, path);
+
+    assert_eq!(
+        [member("Uses", &[0, 2]), member("Coin", &[])].concat(),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                STATIC_CALL
+                  ZVAL "App\\Measure\\Defaults"
+                  ZVAL "op_Equality@App\\Measure"
+                  ARG_LIST
+                    VAR
+                      ZVAL "a"
+                    VAR
+                      ZVAL "b"
+            STMT_LIST
+              METHOD [1] "hash" @8-8
+                PARAM_LIST
+                null
+                STMT_LIST
+                  RETURN
+                    ZVAL 1
+                SHARP_TYPE_ARGS
+                  ZVAL [1] "int"
+                  ZVAL "Function<int()>"
+                null
+              METHOD [17] "op_Equality" @10-10
+                PARAM_LIST
+                  PARAM
+                    ZVAL [256] "App\\Coin"
+                    ZVAL "a"
+                    null
+                    null
+                    null
+                    null
+                  PARAM
+                    ZVAL [256] "App\\Coin"
+                    ZVAL "b"
+                    null
+                    null
+                    null
+                    null
+                null
+                STMT_LIST
+                  IF
+                    IF_ELEM
+                      OR
+                        BINARY_OP [16]
+                          VAR
+                            ZVAL "a"
+                          ZVAL null
+                        BINARY_OP [16]
+                          VAR
+                            ZVAL "b"
+                          ZVAL null
+                      STMT_LIST
+                        RETURN
+                          BINARY_OP [16]
+                            VAR
+                              ZVAL "a"
+                            VAR
+                              ZVAL "b"
+                  RETURN
+                    ZVAL true
+                ZVAL [1] "bool"
+                null
+        "#}
+    );
+}
+
+/// ```php
+/// if ($a instanceof \App\Shipment && $b instanceof \App\Shipment) { return $a->parcel === $b->parcel; }
+/// return $a === $b;
+/// ```
+///
+/// Spec sections 10 and 19: a struct may hold a class two interfaces' `operator ==` tie on, and the checker refuses
+/// each `==` on the struct and each `Set` and `Map` of it, so the property its `==` compares has no operator to run.
+#[test]
+fn a_struct_that_holds_a_class_with_tied_equality_compares_it_by_no_operator() {
+    let files = lowered_each(
+        &[
+            (
+                "src/App/Weighed.sharp",
+                "namespace App;\n\npublic interface Weighed\n{\n    int grams { get; }\n    int hash();\n    static bool operator ==(Weighed a, Weighed b) => a.grams == b.grams;\n}\n",
+            ),
+            (
+                "src/App/Valued.sharp",
+                "namespace App;\n\npublic interface Valued\n{\n    int cents { get; }\n    int hash();\n    static bool operator ==(Valued a, Valued b) => a.cents == b.cents;\n}\n",
+            ),
+            (
+                "src/App/Parcel.sharp",
+                "namespace App;\n\npublic class Parcel : Valued, Weighed\n{\n    public int cents => 1;\n    public int grams => 2;\n    public int hash() => 0;\n}\n",
+            ),
+            (
+                "src/App/Shipment.sharp",
+                "namespace App;\n\npublic struct Shipment\n{\n    public Parcel parcel { get; init; }\n}\n",
+            ),
+        ],
+        &[],
+    );
+
+    assert_eq!(
+        member_in(&files, "Shipment", &[1, 2]),
+        indoc! {r#"
+            STMT_LIST
+              IF
+                IF_ELEM
+                  AND
+                    INSTANCEOF
+                      VAR
+                        ZVAL "a"
+                      ZVAL "App\\Shipment"
+                    INSTANCEOF
+                      VAR
+                        ZVAL "b"
+                      ZVAL "App\\Shipment"
+                  STMT_LIST
+                    RETURN
+                      BINARY_OP [16]
+                        PROP
+                          VAR
+                            ZVAL "a"
+                          ZVAL "parcel"
+                        PROP
+                          VAR
+                            ZVAL "b"
+                          ZVAL "parcel"
+              RETURN
+                BINARY_OP [16]
+                  VAR
+                    ZVAL "a"
+                  VAR
+                    ZVAL "b"
         "#}
     );
 }

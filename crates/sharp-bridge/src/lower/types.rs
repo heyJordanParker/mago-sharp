@@ -1,6 +1,7 @@
 use mago_analyzer::CodebasePatternNames;
 use mago_analyzer::artifacts::AnalysisArtifacts;
 use mago_analyzer::artifacts::CallTarget;
+use mago_analyzer::chosen_operator;
 use mago_analyzer::effects::Effects;
 use mago_codex::defaults_trait_name;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
@@ -37,11 +38,13 @@ use mago_codex::ttype::template::variance::Variance;
 use mago_codex::ttype::union::TUnion;
 use mago_database::file::File;
 use mago_names::ResolvedNames;
+use mago_names::binding::php_operator_name;
 use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::Access;
 use mago_syntax::cst::Argument;
 use mago_syntax::cst::ArgumentList;
+use mago_syntax::cst::BinaryOperator;
 use mago_syntax::cst::Call;
 use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Expression;
@@ -1751,22 +1754,29 @@ impl<'analysis> Types<'analysis> {
         (root, metadata)
     }
 
-    /// The class declaring the static method `name` a PHP# operator on operands of the types `operands` runs as, as the
-    /// checker chose it: the one the left operand's class declares or inherits, else the right one's, as `App\Money`
-    /// for `op_Addition` on two `Order`s that inherit it. Operands with no instance of one class, enums aside, run none.
-    pub(crate) fn operator_class(&self, name: &[u8], operands: &[&TUnion]) -> Option<Word> {
-        operands.iter().find_map(|operand| {
-            let classes = receiver_classes(operand)?;
-            let [class] = classes.as_slice() else {
-                return None;
-            };
-            if matches!(self.class_declaration(class).kind, DeclarationKind::Enum { .. }) {
-                return None;
-            }
-            let method = self.method_declaration(class, name)?;
+    /// The class-like that declares the static method `name` a PHP# operator on operands of the types `operands` runs,
+    /// as the checker chose it from those types, spec section 19, as `App\Money` for `op_Addition` on two `Order`s
+    /// that inherit it, or `App\Priced` for `op_Comparison` on a `Rare` and a `Book`. Operands that no operator takes
+    /// run none.
+    pub(crate) fn operator_owner(&self, name: &[u8], operands: &[&TUnion]) -> Option<Word> {
+        chosen_operator(self.codebase, name, operands).map(|owner| self.scanned(owner.as_bytes()).original_name)
+    }
 
-            (method.kind == DeclarationKind::StaticMethod).then(|| self.class_declaration(method.class.as_bytes()).name)
-        })
+    /// The class-like whose `operator <=>` the PHP# `sortedBy` call `call` orders two keys by, as `<` on two values of
+    /// the key type its function returns chooses it, spec section 19, so a `List<Priced>` sorts by `Priced`'s whatever
+    /// classes it holds. None for any other call, and for keys of a type that declares none, such as strings.
+    pub(crate) fn sorting_operator(&self, call: &Expression) -> Option<Word> {
+        if self.collection_method(call)?.1 != b"sortedby" {
+            return None;
+        }
+        let span = call.span();
+        let [key] = self.artifacts.inferred_type_arguments.get(&(span.start.offset, span.end.offset))?.as_slice()
+        else {
+            unreachable!("sortedBy takes one type argument, the type of its keys");
+        };
+        let key = key.to_non_nullable();
+
+        self.operator_owner(php_operator_name(&BinaryOperator::Spaceship(Span::zero()), 2)?, &[&key, &key])
     }
 
     /// The method `class` declares or inherits by the name `method`, if any.

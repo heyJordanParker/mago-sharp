@@ -304,7 +304,9 @@ where
     )?;
     if carries_data {
         register_case_classes(codebase, r#enum, &mut class_like_metadata, context, scope);
-        create_value_equality(codebase, &mut class_like_metadata, span);
+        if !declares_equality(&r#enum.members) {
+            create_value_equality(codebase, &mut class_like_metadata, span);
+        }
     }
 
     finish_registration(codebase, class_like_metadata)
@@ -520,10 +522,7 @@ where
     )?;
     class_like_metadata.flags |= MetadataFlags::FINAL | MetadataFlags::STRUCT;
     require_struct_properties(&mut class_like_metadata, &r#struct.members);
-    let declares_equality = r#struct.members.iter().any(|member| {
-        matches!(member, ClassLikeMember::Operator(operator) if matches!(operator.symbol, BinaryOperator::Equal(_)))
-    });
-    if !declares_equality {
+    if !declares_equality(&r#struct.members) {
         create_value_equality(codebase, &mut class_like_metadata, span);
     }
     if leaves_parse_free(&r#struct.members) {
@@ -2015,8 +2014,17 @@ fn require_struct_properties(class_like: &mut ClassLikeMetadata, members: &Seque
 /// declared member does.
 fn create_value_equality(codebase: &mut CodebaseMetadata, class_like: &mut ClassLikeMetadata, span: Span) {
     let operand = |name: &str| create_parameter(name, get_mixed(), span);
-    let equality = create_static_method("op_Equality", span, vec![operand("$a"), operand("$b")], get_bool(), vec![]);
+    let mut equality =
+        create_static_method("op_Equality", span, vec![operand("$a"), operand("$b")], get_bool(), vec![]);
+    equality.flags |= MetadataFlags::OPERATOR;
     add_method(codebase, b"op_Equality", class_like, equality);
+}
+
+/// Whether `members` declare `operator ==`, which replaces the one [`create_value_equality`] writes, spec section 19.
+fn declares_equality(members: &Sequence<ClassLikeMember<'_>>) -> bool {
+    members.iter().any(|member| {
+        matches!(member, ClassLikeMember::Operator(operator) if matches!(operator.symbol, BinaryOperator::Equal(_)))
+    })
 }
 
 /// Whether `members` declare no member named `parse` or `tryParse`, whose name the generated pair would take: a type

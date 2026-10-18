@@ -50,6 +50,8 @@ pub mod telemetry;
 
 /// The engine's bridge lowers each PHP# pattern from the PHP the analyzer analyzed, so both build it with these names.
 pub use crate::context::assertion::CodebasePatternNames;
+/// The engine's bridge calls the operator each PHP# operation runs, so both choose it with this rule.
+pub use crate::expression::binary::utils::chosen_operator;
 
 mod analyzable;
 mod assertion;
