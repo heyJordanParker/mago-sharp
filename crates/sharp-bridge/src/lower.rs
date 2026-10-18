@@ -5464,6 +5464,12 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                         )) if self.names.static_property_class(property).is_none() => {
                             self.types.property_has_hooks(self.types.expression_type(object), name.value)
                         }
+                        // `object?.name`, whose conditional tests `object`, spec section 14.4.
+                        Expression::Access(Access::NullSafeProperty(NullSafePropertyAccess {
+                            object,
+                            property: ClassLikeMemberSelector::Identifier(name),
+                            ..
+                        })) => self.types.property_has_hooks(self.types.expression_type(object), name.value),
                         _ => false,
                     }
                 {
@@ -6749,14 +6755,19 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// extension's member, a lazy operation of an `Iterable`, a call of a function that may be null, `f?.(x)`, or any link below a collection method call that runs as PHP on the array or below an
     /// extension's member, which runs as a static call, with its receiver, when `chain` is a member
     /// read, a call or an index whose chain holds one no conditional tests yet. A null there would reach the PHP
-    /// function, where `?->` skips only the rest of its own chain. The walk stops at a receiver a hidden variable
-    /// holds, whose links its own conditional tests.
+    /// function, where `?->` skips only the rest of its own chain. PHP's `?->` never writes, so in the target of a
+    /// write, `=`, a compound assignment, `++` or `--`, every null-safe link is one, spec section 14.4. The walk stops
+    /// at a receiver a hidden variable holds, whose links its own conditional tests.
     fn untested_link<'chain, 'ast>(
         &self,
         chain: &'chain Expression<'ast>,
     ) -> Option<(&'chain Expression<'ast>, &'chain Expression<'ast>)> {
-        let mut link = chain;
-        let mut below_php_call = false;
+        let (mut link, mut below_php_call) = match chain {
+            Expression::Assignment(assignment) => (assignment.lhs, true),
+            Expression::UnaryPrefix(unary) if unary.operator.is_increment_or_decrement() => (unary.operand, true),
+            Expression::UnaryPostfix(unary) => (unary.operand, true),
+            _ => (chain, false),
+        };
         loop {
             if self.held_receivers.iter().any(|(span, _)| *span == link.span()) {
                 return None;
@@ -8087,6 +8098,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 // A plain PHP property the checker reads as a `List` is written as itself.
                 None => self.arriving(target, Arrival::Plain),
             },
+            // `object?.name`, whose conditional tests `object`, spec section 14.4, written as `object.name`.
+            Expression::Access(Access::NullSafeProperty(_)) => self.arriving(target, Arrival::Plain),
             Expression::ArrayAccess(access) => {
                 let value = self.target(access.array, place_use);
                 let key = self.expression(access.index);

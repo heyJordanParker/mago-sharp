@@ -96,6 +96,14 @@ where
         block_context.flags.set_inside_general_use(was_inside_general_use);
     }
 
+    // Spec section 14.4: an index write through `?.` writes only where every `?.` receiver on its left is not null, so
+    // the collection it writes never holds the `null` those links give.
+    if context.dialect.is_sharp()
+        && let Some(read) = artifacts.get_expression_type(root_array_expression).filter(|read| read.has_nullsafe_null())
+    {
+        artifacts.set_expression_type(root_array_expression, read.to_non_nullable());
+    }
+
     let mut root_array_type = artifacts.get_expression_type(root_array_expression).cloned().unwrap_or_else(get_mixed);
     let root_is_array_access_object =
         root_array_type.types.iter().all(|atomic| atomic.extends_or_implements(context.codebase, b"ArrayAccess"));
@@ -284,34 +292,45 @@ where
     }
 
     // A PHP# `Class.name` names a static property, which the write updates as `Class::$name` does.
-    if let Expression::Access(Access::Property(property_access)) = &root_array_expression {
-        let written = match StaticProperty::from_property_access(property_access, context.resolved_names) {
-            Some(static_property) => static_property_assignment::analyze(
+    let write_kind =
+        if root_is_array_access_object { PropertyWriteKind::ArrayAccessMutation } else { PropertyWriteKind::Mutation };
+    match root_array_expression {
+        Expression::Access(Access::Property(property_access)) => {
+            match StaticProperty::from_property_access(property_access, context.resolved_names) {
+                Some(static_property) => static_property_assignment::analyze(
+                    context,
+                    block_context,
+                    artifacts,
+                    static_property,
+                    &root_array_type,
+                    Some(root_array_expression),
+                    root_var_id,
+                    true,
+                )?,
+                None => property_assignment::analyze(
+                    context,
+                    block_context,
+                    artifacts,
+                    property_access,
+                    false,
+                    &root_array_type,
+                    Some(root_array_expression),
+                    write_kind,
+                )?,
+            }
+        }
+        Expression::Access(Access::NullSafeProperty(access)) if context.dialect.is_sharp() => {
+            property_assignment::analyze_null_safe(
                 context,
                 block_context,
                 artifacts,
-                static_property,
+                access,
                 &root_array_type,
                 Some(root_array_expression),
-                root_var_id,
-                true,
-            ),
-            None => property_assignment::analyze(
-                context,
-                block_context,
-                artifacts,
-                property_access,
-                false,
-                &root_array_type,
-                Some(root_array_expression),
-                if root_is_array_access_object {
-                    PropertyWriteKind::ArrayAccessMutation
-                } else {
-                    PropertyWriteKind::Mutation
-                },
-            ),
-        };
-        written?;
+                write_kind,
+            )?;
+        }
+        _ => {}
     }
 
     let root_array_type = Rc::new(root_array_type);

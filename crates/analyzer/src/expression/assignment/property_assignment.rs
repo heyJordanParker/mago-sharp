@@ -17,6 +17,7 @@ use mago_span::HasSpan;
 use mago_syntax::cst::Access;
 use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Expression;
+use mago_syntax::cst::NullSafePropertyAccess;
 use mago_syntax::cst::PropertyAccess;
 
 use crate::artifacts::AnalysisArtifacts;
@@ -48,6 +49,26 @@ use crate::utils::report_int_for_float;
 use crate::utils::template::explain_blocked_substitution;
 use crate::utils::with_function_fit_message;
 use crate::utils::with_set_conversion_help;
+
+/// Writes the member `access` reaches through `?.`, as [`analyze`] writes `object.name`: PHP# writes it only where the
+/// object is not null, spec section 14.4.
+pub(crate) fn analyze_null_safe<'ctx, 'arena, A>(
+    context: &mut Context<'ctx, 'arena, A>,
+    block_context: &mut BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+    access: &NullSafePropertyAccess<'arena>,
+    assigned_value_type: &TUnion,
+    assigned_value: Option<&Expression<'arena>>,
+    write_kind: PropertyWriteKind,
+) -> Result<(), AnalysisError>
+where
+    A: Arena,
+{
+    let written =
+        PropertyAccess { object: access.object, arrow: access.question_mark_arrow, property: access.property.clone() };
+
+    analyze(context, block_context, artifacts, &written, true, assigned_value_type, assigned_value, write_kind)
+}
 
 #[inline]
 pub fn analyze<'ctx, 'arena, A>(

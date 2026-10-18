@@ -86,6 +86,10 @@ pub struct AnalysisArtifacts {
     /// The declared type the value of the expression at the span goes into: a parameter type, and in PHP# a typed
     /// local or property or a return type too. Read through [`Self::get_expected_type`].
     pub(crate) expected_type: Option<(Span, TUnion)>,
+    /// The target of a PHP# write through `?.` that the analysis reads first, as `+=` and `++` read it. The write
+    /// happens only where every `?.` receiver on its left is not null, spec section 14.4, so the read there is never
+    /// the `null` those links give.
+    pub(crate) null_safe_write_target: Option<Span>,
     /// The result type of the function type a PHP# lambda goes into, when these are its body's artifacts and it writes
     /// no result type: its expression body and each `return` take it as their declared type, spec section 11.
     pub(crate) lambda_result: Option<TUnion>,
@@ -154,6 +158,7 @@ impl AnalysisArtifacts {
             loop_scope: None,
             fully_matched_switch_offsets: HashSet::default(),
             expected_type: None,
+            null_safe_write_target: None,
             lambda_result: None,
             method_initialized_properties: HashMap::default(),
             method_calls_this_methods: HashMap::default(),

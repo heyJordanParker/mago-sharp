@@ -787,6 +787,24 @@ fn a_method_read_through_null_safe_access_is_a_closure_or_null() {
     assert_eq!(issues(("src/Demo/Report.sharp", sharp), &[("src/Lib/Calc.php", CALC)]), Vec::<String>::new());
 }
 
+/// Spec section 14.4: a write through `?.` happens only when its receivers are not null, so it is checked against the
+/// member's own type, in every write form, and its value is null when it is skipped.
+#[test]
+fn a_write_through_null_safe_access_is_checked_against_the_member_and_may_be_null() {
+    let sharp = "namespace Demo;\n\nclass Customer\n{\n    public string name { get; set; } = \"\";\n}\n\nclass Order\n{\n    public string note { get; set; } = \"\";\n    public string? gift { get; set; } = null;\n    public List<int> items { get; set; } = [];\n    public int total { get; set; } = 0;\n    public Map<string, bool> tags { get; set; } = [:];\n    public Map<string, int> fixed { get; private set; } = [:];\n    public List<int> counts { get; set; } = [1, 2];\n    public Customer customer { get; } = new Customer();\n}\n\nclass Shop\n{\n    public string change(Order? order, Order known, int fee)\n    {\n        order?.note = \"gift\";\n        order?.items.add(fee);\n        order?.total += fee;\n        order?.customer.name = \"Ada\";\n        order?.total++;\n        --order?.total;\n        order?.gift ??= \"card\";\n        order?.tags[\"vip\"] = true;\n        order?.counts[0] = 5;\n        order?.counts[1]++;\n        order?.fixed[\"a\"] = 1;\n        order?.note += \"!\";\n        order?.note = 1;\n        known?.note = \"x\";\n        const note = (order?.note = \"gift\");\n        return note;\n    }\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Shop.sharp", sharp), &[]),
+        [
+            "34:16 invalid-property-write",
+            "36:23 invalid-property-assignment-value",
+            "37:14 redundant-nullsafe-operator",
+            "39:16 nullable-return-statement",
+            "39:16 invalid-return-statement",
+        ]
+    );
+}
+
 #[test]
 fn a_nullable_value_where_a_value_is_required_is_reported_as_in_php() {
     let sharp = "namespace Demo;\n\nimport Lib.Calc;\n\nclass Report\n{\n    public static int total(int? extra, Calc? calc)\n    {\n        const sum = calc.add(extra, 1);\n        return extra;\n    }\n}\n";

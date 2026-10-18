@@ -62,6 +62,7 @@ use crate::expression::constant_access::field_storage;
 use crate::expression::find_expression_logic_issues;
 use crate::formula::get_formula;
 use crate::resolver::method::get_declared_type;
+use crate::resolver::property::check_redundant_nullsafe;
 use crate::resolver::property::get_localized_property_type;
 use crate::resolver::static_property::StaticProperty;
 use crate::statement::function_like::expect_type;
@@ -69,6 +70,7 @@ use crate::utils::docblock::check_docblock_type_incompatibility;
 use crate::utils::docblock::get_type_from_var_docblock;
 use crate::utils::expression::array::get_array_target_type_given_index;
 use crate::utils::expression::expression_has_logic;
+use crate::utils::expression::expression_is_nullsafe;
 use crate::utils::expression::get_block_expression_id;
 use crate::utils::expression::get_non_nullsafe_expression_id;
 use crate::utils::expression::get_nullsafe_base_expressions;
@@ -91,20 +93,25 @@ mod array_assignment;
 pub(crate) mod property_assignment;
 pub(crate) mod static_property_assignment;
 
-/// Runs `read`, the read of an assignment operation, `+=`, `??=`, `++` or `--`, and returns what it reported in a PHP#
-/// file for [`write_after_read`].
+/// Runs `read`, the read of `target` by an assignment operation, `+=`, `??=`, `++` or `--`, and returns what it reported
+/// in a PHP# file for [`write_after_read`]. A PHP# write through `?.` happens only where every `?.` receiver on its left
+/// is not null, spec section 14.4, so its read of `target` is never the `null` those links give.
 pub(crate) fn read_before_write<'ctx, 'arena, A, T>(
     context: &mut Context<'ctx, 'arena, A>,
-    read: impl FnOnce(&mut Context<'ctx, 'arena, A>) -> T,
+    artifacts: &mut AnalysisArtifacts,
+    target: &Expression<'_>,
+    read: impl FnOnce(&mut Context<'ctx, 'arena, A>, &mut AnalysisArtifacts) -> T,
 ) -> (T, Option<IssueCollection>)
 where
     A: Arena,
 {
     if !context.dialect.is_sharp() {
-        return (read(context), None);
+        return (read(context, artifacts), None);
     }
 
-    let (result, issues) = context.record(read);
+    let outer_target = artifacts.null_safe_write_target.replace(target.span());
+    let (result, issues) = context.record(|context| read(context, artifacts));
+    artifacts.null_safe_write_target = outer_target;
     context.collector.extend(issues.iter().cloned());
 
     (result, Some(issues))
@@ -282,7 +289,9 @@ where
                 });
 
                 let (analyzed, read) =
-                    read_before_write(context, |context| binary_expression.analyze(context, block_context, artifacts));
+                    read_before_write(context, artifacts, target_expression, |context, artifacts| {
+                        binary_expression.analyze(context, block_context, artifacts)
+                    });
                 analyzed?;
                 read_issues = read;
                 block_context.flags.set_inside_assignment_operation(false);
@@ -458,10 +467,23 @@ where
     }
 
     if let Some(assignment_span) = assignment_span {
-        artifacts.set_rc_expression_type(&assignment_span, source_type);
+        artifacts.set_rc_expression_type(&assignment_span, write_value(context, target_expression, source_type));
     }
 
     Ok(())
+}
+
+/// The value of a write to `target` that writes `written`. A PHP# write through `?.` that a null receiver skips gives
+/// null, spec section 14.4.
+pub(crate) fn write_value<A>(context: &Context<'_, '_, A>, target: &Expression<'_>, written: Rc<TUnion>) -> Rc<TUnion>
+where
+    A: Arena,
+{
+    if context.dialect.is_sharp() && expression_is_nullsafe(target) {
+        Rc::new(TUnion::clone(&written).as_nullable())
+    } else {
+        written
+    }
 }
 
 fn add_nullsafe_assignment_clauses<'ctx, 'arena, A>(
@@ -589,6 +611,22 @@ where
                     source_expression,
                     property_write_kind,
                 )?,
+            }
+        }
+        // Spec section 14.4: `order?.note = value` writes only when `order` is not null, so it writes the member as
+        // `order.note = value` does, and its `?.` on an `order` that is never null is refused as a read's is.
+        Expression::Access(Access::NullSafeProperty(access)) if context.dialect.is_sharp() => {
+            property_assignment::analyze_null_safe(
+                context,
+                block_context,
+                artifacts,
+                access,
+                &source_type,
+                source_expression,
+                property_write_kind,
+            )?;
+            if let Some(object_type) = artifacts.get_expression_type(access.object).cloned() {
+                check_redundant_nullsafe(context, access.question_mark_arrow, access.object, &object_type, false);
             }
         }
         Expression::Access(Access::StaticProperty(property_access)) => static_property_assignment::analyze(

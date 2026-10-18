@@ -35,7 +35,6 @@ use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::MethodCall;
 use mago_syntax::cst::NullSafeMethodCall;
-use mago_syntax::cst::PropertyAccess;
 use mago_syntax::cst::TypeArgumentList;
 use mago_syntax_core::stack::ensure_sufficient_stack;
 
@@ -694,7 +693,9 @@ fn check_stored_in_static<A>(
 /// storage, a property whose `set` the caller reaches, which the property write check decides as it does for an
 /// index write, or a `List` index of a place, which changes that place too. The change may fill the collection past
 /// any literal the analyzer saw in it, so the place holds the collections it is declared as from then on, beside
-/// whatever else, such as `null`, it held. Gives the span of the `Map` index the change is refused through as a copy.
+/// whatever else, such as `null`, it held. A collection reached through `?.` changes only where every `?.` receiver on
+/// its left is not null, spec section 14.4, so it never holds the `null` those links give. Gives the span of the `Map`
+/// index the change is refused through as a copy.
 fn check_changed_collection<'ctx, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
     block_context: &mut BlockContext<'ctx>,
@@ -704,7 +705,9 @@ fn check_changed_collection<'ctx, 'arena, A>(
 where
     A: Arena,
 {
-    let mut changed_type = artifacts.get_expression_type(collection).cloned().unwrap_or_else(get_mixed);
+    let mut changed_type = artifacts
+        .get_expression_type(collection)
+        .map_or_else(get_mixed, |read| if read.has_nullsafe_null() { read.to_non_nullable() } else { read.clone() });
     if let Some(declared) = get_declared_collection(context, block_context, artifacts, collection) {
         let others = changed_type.types.iter().filter(|atomic| !matches!(atomic, TAtomic::Array(_))).cloned();
         changed_type = changed_type.clone_with_types(others.chain(declared.types.iter().cloned()).collect());
@@ -753,16 +756,11 @@ where
 
             written.map(|()| None)
         }
-        Expression::Access(Access::NullSafeProperty(access)) => property_assignment::analyze(
+        Expression::Access(Access::NullSafeProperty(access)) => property_assignment::analyze_null_safe(
             context,
             block_context,
             artifacts,
-            &PropertyAccess {
-                object: access.object,
-                arrow: access.question_mark_arrow,
-                property: access.property.clone(),
-            },
-            true,
+            access,
             &changed_type,
             None,
             PropertyWriteKind::Mutation,
