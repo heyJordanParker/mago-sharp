@@ -1729,7 +1729,7 @@ fn a_lambda_constant_has_its_function_type_and_a_constant_holds_a_plain_case_of_
 /// a constant only when it is called.
 #[test]
 fn a_constant_whose_value_reads_back_to_it_is_an_error_that_names_the_cycle() {
-    let code = "namespace App;\n\npublic class Loop\n{\n    public const string A = `a${Loop.B}`;\n    public const string B = `b${Loop.A}`;\n    public const int C = Loop.D + 1;\n    public const int D = Loop.C + 1;\n    public const int E = Loop.E + 1;\n    public const int F = Other.G * 2;\n    public const int TOP = Loop.F + Loop.H;\n    public const int H = 1;\n    public const Function<int()> LATER = () => Loop.LATER_VALUE;\n    public const int LATER_VALUE = (Loop.LATER)();\n}\n";
+    let code = "namespace App;\n\npublic class Loop\n{\n    public const string A = `a${Loop.B}`;\n    public const string B = `b${Loop.A}`;\n    public const int C = Loop.D + 1;\n    public const int D = Loop.C + 1;\n    public const int E = Loop.E + 1;\n    public const int F = Other.G * 2;\n    public const int TOP = Loop.F + Loop.H;\n    public const int H = 1;\n    public const Function<int()> LATER = () => Loop.LATER_VALUE;\n    public const int LATER_VALUE = (Loop.LATER)();\n    public const int P = Loop.Q;\n    public const int Q = Loop.R;\n    public const int R = Loop.P;\n}\n";
     let other = "namespace App;\n\npublic class Other\n{\n    public const int G = Loop.F + 1;\n}\n";
 
     assert_eq!(
@@ -1741,6 +1741,9 @@ fn a_constant_whose_value_reads_back_to_it_is_an_error_that_names_the_cycle() {
             "`Loop.D` refers back to itself through `Loop.C`.",
             "`Loop.E` refers back to itself.",
             "`Loop.F` refers back to itself through `Other.G`.",
+            "`Loop.P` refers back to itself through `Loop.Q` and `Loop.R`.",
+            "`Loop.Q` refers back to itself through `Loop.R` and `Loop.P`.",
+            "`Loop.R` refers back to itself through `Loop.P` and `Loop.Q`.",
         ]
     );
 }
@@ -1772,13 +1775,14 @@ fn a_pattern_that_compares_a_function_is_an_error_as_its_equality_is() {
 /// method body's index runs, and throws `OutOfRangeException` when it misses.
 #[test]
 fn an_index_outside_a_constant_list_in_a_constant_value_is_an_error_that_names_the_size() {
-    let code = "namespace App;\n\npublic class Billing\n{\n    public const List<string> PLANS = [\"free\", \"pro\"];\n    public const string SECOND = Billing.PLANS[1];\n    public const string MISSING = Billing.PLANS[5];\n    public const string MISSING_IN_TEMPLATE = `${Billing.PLANS[2]}`;\n\n    public static bool first(string plan) => plan is == Billing.PLANS[3];\n\n    public static string body() => Billing.PLANS[5];\n}\n";
+    let code = "namespace App;\n\npublic class Billing\n{\n    public const List<string> PLANS = [\"free\", \"pro\"];\n    public const string SECOND = Billing.PLANS[1];\n    public const string MISSING = Billing.PLANS[5];\n    public const string MISSING_IN_TEMPLATE = `${Billing.PLANS[2]}`;\n    public const List<string> NONE = [];\n    public const string NONE_FIRST = Billing.NONE[0];\n\n    public static bool first(string plan) => plan is == Billing.PLANS[3];\n\n    public static string body() => Billing.PLANS[5];\n}\n";
 
     assert_eq!(
         messages(("src/App/Billing.sharp", code), &[]),
         [
             "`Billing.PLANS` holds 2 elements, so it has no index 5.",
             "`Billing.PLANS` holds 2 elements, so it has no index 2.",
+            "`Billing.NONE` holds 0 elements, so it has no index 0.",
             "`Billing.PLANS` holds 2 elements, so it has no index 3.",
         ]
     );

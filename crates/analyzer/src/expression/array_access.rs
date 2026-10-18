@@ -178,54 +178,39 @@ fn check_constant_list_index<A>(
     A: Arena,
 {
     let span = access.span();
-    if !context.dialect.is_sharp()
-        || !(block_context.flags.inside_constant_expression()
+    if context.dialect.is_sharp()
+        && (block_context.flags.inside_constant_expression()
             || context.patterns.iter().any(|(_, pattern)| pattern.span().contains(&span.start)))
+        && let Some(index) = index_type.get_single_literal_int_value()
+        && let Expression::Access(Access::Property(read)) = access.array.unparenthesized()
+        && let Some(StaticProperty {
+            class: Expression::ConstantAccess(class),
+            name: StaticPropertyName::Identifier(name),
+            ..
+        }) = StaticProperty::from_property_access(read, context.resolved_names)
+        && let Some(TAtomic::Array(TArray::List(list))) = context
+            .codebase
+            .get_class_constant(context.resolved_names.get(&class.name), name.value)
+            .and_then(|constant| constant.inferred_type.as_ref())
+        && let Some(known) = list.known_elements.as_ref().filter(|_| list.element_type.is_never())
+        && !usize::try_from(index).is_ok_and(|index| known.contains_key(&index))
     {
-        return;
+        let size = known.len();
+        let elements = if size == 1 { "element" } else { "elements" };
+        let list = quoted_source(context, access.array.span());
+        context.collector.report_with_code(
+            IssueCode::MismatchedArrayIndex,
+            Issue::error(format!("`{list}` holds {size} {elements}, so it has no index {index}."))
+                .with_annotation(
+                    Annotation::primary(access.index.span()).with_message(format!("Index {index} is read here.")),
+                )
+                .with_help(if size == 0 {
+                    "Read an element only once the list holds one.".to_owned()
+                } else {
+                    format!("Read an index from 0 to {}.", size - 1)
+                }),
+        );
     }
-    let (Some(index), Expression::Access(Access::Property(read))) =
-        (index_type.get_single_literal_int_value(), access.array.unparenthesized())
-    else {
-        return;
-    };
-    let Some(StaticProperty {
-        class: Expression::ConstantAccess(class),
-        name: StaticPropertyName::Identifier(name),
-        ..
-    }) = StaticProperty::from_property_access(read, context.resolved_names)
-    else {
-        return;
-    };
-    let Some(TAtomic::Array(TArray::List(list))) = context
-        .codebase
-        .get_class_constant(context.resolved_names.get(&class.name), name.value)
-        .and_then(|constant| constant.inferred_type.as_ref())
-    else {
-        return;
-    };
-    let Some(known) = list.known_elements.as_ref().filter(|_| list.element_type.is_never()) else {
-        return;
-    };
-    if usize::try_from(index).is_ok_and(|index| known.contains_key(&index)) {
-        return;
-    }
-
-    let size = known.len();
-    let elements = if size == 1 { "element" } else { "elements" };
-    let list = quoted_source(context, access.array.span());
-    context.collector.report_with_code(
-        IssueCode::MismatchedArrayIndex,
-        Issue::error(format!("`{list}` holds {size} {elements}, so it has no index {index}."))
-            .with_annotation(
-                Annotation::primary(access.index.span()).with_message(format!("Index {index} is read here.")),
-            )
-            .with_help(if size == 0 {
-                "Read an element only once the list holds one.".to_owned()
-            } else {
-                format!("Read an index from 0 to {}.", size - 1)
-            }),
-    );
 }
 
 /// Spec section 12 types a PHP# `Map` read `V?`, because a key is often missing. A bare read throws on a missing

@@ -2138,7 +2138,7 @@ fn a_static_member_read_in_a_constant_expression_is_an_error() {
 /// compares with a call's value in `when`.
 #[test]
 fn a_match_of_constants_is_a_constant_value_and_any_other_form_runs_code() {
-    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public const string MATCHED = match (Plan.Free) { Plan.Free => \"free\", default => \"other\" };\n    public const Money PRICE = new Money(5);\n    public const bool TESTED = Report.MATCHED is string;\n    public const string CALLED = match (Plan.Free) { Plan.Free => Rates.label(), default => \"other\" };\n    public const string BOUND = match (Report.MAX) { int n when n > 0 => `${n} left`, default => \"none\" };\n\n    [Rule(new Range(1, 10), (int x) => x is == Rates.top())]\n    public int run()\n    {\n        return 1;\n    }\n}\n";
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public const string MATCHED = match (Plan.Free) { Plan.Free => \"free\", default => \"other\" };\n    public const Money PRICE = new Money(5);\n    public const bool TESTED = Report.MATCHED is string;\n    public const string CALLED = match (Plan.Free) { Plan.Free => Rates.label(), default => \"other\" };\n    public const string BOUND = match (Report.MAX) { int n when n > 0 => `${n} left`, default => \"none\" };\n    public const int BUMPED = ++Report.MAX;\n\n    [Rule(new Range(1, 10), (int x) => x is == Rates.top(), --Report.MAX)]\n    public int run()\n    {\n        return 1;\n    }\n}\n";
 
     assert_eq!(
         issues(code),
@@ -2146,7 +2146,9 @@ fn a_match_of_constants_is_a_constant_value_and_any_other_form_runs_code() {
             "6:32 A constant's value is known before the code runs, and `new Money(5)` runs code: use a static field.",
             "7:32 A constant's value is known before the code runs, and `Report.MATCHED is string` runs code: use a static field.",
             "8:67 A constant's value is known before the code runs, and `Rates.label()` runs code: use a static field.",
-            "11:48 A constant's value is known before the code runs, and `Rates.top()` runs code: compare with it in `when`.",
+            "10:31 A constant's value is known before the code runs, and `++Report.MAX` runs code: use a static field.",
+            "12:48 A constant's value is known before the code runs, and `Rates.top()` runs code: compare with it in `when`.",
+            "12:61 An attribute argument is a constant or a `new` of constants, and `--Report.MAX` is neither.",
         ]
     );
 }
@@ -6879,8 +6881,13 @@ fn a_refusal_notes_what_php_sharp_has_where_it_is_written() {
     let pattern = leak(method("        const both = extra is Report&Order;\n        return extra;\n"));
     let interface = "namespace App;\n\npublic interface Sized\n{\n    public const int MAX = 3;\n}\n";
     let constant = "namespace App;\n\npublic class Limits\n{\n    final public const int MAX = 3;\n}\n";
+    let value = "namespace App;\n\npublic class Limits\n{\n    public const int MIN = this;\n}\n";
 
     for (code, note) in [
+        (
+            value,
+            "A constant's value, an attribute argument, an enum case's value or a pattern's value is built from constants: literals, constants, enum cases, a backed case's `value` and the `name` of a case of an enum whose cases carry no data, `typeof(Class)`, list and map literals, indexes, templates, the ternary `c ? a : b`, `match`, `(int)`, `(float)` and `(string)`, and arithmetic, comparison, logical and `??` operators. All but a pattern's value take lambdas that capture nothing, and an attribute argument takes `new` of a class with such arguments, as in `[Rule(new Range(1, 10))]`.",
+        ),
         (
             interface,
             "A PHP# interface has attributes, an optional `public`, a name, optional type parameters as in `<in TItem>`, an optional `: Interface` header, methods and get-only properties, as in `int orderId { get; }`, with no other modifiers, `extends`, constants or other properties.",

@@ -1979,6 +1979,20 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
 
             None
         }
+        // A constant's value writes nothing, so `++` and `--` run code there, as any other form outside it does.
+        (
+            Node::Expression(
+                expression @ Expression::UnaryPrefix(UnaryPrefix {
+                    operator: UnaryPrefixOperator::PreIncrement(_) | UnaryPrefixOperator::PreDecrement(_),
+                    ..
+                }),
+            ),
+            Constant,
+        ) => {
+            report_call_in_constant(expression, context);
+
+            None
+        }
         (Node::UnaryPrefix(unary_prefix), Body | Constant) if unary_prefix.operator.is_cast() => {
             check_cast(unary_prefix, context);
 
@@ -4003,7 +4017,11 @@ fn report_lambda_capture(lambda: &Expression, context: &mut Context<'_, '_, '_>)
 
 /// Reports an expression in a constant value that runs code where the value is known before the code runs, as a call,
 /// a `new` and a property read do: a static field holds a value code computes, and a pattern's `when` compares with one.
+/// An attribute argument names what it takes in `report_attribute_argument`.
 fn report_call_in_constant(call: &Expression, context: &mut Context<'_, '_, '_>) {
+    if is_attribute_argument(context) {
+        return report_attribute_argument(call.span(), context);
+    }
     let written = String::from_utf8_lossy(context.get_code_snippet(call)).into_owned();
     let instead = if context.slice_places.contains(&Some(Place::Pattern)) {
         "compare with it in `when`."
