@@ -2046,9 +2046,9 @@ fn internal_is_an_access_modifier() {
         assert_eq!(issues(code), Vec::<String>::new(), "{declaration}");
     }
 
-    // An anonymous class is not supported yet, and `internal` among its modifiers is no other error.
+    // PHP# has no anonymous class, and `internal` among its modifiers is no other error.
     let anonymous = leak(method("        const other = new readonly internal class {};\n        return 1;\n"));
-    assert_eq!(issues(anonymous), ["7:23 This expression is not supported yet in PHP#."]);
+    assert_eq!(issues(anonymous), ["7:23 PHP# has no class without a name: declare a class in its own file."]);
 }
 
 /// An accessor's access modifier reaches strictly less than its property's, as in C#. `internal` reaches a namespace
@@ -5286,11 +5286,27 @@ fn new_creates_a_class_written_by_its_short_name_with_its_arguments() {
     assert_eq!(issues(code), Vec::<String>::new());
 }
 
+/// Jordan's answer of 10-18: PHP# has no anonymous class, so each names the class to declare in its own file, with the
+/// base class and the interfaces the code names.
 #[test]
-fn new_outside_the_slice_is_not_supported_yet() {
-    let code = leak(method("        const other = new class {};\n        return 1;\n"));
+fn a_class_without_a_name_names_the_class_to_declare() {
+    for (class, declared) in [
+        ("new class {}", "a class"),
+        ("new class implements Notifier {}", "a class that implements `Notifier`"),
+        ("new class extends Base {}", "a class that extends `Base`"),
+        (
+            "new class extends Base implements Notifier, Logged {}",
+            "a class that extends `Base` and implements `Notifier`, `Logged`",
+        ),
+    ] {
+        let code = leak(method(&format!("        const other = {class};\n        return 1;\n")));
 
-    assert_eq!(issues(code), ["7:23 This expression is not supported yet in PHP#."]);
+        assert_eq!(
+            issues(code),
+            [format!("7:23 PHP# has no class without a name: declare {declared} in its own file.")],
+            "{class}"
+        );
+    }
 }
 
 /// A named constructor without arguments is refused, but one a member chain reads through, as the `new App.Shop` of

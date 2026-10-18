@@ -5841,7 +5841,7 @@ fn report_unsupported(node: Node<'_, '_>, place: Place, context: &mut Context<'_
 }
 
 /// Whether a node the slice does not have is a form PHP# has not decided, or that a later change builds, so it is not
-/// supported yet: `break` and `continue` with a level, an anonymous class, `|>`, a partial application, a member of
+/// supported yet: `break` and `continue` with a level, `|>`, a partial application, a member of
 /// `Self` read or written, as in `Self.count`, an interface's constants, property bodies and operators, an enum's
 /// operators, a case's `value` or `name` in a constant value, an intersection type, and a constant typed as a function
 /// or a generic class, as `Class<Report>`.
@@ -5853,10 +5853,7 @@ fn is_undecided(node: Node<'_, '_>, place: Place, context: &Context<'_, '_, '_>)
             ),
             _,
         ) => true,
-        (
-            Node::Expression(Expression::AnonymousClass(_) | Expression::Pipe(_) | Expression::PartialApplication(_)),
-            _,
-        ) => true,
+        (Node::Expression(Expression::Pipe(_) | Expression::PartialApplication(_)), _) => true,
         // The check of an expression runs before the walk enters it, so the last ancestor is its parent.
         (Node::Expression(Expression::Self_(keyword)), _) => {
             is_sharp_self(keyword)
@@ -6031,6 +6028,22 @@ fn never_written(node: Node<'_, '_>, place: Place, context: &Context<'_, '_, '_>
             &format!("write `{} with {{ … }}`, naming each property the copy changes.", written(clone.object.span())),
             "`with` copies an object and sets the properties its braces name.",
         ),
+        (Node::Expression(Expression::AnonymousClass(class)), _) => {
+            let names = |spans: Vec<Span>| spans.into_iter().map(|span| format!("`{}`", written(span))).collect::<Vec<_>>();
+            let base = names(class.extends.iter().flat_map(|extends| extends.types.iter().map(HasSpan::span)).collect());
+            let interfaces =
+                names(class.implements.iter().flat_map(|implements| implements.types.iter().map(HasSpan::span)).collect());
+            let declared = match (base.is_empty(), interfaces.is_empty()) {
+                (true, true) => "a class".to_owned(),
+                (false, true) => format!("a class that extends {}", base.join(", ")),
+                (true, false) => format!("a class that implements {}", interfaces.join(", ")),
+                (false, false) => {
+                    format!("a class that extends {} and implements {}", base.join(", "), interfaces.join(", "))
+                }
+            };
+
+            error(format!("PHP# has no class without a name: declare {declared} in its own file."))
+        }
         (
             Node::Expression(Expression::Construct(
                 Construct::Include(IncludeConstruct { include: keyword, .. })
