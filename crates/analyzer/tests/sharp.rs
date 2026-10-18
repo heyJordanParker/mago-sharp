@@ -1748,6 +1748,28 @@ fn a_constant_whose_value_reads_back_to_it_is_an_error_that_names_the_cycle() {
     );
 }
 
+/// Spec section 2: a backed case's value is a constant value too, and reading the case reads its value, so a case
+/// whose value reads its way back to it through a constant, or a constant that reads its way back through a case, is
+/// the same error that names the reads on the way.
+#[test]
+fn a_backed_case_whose_value_reads_back_to_it_is_an_error_that_names_the_cycle() {
+    let code = "namespace App;\n\npublic enum Code : string\n{\n    case A = `a-${Keys.KEY}`;\n    case B = Code.SELF_KEY;\n    case C = \"c\";\n\n    public const string SELF_KEY = Code.B.value;\n    public const string C_KEY = Code.C.value;\n}\n";
+    let keys = "namespace App;\n\npublic class Keys\n{\n    public const string KEY = Code.A.value;\n}\n";
+
+    assert_eq!(
+        messages(("src/App/Code.sharp", code), &[("src/App/Keys.sharp", keys)]),
+        [
+            "`Code.A` refers back to itself through `Keys.KEY`.",
+            "`Code.B` refers back to itself through `Code.SELF_KEY`.",
+            "`Code.SELF_KEY` refers back to itself through `Code.B`.",
+        ]
+    );
+    assert_eq!(
+        messages(("src/App/Keys.sharp", keys), &[("src/App/Code.sharp", code)]),
+        ["`Keys.KEY` refers back to itself through `Code.A`."]
+    );
+}
+
 /// Spec section 19: a function has no `==`, so a pattern compares no function, whether it names a function constant,
 /// as `is Ops.DOUBLE` and a `match` arm `Ops.DOUBLE`, or writes a lambda, with a parameter or without, and whatever the
 /// value it tests, an unchecked `Any?` included. Each is the error `is == Ops.DOUBLE` gives.

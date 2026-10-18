@@ -155,17 +155,18 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for ClassLikeConstantItem<'arena> {
     }
 }
 
-/// The constants a PHP# constant's value reads on its way back to the constant `start`, a class's lowercase name and
-/// the constant's own, as `Loop.B` for ``A = `a${Loop.B}` `` beside ``B = `b${Loop.A}` ``, or none when no read leads
-/// back. An empty path is a value that reads its own constant.
-fn path_back(codebase: &CodebaseMetadata, start: (Word, Word)) -> Option<Vec<(Word, Word)>> {
+/// The constants and enum cases a PHP# constant's or backed case's value reads on its way back to `start`, a class's
+/// lowercase name and the constant's or case's own, as `Loop.B` for ``A = `a${Loop.B}` `` beside
+/// ``B = `b${Loop.A}` ``, or none when no read leads back. An empty path is a value that reads itself.
+pub(super) fn path_back(codebase: &CodebaseMetadata, start: (Word, Word)) -> Option<Vec<(Word, Word)>> {
     let mut path = Vec::new();
     let mut visited = Vec::new();
 
     leads_back(codebase, start, start, &mut path, &mut visited).then_some(path)
 }
 
-/// Whether a read of the constant `current` leads back to `start`, with `path` holding the constants on the way.
+/// Whether a read of the constant or enum case `current` leads back to `start`, with `path` holding the reads on the
+/// way. Reading a backed case reads its value.
 fn leads_back(
     codebase: &CodebaseMetadata,
     start: (Word, Word),
@@ -173,11 +174,16 @@ fn leads_back(
     path: &mut Vec<(Word, Word)>,
     visited: &mut Vec<(Word, Word)>,
 ) -> bool {
-    let Some(constant) = codebase.get_class_constant(current.0.as_bytes(), current.1.as_bytes()) else {
-        return false;
+    let (class, name) = (current.0.as_bytes(), current.1.as_bytes());
+    let reads = match codebase.get_class_constant(class, name) {
+        Some(constant) => &constant.read_constants,
+        None => match codebase.get_enum_case(class, name) {
+            Some(case) => &case.read_constants,
+            None => return false,
+        },
     };
 
-    for &read in &constant.read_constants {
+    for &read in reads {
         if read == start {
             return true;
         }
@@ -195,9 +201,9 @@ fn leads_back(
     false
 }
 
-/// Reports the constant `constant`, whose value at `value` reads its way back to it through the constants of `path`. A
-/// constant's value is known before the code runs, and a cycle never gives one.
-fn report_cycle<A>(context: &mut Context<'_, '_, A>, constant: &str, path: &[(Word, Word)], value: Span)
+/// Reports the constant or backed case `constant`, whose value at `value` reads its way back to it through the reads of
+/// `path`. A constant's value is known before the code runs, and a cycle never gives one.
+pub(super) fn report_cycle<A>(context: &mut Context<'_, '_, A>, constant: &str, path: &[(Word, Word)], value: Span)
 where
     A: Arena,
 {
