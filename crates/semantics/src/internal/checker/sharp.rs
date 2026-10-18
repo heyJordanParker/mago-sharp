@@ -590,9 +590,6 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             let targets = "PHP# writes to a local, a parameter or a member written `object.name`.";
             match target {
                 Expression::List(list) => report_removed_construct(list.list.value, target.span(), context),
-                Expression::Access(Access::NullSafeProperty(_)) => {
-                    context.report(not_supported_yet(target.span(), "write target", targets));
-                }
                 // A tuple unpacks into new locals, each element named, spec section 30.
                 Expression::Array(array)
                     if !array.elements.iter().any(|element| matches!(element, ArrayElement::Missing(_))) =>
