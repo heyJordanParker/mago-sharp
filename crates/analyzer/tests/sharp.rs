@@ -3280,6 +3280,11 @@ fn a_named_break_or_continue_leaves_or_continues_the_loop_it_names() {
             "23:13 unevaluated-code This statement never runs, because line 20 ends the block. | Delete it, or move it above line 20."
         ]
     );
+
+    // A plain PHP level that is no integer literal says nothing about which loop the jump leaves, so the code after
+    // the inner loop still runs.
+    let php = "<?php\n\nnamespace Demo;\n\nfinal class Levels\n{\n    public static function run(int $levels): int\n    {\n        while ($levels > 0) {\n            while ($levels > 1) {\n                break $levels;\n            }\n            $levels--;\n        }\n        return $levels;\n    }\n}\n";
+    assert_eq!(issues(("src/Demo/Levels.php", php), &[]), ["11:23 invalid-break"]);
 }
 
 /// Spec section 7 refuses a statement that can never run, as Java and Zig do: one after `return`, `throw`, a call that

@@ -2775,6 +2775,99 @@ fn a_static_constructor_runs_as_the_statics_method_after_the_initial_values() {
 }
 
 /// ```php
+/// private static function '#init'($"\0<sharp>\0types")
+/// {
+///     \Sharp\Internal\statics(\App\Tenant\Pool::class, <the text of #0>)['made'] = 1;
+/// }
+/// ```
+///
+/// Spec sections 6 and 11: each type argument of a generic class runs the static constructor once, for its own
+/// statics, so its statements end the class's `#init`, which the engine runs when it adds a type argument's entry,
+/// and no `#statics` runs it.
+#[test]
+fn a_static_constructor_of_a_generic_class_ends_its_init() {
+    let lowered = Lowered::with(
+        "namespace App.Tenant;\n\npublic class Pool<T>\n{\n    public static int made { get; set; } = 0;\n\n    static Pool()\n    {\n        Pool<T>.made = 1;\n    }\n}\n",
+        &[],
+    );
+
+    assert_eq!(
+        lowered.render(lowered.root()),
+        indoc! {r##"
+            STMT_LIST
+              DECLARE
+                CONST_DECL
+                  CONST_ELEM
+                    ZVAL "strict_types"
+                    ZVAL 1
+                    null
+                null
+              NAMESPACE
+                ZVAL "App\\Tenant"
+                null
+              CLASS "Pool" @3-11
+                null
+                null
+                STMT_LIST
+                  PROP_GROUP [8209]
+                    null
+                    PROP_DECL
+                      PROP_ELEM
+                        ZVAL "\0<sharp>\0static constructor"
+                        ZVAL true
+                        null
+                        null
+                    null
+                  PROP_GROUP [8209]
+                    null
+                    PROP_DECL
+                      PROP_ELEM
+                        ZVAL "\0<sharp>\0statics"
+                        ARRAY [3]
+                          ARRAY_ELEM
+                            ARRAY [3]
+                              ARRAY_ELEM
+                                ZVAL 0
+                                ZVAL "made"
+                            ZVAL ""
+                        null
+                        null
+                    null
+                  METHOD [20] "#init" @3-3
+                    PARAM_LIST
+                      PARAM
+                        null
+                        ZVAL "\0<sharp>\0types"
+                        null
+                        null
+                        null
+                        null
+                    null
+                    STMT_LIST
+                      ASSIGN
+                        DIM
+                          CALL
+                            ZVAL "Sharp\\Internal\\statics"
+                            ARG_LIST
+                              CLASS_NAME
+                                ZVAL "App\\Tenant\\Pool"
+                              SHARP_TYPE_OF [1]
+                                ZVAL "#0"
+                          ZVAL "made"
+                        ZVAL 1
+                    null
+                    null
+                  SHARP_CLASS_METADATA
+                    null
+                    ZVAL "Any?"
+                    null
+                null
+                null
+        "##}
+    );
+}
+
+/// ```php
 /// public string $name { set { $this->log($value); $this->name = $value; $this->log($this->name); } }
 /// public int $count { set { $this->count = $value * 2; $this->log('count'); } }
 ///

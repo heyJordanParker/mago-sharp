@@ -1,17 +1,12 @@
 use mago_span::HasSpan;
 use mago_syntax::cst::Construct;
-use mago_syntax::cst::DoWhile;
 use mago_syntax::cst::Expression;
-use mago_syntax::cst::For;
 use mago_syntax::cst::ForBody;
-use mago_syntax::cst::ForOf;
-use mago_syntax::cst::Foreach;
 use mago_syntax::cst::ForeachBody;
 use mago_syntax::cst::Literal;
 use mago_syntax::cst::LocalIdentifier;
 use mago_syntax::cst::PatternMatchArmBody;
 use mago_syntax::cst::Statement;
-use mago_syntax::cst::While;
 use mago_syntax::cst::WhileBody;
 use mago_word::Word;
 use mago_word::word;
@@ -104,7 +99,7 @@ impl ControlAction {
                 _ if statement.is_loop() => {
                     let has_enclosing_loop_break = control_actions.contains(ControlAction::BreakImmediateLoop);
 
-                    let (inner_statements, condition) = match statement {
+                    let (inner_statements, condition, label) = match statement {
                         Statement::For(for_loop) => (
                             match &for_loop.body {
                                 ForBody::Statement(statement) => vec![*statement],
@@ -113,6 +108,7 @@ impl ControlAction {
                                 }
                             },
                             None,
+                            for_loop.label,
                         ),
                         Statement::Foreach(foreach_loop) => (
                             match &foreach_loop.body {
@@ -122,9 +118,12 @@ impl ControlAction {
                                 }
                             },
                             None,
+                            foreach_loop.label,
                         ),
-                        Statement::ForOf(for_of) => (vec![for_of.body], None),
-                        Statement::DoWhile(do_while) => (vec![do_while.statement], Some(do_while.condition)),
+                        Statement::ForOf(for_of) => (vec![for_of.body], None, for_of.label),
+                        Statement::DoWhile(do_while) => {
+                            (vec![do_while.statement], Some(do_while.condition), do_while.label)
+                        }
                         Statement::While(while_loop) => (
                             match &while_loop.body {
                                 WhileBody::Statement(statement) => vec![*statement],
@@ -133,19 +132,12 @@ impl ControlAction {
                                 }
                             },
                             Some(while_loop.condition),
+                            while_loop.label,
                         ),
                         #[allow(clippy::unreachable)]
                         _ => unreachable!(),
                     };
 
-                    let label = match statement {
-                        Statement::For(For { label, .. })
-                        | Statement::Foreach(Foreach { label, .. })
-                        | Statement::ForOf(ForOf { label, .. })
-                        | Statement::While(While { label, .. })
-                        | Statement::DoWhile(DoWhile { label, .. }) => label,
-                        _ => &None,
-                    };
                     let mut loop_break_types = break_type.clone();
                     loop_break_types.push(BreakType::Loop(label.map(|label| word(label.name.value))));
 

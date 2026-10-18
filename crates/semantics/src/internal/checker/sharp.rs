@@ -4388,7 +4388,8 @@ fn loop_name<'arena>(statement: &Statement<'arena>) -> Option<&'arena [u8]> {
 }
 
 /// The named loops around the node the walk is at, innermost first, with the span of each, up to the lambda that
-/// holds the node: a lambda's `break` and `continue` leave only its own loops, as a method's do.
+/// holds the node: a lambda's `break` and `continue` leave only its own loops, as a method's do. Statements nest only
+/// in statements and lambdas, so the first ancestor that is no statement is that lambda.
 fn named_loops_around<'context, 'arena>(
     context: &'context Context<'_, '_, 'arena>,
 ) -> impl Iterator<Item = (Span, &'arena [u8])> + 'context {
@@ -4396,13 +4397,11 @@ fn named_loops_around<'context, 'arena>(
         .ancestors
         .iter()
         .rev()
-        .take_while(|ancestor| {
-            !matches!(ancestor, Node::Expression(Expression::Closure(_) | Expression::ArrowFunction(_)))
-        })
-        .filter_map(|ancestor| match ancestor {
-            Node::Statement(statement) => loop_name(statement).map(|name| (statement.span(), name)),
+        .map_while(|ancestor| match ancestor {
+            Node::Statement(statement) => Some(statement),
             _ => None,
         })
+        .filter_map(|statement| loop_name(statement).map(|name| (statement.span(), name)))
 }
 
 /// Checks the name `label` gives the loop `node`, Jordan's ruling of 10-18 on loop names: a loop inside a loop of the
