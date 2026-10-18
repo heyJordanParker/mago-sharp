@@ -51,6 +51,7 @@ use mago_syntax::cst::Expression;
 use mago_syntax::cst::FunctionCall;
 use mago_syntax::cst::Inheritance;
 use mago_syntax::cst::NullSafeFunctionCall;
+use mago_syntax::cst::NullSafePropertyAccess;
 use mago_syntax::cst::PropertyAccess;
 use mago_word::Word;
 use mago_word::ascii_lowercase_word;
@@ -1595,8 +1596,8 @@ impl<'analysis> Types<'analysis> {
         plain_parameters(b"", self.codebase.get_parent_constructor(class))
     }
 
-    /// The declared type of the property `target` writes, `object.property` or `Class.property`, as the class, or the
-    /// first class its object can be, declares it. None for any other target.
+    /// The declared type of the property `target` writes, `object.property`, `object?.property` or `Class.property`,
+    /// as the class, or the first class its object can be, declares it. None for any other target.
     pub(crate) fn property_type(&self, target: &Expression) -> Option<&'analysis TUnion> {
         let (class, property) = self.accessed_property(target)?;
 
@@ -1612,16 +1613,22 @@ impl<'analysis> Types<'analysis> {
             .is_some_and(|declaring| !declaring.flags.is_sharp())
     }
 
-    /// The class and the `$`-prefixed name of the property `target` reads, `object.property` or `Class.property`, as
-    /// the class, or the first class its object can be, holds it.
+    /// The class and the `$`-prefixed name of the property `target` reads, `object.property`, `object?.property`, which
+    /// is the same property where `object` is not null, spec section 14.4, or `Class.property`, as the class, or the
+    /// first class its object can be, holds it.
     fn accessed_property(&self, target: &Expression) -> Option<(&'analysis [u8], Vec<u8>)> {
-        let Expression::Access(Access::Property(
-            access @ PropertyAccess { object, property: ClassLikeMemberSelector::Identifier(name), .. },
-        )) = target.unparenthesized()
-        else {
-            return None;
+        let (object, name, static_class) = match target.unparenthesized() {
+            Expression::Access(Access::Property(
+                access @ PropertyAccess { object, property: ClassLikeMemberSelector::Identifier(name), .. },
+            )) => (object, name, self.names.static_property_class(access)),
+            Expression::Access(Access::NullSafeProperty(NullSafePropertyAccess {
+                object,
+                property: ClassLikeMemberSelector::Identifier(name),
+                ..
+            })) => (object, name, None),
+            _ => return None,
         };
-        let class = match self.names.static_property_class(access) {
+        let class = match static_class {
             Some(class) => self.names.get(&class.name),
             None => *receiver_classes(self.artifacts.get_expression_type(object)?)?.first()?,
         };

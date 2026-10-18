@@ -112,6 +112,14 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for ArrayAccess<'arena> {
             }
         }
 
+        // Spec section 14.4: `?.` skips the rest of its chain, so past it an index reads the collection's own element,
+        // and only the whole chain may be null, as a member read past it is.
+        let skipped_by_null_safe = context.dialect.is_sharp()
+            && artifacts.get_expression_type(self.array).is_some_and(TUnion::has_nullsafe_null);
+        let container_type = container_type.map(|container_type| {
+            if skipped_by_null_safe { Rc::new(container_type.to_non_nullable()) } else { container_type }
+        });
+
         if let Some(container_type) = container_type {
             let read = |context: &mut Context<'ctx, 'arena, A>| {
                 get_array_target_type_given_index(
@@ -142,6 +150,14 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for ArrayAccess<'arena> {
                 if refused { TUnion::from_atomic(TAtomic::Error) } else { access_type }
             } else {
                 read(context)
+            };
+            let access_type = if skipped_by_null_safe {
+                let element_is_never_null = !access_type.can_be_null();
+                let mut access_type = access_type.as_nullable();
+                access_type.set_nullsafe_null(element_is_never_null);
+                access_type
+            } else {
+                access_type
             };
 
             if let Some(keyed_array_var_id) = &keyed_array_var_id {

@@ -40,6 +40,8 @@ use mago_span::Span;
 use mago_syntax::cst::Access;
 use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Expression;
+use mago_syntax::cst::NullSafePropertyAccess;
+use mago_syntax::cst::PropertyAccess;
 use mago_word::Word;
 use mago_word::ascii_lowercase_word;
 use mago_word::concat_word;
@@ -1444,9 +1446,17 @@ where
                     .clone(),
             })
         }
-        Expression::Access(Access::Property(access)) => {
-            let ClassLikeMemberSelector::Identifier(property) = &access.property else {
+        // Spec section 14.4: `object?.name` is the place `object.name` is, where `object` is not null.
+        Expression::Access(
+            Access::Property(PropertyAccess { object: object_expression, property: selector, .. })
+            | Access::NullSafeProperty(NullSafePropertyAccess { object: object_expression, property: selector, .. }),
+        ) => {
+            let ClassLikeMemberSelector::Identifier(property) = selector else {
                 return None;
+            };
+            let static_class = match object {
+                Expression::Access(Access::Property(access)) => context.resolved_names.static_property_class(access),
+                _ => None,
             };
             let property_name = concat_word!(b"$", property.value);
             let is_declared_in_sharp = |class: &[u8]| {
@@ -1461,14 +1471,14 @@ where
             // parameters given by its type arguments, as `Orders.items` has them given by `Orders : Counter<Order>`.
             // `this` keeps no expression type: it is the `$this` local, the scope's class with its type parameters. A
             // property plain PHP declares keeps PHP's array, which takes either collection literal.
-            if let Some(class) = context.resolved_names.static_property_class(access) {
+            if let Some(class) = static_class {
                 let class = context.resolved_names.get(&class.name);
                 let declared = is_declared_in_sharp(class)
                     .then(|| context.codebase.get_property_type(class, property_name.as_bytes()))??;
                 // A bare `Counter.items`, refused where it is read, reads as its bounds.
-                let bounds = bare_generic_class(context, access.object).map(|(_, bounds)| bounds);
+                let bounds = bare_generic_class(context, object_expression).map(|(_, bounds)| bounds);
                 let type_arguments = artifacts
-                    .get_expression_type(access.object)
+                    .get_expression_type(object_expression)
                     .and_then(TUnion::get_single_named_object)
                     .and_then(|object| object.get_type_parameters())
                     .or(bounds.as_deref());
@@ -1486,10 +1496,10 @@ where
                     declaring_class,
                 ))
             } else {
-                let receiver = if is_this(access.object, context.resolved_names) {
+                let receiver = if is_this(object_expression, context.resolved_names) {
                     block_context.locals.get(&word("$this"))?.as_ref()
                 } else {
-                    artifacts.get_expression_type(access.object)?
+                    artifacts.get_expression_type(object_expression)?
                 };
                 let is_sharp_receiver = receiver.types.iter().any(|atomic| match atomic {
                     TAtomic::Object(object) => {

@@ -407,6 +407,12 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Expression<'arena> {
 
             result?;
 
+            if artifacts.null_safe_write_target == Some(self.span())
+                && let Some(read) = artifacts.get_expression_type(self).filter(|read| read.has_nullsafe_null())
+            {
+                artifacts.set_expression_type(self, read.to_non_nullable());
+            }
+
             if context.plugin_registry.has_expression_hooks() {
                 let mut hook_context = HookContext::new(context, block_context, artifacts);
                 context.plugin_registry.after_expression(self, &mut hook_context)?;

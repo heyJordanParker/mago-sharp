@@ -65,6 +65,7 @@ use crate::expression::assignment::PropertyWriteKind;
 use crate::expression::assignment::assign_to_expression;
 use crate::expression::assignment::read_before_write;
 use crate::expression::assignment::write_after_read;
+use crate::expression::assignment::write_value;
 use crate::expression::binary::utils::analyze_instance_operator;
 use crate::expression::binary::utils::refuse_non_int_operands;
 use crate::expression::call::method_call::analyze_implicit_method_call;
@@ -102,7 +103,9 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for UnaryPrefix<'arena> {
 
         let (analyzed, read_issues) =
             if matches!(self.operator, UnaryPrefixOperator::PreIncrement(_) | UnaryPrefixOperator::PreDecrement(_)) {
-                read_before_write(context, |context| self.operand.analyze(context, block_context, artifacts))
+                read_before_write(context, artifacts, self.operand, |context, artifacts| {
+                    self.operand.analyze(context, block_context, artifacts)
+                })
             } else {
                 (self.operand.analyze(context, block_context, artifacts), None)
             };
@@ -395,13 +398,13 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for UnaryPrefix<'arena> {
                 let resulting_type = write_after_read(context, read_issues.as_ref(), |context| {
                     increment_operand(context, block_context, artifacts, self.operand, self.span())
                 })?;
-                artifacts.set_rc_expression_type(self, resulting_type);
+                artifacts.set_rc_expression_type(self, write_value(context, self.operand, resulting_type));
             }
             UnaryPrefixOperator::PreDecrement(_) => {
                 let resulting_type = write_after_read(context, read_issues.as_ref(), |context| {
                     decrement_operand(context, block_context, artifacts, self.operand, self.span())
                 })?;
-                artifacts.set_rc_expression_type(self, resulting_type);
+                artifacts.set_rc_expression_type(self, write_value(context, self.operand, resulting_type));
             }
             UnaryPrefixOperator::IntCast(_, _) | UnaryPrefixOperator::IntegerCast(_, _) => {
                 let resulting_type = match operand_type {
@@ -544,8 +547,9 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for UnaryPostfix<'arena> {
     {
         let was_in_general_use = block_context.flags.inside_general_use();
         block_context.flags.set_inside_general_use(true);
-        let (analyzed, read_issues) =
-            read_before_write(context, |context| self.operand.analyze(context, block_context, artifacts));
+        let (analyzed, read_issues) = read_before_write(context, artifacts, self.operand, |context, artifacts| {
+            self.operand.analyze(context, block_context, artifacts)
+        });
         analyzed?;
         block_context.flags.set_inside_general_use(was_in_general_use);
 
@@ -559,7 +563,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for UnaryPostfix<'arena> {
         })?;
 
         if let Some(operand_type) = artifacts.get_rc_expression_type(&self.operand).cloned() {
-            artifacts.set_rc_expression_type(self, operand_type);
+            artifacts.set_rc_expression_type(self, write_value(context, self.operand, operand_type));
         }
 
         Ok(())

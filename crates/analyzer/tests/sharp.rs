@@ -787,6 +787,90 @@ fn a_method_read_through_null_safe_access_is_a_closure_or_null() {
     assert_eq!(issues(("src/Demo/Report.sharp", sharp), &[("src/Lib/Calc.php", CALC)]), Vec::<String>::new());
 }
 
+/// Spec section 12: a write into a collection that may be null throws, as a read of it does, so it is refused as the
+/// read is, through `.` and through a `?.` whose member is nullable itself.
+#[test]
+fn a_write_into_a_collection_that_may_be_null_is_refused_as_a_read_is() {
+    let sharp = "namespace Demo;\n\nclass Opt\n{\n    public Map<string, int>? tags { get; set; } = null;\n    public List<int>? items { get; set; } = null;\n}\n\nclass Writes\n{\n    public void dot(Opt o)\n    {\n        o.tags[\"k\"] = 1;\n        o.items[0] = 1;\n    }\n\n    public void safe(Opt? o)\n    {\n        o?.tags[\"k\"] = 1;\n        o?.items[0] = 1;\n    }\n\n    public int? read(Opt o) => o.items[0];\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Writes.sharp", sharp), &[]),
+        [
+            "13:9 possibly-null-array-access",
+            "14:9 possibly-null-array-access",
+            "19:9 possibly-null-array-access",
+            "20:9 possibly-null-array-access",
+            "23:32 possibly-null-array-access",
+        ]
+    );
+}
+
+/// Spec section 14.4: `?.` skips the rest of its chain, as in C#, Kotlin and Swift, so past it each member and index has
+/// its declared type and only the whole chain may be null. A second `?.` on a link that is never null is refused, and a
+/// read after a write past a `?.` may be null.
+#[test]
+fn null_safe_access_skips_the_rest_of_its_chain_through_an_index() {
+    let sharp = "namespace Demo;\n\nclass Node\n{\n    public string name { get; set; } = \"\";\n    public int total { get; set; } = 0;\n    public List<Node> items { get; set; } = [];\n}\n\nclass Holder\n{\n    public Node inner { get; } = new Node();\n}\n\nclass Chains\n{\n    public void written(Node? a)\n    {\n        a?.items[0].name = \"x\";\n        a?.items[0].total += 1;\n        a?.items[0].total++;\n    }\n\n    public string? read(Node? a) => a?.items[0].name;\n\n    public void redundant(Node? a, Holder? h)\n    {\n        a?.items[0]?.name = \"x\";\n        h?.inner?.name = \"y\";\n    }\n\n    public string? redundantRead(Holder? h) => h?.inner?.name;\n\n    public string after(Node? a)\n    {\n        a?.items[0].name = \"x\";\n        return a?.items[0].name;\n    }\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Chains.sharp", sharp), &[]),
+        [
+            "28:20 redundant-nullsafe-operator",
+            "29:17 redundant-nullsafe-operator",
+            "32:56 redundant-nullsafe-operator",
+            "37:16 nullable-return-statement",
+            "37:16 invalid-return-statement",
+        ]
+    );
+}
+
+/// Spec section 14.4: a write through `?.` that a null receiver skips leaves the member as it was, so a read through the
+/// same `?.` after it may be null, in every write form, as it is with no write before it.
+#[test]
+fn a_read_through_null_safe_access_after_a_write_through_it_may_be_null() {
+    let sharp = "namespace Demo;\n\nclass Node\n{\n    public string name { get; set; } = \"\";\n    public int total { get; set; } = 0;\n    public string? gift { get; set; } = null;\n    public Node? next { get; set; } = null;\n    public List<int> counts { get; set; } = [1, 2];\n    public Map<string, int> tags { get; set; } = [:];\n    public List<int> items { get; set; } = [];\n}\n\nclass After\n{\n    public string assigned(Node? a)\n    {\n        a?.name = \"x\";\n        return a?.name;\n    }\n\n    public int compound(Node? a)\n    {\n        a?.total += 1;\n        return a?.total;\n    }\n\n    public int stepped(Node? a)\n    {\n        a?.total++;\n        return a?.total;\n    }\n\n    public string coalesced(Node? a)\n    {\n        a?.gift ??= \"g\";\n        return a?.gift;\n    }\n\n    public int indexed(Node? a)\n    {\n        a?.counts[0] = 1;\n        return a?.counts[0];\n    }\n\n    public List<int> changed(Node? a)\n    {\n        a?.items.add(1);\n        return a?.items;\n    }\n\n    public string nested(Node? a)\n    {\n        a?.next?.name = \"n\";\n        return a?.next?.name;\n    }\n\n    public string element(List<Node?> nodes)\n    {\n        nodes[0]?.name = \"e\";\n        return nodes[0]?.name;\n    }\n\n    public bool checks(Node? a)\n    {\n        a?.name = \"x\";\n        a?.gift = \"g\";\n        a?.tags[\"k\"] = 1;\n        return (a?.name ?? \"-\") == \"x\" && a?.gift == null && (a?.tags[\"k\"] ?? 0) == 1;\n    }\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/After.sharp", sharp), &[]),
+        [
+            "19:16 nullable-return-statement",
+            "19:16 invalid-return-statement",
+            "25:16 nullable-return-statement",
+            "25:16 invalid-return-statement",
+            "31:16 nullable-return-statement",
+            "31:16 invalid-return-statement",
+            "37:16 nullable-return-statement",
+            "37:16 invalid-return-statement",
+            "43:16 nullable-return-statement",
+            "43:16 invalid-return-statement",
+            "49:16 nullable-return-statement",
+            "49:16 invalid-return-statement",
+            "55:16 nullable-return-statement",
+            "55:16 invalid-return-statement",
+            "61:16 nullable-return-statement",
+            "61:16 invalid-return-statement",
+        ]
+    );
+}
+
+/// Spec section 14.4: a write through `?.` happens only when its receivers are not null, so it is checked against the
+/// member's own type, in every write form, and its value is null when it is skipped.
+#[test]
+fn a_write_through_null_safe_access_is_checked_against_the_member_and_may_be_null() {
+    let sharp = "namespace Demo;\n\nclass Customer\n{\n    public string name { get; set; } = \"\";\n}\n\nclass Order\n{\n    public string note { get; set; } = \"\";\n    public string? gift { get; set; } = null;\n    public List<int> items { get; set; } = [];\n    public int total { get; set; } = 0;\n    public Map<string, bool> tags { get; set; } = [:];\n    public Map<string, int> fixed { get; private set; } = [:];\n    public List<int> counts { get; set; } = [1, 2];\n    public Customer customer { get; } = new Customer();\n}\n\nclass Shop\n{\n    public string change(Order? order, Order known, int fee)\n    {\n        order?.note = \"gift\";\n        order?.items.add(fee);\n        order?.total += fee;\n        order?.customer.name = \"Ada\";\n        order?.total++;\n        --order?.total;\n        order?.gift ??= \"card\";\n        order?.tags[\"vip\"] = true;\n        order?.counts[0] = 5;\n        order?.counts[1]++;\n        order?.fixed[\"a\"] = 1;\n        order?.note += \"!\";\n        order?.note = 1;\n        known?.note = \"x\";\n        const note = (order?.note = \"gift\");\n        return note;\n    }\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Shop.sharp", sharp), &[]),
+        [
+            "34:16 invalid-property-write",
+            "36:23 invalid-property-assignment-value",
+            "37:14 redundant-nullsafe-operator",
+            "39:16 nullable-return-statement",
+            "39:16 invalid-return-statement",
+        ]
+    );
+}
+
 #[test]
 fn a_nullable_value_where_a_value_is_required_is_reported_as_in_php() {
     let sharp = "namespace Demo;\n\nimport Lib.Calc;\n\nclass Report\n{\n    public static int total(int? extra, Calc? calc)\n    {\n        const sum = calc.add(extra, 1);\n        return extra;\n    }\n}\n";
@@ -17275,7 +17359,27 @@ fn an_index_read_message_names_its_type_and_null_check_as_sharp_writes_them() {
         refused(("src/Demo/Order.sharp", sharp)),
         [
             "5:34 invalid-array-access Cannot access array index on object `Order` that does not implement `ArrayAccess`. | Object does not implement `ArrayAccess`. | Only objects implementing `ArrayAccess` can be accessed like arrays. | Ensure the object implements `ArrayAccess` before attempting to access it as an array.",
-            "5:34 possibly-null-array-access Cannot perform array access on possibly `null` value. | The expression might be `null` here. | Attempting to read an array index on `null` will result in a runtime error. | Ensure the value is not `null` before reading an index, as in `if (value != null)`.",
+            "5:34 possibly-null-array-access `o` may be null, so it has no index. | This may be null here. | An index on `null` throws. | Ensure the value is not `null` before reading an index, as in `if (value != null)`.",
+        ]
+    );
+}
+
+/// Spec section 14.4: an index into a collection that is null or may be null, read or written, is an error that names
+/// the collection as the file writes it.
+#[test]
+fn an_index_on_null_names_the_collection_as_sharp_writes_it() {
+    let sharp = "namespace Demo;\n\nclass Order\n{\n    public int? first(List<int>? items) => items[0];\n\n    public void fill(Map<string, int>? tags)\n    {\n        tags[\"k\"] = 1;\n    }\n\n    public int? none(List<int>? empty)\n    {\n        if (empty == null) {\n            return empty[0];\n        }\n        return 0;\n    }\n}\n";
+    let refused = worded(("src/Demo/Order.sharp", sharp), &[])
+        .into_iter()
+        .filter(|line| line.contains("null-array-access "))
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        refused,
+        [
+            "5:44 possibly-null-array-access `items` may be null, so it has no index. | This may be null here. | An index on `null` throws. | Ensure the value is not `null` before reading an index, as in `if (value != null)`.",
+            "9:9 possibly-null-array-access `tags` may be null, so it has no index. | This may be null here. | An index on `null` throws. | Ensure the value is not `null` before reading an index, as in `if (value != null)`.",
+            "15:20 null-array-access `empty` is null, so it has no index. | This is null here. | An index on `null` throws. | Ensure the value is not `null` before reading an index, as in `if (value != null)`.",
         ]
     );
 }

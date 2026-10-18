@@ -344,7 +344,8 @@ const OBJECT: &[u8] = b"Object";
 ///   any other use of it is an error, and so is `return value;` in a method that yields, as C#'s CS1622. PHP's
 ///   `yield from`, `yield key => value` and bare `yield` are errors that name the PHP# form.
 /// - Writes: `=`, compound assignment, `++` and `--` write only a local, a parameter, a member written
-///   `object.name` or, when static, `Class.name`, or an index of one of them written `target[key]`. The analyzer,
+///   `object.name` or `object?.name`, which spec section 14.4 writes only when every `?.` receiver on its left is not
+///   null, or, when static, `Class.name`, or an index of one of them written `target[key]`. The analyzer,
 ///   which knows the types, allows an index write only on a `Map`, and a read not under `??` or `?.` only on a `List`,
 ///   as spec section 12 decides.
 /// - A constant, an enum case or a static member is reached through its class name, as in `Report.count`, and the
@@ -591,9 +592,6 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
                 Expression::List(_) => report_unexpected(target.span(), context),
                 // A skipped element, as in `[, a]`, is no PHP# syntax anywhere, so it fails as a typo does at its `,`.
                 Expression::Array(array) if let Some(missing) = skipped(array) => report_unexpected(missing, context),
-                Expression::Access(Access::NullSafeProperty(_)) => {
-                    context.report(not_supported_yet(target.span(), "write target", targets));
-                }
                 // A tuple unpacks into new locals, each element named, spec section 30.
                 Expression::Array(_) => {
                     let written = BytesDisplay(context.get_code_snippet(target));
@@ -4451,15 +4449,15 @@ fn report_hidden_pattern_variables(pattern: &Pattern, hidden: bool, context: &mu
     }
 }
 
-/// Whether the slice can write an expression: a local, a parameter, `field`, a member written `object.name`, or an
-/// index of one of them, as in `counts["a"]`, or PHP's append to one, as in `items[]`. A member written by its bare name
-/// passes, because `check_constant_access` reports it with the name to write instead.
+/// Whether the slice can write an expression: a local, a parameter, `field`, a member written `object.name` or
+/// `object?.name`, or an index of one of them, as in `counts["a"]`, or PHP's append to one, as in `items[]`. A member
+/// written by its bare name passes, because `check_constant_access` reports it with the name to write instead.
 fn is_slice_target(target: &Expression, context: &Context<'_, '_, '_>) -> bool {
     match target {
         Expression::ConstantAccess(access) => {
             matches!(context.names.binding(&access.name), Some(Binding::Local(_) | Binding::Field | Binding::Member))
         }
-        Expression::Access(Access::Property(_)) => true,
+        Expression::Access(Access::Property(_) | Access::NullSafeProperty(_)) => true,
         Expression::ArrayAccess(access) => is_slice_target(access.array, context),
         // The analyzer refuses `x[] = v` with the PHP# form for the collection it writes, as `add` for a `List`.
         Expression::ArrayAppend(append) => is_slice_target(append.array, context),

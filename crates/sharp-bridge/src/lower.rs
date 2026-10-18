@@ -5522,6 +5522,12 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                         )) if self.names.static_property_class(property).is_none() => {
                             self.types.property_has_hooks(self.types.expression_type(object), name.value)
                         }
+                        // `object?.name`, whose conditional tests `object`, spec section 14.4.
+                        Expression::Access(Access::NullSafeProperty(NullSafePropertyAccess {
+                            object,
+                            property: ClassLikeMemberSelector::Identifier(name),
+                            ..
+                        })) => self.types.property_has_hooks(self.types.expression_type(object), name.value),
                         _ => false,
                     }
                 {
@@ -6818,14 +6824,14 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// extension's member, a lazy operation of an `Iterable`, a call of a function that may be null, `f?.(x)`, or any link below a collection method call that runs as PHP on the array or below an
     /// extension's member, which runs as a static call, with its receiver, when `chain` is a member
     /// read, a call or an index whose chain holds one no conditional tests yet. A null there would reach the PHP
-    /// function, where `?->` skips only the rest of its own chain. The walk stops at a receiver a hidden variable
-    /// holds, whose links its own conditional tests.
+    /// function, where `?->` skips only the rest of its own chain. PHP's `?->` never writes, so in the target of a
+    /// write, `=`, a compound assignment, `++` or `--`, every null-safe link is one, spec section 14.4. The walk stops
+    /// at a receiver a hidden variable holds, whose links its own conditional tests.
     fn untested_link<'chain, 'ast>(
         &self,
         chain: &'chain Expression<'ast>,
     ) -> Option<(&'chain Expression<'ast>, &'chain Expression<'ast>)> {
-        let mut link = chain;
-        let mut below_php_call = false;
+        let (mut link, mut below_php_call) = written_place(chain).map_or((chain, false), |place| (place, true));
         loop {
             if self.held_receivers.iter().any(|(span, _)| *span == link.span()) {
                 return None;
@@ -6923,10 +6929,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// A chain whose `untested` null-safe link PHP's `?->` cannot write, as
     /// `($nullsafe#N = receiver) === null ? null : chain`, with the chain reading `$nullsafe#N` in place of the
     /// receiver. The conditional wraps the whole chain, which a null receiver skips as `?->` does. A local receiver is
-    /// tested and read as itself.
+    /// tested and read as itself, but in a write: PHP runs the written value before it reads the object it writes, and
+    /// the value may assign the local, so a write goes to the object it tested, spec section 14.4.
     fn null_safe_chain(&mut self, chain: &Expression, untested: &Expression, receiver: &Expression) -> u32 {
         let line = self.line(chain);
-        let is_local = self.is_local_or_this(receiver);
+        let is_local = self.is_local_or_this(receiver) && written_place(chain).is_none();
         let tested = if is_local {
             self.null_safe_object(receiver)
         } else {
@@ -8171,6 +8178,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 // A plain PHP property the checker reads as a `List` is written as itself.
                 None => self.arriving(target, Arrival::Plain),
             },
+            // `object?.name`, whose conditional tests `object`, spec section 14.4, written as `object.name`.
+            Expression::Access(Access::NullSafeProperty(_)) => self.arriving(target, Arrival::Plain),
             Expression::ArrayAccess(access) => {
                 let value = self.target(access.array, place_use);
                 let key = self.expression(access.index);
@@ -9555,6 +9564,16 @@ const fn compound_operator(operator: &AssignmentOperator) -> Option<BinaryOperat
         AssignmentOperator::Exponentiation(span) => BinaryOperator::Exponentiation(span),
         _ => return None,
     })
+}
+
+/// The place `chain` writes when it is a write, `=`, a compound assignment, `++` or `--`.
+fn written_place<'chain, 'ast>(chain: &'chain Expression<'ast>) -> Option<&'chain Expression<'ast>> {
+    match chain {
+        Expression::Assignment(assignment) => Some(assignment.lhs),
+        Expression::UnaryPrefix(unary) if unary.operator.is_increment_or_decrement() => Some(unary.operand),
+        Expression::UnaryPostfix(unary) => Some(unary.operand),
+        _ => None,
+    }
 }
 
 /// The assignment operators of the slice, as php-src's grammar builds them. Every operator is named, so a new one

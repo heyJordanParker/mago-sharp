@@ -15647,6 +15647,220 @@ fn nested_null_safe_property_calls_each_get_their_own_hidden_variable() {
 }
 
 /// ```php
+/// (($nullsafe#1 = $other) === null ? null : $nullsafe#1->note = 'gift');
+/// (($nullsafe#1 = $this->next()) === null ? null : $nullsafe#1->total += 1);
+/// (($nullsafe#1 = $other?->parent) === null ? null : $nullsafe#1->total++);
+/// ```
+///
+/// PHP's `?->` never writes, so a write through `?.`, spec section 14.4, is a conditional on the receiver of its highest
+/// null-safe link that wraps the whole write, its value included. The receiver goes into a hidden variable, so it runs
+/// once, and the write goes to the object it tested even when the value assigns a local receiver, which PHP reads
+/// after the value.
+#[test]
+fn a_null_safe_write_is_a_conditional_on_its_receiver() {
+    let lowered = Lowered::new(
+        "namespace App.Tenant;\n\nclass Report\n{\n    public string note { get; set; } = \"\";\n    public int total { get; set; } = 0;\n    public Report? parent { get; set; } = null;\n\n    public void run(Report? other)\n    {\n        other?.note = \"gift\";\n        this.next()?.total += 1;\n        other?.parent?.total++;\n    }\n\n    private Report? next() => null;\n}\n",
+    );
+
+    assert_eq!(
+        lowered.body(),
+        indoc! {r#"
+            STMT_LIST
+              CONDITIONAL [1]
+                BINARY_OP [16]
+                  ASSIGN
+                    VAR
+                      ZVAL "nullsafe#1"
+                    VAR
+                      ZVAL "other"
+                  ZVAL null
+                ZVAL null
+                ASSIGN
+                  PROP
+                    VAR
+                      ZVAL "nullsafe#1"
+                    ZVAL "note"
+                  ZVAL "gift"
+              CONDITIONAL [1]
+                BINARY_OP [16]
+                  ASSIGN
+                    VAR
+                      ZVAL "nullsafe#1"
+                    METHOD_CALL
+                      VAR
+                        ZVAL "this"
+                      ZVAL "next"
+                      ARG_LIST
+                  ZVAL null
+                ZVAL null
+                ASSIGN_OP [1]
+                  PROP
+                    VAR
+                      ZVAL "nullsafe#1"
+                    ZVAL "total"
+                  ZVAL 1
+              CONDITIONAL [1]
+                BINARY_OP [16]
+                  ASSIGN
+                    VAR
+                      ZVAL "nullsafe#1"
+                    NULLSAFE_PROP
+                      VAR
+                        ZVAL "other"
+                      ZVAL "parent"
+                  ZVAL null
+                ZVAL null
+                POST_INC
+                  PROP
+                    VAR
+                      ZVAL "nullsafe#1"
+                    ZVAL "total"
+        "#}
+    );
+}
+
+/// ```php
+/// (($nullsafe#1 = $other) === null ? null : $nullsafe#1->prices = \is_array($crossing#2 = <checked>(\Lib\Calc::prices()))
+///     ? new \Sharp\Map(…(string) $key#3…) : $crossing#2);
+/// ```
+///
+/// Spec section 14.4: a write through `?.` writes its value as a write through `.` does, so a plain PHP array written
+/// to a `Map` property becomes the `\Sharp\Map` first.
+#[test]
+fn a_null_safe_write_takes_its_value_as_a_write_through_a_dot() {
+    let lowered = Lowered::with(
+        "namespace App.Tenant;\n\nimport Lib.Calc;\n\nclass Report\n{\n    public Map<string, int> prices { get; set; } = [:];\n\n    public void run(Report? other)\n    {\n        other?.prices = Calc.prices();\n    }\n}\n",
+        &[(
+            "src/Lib/Calc.php",
+            "<?php namespace Lib;\nfinal class Calc { /** @return array<string, int> */ public static function prices(): array { return []; } }",
+        )],
+    );
+
+    assert_eq!(
+        lowered.body(),
+        indoc! {r#"
+            STMT_LIST
+              CONDITIONAL [1]
+                BINARY_OP [16]
+                  ASSIGN
+                    VAR
+                      ZVAL "nullsafe#1"
+                    VAR
+                      ZVAL "other"
+                  ZVAL null
+                ZVAL null
+                ASSIGN
+                  PROP
+                    VAR
+                      ZVAL "nullsafe#1"
+                    ZVAL "prices"
+                  CONDITIONAL
+                    CALL
+                      ZVAL "is_array"
+                      ARG_LIST
+                        ASSIGN
+                          VAR
+                            ZVAL "crossing#2"
+                          VERIFY_TYPE_ARGS
+                            STATIC_CALL
+                              ZVAL "Lib\\Calc"
+                              ZVAL "prices"
+                              ARG_LIST
+                            ZVAL "Map<string, int>"
+                            ZVAL "Lib\\Calc::prices()"
+                    NEW
+                      ZVAL "Sharp\\Map"
+                      ARG_LIST
+                        CALL
+                          ZVAL "array_merge"
+                          ARG_LIST
+                            ARRAY [3]
+                            UNPACK
+                              CALL
+                                ZVAL "array_map"
+                                ARG_LIST
+                                  ARROW_FUNC "" @11-11
+                                    PARAM_LIST
+                                      PARAM
+                                        null
+                                        ZVAL "key#3"
+                                        null
+                                        null
+                                        null
+                                        null
+                                      PARAM
+                                        null
+                                        ZVAL "value#4"
+                                        null
+                                        null
+                                        null
+                                        null
+                                    null
+                                    ARRAY [3]
+                                      ARRAY_ELEM
+                                        CAST [6]
+                                          VAR
+                                            ZVAL "key#3"
+                                        null
+                                      ARRAY_ELEM
+                                        VAR
+                                          ZVAL "value#4"
+                                        null
+                                    null
+                                    null
+                                  CALL
+                                    ZVAL "array_keys"
+                                    ARG_LIST
+                                      VAR
+                                        ZVAL "crossing#2"
+                                  VAR
+                                    ZVAL "crossing#2"
+                    VAR
+                      ZVAL "crossing#2"
+        "#}
+    );
+}
+
+/// ```php
+/// (($nullsafe#1 = $other) === null ? null : $nullsafe#1->stock->put('a', 1));
+/// ```
+///
+/// Spec section 14.4: a write into the `Map` a hooked property holds, through `?.`, puts the key as a write through
+/// `.` does, since PHP gives no reference to a hooked property.
+#[test]
+fn a_null_safe_write_into_a_hooked_map_puts_the_key() {
+    let lowered = Lowered::with(
+        "namespace App.Tenant;\n\nclass Report\n{\n    public Map<string, int> stock { get; set { field = value; } } = [:];\n\n    public void run(Report? other)\n    {\n        other?.stock[\"a\"] = 1;\n    }\n}\n",
+        &[],
+    );
+
+    assert_eq!(
+        lowered.body(),
+        indoc! {r#"
+            STMT_LIST
+              CONDITIONAL [1]
+                BINARY_OP [16]
+                  ASSIGN
+                    VAR
+                      ZVAL "nullsafe#1"
+                    VAR
+                      ZVAL "other"
+                  ZVAL null
+                ZVAL null
+                METHOD_CALL
+                  PROP
+                    VAR
+                      ZVAL "nullsafe#1"
+                    ZVAL "stock"
+                  ZVAL "put"
+                  ARG_LIST
+                    ZVAL "a"
+                    ZVAL 1
+        "#}
+    );
+}
+
+/// ```php
 /// $greeting = 'Hi ' . $name;
 /// $greeting .= '!';
 /// $half = \intdiv($count, 2);

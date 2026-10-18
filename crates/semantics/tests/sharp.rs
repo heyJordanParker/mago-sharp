@@ -2227,20 +2227,15 @@ fn null_safe_access_on_a_class_is_an_error_that_names_the_dot() {
     );
 }
 
+/// Spec section 14.4: a write through `?.` happens only when every `?.` receiver on its left is not null, in each
+/// write form.
 #[test]
-fn a_write_through_null_safe_access_is_not_supported() {
+fn a_write_through_null_safe_access_is_in_the_slice() {
     let code = leak(method(
-        "        this?.count = 1;\n        this?.count ??= 2;\n        this?.count++;\n        return 1;\n",
+        "        this?.count = 1;\n        this?.count += 2;\n        this?.count ??= 2;\n        this?.count++;\n        --this?.count;\n        this?.tags[\"vip\"] = true;\n        this?.owner.name = \"Ada\";\n        return 1;\n",
     ));
 
-    assert_eq!(
-        issues(code),
-        [
-            "7:9 This write target is not supported yet in PHP#.",
-            "8:9 This write target is not supported yet in PHP#.",
-            "9:9 This write target is not supported yet in PHP#.",
-        ]
-    );
+    assert_eq!(issues(code), Vec::<String>::new());
 }
 
 #[test]
