@@ -1914,6 +1914,11 @@ fn atomic_text(atomic: &TAtomic, codebase: &CodebaseMetadata, parameter: Paramet
         SharpType::Void => "void".to_owned(),
         SharpType::Object => "Object".to_owned(),
         SharpType::Enum(name) | SharpType::Class(name, []) => class_text(name, codebase),
+        // A generic class written without type arguments, as `Class<Box>` names it, gets the ones the analysis fills in
+        // from its bounds, and its text is the class alone, which takes the class with any type arguments.
+        SharpType::Class(name, arguments) if arguments.iter().all(TUnion::from_unspecified_template) => {
+            class_text(name, codebase)
+        }
         SharpType::Class(name, arguments) => format!("{}<{}>", class_text(name, codebase), list(&mut arguments.iter())),
         SharpType::List(element_type) => format!("List<{}>", type_text(element_type)),
         SharpType::Set(element_type) => format!("Set<{}>", type_text(element_type)),
