@@ -2617,14 +2617,14 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// A case is its name, its value or null, a null doc comment and its attributes, on the line of its name, as
-    /// php-src's grammar builds `case Active = "active";`. A value is a constant expression.
+    /// php-src's grammar builds `case Active = "active";`. A value is a constant's value.
     fn enum_case(&mut self, case: &EnumCase) -> u32 {
         let name = case.item.name();
         let line = self.line(name.span);
         let name = self.string(0, line, name.value);
         let value = match &case.item {
             EnumCaseItem::Unit(_) => NULL,
-            EnumCaseItem::Backed(item) => self.expression(item.value),
+            EnumCaseItem::Backed(item) => self.constant_value(item.value),
             EnumCaseItem::Data(_) => unreachable!("`data_enum` lowers an enum with a case that carries data"),
         };
         let attributes = self.attributes(&case.attribute_lists, None, None);
@@ -3345,10 +3345,17 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// A parameter's default, `value`. Spec section 9: it is any expression, which runs each time a call leaves the
-    /// argument out. PHP takes a constant expression as a default, so one that is not lowers to a static closure called
-    /// with no arguments, `(static function () { return \time(); })()`, which the engine runs as the default.
+    /// argument out, as [`Self::computed`] makes it.
     fn default_value(&mut self, value: &Expression) -> u32 {
         let (lowered, _) = self.lambda_body(|lowering| lowering.default_expression(value));
+
+        self.computed(value, lowered)
+    }
+
+    /// `lowered`, the lowered `value`, where PHP takes a constant expression: itself when it is one, and otherwise a
+    /// static closure called with no arguments, `(static function () { return \time(); })()`, which the engine runs
+    /// there each time it evaluates the expression.
+    fn computed(&mut self, value: &Expression, lowered: u32) -> u32 {
         if self.is_constant_expression(lowered) {
             return lowered;
         }
@@ -3370,44 +3377,50 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// Whether the lowered expression `node` is one PHP takes as a constant expression, as php-src's
-    /// `zend_is_allowed_in_const_expr` says, leaving out the closures and first-class callables a default never is,
-    /// and the property reads PHP takes only of an enum case where it evaluates the default, as `new Box(7)->size` is
-    /// not.
+    /// `zend_is_allowed_in_const_expr` says, leaving out the closures and first-class callables a default never is, and
+    /// an index read, which a method body runs, as `Billing.PLANS[5]` throws `OutOfRangeException` there, where PHP's
+    /// constant expression warns and gives null. PHP reads a property there only of an enum case, so only a property of
+    /// a class constant, `Plan::Free->value`, is one, where `new Box(7)->size` is not.
     fn is_constant_expression(&self, node: u32) -> bool {
         if node == NULL {
             return true;
         }
         let node = &self.nodes[node as usize];
-        let constant = matches!(
-            node.kind,
-            SHARP_AST_ZVAL
-                | SHARP_AST_BINARY_OP
-                | SHARP_AST_GREATER
-                | SHARP_AST_GREATER_EQUAL
-                | SHARP_AST_AND
-                | SHARP_AST_OR
-                | SHARP_AST_UNARY_OP
-                | SHARP_AST_UNARY_PLUS
-                | SHARP_AST_UNARY_MINUS
-                | SHARP_AST_CAST
-                | SHARP_AST_CONDITIONAL
-                | SHARP_AST_DIM
-                | SHARP_AST_ARRAY
-                | SHARP_AST_ARRAY_ELEM
-                | SHARP_AST_UNPACK
-                | SHARP_AST_CONST
-                | SHARP_AST_CLASS_CONST
-                | SHARP_AST_CLASS_NAME
-                | SHARP_AST_MAGIC_CONST
-                | SHARP_AST_COALESCE
-                | SHARP_AST_CONST_ENUM_INIT
-                | SHARP_AST_NEW
-                | SHARP_AST_ARG_LIST
-                | SHARP_AST_NAMED_ARG
-        );
+        let reads_case = node.kind == SHARP_AST_PROP
+            && self.nodes[self.children[node.first_child as usize] as usize].kind == SHARP_AST_CLASS_CONST;
+        let constant = reads_case
+            || matches!(
+                node.kind,
+                SHARP_AST_ZVAL
+                    | SHARP_AST_BINARY_OP
+                    | SHARP_AST_GREATER
+                    | SHARP_AST_GREATER_EQUAL
+                    | SHARP_AST_AND
+                    | SHARP_AST_OR
+                    | SHARP_AST_UNARY_OP
+                    | SHARP_AST_UNARY_PLUS
+                    | SHARP_AST_UNARY_MINUS
+                    | SHARP_AST_CAST
+                    | SHARP_AST_CONDITIONAL
+                    | SHARP_AST_ARRAY
+                    | SHARP_AST_ARRAY_ELEM
+                    | SHARP_AST_UNPACK
+                    | SHARP_AST_CONST
+                    | SHARP_AST_CLASS_CONST
+                    | SHARP_AST_CLASS_NAME
+                    | SHARP_AST_MAGIC_CONST
+                    | SHARP_AST_COALESCE
+                    | SHARP_AST_CONST_ENUM_INIT
+                    | SHARP_AST_NEW
+                    | SHARP_AST_ARG_LIST
+                    | SHARP_AST_NAMED_ARG
+            );
         let children = node.first_child as usize..(node.first_child + node.child_count) as usize;
 
-        constant && children.into_iter().all(|child| self.is_constant_expression(self.children[child]))
+        constant
+            && ensure_sufficient_stack(|| {
+                children.into_iter().all(|child| self.is_constant_expression(self.children[child]))
+            })
     }
 
     fn takes_php_array(&self, hint: &Hint) -> bool {
@@ -3556,7 +3569,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             Some(value)
                 if !property.initial_value_runs_in_constructor() && !property.initial_value_runs_after_class() =>
             {
-                self.default_expression(value)
+                let lowered = self.default_expression(value);
+
+                self.computed(value, lowered)
             }
             _ => NULL,
         };
@@ -7167,10 +7182,20 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.collection_new(line, b"Sharp\\Map", Some(keys_and_values))
     }
 
-    /// `value` where PHP evaluates a constant expression, a constant's value or an attribute's argument, which holds no
-    /// object, so a collection literal is the PHP array plain PHP receives for it, spec section 12: a `Map` literal is
-    /// `['variant' => 'success']`, a backed enum key `\App\Status::Paid->value`, and a `Set` literal a list.
+    /// `value` where PHP evaluates a constant expression: a constant's value, an enum case's value or an attribute's
+    /// argument. A value PHP takes there is its own lowered form, and any other runs as [`Self::computed`] makes it, as a
+    /// template does, which PHP builds while the code runs, and a plain case of an enum that runs as classes, which its
+    /// class's `instance()` gives.
     fn constant_value(&mut self, value: &Expression) -> u32 {
+        let lowered = self.constant_part(value);
+
+        self.computed(value, lowered)
+    }
+
+    /// A part of a constant's value, which holds no object, so a collection literal is the PHP array plain PHP receives
+    /// for it, spec section 12: a `Map` literal is `['variant' => 'success']`, a backed enum key
+    /// `\App\Status::Paid->value`, and a `Set` literal a list.
+    fn constant_part(&mut self, value: &Expression) -> u32 {
         let Expression::Array(array) = value.unparenthesized() else {
             return self.constant_expression(value);
         };
@@ -7185,12 +7210,12 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                         let backing = self.string(0, line, b"value");
                         key = self.node(SHARP_AST_PROP, 0, line, &[key, backing]);
                     }
-                    let value = self.constant_value(entry.value);
+                    let value = self.constant_part(entry.value);
 
                     self.node(SHARP_AST_ARRAY_ELEM, 0, line, &[value, key])
                 }
                 ArrayElement::Value(element) => {
-                    let value = self.constant_value(element.value);
+                    let value = self.constant_part(element.value);
 
                     self.node(SHARP_AST_ARRAY_ELEM, 0, line, &[value, NULL])
                 }

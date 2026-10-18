@@ -1406,8 +1406,11 @@ where
 
     let mut reported = false;
     for (value, operator) in compared {
+        // A lambda's own parameter, declared inside the value, is read where the lambda runs.
+        let value_span = value.span();
         let reads = value.filter_map(|node| match node {
             Node::Identifier(name) => match context.resolved_names.binding(*name) {
+                Some(Binding::Local(Local { declaration, .. })) if value_span.contains(&declaration.start) => None,
                 Some(Binding::Local(Local { kind: LocalKind::Parameter, .. })) => Some((*name, "a parameter")),
                 Some(Binding::Local(_)) => Some((*name, "a local")),
                 Some(Binding::This) => Some((*name, "the object the method runs on")),

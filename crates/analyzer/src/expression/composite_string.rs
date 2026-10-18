@@ -32,6 +32,7 @@ use crate::expression::binary::utils::display_operand;
 use crate::expression::is_refused_type;
 use crate::expression::unary::cast_type_to_string;
 use crate::utils::expression::get_block_expression_id;
+use crate::utils::quoted_source;
 
 impl<'ast, 'arena> Analyzable<'ast, 'arena> for CompositeString<'arena> {
     fn analyze<'ctx, A>(
@@ -111,7 +112,10 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for CompositeString<'arena> {
 
                 continue;
             }
-            if shows_its_text && check_to_string(context, part, &part_type) {
+            if shows_its_text
+                && (check_to_string(context, part, &part_type)
+                    || report_to_string_in_constant(context, block_context, part))
+            {
                 all_literals = false;
                 resulting_strings = None;
 
@@ -317,6 +321,38 @@ where
     }
 
     refused
+}
+
+/// Refuses `part` of a PHP# template in a constant value, a constant's, an enum case's, an attribute argument's or a
+/// pattern's, whose type declares `toString()`: the template calls it, and a constant's value is known before the code
+/// runs. A static field holds a value code computes, and a pattern's `when` compares with one.
+fn report_to_string_in_constant<A>(
+    context: &mut Context<'_, '_, A>,
+    block_context: &BlockContext<'_>,
+    part: &StringPart<'_>,
+) -> bool
+where
+    A: Arena,
+{
+    let span = part.span();
+    let instead = if context.patterns.iter().any(|(_, pattern)| pattern.span().contains(&span.start)) {
+        "compare with it in `when`."
+    } else if block_context.flags.inside_constant_expression() {
+        "use a static field."
+    } else {
+        return false;
+    };
+
+    context.collector.report_with_code(
+        IssueCode::InvalidOperand,
+        Issue::error(format!(
+            "A constant's value is known before the code runs, and `{}` runs `toString()`: {instead}",
+            quoted_source(context, span)
+        ))
+        .with_annotation(Annotation::primary(span).with_message("Its `toString()` runs here.")),
+    );
+
+    true
 }
 
 /// Refuses `part` of a PHP# template, whose type `part_type` the template does not show.

@@ -148,27 +148,6 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Access<'arena> {
                                 .codebase
                                 .class_constant_exists(context.resolved_names.get(&class_name.name), name.value)) =>
                 {
-                    // Spec section 20: a plain case of an enum whose cases carry data is the one object its class
-                    // makes on the first read, which PHP's constant expressions cannot read.
-                    let class_name = context.resolved_names.get(&class_name.name);
-                    if block_context.flags.inside_constant_expression()
-                        && context
-                            .codebase
-                            .get_class_like(&[class_name, b"\\", name.value].concat())
-                            .is_some_and(|case| case.flags.is_enum_case_class())
-                    {
-                        context.collector.report_with_code(
-                            IssueCode::NotSupportedYet,
-                            Issue::error(format!(
-                                "Reading a case of an enum whose cases carry data, as `{}.{}`, in a constant expression is not supported yet in PHP#.",
-                                BytesDisplay(class_name.rsplit(|&byte| byte == b'\\').next().unwrap_or_default()),
-                                BytesDisplay(name.value),
-                            ))
-                            .with_annotation(Annotation::primary(span).with_message("Read here."))
-                            .with_note("A case of such an enum is an object, made when the code first reads it."),
-                        );
-                    }
-
                     class_constant_access::analyze_class_constant_access(
                         context,
                         block_context,
