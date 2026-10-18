@@ -57,8 +57,8 @@ where
     /// The type is parsed once, and the name after it decides: a name followed by `(`, or by `<` and its type
     /// parameters, makes a method, anything else a field. A type has no length limit, so no fixed lookahead can decide
     /// before it. A PHP property, which starts with `var` or a `$` variable, still parses so the rest of the class does,
-    /// and its PHP syntax is an error. So do `required` on a method or an operator, which is one "not supported yet"
-    /// error, and a type declared inside the class-like. `required` goes on the constructor, spec section 25, and on a
+    /// and its PHP syntax is an error. So do `required` on a method or an operator, which is one error, and a type
+    /// declared inside the class-like. `required` goes on the constructor, spec section 25, and on a
     /// property, section 6.1. A class name, a `.` and a name followed by `(` is a named constructor. `class` followed
     /// by `<` is the type `Class<Order>`, since a declared class names itself first. `extension(…)` with no attribute
     /// or modifier before it is an extension, spec section 26.
@@ -248,7 +248,7 @@ where
     /// Refuses `required` on a member that is neither the constructor nor a property.
     fn refuse_required(&mut self, modifiers: &Sequence<'arena, Modifier<'arena>>) {
         if let Some(required) = modifiers.iter().find(|modifier| matches!(modifier, Modifier::Required(_))) {
-            self.errors.push(ParseError::NotSupportedYetInSharp("`required`", required.span()));
+            self.errors.push(ParseError::RequiredMethodInSharp(required.span()));
         }
     }
 
