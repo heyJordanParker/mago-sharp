@@ -3009,7 +3009,7 @@ fn a_php_closure_or_arrow_function_is_php_syntax_that_names_the_lambda() {
         };
         assert_eq!(
             Issue::from(error).message,
-            "PHP# writes a lambda as a bare arrow without `fn` or `function`, as in `x => x.id` or `(a, b) => { … }`",
+            format!("PHP# has no `{start}`: write the lambda as `(x) => x * 2`."),
             "{lambda}"
         );
         assert_eq!(source(code, error), start, "{lambda}");
@@ -3340,7 +3340,7 @@ fn a_php_closure_reports_its_function_and_its_use_clause() {
     assert_eq!(
         messages,
         [
-            "PHP# writes a lambda as a bare arrow without `fn` or `function`, as in `x => x.id` or `(a, b) => { … }`",
+            "PHP# has no `function`: write the lambda as `(x) => x * 2`.",
             "PHP# has no `use`: import a class with `import`.",
         ]
     );

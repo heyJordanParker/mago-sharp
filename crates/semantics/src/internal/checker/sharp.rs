@@ -5332,11 +5332,7 @@ const REMOVED_CONSTRUCTS: [(&[u8], &str, &str); 9] = [
         "A PHP# local never becomes undefined.",
     ),
     (b"array", "write a list literal, as in `[1, 2]`.", "PHP# writes a list or a map literal in square brackets."),
-    (
-        b"list",
-        "read each element into its own local, as in `const first = pair[0];`.",
-        "PHP# reads a list's elements by index.",
-    ),
+    (b"list", "write `const [a, b] = …`.", "A tuple unpacks into new locals, and `items[0]` reads a list's element."),
 ];
 
 /// Reports the PHP construct `word` starts, when spec sections 2, 8 and 29 remove it.
@@ -6438,12 +6434,18 @@ pub fn check_function_call(function_call: &FunctionCall, context: &mut Context<'
     }
 
     if is_compact_or_extract(function) {
-        let function = BytesDisplay(function);
+        let instead = if function.eq_ignore_ascii_case(b"compact") {
+            "build the Map, as in `[\"name\": name]`."
+        } else {
+            "read each value from the Map by its key, as in `map.get(\"name\")`."
+        };
 
-        context.report(
-            Issue::error(format!("`{function}()` is not part of PHP#."))
-                .with_annotation(Annotation::primary(function_call.span()).with_message("Called here."))
-                .with_help("PHP# variables are never created or read by name at runtime."),
+        report_removed(
+            function_call.span(),
+            format!("{}()", BytesDisplay(function)).as_bytes(),
+            instead,
+            "A PHP# local is never created or read by its name.",
+            context,
         );
     } else if function.eq_ignore_ascii_case(b"assert")
         && let [Argument::Positional(argument)] = function_call.argument_list.arguments.as_slice()
@@ -6480,10 +6482,12 @@ pub fn check_global(global: &Global, context: &mut Context<'_, '_, '_>) {
         return;
     }
 
-    context.report(
-        Issue::error("`global` is not part of PHP#.")
-            .with_annotation(Annotation::primary(global.global.span).with_message("Used here."))
-            .with_help("Pass the value in as a parameter instead."),
+    report_removed(
+        global.global.span,
+        b"global",
+        "pass the value in as a parameter.",
+        "A method reads its parameters, its locals and its class's members.",
+        context,
     );
 }
 

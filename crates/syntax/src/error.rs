@@ -79,8 +79,8 @@ pub enum ParseError {
     TraitUseInSharp(Box<str>, Span),
     /// An escape JavaScript refuses in a PHP# template, such as `\1` or `\x4`, at its backslash and next character.
     InvalidTemplateEscapeInSharp(Span),
-    /// A PHP `fn` arrow function or `function` closure written in a PHP# file, at its keyword.
-    PhpLambdaInSharp(Span),
+    /// A PHP `fn` arrow function or `function` closure written in a PHP# file, with its keyword, at the keyword.
+    PhpLambdaInSharp(&'static str, Span),
     /// A PHP# lambda written right after an operator, such as `handler ?? item => item.ready`, at its parameters and
     /// arrow. A lambda binds as loosely as assignment, as in C#, so it needs parentheses there.
     LambdaAfterOperatorInSharp(Span),
@@ -173,7 +173,7 @@ impl HasFileId for ParseError {
             | ParseError::RequiredMethodInSharp(span)
             | ParseError::TraitUseInSharp(_, span)
             | ParseError::InvalidTemplateEscapeInSharp(span)
-            | ParseError::PhpLambdaInSharp(span)
+            | ParseError::PhpLambdaInSharp(_, span)
             | ParseError::LambdaAfterOperatorInSharp(span)
             | ParseError::ConditionalInGuardInSharp(span)
             | ParseError::UndeclarableOperatorInSharp(_, span)
@@ -230,7 +230,7 @@ impl HasSpan for ParseError {
             | ParseError::RequiredMethodInSharp(span)
             | ParseError::TraitUseInSharp(_, span)
             | ParseError::InvalidTemplateEscapeInSharp(span)
-            | ParseError::PhpLambdaInSharp(span)
+            | ParseError::PhpLambdaInSharp(_, span)
             | ParseError::LambdaAfterOperatorInSharp(span)
             | ParseError::ConditionalInGuardInSharp(span)
             | ParseError::UndeclarableOperatorInSharp(_, span)
@@ -369,9 +369,8 @@ impl std::fmt::Display for ParseError {
             ParseError::InvalidTemplateEscapeInSharp(_) => {
                 "A template takes JavaScript's escapes, as in `\\n`, `\\x41` or `\\u{1F600}`.".to_string()
             }
-            ParseError::PhpLambdaInSharp(_) => {
-                "PHP# writes a lambda as a bare arrow without `fn` or `function`, as in `x => x.id` or `(a, b) => { … }`"
-                    .to_string()
+            ParseError::PhpLambdaInSharp(keyword, _) => {
+                format!("PHP# has no `{keyword}`: write the lambda as `(x) => x * 2`.")
             }
             ParseError::LambdaAfterOperatorInSharp(_) => {
                 "A lambda after an operator needs parentheses, as in `handler ?? (item => item.ready)`.".to_string()

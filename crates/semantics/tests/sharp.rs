@@ -1251,9 +1251,9 @@ fn compact_extract_and_global_are_errors() {
     assert_eq!(
         issues(code),
         [
-            "7:9 `compact()` is not part of PHP#.",
-            "8:9 `extract()` is not part of PHP#.",
-            "9:9 `global` is not part of PHP#.",
+            "7:9 PHP# has no `compact()`: build the Map, as in `[\"name\": name]`.",
+            "8:9 PHP# has no `extract()`: read each value from the Map by its key, as in `map.get(\"name\")`.",
+            "9:9 PHP# has no `global`: pass the value in as a parameter.",
         ]
     );
 }
@@ -1295,7 +1295,7 @@ fn isset_empty_unset_array_and_list_written_as_calls_name_the_php_sharp_form() {
             "8:23 PHP# has no `empty`: compare the value itself, as in `items.count() == 0`.",
             "9:9 PHP# has no `unset`: a local ends at the `}` that closes its block, and `map.remove(key)` removes a Map's entry.",
             "10:23 PHP# has no `array`: write a list literal, as in `[1, 2]`.",
-            "11:9 PHP# has no `list`: read each element into its own local, as in `const first = pair[0];`.",
+            "11:9 PHP# has no `list`: write `const [a, b] = …`.",
         ]
     );
     assert_eq!(issues(local), Vec::<String>::new());

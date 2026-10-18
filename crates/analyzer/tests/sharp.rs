@@ -6481,8 +6481,8 @@ fn an_expression_the_parser_refuses_reports_only_its_parse_error() {
             "11:25 parse PHP# has no `->`: write member access with `.`.",
             "12:25 parse PHP# has no `::`: write static access with `.`.",
             "13:25 parse PHP# has no `?->`: write null-safe member access with `?.`.",
-            "14:20 parse PHP# writes a lambda as a bare arrow without `fn` or `function`, as in `x => x.id` or `(a, b) => { … }`",
-            "15:20 parse PHP# writes a lambda as a bare arrow without `fn` or `function`, as in `x => x.id` or `(a, b) => { … }`",
+            "14:20 parse PHP# has no `fn`: write the lambda as `(x) => x * 2`.",
+            "15:20 parse PHP# has no `function`: write the lambda as `(x) => x * 2`.",
             "16:25 parse PHP# writes a `Map` entry as `key: value`: `=>` is the lambda arrow",
             "17:53 parse A `? :` in a `when` condition needs parentheses, as in `when (strict ? forced : ready) =>`.",
             "18:26 parse PHP# has no `->`: write member access with `.`.",
@@ -7892,10 +7892,16 @@ fn a_member_read_through_a_full_name_names_the_import_to_add() {
 
 /// What the checker's refusals of PHP forms name compiles: a `private static` field for a `static` local, `{ get; set; }`
 /// for `public(set)`, the constructor for `__construct`, `toString` for `__toString`, `with` for `__clone`, the base
-/// class for `parent`, and a tuple unpacked into `const [a, b]` for `[a, b] = …`.
+/// class for `parent`, a tuple unpacked into `const [a, b]` for `[a, b] = …` and `list()`, a lambda as `(x) => x * 2`
+/// for `fn` and `function`, a Map built and read by its key for `compact()` and `extract()`, and a class marked
+/// `[Attribute]` for a class attached as an attribute.
 #[test]
 fn the_form_a_php_form_refusal_names_compiles() {
     const BASE: &str = "namespace Demo;\n\npublic class Base\n{\n}\n";
+    const FIELD: &str = "namespace Demo;\n\nimport Attribute;\n\n[Attribute]\npublic class Field\n{\n}\n";
+    let named = "namespace Demo;\n\n[Field]\npublic class Named\n{\n    public int run(string name)\n    {\n        Function<int(int)> twice = (x) => x * 2;\n        Map<string, string> values = [\"name\": name];\n        return twice(values.get(\"name\") == name ? 1 : 0);\n    }\n}\n";
+
+    assert_eq!(issues(("src/Demo/Named.sharp", named), &[("src/Demo/Field.sharp", FIELD)]), Vec::<String>::new());
     let written = "namespace Demo;\n\npublic class Written : Base\n{\n    private static int calls = 0;\n\n    public int views { get; set; } = 0;\n\n    public Written()\n    {\n    }\n\n    public int run(int extra)\n    {\n        Written.calls++;\n        const [a, b] = this.pair();\n        return extra + a + b;\n    }\n\n    public string toString() => \"written\";\n\n    public Base base() => this;\n\n    public Written copy() => this with { views: 1 };\n\n    private [int, int] pair() => [1, 2];\n}\n";
 
     assert_eq!(issues(("src/Demo/Written.sharp", written), &[("src/Demo/Base.sharp", BASE)]), Vec::<String>::new());
@@ -16398,6 +16404,38 @@ fn a_misplaced_or_repeated_attribute_is_named_as_sharp_writes_it() {
         [
             "5:2 invalid-attribute-target Attribute `Field` cannot be used on a class, interface, enum, or trait. | This attribute is not allowed here | `Field` defined here | The definition of `Field` restricts its use to the following targets: properties. | Remove the `[Field]` attribute from this location, or update the `#[Attribute]` declaration on the `Field` class to include `a class, interface, enum, or trait` as a valid target.",
             "9:6 attribute-not-repeatable Attribute `Field` is not declared as repeatable and has already been used. | Duplicate use of non-repeatable attribute `Field` | Attribute `Field` was first used here | The attribute `Field` is not declared repeatable, so it applies once to a given target. | Remove this duplicate `Field` attribute, or declare the attribute class `Field` repeatable.",
+        ]
+    );
+}
+
+/// A class attached as an attribute that is no attribute class is named as PHP# writes it. A PHP# class is marked
+/// `[Attribute]`, and a plain PHP class is its library's to mark, so PHP# attaches another. The PHP twin keeps
+/// upstream's wording.
+#[test]
+fn a_class_that_is_no_attribute_class_names_what_to_attach() {
+    let field = "namespace Demo;\n\npublic class Field\n{\n}\n";
+    let stamp = "<?php\n\nnamespace Lib;\n\nfinal class Stamp\n{\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Stamp;\n\n[Field]\npublic class Report\n{\n    [Stamp]\n    private int count = 0;\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\n#[\\Lib\\Stamp]\nclass Report\n{\n}\n";
+
+    let attribute_issues = |analyzed| -> Vec<String> {
+        worded(analyzed, &[("src/Demo/Field.sharp", field), ("src/Lib/Stamp.php", stamp)])
+            .into_iter()
+            .filter(|line| line.contains(" class-not-marked-as-attribute"))
+            .collect()
+    };
+
+    assert_eq!(
+        attribute_issues(("src/Demo/Report.sharp", sharp)),
+        [
+            "5:2 class-not-marked-as-attribute `Field` is no attribute class: mark it `[Attribute]`. | Attached here. | `Field` is declared here.",
+            "8:6 class-not-marked-as-attribute `Stamp` is no attribute class: attach an attribute class instead. | Attached here. | `Stamp` is declared here.",
+        ]
+    );
+    assert_eq!(
+        attribute_issues(("src/Demo/Report.php", php)),
+        [
+            "5:3 class-not-marked-as-attribute Class `Lib\\Stamp` is used as an attribute but is not declared with `#[Attribute]`. | `Lib\\Stamp` used as an attribute here | Class `Lib\\Stamp` defined here needs an `#[Attribute]` declaration | To be used as a PHP attribute, a class must itself be decorated with the `#[\\Attribute]` system attribute. | Add `#[\\Attribute]` to the definition of class `Lib\\Stamp` to declare it as an attribute, or use a different class that is a valid attribute.",
         ]
     );
 }
