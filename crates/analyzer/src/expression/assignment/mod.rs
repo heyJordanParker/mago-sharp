@@ -625,9 +625,8 @@ where
                 source_expression,
                 property_write_kind,
             )?;
-            if let Some(object_type) = artifacts.get_expression_type(access.object).cloned() {
-                check_redundant_nullsafe(context, access.question_mark_arrow, access.object, &object_type, false);
-            }
+            let object_type = artifacts.get_expression_type(access.object).cloned().unwrap_or_else(get_mixed);
+            check_redundant_nullsafe(context, access.question_mark_arrow, access.object, &object_type, false);
         }
         Expression::Access(Access::StaticProperty(property_access)) => static_property_assignment::analyze(
             context,
