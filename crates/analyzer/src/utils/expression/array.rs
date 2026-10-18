@@ -40,7 +40,6 @@ use mago_codex::ttype::get_undefined_null;
 use mago_codex::ttype::union::TUnion;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
-use mago_reporting::Level;
 use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::ArrayAccess;
@@ -65,7 +64,8 @@ pub enum ArrayTarget<'ast, 'arena> {
 }
 
 /// Reports an index on `array_like_type`, the type of the collection at `access_array_span`, which is `null` or may be.
-/// A PHP# index on null throws, so one that may be null is an error, as a member access on a value that may be null is.
+/// A PHP# index on null throws, so one that may be null is an error, as a member access on a value that may be null is,
+/// and it names the collection as the file writes it.
 pub(crate) fn report_null_array_access<A>(
     context: &mut Context<'_, '_, A>,
     array_like_type: &TUnion,
@@ -73,19 +73,33 @@ pub(crate) fn report_null_array_access<A>(
 ) where
     A: Arena,
 {
-    if array_like_type.is_nullable() {
-        let mut issue = Issue::warning("Cannot perform array access on possibly `null` value.")
-            .with_annotation(Annotation::primary(access_array_span).with_message("The expression might be `null` here."))
-            .with_note("Attempting to read an array index on `null` will result in a runtime error.")
-            .with_help(if context.dialect.is_sharp() {
-                "Ensure the value is not `null` before reading an index, as in `if (value != null)`."
-            } else {
-                "Ensure the variable holds an array before accessing it, possibly by checking with `is_array()` or initializing it."
-            });
-        if context.dialect.is_sharp() {
-            issue.level = Level::Error;
-        }
-        context.collector.report_with_code(IssueCode::PossiblyNullArrayAccess, issue);
+    let may_be_null = array_like_type.is_nullable();
+    if context.dialect.is_sharp() {
+        let collection = quoted_source(context, access_array_span);
+        let (code, title, annotation) = if may_be_null {
+            (
+                IssueCode::PossiblyNullArrayAccess,
+                format!("`{collection}` may be null, so it has no index."),
+                "This may be null here.",
+            )
+        } else {
+            (IssueCode::NullArrayAccess, format!("`{collection}` is null, so it has no index."), "This is null here.")
+        };
+        context.collector.report_with_code(
+            code,
+            Issue::error(title)
+                .with_annotation(Annotation::primary(access_array_span).with_message(annotation))
+                .with_note("An index on `null` throws.")
+                .with_help("Ensure the value is not `null` before reading an index, as in `if (value != null)`."),
+        );
+    } else if may_be_null {
+        context.collector.report_with_code(
+            IssueCode::PossiblyNullArrayAccess,
+            Issue::warning("Cannot perform array access on possibly `null` value.")
+                .with_annotation(Annotation::primary(access_array_span).with_message("The expression might be `null` here."))
+                .with_note("Attempting to read an array index on `null` will result in a runtime error.")
+                .with_help("Ensure the variable holds an array before accessing it, possibly by checking with `is_array()` or initializing it."),
+        );
     } else {
         context.collector.report_with_code(
             IssueCode::NullArrayAccess,

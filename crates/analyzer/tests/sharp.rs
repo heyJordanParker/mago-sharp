@@ -17258,7 +17258,27 @@ fn an_index_read_message_names_its_type_and_null_check_as_sharp_writes_them() {
         refused(("src/Demo/Order.sharp", sharp)),
         [
             "5:34 invalid-array-access Cannot access array index on object `Order` that does not implement `ArrayAccess`. | Object does not implement `ArrayAccess`. | Only objects implementing `ArrayAccess` can be accessed like arrays. | Ensure the object implements `ArrayAccess` before attempting to access it as an array.",
-            "5:34 possibly-null-array-access Cannot perform array access on possibly `null` value. | The expression might be `null` here. | Attempting to read an array index on `null` will result in a runtime error. | Ensure the value is not `null` before reading an index, as in `if (value != null)`.",
+            "5:34 possibly-null-array-access `o` may be null, so it has no index. | This may be null here. | An index on `null` throws. | Ensure the value is not `null` before reading an index, as in `if (value != null)`.",
+        ]
+    );
+}
+
+/// Spec section 14.4: an index into a collection that is null or may be null, read or written, is an error that names
+/// the collection as the file writes it.
+#[test]
+fn an_index_on_null_names_the_collection_as_sharp_writes_it() {
+    let sharp = "namespace Demo;\n\nclass Order\n{\n    public int? first(List<int>? items) => items[0];\n\n    public void fill(Map<string, int>? tags)\n    {\n        tags[\"k\"] = 1;\n    }\n\n    public int? none(List<int>? empty)\n    {\n        if (empty == null) {\n            return empty[0];\n        }\n        return 0;\n    }\n}\n";
+    let refused = worded(("src/Demo/Order.sharp", sharp), &[])
+        .into_iter()
+        .filter(|line| line.contains("null-array-access "))
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        refused,
+        [
+            "5:44 possibly-null-array-access `items` may be null, so it has no index. | This may be null here. | An index on `null` throws. | Ensure the value is not `null` before reading an index, as in `if (value != null)`.",
+            "9:9 possibly-null-array-access `tags` may be null, so it has no index. | This may be null here. | An index on `null` throws. | Ensure the value is not `null` before reading an index, as in `if (value != null)`.",
+            "15:20 null-array-access `empty` is null, so it has no index. | This is null here. | An index on `null` throws. | Ensure the value is not `null` before reading an index, as in `if (value != null)`.",
         ]
     );
 }
