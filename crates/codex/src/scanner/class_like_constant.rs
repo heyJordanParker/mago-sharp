@@ -1,12 +1,21 @@
 use mago_allocator::Arena;
+use mago_names::ResolvedNames;
 use mago_names::scope::NamespaceScope;
 use mago_phpdoc_syntax::cst::TagValue;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_span::HasSpan;
+use mago_syntax::cst::ArrowFunction;
 use mago_syntax::cst::ClassLikeConstant;
+use mago_syntax::cst::ClassLikeMemberSelector;
+use mago_syntax::cst::Closure;
+use mago_syntax::cst::Expression;
 use mago_syntax::cst::ModifierSequenceExt;
+use mago_syntax::cst::PropertyAccess;
+use mago_syntax::walker::MutWalker;
+use mago_syntax::walker::walk_expression_mut;
 use mago_word::Word;
+use mago_word::ascii_lowercase_word;
 use mago_word::word;
 
 use crate::issue::ScanningIssueKind;
@@ -86,6 +95,9 @@ where
 
             meta.attributes.clone_from(&attributes);
             meta.inferred_type = infer(context, scope, item.value, classname).map(TUnion::get_single_owned);
+            if context.program.dialect.is_sharp() {
+                meta.read_constants = read_constants(context.resolved_names, item.value);
+            }
 
             if let Some(TAtomic::Reference(TReference::Member {
                 class_like_name,
@@ -136,4 +148,34 @@ where
             meta
         })
         .collect()
+}
+
+/// The class constants and enum cases a PHP# constant value reads, as `Billing.TRIAL_DAYS` and `Code.A` in
+/// `Code.A.value`, each as its class's lowercase name and its own name. A lambda in the value reads them only when it
+/// is called, so its reads are left out.
+pub(super) fn read_constants<'arena>(names: &ResolvedNames<'arena>, value: &Expression<'arena>) -> Vec<(Word, Word)> {
+    let mut reads = ConstantReads { names, reads: Vec::new() };
+    walk_expression_mut(&mut reads, value, &mut ());
+
+    reads.reads
+}
+
+/// Finds the reads [`read_constants`] gives.
+struct ConstantReads<'names, 'arena> {
+    names: &'names ResolvedNames<'arena>,
+    reads: Vec<(Word, Word)>,
+}
+
+impl<'ast, 'arena> MutWalker<'ast, 'arena, ()> for ConstantReads<'_, 'arena> {
+    fn walk_in_property_access(&mut self, access: &'ast PropertyAccess<'arena>, _context: &mut ()) {
+        if let (Some(class), ClassLikeMemberSelector::Identifier(name)) =
+            (self.names.static_property_class(access), &access.property)
+        {
+            self.reads.push((ascii_lowercase_word(self.names.get(&class.name)), word(name.value)));
+        }
+    }
+
+    fn walk_closure(&mut self, _closure: &'ast Closure<'arena>, _context: &mut ()) {}
+
+    fn walk_arrow_function(&mut self, _arrow_function: &'ast ArrowFunction<'arena>, _context: &mut ()) {}
 }

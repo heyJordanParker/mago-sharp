@@ -10224,6 +10224,55 @@ fn a_parameter_default_that_is_no_constant_expression_runs_in_a_static_closure()
     assert_eq!(member_in(&lowered, "Report", &[1, 0, 1, 2]), "BINARY_OP [1]\n  ZVAL 1\n  ZVAL 2\n");
 }
 
+/// Spec section 2: a constant's value is built from constants. One PHP takes as a constant expression stays as written,
+/// and a template, which PHP builds while the code runs, runs in the static closure a computed parameter default runs
+/// in, which the engine runs when it first reads the constant.
+///
+/// ```php
+/// public const int GRACE = \Report::DAYS > 7 ? 3 : 1;
+/// public const string LABEL = (static function () { return "Trial: {\Report::DAYS} days"; })();
+/// ```
+#[test]
+fn a_constant_value_that_is_no_constant_expression_runs_in_a_static_closure() {
+    let lowered = [Lowered::new(
+        "class Report\n{\n    public const int DAYS = 14;\n    public const int GRACE = Report.DAYS > 7 ? 3 : 1;\n    public const string LABEL = `Trial: ${Report.DAYS} days`;\n}\n",
+    )];
+
+    assert_eq!(
+        member_in(&lowered, "Report", &[1, 0, 0, 1]),
+        indoc! {r#"
+            CONDITIONAL
+              GREATER
+                CLASS_CONST
+                  ZVAL "Report"
+                  ZVAL "DAYS"
+                ZVAL 7
+              ZVAL 3
+              ZVAL 1
+        "#}
+    );
+    assert_eq!(
+        member_in(&lowered, "Report", &[2, 0, 0, 1]),
+        indoc! {r#"
+            CALL
+              CLOSURE [16] "" @5-5
+                PARAM_LIST
+                null
+                STMT_LIST
+                  RETURN
+                    ENCAPS_LIST
+                      ZVAL "Trial: "
+                      CLASS_CONST
+                        ZVAL "Report"
+                        ZVAL "DAYS"
+                      ZVAL " days"
+                null
+                null
+              ARG_LIST
+        "#}
+    );
+}
+
 /// ```php
 /// public function run(): void
 /// {

@@ -1771,6 +1771,134 @@ fn a_constant_read_from_a_plain_php_constant_has_its_type() {
     assert_eq!(issues(("src/App/Limits.sharp", code), &[]), Vec::<String>::new());
 }
 
+/// Spec section 2: a lambda constant reads as the function type it declares, so its call gives the type that function
+/// returns, and a plain case of an enum whose other cases carry data is a constant's value, as any case is.
+#[test]
+fn a_lambda_constant_has_its_function_type_and_a_constant_holds_a_plain_case_of_a_data_enum() {
+    let code = "namespace App;\n\npublic enum Tier\n{\n    case Free;\n    case Seats(int count);\n}\n\npublic class Billing\n{\n    public const Function<int(int)> DOUBLE = (int x) => x * 2;\n    public const Tier DEFAULT_TIER = Tier.Free;\n\n    public static int doubled(int value) => (Billing.DOUBLE)(value);\n\n    public static string wrong() => (Billing.DOUBLE)(\"x\");\n\n    public static bool free() => Billing.DEFAULT_TIER == Tier.Free;\n}\n";
+
+    assert_eq!(
+        issues(("src/App/Billing.sharp", code), &[]),
+        ["16:54 invalid-argument", "16:37 invalid-return-statement"]
+    );
+}
+
+/// Spec section 2: a constant's value is known before the code runs, so a constant whose value reads its way back to
+/// it, through constants of its class or of another, is an error that names the constants on the way. A lambda reads
+/// a constant only when it is called.
+#[test]
+fn a_constant_whose_value_reads_back_to_it_is_an_error_that_names_the_cycle() {
+    let code = "namespace App;\n\npublic class Loop\n{\n    public const string A = `a${Loop.B}`;\n    public const string B = `b${Loop.A}`;\n    public const int C = Loop.D + 1;\n    public const int D = Loop.C + 1;\n    public const int E = Loop.E + 1;\n    public const int F = Other.G * 2;\n    public const int TOP = Loop.F + Loop.H;\n    public const int H = 1;\n    public const Function<int()> LATER = () => Loop.LATER_VALUE;\n    public const int LATER_VALUE = (Loop.LATER)();\n    public const int P = Loop.Q;\n    public const int Q = Loop.R;\n    public const int R = Loop.P;\n}\n";
+    let other = "namespace App;\n\npublic class Other\n{\n    public const int G = Loop.F + 1;\n}\n";
+
+    assert_eq!(
+        messages(("src/App/Loop.sharp", code), &[("src/App/Other.sharp", other)]),
+        [
+            "`Loop.A` refers back to itself through `Loop.B`.",
+            "`Loop.B` refers back to itself through `Loop.A`.",
+            "`Loop.C` refers back to itself through `Loop.D`.",
+            "`Loop.D` refers back to itself through `Loop.C`.",
+            "`Loop.E` refers back to itself.",
+            "`Loop.F` refers back to itself through `Other.G`.",
+            "`Loop.P` refers back to itself through `Loop.Q` and `Loop.R`.",
+            "`Loop.Q` refers back to itself through `Loop.R` and `Loop.P`.",
+            "`Loop.R` refers back to itself through `Loop.P` and `Loop.Q`.",
+        ]
+    );
+}
+
+/// Spec section 2: a backed case's value is a constant value too, and reading the case reads its value, so a case
+/// whose value reads its way back to it through a constant, or a constant that reads its way back through a case, is
+/// the same error that names the reads on the way.
+#[test]
+fn a_backed_case_whose_value_reads_back_to_it_is_an_error_that_names_the_cycle() {
+    let code = "namespace App;\n\npublic enum Code : string\n{\n    case A = `a-${Keys.KEY}`;\n    case B = Code.SELF_KEY;\n    case C = \"c\";\n\n    public const string SELF_KEY = Code.B.value;\n    public const string C_KEY = Code.C.value;\n}\n";
+    let keys = "namespace App;\n\npublic class Keys\n{\n    public const string KEY = Code.A.value;\n}\n";
+
+    assert_eq!(
+        messages(("src/App/Code.sharp", code), &[("src/App/Keys.sharp", keys)]),
+        [
+            "`Code.A` refers back to itself through `Keys.KEY`.",
+            "`Code.B` refers back to itself through `Code.SELF_KEY`.",
+            "`Code.SELF_KEY` refers back to itself through `Code.B`.",
+        ]
+    );
+    assert_eq!(
+        messages(("src/App/Keys.sharp", keys), &[("src/App/Code.sharp", code)]),
+        ["`Keys.KEY` refers back to itself through `Code.A`."]
+    );
+}
+
+/// Spec section 19: a function has no `==`, so a pattern compares no function, whether it names a function constant,
+/// as `is Ops.DOUBLE` and a `match` arm `Ops.DOUBLE`, or writes a lambda, with a parameter or without, and whatever the
+/// value it tests, an unchecked `Any?` included. Each is the error `is == Ops.DOUBLE` gives.
+#[test]
+fn a_pattern_that_compares_a_function_is_an_error_as_its_equality_is() {
+    let code = "namespace App;\n\npublic class Ops\n{\n    public const Function<int(int)> DOUBLE = (int x) => x * 2;\n\n    public static bool named(Function<int(int)> f) => f is Ops.DOUBLE;\n\n    public static bool compared(Function<int(int)> f) => f is == Ops.DOUBLE;\n\n    public static string arm(Function<int(int)> f) => match (f) {\n        Ops.DOUBLE => \"double\",\n        default => \"other\",\n    };\n\n    public static string withParameter(Function<int(int)> f) => match (f) {\n        == ((int x) => x) => \"same\",\n        default => \"other\",\n    };\n\n    public static string unchecked(Any? f) => match (f) {\n        == (() => 1) => \"one\",\n        default => \"other\",\n    };\n\n    public static bool none(Function<int(int)>? f) => f is null;\n}\n";
+    let refusal = |function: &str, other: &str| {
+        format!("`==` cannot compare `{function}` with `{other}`: `{other}` declares no `operator ==`.")
+    };
+
+    assert_eq!(
+        messages(("src/App/Ops.sharp", code), &[]),
+        [
+            refusal("Function<int(int)>", "Function<int(int)>"),
+            refusal("Function<int(int)>", "Function<int(int)>"),
+            refusal("Function<int(int)>", "Function<int(int)>"),
+            refusal("Function<int(int)>", "Function<int(int)>"),
+            refusal("Any?", "Function<1()>"),
+        ]
+    );
+}
+
+/// Spec section 2: a constant's value is known before the code runs, so an index outside the list a constant holds is
+/// an error that names the index and the list's size, in a constant's value, a template of one and a pattern's value. A
+/// method body's index runs, and throws `OutOfRangeException` when it misses.
+#[test]
+fn an_index_outside_a_constant_list_in_a_constant_value_is_an_error_that_names_the_size() {
+    let code = "namespace App;\n\npublic class Billing\n{\n    public const List<string> PLANS = [\"free\", \"pro\"];\n    public const string SECOND = Billing.PLANS[1];\n    public const string MISSING = Billing.PLANS[5];\n    public const string MISSING_IN_TEMPLATE = `${Billing.PLANS[2]}`;\n    public const List<string> NONE = [];\n    public const string NONE_FIRST = Billing.NONE[0];\n\n    public static bool first(string plan) => plan is == Billing.PLANS[3];\n\n    public static string body() => Billing.PLANS[5];\n}\n";
+
+    assert_eq!(
+        messages(("src/App/Billing.sharp", code), &[]),
+        [
+            "`Billing.PLANS` holds 2 elements, so it has no index 5.",
+            "`Billing.PLANS` holds 2 elements, so it has no index 2.",
+            "`Billing.NONE` holds 0 elements, so it has no index 0.",
+            "`Billing.PLANS` holds 2 elements, so it has no index 3.",
+        ]
+    );
+}
+
+/// Spec section 2: a template in a constant value shows `string`, `int`, `float` and `bool` constants, and one that
+/// shows an object runs its `toString()`, so it is an error in a constant's value, an enum case's value, an attribute
+/// argument and a pattern's value. A lambda's body runs when it is called, and a method's template as it runs.
+#[test]
+fn a_template_in_a_constant_value_that_shows_an_object_is_an_error_that_names_the_part() {
+    let tier = "namespace App;\n\npublic enum Tier\n{\n    case Free;\n    case Seats(int count);\n\n    public string toString() => \"tier\";\n}\n";
+    let code = "namespace App;\n\nimport Lib.Route;\n\npublic class Labels\n{\n    public const string TIER_LABEL = `tier: ${Tier.Free}`;\n    public const string SHOWN = `${1} ${1.5} ${true} ${Labels.TIER_LABEL}`;\n    public const Function<string()> LATER = () => `${Tier.Free}`;\n\n    public static bool pattern(string text) => text is == `${Tier.Free}`;\n\n    [Route(`/${Tier.Free}`)]\n    public static string page() => `${Tier.Free}`;\n}\n";
+    let r#enum = "namespace App;\n\npublic enum Kind : string\n{\n    case Tiered = `${Tier.Free}-kind`;\n}\n";
+    let route = (
+        "src/Lib/Route.php",
+        "<?php\n\nnamespace Lib;\n\n#[\\Attribute]\nfinal class Route\n{\n    public function __construct(public string $path) {}\n}\n",
+    );
+    let message = |part: &str, instead: &str| {
+        format!("A constant's value is known before the code runs, and `{part}` runs `toString()`: {instead}")
+    };
+
+    assert_eq!(
+        messages(("src/App/Labels.sharp", code), &[("src/App/Tier.sharp", tier), route]),
+        [
+            message("${Tier.Free}", "use a static field."),
+            message("${Tier.Free}", "compare with it in `when`."),
+            message("${Tier.Free}", "use a static field."),
+        ]
+    );
+    assert_eq!(
+        messages(("src/App/Kind.sharp", r#enum), &[("src/App/Tier.sharp", tier)]),
+        [message("${Tier.Free}", "use a static field.")]
+    );
+}
+
 /// Spec section 22: a call of a default body names the method by its interface, which PHP# code writes, and never by
 /// the trait that holds the body.
 #[test]

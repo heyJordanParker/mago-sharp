@@ -556,26 +556,16 @@ fn a_class_form_php_sharp_never_has_names_a_form_that_compiles() {
 fn an_undecided_form_is_not_supported_yet() {
     let body =
         leak(method("        const a = extra |> abs(...);\n        const b = max(?, 1);\n        return extra;\n"));
-    let constants = "namespace App.Tenant;\n\nclass Report\n{\n    public const int A = true ? 1 : 2;\n    public const int B = [1][0];\n    public const string C = `c`;\n    public const int D = (int) 1.5;\n    public const Function<int()> E = null;\n    public const Class<Report> F = typeof(Report);\n}\n";
     let declarations = "namespace App.Tenant;\n\nclass Report\n{\n    private Lib&Other b;\n}\n";
 
     assert_eq!(
-        [issues(body), issues(constants), issues(declarations)],
+        [issues(body), issues(declarations)],
         [
             vec![
                 "7:19 This expression is not supported yet in PHP#.",
                 "7:25 The pipe operator (`|>`) is not available in your configured PHP version (8.4.0).",
                 "8:19 This expression is not supported yet in PHP#.",
                 "8:19 Partial function application is only available in PHP 8.6 and above.",
-            ],
-            vec![
-                "8:26 Constant `Report.D` value contains a non-constant expression.",
-                "5:26 This expression is not supported yet in PHP#.",
-                "6:26 This expression is not supported yet in PHP#.",
-                "7:29 This expression is not supported yet in PHP#.",
-                "8:26 This operator is not supported yet in PHP#.",
-                "9:18 This construct is not supported yet in PHP#.",
-                "10:18 This construct is not supported yet in PHP#.",
             ],
             vec!["5:13 This type is not supported yet in PHP#."],
         ]
@@ -2152,8 +2142,8 @@ fn a_constant_or_an_enum_case_is_read_in_a_default_a_constant_value_and_an_initi
     assert_eq!(issues(code), Vec::<String>::new());
 }
 
-/// A constant value cannot read a static member or a member of one, and a parameter's default, which is any
-/// expression, can. A case's `value` or `name` in a constant value is not supported yet.
+/// A constant value cannot read a static member or a member of one, since a property read runs code, and a parameter's
+/// default, which is any expression, can. A case's `value` and `name` are constants.
 #[test]
 fn a_static_member_read_in_a_constant_expression_is_an_error() {
     let code = "namespace App.Tenant;\n\nclass Report\n{\n    private static int count = 0;\n    public const int MAX = Report.count;\n    public const int CENTS = Calc.rate.cents;\n    public const string VALUE = Status.Active.value;\n    public const string NAME = Status.Active.name;\n\n    public int run(int extra = Report.count, int cents = Calc.rate.cents)\n    {\n        return 1;\n    }\n}\n";
@@ -2162,9 +2152,28 @@ fn a_static_member_read_in_a_constant_expression_is_an_error() {
         issues(code),
         [
             "6:28 `Report.count` is a static member, which a constant value cannot read.",
-            "7:30 A constant value can't read `Calc.rate.cents`: it holds literals, constants and the operators on them.",
-            "8:33 This expression is not supported yet in PHP#.",
-            "9:32 This expression is not supported yet in PHP#.",
+            "7:30 A constant's value is known before the code runs, and `Calc.rate.cents` runs code: use a static field.",
+        ]
+    );
+}
+
+/// Spec section 2: a `match` on constants with constant arms is a constant value, and any other expression that is no
+/// constant form runs code, `new` among them, so it names the expression and the static field that holds its value. An
+/// attribute argument still creates an object of constants, and a pattern inside a lambda an attribute argument holds
+/// compares with a call's value in `when`.
+#[test]
+fn a_match_of_constants_is_a_constant_value_and_any_other_form_runs_code() {
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public const string MATCHED = match (Plan.Free) { Plan.Free => \"free\", default => \"other\" };\n    public const Money PRICE = new Money(5);\n    public const bool TESTED = Report.MATCHED is string;\n    public const string CALLED = match (Plan.Free) { Plan.Free => Rates.label(), default => \"other\" };\n    public const string BOUND = match (Report.MAX) { int n when n > 0 => `${n} left`, default => \"none\" };\n    public const int BUMPED = ++Report.MAX;\n\n    [Rule(new Range(1, 10), (int x) => x is == Rates.top(), --Report.MAX)]\n    public int run()\n    {\n        return 1;\n    }\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "6:32 A constant's value is known before the code runs, and `new Money(5)` runs code: use a static field.",
+            "7:32 A constant's value is known before the code runs, and `Report.MATCHED is string` runs code: use a static field.",
+            "8:67 A constant's value is known before the code runs, and `Rates.label()` runs code: use a static field.",
+            "10:31 A constant's value is known before the code runs, and `++Report.MAX` runs code: use a static field.",
+            "12:48 A constant's value is known before the code runs, and `Rates.top()` runs code: compare with it in `when`.",
+            "12:61 An attribute argument is a constant or a `new` of constants, and `--Report.MAX` is neither.",
         ]
     );
 }
@@ -4205,6 +4214,54 @@ fn a_class_constant_has_an_access_modifier_an_optional_type_and_a_constant_value
     assert_eq!(issues(code), Vec::<String>::new());
 }
 
+/// Spec section 2: a constant's value is built from constants, and an attribute argument, an enum case's value and a
+/// pattern's value take the same forms, as a parameter default, which is any expression, does.
+#[test]
+fn a_constant_value_is_built_from_constants_wherever_php_sharp_takes_one() {
+    let code = "namespace App;\n\nimport Lib.Route;\n\nclass Billing\n{\n    public const int GRACE_DAYS = Billing.TRIAL_DAYS > 7 ? 3 : 1;\n    public const string FIRST_PLAN = Billing.PLANS[0];\n    public const string TRIAL_LABEL = `Trial: ${Billing.TRIAL_DAYS} days`;\n    public const int PRICE_CENTS = (int)(9.99 * 100);\n    public const Plan DEFAULT_PLAN = Plan.Free;\n    public const string DEFAULT_KEY = Plan.Free.value;\n    public const string DEFAULT_NAME = Billing.DEFAULT_PLAN.name;\n    public const Function<int(int)> DOUBLE = (int x) => x * 2;\n    public const Class<Billing> KIND = typeof(Billing);\n    private static int rate = Rates.current();\n\n    [Route(`${Billing.TRIAL_DAYS}`, middleware: [Billing.PLANS[0], (float)Billing.TRIAL_DAYS], options: (int x) => x > 7 ? Plan.Free.value : \"\")]\n    public string grade(int days, string text = `${Billing.TRIAL_DAYS}`) => match (days) {\n        == (Billing.TRIAL_DAYS > 7 ? 3 : 1) => Billing.PLANS[0],\n        == (int)(9.99 * 100) => `${days}`,\n        default => text is == Plan.Free.value ? \"free\" : \"\",\n    };\n}\n";
+    let r#enum = "namespace App;\n\nenum Code : string\n{\n    case Grace = Billing.GRACE_DAYS > 2 ? \"long\" : \"short\";\n    case Second = Billing.PLANS[1];\n    case Label = `trial-${Billing.TRIAL_DAYS}`;\n    case Price = (string)Billing.PRICE_CENTS;\n    case Key = Plan.Free.value;\n}\n";
+
+    assert_eq!(issues(code), Vec::<String>::new());
+    assert_eq!(issues(r#enum), Vec::<String>::new());
+}
+
+/// Spec section 2: a constant's value is known before the code runs, so a call there is an error that names it, in a
+/// constant's value, an enum case's value and a pattern's value. A static field's initial value may call code.
+#[test]
+fn a_call_in_a_constant_value_is_an_error_that_names_the_call() {
+    let code = "namespace App;\n\nclass Billing\n{\n    public const int RATE = Rates.current();\n    public const int TOTAL = Billing.TRIAL_DAYS + global.max(1, 2);\n    private static int rate = Rates.current();\n\n    public bool run(int days) => days is == Rates.current();\n}\n";
+    let r#enum = "namespace App;\n\nenum Code : string\n{\n    case Rate = Rates.label();\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "5:29 A constant's value is known before the code runs, and `Rates.current()` runs code: use a static field.",
+            "6:51 A constant's value is known before the code runs, and `global.max(1, 2)` runs code: use a static field.",
+            "9:45 A constant's value is known before the code runs, and `Rates.current()` runs code: compare with it in `when`.",
+        ]
+    );
+    assert_eq!(
+        issues(r#enum),
+        ["5:17 A constant's value is known before the code runs, and `Rates.label()` runs code: use a static field."]
+    );
+}
+
+/// Spec section 2: a lambda in a constant value captures nothing, so one that captures a local of the code around it, or
+/// names `this`, is an error that names what it captures.
+#[test]
+fn a_lambda_in_a_constant_value_that_captures_is_an_error_that_names_what_it_captures() {
+    let code = "namespace App;\n\nimport Lib.Route;\n\nclass Billing\n{\n    public const Function<int(int)> OWN = (int x) => this.size() + x;\n\n    public int size() => 1;\n\n    public bool run(int rate, Function<int(int)> f)\n    {\n        const scaled = [Route(\"/a\", options: (int x) => x * rate)] (int y) => y;\n        return f is == ((int x) => x * rate + scaled(x));\n    }\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "7:54 The lambda captures `this`, and a lambda in a constant value captures nothing.",
+            "13:46 The lambda captures `rate`, and a lambda in a constant value captures nothing.",
+            "14:25 The lambda captures `rate` and `scaled`, and a lambda in a constant value captures nothing.",
+        ]
+    );
+}
+
 #[test]
 fn a_class_constant_outside_the_slice_is_an_error() {
     let code = "namespace App.Tenant;\n\nclass Report\n{\n    const A = 1;\n    public const B = 1, C = 2;\n    final public const D = 1;\n    public const E = 2 <> 3;\n    public const iterable F = [];\n}\n";
@@ -5613,24 +5670,24 @@ fn a_current_default_of_an_imported_or_declared_position_is_a_call() {
     assert_eq!(issues(declared), Vec::<String>::new());
 }
 
-/// A class constant's value and an enum case's value are constant expressions as a default is, and keep the refusal of
-/// any call there. PHP's own check reports the constant's value too.
+/// A class constant's value and an enum case's value are known before the code runs, so `Position.current()` there is a
+/// call that runs code, where a parameter default gives the caller's position. PHP's own check reports a PHP
+/// constant's value.
 #[test]
-fn position_current_as_a_constant_or_an_enum_case_value_keeps_the_constant_expression_refusal() {
+fn position_current_as_a_constant_or_an_enum_case_value_is_a_call_that_runs_code() {
     let code = "namespace App;\n\nclass Reports\n{\n    public const Position HERE = Position.current();\n}\n";
     let r#enum = "namespace App;\n\nenum Spot : string\n{\n    case Here = Position.current();\n}\n";
 
     assert_eq!(
         issues(code),
         [
-            "5:34 Constant `Reports.HERE` value contains a non-constant expression.",
-            "5:34 A constant value can't call `Position.current(…)`: it holds literals, constants and the operators on them.",
+            "5:34 A constant's value is known before the code runs, and `Position.current()` runs code: use a static field."
         ]
     );
     assert_eq!(
         issues(r#enum),
         [
-            "5:17 A constant value can't call `Position.current(…)`: it holds literals, constants and the operators on them."
+            "5:17 A constant's value is known before the code runs, and `Position.current()` runs code: use a static field."
         ]
     );
 
@@ -6849,15 +6906,20 @@ fn a_refusal_notes_what_php_sharp_has_where_it_is_written() {
     let pattern = leak(method("        const both = extra is Report&Order;\n        return extra;\n"));
     let interface = "namespace App;\n\npublic interface Sized\n{\n    int max { get; init; }\n}\n";
     let constant = "namespace App;\n\npublic class Limits\n{\n    final public const int MAX = 3;\n}\n";
+    let value = "namespace App;\n\npublic class Limits\n{\n    public const int MIN = this;\n}\n";
 
     for (code, note) in [
+        (
+            value,
+            "A constant's value, an attribute argument, an enum case's value or a pattern's value is built from constants: literals, constants, enum cases, a backed case's `value` and the `name` of a case of an enum whose cases carry no data, `typeof(Class)`, list and map literals, indexes, templates, the ternary `c ? a : b`, `match`, `(int)`, `(float)` and `(string)`, and arithmetic, comparison, logical and `??` operators. All but a pattern's value take lambdas that capture nothing, and an attribute argument takes `new` of a class with such arguments, as in `[Rule(new Range(1, 10))]`.",
+        ),
         (
             interface,
             "A PHP# interface has attributes, an optional `public`, a name, optional type parameters as in `<in TItem>`, an optional `: Interface` header, constants, methods, properties as in `int orderId { get; }` and `string label => …;`, and operators as in `static int operator <=>(Priced a, Priced b)`, with no other modifiers or `extends`.",
         ),
         (
             constant,
-            "A PHP# constant has attributes, `public`, `protected` or `private`, an optional type of `int`, `float`, `bool`, `string`, `Any`, a class, a collection as in `Map<string, int>`, `Iterable<T>` or a tuple as in `[int, string]`, nullable as in `int?` or not, or a union of them as in `int|string`, one name, and a constant value.",
+            "A PHP# constant has attributes, `public`, `protected` or `private`, an optional type of `int`, `float`, `bool`, `string`, `Any`, a class, a generic type as in `Map<string, int>` or `Class<Report>`, a function type as in `Function<int(int)>` or a tuple as in `[int, string]`, nullable as in `int?` or not, or a union of them as in `int|string`, one name, and a constant value.",
         ),
         (
             pattern,

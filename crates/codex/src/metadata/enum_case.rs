@@ -21,6 +21,10 @@ pub struct EnumCaseMetadata {
     pub name_span: Span,
     pub span: Span,
     pub value_type: Option<TAtomic>,
+    /// The class constants and enum cases a PHP# backed case's value reads, as
+    /// [`ClassLikeConstantMetadata::read_constants`](crate::metadata::class_like_constant::ClassLikeConstantMetadata::read_constants)
+    /// holds a constant's.
+    pub read_constants: Vec<(Word, Word)>,
     pub flags: MetadataFlags,
     /// PHP version range in which this enum case is available, derived from
     /// `Mago\AvailableSince` / `Mago\AvailableUntil` attributes during
@@ -48,6 +52,7 @@ impl EnumCaseMetadata {
             span,
             flags,
             value_type: None,
+            read_constants: Vec::new(),
             version_constraint: VersionConstraint::unconstrained(),
         }
     }

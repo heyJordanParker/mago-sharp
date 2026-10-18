@@ -1070,13 +1070,20 @@ fn refusal(
     codebase: &CodebaseMetadata,
     visiting: &mut Vec<Word>,
 ) -> Option<Refusal> {
-    // A comparison no source writes, as the `===` a value pattern runs as, has no operator token to refuse.
-    if operator.span().length() == 0 {
-        return None;
-    }
-
     let (lhs, rhs) = (comparands(lhs_type, codebase), comparands(rhs_type, codebase));
     let has = |comparand: Comparand| lhs.contains(&comparand) || rhs.contains(&comparand);
+    // A function has no `==`, spec section 19, beside any value but `null`, which `==` lifts, whatever the other side.
+    let compares_function = !lhs.is_empty()
+        && !rhs.is_empty()
+        && [lhs_type, rhs_type]
+            .iter()
+            .any(|side| side.types.iter().any(|atomic| matches!(atomic, TAtomic::Callable(_))));
+
+    // A comparison no source writes, as the `==` a value pattern runs as, has no operator token to refuse, but for a
+    // function, which a value pattern compares as `is == f` does.
+    if operator.span().length() == 0 {
+        return (compares_function && matches!(operator, BinaryOperator::Equal(_))).then_some(Refusal::Instance);
+    }
 
     match operator {
         BinaryOperator::Identical(_) | BinaryOperator::NotIdentical(_) => {
@@ -1091,6 +1098,7 @@ fn refusal(
         }
         // A side that is only `null` makes a null test, which `==` lifts.
         BinaryOperator::Equal(_) | BinaryOperator::NotEqual(_) if lhs.is_empty() || rhs.is_empty() => None,
+        BinaryOperator::Equal(_) | BinaryOperator::NotEqual(_) if compares_function => Some(Refusal::Instance),
         BinaryOperator::Equal(_) | BinaryOperator::NotEqual(_) => {
             let structs: Vec<Word> = lhs
                 .iter()

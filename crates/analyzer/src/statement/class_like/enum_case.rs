@@ -14,6 +14,7 @@ use mago_syntax::cst::Hint;
 use mago_syntax::cst::Identifier;
 use mago_syntax::cst::Node;
 use mago_syntax::cst::Program;
+use mago_word::word;
 
 use crate::analyzable::Analyzable;
 use crate::artifacts::AnalysisArtifacts;
@@ -24,6 +25,8 @@ use crate::error::AnalysisError;
 use crate::resolver::class_name::report_full_class_name;
 use crate::statement::attributes::AttributeTarget;
 use crate::statement::attributes::analyze_attributes;
+use crate::statement::class_like::constant::path_back;
+use crate::statement::class_like::constant::report_cycle;
 use crate::statement::function_like::FunctionLikeBody;
 use crate::statement::function_like::analyze_function_like;
 use crate::utils::names::display_class_like_name;
@@ -226,6 +229,14 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for EnumCaseBackedItem<'arena> {
         };
 
         block_context.in_constant_expression(|block_context| self.value.analyze(context, block_context, artifacts))?;
+
+        if context.dialect.is_sharp()
+            && let Some(path) = path_back(context.codebase, (current_enum.name, word(self.name.value)))
+        {
+            report_cycle(context, &qualified_case, &path, self.value.span());
+
+            return Ok(());
+        }
 
         let Some(value_type) = artifacts.get_rc_expression_type(&self.value).cloned() else {
             context.collector.report_with_code(

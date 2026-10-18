@@ -1,4 +1,5 @@
 use mago_allocator::Arena;
+use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::ttype::comparator::ComparisonResult;
 use mago_codex::ttype::comparator::union_comparator;
 use mago_codex::ttype::expander::StaticClassType;
@@ -7,8 +8,10 @@ use mago_codex::ttype::expander::expand_union;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_span::HasSpan;
+use mago_span::Span;
 use mago_syntax::cst::ClassLikeConstant;
 use mago_syntax::cst::ClassLikeConstantItem;
+use mago_word::Word;
 use mago_word::word;
 
 use crate::analyzable::Analyzable;
@@ -73,7 +76,9 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for ClassLikeConstantItem<'arena> {
             let constant =
                 display_member(context, class_metadata.original_name, mago_bytes::BytesDisplay(self.name.value));
 
-            if let Some(inferred_type) = constant_metadata.inferred_type.as_ref()
+            if is_sharp && let Some(path) = path_back(context.codebase, (class_metadata.name, constant_metadata.name)) {
+                report_cycle(context, &constant, &path, self.value.span());
+            } else if let Some(inferred_type) = constant_metadata.inferred_type.as_ref()
                 && inferred_type.is_never()
             {
                 context.collector.report_with_code(
@@ -148,4 +153,79 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for ClassLikeConstantItem<'arena> {
 
         Ok(())
     }
+}
+
+/// The constants and enum cases a PHP# constant's or backed case's value reads on its way back to `start`, a class's
+/// lowercase name and the constant's or case's own, as `Loop.B` for ``A = `a${Loop.B}` `` beside
+/// ``B = `b${Loop.A}` ``, or none when no read leads back. An empty path is a value that reads itself.
+pub(super) fn path_back(codebase: &CodebaseMetadata, start: (Word, Word)) -> Option<Vec<(Word, Word)>> {
+    let mut path = Vec::new();
+    let mut visited = Vec::new();
+
+    leads_back(codebase, start, start, &mut path, &mut visited).then_some(path)
+}
+
+/// Whether a read of the constant or enum case `current` leads back to `start`, with `path` holding the reads on the
+/// way. Reading a backed case reads its value.
+fn leads_back(
+    codebase: &CodebaseMetadata,
+    start: (Word, Word),
+    current: (Word, Word),
+    path: &mut Vec<(Word, Word)>,
+    visited: &mut Vec<(Word, Word)>,
+) -> bool {
+    let (class, name) = (current.0.as_bytes(), current.1.as_bytes());
+    let reads = match codebase.get_class_constant(class, name) {
+        Some(constant) => &constant.read_constants,
+        None => match codebase.get_enum_case(class, name) {
+            Some(case) => &case.read_constants,
+            None => return false,
+        },
+    };
+
+    for &read in reads {
+        if read == start {
+            return true;
+        }
+        if visited.contains(&read) {
+            continue;
+        }
+        visited.push(read);
+        path.push(read);
+        if leads_back(codebase, start, read, path, visited) {
+            return true;
+        }
+        path.pop();
+    }
+
+    false
+}
+
+/// Reports the constant or backed case `constant`, whose value at `value` reads its way back to it through the reads of
+/// `path`. A constant's value is known before the code runs, and a cycle never gives one.
+pub(super) fn report_cycle<A>(context: &mut Context<'_, '_, A>, constant: &str, path: &[(Word, Word)], value: Span)
+where
+    A: Arena,
+{
+    let names: Vec<String> = path
+        .iter()
+        .map(|(class, name)| {
+            let class = context.codebase.get_class_like(class.as_bytes()).map_or(*class, |class| class.original_name);
+
+            format!("`{}`", display_member(context, class, name))
+        })
+        .collect();
+    let message = match names.split_last() {
+        None => format!("`{constant}` refers back to itself."),
+        Some((last, [])) => format!("`{constant}` refers back to itself through {last}."),
+        Some((last, rest)) => format!("`{constant}` refers back to itself through {} and {last}.", rest.join(", ")),
+    };
+
+    context.collector.report_with_code(
+        IssueCode::UnresolvableClassConstant,
+        Issue::error(message)
+            .with_annotation(Annotation::primary(value).with_message("Its value is read here."))
+            .with_note("A constant's value is known before the code runs, and one that reads itself never gives one.")
+            .with_help("Give one of the constants a value that reads none of the others."),
+    );
 }
