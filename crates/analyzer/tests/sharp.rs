@@ -9082,7 +9082,7 @@ fn a_null_safe_access_on_an_index_reads_a_missing_key_as_null() {
 /// end. Appending is `add`." So `=`, `+=`, `++` and `--` write a `List` index, on a local, a parameter, a property
 /// and an element of another `List`, and PHP's `list[] = v` fails as a typo does, at its `[`. A write into a `List`'s
 /// element is a change through its index, which the index change rule decides. PHP# has no `x[] = v` on any collection,
-/// so on a `Map` it fails as a typo does too, once, a nullable `Map` too, and a `Set` has no index.
+/// so on a `Map`, a nullable `Map` and a `Set` it fails as a typo does too, once.
 #[test]
 fn an_index_write_replaces_a_list_element_and_an_append_fails_as_a_typo_does() {
     let sharp = "namespace Demo;\n\nclass Sizes\n{\n    public List<int> held { get; private set; } = [];\n\n    public void change(List<int> sizes, List<List<int>> grid, Map<string, List<int>> groups, Set<int> tags, Map<int, string> names, Map<string, string>? maybe)\n    {\n        sizes[0] = 1;\n        sizes[0] += 1;\n        sizes[1]++;\n        --sizes[1];\n        grid[0][1] = 1;\n        this.held[0] = 2;\n        groups[\"b\"] = [1];\n        sizes[] = 3;\n        this.held[] = 4;\n        grid[0][] = 5;\n        groups[] = [1];\n        tags[] = 1;\n        names[] = \"a\";\n        maybe[] = \"b\";\n    }\n}\n";
@@ -9096,7 +9096,7 @@ fn an_index_write_replaces_a_list_element_and_an_append_fails_as_a_typo_does() {
             "17:18 parse Parse error encountered during parsing",
             "18:16 parse Parse error encountered during parsing",
             "19:15 parse Parse error encountered during parsing",
-            "20:9 invalid-array-access A `Set<int>` has no index.",
+            "20:13 parse Parse error encountered during parsing",
             "21:14 parse Parse error encountered during parsing",
             "22:14 parse Parse error encountered during parsing",
         ]

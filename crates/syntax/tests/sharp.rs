@@ -2656,17 +2656,20 @@ fn for_in_without_const_fails_as_a_typo_does_and_the_statements_after_it_parse()
     assert_eq!(method_body(program).len(), 2, "{:#?}", method_body(program));
 }
 
+/// `foreach` fails as a typo does, once, at its keyword, with a braced body and with PHP's colon-delimited one.
 #[test]
 fn foreach_fails_as_a_typo_does() {
-    let arena = LocalArena::new();
-    let program = parse(
-        &arena,
-        "src/Report.sharp",
-        "class Report\n{\n    void run()\n    {\n        foreach (lines as line) {\n        }\n    }\n}\n",
-    );
+    for body in ["foreach (lines as line) {\n        }", "foreach (lines as line):\n        endforeach;"] {
+        let code: &'static str = Box::leak(
+            format!("class Report\n{{\n    void run()\n    {{\n        {body}\n    }}\n}}\n").into_boxed_str(),
+        );
+        let arena = LocalArena::new();
+        let program = parse(&arena, "src/Report.sharp", code);
 
-    let messages: Vec<String> = program.errors.iter().map(ToString::to_string).collect();
-    assert_eq!(messages, ["Unexpected token `Identifier`"]);
+        let errors: Vec<(String, &str)> =
+            program.errors.iter().map(|error| (error.to_string(), source(code, error))).collect();
+        assert_eq!(errors, [("Unexpected token `Identifier`".to_owned(), "foreach")], "{body}");
+    }
 }
 
 /// Spec section 27: a `.sharp` file starts in code, so an opening tag is one error, and the file parses on.
@@ -3715,7 +3718,9 @@ fn an_attributed_lambda_without_parentheses_is_one_error() {
 }
 
 /// Spec section 1: an attribute target, as C# writes it, opens its brackets and names where every attribute in them
-/// goes, as `return:` in `[return: NotNull, Pure]`. A target after the first attribute is a parse error, as in C#.
+/// goes, as `method:` in `[method: Logged]`. The parser reads any name there, `return:` included, which the checker
+/// refuses. A target after the first attribute is outside the grammar, as in C#, so it fails as a typo does, at the
+/// target's name.
 #[test]
 fn an_attribute_target_opens_its_brackets() {
     const CODE: &str = "class Report\n{\n    [return: NotNull, Pure]\n    [method: Logged]\n    [Cached]\n    public string run() { return \"\"; }\n}\n";
@@ -3743,14 +3748,7 @@ fn an_attribute_target_opens_its_brackets() {
     let program = parse(&arena, "src/Report.sharp", LATE);
     let messages: Vec<(String, &str)> =
         program.errors.iter().map(|error| (error.to_string(), source(LATE, error))).collect();
-    assert_eq!(
-        messages,
-        [(
-            "An attribute target opens its brackets and names where all of them go, as in `[param: Trimmed]`."
-                .to_owned(),
-            "method:"
-        )]
-    );
+    assert_eq!(messages, [("Unexpected token `Identifier`".to_owned(), "method")]);
 }
 
 /// `typeof` takes any type, spec section 25: a class by its short name, a class value of a generic class with its type

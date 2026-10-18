@@ -119,9 +119,6 @@ pub enum ParseError {
     /// PHP#'s keywords are lowercase and case-sensitive, as C#'s are, except `Self`. The analyzer reports it too, where
     /// a name that spells a keyword names nothing, as `THIS` does.
     MiscasedKeywordInSharp(&'static str, Span),
-    /// A PHP# attribute target written after the first attribute in its brackets, as in `[Cached, param: Trimmed]`, at
-    /// the target and its colon. Spec section 1: a target opens its brackets, as in C#.
-    LateAttributeTargetInSharp(Span),
     /// A PHP# lambda with attributes and a parameter without parentheses, as in `[Pure] n => n * 2`, from the first
     /// attribute list to the parameter. Spec section 1: a lambda with attributes puts its parameters in parentheses.
     UnparenthesizedAttributedLambdaInSharp(Span),
@@ -169,7 +166,6 @@ impl HasFileId for ParseError {
             | ParseError::StructHeaderTypeInSharp(span)
             | ParseError::NamedConstructorTypeParametersInSharp(_, _, span)
             | ParseError::MiscasedKeywordInSharp(_, span)
-            | ParseError::LateAttributeTargetInSharp(span)
             | ParseError::UnparenthesizedAttributedLambdaInSharp(span) => span.file_id,
         }
     }
@@ -219,7 +215,6 @@ impl HasSpan for ParseError {
             | ParseError::StructHeaderTypeInSharp(span)
             | ParseError::NamedConstructorTypeParametersInSharp(_, _, span)
             | ParseError::MiscasedKeywordInSharp(_, span)
-            | ParseError::LateAttributeTargetInSharp(span)
             | ParseError::UnparenthesizedAttributedLambdaInSharp(span) => *span,
         }
     }
@@ -346,10 +341,6 @@ impl std::fmt::Display for ParseError {
                 "Write the keyword `Self` with a capital S and the rest in lowercase.".to_string()
             }
             ParseError::MiscasedKeywordInSharp(keyword, _) => format!("Write the keyword `{keyword}` in lowercase."),
-            ParseError::LateAttributeTargetInSharp(_) => {
-                "An attribute target opens its brackets and names where all of them go, as in `[param: Trimmed]`."
-                    .to_string()
-            }
             ParseError::UnparenthesizedAttributedLambdaInSharp(_) => {
                 "A lambda with attributes puts its parameters in parentheses, as in `[Pure] (n) => n * 2`.".to_string()
             }
@@ -437,7 +428,6 @@ impl From<&ParseError> for Issue {
             | ParseError::NestedTypeInSharp(..)
             | ParseError::StructHeaderTypeInSharp(..)
             | ParseError::MiscasedKeywordInSharp(..)
-            | ParseError::LateAttributeTargetInSharp(..)
             | ParseError::UnparenthesizedAttributedLambdaInSharp(..) => Issue::error(error.to_string())
                 .with_code(PARSE_ERROR_CODE)
                 .with_annotation(Annotation::primary(error.span()).with_message("Written here.")),

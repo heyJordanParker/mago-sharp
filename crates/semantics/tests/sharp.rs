@@ -518,7 +518,8 @@ fn a_member_that_breaks_a_rule_names_it_and_an_unknown_accessor_fails_as_a_typo_
 }
 
 /// A modifier a class doesn't take and a list written to break a rule of their place, so each names the rule. A
-/// `public(set)` and a `static` local are no PHP# syntax, so each fails as a typo does. The PHP# forms compile.
+/// `public(set)`, a `static` local and a skipped element, as in `[, a]`, are no PHP# syntax, so each fails as a typo
+/// does. The PHP# forms compile.
 #[test]
 fn a_class_form_php_sharp_never_has_fails_as_a_typo_does_or_names_the_rule_it_breaks() {
     let virtual_class = "namespace App.Tenant;\n\npublic virtual class Report\n{\n}\n";
@@ -535,7 +536,7 @@ fn a_class_form_php_sharp_never_has_fails_as_a_typo_does_or_names_the_rule_it_br
                 "5:12 Parse error encountered during parsing",
                 "9:9 Parse error encountered during parsing",
                 "12:9 `[a, b]` can't be written to: unpack a tuple into new locals with `const [a, b] = …`.",
-                "14:9 `[, a]` can't be written to.",
+                "14:10 Parse error encountered during parsing",
             ],
             vec![],
         ]
@@ -746,9 +747,8 @@ fn a_catch_variable_is_out_of_scope_after_its_catch_block() {
     assert_eq!(issues(code), ["10:15 `failure` is used after the block that declares it closes."]);
 }
 
-/// The body of `if`, `else` and each loop is a block in braces, a guard clause's `return` or `throw` too, and PHP's
-/// colon-delimited bodies are never valid. The error points at the body, from a colon body's `:` to its `endif;`,
-/// `endwhile;` or `endfor;`, and its help's braced body compiles in its place.
+/// The body of `if`, `else` and each loop is a block in braces, a guard clause's `return` or `throw` too. The error
+/// points at the body, and its help's braced body compiles in its place.
 #[test]
 fn every_body_is_written_in_braces() {
     let refused = [
@@ -770,18 +770,6 @@ fn every_body_is_written_in_braces() {
         ("        do extra += 1; while (extra < 3);\n", "7:12", "{ extra += 1; }"),
         ("        for (let step = 0; step < 3; step++) extra++;\n", "7:46", "{ extra++; }"),
         ("        for (const value of Store.values()) extra += value;\n", "7:45", "{ extra += value; }"),
-        ("        while (extra > 1):\n            extra -= 1;\n        endwhile;\n", "7:26", "{ extra -= 1; }"),
-        ("        for (;;):\n            break;\n        endfor;\n", "7:17", "{ break; }"),
-        (
-            "        if (extra > 3):\n            extra = 3;\n        elseif (extra > 2):\n            extra = 2;\n        else:\n            extra = 1;\n        endif;\n",
-            "7:23",
-            "{ extra = 3; } else if (extra > 2) { extra = 2; } else { extra = 1; }",
-        ),
-        (
-            "        if (extra > 1) {\n            return 1;\n        } else if (extra > 2):\n            return 2;\n        endif;\n",
-            "9:30",
-            "{ return 2; }",
-        ),
     ];
 
     for (body, at, fix) in refused {
@@ -797,6 +785,28 @@ fn every_body_is_written_in_braces() {
         );
         assert_eq!(issue.help, Some(format!("Write `{fix}`.")), "{body}");
         assert_eq!(issues(fixed), Vec::<String>::new(), "{fixed}");
+    }
+}
+
+/// PHP's colon-delimited body, closed by `endif;`, `endwhile;` or `endfor;`, is no PHP# syntax, so it fails as a typo
+/// does, once, at its `:`, with no fix. The parser refuses `foreach` in every form, at its keyword.
+#[test]
+fn a_colon_delimited_body_fails_as_a_typo_does() {
+    for (body, at) in [
+        ("        while (extra > 1):\n            extra -= 1;\n        endwhile;\n", "7:26"),
+        ("        for (;;):\n            break;\n        endfor;\n", "7:17"),
+        (
+            "        if (extra > 3):\n            extra = 3;\n        elseif (extra > 2):\n            extra = 2;\n        else:\n            extra = 1;\n        endif;\n",
+            "7:23",
+        ),
+        (
+            "        if (extra > 1) {\n            return 1;\n        } else if (extra > 2):\n            return 2;\n        endif;\n",
+            "9:30",
+        ),
+    ] {
+        let code = leak(method(&format!("{body}        return extra;\n")));
+
+        assert_eq!(issues(code), [format!("{at} Parse error encountered during parsing")], "{body}");
     }
 }
 

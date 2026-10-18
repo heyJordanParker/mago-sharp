@@ -26,6 +26,7 @@ use mago_span::Position;
 use mago_span::Span;
 use mago_syntax::cst::Access;
 use mago_syntax::cst::Argument;
+use mago_syntax::cst::Array;
 use mago_syntax::cst::ArrayElement;
 use mago_syntax::cst::ArrowFunction;
 use mago_syntax::cst::Assignment;
@@ -573,15 +574,21 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             && superglobal_span(target, context).is_none()
         {
             let targets = "PHP# writes to a local, a parameter or a member written `object.name`.";
+            let skipped = |array: &Array| {
+                array.elements.iter().find_map(|element| match element {
+                    ArrayElement::Missing(missing) => Some(missing.span()),
+                    _ => None,
+                })
+            };
             match target {
                 Expression::List(_) => report_unexpected(target.span(), context),
+                // A skipped element, as in `[, a]`, is no PHP# syntax anywhere, so it fails as a typo does at its `,`.
+                Expression::Array(array) if let Some(missing) = skipped(array) => report_unexpected(missing, context),
                 Expression::Access(Access::NullSafeProperty(_)) => {
                     context.report(not_supported_yet(target.span(), "write target", targets));
                 }
                 // A tuple unpacks into new locals, each element named, spec section 30.
-                Expression::Array(array)
-                    if !array.elements.iter().any(|element| matches!(element, ArrayElement::Missing(_))) =>
-                {
+                Expression::Array(_) => {
                     let written = BytesDisplay(context.get_code_snippet(target));
                     context.report(
                         Issue::error(format!(
@@ -4100,20 +4107,13 @@ impl<'ast, 'arena> Walker<'ast, 'arena, FinallyJumps> for FinallyJumpWalker {
 }
 
 /// The first body of an `if`, `else` or loop that is not a block in braces, with the block to write in its place. An
-/// `else` may also hold the next `if`, whose body is a block too. A colon-delimited body, from its `:` to its `endif;`,
-/// `endwhile;` or `endfor;`, is written as blocks whole, its `elseif` clauses as `else if`. A lone `;` body is the
-/// empty block.
+/// `else` may also hold the next `if`, whose body is a block too. A lone `;` body is the empty block. PHP's
+/// colon-delimited body is no PHP# syntax, so the walk reports it as a typo at its `:`.
 fn body_without_braces(statement: &Statement, context: &Context<'_, '_, '_>) -> Option<(Span, String)> {
     let unbraced = |body: &Statement| match body {
         Statement::Block(_) => None,
         Statement::Noop(_) => Some((body.span(), "{ }".to_owned())),
         _ => Some((body.span(), format!("{{ {} }}", BytesDisplay(context.get_code_snippet(body))))),
-    };
-    let block = |statements: &Sequence<Statement>| {
-        let written: Vec<String> =
-            statements.iter().map(|statement| BytesDisplay(context.get_code_snippet(statement)).to_string()).collect();
-
-        format!("{{ {} }}", written.join(" "))
     };
 
     match statement {
@@ -4123,23 +4123,6 @@ fn body_without_braces(statement: &Statement, context: &Context<'_, '_, '_>) -> 
                 Statement::If(_) => None,
                 next => unbraced(next),
             })
-        }
-        Statement::If(If { body: IfBody::ColonDelimited(body), .. }) => {
-            let mut parts = vec![block(&body.statements)];
-            parts.extend(body.else_if_clauses.iter().map(|clause| {
-                let condition = BytesDisplay(context.get_code_snippet(clause.condition));
-
-                format!("else if ({condition}) {}", block(&clause.statements))
-            }));
-            parts.extend(body.else_clause.iter().map(|clause| format!("else {}", block(&clause.statements))));
-
-            Some((body.colon.join(body.terminator.span()), parts.join(" ")))
-        }
-        Statement::While(While { body: WhileBody::ColonDelimited(body), .. }) => {
-            Some((body.colon.join(body.terminator.span()), block(&body.statements)))
-        }
-        Statement::For(For { body: ForBody::ColonDelimited(body), .. }) => {
-            Some((body.colon.join(body.terminator.span()), block(&body.statements)))
         }
         Statement::While(While { body: WhileBody::Statement(body), .. })
         | Statement::For(For { body: ForBody::Statement(body), .. }) => unbraced(body),

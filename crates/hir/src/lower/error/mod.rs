@@ -18,8 +18,8 @@ pub(crate) fn lower_parse_error(error: &ParseError) -> Error {
         // after a function type's `>` or on an import, a module member that is no law, a computed property's body after
         // a parameter, anything but `super(…)` or `this(…)` after a constructor's `:`, a body after an event, a type
         // declared inside another, type parameters on a named constructor, a keyword in another case, a function
-        // parameter a method names in `uses`, an attribute target after the first attribute or an attributed lambda
-        // without parentheses, is a token the PHP# grammar does not expect there.
+        // parameter a method names in `uses` or an attributed lambda without parentheses, is a token the PHP# grammar
+        // does not expect there.
         ParseError::UnexpectedToken(..)
         | ParseError::RequiredMethodInSharp(..)
         | ParseError::LambdaAfterOperatorInSharp(..)
@@ -43,7 +43,6 @@ pub(crate) fn lower_parse_error(error: &ParseError) -> Error {
         | ParseError::NamedConstructorTypeParametersInSharp(..)
         | ParseError::MiscasedKeywordInSharp(..)
         | ParseError::FunctionParameterInUsesInSharp(..)
-        | ParseError::LateAttributeTargetInSharp(..)
         | ParseError::UnparenthesizedAttributedLambdaInSharp(..) => ErrorKind::UnexpectedToken,
         ParseError::UnclosedLiteralString(..) => ErrorKind::UnclosedLiteralString,
         ParseError::RecursionLimitExceeded(..) | ParseError::NestingTooDeepInSharp(..) => {
