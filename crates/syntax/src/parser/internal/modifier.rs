@@ -24,8 +24,8 @@ where
     }
 
     /// Whether C#'s `partial` starts here, before a type's keyword or its other modifiers, as in `partial class Order`
-    /// or `partial static class Texts`. PHP# has no partial types, so the parser names it, and everywhere else
-    /// `partial` is a name.
+    /// or `partial static class Texts`. PHP# has no partial types, so there it fails as a typo does, and everywhere
+    /// else `partial` is a name.
     pub(crate) fn is_at_partial(&mut self) -> Result<bool, ParseError> {
         if !self.dialect.is_sharp()
             || !self.stream.lookahead(0)?.is_some_and(|token| token.kind == T![Identifier] && token.value == b"partial")

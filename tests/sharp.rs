@@ -102,7 +102,7 @@ fn analyze_reports_a_sharp_error_without_an_extensions_setting() {
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     assert!(!output.status.success(), "{stdout}");
-    assert!(stdout.lines().any(|line| line.starts_with("src/Demo/Report.sharp:7:16:error - semantics:")), "{stdout}");
+    assert!(stdout.lines().any(|line| line.starts_with("src/Demo/Report.sharp:7:16:error - parse:")), "{stdout}");
 }
 
 #[test]
@@ -244,21 +244,21 @@ fn analyze_reports_only_the_refusal_on_each_refused_line() {
     assert_eq!(
         issues_in(&stdout, "src/Demo/Report.sharp"),
         [
-            "5:30 semantics",
-            "9:22 semantics",
-            "14:9 semantics",
-            "17:40 semantics",
-            "23:21 semantics",
-            "28:21 semantics",
-            "33:9 semantics",
-            "38:22 semantics",
-            "43:21 semantics",
-            "44:21 semantics",
-            "45:23 semantics",
-            "46:24 semantics",
-            "47:24 semantics",
-            "48:9 semantics",
-            "54:13 semantics",
+            "5:30 parse",
+            "9:22 parse",
+            "14:9 parse",
+            "17:40 parse",
+            "23:21 parse",
+            "28:21 parse",
+            "33:9 parse",
+            "38:22 parse",
+            "43:21 parse",
+            "44:21 parse",
+            "45:23 parse",
+            "46:24 parse",
+            "47:24 parse",
+            "48:9 parse",
+            "54:13 parse",
         ],
         "{stdout}"
     );
@@ -296,7 +296,7 @@ fn analyze_names_the_member_a_bare_call_meant_on_a_line_without_a_refusal() {
 
     assert_eq!(
         issues_in(&stdout, "src/Demo/Report.sharp"),
-        ["9:39 semantics", "7:32 non-existent-function", "7:32 mixed-return-statement"],
+        ["9:39 parse", "7:32 non-existent-function", "7:32 mixed-return-statement"],
         "{stdout}"
     );
     assert!(

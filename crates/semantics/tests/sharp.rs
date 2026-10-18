@@ -5135,7 +5135,7 @@ fn a_literal_element_outside_the_slice_is_an_error() {
     );
 }
 
-/// PHP's `x[] = v` is the analyzer's to refuse, by the collection it writes: a `List` grows with `add`.
+/// PHP's `x[] = v` is the analyzer's to refuse, by the collection it writes.
 #[test]
 fn an_append_is_left_to_the_analyzer() {
     let code =

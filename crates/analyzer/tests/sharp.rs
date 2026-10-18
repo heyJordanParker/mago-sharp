@@ -6590,21 +6590,21 @@ fn an_expression_the_parser_refuses_reports_only_its_parse_error() {
     assert_eq!(
         reports(("src/Demo/Report.sharp", sharp)),
         [
-            "8:14 parse PHP# has no `.=`: append with `+=`.",
-            "11:25 parse PHP# has no `->`: write member access with `.`.",
-            "12:25 parse PHP# has no `::`: write static access with `.`.",
-            "13:25 parse PHP# has no `?->`: write null-safe member access with `?.`.",
-            "14:20 parse PHP# has no `fn`: write the lambda as `(x) => x * 2`.",
-            "15:20 parse PHP# has no `function`: write the lambda as `(x) => x * 2`.",
-            "16:25 parse PHP# writes a `Map` entry as `key: value`: `=>` is the lambda arrow",
+            "8:14 parse Parse error encountered during parsing",
+            "11:25 parse Parse error encountered during parsing",
+            "12:25 parse Parse error encountered during parsing",
+            "13:25 parse Parse error encountered during parsing",
+            "14:20 parse Parse error encountered during parsing",
+            "15:20 parse Parse error encountered during parsing",
+            "16:25 parse Parse error encountered during parsing",
             "17:53 parse A `? :` in a `when` condition needs parentheses, as in `when (strict ? forced : ready) =>`.",
-            "18:26 parse PHP# has no `->`: write member access with `.`.",
-            "20:40 parse PHP# writes a `Map` entry as `key: value`: `=>` is the lambda arrow",
-            "24:29 parse PHP# has no `->`: write member access with `.`.",
-            "32:51 parse PHP# writes a `Map` entry as `key: value`: `=>` is the lambda arrow",
-            "32:61 parse PHP# writes a `Map` entry as `key: value`: `=>` is the lambda arrow",
-            "36:26 parse PHP# has no `->`: write member access with `.`.",
-            "42:26 parse PHP# has no `->`: write member access with `.`.",
+            "18:26 parse Parse error encountered during parsing",
+            "20:40 parse Parse error encountered during parsing",
+            "24:29 parse Parse error encountered during parsing",
+            "32:51 parse Parse error encountered during parsing",
+            "32:61 parse Parse error encountered during parsing",
+            "36:26 parse Parse error encountered during parsing",
+            "42:26 parse Parse error encountered during parsing",
             "9:21 invalid-local-assignment-value Invalid assignment to `wrong`: it is declared as `int`.",
         ]
     );
@@ -8400,11 +8400,11 @@ fn a_missing_class_is_one_error_that_names_it_as_php_sharp_does() {
                 "5:26 non-existent-class-like `Missing` names no class, and no namespace this file imports. | Names nothing here. | Check the spelling of `Missing`, or import the class or the namespace whose member this reads.".to_owned(),
             ],
         ),
-        // A `use` in a class body names the header, and the class it names is still missing in PHP#'s words.
+        // A `use` in a class body fails as a typo does, and the class it names is still missing in PHP#'s words.
         (
             "namespace App;\n\nclass Report\n{\n    use Missing;\n}\n",
             vec![
-                "5:5 parse PHP# has no `use` in a class: list `Missing` in the header after `:`. | Written here.".to_owned(),
+                "5:5 parse Parse error encountered during parsing | Unexpected token `Identifier` | This error indicates that the parser encountered a parse issue. | Check the syntax of your code.".to_owned(),
                 missing("5:9", "App.Missing"),
             ],
         ),
@@ -9080,28 +9080,25 @@ fn a_null_safe_access_on_an_index_reads_a_missing_key_as_null() {
 
 /// Spec section 12: "`x[i] = v` on a `List` replaces the element at `i`, and throws `OutOfRangeException` past the
 /// end. Appending is `add`." So `=`, `+=`, `++` and `--` write a `List` index, on a local, a parameter, a property
-/// and an element of another `List`, and PHP's `list[] = v` is refused with the `add` to write. A write into a `List`'s
+/// and an element of another `List`, and PHP's `list[] = v` fails as a typo does, at its `[`. A write into a `List`'s
 /// element is a change through its index, which the index change rule decides. PHP# has no `x[] = v` on any collection,
-/// so a `Map` or a `Set` refuses it too, once, a nullable `Map` too.
+/// so on a `Map` it fails as a typo does too, once, a nullable `Map` too, and a `Set` has no index.
 #[test]
-fn an_index_write_replaces_a_list_element_and_list_append_is_add() {
+fn an_index_write_replaces_a_list_element_and_an_append_fails_as_a_typo_does() {
     let sharp = "namespace Demo;\n\nclass Sizes\n{\n    public List<int> held { get; private set; } = [];\n\n    public void change(List<int> sizes, List<List<int>> grid, Map<string, List<int>> groups, Set<int> tags, Map<int, string> names, Map<string, string>? maybe)\n    {\n        sizes[0] = 1;\n        sizes[0] += 1;\n        sizes[1]++;\n        --sizes[1];\n        grid[0][1] = 1;\n        this.held[0] = 2;\n        groups[\"b\"] = [1];\n        sizes[] = 3;\n        this.held[] = 4;\n        grid[0][] = 5;\n        groups[] = [1];\n        tags[] = 1;\n        names[] = \"a\";\n        maybe[] = \"b\";\n    }\n}\n";
-    let list = "PHP# has no `list[] = value`: a `List` grows with `add`.";
-    let map = "PHP# has no `map[] = value`: a `Map` writes a key with `map[key] = value`.";
-
     assert_eq!(
         analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Sizes.sharp", sharp), &[])
             .iter()
             .map(|issue| format!("{} {}", located(sharp, issue), issue.message))
             .collect::<Vec<_>>(),
         [
-            format!("16:9 invalid-array-access {list}"),
-            format!("17:9 invalid-array-access {list}"),
-            format!("18:9 invalid-array-access {list}"),
-            format!("19:9 invalid-array-access {map}"),
-            "20:9 invalid-array-access A `Set<int>` has no index.".to_owned(),
-            format!("21:9 invalid-array-access {map}"),
-            format!("22:9 invalid-array-access {map}"),
+            "16:14 parse Parse error encountered during parsing",
+            "17:18 parse Parse error encountered during parsing",
+            "18:16 parse Parse error encountered during parsing",
+            "19:15 parse Parse error encountered during parsing",
+            "20:9 invalid-array-access A `Set<int>` has no index.",
+            "21:14 parse Parse error encountered during parsing",
+            "22:14 parse Parse error encountered during parsing",
         ]
     );
 }
