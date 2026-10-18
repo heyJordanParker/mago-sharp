@@ -1712,6 +1712,18 @@ fn a_constant_read_from_a_plain_php_constant_has_its_type() {
     assert_eq!(issues(("src/App/Limits.sharp", code), &[]), Vec::<String>::new());
 }
 
+/// Spec section 2: a lambda constant reads as the function type it declares, so its call gives the type that function
+/// returns, and a plain case of an enum whose other cases carry data is a constant's value, as any case is.
+#[test]
+fn a_lambda_constant_has_its_function_type_and_a_constant_holds_a_plain_case_of_a_data_enum() {
+    let code = "namespace App;\n\npublic enum Tier\n{\n    case Free;\n    case Seats(int count);\n}\n\npublic class Billing\n{\n    public const Function<int(int)> DOUBLE = (int x) => x * 2;\n    public const Tier DEFAULT_TIER = Tier.Free;\n\n    public static int doubled(int value) => (Billing.DOUBLE)(value);\n\n    public static string wrong() => (Billing.DOUBLE)(\"x\");\n\n    public static bool free() => Billing.DEFAULT_TIER == Tier.Free;\n}\n";
+
+    assert_eq!(
+        issues(("src/App/Billing.sharp", code), &[]),
+        ["16:54 invalid-argument", "16:37 invalid-return-statement"]
+    );
+}
+
 /// Spec section 22: a call of a default body names the method by its interface, which PHP# code writes, and never by
 /// the trait that holds the body.
 #[test]

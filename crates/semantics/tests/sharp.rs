@@ -4013,6 +4013,54 @@ fn a_class_constant_has_an_access_modifier_an_optional_type_and_a_constant_value
     assert_eq!(issues(code), Vec::<String>::new());
 }
 
+/// Spec section 2: a constant's value is built from constants, and an attribute argument, an enum case's value and a
+/// pattern's value take the same forms, as a parameter default, which is any expression, does.
+#[test]
+fn a_constant_value_is_built_from_constants_wherever_php_sharp_takes_one() {
+    let code = "namespace App;\n\nimport Lib.Route;\n\nclass Billing\n{\n    public const int GRACE_DAYS = Billing.TRIAL_DAYS > 7 ? 3 : 1;\n    public const string FIRST_PLAN = Billing.PLANS[0];\n    public const string TRIAL_LABEL = `Trial: ${Billing.TRIAL_DAYS} days`;\n    public const int PRICE_CENTS = (int)(9.99 * 100);\n    public const Plan DEFAULT_PLAN = Plan.Free;\n    public const string DEFAULT_KEY = Plan.Free.value;\n    public const string DEFAULT_NAME = Billing.DEFAULT_PLAN.name;\n    public const Function<int(int)> DOUBLE = (int x) => x * 2;\n    private static int rate = Rates.current();\n\n    [Route(`${Billing.TRIAL_DAYS}`, middleware: [Billing.PLANS[0], (float)Billing.TRIAL_DAYS], options: (int x) => x > 7 ? Plan.Free.value : \"\")]\n    public string grade(int days, string text = `${Billing.TRIAL_DAYS}`) => match (days) {\n        == (Billing.TRIAL_DAYS > 7 ? 3 : 1) => Billing.PLANS[0],\n        == (int)(9.99 * 100) => `${days}`,\n        default => text is == Plan.Free.value ? \"free\" : \"\",\n    };\n}\n";
+    let r#enum = "namespace App;\n\nenum Code : string\n{\n    case Grace = Billing.GRACE_DAYS > 2 ? \"long\" : \"short\";\n    case Second = Billing.PLANS[1];\n    case Label = `trial-${Billing.TRIAL_DAYS}`;\n    case Price = (string)Billing.PRICE_CENTS;\n    case Key = Plan.Free.value;\n}\n";
+
+    assert_eq!(issues(code), Vec::<String>::new());
+    assert_eq!(issues(r#enum), Vec::<String>::new());
+}
+
+/// Spec section 2: a constant's value is known before the code runs, so a call there is an error that names it, in a
+/// constant's value, an enum case's value and a pattern's value. A static field's initial value may call code.
+#[test]
+fn a_call_in_a_constant_value_is_an_error_that_names_the_call() {
+    let code = "namespace App;\n\nclass Billing\n{\n    public const int RATE = Rates.current();\n    public const int TOTAL = Billing.TRIAL_DAYS + global.max(1, 2);\n    private static int rate = Rates.current();\n\n    public bool run(int days) => days is == Rates.current();\n}\n";
+    let r#enum = "namespace App;\n\nenum Code : string\n{\n    case Rate = Rates.label();\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "5:29 A constant's value is known before the code runs, and `Rates.current()` runs code: use a static field.",
+            "6:51 A constant's value is known before the code runs, and `global.max(1, 2)` runs code: use a static field.",
+            "9:45 A constant's value is known before the code runs, and `Rates.current()` runs code: compare with it in `when`.",
+        ]
+    );
+    assert_eq!(
+        issues(r#enum),
+        ["5:17 A constant's value is known before the code runs, and `Rates.label()` runs code: use a static field."]
+    );
+}
+
+/// Spec section 2: a lambda in a constant value captures nothing, so one that captures a local of the code around it, or
+/// names `this`, is an error that names what it captures.
+#[test]
+fn a_lambda_in_a_constant_value_that_captures_is_an_error_that_names_what_it_captures() {
+    let code = "namespace App;\n\nimport Lib.Route;\n\nclass Billing\n{\n    public const Function<int(int)> OWN = (int x) => this.size() + x;\n\n    public int size() => 1;\n\n    public bool run(int rate, Function<int(int)> f)\n    {\n        const scaled = [Route(\"/a\", options: (int x) => x * rate)] (int y) => y;\n        return f is == ((int x) => x * rate + scaled(x));\n    }\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "7:54 The lambda captures `this`, and a lambda in a constant value captures nothing.",
+            "13:46 The lambda captures `rate`, and a lambda in a constant value captures nothing.",
+            "14:25 The lambda captures `rate` and `scaled`, and a lambda in a constant value captures nothing.",
+        ]
+    );
+}
+
 #[test]
 fn a_class_constant_outside_the_slice_is_not_supported_yet() {
     let code = "namespace App.Tenant;\n\nclass Report\n{\n    const A = 1;\n    public const B = 1, C = 2;\n    final public const D = 1;\n    public const E = 2 <> 3;\n    public const iterable F = [];\n}\n";
@@ -5383,21 +5431,26 @@ fn a_current_default_of_an_imported_or_declared_position_is_a_call() {
     assert_eq!(issues(declared), Vec::<String>::new());
 }
 
-/// A class constant's value and an enum case's value are constant expressions as a default is, and keep the refusal of
-/// any call there. PHP's own check reports the constant's value too.
+/// A class constant's value and an enum case's value are known before the code runs, so `Position.current()` there is a
+/// call that runs code, where a parameter default gives the caller's position. PHP's own check reports a PHP
+/// constant's value.
 #[test]
-fn position_current_as_a_constant_or_an_enum_case_value_keeps_the_constant_expression_refusal() {
+fn position_current_as_a_constant_or_an_enum_case_value_is_a_call_that_runs_code() {
     let code = "namespace App;\n\nclass Reports\n{\n    public const Position HERE = Position.current();\n}\n";
     let r#enum = "namespace App;\n\nenum Spot : string\n{\n    case Here = Position.current();\n}\n";
 
     assert_eq!(
         issues(code),
         [
-            "5:34 Constant `Reports.HERE` value contains a non-constant expression.",
-            "5:34 This expression is not supported yet in PHP#.",
+            "5:34 A constant's value is known before the code runs, and `Position.current()` runs code: use a static field."
         ]
     );
-    assert_eq!(issues(r#enum), ["5:17 This expression is not supported yet in PHP#."]);
+    assert_eq!(
+        issues(r#enum),
+        [
+            "5:17 A constant's value is known before the code runs, and `Position.current()` runs code: use a static field."
+        ]
+    );
 
     let php = "<?php\n\nnamespace App;\n\nclass Reports\n{\n    public const Position HERE = Position::current();\n}\n\nenum Spot: string\n{\n    case Here = Position::current();\n}\n";
     assert_eq!(
@@ -6617,7 +6670,7 @@ fn a_refusal_notes_what_php_sharp_has_where_it_is_written() {
         ),
         (
             constant,
-            "A PHP# constant has attributes, `public`, `protected` or `private`, an optional type of `int`, `float`, `bool`, `string`, `Any`, a class, a collection as in `Map<string, int>`, `Iterable<T>` or a tuple as in `[int, string]`, nullable as in `int?` or not, or a union of them as in `int|string`, one name, and a constant value.",
+            "A PHP# constant has attributes, `public`, `protected` or `private`, an optional type of `int`, `float`, `bool`, `string`, `Any`, a class, a collection as in `Map<string, int>`, `Iterable<T>`, a function type as in `Function<int(int)>` or a tuple as in `[int, string]`, nullable as in `int?` or not, or a union of them as in `int|string`, one name, and a constant value.",
         ),
         (
             pattern,
