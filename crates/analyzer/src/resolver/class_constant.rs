@@ -343,7 +343,7 @@ where
             const_span,
         );
 
-        let mut const_type = read_type(constant_metadata);
+        let mut const_type = read_type(constant_metadata, metadata.flags.is_sharp());
 
         expander::expand_union(
             context.codebase,
@@ -378,7 +378,7 @@ where
         };
 
         if let Some(constant_metadata) = required_metadata.constants.get(&const_name) {
-            let mut const_type = read_type(constant_metadata);
+            let mut const_type = read_type(constant_metadata, required_metadata.flags.is_sharp());
 
             expander::expand_union(
                 context.codebase,
@@ -414,11 +414,19 @@ where
 }
 
 /// The type a read of `constant` gives. Its docblock type (`@var`) reflects the type the user intends, so it comes first.
+/// A collection literal takes its type from where PHP# writes it, spec section 12, so a PHP# constant that declares a
+/// collection, a tuple or an `Iterable` reads as that type, where its value's own type is only a list or a keyed array.
 /// The type its value is inferred to have is more specific than the declared type, which it is copied from, so it comes
 /// next.
-fn read_type(constant: &ClassLikeConstantMetadata) -> TUnion {
+fn read_type(constant: &ClassLikeConstantMetadata, sharp: bool) -> TUnion {
     if let Some(type_metadata) = &constant.type_metadata
-        && type_metadata.from_docblock
+        && (type_metadata.from_docblock
+            || (sharp
+                && type_metadata
+                    .type_union
+                    .types
+                    .iter()
+                    .any(|atomic| matches!(atomic, TAtomic::Array(_) | TAtomic::Iterable(_)))))
     {
         return type_metadata.type_union.clone();
     }

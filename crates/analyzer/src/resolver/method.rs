@@ -17,6 +17,7 @@ use mago_codex::ttype::atomic::iterable::TIterable;
 use mago_codex::ttype::atomic::mixed::TMixed;
 use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::object::named::TNamedObject;
+use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::comparator::ComparisonResult;
 use mago_codex::ttype::comparator::union_comparator::is_contained_by;
 use mago_codex::ttype::expander;
@@ -58,6 +59,7 @@ use crate::resolver::class_name::holds_no_class;
 use crate::resolver::class_name::report_non_existent_class_like;
 use crate::resolver::class_name::report_unknown_sharp_class;
 use crate::resolver::extension::Extension;
+use crate::resolver::extension::extension_methods;
 use crate::resolver::extension::resolve_extension;
 use crate::resolver::property::DeclaredPropertyKind;
 use crate::resolver::property::get_localized_property_type;
@@ -202,9 +204,9 @@ pub struct MethodResolutionResult {
     pub has_ambiguous_target: bool,
     /// True if any resolution path was definitively invalid (e.g., method not found, call on non-object).
     pub has_invalid_target: bool,
-    /// True when a kind of PHP# collection the receiver may be lacks the method, as `contains` on a value that may be
-    /// a `Map`. The call is refused once, so its result is refused too.
-    pub lacks_collection_method: bool,
+    /// True when a kind of PHP# collection, `string`, `int`, `float` or `bool` the receiver may be lacks the method, as
+    /// `contains` on a value that may be a `Map`. The call is refused once, so its result is refused too.
+    pub lacks_sharp_method: bool,
     /// True if an access on a `mixed` type was encountered.
     pub encountered_mixed: bool,
     /// True if an access on a `null` type was encountered.
@@ -340,7 +342,28 @@ where
                         result.has_invalid_target = true;
                     }
 
-                    report_call_on_non_object(context, object_atomic, written_atomic, object.span(), selector.span());
+                    if context.dialect.is_sharp()
+                        && let ClassLikeMemberSelector::Identifier(written) = selector
+                        && let Some(scalar) = scalar_name(object_atomic)
+                    {
+                        report_non_existent_scalar_method(
+                            context,
+                            object_atomic,
+                            scalar,
+                            object.span(),
+                            selector.span(),
+                            word(written.value),
+                        );
+                        result.lacks_sharp_method = true;
+                    } else {
+                        report_call_on_non_object(
+                            context,
+                            object_atomic,
+                            written_atomic,
+                            object.span(),
+                            selector.span(),
+                        );
+                    }
                     continue;
                 }
             };
@@ -429,7 +452,7 @@ where
                                     );
 
                                     result.has_invalid_target = true;
-                                    result.lacks_collection_method = true;
+                                    result.lacks_sharp_method = true;
                                 } else {
                                     // A PHP# union of one generic class, as `Pair<int, Order>|Pair<string, Order>`,
                                     // misses the method once.
@@ -1610,6 +1633,49 @@ where
     );
 
     true
+}
+
+/// `string`, `int`, `float` or `bool`, the PHP# type `atomic` is, when it is one of them.
+fn scalar_name(atomic: &TAtomic) -> Option<&'static str> {
+    Some(match atomic {
+        TAtomic::Scalar(TScalar::String(_)) => "string",
+        TAtomic::Scalar(TScalar::Integer(_)) => "int",
+        TAtomic::Scalar(TScalar::Float(_)) => "float",
+        TAtomic::Scalar(TScalar::Bool(_)) => "bool",
+        _ => return None,
+    })
+}
+
+/// Reports a method a PHP# `string`, `int`, `float` or `bool`, named `scalar`, does not have, naming the extension
+/// methods it has in this file, as the standard library's on `string`, spec section 26, as a collection's error names
+/// its methods.
+fn report_non_existent_scalar_method<A>(
+    context: &mut Context<'_, '_, A>,
+    receiver: &TAtomic,
+    scalar: &str,
+    obj_span: Span,
+    selector_span: Span,
+    method_name: Word,
+) where
+    A: Arena,
+{
+    let methods = extension_methods(context, &TUnion::from_atomic(receiver.clone()));
+    let article = if scalar.starts_with('i') { "An" } else { "A" };
+    let help = if methods.is_empty() {
+        format!("{article} `{scalar}` has no methods.")
+    } else {
+        format!("{article} `{scalar}` has the methods {}.", methods.join(", "))
+    };
+
+    context.collector.report_with_code(
+        IssueCode::NonExistentMethod,
+        Issue::error(format!("Method `{method_name}` does not exist on `{scalar}`."))
+            .with_annotation(Annotation::primary(selector_span).with_message("This method selection is invalid"))
+            .with_annotation(
+                Annotation::secondary(obj_span).with_message(format!("This expression has type `{scalar}`")),
+            )
+            .with_help(help),
+    );
 }
 
 /// Reports a method call on `atomic_type`, which is not an object. A PHP# message names the type the code wrote,

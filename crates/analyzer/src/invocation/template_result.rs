@@ -41,6 +41,7 @@ use crate::statement::function_like::report_undefined_types;
 use crate::statement::get_type_from_hint;
 use crate::statement::report_hint_type_arguments;
 use crate::utils::names::display_class_like_name;
+use crate::utils::names::display_extension_member;
 use crate::utils::template::get_template_types_for_class_member;
 use mago_names::display_sharp_member;
 
@@ -341,7 +342,7 @@ pub fn seed_method_type_arguments<'ctx, A>(
     }
 }
 
-/// Seeds the type arguments written on a call of the extension member `metadata` of `class`, spec section 26, as
+/// Seeds the type arguments written on a call of the extension member `metadata`, spec section 26, as
 /// `orders.converted<string>(…)`. They are the member's own: the static method it runs as takes the extension block's
 /// type parameters first, which the call infers from its receiver, the one parameter that names them.
 pub fn seed_extension_type_arguments<A>(
@@ -349,7 +350,6 @@ pub fn seed_extension_type_arguments<A>(
     block_context: &BlockContext<'_>,
     artifacts: &mut AnalysisArtifacts,
     type_arguments: &TypeArgumentList<'_>,
-    class: Word,
     metadata: &FunctionLikeMetadata,
     template_result: &mut TemplateResult,
 ) where
@@ -388,7 +388,7 @@ pub fn seed_extension_type_arguments<A>(
         block_context,
         artifacts,
         type_arguments,
-        display_sharp_member(display_class_like_name(context, class), metadata.original_name),
+        display_extension_member(context, metadata),
         metadata.name_span.unwrap_or(metadata.span),
         &own,
         template_result,

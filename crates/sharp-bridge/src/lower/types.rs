@@ -19,6 +19,7 @@ use mago_codex::ttype::add_optional_union_type;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::callable::TCallable;
+use mago_codex::ttype::atomic::callable::TCallableSignature;
 use mago_codex::ttype::atomic::callable::parameter::TCallableParameter;
 use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::object::named::TNamedObject;
@@ -29,6 +30,7 @@ use mago_codex::ttype::comparator::union_comparator;
 use mago_codex::ttype::comparator::union_comparator::can_expression_types_be_identical;
 use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::get_mixed;
+use mago_codex::ttype::get_php_array_key_type;
 use mago_codex::ttype::get_sharp_type;
 use mago_codex::ttype::is_written_in_sharp;
 use mago_codex::ttype::template::variance::Variance;
@@ -48,6 +50,7 @@ use mago_syntax::cst::Inheritance;
 use mago_syntax::cst::NullSafeFunctionCall;
 use mago_syntax::cst::PropertyAccess;
 use mago_word::Word;
+use mago_word::ascii_lowercase_word;
 use mago_word::word;
 
 use super::inline::InlineForm;
@@ -511,11 +514,7 @@ impl<'analysis> Types<'analysis> {
     /// The whole type of the lambda written at `lambda`, which `is` tests a closure of it by: [`Self::function_type`] of
     /// the parameter and result types the analysis gave it, written or inferred.
     pub(crate) fn lambda_type(&self, lambda: Span) -> FunctionType {
-        let Some(TAtomic::Callable(TCallable::Signature(signature))) =
-            self.artifacts.get_expression_type(&lambda).and_then(|r#type| r#type.types.first())
-        else {
-            unreachable!("the analysis types a lambda as its signature, not the lambda at {lambda:?}");
-        };
+        let signature = self.lambda_signature(lambda);
         let parameters: Vec<Option<&TUnion>> =
             signature.get_parameters().iter().map(TCallableParameter::get_type_signature).collect();
 
@@ -524,6 +523,22 @@ impl<'analysis> Types<'analysis> {
             &parameters,
             signature.get_return_type(),
         )
+    }
+
+    /// The result type the analysis gave the lambda written at `lambda`, written or inferred.
+    pub(crate) fn lambda_result(&self, lambda: Span) -> Option<&'analysis TUnion> {
+        self.lambda_signature(lambda).get_return_type()
+    }
+
+    /// The signature the analysis gave the lambda written at `lambda`.
+    fn lambda_signature(&self, lambda: Span) -> &'analysis TCallableSignature {
+        let Some(TAtomic::Callable(TCallable::Signature(signature))) =
+            self.artifacts.get_expression_type(&lambda).and_then(|r#type| r#type.types.first())
+        else {
+            unreachable!("the analysis types a lambda as its signature, not the lambda at {lambda:?}");
+        };
+
+        signature
     }
 
     /// The whole type of the method `class::method`, which `is` tests a closure of it by: [`Self::function_type`] of its
@@ -541,6 +556,67 @@ impl<'analysis> Types<'analysis> {
         let result = metadata.return_type_metadata.as_ref().map(|r#type| &r#type.type_union);
 
         self.function_type(&function, &parameters, result)
+    }
+
+    /// Whether the method `method` of `class` overrides or implements a plain PHP method that declares a PHP return type,
+    /// such as `JsonSerializable::jsonSerialize(): mixed`, which PHP requires its override to declare too.
+    pub(crate) fn overrides_typed_result(&self, class: &[u8], method: &[u8]) -> bool {
+        let Some(overridden) = self.scanned(class).overridden_method_ids.get(&ascii_lowercase_word(method)) else {
+            return false;
+        };
+
+        overridden
+            .values()
+            .filter_map(|parent| self.codebase.get_method_by_id(parent))
+            .any(|parent| !parent.flags.is_sharp() && parent.return_type_declaration_metadata.is_some())
+    }
+
+    /// Each method of a PHP# interface `class` implements that `class` takes from a plain PHP parent declaring no return
+    /// type, as Eloquent's `getKey()` declares none, by its name and the interface's result. PHP refuses that parent
+    /// method as the implementation of a typed interface method, so `class` forwards it, spec section 22.
+    pub(crate) fn forwarded_methods(&self, class: &[u8]) -> Vec<(Word, &'analysis TUnion)> {
+        let metadata = self.scanned(class);
+        let mut forwarded = Vec::new();
+        for interface in &metadata.all_parent_interfaces {
+            let Some(interface) =
+                self.codebase.get_class_like(interface.as_bytes()).filter(|interface| interface.flags.is_sharp())
+            else {
+                continue;
+            };
+            for method in &interface.methods {
+                let taken = metadata
+                    .declaring_method_ids
+                    .get(method)
+                    .and_then(|declaring| self.codebase.get_method_by_id(declaring))
+                    .filter(|taken| !taken.flags.is_sharp() && taken.return_type_declaration_metadata.is_none());
+                let required = self.codebase.get_method(interface.name.as_bytes(), method.as_bytes());
+                let (Some(_), Some(required)) = (taken, required) else {
+                    continue;
+                };
+                if let Some(result) = &required.return_type_declaration_metadata
+                    && !forwarded
+                        .iter()
+                        .any(|(name, _): &(Word, _)| name.as_bytes().eq_ignore_ascii_case(required.name.as_bytes()))
+                {
+                    forwarded.push((required.original_name, &result.type_union));
+                }
+            }
+        }
+
+        forwarded
+    }
+
+    /// The declared result type of the method `class::method`, with a type parameter as itself, or none without one.
+    pub(crate) fn declared_result(&self, class: &[u8], method: &[u8]) -> Option<&'analysis TUnion> {
+        Some(&self.codebase.get_method(class, method)?.return_type_metadata.as_ref()?.type_union)
+    }
+
+    /// The declared type of the property `property` of the class `class` declares or inherits, with a type parameter as
+    /// itself.
+    pub(crate) fn declared_property_type(&self, class: &[u8], property: &[u8]) -> Option<&'analysis TUnion> {
+        let metadata = self.codebase.get_declaring_property(class, &[b"$", property].concat())?;
+
+        Some(&metadata.type_metadata.as_ref()?.type_union)
     }
 
     /// The type text of the result of the method `class::method`, as [`FunctionType::result`] writes it.
@@ -1150,7 +1226,7 @@ impl<'analysis> Types<'analysis> {
     }
 
     /// The full name of the plain PHP function the read `read` gives the value of, spec section 14.3, as
-    /// `global.strtoupper` and `Pdf.render` read one, as the analysis resolved it. None for any other read.
+    /// `global.ucfirst` and `Pdf.render` read one, as the analysis resolved it. None for any other read.
     pub(crate) fn function_value(&self, read: &Expression) -> Option<Word> {
         match self.artifacts.get_callees(read).next() {
             Some(CallTarget::FunctionLike { callee: FunctionLikeIdentifier::Function(function), .. })
@@ -1300,6 +1376,11 @@ impl<'analysis> Types<'analysis> {
         get_array_parameters(array, self.codebase)
     }
 
+    /// Whether a PHP array holds each key of a `Map` keyed by `key_type`, as the codex's `get_php_array_key_type` says.
+    pub(crate) fn keys_hold_in_array(&self, key_type: &TUnion) -> bool {
+        get_php_array_key_type(key_type, self.codebase).is_some()
+    }
+
     /// The type of the elements a value of `r#type` holds, the `T` of a `List<T>`, leaving out `null`. The caller asks
     /// only about a value the checker typed as a collection: a collection method's receiver, an operand of a
     /// collection's `==`, or a spread.
@@ -1443,8 +1524,8 @@ impl<'analysis> Types<'analysis> {
     }
 
     /// The parameters of the plain PHP function or method the call `call` runs, as the analysis resolved it, which a
-    /// `Map` or a `Set` crosses into as a PHP array where the parameter's declared type names `array`. None for a PHP#
-    /// one, which takes the object.
+    /// `Map` or a `Set` crosses into as a PHP array where the parameter takes one. None for a PHP# one, which takes the
+    /// object.
     pub(crate) fn call_parameters(&self, call: &Expression) -> Option<Vec<PlainParameter<'analysis>>> {
         let mut callees = self.artifacts.get_callees(call);
         let (Some(CallTarget::FunctionLike { callee, .. }), None) = (callees.next(), callees.next()) else {
@@ -1458,10 +1539,10 @@ impl<'analysis> Types<'analysis> {
         plain_parameters(owner, self.codebase.get_function_like(callee))
     }
 
-    /// The parameters of the plain PHP closure the expression `function` gives, which the call `function(…)` runs, as
-    /// the signature of its type gives them, as [`Self::call_parameters`] gives a call's. None for a function value
-    /// whose signature PHP# wrote, which takes the object, and for a value of any other type, such as an object whose
-    /// `__invoke` the call runs, which [`Self::call_parameters`] finds.
+    /// The parameters of the closure the expression `function` gives, which the call `function(…)` runs, as the
+    /// signature of its type gives them, as [`Self::call_parameters`] gives a call's. Whether PHP or PHP# wrote the
+    /// signature, the closure behind it may be either, so the call checks its closure as each value crosses. None for a
+    /// value of any other type, such as an object whose `__invoke` the call runs, which [`Self::call_parameters`] finds.
     pub(crate) fn closure_parameters(&self, function: &Expression) -> Option<Vec<PlainParameter<'analysis>>> {
         let [TAtomic::Callable(TCallable::Signature(signature))] =
             self.artifacts.get_expression_type(function)?.types.as_ref()
@@ -1469,7 +1550,7 @@ impl<'analysis> Types<'analysis> {
             return None;
         };
 
-        signature.effects.is_none().then(|| signature.get_parameters().iter().map(PlainParameter::Callable).collect())
+        Some(signature.get_parameters().iter().map(PlainParameter::Callable).collect())
     }
 
     /// The parameters of the constructor `new` runs for the fully qualified class name `class`, as
@@ -1765,6 +1846,20 @@ impl<'analysis> PlainParameter<'analysis> {
         }
     }
 
+    /// Whether the parameter takes a PHP array, which a `Map` or a `Set` crosses into, spec section 12: it declares no
+    /// type, or one that names `array`, `iterable`, `mixed` or a template. A type that takes only objects, such as
+    /// `\Countable` or an interface, takes the object.
+    pub(crate) fn takes_array(self) -> bool {
+        self.declared_type().is_none_or(|declared| {
+            declared.types.iter().any(|atomic| {
+                matches!(
+                    atomic,
+                    TAtomic::Array(_) | TAtomic::Iterable(_) | TAtomic::Mixed(_) | TAtomic::GenericParameter(_)
+                )
+            })
+        })
+    }
+
     pub(crate) fn is_variadic(self) -> bool {
         match self {
             Self::Declared(parameter) => parameter.flags.is_variadic(),
@@ -1914,6 +2009,11 @@ fn atomic_text(atomic: &TAtomic, codebase: &CodebaseMetadata, parameter: Paramet
         SharpType::Void => "void".to_owned(),
         SharpType::Object => "Object".to_owned(),
         SharpType::Enum(name) | SharpType::Class(name, []) => class_text(name, codebase),
+        // A generic class written without type arguments, as `Class<Box>` names it, gets the ones the analysis fills in
+        // from its bounds, and its text is the class alone, which takes the class with any type arguments.
+        SharpType::Class(name, arguments) if arguments.iter().all(TUnion::from_unspecified_template) => {
+            class_text(name, codebase)
+        }
         SharpType::Class(name, arguments) => format!("{}<{}>", class_text(name, codebase), list(&mut arguments.iter())),
         SharpType::List(element_type) => format!("List<{}>", type_text(element_type)),
         SharpType::Set(element_type) => format!("Set<{}>", type_text(element_type)),

@@ -9,6 +9,7 @@ use mago_codex::ttype::atomic::array::keyed::TKeyedArray;
 use mago_codex::ttype::combiner::CombinerOptions;
 use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::get_list;
+use mago_codex::ttype::get_map_entry;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_php_received_type;
 use mago_codex::ttype::get_sharp_received_type;
@@ -57,6 +58,10 @@ where
             || is_method(&invocation.target, b"Sharp\\Internal\\ListMethods", b"toSet"))
     {
         return Ok(fetch_set_return_type(context, invocation, template_result, parameters));
+    }
+
+    if context.dialect.is_sharp() && is_method(&invocation.target, b"Sharp\\Internal\\MapMethods", b"toList") {
+        return Ok(fetch_entries_return_type(context, invocation, template_result, parameters));
     }
 
     // `sortedBy` orders by the key its function returns, and `groupBy` and `associateBy` key the `Map` they return by it.
@@ -199,6 +204,25 @@ where
         declared.get_single_array().map_or_else(get_mixed, |array| get_array_parameters(array, context.codebase).1);
 
     TUnion::from_atomic(TAtomic::Array(TArray::Set(Arc::new(element_type))))
+}
+
+/// Gives a PHP# `Map<K, V>`'s `toList` its type `List<[K, V]>`, spec section 12, as Kotlin's gives pairs. A docblock
+/// writes no tuple, so `Sharp\Internal\MapMethods::toList` declares the map, and the call holds each entry as a tuple.
+fn fetch_entries_return_type<A>(
+    context: &Context<'_, '_, A>,
+    invocation: &Invocation<'_, '_, '_>,
+    template_result: &TemplateResult,
+    parameters: &WordMap<TUnion>,
+) -> TUnion
+where
+    A: Arena,
+{
+    let declared = fetch_declared_invocation_return_type(context, invocation, template_result, parameters);
+    let (key_type, value_type) = declared
+        .get_single_array()
+        .map_or_else(|| (get_mixed(), get_mixed()), |array| get_array_parameters(array, context.codebase));
+
+    get_list(get_map_entry(key_type, value_type))
 }
 
 /// Whether `target` is a PHP# `List`'s or `Map`'s `groupBy` or `associateBy`, which key a `Map` by what their function

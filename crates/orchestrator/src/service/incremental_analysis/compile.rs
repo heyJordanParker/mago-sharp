@@ -1291,21 +1291,21 @@ mod tests {
         );
     }
 
-    const TEXT: &str = "namespace Sharp;\n\npublic class Text\n{\n    public static string shout(string text) => global.strtoupper(text);\n}\n";
-    const TITLE: &str = "namespace App;\n\nimport Sharp.Text;\n\npublic class Title\n{\n    public string of(string name)\n    {\n        return Text.shout(name);\n    }\n}\n";
+    const TEXT: &str = "namespace Sharp;\n\npublic class Text\n{\n    public static string capitalized(string text) => global.ucfirst(text);\n}\n";
+    const TITLE: &str = "namespace App;\n\nimport Sharp.Text;\n\npublic class Title\n{\n    public string of(string name)\n    {\n        return Text.capitalized(name);\n    }\n}\n";
     const TEXT_PATH: &str = "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Text.sharp";
 
     #[test]
     fn a_caller_inlines_the_library_form_and_a_library_body_edit_changes_its_key() {
         let before = project(&[(TEXT_PATH, TEXT), ("app/Title.sharp", TITLE)]);
-        let lowered = TEXT.replace("strtoupper", "strtolower");
+        let lowered = TEXT.replace("ucfirst", "lcfirst");
         let after = project(&[(TEXT_PATH, lowered.as_str()), ("app/Title.sharp", TITLE)]);
 
         let before = compile(&mut analyzed(&before), empty_stamp);
         let after = compile(&mut analyzed(&after), empty_stamp);
 
         let title = accepted(&before, "app/Title.sharp");
-        assert!(title.windows(b"strtoupper".len()).any(|window| window == b"strtoupper"), "the form is inlined");
+        assert!(title.windows(b"ucfirst".len()).any(|window| window == b"ucfirst"), "the form is inlined");
         accepted(&before, TEXT_PATH);
         assert_ne!(compiled_key(title), compiled_key(accepted(&after, "app/Title.sharp")));
     }
