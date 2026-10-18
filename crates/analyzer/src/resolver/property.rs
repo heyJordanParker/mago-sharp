@@ -84,6 +84,7 @@ use crate::statement::function_like::closure_parameter_types;
 use crate::statement::function_like::get_this_type;
 use crate::statement::function_like::known_type_or_error;
 use crate::utils::expression::analyze_member_object;
+use crate::utils::expression::expression_is_nullsafe;
 use crate::utils::expression::is_this;
 use crate::utils::names::display_atomic;
 use crate::utils::names::display_class_like_name;
@@ -2000,6 +2001,16 @@ pub(crate) fn check_redundant_nullsafe<'arena, A>(
 ) where
     A: Arena,
 {
+    // Spec section 14.4: `?.` skips the rest of its chain, so the null an earlier `?.` of the same chain gives never
+    // reaches a later link.
+    let link_type;
+    let object_type =
+        if context.dialect.is_sharp() && object_type.has_nullsafe_null() && expression_is_nullsafe(object_expr) {
+            link_type = object_type.to_non_nullable();
+            &link_type
+        } else {
+            object_type
+        };
     let is_nullable = object_type.can_be_null() || object_type.possibly_undefined();
     let is_all_null = object_type.is_null() || object_type.is_void();
     if is_nullable || is_all_null || is_refused_type(object_type) {

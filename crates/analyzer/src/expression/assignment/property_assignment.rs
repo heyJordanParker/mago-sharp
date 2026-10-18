@@ -35,6 +35,7 @@ use crate::resolver::method::get_declared_type;
 use crate::resolver::property::resolve_instance_properties;
 use crate::resolver::static_property::StaticProperty;
 use crate::resolver::static_property::StaticPropertyName;
+use crate::utils::expression::expression_is_nullsafe;
 use crate::utils::expression::get_property_access_expression_id;
 use crate::utils::expression::is_this;
 use crate::utils::get_type_diff;
@@ -411,7 +412,12 @@ where
 
     let resulting_type = Rc::new(resulting_type.unwrap_or_else(get_never));
 
-    if context.settings.memoize_properties
+    // Spec section 14.4: a PHP# write through `?.` that a null receiver skips leaves the member as it was, so a later
+    // read of it is what it is with no write before it, never the written value alone.
+    let skippable = context.dialect.is_sharp() && (is_null_safe || expression_is_nullsafe(property_access.object));
+    if skippable && let Some(property_access_id) = property_access_id {
+        block_context.locals.remove(&property_access_id);
+    } else if context.settings.memoize_properties
         && !resolution_result.has_unreadable_property
         && let Some(property_access_id) = property_access_id
     {

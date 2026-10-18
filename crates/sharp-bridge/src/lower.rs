@@ -6797,12 +6797,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         &self,
         chain: &'chain Expression<'ast>,
     ) -> Option<(&'chain Expression<'ast>, &'chain Expression<'ast>)> {
-        let (mut link, mut below_php_call) = match chain {
-            Expression::Assignment(assignment) => (assignment.lhs, true),
-            Expression::UnaryPrefix(unary) if unary.operator.is_increment_or_decrement() => (unary.operand, true),
-            Expression::UnaryPostfix(unary) => (unary.operand, true),
-            _ => (chain, false),
-        };
+        let (mut link, mut below_php_call) = written_place(chain).map_or((chain, false), |place| (place, true));
         loop {
             if self.held_receivers.iter().any(|(span, _)| *span == link.span()) {
                 return None;
@@ -6900,10 +6895,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// A chain whose `untested` null-safe link PHP's `?->` cannot write, as
     /// `($nullsafe#N = receiver) === null ? null : chain`, with the chain reading `$nullsafe#N` in place of the
     /// receiver. The conditional wraps the whole chain, which a null receiver skips as `?->` does. A local receiver is
-    /// tested and read as itself.
+    /// tested and read as itself, but in a write: PHP runs the written value before it reads the object it writes, and
+    /// the value may assign the local, so a write goes to the object it tested, spec section 14.4.
     fn null_safe_chain(&mut self, chain: &Expression, untested: &Expression, receiver: &Expression) -> u32 {
         let line = self.line(chain);
-        let is_local = self.is_local_or_this(receiver);
+        let is_local = self.is_local_or_this(receiver) && written_place(chain).is_none();
         let tested = if is_local {
             self.null_safe_object(receiver)
         } else {
@@ -9507,6 +9503,16 @@ const fn compound_operator(operator: &AssignmentOperator) -> Option<BinaryOperat
         AssignmentOperator::Exponentiation(span) => BinaryOperator::Exponentiation(span),
         _ => return None,
     })
+}
+
+/// The place `chain` writes when it is a write, `=`, a compound assignment, `++` or `--`.
+fn written_place<'chain, 'ast>(chain: &'chain Expression<'ast>) -> Option<&'chain Expression<'ast>> {
+    match chain {
+        Expression::Assignment(assignment) => Some(assignment.lhs),
+        Expression::UnaryPrefix(unary) if unary.operator.is_increment_or_decrement() => Some(unary.operand),
+        Expression::UnaryPostfix(unary) => Some(unary.operand),
+        _ => None,
+    }
 }
 
 /// The assignment operators of the slice, as php-src's grammar builds them. Every operator is named, so a new one

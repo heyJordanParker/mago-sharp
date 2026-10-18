@@ -40,6 +40,7 @@ use mago_codex::ttype::get_undefined_null;
 use mago_codex::ttype::union::TUnion;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
+use mago_reporting::Level;
 use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::ArrayAccess;
@@ -61,6 +62,39 @@ use crate::utils::quoted_source;
 pub enum ArrayTarget<'ast, 'arena> {
     Access(&'ast ArrayAccess<'arena>),
     Append(&'ast ArrayAppend<'arena>),
+}
+
+/// Reports an index on `array_like_type`, the type of the collection at `access_array_span`, which is `null` or may be.
+/// A PHP# index on null throws, so one that may be null is an error, as a member access on a value that may be null is.
+pub(crate) fn report_null_array_access<A>(
+    context: &mut Context<'_, '_, A>,
+    array_like_type: &TUnion,
+    access_array_span: Span,
+) where
+    A: Arena,
+{
+    if array_like_type.is_nullable() {
+        let mut issue = Issue::warning("Cannot perform array access on possibly `null` value.")
+            .with_annotation(Annotation::primary(access_array_span).with_message("The expression might be `null` here."))
+            .with_note("Attempting to read an array index on `null` will result in a runtime error.")
+            .with_help(if context.dialect.is_sharp() {
+                "Ensure the value is not `null` before reading an index, as in `if (value != null)`."
+            } else {
+                "Ensure the variable holds an array before accessing it, possibly by checking with `is_array()` or initializing it."
+            });
+        if context.dialect.is_sharp() {
+            issue.level = Level::Error;
+        }
+        context.collector.report_with_code(IssueCode::PossiblyNullArrayAccess, issue);
+    } else {
+        context.collector.report_with_code(
+            IssueCode::NullArrayAccess,
+            Issue::error("Cannot perform array access on `null`.")
+                .with_annotation(Annotation::primary(access_array_span).with_message("The expression is `null` here."))
+                .with_note("Attempting to read an array index on `null` will result in a runtime error.")
+                .with_help("Ensure the variable holds an array before accessing it."),
+        );
+    }
 }
 
 fn accumulate_value_type(
@@ -347,37 +381,7 @@ where
                     && !block_context.flags.inside_unset()
                     && !array_like_type.ignore_nullable_issues()
                 {
-                    if array_like_type.is_nullable() {
-                        context.collector.report_with_code(
-                            IssueCode::PossiblyNullArrayAccess,
-                            Issue::warning("Cannot perform array access on possibly `null` value.")
-                                .with_annotation(
-                                    Annotation::primary(access_array_span)
-                                        .with_message("The expression might be `null` here."),
-                                )
-                                .with_note(
-                                    "Attempting to read an array index on `null` will result in a runtime error.",
-                                )
-                                .with_help(if context.dialect.is_sharp() {
-                                    "Ensure the value is not `null` before reading an index, as in `if (value != null)`."
-                                } else {
-                                    "Ensure the variable holds an array before accessing it, possibly by checking with `is_array()` or initializing it."
-                                }),
-                        );
-                    } else {
-                        context.collector.report_with_code(
-                            IssueCode::NullArrayAccess,
-                            Issue::error("Cannot perform array access on `null`.")
-                                .with_annotation(
-                                    Annotation::primary(access_array_span)
-                                        .with_message("The expression is `null` here."),
-                                )
-                                .with_note(
-                                    "Attempting to read an array index on `null` will result in a runtime error.",
-                                )
-                                .with_help("Ensure the variable holds an array before accessing it."),
-                        );
-                    }
+                    report_null_array_access(context, array_like_type, access_array_span);
                 }
 
                 has_valid_expected_index = true;

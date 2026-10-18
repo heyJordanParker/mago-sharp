@@ -15605,14 +15605,15 @@ fn nested_null_safe_property_calls_each_get_their_own_hidden_variable() {
 }
 
 /// ```php
-/// ($other === null ? null : $other->note = 'gift');
+/// (($nullsafe#1 = $other) === null ? null : $nullsafe#1->note = 'gift');
 /// (($nullsafe#1 = $this->next()) === null ? null : $nullsafe#1->total += 1);
 /// (($nullsafe#1 = $other?->parent) === null ? null : $nullsafe#1->total++);
 /// ```
 ///
 /// PHP's `?->` never writes, so a write through `?.`, spec section 14.4, is a conditional on the receiver of its highest
-/// null-safe link that wraps the whole write, its value included. A receiver other than a local goes into a hidden
-/// variable, so it runs once.
+/// null-safe link that wraps the whole write, its value included. The receiver goes into a hidden variable, so it runs
+/// once, and the write goes to the object it tested even when the value assigns a local receiver, which PHP reads
+/// after the value.
 #[test]
 fn a_null_safe_write_is_a_conditional_on_its_receiver() {
     let lowered = Lowered::new(
@@ -15625,14 +15626,17 @@ fn a_null_safe_write_is_a_conditional_on_its_receiver() {
             STMT_LIST
               CONDITIONAL [1]
                 BINARY_OP [16]
-                  VAR
-                    ZVAL "other"
+                  ASSIGN
+                    VAR
+                      ZVAL "nullsafe#1"
+                    VAR
+                      ZVAL "other"
                   ZVAL null
                 ZVAL null
                 ASSIGN
                   PROP
                     VAR
-                      ZVAL "other"
+                      ZVAL "nullsafe#1"
                     ZVAL "note"
                   ZVAL "gift"
               CONDITIONAL [1]
@@ -15674,8 +15678,8 @@ fn a_null_safe_write_is_a_conditional_on_its_receiver() {
 }
 
 /// ```php
-/// ($other === null ? null : $other->prices = \is_array($crossing#1 = <checked>(\Lib\Calc::prices()))
-///     ? new \Sharp\Map(…(string) $key#2…) : $crossing#1);
+/// (($nullsafe#1 = $other) === null ? null : $nullsafe#1->prices = \is_array($crossing#2 = <checked>(\Lib\Calc::prices()))
+///     ? new \Sharp\Map(…(string) $key#3…) : $crossing#2);
 /// ```
 ///
 /// Spec section 14.4: a write through `?.` writes its value as a write through `.` does, so a plain PHP array written
@@ -15696,14 +15700,17 @@ fn a_null_safe_write_takes_its_value_as_a_write_through_a_dot() {
             STMT_LIST
               CONDITIONAL [1]
                 BINARY_OP [16]
-                  VAR
-                    ZVAL "other"
+                  ASSIGN
+                    VAR
+                      ZVAL "nullsafe#1"
+                    VAR
+                      ZVAL "other"
                   ZVAL null
                 ZVAL null
                 ASSIGN
                   PROP
                     VAR
-                      ZVAL "other"
+                      ZVAL "nullsafe#1"
                     ZVAL "prices"
                   CONDITIONAL
                     CALL
@@ -15711,7 +15718,7 @@ fn a_null_safe_write_takes_its_value_as_a_write_through_a_dot() {
                       ARG_LIST
                         ASSIGN
                           VAR
-                            ZVAL "crossing#1"
+                            ZVAL "crossing#2"
                           VERIFY_TYPE_ARGS
                             STATIC_CALL
                               ZVAL "Lib\\Calc"
@@ -15734,14 +15741,14 @@ fn a_null_safe_write_takes_its_value_as_a_write_through_a_dot() {
                                     PARAM_LIST
                                       PARAM
                                         null
-                                        ZVAL "key#2"
+                                        ZVAL "key#3"
                                         null
                                         null
                                         null
                                         null
                                       PARAM
                                         null
-                                        ZVAL "value#3"
+                                        ZVAL "value#4"
                                         null
                                         null
                                         null
@@ -15751,11 +15758,11 @@ fn a_null_safe_write_takes_its_value_as_a_write_through_a_dot() {
                                       ARRAY_ELEM
                                         CAST [6]
                                           VAR
-                                            ZVAL "key#2"
+                                            ZVAL "key#3"
                                         null
                                       ARRAY_ELEM
                                         VAR
-                                          ZVAL "value#3"
+                                          ZVAL "value#4"
                                         null
                                     null
                                     null
@@ -15763,17 +15770,17 @@ fn a_null_safe_write_takes_its_value_as_a_write_through_a_dot() {
                                     ZVAL "array_keys"
                                     ARG_LIST
                                       VAR
-                                        ZVAL "crossing#1"
+                                        ZVAL "crossing#2"
                                   VAR
-                                    ZVAL "crossing#1"
+                                    ZVAL "crossing#2"
                     VAR
-                      ZVAL "crossing#1"
+                      ZVAL "crossing#2"
         "#}
     );
 }
 
 /// ```php
-/// ($other === null ? null : $other->stock->put('a', 1));
+/// (($nullsafe#1 = $other) === null ? null : $nullsafe#1->stock->put('a', 1));
 /// ```
 ///
 /// Spec section 14.4: a write into the `Map` a hooked property holds, through `?.`, puts the key as a write through
@@ -15791,14 +15798,17 @@ fn a_null_safe_write_into_a_hooked_map_puts_the_key() {
             STMT_LIST
               CONDITIONAL [1]
                 BINARY_OP [16]
-                  VAR
-                    ZVAL "other"
+                  ASSIGN
+                    VAR
+                      ZVAL "nullsafe#1"
+                    VAR
+                      ZVAL "other"
                   ZVAL null
                 ZVAL null
                 METHOD_CALL
                   PROP
                     VAR
-                      ZVAL "other"
+                      ZVAL "nullsafe#1"
                     ZVAL "stock"
                   ZVAL "put"
                   ARG_LIST

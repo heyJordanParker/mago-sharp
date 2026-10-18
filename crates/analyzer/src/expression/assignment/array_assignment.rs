@@ -56,6 +56,8 @@ use crate::resolver::method::with_declared_kinds;
 use crate::resolver::static_property::StaticProperty;
 use crate::utils::expression::array::ArrayTarget;
 use crate::utils::expression::array::get_array_target_type_given_index;
+use crate::utils::expression::array::report_null_array_access;
+use crate::utils::expression::expression_is_nullsafe;
 use crate::utils::expression::get_block_expression_id;
 use crate::utils::expression::get_index_id;
 use crate::utils::int_refused_for_float;
@@ -105,6 +107,17 @@ where
     }
 
     let mut root_array_type = artifacts.get_expression_type(root_array_expression).cloned().unwrap_or_else(get_mixed);
+
+    // Spec section 12: a write into a collection that may be null throws, as a read of it does, so it is refused as the
+    // read is. An append is refused as an append, which says what to write instead.
+    if context.dialect.is_sharp()
+        && matches!(array_target_expressions.last(), Some(ArrayTarget::Access(_)))
+        && !root_array_type.ignore_nullable_issues()
+        && root_array_type.types.iter().any(|atomic| matches!(atomic, TAtomic::Null | TAtomic::Void))
+    {
+        report_null_array_access(context, &root_array_type, root_array_expression.span());
+    }
+
     let root_is_array_access_object =
         root_array_type.types.iter().all(|atomic| atomic.extends_or_implements(context.codebase, b"ArrayAccess"));
 
@@ -148,7 +161,10 @@ where
     }
     let assign_value_type = set_literal_type.as_ref().unwrap_or(assign_value_type);
 
-    let root_var_id = get_block_expression_id(root_array_expression, context, block_context);
+    // Spec section 14.4: a write through `?.` that a null receiver skips leaves the collection as it was, so no place
+    // reached through `?.` remembers the written value.
+    let root_var_id = get_block_expression_id(root_array_expression, context, block_context)
+        .filter(|_| !(context.dialect.is_sharp() && expression_is_nullsafe(root_array_expression)));
     let current_index = analyze_nested_array_assignment(
         context,
         block_context,
