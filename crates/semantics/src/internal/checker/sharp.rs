@@ -415,18 +415,13 @@ const OBJECT: &[u8] = b"Object";
 /// The check runs on every node the checking walk enters, and refuses any node, or any position of a node, that this
 /// list does not name. It reports each refusal once, at its outermost node, and skips the nodes inside the refusal's
 /// span. A node refused at a part, such as a method at its name or a cast at its operator, keeps its other parts
-/// checked, so every PHP form PHP# removes is refused by name wherever it is written. It does not run on a file with a
-/// parse error, which is the one error to fix first, except a keyword in another case, which reads as the keyword and
-/// leaves the tree whole. The constructs PHP# never has, such as `$`
-/// variables, `global` and top-level functions, keep their own errors. So do the PHP forms PHP# removes, each an error
-/// that names its replacement. In a method body, they are `echo`, `print`, `die`, `exit` without parentheses or
-/// with a string literal or a template as its first argument, and `switch`. In a method body and a constant
-/// expression, they are the word operators `and`, `or` and `xor`. In a method body and a constant expression, they are
-/// superglobals, read or written, magic constants and other `__Something__` names, `(array)` and `(object)`. A
-/// `__Something__` name is an error when it is declared too, as a class, interface, enum, enum case, method, property,
-/// constant, parameter or local. A method name that starts but does not end with `__`, as PHP's magic methods do, is
-/// an error that names what PHP# writes for the magic method's job, or the name without its underscores. Any other node outside this list is a form `is_undecided` names,
-/// which is not supported yet, a PHP form `never_written` names with what PHP# writes instead, or no PHP# construct.
+/// checked. It does not run on a file with a parse error, which is the one error to fix first, except a keyword in
+/// another case, which reads as the keyword and leaves the tree whole. A node outside this list is a form
+/// `is_undecided` names, which is not supported yet, a PHP# form that breaks a rule of its place, which `broken_rule`
+/// names, or a form PHP# never writes, which fails as a typo does, at the first token PHP# has no place for. Such
+/// forms include `$` variables, `global`, `echo`, `print`, `switch`, the word operators `and`, `or` and `xor`,
+/// superglobals, magic constants and other `__Something__` names, every cast but `(int)`, `(float)` and `(string)`, and
+/// a method name that starts with `__`.
 ///
 /// Twenty-two more refusals need inferred types or the codebase, so the analyzer makes them as its part of this
 /// contract:
