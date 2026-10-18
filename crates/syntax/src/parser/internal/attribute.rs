@@ -72,7 +72,7 @@ where
             parser.parse_attribute()
         })?;
         if self.dialect.is_sharp() && open == T!["#["] {
-            self.errors.push(ParseError::PhpSyntaxInSharp(open, result.open));
+            self.report_unexpected_in_sharp(result.open);
         }
 
         Ok(AttributeList {

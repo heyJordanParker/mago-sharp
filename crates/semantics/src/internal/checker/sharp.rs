@@ -2260,75 +2260,73 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
 /// C# allows: `type:` on a type, `event:` on an event, `method:` on a method, an operator, a named constructor, a lambda
 /// or an accessor, `param:` on a parameter and on `set` or `init`, `field:` on a field, a constant, an enum case and a
 /// property with storage, `property:` on a property, and `property:` and `field:` on a parameter that declares a
-/// property: a promoted one, an event's or a data case's. A return value takes no attributes.
+/// property: a promoted one, an event's or a data case's. An attribute always describes a declaration, so C#'s
+/// `return:` is no PHP# syntax.
 fn check_attribute_target(list: &AttributeList, context: &mut Context<'_, '_, '_>) -> Option<Place> {
-    /// The declaration a list is on, its targets, and, for one that returns a value, the name `return:` refers it to.
-    type Declaration = (&'static str, &'static [&'static str], Option<&'static str>);
+    /// The declaration a list is on, and its targets.
+    type Declaration = (&'static str, &'static [&'static str]);
 
     let Some(target) = &list.target else {
         return Some(Place::Attribute);
     };
+    if target.name.value == b"return" {
+        report_unexpected(target.name.span, context);
+
+        return None;
+    }
     let written = BytesDisplay(target.name.value);
     // The declaration that holds the list. The walk keeps no member on its ancestors, so the file names it.
     let holds = |lists: &Sequence<AttributeList>| lists.iter().any(|held| held.span() == list.span());
     let declaration = Node::Program(context.program).filter_map(|node| -> Option<Declaration> {
         match node {
-            Node::Class(class) if holds(&class.attribute_lists) => Some(("a class", &["type"], None)),
-            Node::Interface(interface) if holds(&interface.attribute_lists) => Some(("an interface", &["type"], None)),
-            Node::Enum(r#enum) if holds(&r#enum.attribute_lists) => Some(("an enum", &["type"], None)),
-            Node::Struct(r#struct) if holds(&r#struct.attribute_lists) => Some(("a struct", &["type"], None)),
-            Node::Event(event) if holds(&event.attribute_lists) => Some(("an event", &["type", "event"], None)),
-            Node::Method(method) if holds(&method.attribute_lists) => {
-                Some(("a method", &["method"], Some("the method")))
-            }
-            Node::Operator(operator) if holds(&operator.attribute_lists) => {
-                Some(("an operator", &["method"], Some("the operator")))
-            }
+            Node::Class(class) if holds(&class.attribute_lists) => Some(("a class", &["type"])),
+            Node::Interface(interface) if holds(&interface.attribute_lists) => Some(("an interface", &["type"])),
+            Node::Enum(r#enum) if holds(&r#enum.attribute_lists) => Some(("an enum", &["type"])),
+            Node::Struct(r#struct) if holds(&r#struct.attribute_lists) => Some(("a struct", &["type"])),
+            Node::Event(event) if holds(&event.attribute_lists) => Some(("an event", &["type", "event"])),
+            Node::Method(method) if holds(&method.attribute_lists) => Some(("a method", &["method"])),
+            Node::Operator(operator) if holds(&operator.attribute_lists) => Some(("an operator", &["method"])),
             Node::NamedConstructor(constructor) if holds(&constructor.attribute_lists) => {
-                Some(("a named constructor", &["method"], None))
+                Some(("a named constructor", &["method"]))
             }
             Node::Closure(Closure { attribute_lists, .. })
             | Node::ArrowFunction(ArrowFunction { attribute_lists, .. })
                 if holds(attribute_lists) =>
             {
-                Some(("a lambda", &["method"], Some("the lambda")))
+                Some(("a lambda", &["method"]))
             }
-            Node::ClassLikeConstant(constant) if holds(&constant.attribute_lists) => {
-                Some(("a constant", &["field"], None))
-            }
-            Node::EnumCase(case) if holds(&case.attribute_lists) => Some(("an enum case", &["field"], None)),
-            Node::Property(Property::Plain(field)) if holds(&field.attribute_lists) => {
-                Some(("a field", &["field"], None))
-            }
+            Node::ClassLikeConstant(constant) if holds(&constant.attribute_lists) => Some(("a constant", &["field"])),
+            Node::EnumCase(case) if holds(&case.attribute_lists) => Some(("an enum case", &["field"])),
+            Node::Property(Property::Plain(field)) if holds(&field.attribute_lists) => Some(("a field", &["field"])),
             Node::Property(Property::Hooked(property)) if holds(&property.attribute_lists) => Some(
                 if context.names.has_storage(&property.hook_list)
                     && !property.modifiers.contains_abstract()
                     && !is_in_interface(context.program, property.span())
                 {
-                    ("a property", &["property", "field"], None)
+                    ("a property", &["property", "field"])
                 } else {
-                    ("a property without storage", &["property"], None)
+                    ("a property without storage", &["property"])
                 },
             ),
             Node::Property(Property::Computed(property)) if holds(&property.attribute_lists) => {
-                Some(("a property without storage", &["property"], None))
+                Some(("a property without storage", &["property"]))
             }
             Node::FunctionLikeParameter(parameter) if holds(&parameter.attribute_lists) => {
                 Some(if declares_property(parameter, context.program) {
-                    ("a parameter that declares a property", &["param", "property", "field"], None)
+                    ("a parameter that declares a property", &["param", "property", "field"])
                 } else {
-                    ("a parameter", &["param"], None)
+                    ("a parameter", &["param"])
                 })
             }
             Node::PropertyHook(accessor) if holds(&accessor.attribute_lists) => Some(if accessor.is_setter() {
-                ("`set` and `init`", &["method", "param"], Some("the accessor"))
+                ("`set` and `init`", &["method", "param"])
             } else {
-                ("`get`", &["method"], Some("the accessor"))
+                ("`get`", &["method"])
             }),
             _ => None,
         }
     });
-    let Some((declaration, targets, returns)) = declaration.into_iter().next() else {
+    let Some((declaration, targets)) = declaration.into_iter().next() else {
         context.report(
             Issue::error(format!("`{written}:` names no part of this declaration."))
                 .with_annotation(Annotation::primary(target.span()).with_message("Written here."))
@@ -2338,14 +2336,6 @@ fn check_attribute_target(list: &AttributeList, context: &mut Context<'_, '_, '_
         return None;
     };
 
-    if let (b"return", Some(returns)) = (target.name.value, returns) {
-        context.report(
-            Issue::error(format!("A return value takes no attributes: put them on {returns}, with no target."))
-                .with_annotation(Annotation::primary(target.span()).with_message("Written here.")),
-        );
-
-        return None;
-    }
     if !targets.iter().any(|named| named.as_bytes() == target.name.value) {
         let targets: Vec<String> = targets.iter().map(|named| format!("`{named}:`")).collect();
         context.report(

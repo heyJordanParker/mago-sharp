@@ -3195,9 +3195,9 @@ fn an_attribute_target_names_a_part_of_its_declaration_and_an_accessor_takes_att
         issues(code),
         [
             "3:2 `method:` names no part of a class, whose targets are `type:`.",
-            "6:6 A return value takes no attributes: put them on the method, with no target.",
+            "6:6 Parse error encountered during parsing",
             "9:6 `field:` names no part of a property without storage, whose targets are `property:`.",
-            "12:30 A return value takes no attributes: put them on the accessor, with no target.",
+            "12:30 Parse error encountered during parsing",
             "14:34 `willSet` runs inside the `set` accessor, so it has no place of its own for an attribute.",
             "16:23 `property:` names no part of a parameter, whose targets are `param:`.",
             "18:6 `module:` names no part of a method, whose targets are `method:`.",

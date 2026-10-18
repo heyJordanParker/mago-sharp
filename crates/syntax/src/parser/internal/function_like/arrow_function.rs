@@ -26,7 +26,7 @@ where
         let arrow_function = ArrowFunction {
             attribute_lists: attributes,
             r#static: self.maybe_expect_keyword(T!["static"])?,
-            r#fn: Some(self.expect_php_lambda_keyword(T!["fn"])?),
+            r#fn: Some(self.expect_php_keyword(T!["fn"])?),
             ampersand: if self.stream.is_at(T!["&"])? { Some(self.stream.eat_span(T!["&"])?) } else { None },
             parameter_list: self.parse_function_like_parameter_list()?,
             return_type_hint: self.parse_optional_function_like_return_type_hint()?,

@@ -41,12 +41,12 @@ where
         Ok(self.stream.lookahead(1)?.is_some_and(|token| token.kind == T![Identifier] && token.value == b"in"))
     }
 
-    /// Reports TypeScript's `for (x in y)` with the `of` to write, as `parse_of_keyword` reports `in`. The loop
+    /// Reports TypeScript's `for (x in y)` as a typo at its `in`, as `parse_of_keyword` reports `in`. The loop
     /// declares no variable, so it parses to its body alone, and the statements after it still parse.
     pub(crate) fn parse_for_in_without_keyword(&mut self) -> Result<Statement<'arena>, ParseError> {
         self.stream.consume()?;
         let r#in = self.stream.consume()?;
-        self.errors.push(ParseError::ForInInSharp(r#in.span_for(self.stream.file_id())));
+        self.report_unexpected_in_sharp(r#in.span_for(self.stream.file_id()));
         self.parse_expression()?;
         self.stream.eat_span(T![")"])?;
 
@@ -112,7 +112,7 @@ where
         Ok(ForOfVariable { hint, name: self.parse_local_identifier()? })
     }
 
-    /// Consumes `of`. TypeScript's `in` is reported with the `of` to write, and the loop still parses.
+    /// Consumes `of`. TypeScript's `in` fails as a typo does, and the loop still parses.
     fn parse_of_keyword(&mut self) -> Result<Keyword<'arena>, ParseError> {
         let token = self.stream.consume()?;
         let keyword = Keyword { span: token.span_for(self.stream.file_id()), value: token.value };
@@ -121,7 +121,7 @@ where
         }
 
         if token.value == b"in" {
-            self.errors.push(ParseError::ForInInSharp(keyword.span));
+            self.report_unexpected_in_sharp(keyword.span);
         }
 
         Ok(keyword)

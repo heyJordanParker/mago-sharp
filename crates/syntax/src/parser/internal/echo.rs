@@ -15,7 +15,7 @@ where
     pub(crate) fn parse_echo_tag(&mut self) -> Result<EchoTag<'arena>, ParseError> {
         let tag = self.stream.eat_span(T!["<?="])?;
         if self.dialect.is_sharp() {
-            self.errors.push(ParseError::PhpSyntaxInSharp(T!["<?="], tag));
+            self.report_unexpected_in_sharp(tag);
         }
 
         Ok(EchoTag {

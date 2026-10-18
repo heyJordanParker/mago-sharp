@@ -84,19 +84,20 @@ where
             Some(T!["private(set)"]) => Modifier::PrivateSet(self.expect_any_keyword()?),
             Some(T!["protected(set)"]) => Modifier::ProtectedSet(self.expect_any_keyword()?),
             Some(T!["public(set)"]) => Modifier::PublicSet(self.expect_any_keyword()?),
-            // Spec section 5 has no named reach, so `internal(App.Tenant)` names the rule at its parentheses, and the
-            // declaration parses on as `internal`.
+            // Spec section 5 has no named reach, so `internal(App.Tenant)` fails as a typo does at its parentheses, and
+            // the declaration parses on as `internal`.
             Some(T![Identifier]) if self.is_internal_token_at(0)? && self.stream.peek_kind(1)? == Some(T!["("]) => {
                 let internal = self.expect_any_keyword()?;
                 let reach = self.skip_parenthesized()?;
-                self.errors.push(ParseError::NamedReachInSharp(reach));
+                self.report_unexpected_in_sharp(reach);
 
                 Modifier::Internal(internal)
             }
-            // A class lives in one file, so `partial` names the rule, and the declaration parses on without it.
+            // A class lives in one file, so C#'s `partial` fails as a typo does, and the declaration parses on without
+            // it.
             Some(T![Identifier]) if self.is_at_partial()? => {
                 let partial = self.stream.consume()?.span_for(self.stream.file_id());
-                self.errors.push(ParseError::PartialTypeInSharp(partial));
+                self.report_unexpected_in_sharp(partial);
 
                 return self.parse_optional_modifier();
             }

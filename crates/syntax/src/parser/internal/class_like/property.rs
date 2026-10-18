@@ -205,7 +205,7 @@ where
 
         // The error stands, and the PHP property still parses so the rest of the class does.
         let variable = self.parse_direct_variable()?;
-        self.errors.push(ParseError::PhpSyntaxInSharp(T!["$variable"], variable.span));
+        self.report_unexpected_in_sharp(variable.span);
 
         Ok(variable)
     }
