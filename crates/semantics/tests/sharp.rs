@@ -7050,12 +7050,12 @@ fn an_operator_body_is_a_method_body() {
     );
 }
 
-/// Spec section 19: an enum declares an operator as a class does, and an interface writes it `static` alone, as it
-/// writes every member bare.
+/// Spec section 19: an enum declares an operator as a class does, also after an import, and an interface writes it
+/// `static` alone, as it writes every member bare.
 #[test]
 fn an_interface_and_an_enum_declare_operators() {
     let interface = "namespace App;\n\npublic interface Priced\n{\n    static int operator <=>(Priced a, Priced b) => 0;\n    public static int operator +(Priced a, Priced b) => 0;\n    int operator -(Priced a, Priced b) => 0;\n    static int operator *(int a, int b) => 0;\n    static int operator <=>(Priced a, Priced b) => 1;\n}\n";
-    let r#enum = "namespace App;\n\npublic enum Suit\n{\n    case Hearts;\n\n    public static int operator <=>(Suit a, Suit b) => 0;\n    static int operator +(Suit a, Suit b) => 0;\n}\n";
+    let r#enum = "namespace App;\n\nimport App.Shared.Money;\n\npublic enum Suit\n{\n    case Hearts;\n\n    public static int operator <=>(Suit a, Suit b) => 0;\n    static int operator +(Suit a, Suit b) => 0;\n}\n";
 
     assert_eq!(
         issues_in("src/Priced.sharp", interface),
@@ -7068,7 +7068,7 @@ fn an_interface_and_an_enum_declare_operators() {
     );
     assert_eq!(
         issues_in("src/Suit.sharp", r#enum),
-        ["8:16 An operator is `public static`, as in `public static Suit operator +(Suit a, Suit b)`."]
+        ["10:16 An operator is `public static`, as in `public static Suit operator +(Suit a, Suit b)`."]
     );
 }
 

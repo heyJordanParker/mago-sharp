@@ -25816,6 +25816,143 @@ fn an_interface_operator_runs_from_its_trait_on_the_class_of_an_operand() {
 }
 
 /// ```php
+/// return [$operand#1 = $a, $operand#2 = $b, $operand#1 === null || $operand#2 === null
+///     ? $operand#1 === $operand#2
+///     : $operand#1::{'op_Equality@App\Measure'}($operand#1, $operand#2)][2];
+/// enum Coin {
+///     public function hash(): int { return 1; }
+///     public static function op_Equality(\App\Coin $a, \App\Coin $b): bool { … }
+/// }
+/// ```
+///
+/// Spec sections 19 and 20: `==` on two values of an interface holds both, so each runs once, and lifts null over
+/// them as C# lifts it, so null equals only null and runs no operator. An enum with data that declares `==` compares
+/// its cases by it, so it gets no value equality.
+#[test]
+fn interface_equality_lifts_null_and_an_enum_compares_its_cases_by_its_own_equality() {
+    let files = lowered_each(
+        &[
+            (
+                "src/App/Measure.sharp",
+                "namespace App;\n\npublic interface Measure\n{\n    int grams { get; }\n    int hash() => this.grams;\n    static bool operator ==(Measure a, Measure b) => a.grams == b.grams;\n}\n",
+            ),
+            (
+                "src/App/Coin.sharp",
+                "namespace App;\n\npublic enum Coin\n{\n    case Gold(int grams);\n    case Copper;\n\n    public int hash() => 1;\n\n    public static bool operator ==(Coin a, Coin b) => true;\n}\n",
+            ),
+            (
+                "src/App/Uses.sharp",
+                "namespace App;\n\npublic static class Uses\n{\n    public static bool same(Measure? a, Measure? b) => a == b;\n}\n",
+            ),
+        ],
+        &[],
+    );
+    let member = |name: &str, path: &[u32]| member_in(&files, name, path);
+
+    assert_eq!(
+        [member("Uses", &[0, 2]), member("Coin", &[])].concat(),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                DIM
+                  ARRAY [3]
+                    ARRAY_ELEM
+                      ASSIGN
+                        VAR
+                          ZVAL "operand#1"
+                        VAR
+                          ZVAL "a"
+                      null
+                    ARRAY_ELEM
+                      ASSIGN
+                        VAR
+                          ZVAL "operand#2"
+                        VAR
+                          ZVAL "b"
+                      null
+                    ARRAY_ELEM
+                      CONDITIONAL
+                        OR
+                          BINARY_OP [16]
+                            VAR
+                              ZVAL "operand#1"
+                            ZVAL null
+                          BINARY_OP [16]
+                            VAR
+                              ZVAL "operand#2"
+                            ZVAL null
+                        BINARY_OP [16]
+                          VAR
+                            ZVAL "operand#1"
+                          VAR
+                            ZVAL "operand#2"
+                        STATIC_CALL
+                          VAR
+                            ZVAL "operand#1"
+                          ZVAL "op_Equality@App\\Measure"
+                          ARG_LIST
+                            VAR
+                              ZVAL "operand#1"
+                            VAR
+                              ZVAL "operand#2"
+                      null
+                  ZVAL 2
+            STMT_LIST
+              METHOD [1] "hash" @8-8
+                PARAM_LIST
+                null
+                STMT_LIST
+                  RETURN
+                    ZVAL 1
+                SHARP_TYPE_ARGS
+                  ZVAL [1] "int"
+                  ZVAL "Function<int()>"
+                null
+              METHOD [17] "op_Equality" @10-10
+                PARAM_LIST
+                  PARAM
+                    ZVAL [256] "App\\Coin"
+                    ZVAL "a"
+                    null
+                    null
+                    null
+                    null
+                  PARAM
+                    ZVAL [256] "App\\Coin"
+                    ZVAL "b"
+                    null
+                    null
+                    null
+                    null
+                null
+                STMT_LIST
+                  IF
+                    IF_ELEM
+                      OR
+                        BINARY_OP [16]
+                          VAR
+                            ZVAL "a"
+                          ZVAL null
+                        BINARY_OP [16]
+                          VAR
+                            ZVAL "b"
+                          ZVAL null
+                      STMT_LIST
+                        RETURN
+                          BINARY_OP [16]
+                            VAR
+                              ZVAL "a"
+                            VAR
+                              ZVAL "b"
+                  RETURN
+                    ZVAL true
+                ZVAL [1] "bool"
+                null
+        "#}
+    );
+}
+
+/// ```php
 /// return \App\Money::op_UnaryNegation(\App\Money::op_Addition($a, $b));
 /// ```
 #[test]
