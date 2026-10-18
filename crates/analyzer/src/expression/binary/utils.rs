@@ -125,19 +125,18 @@ fn declared_operators<'ctx>(
 }
 
 /// The operators named `name` that the class-like `class`, its parent classes and its interfaces declare, the class's
-/// own first.
+/// own first. A class the codebase does not hold declares none.
 fn class_operators<'ctx>(
     codebase: &'ctx CodebaseMetadata,
     class: Word,
     name: &[u8],
 ) -> Vec<(MethodIdentifier, &'ctx FunctionLikeMetadata)> {
-    let Some(metadata) = codebase.get_class_like(class.as_bytes()) else {
-        return Vec::new();
-    };
-
-    std::iter::once(&metadata.name)
-        .chain(&metadata.all_parent_classes)
-        .chain(&metadata.all_parent_interfaces)
+    codebase
+        .get_class_like(class.as_bytes())
+        .into_iter()
+        .flat_map(|metadata| {
+            std::iter::once(&metadata.name).chain(&metadata.all_parent_classes).chain(&metadata.all_parent_interfaces)
+        })
         .filter_map(|owner| {
             let owner = codebase.get_class_like(owner.as_bytes())?;
             let method = codebase.get_method(owner.name.as_bytes(), name)?;

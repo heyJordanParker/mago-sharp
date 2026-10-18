@@ -26134,6 +26134,73 @@ fn interface_equality_runs_on_its_trait_and_an_enum_compares_its_cases_by_its_ow
 }
 
 /// ```php
+/// if ($a instanceof \App\Shipment && $b instanceof \App\Shipment) { return $a->parcel === $b->parcel; }
+/// return $a === $b;
+/// ```
+///
+/// Spec sections 10 and 19: a struct may hold a class two interfaces' `operator ==` tie on, and the checker refuses
+/// each `==` on the struct and each `Set` and `Map` of it, so the property its `==` compares has no operator to run.
+#[test]
+fn a_struct_that_holds_a_class_with_tied_equality_compares_it_by_no_operator() {
+    let files = lowered_each(
+        &[
+            (
+                "src/App/Weighed.sharp",
+                "namespace App;\n\npublic interface Weighed\n{\n    int grams { get; }\n    int hash();\n    static bool operator ==(Weighed a, Weighed b) => a.grams == b.grams;\n}\n",
+            ),
+            (
+                "src/App/Valued.sharp",
+                "namespace App;\n\npublic interface Valued\n{\n    int cents { get; }\n    int hash();\n    static bool operator ==(Valued a, Valued b) => a.cents == b.cents;\n}\n",
+            ),
+            (
+                "src/App/Parcel.sharp",
+                "namespace App;\n\npublic class Parcel : Valued, Weighed\n{\n    public int cents => 1;\n    public int grams => 2;\n    public int hash() => 0;\n}\n",
+            ),
+            (
+                "src/App/Shipment.sharp",
+                "namespace App;\n\npublic struct Shipment\n{\n    public Parcel parcel { get; init; }\n}\n",
+            ),
+        ],
+        &[],
+    );
+
+    assert_eq!(
+        member_in(&files, "Shipment", &[1, 2]),
+        indoc! {r#"
+            STMT_LIST
+              IF
+                IF_ELEM
+                  AND
+                    INSTANCEOF
+                      VAR
+                        ZVAL "a"
+                      ZVAL "App\\Shipment"
+                    INSTANCEOF
+                      VAR
+                        ZVAL "b"
+                      ZVAL "App\\Shipment"
+                  STMT_LIST
+                    RETURN
+                      BINARY_OP [16]
+                        PROP
+                          VAR
+                            ZVAL "a"
+                          ZVAL "parcel"
+                        PROP
+                          VAR
+                            ZVAL "b"
+                          ZVAL "parcel"
+              RETURN
+                BINARY_OP [16]
+                  VAR
+                    ZVAL "a"
+                  VAR
+                    ZVAL "b"
+        "#}
+    );
+}
+
+/// ```php
 /// return \App\Money::op_UnaryNegation(\App\Money::op_Addition($a, $b));
 /// ```
 #[test]

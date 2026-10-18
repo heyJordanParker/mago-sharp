@@ -1607,12 +1607,14 @@ fn an_operator_is_chosen_from_the_types_of_both_operands() {
 }
 
 /// Spec section 19: two interfaces that each declare an operator for a class tie on every use that takes the class on
-/// both sides: `<`, `+`, `sortedBy` and `contains`, each one error that names the operator and both interfaces. An
-/// operand of a class the codebase does not hold declares no operator.
+/// both sides: `<`, `+`, `sortedBy` and `contains`, each one error that names the operator and both interfaces. A
+/// `Set` of the class, a `Map` keyed by it and a struct that holds it in a `Set` are refused too, since they compare
+/// two of it by `==`. An operand of a class the codebase does not hold declares no operator.
 #[test]
 fn every_use_of_two_tied_operators_is_one_error() {
     let sharp = "namespace App;\n\npublic interface Weighed\n{\n    int grams { get; }\n    int hash();\n    static bool operator ==(Weighed a, Weighed b) => a.grams == b.grams;\n    static int operator <=>(Weighed a, Weighed b) => a.grams <=> b.grams;\n    static readonly Weighed operator +(Weighed a, Weighed b) => a;\n}\n\npublic interface Valued\n{\n    int cents { get; }\n    int hash();\n    static bool operator ==(Valued a, Valued b) => a.cents == b.cents;\n    static int operator <=>(Valued a, Valued b) => a.cents <=> b.cents;\n    static readonly Valued operator +(Valued a, Valued b) => a;\n}\n\npublic class Parcel : Valued, Weighed\n{\n    public int cents => 1;\n    public int grams => 2;\n    public int hash() => 0;\n}\n\npublic static class Uses\n{\n    public static bool lighter(Parcel a, Parcel b) => a < b;\n\n    public static readonly Parcel sum(Parcel a, Parcel b) => a + b;\n\n    public static List<Parcel> sorted(List<Parcel> parcels) => parcels.sortedBy(parcel => parcel);\n\n    public static bool held(List<Parcel> parcels, Parcel parcel) => parcels.contains(parcel);\n}\n";
     let missing = "namespace App;\n\npublic static class Uses\n{\n    public static bool lighter(Missing a, Missing b) => a < b;\n}\n";
+    let held = "namespace App;\n\npublic struct Shipment\n{\n    public Parcel parcel { get; init; }\n}\n\npublic static class Held\n{\n    public static int shipments(Set<Shipment> held) => held.count();\n\n    public static int parcels(Set<Parcel> held) => held.count();\n\n    public static int keys(Map<Parcel, int> held) => held.count();\n}\n";
 
     assert_eq!(
         messages(("src/App/Weighed.sharp", sharp), &[]),
@@ -1626,6 +1628,14 @@ fn every_use_of_two_tied_operators_is_one_error() {
     assert_eq!(
         issues(("src/App/Uses.sharp", missing), &[]),
         ["5:32 non-existent-class-like", "5:43 non-existent-class-like"]
+    );
+    assert_eq!(
+        messages(("src/App/Shipment.sharp", held), &[("src/App/Weighed.sharp", sharp)]),
+        [
+            "`Shipment` can't be in a `Set`: `parcel` is a `Parcel`, a class, and a `Set` holds only values.",
+            "`==` on `Parcel` and `Parcel` is ambiguous: `Valued` and `Weighed` each declare an `operator ==` that takes them.",
+            "`==` on `Parcel` and `Parcel` is ambiguous: `Valued` and `Weighed` each declare an `operator ==` that takes them.",
+        ]
     );
 }
 
