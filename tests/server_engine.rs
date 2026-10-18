@@ -24,6 +24,7 @@ use mago_reporting::IssueCollection;
 use mago_server::Server;
 use mago_server::Settings;
 use mago_sharp_bridge::unit::Input;
+use mago_sharp_bridge::unit::Library;
 use mago_sharp_bridge::unit::header;
 use mago_sharp_bridge::unit::source_hash;
 use mago_syntax::settings::ParserSettings;
@@ -344,6 +345,7 @@ fn compiled(server: &mut Server) -> (BTreeMap<String, Option<Input>>, Vec<u8>) {
             },
             |_| Ok(Vec::new()),
             |_, _| Ok(Default::default()),
+            &Library::default(),
         )
         .expect("the compile runs");
     let [(_, Compilation::Accepted(bytes))] = compiled.as_slice() else {

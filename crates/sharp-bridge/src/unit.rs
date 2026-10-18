@@ -61,6 +61,12 @@ pub struct sharp_unit_header {
     pub root: u32,
     pub texts_size: u32,
     pub facts_size: u32,
+    /// The native fingerprint of the standard library the file was compiled against, which the engine compares with
+    /// its own `SHARP_NATIVE`. All zero when the project holds no standard library.
+    pub native_fingerprint: [u8; 16],
+    /// The version Composer installed that standard library at, which the engine's refusal names. Empty when Composer
+    /// reports none.
+    pub library_version: sharp_str,
 }
 
 /// A file whose edit makes the compiled file's source due for a check.
@@ -75,7 +81,7 @@ pub struct sharp_input {
 }
 
 const _: () = {
-    assert!(size_of::<sharp_unit_header>() == 104, "the header is 104 bytes");
+    assert!(size_of::<sharp_unit_header>() == 128, "the header is 128 bytes");
     assert!(offset_of!(sharp_unit_header, abi) == 8, "abi is at 8");
     assert!(offset_of!(sharp_unit_header, checker) == 24, "checker is at 24");
     assert!(offset_of!(sharp_unit_header, key) == 40, "key is at 40");
@@ -87,6 +93,8 @@ const _: () = {
     assert!(offset_of!(sharp_unit_header, root) == 92, "root is at 92");
     assert!(offset_of!(sharp_unit_header, texts_size) == 96, "texts_size is at 96");
     assert!(offset_of!(sharp_unit_header, facts_size) == 100, "facts_size is at 100");
+    assert!(offset_of!(sharp_unit_header, native_fingerprint) == 104, "native_fingerprint is at 104");
+    assert!(offset_of!(sharp_unit_header, library_version) == 120, "library_version is at 120");
     assert!(size_of::<sharp_input>() == 40, "an input is 40 bytes");
     assert!(offset_of!(sharp_input, size) == 8, "an input's size is at 8");
     assert!(offset_of!(sharp_input, mtime_ns) == 16, "an input's mtime_ns is at 16");
@@ -135,14 +143,24 @@ pub struct Reads {
     pub function_types: Vec<Read>,
 }
 
+/// The standard library a project's files compile against, as each compiled file's header names it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Library {
+    /// The native fingerprint its `native.php` gives. All zero when the project holds no standard library.
+    pub native_fingerprint: [u8; 16],
+    /// The version Composer installed it at. Empty when Composer reports none.
+    pub version: Vec<u8>,
+}
+
 /// The fields of a header that passed load checks 1 and 2.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Header {
     pub abi: [u8; 16],
     pub checker: [u8; 16],
     pub key: [u8; 16],
     pub source_hash: [u8; 16],
     pub source_size: u64,
+    pub library: Library,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -193,14 +211,16 @@ fn key_of(compiler: &[&[u8]], source_hash: [u8; 16], reads: &Reads) -> [u8; 16] 
     hasher.digest128().to_be_bytes()
 }
 
-/// The bytes of the `.sharpc` file for `unit`, lowered from `source`. The same arguments always give the same bytes.
+/// The bytes of the `.sharpc` file for `unit`, lowered from `source` against `library`. The same arguments always give
+/// the same bytes.
 ///
 /// # Panics
 ///
 /// Panics when a section holds more than a 32-bit size can say.
 #[must_use]
-pub fn encode(unit: &Unit, source: &[u8], key: [u8; 16], inputs: &[Input], facts: &[u8]) -> Vec<u8> {
+pub fn encode(unit: &Unit, source: &[u8], key: [u8; 16], inputs: &[Input], facts: &[u8], library: &Library) -> Vec<u8> {
     let mut texts = unit.texts.clone();
+    let library_version = store_text(&mut texts, &library.version);
     let inputs: Vec<sharp_input> = inputs
         .iter()
         .map(|input| sharp_input {
@@ -224,6 +244,8 @@ pub fn encode(unit: &Unit, source: &[u8], key: [u8; 16], inputs: &[Input], facts
         root: unit.root,
         texts_size: size("texts", texts.len()),
         facts_size: size("facts", facts.len()),
+        native_fingerprint: library.native_fingerprint,
+        library_version,
     };
 
     let mut bytes = Vec::with_capacity(length(&header) as usize);
@@ -283,6 +305,11 @@ pub fn header(bytes: &[u8]) -> Result<Header, FormatError> {
         root: word(offset_of!(sharp_unit_header, root)),
         texts_size: word(offset_of!(sharp_unit_header, texts_size)),
         facts_size: word(offset_of!(sharp_unit_header, facts_size)),
+        native_fingerprint: hash(offset_of!(sharp_unit_header, native_fingerprint)),
+        library_version: sharp_str {
+            offset: word(offset_of!(sharp_unit_header, library_version) + offset_of!(sharp_str, offset)),
+            len: word(offset_of!(sharp_unit_header, library_version) + offset_of!(sharp_str, len)),
+        },
     };
     if header.abi != SHARP_UNIT_ABI {
         return Err(FormatError::Abi);
@@ -291,12 +318,23 @@ pub fn header(bytes: &[u8]) -> Result<Header, FormatError> {
         return Err(FormatError::Length);
     }
 
+    let texts = size_of::<sharp_unit_header>()
+        + size_of::<sharp_input>() * header.input_count as usize
+        + size_of::<sharp_node>() * header.node_count as usize
+        + size_of::<u32>() * header.children_count as usize;
+    let version = header.library_version.offset as usize
+        ..header.library_version.offset as usize + header.library_version.len as usize;
+    let Some(version) = bytes[texts..texts + header.texts_size as usize].get(version) else {
+        return Err(FormatError::Length);
+    };
+
     Ok(Header {
         abi: header.abi,
         checker: header.checker,
         key: header.key,
         source_hash: header.source_hash,
         source_size: header.source_size,
+        library: Library { native_fingerprint: header.native_fingerprint, version: version.to_vec() },
     })
 }
 
@@ -479,6 +517,8 @@ fn header_bytes(header: &sharp_unit_header) -> [u8; size_of::<sharp_unit_header>
     put(&mut bytes, offset_of!(sharp_unit_header, root), &header.root.to_le_bytes());
     put(&mut bytes, offset_of!(sharp_unit_header, texts_size), &header.texts_size.to_le_bytes());
     put(&mut bytes, offset_of!(sharp_unit_header, facts_size), &header.facts_size.to_le_bytes());
+    put(&mut bytes, offset_of!(sharp_unit_header, native_fingerprint), &header.native_fingerprint);
+    put_text(&mut bytes, offset_of!(sharp_unit_header, library_version), header.library_version);
 
     bytes
 }

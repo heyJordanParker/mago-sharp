@@ -27,6 +27,7 @@ use mago_sharp_bridge::sharp_kind;
 use mago_sharp_bridge::sharp_node;
 use mago_sharp_bridge::sharp_str;
 use mago_sharp_bridge::sharp_value;
+use mago_sharp_bridge::unit::Library;
 use mago_sharp_bridge::unit::encode;
 use xxhash_rust::xxh3::xxh3_64;
 
@@ -17752,7 +17753,7 @@ fn a_file_lowers_to_the_same_bytes_from_any_workspace_root_and_names_no_path() {
             "no text names the file"
         );
 
-        encode(&unit, &file.contents, [0; 16], &[], &[])
+        encode(&unit, &file.contents, [0; 16], &[], &[], &Library::default())
     });
 
     assert_eq!(encoded[0], encoded[1]);

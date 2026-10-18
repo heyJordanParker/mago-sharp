@@ -143,4 +143,4 @@ pub const SHARP_T_FILE: u32 = 347;
 /// The hash of the kind table, the tokens and the layouts of the compiled file's structs.
 /// An engine reads only a compiled file written for its own value.
 #[allow(clippy::unreadable_literal, clippy::big_endian_bytes)]
-pub const SHARP_UNIT_ABI: [u8; 16] = 0x88205dd03a07d3b44e4db355a2a76eeeu128.to_be_bytes();
+pub const SHARP_UNIT_ABI: [u8; 16] = 0xc15c234eae3765fb4be19493456f859fu128.to_be_bytes();

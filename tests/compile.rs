@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::process::Output;
 
+use mago_sharp_bridge::unit::Library;
 use mago_sharp_bridge::unit::header;
 use mago_sharp_bridge::unit::is_stale;
 use mago_sharp_bridge::unit::source_hash;
@@ -111,6 +112,60 @@ fn compile_writes_each_accepted_file_into_the_sharp_folder_at_its_source_path() 
     }
     assert_eq!(files_under(&root.join("vendor")), vendor, "nothing is written under vendor/");
     assert!(printed(&output).contains("Compiled 2 PHP# files into .sharp/."), "{}", printed(&output));
+}
+
+/// Each compiled file names the standard library the project installs: the native fingerprint its package's
+/// `native.php` gives and the version Composer's `installed.json` lists, which the engine compares and names. A
+/// library with no `native.php` declares no native bodies, and one whose `native.php` gives no fingerprint fails the
+/// compile.
+#[test]
+fn compile_names_the_installed_standard_library_in_each_compiled_file() {
+    let directory = project(ORDER, MONEY);
+    let root = directory.path();
+    let library = "vendor/heyjordanparker/php-sharp-composer";
+    write(root, &format!("{library}/composer.json"), "{\"name\": \"heyjordanparker/php-sharp-composer\"}\n");
+    write(
+        root,
+        &format!("{library}/library/Sharp/Math/Math.sharp"),
+        "namespace Sharp.Math;\n\npublic static class Math\n{\n    public static int twice(int value) => value * 2;\n}\n",
+    );
+    write(
+        root,
+        "vendor/composer/installed.json",
+        "{\"packages\": [{\"name\": \"heyjordanparker/php-sharp-composer\", \"version\": \"v0.3.2\"}]}\n",
+    );
+    let named = |root: &Path| header(&std::fs::read(compiled(root, "app/Order.sharp")).unwrap()).unwrap().library;
+
+    write(
+        root,
+        &format!("{library}/native.php"),
+        "<?php\n\nreturn [\n    'fingerprint' => '00112233445566778899aabbccddeeff',\n    'bodies' => [],\n];\n",
+    );
+    compile_succeeds(root);
+    assert_eq!(
+        named(root),
+        Library {
+            native_fingerprint: [
+                0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff
+            ],
+            version: b"v0.3.2".to_vec(),
+        }
+    );
+
+    std::fs::remove_file(root.join(library).join("native.php")).unwrap();
+    compile_succeeds(root);
+    assert_eq!(named(root), Library::default());
+
+    write(root, &format!("{library}/native.php"), "<?php\n\nreturn [];\n");
+    let output = compile(root);
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    assert!(
+        printed(&output).contains(&format!(
+            "{library}/native.php gives no native fingerprint. Reinstall heyjordanparker/php-sharp-composer."
+        )),
+        "{}",
+        printed(&output)
+    );
 }
 
 /// A dangling link named like a source, as Emacs leaves beside a buffer with unsaved changes, is no source: the loader
