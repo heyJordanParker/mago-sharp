@@ -668,8 +668,11 @@ pub fn check_interface<'ast, 'arena>(interface: &'ast Interface<'arena>, context
                             );
                         }
 
+                        // `check_slice` refuses an accessor body of a PHP# interface property, naming the computed form.
                         for hook in &hooked_property.hook_list.hooks {
-                            if let PropertyHookBody::Concrete(property_hook_concrete_body) = &hook.body {
+                            if let PropertyHookBody::Concrete(property_hook_concrete_body) = &hook.body
+                                && !context.program.dialect.is_sharp()
+                            {
                                 context.report(
                                     Issue::error(format!(
                                         "Interface virtual property `{property_display}` must be abstract."

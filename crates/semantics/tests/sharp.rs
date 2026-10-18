@@ -2125,7 +2125,6 @@ fn an_interface_property_is_get_only_or_settable() {
     assert_eq!(
         issues(code),
         [
-            "6:24 Interface virtual property `Named.label` must be abstract.",
             "6:20 An interface property's default body is an expression: write `string label => …;`.",
             "8:23 An interface member is always public, so it takes no access modifier.",
             "9:19 An interface member is always public, so it takes no access modifier.",
@@ -2133,7 +2132,7 @@ fn an_interface_property_is_get_only_or_settable() {
         ]
     );
     let helps: Vec<Option<String>> =
-        check_in_type_file(code).into_iter().skip(2).take(2).map(|issue| issue.help).collect();
+        check_in_type_file(code).into_iter().skip(1).take(2).map(|issue| issue.help).collect();
     assert_eq!(
         helps,
         [

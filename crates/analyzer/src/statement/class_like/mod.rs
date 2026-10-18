@@ -1289,7 +1289,15 @@ where
     }
 
     if has_complete_hierarchy && !class_like_metadata.kind.is_trait() && !class_like_metadata.flags.is_abstract() {
+        let without_defaults =
+            report_missing_defaults(context, class_like_metadata, name_span.unwrap_or(declaration_span));
         for (method_name, method_id) in &class_like_metadata.declaring_method_ids {
+            if without_defaults
+                .iter()
+                .any(|defaults| context.codebase.get_method(defaults.as_bytes(), method_name.as_bytes()).is_some())
+            {
+                continue;
+            }
             if class_like_metadata.kind.is_enum() {
                 if method_name.as_bytes().eq_ignore_ascii_case(b"cases") {
                     continue;
@@ -1752,6 +1760,49 @@ where
             .with_annotation(Annotation::primary(span).with_message("Declared here.")),
         );
     }
+}
+
+/// Reports a plain PHP class, declared at `span`, that implements a PHP# interface with default bodies without using
+/// the interface's trait `<Interface>\Defaults`, through which alone it gets them, spec section 22, and returns those
+/// traits, whose methods need no report of their own.
+fn report_missing_defaults<A>(
+    context: &mut Context<'_, '_, A>,
+    class_like_metadata: &ClassLikeMetadata,
+    span: Span,
+) -> Vec<Word>
+where
+    A: Arena,
+{
+    if context.dialect.is_sharp() || !class_like_metadata.kind.is_class() {
+        return Vec::new();
+    }
+
+    let mut reported = Vec::new();
+    for defaults in context.codebase.get_defaults_traits(class_like_metadata) {
+        if class_like_metadata.used_traits.contains(&defaults.name) {
+            continue;
+        }
+        let Some(interface) = context.codebase.get_defaults_interface(defaults) else {
+            continue;
+        };
+
+        let class = class_like_metadata.original_name;
+        context.collector.report_with_code(
+            IssueCode::UnimplementedAbstractMethod,
+            Issue::error(format!(
+                "`{class}` implements `{}` without its default bodies: write `use \\{};` in `{class}`.",
+                interface.original_name, defaults.original_name
+            ))
+            .with_annotation(Annotation::primary(span).with_message("Declared here."))
+            .with_note(format!(
+                "A plain PHP class gets the default bodies of the PHP# interface `{}` through the trait `{}`.",
+                interface.original_name, defaults.original_name
+            )),
+        );
+        reported.push(defaults.name);
+    }
+
+    reported
 }
 
 /// Reports a PHP# class or event, declared at `span`, that does not give the property `property_name` that `parent`
@@ -5738,8 +5789,23 @@ fn check_class_like_constants<'ctx, 'arena, A>(
                     let constant = display_member(context, class_like_metadata.original_name, constant_name);
                     let interface_name = display_class_like_name(context, interface_metadata.original_name);
                     let child_visibility = child_constant.visibility;
-
-                    context.collector.report_with_code(
+                    // A PHP# constant written bare is private, spec section 5, so it names the `public` it takes.
+                    if context.dialect.is_sharp() {
+                        let name = BytesDisplay(constant_name.as_bytes());
+                        context.collector.report_with_code(
+                            IssueCode::IncompatibleConstantVisibility,
+                            Issue::error(format!(
+                                "`{name}` implements `{interface_name}.{name}`, so it is written `public const`."
+                            ))
+                            .with_annotation(Annotation::primary(child_span).with_message("Declared here."))
+                            .with_annotation(
+                                Annotation::secondary(interface_span)
+                                    .with_message(format!("`{interface_name}` declares it here.")),
+                            )
+                            .with_note("An interface's members are public, and so is each member that implements one."),
+                        );
+                    } else {
+                        context.collector.report_with_code(
                         IssueCode::IncompatibleConstantVisibility,
                         Issue::error(format!(
                             "Constant `{constant}` must be public to implement interface `{interface_name}`."
@@ -5755,6 +5821,7 @@ fn check_class_like_constants<'ctx, 'arena, A>(
                         .with_note("All interface constants are implicitly public and implementing classes must maintain public visibility.")
                         .with_help(format!("Change the visibility of `{constant_name}` to `public`.")),
                     );
+                    }
                 }
 
                 if let (Some(child_type), Some(interface_type)) =

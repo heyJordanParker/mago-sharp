@@ -3,9 +3,7 @@ use std::rc::Rc;
 
 use mago_allocator::Arena;
 use mago_bytes::BytesDisplay;
-use mago_codex::identifier::method::MethodIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
-use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::metadata::property::PropertyMetadata;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
@@ -49,6 +47,7 @@ use crate::expression::ancestor_type_arguments;
 use crate::expression::array::check_sharp_literal_kind;
 use crate::expression::array::get_empty_literal_type;
 use crate::expression::array::get_set_literal_type;
+use crate::expression::binary::utils::DeclaredOperator;
 use crate::expression::binary::utils::analyze_operator_call;
 use crate::expression::binary::utils::are_definitely_loosely_equal;
 use crate::expression::binary::utils::are_definitely_not_identical;
@@ -61,6 +60,7 @@ use crate::expression::binary::utils::is_always_greater_than_or_equal;
 use crate::expression::binary::utils::is_always_identical_to;
 use crate::expression::binary::utils::is_always_less_than;
 use crate::expression::binary::utils::is_always_less_than_or_equal;
+use crate::expression::binary::utils::report_tied_operator;
 use crate::expression::binary::utils::takes_operands;
 use crate::expression::with_type_arguments;
 use crate::statement::class_like::r#struct::data_enum;
@@ -70,6 +70,7 @@ use crate::utils::expression::get_literal_array_key;
 use crate::utils::misc::unwrap_expression;
 use crate::utils::names::article;
 use crate::utils::names::display_bool;
+use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_type;
 use crate::utils::quoted_source;
 use crate::utils::template::class_type_arguments;
@@ -1029,6 +1030,8 @@ pub(crate) enum Refusal {
     /// `==` or `!=` on two values of types that never match, a string ordered against another type, or an instance
     /// compared with a value its class's operator never takes, as `money < 5`.
     DifferentTypes,
+    /// A comparison of instances that two operators take, of which neither is more specific.
+    Tied,
 }
 
 /// Whether spec section 19 compares a value of `lhs_type` with one of `rhs_type` as two floats: both are numbers, `null`
@@ -1137,7 +1140,8 @@ fn refusal(
             } else if has(Comparand::Instance) || !structs.is_empty() {
                 match get_comparison_method(operator, lhs_type, rhs_type, codebase) {
                     None => Some(Refusal::Instance),
-                    Some(method) => {
+                    Some(DeclaredOperator::Tied(_)) => Some(Refusal::Tied),
+                    Some(DeclaredOperator::Chosen(method)) => {
                         let operands = [&lhs_type.to_non_nullable(), &rhs_type.to_non_nullable()];
 
                         (!can_take_operands(codebase, method, &operands)).then_some(Refusal::DifferentTypes)
@@ -1193,8 +1197,10 @@ fn ordering_refusal(lhs_type: &TUnion, rhs_type: &TUnion, codebase: &CodebaseMet
 
     let different_types = if lhs.iter().chain(&rhs).any(|comparand| comparand.is_instance() || ordered_case(comparand))
     {
-        let Some(method) = method else {
-            return Some(Refusal::Instance);
+        let method = match method {
+            None => return Some(Refusal::Instance),
+            Some(DeclaredOperator::Tied(_)) => return Some(Refusal::Tied),
+            Some(DeclaredOperator::Chosen(method)) => method,
         };
 
         !can_take_operands(codebase, method, &[&lhs_type.to_non_nullable(), &rhs_type.to_non_nullable()])
@@ -1213,14 +1219,14 @@ fn ordering_refusal(lhs_type: &TUnion, rhs_type: &TUnion, codebase: &CodebaseMet
 }
 
 /// The static method a PHP# comparison of instances runs: `op_Equality` for `==` and `!=`, and `op_Comparison` for
-/// `<=>` and the orderings, which the class of an instance side declares or inherits. `== null` tests for `null`, and
-/// runs none.
+/// `<=>` and the orderings, as [`get_operator_method`] chooses it from the types of both sides. `== null` tests for
+/// `null`, and runs none.
 pub(crate) fn get_comparison_method<'ctx>(
     operator: &BinaryOperator<'_>,
     lhs_type: &TUnion,
     rhs_type: &TUnion,
     codebase: &'ctx CodebaseMetadata,
-) -> Option<(MethodIdentifier, &'ctx FunctionLikeMetadata)> {
+) -> Option<DeclaredOperator<'ctx>> {
     let declared = match operator {
         BinaryOperator::Equal(_) | BinaryOperator::NotEqual(_) if lhs_type.is_null() || rhs_type.is_null() => {
             return None;
@@ -1249,7 +1255,7 @@ pub(crate) fn analyze_declared_comparison<'arena, A>(
 where
     A: Arena,
 {
-    let method = get_comparison_method(&binary.operator, lhs_type, rhs_type, context.codebase)?;
+    let method = get_comparison_method(&binary.operator, lhs_type, rhs_type, context.codebase)?.chosen()?;
     let (lhs_type, rhs_type) = if matches!(binary.operator, BinaryOperator::Equal(_) | BinaryOperator::NotEqual(_)) {
         (lhs_type.to_non_nullable(), rhs_type.to_non_nullable())
     } else {
@@ -1278,7 +1284,18 @@ pub(crate) fn report_sharp_refusal<A>(
     let part = |refused: fn(Comparand) -> bool| display_refused_side(context, lhs_type, rhs_type, refused);
 
     let equality = if operator.is_negated_equality() { "!=" } else { "==" };
+    if matches!(refusal, Refusal::Tied) {
+        let operands = [&lhs_type.to_non_nullable(), &rhs_type.to_non_nullable()];
+        if let Some(DeclaredOperator::Tied(tied)) =
+            get_comparison_method(operator, operands[0], operands[1], context.codebase)
+        {
+            report_tied_operator(context, operator, &operands, &tied, binary.span());
+        }
+
+        return;
+    }
     let (code, issue) = match refusal {
+        Refusal::Tied => unreachable!("a tie is reported with the operators it ties"),
         Refusal::Identity => (
             IssueCode::InvalidOperand,
             Issue::error(format!("{pair}: it tests whether two class instances are the same object."))
@@ -1370,7 +1387,12 @@ pub(crate) fn report_sharp_refusal<A>(
                 .with_help("Test it with `!= null` before the comparison."),
         ),
         Refusal::UnorderedOperand => {
-            (IssueCode::InvalidOperand, unordered_issue(op, &part(Comparand::is_unordered), refusal))
+            let unordered_enum = unordered_enum(context, lhs_type, rhs_type);
+
+            (
+                IssueCode::InvalidOperand,
+                unordered_issue(op, &part(Comparand::is_unordered), refusal, unordered_enum.as_deref()),
+            )
         }
         Refusal::DifferentTypes => (
             IssueCode::InvalidOperand,
@@ -1406,11 +1428,27 @@ where
 
             different_types_issue(&comparison, "Convert the key so every key has the same type.")
         }
-        Some(refusal @ Refusal::Instance) => {
-            unordered_issue("sortedBy", &display_refused_part(context, &key_type, Comparand::is_instance), refusal)
-        }
+        Some(refusal @ Refusal::Instance) => unordered_issue(
+            "sortedBy",
+            &display_refused_part(context, &key_type, Comparand::is_instance),
+            refusal,
+            None,
+        ),
         Some(refusal @ Refusal::UnorderedOperand) => {
-            unordered_issue("sortedBy", &display_refused_part(context, &key_type, Comparand::is_unordered), refusal)
+            let unordered_enum = unordered_enum(context, &key_type, &key_type);
+            let part = display_refused_part(context, &key_type, Comparand::is_unordered);
+
+            unordered_issue("sortedBy", &part, refusal, unordered_enum.as_deref())
+        }
+        Some(Refusal::Tied) => {
+            let ordering = BinaryOperator::Spaceship(Span::zero());
+            if let Some(DeclaredOperator::Tied(tied)) =
+                get_comparison_method(&ordering, &key_type, &key_type, context.codebase)
+            {
+                report_tied_operator(context, &ordering, &[&key_type, &key_type], &tied, selector.span());
+            }
+
+            return;
         }
         Some(
             Refusal::Identity
@@ -1457,7 +1495,7 @@ pub(crate) fn check_element_equality<A>(
     // `==` checks the operands of a declared operator as the arguments of its call, so `Money::op_Equality` refuses a
     // `Money|Line` element as `element == money` does. An `Any` element keeps its own report.
     let refusal = sharp_refusal(&equality, element_type, value_type, context.codebase).or_else(|| {
-        let method = get_comparison_method(&equality, element_type, value_type, context.codebase)?;
+        let method = get_comparison_method(&equality, element_type, value_type, context.codebase)?.chosen()?;
         let operands = [&element_type.to_non_nullable(), &value_type.to_non_nullable()];
 
         (!element_type.is_mixed() && !takes_operands(context.codebase, method, &operands))
@@ -1559,6 +1597,16 @@ pub(crate) fn check_element_equality<A>(
                 .with_note("A search compares each element with the value by `==`.")
                 .with_help(format!("Make the `operator ==` of `{class}` take `{element_name}` and `{value_name}`.")),
             )
+        }
+        Some(Refusal::Tied) => {
+            let operands = [&element_type.to_non_nullable(), &value_type.to_non_nullable()];
+            if let Some(DeclaredOperator::Tied(tied)) =
+                get_comparison_method(&equality, operands[0], operands[1], context.codebase)
+            {
+                report_tied_operator(context, &equality, &operands, &tied, value.span());
+            }
+
+            return;
         }
         Some(Refusal::Identity | Refusal::StructIdentity | Refusal::NullableOperand | Refusal::UnorderedOperand) => {
             unreachable!("`==` is refused only for a collection, an instance, or the operands of its operator")
@@ -1712,20 +1760,46 @@ fn different_types_issue(comparison: &str, help: &str) -> Issue {
 }
 
 /// The issue that refuses ordering a value whose part `part` has no order by `orderer`, an operator or `sortedBy`, as
-/// `refusal` gives the reason: a `bool`, an enum case or a collection, or an instance of a class that declares no
-/// `operator <=>`.
-fn unordered_issue(orderer: impl std::fmt::Display, part: &str, refusal: Refusal) -> Issue {
+/// `refusal` gives the reason: a `bool`, a case of an enum that declares no `operator <=>`, `unordered_enum` when it
+/// is one, or a collection, or an instance of a class that declares none.
+fn unordered_issue(
+    orderer: impl std::fmt::Display,
+    part: &str,
+    refusal: Refusal,
+    unordered_enum: Option<&str>,
+) -> Issue {
     let note = if matches!(refusal, Refusal::Instance) {
         "A class instance has an order only where its class declares `operator <=>`."
     } else {
-        "A `bool`, an enum case and a collection have no order."
+        "A `bool` and a collection have no order, and an enum's cases have one only where it declares `operator <=>`."
+    };
+    let help = match unordered_enum {
+        Some(r#enum) => format!(
+            "Declare `public static int operator <=>({enum} a, {enum} b)` in `{enum}`: an enum orders its cases once it declares `operator <=>`.",
+            r#enum = r#enum
+        ),
+        None => "Order a number or a string taken from the value instead.".to_owned(),
     };
 
     Issue::error(format!(
-        "`{orderer}` orders numbers, strings and classes that declare `operator <=>`, and `{part}` is none of them."
+        "`{orderer}` orders numbers, strings, and classes and enums that declare `operator <=>`, and `{part}` is none of them."
     ))
     .with_note(note)
-    .with_help("Order a number or a string taken from the value instead.")
+    .with_help(help)
+}
+
+/// The enum a case of `lhs_type` or `rhs_type` belongs to when its cases have no order, as `Status`, for the help
+/// that names the `operator <=>` it declares to order them.
+fn unordered_enum<A>(context: &Context<'_, '_, A>, lhs_type: &TUnion, rhs_type: &TUnion) -> Option<String>
+where
+    A: Arena,
+{
+    comparands(lhs_type, context.codebase).into_iter().chain(comparands(rhs_type, context.codebase)).find_map(
+        |comparand| match comparand {
+            Comparand::Enum(name) => Some(display_class_like_name(context, name).to_string()),
+            _ => None,
+        },
+    )
 }
 
 /// Whether `atomic` holds a comparand `refused` accepts.

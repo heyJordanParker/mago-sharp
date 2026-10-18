@@ -1,6 +1,7 @@
 use mago_analyzer::CodebasePatternNames;
 use mago_analyzer::artifacts::AnalysisArtifacts;
 use mago_analyzer::artifacts::CallTarget;
+use mago_analyzer::chosen_operator;
 use mago_analyzer::effects::Effects;
 use mago_codex::defaults_trait_name;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
@@ -37,11 +38,13 @@ use mago_codex::ttype::template::variance::Variance;
 use mago_codex::ttype::union::TUnion;
 use mago_database::file::File;
 use mago_names::ResolvedNames;
+use mago_names::binding::php_operator_name;
 use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::Access;
 use mago_syntax::cst::Argument;
 use mago_syntax::cst::ArgumentList;
+use mago_syntax::cst::BinaryOperator;
 use mago_syntax::cst::Call;
 use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Expression;
@@ -260,8 +263,7 @@ impl<'analysis> Types<'analysis> {
 
     /// The default bodies the fully qualified class-like name `class` uses itself, spec section 22: each method of the
     /// traits [`CodebaseMetadata::get_defaults_traits`] gives it, with its trait, its interface's full name, and the
-    /// trait of a sub-interface whose body replaces it, in declaration order. An operator, which the trait already
-    /// holds as `op_Comparison@App\Priced`, is none.
+    /// trait of a sub-interface whose body replaces it, in declaration order.
     #[must_use]
     pub fn default_bodies(&self, class: &[u8]) -> Vec<(Word, Word, Word, Option<Word>)> {
         let metadata = self.scanned(class);
@@ -273,9 +275,6 @@ impl<'analysis> Types<'analysis> {
                 // A computed property's default body is already the protected `designKey@App\HasDesign`.
                 defaults.methods.iter().filter(|method| !method.as_bytes().contains(&b'@')).filter_map(|method| {
                     let body = self.codebase.get_method(defaults.name.as_bytes(), method.as_bytes())?;
-                    if body.flags.is_operator() {
-                        return None;
-                    }
                     let replacing = Self::replacing(&interfaces, interface, |other| {
                         self.codebase
                             .get_method(
@@ -1748,27 +1747,29 @@ impl<'analysis> Types<'analysis> {
         (root, metadata)
     }
 
-    /// The type whose static method `name` a PHP# operator on operands of the types `operands` runs, as the checker
-    /// chose it, with the operand it was found through: the one the left operand's class or enum declares or inherits,
-    /// else the right one's, as `App\Money` for `op_Addition` on two `Order`s that inherit it. A class that gets the
-    /// operator of an interface, spec section 19, from the interface's trait of default bodies runs it as its own, and
-    /// a value of the interface itself gives the interface. Operands with no instance of one type run none.
-    pub(crate) fn operator_class(&self, name: &[u8], operands: &[&TUnion]) -> Option<(Word, usize)> {
-        operands.iter().enumerate().find_map(|(index, operand)| {
-            let classes = receiver_classes(operand)?;
-            let [class] = classes.as_slice() else {
-                return None;
-            };
-            let method = self.method_declaration(class, name)?;
-            if method.kind != DeclarationKind::StaticMethod {
-                return None;
-            }
-            let declaring = self.scanned(method.class.as_bytes());
-            let runs_on =
-                if self.codebase.get_defaults_interface(declaring).is_some() { self.scanned(class) } else { declaring };
+    /// The class-like that declares the static method `name` a PHP# operator on operands of the types `operands` runs,
+    /// as the checker chose it from those types, spec section 19, as `App\Money` for `op_Addition` on two `Order`s
+    /// that inherit it, or `App\Priced` for `op_Comparison` on a `Rare` and a `Book`. Operands that no operator takes
+    /// run none.
+    pub(crate) fn operator_owner(&self, name: &[u8], operands: &[&TUnion]) -> Option<Word> {
+        chosen_operator(self.codebase, name, operands).map(|owner| self.scanned(owner.as_bytes()).original_name)
+    }
 
-            Some((runs_on.original_name, index))
-        })
+    /// The class-like whose `operator <=>` the PHP# `sortedBy` call `call` orders two keys by, as `<` on two values of
+    /// the key type its function returns chooses it, spec section 19, so a `List<Priced>` sorts by `Priced`'s whatever
+    /// classes it holds. None for any other call, and for keys of a type that declares none, such as strings.
+    pub(crate) fn sorting_operator(&self, call: &Expression) -> Option<Word> {
+        if self.collection_method(call)?.1 != b"sortedby" {
+            return None;
+        }
+        let span = call.span();
+        let [key] = self.artifacts.inferred_type_arguments.get(&(span.start.offset, span.end.offset))?.as_slice()
+        else {
+            return None;
+        };
+        let key = key.to_non_nullable();
+
+        self.operator_owner(php_operator_name(&BinaryOperator::Spaceship(Span::zero()), 2)?, &[&key, &key])
     }
 
     /// The method `class` declares or inherits by the name `method`, if any.

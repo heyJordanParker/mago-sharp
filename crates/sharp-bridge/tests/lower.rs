@@ -25643,21 +25643,21 @@ fn ordering_instances_compares_op_comparison_with_zero() {
 /// ```php
 /// interface Priced { public const string CURRENCY = 'USD'; public mixed $label { get; } }
 /// trait Priced\Defaults {
-///     public static function op_Comparison(\App\Priced $a, \App\Priced $b): int { return $a->cents <=> $b->cents; }
-///     public static function 'op_Comparison@App\Priced'(\App\Priced $a, \App\Priced $b): int { … }
+///     public static function 'op_Comparison@App\Priced'(\App\Priced $a, \App\Priced $b): int { return $a->cents <=> $b->cents; }
 /// }
-/// return [$operand#1 = $a, $operand#1::{'op_Comparison@App\Priced'}($operand#1, $b)][1] < 0;
-/// return \App\Book::op_Comparison($a, $b) < 0;
+/// return \App\Priced\Defaults::{'op_Comparison@App\Priced'}($a, $b) < 0;
+/// return \App\Priced\Defaults::{'op_Comparison@App\Priced'}($a, $b) < 0;
 /// return \App\Size::op_Comparison(\App\Size::Small, \App\Size::Large) < 0;
+/// return $books->sortedBy(…, \App\Priced\Defaults::{'op_Comparison@App\Priced'}(...));
 /// ```
 ///
-/// Spec sections 19 and 22: an interface's constant is `[1]` `ZEND_ACC_PUBLIC`, and its operator is a `[17]` public
-/// static method of its trait of default bodies twice: by its own name, which a class's own operator replaces, and by
-/// the name of its interface, which no class replaces. Two values of the interface run the second on the class of the
-/// first, which runs once. A class that gets the operator from the trait, and an enum that declares one, run it as a
-/// class runs its own.
+/// Spec sections 19 and 22: an interface's constant is `[1]` `ZEND_ACC_PUBLIC`, and its operator is one `[17]` public
+/// static method of its trait of default bodies, named after its interface. The operator is chosen from the static
+/// types of both operands, so two values of the interface and two `Book`s, which declares none, call it on the trait
+/// itself, and no class or operand order changes which one runs. An enum that declares one runs it as a class does.
+/// `sortedBy` passes the engine the operator `<` on two of its keys runs, as a first-class callable.
 #[test]
-fn an_interface_operator_runs_from_its_trait_on_the_class_of_an_operand() {
+fn an_interface_operator_runs_from_its_trait_as_the_types_of_the_operands_choose_it() {
     let files = lowered_each(
         &[
             (
@@ -25674,7 +25674,7 @@ fn an_interface_operator_runs_from_its_trait_on_the_class_of_an_operand() {
             ),
             (
                 "src/App/Uses.sharp",
-                "namespace App;\n\npublic static class Uses\n{\n    public static bool priced(Priced a, Priced b) => a < b;\n\n    public static bool books(Book a, Book b) => a < b;\n\n    public static bool sizes() => Size.Small < Size.Large;\n}\n",
+                "namespace App;\n\npublic static class Uses\n{\n    public static bool priced(Priced a, Priced b) => a < b;\n\n    public static bool books(Book a, Book b) => a < b;\n\n    public static bool sizes() => Size.Small < Size.Large;\n\n    public static List<Book> sorted(List<Book> books) => books.sortedBy(book => book);\n}\n",
             ),
         ],
         &[],
@@ -25688,6 +25688,7 @@ fn an_interface_operator_runs_from_its_trait_on_the_class_of_an_operand() {
             member("Uses", &[0, 2]),
             member("Uses", &[1, 2]),
             member("Uses", &[2, 2]),
+            member("Uses", &[3, 2, 0, 0, 2, 1]),
         ]
         .concat(),
         indoc! {r#"
@@ -25700,36 +25701,6 @@ fn an_interface_operator_runs_from_its_trait_on_the_class_of_an_operand() {
               null
               ZVAL [1] "string"
             STMT_LIST
-              METHOD [17] "op_Comparison" @7-7
-                PARAM_LIST
-                  PARAM
-                    ZVAL "App\\Priced"
-                    ZVAL "a"
-                    null
-                    null
-                    null
-                    null
-                  PARAM
-                    ZVAL "App\\Priced"
-                    ZVAL "b"
-                    null
-                    null
-                    null
-                    null
-                null
-                STMT_LIST
-                  RETURN
-                    BINARY_OP [170]
-                      PROP
-                        VAR
-                          ZVAL "a"
-                        ZVAL "cents"
-                      PROP
-                        VAR
-                          ZVAL "b"
-                        ZVAL "cents"
-                ZVAL [1] "int"
-                null
               METHOD [17] "op_Comparison@App\\Priced" @7-7
                 PARAM_LIST
                   PARAM
@@ -25763,34 +25734,21 @@ fn an_interface_operator_runs_from_its_trait_on_the_class_of_an_operand() {
             STMT_LIST
               RETURN
                 BINARY_OP [20]
-                  DIM
-                    ARRAY [3]
-                      ARRAY_ELEM
-                        ASSIGN
-                          VAR
-                            ZVAL "operand#1"
-                          VAR
-                            ZVAL "a"
-                        null
-                      ARRAY_ELEM
-                        STATIC_CALL
-                          VAR
-                            ZVAL "operand#1"
-                          ZVAL "op_Comparison@App\\Priced"
-                          ARG_LIST
-                            VAR
-                              ZVAL "operand#1"
-                            VAR
-                              ZVAL "b"
-                        null
-                    ZVAL 1
+                  STATIC_CALL
+                    ZVAL "App\\Priced\\Defaults"
+                    ZVAL "op_Comparison@App\\Priced"
+                    ARG_LIST
+                      VAR
+                        ZVAL "a"
+                      VAR
+                        ZVAL "b"
                   ZVAL 0
             STMT_LIST
               RETURN
                 BINARY_OP [20]
                   STATIC_CALL
-                    ZVAL "App\\Book"
-                    ZVAL "op_Comparison"
+                    ZVAL "App\\Priced\\Defaults"
+                    ZVAL "op_Comparison@App\\Priced"
                     ARG_LIST
                       VAR
                         ZVAL "a"
@@ -25811,25 +25769,27 @@ fn an_interface_operator_runs_from_its_trait_on_the_class_of_an_operand() {
                         ZVAL "App\\Size"
                         ZVAL "Large"
                   ZVAL 0
+            STATIC_CALL
+              ZVAL "App\\Priced\\Defaults"
+              ZVAL "op_Comparison@App\\Priced"
+              CALLABLE_CONVERT
         "#}
     );
 }
 
 /// ```php
-/// return [$operand#1 = $a, $operand#2 = $b, $operand#1 === null || $operand#2 === null
-///     ? $operand#1 === $operand#2
-///     : $operand#1::{'op_Equality@App\Measure'}($operand#1, $operand#2)][2];
+/// return \App\Measure\Defaults::{'op_Equality@App\Measure'}($a, $b);
 /// enum Coin {
 ///     public function hash(): int { return 1; }
-///     public static function op_Equality(\App\Coin $a, \App\Coin $b): bool { … }
+///     public static function op_Equality(?\App\Coin $a, ?\App\Coin $b): bool { if ($a === null || $b === null) { return $a === $b; } … }
 /// }
 /// ```
 ///
-/// Spec sections 19 and 20: `==` on two values of an interface holds both, so each runs once, and lifts null over
-/// them as C# lifts it, so null equals only null and runs no operator. An enum with data that declares `==` compares
-/// its cases by it, so it gets no value equality.
+/// Spec sections 19 and 20: `==` on two values of an interface that may be null calls the interface's operator on its
+/// trait, whose body lifts null over them as each `operator ==` does, so null equals only null. An enum with data
+/// that declares `==` compares its cases by it, so it gets no value equality.
 #[test]
-fn interface_equality_lifts_null_and_an_enum_compares_its_cases_by_its_own_equality() {
+fn interface_equality_runs_on_its_trait_and_an_enum_compares_its_cases_by_its_own_equality() {
     let files = lowered_each(
         &[
             (
@@ -25854,49 +25814,14 @@ fn interface_equality_lifts_null_and_an_enum_compares_its_cases_by_its_own_equal
         indoc! {r#"
             STMT_LIST
               RETURN
-                DIM
-                  ARRAY [3]
-                    ARRAY_ELEM
-                      ASSIGN
-                        VAR
-                          ZVAL "operand#1"
-                        VAR
-                          ZVAL "a"
-                      null
-                    ARRAY_ELEM
-                      ASSIGN
-                        VAR
-                          ZVAL "operand#2"
-                        VAR
-                          ZVAL "b"
-                      null
-                    ARRAY_ELEM
-                      CONDITIONAL
-                        OR
-                          BINARY_OP [16]
-                            VAR
-                              ZVAL "operand#1"
-                            ZVAL null
-                          BINARY_OP [16]
-                            VAR
-                              ZVAL "operand#2"
-                            ZVAL null
-                        BINARY_OP [16]
-                          VAR
-                            ZVAL "operand#1"
-                          VAR
-                            ZVAL "operand#2"
-                        STATIC_CALL
-                          VAR
-                            ZVAL "operand#1"
-                          ZVAL "op_Equality@App\\Measure"
-                          ARG_LIST
-                            VAR
-                              ZVAL "operand#1"
-                            VAR
-                              ZVAL "operand#2"
-                      null
-                  ZVAL 2
+                STATIC_CALL
+                  ZVAL "App\\Measure\\Defaults"
+                  ZVAL "op_Equality@App\\Measure"
+                  ARG_LIST
+                    VAR
+                      ZVAL "a"
+                    VAR
+                      ZVAL "b"
             STMT_LIST
               METHOD [1] "hash" @8-8
                 PARAM_LIST

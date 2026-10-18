@@ -2014,7 +2014,9 @@ fn require_struct_properties(class_like: &mut ClassLikeMetadata, members: &Seque
 /// declared member does.
 fn create_value_equality(codebase: &mut CodebaseMetadata, class_like: &mut ClassLikeMetadata, span: Span) {
     let operand = |name: &str| create_parameter(name, get_mixed(), span);
-    let equality = create_static_method("op_Equality", span, vec![operand("$a"), operand("$b")], get_bool(), vec![]);
+    let mut equality =
+        create_static_method("op_Equality", span, vec![operand("$a"), operand("$b")], get_bool(), vec![]);
+    equality.flags |= MetadataFlags::OPERATOR;
     add_method(codebase, b"op_Equality", class_like, equality);
 }
 

@@ -2163,8 +2163,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// engine declares it in the file's namespace, so every name in a body resolves as it does in the interface. Each
     /// default body is a method, in source order: a method's is `public`, a computed property's is
     /// `protected function 'designKey@App\HasDesign'(): string`, which the property of each class that gets it runs,
-    /// and an operator is `op_Comparison` and `'op_Comparison@App\Priced'`, as [`Self::operator`] lowers it. A
-    /// generic interface's trait has the header `App.Keyed<$0>`. An interface without a default body has no trait.
+    /// and an operator is `public static function 'op_Comparison@App\Priced'`, as [`Self::operator`] lowers it, which
+    /// each use of it calls on the trait itself, spec section 19. A generic interface's trait has the header
+    /// `App.Keyed<$0>`. An interface without a default body or an operator has no trait.
     fn defaults(&mut self, interface: &Interface) -> Option<u32> {
         self.class = self.names.get(&interface.name);
         let mut members = Vec::new();
@@ -2193,10 +2194,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                         &[parameters, NULL, body, return_type, NULL],
                     ));
                 }
-                ClassLikeMember::Operator(operator) => {
-                    members.push(self.operator(operator, None));
-                    members.push(self.operator(operator, Some(interface_name)));
-                }
+                ClassLikeMember::Operator(operator) => members.push(self.operator(operator, Some(interface_name))),
                 _ => {}
             }
         }
@@ -2800,9 +2798,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// builds `public static function op_Addition(\App\Money $a, \App\Money $b): \App\Money`. `==` is lifted over null,
     /// as C# lifts it: its parameters are nullable, and its body starts with
     /// `if ($a === null || $b === null) { return $a === $b; }`, so null equals only null. Its body makes each `Set`
-    /// parameter a `Set` before that, as a method's does. An interface's operator runs from its trait of default
-    /// bodies, once as `op_Addition`, which each class that uses the trait gets unless it declares its own, and once
-    /// as `op_Addition@App\Priced`, which no class replaces: the method `interface` names it after.
+    /// parameter a `Set` before that, as a method's does. An interface's operator is a static method of its trait of
+    /// default bodies, `op_Addition@App\Priced` after the interface `interface` names, which each use calls on the
+    /// trait itself, so no class replaces it.
     fn operator(&mut self, operator: &Operator, interface: Option<Word>) -> u32 {
         let Some(name) = php_operator_name(&operator.symbol, operator.parameter_list.parameters.len()) else {
             unreachable!("check_slice refuses the operator `{}`", operator.symbol);
@@ -5399,12 +5397,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             Expression::UnaryPrefix(unary) => {
                 if let UnaryPrefixOperator::Negation(operator) = unary.operator
                     && let Some(name) = php_operator_name(&BinaryOperator::Subtraction(operator), 1)
-                    && let Some(declaring) =
-                        self.types.operator_class(name, &[self.types.expression_type(unary.operand)])
+                    && let Some(owner) = self.types.operator_owner(name, &[self.types.expression_type(unary.operand)])
                 {
-                    return self.declared_operator_call(line, declaring, name, |lowering| {
-                        vec![lowering.expression(unary.operand)]
-                    });
+                    let operand = self.expression(unary.operand);
+
+                    return self.operator_call(line, owner, name, &[operand]);
                 }
 
                 if let Expression::ArrayAccess(access) = unary.operand
@@ -5740,7 +5737,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 };
                 let method = self.member(&call.method);
                 if self.types.collection_method(expression).is_some() {
-                    let arguments = self.collection_arguments(&call.argument_list);
+                    let arguments = self.collection_arguments(expression, &call.argument_list);
                     let kind = if tested { SHARP_AST_METHOD_CALL } else { SHARP_AST_NULLSAFE_METHOD_CALL };
 
                     return self.node(kind, 0, line, &[object, method, arguments]);
@@ -6174,10 +6171,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
             return if negated { self.node(SHARP_AST_UNARY_OP, ZEND_BOOL_NOT, line, &[call]) } else { call };
         }
-        if let Some((declaring, name)) = self.declared_equality(lhs_type, rhs_type) {
-            let call = self.declared_operator_call(line, declaring, name, |lowering| {
-                vec![lowering.side(&lhs), lowering.side(&rhs)]
-            });
+        if let Some((owner, name)) = self.declared_equality(lhs_type, rhs_type) {
+            let operands = [self.side(&lhs), self.side(&rhs)];
+            let call = self.operator_call(line, owner, name, &operands);
 
             return if negated { self.node(SHARP_AST_UNARY_OP, ZEND_BOOL_NOT, line, &[call]) } else { call };
         }
@@ -6205,15 +6201,14 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// The type whose `op_Equality` `==` runs on a value of `lhs_type` and one of `rhs_type`, as the checker chose it,
-    /// with the operand it was found through and the method's name, or none when `==` on them is `===` or two floats.
-    /// `== null` runs none.
-    fn declared_equality(&self, lhs_type: &TUnion, rhs_type: &TUnion) -> Option<((Word, usize), &'static [u8])> {
+    /// with the method's name, or none when `==` on them is `===` or two floats. `== null` runs none.
+    fn declared_equality(&self, lhs_type: &TUnion, rhs_type: &TUnion) -> Option<(Word, &'static [u8])> {
         if lhs_type.is_null() || rhs_type.is_null() {
             return None;
         }
         let name = php_operator_name(&BinaryOperator::Equal(Span::zero()), 2)?;
 
-        Some((self.types.operator_class(name, &[lhs_type, rhs_type])?, name))
+        Some((self.types.operator_owner(name, &[lhs_type, rhs_type])?, name))
     }
 
     /// The type of the value `side` holds.
@@ -6505,24 +6500,24 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.node(SHARP_AST_CONDITIONAL, ZEND_PARENTHESIZED_CONDITIONAL, line, &[set, given, otherwise])
     }
 
-    /// The type, with the operand it was found through, and the PHP name of the operator a compound assignment runs on
-    /// instances, as `op_Addition` for `+=`, or none when its operands are no instances whose type declares it.
-    fn declared_compound_operator(&self, assignment: &Assignment) -> Option<((Word, usize), &'static [u8])> {
+    /// The type and the PHP name of the operator a compound assignment runs on instances, as `op_Addition` for `+=`,
+    /// or none when its operands are no instances whose types declare it.
+    fn declared_compound_operator(&self, assignment: &Assignment) -> Option<(Word, &'static [u8])> {
         let operator = compound_operator(&assignment.operator)?;
         let name = php_operator_name(&operator, 2)?;
         let types = self.types;
-        let class = types
-            .operator_class(name, &[types.expression_type(assignment.lhs), types.expression_type(assignment.rhs)])?;
+        let owner = types
+            .operator_owner(name, &[types.expression_type(assignment.lhs), types.expression_type(assignment.rhs)])?;
 
-        Some((class, name))
+        Some((owner, name))
     }
 
     /// What the compound assignment `assignment` writes, from the lowered `read` of its target and its lowered `value`:
     /// the operator its operands' class declares, and otherwise spec section 24's: `+` on two strings joins them, and
     /// `/` on two ints divides toward zero.
     fn compound_value(&mut self, line: u32, assignment: &Assignment, read: u32, value: u32) -> u32 {
-        if let Some((declaring, name)) = self.declared_compound_operator(assignment) {
-            return self.declared_operator_call(line, declaring, name, |_| vec![read, value]);
+        if let Some((owner, name)) = self.declared_compound_operator(assignment) {
+            return self.operator_call(line, owner, name, &[read, value]);
         }
 
         match (&assignment.operator, self.operand_types_of(assignment)) {
@@ -6613,11 +6608,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         };
         let name = php_operator_name(&declared, 2)?;
         let types = self.types;
-        let declaring =
-            types.operator_class(name, &[types.expression_type(binary.lhs), types.expression_type(binary.rhs)])?;
-        let call = self.declared_operator_call(line, declaring, name, |lowering| {
-            vec![lowering.expression(binary.lhs), lowering.expression(binary.rhs)]
-        });
+        let owner =
+            types.operator_owner(name, &[types.expression_type(binary.lhs), types.expression_type(binary.rhs)])?;
+        let operands = [self.expression(binary.lhs), self.expression(binary.rhs)];
+        let call = self.operator_call(line, owner, name, &operands);
 
         Some(match binary.operator {
             BinaryOperator::LessThan(_)
@@ -6633,69 +6627,25 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         })
     }
 
-    /// The call a PHP# operator runs on the operands `operands` lowers, on the type [`Types::operator_class`] found, at
-    /// the operand it found it through: the static method a class or an enum declares, as
-    /// `\App\Money::op_Addition($a, $b)`, or an interface's, spec section 19, the method each class that uses the
-    /// interface's trait gets and never replaces, called on the class of that operand. The operands up to that one,
-    /// and both of `==`, run once, in order, into hidden locals, and the call reads them:
-    /// `[$operand#1 = $a, $operand#1::{'op_Addition@App\Priced'}($operand#1, $b)][1]`. `==` lifts null over them, as
-    /// C# lifts it, so null equals only null and runs no operator.
-    fn declared_operator_call(
-        &mut self,
-        line: u32,
-        (class, receiver): (Word, usize),
-        name: &[u8],
-        operands: impl FnOnce(&mut Self) -> Vec<u32>,
-    ) -> u32 {
-        if self.types.class_declaration(class.as_bytes()).kind != DeclarationKind::Interface {
-            let operands = operands(self);
+    /// `\Class::name(arguments)`, the static method `class` declares to run an operator or an extension's member, as
+    /// [`Self::operator_method`] reaches it.
+    fn operator_call(&mut self, line: u32, class: Word, name: &[u8], arguments: &[u32]) -> u32 {
+        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, arguments);
 
-            return self.operator_call(line, class, name, &operands);
-        }
-
-        let lifted = php_operator_name(&BinaryOperator::Equal(Span::zero()), 2) == Some(name);
-        let taken = self.temporaries;
-        let count = if lifted { 2 } else { receiver + 1 };
-        let held: Vec<Vec<u8>> = std::iter::repeat_with(|| self.hidden("operand")).take(count).collect();
-        let mut arguments = operands(self);
-        self.temporaries = taken;
-        let read = |lowering: &mut Self, index: usize| {
-            let variable = lowering.local_name(0, line, &held[index]);
-
-            lowering.node(SHARP_AST_VAR, 0, line, &[variable])
-        };
-        let mut steps = Vec::new();
-        for (index, argument) in arguments.iter_mut().take(held.len()).enumerate() {
-            let place = read(self, index);
-            let assign = self.node(SHARP_AST_ASSIGN, 0, line, &[place, *argument]);
-            steps.push(self.node(SHARP_AST_ARRAY_ELEM, 0, line, &[assign, NULL]));
-            *argument = read(self, index);
-        }
-        let receiver_class = read(self, receiver);
-        let method = self.string(0, line, &super_alias(class, word(name)));
-        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &arguments);
-        let mut call = self.node(SHARP_AST_STATIC_CALL, 0, line, &[receiver_class, method, arguments]);
-        if lifted {
-            let [lhs, rhs] = [0, 1].map(|index| read(self, index));
-            let [lhs_null, rhs_null] = [lhs, rhs].map(|operand| self.is_null(line, operand));
-            let either_null = self.node(SHARP_AST_OR, 0, line, &[lhs_null, rhs_null]);
-            let [lhs, rhs] = [0, 1].map(|index| read(self, index));
-            let both_null = self.node(SHARP_AST_BINARY_OP, ZEND_IS_IDENTICAL, line, &[lhs, rhs]);
-            call = self.node(SHARP_AST_CONDITIONAL, 0, line, &[either_null, both_null, call]);
-        }
-        steps.push(self.node(SHARP_AST_ARRAY_ELEM, 0, line, &[call, NULL]));
-        let position = steps.len() - 1;
-        let steps = self.node(SHARP_AST_ARRAY, ZEND_ARRAY_SYNTAX_SHORT, line, &steps);
-        let position = self.zval(line, sharp_value::SHARP_LONG, |node| node.long_value = position as i64);
-
-        self.node(SHARP_AST_DIM, 0, line, &[steps, position])
+        self.operator_method(line, class, name, arguments)
     }
 
-    /// `\Class::name(arguments)`, the static method `class` declares to run an operator or an extension's member.
-    fn operator_call(&mut self, line: u32, class: Word, name: &[u8], arguments: &[u32]) -> u32 {
+    /// The static method `class` declares to run the operator `name`, called with `arguments`, or, when `arguments` is
+    /// a `CALLABLE_CONVERT`, its first-class callable. An interface's operator, spec section 19, is the method of its
+    /// trait that no class replaces, reached on the trait: `\App\Priced\Defaults::{'op_Comparison@App\Priced'}`.
+    fn operator_method(&mut self, line: u32, class: Word, name: &[u8], arguments: u32) -> u32 {
+        let (class, name) = if self.types.class_declaration(class.as_bytes()).kind == DeclarationKind::Interface {
+            (defaults_trait_name(class.as_bytes()), super_alias(class, word(name)))
+        } else {
+            (class, name.to_vec())
+        };
         let class = self.string(ZEND_NAME_FQ, line, class.as_bytes());
-        let method = self.string(0, line, name);
-        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, arguments);
+        let method = self.string(0, line, &name);
 
         self.node(SHARP_AST_STATIC_CALL, 0, line, &[class, method, arguments])
     }
@@ -7676,7 +7626,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             Some(is_list) => {
                 let other = self.read_collection(&mut collection, line, false);
                 let name = self.string(0, line, &method);
-                let arguments = self.collection_arguments(arguments);
+                let arguments = self.collection_arguments(call, arguments);
                 let own = self.node(SHARP_AST_METHOD_CALL, 0, line, &[other, name, arguments]);
 
                 self.node(SHARP_AST_CONDITIONAL, ZEND_PARENTHESIZED_CONDITIONAL, line, &[is_list, lowered, own])
@@ -8341,7 +8291,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         };
         let method = self.member(&call.method);
         if self.types.collection_method(expression).is_some() {
-            let arguments = self.collection_arguments(&call.argument_list);
+            let arguments = self.collection_arguments(expression, &call.argument_list);
 
             return self.node(kind, 0, line, &[object, method, arguments]);
         }
@@ -8524,14 +8474,23 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// The arguments of a call of a `List`, `Map` or `Set` method, which runs as the `Sharp\Collection` method that
     /// serves every collection. A method of one parameter names it after what its collection takes, `key` or
     /// `value`, where `Sharp\Collection` has one name, so a named argument goes in by position. `set` and `insert`,
-    /// the methods of two parameters, name them as `Sharp\Collection` does.
-    fn collection_arguments(&mut self, list: &ArgumentList) -> u32 {
-        let [Argument::Named(named)] = list.arguments.as_slice() else {
-            return self.arguments(list);
+    /// the methods of two parameters, name them as `Sharp\Collection` does. A `sortedBy` whose keys order by a declared
+    /// `operator <=>`, spec section 19, passes its first-class callable after its function, so the engine orders by
+    /// the operator `<` on two keys runs.
+    fn collection_arguments(&mut self, call: &Expression, list: &ArgumentList) -> u32 {
+        let mut arguments = match list.arguments.as_slice() {
+            [Argument::Named(named)] => vec![self.expression(named.value)],
+            _ => self.argument_nodes(list),
         };
-        let value = self.expression(named.value);
+        if let Some(owner) = self.types.sorting_operator(call)
+            && let Some(name) = php_operator_name(&BinaryOperator::Spaceship(Span::zero()), 2)
+        {
+            let line = self.line(list);
+            let callable = self.node(SHARP_AST_CALLABLE_CONVERT, 0, line, &[]);
+            arguments.push(self.operator_method(line, owner, name, callable));
+        }
 
-        self.node(SHARP_AST_ARG_LIST, 0, self.line(list), &[value])
+        self.node(SHARP_AST_ARG_LIST, 0, self.line(list), &arguments)
     }
 
     fn arguments(&mut self, list: &ArgumentList) -> u32 {

@@ -3,7 +3,6 @@ use mago_bytes::BytesDisplay;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::identifier::method::MethodIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
-use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
@@ -42,21 +41,154 @@ use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_sharp_type;
 use crate::utils::php_emulation::numeric_string_equals_int;
 
-/// The static method a PHP# operator runs as, named `name`, on operands of `operand_types`: the one the left
-/// operand's class declares or inherits, else the right one's, as `Money::op_Addition` for `money + other`. A class
-/// that declares none, or an operand that is no instance of one class, has none.
+/// The static method a PHP# operator runs as, spec section 19, chosen from the static types of its operands, as C#
+/// chooses one.
+pub(crate) enum DeclaredOperator<'ctx> {
+    /// The operator that runs. When none takes the operands, it is the first their types declare, which the
+    /// operator's report names.
+    Chosen((MethodIdentifier, &'ctx FunctionLikeMetadata)),
+    /// Two or more take the operands and neither takes fewer than the other, so the use is ambiguous.
+    Tied(Vec<MethodIdentifier>),
+}
+
+impl<'ctx> DeclaredOperator<'ctx> {
+    /// The operator that runs, or none when the use is ambiguous.
+    pub(crate) fn chosen(self) -> Option<(MethodIdentifier, &'ctx FunctionLikeMetadata)> {
+        match self {
+            DeclaredOperator::Chosen(method) => Some(method),
+            DeclaredOperator::Tied(_) => None,
+        }
+    }
+}
+
+/// The static method a PHP# operator named `name` runs as on operands of `operand_types`, spec section 19. The
+/// candidates are the operators that the classes, enums and type-parameter bounds of the operands declare, with their
+/// parent classes and their interfaces, as `Money::op_Addition` for `money + other`. Of those whose parameters take
+/// every operand, the one whose parameters each take no more than those of every other runs, so `Rare`'s own
+/// `operator <=>(Rare a, Rare b)` wins over `Priced`'s on two `Rare`s, and `Priced`'s runs on a `Rare` and a `Book`.
+/// Operands with no class-like type declare none.
 pub(crate) fn get_operator_method<'ctx>(
     codebase: &'ctx CodebaseMetadata,
     name: &[u8],
     operand_types: &[&TUnion],
-) -> Option<(MethodIdentifier, &'ctx FunctionLikeMetadata)> {
-    operand_types.iter().find_map(|operand_type| {
-        let class = get_instance_class(operand_type, codebase)?;
-        let method = codebase.get_declaring_method_identifier(&MethodIdentifier::new(class, word(name)));
-        let metadata = codebase.get_method_by_id(&method)?;
+) -> Option<DeclaredOperator<'ctx>> {
+    let candidates = declared_operators(codebase, name, operand_types);
+    let fitting: Vec<_> =
+        candidates.iter().filter(|method| takes_operands(codebase, **method, operand_types)).collect();
+    if fitting.is_empty() {
+        let first = candidates.iter().find(|method| can_take_operands(codebase, **method, operand_types));
 
-        metadata.method_metadata.as_ref().is_some_and(|method| method.is_static).then_some((method, metadata))
+        return first.or(candidates.first()).map(|method| DeclaredOperator::Chosen(*method));
+    }
+
+    let narrowest = fitting.iter().find(|method| {
+        let parameters = parameter_types(codebase, ***method);
+        let parameters: Vec<&TUnion> = parameters.iter().collect();
+
+        fitting.iter().all(|other| takes_operands(codebase, **other, &parameters))
+    });
+
+    Some(match narrowest {
+        Some(method) => DeclaredOperator::Chosen(**method),
+        None => DeclaredOperator::Tied(fitting.iter().map(|(method, _)| *method).collect()),
     })
+}
+
+/// The class-like whose operator named `name` runs on operands of `operand_types`, spec section 19.
+///
+/// [`get_operator_method`] chooses it, as `App\Priced` for `a < b` on a `Rare` and a `Book`. None when no operator
+/// takes the operands, or two tie.
+#[must_use]
+pub fn chosen_operator(codebase: &CodebaseMetadata, name: &[u8], operand_types: &[&TUnion]) -> Option<Word> {
+    let method = get_operator_method(codebase, name, operand_types)?.chosen()?;
+
+    can_take_operands(codebase, method, operand_types).then(|| method.0.get_class_name())
+}
+
+/// The operators named `name` that the class-like types of `operand_types` declare, with their parent classes and
+/// their interfaces, each once, in the order of the operands, a type's own before its parents' and its interfaces'.
+fn declared_operators<'ctx>(
+    codebase: &'ctx CodebaseMetadata,
+    name: &[u8],
+    operand_types: &[&TUnion],
+) -> Vec<(MethodIdentifier, &'ctx FunctionLikeMetadata)> {
+    let mut operators: Vec<(MethodIdentifier, &FunctionLikeMetadata)> = Vec::new();
+    for class in operand_types.iter().flat_map(|operand_type| operand_classes(operand_type).unwrap_or_default()) {
+        for operator in class_operators(codebase, class, name) {
+            if !operators.iter().any(|(known, _)| *known == operator.0) {
+                operators.push(operator);
+            }
+        }
+    }
+
+    operators
+}
+
+/// The operators named `name` that the class-like `class`, its parent classes and its interfaces declare, the class's
+/// own first.
+fn class_operators<'ctx>(
+    codebase: &'ctx CodebaseMetadata,
+    class: Word,
+    name: &[u8],
+) -> Vec<(MethodIdentifier, &'ctx FunctionLikeMetadata)> {
+    let Some(metadata) = codebase.get_class_like(class.as_bytes()) else {
+        return Vec::new();
+    };
+
+    std::iter::once(&metadata.name)
+        .chain(&metadata.all_parent_classes)
+        .chain(&metadata.all_parent_interfaces)
+        .filter_map(|owner| {
+            let owner = codebase.get_class_like(owner.as_bytes())?;
+            let method = codebase.get_method(owner.name.as_bytes(), name)?;
+            let is_static = method.method_metadata.as_ref().is_some_and(|method| method.is_static);
+
+            (is_static && method.flags.is_operator())
+                .then(|| (MethodIdentifier::new(owner.original_name, word(name)), method))
+        })
+        .collect()
+}
+
+/// The class-likes a value of `operand_type` is an instance of, `null` aside: a class, an enum or a case, and a type
+/// parameter's from its bound. None when one of its types is no class-like.
+fn operand_classes(operand_type: &TUnion) -> Option<Vec<Word>> {
+    let mut classes = Vec::new();
+    for atomic in operand_type.types.iter().filter(|atomic| !atomic.is_null()) {
+        match atomic {
+            TAtomic::Object(object @ (TObject::Named(_) | TObject::Enum(_))) => classes.push(object.get_name()?),
+            TAtomic::GenericParameter(parameter) => classes.extend(operand_classes(&parameter.constraint)?),
+            _ => return None,
+        }
+    }
+
+    (!classes.is_empty()).then_some(classes)
+}
+
+/// Whether a PHP# operator named `name` runs on a value of `operand_type`, spec section 19: each of its types is a
+/// class, a case or a type parameter bounded by one, or an enum that declares the operator, or gets it from an
+/// interface, as no other operator takes an enum's cases.
+fn is_instance(codebase: &CodebaseMetadata, operand_type: &TUnion, name: &[u8]) -> bool {
+    operand_classes(operand_type).is_some_and(|classes| {
+        classes.into_iter().all(|class| {
+            codebase.get_enum(class.as_bytes()).is_none() || !class_operators(codebase, class, name).is_empty()
+        })
+    })
+}
+
+/// The types the parameters of the static method `method` take, as the class declaring it reads them.
+fn parameter_types(
+    codebase: &CodebaseMetadata,
+    (method, metadata): (MethodIdentifier, &FunctionLikeMetadata),
+) -> Vec<TUnion> {
+    metadata
+        .parameters
+        .iter()
+        .map(|parameter| {
+            parameter
+                .get_type_metadata()
+                .map_or_else(get_mixed, |parameter_type| expand_in_class(codebase, &method, &parameter_type.type_union))
+        })
+        .collect()
 }
 
 /// Whether each of `operand_types` can be the value the matching parameter of the static method `method` takes. An
@@ -100,10 +232,10 @@ pub(crate) fn takes_operands(
     })
 }
 
-/// Runs the PHP# arithmetic operator `symbol` on `operands` when one of them is an instance: the static method its
-/// class declares or inherits, checked as the call it runs as, gives the result. An instance whose class declares
-/// none, or an operand the operator does not take, is refused, and the rest of the code is checked as if the operator
-/// gave that instance. Operands with no instance run none.
+/// Runs the PHP# arithmetic operator `symbol` on `operands` when one of them is an instance: the static method
+/// [`get_operator_method`] chooses, checked as the call it runs as, gives the result. An instance whose types declare
+/// none, an operand no operator takes, or two operators of which neither is more specific, are refused, and the rest
+/// of the code is checked as if the operator gave that instance. Operands with no instance run none.
 pub(crate) fn analyze_instance_operator<'arena, A>(
     context: &mut Context<'_, 'arena, A>,
     artifacts: &mut AnalysisArtifacts,
@@ -115,21 +247,83 @@ where
     A: Arena,
 {
     let codebase = context.codebase;
-    let instance =
-        operands.iter().position(|(_, operand_type)| get_instance_class(operand_type, codebase).is_some())?;
     let name = php_operator_name(symbol, operands.len())?;
+    let instance = operands.iter().position(|(_, operand_type)| is_instance(codebase, operand_type, name))?;
     let operand_types: Vec<&TUnion> = operands.iter().map(|(_, operand_type)| *operand_type).collect();
 
     Some(match get_operator_method(codebase, name, &operand_types) {
-        Some(method) if can_take_operands(codebase, method, &operand_types) => {
+        Some(DeclaredOperator::Chosen(method)) if can_take_operands(codebase, method, &operand_types) => {
             analyze_operator_call(context, artifacts, method, operands, span)
         }
+        Some(DeclaredOperator::Tied(tied)) => {
+            report_tied_operator(context, symbol, &operand_types, &tied, span);
+
+            operands[instance].1.to_non_nullable()
+        }
         method => {
-            report_refused_operator(context, symbol, operands, instance, method);
+            report_refused_operator(context, symbol, operands, instance, method.and_then(DeclaredOperator::chosen));
 
             operands[instance].1.to_non_nullable()
         }
     })
+}
+
+/// Reports a PHP# operator `symbol` on operands of `operand_types` at `span` that two or more operators of `tied`
+/// take, of which none takes fewer operands than another, spec section 19, with the operator to declare that wins
+/// over them: one that takes the operands' own class.
+pub(crate) fn report_tied_operator<A>(
+    context: &mut Context<'_, '_, A>,
+    symbol: &BinaryOperator<'_>,
+    operand_types: &[&TUnion],
+    tied: &[MethodIdentifier],
+    span: Span,
+) where
+    A: Arena,
+{
+    let codebase = context.codebase;
+    let op = BytesDisplay(symbol.as_bytes());
+    let declared = match symbol {
+        BinaryOperator::Equal(_) | BinaryOperator::NotEqual(_) => "==".to_owned(),
+        BinaryOperator::LessThan(_)
+        | BinaryOperator::LessThanOrEqual(_)
+        | BinaryOperator::GreaterThan(_)
+        | BinaryOperator::GreaterThanOrEqual(_)
+        | BinaryOperator::Spaceship(_) => "<=>".to_owned(),
+        _ => op.to_string(),
+    };
+    let operands: Vec<String> = operand_types.iter().map(|operand| display_operand(context, operand)).collect();
+    let mut owners: Vec<String> =
+        tied.iter().map(|method| format!("`{}`", display_class_like_name(context, method.get_class_name()))).collect();
+    owners.sort();
+    let owners = match owners.as_slice() {
+        [rest @ .., last] if !rest.is_empty() => format!("{} and {last}", rest.join(", ")),
+        _ => owners.join(""),
+    };
+    let returned = tied
+        .first()
+        .and_then(|method| codebase.get_method_by_id(method))
+        .and_then(|method| method.return_type_metadata.as_ref())
+        .map_or_else(|| "bool".to_owned(), |returned| display_operand(context, &returned.type_union));
+    let class = operand_types
+        .iter()
+        .find_map(|operand| operand_classes(operand).and_then(|classes| classes.first().copied()))
+        .map(|class| display_class_like_name(context, class).to_string())
+        .unwrap_or_default();
+    let parameters = ["a", "b"].iter().take(operands.len()).map(|name| format!("{class} {name}")).collect::<Vec<_>>();
+
+    context.collector.report_with_code(
+        IssueCode::InvalidOperand,
+        Issue::error(format!(
+            "`{op}` on `{}` is ambiguous: {owners} each declare an `operator {declared}` that takes them.",
+            operands.join("` and `")
+        ))
+        .with_annotation(Annotation::primary(span).with_message("Applied here."))
+        .with_note("An operator is chosen from the types of its operands, and the most specific one runs.")
+        .with_help(format!(
+            "Declare `public static {returned} operator {declared}({})` in `{class}`, which wins over each of them.",
+            parameters.join(", ")
+        )),
+    );
 }
 
 /// `union` as the class declaring `method` reads it, so its `self` is that class.
@@ -144,28 +338,6 @@ fn expand_in_class(codebase: &CodebaseMetadata, method: &MethodIdentifier, union
     expander::expand_union(codebase, &mut union, &options);
 
     union
-}
-
-/// The one class of an instance of `operand_type`, `null` aside, and a type parameter's the one class of its bound. An
-/// enum is one only when it declares an operator, spec section 19, as no other operator takes its cases.
-fn get_instance_class(operand_type: &TUnion, codebase: &CodebaseMetadata) -> Option<Word> {
-    let mut types = operand_type.types.iter().filter(|atomic| !atomic.is_null());
-    match (types.next(), types.next()) {
-        (Some(TAtomic::Object(object @ (TObject::Named(_) | TObject::Enum(_)))), None) => {
-            let name = object.get_name()?;
-
-            codebase.get_enum(name.as_bytes()).is_none_or(|r#enum| declares_operator(r#enum, codebase)).then_some(name)
-        }
-        (Some(TAtomic::GenericParameter(parameter)), None) => get_instance_class(&parameter.constraint, codebase),
-        _ => None,
-    }
-}
-
-/// Whether the class-like `class` declares a PHP# operator, spec section 19.
-pub(crate) fn declares_operator(class: &ClassLikeMetadata, codebase: &CodebaseMetadata) -> bool {
-    class.methods.iter().any(|method| {
-        codebase.get_method(class.name.as_bytes(), method.as_bytes()).is_some_and(|method| method.flags.is_operator())
-    })
 }
 
 /// Checks the operands of a PHP# operator as the arguments of the static call `method` it runs as, at `span`, and
