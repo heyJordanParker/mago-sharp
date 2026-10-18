@@ -21193,6 +21193,259 @@ fn attributes_are_attribute_lists_of_attribute_groups_on_their_declarations() {
 }
 
 /// ```php
+/// interface Labeled {
+///     #[\Lib\Field('shown in lists')] public function label(): string;
+///     #[\Lib\Entity('shown in headings')] public function title(): string;
+/// }
+/// trait Labeled\Defaults { #[\Lib\Entity('shown in headings')] public function title(): string { … } }
+/// ```
+///
+/// ```php
+/// #[\Lib\Field('sized')] interface Sized { #[\Lib\Field('size')] public int $size { get; } }
+/// #[\Lib\Field('paid')] final class Paid { … }
+/// final class Limits {
+///     #[\Lib\Field('max')] public const int MAX = 3;
+///     … #[\Lib\Field('twice')] static fn (int $n): int => $n * 2 …
+/// }
+/// ```
+///
+/// Spec section 1: an attribute on an interface, an interface property, an event, a constant or a lambda is where
+/// php-src's grammar holds it: the 4th child of a class, the 3rd of a property group, the 2nd of a constant group and
+/// the 5th of a closure.
+#[test]
+fn attributes_on_an_interface_its_property_an_event_a_constant_and_a_lambda_lower_where_php_holds_them() {
+    let files = lowered_each(
+        &[
+            (
+                "src/App/Sized.sharp",
+                "namespace App;\n\nimport Lib.Field;\n\n[Field(\"sized\")]\npublic interface Sized\n{\n    [Field(\"size\")]\n    int size { get; }\n}\n",
+            ),
+            (
+                "src/App/Paid.sharp",
+                "namespace App;\n\nimport Lib.Field;\n\n[Field(\"paid\")]\npublic event Paid(int orderId);\n",
+            ),
+            (
+                "src/App/Limits.sharp",
+                "namespace App;\n\nimport Lib.Field;\n\npublic class Limits\n{\n    [Field(\"max\")]\n    public const int MAX = 3;\n\n    public Function<int(int)> twice() => [Field(\"twice\")] (int n) => n * 2;\n}\n",
+            ),
+        ],
+        &[common::FIELD],
+    );
+    let attribute = |text: &str| {
+        format!(
+            "ATTRIBUTE_LIST\n  ATTRIBUTE_GROUP\n    ATTRIBUTE\n      ZVAL \"Lib\\\\Field\"\n      ARG_LIST\n        ZVAL {text:?}\n"
+        )
+    };
+    let class_attributes = |name: &str| {
+        let (lowered, class) = class_in(&files, name);
+
+        lowered.render(lowered.child(class, 3))
+    };
+    let (limits, _) = class_in(&files, "Limits");
+    let closure = limits
+        .nodes()
+        .iter()
+        .position(|node| node.kind == sharp_kind::SHARP_AST_CLOSURE || node.kind == sharp_kind::SHARP_AST_ARROW_FUNC)
+        .expect("Limits declares a lambda") as u32;
+
+    assert_eq!(class_attributes("Sized"), attribute("sized"));
+    assert_eq!(member_in(&files, "Sized", &[0, 2]), attribute("size"));
+    assert_eq!(class_attributes("Paid"), attribute("paid"));
+    assert_eq!(member_in(&files, "Limits", &[0, 1]), attribute("max"));
+    assert_eq!(limits.render(limits.child(closure, 4)), attribute("twice"));
+}
+
+/// ```php
+/// #[\Lib\Field([new \Lib\Throttle(perMinute: 60, window: new \App\Window(5))])]
+/// ```
+///
+/// Spec section 1: an attribute argument may `new` an object from constants, which lowers to the `NEW` php-src's
+/// grammar builds in a constant expression, so PHP creates the object each time it reads the attribute.
+#[test]
+fn a_new_in_an_attribute_argument_lowers_to_the_new_php_takes_there() {
+    let throttle = (
+        "src/Lib/Throttle.php",
+        "<?php namespace Lib; final class Throttle { public function __construct(public int $perMinute, public ?object $window = null) {} }",
+    );
+    let files = lowered_each(
+        &[
+            (
+                "src/App/Window.sharp",
+                "namespace App;\n\npublic class Window\n{\n    public Window(public int seconds { get; }) { }\n}\n",
+            ),
+            (
+                "src/App/Orders.sharp",
+                "namespace App;\n\nimport Lib.Field;\nimport Lib.Throttle;\n\n[Field([new Throttle(perMinute: 60, window: new Window(5))])]\npublic class Orders\n{\n}\n",
+            ),
+        ],
+        &[common::FIELD, throttle],
+    );
+    let (lowered, class) = class_in(&files, "Orders");
+
+    assert_eq!(
+        lowered.render(lowered.child(class, 3)),
+        indoc! {r#"
+            ATTRIBUTE_LIST
+              ATTRIBUTE_GROUP
+                ATTRIBUTE
+                  ZVAL "Lib\\Field"
+                  ARG_LIST
+                    ARRAY [3]
+                      ARRAY_ELEM
+                        NEW
+                          ZVAL "Lib\\Throttle"
+                          ARG_LIST
+                            NAMED_ARG
+                              ZVAL "perMinute"
+                              ZVAL 60
+                            NAMED_ARG
+                              ZVAL "window"
+                              NEW
+                                ZVAL "App\\Window"
+                                ARG_LIST
+                                  ZVAL 5
+                        null
+        "#}
+    );
+}
+
+/// ```php
+/// public int $count = 0 { #[\Lib\Field("get")] get => $this->count; #[\Lib\Field("set")] set(#[\Lib\Field("value")] int $value) { $this->count = $value; } }
+/// ```
+///
+/// Spec section 1: an accessor's attributes go on its hook, and a `param:` one on the value `set` takes, which the hook
+/// then declares. An auto accessor with attributes is the hook over the storage. A static property's accessor carries
+/// them on its hidden method, and a promoted parameter's `param:` ones stay on the parameter, beside the property
+/// that takes its `property:` ones.
+#[test]
+fn an_accessor_carries_its_attributes_on_its_hook_and_a_target_picks_the_part() {
+    let files = lowered_each(
+        &[
+            (
+                "src/App/Report.sharp",
+                "namespace App;\n\nimport Lib.Field;\n\npublic class Report\n{\n    public int count { [Field(\"get\")] get; [param: Field(\"value\")] [Field(\"set\")] set; } = 0;\n\n    public static int total { [Field(\"read\")] get => 1; }\n\n    public Report([param: Field(\"in\")] [property: Field(\"kept\")] public int id { get; }) { }\n}\n",
+            ),
+            (
+                "src/App/Sized.sharp",
+                "namespace App;\n\nimport Lib.Field;\n\npublic interface Sized\n{\n    int size { [Field(\"measured\")] get; [param: Field(\"new size\")] set; }\n}\n",
+            ),
+        ],
+        &[common::FIELD],
+    );
+
+    let attribute = |text: &str| {
+        format!(
+            "ATTRIBUTE_LIST\n  ATTRIBUTE_GROUP\n    ATTRIBUTE\n      ZVAL \"Lib\\\\Field\"\n      ARG_LIST\n        ZVAL {text:?}\n"
+        )
+    };
+    let member = |path: &[u32]| member_in(&files, "Report", path);
+    let hooks = [0, 1, 0, 3];
+
+    assert_eq!(
+        member(&[hooks.as_slice(), &[0, 2]].concat()),
+        "PROPERTY_HOOK_SHORT_BODY\n  PROP\n    VAR\n      ZVAL \"this\"\n    ZVAL \"count\"\n"
+    );
+    assert_eq!(member(&[hooks.as_slice(), &[0, 4]].concat()), attribute("get"));
+    assert_eq!(member(&[hooks.as_slice(), &[1, 4]].concat()), attribute("set"));
+    assert_eq!(member(&[hooks.as_slice(), &[1, 0, 0, 0]].concat()), "ZVAL [1] \"int\"\n");
+    assert_eq!(member(&[hooks.as_slice(), &[1, 0, 0, 3]].concat()), attribute("value"));
+    assert_eq!(member(&[1, 4]), attribute("read"));
+    assert_eq!(member(&[2, 2]), attribute("kept"));
+    assert_eq!(member(&[3, 0, 0, 3]), attribute("in"));
+    assert_eq!(member_in(&files, "Sized", &[0, 1, 0, 3, 0, 4]), attribute("measured"));
+    assert_eq!(member_in(&files, "Sized", &[0, 1, 0, 3, 1, 0, 0, 3]), attribute("new size"));
+}
+
+/// Spec section 1: every accessor form takes attributes. A static auto-property's accessors with attributes run as its
+/// hidden methods over the storage, and a get-only auto-property's `get;` with attributes is a hook, so the property is
+/// `protected(set)`, as `readonly` takes no hooks. An event's and a data case's parameters declare properties, so a
+/// targeted list declares each property beside its parameter, which the constructor sets.
+#[test]
+fn every_accessor_form_takes_attributes_and_an_event_parameter_targets_its_part() {
+    let files = lowered_each(
+        &[
+            (
+                "src/App/Counter.sharp",
+                "namespace App;\n\nimport Lib.Field;\n\npublic class Counter\n{\n    public static int counter { [Field(\"counted\")] get; set; } = 0;\n\n    public string code { [Field(\"coded\")] get; }\n\n    public Counter()\n    {\n        this.code = \"c\";\n    }\n}\n",
+            ),
+            (
+                "src/App/Settled.sharp",
+                "namespace App;\n\nimport Lib.Field;\n\npublic event Settled([param: Field(\"order\")] int orderId, [property: Field(\"amount\")] int amount);\n",
+            ),
+            (
+                "src/App/Payment.sharp",
+                "namespace App;\n\nimport Lib.Field;\n\npublic enum Payment\n{\n    case Paid([param: Field(\"given\")] string id);\n    case Open;\n}\n",
+            ),
+        ],
+        &[common::FIELD],
+    );
+
+    let attribute = |text: &str| {
+        format!(
+            "ATTRIBUTE_LIST\n  ATTRIBUTE_GROUP\n    ATTRIBUTE\n      ZVAL \"Lib\\\\Field\"\n      ARG_LIST\n        ZVAL {text:?}\n"
+        )
+    };
+    let counter = |path: &[u32]| member_in(&files, "Counter", path);
+    let settled = |path: &[u32]| member_in(&files, "Settled", path);
+    let set_by_constructor = |name: &str| {
+        format!("ASSIGN\n  PROP\n    VAR\n      ZVAL \"this\"\n    ZVAL {name:?}\n  VAR\n    ZVAL {name:?}\n")
+    };
+
+    assert_eq!(counter(&[1, 4]), attribute("counted"));
+    assert!(counter(&[0]).starts_with("PROP_GROUP [20]\n"), "the storage is a private static");
+    assert!(counter(&[3]).starts_with("PROP_GROUP [2049]\n"), "a public protected(set) property, not readonly");
+    assert_eq!(counter(&[3, 1, 0, 3, 0, 4]), attribute("coded"));
+    assert_eq!(settled(&[0, 2]), "null\n");
+    assert_eq!(settled(&[1, 2]), attribute("amount"));
+    assert_eq!(settled(&[2, 0, 0, 3]), attribute("order"));
+    assert_eq!(settled(&[2, 0, 1, 3]), "null\n");
+    assert_eq!(settled(&[2, 2, 0]), set_by_constructor("orderId"));
+    assert_eq!(settled(&[2, 2, 1]), set_by_constructor("amount"));
+    let paid = |path: &[u32]| member_in(&files, "Payment\\Paid", path);
+    assert_eq!(paid(&[0, 2]), "null\n");
+    assert_eq!(paid(&[1, 0, 0, 3]), attribute("given"));
+    assert_eq!(paid(&[1, 2, 0]), set_by_constructor("id"));
+}
+
+/// Spec section 1: an interface method carries its attributes as a class method does, and so does the trait method
+/// that runs its default body.
+#[test]
+fn an_interface_method_carries_its_attributes() {
+    let files = lowered_each(
+        &[(
+            "src/App/Labeled.sharp",
+            "namespace App;\n\nimport Lib.Field;\nimport Lib.Entity;\n\npublic interface Labeled\n{\n    [Field(\"shown in lists\")]\n    string label();\n\n    [Entity(\"shown in headings\")]\n    string title() => \"Untitled\";\n}\n",
+        )],
+        &[common::FIELD, common::ENTITY],
+    );
+    let member = |name: &str, path: &[u32]| member_in(&files, name, path);
+
+    assert_eq!(
+        [member("Labeled", &[0, 4]), member("Labeled", &[1, 4]), member("Labeled\\Defaults", &[0, 4])].concat(),
+        indoc! {r#"
+            ATTRIBUTE_LIST
+              ATTRIBUTE_GROUP
+                ATTRIBUTE
+                  ZVAL "Lib\\Field"
+                  ARG_LIST
+                    ZVAL "shown in lists"
+            ATTRIBUTE_LIST
+              ATTRIBUTE_GROUP
+                ATTRIBUTE
+                  ZVAL "Lib\\Entity"
+                  ARG_LIST
+                    ZVAL "shown in headings"
+            ATTRIBUTE_LIST
+              ATTRIBUTE_GROUP
+                ATTRIBUTE
+                  ZVAL "Lib\\Entity"
+                  ARG_LIST
+                    ZVAL "shown in headings"
+        "#}
+    );
+}
+
+/// ```php
 /// public \Sharp\Map $stock;    #[\Sharp\Crossing(['map', 'string', null])]
 /// public \Sharp\Map $names;    #[\Sharp\Crossing(['map', null, null])]
 /// public \Sharp\Map $counts;   #[\Sharp\Crossing(['map', 'App\Tenant\Status', null])]
@@ -21406,6 +21659,40 @@ fn statements_at(code: &str, library: &[(&str, &str)], positions: std::ops::Rang
 }
 
 /// ```php
+/// \Lib\Calc::sum(\Sharp\Internal\arrayOf($stock), extra: \Sharp\Internal\arrayOf($stock));
+/// ```
+///
+/// Spec section 16: a named argument that matches no other parameter of a plain PHP method fills its `...` parameter,
+/// so a `Map` goes in under its name as its PHP array, as it goes in by position.
+#[test]
+fn a_map_named_into_a_plain_php_variadic_goes_in_as_its_php_array() {
+    let code = "namespace App.Tenant;\n\nimport Lib.Calc;\n\nclass Report\n{\n    public int run(int extra)\n    {\n        Map<string, int> stock = this.stock();\n        return Calc.sum(stock, extra: stock);\n    }\n\n    private Map<string, int> stock() => [:];\n}\n";
+
+    assert_eq!(
+        statements_at(code, &[], 1..2),
+        [indoc! {r#"
+            RETURN
+              STATIC_CALL
+                ZVAL "Lib\\Calc"
+                ZVAL "sum"
+                ARG_LIST
+                  CALL
+                    ZVAL "Sharp\\Internal\\arrayOf"
+                    ARG_LIST
+                      VAR
+                        ZVAL "stock"
+                  NAMED_ARG
+                    ZVAL "extra"
+                    CALL
+                      ZVAL "Sharp\\Internal\\arrayOf"
+                      ARG_LIST
+                        VAR
+                          ZVAL "stock"
+        "#}]
+    );
+}
+
+/// ```php
 /// $typed = $gadget->label(...);
 /// $held = $gadget->format;
 /// ```
@@ -21442,6 +21729,128 @@ fn a_plain_php_method_of_a_property_s_name_read_as_a_function_is_a_first_class_c
                     VAR
                       ZVAL "gadget"
                     ZVAL "format"
+            "#},
+        ]
+    );
+}
+
+/// ```php
+/// $owner = $this->owner;
+/// $relation = $this->owner(...);
+/// ```
+///
+/// A PHP# class whose plain PHP parent defines `__get`, as a PHP# Eloquent model is, has the properties `__get` reads,
+/// spec section 14.3, so a read of its own method's name reads the property, and takes the method where the code takes
+/// a function.
+#[test]
+fn a_read_of_a_sharp_class_whose_plain_php_parent_defines_get_reads_the_property() {
+    let model = (
+        "src/Lib/Model.php",
+        "<?php\n\nnamespace Lib;\n\nabstract class Model\n{\n    public function __get(string $name): mixed\n    {\n        return $name;\n    }\n}\n",
+    );
+    let code = "namespace App.Tenant;\n\nimport Lib.Model;\n\nclass Row : Model\n{\n    public Row() : super() { }\n\n    public string owner() => \"relation\";\n\n    public int run()\n    {\n        const owner = this.owner;\n        Function<string()> relation = this.owner;\n        return global.strlen(relation()) + (owner is string ? 1 : 0);\n    }\n}\n";
+    let lowered = Lowered::with(code, &[model]);
+    let run = member_in(std::slice::from_ref(&lowered), "Row", &[2, 2]);
+
+    assert_eq!(
+        run,
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "owner"
+                PROP
+                  VAR
+                    ZVAL "this"
+                  ZVAL "owner"
+              ASSIGN
+                VAR
+                  ZVAL "relation"
+                METHOD_CALL
+                  VAR
+                    ZVAL "this"
+                  ZVAL "owner"
+                  CALLABLE_CONVERT
+              RETURN
+                BINARY_OP [1]
+                  CALL
+                    ZVAL "strlen"
+                    ARG_LIST
+                      CALL
+                        VAR
+                          ZVAL "relation"
+                        ARG_LIST
+                  CONDITIONAL [1]
+                    CALL
+                      ZVAL "is_string"
+                      ARG_LIST
+                        VAR
+                          ZVAL "owner"
+                    ZVAL 1
+                    ZVAL 0
+        "#}
+    );
+}
+
+/// ```php
+/// $contact = $row->contact;
+/// $owner = $row->owner;
+/// $relation = $row->owner(...);
+/// $called = $row->owner();
+/// ```
+///
+/// A plain PHP class that defines `__get` has the properties it reads, spec section 14.3, so a read of a name it also
+/// has a method of reads the property, typed by an `@property-read` line or not. The method is the value where the code
+/// takes a function, and a call calls it.
+#[test]
+fn a_read_of_a_plain_php_class_with_get_reads_the_property_and_takes_the_method_as_a_function() {
+    let row = (
+        "src/Lib/Row.php",
+        "<?php\n\nnamespace Lib;\n\n/** @property-read Contact $contact */\nclass Row\n{\n    public function contact(): Contact\n    {\n        return new Contact();\n    }\n\n    public function owner(): Contact\n    {\n        return new Contact();\n    }\n\n    public function __get(string $name): mixed\n    {\n        return new Contact();\n    }\n}\n",
+    );
+    let contact = ("src/Lib/Contact.php", "<?php\n\nnamespace Lib;\n\nfinal class Contact\n{\n}\n");
+    let code = "namespace App.Tenant;\n\nimport Lib.Contact;\nimport Lib.Row;\nextern Row.owner;\n\nclass Report\n{\n    public int run(Row row)\n    {\n        const contact = row.contact;\n        const owner = row.owner;\n        Function<Contact()> relation = row.owner;\n        const called = row.owner();\n        return [contact, relation(), called].count() + (owner is Contact ? 1 : 0);\n    }\n}\n";
+
+    assert_eq!(
+        statements_at(code, &[row, contact], 0..4),
+        [
+            indoc! {r#"
+                ASSIGN
+                  VAR
+                    ZVAL "contact"
+                  PROP
+                    VAR
+                      ZVAL "row"
+                    ZVAL "contact"
+            "#},
+            indoc! {r#"
+                ASSIGN
+                  VAR
+                    ZVAL "owner"
+                  PROP
+                    VAR
+                      ZVAL "row"
+                    ZVAL "owner"
+            "#},
+            indoc! {r#"
+                ASSIGN
+                  VAR
+                    ZVAL "relation"
+                  METHOD_CALL
+                    VAR
+                      ZVAL "row"
+                    ZVAL "owner"
+                    CALLABLE_CONVERT
+            "#},
+            indoc! {r#"
+                ASSIGN
+                  VAR
+                    ZVAL "called"
+                  METHOD_CALL
+                    VAR
+                      ZVAL "row"
+                    ZVAL "owner"
+                    ARG_LIST
             "#},
         ]
     );

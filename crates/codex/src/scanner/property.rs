@@ -504,8 +504,8 @@ fn is_sharp_init(accessors: &PropertyHookList) -> bool {
     accessors.setter().is_some_and(|setter| setter.name.value == b"init")
 }
 
-/// Scans a property's hooks and whether it is virtual. A PHP# accessor without a body is storage, as an
-/// auto-property's is, so only its bodies are hooks. A PHP# property is virtual when no accessor is auto and no body
+/// Scans a property's hooks and whether it is virtual. A PHP# auto accessor is storage, as an auto-property's is, so
+/// only the accessors that [run as hooks](PropertyHook::runs_as_hook) are hooks. A PHP# property is virtual when no accessor is auto and no body
 /// uses `field`, as the engine lowers it, and a PHP one when no hook reaches `$this->name`. A PHP# interface property
 /// and an abstract one run as PHP's, so their accessors are abstract hooks.
 fn scan_hooks<'arena, A>(
@@ -521,7 +521,7 @@ fn scan_hooks<'arena, A>(
     let is_sharp =
         context.program.dialect.is_sharp() && !class_like_metadata.kind.is_interface() && !property.flags.is_abstract();
     for hook in &hook_list.hooks {
-        if is_sharp && matches!(hook.body, PropertyHookBody::Abstract(_)) {
+        if is_sharp && !hook.runs_as_hook() {
             continue;
         }
 

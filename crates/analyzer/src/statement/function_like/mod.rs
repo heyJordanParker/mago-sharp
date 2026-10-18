@@ -934,7 +934,8 @@ where
             block_context,
             artifacts,
             parameter_node.attribute_lists.as_slice(),
-            if parameter_node.is_promoted_property() {
+            // An event's or a data case's parameter declares a property as a promoted one does.
+            if parameter_metadata.flags.is_promoted_property() {
                 AttributeTarget::PromotedProperty
             } else {
                 AttributeTarget::Parameter
