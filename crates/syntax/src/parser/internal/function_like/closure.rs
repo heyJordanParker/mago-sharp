@@ -22,7 +22,7 @@ where
         let closure = Closure {
             attribute_lists: attributes,
             r#static: self.maybe_expect_keyword(T!["static"])?,
-            function: Some(self.expect_php_lambda_keyword(T!["function"])?),
+            function: Some(self.expect_php_keyword(T!["function"])?),
             ampersand: if self.stream.is_at(T!["&"])? { Some(self.stream.eat_span(T!["&"])?) } else { None },
             parameter_list: self.parse_function_like_parameter_list()?,
             use_clause: self.parse_optional_closure_use_clause()?,

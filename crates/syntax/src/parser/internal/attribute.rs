@@ -56,7 +56,8 @@ where
     }
 
     /// PHP# writes an attribute list in square brackets, as in `[Searchable]`, which may open with a target, as in
-    /// `[return: NotNull]`, spec section 1. PHP's `#[` stands in a PHP# file as an error, and the list still parses.
+    /// `[param: Trimmed]`, spec section 1. A target written after the first attribute, as in `[Cached, param: Trimmed]`,
+    /// and PHP's `#[` are no PHP# syntax, so each fails as a typo does, and the list still parses.
     fn parse_attribute_list(&mut self, open: TokenKind) -> Result<AttributeList<'arena>, ParseError> {
         let mut target = None;
         let mut first = true;
@@ -65,14 +66,14 @@ where
             if first {
                 target = attribute_target;
             } else if let Some(late) = attribute_target {
-                parser.errors.push(ParseError::LateAttributeTargetInSharp(late.span()));
+                parser.report_unexpected_in_sharp(late.span());
             }
             first = false;
 
             parser.parse_attribute()
         })?;
         if self.dialect.is_sharp() && open == T!["#["] {
-            self.errors.push(ParseError::PhpSyntaxInSharp(open, result.open));
+            self.report_unexpected_in_sharp(result.open);
         }
 
         Ok(AttributeList {

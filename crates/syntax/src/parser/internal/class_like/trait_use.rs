@@ -45,17 +45,9 @@ where
 
             TokenSeparatedSequence::new(traits, commas)
         };
+        // PHP's `use` of a trait in a class is no PHP# syntax, which lists a trait in the header.
         if self.dialect.is_sharp() {
-            // A header names each class by its short name, spec section 23.
-            let traits: std::vec::Vec<String> = trait_names
-                .iter()
-                .map(|name| {
-                    let short_name = name.value().rsplit(|byte| *byte == b'\\').next().unwrap_or_default();
-
-                    String::from_utf8_lossy(short_name).into_owned()
-                })
-                .collect();
-            self.errors.push(ParseError::TraitUseInSharp(traits.join(", ").into_boxed_str(), r#use.span));
+            self.report_unexpected_in_sharp(r#use.span);
         }
 
         Ok(TraitUse { r#use, trait_names, specification: self.parse_trait_use_specification()? })

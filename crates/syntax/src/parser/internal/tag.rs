@@ -19,7 +19,7 @@ where
         let token = self.stream.consume()?;
         let span = token.span_for(self.stream.file_id());
         if self.dialect.is_sharp() {
-            self.errors.push(ParseError::PhpSyntaxInSharp(token.kind, span));
+            self.report_unexpected_in_sharp(span);
         }
 
         Ok(match token.kind {
@@ -34,7 +34,7 @@ where
     pub(crate) fn parse_closing_tag(&mut self) -> Result<ClosingTag, ParseError> {
         let span = if self.dialect.is_sharp() {
             let span = self.stream.eat_span(T!["?"])?.join(self.stream.eat_span(T![">"])?);
-            self.errors.push(ParseError::PhpSyntaxInSharp(T!["?>"], span));
+            self.report_unexpected_in_sharp(span);
 
             span
         } else {

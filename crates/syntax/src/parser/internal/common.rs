@@ -1,5 +1,6 @@
 use mago_allocator::prelude::*;
 use mago_database::file::HasFileId;
+use mago_span::Span;
 
 use crate::T;
 use crate::cst::cst::Keyword;
@@ -35,10 +36,16 @@ where
     pub(crate) fn expect_php_keyword(&mut self, kind: TokenKind) -> Result<Keyword<'arena>, ParseError> {
         let keyword = self.expect_keyword(kind)?;
         if self.dialect.is_sharp() {
-            self.errors.push(ParseError::PhpSyntaxInSharp(kind, keyword.span));
+            self.report_unexpected_in_sharp(keyword.span);
         }
 
         Ok(keyword)
+    }
+
+    /// Records a form outside the PHP# grammar as the error a typo gives, at the token `span` starts with. The form
+    /// still parses, so the rest of the file does.
+    pub(crate) fn report_unexpected_in_sharp(&mut self, span: Span) {
+        self.errors.push(ParseError::unexpected_in_sharp(span.file_id, self.source, span.start.offset));
     }
 
     /// Reads the name at the head of the stream, or after `static` there, as the PHP keyword it spells where PHP's
@@ -252,18 +259,6 @@ where
                 && token.kind == T![Identifier]
                 && (keyword.is_magic_constant() || !token.value.iter().any(u8::is_ascii_uppercase))
         })
-    }
-
-    /// Expects and consumes the `fn` or `function` that starts a PHP lambda, and reports it in a PHP# file, which
-    /// writes a lambda as a bare arrow. The error stands, and the PHP lambda still parses.
-    pub(crate) fn expect_php_lambda_keyword(&mut self, kind: TokenKind) -> Result<Keyword<'arena>, ParseError> {
-        let keyword = self.expect_keyword(kind)?;
-        if self.dialect.is_sharp() {
-            let written = if kind == T!["fn"] { "fn" } else { "function" };
-            self.errors.push(ParseError::PhpLambdaInSharp(written, keyword.span));
-        }
-
-        Ok(keyword)
     }
 
     /// Optionally consumes a keyword token if present.

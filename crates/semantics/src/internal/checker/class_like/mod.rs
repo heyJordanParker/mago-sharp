@@ -1017,9 +1017,11 @@ pub fn check_enum<'ast, 'arena>(r#enum: &'ast Enum<'arena>, context: &mut Contex
                 let method_name = BytesDisplay(method_name_bytes);
                 let method_display = context.display_member(enum_name_bytes, method_name);
 
-                if let Some(magic_method) = ENUM_FORBIDDEN_MAGIC_METHODS
-                    .iter()
-                    .find(|magic_method| magic_method.eq_ignore_ascii_case(method_name_bytes))
+                // A PHP# method name never starts with `__`, which fails as a typo does.
+                if !context.program.dialect.is_sharp()
+                    && let Some(magic_method) = ENUM_FORBIDDEN_MAGIC_METHODS
+                        .iter()
+                        .find(|magic_method| magic_method.eq_ignore_ascii_case(method_name_bytes))
                 {
                     let magic_method = BytesDisplay(magic_method);
                     context.report(

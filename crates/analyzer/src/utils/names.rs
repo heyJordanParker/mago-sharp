@@ -271,6 +271,12 @@ pub(crate) fn is_sharp_internal(name: &[u8]) -> bool {
         && matches!(name.get(internal.len()), None | Some(b'\\'))
 }
 
+/// Whether the full name `name` is PHP's `Closure`, compared ignoring case. Spec section 14.1 has one name for every
+/// function type, `Function<R(P)>`, so a `.sharp` file names no class `Closure`, as it names none it never declared.
+pub(crate) fn is_php_closure(name: &[u8]) -> bool {
+    mago_bytes::trim_start_byte(name, b'\\').eq_ignore_ascii_case(b"Closure")
+}
+
 /// Returns the property `name`, which the codebase keys with its `$`, as the analyzed file names it in prose: `total`
 /// in a `.sharp` file, and `$total` in PHP.
 #[inline]

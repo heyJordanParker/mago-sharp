@@ -42,7 +42,7 @@ where
                         let variable = self.parse_direct_variable()?;
                         if self.dialect.is_sharp() {
                             // The error stands, and the PHP clause still parses so the rest of the method does.
-                            self.errors.push(ParseError::PhpSyntaxInSharp(T!["$variable"], variable.span));
+                            self.report_unexpected_in_sharp(variable.span);
                         }
 
                         Some(variable)

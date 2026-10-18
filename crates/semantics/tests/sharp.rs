@@ -175,7 +175,7 @@ fn a_case_in_an_interface_is_no_php_sharp_construct() {
 
     assert_eq!(
         issues(interface),
-        ["5:5 Interface `Shape` cannot contain enum cases.", "5:5 This class member is not part of PHP#."]
+        ["5:5 Interface `Shape` cannot contain enum cases.", "5:5 Parse error encountered during parsing"]
     );
 }
 
@@ -442,26 +442,21 @@ fn every_construct_outside_the_slice_is_an_error() {
     let class = "namespace App.Tenant;\n\nclass Report\n{\n    public int run(int extra)\n    {\n        const made = new Report;\n        const partial = this.run(...);\n        const text = <<<TEXT\ntotal\nTEXT;\n        return extra;\n    }\n}\n";
 
     assert_eq!(issues(interface), Vec::<String>::new());
-    assert_eq!(
-        issues(r#trait),
-        [
-            "3:1 PHP# has no `trait`: give the shared methods default bodies in an interface, as in `string label() => \"label\";`."
-        ]
-    );
+    assert_eq!(issues(r#trait), ["3:1 Parse error encountered during parsing"]);
     assert_eq!(
         issues(class),
         [
-            "7:22 `new Report` needs parentheses: write `new Report()`.",
-            "8:25 PHP# writes a method value without `(...)`: `this.run`.",
-            "9:22 PHP# has no `<<<TEXT`: write a backtick template, as in `` `Total: ${total}` ``.",
+            "7:32 Parse error encountered during parsing",
+            "8:34 Parse error encountered during parsing",
+            "9:22 Parse error encountered during parsing",
         ]
     );
 }
 
-/// A PHP form PHP# never has is an error that names the form as written and what PHP# writes instead, never "not
-/// supported yet", which would say a later version adds it.
+/// A PHP form PHP# never has fails as a typo does, with no message that names the form, never "not supported yet",
+/// which would say a later version adds it. A PHP# form at a place its rules refuse keeps the rule's error.
 #[test]
-fn a_php_form_php_sharp_never_has_names_what_to_write() {
+fn a_php_form_php_sharp_never_has_fails_as_a_typo_does() {
     let body = leak(method(
         "        const a = extra instanceof Report;\n        const b = (unset) extra;\n        (void) this.run(1);\n        const c = <<<'TEXT'\ntotal\nTEXT;\n        goto end;\n        end:\n        const d = clone this;\n        include \"x.php\";\n        require \"y.php\";\n        return extra;\n",
     ));
@@ -472,27 +467,25 @@ fn a_php_form_php_sharp_never_has_names_what_to_write() {
         [issues(body), issues(declarations), issues(members)],
         [
             vec![
-                "7:25 PHP# has no `instanceof`: write `extra is Report`.",
-                "8:19 PHP# has no `(unset)`: write `null`.",
-                "8:19 The `unset` cast is no longer supported in PHP 8.0 and later.",
-                "9:9 PHP# has no `(void)`: write the call as a statement of its own.",
-                "9:9 The `void` cast is only available in PHP 8.5 and later.",
-                "10:19 PHP# has no `<<<'TEXT'`: write a backtick template, as in `` `Total: ${total}` ``.",
-                "13:9 PHP# has no `goto`: leave a loop with `break` or `continue`, or the method with `return`.",
-                "14:9 PHP# has no `goto` labels: remove `end:`.",
-                "15:19 PHP# has no `clone`: write `this with { … }`, naming each property the copy changes.",
-                "16:9 PHP# has no `include`: import the class the file declares, as in `import App.Shop.Order;`.",
-                "17:9 PHP# has no `require`: import the class the file declares, as in `import App.Shop.Order;`.",
+                "7:25 Parse error encountered during parsing",
+                "8:19 Parse error encountered during parsing",
+                "9:9 Parse error encountered during parsing",
+                "10:19 Parse error encountered during parsing",
+                "13:9 Parse error encountered during parsing",
+                "14:9 Parse error encountered during parsing",
+                "15:19 Parse error encountered during parsing",
+                "16:9 Parse error encountered during parsing",
+                "17:9 Parse error encountered during parsing",
             ],
             vec![
                 "7:9 An `import` goes at the top of the file, after the namespace: move it out of the method.",
                 "8:9 A method can't declare a type inside it: declare `Inner` in its own file.",
             ],
             vec![
-                "5:12 PHP# has no `private(set)`: give the property `{ get; private set; }`.",
+                "5:12 Parse error encountered during parsing",
                 "6:13 Write `Calc` without parentheses: they go only around a union before `?`, as in `(int|string)?`.",
                 "6:14 Type `Calc` cannot be parenthesized.",
-                "7:20 PHP# has no `&get`: write `get`.",
+                "7:20 Parse error encountered during parsing",
                 "8:20 An accessor takes no `final`: remove it.",
                 "9:30 `willSet` takes no access level: it runs inside `set`.",
             ],
@@ -500,10 +493,10 @@ fn a_php_form_php_sharp_never_has_names_what_to_write() {
     );
 }
 
-/// A member written in a form PHP# never has is an error that names what PHP# writes, or that the form is no PHP#
-/// construct.
+/// A member that breaks a rule of its place is an error that names the rule, and an accessor PHP# never has, as
+/// `fetch`, fails as a typo does.
 #[test]
-fn a_member_form_php_sharp_never_has_names_what_to_write() {
+fn a_member_that_breaks_a_rule_names_it_and_an_unknown_accessor_fails_as_a_typo_does() {
     let class = "namespace App.Tenant;\n\nclass Report\n{\n    public foreign int run(override int x) => x;\n    public int d { get(int x); set; }\n    private Iterable items;\n}\n";
     let accessor = "namespace App.Tenant;\n\nclass Report\n{\n    public int e { fetch; set; }\n}\n";
     let interface = "namespace App.Tenant;\n\ninterface Shape\n{\n    area();\n}\n";
@@ -518,16 +511,17 @@ fn a_member_form_php_sharp_never_has_names_what_to_write() {
                 "6:20 `get` takes no parameter list.",
                 "7:13 `Iterable` takes 1 type argument: the element.",
             ],
-            vec!["5:20 This accessor is not part of PHP#.", "5:16 A PHP# property needs a `get` accessor."],
+            vec!["5:20 Parse error encountered during parsing", "5:16 A PHP# property needs a `get` accessor."],
             vec!["5:5 An interface method needs a return type in PHP#."],
         ]
     );
 }
 
-/// A modifier a class doesn't take, a `public(set)` and a `static` local each name what PHP# writes, and what they
-/// name compiles.
+/// A modifier a class doesn't take and a list written to break a rule of their place, so each names the rule. A
+/// `public(set)`, a `static` local and a skipped element, as in `[, a]`, are no PHP# syntax, so each fails as a typo
+/// does. The PHP# forms compile.
 #[test]
-fn a_class_form_php_sharp_never_has_names_a_form_that_compiles() {
+fn a_class_form_php_sharp_never_has_fails_as_a_typo_does_or_names_the_rule_it_breaks() {
     let virtual_class = "namespace App.Tenant;\n\npublic virtual class Report\n{\n}\n";
     let required_class = "namespace App.Tenant;\n\npublic required class Report\n{\n}\n";
     let members = "namespace App.Tenant;\n\nclass Report\n{\n    public public(set) int views { get; set; } = 0;\n\n    public int run(int extra)\n    {\n        static $calls = 0;\n        let a = 0;\n        let b = 0;\n        [a, b] = [1, 2];\n        eval(\"return 1;\");\n        [, a] = [1, 2];\n        return extra;\n    }\n}\n";
@@ -539,43 +533,109 @@ fn a_class_form_php_sharp_never_has_names_a_form_that_compiles() {
             vec!["3:8 A class takes no `virtual`: remove it."],
             vec!["3:8 A class takes no `required`: remove it."],
             vec![
-                "5:12 PHP# has no `public(set)`: give the property `{ get; set; }`.",
-                "9:9 A local keeps no value between calls: keep it in a `private static` field of the class.",
+                "5:12 Parse error encountered during parsing",
+                "9:9 Parse error encountered during parsing",
                 "12:9 `[a, b]` can't be written to: unpack a tuple into new locals with `const [a, b] = …`.",
-                "13:9 PHP# has no `eval`: write the code as a method, and call it.",
-                "14:9 `[, a]` can't be written to.",
+                "14:10 Parse error encountered during parsing",
             ],
             vec![],
         ]
     );
 }
 
-/// A form PHP# has not decided, or that a later change builds, stays not supported yet, while every other refusal says
-/// what PHP# writes instead.
+/// Jordan's answer of 10-18: PHP# has no `|>` and no open argument in a call, so each fails as a typo does, at the `|>`
+/// and at the first `?` or `...` that leaves an argument open.
 #[test]
-fn an_undecided_form_is_not_supported_yet() {
-    let body =
-        leak(method("        const a = extra |> abs(...);\n        const b = max(?, 1);\n        return extra;\n"));
-    let declarations = "namespace App.Tenant;\n\nclass Report\n{\n    private Lib&Other b;\n}\n";
+fn a_pipe_and_an_open_argument_fail_as_a_typo_does() {
+    let code = leak(method(
+        "        const a = extra |> abs(...);\n        const b = max(?, 1);\n        const c = this.format(?, \"USD\");\n        const d = max(1, ...);\n        const e = this.format(cents: ?);\n        return extra;\n",
+    ));
 
     assert_eq!(
-        [issues(body), issues(declarations)],
+        issues(code),
         [
-            vec![
-                "7:19 This expression is not supported yet in PHP#.",
-                "7:25 The pipe operator (`|>`) is not available in your configured PHP version (8.4.0).",
-                "8:19 This expression is not supported yet in PHP#.",
-                "8:19 Partial function application is only available in PHP 8.6 and above.",
-            ],
-            vec!["5:13 This type is not supported yet in PHP#."],
+            "7:25 Parse error encountered during parsing",
+            "8:23 Parse error encountered during parsing",
+            "9:31 Parse error encountered during parsing",
+            "10:26 Parse error encountered during parsing",
+            "11:38 Parse error encountered during parsing",
         ]
     );
 }
 
-/// Spec section 21 removes `switch` for `match`, and PHP's `and`, `or` and `xor` for `&&`, `||` and `!`. Each is an
-/// error that names what to write, never "not supported yet", which would say a later version adds it.
+/// A PHP version gates PHP's syntax, not PHP#'s, so a `.sharp` file gets none of mago's PHP version errors and no
+/// undefined `goto` label: each form fails as a typo does, once. The PHP twin keeps every error.
 #[test]
-fn switch_and_or_and_xor_are_errors_that_name_their_replacement() {
+fn a_php_version_error_and_a_goto_label_error_stay_out_of_a_sharp_file() {
+    let code = leak(method(
+        "        const a = extra |> abs(...);\n        const b = max(?, 1);\n        const c = (unset) extra;\n        (void) this.run(1);\n        goto end;\n        const d = clone(this, [\"x\": 1]);\n        return extra;\n",
+    ));
+    let php = leak(php_method(
+        "        $a = $extra |> abs(...);\n        $b = max(?, 1);\n        $c = (unset) $extra;\n        (void) $this->run(1);\n        goto end;\n        $d = clone($this, ['x' => 1]);\n        return $extra;\n",
+    ));
+
+    assert_eq!(
+        issues(code),
+        [
+            "7:25 Parse error encountered during parsing",
+            "8:23 Parse error encountered during parsing",
+            "9:19 Parse error encountered during parsing",
+            "10:9 Parse error encountered during parsing",
+            "11:9 Parse error encountered during parsing",
+        ]
+    );
+    assert_eq!(
+        issues_in("src/Report.php", php),
+        [
+            "7:21 The pipe operator (`|>`) is not available in your configured PHP version (8.4.0).",
+            "8:14 Partial function application is only available in PHP 8.6 and above.",
+            "9:14 The `unset` cast is no longer supported in PHP 8.0 and later.",
+            "10:9 The `void` cast is only available in PHP 8.5 and later.",
+            "11:14 Undefined `goto` label `end`.",
+            "12:14 Cloning with properties is only available in PHP 8.5 and above.",
+        ]
+    );
+}
+
+/// Whatever PHP version a project names, a `.sharp` file gets none of mago's PHP version errors, as an enum under PHP
+/// 8.0, and its PHP twin keeps them.
+#[test]
+fn a_sharp_file_gets_no_php_version_error_under_any_php_version() {
+    let messages = |path: &'static str, code: &'static str| {
+        let arena = LocalArena::new();
+        let file = File::ephemeral(Cow::Borrowed(path.as_bytes()), Cow::Borrowed(code.as_bytes()));
+        let program = parse_file(&arena, &file);
+        let names = NameResolver::new(&arena).resolve(program);
+
+        SemanticsChecker::new(PHPVersion::new(8, 0, 0))
+            .check(&file, program, &names)
+            .into_iter()
+            .map(|issue| issue.message)
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(
+        messages("src/Suit.sharp", "public enum Suit\n{\n    case Hearts;\n    case Spades;\n}\n"),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        messages("src/Suit.php", "<?php\n\nenum Suit\n{\n    case Hearts;\n    case Spades;\n}\n"),
+        ["Enums are only available in PHP 8.1 and above."]
+    );
+}
+
+/// A form PHP# has not decided, or that a later change builds, stays not supported yet.
+#[test]
+fn an_undecided_form_is_not_supported_yet() {
+    let declarations = "namespace App.Tenant;\n\nclass Report\n{\n    private Lib&Other b;\n}\n";
+
+    assert_eq!(issues(declarations), ["5:13 This type is not supported yet in PHP#."]);
+}
+
+/// Spec section 21 removes `switch` for `match`, and PHP's `and`, `or` and `xor` for `&&`, `||` and `!`. Each fails as
+/// a typo does, never "not supported yet", which would say a later version adds it.
+#[test]
+fn switch_and_or_and_xor_fail_as_a_typo_does() {
     let code = leak(method(
         "        switch (extra) {\n            default: return 1;\n        }\n        let a = extra > 0;\n        a = a and true;\n        a = a or true;\n        a = a xor true;\n        return extra;\n",
     ));
@@ -583,10 +643,10 @@ fn switch_and_or_and_xor_are_errors_that_name_their_replacement() {
     assert_eq!(
         issues(code),
         [
-            "7:9 PHP# has no `switch`: write `match`.",
-            "11:15 PHP# has no `and`: write `&&`.",
-            "12:15 PHP# has no `or`: write `||`.",
-            "13:15 PHP# has no `xor`: write `!=` between two `bool`s.",
+            "7:9 Parse error encountered during parsing",
+            "11:15 Parse error encountered during parsing",
+            "12:15 Parse error encountered during parsing",
+            "13:15 Parse error encountered during parsing",
         ]
     );
 }
@@ -602,31 +662,33 @@ fn a_parent_type_and_a_self_type_are_errors_that_name_the_class() {
 
     assert_eq!(
         issues(code),
-        [
-            "7:12 PHP# has no `parent` type: write `Entity`, the class's base class.",
-            "7:24 PHP# has no `self`: write the class's own name, `Report`, for the declaring class.",
-        ]
+        ["7:12 Parse error encountered during parsing", "7:24 Parse error encountered during parsing"]
     );
     assert_eq!(
         [issues(listed), issues(unlisted), issues(written)],
         [
-            vec![
-                "8:12 PHP# has no `parent` type: write the base class's name, the class among `Entity`, `Linkable` in the header."
-            ],
-            vec!["5:12 PHP# has no `parent` type: this class has no base class, as its header lists none."],
+            vec!["8:12 Parse error encountered during parsing"],
+            vec!["5:12 Parse error encountered during parsing"],
             vec![],
         ]
     );
 }
 
+/// A final enum breaks a rule of PHP#'s enum, which names the modifier. A trait is no PHP# declaration, so it fails as a
+/// typo does at its `trait`, after any attributes and modifiers before it.
 #[test]
-fn a_final_enum_or_a_public_trait_is_an_error_where_it_starts() {
-    let code = "namespace App.Tenant;\n\nfinal enum Suit\n{\n}\n\npublic trait Tagged\n{\n}\n\ntrait Bare\n{\n}\n";
-    let r#trait = "PHP# has no `trait`: give the shared methods default bodies in an interface, as in `string label() => \"label\";`.";
+fn a_final_enum_is_an_error_and_a_trait_fails_as_a_typo_does_at_its_keyword() {
+    let code = "namespace App.Tenant;\n\nfinal enum Suit\n{\n}\n\npublic trait Tagged\n{\n}\n\ntrait Bare\n{\n}\n\n[Deprecated]\ntrait Old\n{\n}\n";
+    let r#trait = "Parse error encountered during parsing";
 
     assert_eq!(
         issues(code),
-        ["3:1 An enum takes no `final`: remove it.".to_owned(), format!("7:1 {trait}"), format!("11:1 {trait}"),]
+        [
+            "3:1 An enum takes no `final`: remove it.".to_owned(),
+            format!("7:8 {trait}"),
+            format!("11:1 {trait}"),
+            format!("16:1 {trait}"),
+        ]
     );
 }
 
@@ -651,7 +713,7 @@ fn a_template_is_in_the_slice_with_any_slice_expression_in_its_interpolations() 
 fn an_interpolation_outside_the_slice_is_an_error() {
     let code = leak(method("        const label = `made ${this.run(...)}`;\n        return extra;\n"));
 
-    assert_eq!(issues(code), ["7:31 PHP# writes a method value without `(...)`: `this.run`."]);
+    assert_eq!(issues(code), ["7:40 Parse error encountered during parsing"]);
 }
 
 #[test]
@@ -693,7 +755,7 @@ fn a_catch_variable_named_this_is_an_error_and_one_named_as_a_superglobal_is_a_n
 
     assert_eq!(
         issues(code),
-        ["8:26 `this` is a keyword; write `@this`.", "9:25 Catch variable name `_GET` should be in camel case.",]
+        ["8:26 `this` is a keyword; write `@this`.", "9:25 Catch variable name `_GET` should be in camel case."]
     );
 }
 
@@ -704,9 +766,8 @@ fn a_catch_variable_is_out_of_scope_after_its_catch_block() {
     assert_eq!(issues(code), ["10:15 `failure` is used after the block that declares it closes."]);
 }
 
-/// The body of `if`, `else` and each loop is a block in braces, a guard clause's `return` or `throw` too, and PHP's
-/// colon-delimited bodies are never valid. The error points at the body, from a colon body's `:` to its `endif;`,
-/// `endwhile;` or `endfor;`, and its help's braced body compiles in its place.
+/// The body of `if`, `else` and each loop is a block in braces, a guard clause's `return` or `throw` too. The error
+/// points at the body, and its help's braced body compiles in its place.
 #[test]
 fn every_body_is_written_in_braces() {
     let refused = [
@@ -728,18 +789,6 @@ fn every_body_is_written_in_braces() {
         ("        do extra += 1; while (extra < 3);\n", "7:12", "{ extra += 1; }"),
         ("        for (let step = 0; step < 3; step++) extra++;\n", "7:46", "{ extra++; }"),
         ("        for (const value of Store.values()) extra += value;\n", "7:45", "{ extra += value; }"),
-        ("        while (extra > 1):\n            extra -= 1;\n        endwhile;\n", "7:26", "{ extra -= 1; }"),
-        ("        for (;;):\n            break;\n        endfor;\n", "7:17", "{ break; }"),
-        (
-            "        if (extra > 3):\n            extra = 3;\n        elseif (extra > 2):\n            extra = 2;\n        else:\n            extra = 1;\n        endif;\n",
-            "7:23",
-            "{ extra = 3; } else if (extra > 2) { extra = 2; } else { extra = 1; }",
-        ),
-        (
-            "        if (extra > 1) {\n            return 1;\n        } else if (extra > 2):\n            return 2;\n        endif;\n",
-            "9:30",
-            "{ return 2; }",
-        ),
     ];
 
     for (body, at, fix) in refused {
@@ -758,13 +807,35 @@ fn every_body_is_written_in_braces() {
     }
 }
 
+/// PHP's colon-delimited body, closed by `endif;`, `endwhile;` or `endfor;`, is no PHP# syntax, so it fails as a typo
+/// does, once, at its `:`, with no fix. The parser refuses `foreach` in every form, at its keyword.
 #[test]
-fn elseif_is_an_error_that_names_else_if() {
+fn a_colon_delimited_body_fails_as_a_typo_does() {
+    for (body, at) in [
+        ("        while (extra > 1):\n            extra -= 1;\n        endwhile;\n", "7:26"),
+        ("        for (;;):\n            break;\n        endfor;\n", "7:17"),
+        (
+            "        if (extra > 3):\n            extra = 3;\n        elseif (extra > 2):\n            extra = 2;\n        else:\n            extra = 1;\n        endif;\n",
+            "7:23",
+        ),
+        (
+            "        if (extra > 1) {\n            return 1;\n        } else if (extra > 2):\n            return 2;\n        endif;\n",
+            "9:30",
+        ),
+    ] {
+        let code = leak(method(&format!("{body}        return extra;\n")));
+
+        assert_eq!(issues(code), [format!("{at} Parse error encountered during parsing")], "{body}");
+    }
+}
+
+#[test]
+fn elseif_fails_as_a_typo_does() {
     let code = leak(method(
         "        if (extra > 1) {\n            return 1;\n        } elseif (extra > 2) {\n            return 2;\n        }\n        return extra;\n",
     ));
 
-    assert_eq!(issues(code), ["9:11 PHP# has no `elseif`: write `else if`."]);
+    assert_eq!(issues(code), ["9:11 Parse error encountered during parsing"]);
 }
 
 #[test]
@@ -804,14 +875,14 @@ fn break_and_continue_without_a_level_are_in_the_slice() {
 }
 
 #[test]
-fn break_and_continue_with_a_level_are_not_supported_yet() {
+fn break_and_continue_with_a_level_fail_as_a_typo_does_at_the_level() {
     let code = leak(method(
         "        while (extra > 0) {\n            while (extra > 1) {\n                break 2;\n            }\n            continue 1;\n        }\n        return extra;\n",
     ));
 
     assert_eq!(
         issues(code),
-        ["9:17 This statement is not supported yet in PHP#.", "11:13 This statement is not supported yet in PHP#."]
+        ["9:23 Parse error encountered during parsing", "11:22 Parse error encountered during parsing"]
     );
 }
 
@@ -870,7 +941,7 @@ fn a_loop_variable_named_this_is_an_error_and_one_named_as_a_superglobal_is_a_na
 
     assert_eq!(
         issues(code),
-        ["7:20 `this` is a keyword; write `@this`.", "9:21 Loop variable name `_GET` should be in camel case.",]
+        ["7:20 `this` is a keyword; write `@this`.", "9:21 Loop variable name `_GET` should be in camel case."]
     );
 }
 
@@ -965,7 +1036,7 @@ fn writing_a_const_local_after_its_block_closes_reports_only_the_scope_error() {
 /// A function declared in a method is one PHP declares globally when the method runs, so it is the same error, once.
 #[test]
 fn a_top_level_function_is_an_error() {
-    let message = "PHP# has no top-level functions: move `total` into a class as a static method.";
+    let message = "Parse error encountered during parsing";
     for (code, at) in [
         ("namespace App.Tenant;\n\nfunction total(int extra) { return extra; }\n", "3:10"),
         ("namespace App.Tenant;\n\nFUNCTION total(int extra) { return extra; }\n", "3:10"),
@@ -1020,7 +1091,7 @@ fn a_statement_at_file_level_is_an_error() {
 /// file compiles without it.
 #[test]
 fn declare_strict_types_is_one_error_wherever_it_is_written() {
-    let message = "PHP# is always strict: remove `declare(strict_types=1);`.";
+    let message = "Parse error encountered during parsing";
     let before = "declare(strict_types=1);\n\nnamespace App.Tenant;\n\nclass Report\n{\n}\n";
     let after = "namespace App.Tenant;\n\ndeclare(strict_types=1);\n\nclass Report\n{\n}\n";
     let inside = leak(method("        declare(strict_types=1);\n        return extra;\n"));
@@ -1070,7 +1141,7 @@ fn a_keyword_in_another_case_leaves_the_files_other_errors_reported() {
         .collect();
 
     assert_eq!(parse_errors, ["Write the keyword `return` in lowercase."]);
-    assert_eq!(semantic_issues, ["Write `true` in lowercase.", "PHP# variables have no `$`: write `total`."]);
+    assert_eq!(semantic_issues, ["Write `true` in lowercase.", "Parse error encountered during parsing"]);
 }
 
 /// PHP reserves `X::class` for a class's name, so a constant named `class` in any case fails when PHP loads the file.
@@ -1089,19 +1160,15 @@ fn a_constant_named_class_is_an_error() {
     }
 }
 
-/// PHP's other `declare` settings, `ticks` and `encoding`, set what PHP# leaves at PHP's defaults, so each is one error
-/// that names it, and the help removes it or the `declare` around its body.
+/// PHP's other `declare` settings, `ticks` and `encoding`, are no PHP# syntax, so each fails as a typo does, once, at
+/// its `declare`, and its body is never checked.
 #[test]
-fn declare_of_another_setting_is_one_error_that_names_it() {
-    for (body, head, help) in [
-        ("        declare(ticks=1);\n", "declare(ticks=1)", "Delete it."),
-        ("        declare(encoding=\"UTF-8\");\n", "declare(encoding=\"UTF-8\")", "Delete it."),
-        (
-            "        declare(ticks=1) { extra = 2; }\n",
-            "declare(ticks=1)",
-            "Write its body's code without the `declare` around it.",
-        ),
-        ("        declare(strict_types=1, ticks=1);\n", "declare(strict_types=1, ticks=1)", "Delete it."),
+fn declare_of_another_setting_fails_as_a_typo_does() {
+    for body in [
+        "        declare(ticks=1);\n",
+        "        declare(encoding=\"UTF-8\");\n",
+        "        declare(ticks=1) { extra = 2; }\n",
+        "        declare(strict_types=1, ticks=1);\n",
     ] {
         let code = leak(method(&format!("{body}        return extra;\n")));
         let issues: Vec<(String, Option<String>)> =
@@ -1109,7 +1176,7 @@ fn declare_of_another_setting_is_one_error_that_names_it() {
 
         assert_eq!(
             issues,
-            [(format!("PHP# has no `{head}`: a `.sharp` file takes no settings."), Some(help.to_owned()))],
+            [("Parse error encountered during parsing".to_owned(), Some("Check the syntax of your code.".to_owned()))],
             "{code}"
         );
     }
@@ -1121,7 +1188,7 @@ fn dollar_variables_are_errors() {
 
     assert_eq!(
         issues(code),
-        ["7:9 PHP# variables have no `$`: write `total`.", "8:9 Variable variables are not part of PHP#.",]
+        ["7:9 Parse error encountered during parsing", "8:9 Parse error encountered during parsing"]
     );
 }
 
@@ -1129,7 +1196,7 @@ fn dollar_variables_are_errors() {
 fn a_dollar_parameter_is_an_error() {
     let code = "class Report\n{\n    public int run(int $extra) { return 1; }\n}\n";
 
-    assert_eq!(issues(code), ["3:24 PHP# variables have no `$`: write `extra`."]);
+    assert_eq!(issues(code), ["3:24 Parse error encountered during parsing"]);
 }
 
 #[test]
@@ -1149,7 +1216,7 @@ fn a_construct_outside_the_slice_is_an_error_in_a_catch_block_or_a_call_argument
 
     assert_eq!(
         issues(code),
-        ["9:27 PHP# has no `<>`: write `!=`.", "11:22 PHP# writes a method value without `(...)`: `this.run`."]
+        ["9:27 Parse error encountered during parsing", "11:31 Parse error encountered during parsing"]
     );
 }
 
@@ -1182,80 +1249,56 @@ fn a_php_first_class_callable_names_the_method_value() {
 
     assert_eq!(
         issues(code),
-        [
-            "7:25 PHP# writes a method value without `(...)`: `Report.doubled`.",
-            "8:22 PHP# writes a method value without `(...)`: `this.plus`.",
-        ]
+        ["7:40 Parse error encountered during parsing", "8:32 Parse error encountered during parsing"]
     );
 }
 
-/// Spec section 14.1: one name covers every function type, so PHP's `Closure` is no type a `.sharp` file imports, as
-/// `callable` is no type it writes.
+/// Spec section 14.1: one name covers every function type, so an import of PHP's `Closure` gets what an import of a name
+/// nothing declares gets, which the analyzer reports, and none here.
 #[test]
-fn an_import_of_closure_is_an_error_that_names_the_function_type() {
+fn an_import_of_closure_gets_no_error_of_its_own() {
     let code = "namespace App;\n\nimport Closure;\nimport Closure as Callback;\nimport Lib.Tools.Closure as Tool;\n\nclass Report\n{\n}\n";
 
-    assert_eq!(
-        issues(code),
-        ["3:8 PHP# has no `Closure`: write `Function<R(P)>`.", "4:8 PHP# has no `Closure`: write `Function<R(P)>`."]
-    );
+    assert_eq!(issues(code), Vec::<String>::new());
 }
 
+/// PHP's `global $x;` fails as a typo does. `compact` and `extract` are PHP functions, which the analyzer refuses as it
+/// refuses every function the standard library replaces.
 #[test]
-fn compact_extract_and_global_are_errors() {
+fn global_fails_as_a_typo_does_and_compact_and_extract_are_calls() {
     let code =
         leak(method("        compact(\"extra\");\n        extract([]);\n        global $config;\n        return 1;\n"));
 
+    assert_eq!(issues(code), ["9:9 Parse error encountered during parsing"]);
+}
+
+/// Spec section 8 removes `echo` and `print`: output goes through the standard library's `Console`, so PHP's `echo`
+/// and `print` statements fail as a typo does. Spec section 2 makes `echo` and `print` plain names, so each written as
+/// a call is a call of a function no code declares, which the analyzer refuses as it refuses any unknown name.
+#[test]
+fn echo_and_print_fail_as_a_typo_does_and_their_calls_are_unknown_names() {
+    let echo = leak(method("        echo \"total\", extra;\n        echo(\"total\");\n        return extra;\n"));
+    let print =
+        leak(method("        const shown = print \"total\";\n        print(\"total\");\n        return extra;\n"));
+
     assert_eq!(
-        issues(code),
-        [
-            "7:9 PHP# has no `compact()`: build the Map, as in `[\"name\": name]`.",
-            "8:9 PHP# has no `extract()`: read each value from the Map by its key, as in `map.get(\"name\")`.",
-            "9:9 PHP# has no `global`: pass the value in as a parameter.",
-        ]
+        [issues(echo), issues(print)],
+        [vec!["7:9 Parse error encountered during parsing"], vec!["7:23 Parse error encountered during parsing"]]
     );
 }
 
-/// Spec section 8 removes `echo` and `print`: output goes through the standard library's `Console`. Spec section 2
-/// makes `echo` a plain name, so `echo` written as a call is a call of a function no code declares, refused the same
-/// way.
+/// Spec section 2 makes `isset`, `empty`, `unset`, `array`, `list` and `die` plain names, so each written as PHP writes
+/// it is a call of a function, or a read of a constant, that no code declares, which the analyzer refuses as it refuses
+/// any unknown name. `list(…) = …` is no write target, and a local of the name is called as any local that holds a
+/// lambda is.
 #[test]
-fn echo_is_an_error_that_names_console_write() {
-    let code = leak(method("        echo \"total\", extra;\n        echo(\"total\");\n        return extra;\n"));
-    let message = "PHP# has no `echo`: write `console.write(text)` on the `Console` your constructor takes.";
-
-    assert_eq!(issues(code), [format!("7:9 {message}"), format!("8:9 {message}")]);
-}
-
-#[test]
-fn print_is_an_error_that_names_console_write() {
-    let code =
-        leak(method("        const shown = print \"total\";\n        print(\"total\");\n        return extra;\n"));
-    let message = "PHP# has no `print`: write `console.write(text)` on the `Console` your constructor takes.";
-
-    assert_eq!(issues(code), [format!("7:23 {message}"), format!("8:9 {message}")]);
-}
-
-/// Spec section 2 makes `isset`, `empty`, `unset`, `array` and `list` plain names, so each written as PHP calls it is a
-/// call of a function no code declares, refused with the PHP# form. A local of the name is called as any local that
-/// holds a lambda is.
-#[test]
-fn isset_empty_unset_array_and_list_written_as_calls_name_the_php_sharp_form() {
+fn isset_empty_unset_array_list_and_die_are_plain_names() {
     let code = leak(method(
-        "        const set = isset(extra);\n        const blank = empty(extra);\n        unset(extra);\n        const items = array(1, 2);\n        list(first) = items;\n        return extra;\n",
+        "        const set = isset(extra);\n        const blank = empty(extra);\n        unset(extra);\n        const items = array(1, 2);\n        list(first) = items;\n        die;\n        die(\"failed\");\n        return extra;\n",
     ));
     let local = leak(method("        const isset = (int value) => value > 0;\n        return isset(extra) ? 1 : 0;\n"));
 
-    assert_eq!(
-        issues(code),
-        [
-            "7:21 PHP# has no `isset`: test it against null, as in `value != null`.",
-            "8:23 PHP# has no `empty`: compare the value itself, as in `items.count() == 0`.",
-            "9:9 PHP# has no `unset`: a local ends at the `}` that closes its block, and `map.remove(key)` removes a Map's entry.",
-            "10:23 PHP# has no `array`: write a list literal, as in `[1, 2]`.",
-            "11:9 PHP# has no `list`: write `const [a, b] = …`.",
-        ]
-    );
+    assert_eq!(issues(code), ["11:9 Parse error encountered during parsing"]);
     assert_eq!(issues(local), Vec::<String>::new());
 }
 
@@ -1380,20 +1423,6 @@ fn every_keyword_names_a_local_or_parameter_only_with_at() {
     }
 }
 
-/// `die("…")` prints its message and exits with status 0, which reports success, so spec section 8 removes `die`.
-#[test]
-fn die_in_every_form_is_an_error_that_names_write_error_and_exit() {
-    let code = leak(method(
-        "        die;\n        die();\n        die(\"failed\");\n        die(1);\n        return extra;\n",
-    ));
-    let message = "PHP# has no `die`: write the message with `console.writeError(text)`, then `process.exit(1)`.";
-
-    assert_eq!(
-        issues(code),
-        [format!("7:9 {message}"), format!("8:9 {message}"), format!("9:9 {message}"), format!("10:9 {message}")]
-    );
-}
-
 /// `exit` is PHP's function `exit`, which the analyzer refuses bare as it refuses any bare call of a plain PHP
 /// function, spec section 23, so `check_slice` takes it in every form.
 #[test]
@@ -1454,7 +1483,7 @@ fn an_interface_member_gives_a_default_body_checked_as_a_class_member_body() {
         issues(refused),
         [
             "8:16 Write `this.designColumn`: members of the same object are always written with `this.`.",
-            "10:29 PHP# variables have no `$`: write `label`.",
+            "10:29 Parse error encountered during parsing",
             "11:25 Write `this.designColumn`: members of the same object are always written with `this.`.",
             "12:5 An interface property takes no modifier but `override`: its default body runs on each read."
         ]
@@ -1616,7 +1645,7 @@ fn a_named_constructor_shares_no_name_with_a_method() {
     assert_eq!(issues(after), ["8:16 `Order.copy` cannot share its name with `Order`'s named constructor `copy`."]);
     assert_eq!(
         issues(before),
-        ["8:18 The named constructor `Order.copy` cannot share its name with the method `Order.Copy`.",]
+        ["8:18 The named constructor `Order.copy` cannot share its name with the method `Order.Copy`."]
     );
     assert_eq!(
         issues(law),
@@ -1744,7 +1773,7 @@ fn new_self_needs_a_required_constructor() {
 
     assert_eq!(issues(report), [format!("9:34 {needs}")]);
     assert_eq!(issues(total), [format!("5:34 {needs}")]);
-    assert_eq!(issues(entity), ["9:34 `new Self` needs parentheses: write `new Self()`."]);
+    assert_eq!(issues(entity), ["9:42 Parse error encountered during parsing"]);
     assert_eq!(help(report), ["Declare the constructor of `Report` `required`, as in `public required Report(…)`."]);
     assert_eq!(help(total), ["Declare the constructor of `Total` `required`, as in `public required Total(…)`."]);
 }
@@ -1770,15 +1799,10 @@ fn self_names_the_class_and_self_where_it_goes() {
     let r#struct = "namespace App.Tenant;\n\nstruct Spot\n{\n    public self moved() => this;\n}\n";
     let class = "namespace App.Tenant;\n\nclass Report\n{\n    private static int count = 0;\n    private self other;\n\n    public required Report(self copy)\n    {\n    }\n\n    public static self make()\n    {\n        self.count = 1;\n        let made = self.make();\n        return new self(self.count);\n    }\n}\n";
     let interface = "namespace App.Tenant;\n\ninterface Copyable\n{\n    self copy();\n}\n";
-    let without_self = "PHP# has no `self`: write the class's own name, `Report`, for the declaring class.";
-    let with_self = "PHP# has no `self`: write the class's own name, `Report`, for the declaring class, or `Self` for the class a static method is called on.";
+    let without_self = "Parse error encountered during parsing";
+    let with_self = "Parse error encountered during parsing";
 
-    assert_eq!(
-        issues(r#struct),
-        [
-            "5:12 PHP# has no `self`: write the class's own name, `Spot`, for the declaring class, or `Self` for the class a static method is called on."
-        ]
-    );
+    assert_eq!(issues(r#struct), ["5:12 Parse error encountered during parsing"]);
     assert_eq!(
         issues(class),
         [
@@ -1791,18 +1815,13 @@ fn self_names_the_class_and_self_where_it_goes() {
             format!("16:25 {without_self}"),
         ]
     );
-    assert_eq!(
-        issues(interface),
-        [
-            "5:5 PHP# has no `self`: write the class's own name, `Copyable`, for the declaring class, or `Self` for the class a static method is called on."
-        ]
-    );
+    assert_eq!(issues(interface), ["5:5 Parse error encountered during parsing"]);
 }
 
 #[test]
 fn static_is_written_self() {
     let code = "namespace App.Tenant;\n\nclass Report\n{\n    private static int count = 0;\n\n    public required Report(int|static copy)\n    {\n    }\n\n    public static int|static make()\n    {\n        let count = static.count;\n        let made = static.make();\n        return new static(static.count);\n    }\n}\n";
-    let message = "PHP# has no `static` class name: write `Self`.";
+    let message = "Parse error encountered during parsing";
 
     assert_eq!(
         issues(code),
@@ -2038,7 +2057,7 @@ fn internal_is_an_access_modifier() {
 
     // PHP# has no anonymous class, and `internal` among its modifiers is no other error.
     let anonymous = leak(method("        const other = new readonly internal class {};\n        return 1;\n"));
-    assert_eq!(issues(anonymous), ["7:23 PHP# has no class without a name: declare a class in its own file."]);
+    assert_eq!(issues(anonymous), ["7:23 Parse error encountered during parsing"]);
 }
 
 /// An accessor's access modifier reaches strictly less than its property's, as in C#. `internal` reaches a namespace
@@ -2163,7 +2182,7 @@ fn a_static_member_read_in_a_constant_expression_is_an_error() {
 /// compares with a call's value in `when`.
 #[test]
 fn a_match_of_constants_is_a_constant_value_and_any_other_form_runs_code() {
-    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public const string MATCHED = match (Plan.Free) { Plan.Free => \"free\", default => \"other\" };\n    public const Money PRICE = new Money(5);\n    public const bool TESTED = Report.MATCHED is string;\n    public const string CALLED = match (Plan.Free) { Plan.Free => Rates.label(), default => \"other\" };\n    public const string BOUND = match (Report.MAX) { int n when n > 0 => `${n} left`, default => \"none\" };\n    public const int BUMPED = ++Report.MAX;\n\n    [Rule(new Range(1, 10), (int x) => x is == Rates.top(), --Report.MAX)]\n    public int run()\n    {\n        return 1;\n    }\n}\n";
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public const string MATCHED = match (Plan.Free) { Plan.Free => \"free\", default => \"other\" };\n    public const Money PRICE = new Money(5);\n    public const bool TESTED = Report.MATCHED is string;\n    public const string CALLED = match (Plan.Free) { Plan.Free => Rates.label(), default => \"other\" };\n    public const string BOUND = match (Report.MAX) { int n when n > 0 => `${n} left`, default => \"none\" };\n    public const int BUMPED = ++Report.MAX;\n    public const Report ITSELF = this;\n\n    [Rule(new Range(1, 10), (int x) => x is == Rates.top(), --Report.MAX)]\n    public int run()\n    {\n        return 1;\n    }\n}\n";
 
     assert_eq!(
         issues(code),
@@ -2172,8 +2191,9 @@ fn a_match_of_constants_is_a_constant_value_and_any_other_form_runs_code() {
             "7:32 A constant's value is known before the code runs, and `Report.MATCHED is string` runs code: use a static field.",
             "8:67 A constant's value is known before the code runs, and `Rates.label()` runs code: use a static field.",
             "10:31 A constant's value is known before the code runs, and `++Report.MAX` runs code: use a static field.",
-            "12:48 A constant's value is known before the code runs, and `Rates.top()` runs code: compare with it in `when`.",
-            "12:61 An attribute argument is a constant or a `new` of constants, and `--Report.MAX` is neither.",
+            "11:34 A constant's value is known before the code runs, and `this` runs code: use a static field.",
+            "13:48 A constant's value is known before the code runs, and `Rates.top()` runs code: compare with it in `when`.",
+            "13:61 An attribute argument is a constant or a `new` of constants, and `--Report.MAX` is neither.",
         ]
     );
 }
@@ -2470,7 +2490,7 @@ fn two_imports_with_the_same_short_name_are_an_error() {
 fn a_parameter_or_local_named_this_is_an_error() {
     let code = "class Report\n{\n    public int run(int this) { return 1; }\n\n    public int total() { let this = 1; return 1; }\n}\n";
 
-    assert_eq!(issues(code), ["3:24 `this` is a keyword; write `@this`.", "5:30 `this` is a keyword; write `@this`.",]);
+    assert_eq!(issues(code), ["3:24 `this` is a keyword; write `@this`.", "5:30 `this` is a keyword; write `@this`."]);
 }
 
 #[test]
@@ -2738,21 +2758,20 @@ fn a_local_or_parameter_named_after_a_superglobal_is_a_name_like_any_other() {
     );
 }
 
-/// Spec section 29 removes every superglobal, written with `$` or bare as in `_SERVER["HTTP_HOST"]`. Only `_ENV` names
-/// `Environment`, and `GLOBALS`, which holds no request data, names a parameter.
+/// Spec section 29 removes every superglobal, written with `$` or bare as in `_SERVER["HTTP_HOST"]`, and PHP's `$argv`
+/// and `$argc`. Each fails as a typo does, at its name.
 #[test]
-fn a_superglobal_with_or_without_dollar_is_an_error_that_names_a_request() {
+fn a_superglobal_with_or_without_dollar_fails_as_a_typo_does() {
     let code = leak(method(
-        "        Store.keep(GLOBALS[\"a\"], $GLOBALS);\n        Store.keep(_SERVER[\"a\"], $_SERVER);\n        Store.keep(_GET[\"a\"], $_GET);\n        Store.keep(_POST[\"a\"], $_POST);\n        Store.keep(_FILES[\"a\"], $_FILES);\n        Store.keep(_COOKIE[\"a\"], $_COOKIE);\n        Store.keep(_SESSION[\"a\"], $_SESSION);\n        Store.keep(_REQUEST[\"a\"], $_REQUEST);\n        Store.keep(_ENV[\"a\"], $_ENV);\n        return extra;\n",
+        "        Store.keep(GLOBALS[\"a\"], $GLOBALS);\n        Store.keep(_SERVER[\"a\"], $_SERVER);\n        Store.keep(_GET[\"a\"], $_GET);\n        Store.keep(_POST[\"a\"], $_POST);\n        Store.keep(_FILES[\"a\"], $_FILES);\n        Store.keep(_COOKIE[\"a\"], $_COOKIE);\n        Store.keep(_SESSION[\"a\"], $_SESSION);\n        Store.keep(_REQUEST[\"a\"], $_REQUEST);\n        Store.keep(_ENV[\"a\"], $_ENV);\n        Store.keep($argv, $argc);\n        return extra;\n",
     ));
-    let message = "PHP# has no superglobals; take a Request";
-    let globals = "PHP# has no global variables; take the value as a constructor or method parameter";
+    let message = "Parse error encountered during parsing";
 
     assert_eq!(
         issues(code),
         [
-            format!("7:20 {globals}"),
-            format!("7:34 {globals}"),
+            format!("7:20 {message}"),
+            format!("7:34 {message}"),
             format!("8:20 {message}"),
             format!("8:34 {message}"),
             format!("9:20 {message}"),
@@ -2767,90 +2786,29 @@ fn a_superglobal_with_or_without_dollar_is_an_error_that_names_a_request() {
             format!("13:35 {message}"),
             format!("14:20 {message}"),
             format!("14:35 {message}"),
-            "15:20 PHP# has no superglobals; take an Environment".to_owned(),
-            "15:31 PHP# has no superglobals; take an Environment".to_owned(),
+            format!("15:20 {message}"),
+            format!("15:31 {message}"),
+            format!("16:20 {message}"),
+            format!("16:27 {message}"),
         ]
     );
 }
 
-/// Spec section 29: for the environment and the command-line arguments the error names `Environment`, so `_ENV` and a
-/// read of `_SERVER`'s `"argv"` or `"argc"` do, with or without `$`, and every other read of `_SERVER` names a request.
+/// A write to a superglobal's element fails as a read does, at the superglobal, not at the write target.
 #[test]
-fn an_environment_superglobal_is_an_error_that_names_environment() {
-    let code = leak(method(
-        "        Store.keep(_ENV[\"HOME\"], $_ENV);\n        Store.keep(_SERVER[\"argv\"], $_SERVER[\"argc\"]);\n        Store.keep(_SERVER[\"HTTP_HOST\"], _SERVER[extra]);\n        return extra;\n",
-    ));
-    let environment = "PHP# has no superglobals; take an Environment";
-    let request = "PHP# has no superglobals; take a Request";
-
-    assert_eq!(
-        issues(code),
-        [
-            format!("7:20 {environment}"),
-            format!("7:34 {environment}"),
-            format!("8:20 {environment}"),
-            format!("8:37 {environment}"),
-            format!("9:20 {request}"),
-            format!("9:42 {request}"),
-        ]
-    );
-    // A file whose import takes the short name `Environment` is told the aliased import to write.
-    let shadowed = leak(
-        method("        Store.keep(_ENV);\n        return extra;\n")
-            .replace("namespace App.Tenant;\n", "namespace App.Tenant;\n\nimport App.Shared.Environment;\n"),
-    );
-    assert_eq!(
-        issues(shadowed),
-        [
-            "9:20 PHP# has no superglobals; take a SharpEnvironment after `import Sharp.Environment as SharpEnvironment;`"
-        ]
-    );
-}
-
-/// Spec section 29: PHP's `$argv` and `$argc` hold the command-line arguments, so a read of either names the
-/// `Environment` member that reads them. A parameter of that name declares a local and reads nothing, so it gets the
-/// `$` error.
-#[test]
-fn a_command_line_variable_is_an_error_that_names_the_environment_member() {
-    let code = leak(method("        Store.keep($argv, $argc);\n        return extra;\n"));
-    let parameter = "class Report\n{\n    public int run(int $argv) { return 1; }\n}\n";
-
-    assert_eq!(
-        issues(code),
-        [
-            "7:20 PHP# has no `$argv`: write `environment.arguments` on the `Environment` your constructor takes.",
-            "7:27 PHP# has no `$argc`: write `environment.arguments.count()` on the `Environment` your constructor takes.",
-        ]
-    );
-    assert_eq!(issues(parameter), ["3:24 PHP# variables have no `$`: write `argv`."]);
-    // A file whose import takes the short name `Environment` is told the aliased import to write.
-    let shadowed = leak(
-        method("        Store.keep($argv);\n        return extra;\n")
-            .replace("namespace App.Tenant;\n", "namespace App.Tenant;\n\nimport App.Shared.Environment;\n"),
-    );
-    assert_eq!(
-        issues(shadowed),
-        [
-            "9:20 PHP# has no `$argv`: write `sharpEnvironment.arguments` on the `SharpEnvironment` your constructor takes after `import Sharp.Environment as SharpEnvironment;`."
-        ]
-    );
-}
-
-/// A write to a superglobal's element names the request as a read does, not the write target.
-#[test]
-fn a_write_to_a_superglobal_is_an_error_that_names_a_request() {
+fn a_write_to_a_superglobal_fails_as_a_typo_does() {
     let code = leak(method(
         "        _SESSION[\"user\"] = extra;\n        $_SESSION[\"user\"] = extra;\n        _GET[\"n\"]++;\n        return extra;\n",
     ));
-    let message = "PHP# has no superglobals; take a Request";
+    let message = "Parse error encountered during parsing";
 
     assert_eq!(issues(code), [format!("7:9 {message}"), format!("8:9 {message}"), format!("9:9 {message}")]);
 }
 
-/// A constant expression that reads a superglobal, or a member of one or of a `__Something__` name, names the
-/// replacement, as a method body does: a parameter default, an attribute argument and a constant's value.
+/// A constant expression that reads a superglobal, or a member of one or of a `__Something__` name, fails as a typo
+/// does, as a method body does: a parameter default, an attribute argument and a constant's value.
 #[test]
-fn a_superglobal_in_a_constant_expression_is_an_error_that_names_a_request() {
+fn a_superglobal_in_a_constant_expression_fails_as_a_typo_does() {
     let code = leak(
         method("        return 1;\n")
             .replace("{\n    public int run", "{\n    public const int A = __Foo__.bar;\n    [Field(_SERVER.x)]\n    public int run")
@@ -2859,146 +2817,117 @@ fn a_superglobal_in_a_constant_expression_is_an_error_that_names_a_request() {
                 "string host = _SERVER[\"HTTP_HOST\"], string other = $_SERVER[\"HTTP_HOST\"], string server = _SERVER.HTTP_HOST, int line = __Foo__.bar",
             ),
     );
-    let message = "PHP# has no superglobals; take a Request";
-    let magic = "PHP# has no `__Foo__`: `Position.current()` gives the file, directory, line, column and function.";
+    let message = "Parse error encountered during parsing";
 
     assert_eq!(
         issues(code),
         [
-            format!("5:26 {magic}"),
+            format!("5:26 {message}"),
             format!("6:12 {message}"),
             format!("7:34 {message}"),
             format!("7:71 {message}"),
             format!("7:110 {message}"),
-            format!("7:140 {magic}"),
+            format!("7:140 {message}"),
         ]
     );
 }
 
-/// A superglobal or a `__Something__` name before `.` or `?.` binds as a class, and is refused as its bare form is. A
+/// A superglobal or a `__Something__` name before `.` or `?.` binds as a class, and fails as its bare form does. A
 /// class whose name only starts with `_` is read as a class.
 #[test]
-fn a_superglobal_or_a_double_underscore_name_before_a_member_is_an_error() {
+fn a_superglobal_or_a_double_underscore_name_before_a_member_fails_as_a_typo_does() {
     let code = leak(method(
         "        Store.keep(_SERVER.x);\n        Store.keep(GLOBALS.x);\n        _SERVER.read();\n        _SERVER.x = 1;\n        Store.keep(__Foo__.bar);\n        __Foo__.bar();\n        Store.keep(_SERVER?.x);\n        Store.keep(_Helper.x);\n        return extra;\n",
     ));
-    let superglobal = "PHP# has no superglobals; take a Request";
-    let magic = "PHP# has no `__Foo__`: `Position.current()` gives the file, directory, line, column and function.";
+    let message = "Parse error encountered during parsing";
 
     assert_eq!(
         issues(code),
         [
-            format!("7:20 {superglobal}"),
-            "8:20 PHP# has no global variables; take the value as a constructor or method parameter".to_owned(),
-            format!("9:9 {superglobal}"),
-            format!("10:9 {superglobal}"),
-            format!("11:20 {magic}"),
-            format!("12:9 {magic}"),
-            format!("13:20 {superglobal}"),
+            format!("7:20 {message}"),
+            format!("8:20 {message}"),
+            format!("9:9 {message}"),
+            format!("10:9 {message}"),
+            format!("11:20 {message}"),
+            format!("12:9 {message}"),
+            format!("13:20 {message}"),
         ]
     );
 }
 
 /// Spec section 27 removes PHP's magic constants and every other `__Something__` name, in a body and in a constant
-/// expression, and `Position` says where code sits. Each error names the magic constant as written.
+/// expression, and `Position` says where code sits. Each fails as a typo does, at its name.
 #[test]
-fn a_magic_constant_or_another_double_underscore_name_is_an_error_that_names_position() {
+fn a_magic_constant_or_another_double_underscore_name_fails_as_a_typo_does() {
     let code = leak(
         method(
             "        Store.keep(__DIR__);\n        Store.keep(__FILE__);\n        Store.keep(__LINE__);\n        Store.keep(__FUNCTION__);\n        Store.keep(__METHOD__);\n        Store.keep(__CLASS__);\n        Store.keep(__NAMESPACE__);\n        Store.keep(__TRAIT__);\n        Store.keep(__PROPERTY__);\n        Store.keep(__COMPILER_HALT_OFFSET__);\n        Store.keep(__dir__);\n        Store.keep(____, __Version);\n        return extra;\n",
         )
         .replace("int extra", "int extra = __LINE__"),
     );
-    let position = "`Position.current()` gives the file, directory, line, column and function.";
 
     assert_eq!(
         issues(code),
         [
-            "5:32 PHP# has no `__LINE__`: write `Position.current().line`.".to_owned(),
-            "7:20 PHP# has no `__DIR__`: write `Position.current().directory`.".to_owned(),
-            "8:20 PHP# has no `__FILE__`: write `Position.current().file`.".to_owned(),
-            "9:20 PHP# has no `__LINE__`: write `Position.current().line`.".to_owned(),
-            "10:20 PHP# has no `__FUNCTION__`: write `Position.current().function`.".to_owned(),
-            "11:20 PHP# has no `__METHOD__`: write `Position.current().function`.".to_owned(),
-            "12:20 PHP# has no `__CLASS__`: write `typeof(Class)` with the class's name.".to_owned(),
-            "13:20 PHP# has no `__NAMESPACE__`: write `Position.current().function`, which starts with the namespace."
-                .to_owned(),
-            format!("14:20 PHP# has no `__TRAIT__`: {position}"),
-            format!("15:20 PHP# has no `__PROPERTY__`: {position}"),
-            format!("16:20 PHP# has no `__COMPILER_HALT_OFFSET__`: {position}"),
-            "17:20 PHP# has no `__dir__`: write `Position.current().directory`.".to_owned(),
+            "5:32 Parse error encountered during parsing".to_owned(),
+            "7:20 Parse error encountered during parsing".to_owned(),
+            "8:20 Parse error encountered during parsing".to_owned(),
+            "9:20 Parse error encountered during parsing".to_owned(),
+            "10:20 Parse error encountered during parsing".to_owned(),
+            "11:20 Parse error encountered during parsing".to_owned(),
+            "12:20 Parse error encountered during parsing".to_owned(),
+            "13:20 Parse error encountered during parsing".to_owned(),
+            "14:20 Parse error encountered during parsing".to_owned(),
+            "15:20 Parse error encountered during parsing".to_owned(),
+            "16:20 Parse error encountered during parsing".to_owned(),
+            "17:20 Parse error encountered during parsing".to_owned(),
         ]
     );
 }
 
-/// Spec section 23: once an imported class takes the short name `Position` or `Environment`, a help names the standard
-/// one through an aliased import, which is the only form the file can write.
+/// A declared `__Something__` name fails as a read of one does, in every kind of declaration, and so does a method
+/// named as PHP's magic methods are, starting but not ending with `__`.
 #[test]
-fn a_help_names_a_standard_class_the_file_shadows_through_an_aliased_import() {
-    let code =
-        leak(method("        Store.keep(__DIR__);\n        Store.keep($_SERVER);\n        return extra;\n").replace(
-            "namespace App.Tenant;\n",
-            "namespace App.Tenant;\n\nimport App.Shared.Environment;\nimport App.Shared.Position;\n",
-        ));
-
-    assert_eq!(
-        issues(code),
-        [
-            "10:20 PHP# has no `__DIR__`: write `SharpPosition.current().directory` after `import Sharp.Position as SharpPosition;`.",
-            "11:20 PHP# has no superglobals; take a Request",
-        ]
-    );
-    let superglobal = check_in_type_file(code).into_iter().find(|issue| issue.message.contains("superglobals"));
-    assert_eq!(
-        superglobal.expect("the superglobal is refused").notes,
-        [
-            "Request data arrives as an object, such as a framework's `Request`, and the process environment as `SharpEnvironment` after `import Sharp.Environment as SharpEnvironment;`."
-        ]
-    );
-}
-
-/// A declared `__Something__` name is refused as a read of one is, in every kind of declaration. A method named as
-/// PHP's magic methods are, starting but not ending with `__`, keeps its own error.
-#[test]
-fn a_declared_double_underscore_name_is_an_error_that_names_position() {
+fn a_declared_double_underscore_name_fails_as_a_typo_does() {
     let class = "namespace App.Tenant;\n\nclass __Shape__\n{\n}\n";
     let interface = "namespace App.Tenant;\n\ninterface __Named__\n{\n    int __area__(int __side__);\n}\n";
     let r#enum = "namespace App.Tenant;\n\nenum __Suit__\n{\n    case __Hearts__;\n}\n";
     let code = "namespace App.Tenant;\n\nclass Report\n{\n    private int __count__ = 0;\n    public int __views__ { get; set; }\n    public string __slug__ => \"a\";\n    public const int __MAX__ = 1;\n\n    public Report(private int __kept__)\n    {\n    }\n\n    public int __run__(int __extra__)\n    {\n        let __a__ = 1;\n        const __b__ = 2;\n        int __c__ = 3;\n        for (let __i__ = 0; __i__ < 1; __i__++) {\n        }\n        for (const __v__ of Store.values()) {\n        }\n        try {\n        } catch (Missing __e__) {\n        }\n        const f = (int __x__) => __x__;\n        return 1;\n    }\n\n    public int __get(string name) => 1;\n}\n";
-    let position = "`Position.current()` gives the file, directory, line, column and function.";
 
-    assert_eq!(issues(class), [format!("3:7 PHP# has no `__Shape__`: {position}")]);
+    assert_eq!(issues(class), ["3:7 Parse error encountered during parsing".to_owned()]);
     assert_eq!(
         issues(interface),
         [
-            format!("3:11 PHP# has no `__Named__`: {position}"),
-            format!("5:9 PHP# has no `__area__`: {position}"),
-            format!("5:22 PHP# has no `__side__`: {position}"),
+            "3:11 Parse error encountered during parsing".to_owned(),
+            "5:9 Parse error encountered during parsing".to_owned(),
+            "5:22 Parse error encountered during parsing".to_owned(),
         ]
     );
     assert_eq!(
         issues(r#enum),
-        [format!("3:6 PHP# has no `__Suit__`: {position}"), format!("5:10 PHP# has no `__Hearts__`: {position}")]
+        [
+            "3:6 Parse error encountered during parsing".to_owned(),
+            "5:10 Parse error encountered during parsing".to_owned()
+        ]
     );
     assert_eq!(
         issues(code),
         [
-            format!("5:17 PHP# has no `__count__`: {position}"),
-            format!("6:16 PHP# has no `__views__`: {position}"),
-            format!("7:19 PHP# has no `__slug__`: {position}"),
-            format!("8:22 PHP# has no `__MAX__`: {position}"),
-            format!("10:31 PHP# has no `__kept__`: {position}"),
-            format!("14:16 PHP# has no `__run__`: {position}"),
-            format!("14:28 PHP# has no `__extra__`: {position}"),
-            format!("16:13 PHP# has no `__a__`: {position}"),
-            format!("17:15 PHP# has no `__b__`: {position}"),
-            format!("18:13 PHP# has no `__c__`: {position}"),
-            format!("19:18 PHP# has no `__i__`: {position}"),
-            format!("21:20 PHP# has no `__v__`: {position}"),
-            format!("24:26 PHP# has no `__e__`: {position}"),
-            format!("26:24 PHP# has no `__x__`: {position}"),
-            "30:16 A method name can't start with `__`: PHP# never calls it for you: give it a camelCase name and call it."
-                .to_owned(),
+            "5:17 Parse error encountered during parsing".to_owned(),
+            "6:16 Parse error encountered during parsing".to_owned(),
+            "7:19 Parse error encountered during parsing".to_owned(),
+            "8:22 Parse error encountered during parsing".to_owned(),
+            "10:31 Parse error encountered during parsing".to_owned(),
+            "14:16 Parse error encountered during parsing".to_owned(),
+            "14:28 Parse error encountered during parsing".to_owned(),
+            "16:13 Parse error encountered during parsing".to_owned(),
+            "17:15 Parse error encountered during parsing".to_owned(),
+            "18:13 Parse error encountered during parsing".to_owned(),
+            "19:18 Parse error encountered during parsing".to_owned(),
+            "21:20 Parse error encountered during parsing".to_owned(),
+            "24:26 Parse error encountered during parsing".to_owned(),
+            "26:24 Parse error encountered during parsing".to_owned(),
+            "30:16 Parse error encountered during parsing".to_owned(),
         ]
     );
 }
@@ -3008,11 +2937,7 @@ fn a_declared_double_underscore_name_is_an_error_that_names_position() {
 fn a_double_underscore_class_with_a_constructor_reports_its_name_once() {
     let code = "namespace App.Tenant;\n\nclass __Shape__\n{\n    public __Shape__()\n    {\n    }\n}\n";
 
-    assert_eq!(
-        issues(code),
-        ["3:7 PHP# has no `__Shape__`: `Position.current()` gives the file, directory, line, column and function."
-            .to_owned()]
-    );
+    assert_eq!(issues(code), ["3:7 Parse error encountered during parsing".to_owned()]);
 }
 
 /// A refusal skips a node's children only when its span covers them, so a method refused at its name still has its
@@ -3025,8 +2950,8 @@ fn a_method_refused_at_its_name_has_its_body_checked() {
         issues(code),
         [
             "5:17 Only the constructor is named after its class: rename `forms`.",
-            "7:22 PHP# has no superglobals; take a Request",
-            "8:9 PHP# has no `echo`: write `console.write(text)` on the `Console` your constructor takes.",
+            "7:22 Parse error encountered during parsing",
+            "8:9 Parse error encountered during parsing",
         ]
     );
 }
@@ -3037,34 +2962,30 @@ fn a_member_refused_at_part_of_its_declaration_has_the_rest_checked() {
     let interface = "namespace App.Tenant;\n\ninterface Named\n{\n    void __get(string name = _SERVER[\"x\"]);\n}\n";
     let r#enum = "namespace App.Tenant;\n\nenum Suit\n{\n    case Hearts;\n\n    public Suit()\n    {\n        echo \"a\";\n    }\n}\n";
     let code = "namespace App.Tenant;\n\nclass Report\n{\n    int count = __LINE__;\n    const int MAX = __LINE__;\n\n    public Report(public int id = __LINE__, &total = __LINE__)\n    {\n    }\n\n    int run()\n    {\n        Map<Any, callable> rows = [:];\n        echo \"b\";\n        return 1;\n    }\n}\n";
-    let line = "write `Position.current().line`.";
 
     assert_eq!(
         issues(interface),
-        [
-            "5:10 A method name can't start with `__`: PHP# never calls it for you: give it a camelCase name and call it.",
-            "5:30 PHP# has no superglobals; take a Request"
-        ]
+        ["5:10 Parse error encountered during parsing", "5:30 Parse error encountered during parsing"]
     );
     assert_eq!(
         issues(r#enum),
         [
             "7:12 An enum has no constructor: its cases are its only values.",
-            "9:9 PHP# has no `echo`: write `console.write(text)` on the `Console` your constructor takes.",
+            "9:9 Parse error encountered during parsing",
         ]
     );
     assert_eq!(
         issues(code),
         [
-            format!("5:17 PHP# has no `__LINE__`: {line}"),
-            format!("6:21 PHP# has no `__LINE__`: {line}"),
+            "5:17 Parse error encountered during parsing".to_owned(),
+            "6:21 Parse error encountered during parsing".to_owned(),
             "8:19 A constructor parameter declared `public` needs accessors: it is a property, as in `public int id { get; }`.".to_owned(),
-            format!("8:35 PHP# has no `__LINE__`: {line}"),
-            "8:45 PHP# has no by-reference parameter: return the new value.".to_owned(),
-            format!("8:54 PHP# has no `__LINE__`: {line}"),
+            "8:35 Parse error encountered during parsing".to_owned(),
+            "8:45 Parse error encountered during parsing".to_owned(),
+            "8:54 Parse error encountered during parsing".to_owned(),
             "14:13 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`.".to_owned(),
-            "14:18 PHP# has no `callable`: write `Function<R(P)>`.".to_owned(),
-            "15:9 PHP# has no `echo`: write `console.write(text)` on the `Console` your constructor takes.".to_owned(),
+            "14:18 Parse error encountered during parsing".to_owned(),
+            "15:9 Parse error encountered during parsing".to_owned(),
         ]
     );
 }
@@ -3073,31 +2994,29 @@ fn a_member_refused_at_part_of_its_declaration_has_the_rest_checked() {
 #[test]
 fn an_expression_refused_at_part_of_it_has_the_rest_checked() {
     let code = "namespace App.Tenant;\n\nclass Report\n{\n    public void run()\n    {\n        const a = (array) _SERVER;\n        const b = _GET ?: __LINE__;\n        const c = self.make(__LINE__);\n        const d = new static(__LINE__);\n        const e = total(__LINE__);\n        const f = _SERVER[__LINE__];\n        PI = __LINE__;\n        _SERVER[\"x\"] = _GET;\n        const g = _GET ? 1 : 2 ? 3 : __LINE__;\n    }\n\n    public int total(int x) => x;\n}\n";
-    let line = "write `Position.current().line`.";
-    let request = "PHP# has no superglobals; take a Request";
+    let request = "Parse error encountered during parsing";
 
     assert_eq!(
         issues(code),
         [
-            "7:19 PHP# has no `(array)`: write a struct's `parse(value)` for an object, or `List.wrap(value)` for a value."
-                .to_owned(),
+            "7:19 Parse error encountered during parsing".to_owned(),
             format!("7:27 {request}"),
-            "8:24 PHP# has no `?:`: write `a ?? b` to replace null, or `c ? a : b` with a `bool` condition.".to_owned(),
+            "8:24 Parse error encountered during parsing".to_owned(),
             format!("8:19 {request}"),
-            format!("8:27 PHP# has no `__LINE__`: {line}"),
-            "9:19 PHP# has no `self`: write the class's own name, `Report`, for the declaring class, or `Self` for the class a static method is called on.".to_owned(),
-            format!("9:29 PHP# has no `__LINE__`: {line}"),
-            "10:23 PHP# has no `static` class name: write `Self`.".to_owned(),
-            format!("10:30 PHP# has no `__LINE__`: {line}"),
-            format!("11:25 PHP# has no `__LINE__`: {line}"),
+            "8:27 Parse error encountered during parsing".to_owned(),
+            "9:19 Parse error encountered during parsing".to_owned(),
+            "9:29 Parse error encountered during parsing".to_owned(),
+            "10:23 Parse error encountered during parsing".to_owned(),
+            "10:30 Parse error encountered during parsing".to_owned(),
+            "11:25 Parse error encountered during parsing".to_owned(),
             format!("12:19 {request}"),
-            format!("12:27 PHP# has no `__LINE__`: {line}"),
+            "12:27 Parse error encountered during parsing".to_owned(),
             "13:9 `PI` can't be written to.".to_owned(),
-            format!("13:14 PHP# has no `__LINE__`: {line}"),
+            "13:14 Parse error encountered during parsing".to_owned(),
             format!("14:9 {request}"),
             format!("14:24 {request}"),
             format!("15:19 {request}"),
-            format!("15:38 PHP# has no `__LINE__`: {line}"),
+            "15:38 Parse error encountered during parsing".to_owned(),
         ]
     );
 }
@@ -3112,17 +3031,17 @@ fn a_function_or_namespace_refused_at_its_name_has_its_code_checked() {
     assert_eq!(
         issues(code),
         [
-            "3:10 PHP# has no top-level functions: move `helper` into a class as a static method.",
-            "5:5 PHP# has no `echo`: write `console.write(text)` on the `Console` your constructor takes.",
+            "3:10 Parse error encountered during parsing",
+            "5:5 Parse error encountered during parsing",
             "8:1 A file has one namespace: move the code after this one to a file in its own namespace's folder.",
-            "14:9 PHP# has no `echo`: write `console.write(text)` on the `Console` your constructor takes.",
+            "14:9 Parse error encountered during parsing",
         ]
     );
     assert_eq!(
         issues(braced),
         [
             "1:1 A namespace is written without braces, as in `namespace App.Tenant;`.",
-            "6:13 PHP# has no `echo`: write `console.write(text)` on the `Console` your constructor takes.",
+            "6:13 Parse error encountered during parsing",
         ]
     );
 }
@@ -3154,10 +3073,10 @@ fn a_map_key_is_refused_once() {
     assert_eq!(
         issues(code),
         [
-            "7:13 PHP# has no `callable`: write `Function<R(P)>`.".to_owned(),
-            "8:13 PHP# has no `static` class name: write `Self`.".to_owned(),
+            "7:13 Parse error encountered during parsing".to_owned(),
+            "8:13 Parse error encountered during parsing".to_owned(),
             format!("9:13 {key}"),
-            "10:13 PHP# has no `callable`: write `Function<R(P)>`.".to_owned(),
+            "10:13 Parse error encountered during parsing".to_owned(),
             format!("11:13 {key}"),
         ]
     );
@@ -3173,7 +3092,7 @@ fn a_public_parameter_outside_a_constructor_reports_only_the_php_error() {
         issues(code),
         [
             format!("3:17 {promoted}"),
-            "3:10 PHP# has no top-level functions: move `helper` into a class as a static method.".to_owned(),
+            "3:10 Parse error encountered during parsing".to_owned(),
             format!("9:21 {promoted}"),
         ]
     );
@@ -3221,19 +3140,19 @@ fn a_bare_call_named_like_a_method_of_its_class_compiles_as_the_global_function(
 }
 
 #[test]
-fn extends_is_an_error_that_names_the_header() {
+fn extends_fails_as_a_typo_does() {
     let base = "namespace App.Tenant;\n\nclass Base\n{\n}\n";
     let code = "namespace App.Tenant;\n\nclass Report extends Base\n{\n}\n";
 
     assert_eq!(issues(base), Vec::<String>::new());
-    assert_eq!(issues(code), ["3:14 PHP# has no `extends`: list `Base` in the header after `:`."]);
+    assert_eq!(issues(code), ["3:14 Parse error encountered during parsing"]);
 }
 
 #[test]
-fn implements_is_an_error_that_names_the_header() {
+fn implements_fails_as_a_typo_does() {
     let code = "namespace App.Tenant;\n\nimport Lib.Shape;\n\nclass Report implements Shape\n{\n}\n";
 
-    assert_eq!(issues(code), ["5:14 PHP# has no `implements`: list `Shape` in the header after `:`."]);
+    assert_eq!(issues(code), ["5:14 Parse error encountered during parsing"]);
 }
 
 #[test]
@@ -3292,9 +3211,9 @@ fn an_attribute_target_names_a_part_of_its_declaration_and_an_accessor_takes_att
         issues(code),
         [
             "3:2 `method:` names no part of a class, whose targets are `type:`.",
-            "6:6 A return value takes no attributes: put them on the method, with no target.",
+            "6:6 Parse error encountered during parsing",
             "9:6 `field:` names no part of a property without storage, whose targets are `property:`.",
-            "12:30 A return value takes no attributes: put them on the accessor, with no target.",
+            "12:30 Parse error encountered during parsing",
             "14:34 `willSet` runs inside the `set` accessor, so it has no place of its own for an attribute.",
             "16:23 `property:` names no part of a parameter, whose targets are `param:`.",
             "18:6 `module:` names no part of a method, whose targets are `method:`.",
@@ -3303,10 +3222,7 @@ fn an_attribute_target_names_a_part_of_its_declaration_and_an_accessor_takes_att
     // A declaration PHP# refuses has no part for a target to name.
     assert_eq!(
         issues("namespace App.Tenant;\n\n[method: Note]\nfunction helper() { }\n"),
-        [
-            "4:10 PHP# has no top-level functions: move `helper` into a class as a static method.",
-            "3:2 `method:` names no part of this declaration.",
-        ]
+        ["4:10 Parse error encountered during parsing", "3:2 `method:` names no part of this declaration."]
     );
 }
 
@@ -3402,31 +3318,30 @@ fn final_marks_only_an_override_and_a_modifier_that_cant_matter_is_an_error() {
     );
 }
 
-/// A method name that starts with `__` names what PHP# writes for the job PHP gives it, and a name PHP never calls by
-/// itself loses its underscores only when the rest is camelCase. Each named replacement compiles.
+/// A method name that starts with `__` fails as a typo does, with none of PHP's magic method rules, in a class and in an
+/// enum. The PHP# forms for those jobs compile.
 #[test]
-fn a_method_name_starting_with_two_underscores_is_an_error_that_names_the_name_to_write() {
+fn a_method_name_starting_with_two_underscores_fails_as_a_typo_does() {
     let code = "namespace App.Tenant;\n\nclass Report\n{\n    public void __clone() { }\n    public int __get(string name) { return 1; }\n    public int __invoke() { return 1; }\n    public string __toString() { return \"report\"; }\n    public void __construct() { }\n    public int __sleep() { return 1; }\n    public int __total() { return 1; }\n    public int __1st() { return 1; }\n    public int __Report() { return 1; }\n}\n";
+    let r#enum = "namespace App.Tenant;\n\nenum Suit\n{\n    case Hearts;\n\n    public int __get(string name) { return 1; }\n}\n";
     let written = "namespace App.Tenant;\n\nclass Report\n{\n    public Report()\n    {\n    }\n\n    public string toString() => \"report\";\n\n    public int total() => 1;\n\n    public Report copy() => this with { };\n}\n";
-    let invented = "PHP# never calls it for you: give it a camelCase name and call it.";
+    let message = "Parse error encountered during parsing";
 
     assert_eq!(
         issues(code),
         [
-            "9:12 Magic method `Report.__construct` cannot have a return type hint.".to_owned(),
-            "5:17 A method name can't start with `__`: copy with `with`, as in `this with { … }`.".to_owned(),
-            format!("6:16 A method name can't start with `__`: {invented}"),
-            format!("7:16 A method name can't start with `__`: {invented}"),
-            "8:19 A method name can't start with `__`: write `toString`, which every conversion to text calls."
-                .to_owned(),
-            "9:17 A method name can't start with `__`: the constructor is named after its class, as in `public Report(…)`."
-                .to_owned(),
-            format!("10:16 A method name can't start with `__`: {invented}"),
-            "11:16 A method name can't start with `__`: write `total`.".to_owned(),
-            "12:16 A method name can't start with `__`: give it a camelCase name, as in `toString`.".to_owned(),
-            "13:16 A method name can't start with `__`: give it a camelCase name, as in `toString`.".to_owned(),
+            format!("5:17 {message}"),
+            format!("6:16 {message}"),
+            format!("7:16 {message}"),
+            format!("8:19 {message}"),
+            format!("9:17 {message}"),
+            format!("10:16 {message}"),
+            format!("11:16 {message}"),
+            format!("12:16 {message}"),
+            format!("13:16 {message}"),
         ]
     );
+    assert_eq!(issues_in("src/Suit.sharp", r#enum), [format!("7:16 {message}")]);
     assert_eq!(issues(written), Vec::<String>::new());
 }
 
@@ -3860,10 +3775,7 @@ fn an_extension_member_body_is_checked_as_a_method_body() {
 
     assert_eq!(
         issues(code),
-        [
-            "7:41 PHP# has no `?:`: write `a ?? b` to replace null, or `c ? a : b` with a `bool` condition.",
-            "8:39 PHP# has no `?:`: write `a ?? b` to replace null, or `c ? a : b` with a `bool` condition.",
-        ]
+        ["7:41 Parse error encountered during parsing", "8:39 Parse error encountered during parsing"]
     );
 }
 
@@ -3983,7 +3895,7 @@ fn an_extern_method_with_a_body_has_its_body_checked() {
         issues(code),
         [
             "5:33 An `extern` method is `static`, in a static or `foreign` class, with no body.",
-            "7:9 PHP# has no `echo`: write `console.write(text)` on the `Console` your constructor takes.",
+            "7:9 Parse error encountered during parsing",
         ]
     );
 }
@@ -4004,13 +3916,7 @@ fn the_error_control_operator_is_an_error_in_every_namespace() {
             "namespace {namespace};\n\npublic static class Text\n{{\n    public static string quiet(string title) => @(global.trim(title));\n}}\n"
         ));
 
-        assert_eq!(
-            issues(code),
-            [
-                "5:49 PHP# has no `@`: a failure is the value a call returns, so test that value, as in `global.iconv(from, to, text) is string converted`."
-            ],
-            "{namespace}"
-        );
+        assert_eq!(issues(code), ["5:49 Parse error encountered during parsing"], "{namespace}");
     }
 }
 
@@ -4165,7 +4071,7 @@ fn a_static_needs_an_initial_value_whatever_its_type() {
 fn a_nullable_field_of_a_type_outside_the_slice_is_an_error() {
     let code =
         "namespace App.Tenant;\n\nclass Report\n{\n    private iterable? items;\n    private (int|iterable)? key;\n}\n";
-    let iterable = "PHP# has no `iterable`: write `Iterable<T>`, as in `Iterable<Order>`.";
+    let iterable = "Parse error encountered during parsing";
 
     assert_eq!(issues(code), [format!("5:13 {iterable}"), format!("6:18 {iterable}")]);
 }
@@ -4271,8 +4177,8 @@ fn a_class_constant_outside_the_slice_is_an_error() {
         [
             "6:5 A constant declares one name: declare each constant on its own line.",
             "7:5 A constant takes no `final`: remove it.",
-            "8:24 PHP# has no `<>`: write `!=`.",
-            "9:18 PHP# has no `iterable`: give the constant a type it holds.",
+            "8:24 Parse error encountered during parsing",
+            "9:18 Parse error encountered during parsing",
         ]
     );
 }
@@ -4316,7 +4222,7 @@ fn a_union_typed_class_constant_follows_the_union_rules() {
         issues(code),
         [
             "5:22 A type that holds null is written `int?`.",
-            "6:22 PHP# has no `iterable`: give the constant a type it holds.",
+            "6:22 Parse error encountered during parsing",
             "7:29 Duplicate type `int` is redundant.",
         ]
     );
@@ -4367,10 +4273,7 @@ fn an_expression_body_is_checked_as_a_method_body() {
 
     assert_eq!(
         issues(code),
-        [
-            "7:38 PHP# has no `?:`: write `a ?? b` to replace null, or `c ? a : b` with a `bool` condition.",
-            "8:35 PHP# has no `?:`: write `a ?? b` to replace null, or `c ? a : b` with a `bool` condition.",
-        ]
+        ["7:38 Parse error encountered during parsing", "8:35 Parse error encountered during parsing"]
     );
 }
 
@@ -4799,10 +4702,7 @@ fn operators_outside_the_slice_are_an_error() {
 
     assert_eq!(
         issues(code),
-        [
-            "8:13 PHP# has no `@`: a failure is the value a call returns, so test that value, as in `global.iconv(from, to, text) is string converted`.",
-            "9:19 PHP# has no `<>`: write `!=`.",
-        ]
+        ["8:13 Parse error encountered during parsing", "9:19 Parse error encountered during parsing"]
     );
 }
 
@@ -4819,28 +4719,29 @@ fn spaceship_is_in_the_slice() {
 fn a_member_name_written_as_an_expression_is_an_error() {
     let code = leak(method("        return this.{\"run\"}(extra);\n"));
 
-    assert_eq!(issues(code), ["7:21 PHP# has no `.{\"run\"}`: write the member's name after `.`, as in `this.total`."]);
+    assert_eq!(issues(code), ["7:21 Parse error encountered during parsing"]);
 }
 
-/// Spec section 24: the built-in types are lowercase, every other type is capitalized, and each PHP type PHP# writes
-/// another way is an error that names the PHP# form, wherever a type is written.
+/// Spec section 24: the built-in types are lowercase, every other type is capitalized, and a PHP# type written in
+/// another case is an error that names its PHP# spelling, wherever a type is written. A PHP type PHP# never writes, as
+/// `mixed` or `array`, fails as a typo does.
 #[test]
-fn a_type_php_sharp_writes_another_way_is_an_error_that_names_its_form() {
+fn a_type_written_in_another_case_names_its_spelling_and_a_php_type_fails_as_a_typo_does() {
     let rows = [
         ("Int", "PHP# writes the type `int`."),
         ("Float", "PHP# writes the type `float`."),
         ("Bool", "PHP# writes the type `bool`."),
         ("String", "PHP# writes the type `string`."),
         ("INT", "PHP# writes the type `int`."),
-        ("object", "PHP# has no `object`: write `Object`."),
-        ("OBJECT", "PHP# has no `OBJECT`: write `Object`."),
+        ("object", "Parse error encountered during parsing"),
+        ("OBJECT", "PHP# writes `Object`."),
         ("any", "PHP# writes `Any`."),
-        ("mixed", "PHP# has no `mixed`: write `Any?`, or `Any` for a value that is never null."),
+        ("mixed", "Parse error encountered during parsing"),
         ("null", "A type holds null only with `?` after it: write the type, as in `int?`."),
-        ("true", "PHP# has no `true` type: write `bool`."),
-        ("false", "PHP# has no `false` type: write `bool`."),
-        ("array", "PHP# has no `array`: write `List<T>` or `Map<TKey, TValue>`."),
-        ("callable", "PHP# has no `callable`: write `Function<R(P)>`."),
+        ("true", "Parse error encountered during parsing"),
+        ("false", "Parse error encountered during parsing"),
+        ("array", "Parse error encountered during parsing"),
+        ("callable", "Parse error encountered during parsing"),
     ];
 
     for (written, message) in rows {
@@ -4865,7 +4766,7 @@ fn a_type_php_sharp_writes_another_way_is_an_error_that_names_its_form() {
     let union = leak(method("        return 1;\n").replace("int extra", "Int|string extra"));
     assert_eq!(issues(union), ["5:20 PHP# writes the type `int`."]);
     let keyword_union = leak(method("        return 1;\n").replace("int extra", "int|false extra"));
-    assert_eq!(issues(keyword_union), ["5:24 PHP# has no `false` type: write `bool`."]);
+    assert_eq!(issues(keyword_union), ["5:24 Parse error encountered during parsing"]);
     let written = leak(
         method("        return 1;\n").replace("int extra", "int a, float b, bool c, string d, Any e, Any? f, Object g"),
     );
@@ -4926,19 +4827,19 @@ fn a_type_php_sharp_writes_another_way_is_an_error_that_names_its_form() {
 #[test]
 fn types_outside_the_slice_are_an_error_and_an_intersection_is_not_supported_yet() {
     let code = "class Report\n{\n    public object run(iterable? a, int|iterable b, iterable c, callable d, (Lib&Other)|null e)\n    {\n        return 1;\n    }\n\n    public self make(Lib f, float g, bool h, string i)\n    {\n        return this;\n    }\n}\n";
-    let iterable = "PHP# has no `iterable`: write `Iterable<T>`, as in `Iterable<Order>`.";
+    let iterable = "Parse error encountered during parsing";
 
     assert_eq!(
         issues(code),
         [
-            "3:12 PHP# has no `object`: write `Object`.".to_owned(),
+            "3:12 Parse error encountered during parsing".to_owned(),
             format!("3:23 {iterable}"),
             format!("3:40 {iterable}"),
             format!("3:52 {iterable}"),
-            "3:64 PHP# has no `callable`: write `Function<R(P)>`.".to_owned(),
+            "3:64 Parse error encountered during parsing".to_owned(),
             "3:76 This type is not supported yet in PHP#.".to_owned(),
             "3:88 A type that holds null is written `(Lib&Other)?`.".to_owned(),
-            "8:12 PHP# has no `self`: write the class's own name, `Report`, for the declaring class, or `Self` for the class a static method is called on.".to_owned(),
+            "8:12 Parse error encountered during parsing".to_owned(),
         ]
     );
 }
@@ -4953,8 +4854,8 @@ fn a_typed_local_takes_the_types_of_the_slice_but_not_void() {
         issues(code),
         [
             "7:9 A local cannot be `void`: `void` is only a return type.",
-            "8:9 PHP# has no `iterable`: write `Iterable<T>`, as in `Iterable<Order>`.",
-            "9:9 PHP# has no `mixed`: write `Any?`, or `Any` for a value that is never null.",
+            "8:9 Parse error encountered during parsing",
+            "9:9 Parse error encountered during parsing",
             "11:9 Cannot assign to `kept`: it is declared with `const`.",
         ]
     );
@@ -4970,7 +4871,7 @@ fn a_typed_for_counter_takes_the_types_of_the_slice_but_not_void() {
         issues(code),
         [
             "7:14 A local cannot be `void`: `void` is only a return type.",
-            "9:14 PHP# has no `iterable`: write `Iterable<T>`, as in `Iterable<Order>`.",
+            "9:14 Parse error encountered during parsing",
             "11:40 Cannot assign to `kept`: it is declared with `const`.",
         ]
     );
@@ -4986,7 +4887,7 @@ fn a_typed_loop_variable_takes_the_types_of_the_slice_but_not_void() {
         issues(code),
         [
             "11:20 A local cannot be `void`: `void` is only a return type.",
-            "13:20 PHP# has no `iterable`: write `Iterable<T>`, as in `Iterable<Order>`.",
+            "13:20 Parse error encountered during parsing",
         ]
     );
 }
@@ -4998,19 +4899,19 @@ fn a_nullable_void_reports_only_the_php_error() {
     assert_eq!(issues(code), ["3:12 Type `void` cannot be nullable."]);
 }
 
-/// PHP# has no by-reference parameter: a method returns the new value.
+/// PHP# has no by-reference parameter, so `&` before one fails as a typo does.
 #[test]
-fn a_method_parameter_by_reference_is_an_error_that_names_the_sharp_way() {
+fn a_method_parameter_by_reference_fails_as_a_typo_does() {
     let code = leak(method("        return 1;\n").replace("int extra", "&extra"));
 
-    assert_eq!(issues(code), ["5:20 PHP# has no by-reference parameter: return the new value."]);
+    assert_eq!(issues(code), ["5:20 Parse error encountered during parsing"]);
 }
 
 #[test]
 fn a_dollar_parameter_without_a_type_reports_only_the_dollar_error() {
     let code = leak(method("        return 1;\n").replace("int extra", "$extra"));
 
-    assert_eq!(issues(code), ["5:20 PHP# variables have no `$`: write `extra`."]);
+    assert_eq!(issues(code), ["5:20 Parse error encountered during parsing"]);
 }
 
 #[test]
@@ -5071,7 +4972,7 @@ fn list_and_map_types_literals_and_indexes_are_in_the_slice() {
 fn a_type_argument_takes_a_question_mark_in_a_field() {
     let code = "class Report\n{\n    private Map<string, Any?> saved = [:];\n    public List<int?> sizes { get; private set; } = [];\n    private Map<string, List<Line?>> lines = [:];\n    private Map<string, mixed> old = [:];\n    private Map<string, Any?>? maybe = null;\n    private Map<string, Function<Any?(Any)>> handlers = [:];\n}\n";
 
-    assert_eq!(issues(code), ["6:25 PHP# has no `mixed`: write `Any?`, or `Any` for a value that is never null."]);
+    assert_eq!(issues(code), ["6:25 Parse error encountered during parsing"]);
 }
 
 #[test]
@@ -5234,7 +5135,7 @@ fn yield_as_a_value_or_without_a_value_is_an_error() {
         [
             "7:22 `yield` gives no value back: write it as a statement, as in `yield value;`.",
             "8:20 `yield` gives no value back: write it as a statement, as in `yield value;`.",
-            "9:9 PHP# has no `yield;`: write `yield value;`.",
+            "9:9 Parse error encountered during parsing",
         ]
     );
 }
@@ -5245,10 +5146,7 @@ fn php_yield_from_and_a_yielded_key_are_errors_that_name_the_php_sharp_form() {
 
     assert_eq!(
         issues(code),
-        [
-            "7:9 PHP# has no `yield from`: write `yield ...other;`.",
-            "8:9 PHP# has no `yield key => value`: write `yield value;`.",
-        ]
+        ["7:9 Parse error encountered during parsing", "8:9 Parse error encountered during parsing"]
     );
 }
 
@@ -5300,14 +5198,11 @@ fn a_literal_element_outside_the_slice_is_an_error() {
 
     assert_eq!(
         issues(code),
-        [
-            "7:28 PHP# has no `&`: write the value itself.",
-            "8:26 A list literal has no empty element: write a value between each two commas.",
-        ]
+        ["7:28 Parse error encountered during parsing", "8:26 Parse error encountered during parsing"]
     );
 }
 
-/// PHP's `x[] = v` is the analyzer's to refuse, by the collection it writes: a `List` grows with `add`.
+/// PHP's `x[] = v` is the analyzer's to refuse, by the collection it writes.
 #[test]
 fn an_append_is_left_to_the_analyzer() {
     let code =
@@ -5357,7 +5252,7 @@ fn an_invalid_codepoint_escape_is_an_error_as_in_php() {
 
     assert_eq!(
         issues(code),
-        ["7:21 Invalid UTF-8 codepoint escape sequence.", "8:23 Invalid UTF-8 codepoint escape sequence.",]
+        ["7:21 Invalid UTF-8 codepoint escape sequence.", "8:23 Invalid UTF-8 codepoint escape sequence."]
     );
 }
 
@@ -5368,26 +5263,18 @@ fn new_creates_a_class_written_by_its_short_name_with_its_arguments() {
     assert_eq!(issues(code), Vec::<String>::new());
 }
 
-/// Jordan's answer of 10-18: PHP# has no anonymous class, so each names the class to declare in its own file, with the
-/// base class and the interfaces the code names.
+/// Jordan's answer of 10-18: PHP# has no anonymous class, so `new class` fails as a typo does, at its `new`.
 #[test]
-fn a_class_without_a_name_names_the_class_to_declare() {
-    for (class, declared) in [
-        ("new class {}", "a class"),
-        ("new class implements Notifier {}", "a class that implements `Notifier`"),
-        ("new class extends Base {}", "a class that extends `Base`"),
-        (
-            "new class extends Base implements Notifier, Logged {}",
-            "a class that extends `Base` and implements `Notifier`, `Logged`",
-        ),
+fn a_class_without_a_name_fails_as_a_typo_does() {
+    for class in [
+        "new class {}",
+        "new class implements Notifier {}",
+        "new class extends Base {}",
+        "new class extends Base implements Notifier, Logged {}",
     ] {
         let code = leak(method(&format!("        const other = {class};\n        return 1;\n")));
 
-        assert_eq!(
-            issues(code),
-            [format!("7:23 PHP# has no class without a name: declare {declared} in its own file.")],
-            "{class}"
-        );
+        assert_eq!(issues(code), ["7:23 Parse error encountered during parsing"], "{class}");
     }
 }
 
@@ -5399,7 +5286,7 @@ fn a_new_without_arguments_is_refused_unless_a_member_chain_reads_through_it() {
         "        const bare = new Report.of;\n        const chained = new App.Shop.Order();\n        const read = new App.Shop.total;\n        return 1;\n",
     ));
 
-    assert_eq!(issues(code), ["7:22 `new Report.of` needs parentheses: write `new Report.of()`."]);
+    assert_eq!(issues(code), ["7:35 Parse error encountered during parsing"]);
 }
 
 /// `new (type)(…)` creates an object from a class value, with or without type arguments, spec section 25. It calls
@@ -5415,7 +5302,7 @@ fn new_through_a_class_value_calls_the_constructor_with_its_arguments() {
         issues(code),
         [
             "9:39 `new` through a class value calls the class's constructor, so it names no other one.",
-            "10:22 `new (type)` needs parentheses: write `new (type)()`.",
+            "10:32 Parse error encountered during parsing",
         ]
     );
 }
@@ -5445,7 +5332,7 @@ fn typeof_takes_one_type_in_a_method_body() {
         ),
         (
             "self",
-            vec!["7:27 PHP# has no `self`: write the class's own name, `Report`, for the declaring class.".to_owned()],
+            vec!["7:27 Parse error encountered during parsing".to_owned()],
         ),
     ] {
         let code = leak(method(&format!("        Store.keep(typeof({type}));\n        return extra;\n")));
@@ -5487,10 +5374,7 @@ fn the_ternary_is_in_the_slice_with_a_nested_ternary_in_parentheses() {
 fn the_two_operand_ternary_is_not_part_of_php_sharp() {
     let code = leak(method("        return extra ?: 1;\n"));
 
-    assert_eq!(
-        issues(code),
-        ["7:22 PHP# has no `?:`: write `a ?? b` to replace null, or `c ? a : b` with a `bool` condition."]
-    );
+    assert_eq!(issues(code), ["7:22 Parse error encountered during parsing"]);
 }
 
 /// Spec section 21: `a ? b : c ? d : e` means `a ? b : (c ? d : e)`, so it needs no parentheses.
@@ -5519,45 +5403,42 @@ fn bool_array_and_object_casts_do_not_exist_in_php_sharp() {
     assert_eq!(
         issues(code),
         [
-            "7:19 PHP# has no `(bool)`: compare the value instead, as in `count > 0` or `flag == \"1\"`.",
-            "8:19 PHP# has no `(array)`: write a struct's `parse(extra)` for an object, or `List.wrap(extra)` for a value.",
-            "9:19 PHP# has no `(object)`: write a `Map` literal, or a struct.",
+            "7:19 Parse error encountered during parsing",
+            "8:19 Parse error encountered during parsing",
+            "9:19 Parse error encountered during parsing",
         ]
     );
 }
 
-/// Spec section 24 replaces `(array)` with a struct's `parse` for an object and `List.wrap` for a value, and names a
-/// bare operand, as its `(array)row` does.
+/// Spec section 24 replaces `(array)` with a struct's `parse` for an object and `List.wrap` for a value, so `(array)`
+/// fails as a typo does, at the cast, and a superglobal or `__Something__` operand fails at its own name too.
 #[test]
-fn an_array_cast_is_an_error_that_names_parse_and_list_wrap() {
+fn an_array_cast_fails_as_a_typo_does() {
     let code = leak(
         method(
             "        const data = (array)row;\n        const items = (array)this.list();\n        const server = (array)_SERVER;\n        const version = (array)__VERSION__;\n        return 1;\n",
         )
         .replace("int extra", "int row"),
     );
-    let value = "write a struct's `parse(value)` for an object, or `List.wrap(value)` for a value.";
 
     assert_eq!(
         issues(code),
         [
-            "7:22 PHP# has no `(array)`: write a struct's `parse(row)` for an object, or `List.wrap(row)` for a value."
-                .to_owned(),
-            format!("8:23 PHP# has no `(array)`: {value}"),
-            format!("9:24 PHP# has no `(array)`: {value}"),
-            "9:31 PHP# has no superglobals; take a Request".to_owned(),
-            format!("10:25 PHP# has no `(array)`: {value}"),
-            "10:32 PHP# has no `__VERSION__`: `Position.current()` gives the file, directory, line, column and function."
-                .to_owned(),
+            "7:22 Parse error encountered during parsing".to_owned(),
+            "8:23 Parse error encountered during parsing".to_owned(),
+            "9:24 Parse error encountered during parsing".to_owned(),
+            "9:31 Parse error encountered during parsing".to_owned(),
+            "10:25 Parse error encountered during parsing".to_owned(),
+            "10:32 Parse error encountered during parsing".to_owned(),
         ]
     );
 }
 
 #[test]
-fn an_object_cast_is_an_error_that_names_a_map_literal_and_a_struct() {
+fn an_object_cast_fails_as_a_typo_does() {
     let code = leak(method("        const row = (object)extra;\n        return 1;\n"));
 
-    assert_eq!(issues(code), ["7:21 PHP# has no `(object)`: write a `Map` literal, or a struct."]);
+    assert_eq!(issues(code), ["7:21 Parse error encountered during parsing"]);
 }
 
 #[test]
@@ -5569,11 +5450,11 @@ fn php_cast_aliases_do_not_exist_in_php_sharp() {
     assert_eq!(
         issues(code),
         [
-            "7:19 PHP# has no `(integer)`: write `(int)`.",
-            "8:19 PHP# has no `(double)`: write `(float)`.",
-            "9:19 PHP# has no `(real)`: write `(float)`.",
-            "10:19 PHP# has no `(boolean)`: compare the value instead, as in `count > 0` or `flag == \"1\"`.",
-            "11:19 PHP# has no `(binary)`: write `(string)`.",
+            "7:19 Parse error encountered during parsing",
+            "8:19 Parse error encountered during parsing",
+            "9:19 Parse error encountered during parsing",
+            "10:19 Parse error encountered during parsing",
+            "11:19 Parse error encountered during parsing",
         ]
     );
 }
@@ -5592,10 +5473,10 @@ fn mixed_does_not_exist_in_php_sharp() {
     assert_eq!(
         issues(code),
         [
-            "5:13 PHP# has no `mixed`: write `Any?`, or `Any` for a value that is never null.",
-            "7:12 PHP# has no `mixed`: write `Any?`, or `Any` for a value that is never null.",
-            "7:23 PHP# has no `mixed`: write `Any?`, or `Any` for a value that is never null.",
-            "9:9 PHP# has no `mixed`: write `Any?`, or `Any` for a value that is never null.",
+            "5:13 Parse error encountered during parsing",
+            "7:12 Parse error encountered during parsing",
+            "7:23 Parse error encountered during parsing",
+            "9:9 Parse error encountered during parsing",
         ]
     );
 }
@@ -5605,7 +5486,7 @@ fn an_interface_method_and_a_class_constant_take_any_and_never_mixed() {
     let interface =
         "namespace App.Tenant;\n\ninterface Source\n{\n    mixed read(mixed key);\n\n    Any? first(Any key);\n}\n";
     let class = "namespace App.Tenant;\n\nclass Report\n{\n    public const mixed NONE = 1;\n\n    public const Any SOME = 1;\n}\n";
-    let mixed = "PHP# has no `mixed`: write `Any?`, or `Any` for a value that is never null.";
+    let mixed = "Parse error encountered during parsing";
 
     assert_eq!(issues(interface), [format!("5:5 {mixed}"), format!("5:16 {mixed}")]);
     assert_eq!(issues(class), [format!("5:18 {mixed}")]);
@@ -5742,7 +5623,7 @@ fn implements_in_an_enum_and_a_final_enum_method_are_errors() {
     assert_eq!(
         issues(code),
         [
-            "5:22 PHP# has no `implements`: list `Shape` in the header after `:`.",
+            "5:22 Parse error encountered during parsing",
             "9:5 `final` marks only an override: a PHP# method is already closed unless it is `virtual`.",
         ]
     );
@@ -5892,7 +5773,7 @@ fn a_type_parameter_list_that_declares_a_name_twice_is_an_error() {
 
     assert_eq!(
         issues(code),
-        ["3:33 This type parameter list declares `TKey` twice.", "5:24 This type parameter list declares `T` twice.",]
+        ["3:33 This type parameter list declares `TKey` twice.", "5:24 This type parameter list declares `T` twice."]
     );
 }
 
@@ -6021,7 +5902,7 @@ fn the_type_arguments_of_new_and_of_a_method_call_are_checked_as_types() {
         issues(code),
         [
             "10:40 A type argument cannot be `void`: `void` is only a return type.",
-            "11:33 PHP# has no `mixed`: write `Any?`, or `Any` for a value that is never null.",
+            "11:33 Parse error encountered during parsing",
             "12:32 A type argument cannot be `void`: `void` is only a return type.",
         ]
     );
@@ -6114,12 +5995,7 @@ fn a_static_member_of_a_generic_class_returns_self() {
     let pair =
         "namespace App.Tenant;\n\npublic class Pair<TFirst, TSecond>\n{\n    public static Self? none() => null;\n}\n";
 
-    assert_eq!(
-        issues(code),
-        [
-            "11:19 PHP# has no `self`: write the class's own name, `Box`, for the declaring class, or `Self` for the class a static method is called on.",
-        ]
-    );
+    assert_eq!(issues(code), ["11:19 Parse error encountered during parsing"]);
     assert_eq!(issues(pair), Vec::<String>::new());
 }
 
@@ -6411,7 +6287,7 @@ fn a_properties_pattern_without_a_type_takes_no_name() {
         issues(code),
         [
             "7:45 A pattern creates a variable only through a typed declaration: write the type, as in `Response { status: 200 } r`.",
-            "9:9 PHP# variables have no `$`: write `leftover`.",
+            "9:9 Parse error encountered during parsing",
         ]
     );
 }
@@ -6731,9 +6607,9 @@ fn a_property_named_as_its_class_is_no_clash_with_the_constructor() {
     assert_eq!(issues(parameter), Vec::<String>::new());
 }
 
-/// PHP# has no by-reference parameter: a lambda changes a variable it captures, and a method returns the new value.
+/// PHP# has no by-reference parameter, so `&` before a lambda's parameter fails as a typo does.
 #[test]
-fn a_lambda_parameter_by_reference_is_an_error_that_names_the_sharp_way() {
+fn a_lambda_parameter_by_reference_fails_as_a_typo_does() {
     let code = leak(method(
         "        const changed = (&value) => value;\n        const marked = (readonly int value) => value;\n        const typed = (int &value, string label) => value;\n        return extra;\n",
     ));
@@ -6741,15 +6617,15 @@ fn a_lambda_parameter_by_reference_is_an_error_that_names_the_sharp_way() {
     assert_eq!(
         issues(code),
         [
-            "7:26 PHP# has no by-reference parameter: return the new value, or let the lambda change a variable it captures.",
+            "7:26 Parse error encountered during parsing",
             "8:25 An `int` never changes, so `readonly` changes nothing: write `int`.",
-            "9:28 PHP# has no by-reference parameter: return the new value, or let the lambda change a variable it captures.",
+            "9:28 Parse error encountered during parsing",
         ]
     );
     // A method's typed parameter, which reads as the intersection `int & value` until the parameter ends.
     let typed = leak(method("        return 1;\n").replace("int extra", "int &extra"));
 
-    assert_eq!(issues(typed), ["5:24 PHP# has no by-reference parameter: return the new value."]);
+    assert_eq!(issues(typed), ["5:24 Parse error encountered during parsing"]);
 }
 
 /// A lambda's parameter is a method's, so it takes a union, a nullable union and a variadic last parameter, and a
@@ -6771,7 +6647,7 @@ fn self_in_a_function_type_is_an_error_and_a_list_of_self_is_a_return_type() {
 
     assert_eq!(
         issues(code),
-        ["5:22 `Self` is only a return type in PHP#.", "7:52 `Self` is only a return type in PHP#.",]
+        ["5:22 `Self` is only a return type in PHP#.", "7:52 `Self` is only a return type in PHP#."]
     );
 }
 
@@ -6896,23 +6772,16 @@ fn a_member_defined_twice_and_its_class_are_named_as_sharp_writes_them() {
     );
 }
 
-/// A construct outside the slice is refused with a note that lists what PHP# has where it is written, so the note of
-/// a refused class member names a class's members, the note of a refused expression names a body's expressions, and
-/// the note of a refused type in a pattern names the patterns.
+/// A PHP# form refused at its place carries a note that lists what PHP# has there, so the note of a refused class
+/// member names a class's members, and the note of a refused type in a pattern names the patterns.
 #[test]
 fn a_refusal_notes_what_php_sharp_has_where_it_is_written() {
     let class = "namespace App;\n\npublic class Order\n{\n    case Open;\n}\n";
-    let body = leak(method("        while (extra > 0) {\n            break 2;\n        }\n        return extra;\n"));
     let pattern = leak(method("        const both = extra is Report&Order;\n        return extra;\n"));
     let interface = "namespace App;\n\npublic interface Sized\n{\n    int max { get; init; }\n}\n";
     let constant = "namespace App;\n\npublic class Limits\n{\n    final public const int MAX = 3;\n}\n";
-    let value = "namespace App;\n\npublic class Limits\n{\n    public const int MIN = this;\n}\n";
 
     for (code, note) in [
-        (
-            value,
-            "A constant's value, an attribute argument, an enum case's value or a pattern's value is built from constants: literals, constants, enum cases, a backed case's `value` and the `name` of a case of an enum whose cases carry no data, `typeof(Class)`, list and map literals, indexes, templates, the ternary `c ? a : b`, `match`, `(int)`, `(float)` and `(string)`, and arithmetic, comparison, logical and `??` operators. All but a pattern's value take lambdas that capture nothing, and an attribute argument takes `new` of a class with such arguments, as in `[Rule(new Range(1, 10))]`.",
-        ),
         (
             interface,
             "A PHP# interface has attributes, an optional `public`, a name, optional type parameters as in `<in TItem>`, an optional `: Interface` header, constants, methods, properties as in `int orderId { get; }` and `string label => …;`, and operators as in `static int operator <=>(Priced a, Priced b)`, with no other modifiers or `extends`.",
@@ -6928,10 +6797,6 @@ fn a_refusal_notes_what_php_sharp_has_where_it_is_written() {
         (
             class,
             "A PHP# class has attributes, an optional `public`, `abstract` or `final`, a name, optional type parameters as in `<out TItem : DatabaseEntity>`, an optional `: Base, Interface` header, constants, fields, properties, methods, named constructors, operators, laws and, in a static class, extensions, with no other modifiers, `extends` or `implements`.",
-        ),
-        (
-            body,
-            "In a method body, PHP# supports blocks, expression statements, `return`, `let` and `const`, which may unpack a tuple, and typed locals, `if` with `else if` and `else`, `while`, `do … while`, `for`, `for … of`, `break` and `continue` without a level, `try` with `catch` and `finally`, and `yield value;` and `yield ...other;` in a method that returns `Iterable<T>`, with literals, list and map literals, index reads, templates, parentheses, bare names, assignment, arithmetic, comparison and logical operators, `??`, the ternary `c ? a : b`, `(int)`, `(float)` and `(string)`, `++` and `--`, method calls, with optional type arguments as in `Json.decode<WebhookPayload>(body)`, and property reads written with `.` or `?.`, lambdas as in `x => x.id`, `new Class(...)` with optional type arguments as in `new PaginatedList<Order>(rows)`, `new Class.name(...)` and, with a `required` constructor, `new Self(...)` and `new (type)(...)` of a class value, calls of global functions and of a local that holds a lambda, `super.method(...)` and `Self.method(...)`, each with positional, named and spread arguments as in `max(...prices)`, `throw`, `try` before a `Result`, `exit(code)`, `typeof(Class)`, `nameof(Class.property)`, `is`, `as` and `match`.",
         ),
     ] {
         assert_eq!(
@@ -6994,7 +6859,7 @@ fn an_error_for_a_php_form_without_a_sharp_form_names_no_php_code() {
     assert_eq!(
         helps("src/Demo/Order.sharp", code),
         [
-            ("`new` takes a class name, or a class value in parentheses: write `new (Order[0])(…)`.".to_owned(), None),
+            ("Parse error encountered during parsing".to_owned(), Some("Check the syntax of your code.".to_owned())),
             ("`[` cannot follow a class name in a `new` expression.".to_owned(), None),
             (
                 "Write the lambda in parentheses to call it where it is written, as in `((int a) => a + 1)(2)`."
@@ -7105,10 +6970,7 @@ fn an_operator_body_is_a_method_body() {
         "    public static Money operator +(Money a, Money b)\n    {\n        echo \"adding\";\n        return a;\n    }\n",
     );
 
-    assert_eq!(
-        issues_in("src/Money.sharp", code),
-        ["7:9 PHP# has no `echo`: write `console.write(text)` on the `Console` your constructor takes."]
-    );
+    assert_eq!(issues_in("src/Money.sharp", code), ["7:9 Parse error encountered during parsing"]);
 }
 
 /// Spec section 19: an enum declares an operator as a class does, also after an import, and an interface writes it

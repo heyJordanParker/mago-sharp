@@ -21,8 +21,7 @@ where
         // PHP# writes a full name only in an `import` line. The error stands, and the name still parses so the rest
         // of the file does.
         if self.dialect.is_sharp() && !identifier.is_local() {
-            let name = String::from_utf8_lossy(identifier.value()).trim_start_matches('\\').replace('\\', ".");
-            self.errors.push(ParseError::QualifiedNameInSharp(name.into_boxed_str(), identifier.span()));
+            self.report_unexpected_in_sharp(identifier.span());
         }
 
         Ok(identifier)

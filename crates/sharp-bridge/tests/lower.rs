@@ -387,17 +387,15 @@ fn a_const_local_reassigned_returns_one_compile_error_and_no_nodes() {
 fn php_syntax_returns_a_parse_error_and_no_nodes() {
     let lowered = Lowered::new(&method("        return this->run(1);\n"));
 
-    assert_eq!(lowered.diagnostics(), ["9:20 parse error: PHP# has no `->`: write member access with `.`."]);
+    assert_eq!(lowered.diagnostics(), ["9:20 parse error: Unexpected token `MinusGreaterThan`"]);
     assert_eq!(lowered.nodes().len(), 0);
 }
 
 #[test]
 fn a_construct_outside_the_slice_returns_its_not_supported_error() {
-    let lowered = Lowered::new(&method(
-        "        while (extra > 0) {\n            while (extra > 1) {\n                break 2;\n            }\n        }\n        return 1;\n",
-    ));
+    let lowered = Lowered::new(&method_with("int run(Report & Report other)", "        return 1;\n"));
 
-    assert_eq!(lowered.diagnostics(), ["11:17 compile error: This statement is not supported yet in PHP#."]);
+    assert_eq!(lowered.diagnostics(), ["7:20 compile error: This type is not supported yet in PHP#."]);
 }
 
 /// Spec section 2: each of the 43 PHP keywords PHP# doesn't use is a plain name, and so is a word that means something
@@ -764,12 +762,7 @@ fn every_line_is_the_line_the_zend_scanner_counts() {
     assert_eq!(lines, [("SHARP_AST_RETURN".to_owned(), 5, 0), ("SHARP_AST_METHOD".to_owned(), 3, 6)]);
 
     let refused = Lowered::new("class Report\r{\r    public void run() { echo 1; }\r}\r");
-    assert_eq!(
-        refused.diagnostics(),
-        [
-            "3:25 compile error: PHP# has no `echo`: write `console.write(text)` on the `Console` your constructor takes."
-        ]
-    );
+    assert_eq!(refused.diagnostics(), ["3:25 compile error: Parse error encountered during parsing"]);
 }
 
 /// ```php
@@ -25142,7 +25135,7 @@ fn a_fully_qualified_null_true_or_false_in_a_library_body_is_refused() {
             .expect_err("PHP# refuses a `\\` name in a library body");
 
         assert_eq!(refusal.len(), 1, "{refusal:?}");
-        assert!(refusal[0].contains("parse error: PHP# has no `\\` names"), "{refusal:?}");
+        assert!(refusal[0].contains("parse error: Unexpected token `FullyQualifiedIdentifier`"), "{refusal:?}");
     }
 }
 
