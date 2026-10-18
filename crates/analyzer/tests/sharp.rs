@@ -5421,10 +5421,7 @@ fn a_plain_php_function_that_changes_or_reads_the_callers_variables_is_no_functi
             "12:9 wrapped-function: `array_push` is wrapped by the standard library: write `numbers.add(…)`.",
             "13:9 wrapped-function: `shuffle` is wrapped by the standard library: write `random.shuffle(…)` on the `Random` your constructor takes.",
             "14:40 invalid-pass-by-reference: `global.preg_match` changes the variable it is given, and PHP# passes every argument by value, so `numbers` can't go there.",
-            // `preg_match` leaves `numbers` a `Map` keyed by `int|string`, which no plain PHP array parameter takes.
-            "15:30 invalid-argument: `Map<int|string, string>` can't be passed to the parameter `array` of function `global.array_unshift`, which takes a PHP array: two keys of `int|string` can be one PHP array key, as `5` and `\"5\"` are, and PHP keeps only one.",
             "15:30 invalid-pass-by-reference: `global.array_unshift` changes the variable it is given, and PHP# passes every argument by value: write `numbers.insert(0, …)`.",
-            "16:52 invalid-argument: `List<int|string>|Map<int|string, int|string>` can't be passed to the parameter `array` of function `global.usort`, which takes a PHP array: two keys of `int|string` can be one PHP array key, as `5` and `\"5\"` are, and PHP keeps only one.",
             "16:52 invalid-pass-by-reference: `global.usort` changes the variable it is given, and PHP# passes every argument by value: write `numbers = numbers.sortedBy(…)`.",
         ],
     );
@@ -6880,15 +6877,7 @@ fn initial_values_in_the_constructor_under_a_base_class_constructor_with_paramet
             "47:7 missing-super-call: `Bill` must declare a constructor that calls `Priced`'s with `: super(…)`. Write `public Bill(Money money, int count = 0, string label = \"each\", bool taxed = true, bool fixed = false) : super(money, count, label, taxed, fixed) { }`. Add `import Billing.Money;` to the file.",
         ]
     );
-    // PHP#'s type for plain PHP's `array`, `Map<int|string, Any?>`, holds keys that can collide in a PHP array, so the
-    // written constructor can't pass it back to the base one, spec section 12.
-    assert_messages(
-        fixed,
-        &library,
-        &[
-            "39:127 invalid-argument: `Map<int|string, Any?>` can't be passed to the parameter `items` of method `Legacy.__construct`, which takes a PHP array: two keys of `int|string` can be one PHP array key, as `5` and `\"5\"` are, and PHP keeps only one.",
-        ],
-    );
+    assert_messages(fixed, &library, &[]);
 }
 
 /// Spec section 9.1: `new Artifact.sized(…)` calls the named constructor `sized`, so its arguments are checked against
@@ -10750,14 +10739,14 @@ fn a_map_keyed_by_an_object_is_refused_where_plain_php_takes_an_array() {
     );
 }
 
-/// Spec section 12: a PHP array holds one entry for the keys `5` and `"5"`, so a `Map` whose keys can be both an `int`
-/// and a `string`, or a backed enum beside its backing type, can lose an entry as a PHP array.
-/// The call is refused where plain PHP takes an array, whatever the `Map` holds, and passes where it takes the `Map`
-/// itself. A `Map` keyed by one of `int`, `string` or a backed enum crosses.
+/// Spec section 12: a `Map` whose key type lets two keys be one PHP array key, as `int|string` lets `5` and `"5"`, or a
+/// backed enum beside its backing type, passes where plain PHP takes an array. Only its data shows whether two of its
+/// keys are one, so the crossing checks that when it runs. The PHP array plain PHP gives, as `get_object_vars`'s, is
+/// such a `Map`, and passes back to plain PHP.
 #[test]
-fn a_map_whose_keys_can_collide_is_refused_where_plain_php_takes_an_array() {
-    let sharp = "namespace Demo;\n\nimport Lib.Sink;\nimport Lib.Status;\n\nclass Tally\n{\n    public int total(Map<int|string, int> mixed, Map<string|Status, int> named, Map<Status, int> counts)\n    {\n        return Sink.plain(mixed) + Sink.plain(named) + Sink.plain(counts) + Sink.anything(mixed);\n    }\n}\n";
-    let sink = "<?php\n\nnamespace Lib;\n\nfinal class Sink\n{\n    public static function plain(array $counts): int\n    {\n        return count($counts);\n    }\n\n    public static function anything(mixed $counts): int\n    {\n        return 1;\n    }\n}\n";
+fn a_map_whose_keys_can_collide_passes_where_plain_php_takes_an_array() {
+    let sharp = "namespace Demo;\n\nimport Lib.Sink;\nimport Lib.Status;\n\nclass Tally\n{\n    public int total(Map<int|string, int> mixed, Map<string|Status, int> named, Map<Status, int> counts)\n    {\n        return Sink.plain(mixed) + Sink.plain(named) + Sink.plain(counts) + Sink.plain(global.get_object_vars(this));\n    }\n}\n";
+    let sink = "<?php\n\nnamespace Lib;\n\nfinal class Sink\n{\n    public static function plain(array $counts): int\n    {\n        return count($counts);\n    }\n}\n";
 
     assert_eq!(
         analyze(
@@ -10769,10 +10758,7 @@ fn a_map_whose_keys_can_collide_is_refused_where_plain_php_takes_an_array() {
         .iter()
         .map(|issue| format!("{} {}", located(sharp, issue), issue.message))
         .collect::<Vec<_>>(),
-        [
-            "10:27 invalid-argument `Map<int|string, int>` can't be passed to the parameter `counts` of method `Sink.plain`, which takes a PHP array: two keys of `int|string` can be one PHP array key, as `5` and `\"5\"` are, and PHP keeps only one.",
-            "10:47 invalid-argument `Map<string|Status, int>` can't be passed to the parameter `counts` of method `Sink.plain`, which takes a PHP array: two keys of `string|Status` can be one PHP array key, as `5` and `\"5\"` are, and PHP keeps only one.",
-        ]
+        Vec::<String>::new()
     );
 }
 

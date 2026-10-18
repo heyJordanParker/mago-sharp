@@ -13,7 +13,6 @@ use mago_codex::metadata::module::ModuleMetadata;
 use mago_codex::metadata::parameter::FunctionLikeParameterMetadata;
 use mago_codex::metadata::property::PropertyMetadata;
 use mago_codex::misc::GenericParent;
-use mago_codex::ttype::ArrayKeyForm;
 use mago_codex::ttype::SharpType;
 use mago_codex::ttype::TType;
 use mago_codex::ttype::add_optional_union_type;
@@ -29,9 +28,9 @@ use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeString;
 use mago_codex::ttype::comparator::ComparisonResult;
 use mago_codex::ttype::comparator::union_comparator;
 use mago_codex::ttype::comparator::union_comparator::can_expression_types_be_identical;
-use mago_codex::ttype::get_array_key_form;
 use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::get_mixed;
+use mago_codex::ttype::get_php_array_key_type;
 use mago_codex::ttype::get_sharp_type;
 use mago_codex::ttype::is_written_in_sharp;
 use mago_codex::ttype::template::variance::Variance;
@@ -1377,9 +1376,9 @@ impl<'analysis> Types<'analysis> {
         get_array_parameters(array, self.codebase)
     }
 
-    /// How the keys of a `Map` keyed by `key_type` sit in a PHP array, as the codex gives it.
-    pub(crate) fn key_form(&self, key_type: &TUnion) -> ArrayKeyForm {
-        get_array_key_form(key_type, self.codebase)
+    /// Whether a PHP array holds each key of a `Map` keyed by `key_type`, as the codex's `get_php_array_key_type` says.
+    pub(crate) fn keys_hold_in_array(&self, key_type: &TUnion) -> bool {
+        get_php_array_key_type(key_type, self.codebase).is_some()
     }
 
     /// The type of the elements a value of `r#type` holds, the `T` of a `List<T>`, leaving out `null`. The caller asks

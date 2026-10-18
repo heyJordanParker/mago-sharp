@@ -19693,8 +19693,9 @@ fn a_method_that_yields_is_a_generator() {
 /// carries `ZEND_SHARP_RESULT_CROSSES`, `1`, as the attr of its result's type, so each of its returns and yields emits
 /// the `ZEND_SHARP_RETURN_ARRAY` that gives a plain PHP caller the PHP array, spec section 12, and its PHP type takes
 /// `array` beside the class. A lambda carries it by its result as the analysis gives it. A result of any other type, as
-/// `List<int>` or a function, carries none, nor does a `Map` whose keys can collide in a PHP array, which plain PHP
-/// gets as the object.
+/// `List<int>` or a function, carries none, nor does one that holds a `Map` keyed by a type no PHP array holds, as
+/// `List<int>`, which plain PHP gets as the object. A `Map` keyed by `int|string` crosses, and throws when it runs if
+/// two of its keys are one PHP array key.
 #[test]
 fn a_function_whose_result_holds_a_map_or_a_set_gives_plain_php_its_array() {
     let lowered = Lowered::new(
@@ -19740,7 +19741,7 @@ fn a_function_whose_result_holds_a_map_or_a_set_gives_plain_php_its_array() {
             "anything true: null",
             "held true: null",
             "streamed true: ZVAL [1] \"iterable\"",
-            "mixed false: ZVAL \"Sharp\\\\Map\"",
+            "mixed true: TYPE_UNION ZVAL \"Sharp\\\\Map\" TYPE [7]",
             "listed false: TYPE [7]",
         ]
     );
@@ -21308,7 +21309,9 @@ fn a_map_or_set_property_carries_the_plan_a_php_array_crosses_by() {
 }
 
 /// ```php
-/// public \Sharp\Map $mixed;   #[\Sharp\Crossing(['map', null, null], false)]
+/// ```php
+/// public \Sharp\Map $mixed;   #[\Sharp\Crossing(['map', null, null])]
+/// public \Sharp\Map $listed;  #[\Sharp\Crossing(['map', null, null], false)]
 /// public mixed $loose;        #[\Sharp\Crossing(null)]
 /// public iterable $shelved;   #[\Sharp\Crossing(null)]
 /// public mixed $held;         #[\Sharp\Crossing(null)]
@@ -21316,12 +21319,13 @@ fn a_map_or_set_property_carries_the_plan_a_php_array_crosses_by() {
 ///
 /// Plain PHP reads a property whose type can hold a `Map` or a `Set` with each one as its PHP array, spec section 12, so
 /// an `Any?`, an `Iterable` or a type parameter carries `#[\Sharp\Crossing]` with no plan, since nothing it holds
-/// crosses back. A `Map` whose keys can collide in a PHP array crosses in by its plan, and its `false` keeps it the
-/// object plain PHP reads, since its PHP array would lose an entry.
+/// crosses back. A `Map` keyed by `int|string` reads as its PHP array too, which throws when it runs if two of its keys
+/// are one PHP array key. A `Map` keyed by a type no PHP array holds, as `List<int>`, crosses in by its plan, and its
+/// `false` keeps it the object plain PHP reads.
 #[test]
 fn a_property_that_can_hold_a_map_carries_whether_plain_php_reads_its_array() {
     let lowered = Lowered::new(
-        "namespace App.Tenant;\n\nclass Ledger<T>\n{\n    public Map<int|string, int> mixed { get; set; } = [:];\n    public Any? loose { get; set; } = null;\n    public Iterable<Map<string, int>> shelved { get; set; } = [[\"s\": 1]];\n    public T? held { get; set; } = null;\n}\n",
+        "namespace App.Tenant;\n\nclass Ledger<T>\n{\n    public Map<int|string, int> mixed { get; set; } = [:];\n    public Map<List<int>, int> listed { get; set; } = [:];\n    public Any? loose { get; set; } = null;\n    public Iterable<Map<string, int>> shelved { get; set; } = [[\"s\": 1]];\n    public T? held { get; set; } = null;\n}\n",
     );
     let attributes: Vec<String> = lowered
         .nodes()
@@ -21345,28 +21349,23 @@ fn a_property_that_can_hold_a_map_carries_whether_plain_php_reads_its_array() {
         attribute
     };
     let unplanned = crossing("ZVAL null\n");
+    let keyed = indoc! {r#"
+        ARRAY [3]
+          ARRAY_ELEM
+            ZVAL "map"
+            null
+          ARRAY_ELEM
+            ZVAL null
+            null
+          ARRAY_ELEM
+            ZVAL null
+            null
+    "#};
 
     assert_eq!(lowered.diagnostics(), Vec::<String>::new(), "the source lowers");
     assert_eq!(
         attributes,
-        [
-            crossing(indoc! {r#"
-                ARRAY [3]
-                  ARRAY_ELEM
-                    ZVAL "map"
-                    null
-                  ARRAY_ELEM
-                    ZVAL null
-                    null
-                  ARRAY_ELEM
-                    ZVAL null
-                    null
-                ZVAL false
-            "#}),
-            unplanned.clone(),
-            unplanned.clone(),
-            unplanned,
-        ]
+        [crossing(keyed), crossing(&format!("{keyed}ZVAL false\n")), unplanned.clone(), unplanned.clone(), unplanned,]
     );
 }
 

@@ -9,7 +9,6 @@ use mago_codex::metadata::module::ModuleKind;
 use mago_codex::metadata::module::service_id;
 use mago_codex::metadata::parameter::FunctionLikeParameterMetadata;
 use mago_codex::scanner::get_union_from_hint;
-use mago_codex::ttype::ArrayKeyForm;
 use mago_codex::ttype::TType;
 use mago_codex::ttype::TypeRef;
 use mago_codex::ttype::atomic::TAtomic;
@@ -3911,8 +3910,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// The `#[\Sharp\Crossing(plan)]` group of a property written `hint` whose type holds a `Map` or a `Set`, at any
     /// depth, or can when it runs, with the plan [`Self::crossing_plan`] gives it, by which the engine crosses a PHP
     /// array plain PHP writes there, and gives plain PHP the PHP array of each `Map` and `Set` it reads there, as
-    /// [`Self::crosses_outward`] says. A property whose `Map` plain PHP reads as the object, as one keyed by `int|string`,
-    /// takes `#[\Sharp\Crossing(plan, false)]`. None for a property of any other type. The property is `property` of the
+    /// [`Self::crosses_outward`] says. A property whose `Map` plain PHP reads as the object, as one keyed by an enum
+    /// without backing values, takes `#[\Sharp\Crossing(plan, false)]`. None for a property of any other type. The property is `property` of the
     /// class being lowered, whose declared type says what it can hold, a type parameter included.
     fn crossing_attribute(&mut self, property: &[u8], hint: Option<&Hint>) -> Option<u32> {
         let hint = hint?;
@@ -7193,10 +7192,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
     /// Whether plain PHP gets a value of `r#type` with each `Map` and `Set` in it as its PHP array, spec section 12: a
     /// value that holds one at any depth, or can when it runs, as `Any`, an unbounded type parameter and an `Iterable` of
-    /// them can, where every `Map` the type names has a key type whose keys are each one PHP array key. Any other `Map`
-    /// reaches plain PHP as the object, and so does whatever holds it.
+    /// them can, where a PHP array holds each key of every `Map` the type names. Any other `Map` reaches plain PHP as the
+    /// object, and so does whatever holds it.
     fn crosses_outward(&self, r#type: &TUnion) -> bool {
-        self.keys_form(r#type) == ArrayKeyForm::Distinct && self.may_hold_collection(r#type)
+        self.keys_hold_in_array(r#type) && self.may_hold_collection(r#type)
     }
 
     /// Whether a value of `r#type` can hold a `Map` or a `Set` at any depth.
@@ -7210,30 +7209,18 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         })
     }
 
-    /// The key form of the `Map` in `r#type`, at any depth, whose keys sit worst in a PHP array: `Unheld` before
-    /// `Colliding` before `Distinct`, which a type without a `Map` has too.
-    fn keys_form(&self, r#type: &TUnion) -> ArrayKeyForm {
-        let mut form = ArrayKeyForm::Distinct;
-        for atomic in r#type.types.iter() {
-            let (keyed, key_type, element_type) = match atomic {
-                TAtomic::Array(array) => {
-                    let (key_type, element_type) = self.types.array_parameters(array);
+    /// Whether a PHP array holds each key of every `Map` in `r#type`, at any depth, as a type without a `Map` does.
+    fn keys_hold_in_array(&self, r#type: &TUnion) -> bool {
+        r#type.types.iter().all(|atomic| match atomic {
+            TAtomic::Array(array) => {
+                let (key_type, element_type) = self.types.array_parameters(array);
 
-                    (matches!(array, TArray::Keyed(_)), key_type, element_type)
-                }
-                TAtomic::Iterable(iterable) => (false, get_mixed(), iterable.get_value_type().clone()),
-                _ => continue,
-            };
-            for inner in [keyed.then(|| self.types.key_form(&key_type)), Some(self.keys_form(&element_type))] {
-                form = match (form, inner) {
-                    (ArrayKeyForm::Unheld, _) | (_, Some(ArrayKeyForm::Unheld)) => ArrayKeyForm::Unheld,
-                    (ArrayKeyForm::Colliding, _) | (_, Some(ArrayKeyForm::Colliding)) => ArrayKeyForm::Colliding,
-                    _ => ArrayKeyForm::Distinct,
-                };
+                (!matches!(array, TArray::Keyed(_)) || self.types.keys_hold_in_array(&key_type))
+                    && self.keys_hold_in_array(&element_type)
             }
-        }
-
-        form
+            TAtomic::Iterable(iterable) => self.keys_hold_in_array(iterable.get_value_type()),
+            _ => true,
+        })
     }
 
     /// Whether plain PHP gets the result of the method `method` of the class being lowered, whose result type `hint`
@@ -8527,14 +8514,14 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
     /// Whether `value`, passed to `parameter` of plain PHP, crosses as its PHP array: the parameter takes an array and
     /// the value's type holds a `Map` or a `Set` that plain PHP did not itself give, each with a PHP array, as
-    /// [`Self::keys_form`] says. A value whose type says nothing of what it holds, as `Any`, passes as it is.
+    /// [`Self::keys_hold_in_array`] says. A value whose type says nothing of what it holds, as `Any`, passes as it is.
     fn argument_crosses(&self, value: &Expression, parameter: Option<PlainParameter>) -> bool {
         let r#type = self.types.expression_type(value);
 
         parameter.is_some_and(PlainParameter::takes_array)
             && !self.plain_value(value)
             && self.crossing_array(r#type).is_some()
-            && self.keys_form(r#type) == ArrayKeyForm::Distinct
+            && self.keys_hold_in_array(r#type)
     }
 
     /// Whether a value of `list` crosses into `parameters` as [`Self::argument_crosses`] says.

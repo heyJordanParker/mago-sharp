@@ -1670,59 +1670,44 @@ pub fn get_backed_enum<'codebase>(
     })
 }
 
-/// How the keys of a PHP# `Map` keyed by a type sit in a PHP array, spec section 12.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ArrayKeyForm {
-    /// Each key is a PHP array key, and no two are one: the type is `int`, `string` or one backed enum's cases.
-    Distinct,
-    /// Each key is a PHP array key, and two can be one, as `5` and `"5"` are: `int|string`, a backed enum beside its
-    /// backing type or another enum, or `Any`.
-    Colliding,
-    /// Some key is no PHP array key: a class, a struct, a collection, an enum without backing values, or a `float`.
-    Unheld,
-}
-
-/// The [`ArrayKeyForm`] of a `Map` keyed by `key_type`. A type parameter's keys are its bound's, and an unbounded one's
-/// are decided when the code runs, as `Distinct`.
+/// The key type of the PHP array a PHP# `Map` keyed by `key_type` gives plain PHP, spec section 12.
+///
+/// Each backed enum is its backing type, and each other key is as it is. None when a key has no PHP array form: a
+/// class, a struct, a collection, an enum without backing values or a `float`. A type parameter's keys are its
+/// bound's, and an unbounded one's are decided when the code runs.
 #[must_use]
-pub fn get_array_key_form(key_type: &TUnion, codebase: &CodebaseMetadata) -> ArrayKeyForm {
-    #[derive(PartialEq)]
-    enum Holder {
-        Int,
-        String,
-        Enum(Word),
-    }
+pub fn get_php_array_key_type<'key>(key_type: &'key TUnion, codebase: &CodebaseMetadata) -> Option<Cow<'key, TUnion>> {
+    let backing_type = |atomic: &TAtomic| match atomic {
+        TAtomic::Reference(TReference::Symbol { name, .. }) => codebase
+            .get_class_like(name.as_bytes())
+            .filter(|class_like| class_like.kind.is_enum())
+            .and_then(|class_like| class_like.enum_type.clone()),
+        atomic => get_backed_enum(atomic, codebase, Dialect::Sharp)?.enum_type.clone(),
+    };
 
-    let mut holders: Vec<Holder> = Vec::new();
+    let mut backed = false;
     for atomic in key_type.types.iter() {
-        let holder = match atomic {
-            TAtomic::Never => continue,
-            TAtomic::Mixed(_) | TAtomic::Scalar(TScalar::ArrayKey) => return ArrayKeyForm::Colliding,
-            TAtomic::Scalar(TScalar::Integer(_)) => Holder::Int,
-            TAtomic::Scalar(TScalar::String(_) | TScalar::ClassLikeString(_)) => Holder::String,
-            TAtomic::GenericParameter(parameter) if parameter.constraint.is_mixed() => continue,
-            TAtomic::GenericParameter(parameter) => match get_array_key_form(&parameter.constraint, codebase) {
-                ArrayKeyForm::Distinct => continue,
-                form => return form,
-            },
-            TAtomic::Reference(TReference::Symbol { name, .. })
-                if codebase
-                    .get_class_like(name.as_bytes())
-                    .is_some_and(|class_like| class_like.kind.is_enum() && class_like.enum_type.is_some()) =>
-            {
-                Holder::Enum(*name)
-            }
-            atomic => match get_backed_enum(atomic, codebase, Dialect::Sharp) {
-                Some(backed) => Holder::Enum(backed.name),
-                None => return ArrayKeyForm::Unheld,
-            },
-        };
-        if !holders.contains(&holder) {
-            holders.push(holder);
+        match atomic {
+            TAtomic::Never
+            | TAtomic::Error
+            | TAtomic::Mixed(_)
+            | TAtomic::Scalar(
+                TScalar::ArrayKey | TScalar::Integer(_) | TScalar::String(_) | TScalar::ClassLikeString(_),
+            ) => {}
+            atomic if backing_type(atomic).is_some() => backed = true,
+            TAtomic::GenericParameter(parameter)
+                if parameter.constraint.is_mixed()
+                    || get_php_array_key_type(&parameter.constraint, codebase).is_some() => {}
+            _ => return None,
         }
     }
+    if !backed {
+        return Some(Cow::Borrowed(key_type));
+    }
 
-    if holders.len() > 1 { ArrayKeyForm::Colliding } else { ArrayKeyForm::Distinct }
+    Some(Cow::Owned(TUnion::from_vec(
+        key_type.types.iter().map(|atomic| backing_type(atomic).unwrap_or_else(|| atomic.clone())).collect(),
+    )))
 }
 
 /// The value of `input`, whose key is `key` and whose value is `value`, as the iterable `container` reads it.

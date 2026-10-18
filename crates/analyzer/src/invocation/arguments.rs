@@ -6,7 +6,6 @@ use foldhash::HashMap;
 use mago_allocator::Arena;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
-use mago_codex::ttype::ArrayKeyForm;
 use mago_codex::ttype::TType;
 use mago_codex::ttype::add_union_type;
 use mago_codex::ttype::atomic::TAtomic;
@@ -22,12 +21,11 @@ use mago_codex::ttype::comparator::ComparisonResult;
 use mago_codex::ttype::comparator::union_comparator::can_expression_types_be_identical;
 use mago_codex::ttype::comparator::union_comparator::is_contained_by;
 use mago_codex::ttype::expander::get_signature_of_function_like_identifier;
-use mago_codex::ttype::get_array_key_form;
 use mago_codex::ttype::get_array_parameters;
-use mago_codex::ttype::get_backed_enum;
 use mago_codex::ttype::get_iterable_value_parameter;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_never;
+use mago_codex::ttype::get_php_array_key_type;
 use mago_codex::ttype::union::TUnion;
 use mago_names::ResolvedNames;
 use mago_reporting::Annotation;
@@ -91,10 +89,10 @@ fn shareable_part(union: &TUnion, is_sharp: bool) -> Option<Cow<'_, TUnion>> {
 
 /// Spec section 12 passes a `Map` to a plain PHP parameter whose declared type names `array` as a PHP array, whose
 /// keys are `int` or `string`, and a backed enum's cases as their backing values. A `Map` keyed by anything else, as a
-/// unit enum, a struct or a `float`, has no such array, where PHP would cast or refuse each key, and neither has one
-/// whose key type lets two keys be one PHP array key, as `int|string` lets `5` and `"5"`, since PHP keeps one of them.
-/// Plain PHP gets either `Map` itself, so its call is refused here rather than failing where it runs. Returns the type
-/// plain PHP receives, `input_type` with each backed enum key its backing type, or None when it refused the call.
+/// unit enum, a struct or a `float`, has no such array, where PHP would cast or refuse each key, so its call is refused
+/// here rather than failing where it runs. A `Map` whose two keys are one PHP array key, as `5` and `"5"` are, fails
+/// where it crosses, since only its data shows that. Returns the type plain PHP receives, `input_type` with each backed
+/// enum key its backing type, or None when it refused the call.
 pub(super) fn check_array_crossing<'input, A>(
     context: &mut Context<'_, '_, A>,
     input_type: &'input TUnion,
@@ -116,20 +114,14 @@ where
     }) else {
         return Some(Cow::Borrowed(input_type));
     };
-    let form = get_array_key_form(&key_type, context.codebase);
-    if form == ArrayKeyForm::Distinct && key_type.is_always_array_key(true) {
-        return Some(Cow::Borrowed(input_type));
-    }
-    let backing_types: Option<Vec<TAtomic>> = key_type
-        .types
-        .iter()
-        .map(|atomic| get_backed_enum(atomic, context.codebase, Dialect::Sharp)?.enum_type.clone())
-        .collect();
-    if form == ArrayKeyForm::Distinct
-        && let Some(backing_types) = backing_types
-    {
+    let array_key_type = get_php_array_key_type(&key_type, context.codebase)
+        .filter(|array_key_type| array_key_type.is_always_array_key(true));
+    if let Some(array_key_type) = array_key_type {
+        if matches!(array_key_type, Cow::Borrowed(_)) {
+            return Some(Cow::Borrowed(input_type));
+        }
         let crossed = TAtomic::Array(TArray::Keyed(TKeyedArray::new_with_parameters(
-            Arc::new(TUnion::from_vec(backing_types)),
+            Arc::new(array_key_type.into_owned()),
             Arc::new(value_type),
         )));
         let types = input_type
@@ -153,25 +145,14 @@ where
     let target = invocation_target.guess_name(context);
     let input = display_type(context, input_type);
     let key = display_type(context, &key_type);
-    let (reason, help) = if form == ArrayKeyForm::Colliding {
-        (
-            format!("two keys of `{key}` can be one PHP array key, as `5` and `\"5\"` are, and PHP keeps only one"),
-            "Pass a `Map` keyed by one of `int`, `string` or a backed enum.",
-        )
-    } else {
-        (
-            format!("a PHP array's keys are `int` or `string`, and this `Map`'s keys are `{key}`"),
-            "Pass a `Map` keyed by `int` or `string`, such as one keyed by a field of each key.",
-        )
-    };
     context.collector.report_with_code(
         IssueCode::InvalidArgument,
         Issue::error(format!(
-            "`{input}` can't be passed to the {parameter} of {target_kind} `{target}`, which takes a PHP array: {reason}."
+            "`{input}` can't be passed to the {parameter} of {target_kind} `{target}`, which takes a PHP array: a PHP array's keys are `int` or `string`, and this `Map`'s keys are `{key}`."
         ))
         .with_annotation(Annotation::primary(input_expression.span()).with_message(format!("This `Map` is keyed by `{key}`")))
         .with_annotation(Annotation::secondary(invocation_target.span()).with_message("Plain PHP declares this call"))
-        .with_help(help),
+        .with_help("Pass a `Map` keyed by `int` or `string`, such as one keyed by a field of each key."),
     );
     None
 }
