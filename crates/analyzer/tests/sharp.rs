@@ -1487,6 +1487,26 @@ fn a_default_body_sees_only_its_interface_and_a_plain_php_class_gets_it_through_
     );
 }
 
+/// Spec sections 19 and 22: an interface's constant is read through the interface and through each class that
+/// implements it, a default body reads it, and the interface's operator orders two values of the interface and two of a
+/// class that gets it. A class's own operator for two of its values replaces none, so it overrides nothing the
+/// interface declares.
+#[test]
+fn an_interface_gives_each_class_its_constant_and_its_operator() {
+    let sharp = "namespace App;\n\npublic interface Priced\n{\n    const string CURRENCY = \"USD\";\n    int cents { get; }\n    string label => `${this.cents} ${Priced.CURRENCY}`;\n    static int operator <=>(Priced a, Priced b) => a.cents <=> b.cents;\n}\n\npublic class Book : Priced\n{\n    public int cents { get; }\n    public Book(int cents) { this.cents = cents; }\n}\n\npublic class Rare : Priced\n{\n    public int cents { get; }\n    public Rare(int cents) { this.cents = cents; }\n    public static int operator <=>(Rare a, Rare b) => b.cents <=> a.cents;\n}\n\npublic static class Uses\n{\n    public static string currencies() => Priced.CURRENCY + Book.CURRENCY;\n\n    public static bool cheaper(Priced a, Priced b) => a < b;\n\n    public static int books() => new Book(1) <=> new Book(2);\n\n    public static bool rares() => new Rare(1) >= new Rare(2);\n\n    public static string label() => new Book(1).label;\n\n    public static bool unpriced(Priced a) => a < 3;\n}\n";
+
+    assert_eq!(issues(("src/App/Priced.sharp", sharp), &[]), ["36:46 invalid-operand"]);
+}
+
+/// Spec section 19: an enum that declares `operator <=>` orders its cases by it, as a class does, and its operator
+/// takes only its own cases.
+#[test]
+fn an_enum_that_declares_comparison_orders_its_cases() {
+    let sharp = "namespace App;\n\npublic enum Size : int\n{\n    case Small = 1;\n    case Large = 3;\n\n    public static int operator <=>(Size a, Size b) => a.value <=> b.value;\n}\n\npublic enum Mood\n{\n    case Calm;\n}\n\npublic static class Uses\n{\n    public static bool smaller() => Size.Small < Size.Large;\n\n    public static int order(Size a, Size b) => a <=> b;\n\n    public static bool calmer() => Mood.Calm < Mood.Calm;\n\n    public static bool mixed() => Size.Small < 1;\n}\n";
+
+    assert_eq!(issues(("src/App/Size.sharp", sharp), &[]), ["22:36 invalid-operand", "24:35 invalid-operand"]);
+}
+
 /// Spec section 22: a generic interface's default bodies read the type arguments each class gives the interface, in its
 /// header or through an interface that extends it, as a class's own methods do.
 #[test]

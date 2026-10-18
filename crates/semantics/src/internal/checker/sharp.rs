@@ -182,12 +182,14 @@ const OBJECT: &[u8] = b"Object";
 ///   `public`, no header and no constructor, and only constants and static members. The bridge lowers it to a final
 ///   PHP class.
 /// - An interface: attributes, an optional `public`, a name, optional type parameters, an optional `: Interface` header,
-///   methods and properties, with no other modifiers, `extends` or fields. An interface method has optional type
-///   parameters, parameters, a return type and no body, as spec section 29 writes `Money quote(Cart cart);`, or a
-///   default body, a block or `=> expr;`, as spec section 22 writes `string designKey() => …;`, checked as a class
-///   method's body. A property is written `int orderId { get; }` or `List<string> claims { get; set; }`. Every
-///   interface member is public, written bare, so an access modifier on one is an error, and so is any other modifier
-///   on a method.
+///   constants, methods, properties and operators, with no other modifiers, `extends`, fields or laws. A constant
+///   follows a class constant's rules. An interface method has optional type parameters, parameters, a return type
+///   and no body, as spec section 29 writes `Money quote(Cart cart);`, or a default body, a block or `=> expr;`, as
+///   spec section 22 writes `string designKey() => …;`, checked as a class method's body. A property is written
+///   `int orderId { get; }` or `List<string> claims { get; set; }`, and a computed property's expression is its
+///   default body. An interface holds no storage, so a property with an initial value is an error, and so is one with
+///   an accessor body, which the computed form writes. Every interface member is public, written bare, so an access
+///   modifier on one is an error, and so is any other modifier on a method.
 /// - Type parameters, as spec section 11 declares them: on a class, an interface and a method, as in
 ///   `<out TItem : DatabaseEntity & Shareable, TKey>`. A name is `T`, or `T` and an uppercase ASCII letter, as in
 ///   `TItem`, and any other name is an error, as C# names them. A list that declares a name twice is an error. `in` and
@@ -200,12 +202,12 @@ const OBJECT: &[u8] = b"Object";
 ///   method uses them, because each type argument has its own, as `Box<int>.count` reaches it. The analyzer checks
 ///   variance, bounds and inference.
 /// - An enum: attributes, an optional `public`, a name, an optional `: string, Interface` header, constants, cases,
-///   methods and laws, with no other modifiers or `implements`. A leading `int` or `string` in the header is the backing type,
-///   and every class name is an interface. A constant follows a class constant's rules. A case has attributes as a
-///   class has them, and is `case Active;` or, in a backed enum, `case Active = "a";`, whose value is a constant
-///   expression. A case named `class`, compared ignoring case, is an error, as in PHP. A method follows a class's
-///   method rules, but an enum has no constructor, so a method without a return type is an error. PHP's `check_enum`
-///   reports a property and any other backing type, and the analyzer a class name in the header.
+///   methods, operators and laws, with no other modifiers or `implements`. A leading `int` or `string` in the header is
+///   the backing type, and every class name is an interface. A constant follows a class constant's rules. A case has
+///   attributes as a class has them, and is `case Active;` or, in a backed enum, `case Active = "a";`, whose value is
+///   a constant expression. A case named `class`, compared ignoring case, is an error, as in PHP. A method follows a
+///   class's method rules, but an enum has no constructor, so a method without a return type is an error. PHP's
+///   `check_enum` reports a property and any other backing type, and the analyzer a class name in the header.
 /// - A header of a class, an interface or an enum that names one type twice is an error, and so is an enum header that
 ///   names `UnitEnum` or `BackedEnum`, because the engine refuses both when it declares the class. A header names each
 ///   class and interface by its short name, and a generic one with its type arguments, as in `: PaginatedList<Order>`,
@@ -267,7 +269,8 @@ const OBJECT: &[u8] = b"Object";
 ///   `!=` derives from `==`, and `< > <= >=` from `<=>`, so declaring one is an error that names its source. `==`,
 ///   `<=>` and the binary arithmetic operators take two parameters, unary `-` one, and one of them is the declaring
 ///   class. `==` returns `bool`, and `<=>` `int`. A class declares each operator once, because each runs as one
-///   static method named after .NET's, such as `op_Addition`. An interface or an enum declares no operator.
+///   static method named after .NET's, such as `op_Addition`. An enum declares an operator as a class does, and an
+///   interface as `static int operator <=>(Priced a, Priced b)`, `static` alone, as its other members are written bare.
 /// - An `extern` method, `public static extern string slug(string title);`, whose body is native, compiled into the
 ///   engine, as spec section 29 writes it: a `public static` method of a static class, with no body. Only the
 ///   standard library declares one, and the analyzer refuses one anywhere else.
@@ -909,6 +912,40 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
 
             Some(FieldOrProperty)
         }
+        // Spec section 22: an interface holds no storage, so a property it states takes no initial value, and its
+        // default body is a computed property's expression.
+        (Node::ClassLikeMember(ClassLikeMember::Property(Property::Hooked(property))), Interface)
+            if let Some(initial_value) = &property.initial_value =>
+        {
+            let name = BytesDisplay(property.item.variable().name);
+            context.report(
+                Issue::error("An interface holds no storage, so it gives no initial value.")
+                    .with_annotation(Annotation::primary(initial_value.span()).with_message("Written here."))
+                    .with_help(format!(
+                        "Remove it, and give `{name}` its value in each class that implements the interface."
+                    )),
+            );
+
+            None
+        }
+        (Node::ClassLikeMember(ClassLikeMember::Property(Property::Hooked(property))), Interface)
+            if let Some(body) = property
+                .hook_list
+                .hooks
+                .iter()
+                .find(|accessor| matches!(accessor.body, PropertyHookBody::Concrete(_))) =>
+        {
+            let hint = property.hint.as_ref().map(|hint| String::from_utf8_lossy(context.get_code_snippet(hint)));
+            let declared = format!("{} {}", hint.unwrap_or_default(), BytesDisplay(property.item.variable().name));
+            context.report(
+                Issue::error(format!(
+                    "An interface property's default body is an expression: write `{declared} => …;`."
+                ))
+                .with_annotation(Annotation::primary(body.span()).with_message("Written here.")),
+            );
+
+            None
+        }
         // Spec section 22: every field is declared in the class that owns it.
         (Node::ClassLikeMember(ClassLikeMember::Property(field @ Property::Plain(_))), Interface) => {
             let interface = BytesDisplay(enclosing_class_like_name(context.program, field.span()).unwrap_or_default());
@@ -930,7 +967,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
                 | Modifier::Private(_)
                 | Modifier::Internal(_)),
             ),
-            Signature | FieldOrProperty,
+            Signature | FieldOrProperty | ClassConstant,
         ) if is_in_interface(context.program, modifier.span()) => {
             report_interface_member_access(modifier, context);
 
@@ -1041,9 +1078,24 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         (Node::ClassLikeMember(_), Place::Extension) => None,
         // A law's parameters and body are checked as a method's. `check_members` refuses a default and a variadic one.
         (Node::Law(_), Class | Enum | Place::Module) => Some(Method),
+        // Spec section 28: a law is proved against the code of a class or an enum, and any class may implement an
+        // interface later.
+        (Node::ClassLikeMember(ClassLikeMember::Law(law)), Interface) => {
+            context.report(
+                Issue::error(format!(
+                    "An interface has no laws: state `{}` in a class or an enum, whose values it is about.",
+                    BytesDisplay(law.name.value)
+                ))
+                .with_annotation(Annotation::primary(law.span()).with_message("Written here."))
+                .with_note(supported(place)),
+            );
+
+            None
+        }
         (Node::ClassLikeMember(ClassLikeMember::Operator(_) | ClassLikeMember::NamedConstructor(_)), Class) => {
             Some(Class)
         }
+        (Node::ClassLikeMember(ClassLikeMember::Operator(_)), Interface | Enum) => Some(place),
         // A named constructor's parts are a method's, and `check_named_constructor` decides its class, name, modifiers
         // and `: this(…)` when the walk enters its class.
         (Node::NamedConstructor(_), Class) => Some(Method),
@@ -1062,7 +1114,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         }
         // An operator's parts are a method's, and `check_operator` decides its modifiers and its symbol, the one binary
         // operator a method's parts hold.
-        (Node::Operator(operator), Class) => {
+        (Node::Operator(operator), Class | Interface | Enum) => {
             check_operator(operator, context);
             // Spec section 13: the language runs an operator on readonly values, so its operands are readonly already.
             for parameter in &operator.parameter_list.parameters {
@@ -1150,29 +1202,31 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
                 ),
             }
         }
-        (Node::ClassLikeMember(ClassLikeMember::Constant(constant)), Class | Enum) => match is_slice_constant(constant) {
-            Ok(()) => {
-                let name = &constant.first_item().name;
-                // PHP reserves `X::class` for the class's name, so it loads no constant named `class` in any case.
-                if name.value.eq_ignore_ascii_case(b"class")
-                    && let Some(class) = enclosing_class_like_name(context.program, constant.span())
-                {
-                    context.report(
-                        Issue::error(format!(
-                            "`{}` can't name a constant: `{}.class` already names the class.",
-                            BytesDisplay(name.value),
-                            BytesDisplay(class)
-                        ))
-                        .with_annotation(Annotation::primary(name.span).with_message("Declared here.")),
-                    );
-                } else {
-                    check_declared_name(name.value, name.span, "Constant", NameCase::UpperSnake, context);
-                }
+        (Node::ClassLikeMember(ClassLikeMember::Constant(constant)), Class | Interface | Enum) => {
+            match is_slice_constant(constant) {
+                Ok(()) => {
+                    let name = &constant.first_item().name;
+                    // PHP reserves `X::class` for the class's name, so it loads no constant named `class` in any case.
+                    if name.value.eq_ignore_ascii_case(b"class")
+                        && let Some(class) = enclosing_class_like_name(context.program, constant.span())
+                    {
+                        context.report(
+                            Issue::error(format!(
+                                "`{}` can't name a constant: `{}.class` already names the class.",
+                                BytesDisplay(name.value),
+                                BytesDisplay(class)
+                            ))
+                            .with_annotation(Annotation::primary(name.span).with_message("Declared here.")),
+                        );
+                    } else {
+                        check_declared_name(name.value, name.span, "Constant", NameCase::UpperSnake, context);
+                    }
 
-                Some(ClassConstant)
+                    Some(ClassConstant)
+                }
+                Err(issue) => report_refusal(*issue, constant.span(), ClassConstant, context),
             }
-            Err(issue) => report_refusal(*issue, constant.span(), ClassConstant, context),
-        },
+        }
         (
             Node::ClassLikeConstant(_)
             | Node::Modifier(
@@ -2599,17 +2653,35 @@ fn is_slice_signature(method: &Method) -> Result<(), (&'static str, &'static str
     }
 }
 
-/// Checks an operator a class declares, spec section 19: a symbol a class can declare, `public static`, the number of
-/// parameters its symbol takes with one of them the class itself, `bool` from `==` and `int` from `<=>`, and one
-/// declaration of it in its class. A refused symbol is the one error, because the other rules depend on it. The
-/// analyzer checks that a class that declares `==` has a `hash()`.
+/// Checks an operator a class, an enum or an interface declares, spec section 19: a symbol a class can declare,
+/// `public static`, or `static` alone in an interface, whose members are written bare, the number of parameters its
+/// symbol takes with one of them the declaring type itself, `bool` from `==` and `int` from `<=>`, and one declaration
+/// of it in its type. A refused symbol is the one error, because the other rules depend on it. The analyzer checks
+/// that a type that declares `==` has a `hash()`.
 fn check_operator(operator: &Operator, context: &mut Context<'_, '_, '_>) {
-    let Some(class) = enclosing_class(context.program, operator.span()) else {
+    let start = operator.span().start;
+    let Some((owner, members, kind)) = file_statements(context.program).find_map(|statement| match statement {
+        Statement::Interface(interface) if interface.span().contains(&start) => {
+            Some((&interface.name, &interface.members, "interface"))
+        }
+        Statement::Enum(r#enum) if r#enum.span().contains(&start) => Some((&r#enum.name, &r#enum.members, "enum")),
+        Statement::Class(class) if class.span().contains(&start) => Some((&class.name, &class.members, "class")),
+        Statement::Struct(r#struct) if r#struct.span().contains(&start) => {
+            Some((&r#struct.name, &r#struct.members, "class"))
+        }
+        _ => None,
+    }) else {
         return;
     };
+    let interface = kind == "interface";
     let names = context.names;
-    let class_name = BytesDisplay(class.name.value);
+    let class_name = BytesDisplay(owner.value);
     let symbol = BytesDisplay(operator.symbol.as_bytes());
+    if interface {
+        for modifier in operator.modifiers.iter().filter(|modifier| modifier.is_visibility()) {
+            report_interface_member_access(modifier, context);
+        }
+    }
     let mut report = |message: String, span: Span| {
         context.report(Issue::error(message).with_annotation(Annotation::primary(span).with_message("Declared here.")));
     };
@@ -2627,7 +2699,21 @@ fn check_operator(operator: &Operator, context: &mut Context<'_, '_, '_>) {
         return report(format!("`operator {symbol}` cannot be declared: {reason}."), operator.symbol.span());
     };
 
-    if operator.modifiers.len() != 2
+    if interface {
+        if !operator
+            .modifiers
+            .iter()
+            .all(|modifier| modifier.is_visibility() || matches!(modifier, Modifier::Static(_)))
+            || !operator.modifiers.contains_static()
+        {
+            report(
+                format!(
+                    "An interface operator is `static`, as in `static {class_name} operator +({class_name} a, {class_name} b)`."
+                ),
+                operator.operator.span,
+            );
+        }
+    } else if operator.modifiers.len() != 2
         || !operator.modifiers.contains_static()
         || operator.modifiers.get_public().is_none()
     {
@@ -2640,7 +2726,7 @@ fn check_operator(operator: &Operator, context: &mut Context<'_, '_, '_>) {
     }
 
     let parameters = &operator.parameter_list.parameters;
-    let class_fqcn = names.get(class.name);
+    let class_fqcn = names.get(owner);
     if matches!(operator.symbol, BinaryOperator::Subtraction(_)) && !matches!(parameters.len(), 1 | 2) {
         report(
             "`operator -` takes one parameter, to negate, or two, to subtract.".to_owned(),
@@ -2653,7 +2739,7 @@ fn check_operator(operator: &Operator, context: &mut Context<'_, '_, '_>) {
         .any(|parameter| parameter.hint.as_ref().is_some_and(|hint| is_class_type(hint, class_fqcn, names)))
     {
         report(
-            format!("One parameter of `operator {symbol}` is `{class_name}`, the class that declares it."),
+            format!("One parameter of `operator {symbol}` is `{class_name}`, the {kind} that declares it."),
             operator.parameter_list.span(),
         );
     }
@@ -2669,8 +2755,7 @@ fn check_operator(operator: &Operator, context: &mut Context<'_, '_, '_>) {
         _ => {}
     }
 
-    let declared_before = class
-        .members
+    let declared_before = members
         .iter()
         .filter_map(|member| match member {
             ClassLikeMember::Operator(earlier) => Some(earlier),
@@ -5701,13 +5786,13 @@ fn supported(place: Place) -> &'static str {
             "A PHP# class has attributes, an optional `public`, `abstract` or `final`, a name, optional type parameters as in `<out TItem : DatabaseEntity>`, an optional `: Base, Interface` header, constants, fields, properties, methods, named constructors, operators, laws and, in a static class, extensions, with no other modifiers, `extends` or `implements`."
         }
         Place::Interface => {
-            "A PHP# interface has attributes, an optional `public`, a name, optional type parameters as in `<in TItem>`, an optional `: Interface` header, methods and get-only properties, as in `int orderId { get; }`, with no other modifiers, `extends`, constants or other properties."
+            "A PHP# interface has attributes, an optional `public`, a name, optional type parameters as in `<in TItem>`, an optional `: Interface` header, constants, methods, properties as in `int orderId { get; }` and `string label => …;`, and operators as in `static int operator <=>(Priced a, Priced b)`, with no other modifiers or `extends`."
         }
         Place::Signature => {
             "A PHP# interface method has attributes, no modifier, optional type parameters, parameters, a return type of `int`, `float`, `bool`, `string`, `Any`, `void`, `never`, a class or a type parameter, a generic type as in `List<T>` or `PaginatedList<Order>`, or `Self`, each but `void` and `never` nullable as in `int?`, or a union of them but `void` and `never`, as in `int|string`, and no body or a default body."
         }
         Place::Enum => {
-            "A PHP# enum has attributes, an optional `public`, a name, optional type parameters as in `<T, TError : Error>` when it has no backing type, an optional `: string, Interface` header whose `int` or `string` comes first, constants, cases, computed properties, methods and laws, with no other modifiers or `implements`. A case of a backed enum has a value, as in `case None = \"none\";`, and a case of any other enum may carry data, as in `case Paid(string transactionId);`."
+            "A PHP# enum has attributes, an optional `public`, a name, optional type parameters as in `<T, TError : Error>` when it has no backing type, an optional `: string, Interface` header whose `int` or `string` comes first, constants, cases, computed properties, methods, operators and laws, with no other modifiers or `implements`. A case of a backed enum has a value, as in `case None = \"none\";`, and a case of any other enum may carry data, as in `case Paid(string transactionId);`."
         }
         Place::Case => unreachable!("`enter` takes a case's name, its field list and each of its fields"),
         Place::Header => {

@@ -260,7 +260,8 @@ impl<'analysis> Types<'analysis> {
 
     /// The default bodies the fully qualified class-like name `class` uses itself, spec section 22: each method of the
     /// traits [`CodebaseMetadata::get_defaults_traits`] gives it, with its trait, its interface's full name, and the
-    /// trait of a sub-interface whose body replaces it, in declaration order.
+    /// trait of a sub-interface whose body replaces it, in declaration order. An operator, which the trait already
+    /// holds as `op_Comparison@App\Priced`, is none.
     #[must_use]
     pub fn default_bodies(&self, class: &[u8]) -> Vec<(Word, Word, Word, Option<Word>)> {
         let metadata = self.scanned(class);
@@ -272,6 +273,9 @@ impl<'analysis> Types<'analysis> {
                 // A computed property's default body is already the protected `designKey@App\HasDesign`.
                 defaults.methods.iter().filter(|method| !method.as_bytes().contains(&b'@')).filter_map(|method| {
                     let body = self.codebase.get_method(defaults.name.as_bytes(), method.as_bytes())?;
+                    if body.flags.is_operator() {
+                        return None;
+                    }
                     let replacing = Self::replacing(&interfaces, interface, |other| {
                         self.codebase
                             .get_method(
@@ -1725,21 +1729,26 @@ impl<'analysis> Types<'analysis> {
         (root, metadata)
     }
 
-    /// The class declaring the static method `name` a PHP# operator on operands of the types `operands` runs as, as the
-    /// checker chose it: the one the left operand's class declares or inherits, else the right one's, as `App\Money`
-    /// for `op_Addition` on two `Order`s that inherit it. Operands with no instance of one class, enums aside, run none.
-    pub(crate) fn operator_class(&self, name: &[u8], operands: &[&TUnion]) -> Option<Word> {
-        operands.iter().find_map(|operand| {
+    /// The type whose static method `name` a PHP# operator on operands of the types `operands` runs, as the checker
+    /// chose it, with the operand it was found through: the one the left operand's class or enum declares or inherits,
+    /// else the right one's, as `App\Money` for `op_Addition` on two `Order`s that inherit it. A class that gets the
+    /// operator of an interface, spec section 19, from the interface's trait of default bodies runs it as its own, and
+    /// a value of the interface itself gives the interface. Operands with no instance of one type run none.
+    pub(crate) fn operator_class(&self, name: &[u8], operands: &[&TUnion]) -> Option<(Word, usize)> {
+        operands.iter().enumerate().find_map(|(index, operand)| {
             let classes = receiver_classes(operand)?;
             let [class] = classes.as_slice() else {
                 return None;
             };
-            if matches!(self.class_declaration(class).kind, DeclarationKind::Enum { .. }) {
+            let method = self.method_declaration(class, name)?;
+            if method.kind != DeclarationKind::StaticMethod {
                 return None;
             }
-            let method = self.method_declaration(class, name)?;
+            let declaring = self.scanned(method.class.as_bytes());
+            let runs_on =
+                if self.codebase.get_defaults_interface(declaring).is_some() { self.scanned(class) } else { declaring };
 
-            (method.kind == DeclarationKind::StaticMethod).then(|| self.class_declaration(method.class.as_bytes()).name)
+            Some((runs_on.original_name, index))
         })
     }
 

@@ -3,6 +3,7 @@ use mago_bytes::BytesDisplay;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::identifier::method::MethodIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
+use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
@@ -146,16 +147,25 @@ fn expand_in_class(codebase: &CodebaseMetadata, method: &MethodIdentifier, union
 }
 
 /// The one class of an instance of `operand_type`, `null` aside, and a type parameter's the one class of its bound. An
-/// enum, which no operator takes, is none.
+/// enum is one only when it declares an operator, spec section 19, as no other operator takes its cases.
 fn get_instance_class(operand_type: &TUnion, codebase: &CodebaseMetadata) -> Option<Word> {
     let mut types = operand_type.types.iter().filter(|atomic| !atomic.is_null());
     match (types.next(), types.next()) {
-        (Some(TAtomic::Object(TObject::Named(object))), None) => {
-            codebase.get_enum(object.name.as_bytes()).is_none().then_some(object.name)
+        (Some(TAtomic::Object(object @ (TObject::Named(_) | TObject::Enum(_)))), None) => {
+            let name = object.get_name()?;
+
+            codebase.get_enum(name.as_bytes()).is_none_or(|r#enum| declares_operator(r#enum, codebase)).then_some(name)
         }
         (Some(TAtomic::GenericParameter(parameter)), None) => get_instance_class(&parameter.constraint, codebase),
         _ => None,
     }
+}
+
+/// Whether the class-like `class` declares a PHP# operator, spec section 19.
+pub(crate) fn declares_operator(class: &ClassLikeMetadata, codebase: &CodebaseMetadata) -> bool {
+    class.methods.iter().any(|method| {
+        codebase.get_method(class.name.as_bytes(), method.as_bytes()).is_some_and(|method| method.flags.is_operator())
+    })
 }
 
 /// Checks the operands of a PHP# operator as the arguments of the static call `method` it runs as, at `span`, and

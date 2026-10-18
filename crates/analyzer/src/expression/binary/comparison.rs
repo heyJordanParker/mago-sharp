@@ -1176,20 +1176,23 @@ fn refusal(
 }
 
 /// Why PHP# cannot order a value of `lhs_type` against one of `rhs_type`, as `<`, `<=`, `>`, `>=`, `<=>` and `sortedBy`
-/// order, or `None` when it can. PHP# orders an instance by the `operator <=>` its class declares, and a string by its
-/// bytes, so only against a string. A `bool`, an enum case and a collection have no order, even against an `Any?`. Only
-/// `==` and `!=` take `null`, so a side that may be `null` is refused whatever its type. An `Any?` keeps its own report.
+/// order, or `None` when it can. PHP# orders an instance by the `operator <=>` its class declares, a case by the one
+/// its enum declares, and a string by its bytes, so only against a string. A `bool`, a case of any other enum and a
+/// collection have no order, even against an `Any?`. Only `==` and `!=` take `null`, so a side that may be `null` is
+/// refused whatever its type. An `Any?` keeps its own report.
 fn ordering_refusal(lhs_type: &TUnion, rhs_type: &TUnion, codebase: &CodebaseMetadata) -> Option<Refusal> {
     let (lhs, rhs) = (comparands(lhs_type, codebase), comparands(rhs_type, codebase));
     let has = |comparand: Comparand| lhs.contains(&comparand) || rhs.contains(&comparand);
+    let method = get_comparison_method(&BinaryOperator::Spaceship(Span::zero()), lhs_type, rhs_type, codebase);
+    let ordered_case = |comparand: &Comparand| matches!(comparand, Comparand::Enum(_)) && method.is_some();
 
-    if lhs.iter().chain(&rhs).any(|comparand| comparand.is_unordered()) {
+    if lhs.iter().chain(&rhs).any(|comparand| comparand.is_unordered() && !ordered_case(comparand)) {
         return Some(Refusal::UnorderedOperand);
     }
 
-    let different_types = if lhs.iter().chain(&rhs).any(|comparand| comparand.is_instance()) {
-        let ordering = BinaryOperator::Spaceship(Span::zero());
-        let Some(method) = get_comparison_method(&ordering, lhs_type, rhs_type, codebase) else {
+    let different_types = if lhs.iter().chain(&rhs).any(|comparand| comparand.is_instance() || ordered_case(comparand))
+    {
+        let Some(method) = method else {
             return Some(Refusal::Instance);
         };
 

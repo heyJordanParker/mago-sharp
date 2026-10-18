@@ -25433,6 +25433,181 @@ fn ordering_instances_compares_op_comparison_with_zero() {
 }
 
 /// ```php
+/// interface Priced { public const string CURRENCY = 'USD'; public mixed $label { get; } }
+/// trait Priced\Defaults {
+///     public static function op_Comparison(\App\Priced $a, \App\Priced $b): int { return $a->cents <=> $b->cents; }
+///     public static function 'op_Comparison@App\Priced'(\App\Priced $a, \App\Priced $b): int { … }
+/// }
+/// return [$operand#1 = $a, $operand#1::{'op_Comparison@App\Priced'}($operand#1, $b)][1] < 0;
+/// return \App\Book::op_Comparison($a, $b) < 0;
+/// return \App\Size::op_Comparison(\App\Size::Small, \App\Size::Large) < 0;
+/// ```
+///
+/// Spec sections 19 and 22: an interface's constant is `[1]` `ZEND_ACC_PUBLIC`, and its operator is a `[17]` public
+/// static method of its trait of default bodies twice: by its own name, which a class's own operator replaces, and by
+/// the name of its interface, which no class replaces. Two values of the interface run the second on the class of the
+/// first, which runs once. A class that gets the operator from the trait, and an enum that declares one, run it as a
+/// class runs its own.
+#[test]
+fn an_interface_operator_runs_from_its_trait_on_the_class_of_an_operand() {
+    let files = lowered_each(
+        &[
+            (
+                "src/App/Priced.sharp",
+                "namespace App;\n\npublic interface Priced\n{\n    const string CURRENCY = \"USD\";\n    int cents { get; }\n    static int operator <=>(Priced a, Priced b) => a.cents <=> b.cents;\n}\n",
+            ),
+            (
+                "src/App/Book.sharp",
+                "namespace App;\n\npublic class Book : Priced\n{\n    public int cents { get; }\n    public Book(int cents) { this.cents = cents; }\n}\n",
+            ),
+            (
+                "src/App/Size.sharp",
+                "namespace App;\n\npublic enum Size : int\n{\n    case Small = 1;\n    case Large = 3;\n\n    public static int operator <=>(Size a, Size b) => a.value <=> b.value;\n}\n",
+            ),
+            (
+                "src/App/Uses.sharp",
+                "namespace App;\n\npublic static class Uses\n{\n    public static bool priced(Priced a, Priced b) => a < b;\n\n    public static bool books(Book a, Book b) => a < b;\n\n    public static bool sizes() => Size.Small < Size.Large;\n}\n",
+            ),
+        ],
+        &[],
+    );
+    let member = |name: &str, path: &[u32]| member_in(&files, name, path);
+
+    assert_eq!(
+        [
+            member("Priced", &[0]),
+            member("Priced\\Defaults", &[]),
+            member("Uses", &[0, 2]),
+            member("Uses", &[1, 2]),
+            member("Uses", &[2, 2]),
+        ]
+        .concat(),
+        indoc! {r#"
+            CLASS_CONST_GROUP [1]
+              CLASS_CONST_DECL
+                CONST_ELEM
+                  ZVAL "CURRENCY"
+                  ZVAL "USD"
+                  null
+              null
+              ZVAL [1] "string"
+            STMT_LIST
+              METHOD [17] "op_Comparison" @7-7
+                PARAM_LIST
+                  PARAM
+                    ZVAL "App\\Priced"
+                    ZVAL "a"
+                    null
+                    null
+                    null
+                    null
+                  PARAM
+                    ZVAL "App\\Priced"
+                    ZVAL "b"
+                    null
+                    null
+                    null
+                    null
+                null
+                STMT_LIST
+                  RETURN
+                    BINARY_OP [170]
+                      PROP
+                        VAR
+                          ZVAL "a"
+                        ZVAL "cents"
+                      PROP
+                        VAR
+                          ZVAL "b"
+                        ZVAL "cents"
+                ZVAL [1] "int"
+                null
+              METHOD [17] "op_Comparison@App\\Priced" @7-7
+                PARAM_LIST
+                  PARAM
+                    ZVAL "App\\Priced"
+                    ZVAL "a"
+                    null
+                    null
+                    null
+                    null
+                  PARAM
+                    ZVAL "App\\Priced"
+                    ZVAL "b"
+                    null
+                    null
+                    null
+                    null
+                null
+                STMT_LIST
+                  RETURN
+                    BINARY_OP [170]
+                      PROP
+                        VAR
+                          ZVAL "a"
+                        ZVAL "cents"
+                      PROP
+                        VAR
+                          ZVAL "b"
+                        ZVAL "cents"
+                ZVAL [1] "int"
+                null
+            STMT_LIST
+              RETURN
+                BINARY_OP [20]
+                  DIM
+                    ARRAY [3]
+                      ARRAY_ELEM
+                        ASSIGN
+                          VAR
+                            ZVAL "operand#1"
+                          VAR
+                            ZVAL "a"
+                        null
+                      ARRAY_ELEM
+                        STATIC_CALL
+                          VAR
+                            ZVAL "operand#1"
+                          ZVAL "op_Comparison@App\\Priced"
+                          ARG_LIST
+                            VAR
+                              ZVAL "operand#1"
+                            VAR
+                              ZVAL "b"
+                        null
+                    ZVAL 1
+                  ZVAL 0
+            STMT_LIST
+              RETURN
+                BINARY_OP [20]
+                  STATIC_CALL
+                    ZVAL "App\\Book"
+                    ZVAL "op_Comparison"
+                    ARG_LIST
+                      VAR
+                        ZVAL "a"
+                      VAR
+                        ZVAL "b"
+                  ZVAL 0
+            STMT_LIST
+              RETURN
+                BINARY_OP [20]
+                  STATIC_CALL
+                    ZVAL "App\\Size"
+                    ZVAL "op_Comparison"
+                    ARG_LIST
+                      CLASS_CONST
+                        ZVAL "App\\Size"
+                        ZVAL "Small"
+                      CLASS_CONST
+                        ZVAL "App\\Size"
+                        ZVAL "Large"
+                  ZVAL 0
+        "#}
+    );
+}
+
+/// ```php
 /// return \App\Money::op_UnaryNegation(\App\Money::op_Addition($a, $b));
 /// ```
 #[test]

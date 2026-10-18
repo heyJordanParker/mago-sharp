@@ -1021,10 +1021,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             r#struct.left_brace,
             r#struct.right_brace,
         );
-        let declares_equality = r#struct.members.iter().any(|member| {
-            matches!(member, ClassLikeMember::Operator(operator) if matches!(operator.symbol, BinaryOperator::Equal(_)))
-        });
-        if !declares_equality {
+        if !declares_equality(&r#struct.members) {
             members.push(self.value_equality(r#struct.name.span, &[self.class]));
         }
         members.extend(self.parse_methods(&r#struct.members, r#struct.name.span));
@@ -1771,7 +1768,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 ClassLikeMember::Method(method) => {
                     self.method(method, modifier_flags_or_private(&method.modifiers), &[])
                 }
-                ClassLikeMember::Operator(operator) => self.operator(operator),
+                ClassLikeMember::Operator(operator) => self.operator(operator, None),
                 ClassLikeMember::NamedConstructor(
                     constructor @ NamedConstructor { initializer: Some(initializer), .. },
                 ) => self.named_constructor(constructor, initializer),
@@ -2126,26 +2123,24 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.node(SHARP_AST_NAME_LIST, 0, self.line(inheritance), &names)
     }
 
-    /// An interface is a class declaration with `ZEND_ACC_INTERFACE` whose methods are `public` and abstract, as
-    /// php-src's grammar builds `interface Measured { public function area(): float; }`. Its default bodies are in the
-    /// trait `defaults` lowers.
+    /// An interface is a class declaration with `ZEND_ACC_INTERFACE` whose methods are `public` and abstract and whose
+    /// constants are public, as php-src's grammar builds
+    /// `interface Measured { public const int SIDES = 4; public function area(): float; }`. Its default bodies and its
+    /// operators are in the trait `defaults` lowers.
     fn interface(&mut self, interface: &Interface) -> u32 {
         self.class = self.names.get(&interface.name);
         let mut members = Vec::new();
         for member in &interface.members {
-            if let ClassLikeMember::Property(Property::Hooked(property)) = member {
-                members.push(self.interface_property(property));
-                continue;
-            }
-            if let ClassLikeMember::Property(Property::Computed(computed)) = member {
-                members.push(self.defaulted_property(computed.variable.name, computed.span(), NULL));
-                continue;
-            }
-            let ClassLikeMember::Method(method) = member else {
-                unreachable!("check_slice refuses the interface member `{member}`");
-            };
-
-            members.push(self.signature(method));
+            members.push(match member {
+                ClassLikeMember::Property(Property::Hooked(property)) => self.interface_property(property),
+                ClassLikeMember::Property(Property::Computed(computed)) => {
+                    self.defaulted_property(computed.variable.name, computed.span(), NULL)
+                }
+                ClassLikeMember::Method(method) => self.signature(method),
+                ClassLikeMember::Constant(constant) => self.constant(constant),
+                ClassLikeMember::Operator(_) => continue,
+                _ => unreachable!("check_slice refuses the interface member `{member}`"),
+            });
         }
 
         members.extend(self.class_metadata(self.class, self.line(interface.name)));
@@ -2166,8 +2161,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// The trait that holds an interface's default bodies, spec section 22, on the interface's lines, as php-src's
     /// grammar builds `trait Defaults { … }`. It is named `HasDesign\Defaults` for the interface `HasDesign`, and the
     /// engine declares it in the file's namespace, so every name in a body resolves as it does in the interface. Each
-    /// default body is a method, in source order: a method's is `public`, and a computed property's is
-    /// `protected function 'designKey@App\HasDesign'(): string`, which the property of each class that gets it runs. A
+    /// default body is a method, in source order: a method's is `public`, a computed property's is
+    /// `protected function 'designKey@App\HasDesign'(): string`, which the property of each class that gets it runs,
+    /// and an operator is `op_Comparison` and `'op_Comparison@App\Priced'`, as [`Self::operator`] lowers it. A
     /// generic interface's trait has the header `App.Keyed<$0>`. An interface without a default body has no trait.
     fn defaults(&mut self, interface: &Interface) -> Option<u32> {
         self.class = self.names.get(&interface.name);
@@ -2196,6 +2192,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                         &name,
                         &[parameters, NULL, body, return_type, NULL],
                     ));
+                }
+                ClassLikeMember::Operator(operator) => {
+                    members.push(self.operator(operator, None));
+                    members.push(self.operator(operator, Some(interface_name)));
                 }
                 _ => {}
             }
@@ -2395,8 +2395,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// Spec section 20: an enum with a case that carries data is an abstract class, with the enum's header as its
-    /// interface list, the enum's constants and methods, and the `op_Equality` that compares two of the same case
-    /// field by field, as `abstract class PaymentResult implements \App\HasLabel`. Each case is a final subclass named
+    /// interface list, the enum's constants, methods and operators, and, unless it declares `operator ==`, the
+    /// `op_Equality` that compares two of the same case field by field, as
+    /// `abstract class PaymentResult implements \App\HasLabel`. Each case is a final subclass named
     /// in the enum's namespace, declared after it, that implements `\Sharp\Struct`, so a `Map` or a `Set` hashes it by
     /// its fields as it hashes a struct. A case that carries data promotes its fields in its constructor, as
     /// `final class Paid extends \App\PaymentResult implements \Sharp\Struct { public function __construct(public readonly string $transactionId) {} }`
@@ -2421,6 +2422,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     continue;
                 }
                 ClassLikeMember::Property(property @ Property::Computed(_)) => self.property(property, None),
+                ClassLikeMember::Operator(operator) => self.operator(operator, None),
                 ClassLikeMember::EnumCase(_) | ClassLikeMember::Law(_) => continue,
                 _ => unreachable!("check_slice refuses the enum member `{member}`"),
             });
@@ -2435,7 +2437,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             })
             .collect();
         let cases: Vec<&[u8]> = cases.iter().map(Vec::as_slice).collect();
-        members.push(self.value_equality(r#enum.name.span, &cases));
+        if !declares_equality(&r#enum.members) {
+            members.push(self.value_equality(r#enum.name.span, &cases));
+        }
         members.splice(0..0, self.trait_members(r#enum.inheritance.as_ref(), r#enum.left_brace));
 
         let members = self.node(SHARP_AST_STMT_LIST, 0, self.line(r#enum.left_brace), &members);
@@ -2595,6 +2599,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 }
                 // Spec section 31: a computed property has no storage, which a PHP# enum's property may lack.
                 ClassLikeMember::Property(property @ Property::Computed(_)) => self.property(property, None),
+                ClassLikeMember::Operator(operator) => self.operator(operator, None),
                 _ => unreachable!("check_slice refuses the enum member `{member}`"),
             });
         }
@@ -2795,11 +2800,14 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// builds `public static function op_Addition(\App\Money $a, \App\Money $b): \App\Money`. `==` is lifted over null,
     /// as C# lifts it: its parameters are nullable, and its body starts with
     /// `if ($a === null || $b === null) { return $a === $b; }`, so null equals only null. Its body makes each `Set`
-    /// parameter a `Set` before that, as a method's does.
-    fn operator(&mut self, operator: &Operator) -> u32 {
+    /// parameter a `Set` before that, as a method's does. An interface's operator runs from its trait of default
+    /// bodies, once as `op_Addition`, which each class that uses the trait gets unless it declares its own, and once
+    /// as `op_Addition@App\Priced`, which no class replaces: the method `interface` names it after.
+    fn operator(&mut self, operator: &Operator, interface: Option<Word>) -> u32 {
         let Some(name) = php_operator_name(&operator.symbol, operator.parameter_list.parameters.len()) else {
             unreachable!("check_slice refuses the operator `{}`", operator.symbol);
         };
+        let declared = interface.map_or_else(|| name.to_vec(), |interface| super_alias(interface, word(name)));
         let lifted = matches!(operator.symbol, BinaryOperator::Equal(_));
 
         self.enter(name);
@@ -2829,10 +2837,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
         self.declaration(
             SHARP_AST_METHOD,
-            modifier_flags(&operator.modifiers),
+            modifier_flags(&operator.modifiers) | ZEND_ACC_PUBLIC,
             &operator.return_type_hint,
             operator.body.span(),
-            name,
+            &declared,
             &[parameters, NULL, body, return_type, attributes],
         )
     }
@@ -4065,7 +4073,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// A constant is a class constant group of one constant, as php-src's grammar builds `public const int MAX = 3;`:
-    /// the constant list, the attributes, then the type.
+    /// the constant list, the attributes, then the type. A constant without an access modifier is `private`, and an
+    /// interface's is `public`, as every interface member is.
     fn constant(&mut self, constant: &ClassLikeConstant) -> u32 {
         let item = constant.first_item();
         let line = self.line(item.name);
@@ -4085,12 +4094,13 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             None => NULL,
         };
 
-        self.node(
-            SHARP_AST_CLASS_CONST_GROUP,
-            modifier_flags_or_private(&constant.modifiers),
-            self.line(constant),
-            &[declaration, attributes, hint],
-        )
+        let flags = if self.types.class_declaration(self.class).kind == DeclarationKind::Interface {
+            ZEND_ACC_PUBLIC
+        } else {
+            modifier_flags_or_private(&constant.modifiers)
+        };
+
+        self.node(SHARP_AST_CLASS_CONST_GROUP, flags, self.line(constant), &[declaration, attributes, hint])
     }
 
     /// The hidden method that sets each static whose initial value isn't constant, as PHP gives a static only a constant
@@ -5354,11 +5364,12 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             Expression::UnaryPrefix(unary) => {
                 if let UnaryPrefixOperator::Negation(operator) = unary.operator
                     && let Some(name) = php_operator_name(&BinaryOperator::Subtraction(operator), 1)
-                    && let Some(class) = self.types.operator_class(name, &[self.types.expression_type(unary.operand)])
+                    && let Some(declaring) =
+                        self.types.operator_class(name, &[self.types.expression_type(unary.operand)])
                 {
-                    let operand = self.expression(unary.operand);
-
-                    return self.operator_call(line, class, name, &[operand]);
+                    return self.declared_operator_call(line, declaring, name, |lowering| {
+                        vec![lowering.expression(unary.operand)]
+                    });
                 }
 
                 if let Expression::ArrayAccess(access) = unary.operand
@@ -6128,10 +6139,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
             return if negated { self.node(SHARP_AST_UNARY_OP, ZEND_BOOL_NOT, line, &[call]) } else { call };
         }
-        if let Some((class, name)) = self.declared_equality(lhs_type, rhs_type) {
-            let lhs = self.side(&lhs);
-            let rhs = self.side(&rhs);
-            let call = self.operator_call(line, class, name, &[lhs, rhs]);
+        if let Some((declaring, name)) = self.declared_equality(lhs_type, rhs_type) {
+            let call = self.declared_operator_call(line, declaring, name, |lowering| {
+                vec![lowering.side(&lhs), lowering.side(&rhs)]
+            });
 
             return if negated { self.node(SHARP_AST_UNARY_OP, ZEND_BOOL_NOT, line, &[call]) } else { call };
         }
@@ -6158,9 +6169,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.node(SHARP_AST_BINARY_OP, attr, line, &[lhs, rhs])
     }
 
-    /// The class whose `op_Equality` `==` runs on a value of `lhs_type` and one of `rhs_type`, as the checker chose it,
-    /// with the method's name, or none when `==` on them is `===` or two floats. `== null` runs none.
-    fn declared_equality(&self, lhs_type: &TUnion, rhs_type: &TUnion) -> Option<(Word, &'static [u8])> {
+    /// The type whose `op_Equality` `==` runs on a value of `lhs_type` and one of `rhs_type`, as the checker chose it,
+    /// with the operand it was found through and the method's name, or none when `==` on them is `===` or two floats.
+    /// `== null` runs none.
+    fn declared_equality(&self, lhs_type: &TUnion, rhs_type: &TUnion) -> Option<((Word, usize), &'static [u8])> {
         if lhs_type.is_null() || rhs_type.is_null() {
             return None;
         }
@@ -6458,9 +6470,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.node(SHARP_AST_CONDITIONAL, ZEND_PARENTHESIZED_CONDITIONAL, line, &[set, given, otherwise])
     }
 
-    /// The class and the PHP name of the operator a compound assignment runs on instances, as `op_Addition` for `+=`,
-    /// or none when its operands are no instances whose class declares it.
-    fn declared_compound_operator(&self, assignment: &Assignment) -> Option<(Word, &'static [u8])> {
+    /// The type, with the operand it was found through, and the PHP name of the operator a compound assignment runs on
+    /// instances, as `op_Addition` for `+=`, or none when its operands are no instances whose type declares it.
+    fn declared_compound_operator(&self, assignment: &Assignment) -> Option<((Word, usize), &'static [u8])> {
         let operator = compound_operator(&assignment.operator)?;
         let name = php_operator_name(&operator, 2)?;
         let types = self.types;
@@ -6474,8 +6486,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// the operator its operands' class declares, and otherwise spec section 24's: `+` on two strings joins them, and
     /// `/` on two ints divides toward zero.
     fn compound_value(&mut self, line: u32, assignment: &Assignment, read: u32, value: u32) -> u32 {
-        if let Some((class, name)) = self.declared_compound_operator(assignment) {
-            return self.operator_call(line, class, name, &[read, value]);
+        if let Some((declaring, name)) = self.declared_compound_operator(assignment) {
+            return self.declared_operator_call(line, declaring, name, |_| vec![read, value]);
         }
 
         match (&assignment.operator, self.operand_types_of(assignment)) {
@@ -6566,12 +6578,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         };
         let name = php_operator_name(&declared, 2)?;
         let types = self.types;
-        let class =
+        let declaring =
             types.operator_class(name, &[types.expression_type(binary.lhs), types.expression_type(binary.rhs)])?;
-
-        let lhs = self.expression(binary.lhs);
-        let rhs = self.expression(binary.rhs);
-        let call = self.operator_call(line, class, name, &[lhs, rhs]);
+        let call = self.declared_operator_call(line, declaring, name, |lowering| {
+            vec![lowering.expression(binary.lhs), lowering.expression(binary.rhs)]
+        });
 
         Some(match binary.operator {
             BinaryOperator::LessThan(_)
@@ -6585,6 +6596,64 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             }
             _ => call,
         })
+    }
+
+    /// The call a PHP# operator runs on the operands `operands` lowers, on the type [`Types::operator_class`] found, at
+    /// the operand it found it through: the static method a class or an enum declares, as
+    /// `\App\Money::op_Addition($a, $b)`, or an interface's, spec section 19, the method each class that uses the
+    /// interface's trait gets and never replaces, called on the class of that operand. The operands up to that one,
+    /// and both of `==`, run once, in order, into hidden locals, and the call reads them:
+    /// `[$operand#1 = $a, $operand#1::{'op_Addition@App\Priced'}($operand#1, $b)][1]`. `==` lifts null over them, as
+    /// C# lifts it, so null equals only null and runs no operator.
+    fn declared_operator_call(
+        &mut self,
+        line: u32,
+        (class, receiver): (Word, usize),
+        name: &[u8],
+        operands: impl FnOnce(&mut Self) -> Vec<u32>,
+    ) -> u32 {
+        if self.types.class_declaration(class.as_bytes()).kind != DeclarationKind::Interface {
+            let operands = operands(self);
+
+            return self.operator_call(line, class, name, &operands);
+        }
+
+        let lifted = php_operator_name(&BinaryOperator::Equal(Span::zero()), 2) == Some(name);
+        let taken = self.temporaries;
+        let count = if lifted { 2 } else { receiver + 1 };
+        let held: Vec<Vec<u8>> = std::iter::repeat_with(|| self.hidden("operand")).take(count).collect();
+        let mut arguments = operands(self);
+        self.temporaries = taken;
+        let read = |lowering: &mut Self, index: usize| {
+            let variable = lowering.local_name(0, line, &held[index]);
+
+            lowering.node(SHARP_AST_VAR, 0, line, &[variable])
+        };
+        let mut steps = Vec::new();
+        for (index, argument) in arguments.iter_mut().take(held.len()).enumerate() {
+            let place = read(self, index);
+            let assign = self.node(SHARP_AST_ASSIGN, 0, line, &[place, *argument]);
+            steps.push(self.node(SHARP_AST_ARRAY_ELEM, 0, line, &[assign, NULL]));
+            *argument = read(self, index);
+        }
+        let receiver_class = read(self, receiver);
+        let method = self.string(0, line, &super_alias(class, word(name)));
+        let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &arguments);
+        let mut call = self.node(SHARP_AST_STATIC_CALL, 0, line, &[receiver_class, method, arguments]);
+        if lifted {
+            let [lhs, rhs] = [0, 1].map(|index| read(self, index));
+            let [lhs_null, rhs_null] = [lhs, rhs].map(|operand| self.is_null(line, operand));
+            let either_null = self.node(SHARP_AST_OR, 0, line, &[lhs_null, rhs_null]);
+            let [lhs, rhs] = [0, 1].map(|index| read(self, index));
+            let both_null = self.node(SHARP_AST_BINARY_OP, ZEND_IS_IDENTICAL, line, &[lhs, rhs]);
+            call = self.node(SHARP_AST_CONDITIONAL, 0, line, &[either_null, both_null, call]);
+        }
+        steps.push(self.node(SHARP_AST_ARRAY_ELEM, 0, line, &[call, NULL]));
+        let position = steps.len() - 1;
+        let steps = self.node(SHARP_AST_ARRAY, ZEND_ARRAY_SYNTAX_SHORT, line, &steps);
+        let position = self.zval(line, sharp_value::SHARP_LONG, |node| node.long_value = position as i64);
+
+        self.node(SHARP_AST_DIM, 0, line, &[steps, position])
     }
 
     /// `\Class::name(arguments)`, the static method `class` declares to run an operator or an extension's member.
@@ -9024,6 +9093,14 @@ fn union_members<'hint, 'arena>(hint: &'hint Hint<'arena>) -> Vec<&'hint Hint<'a
 /// as `label@App\HasLabel`. No PHP# member name holds `@`, so it can't clash with one.
 fn super_alias(interface: Word, method: Word) -> Vec<u8> {
     [method.as_bytes(), b"@", interface.as_bytes()].concat()
+}
+
+/// Whether `members` declare `operator ==`, which replaces the `op_Equality` a struct or an enum with data gets with no
+/// code, spec section 19.
+fn declares_equality(members: &Sequence<ClassLikeMember>) -> bool {
+    members.iter().any(|member| {
+        matches!(member, ClassLikeMember::Operator(operator) if matches!(operator.symbol, BinaryOperator::Equal(_)))
+    })
 }
 
 /// Whether a static property runs accessors, decision 3: a computed one, or one whose accessors run as hooks, an

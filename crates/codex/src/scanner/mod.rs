@@ -440,10 +440,11 @@ impl Scanner {
     }
 
     /// Registers the trait that holds a PHP# interface's default bodies, spec section 22, named by
-    /// [`defaults_trait_name`], with each method of the interface that has a body, when the interface gives a method or
-    /// a computed property one. The interface's own methods stay
-    /// abstract, as the PHP interface's are, so a class gets a default body only through the trait: the populator gives
-    /// it to each PHP# class that implements the interface, and a plain PHP class writes `use HasDesign\Defaults;`.
+    /// [`defaults_trait_name`], with each method of the interface that has a body and each operator, spec section 19,
+    /// when the interface gives a method or a computed property one or declares an operator. The interface's own
+    /// methods stay abstract, as the PHP interface's are, so a class gets a default body only through the trait: the
+    /// populator gives it to each PHP# class that implements the interface, and a plain PHP class writes
+    /// `use HasDesign\Defaults;`.
     fn register_defaults_trait<'arena, A>(&mut self, interface: &Interface<'arena>, context: &Context<'_, 'arena, A>)
     where
         A: Arena,
@@ -492,14 +493,16 @@ impl Scanner {
         }
 
         for member in &interface.members {
-            let ClassLikeMember::Method(method) = member else {
-                continue;
+            let member_name = match member {
+                ClassLikeMember::Method(method) if !matches!(method.body, MethodBody::Abstract(_)) => method.name.value,
+                ClassLikeMember::Operator(operator) => match MethodParts::of_operator(operator) {
+                    Some(parts) => parts.name,
+                    None => continue,
+                },
+                _ => continue,
             };
-            if matches!(method.body, MethodBody::Abstract(_)) {
-                continue;
-            }
 
-            let method_name = ascii_lowercase_word(method.name.value);
+            let method_name = ascii_lowercase_word(member_name);
             let Some(signature) = self.codebase.function_likes.get(&(interface_name, method_name)) else {
                 continue;
             };
