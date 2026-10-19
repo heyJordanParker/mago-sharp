@@ -18255,6 +18255,68 @@ fn a_static_method_value_of_a_generic_class_keeps_its_type_arguments() {
     let lowered = Lowered::new(
         "namespace App.Tenant;\n\nclass Counter<T>\n{\n    public static int bump() => 1;\n\n    public static Function<int()> bumper() => Self.bump;\n}\n",
     );
+    let main = Lowered::with(
+        "namespace App.Tenant;\n\nclass Main\n{\n    public static Function<int()> bumper() => Counter<int>.bump;\n\n    public static Function<int()> own() => Self.one;\n\n    public static int one() => 1;\n}\n",
+        &[(
+            "src/App/Tenant/Counter.sharp",
+            "namespace App.Tenant;\n\nclass Counter<T>\n{\n    public static int bump() => 1;\n}\n",
+        )],
+    );
+
+    // `Counter<int>.bump` keeps `int`, on `Counter::class`.
+    assert_eq!(
+        main.render(main.child(main.method_named("bumper"), 2)),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                CALL
+                  CLOSURE "" @5-5
+                    PARAM_LIST
+                      PARAM
+                        null
+                        ZVAL "receiver"
+                        null
+                        null
+                        null
+                        null
+                    null
+                    STMT_LIST
+                      RETURN
+                        CLOSURE "" @5-5
+                          PARAM_LIST
+                          CLOSURE_USES
+                            ZVAL "receiver"
+                          STMT_LIST
+                            RETURN
+                              STATIC_CALL
+                                VAR
+                                  ZVAL "receiver"
+                                ZVAL "bump"
+                                ARG_LIST
+                                  SHARP_TYPE_ARGS
+                                    null
+                                    ZVAL "int"
+                          null
+                          null
+                    null
+                    null
+                  ARG_LIST
+                    CLASS_NAME
+                      ZVAL "App\\Tenant\\Counter"
+        "#}
+    );
+    // A class that isn't generic keeps PHP's first-class callable.
+    assert_eq!(
+        main.render(main.child(main.method_named("own"), 2)),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                STATIC_CALL
+                  ZVAL [1] "static"
+                  ZVAL "one"
+                  CALLABLE_CONVERT
+        "#}
+    );
 
     assert_eq!(
         lowered.render(lowered.child(lowered.method_named("bumper"), 2)),

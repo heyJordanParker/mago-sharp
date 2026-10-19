@@ -551,9 +551,6 @@ fn record_class_type_arguments<A>(
 ) where
     A: Arena,
 {
-    if !context.dialect.is_sharp() {
-        return;
-    }
     let Some(type_arguments) = statics_type_arguments(context, block_context, artifacts, class_expression) else {
         return;
     };
