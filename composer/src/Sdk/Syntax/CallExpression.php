@@ -103,7 +103,7 @@ final class CallExpression
             );
         // A PHP# call of a plain PHP function, `global.max()` or `Pdf.render()`, is a method call whose member Mago
         // names as the function.
-        if ($memberName !== null && !$builds) {
+        if ($member !== null && $memberName !== null && !$builds) {
             return new self($node, $member, null, $member, $arguments, false, true);
         }
 

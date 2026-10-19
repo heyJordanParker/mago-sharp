@@ -855,9 +855,9 @@ final class InvocationCallKindHook implements NodeAnalysisHook
     {
         $call = CallExpression::fromNode($context->source, $context->node);
         InvocationAudit::record('call-kind-' . self::describe($context, $call));
-        // A PHP# call of a plain PHP function names the function at its member, `render` in `Pdf.render()`.
-        if ($call->isFunction() && $call->member !== null && getenv('MAGO_INVOCATION_FUNCTION_NAMES') === '1') {
-            InvocationAudit::record('function-' . ($context->source->getResolvedName($call->member)?->name ?? ''));
+        // A PHP# call of a plain PHP function names the function at its callee, `render` in `Pdf.render()`.
+        if ($call->isFunction() && getenv('MAGO_INVOCATION_FUNCTION_NAMES') === '1') {
+            InvocationAudit::record('function-' . ($context->source->getResolvedName($call->callee)->name ?? ''));
         }
 
         $receiver = $call->receiver === null ? null : CallExpression::fromExpression($context->source, $call->receiver);
