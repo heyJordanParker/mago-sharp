@@ -620,11 +620,11 @@ impl Issue {
             || self.code.as_deref().is_some_and(|code| code.contains('/'))
     }
 
-    /// The warning that a suppression targets an error in a PHP# file, which it can't hide. The `annotations` point
-    /// at the suppression and the error.
+    /// The warning that a suppression targets one of the language's errors in a PHP# file, which it can't hide. The
+    /// `annotations` point at the suppression and the error.
     #[must_use]
     pub fn unsuppressible_error(annotations: impl IntoIterator<Item = Annotation>) -> Self {
-        Self::warning("An error can't be suppressed in PHP#.")
+        Self::warning("A pragma, an `ignore` entry or the baseline hides an extension host rule's error, never one of the language's errors.")
             .with_code(UNSUPPRESSIBLE_ERROR)
             .with_annotations(annotations)
             .with_help("Fix the error, then remove the suppression.")

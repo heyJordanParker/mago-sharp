@@ -616,7 +616,11 @@ fn remove_folder(folder: &Path) -> io::Result<()> {
 
 /// Mago's cache folder: `$XDG_CACHE_HOME/mago`, else `~/Library/Caches/mago` on macOS, `%LOCALAPPDATA%\mago` on
 /// Windows and `~/.cache/mago` elsewhere.
-fn cache_root() -> io::Result<PathBuf> {
+///
+/// # Errors
+///
+/// Returns an error when no environment variable names the cache and the user has no home folder.
+pub fn cache_root() -> io::Result<PathBuf> {
     if let Some(cache) = std::env::var_os("XDG_CACHE_HOME").filter(|cache| !cache.is_empty()) {
         return Ok(PathBuf::from(cache).join("mago"));
     }

@@ -45,6 +45,7 @@ use mago_reporting::Level;
 
 use crate::commands::args::baseline_reporting::BaselineReportingArgs;
 use crate::commands::args::substitution::SubstitutionArgs;
+use crate::commands::compile::compile_for_hosts;
 use crate::commands::outcome::CommandOutcome;
 use crate::commands::stdin_input;
 use crate::config::Configuration;
@@ -266,7 +267,8 @@ impl LintCommand {
         let orchestrator_init_duration = orchestrator_init_start.map(|s| s.elapsed());
 
         let load_database_start = trace_enabled.then(Instant::now);
-        let extension_hosts = &configuration.extension_hosts;
+        let (extension_hosts, _) = compile_for_hosts(&configuration)?;
+        let extension_hosts = &extension_hosts;
         let extension_host_enabled = extension_hosts.values().any(|host| host.enabled);
         let worker_count = configuration.threads;
         let php_version = configuration.php_version;

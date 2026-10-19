@@ -10,6 +10,7 @@
 //! finds classes by listing `*.php` files or reading their source finds PHP# classes too, spec section 27. A removed
 //! source loses its PHP file, and git's `info/exclude` keeps the files no `.gitignore` covers out of git.
 
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -23,17 +24,22 @@ use clap::ColorChoice;
 use clap::Parser;
 
 use mago_allocator::LocalArena;
+use mago_database::Database;
 use mago_database::DatabaseReader;
 use mago_database::error::DatabaseError;
 use mago_database::file::COMPANION_START;
 use mago_database::file::File;
 use mago_database::file::FileType;
 use mago_database::file::FolderNamespace;
+use mago_orchestrator::Orchestrator;
 use mago_orchestrator::service::incremental_analysis::compile::Compilation;
 use mago_orchestrator::service::incremental_analysis::compile::DispatcherModule;
 use mago_orchestrator::service::incremental_analysis::compile::Listener;
 use mago_prelude::Prelude;
+use mago_reporting::CompiledIgnoreSet;
 use mago_reporting::IssueCollection;
+use mago_reporting::ReportingFormat;
+use mago_reporting::ReportingTarget;
 use mago_reporting::color::ColorChoice as ReportingColorChoice;
 use mago_reporting::reporter::Reporter;
 use mago_reporting::reporter::ReporterConfig;
@@ -47,12 +53,14 @@ use mago_syntax::cst::Statement;
 use mago_syntax::dialect::Dialect;
 use mago_syntax::parser::parse_file;
 
+use crate::baseline::unserialize_baseline;
 use crate::commands::analyze::analyze_the_whole_workspace_without_paths;
 use crate::commands::analyze::decode_prelude;
 use crate::commands::analyze::server_settings;
 use crate::commands::args::reporting::default_reporting_format;
 use crate::commands::outcome::CommandOutcome;
 use crate::config::Configuration;
+use crate::config::extension::ExtensionHostConfiguration;
 use crate::consts::PRELUDE_BYTES;
 use crate::error::Error;
 use crate::extensions::start_external_analyzer;
@@ -80,55 +88,170 @@ impl CompileCommand {
     /// included, when a source is a link to a file outside the workspace, when a package in `vendor/` holds a `.sharp`
     /// folder of its own, or when a PHP file someone wrote sits where a source's PHP file goes. Every accepted file is
     /// written either way.
-    pub fn execute(self, configuration: Configuration, color_choice: ColorChoice) -> Result<CommandOutcome, Error> {
-        compile_for_hosts(&configuration, color_choice)?;
+    pub fn execute(self, mut configuration: Configuration, color_choice: ColorChoice) -> Result<CommandOutcome, Error> {
+        configuration.extension_hosts = compile_for_hosts(&configuration)?.0;
 
-        compile(&configuration, color_choice, false)
+        compile(&configuration, color_choice)
     }
 }
 
-/// Compiles the project without its extension hosts when one of its PHP# files has no current compiled file, so a host
-/// loads the project's own classes as on plain PHP, on a fresh tree and after any change. A host sees the project as
-/// it is without what the hosts add, as a Roslyn source generator sees the compilation before its generators run and a
-/// Kotlin compiler plugin sees the module's own classes. Prints nothing: the run with the hosts that follows reports the
-/// project's errors and replaces each compiled file.
+/// The environment variable that names the project root to a worker of an extension host, which the engine reads.
+const HOST_ROOT: &str = "SHARP_ROOT";
+
+/// The environment variable that names to a worker of an extension host the folder its engine reads the project's
+/// compiled files from.
+const HOST_COMPILED: &str = "SHARP_COMPILED";
+
+/// The checker's report of the files the hosts' compile refused, in the hosts' folder, which the engine reads for a
+/// worker's refusal of such a file.
+const HOST_REPORT: &str = "report.json";
+
+/// Compiles every PHP# file of the project for its extension hosts, so a host loads the project's own classes as on
+/// plain PHP, on a fresh or read-only tree and after any change. Returns the project's hosts, each enabled one given
+/// the folder through [`HOST_ROOT`] and [`HOST_COMPILED`], which every command starts its hosts from, and whether a
+/// file in the folder changed, so a watch knows its hosts' workers may hold classes that changed. The folder is the
+/// project's in mago's cache, outside the project, and only the hosts' engine reads it, so the project's `.sharp`
+/// folder holds only what `mago compile` accepted.
+///
+/// The compile runs without the hosts and lowers every file that lowers, whatever the analysis says of it: a host sees
+/// the project as it is, as a Roslyn analyzer gets the compilation with its errors and `tsc` emits despite type errors.
+/// A file that does not lower is in the folder's [`HOST_REPORT`], so a worker that loads it gets the checker's errors.
+/// It runs only when a file is missing from the folder or out of date, and prints nothing: the run with the hosts that
+/// follows reports the project's errors.
 ///
 /// # Errors
 ///
 /// Returns the error that stops the compile.
-pub(crate) fn compile_for_hosts(configuration: &Configuration, color_choice: ColorChoice) -> Result<(), Error> {
-    if !configuration.extension_hosts.values().any(|host| host.enabled) {
-        return Ok(());
+pub(crate) fn compile_for_hosts(
+    configuration: &Configuration,
+) -> Result<(BTreeMap<String, ExtensionHostConfiguration>, bool), Error> {
+    let mut hosts = configuration.extension_hosts.clone();
+    if !hosts.values().any(|host| host.enabled) {
+        return Ok((hosts, false));
     }
 
+    let workspace = configuration.source.workspace.clone();
+    let root = workspace.canonicalize().map_err(|error| Error::CanonicalizingPath(workspace.clone(), error))?;
+    let project: String =
+        unit::source_hash(root.as_os_str().as_encoded_bytes()).iter().map(|byte| format!("{byte:02x}")).collect();
+    let folder = mago_sharp_lean::cache_root().map_err(DatabaseError::from)?.join("hosts").join(project);
     let mut without_hosts = configuration.clone();
     without_hosts.extension_hosts.clear();
 
-    tracing::subscriber::with_default(tracing::subscriber::NoSubscriber::default(), || {
-        compile(&without_hosts, color_choice, true)
-    })
-    .map(|_| ())
-}
+    let compiled = tracing::subscriber::with_default(tracing::subscriber::NoSubscriber::default(), || {
+        compile_into(&without_hosts, &root, &folder)
+    })?;
 
-/// Checks every PHP# file the analyzer loads, writes the compiled file of each accepted one, and deletes every other
-/// file in the `.sharp` folder, as [`CompileCommand::execute`] says. With `for_hosts`, it compiles only when a PHP#
-/// file has no current compiled file, and reports nothing.
-fn compile(configuration: &Configuration, color_choice: ColorChoice, for_hosts: bool) -> Result<CommandOutcome, Error> {
-    let mut orchestrator = create_orchestrator(configuration, color_choice, false, !for_hosts, false);
-    analyze_the_whole_workspace_without_paths(&mut orchestrator);
-    orchestrator.add_exclude_patterns(configuration.analyzer.excludes.iter());
-    if let Some(external_analyzer) = start_external_analyzer(
-        &configuration.extension_hosts,
-        configuration.php_version,
-        configuration.threads,
-        &configuration.analyzer.plugins,
-        configuration.analyzer.disable_default_plugins,
-    ) {
-        orchestrator.set_external_analyzer_handle(external_analyzer);
+    for host in hosts.values_mut().filter(|host| host.enabled) {
+        host.environment.insert(HOST_ROOT.to_owned(), root.to_string_lossy().into_owned());
+        host.environment.insert(HOST_COMPILED.to_owned(), folder.to_string_lossy().into_owned());
     }
 
-    let workspace = configuration.source.workspace.as_path();
-    let root = workspace.canonicalize().map_err(|error| Error::CanonicalizingPath(workspace.to_path_buf(), error))?;
+    Ok((hosts, compiled))
+}
+
+/// Compiles the project at `root` into `folder` for its extension hosts, as [`compile_for_hosts`] says, unless every
+/// file there is current. Returns whether a file in `folder` changed.
+fn compile_into(configuration: &Configuration, root: &Path, folder: &Path) -> Result<bool, Error> {
+    let mut orchestrator = create_orchestrator(configuration, ColorChoice::Never, false, false, false);
+    analyze_the_whole_workspace_without_paths(&mut orchestrator);
+    orchestrator.add_exclude_patterns(configuration.analyzer.excludes.iter());
+    let (database, _) = project_database(&orchestrator, &configuration.source.workspace)?;
+    if every_compiled_file_is_current(root, folder, &database)? {
+        return Ok(false);
+    }
+
+    let library = standard_library(root, &database).unwrap_or_default();
+    let mut server = Server::new(database.into_static(), decode_prelude, server_settings(&orchestrator));
+    server.analyze()?;
+    // A file whose errors the lowering does not survive is refused, whatever panic message its lowering printed.
+    let printing = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|panic| tracing::debug!("{panic}")));
+    let compilations = server.compile(
+        |path| unit::stamp(root, path),
+        |_| Ok(Vec::new()),
+        |_, _| Ok(Default::default()),
+        &library,
+        |_| IssueCollection::default(),
+    );
+    std::panic::set_hook(printing);
+    let database = server.database();
+
+    // Whether a file a host's worker loads changed, so a watch knows to start the workers again.
+    let mut changed = false;
+    let mut write = |path: &Path, bytes: &[u8]| -> Result<(), Error> {
+        if std::fs::read(path).ok().as_deref() != Some(bytes) {
+            write_by_rename(path, bytes).map_err(DatabaseError::from)?;
+            changed = true;
+        }
+        Ok(())
+    };
+    let mut written = BTreeSet::new();
+    let mut refused = IssueCollection::default();
+    let mut accepted = HashSet::new();
+    for (file_id, compilation) in compilations? {
+        let file = database.get_ref(&file_id)?;
+        let source = file.path.clone().unwrap_or_else(|| root.join(String::from_utf8_lossy(&file.name).as_ref()));
+        let Some(compiled) = host_compiled_path(root, folder, &source).map_err(DatabaseError::from)? else {
+            continue;
+        };
+        match compilation {
+            Compilation::Accepted(bytes) => {
+                write(&compiled, &bytes)?;
+                written.insert(compiled);
+                accepted.insert(file_id);
+            }
+            Compilation::Refused(errors) => refused.extend(errors),
+        }
+    }
+
+    let inputs = listener_inputs(root, database)?;
+    if !inputs.is_empty() {
+        let listeners = server.listeners();
+        let accepted: Vec<&Listener> =
+            listeners.iter().filter(|listener| accepted.contains(&listener.file_id)).collect();
+        let table = folder.join(LISTENERS);
+        write(&table, &listener_table(&inputs, &accepted, server.dispatcher_module().as_ref()))?;
+        written.insert(table);
+    }
+
+    let (target, report) = ReportingTarget::buffer();
+    Reporter::new(
+        database.read_only(),
+        ReporterConfig {
+            target,
+            format: ReportingFormat::Json,
+            color_choice: ReportingColorChoice::Never,
+            filter_fixable: false,
+            sort: false,
+            minimum_report_level: None,
+            editor_url: None,
+        },
+    )
+    .report(refused, None)?;
+    let report = report.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+    let path = folder.join(HOST_REPORT);
+    write(&path, &report)?;
+    written.insert(path);
+    let deleted = delete_all_but(folder, &written, &folder.join(PACKAGE_FOLDER)).map_err(DatabaseError::from)?;
+
+    Ok(changed || deleted > 0)
+}
+
+/// Where the hosts' compile of the project at `root` into `folder` puts the compiled file of `source`, at its real path
+/// relative to `root` with `.sharp` replaced by `.sharpc`, or none when `source` is a link outside `root`.
+fn host_compiled_path(root: &Path, folder: &Path, source: &Path) -> std::io::Result<Option<PathBuf>> {
+    let real = source.canonicalize()?;
+
+    Ok(real.strip_prefix(root).ok().map(|relative| folder.join(relative).with_extension("sharpc")))
+}
+
+/// The project's database: every file the analyzer loads with the prelude, and each `.sharp` file of a package as a
+/// file of the project, which the compile checks too. Also gives the names of those packaged files.
+fn project_database(
+    orchestrator: &Orchestrator<'_>,
+    workspace: &Path,
+) -> Result<(Database<'static>, HashSet<Vec<u8>>), Error> {
     let mut database = orchestrator.load_database(workspace, true, None, None)?;
     database.merge_base(Prelude::decode_database(PRELUDE_BYTES).expect("Failed to decode embedded prelude"));
     let packaged: Vec<File> = database
@@ -146,9 +269,29 @@ fn compile(configuration: &Configuration, color_choice: ColorChoice, for_hosts: 
     for file in packaged {
         database.add(file);
     }
-    if for_hosts && every_compiled_file_is_current(&root, &database)? {
-        return Ok(ExitCode::SUCCESS.into());
+
+    Ok((database.into_static(), included))
+}
+
+/// Checks every PHP# file the analyzer loads, writes the compiled file of each accepted one, and deletes every other
+/// file in the `.sharp` folder, as [`CompileCommand::execute`] says.
+fn compile(configuration: &Configuration, color_choice: ColorChoice) -> Result<CommandOutcome, Error> {
+    let mut orchestrator = create_orchestrator(configuration, color_choice, false, true, false);
+    analyze_the_whole_workspace_without_paths(&mut orchestrator);
+    orchestrator.add_exclude_patterns(configuration.analyzer.excludes.iter());
+    if let Some(external_analyzer) = start_external_analyzer(
+        &configuration.extension_hosts,
+        configuration.php_version,
+        configuration.threads,
+        &configuration.analyzer.plugins,
+        configuration.analyzer.disable_default_plugins,
+    ) {
+        orchestrator.set_external_analyzer_handle(external_analyzer);
     }
+
+    let workspace = configuration.source.workspace.as_path();
+    let root = workspace.canonicalize().map_err(|error| Error::CanonicalizingPath(workspace.to_path_buf(), error))?;
+    let (database, included) = project_database(&orchestrator, workspace)?;
 
     // Written before the compile stamps its inputs, which hold the PHP file a default class's name could name in
     // a file's folder, so a compiled file is current once it is written.
@@ -231,12 +374,29 @@ fn compile(configuration: &Configuration, color_choice: ColorChoice, for_hosts: 
     };
     let mut server = Server::new(database.into_static(), decode_prelude, server_settings(&orchestrator));
     server.analyze()?;
+    // The compile hides what `mago analyze` hides: a host rule's error an `ignore` entry or the baseline targets.
+    let ignored =
+        CompiledIgnoreSet::compile(&configuration.analyzer.ignore, configuration.source.glob.to_database_settings());
+    let baseline = match configuration.analyzer.baseline.as_deref().filter(|path| path.exists()) {
+        Some(path) => Some(unserialize_baseline(path)?.0),
+        None => None,
+    };
+    let read_database = server.database().read_only();
     let lean = Lean::new(&root);
     let compilations = server.compile(
         |path| unit::stamp(&root, path),
         |name| rules_files(&root, name),
         |translations, namespaces| lean.check(translations, namespaces),
         &library,
+        |mut issues| {
+            issues.filter_out_ignored(&ignored, |file_id| {
+                read_database.get_ref(&file_id).ok().map(|file| String::from_utf8_lossy(&file.name).into_owned())
+            });
+            match &baseline {
+                Some(baseline) => baseline.filter_issues(issues, &read_database),
+                None => issues,
+            }
+        },
     )?;
     let database = server.database();
 
@@ -294,10 +454,6 @@ fn compile(configuration: &Configuration, color_choice: ColorChoice, for_hosts: 
     if compiled_folder.is_dir() {
         delete_all_but(&compiled_folder, &written, &compiled_folder.join(PACKAGE_FOLDER))
             .map_err(DatabaseError::from)?;
-    }
-
-    if for_hosts {
-        return Ok(ExitCode::SUCCESS.into());
     }
 
     for folder in package_compiled_folders(&root, database) {
@@ -358,16 +514,17 @@ fn compile(configuration: &Configuration, color_choice: ColorChoice, for_hosts: 
     Ok(ExitCode::SUCCESS.into())
 }
 
-/// Whether each PHP# file the compile checks has a compiled file the engine runs: one whose every input is as it was
-/// stamped, written by this checker build. A source that is a link outside the project never has one.
+/// Whether each PHP# file the compile checks has a compiled file in the hosts' `folder` the engine runs: one whose every
+/// input is as it was stamped, written by this checker build. A source that is a link outside the project never has
+/// one.
 ///
 /// # Errors
 ///
 /// Returns the error of reading a compiled file or one of its inputs.
-fn every_compiled_file_is_current(root: &Path, database: &impl DatabaseReader) -> Result<bool, Error> {
+fn every_compiled_file_is_current(root: &Path, folder: &Path, database: &impl DatabaseReader) -> Result<bool, Error> {
     for file in database.files().filter(|file| file.file_type == FileType::Host && Dialect::of(file).is_sharp()) {
         let source = file.path.clone().unwrap_or_else(|| root.join(String::from_utf8_lossy(&file.name).as_ref()));
-        let Some(compiled) = unit::compiled_path(root, &source).map_err(DatabaseError::from)? else {
+        let Some(compiled) = host_compiled_path(root, folder, &source).map_err(DatabaseError::from)? else {
             continue;
         };
         let bytes = match std::fs::read(&compiled) {
@@ -659,27 +816,27 @@ fn files(count: usize) -> String {
 }
 
 /// Deletes every file under `folder` that is not in `kept` and not under the folder `owned`, which the Lean step owns,
-/// then every folder left empty, `folder` included.
-fn delete_all_but(folder: &Path, kept: &BTreeSet<PathBuf>, owned: &Path) -> std::io::Result<bool> {
-    let mut empty = true;
+/// then every folder left empty, `folder` included. Returns how many files it deleted.
+fn delete_all_but(folder: &Path, kept: &BTreeSet<PathBuf>, owned: &Path) -> std::io::Result<usize> {
+    let mut deleted = 0;
     for entry in std::fs::read_dir(folder)? {
         let entry = entry?;
         let path = entry.path();
-        if path == owned {
-            empty = false;
-        } else if entry.file_type()?.is_dir() {
-            empty &= delete_all_but(&path, kept, owned)?;
-        } else if kept.contains(&path) {
-            empty = false;
+        if path == owned || kept.contains(&path) {
+            continue;
+        }
+        if entry.file_type()?.is_dir() {
+            deleted += delete_all_but(&path, kept, owned)?;
         } else {
             std::fs::remove_file(&path)?;
+            deleted += 1;
         }
     }
-    if empty {
+    if std::fs::read_dir(folder)?.next().is_none() {
         std::fs::remove_dir(folder)?;
     }
 
-    Ok(empty)
+    Ok(deleted)
 }
 
 /// The Composer package of the file named `name`, as `vendor/package`, or none outside `vendor/`.

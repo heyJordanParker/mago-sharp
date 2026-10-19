@@ -118,7 +118,7 @@ impl Server {
     /// `.sharp` file at a workspace-relative path. `check` gets the Lean translation of every accepted file and the
     /// namespace of every PHP# class-like, and returns the issues of each file whose law is not proved or that breaks a
     /// structure rule. Each compiled file's header names `standard_library`, the standard library the workspace
-    /// compiles against.
+    /// compiles against. `refusing` keeps the analysis's errors that refuse their file.
     ///
     /// # Errors
     ///
@@ -130,8 +130,9 @@ impl Server {
         rules: impl FnMut(&[u8]) -> std::io::Result<Vec<Vec<u8>>>,
         check: impl FnOnce(Vec<Translation>, &[String]) -> std::io::Result<HashMap<FileId, IssueCollection>>,
         standard_library: &Library,
+        refusing: impl FnOnce(IssueCollection) -> IssueCollection,
     ) -> Result<Vec<(FileId, Compilation)>, ServerError> {
-        self.service.compile(stamp, rules, check, standard_library).map_err(ServerError::from)
+        self.service.compile(stamp, rules, check, standard_library, refusing).map_err(ServerError::from)
     }
 
     /// Every PHP# listener of the last analysis, in the order the engine runs them.

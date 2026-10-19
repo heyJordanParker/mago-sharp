@@ -228,8 +228,7 @@ const RECORD: &str = "<?php\n\nnamespace App;\n\nclass Record\n{\n    public fun
 
 /// A plain PHP class that implements a PHP# interface with default bodies needs its `Defaults` trait, what it inherits
 /// must fit the interface, and a parameter must take what the interface's parameter erases to, spec section 22, or the
-/// engine refuses the class when it links it. The compile refuses each, whatever `ignore` entry targets it, and still
-/// writes every accepted PHP# file.
+/// engine refuses the class when it links it. The compile refuses each, and still writes every accepted PHP# file.
 #[test]
 fn compile_refuses_a_plain_php_class_that_does_not_satisfy_the_php_sharp_interface_it_implements() {
     let directory = project(ORDER, MONEY);
@@ -244,11 +243,6 @@ fn compile_refuses_a_plain_php_class_that_does_not_satisfy_the_php_sharp_interfa
         )
     };
     write(root, "app/IntBox.php", &int_box("int"));
-    write(
-        root,
-        "mago.toml",
-        "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[analyzer]\nignore = [\"unimplemented-abstract-method\", \"incompatible-return-type\", \"incompatible-parameter-type\"]\n",
-    );
 
     let output = compile(root);
 
@@ -300,8 +294,9 @@ fn compile_leaves_every_other_error_in_a_plain_php_file_to_mago_analyze() {
     compile_succeeds(root);
 }
 
-/// An extension host that reads the compiled file of `app/Word.sharp` as its hooks run, and appends which word the
-/// file holds to `host.log`, as a host that loads a project class runs that file.
+/// An extension host that reads the compiled file of `app/Word.sharp` its engine would load, from the folder mago names
+/// in `SHARP_COMPILED`, as its hooks run, and appends which word the file holds to `host.log`, as a host that loads a
+/// project class runs that file.
 const HOST_READING_THE_COMPILED_FILE: &str = r#"<?php
 
 declare(strict_types=1);
@@ -330,7 +325,7 @@ final class ReadsTheCompiledFile implements Plugin, BeforeAnalysisHook
 
     public function beforeAnalysis(BeforeAnalysisContext $context): void
     {
-        $compiled = @file_get_contents('.sharp/app/Word.sharpc');
+        $compiled = @file_get_contents(getenv('SHARP_COMPILED') . '/app/Word.sharpc');
         $seen = match (true) {
             $compiled === false => 'nothing',
             str_contains($compiled, 'second') => 'second',
@@ -344,7 +339,9 @@ final class ReadsTheCompiledFile implements Plugin, BeforeAnalysisHook
 "#;
 
 /// A Roslyn source generator sees the compilation's symbols, and a Kotlin compiler plugin sees the module's own
-/// classes, so a host sees each PHP# file compiled from its current source, on a fresh tree and after an edit.
+/// classes, so a host sees each PHP# file compiled from its current source, on a fresh tree and after an edit. The
+/// hosts' compile lives outside the project, so `mago analyze` leaves the project's `.sharp` folder as `mago compile`
+/// wrote it.
 #[test]
 fn a_host_sees_each_php_sharp_file_compiled_from_its_current_source() {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -368,16 +365,378 @@ fn a_host_sees_each_php_sharp_file_compiled_from_its_current_source() {
     );
 
     compile_succeeds(root);
+    let compiled_by_compile = std::fs::read(compiled(root, "app/Word.sharp")).unwrap();
     write(root, "app/Word.sharp", &word("second"));
     let analyzed = Command::new(env!("CARGO_BIN_EXE_mago"))
         .args(["--no-version-check", "--colors", "never", "analyze"])
+        .env("XDG_CACHE_HOME", Path::new(env!("CARGO_TARGET_TMPDIR")).join("cache"))
         .current_dir(root)
         .output()
         .unwrap();
 
     assert!(analyzed.status.success(), "{}", printed(&analyzed));
     assert_eq!(std::fs::read_to_string(root.join("host.log")).unwrap(), "first\nsecond\n");
+    assert_eq!(std::fs::read(compiled(root, "app/Word.sharp")).unwrap(), compiled_by_compile);
 }
+
+/// An extension host whose linter rule appends the word the compiled `app/Word.sharp` holds to `host.log` as it lints
+/// a class, as a rule that instantiates a project's attributes loads that file.
+const LINT_HOST_READING_THE_COMPILED_FILE: &str = r#"<?php
+
+declare(strict_types=1);
+
+use Mago\Sdk\Extension;
+use Mago\Sdk\Linter\LintContext;
+use Mago\Sdk\Linter\Rule;
+use Mago\Sdk\Linter\RuleDefinition;
+use Mago\Sdk\Reporting\Level;
+use Mago\Sdk\Syntax\NodeKind;
+use Mago\Sdk\Worker;
+
+require $argv[1];
+
+final class ReadsTheCompiledFile implements Rule
+{
+    public function getDefinition(): RuleDefinition
+    {
+        return new RuleDefinition(
+            code: 'reader/reads-the-compiled-file',
+            name: 'Reads the compiled file',
+            description: 'Reads app/Word.sharp compiled.',
+            defaultLevel: Level::Warning,
+            defaultEnabled: true,
+            targets: [NodeKind::Class_],
+        );
+    }
+
+    public function lint(LintContext $context): void
+    {
+        $compiled = (string) @file_get_contents(getenv('SHARP_COMPILED') . '/app/Word.sharpc');
+        file_put_contents('host.log', (str_contains($compiled, 'first') ? 'first' : 'nothing') . "\n", FILE_APPEND);
+    }
+}
+
+(new Worker(new Extension('reader', 'Reader', '0.0.0', linterRules: [new ReadsTheCompiledFile()])))->run();
+"#;
+
+/// `mago lint` starts its hosts as `mago analyze` does, so a linter host loads the project's classes on a fresh tree.
+#[test]
+fn a_linter_host_sees_each_php_sharp_file_compiled_on_a_fresh_tree() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if !common::php_sdk_is_available(repository, "the linter host compile test") {
+        return;
+    }
+    let directory = project(ORDER, MONEY);
+    let root = directory.path();
+    write(
+        root,
+        "app/Word.sharp",
+        "namespace App;\n\npublic class Word\n{\n    public static string text() => \"first\";\n}\n",
+    );
+    write(root, "app/Plain.php", "<?php\n\nnamespace App;\n\nfinal class Plain {}\n");
+    write(root, "tools/host.php", LINT_HOST_READING_THE_COMPILED_FILE);
+    write(
+        root,
+        "mago.toml",
+        &format!(
+            "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.reader]\nworkers = 1\ncommand = [\"php\", \"tools/host.php\", {:?}]\n",
+            repository.join("vendor/autoload.php").display().to_string()
+        ),
+    );
+
+    let linted = Command::new(env!("CARGO_BIN_EXE_mago"))
+        .args(["--no-version-check", "--colors", "never", "lint"])
+        .env("XDG_CACHE_HOME", Path::new(env!("CARGO_TARGET_TMPDIR")).join("cache"))
+        .current_dir(root)
+        .output()
+        .unwrap();
+
+    assert!(linted.status.success(), "{}", printed(&linted));
+    let log = std::fs::read_to_string(root.join("host.log")).unwrap_or_default();
+    assert!(!log.is_empty() && log.lines().all(|line| line == "first"), "{log}{}", printed(&linted));
+    assert!(!root.join(".sharp").exists());
+}
+
+/// An extension host that appends its process id and the word the compiled `app/Word.sharp` holds to `host.log` as
+/// each analysis starts.
+const HOST_LOGGING_ITS_PROCESS: &str = r#"<?php
+
+declare(strict_types=1);
+
+use Mago\Sdk\Analyzer\BeforeAnalysisContext;
+use Mago\Sdk\Analyzer\BeforeAnalysisHook;
+use Mago\Sdk\Analyzer\Plugin;
+use Mago\Sdk\Analyzer\PluginDefinition;
+use Mago\Sdk\Analyzer\PluginRegistry;
+use Mago\Sdk\Extension;
+use Mago\Sdk\Worker;
+
+require $argv[1];
+
+final class LogsItsProcess implements Plugin, BeforeAnalysisHook
+{
+    public function getDefinition(): PluginDefinition
+    {
+        return new PluginDefinition('logs-its-process', 'Logs its process', 'Logs its process id.');
+    }
+
+    public function register(PluginRegistry $registry): void
+    {
+        $registry->registerBeforeAnalysisHook($this);
+    }
+
+    public function beforeAnalysis(BeforeAnalysisContext $context): void
+    {
+        $compiled = (string) @file_get_contents(getenv('SHARP_COMPILED') . '/app/Word.sharpc');
+        $word = str_contains($compiled, 'second') ? 'second' : (str_contains($compiled, 'first') ? 'first' : 'nothing');
+        file_put_contents('host.log', getmypid() . " {$word}\n", FILE_APPEND);
+    }
+}
+
+(new Worker(new Extension('logger', 'Logger', '0.0.0', analyzerPlugins: [new LogsItsProcess()])))->run();
+"#;
+
+/// A host's worker keeps each class it loaded, as PHP declares a class once, so `mago analyze --watch` starts the
+/// hosts' workers again when a PHP# file they load changes, as a dev server restarts a worker when a module it loaded
+/// changes.
+#[test]
+fn a_watch_starts_the_hosts_again_when_a_php_sharp_file_changes() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if !common::php_sdk_is_available(repository, "the host watch test") {
+        return;
+    }
+    let directory = project(ORDER, MONEY);
+    let root = directory.path();
+    let word = |word: &str| {
+        format!("namespace App;\n\npublic class Word\n{{\n    public static string text() => \"{word}\";\n}}\n")
+    };
+    write(root, "app/Word.sharp", &word("first"));
+    write(root, "tools/host.php", HOST_LOGGING_ITS_PROCESS);
+    write(
+        root,
+        "mago.toml",
+        &format!(
+            "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.logger]\nworkers = 1\ncommand = [\"php\", \"tools/host.php\", {:?}]\n",
+            repository.join("vendor/autoload.php").display().to_string()
+        ),
+    );
+    let log = || std::fs::read_to_string(root.join("host.log")).unwrap_or_default();
+    let wait_for_lines = |lines: usize| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        while log().lines().count() < lines && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    };
+
+    let mut watch = Command::new(env!("CARGO_BIN_EXE_mago"))
+        .args(["--no-version-check", "--colors", "never", "analyze", "--watch"])
+        .env("XDG_CACHE_HOME", Path::new(env!("CARGO_TARGET_TMPDIR")).join("cache"))
+        .current_dir(root)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    wait_for_lines(1);
+    write(root, "app/Word.sharp", &word("second"));
+    wait_for_lines(2);
+    watch.kill().unwrap();
+    watch.wait().unwrap();
+
+    let log = log();
+    let runs: Vec<(&str, &str)> = log.lines().filter_map(|line| line.split_once(' ')).collect();
+    assert!(runs.len() >= 2, "{log}");
+    assert_eq!(runs[0].1, "first", "{log}");
+    assert_eq!(runs[1].1, "second", "{log}");
+    assert_ne!(runs[0].0, runs[1].0, "{log}");
+}
+
+/// A host that types the project's code, as one that gives a plain PHP helper its return type does, can load the
+/// classes only its typing makes correct: the hosts' compile lowers every file that lowers, whatever the analysis
+/// without the hosts says of it, as Roslyn hands an analyzer a compilation with errors and `tsc` emits despite them.
+/// The host here fails its hook unless the compiled file of `app/Greeting.sharp` is there.
+#[test]
+fn a_typing_host_loads_a_class_only_its_typing_makes_correct_on_a_fresh_tree() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if !common::php_sdk_is_available(repository, "the typing host compile test") {
+        return;
+    }
+    let directory = project(ORDER, MONEY);
+    let root = directory.path();
+    write(
+        root,
+        "app/Greeting.sharp",
+        "namespace App;\n\nimport App.Helpers;\n\npublic class Greeting\n{\n    public static string hello() => Helpers.untyped();\n}\n",
+    );
+    write(
+        root,
+        "app/Helpers/helpers.php",
+        "<?php\n\nnamespace App\\Helpers;\n\nfunction untyped()\n{\n    return 'typed by the host';\n}\n",
+    );
+    write(root, "tools/host.php", TYPING_HOST);
+    write(
+        root,
+        "mago.toml",
+        &format!(
+            "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.typing]\nworkers = 1\ncommand = [\"php\", \"tools/host.php\", {:?}]\n",
+            repository.join("vendor/autoload.php").display().to_string()
+        ),
+    );
+
+    compile_succeeds(root);
+    compile_succeeds(root);
+    assert!(compiled(root, "app/Greeting.sharp").exists());
+}
+
+/// An extension host whose rule `acme/no-marker` reports an error at each `host-error-here` in a file.
+const MARKER_HOST: &str = r#"<?php
+
+declare(strict_types=1);
+
+use Mago\Sdk\Analyzer\AfterFileAnalysisContext;
+use Mago\Sdk\Analyzer\AfterFileAnalysisHook;
+use Mago\Sdk\Analyzer\Plugin;
+use Mago\Sdk\Analyzer\PluginDefinition;
+use Mago\Sdk\Analyzer\PluginRegistry;
+use Mago\Sdk\Extension;
+use Mago\Sdk\Reporting\Issue;
+use Mago\Sdk\Reporting\Level;
+use Mago\Sdk\SourceLocation;
+use Mago\Sdk\Span;
+use Mago\Sdk\Worker;
+
+require $argv[1];
+
+final class MarkerRule implements Plugin, AfterFileAnalysisHook
+{
+    public function getDefinition(): PluginDefinition
+    {
+        return new PluginDefinition('acme', 'Acme rules', 'Reports each marker.');
+    }
+
+    public function register(PluginRegistry $registry): void
+    {
+        $registry->registerAfterFileAnalysisHook($this);
+    }
+
+    public function getRequirements(): array
+    {
+        return [];
+    }
+
+    public function afterFileAnalysis(AfterFileAnalysisContext $context): void
+    {
+        $contents = $context->analysis->getSourceFile()->contents;
+        $found = strpos($contents, 'host-error-here');
+        if ($found !== false) {
+            $context->report(Level::Error, 'no-marker', Issue::at(
+                'The marker `host-error-here` is here.',
+                new SourceLocation($context->analysis->file, new Span($found, $found + 15)),
+            ));
+        }
+    }
+}
+
+(new Worker(new Extension('acme', 'Acme', '0.0.0', analyzerPlugins: [new MarkerRule()])))->run();
+"#;
+
+/// `mago compile` hides what `mago analyze` hides: an error of a host's rule that an `ignore` entry or the baseline
+/// targets refuses no file, as `tsc` and `tsc --noEmit` report the same errors.
+#[test]
+fn compile_hides_the_host_errors_an_ignore_entry_or_the_baseline_hides_from_analyze() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if !common::php_sdk_is_available(repository, "the host error suppression compile test") {
+        return;
+    }
+    let directory = project(ORDER, MONEY);
+    let root = directory.path();
+    write(
+        root,
+        "app/Marked.sharp",
+        "namespace App;\n\npublic class Marked\n{\n    public static string text() => \"host-error-here\";\n}\n",
+    );
+    write(root, "tools/host.php", MARKER_HOST);
+    write(
+        root,
+        "baseline.toml",
+        "variant = \"loose\"\n\n[[issues]]\nfile = \"app/Marked.sharp\"\ncode = \"acme/no-marker\"\nmessage = \"The marker `host-error-here` is here.\"\ncount = 1\n",
+    );
+    let config = |analyzer: &str| {
+        format!(
+            "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[analyzer]\n{analyzer}\n\n[extension-hosts.acme]\nworkers = 1\ncommand = [\"php\", \"tools/host.php\", {:?}]\n",
+            repository.join("vendor/autoload.php").display().to_string()
+        )
+    };
+
+    write(root, "mago.toml", &config(""));
+    let output = compile(root);
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    assert!(printed(&output).contains("acme/no-marker"), "{}", printed(&output));
+
+    for hidden in ["ignore = [\"acme/no-marker\"]", "baseline = \"baseline.toml\""] {
+        write(root, "mago.toml", &config(hidden));
+        let output = compile(root);
+        assert!(output.status.success(), "{hidden}: {}", printed(&output));
+        assert!(compiled(root, "app/Marked.sharp").exists(), "{hidden}");
+    }
+}
+
+/// The typing host of [`a_typing_host_loads_a_class_only_its_typing_makes_correct_on_a_fresh_tree`]: it gives
+/// `App\Helpers\untyped()` the return type `string`, and its hook throws unless the hosts' compile holds
+/// `app/Greeting.sharp`, as a host whose loading of a project class fails rethrows.
+const TYPING_HOST: &str = r#"<?php
+
+declare(strict_types=1);
+
+use Mago\Sdk\Analyzer\BeforeAnalysisContext;
+use Mago\Sdk\Analyzer\BeforeAnalysisHook;
+use Mago\Sdk\Analyzer\FunctionReturnTypeProvider;
+use Mago\Sdk\Analyzer\FunctionTarget;
+use Mago\Sdk\Analyzer\Plugin;
+use Mago\Sdk\Analyzer\PluginDefinition;
+use Mago\Sdk\Analyzer\PluginRegistry;
+use Mago\Sdk\Analyzer\ReturnTypeProviderContext;
+use Mago\Sdk\Analyzer\Type;
+use Mago\Sdk\Extension;
+use Mago\Sdk\Worker;
+
+require $argv[1];
+
+final class TypesHelpers implements FunctionReturnTypeProvider
+{
+    public function getTargets(): array
+    {
+        return [FunctionTarget::exact('App\\Helpers\\untyped')];
+    }
+
+    public function getReturnType(ReturnTypeProviderContext $context): ?Type
+    {
+        return Type::string();
+    }
+}
+
+final class Typing implements Plugin, BeforeAnalysisHook
+{
+    public function getDefinition(): PluginDefinition
+    {
+        return new PluginDefinition('typing', 'Typing', 'Types the helpers and loads App\Greeting.');
+    }
+
+    public function register(PluginRegistry $registry): void
+    {
+        $registry->registerFunctionReturnTypeProvider(new TypesHelpers());
+        $registry->registerBeforeAnalysisHook($this);
+    }
+
+    public function beforeAnalysis(BeforeAnalysisContext $context): void
+    {
+        if (!is_file(getenv('SHARP_COMPILED') . '/app/Greeting.sharpc')) {
+            throw new RuntimeException('App\Greeting isn\'t compiled for the hosts.');
+        }
+    }
+}
+
+(new Worker(new Extension('typing', 'Typing', '0.0.0', analyzerPlugins: [new Typing()])))->run();
+"#;
 
 #[test]
 fn compile_deletes_the_compiled_file_of_a_renamed_or_removed_source() {

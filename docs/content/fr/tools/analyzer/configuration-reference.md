@@ -82,7 +82,7 @@ Le motif est une [regex Rust brute](https://docs.rs/regex/). Écrivez `(?i)` au 
 
 `excludes` et `ignore` ne sont pas la même chose. `excludes` retire entièrement les fichiers de l'analyse, ils ne sont donc pas analysés pour les informations de type. `ignore` analyse toujours le fichier mais supprime les codes listés dans la sortie.
 
-Une entrée `ignore` ne peut pas masquer une erreur dans un fichier PHP# : l'erreur reste signalée, avec un avertissement `unsuppressible-error`.
+Une entrée `ignore` ne peut pas masquer une erreur du langage dans un fichier PHP# : l'erreur reste signalée, avec un avertissement `unsuppressible-error`. Elle masque une erreur d'une règle d'un hôte d'extension, dont le code nomme son hôte, comme `acme/no-raw-sql`, comme tout autre problème, pour `mago analyze` comme pour `mago compile`.
 
 Pour voir ce que la liste `ignore` masque actuellement, lancez `mago analyze --skip-ignores` : la liste entière est désactivée pour cette exécution uniquement.
 

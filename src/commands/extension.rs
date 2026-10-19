@@ -5,6 +5,7 @@ use std::process::ExitCode;
 use clap::Parser;
 use clap::Subcommand;
 
+use crate::commands::compile::compile_for_hosts;
 use crate::config::Configuration;
 use crate::error::Error;
 use crate::extensions::initialize_external_linter;
@@ -33,12 +34,9 @@ impl ExtensionCommand {
     pub fn execute(self, configuration: Configuration) -> Result<ExitCode, Error> {
         let mago_threads = configuration.threads;
         let enabled_hosts = configuration.extension_hosts.iter().filter(|(_, host)| host.enabled).collect::<Vec<_>>();
-        let external = initialize_external_linter(
-            &configuration.extension_hosts,
-            configuration.php_version,
-            configuration.threads,
-        )
-        .map_err(mago_orchestrator::OrchestratorError::from)?;
+        let (extension_hosts, _) = compile_for_hosts(&configuration)?;
+        let external = initialize_external_linter(&extension_hosts, configuration.php_version, configuration.threads)
+            .map_err(mago_orchestrator::OrchestratorError::from)?;
 
         match self.command {
             ExtensionSubcommand::List { json } => {

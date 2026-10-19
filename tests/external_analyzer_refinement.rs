@@ -324,6 +324,7 @@ fn compiled_consumer(
             |_| Ok(Vec::new()),
             |_, _| Ok(Default::default()),
             &Library::default(),
+            |issues| issues,
         )
         .expect("the compile runs");
     let [(_, Compilation::Accepted(bytes))] = compiled.as_slice() else {

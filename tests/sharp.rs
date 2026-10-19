@@ -1289,7 +1289,7 @@ fn analyze_reports_a_sharp_error_an_expect_pragma_targets_and_points_at_the_prag
     assert!(stdout.contains("src/Demo/Broken.sharp:8:16:error - invalid-return-statement:"), "{stdout}");
     assert!(
         stdout.contains(
-            "src/Demo/Broken.sharp:7:12:warning - unsuppressible-error: An error can't be suppressed in PHP#."
+            "src/Demo/Broken.sharp:7:12:warning - unsuppressible-error: A pragma, an `ignore` entry or the baseline hides an extension host rule's error, never one of the language's errors."
         ),
         "{stdout}"
     );
@@ -1309,7 +1309,7 @@ fn analyze_reports_a_sharp_error_an_ignore_entry_targets_and_points_at_the_error
     assert!(stdout.contains("src/Demo/Broken.sharp:8:16:error - invalid-return-statement:"), "{stdout}");
     assert!(
         stdout.contains(
-            "src/Demo/Broken.sharp:8:16:warning - unsuppressible-error: An error can't be suppressed in PHP#."
+            "src/Demo/Broken.sharp:8:16:warning - unsuppressible-error: A pragma, an `ignore` entry or the baseline hides an extension host rule's error, never one of the language's errors."
         ),
         "{stdout}"
     );
@@ -1331,7 +1331,7 @@ fn analyze_reports_a_sharp_error_a_baseline_entry_targets_and_points_at_the_erro
     assert!(stdout.contains("src/Demo/Broken.sharp:8:16:error - invalid-return-statement:"), "{stdout}");
     assert!(
         stdout.contains(
-            "src/Demo/Broken.sharp:8:16:warning - unsuppressible-error: An error can't be suppressed in PHP#."
+            "src/Demo/Broken.sharp:8:16:warning - unsuppressible-error: A pragma, an `ignore` entry or the baseline hides an extension host rule's error, never one of the language's errors."
         ),
         "{stdout}"
     );

@@ -17,6 +17,7 @@ mod translate;
 
 pub use lean::Lean;
 pub use lean::proof_file;
+pub use library::cache_root;
 pub use package::PACKAGE_FOLDER;
 pub use reach::Reach;
 pub use rules::rules_files;

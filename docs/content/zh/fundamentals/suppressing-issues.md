@@ -18,7 +18,7 @@ nav_section = "基础"
 
 逗号前后可以有空格或制表符。也可以在每个 code 前重复同一类别：`@mago-expect analysis:mixed-operand(2), analysis:unused-variable`。
 
-`@mago-expect` 或 `@mago-ignore` 指令无法隐藏 PHP# 文件中的错误:该错误仍会被报告,并在该指令上附带一条 `unsuppressible-error` 警告。
+`@mago-expect` 或 `@mago-ignore` 指令无法隐藏 PHP# 文件中的语言错误:该错误仍会被报告,并在该指令上附带一条 `unsuppressible-error` 警告。它会像隐藏其他问题一样,隐藏扩展宿主规则的错误,这类错误的代码会带上宿主名,例如 `acme/no-raw-sql`。
 
 ## `@mago-expect`
 

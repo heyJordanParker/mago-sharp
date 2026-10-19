@@ -18,7 +18,7 @@ Plusieurs codes peuvent être supprimés à la fois avec une liste séparée par
 
 Les espaces et tabulations autour des virgules sont autorisés. Vous pouvez répéter la même catégorie devant chaque code : `@mago-expect analysis:mixed-operand(2), analysis:unused-variable`.
 
-Un pragma `@mago-expect` ou `@mago-ignore` ne peut pas masquer une erreur dans un fichier PHP# : l'erreur reste signalée, avec un avertissement `unsuppressible-error` sur le pragma.
+Un pragma `@mago-expect` ou `@mago-ignore` ne peut pas masquer une erreur du langage dans un fichier PHP# : l'erreur reste signalée, avec un avertissement `unsuppressible-error` sur le pragma. Il masque une erreur d'une règle d'un hôte d'extension, dont le code nomme son hôte, comme `acme/no-raw-sql`, comme tout autre problème.
 
 ## `@mago-expect`
 
