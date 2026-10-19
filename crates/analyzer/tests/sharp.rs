@@ -7424,9 +7424,9 @@ fn new_with_a_named_constructor_checks_its_arguments_and_creates_its_class() {
 }
 
 /// Spec section 9.1: a named constructor is its own class's, so `new` on a subclass finds none, and `new` names only a
-/// named constructor the class declares. `new Self.sized(…)` in the subclass names the class that declares it, as
-/// `own` writes it. A subclass may declare its own of the same name, which keeps a signature PHP accepts for the
-/// static method it runs as.
+/// named constructor the class declares. `new Self.sized(…)` in the subclass finds none either, since `sized` is not
+/// `required`, spec section 11. A subclass may declare its own of the same name, which keeps a signature PHP accepts
+/// for the static method it runs as.
 #[test]
 fn a_named_constructor_is_not_inherited() {
     let sharp = "namespace Demo;\n\nclass Base\n{\n    public Base(public int size { get; }) { }\n\n    public Base.sized(int size) : this(size) { }\n}\n\nclass Sub : Base\n{\n    public Sub(int size) : super(size) { }\n\n    public static Base inherited() => new Sub.sized(1);\n    public static Base missing() => new Base.missing(1);\n    public static Base own() => new Base.sized(1);\n    public static Base itself() => new Self.sized(1);\n}\n\nclass Resized : Base\n{\n    public Resized(int size) : super(size) { }\n\n    public Resized.sized(int size) : this(size * 2) { }\n}\n\nclass Restrung : Base\n{\n    public Restrung(int size) : super(size) { }\n\n    public Restrung.sized(string size) : this(global.strlen(size)) { }\n}\n";
@@ -7437,15 +7437,10 @@ fn a_named_constructor_is_not_inherited() {
         &[
             "14:47 non-existent-method: `Sub` has no constructor `sized`: named constructors are not inherited.",
             "15:46 non-existent-method: `Base` has no constructor `missing`.",
-            "17:36 non-existent-method: `Self` cannot name a named constructor: a named constructor is not inherited, and `Self` can be any subclass.",
+            "17:45 non-existent-method: `Sub` has no constructor `sized`: named constructors are not inherited.",
             "31:21 incompatible-parameter-type: Parameter `size` of `Restrung.sized` expects type `string` but parent `Base.sized` expects type `int`",
         ],
     );
-    let helps: Vec<Option<String>> = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Entity.sharp", sharp), &[])
-        .into_iter()
-        .map(|issue| issue.help)
-        .collect();
-    assert_eq!(helps[2].as_deref(), Some("Name its class: write `new Base.sized(1)`."));
 }
 
 /// Spec section 9.1: a named constructor runs as a static method, and PHP refuses a static and an instance method of
@@ -13332,6 +13327,142 @@ fn new_of_a_type_parameter_is_the_type_parameter_and_takes_its_bounds_required_c
             "Invalid return type for method `Builder.sized`: expected `int`, but found `TItem`.",
             "`new TPlain(…)` needs a `required` constructor: `TPlain` can be any subclass of `Plain`, so every subclass must keep a constructor that `new TPlain(…)` can call.",
         ]
+    );
+}
+
+/// Spec section 11: `new TItem.fromJson(…)` calls the named constructor of the type argument the code runs with, so it
+/// has the type `TItem`, its arguments are checked against the bound's, and the bound marks it `required`, as Swift's
+/// `T(json:)` needs a `required init`. A subclass inherits no named constructor, so each subclass with objects of its
+/// own declares one that a `required` one above it names, and a non-`required` one is refused by its name.
+#[test]
+fn new_of_a_type_parameter_calls_its_bounds_required_named_constructor() {
+    let sharp = "namespace Demo;\n\npublic class Entity\n{\n    public Entity() { }\n\n    public required Entity.fromJson(string json) : this() { }\n\n    public Entity.blank() : this() { }\n}\n\npublic class Order : Entity\n{\n    public Order() : super() { }\n\n    public Order.fromJson(string json) : this() { }\n}\n\npublic class Invoice : Entity\n{\n    public Invoice() : super() { }\n}\n\npublic abstract class Draft : Entity\n{\n    public Draft() : super() { }\n}\n\npublic class Repository<TItem : Entity>\n{\n    public TItem load(string json) => new TItem.fromJson(json);\n\n    public TItem wrong() => new TItem.fromJson(1);\n\n    public int sized(string json) => new TItem.fromJson(json);\n\n    public TItem blank() => new TItem.blank();\n}\n";
+
+    assert_eq!(
+        messages(("src/Demo/Repository.sharp", sharp), &[]),
+        [
+            "`Invoice` must declare the named constructor `fromJson`: `Entity.fromJson` is `required`, so every subclass of `Entity` declares its own.",
+            "Invalid argument type for argument #1 of `Entity.fromJson`: expected `string`, but found `int`.",
+            "Invalid return type for method `Repository.sized`: expected `int`, but found `TItem`.",
+            "`new TItem.blank(…)` needs a `required` named constructor: `TItem` can be any subclass of `Entity`, so every subclass must declare a `blank` that `new TItem.blank(…)` can call.",
+        ]
+    );
+}
+
+/// Spec section 11: `required` passes down, as Swift's `required init` does. A bound anywhere below the class that
+/// marks a named constructor `required`, an abstract one included, accepts `new TItem.fromJson(…)`, and an abstract
+/// class declares a `required` one for its subclasses. `new Self.fromJson(…)` calls the one of the class the code is
+/// called on, so it needs `required` too.
+#[test]
+fn a_required_named_constructor_passes_down() {
+    let sharp = "namespace Demo;\n\npublic class Record\n{\n    public Record() { }\n\n    public required Record.fromJson(string json) : this() { }\n\n    public static Record parse(string json) => new Self.fromJson(json);\n}\n\npublic abstract class Entity : Record\n{\n    public Entity() : super() { }\n}\n\npublic class Order : Entity\n{\n    public Order() : super() { }\n\n    public Order.fromJson(string json) : this() { }\n}\n\npublic abstract class Base\n{\n    public Base() { }\n\n    public required Base.fromJson(string json) : this() { }\n}\n\npublic class Plain\n{\n    public Plain() { }\n\n    public Plain.fromJson(string json) : this() { }\n\n    public static Plain parse() => new Self.fromJson(\"{}\");\n}\n\npublic class Repository<TOrder : Order, TEntity : Entity, TBase : Base>\n{\n    public Repository() { }\n\n    public TOrder order() => new TOrder.fromJson(\"{}\");\n\n    public TEntity entity() => new TEntity.fromJson(\"{}\");\n\n    public TBase base() => new TBase.fromJson(\"{}\");\n}\n";
+
+    assert_messages(
+        sharp,
+        &[],
+        &[
+            "37:36 unsafe-instantiation: `new Self.fromJson(…)` needs a `required` named constructor: `Self` can be any subclass of `Plain`, so every subclass must declare a `fromJson` that `new Self.fromJson(…)` can call.",
+        ],
+    );
+}
+
+/// Spec section 11: a plain PHP class keeps no named constructor of its own, so it is no type argument for a type
+/// parameter the code calls a named constructor through, and is one for a type parameter the code calls none through.
+#[test]
+fn a_plain_php_class_is_no_type_argument_a_named_constructor_is_called_through() {
+    let record = (
+        "src/Demo/Record.sharp",
+        "namespace Demo;\n\npublic class Record\n{\n    public Record() { }\n\n    public required Record.fromJson(string json) : this() { }\n}\n",
+    );
+    let repository = (
+        "src/Demo/Repository.sharp",
+        "namespace Demo;\n\npublic class Repository<TItem : Record>\n{\n    public Repository() { }\n\n    public TItem load(string json) => new TItem.fromJson(json);\n}\n",
+    );
+    let shelf = (
+        "src/Demo/Shelf.sharp",
+        "namespace Demo;\n\npublic class Shelf<TItem : Record>\n{\n    public Shelf() { }\n}\n",
+    );
+    let plain = ("src/Demo/PhpRecord.php", "<?php\n\nnamespace Demo;\n\nclass PhpRecord extends Record\n{\n}\n");
+    let main = (
+        "src/Demo/Main.sharp",
+        "namespace Demo;\n\npublic class Main\n{\n    public static Record run()\n    {\n        Shelf<PhpRecord> shelf = new Shelf<PhpRecord>();\n        Repository<Record> records = new Repository<Record>();\n        return new Repository<PhpRecord>().load(\"{}\");\n    }\n}\n",
+    );
+
+    assert_eq!(
+        messages(main, &[record, repository, shelf, plain]),
+        [
+            "`Repository` calls `new TItem.fromJson(…)`, and the plain PHP class `PhpRecord` keeps no `fromJson` of its own."
+        ]
+    );
+}
+
+/// Spec section 25: `Self.name` reads and writes a constant or a static member of the class the code is called on, as
+/// Swift's `Self.name` does, so a subclass's own constant answers when the call ran on the subclass.
+#[test]
+fn self_reads_and_writes_members_of_the_class_the_code_is_called_on() {
+    let sharp = "namespace Demo;\n\npublic class Store\n{\n    public const string TABLE = \"items\";\n    public static virtual int count { get; set; } = 0;\n\n    public static string table() => Self.TABLE;\n\n    public static int bump()\n    {\n        Self.count += 1;\n        Self.count = Self.count + 1;\n        return Self.count;\n    }\n\n    public static int wrong() => Self.TABLE;\n\n    public static string missing() => Self.NOPE;\n\n    public static string named() => Store.NOPE;\n}\n";
+
+    assert_eq!(
+        messages(("src/Demo/Store.sharp", sharp), &[]),
+        [
+            "Invalid return type for method `Store.wrong`: expected `int`, but found `string`.",
+            "`Store.NOPE` does not exist.",
+            "Invalid return type for method `Store.missing`: expected `string`, but found `null`.",
+            "`Store.NOPE` does not exist.",
+            "Invalid return type for method `Store.named`: expected `string`, but found `null`.",
+        ]
+    );
+}
+
+/// Spec section 25: `Self.name` can name any subclass, and a private member belongs to the class that declares it, so
+/// `Self.name` on a private constant or static, read or written, is an error that names `Vault.name`, as Swift reaches
+/// through `Self` only what every subclass has. A protected one is each subclass's, and a private static's accessor
+/// reaches its own `field`.
+#[test]
+fn self_reaches_no_private_member() {
+    let sharp = "namespace Demo;\n\npublic class Vault\n{\n    private const string KEY = \"vault\";\n    private static int count = 0;\n    protected const string LABEL = \"vault\";\n    private static int doubled { get; set => field = value * 2; } = 0;\n\n    public static string key() => Self.KEY;\n\n    public static int tick()\n    {\n        Self.count += 1;\n        return Self.count;\n    }\n\n    public static string label() => Self.LABEL;\n\n    public static int twice()\n    {\n        Vault.doubled = 2;\n        return Vault.doubled;\n    }\n}\n";
+
+    assert_eq!(
+        messages(("src/Demo/Vault.sharp", sharp), &[]),
+        [
+            "`Self.KEY` can name a subclass, which has no private `KEY`: write `Vault.KEY`.",
+            "`Self.count` can name a subclass, which has no private `count`: write `Vault.count`.",
+            "`Self.count` can name a subclass, which has no private `count`: write `Vault.count`.",
+        ]
+    );
+}
+
+/// Spec section 24: `&` joins classes and interfaces, and a value is of the intersection only when it is of every type
+/// it joins, as in TypeScript and Swift, so a value of one of them is refused where the intersection goes, and a pattern
+/// narrows to the whole intersection.
+#[test]
+fn an_intersection_takes_a_value_of_every_type_it_joins() {
+    let sharp = "namespace Demo;\n\npublic interface Shippable\n{\n    int weight();\n}\n\npublic interface Billable\n{\n    int amount();\n}\n\npublic class Parcel : Shippable, Billable\n{\n    public int weight() => 1;\n\n    public int amount() => 2;\n}\n\npublic class Box : Shippable\n{\n    public int weight() => 3;\n}\n\npublic class Shipping\n{\n    public (Shippable & Billable)? held { get; set; } = null;\n\n    public int ship(Shippable & Billable item) => item.weight() + item.amount();\n\n    public Shippable & Billable keep(Shippable & Billable item) => item;\n\n    public int test(Any value) => value is Shippable & Billable both ? both.weight() + both.amount() : 0;\n\n    public void run()\n    {\n        this.ship(new Parcel());\n        this.held = new Parcel();\n        this.ship(new Box());\n        this.held = new Box();\n        Shippable & Billable local = new Box();\n    }\n}\n";
+
+    assert_eq!(
+        messages(("src/Demo/Shipping.sharp", sharp), &[]),
+        [
+            "Possible argument type mismatch for argument #1 of `Shipping.ship`: expected `Shippable & Billable`, but possibly received `Box`.",
+            "Invalid type for property `Shipping.held`: expected `(Shippable & Billable)?`, but got `Box`.",
+            "Invalid assignment to `local`: it is declared as `Shippable & Billable`.",
+        ]
+    );
+}
+
+/// Spec section 24: `&` joins at most one class with interfaces, as Swift and Java do, so two classes in one `&` are
+/// refused wherever the type is written: a parameter, a return type, a property, a local, a type test and a type
+/// argument. A class with interfaces, or interfaces alone, are an intersection.
+#[test]
+fn an_intersection_joins_at_most_one_class() {
+    let sharp = "namespace Demo;\n\npublic interface Shareable\n{\n}\n\npublic class Order\n{\n}\n\npublic class Invoice\n{\n}\n\npublic class Desk\n{\n    public (Order & Invoice)? held { get; set; } = null;\n\n    public void take(Order & Shareable & Invoice item) { }\n\n    public Order & Shareable keep(Order & Shareable item) => item;\n\n    public bool test(Any value) => value is Invoice & Order;\n\n    public void run()\n    {\n        List<Order & Invoice> both = [];\n    }\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Desk.sharp", sharp), &[]),
+        ["17:12 invalid-extend", "19:22 invalid-extend", "23:45 invalid-extend", "27:9 invalid-extend"]
+    );
+    assert_eq!(
+        messages(("src/Demo/Desk.sharp", sharp), &[])[0],
+        "`&` joins at most one class with interfaces, and `Order` and `Invoice` are both classes."
     );
 }
 
@@ -19307,6 +19438,45 @@ fn an_on_clause_lists_events_or_interfaces_an_event_implements() {
             format!("9:34 invalid-event `string` is not an event. | Listed here. | {note}"),
             format!("11:26 invalid-event `Any` is not an event. | Listed here. | {note}"),
             format!("13:28 invalid-event `Level` is not an event. | Listed here. | {note}"),
+        ]
+    );
+}
+
+/// Spec section 15: an `on` clause names a generic event's type arguments, as every type does, spec section 11, so
+/// `on Saved<Order>` hears only a `Saved<Order>`, as C# subscribes to an `EventHandler<OrderSaved>`. A bare `on Saved`
+/// names none, and type arguments outside the bound or too many are refused as anywhere else. The parameter is a type
+/// every listed event is, the interface the event implements among them.
+#[test]
+fn an_on_clause_names_the_type_arguments_of_a_generic_event() {
+    let entity = ("app/Shop/Entity.sharp", "namespace App.Shop;\n\npublic class Entity\n{\n}\n");
+    let order = ("app/Shop/Order.sharp", "namespace App.Shop;\n\npublic class Order : Entity\n{\n}\n");
+    let invoice = ("app/Shop/Invoice.sharp", "namespace App.Shop;\n\npublic class Invoice : Entity\n{\n}\n");
+    let entity_event = ("app/Shop/EntityEvent.sharp", "namespace App.Shop;\n\npublic interface EntityEvent\n{\n}\n");
+    let saved =
+        ("app/Shop/Saved.sharp", "namespace App.Shop;\n\npublic event Saved<T : Entity>(T entity) : EntityEvent;\n");
+    let hears = (
+        "app/Shop/Hears.sharp",
+        "namespace App.Shop;\n\npublic class Hears\n{\n    public void orders(Saved<Order> e) on Saved<Order> { }\n\n    public void any(EntityEvent e) on Saved<Order>, Saved<Invoice> { }\n\n    public void bare(Saved<Order> e) on Saved { }\n\n    public void wrong(Saved<Invoice> e) on Saved<Order> { }\n\n    public void unbound() on Saved<string> { }\n\n    public void many() on Saved<Order, Invoice> { }\n}\n",
+    );
+    // A class's type parameter is no type argument a listener can know.
+    let tracker = (
+        "app/Shop/Tracker.sharp",
+        "namespace App.Shop;\n\npublic class Tracker<T : Entity>\n{\n    public void heard(Saved<T> e) on Saved<T> { }\n}\n",
+    );
+
+    assert_eq!(
+        worded(tracker, &[entity, order, entity_event, saved]),
+        [
+            "5:38 invalid-event `Saved<T>` names a type parameter, which no listener can know: name the type it hears, as in `Saved<Order>`, or listen on an interface the event implements. | Listed here. | An `on` clause lists events, which `event` or `extern event` declares, or interfaces an event implements."
+        ]
+    );
+    assert_eq!(
+        worded(hears, &[entity, order, invoice, entity_event, saved]),
+        [
+            "9:41 missing-template-parameter `Saved` needs its type argument. | `Saved` has type parameters | A type, `new` and a static member name the type arguments of a generic class. | Write a type for its type parameter: `Saved<T>`.",
+            "11:44 invalid-event `wrong` takes a `Saved<Invoice>`, and it listens to `Saved<Order>`, which is not one. | Listed here. | The event it takes. | Take a type every listed event implements, such as `EntityEvent`, or take no parameter.",
+            "13:30 template-constraint-violation Type argument `string` does not satisfy `Saved`'s `T`. | `string` is supplied for `T` here... | ...but `T` is bounded by `Entity`. | Supply a type contained by `Entity`.",
+            "15:27 excess-template-parameter Too many type arguments for `Saved`: expected 1, but found 2. | `Saved` is applied here. | `Saved` declares 1 type parameter.",
         ]
     );
 }

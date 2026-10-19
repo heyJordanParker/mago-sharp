@@ -72,13 +72,13 @@ use crate::resolver::class_name::report_class_value_of_no_class;
 use crate::resolver::class_name::report_missing_class;
 use crate::resolver::class_name::report_non_existent_class_like;
 use crate::resolver::class_name::resolve_classnames_from_expression;
+use crate::statement::class_like::requiring_class;
 use crate::statement::function_like::get_this_type;
 use crate::utils::names::article;
 use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_code_member;
 use crate::utils::names::display_member;
 use crate::utils::names::display_type;
-use crate::utils::names::sharp_code_class_name;
 use crate::utils::template::get_generic_parameter_for_offset;
 use crate::visibility::check_method_visibility;
 
@@ -657,48 +657,46 @@ where
 
     let mut type_parameters = None;
 
+    // PHP#'s `new TItem(…)` and `new TItem.fromJson(…)` create the type argument, `new (type)(…)` the class a class
+    // value holds, and `new Self(…)` the class the code is called on, any class below the one they name.
+    let through_class_value = context.dialect.is_sharp() && classname.is_from_class_string();
+    let below_named_class = through_class_value || (context.dialect.is_sharp() && classname.is_static());
+
     let (constructor_id, invocation_kind) = match constructor {
         // A named constructor is the class's own: a subclass inherits none, so `new Sub.fromJson(…)` creates no `Sub`.
+        // A `required` one passes down, spec section 11, so a class below the one that requires it has its own, which
+        // `new TItem.fromJson(…)` and `new Self.fromJson(…)` call, whether or not the class they name declares one.
         Some(constructor) => {
-            let constructor_id = MethodIdentifier::new(metadata.name, ascii_lowercase_word(constructor.name.value));
-            if !context
+            let constructor_name = ascii_lowercase_word(constructor.name.value);
+            let declared = context
                 .codebase
-                .get_method_by_id(&constructor_id)
-                .is_some_and(|method| method.flags.is_named_constructor())
-            {
+                .get_method_by_id(&MethodIdentifier::new(metadata.name, constructor_name))
+                .is_some_and(|method| method.flags.is_named_constructor());
+            let requiring = below_named_class
+                .then(|| requiring_class(context.codebase, Some(metadata.name), constructor.name.value))
+                .flatten();
+            let constructor_id = match requiring {
+                Some(requiring) if !declared => MethodIdentifier::new(requiring.name, constructor_name),
+                _ => MethodIdentifier::new(metadata.name, constructor_name),
+            };
+            if !declared && requiring.is_none() {
                 let name = BytesDisplay(constructor.name.value);
                 let inherited = context
                     .codebase
                     .get_declaring_method(metadata.name.as_bytes(), constructor.name.value)
                     .is_some_and(|method| method.flags.is_named_constructor());
-                let issue = match (inherited, &classname.origin, argument_list) {
-                    // `new Self.of(…)` in a class that inherits `of`, whose declaring class semantics can't see.
-                    (true, ResolutionOrigin::Static { .. }, Some(arguments)) => {
-                        let declaring = context.codebase.get_declaring_method_identifier(&constructor_id);
-                        let fix = format!(
-                            "new {}.{name}{}",
-                            sharp_code_class_name(
-                                context.codebase,
-                                &context.imported_names,
-                                &context.scope,
-                                declaring.get_class_name()
-                            ),
-                            BytesDisplay(&context.source_file.contents[arguments.span().to_range_usize()])
-                        );
-
-                        Issue::error("`Self` cannot name a named constructor: a named constructor is not inherited, and `Self` can be any subclass.")
-                            .with_annotation(Annotation::primary(instantiation_span).with_message("Created here."))
-                            .with_help(format!("Name its class: write `{fix}`."))
-                    }
-                    (true, ..) => Issue::error(format!(
+                let issue = if inherited {
+                    Issue::error(format!(
                         "`{classname_str}` has no constructor `{name}`: named constructors are not inherited."
                     ))
-                    .with_annotation(Annotation::primary(constructor.name.span).with_message("Called here.")),
-                    _ => Issue::error(format!("`{classname_str}` has no constructor `{name}`."))
-                        .with_annotation(Annotation::primary(constructor.name.span).with_message("Called here.")),
+                } else {
+                    Issue::error(format!("`{classname_str}` has no constructor `{name}`."))
                 };
 
-                context.collector.report_with_code(IssueCode::NonExistentMethod, issue);
+                context.collector.report_with_code(
+                    IssueCode::NonExistentMethod,
+                    issue.with_annotation(Annotation::primary(constructor.name.span).with_message("Called here.")),
+                );
 
                 argument_list.analyze(context, block_context, artifacts)?;
 
@@ -916,15 +914,35 @@ where
     // of the class, so the class keeps a constructor every subclass must keep, as `new Self(…)` needs, spec section 25.
     // That holds for every class value, `typeof(Loose)` included, as the spec writes the rule. A plain PHP class's own
     // constructor checks the call.
-    let through_class_value = context.dialect.is_sharp() && classname.is_from_class_string();
-    if has_inconsistent_constructor && through_class_value && metadata.flags.is_sharp() {
-        let written = String::from_utf8_lossy(&context.source_file.contents[class_expression_span.to_range_usize()]);
-        let holder = match &classname.origin {
-            ResolutionOrigin::SpecificClassLikeString(TClassLikeString::Generic { parameter_name, .. }) => {
-                format!("`{parameter_name}` can be")
-            }
-            _ => "a class value can hold".to_owned(),
-        };
+    // `new TItem.fromJson(…)` and `new Self.fromJson(…)` call the named constructor of a class below, which declares
+    // its own, as it inherits none, so it needs one marked `required`, which every subclass keeps, spec section 11.
+    let written = || String::from_utf8_lossy(&context.source_file.contents[class_expression_span.to_range_usize()]);
+    let holder = || match &classname.origin {
+        ResolutionOrigin::SpecificClassLikeString(TClassLikeString::Generic { parameter_name, .. }) => {
+            format!("`{parameter_name}` can be")
+        }
+        ResolutionOrigin::Static { .. } => "`Self` can be".to_owned(),
+        _ => "a class value can hold".to_owned(),
+    };
+    if below_named_class
+        && metadata.flags.is_sharp()
+        && let Some(constructor) = constructor
+    {
+        if requiring_class(context.codebase, Some(metadata.name), constructor.name.value).is_none() {
+            let (written, holder, name) = (written(), holder(), BytesDisplay(constructor.name.value));
+            context.collector.report_with_code(
+                IssueCode::UnsafeInstantiation,
+                Issue::error(format!(
+                    "`new {written}.{name}(…)` needs a `required` named constructor: {holder} any subclass of `{classname_str}`, so every subclass must declare a `{name}` that `new {written}.{name}(…)` can call.",
+                ))
+                .with_annotation(Annotation::primary(instantiation_span).with_message("Created here."))
+                .with_help(format!(
+                    "Declare `{classname_str}.{name}` `required`, as in `public required {classname_str}.{name}(…)`."
+                )),
+            );
+        }
+    } else if has_inconsistent_constructor && through_class_value && metadata.flags.is_sharp() {
+        let (written, holder) = (written(), holder());
         context.collector.report_with_code(
             IssueCode::UnsafeInstantiation,
             Issue::error(format!(

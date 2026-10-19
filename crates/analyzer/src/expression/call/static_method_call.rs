@@ -176,7 +176,7 @@ where
                 context,
                 resolved_method.classname,
                 resolved_method.method_identifier.get_class_name(),
-                statics_type_arguments(artifacts, call.class),
+                statics_type_arguments(context, block_context, artifacts, call.class).as_deref(),
             );
         }
 

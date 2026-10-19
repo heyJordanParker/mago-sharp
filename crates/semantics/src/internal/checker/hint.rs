@@ -37,12 +37,12 @@ pub fn check_hint(hint: &Hint, context: &mut Context<'_, '_, '_>) {
                 );
             }
 
-            // PHP# writes `Any?` for PHP's `mixed` and `(int|string)?` for a union that holds null, and `check_slice`
-            // checks both.
+            // PHP# writes `Any?` for PHP's `mixed`, and `(int|string)?` and `(Shippable & Billable)?` for a union and an
+            // intersection that hold null, and `check_slice` checks each.
             let is_sharp_nullable = context.program.dialect.is_sharp()
                 && match nullable_hint.hint {
                     Hint::Mixed(_) => true,
-                    Hint::Parenthesized(parenthesized) => parenthesized.hint.is_union(),
+                    Hint::Parenthesized(parenthesized) => parenthesized.hint.is_parenthesizable(),
                     _ => false,
                 };
 
@@ -62,7 +62,12 @@ pub fn check_hint(hint: &Hint, context: &mut Context<'_, '_, '_>) {
             }
         }
         Hint::Union(union_hint) => {
-            if !union_hint.left.is_unionable() {
+            // PHP#'s `&` binds tighter than `|`, so a PHP# union holds an intersection, which `check_slice` decides.
+            let is_unionable = |member: &Hint| {
+                member.is_unionable() || (context.program.dialect.is_sharp() && member.is_intersection())
+            };
+
+            if !is_unionable(union_hint.left) {
                 let val = BytesDisplay(context.get_code_snippet(union_hint.left));
 
                 context.report(
@@ -78,7 +83,7 @@ pub fn check_hint(hint: &Hint, context: &mut Context<'_, '_, '_>) {
                 );
             }
 
-            if !union_hint.right.is_unionable() {
+            if !is_unionable(union_hint.right) {
                 let val = BytesDisplay(context.get_code_snippet(union_hint.right));
 
                 context.report(
@@ -106,6 +111,11 @@ pub fn check_hint(hint: &Hint, context: &mut Context<'_, '_, '_>) {
                     )
                     .with_help("Upgrade to PHP 8.2 or above to use intersection types."),
                 );
+            }
+
+            // `check_slice` decides each type a PHP# intersection joins.
+            if context.program.dialect.is_sharp() {
+                return;
             }
 
             if !intersection_hint.left.is_intersectable() {

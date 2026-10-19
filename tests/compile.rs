@@ -862,6 +862,33 @@ fn compile_writes_every_listener_of_an_accepted_file_in_order() {
     );
 }
 
+/// Spec section 15: a listener on a generic event lists the event with its type arguments, as the type text the engine
+/// tests an emitted event against, so `on Saved<Order>` runs for a `Saved<Order>` alone, while a listener on an
+/// interface the event implements lists the interface's name and runs for every `Saved<…>`.
+#[test]
+fn compile_writes_a_generic_event_s_listener_with_its_type_arguments() {
+    let directory = lawful_project(&[
+        ("app/Entity.sharp", "namespace App;\n\npublic class Entity\n{\n}\n"),
+        ("app/Order.sharp", "namespace App;\n\npublic class Order : Entity\n{\n}\n"),
+        ("app/EntityEvent.sharp", "namespace App;\n\npublic interface EntityEvent\n{\n}\n"),
+        ("app/Saved.sharp", "namespace App;\n\npublic event Saved<T : Entity>(T entity) : EntityEvent;\n"),
+        (
+            "app/Audit.sharp",
+            "namespace App;\n\npublic class Audit\n{\n    private void deliver(Saved<Order> e) on Saved<Order> { }\n    private void record(EntityEvent e) on EntityEvent { }\n}\n",
+        ),
+    ]);
+    let root = directory.path();
+
+    compile_succeeds(root);
+    let table = read(root, ".sharp/listeners.php");
+    assert!(
+        table.contains(
+            "        ['App\\Audit', 'deliver', ['App.Saved<App.Order>'], true],\n        ['App\\Audit', 'record', ['App\\EntityEvent'], true],\n"
+        ),
+        "{table}"
+    );
+}
+
 /// The standard library's `Dispatcher`, at its place in a project that installs the library.
 const LIBRARY_DISPATCHER: [(&str, &str); 2] = [
     (

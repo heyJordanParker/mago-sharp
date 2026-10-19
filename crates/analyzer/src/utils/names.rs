@@ -598,10 +598,12 @@ where
         }
     }
 
+    // An intersection that holds null is written in parentheses, as a union is, spec section 24.
+    let is_intersection = union.types.iter().any(TAtomic::has_intersection_types);
     match (union.has_null(), parts.as_slice()) {
         (false, _) => parts.join("|"),
         (true, []) => "null".to_owned(),
-        (true, [part]) => format!("{part}?"),
+        (true, [part]) if !is_intersection => format!("{part}?"),
         (true, _) => format!("({})?", parts.join("|")),
     }
 }

@@ -1970,13 +1970,15 @@ enum Parameter {
     Bound,
 }
 
-/// `r#type` in the one PHP# spelling the engine parses, the type text of php-sharp's decision 72: a class by its full
-/// dotted name as it is declared, the built-in types, `List<T>`, `Map<K, V>`, `Set<T>`, `Iterable<T>`, a tuple as
-/// `[A, B]`, `Class<T>`,
-/// `Function<R(P1, P2)>`, a type parameter as `Any?`, `T?`, `(A|B)?`, `A & B`, and an intersection in parentheses
-/// inside a union or a nullable type, `(A & B)|C` and `(A & B)?`. Union and intersection members are sorted by their
-/// text, and a space comes only after a comma and around `&`.
-pub(crate) fn type_text(r#type: &TUnion, codebase: &CodebaseMetadata) -> String {
+/// `r#type` in the one PHP# spelling the engine parses, the type text of php-sharp's decision 72.
+///
+/// A class is written by its full dotted name as it is declared, beside the built-in types, `List<T>`, `Map<K, V>`,
+/// `Set<T>`, `Iterable<T>`, a tuple as `[A, B]`, `Class<T>`, `Function<R(P1, P2)>`, a type parameter as `Any?`, `T?`,
+/// `(A|B)?`, `A & B`, and an intersection in parentheses inside a union or a nullable type, `(A & B)|C` and
+/// `(A & B)?`. Union and intersection members are sorted by their text, and a space comes only after a comma and
+/// around `&`.
+#[must_use]
+pub fn type_text(r#type: &TUnion, codebase: &CodebaseMetadata) -> String {
     text(r#type, codebase, Parameter::Any)
 }
 

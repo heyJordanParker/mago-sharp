@@ -393,9 +393,9 @@ fn php_syntax_returns_a_parse_error_and_no_nodes() {
 
 #[test]
 fn a_construct_outside_the_slice_returns_its_not_supported_error() {
-    let lowered = Lowered::new(&method_with("int run(Report & Report other)", "        return 1;\n"));
+    let lowered = Lowered::new("namespace App;\n\ninterface Sized\n{\n    int max { get; init; }\n}\n");
 
-    assert_eq!(lowered.diagnostics(), ["7:20 compile error: This type is not supported yet in PHP#."]);
+    assert_eq!(lowered.diagnostics(), ["5:5 compile error: This class member is not supported yet in PHP#."]);
 }
 
 /// Spec section 2: each of the 43 PHP keywords PHP# doesn't use is a plain name, and so is a word that means something
@@ -4463,6 +4463,168 @@ fn a_static_method_of_a_generic_class_takes_the_class_type_arguments_as_its_own(
                         ZVAL "App.Order"
                   ZVAL "count"
         "##}
+    );
+}
+
+/// ```php
+/// public static function bump(/* type args: bounds "Any?" */): int {
+///     \Sharp\Internal\statics(\App\Counter::class, /* the text of "#0" */)['count'] += 1;
+///     return \Sharp\Internal\statics(\App\Counter::class, /* the text of "#0" */)['count'];
+/// }
+/// ```
+///
+/// Spec sections 11 and 25: `Self.count` in a generic class reads the statics of the class with its own type
+/// parameters, as `Counter<TItem>.count` does, so each type argument keeps its own count.
+#[test]
+fn self_in_a_generic_class_reads_the_statics_of_its_own_type_arguments() {
+    let lowered = Lowered::new(
+        "namespace App;\n\nclass Counter<TItem>\n{\n    public static int count { get; set; } = 0;\n\n    public static int bump()\n    {\n        Self.count += 1;\n\n        return Self.count;\n    }\n}\n",
+    );
+    let bump = lowered.method_named("bump");
+
+    assert_eq!(
+        lowered.render(lowered.child(bump, 2)),
+        indoc! {r##"
+            STMT_LIST
+              ASSIGN_OP [1]
+                DIM
+                  CALL
+                    ZVAL "Sharp\\Internal\\statics"
+                    ARG_LIST
+                      CLASS_NAME
+                        ZVAL "App\\Counter"
+                      SHARP_TYPE_OF [1]
+                        ZVAL "#0"
+                  ZVAL "count"
+                ZVAL 1
+              RETURN
+                DIM
+                  CALL
+                    ZVAL "Sharp\\Internal\\statics"
+                    ARG_LIST
+                      CLASS_NAME
+                        ZVAL "App\\Counter"
+                      SHARP_TYPE_OF [1]
+                        ZVAL "#0"
+                  ZVAL "count"
+        "##}
+    );
+}
+
+/// ```php
+/// public function load($json): mixed {
+///     return /* the class value of "$0" */::fromJson($json);
+/// }
+/// ```
+///
+/// Spec section 11: `new TItem.fromJson(json)` calls the static method the named constructor runs as on the class of
+/// the type argument the code runs with, as `TItem.make()` calls a static method.
+#[test]
+fn new_of_a_type_parameter_with_a_named_constructor_calls_it_on_the_type_argument() {
+    let entity = (
+        "src/App/Entity.sharp",
+        "namespace App;\n\nclass Entity\n{\n    public Entity() { }\n\n    public required Entity.fromJson(string json) : this() { }\n}\n",
+    );
+    let lowered = Lowered::with(
+        "namespace App;\n\nclass Repository<TItem : Entity>\n{\n    public TItem load(string json) => new TItem.fromJson(json);\n}\n",
+        &[entity],
+    );
+    let load = lowered.method_named("load");
+
+    assert_eq!(
+        lowered.render(lowered.child(load, 2)),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                STATIC_CALL
+                  SHARP_TYPE_OF
+                    ZVAL "$0"
+                  ZVAL "fromJson"
+                  ARG_LIST
+                    VAR
+                      ZVAL "json"
+        "#}
+    );
+}
+
+/// ```php
+/// public static function parse($json): static {
+///     return static::fromJson($json);
+/// }
+/// public function copy(): static {
+///     return static::fromJson($this->id, /* type arguments "$0" */);
+/// }
+/// ```
+///
+/// Spec section 11: `new Self.fromJson(json)` calls the `required` named constructor of the class the code is called
+/// on, so a subclass's own `fromJson` builds the subclass, and a generic class passes `this`'s type arguments.
+#[test]
+fn new_of_self_with_a_named_constructor_calls_it_on_the_class_the_code_is_called_on() {
+    let record = Lowered::new(
+        "namespace App;\n\nclass Record\n{\n    public Record() { }\n\n    public required Record.fromJson(string json) : this() { }\n\n    public static Self parse(string json) => new Self.fromJson(json);\n}\n",
+    );
+
+    assert_eq!(
+        record.render(record.child(record.method_named("parse"), 2)),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                STATIC_CALL
+                  ZVAL [1] "static"
+                  ZVAL "fromJson"
+                  ARG_LIST
+                    VAR
+                      ZVAL "json"
+        "#}
+    );
+
+    let shelf = Lowered::new(
+        "namespace App;\n\nclass Shelf<T>\n{\n    public Shelf() { }\n\n    public required Shelf.fromJson(string json) : this() { }\n\n    public Self copy() => new Self.fromJson(\"{}\");\n}\n",
+    );
+
+    assert_eq!(
+        shelf.render(shelf.child(shelf.method_named("copy"), 2)),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                STATIC_CALL
+                  ZVAL [1] "static"
+                  ZVAL "fromJson"
+                  ARG_LIST
+                    ZVAL "{}"
+                    SHARP_TYPE_ARGS
+                      null
+                      ZVAL "$0"
+        "#}
+    );
+}
+
+/// ```php
+/// return /* $value is "App.Billable & App.Shippable" */;
+/// ```
+///
+/// Spec section 24: a pattern of an intersection tests every type it joins, which the engine reads from the type text,
+/// with its members sorted.
+#[test]
+fn a_pattern_of_an_intersection_tests_every_type_it_joins() {
+    let shippable = ("src/App/Shippable.sharp", "namespace App;\n\ninterface Shippable\n{\n}\n");
+    let billable = ("src/App/Billable.sharp", "namespace App;\n\ninterface Billable\n{\n}\n");
+    let lowered = Lowered::with(
+        "namespace App;\n\nclass Shipping\n{\n    public bool test(Any value) => value is Shippable & Billable;\n}\n",
+        &[shippable, billable],
+    );
+    let test = lowered.method_named("test");
+
+    assert_eq!(
+        lowered.render(lowered.child(test, 2)),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                SHARP_IS_TYPE
+                  VAR
+                    ZVAL "value"
+                  ZVAL "App.Billable & App.Shippable"
+        "#}
     );
 }
 
@@ -18037,6 +18199,195 @@ fn a_static_property_or_method_in_a_parameter_default_runs_in_a_static_closure()
                 null
               ARG_LIST
         "#}
+    );
+}
+
+/// ```php
+/// public static function pick(string $table = (static function () { return static::TABLE; })()): string
+/// ```
+///
+/// Spec section 25: `Self.TABLE` in a default reads the class the call ran on, which no constant expression knows, so
+/// it runs in a static closure, which the engine binds to that class. `Report.TABLE` stays a constant expression.
+#[test]
+fn a_self_constant_in_a_parameter_default_runs_in_a_static_closure() {
+    let lowered = [Lowered::new(
+        "namespace App.Tenant;\n\nclass Report\n{\n    public const string TABLE = \"reports\";\n\n    public static string pick(string table = Self.TABLE) => table;\n\n    public static string named(string table = Report.TABLE) => table;\n}\n",
+    )];
+
+    assert_eq!(
+        member_in(&lowered, "Report", &[1, 0, 0, 2]),
+        indoc! {r#"
+            CALL
+              CLOSURE [16] "" @7-7
+                PARAM_LIST
+                null
+                STMT_LIST
+                  RETURN
+                    CLASS_CONST
+                      ZVAL [1] "static"
+                      ZVAL "TABLE"
+                null
+                null
+              ARG_LIST
+        "#}
+    );
+    assert_eq!(
+        member_in(&lowered, "Report", &[2, 0, 0, 2]),
+        indoc! {r#"
+            CLASS_CONST
+              ZVAL "App\\Tenant\\Report"
+              ZVAL "TABLE"
+        "#}
+    );
+}
+
+/// ```php
+/// public function sort((\App\Tenant\Shippable&\App\Tenant\Billable)|\App\Tenant\Report $item): void
+/// ```
+///
+/// Spec section 24: `&` binds tighter than `|`, so a union holds the intersection, and parentheses around it change
+/// nothing.
+#[test]
+fn a_union_that_holds_an_intersection_is_a_php_dnf_type() {
+    let lowered = [Lowered::with(
+        "namespace App.Tenant;\n\nclass Report\n{\n    public void sort(Shippable & Billable | Report item) { }\n\n    public void grouped((Shippable & Billable) | Report item) { }\n}\n",
+        &[
+            ("src/App/Tenant/Shippable.sharp", "namespace App.Tenant;\n\npublic interface Shippable\n{\n}\n"),
+            ("src/App/Tenant/Billable.sharp", "namespace App.Tenant;\n\npublic interface Billable\n{\n}\n"),
+        ],
+    )];
+    let dnf = indoc! {r#"
+        TYPE_UNION
+          TYPE_INTERSECTION
+            ZVAL "App\\Tenant\\Shippable"
+            ZVAL "App\\Tenant\\Billable"
+          ZVAL "App\\Tenant\\Report"
+    "#};
+
+    assert_eq!(member_in(&lowered, "Report", &[0, 0, 0, 0]), dnf);
+    assert_eq!(member_in(&lowered, "Report", &[1, 0, 0, 0]), dnf);
+}
+
+/// ```php
+/// public static function bumper(): \Closure {
+///     return (function ($receiver) use (/* the method's type arguments */) {
+///         return function () use ($receiver, /* the method's type arguments */) { return $receiver::bump(/* "#0" */); };
+///     })(static::class);
+/// }
+/// ```
+///
+/// Spec section 11: a static method of a generic class runs with its class's type arguments, so its value keeps them:
+/// `Self.bump` those of the call, as `#0`, on the class the code is called on.
+#[test]
+fn a_static_method_value_of_a_generic_class_keeps_its_type_arguments() {
+    let lowered = Lowered::new(
+        "namespace App.Tenant;\n\nclass Counter<T>\n{\n    public static int bump() => 1;\n\n    public static Function<int()> bumper() => Self.bump;\n}\n",
+    );
+    let main = Lowered::with(
+        "namespace App.Tenant;\n\nclass Main\n{\n    public static Function<int()> bumper() => Counter<int>.bump;\n\n    public static Function<int()> own() => Self.one;\n\n    public static int one() => 1;\n}\n",
+        &[(
+            "src/App/Tenant/Counter.sharp",
+            "namespace App.Tenant;\n\nclass Counter<T>\n{\n    public static int bump() => 1;\n}\n",
+        )],
+    );
+
+    // `Counter<int>.bump` keeps `int`, on `Counter::class`.
+    assert_eq!(
+        main.render(main.child(main.method_named("bumper"), 2)),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                CALL
+                  CLOSURE "" @5-5
+                    PARAM_LIST
+                      PARAM
+                        null
+                        ZVAL "receiver"
+                        null
+                        null
+                        null
+                        null
+                    null
+                    STMT_LIST
+                      RETURN
+                        CLOSURE "" @5-5
+                          PARAM_LIST
+                          CLOSURE_USES
+                            ZVAL "receiver"
+                          STMT_LIST
+                            RETURN
+                              STATIC_CALL
+                                VAR
+                                  ZVAL "receiver"
+                                ZVAL "bump"
+                                ARG_LIST
+                                  SHARP_TYPE_ARGS
+                                    null
+                                    ZVAL "int"
+                          null
+                          null
+                    null
+                    null
+                  ARG_LIST
+                    CLASS_NAME
+                      ZVAL "App\\Tenant\\Counter"
+        "#}
+    );
+    // A class that isn't generic keeps PHP's first-class callable.
+    assert_eq!(
+        main.render(main.child(main.method_named("own"), 2)),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                STATIC_CALL
+                  ZVAL [1] "static"
+                  ZVAL "one"
+                  CALLABLE_CONVERT
+        "#}
+    );
+
+    assert_eq!(
+        lowered.render(lowered.child(lowered.method_named("bumper"), 2)),
+        indoc! {r##"
+            STMT_LIST
+              RETURN
+                CALL
+                  CLOSURE "" @7-7
+                    PARAM_LIST
+                      PARAM
+                        null
+                        ZVAL "receiver"
+                        null
+                        null
+                        null
+                        null
+                    CLOSURE_USES
+                      ZVAL "\0<sharp>\0types"
+                    STMT_LIST
+                      RETURN
+                        CLOSURE "" @7-7
+                          PARAM_LIST
+                          CLOSURE_USES
+                            ZVAL "receiver"
+                            ZVAL "\0<sharp>\0types"
+                          STMT_LIST
+                            RETURN
+                              STATIC_CALL
+                                VAR
+                                  ZVAL "receiver"
+                                ZVAL "bump"
+                                ARG_LIST
+                                  SHARP_TYPE_ARGS
+                                    null
+                                    ZVAL "#0"
+                          null
+                          null
+                    null
+                    null
+                  ARG_LIST
+                    CLASS_NAME
+                      ZVAL [1] "static"
+        "##}
     );
 }
 

@@ -124,7 +124,7 @@ fn an_extern_event_names_a_class() {
 /// Spec section 15: an event runs as a final class whose parameters are its public get-only properties. It takes only
 /// `public` or `internal`, spec section 5, and each parameter is a type, a `Set` among them, a name and an optional
 /// default. An event is a class, so any capitalized word but a reserved type name names one, as `Print` and `Exit` do,
-/// and `Self` is refused.
+/// and `Self` is refused. A generic event declares its type parameters as a class does.
 #[test]
 fn an_event_takes_only_public_or_internal_and_its_parameters_are_its_properties() {
     for (declaration, expected) in [
@@ -161,6 +161,12 @@ fn an_event_takes_only_public_or_internal_and_its_parameters_are_its_properties(
         ("public event Self(int id);", vec!["3:14 Cannot use `Self` as a class name: it is reserved."]),
         ("public event Moved(int id);", vec![]),
         ("event Emptied();", vec![]),
+        ("public event Saved<T : DatabaseEntity>(T entity) : EntityEvent;", vec![]),
+        ("public event Paired<TKey, TValue>(TKey key, TValue value);", vec![]),
+        (
+            "public event Named<Item>(Item item);",
+            vec!["3:20 A type parameter's name is `T`, or `T` and a capital letter, as in `TItem`."],
+        ),
     ] {
         let code = leak(format!("namespace App.Shop;\n\n{declaration}\n"));
 
@@ -483,7 +489,7 @@ fn a_php_form_php_sharp_never_has_fails_as_a_typo_does() {
             ],
             vec![
                 "5:12 Parse error encountered during parsing",
-                "6:13 Write `Calc` without parentheses: they go only around a union before `?`, as in `(int|string)?`.",
+                "6:13 Write `Calc` without parentheses: they go only around a union or an intersection before `?`, as in `(int|string)?`.",
                 "6:14 Type `Calc` cannot be parenthesized.",
                 "7:20 Parse error encountered during parsing",
                 "8:20 An accessor takes no `final`: remove it.",
@@ -624,12 +630,46 @@ fn a_sharp_file_gets_no_php_version_error_under_any_php_version() {
     );
 }
 
-/// A form PHP# has not decided, or that a later change builds, stays not supported yet.
+/// Spec section 24: `&` joins classes and interfaces wherever a type goes, a field, a property, a parameter, a return
+/// type, a local and a pattern, as TypeScript's intersections and Swift's protocol compositions do. One that holds null
+/// is written `(A & B)?`, as Swift writes `(A & B)?`, and a member that is no class or interface is an error.
 #[test]
-fn an_undecided_form_is_not_supported_yet() {
-    let declarations = "namespace App.Tenant;\n\nclass Report\n{\n    private Lib&Other b;\n}\n";
+fn an_intersection_joins_classes_and_interfaces_wherever_a_type_goes() {
+    let declarations = "namespace App.Tenant;\n\nclass Report\n{\n    private Lib & Other b;\n\n    public (Lib & Other)? c { get; set; }\n\n    public Lib & Other run(Lib & Other item)\n    {\n        Lib & Other local = item;\n        if (local is Lib & Other both) { return both; }\n        return item;\n    }\n\n    private int & string d;\n\n    private Lib & Other? e;\n\n    private Lib & Other & Third f;\n\n    public void keep(Lib item)\n    {\n        int & Lib bad = item;\n    }\n}\n";
 
-    assert_eq!(issues(declarations), ["5:13 This type is not supported yet in PHP#."]);
+    assert_eq!(
+        issues(declarations),
+        [
+            "16:13 `&` joins classes and interfaces only, and `int` is neither.",
+            "16:19 `&` joins classes and interfaces only, and `string` is neither.",
+            "18:19 An intersection that holds null is written `(Lib & Other)?`.",
+            "24:9 `&` joins classes and interfaces only, and `int` is neither.",
+        ]
+    );
+    // A type written twice is redundant, as in a union, in any place of the intersection.
+    assert_eq!(
+        issues(
+            "namespace App.Tenant;\n\nclass Report\n{\n    private Lib & Other & Lib g;\n\n    private Lib<int> & Lib<int> h;\n}\n"
+        ),
+        ["5:27 Duplicate type `Lib` is redundant.", "7:24 Duplicate type `Lib<int>` is redundant."]
+    );
+    // Parentheses around one member get the parentheses error, never the error that the member is no class.
+    let parenthesized = issues("namespace App.Tenant;\n\nclass Report\n{\n    private (Lib) & Other g;\n}\n");
+    assert!(parenthesized.contains(&"5:13 Write `Lib` without parentheses: they go only around a union or an intersection before `?`, as in `(int|string)?`.".to_owned()), "{parenthesized:?}");
+    assert!(!parenthesized.iter().any(|issue| issue.contains("joins")), "{parenthesized:?}");
+    // `&` binds tighter than `|`, so a union holds an intersection, with or without parentheses, and the
+    // intersection's members are checked as they are alone.
+    assert_eq!(
+        issues(
+            "namespace App.Tenant;\n\nclass Report\n{\n    public void run(Lib & Other | Third a, (Lib & Other) | Third b, Third | Lib & int c) { }\n}\n"
+        ),
+        ["5:83 `&` joins classes and interfaces only, and `int` is neither."]
+    );
+    // A plain PHP file keeps PHP's own rule on what an intersection joins.
+    assert_eq!(
+        issues_in("src/Report.php", "<?php\n\nfunction run(int&string $item): void {}\n"),
+        ["3:14 Type `int` cannot be part of an intersection.", "3:18 Type `string` cannot be part of an intersection."]
+    );
 }
 
 /// Spec section 21 removes `switch` for `match`, and PHP's `and`, `or` and `xor` for `&&`, `||` and `!`. Each fails as
@@ -1664,13 +1704,15 @@ fn a_named_constructor_passes_control_with_this_and_its_arguments_cannot_use_thi
     );
 }
 
-/// Spec section 9.1: a named constructor is declared on its own class's name with an access modifier and nothing else,
-/// a name that is neither its class's nor one PHP reserves, parameters that declare no property, and a body. An
-/// abstract class has no objects of its own, and named constructors are not inherited, so it declares none.
+/// Spec section 9.1: a named constructor is declared on its own class's name with an access modifier, and `required`
+/// when every subclass keeps it, spec section 11, and nothing else, a name that is neither its class's nor one PHP
+/// reserves, parameters that declare no property, and a body. An abstract class has no objects of its own, and named
+/// constructors are not inherited, so it declares only `required` ones, which each subclass declares again.
 #[test]
 fn a_named_constructor_is_declared_on_its_class_with_an_access_modifier_a_name_and_a_body() {
-    let code = "namespace App.Tenant;\n\npublic class Order\n{\n    public Order(int count) { }\n\n    public Other.copy() : this(1) { }\n    public Order.order() : this(1) { }\n    public Order.__make() : this(1) { }\n    public static Order.fixed() : this(1) { }\n    Order.bare() : this(1) { }\n    public Order.kept(public int count { get; }) : this(count) { }\n    public Order.empty() : this(1);\n}\n";
-    let r#abstract = "namespace App.Tenant;\n\npublic abstract class Shape\n{\n    public Shape(int sides) { }\n\n    public Shape.triangle() : this(3) { }\n}\n";
+    let code = "namespace App.Tenant;\n\npublic class Order\n{\n    public Order(int count) { }\n\n    public Other.copy() : this(1) { }\n    public Order.order() : this(1) { }\n    public Order.__make() : this(1) { }\n    public static Order.fixed() : this(1) { }\n    Order.bare() : this(1) { }\n    public Order.kept(public int count { get; }) : this(count) { }\n    public Order.empty() : this(1);\n    public required Order.parsed() : this(1) { }\n}\n";
+    // A `required` one is the contract each subclass keeps, so an abstract class declares it, spec section 11.
+    let r#abstract = "namespace App.Tenant;\n\npublic abstract class Shape\n{\n    public Shape(int sides) { }\n\n    public Shape.triangle() : this(3) { }\n    public required Shape.parsed() : this(3) { }\n}\n";
 
     assert_eq!(
         issues(code),
@@ -1678,14 +1720,16 @@ fn a_named_constructor_is_declared_on_its_class_with_an_access_modifier_a_name_a
             "7:12 A named constructor is declared on its own class, as in `Order.copy`.",
             "8:18 A named constructor cannot have its class's name: `new Order(…)` calls the main constructor.",
             "9:18 A named constructor's name cannot start with `__`: PHP reserves those names for its magic methods.",
-            "10:12 A named constructor takes only `public`, `protected` or `private`: remove `static`.",
+            "10:12 A named constructor takes only `public`, `protected`, `private` or `required`: remove `static`.",
             "12:23 A named constructor's parameter declares no property: only the main constructor's parameters do.",
             "13:35 A named constructor needs a body, even an empty `{ }`.",
         ]
     );
     assert_eq!(
         issues(r#abstract),
-        ["7:18 An abstract class has no objects of its own, so it declares no named constructor."]
+        [
+            "7:18 An abstract class has no objects of its own, so a named constructor it declares is `required`, for each subclass to declare its own."
+        ]
     );
 }
 
@@ -1802,29 +1846,14 @@ fn new_self_names_no_type_arguments() {
     assert_eq!(issues(code), ["11:36 `Self` already carries its class's type parameters."]);
 }
 
-/// Spec section 9.1: a named constructor belongs to the class that declares it and is not inherited, so `Self`, which
-/// can be any subclass, cannot name one. The help names the class, and that fix compiles.
+/// Spec section 11: `new Self.of(…)` calls the named constructor of the class the code is called on, which the analyzer
+/// accepts when `of` is `required`, so the checker lets it through, as it does in a class that inherits `of`.
 #[test]
-fn new_self_cannot_name_a_named_constructor() {
-    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public Report(int count)\n    {\n    }\n\n    public Report.of(int count) : this(count)\n    {\n    }\n\n    public static Report make() => new Self.of(1);\n}\n";
-    let fixed = code.replace("new Self.of(1)", "new Report.of(1)");
-
-    let issue = check_in_type_file(code).remove(0);
-    assert_eq!(
-        issue.message,
-        "`Self` cannot name a named constructor: a named constructor is not inherited, and `Self` can be any subclass."
-    );
-    assert_eq!(issue.help.as_deref(), Some("Name its class: write `new Report.of(1)`."));
-    assert_eq!(
-        issues(code),
-        [
-            "13:36 `Self` cannot name a named constructor: a named constructor is not inherited, and `Self` can be any subclass."
-        ]
-    );
-    assert_eq!(issues(leak(fixed)), Vec::<String>::new());
-
-    // A class that inherits `of` shows no declaring class here, so the analyzer reports it with that class's name.
+fn new_self_names_a_named_constructor() {
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public Report(int count)\n    {\n    }\n\n    public required Report.of(int count) : this(count)\n    {\n    }\n\n    public static Report make() => new Self.of(1);\n}\n";
     let inherited = "namespace App.Tenant;\n\nclass Summary : Report\n{\n    public Summary(int count) : super(count)\n    {\n    }\n\n    public static Report make() => new Self.of(1);\n}\n";
+
+    assert_eq!(issues(code), Vec::<String>::new());
     assert_eq!(issues(inherited), Vec::<String>::new());
 }
 
@@ -1845,17 +1874,17 @@ fn new_self_needs_a_required_constructor() {
     assert_eq!(help(total), ["Declare the constructor of `Total` `required`, as in `public required Total(…)`."]);
 }
 
-/// `Self.y` is not ruled yet, as `super.y` is not, and `Self` is no value of its own.
+/// Spec section 25: `Self.y` reads and writes a member of the class the code is called on, as Swift's `Self.y` and
+/// PHP's late static binding do, so no constant expression reads it, and `Self` is no value of its own.
 #[test]
-fn a_member_of_self_read_or_written_is_not_supported_yet() {
-    let code = "namespace App.Tenant;\n\nclass Report\n{\n    private static int count = 0;\n\n    public static int run()\n    {\n        Self.count = 1;\n        return Self.count + Self;\n    }\n}\n";
+fn a_member_of_self_is_read_and_written_outside_a_constant_and_self_is_no_value() {
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public const int LIMIT = 10;\n    public const int TWICE = Self.LIMIT * 2;\n    private static int count = 0;\n\n    public static int run()\n    {\n        Self.count = 1;\n        return Self.count + Self.LIMIT + Self;\n    }\n}\n";
 
     assert_eq!(
         issues(code),
         [
-            "9:9 This expression is not supported yet in PHP#.",
-            "10:16 This expression is not supported yet in PHP#.",
-            "10:29 `Self` is no value: write `typeof(Self)` for the class a static method is called on.",
+            "6:30 `Self.LIMIT` is not a constant: it reads the class the code is called on.",
+            "12:42 `Self` is no value: write `typeof(Self)` for the class a static method is called on.",
         ]
     );
 }
@@ -2016,13 +2045,14 @@ fn an_interface_method_takes_union_types_and_a_variadic_parameter() {
 /// A type an interface method can't take is refused with what an interface method has, its type parameters among them.
 #[test]
 fn a_type_an_interface_method_cannot_take_names_what_it_has() {
-    let code = "namespace App.Tenant;\n\ninterface Measured\n{\n    Shape&Named area();\n}\n";
+    let code =
+        "namespace App.Tenant;\n\ninterface Measured\n{\n    Shape & Named area();\n    int & Named sides();\n}\n";
 
-    assert_eq!(issues(code), ["5:5 This type is not supported yet in PHP#."]);
+    assert_eq!(issues(code), ["6:5 `&` joins classes and interfaces only, and `int` is neither."]);
     assert_eq!(
         check_in_type_file(code).into_iter().map(|issue| issue.notes).collect::<Vec<_>>(),
         [[
-            "A PHP# interface method has attributes, no modifier, optional type parameters, parameters, a return type of `int`, `float`, `bool`, `string`, `Any`, `void`, `never`, a class or a type parameter, a generic type as in `List<T>` or `PaginatedList<Order>`, or `Self`, each but `void` and `never` nullable as in `int?`, or a union of them but `void` and `never`, as in `int|string`, and no body or a default body."
+            "A PHP# interface method has attributes, no modifier, optional type parameters, parameters, a return type of `int`, `float`, `bool`, `string`, `Any`, `void`, `never`, a class or a type parameter, a generic type as in `List<T>` or `PaginatedList<Order>`, or `Self`, each but `void` and `never` nullable as in `int?`, or a union of them but `void` and `never`, as in `int|string`, or classes and interfaces joined with `&`, as in `Shippable & Billable`, and no body or a default body."
         ]]
     );
 }
@@ -4907,7 +4937,7 @@ fn a_type_written_in_another_case_names_its_spelling_and_a_php_type_fails_as_a_t
 }
 
 #[test]
-fn types_outside_the_slice_are_an_error_and_an_intersection_is_not_supported_yet() {
+fn types_outside_the_slice_are_an_error_and_an_intersection_holds_null_only_as_a_whole() {
     let code = "class Report\n{\n    public object run(iterable? a, int|iterable b, iterable c, callable d, (Lib&Other)|null e)\n    {\n        return 1;\n    }\n\n    public self make(Lib f, float g, bool h, string i)\n    {\n        return this;\n    }\n}\n";
     let iterable = "Parse error encountered during parsing";
 
@@ -4919,7 +4949,6 @@ fn types_outside_the_slice_are_an_error_and_an_intersection_is_not_supported_yet
             format!("3:40 {iterable}"),
             format!("3:52 {iterable}"),
             "3:64 Parse error encountered during parsing".to_owned(),
-            "3:76 This type is not supported yet in PHP#.".to_owned(),
             "3:88 A type that holds null is written `(Lib&Other)?`.".to_owned(),
             "8:12 Parse error encountered during parsing".to_owned(),
         ]
@@ -5408,7 +5437,7 @@ fn typeof_takes_one_type_in_a_method_body() {
         (
             "(Order|Line)",
             vec![
-                "7:27 Write `Order|Line` without parentheses: they go only around a union before `?`, as in `(int|string)?`."
+                "7:27 Write `Order|Line` without parentheses: they go only around a union or an intersection before `?`, as in `(int|string)?`."
                     .to_owned(),
             ],
         ),
@@ -5896,7 +5925,8 @@ fn a_bound_that_is_not_object_a_class_an_interface_a_generic_class_type_or_a_typ
                 8 => "8:24 A bound can't be a union: join several bounds with `&`.".to_owned(),
                 13 => "13:24 A type parameter is a bound alone, as in `<TSub : T>`: it joins no other bound with `&`."
                     .to_owned(),
-                15 => "15:24 Type `Object` cannot be part of an intersection.".to_owned(),
+                15 => "15:24 `Object` is a bound alone, as in `<TValue : Object>`: it joins no other bound with `&`."
+                    .to_owned(),
                 line => format!(
                     "{line}:24 A bound is `Object`, a class, an interface or a type parameter, as in `<TItem : DatabaseEntity>`."
                 ),
@@ -5937,7 +5967,6 @@ fn a_type_argument_of_a_bound_is_never_void() {
         issues(code),
         [
             "3:34 A type argument cannot be `void`: `void` is only a return type.",
-            "5:41 Type `Comparable<void>` cannot be part of an intersection.",
             "5:52 A type argument cannot be `void`: `void` is only a return type.",
         ]
     );
@@ -5991,9 +6020,9 @@ fn the_type_arguments_of_new_and_of_a_method_call_are_checked_as_types() {
 }
 
 /// What reads a type argument runs in a body: `is`, `as` and a `match` arm of a type parameter or of a class with type
-/// arguments, `typeof`, `new`, a static member of a type parameter, and a catch clause of one, alone or in a union. A
-/// constant value has no type argument to read, and `new TItem` names none, because its type argument carries its own.
-/// A named constructor of a type parameter, `new TItem.of(…)`, is not supported yet.
+/// arguments, `typeof`, `new`, a named constructor and a static member of a type parameter, and a catch clause of one,
+/// alone or in a union. A constant value has no type argument to read, and `new TItem` names none, because its type
+/// argument carries its own.
 #[test]
 fn a_type_argument_is_read_in_a_body_and_never_in_a_constant() {
     let code = "namespace App.Tenant;\n\nclass Box<TItem>\n{\n    public bool run<TKey>(Any value, List<TItem> items)\n    {\n        const a = value is TItem item;\n        const b = value as TKey;\n        const c = match (value) { TItem => 1, PaginatedList<Order> page => 2, default => 0 };\n        const d = typeof(TItem);\n        const e = new TKey(value);\n        const f = TItem.make(value);\n        const g = TItem.LIMIT;\n        TKey.count = g;\n        try {\n        } catch (TItem failure) {\n        } catch (RuntimeException | TKey failure) {\n        }\n        return value is PaginatedList<Order> page;\n    }\n\n    public string named(string name = typeof(TItem)) => name;\n\n    public int limit(int size = TItem.LIMIT) => size;\n\n    public Any made(Any value) => new TItem<int>(value);\n\n    public Any built(Any value) => new TItem.of(value);\n}\n";
@@ -6004,7 +6033,6 @@ fn a_type_argument_is_read_in_a_body_and_never_in_a_constant() {
             "22:46 A parameter's default runs before the method, so `TItem` is not there yet.",
             "24:33 A parameter's default runs before the method, so `TItem` is not there yet.",
             "26:44 `TItem` already carries the type arguments of the type it stands for.",
-            "28:36 A named constructor through a type parameter, as in `new TItem.of(…)`, is not supported yet in PHP#.",
         ]
     );
 }
@@ -6495,12 +6523,20 @@ fn a_nullable_type_pattern_or_as_to_a_nullable_type_is_an_error() {
     );
 }
 
-/// `void` and `Self` are only return types, so a pattern of either says so, as a local's type does.
+/// `void` and `Self` are only return types, so a pattern of either says so, as a local's type does. `Self.LIMIT` is a
+/// value, as `Report.LIMIT` is, spec section 25.
 #[test]
 fn a_pattern_of_void_or_self_is_only_a_return_type() {
     let code = leak(method(
-        "        const a = extra is void;\n        const b = extra is Self;\n        const c = extra as Self;\n        const d = match (extra) { Self s => 1, default => 2 };\n        return extra;\n",
+        "        const a = extra is void;\n        const b = extra is Self;\n        const c = extra as Self;\n        const d = match (extra) { Self s => 1, default => 2 };\n        const e = extra is Self.LIMIT or Report.LIMIT;\n        const f = match (extra) { Self.LIMIT => 1, default => 2 };\n        return extra;\n",
     ));
+    // A constant's value knows no class the code is called on.
+    assert_eq!(
+        issues(
+            "namespace App.Tenant;\n\nclass Report\n{\n    public const int LIMIT = 1;\n    public const bool TOP = match (1) { Self.LIMIT => true, default => false };\n}\n"
+        ),
+        ["6:41 `Self.LIMIT` is not a constant: it reads the class the code is called on."]
+    );
 
     assert_eq!(
         issues(code),
@@ -6878,10 +6914,9 @@ fn a_member_defined_twice_and_its_class_are_named_as_sharp_writes_them() {
 #[test]
 fn a_refusal_notes_what_php_sharp_has_where_it_is_written() {
     let class = "namespace App;\n\npublic class Order\n{\n    case Open;\n}\n";
-    let pattern = leak(method("        const both = extra is Report&Order;\n        return extra;\n"));
+    let pattern = leak(method("        const both = extra is int & Report;\n        return extra;\n"));
     let interface = "namespace App;\n\npublic interface Sized\n{\n    int max { get; init; }\n}\n";
     let constant = "namespace App;\n\npublic class Limits\n{\n    final public const int MAX = 3;\n}\n";
-
     for (code, note) in [
         (
             interface,
@@ -6893,7 +6928,7 @@ fn a_refusal_notes_what_php_sharp_has_where_it_is_written() {
         ),
         (
             pattern,
-            "A PHP# pattern is a type of `int`, `float`, `string`, `bool`, `Any`, `Object`, a class, a collection as in `List<int>`, a class value as in `Class<Order>`, a function type as in `Function<int(int)>`, or a union of them, a tuple among them, as in `int|[int, string]`, with an optional name, as in `int count`, a case with its fields, as in `PaymentResult.Paid(string transactionId)`, a class with properties, as in `Paid { amount: > 0 } big`, a constant, a comparison such as `< 10`, a properties pattern such as `{ total: > 0 }`, a list pattern such as `[Line first, ...List<Line> rest]`, or patterns joined by `and`, `or` and `not`.",
+            "A PHP# pattern is a type of `int`, `float`, `string`, `bool`, `Any`, `Object`, a class, a collection as in `List<int>`, a class value as in `Class<Order>`, a function type as in `Function<int(int)>`, or a union of them, a tuple among them, as in `int|[int, string]`, or classes and interfaces joined with `&`, as in `Shippable & Billable`, with an optional name, as in `int count`, a case with its fields, as in `PaymentResult.Paid(string transactionId)`, a class with properties, as in `Paid { amount: > 0 } big`, a constant, a comparison such as `< 10`, a properties pattern such as `{ total: > 0 }`, a list pattern such as `[Line first, ...List<Line> rest]`, or patterns joined by `and`, `or` and `not`.",
         ),
         (
             class,

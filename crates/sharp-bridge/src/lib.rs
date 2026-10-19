@@ -27,6 +27,7 @@ pub use lower::lower;
 pub use lower::types::Declaration;
 pub use lower::types::DeclarationKind;
 pub use lower::types::Types;
+pub use lower::types::type_text;
 
 /// `len` bytes of UTF-8 at `offset` in the unit's texts, not NUL-terminated.
 #[repr(C)]

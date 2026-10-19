@@ -63,6 +63,41 @@ pub(crate) fn namespace_of(class: &[u8]) -> &[u8] {
     class.iter().rposition(|&byte| byte == b'\\').map_or(&b""[..], |end| &class[..end])
 }
 
+/// Spec section 25: `Self.name` reads the class the code is called on, which may be any subclass, and a private member
+/// belongs to the class that declares it, so `Self.name` reaches only a member every subclass sees, as Swift's
+/// `Self.name` does. Reports `Self.name` at `span`, with `code`, when `name` is a private member of `class`, the class
+/// the code is in, and returns whether it did.
+pub(crate) fn report_private_self_member<A>(
+    context: &mut Context<'_, '_, A>,
+    class: Word,
+    name: &[u8],
+    is_private: bool,
+    span: Span,
+    code: IssueCode,
+) -> bool
+where
+    A: Arena,
+{
+    if !is_private {
+        return false;
+    }
+
+    let name = BytesDisplay(name.strip_prefix(b"$").unwrap_or(name));
+    let class = display_class_like_name(context, class);
+    context.collector.report_with_code(
+        code,
+        Issue::error(format!(
+            "`Self.{name}` can name a subclass, which has no private `{name}`: write `{class}.{name}`."
+        ))
+        .with_annotation(Annotation::primary(span).with_message("Reached through `Self` here."))
+        .with_help(format!(
+            "Write `{class}.{name}` for this class's own, or make `{name}` `protected` so each subclass has one."
+        )),
+    );
+
+    true
+}
+
 /// Checks that PHP# code reaches `class`, or one of its members, by [`reaches_internal`], and reports at `span` when
 /// it does not. `member` says whether the member is `internal` itself for this access, and `None` for the class.
 /// `member_name` gives the member's name as PHP# writes it, such as `Order.total` or `Order.total.set`, only when the

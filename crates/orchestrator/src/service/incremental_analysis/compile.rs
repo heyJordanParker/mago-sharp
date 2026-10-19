@@ -38,6 +38,7 @@ use mago_sharp_bridge::Unit;
 use mago_sharp_bridge::check;
 use mago_sharp_bridge::inline_forms;
 use mago_sharp_bridge::lower;
+use mago_sharp_bridge::type_text;
 use mago_sharp_bridge::unit::Input;
 use mago_sharp_bridge::unit::Library;
 use mago_sharp_bridge::unit::Read;
@@ -96,8 +97,9 @@ pub struct Listener {
     /// The fully qualified name of its class.
     pub class: Word,
     pub method: Word,
-    /// The fully qualified names its `on` clause lists, in their written order.
-    pub events: Vec<Word>,
+    /// The types its `on` clause lists, in their written order: each by its fully qualified name, and a generic event
+    /// with its type arguments in the type text the engine reads, as `App.Saved<App.Order>`.
+    pub events: Vec<String>,
     /// Whether it takes the event as its parameter.
     pub takes_event: bool,
 }
@@ -127,8 +129,17 @@ impl IncrementalAnalysisService {
                 let events = method
                     .listens
                     .iter()
-                    .map(|event| {
-                        self.codebase.get_class_like(event.as_bytes()).map_or(*event, |event| event.original_name)
+                    .filter_map(|listed| {
+                        let named = listed.get_single_named_object()?;
+
+                        Some(match named.type_parameters {
+                            Some(_) => type_text(listed, &self.codebase),
+                            None => self
+                                .codebase
+                                .get_class_like(named.name.as_bytes())
+                                .map_or(named.name, |event| event.original_name)
+                                .to_string(),
+                        })
                     })
                     .collect();
 

@@ -126,7 +126,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Return<'arena> {
             // A refused value is `never`, and its error already reports it.
             if let Some(inferred_return_type) = &inferred_return_type
                 && inferred_return_type.is_never()
-                && !is_refused(return_value, context)
+                && !is_refused(return_value)
             {
                 context.collector.report_with_code(
                     IssueCode::NeverReturn,

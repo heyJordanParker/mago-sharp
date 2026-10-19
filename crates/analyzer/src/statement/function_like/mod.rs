@@ -46,6 +46,7 @@ use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_never;
 use mago_codex::ttype::get_void;
 use mago_codex::ttype::is_key_type;
+use mago_codex::ttype::template::GenericTemplate;
 use mago_codex::ttype::template::TemplateResult;
 use mago_codex::ttype::template::inferred_type_replacer;
 use mago_codex::ttype::union::TUnion;
@@ -2166,6 +2167,11 @@ where
         let TypeRef::Atomic(TAtomic::Object(TObject::Named(named))) = type_ref else {
             continue;
         };
+        if context.dialect.is_sharp()
+            && let Some(joined) = &named.intersection_types
+        {
+            is_refused |= report_classes_joined(context, named, joined, type_metadata.span);
+        }
         let Some(class) = codebase.get_class_like(named.name.as_bytes()) else {
             continue;
         };
@@ -2186,6 +2192,46 @@ where
     }
 
     is_refused
+}
+
+/// Spec section 24: `&` joins at most one class with any number of interfaces, as Swift's `Order & Shareable` and
+/// Java's `<T extends Order & Shareable>` do, since an object has one class above it at each step. Reports the PHP#
+/// intersection of `first` and `joined` written at `span` when two of its types are classes, and returns whether it did.
+fn report_classes_joined<A>(
+    context: &mut Context<'_, '_, A>,
+    first: &TNamedObject,
+    joined: &[TAtomic],
+    span: Span,
+) -> bool
+where
+    A: Arena,
+{
+    let codebase = context.codebase;
+    let classes: Vec<Word> = std::iter::once(first)
+        .chain(joined.iter().filter_map(|atomic| match atomic {
+            TAtomic::Object(TObject::Named(named)) => Some(named),
+            _ => None,
+        }))
+        .filter_map(|named| codebase.get_class_like(named.name.as_bytes()))
+        .filter(|class| !class.kind.is_interface())
+        .map(|class| class.original_name)
+        .collect();
+    let [first_class, second_class, ..] = classes[..] else {
+        return false;
+    };
+
+    let (first_class, second_class) =
+        (display_class_like_name(context, first_class), display_class_like_name(context, second_class));
+    context.collector.report_with_code(
+        IssueCode::InvalidExtend,
+        Issue::error(format!(
+            "`&` joins at most one class with interfaces, and `{first_class}` and `{second_class}` are both classes."
+        ))
+        .with_annotation(Annotation::primary(span).with_message("Joined here."))
+        .with_help(format!("Keep one of `{first_class}` and `{second_class}`, and join only interfaces to it.")),
+    );
+
+    true
 }
 
 /// Reports `arguments`, applied at `span` to the templates `owner` declares at `owner_span`, when their number differs
@@ -2287,6 +2333,8 @@ where
             false,
             &mut ComparisonResult::for_dialect(context.dialect),
         ) {
+            report_plain_named_constructor_argument(context, &generic_owner, *template_name, template, argument, span);
+
             continue;
         }
 
@@ -2310,6 +2358,49 @@ where
     }
 
     true
+}
+
+/// Spec section 11: `new TItem.fromJson(…)` runs the type argument's own `fromJson`, which every PHP# class below the
+/// one that marks it `required` declares, and a plain PHP class never does, so a plain PHP class is refused at `span`
+/// as the argument of a type parameter the code of `owner` calls a named constructor through, as Swift refuses a type
+/// that keeps no `required init`.
+fn report_plain_named_constructor_argument<A>(
+    context: &mut Context<'_, '_, A>,
+    owner: &str,
+    template_name: Word,
+    template: &GenericTemplate,
+    argument: &TUnion,
+    span: Span,
+) where
+    A: Arena,
+{
+    let codebase = context.codebase;
+    let (GenericParent::ClassLike(class) | GenericParent::FunctionLike((class, _))) = template.defining_entity;
+    let Some((_, _, constructor)) = codebase.get_class_like(class.as_bytes()).and_then(|class| {
+        class
+            .type_parameter_named_constructors
+            .iter()
+            .find(|(entity, name, _)| *entity == template.defining_entity && *name == template_name)
+    }) else {
+        return;
+    };
+    let Some(argument_class) = argument
+        .get_single_named_object()
+        .and_then(|named| codebase.get_class_like(named.name.as_bytes()))
+        .filter(|class| !class.flags.is_sharp())
+    else {
+        return;
+    };
+
+    let argument_name = display_class_like_name(context, argument_class.original_name);
+    context.collector.report_with_code(
+        IssueCode::TemplateConstraintViolation,
+        Issue::error(format!(
+            "`{owner}` calls `new {template_name}.{constructor}(…)`, and the plain PHP class `{argument_name}` keeps no `{constructor}` of its own."
+        ))
+        .with_annotation(Annotation::primary(span).with_message(format!("`{argument_name}` is supplied for `{template_name}` here.")))
+        .with_help(format!("Supply a PHP# class, which declares its own `{constructor}`.")),
+    );
 }
 
 /// Reports each PHP# `Map` written in `type_union` whose key type has no `==` and `hash()`, or is a struct that holds a

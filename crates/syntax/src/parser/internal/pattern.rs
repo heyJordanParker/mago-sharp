@@ -146,6 +146,11 @@ where
                     Pattern::Value(self.parse_expression_with_precedence(Precedence::SharpComparison)?)
                 }
             }
+            // `Self.TABLE` is the value of the constant of the class the code is called on, spec section 25, as
+            // `Shelf.TABLE` is the value of `Shelf`'s.
+            T!["self"] if self.stream.peek_kind(1)? == Some(T!["."]) => {
+                Pattern::Value(self.parse_expression_with_precedence(Precedence::SharpComparison)?)
+            }
             _ => Pattern::Type(TypePattern {
                 hint: self.parse_type_hint_in_expression()?,
                 fields: None,

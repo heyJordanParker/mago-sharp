@@ -10,7 +10,6 @@ use crate::cst::cst::class_like::constructor::ConstructorInitializer;
 use crate::cst::cst::expression::Expression;
 use crate::cst::cst::function_like::parameter::FunctionLikeParameterList;
 use crate::cst::cst::function_like::r#return::FunctionLikeReturnTypeHint;
-use crate::cst::cst::identifier::Identifier;
 use crate::cst::cst::identifier::LocalIdentifier;
 use crate::cst::cst::keyword::Keyword;
 use crate::cst::cst::modifier::Modifier;
@@ -67,19 +66,20 @@ pub struct Method<'arena> {
 /// Represents a PHP# `on` clause, spec section 15: the comma-separated events a method listens to, written after its
 /// parameters.
 ///
-/// An event is a name, and a dotted one is a full name, which the analyzer refuses with the import to add, spec section
-/// 23.
+/// An event is a name, a [`Hint::Identifier`], or a generic event with its type arguments, a [`Hint::Generic`]. A
+/// dotted name is a full name, which the analyzer refuses with the import to add, spec section 23.
 ///
 /// Example:
 ///
 /// ```csharp
 /// public void send(OrderEvent e) on OrderPaid, OrderRefunded { … }
+/// public void deliver(Saved<Order> e) on Saved<Order> { … }
 /// ```
 #[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct On<'arena> {
     pub on: Keyword<'arena>,
-    pub events: TokenSeparatedSequence<'arena, Identifier<'arena>>,
+    pub events: TokenSeparatedSequence<'arena, Hint<'arena>>,
 }
 
 /// Represents the body of a method statement in PHP.

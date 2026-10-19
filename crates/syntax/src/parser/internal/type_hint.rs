@@ -203,11 +203,24 @@ where
                 let ampersand = self.stream.eat_span(T!["&"])?;
                 let right = ensure_sufficient_stack(|| self.parse_type_hint_inner(in_expression))?;
 
-                Hint::Intersection(IntersectionHint {
-                    left: self.arena.alloc(left),
-                    ampersand,
-                    right: self.arena.alloc(right),
-                })
+                match right {
+                    // PHP#'s `&` binds tighter than `|`, as TypeScript's does, spec section 24, so `A & B | C` joins
+                    // `A` with `B` only, and the union holds that intersection and `C`.
+                    Hint::Union(union) if self.dialect.is_sharp() => Hint::Union(UnionHint {
+                        left: self.arena.alloc(Hint::Intersection(IntersectionHint {
+                            left: self.arena.alloc(left),
+                            ampersand,
+                            right: union.left,
+                        })),
+                        pipe: union.pipe,
+                        right: union.right,
+                    }),
+                    right => Hint::Intersection(IntersectionHint {
+                        left: self.arena.alloc(left),
+                        ampersand,
+                        right: self.arena.alloc(right),
+                    }),
+                }
             }
             _ => hint,
         })
