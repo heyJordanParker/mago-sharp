@@ -56,11 +56,11 @@ pub struct SelfUpdateCommand {
     /// Update to whatever version the project's `mago.toml` pins.
     ///
     /// Reads the `version` field from `mago.toml` and installs the matching release.
-    /// Fails if `mago.toml` has no `version` pin; add one (e.g. `version = "0.3"`) or
+    /// Fails if `mago.toml` has no `version` pin; add one (e.g. `version = "0.4"`) or
     /// use `--tag` explicitly.
     ///
-    /// For exact pins (`version = "0.3.1"`) this resolves to that exact release tag.
-    /// For non-exact pins (`version = "0"` or `version = "0.3"`) this installs the
+    /// For exact pins (`version = "0.4.0"`) this resolves to that exact release tag.
+    /// For non-exact pins (`version = "0"` or `version = "0.4"`) this installs the
     /// latest published release that satisfies the pin, or fails with a clear error
     /// if the latest release is on a different major/minor line.
     #[arg(long, conflicts_with = "tag")]

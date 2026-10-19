@@ -16,7 +16,7 @@ Start from a plain Composer package that requires `heyjordanparker/mago-sharp` a
   "type": "library",
   "require": {
     "php": "^8.1",
-    "heyjordanparker/mago-sharp": "^0.3"
+    "heyjordanparker/mago-sharp": "^0.4"
   },
   "autoload": {
     "psr-4": {

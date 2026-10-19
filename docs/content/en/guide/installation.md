@@ -27,7 +27,7 @@ wget -qO- https://raw.githubusercontent.com/heyJordanParker/php-sharp/master/sha
 ### Pin a specific version
 
 ```sh
-curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/heyJordanParker/php-sharp/master/sharp/mago/scripts/install.sh | bash -s -- --version=0.3.1
+curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/heyJordanParker/php-sharp/master/sharp/mago/scripts/install.sh | bash -s -- --version=0.4.0
 ```
 
 The same syntax works with `wget`.
@@ -55,7 +55,7 @@ The recommended path on Windows and a fine fallback on any system without `bash`
 If you keep the archive around, you can verify it yourself before extracting.
 
 ```sh
-VERSION=0.3.1
+VERSION=0.4.0
 TARGET=x86_64-unknown-linux-gnu  # adjust for your platform
 ASSET=mago-${VERSION}-${TARGET}.tar.gz
 
@@ -79,7 +79,7 @@ The attestation is bound to the archive, not to the extracted binary. If you onl
 For PHP projects:
 
 ```sh
-composer require --dev "heyjordanparker/mago-sharp:^0.3.1"
+composer require --dev "heyjordanparker/mago-sharp:^0.4.0"
 ```
 
 The Composer package is a thin wrapper. The first call to `vendor/bin/mago` downloads the matching pre-built binary from the GitHub release and caches it. Subsequent calls reuse the cache and make no network requests.

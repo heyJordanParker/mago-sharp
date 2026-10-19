@@ -29,15 +29,20 @@ use const STDOUT;
 
 const VERSIONED_DOCUMENTATION_FILES = [
     'README.md',
+    'docs/content/en/extensions/development/packaging-and-compatibility.md',
+    'docs/content/en/extensions/getting-started.md',
     'docs/content/en/guide/configuration.md',
     'docs/content/en/guide/installation.md',
     'docs/content/en/guide/upgrading.md',
+    'docs/content/en/recipes/github-actions.md',
     'docs/content/fr/guide/configuration.md',
     'docs/content/fr/guide/installation.md',
     'docs/content/fr/guide/upgrading.md',
+    'docs/content/fr/recipes/github-actions.md',
     'docs/content/zh/guide/configuration.md',
     'docs/content/zh/guide/installation.md',
     'docs/content/zh/guide/upgrading.md',
+    'docs/content/zh/recipes/github-actions.md',
 ];
 
 const MANIFEST_VERSION_DECLARATIONS = [
