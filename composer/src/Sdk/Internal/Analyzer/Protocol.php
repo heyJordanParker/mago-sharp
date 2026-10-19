@@ -1131,7 +1131,11 @@ final class Protocol
                     $argumentTypes,
                     $variableDefinedness,
                     $targetedHookIndices,
-                    $reader->readBoolean(),
+                    $reader->readBoolean()
+                        ? $nodeKinds[$reader->readU16()] ?? throw new ProtocolException(
+                            'A node-analysis target means an unknown node kind.',
+                        )
+                        : null,
                 );
             }
         }

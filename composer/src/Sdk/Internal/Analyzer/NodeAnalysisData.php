@@ -6,6 +6,7 @@ namespace Mago\Sdk\Internal\Analyzer;
 
 use Mago\Sdk\Analyzer\Type;
 use Mago\Sdk\Analyzer\VariableDefinedness;
+use Mago\Sdk\Syntax\NodeKind;
 
 /**
  * @internal
@@ -24,6 +25,11 @@ final class NodeAnalysisData
         public readonly array $argumentTypes,
         public readonly ?array $variableDefinedness,
         public readonly array $targetedHookIndices,
-        public readonly bool $isSharpStaticCall,
+        /**
+         * The kind of node a PHP# method call means when it is not a method call: `StaticMethodCall` for
+         * `Calc.make()`, `FunctionCall` for `global.max()` or `Pdf.render()` after `import Vendor.Pdf;`, and
+         * `Instantiation` for `PaymentResult.Declined(…)`, which builds an enum case.
+         */
+        public readonly ?NodeKind $meaning,
     ) {}
 }

@@ -1,5 +1,7 @@
 //! Compact syntax snapshots shared by external linter and analyzer protocols.
 
+use std::borrow::Cow;
+
 use mago_names::ResolvedNames;
 use mago_names::binding::Binding;
 use mago_span::HasSpan;
@@ -46,6 +48,9 @@ struct SnapshotNode {
     last_child: Option<u32>,
 }
 
+/// A resolved name of a snapshot as `(start, end, name, imported, binding)`.
+type NameRecord<'arena> = (u32, u32, Cow<'arena, [u8]>, bool, u8);
+
 /// A flat syntax tree, resolved-name table, and comment table ready for a
 /// capability-specific extension protocol to encode.
 #[derive(Debug)]
@@ -53,7 +58,7 @@ pub struct SourceSnapshot<'arena> {
     nodes: Vec<SnapshotNode>,
     targets: Vec<u32>,
     /// Each resolved name as `(start, end, name, imported, binding)`, the binding encoded by [`binding_code`].
-    names: Vec<(u32, u32, &'arena [u8], bool, u8)>,
+    names: Vec<NameRecord<'arena>>,
     trivia: Vec<(u8, u32, u32)>,
 }
 
@@ -200,6 +205,20 @@ impl<'arena> SourceSnapshot<'arena> {
         }))
     }
 
+    /// Gives the source the names `(start, end, name, binding)` the analysis finds it writes where name resolution
+    /// alone can't tell, in place of the name resolution put at `start`, each binding encoded as [`binding_code`]
+    /// encodes one. A name lands only where the snapshot holds a node that starts at `start`.
+    pub fn rename(&mut self, names: &[(u32, u32, Vec<u8>, u8)]) {
+        for (start, end, name, binding) in names {
+            if !self.nodes.iter().any(|node| node.start == *start) {
+                continue;
+            }
+            self.names.retain(|(other, _, _, _, _)| other != start);
+            self.names.push((*start, *end, Cow::Owned(name.clone()), false, *binding));
+        }
+        self.names.sort_unstable_by_key(|(start, end, _, _, _)| (*start, *end));
+    }
+
     fn append_subtree<'ast>(
         root: Node<'ast, 'arena>,
         is_target: &mut impl FnMut(Node<'ast, 'arena>) -> bool,
@@ -335,8 +354,8 @@ impl<'arena> SourceSnapshot<'arena> {
 fn with_binding<'arena>(
     resolved_names: &ResolvedNames<'arena>,
     (start, end, name, imported): (u32, u32, &'arena [u8], bool),
-) -> (u32, u32, &'arena [u8], bool, u8) {
-    (start, end, name, imported, binding_code(resolved_names.binding(&Position::new(start))))
+) -> NameRecord<'arena> {
+    (start, end, Cow::Borrowed(name), imported, binding_code(resolved_names.binding(&Position::new(start))))
 }
 
 /// The byte a resolved-name record carries for its binding: `0` for a PHP name, then `1` for a class, `2` for a

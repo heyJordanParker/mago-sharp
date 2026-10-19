@@ -1367,11 +1367,19 @@ final class Worker
             }
 
             $data = $context->analysis->getNodeAnalysisData($targetIndex - 1);
-            // A PHP# static call, `Calc.make()`, is a method call whose receiver Mago bound to a class. A hook that
-            // targets static calls receives it, as it receives `Calc::make()` in PHP.
-            $hooks = $data->isSharpStaticCall
-                ? self::nodeAnalysisHooksTargeting($registered, NodeKind::MethodCall, NodeKind::StaticMethodCall)
-                : $registered->nodeAnalysisHooksByNodeKind[$node->kind->value] ?? [];
+            // A PHP# method call reaches the hooks of the node it means, as Mago reads it: a hook that targets function
+            // calls receives `global.max()`, as it receives `max()` in PHP, one that targets static calls receives
+            // `Calc.make()`, whose receiver Mago bound to a class, as it receives `Calc::make()`, and one that targets
+            // instantiations receives `PaymentResult.Declined(…)`, as it receives `new PaymentResult\Declined(…)`.
+            $hooks = match ($data->meaning) {
+                null => $registered->nodeAnalysisHooksByNodeKind[$node->kind->value] ?? [],
+                NodeKind::StaticMethodCall => self::nodeAnalysisHooksTargeting(
+                    $registered,
+                    NodeKind::MethodCall,
+                    NodeKind::StaticMethodCall,
+                ),
+                default => $registered->nodeAnalysisHooksByNodeKind[$data->meaning->value] ?? [],
+            };
             if ($hooks === [] && $data->targetedHookIndices === []) {
                 continue;
             }

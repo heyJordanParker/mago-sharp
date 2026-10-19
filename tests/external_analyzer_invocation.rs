@@ -660,7 +660,8 @@ fn node_hooks_see_a_sharp_static_call_as_static_as_in_php() -> Result<(), Box<dy
 }
 
 /// `global.largest(…)` calls the function `largest` of PHP's root namespace, spec section 23, as `largest(…)` does in
-/// PHP.
+/// PHP, so it reaches the hooks that target function calls, and only them, as a Roslyn analyzer registered for
+/// invocations of a kind receives each call the semantic model reads as that kind.
 #[test]
 fn node_hooks_see_a_sharp_call_of_a_global_function_as_a_function_call_as_in_php()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -680,10 +681,88 @@ fn node_hooks_see_a_sharp_call_of_a_global_function_as_a_function_call_as_in_php
     );
 
     for files in [&[LARGEST, CALC, SHARP][..], &[LARGEST, PHP]] {
-        let observation = analyze_files_with_fixture(files, &["MAGO_INVOCATION_CALL_KINDS"])?;
+        let functions = analyze_files_with_fixture(files, &["MAGO_INVOCATION_FUNCTION_CALL_KINDS"])?;
+        let methods = analyze_files_with_fixture(files, &["MAGO_INVOCATION_CALL_KINDS"])?;
 
-        assert_eq!(observation.issues, [], "{files:?}");
-        assert_eq!(observation.invocations, ["call-kind-largest-function", "call-kind-add-instance"], "{files:?}");
+        assert_eq!(functions.issues, [], "{files:?}");
+        assert_eq!(functions.invocations, ["call-kind-largest-function"], "{files:?}");
+        assert_eq!(methods.invocations, ["call-kind-add-instance"], "{files:?}");
+    }
+
+    Ok(())
+}
+
+/// A host reads each PHP# call as the PHP that means it: `Self.cap(3)` calls the enclosing class's static method, as
+/// `static::cap(3)` does, `PaymentResult.Declined(reason: …)` builds the enum case, as `new PaymentResult\Declined(…)`
+/// does, so it reaches no method hook, and `twice(1)` calls the function value a local holds, which names no function,
+/// as `$twice(1)` does.
+#[test]
+fn node_hooks_see_a_sharp_call_of_self_a_case_and_a_local_as_the_php_that_means_it()
+-> Result<(), Box<dyn std::error::Error>> {
+    if !php_sdk_is_available() {
+        return Ok(());
+    }
+
+    const RESULT: (&str, &str) = (
+        "src/PaymentResult.sharp",
+        "namespace Demo;\n\npublic enum PaymentResult\n{\n    case Paid(string transactionId);\n    case Declined(string reason);\n}\n",
+    );
+    const SHARP: (&str, &str) = (
+        "src/Report.sharp",
+        "namespace Demo;\n\nclass Report\n{\n    public static int cap(int x) => x;\n\n    public static int total()\n    {\n        const twice = (int x) => x * 2;\n        return Self.cap(3) + twice(1);\n    }\n\n    public static PaymentResult decline() => PaymentResult.Declined(reason: \"expired\");\n}\n",
+    );
+    const PHP: (&str, &str) = (
+        "src/Report.php",
+        "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    public static function cap(int $x): int\n    {\n        return $x;\n    }\n\n    public static function total(): int\n    {\n        $twice = fn (int $x): int => $x * 2;\n        return static::cap(3) + $twice(1);\n    }\n\n    public static function decline(): PaymentResult\n    {\n        return new PaymentResult\\Declined(reason: 'expired');\n    }\n}\n",
+    );
+
+    for files in [&[RESULT, SHARP][..], &[RESULT, PHP]] {
+        let methods = analyze_files_with_fixture(files, &["MAGO_INVOCATION_CALL_KINDS"])?;
+        let functions = analyze_files_with_fixture(files, &["MAGO_INVOCATION_FUNCTION_CALL_KINDS"])?;
+
+        assert_eq!(methods.invocations, ["call-kind-cap-static"], "{files:?}");
+        assert_eq!(functions.invocations, ["call-kind-unnamed-function"], "{files:?}");
+    }
+
+    Ok(())
+}
+
+/// `Pdf.render(…)` after `import Vendor.Pdf;` calls the plain PHP function `Vendor\Pdf\render`, spec section 23, where
+/// no class is named `Vendor\Pdf`, as `render(…)` does in PHP after `use function Vendor\Pdf\render;`. A host reads it
+/// as that function's call, named at `render`, as Roslyn's semantic model gives a call's symbol.
+#[test]
+fn node_hooks_see_a_sharp_call_of_a_namespace_function_as_a_call_of_that_function()
+-> Result<(), Box<dyn std::error::Error>> {
+    if !php_sdk_is_available() {
+        return Ok(());
+    }
+
+    const PDF: (&str, &str) = (
+        "src/pdf.php",
+        "<?php\n\nnamespace Vendor\\Pdf;\n\nfunction render(string $html): string\n{\n    return $html;\n}\n",
+    );
+    const SHARP: (&str, &str) = (
+        "src/Report.sharp",
+        "namespace Demo;\n\nimport Vendor.Pdf;\n\nclass Report\n{\n    public static string total() => Pdf.render(\"x\");\n}\n",
+    );
+    const PHP: (&str, &str) = (
+        "src/Report.php",
+        "<?php\n\nnamespace Demo;\n\nuse function Vendor\\Pdf\\render;\n\nclass Report\n{\n    public static function total(): string\n    {\n        return render('x');\n    }\n}\n",
+    );
+
+    let named = analyze_files_with_fixture(
+        &[PDF, SHARP],
+        &["MAGO_INVOCATION_FUNCTION_CALL_KINDS", "MAGO_INVOCATION_FUNCTION_NAMES"],
+    )?;
+    assert_eq!(named.issues, []);
+    assert_eq!(named.invocations, ["call-kind-render-function", "function-Vendor\\Pdf\\render"]);
+
+    for files in [&[PDF, SHARP][..], &[PDF, PHP]] {
+        let functions = analyze_files_with_fixture(files, &["MAGO_INVOCATION_FUNCTION_CALL_KINDS"])?;
+        let methods = analyze_files_with_fixture(files, &["MAGO_INVOCATION_CALL_KINDS"])?;
+
+        assert_eq!(functions.invocations, ["call-kind-render-function"], "{files:?}");
+        assert_eq!(methods.invocations, [] as [&str; 0], "{files:?}");
     }
 
     Ok(())

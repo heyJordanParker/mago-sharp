@@ -7,6 +7,7 @@ namespace Mago\Sdk\Syntax;
 use Mago\Sdk\Exception\InvalidArgumentException;
 
 use function count;
+use function in_array;
 use function str_starts_with;
 
 /**
@@ -82,18 +83,31 @@ final class CallExpression
             );
         }
 
-        // A PHP# static call, `Calc.make()`, is a method call whose receiver is a bare name Mago bound to a class.
+        // Mago names a class at the member of `PaymentResult.Declined(…)`, which builds that enum case, spec section 20,
+        // as `new PaymentResult\Declined(…)` does: no call of a function or a method.
+        $memberName = $member === null ? null : $source->getResolvedName($member);
+        $builds = $memberName?->binding === Binding::ClassName;
+        // A PHP# static call is a method call whose receiver is a bare name Mago bound to a class, `Calc.make()`, the
+        // enclosing class, `Self.cap()`, as PHP's `static::cap()`, or its parent, `super.save()` or
+        // `super<HasLabel>.label()`, as PHP's `parent::save()`.
         $static =
             $node->kind === NodeKind::StaticMethodCall
             || $node->kind === NodeKind::MethodCall
-            && $callee->kind === NodeKind::ConstantAccess
-            && $source->getResolvedName($callee)?->binding === Binding::ClassName;
-        // A PHP# call of a global function, `global.max()`, is a method call whose member Mago names as the function.
-        if ($member !== null && $source->getResolvedName($member) !== null) {
+            && !$builds
+            && (
+                $callee->kind === NodeKind::ConstantAccess
+                && $source->getResolvedName($callee)?->binding === Binding::ClassName
+                || $callee->kind === NodeKind::Keyword
+                && in_array($source->getText($callee), ['Self', 'super'], true)
+                || $callee->kind === NodeKind::SuperOf
+            );
+        // A PHP# call of a plain PHP function, `global.max()` or `Pdf.render()`, is a method call whose member Mago
+        // names as the function.
+        if ($memberName !== null && !$builds) {
             return new self($node, $member, null, $member, $arguments, false, true);
         }
 
-        return new self($node, $callee, $function ? null : $callee, $member, $arguments, $static, $function);
+        return new self($node, $callee, $function || $builds ? null : $callee, $member, $arguments, $static, $function);
     }
 
     public static function fromExpression(SourceFile $source, Node $node): ?self
@@ -133,6 +147,7 @@ final class CallExpression
             ($this->node->kind === NodeKind::MethodCall || $this->node->kind === NodeKind::NullSafeMethodCall)
             && !$this->static
             && !$this->function
+            && $this->receiver !== null
         );
     }
 
@@ -148,12 +163,14 @@ final class CallExpression
                 $callee = $next;
             }
 
+            // A PHP# call of a local, `twice(1)`, calls the function value it holds, which has no name, as `$twice(1)`
+            // has none: Mago names no function there.
             return match ($callee->kind) {
                 NodeKind::Identifier,
                 NodeKind::LocalIdentifier,
                 NodeKind::QualifiedIdentifier,
                 NodeKind::FullyQualifiedIdentifier,
-                    => $source->getText($callee),
+                    => $source->getResolvedName($callee) === null ? null : $source->getText($callee),
                 default => null,
             };
         }

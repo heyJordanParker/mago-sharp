@@ -1792,11 +1792,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                         call
                     };
 
-                    self.method(method, modifier_flags_or_private(&method.modifiers), &[body])
+                    self.method(method, closed_method_flags(method), &[body])
                 }
-                ClassLikeMember::Method(method) => {
-                    self.method(method, modifier_flags_or_private(&method.modifiers), &[])
-                }
+                ClassLikeMember::Method(method) => self.method(method, closed_method_flags(method), &[]),
                 ClassLikeMember::Operator(operator) => self.operator(operator, None),
                 ClassLikeMember::NamedConstructor(
                     constructor @ NamedConstructor { initializer: Some(initializer), .. },
@@ -9390,6 +9388,17 @@ fn modifier_flags_or_private(modifiers: &Sequence<Modifier>) -> u32 {
     } else {
         flags
     }
+}
+
+/// The flags of a class's method, with `ZEND_ACC_FINAL` when no subclass may replace it: a method that is not
+/// `virtual`, abstract, an `override` or private is closed, spec section 22, and runs as PHP's `final` one, as Kotlin
+/// emits a member that is not `open` as a final JVM method. The engine then refuses a plain PHP class that replaces it.
+fn closed_method_flags(method: &Method) -> u32 {
+    let flags = modifier_flags_or_private(&method.modifiers);
+    let open = flags & (ZEND_ACC_ABSTRACT | ZEND_ACC_PRIVATE) != 0
+        || method.modifiers.iter().any(|modifier| matches!(modifier, Modifier::Virtual(_) | Modifier::Override(_)));
+
+    if open { flags } else { flags | ZEND_ACC_FINAL }
 }
 
 /// `ZEND_ACC_GENERATOR` for a method whose body yields, as php-src's grammar flags a function whose body holds a

@@ -226,6 +226,48 @@ fn compile_refuses_a_package_file_with_an_error_and_names_its_package() {
 const KEYED: &str = "namespace App;\n\npublic interface Keyed\n{\n    int getKey();\n\n    string label() => `record:${this.getKey()}`;\n}\n";
 const RECORD: &str = "<?php\n\nnamespace App;\n\nclass Record\n{\n    public function getKey(): int|string|null\n    {\n        return 7;\n    }\n}\n";
 
+/// The engine refuses a plain PHP class that extends a PHP# struct, or replaces a PHP# method that is not `virtual`,
+/// static or not, which runs as a `final` one, as Kotlin emits a member that is not `open`. The compile refuses each
+/// such class, as it refuses every other class the engine refuses when it links it, and links one that replaces a
+/// `virtual` method.
+#[test]
+fn compile_refuses_a_plain_php_class_that_extends_a_struct_or_replaces_a_closed_method() {
+    let directory = project(ORDER, MONEY);
+    let root = directory.path();
+    write(
+        root,
+        "app/Base.sharp",
+        "namespace App;\n\npublic class Base\n{\n    public Base() { }\n\n    public void save() { }\n\n    public virtual string title() => \"base\";\n\n    public static string kind() => \"base\";\n}\n",
+    );
+    write(root, "app/Point.sharp", "namespace App;\n\npublic struct Point\n{\n    public int x { get; init; }\n}\n");
+    write(root, "app/ExtendsStruct.php", "<?php\n\nnamespace App;\n\nclass ExtendsStruct extends Point\n{\n}\n");
+    write(
+        root,
+        "app/StaticToInstance.php",
+        "<?php\n\nnamespace App;\n\nclass StaticToInstance extends Base\n{\n    public function kind(): string\n    {\n        return 'instance';\n    }\n}\n",
+    );
+    write(
+        root,
+        "app/OverridesClosed.php",
+        "<?php\n\nnamespace App;\n\nclass OverridesClosed extends Base\n{\n    public function save(): void\n    {\n    }\n}\n",
+    );
+    write(
+        root,
+        "app/OverridesVirtual.php",
+        "<?php\n\nnamespace App;\n\nclass OverridesVirtual extends Base\n{\n    public function title(): string\n    {\n        return 'virtual';\n    }\n}\n",
+    );
+
+    let output = compile(root);
+
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    assert!(printed(&output).contains("`App\\Point` is a struct, which can't be inherited."), "{}", printed(&output));
+    assert!(printed(&output).contains("`App\\Base::save()` is not `virtual`"), "{}", printed(&output));
+    assert!(printed(&output).contains("`App\\Base::kind()` is not `virtual`"), "{}", printed(&output));
+    assert!(!printed(&output).contains("OverridesVirtual"), "{}", printed(&output));
+    assert!(printed(&output).contains("3 plain PHP files were refused"), "{}", printed(&output));
+    assert!(compiled(root, "app/Base.sharp").exists());
+}
+
 /// A plain PHP class that implements a PHP# interface with default bodies needs its `Defaults` trait, what it inherits
 /// must fit the interface, and a parameter must take what the interface's parameter erases to, spec section 22, or the
 /// engine refuses the class when it links it. The compile refuses each, and still writes every accepted PHP# file.
