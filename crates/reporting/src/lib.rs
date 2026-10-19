@@ -608,12 +608,16 @@ impl Issue {
 
     /// Returns `true` when a suppression may hide this issue in the file named `file_name`.
     ///
-    /// This is the one place Mago decides it. An error in a PHP# file keeps the file from running, so nothing hides
-    /// it: not an `@mago-ignore` or `@mago-expect` pragma, not an analyzer `ignore` entry, not a baseline entry.
-    /// Every other issue may be suppressed.
+    /// This is the one place Mago decides it. The language's own error in a PHP# file keeps the file from running, so
+    /// nothing hides it: not an `@mago-ignore` or `@mago-expect` pragma, not an analyzer `ignore` entry, not a baseline
+    /// entry. Every other issue may be suppressed, an extension host's at any level, as C#'s `#pragma warning disable`
+    /// hides an analyzer's error but never the compiler's, and ESLint's `eslint-disable-next-line` hides a rule set to
+    /// error. A host's issue is the one whose code names its host, `<host>/<rule>`, as ESLint names a plugin's rule.
     #[must_use]
     pub fn can_be_suppressed_in(&self, file_name: &[u8]) -> bool {
-        self.level < Level::Error || !file_name.ends_with(b".sharp")
+        self.level < Level::Error
+            || !file_name.ends_with(b".sharp")
+            || self.code.as_deref().is_some_and(|code| code.contains('/'))
     }
 
     /// The warning that a suppression targets an error in a PHP# file, which it can't hide. The `annotations` point
@@ -951,6 +955,17 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
+
+    /// A suppression hides an extension host's error in a PHP# file, and never the language's own.
+    #[test]
+    pub fn a_hosts_error_in_a_sharp_file_may_be_suppressed_and_the_languages_may_not() {
+        let host = Issue::error("A class reaches another module.").with_code("acme/module-boundary");
+        let language = Issue::error("Invalid return.").with_code("invalid-return-statement");
+
+        assert!(host.can_be_suppressed_in(b"app/Plan.sharp"));
+        assert!(!language.can_be_suppressed_in(b"app/Plan.sharp"));
+        assert!(language.can_be_suppressed_in(b"app/Plan.php"));
+    }
 
     #[test]
     pub fn test_highest_collection_level() {

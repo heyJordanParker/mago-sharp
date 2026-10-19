@@ -76,234 +76,311 @@ impl CompileCommand {
     /// Checks every PHP# file the analyzer loads, writes the compiled file of each accepted one, and deletes every
     /// other file in the `.sharp` folder.
     ///
-    /// Fails when a file is refused, when a source is a link to a file outside the workspace, when a package in
-    /// `vendor/` holds a `.sharp` folder of its own, or when a PHP file someone wrote sits where a source's PHP file
-    /// goes. Every accepted file is written either way.
+    /// Fails when a file is refused, a plain PHP file whose class doesn't satisfy a PHP# type it extends or implements
+    /// included, when a source is a link to a file outside the workspace, when a package in `vendor/` holds a `.sharp`
+    /// folder of its own, or when a PHP file someone wrote sits where a source's PHP file goes. Every accepted file is
+    /// written either way.
     pub fn execute(self, configuration: Configuration, color_choice: ColorChoice) -> Result<CommandOutcome, Error> {
-        let mut orchestrator = create_orchestrator(&configuration, color_choice, false, true, false);
-        analyze_the_whole_workspace_without_paths(&mut orchestrator);
-        orchestrator.add_exclude_patterns(configuration.analyzer.excludes.iter());
-        if let Some(external_analyzer) = start_external_analyzer(
-            &configuration.extension_hosts,
-            configuration.php_version,
-            configuration.threads,
-            &configuration.analyzer.plugins,
-            configuration.analyzer.disable_default_plugins,
-        ) {
-            orchestrator.set_external_analyzer_handle(external_analyzer);
-        }
+        compile_for_hosts(&configuration, color_choice)?;
 
-        let workspace = configuration.source.workspace.as_path();
-        let root =
-            workspace.canonicalize().map_err(|error| Error::CanonicalizingPath(workspace.to_path_buf(), error))?;
-        let mut database = orchestrator.load_database(workspace, true, None, None)?;
-        database.merge_base(Prelude::decode_database(PRELUDE_BYTES).expect("Failed to decode embedded prelude"));
-        let packaged: Vec<File> = database
-            .files()
-            .filter(|file| file.file_type == FileType::Vendored && Dialect::of(file).is_sharp())
-            .map(|file| {
-                let mut host = File::new(file.name.clone(), FileType::Host, file.path.clone(), file.contents.clone());
-                host.is_standard_library = file.is_standard_library;
-                host.folder_namespace = file.folder_namespace.clone();
-                host.is_project = file.is_project;
-                host
-            })
-            .collect();
-        let included: HashSet<Vec<u8>> = packaged.iter().map(|file| file.name.to_vec()).collect();
-        for file in packaged {
-            database.add(file);
-        }
+        compile(&configuration, color_choice, false)
+    }
+}
 
-        // Written before the compile stamps its inputs, which hold the PHP file a default class's name could name in
-        // a file's folder, so a compiled file is current once it is written.
-        let mut failed = false;
-        let mut written_beside = BTreeSet::new();
-        let mut folders = BTreeSet::new();
-        let mut listings = HashMap::new();
-        for file in database.files().filter(|file| {
-            file.file_type == FileType::Host
-                && Dialect::of(file).is_sharp()
-                && !file.is_standard_library
-                && !file.name.starts_with(VENDOR)
-                && !included.contains(file.name.as_ref())
-        }) {
-            let source = root.join(String::from_utf8_lossy(&file.name).as_ref());
-            let folder = source.parent().unwrap_or(&root).to_path_buf();
-            folders.insert(folder.clone());
-            if file.folder_namespace == Some(FolderNamespace::Test) {
-                continue;
-            }
-            let Some(declared) = declared_type(&file) else {
-                continue;
-            };
-            let (type_file, class) = (&declared.file, &declared.name);
-            let php = format!("{}.php", type_file.strip_suffix(".sharp").unwrap_or(type_file));
-            let listing = match listings.entry(folder.clone()) {
-                Entry::Occupied(listing) => listing.into_mut(),
-                Entry::Vacant(listing) => listing.insert(file_names(&folder).map_err(DatabaseError::from)?),
-            };
-            // PHP names a class whatever its case, and a disk that ignores case opens `order.php` for `Order.php`.
-            let named: Vec<&String> = listing.iter().filter(|name| name.eq_ignore_ascii_case(&php)).collect();
-            let mut someone_wrote = None;
-            for name in &named {
-                if !written_by_compile(&folder.join(name)).map_err(DatabaseError::from)? {
-                    someone_wrote = Some(name);
-                    break;
-                }
-            }
-            if let Some(name) = someone_wrote {
-                let source = String::from_utf8_lossy(&file.name);
-                let written = format!("{}{name}", &source[..source.len() - type_file.len()]);
-                tracing::error!("{written} and {source} both name {class}. Delete {written}, or rename one of them.");
-                failed = true;
-                continue;
-            }
-            // A rename onto a file of another case keeps that file's name on a disk that ignores case.
-            for name in named.into_iter().filter(|name| **name != php) {
-                std::fs::remove_file(folder.join(name)).or_else(ignore_missing).map_err(DatabaseError::from)?;
-            }
-            let path = folder.join(&php);
-            let contents = beside(&declared);
-            if !listing.contains(&php) || std::fs::read(&path).map_err(DatabaseError::from)? != contents.as_bytes() {
-                write_by_rename(&path, contents.as_bytes()).map_err(DatabaseError::from)?;
-            }
-            written_beside.insert(path);
-        }
-        // A removed source's PHP file is in a folder that holds a source, or held one at the last compile.
-        let compiled_folder = root.join(unit::COMPILED_FOLDER);
-        source_folders(&root, &compiled_folder, &compiled_folder, &mut folders).map_err(DatabaseError::from)?;
-        for folder in folders {
-            for name in file_names(&folder).map_err(DatabaseError::from)? {
-                let path = folder.join(&name);
-                if name.ends_with(".php")
-                    && !written_beside.contains(&path)
-                    && written_by_compile(&path).map_err(DatabaseError::from)?
-                {
-                    std::fs::remove_file(&path).or_else(ignore_missing).map_err(DatabaseError::from)?;
-                }
-            }
-        }
-        git::exclude(&root, "mago compile", &written_beside.into_iter().collect::<Vec<_>>())?;
+/// Compiles the project without its extension hosts when one of its PHP# files has no current compiled file, so a host
+/// loads the project's own classes as on plain PHP, on a fresh tree and after any change. A host sees the project as
+/// it is without what the hosts add, as a Roslyn source generator sees the compilation before its generators run and a
+/// Kotlin compiler plugin sees the module's own classes. Prints nothing: the run with the hosts that follows reports the
+/// project's errors and replaces each compiled file.
+///
+/// # Errors
+///
+/// Returns the error that stops the compile.
+pub(crate) fn compile_for_hosts(configuration: &Configuration, color_choice: ColorChoice) -> Result<(), Error> {
+    if !configuration.extension_hosts.values().any(|host| host.enabled) {
+        return Ok(());
+    }
 
-        let library = match standard_library(&root, &database) {
-            Ok(library) => library,
-            Err(refusal) => {
-                tracing::error!("{refusal}");
+    let mut without_hosts = configuration.clone();
+    without_hosts.extension_hosts.clear();
 
-                return Ok(ExitCode::FAILURE.into());
-            }
+    tracing::subscriber::with_default(tracing::subscriber::NoSubscriber::default(), || {
+        compile(&without_hosts, color_choice, true)
+    })
+    .map(|_| ())
+}
+
+/// Checks every PHP# file the analyzer loads, writes the compiled file of each accepted one, and deletes every other
+/// file in the `.sharp` folder, as [`CompileCommand::execute`] says. With `for_hosts`, it compiles only when a PHP#
+/// file has no current compiled file, and reports nothing.
+fn compile(configuration: &Configuration, color_choice: ColorChoice, for_hosts: bool) -> Result<CommandOutcome, Error> {
+    let mut orchestrator = create_orchestrator(configuration, color_choice, false, !for_hosts, false);
+    analyze_the_whole_workspace_without_paths(&mut orchestrator);
+    orchestrator.add_exclude_patterns(configuration.analyzer.excludes.iter());
+    if let Some(external_analyzer) = start_external_analyzer(
+        &configuration.extension_hosts,
+        configuration.php_version,
+        configuration.threads,
+        &configuration.analyzer.plugins,
+        configuration.analyzer.disable_default_plugins,
+    ) {
+        orchestrator.set_external_analyzer_handle(external_analyzer);
+    }
+
+    let workspace = configuration.source.workspace.as_path();
+    let root = workspace.canonicalize().map_err(|error| Error::CanonicalizingPath(workspace.to_path_buf(), error))?;
+    let mut database = orchestrator.load_database(workspace, true, None, None)?;
+    database.merge_base(Prelude::decode_database(PRELUDE_BYTES).expect("Failed to decode embedded prelude"));
+    let packaged: Vec<File> = database
+        .files()
+        .filter(|file| file.file_type == FileType::Vendored && Dialect::of(file).is_sharp())
+        .map(|file| {
+            let mut host = File::new(file.name.clone(), FileType::Host, file.path.clone(), file.contents.clone());
+            host.is_standard_library = file.is_standard_library;
+            host.folder_namespace = file.folder_namespace.clone();
+            host.is_project = file.is_project;
+            host
+        })
+        .collect();
+    let included: HashSet<Vec<u8>> = packaged.iter().map(|file| file.name.to_vec()).collect();
+    for file in packaged {
+        database.add(file);
+    }
+    if for_hosts && every_compiled_file_is_current(&root, &database)? {
+        return Ok(ExitCode::SUCCESS.into());
+    }
+
+    // Written before the compile stamps its inputs, which hold the PHP file a default class's name could name in
+    // a file's folder, so a compiled file is current once it is written.
+    let mut failed = false;
+    let mut written_beside = BTreeSet::new();
+    let mut folders = BTreeSet::new();
+    let mut listings = HashMap::new();
+    for file in database.files().filter(|file| {
+        file.file_type == FileType::Host
+            && Dialect::of(file).is_sharp()
+            && !file.is_standard_library
+            && !file.name.starts_with(VENDOR)
+            && !included.contains(file.name.as_ref())
+    }) {
+        let source = root.join(String::from_utf8_lossy(&file.name).as_ref());
+        let folder = source.parent().unwrap_or(&root).to_path_buf();
+        folders.insert(folder.clone());
+        if file.folder_namespace == Some(FolderNamespace::Test) {
+            continue;
+        }
+        let Some(declared) = declared_type(&file) else {
+            continue;
         };
-        let mut server = Server::new(database.into_static(), decode_prelude, server_settings(&orchestrator));
-        server.analyze()?;
-        let lean = Lean::new(&root);
-        let compilations = server.compile(
-            |path| unit::stamp(&root, path),
-            |name| rules_files(&root, name),
-            |translations, namespaces| lean.check(translations, namespaces),
-            &library,
-        )?;
-        let database = server.database();
-
-        let mut written = BTreeSet::new();
-        let mut accepted = HashSet::new();
-        let mut refused = IssueCollection::default();
-        let mut refused_files = 0;
-        let mut packaged_refusals = Vec::new();
-        for (file_id, compilation) in compilations {
-            let file = database.get_ref(&file_id)?;
-            let name = String::from_utf8_lossy(&file.name);
-            let source = file.path.clone().unwrap_or_else(|| root.join(name.as_ref()));
-            let Some(compiled) = unit::compiled_path(&root, &source).map_err(DatabaseError::from)? else {
-                tracing::error!(
-                    "{name} is a link to {}, outside the project, so it was not compiled. Install the package as a copy instead of a link.",
-                    source.canonicalize().map_err(DatabaseError::from)?.display()
-                );
-                failed = true;
-                continue;
-            };
-
-            match compilation {
-                Compilation::Accepted(bytes) => {
-                    write_by_rename(&compiled, &bytes).map_err(DatabaseError::from)?;
-                    written.insert(compiled);
-                    accepted.insert(file_id);
-                }
-                Compilation::Refused(errors) => {
-                    refused.extend(errors);
-                    refused_files += 1;
-                    if let Some(package) = package_of(&file.name) {
-                        packaged_refusals.push(format!(
-                            "{name} comes from the Composer package {package}. Update the package, or report the error to its maintainers."
-                        ));
-                    }
-                }
+        let (type_file, class) = (&declared.file, &declared.name);
+        let php = format!("{}.php", type_file.strip_suffix(".sharp").unwrap_or(type_file));
+        let listing = match listings.entry(folder.clone()) {
+            Entry::Occupied(listing) => listing.into_mut(),
+            Entry::Vacant(listing) => listing.insert(file_names(&folder).map_err(DatabaseError::from)?),
+        };
+        // PHP names a class whatever its case, and a disk that ignores case opens `order.php` for `Order.php`.
+        let named: Vec<&String> = listing.iter().filter(|name| name.eq_ignore_ascii_case(&php)).collect();
+        let mut someone_wrote = None;
+        for name in &named {
+            if !written_by_compile(&folder.join(name)).map_err(DatabaseError::from)? {
+                someone_wrote = Some(name);
+                break;
             }
         }
-
-        let listeners = server.listeners();
-        let inputs = listener_inputs(&root, database)?;
-        if !inputs.is_empty() {
-            let accepted: Vec<&Listener> =
-                listeners.iter().filter(|listener| accepted.contains(&listener.file_id)).collect();
-            let table = compiled_folder.join(LISTENERS);
-            write_by_rename(&table, &listener_table(&inputs, &accepted, server.dispatcher_module().as_ref()))
-                .map_err(DatabaseError::from)?;
-            written.insert(table);
-        }
-        if compiled_folder.is_dir() {
-            delete_all_but(&compiled_folder, &written, &compiled_folder.join(PACKAGE_FOLDER))
-                .map_err(DatabaseError::from)?;
-        }
-
-        for folder in package_compiled_folders(&root, database) {
-            tracing::error!(
-                "{folder} is a compiled folder inside a package, and the engine would read it instead of the project's .sharp folder. Delete {folder}."
-            );
+        if let Some(name) = someone_wrote {
+            let source = String::from_utf8_lossy(&file.name);
+            let written = format!("{}{name}", &source[..source.len() - type_file.len()]);
+            tracing::error!("{written} and {source} both name {class}. Delete {written}, or rename one of them.");
             failed = true;
+            continue;
         }
+        // A rename onto a file of another case keeps that file's name on a disk that ignores case.
+        for name in named.into_iter().filter(|name| **name != php) {
+            std::fs::remove_file(folder.join(name)).or_else(ignore_missing).map_err(DatabaseError::from)?;
+        }
+        let path = folder.join(&php);
+        let contents = beside(&declared);
+        if !listing.contains(&php) || std::fs::read(&path).map_err(DatabaseError::from)? != contents.as_bytes() {
+            write_by_rename(&path, contents.as_bytes()).map_err(DatabaseError::from)?;
+        }
+        written_beside.insert(path);
+    }
+    // A removed source's PHP file is in a folder that holds a source, or held one at the last compile.
+    let compiled_folder = root.join(unit::COMPILED_FOLDER);
+    source_folders(&root, &compiled_folder, &compiled_folder, &mut folders).map_err(DatabaseError::from)?;
+    for folder in folders {
+        for name in file_names(&folder).map_err(DatabaseError::from)? {
+            let path = folder.join(&name);
+            if name.ends_with(".php")
+                && !written_beside.contains(&path)
+                && written_by_compile(&path).map_err(DatabaseError::from)?
+            {
+                std::fs::remove_file(&path).or_else(ignore_missing).map_err(DatabaseError::from)?;
+            }
+        }
+    }
+    git::exclude(&root, "mago compile", &written_beside.into_iter().collect::<Vec<_>>())?;
 
-        if !refused.is_empty() {
-            let reporter = Reporter::new(
-                database.read_only(),
-                ReporterConfig {
-                    target: Default::default(),
-                    format: default_reporting_format(),
-                    color_choice: match color_choice {
-                        ColorChoice::Auto => ReportingColorChoice::Auto,
-                        ColorChoice::Always => ReportingColorChoice::Always,
-                        ColorChoice::Never => ReportingColorChoice::Never,
-                    },
-                    filter_fixable: false,
-                    sort: false,
-                    minimum_report_level: None,
-                    editor_url: configuration.editor_url.clone(),
-                },
-            );
-            reporter.report(refused, None)?;
-        }
-        for refusal in packaged_refusals {
+    let library = match standard_library(&root, &database) {
+        Ok(library) => library,
+        Err(refusal) => {
             tracing::error!("{refusal}");
-        }
-
-        let summary = match (accepted.len(), refused_files) {
-            (0, 0) => "No PHP# files found to compile.".to_string(),
-            (compiled, 0) => format!("Compiled {} into .sharp/.", files(compiled)),
-            (compiled, refused) => format!(
-                "Compiled {} into .sharp/. {} refused: fix {} errors and run vendor/bin/mago compile again.",
-                files(compiled),
-                if refused == 1 { "1 PHP# file was".to_string() } else { format!("{refused} PHP# files were") },
-                if refused == 1 { "its" } else { "their" },
-            ),
-        };
-        if failed || refused_files > 0 {
-            tracing::error!("{summary}");
 
             return Ok(ExitCode::FAILURE.into());
         }
-        tracing::info!("{summary}");
+    };
+    let mut server = Server::new(database.into_static(), decode_prelude, server_settings(&orchestrator));
+    server.analyze()?;
+    let lean = Lean::new(&root);
+    let compilations = server.compile(
+        |path| unit::stamp(&root, path),
+        |name| rules_files(&root, name),
+        |translations, namespaces| lean.check(translations, namespaces),
+        &library,
+    )?;
+    let database = server.database();
 
-        Ok(ExitCode::SUCCESS.into())
+    let mut written = BTreeSet::new();
+    let mut accepted = HashSet::new();
+    let mut refused = IssueCollection::default();
+    let mut refused_files = 0;
+    let mut refused_php_files = 0;
+    let mut packaged_refusals = Vec::new();
+    for (file_id, compilation) in compilations {
+        let file = database.get_ref(&file_id)?;
+        let name = String::from_utf8_lossy(&file.name);
+        let source = file.path.clone().unwrap_or_else(|| root.join(name.as_ref()));
+        let Some(compiled) = unit::compiled_path(&root, &source).map_err(DatabaseError::from)? else {
+            tracing::error!(
+                "{name} is a link to {}, outside the project, so it was not compiled. Install the package as a copy instead of a link.",
+                source.canonicalize().map_err(DatabaseError::from)?.display()
+            );
+            failed = true;
+            continue;
+        };
+
+        match compilation {
+            Compilation::Accepted(bytes) => {
+                write_by_rename(&compiled, &bytes).map_err(DatabaseError::from)?;
+                written.insert(compiled);
+                accepted.insert(file_id);
+            }
+            Compilation::Refused(errors) => {
+                refused.extend(errors);
+                if Dialect::of(file).is_sharp() {
+                    refused_files += 1;
+                } else {
+                    refused_php_files += 1;
+                }
+                if let Some(package) = package_of(&file.name) {
+                    packaged_refusals.push(format!(
+                            "{name} comes from the Composer package {package}. Update the package, or report the error to its maintainers."
+                        ));
+                }
+            }
+        }
     }
+
+    let listeners = server.listeners();
+    let inputs = listener_inputs(&root, database)?;
+    if !inputs.is_empty() {
+        let accepted: Vec<&Listener> =
+            listeners.iter().filter(|listener| accepted.contains(&listener.file_id)).collect();
+        let table = compiled_folder.join(LISTENERS);
+        write_by_rename(&table, &listener_table(&inputs, &accepted, server.dispatcher_module().as_ref()))
+            .map_err(DatabaseError::from)?;
+        written.insert(table);
+    }
+    if compiled_folder.is_dir() {
+        delete_all_but(&compiled_folder, &written, &compiled_folder.join(PACKAGE_FOLDER))
+            .map_err(DatabaseError::from)?;
+    }
+
+    if for_hosts {
+        return Ok(ExitCode::SUCCESS.into());
+    }
+
+    for folder in package_compiled_folders(&root, database) {
+        tracing::error!(
+            "{folder} is a compiled folder inside a package, and the engine would read it instead of the project's .sharp folder. Delete {folder}."
+        );
+        failed = true;
+    }
+
+    if !refused.is_empty() {
+        let reporter = Reporter::new(
+            database.read_only(),
+            ReporterConfig {
+                target: Default::default(),
+                format: default_reporting_format(),
+                color_choice: match color_choice {
+                    ColorChoice::Auto => ReportingColorChoice::Auto,
+                    ColorChoice::Always => ReportingColorChoice::Always,
+                    ColorChoice::Never => ReportingColorChoice::Never,
+                },
+                filter_fixable: false,
+                sort: false,
+                minimum_report_level: None,
+                editor_url: configuration.editor_url.clone(),
+            },
+        );
+        reporter.report(refused, None)?;
+    }
+    for refusal in packaged_refusals {
+        tracing::error!("{refusal}");
+    }
+
+    let mut summary = match (accepted.len(), refused_files) {
+        (0, 0) => "No PHP# files found to compile.".to_string(),
+        (compiled, _) => format!("Compiled {} into .sharp/.", files(compiled)),
+    };
+    let mut errors = Vec::new();
+    match refused_files {
+        0 => {}
+        1 => errors.push("1 PHP# file was refused".to_string()),
+        refused => errors.push(format!("{refused} PHP# files were refused")),
+    }
+    match refused_php_files {
+        0 => {}
+        1 => errors.push("1 plain PHP file was refused".to_string()),
+        refused => errors.push(format!("{refused} plain PHP files were refused")),
+    }
+    if !errors.is_empty() {
+        summary.push_str(&format!(" {}: fix the errors and run vendor/bin/mago compile again.", errors.join(", and ")));
+    }
+    if failed || !errors.is_empty() {
+        tracing::error!("{summary}");
+
+        return Ok(ExitCode::FAILURE.into());
+    }
+    tracing::info!("{summary}");
+
+    Ok(ExitCode::SUCCESS.into())
+}
+
+/// Whether each PHP# file the compile checks has a compiled file the engine runs: one whose every input is as it was
+/// stamped, written by this checker build. A source that is a link outside the project never has one.
+///
+/// # Errors
+///
+/// Returns the error of reading a compiled file or one of its inputs.
+fn every_compiled_file_is_current(root: &Path, database: &impl DatabaseReader) -> Result<bool, Error> {
+    for file in database.files().filter(|file| file.file_type == FileType::Host && Dialect::of(file).is_sharp()) {
+        let source = file.path.clone().unwrap_or_else(|| root.join(String::from_utf8_lossy(&file.name).as_ref()));
+        let Some(compiled) = unit::compiled_path(root, &source).map_err(DatabaseError::from)? else {
+            continue;
+        };
+        let bytes = match std::fs::read(&compiled) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(DatabaseError::from(error).into()),
+        };
+        if unit::is_stale(root, &bytes).map_err(DatabaseError::from)? {
+            return Ok(false);
+        }
+    }
+
+    Ok(true)
 }
 
 /// The standard library's package name, as its `composer.json` and Composer's `installed.json` give it.

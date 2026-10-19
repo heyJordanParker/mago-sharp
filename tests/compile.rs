@@ -12,6 +12,8 @@ use mago_sharp_bridge::unit::source_hash;
 use mago_sharp_bridge::unit::stamp;
 use mago_sharp_lean::PACKAGE_FOLDER;
 
+mod common;
+
 const ORDER: &str = "namespace App;\n\npublic class Order\n{\n    public int total(int extra)\n    {\n        return extra + 1;\n    }\n}\n";
 const BROKEN_ORDER: &str = "namespace App;\n\npublic class Order\n{\n    public int total(int extra)\n    {\n        return \"one\";\n    }\n}\n";
 const MONEY: &str =
@@ -218,6 +220,163 @@ fn compile_refuses_a_package_file_with_an_error_and_names_its_package() {
     assert!(!compiled(root, MONEY_PATH).exists());
     assert!(compiled(root, "app/Order.sharp").exists());
     assert!(printed(&output).contains("Composer package acme/money"), "{}", printed(&output));
+}
+
+/// A PHP# interface with a default body, and a plain PHP class whose method returns more than the interface allows.
+const KEYED: &str = "namespace App;\n\npublic interface Keyed\n{\n    int getKey();\n\n    string label() => `record:${this.getKey()}`;\n}\n";
+const RECORD: &str = "<?php\n\nnamespace App;\n\nclass Record\n{\n    public function getKey(): int|string|null\n    {\n        return 7;\n    }\n}\n";
+
+/// A plain PHP class that implements a PHP# interface with default bodies needs its `Defaults` trait, what it inherits
+/// must fit the interface, and a parameter must take what the interface's parameter erases to, spec section 22, or the
+/// engine refuses the class when it links it. The compile refuses each, whatever `ignore` entry targets it, and still
+/// writes every accepted PHP# file.
+#[test]
+fn compile_refuses_a_plain_php_class_that_does_not_satisfy_the_php_sharp_interface_it_implements() {
+    let directory = project(ORDER, MONEY);
+    let root = directory.path();
+    write(root, "app/Keyed.sharp", KEYED);
+    write(root, "app/Record.php", RECORD);
+    write(root, "app/Bare.php", "<?php\n\nnamespace App;\n\nclass Bare extends Record implements Keyed\n{\n}\n");
+    write(root, "app/Box.sharp", "namespace App;\n\npublic interface Box<T>\n{\n    void put(T item);\n}\n");
+    let int_box = |parameter: &str| {
+        format!(
+            "<?php\n\nnamespace App;\n\n/** @implements Box<int> */\nclass IntBox implements Box\n{{\n    public function put({parameter} $item): void\n    {{\n    }}\n}}\n"
+        )
+    };
+    write(root, "app/IntBox.php", &int_box("int"));
+    write(
+        root,
+        "mago.toml",
+        "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[analyzer]\nignore = [\"unimplemented-abstract-method\", \"incompatible-return-type\", \"incompatible-parameter-type\"]\n",
+    );
+
+    let output = compile(root);
+
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    assert!(
+        printed(&output).contains("`App\\Bare` implements `App\\Keyed` without its default bodies"),
+        "{}",
+        printed(&output)
+    );
+    assert!(printed(&output).contains("incompatible-return-type"), "{}", printed(&output));
+    assert!(
+        printed(&output).contains("Parameter `item` of `App\\IntBox::put()` must take at least `mixed`"),
+        "{}",
+        printed(&output)
+    );
+    assert!(printed(&output).contains("2 plain PHP files were refused"), "{}", printed(&output));
+    assert!(compiled(root, "app/Keyed.sharp").exists());
+
+    write(
+        root,
+        "app/Bare.php",
+        "<?php\n\nnamespace App;\n\nclass Bare extends Record implements Keyed\n{\n    use Keyed\\Defaults;\n\n    public function getKey(): int\n    {\n        return 7;\n    }\n}\n",
+    );
+    write(root, "app/IntBox.php", &int_box("mixed"));
+    compile_succeeds(root);
+}
+
+/// The compile checks a plain PHP file only where its class meets a PHP# type, as kotlinc checks a Java type only
+/// where it meets a Kotlin declaration. Every other error there stays `mago analyze`'s, as in a plain PHP project.
+#[test]
+fn compile_leaves_every_other_error_in_a_plain_php_file_to_mago_analyze() {
+    let directory = project(ORDER, MONEY);
+    let root = directory.path();
+    write(root, "app/Keyed.sharp", KEYED);
+    write(
+        root,
+        "app/Sorting.php",
+        "<?php\n\nnamespace App;\n\nfunction sorted(): array\n{\n    ksort($prices);\n\n    return $prices;\n}\n",
+    );
+
+    let analyzed = Command::new(env!("CARGO_BIN_EXE_mago"))
+        .args(["--no-version-check", "--colors", "never", "analyze"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+
+    assert_eq!(analyzed.status.code(), Some(1), "{}", printed(&analyzed));
+    assert!(printed(&analyzed).contains("app/Sorting.php"), "{}", printed(&analyzed));
+    compile_succeeds(root);
+}
+
+/// An extension host that reads the compiled file of `app/Word.sharp` as its hooks run, and appends which word the
+/// file holds to `host.log`, as a host that loads a project class runs that file.
+const HOST_READING_THE_COMPILED_FILE: &str = r#"<?php
+
+declare(strict_types=1);
+
+use Mago\Sdk\Analyzer\BeforeAnalysisContext;
+use Mago\Sdk\Analyzer\BeforeAnalysisHook;
+use Mago\Sdk\Analyzer\Plugin;
+use Mago\Sdk\Analyzer\PluginDefinition;
+use Mago\Sdk\Analyzer\PluginRegistry;
+use Mago\Sdk\Extension;
+use Mago\Sdk\Worker;
+
+require $argv[1];
+
+final class ReadsTheCompiledFile implements Plugin, BeforeAnalysisHook
+{
+    public function getDefinition(): PluginDefinition
+    {
+        return new PluginDefinition('reads-the-compiled-file', 'Reads the compiled file', 'Reads app/Word.sharp compiled.');
+    }
+
+    public function register(PluginRegistry $registry): void
+    {
+        $registry->registerBeforeAnalysisHook($this);
+    }
+
+    public function beforeAnalysis(BeforeAnalysisContext $context): void
+    {
+        $compiled = @file_get_contents('.sharp/app/Word.sharpc');
+        $seen = match (true) {
+            $compiled === false => 'nothing',
+            str_contains($compiled, 'second') => 'second',
+            str_contains($compiled, 'first') => 'first',
+        };
+        file_put_contents('host.log', "{$seen}\n", FILE_APPEND);
+    }
+}
+
+(new Worker(new Extension('reader', 'Reader', '0.0.0', analyzerPlugins: [new ReadsTheCompiledFile()])))->run();
+"#;
+
+/// A Roslyn source generator sees the compilation's symbols, and a Kotlin compiler plugin sees the module's own
+/// classes, so a host sees each PHP# file compiled from its current source, on a fresh tree and after an edit.
+#[test]
+fn a_host_sees_each_php_sharp_file_compiled_from_its_current_source() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if !common::php_sdk_is_available(repository, "the host compile test") {
+        return;
+    }
+    let directory = project(ORDER, MONEY);
+    let root = directory.path();
+    let word = |word: &str| {
+        format!("namespace App;\n\npublic class Word\n{{\n    public static string text() => \"{word}\";\n}}\n")
+    };
+    write(root, "app/Word.sharp", &word("first"));
+    write(root, "tools/host.php", HOST_READING_THE_COMPILED_FILE);
+    write(
+        root,
+        "mago.toml",
+        &format!(
+            "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.reader]\nworkers = 1\ncommand = [\"php\", \"tools/host.php\", {:?}]\n",
+            repository.join("vendor/autoload.php").display().to_string()
+        ),
+    );
+
+    compile_succeeds(root);
+    write(root, "app/Word.sharp", &word("second"));
+    let analyzed = Command::new(env!("CARGO_BIN_EXE_mago"))
+        .args(["--no-version-check", "--colors", "never", "analyze"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+
+    assert!(analyzed.status.success(), "{}", printed(&analyzed));
+    assert_eq!(std::fs::read_to_string(root.join("host.log")).unwrap(), "first\nsecond\n");
 }
 
 #[test]

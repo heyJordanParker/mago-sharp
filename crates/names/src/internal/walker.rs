@@ -297,12 +297,24 @@ impl<'arena, 'classes> NameWalker<'arena, 'classes> {
 
     /// Marks a bare name written before `.` or `?.`, with or without type arguments, which binds as a class unless it
     /// names a local, `this` or a type parameter in scope.
-    fn mark_member_object(&mut self, object: &Expression<'arena>) {
-        if self.sharp
-            && let Expression::ConstantAccess(object)
-            | Expression::GenericClass(GenericClass { class: Expression::ConstantAccess(object), .. }) = object
+    ///
+    /// `global.member` names the function or constant `member` of PHP's root namespace, spec section 23, as `\member`
+    /// does, so the source names `member` there.
+    fn mark_member_object(&mut self, object: &Expression<'arena>, member: &ClassLikeMemberSelector<'arena>) {
+        if !self.sharp {
+            return;
+        }
+        let (Expression::ConstantAccess(object)
+        | Expression::GenericClass(GenericClass { class: Expression::ConstantAccess(object), .. })) = object
+        else {
+            return;
+        };
+
+        self.member_objects.insert(object.name.span().start.offset);
+        if object.name.value() == b"global"
+            && let ClassLikeMemberSelector::Identifier(member) = member
         {
-            self.member_objects.insert(object.name.span().start.offset);
+            self.resolved_names.insert_written_at(member.span, member.value, false);
         }
     }
 
@@ -331,7 +343,7 @@ impl<'arena, 'classes> NameWalker<'arena, 'classes> {
             return false;
         };
 
-        self.resolved_names.insert_at(span, name, false);
+        self.resolved_names.insert_lowered_at(span, name, false);
         self.resolved_names.bind(span, Binding::TypeParameter { declaration });
 
         true
@@ -357,10 +369,11 @@ impl<'arena, 'classes> NameWalker<'arena, 'classes> {
         self.resolved_names.bind(variable.span, Binding::Local(local));
     }
 
-    /// Records each function a pattern's PHP calls as the name resolved at its span, as a call's name is.
+    /// Records each function a pattern's PHP calls as the name resolved at its span, as a call's name is. The source
+    /// names none of them.
     fn record_called_functions(&mut self, node: Node<'_, 'arena>) {
         for function in called_functions(node) {
-            self.resolved_names.insert_at(function.span, function.value, false);
+            self.resolved_names.insert_lowered_at(function.span, function.value, false);
         }
     }
 
@@ -1156,7 +1169,8 @@ where
     }
 
     /// A value pattern `Enum.Case` may name a case of an enum with data, spec section 20, which `php_shape` tests with
-    /// `instanceof` the case's class, named at `Case`: the name there is the enum's full name and the case's.
+    /// `instanceof` the case's class, named at `Case`: the name there is the enum's full name and the case's. The source
+    /// names the enum's case there, which, as in `Enum.Case` anywhere else, has no name of its own.
     fn walk_in_pattern(&mut self, pattern: &'ast Pattern<'arena>, context: &mut NameResolutionContext<'arena, A>) {
         if let Pattern::Value(Expression::Access(Access::Property(PropertyAccess {
             object: Expression::ConstantAccess(class),
@@ -1166,7 +1180,7 @@ where
         {
             let (enum_name, imported) = self.resolve_class(context, class.name.value());
             let name = context.intern(&[enum_name, b"\\", case.value].concat());
-            self.resolved_names.insert_at(case.span, name, imported);
+            self.resolved_names.insert_lowered_at(case.span, name, imported);
         }
     }
 
@@ -1340,7 +1354,7 @@ where
         method_call: &'ast MethodCall<'arena>,
         _context: &mut NameResolutionContext<'arena, A>,
     ) {
-        self.mark_member_object(method_call.object);
+        self.mark_member_object(method_call.object, &method_call.method);
         self.record_changing_call(method_call.object, &method_call.method);
     }
 
@@ -1349,7 +1363,7 @@ where
         method_partial_application: &'ast MethodPartialApplication<'arena>,
         _context: &mut NameResolutionContext<'arena, A>,
     ) {
-        self.mark_member_object(method_partial_application.object);
+        self.mark_member_object(method_partial_application.object, &method_partial_application.method);
     }
 
     fn walk_in_property_access(
@@ -1357,7 +1371,7 @@ where
         property_access: &'ast PropertyAccess<'arena>,
         _context: &mut NameResolutionContext<'arena, A>,
     ) {
-        self.mark_member_object(property_access.object);
+        self.mark_member_object(property_access.object, &property_access.property);
     }
 
     fn walk_in_null_safe_method_call(
@@ -1365,7 +1379,7 @@ where
         null_safe_method_call: &'ast NullSafeMethodCall<'arena>,
         _context: &mut NameResolutionContext<'arena, A>,
     ) {
-        self.mark_member_object(null_safe_method_call.object);
+        self.mark_member_object(null_safe_method_call.object, &null_safe_method_call.method);
         self.record_changing_call(null_safe_method_call.object, &null_safe_method_call.method);
     }
 
@@ -1374,7 +1388,7 @@ where
         null_safe_property_access: &'ast NullSafePropertyAccess<'arena>,
         _context: &mut NameResolutionContext<'arena, A>,
     ) {
-        self.mark_member_object(null_safe_property_access.object);
+        self.mark_member_object(null_safe_property_access.object, &null_safe_property_access.property);
     }
 
     fn walk_in_interface(
@@ -1510,16 +1524,16 @@ where
     ) {
         if let Expression::Identifier(identifier) = function_call.function {
             let (name, imported) = context.resolve(NameKind::Function, identifier.value());
+            // A call of a PHP# local calls the function value it holds, which has no name, as `$twice(2)` has none.
+            let local = if self.sharp { self.locals.lookup(identifier.value()) } else { None };
+            let Some(local) = local else {
+                self.resolved_names.insert_at(identifier.span(), name, imported);
 
-            self.resolved_names.insert_at(identifier.span(), name, imported);
-
-            if !self.sharp {
                 return;
-            }
+            };
 
-            if let Some(local) = self.locals.lookup(identifier.value()) {
-                self.bind_local(identifier.value(), identifier.span(), local);
-            }
+            self.resolved_names.insert_lowered_at(identifier.span(), name, imported);
+            self.bind_local(identifier.value(), identifier.span(), local);
         }
     }
 
@@ -1677,7 +1691,12 @@ where
                 (Binding::Constant, context.resolve(NameKind::Constant, name))
             };
 
-            self.resolved_names.insert_at(span, fqn, imported);
+            // `global` names PHP's root namespace, which `mark_member_object` records as its member's namespace.
+            if is_member_object && name == b"global" {
+                self.resolved_names.insert_lowered_at(span, fqn, imported);
+            } else {
+                self.resolved_names.insert_at(span, fqn, imported);
+            }
             self.resolved_names.bind(span, binding);
 
             return;

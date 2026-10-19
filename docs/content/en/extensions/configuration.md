@@ -33,7 +33,7 @@ stderr-tail-size = 65536
 | `environment` | string map | `{}` | Variables added to, or replacing values in, the worker environment. |
 | `inherit-environment` | boolean | `true` | Whether workers inherit Mago's process environment before `environment` is applied. |
 | `maximum-payload-size` | positive integer | `67108864` | Maximum payload bytes accepted in one protocol frame. The maximum representable value is `4294967295`. |
-| `request-timeout-ms` | positive integer | `30000` | Deadline for an outer request, including nested metadata and type-comparison requests. It counts from when the worker starts the request, not while the request waits behind earlier ones. |
+| `request-timeout-ms` | positive integer | `30000` | Longest an outer request may go without progress. It counts from when the worker starts the request, not while the request waits behind earlier ones, and starts again at each nested metadata or type-comparison request the worker makes for it, as an HTTP client's read timeout starts again at each byte. A batch of many files' hooks lives while its hooks make progress, and a callback that stops answering fails. |
 | `shutdown-timeout-ms` | non-negative integer | `250` | Grace period after shutdown before Mago forcibly terminates a worker. |
 | `stderr-tail-size` | non-negative integer | `65536` | Trailing worker standard-error bytes retained for failure diagnostics. |
 

@@ -530,11 +530,14 @@ impl Worker {
         let (sender, receiver) = mpsc::channel();
         let (request_id, starts) = self.inner.send_request(payload, sender)?;
 
-        let mut started_at = starts.then(Instant::now);
+        // The deadline runs from the worker's start of the request or its last frame for it, as an HTTP client's read
+        // timeout runs from the last byte. A batch of many files' hooks, or a request that shares its worker's
+        // process with others, lives while it makes progress, and a hook that stops answering fails.
+        let mut progressed_at = starts.then(Instant::now);
         loop {
-            let event = match started_at {
-                Some(started_at) => {
-                    let Some(remaining) = self.request_timeout.checked_sub(started_at.elapsed()) else {
+            let event = match progressed_at {
+                Some(progressed_at) => {
+                    let Some(remaining) = self.request_timeout.checked_sub(progressed_at.elapsed()) else {
                         return Err(self.timeout(request_id));
                     };
                     receiver.recv_timeout(remaining)
@@ -542,8 +545,12 @@ impl Worker {
                 None => receiver.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected),
             };
 
-            if matches!(event, Ok(PendingEvent::Started | PendingEvent::Frame(_))) {
-                started_at.get_or_insert_with(Instant::now);
+            match event {
+                Ok(PendingEvent::Started) => {
+                    progressed_at.get_or_insert_with(Instant::now);
+                }
+                Ok(PendingEvent::Frame(_)) => progressed_at = Some(Instant::now()),
+                _ => {}
             }
 
             match event {
@@ -1182,6 +1189,50 @@ mod tests {
         );
         assert!(elapsed >= deadline && elapsed < deadline * 2, "the hung request failed after {elapsed:?}");
         assert!(!worker.is_running());
+        peer.join().expect("peer thread should join");
+        worker.shutdown();
+    }
+
+    /// A batch of many files' hooks runs longer than the deadline, and asks Mago for metadata as each hook runs.
+    #[test]
+    fn a_request_that_keeps_asking_for_metadata_lives_past_the_deadline() {
+        let deadline = Duration::from_millis(300);
+        let (worker, mut peer_reader, mut peer_writer) = connected_worker(deadline);
+        let peer = std::thread::spawn(move || {
+            let outer = Frame::read_from(&mut peer_reader, 1024)
+                .expect("outer request should decode")
+                .expect("outer request should be present");
+            for id in 1..=6 {
+                std::thread::sleep(deadline / 2);
+                let nested = Frame {
+                    version: crate::protocol::PROTOCOL_VERSION,
+                    kind: FrameKind::Request,
+                    flags: FrameFlags::empty(),
+                    id,
+                    parent_id: outer.id,
+                    payload: b"metadata?".to_vec(),
+                };
+                nested.write_to(&mut peer_writer, 1024).expect("nested request should encode");
+                peer_writer.flush().expect("nested request should flush");
+                let answer = Frame::read_from(&mut peer_reader, 1024)
+                    .expect("nested response should decode")
+                    .expect("nested response should be present");
+                if answer.kind == FrameKind::Cancel {
+                    return;
+                }
+            }
+            Frame::response(outer.id, 0, b"done".to_vec())
+                .write_to(&mut peer_writer, 1024)
+                .expect("outer response should encode");
+            peer_writer.flush().expect("outer response should flush");
+        });
+
+        let started_at = Instant::now();
+        let mut handler = |_: &Frame| Ok(b"metadata!".to_vec());
+        let response = worker.request_with_handler(b"analyze".to_vec(), &mut handler);
+
+        assert_eq!(response.expect("the request should finish"), b"done");
+        assert!(started_at.elapsed() > deadline * 2, "the request took {:?}", started_at.elapsed());
         peer.join().expect("peer thread should join");
         worker.shutdown();
     }

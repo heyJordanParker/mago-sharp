@@ -68,6 +68,7 @@ use mago_server::Settings as ServerSettings;
 use crate::commands::args::baseline_reporting::BaselineReportingArgs;
 use crate::commands::args::substitution::Substitution;
 use crate::commands::args::substitution::SubstitutionArgs;
+use crate::commands::compile::compile_for_hosts;
 use crate::commands::outcome::CommandOutcome;
 use crate::commands::stdin_input;
 use crate::config::Configuration;
@@ -303,6 +304,7 @@ impl AnalyzeCommand {
         let load_inputs_start = trace_enabled.then(Instant::now);
         let mut prelude_duration = None;
         let mut load_database_duration = None;
+        compile_for_hosts(&configuration, color_choice)?;
         let external_analyzer = start_external_analyzer(
             &configuration.extension_hosts,
             configuration.php_version,
@@ -436,6 +438,7 @@ impl AnalyzeCommand {
             analyze_the_whole_workspace_without_paths(&mut orchestrator);
             orchestrator.add_exclude_patterns(configuration.analyzer.excludes.iter());
 
+            compile_for_hosts(&configuration, color_choice)?;
             if let Some(external_analyzer) = initialize_external_analyzer(
                 &configuration.extension_hosts,
                 configuration.php_version,
@@ -555,6 +558,7 @@ impl AnalyzeCommand {
             tracing::info!("Detected {} file change(s), re-analyzing...", changed_file_ids.len());
 
             *server.database_mut() = watcher.database().clone().into_static();
+            compile_for_hosts(configuration, color_choice)?;
 
             let mut issues = server.analyze_incremental(&changed_file_ids)?.issues;
             issues.filter_out_ignored(&ignore_set, |file_id| {

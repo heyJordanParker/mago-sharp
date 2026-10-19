@@ -149,7 +149,7 @@ Useful isolation switches are:
 
 ## Timeouts and cancellation
 
-The host's `request-timeout-ms` covers an outer callback and its nested metadata or comparison requests. When Mago cancels work, `CancellationTokenInterface` becomes cancelled and `throwIfCancelled()` raises `CancelledException`.
+The host's `request-timeout-ms` is the longest an outer callback may go without progress: it starts again at each nested metadata or comparison request the callback makes. When Mago cancels work, `CancellationTokenInterface` becomes cancelled and `throwIfCancelled()` raises `CancelledException`.
 
 Check cancellation in long scans and aggregation loops. `subscribe()` integrates cancellation with asynchronous work; always `unsubscribe()` a retained subscription after completion.
 

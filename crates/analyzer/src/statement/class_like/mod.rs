@@ -1263,6 +1263,15 @@ where
         }))
         .collect();
 
+    let links_to_sharp = !context.dialect.is_sharp()
+        && class_like_metadata.all_parent_classes.iter().chain(&class_like_metadata.all_parent_interfaces).any(
+            |parent| context.codebase.get_class_like(parent.as_bytes()).is_some_and(|parent| parent.flags.is_sharp()),
+        );
+    let class_span = name_span.unwrap_or(declaration_span);
+    if links_to_sharp {
+        context.collector.start_recording();
+    }
+
     if class_like_metadata.flags.is_sharp() {
         check_sharp_reached_twice(context, class_like_metadata, inheritance_ast, &mut checked_signatures);
     }
@@ -1536,6 +1545,9 @@ where
     }
     check_class_like_properties(context, class_like_metadata);
     check_docblock_declared_members(context, class_like_metadata, declaration_span);
+    if links_to_sharp {
+        report_in_class(context, class_span, name);
+    }
 
     let mut scope = ScopeContext::new(ReferenceOrigin::Symbol((class_like_metadata.name, mago_word::empty_word())));
     scope.set_class_like(Some(class_like_metadata));
@@ -1666,7 +1678,13 @@ where
 
     // Check trait constant overrides AFTER constants have been analyzed
     // so we can compare their inferred values
+    if links_to_sharp {
+        context.collector.start_recording();
+    }
     check_class_like_constants(context, class_like_metadata, members);
+    if links_to_sharp {
+        report_in_class(context, class_span, name);
+    }
 
     if has_complete_hierarchy {
         crate::readonly::finalize_class_writes(context, artifacts, class_like_metadata);
@@ -1681,6 +1699,24 @@ where
     }
 
     Ok(())
+}
+
+/// Reports the issues recorded since `start_recording` for a plain PHP class that extends or implements a PHP# type,
+/// each error with an annotation at `class_span` that names the class, as a signature check's has. The engine links the
+/// class against the PHP# type, spec section 22, and `mago compile` refuses each error in it that names the class and a
+/// PHP# declaration, as `IncrementalAnalysisService::unlinkable_plain_php_classes` finds them.
+fn report_in_class<A>(context: &mut Context<'_, '_, A>, class_span: Span, name: Word)
+where
+    A: Arena,
+{
+    let issues = context.collector.finish_recording().unwrap_or_default();
+    context.collector.extend(issues.into_iter().map(|issue| {
+        if issue.level < Level::Error || issue.annotations.iter().any(|annotation| annotation.span == class_span) {
+            return issue;
+        }
+
+        issue.with_annotation(Annotation::secondary(class_span).with_message(format!("In class `{name}`")))
+    }));
 }
 
 /// Reports each static of a PHP# class-like named like a member of `Class`, spec section 25, as TypeScript's error 2699
@@ -1819,6 +1855,10 @@ where
                 interface.original_name, defaults.original_name
             ))
             .with_annotation(Annotation::primary(span).with_message("Declared here."))
+            .with_annotation(
+                Annotation::secondary(interface.name_span.unwrap_or(interface.span))
+                    .with_message(format!("`{}` is declared here.", interface.original_name)),
+            )
             .with_note(format!(
                 "A plain PHP class gets the default bodies of the PHP# interface `{}` through the trait `{}`.",
                 interface.original_name, defaults.original_name

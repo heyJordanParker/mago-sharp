@@ -58,7 +58,7 @@ struct PoolTelemetry {
 pub struct WorkerPoolOptions {
     /// Maximum payload bytes accepted in one protocol frame.
     pub maximum_payload_size: usize,
-    /// Deadline for one outer request, including nested worker requests.
+    /// Longest one outer request may go without a frame from its worker once the worker starts it.
     pub request_timeout: Duration,
     /// Grace period between the shutdown frame and forcibly killing a worker.
     pub shutdown_timeout: Duration,

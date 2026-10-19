@@ -1568,7 +1568,7 @@ fn a_default_body_sees_only_its_interface_and_a_plain_php_class_gets_it_through_
     assert_eq!(
         worded(("src/Legacy/LegacyPage.php", php), &[("src/App/HasDesign.sharp", sharp)]),
         [
-            "14:7 unimplemented-abstract-method `Legacy\\Bare` implements `App\\HasDesign` without its default bodies: write `use \\App\\HasDesign\\Defaults;` in `Legacy\\Bare`. | Declared here. | A plain PHP class gets the default bodies of the PHP# interface `App\\HasDesign` through the trait `App\\HasDesign\\Defaults`."
+            "14:7 unimplemented-abstract-method `Legacy\\Bare` implements `App\\HasDesign` without its default bodies: write `use \\App\\HasDesign\\Defaults;` in `Legacy\\Bare`. | Declared here. | `App\\HasDesign` is declared here. | A plain PHP class gets the default bodies of the PHP# interface `App\\HasDesign` through the trait `App\\HasDesign\\Defaults`."
         ]
     );
 }

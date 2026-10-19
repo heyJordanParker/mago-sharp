@@ -28,6 +28,7 @@ use mago_database::file::FileId;
 use mago_database::file::FileType;
 use mago_names::resolver::NameResolver;
 use mago_names::short_name;
+use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_reporting::IssueCollection;
 use mago_reporting::Level;
@@ -66,7 +67,8 @@ const VENDOR: &[u8] = b"vendor/";
 /// The input that changes whenever Composer changes `vendor/`.
 const COMPOSER_LOCK: &[u8] = b"composer.lock";
 
-/// What [`IncrementalAnalysisService::compile`] made of one `.sharp` file.
+/// What [`IncrementalAnalysisService::compile`] made of one `.sharp` file, or of a plain PHP file whose class the
+/// engine would refuse to link.
 #[derive(Debug)]
 pub enum Compilation {
     /// The bytes of its `.sharpc` file.
@@ -183,7 +185,8 @@ impl IncrementalAnalysisService {
             .map(|module| DispatcherModule { file: module.file, namespace })
     }
 
-    /// Compiles each `.sharp` file of the last analysis, in file name order.
+    /// Compiles each `.sharp` file of the last analysis, in file name order, then refuses each plain PHP file whose
+    /// class the engine would refuse to link, as [`Self::unlinkable_plain_php_classes`] finds them.
     ///
     /// A file is accepted when the analysis reported no error-level issue in it. The standard library's files, those
     /// `File::is_standard_library` marks, lower first, and the others inline their forms.
@@ -418,8 +421,49 @@ impl IncrementalAnalysisService {
 
             compiled.push((file.id, compilation));
         }
+        compiled.extend(self.unlinkable_plain_php_classes(&errors));
 
         Ok(compiled)
+    }
+
+    /// Refuses each plain PHP file that declares a class extending or implementing a PHP# type that it doesn't satisfy,
+    /// spec section 22: each error the analysis reports at the class's declaration that names a PHP# declaration, as a
+    /// missing `Defaults` trait or a member whose signature doesn't fit the PHP# member it implements, a case the engine
+    /// refuses when it links the class. The analysis names the class in each error of its declaration's checks. Every
+    /// other error in a plain PHP file stays the analysis's, as kotlinc checks a Java type only where it meets a Kotlin
+    /// declaration and leaves every other Java error to javac.
+    fn unlinkable_plain_php_classes(&self, errors: &HashMap<FileId, IssueCollection>) -> Vec<(FileId, Compilation)> {
+        let in_sharp_file = |annotation: &Annotation| {
+            self.database.get(&annotation.span.file_id).is_ok_and(|file| Dialect::of(&file).is_sharp())
+        };
+        let names_sharp_type =
+            |name: &Word| self.codebase.get_class_like(name.as_bytes()).is_some_and(|class| class.flags.is_sharp());
+        let declarations: HashSet<_> = self
+            .codebase
+            .class_likes
+            .values()
+            .filter(|class| class.all_parent_classes.iter().chain(&class.all_parent_interfaces).any(names_sharp_type))
+            .filter(|class| {
+                self.database
+                    .get(&class.span.file_id)
+                    .is_ok_and(|file| file.file_type == FileType::Host && !Dialect::of(&file).is_sharp())
+            })
+            .map(|class| class.name_span.unwrap_or(class.span))
+            .collect();
+
+        let mut refused: HashMap<FileId, IssueCollection> = HashMap::default();
+        for issue in errors.values().flat_map(IssueCollection::iter) {
+            if let Some(declaration) =
+                issue.annotations.iter().find(|annotation| declarations.contains(&annotation.span))
+                && issue.annotations.iter().any(in_sharp_file)
+            {
+                refused.entry(declaration.span.file_id).or_default().push(issue.clone());
+            }
+        }
+        let mut refused: Vec<(FileId, IssueCollection)> = refused.into_iter().collect();
+        refused.sort_unstable_by_key(|(file_id, _)| self.database.get(file_id).map(|file| file.name.clone()).ok());
+
+        refused.into_iter().map(|(file_id, issues)| (file_id, Compilation::Refused(issues))).collect()
     }
 
     /// What each file's analysis read from other files: each declaration it read through its signature, each method

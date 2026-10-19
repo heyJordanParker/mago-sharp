@@ -157,6 +157,9 @@ pub fn display_sharp_member(class_name: impl AsRef<[u8]>, member_name: impl std:
     format!("{}.{}", short_name(class_name), member_name.to_string().trim_start_matches('$'))
 }
 
+/// A resolved name's end offset, and its fully qualified name with whether an import gave it.
+type Resolved<'arena> = (u32, (&'arena [u8], bool));
+
 /// Stores the results of a name resolution pass over a PHP program.
 ///
 /// Maps the start byte offset of every identifier in the source to a tuple of
@@ -167,7 +170,14 @@ pub fn display_sharp_member(class_name: impl AsRef<[u8]>, member_name: impl std:
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct ResolvedNames<'arena> {
     /// Internal map: start offset -> (end offset, (resolved FQN, imported flag)).
-    names: HashMap<u32, (u32, (&'arena [u8], bool))>,
+    names: HashMap<u32, Resolved<'arena>>,
+
+    /// Start offset -> what a PHP# file writes there where `names` holds the PHP the form runs as instead, which the
+    /// checker, the analyzer and the bridge read: `None` where the source names nothing, as at `Starter` in the pattern
+    /// `Plan.Starter`, at the type parameter `T` or at `global`, and `Some` where it names what `names` holds nowhere,
+    /// as `ucfirst` in `global.ucfirst("tea")`. Empty for PHP.
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "HashMap::is_empty"))]
+    written: HashMap<u32, Option<Resolved<'arena>>>,
 
     /// Start offset of every bare PHP# name, and of every PHP# type name that names a type parameter -> what it refers
     /// to. Empty for PHP.
@@ -259,9 +269,16 @@ impl<'arena> ResolvedNames<'arena> {
         })
     }
 
-    /// Iterates over every resolved entry as `(start, end, fqn, imported)`.
+    /// Iterates over every name the source writes as `(start, end, fqn, imported)`, as a reader of the source sees
+    /// it: an extension host, or `mago cst --names`. In a PHP# file that is the name each form means, the same name the
+    /// PHP that means it gives: `App\Plan` alone for the pattern `Plan.Starter`, as for `Plan::Starter`, `ucfirst` for
+    /// `global.ucfirst`, as for `\ucfirst`, and no name for a local or a type parameter. The other methods read the PHP
+    /// each form runs as.
     pub fn iter(&self) -> impl Iterator<Item = (u32, u32, &'arena [u8], bool)> + '_ {
-        self.names.iter().map(|(&start, &(end, (name, imported)))| (start, end, name, imported))
+        let read = self.names.iter().filter(|(start, _)| !self.written.contains_key(start));
+        let written = self.written.iter().filter_map(|(start, name)| name.as_ref().map(|name| (start, name)));
+
+        read.chain(written).map(|(&start, &(end, (name, imported)))| (start, end, name, imported))
     }
 
     /// Byte ranges `(start, end)` of every entry whose resolved name matches
@@ -429,6 +446,17 @@ impl<'arena> ResolvedNames<'arena> {
     /// and other range-based lookups work without re-scanning the source.
     pub(crate) fn insert_at(&mut self, span: Span, name: &'arena [u8], imported: bool) {
         self.names.insert(span.start.offset, (span.end.offset, (name, imported)));
+    }
+
+    /// Inserts a name the PHP a PHP# form runs as reads at `span`, where the source names nothing.
+    pub(crate) fn insert_lowered_at(&mut self, span: Span, name: &'arena [u8], imported: bool) {
+        self.insert_at(span, name, imported);
+        self.written.insert(span.start.offset, None);
+    }
+
+    /// Inserts a name a PHP# file writes at `span`, where the PHP the form runs as reads none.
+    pub(crate) fn insert_written_at(&mut self, span: Span, name: &'arena [u8], imported: bool) {
+        self.written.insert(span.start.offset, Some((span.end.offset, (name, imported))));
     }
 }
 

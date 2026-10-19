@@ -868,6 +868,7 @@ final class InvocationCallKindHook implements NodeAnalysisHook
             'A call-kind hook received an unnamed call.',
         );
         $kind = match (true) {
+            $call->isFunction() => 'function',
             $call->isStaticMethod() => 'static',
             $call->isMethod() => 'instance',
             default => 'other',
@@ -1009,7 +1010,11 @@ final class InvocationPlugin implements IssueFilterHook, Plugin
 $registerMethodProvider = getenv('MAGO_INVOCATION_FUNCTION_ONLY') !== '1';
 $registerIssueFilter = getenv('MAGO_INVOCATION_ISSUE_FILTER') === '1';
 $callKindTargets = match (true) {
-    getenv('MAGO_INVOCATION_CALL_KINDS') === '1' => [NodeKind::MethodCall, NodeKind::StaticMethodCall],
+    getenv('MAGO_INVOCATION_CALL_KINDS') === '1' => [
+        NodeKind::FunctionCall,
+        NodeKind::MethodCall,
+        NodeKind::StaticMethodCall,
+    ],
     getenv('MAGO_INVOCATION_STATIC_CALL_KINDS') === '1' => [NodeKind::StaticMethodCall],
     default => [],
 };
