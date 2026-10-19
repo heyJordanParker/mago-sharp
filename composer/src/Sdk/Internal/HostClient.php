@@ -48,6 +48,16 @@ final class HostClient
         }
     }
 
+    /**
+     * Tells Mago that request `$parentId` starts the hooks of `$file`, which starts its deadline again.
+     *
+     * @param int<1, max> $parentId
+     */
+    public function progress(int $parentId, string $file): void
+    {
+        $this->writer->write($this->codec->encode(Frame::notification($parentId, $file)));
+    }
+
     public function accept(Frame $frame): bool
     {
         if ($frame->kind !== FrameKind::Response) {

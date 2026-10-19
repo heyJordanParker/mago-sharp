@@ -37,7 +37,7 @@ pub(crate) fn initialize_external_linter(
             })?;
 
             let size = host.worker_count(mago_threads);
-            let options = host.worker_pool_options();
+            let options = host.worker_pool_options(name);
             tracing::trace!(
                 host = %name,
                 command = ?command,
@@ -108,7 +108,7 @@ pub(crate) fn initialize_external_analyzer(
             })?;
 
             let size = host.worker_count(mago_threads);
-            let options = host.worker_pool_options();
+            let options = host.worker_pool_options(name);
             tracing::trace!(
                 host = %name,
                 command = ?command,

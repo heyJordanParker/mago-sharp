@@ -56,9 +56,12 @@ struct PoolTelemetry {
 /// Runtime and safety limits shared by every process in a worker pool.
 #[derive(Debug, Clone)]
 pub struct WorkerPoolOptions {
+    /// The host's name in the configuration, which an error of its workers names.
+    pub host: String,
     /// Maximum payload bytes accepted in one protocol frame.
     pub maximum_payload_size: usize,
-    /// Longest one outer request may go without a frame from its worker once the worker starts it.
+    /// Longest one outer request may go without progress once the worker starts it: the worker's start of each
+    /// file's hooks, for any of its requests, is progress.
     pub request_timeout: Duration,
     /// Grace period between the shutdown frame and forcibly killing a worker.
     pub shutdown_timeout: Duration,
@@ -69,6 +72,7 @@ pub struct WorkerPoolOptions {
 impl Default for WorkerPoolOptions {
     fn default() -> Self {
         Self {
+            host: String::new(),
             maximum_payload_size: 64 * 1024 * 1024,
             request_timeout: Duration::from_secs(30),
             shutdown_timeout: Duration::from_millis(250),

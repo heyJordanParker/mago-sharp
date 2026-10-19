@@ -48,4 +48,12 @@ final class Frame
     {
         return new self(FrameKind::Request, 0, $id, $parentId, $payload);
     }
+
+    /**
+     * @param int<1, max> $parentId
+     */
+    public static function notification(int $parentId, string $payload): self
+    {
+        return new self(FrameKind::Notification, 0, 0, $parentId, $payload);
+    }
 }

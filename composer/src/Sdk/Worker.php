@@ -1227,6 +1227,10 @@ final class Worker
         $recordedReads = [];
         $analyses = is_array($request->analysis) ? $request->analysis : [$request->analysis];
         foreach ($analyses as $analysis) {
+            if ($analysis instanceof FileAnalysis) {
+                $host->progress($requestId, $analysis->file);
+            }
+
             $reads = $analysis instanceof FileAnalysis ? new CodebaseReads() : null;
             $fileCodebase = $reads === null
                 ? $codebase

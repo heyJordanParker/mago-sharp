@@ -178,9 +178,20 @@ struct WorkerInner {
     trace_summary_emitted: AtomicBool,
     telemetry: WorkerTelemetry,
     started_at: Option<Instant>,
+    /// When the worker last sent a progress frame, and the file whose hooks it started then.
+    progress: Mutex<Option<(Instant, String)>>,
 }
 
 impl WorkerInner {
+    /// The later of `started_at` and the worker's last progress, with the file whose hooks it started when that
+    /// progress is the later.
+    fn progress_since(&self, started_at: Instant) -> (Instant, Option<String>) {
+        match &*lock(&self.progress) {
+            Some((at, file)) if *at > started_at => (*at, Some(file.clone())),
+            _ => (started_at, None),
+        }
+    }
+
     fn send(&self, frame: &Frame) -> Result<(), WorkerError> {
         let written = self.write(&mut lock(&self.writer), frame);
         self.finish_write(frame, written)
@@ -274,6 +285,10 @@ impl WorkerInner {
             tracing::trace!(worker = self.id, "Extension worker requested host-side shutdown.");
             self.fail("worker requested shutdown");
             return;
+        }
+
+        if frame.kind == FrameKind::Notification {
+            *lock(&self.progress) = Some((Instant::now(), String::from_utf8_lossy(&frame.payload).into_owned()));
         }
 
         let pending_id = match frame.kind {
@@ -389,6 +404,7 @@ impl Drop for WorkerRequestTrace<'_> {
 
 pub(crate) struct Worker {
     inner: Arc<WorkerInner>,
+    host: String,
     request_timeout: Duration,
     shutdown_timeout: Duration,
     reader_thread: Mutex<Option<JoinHandle<()>>>,
@@ -451,6 +467,7 @@ impl Worker {
             trace_summary_emitted: AtomicBool::new(false),
             telemetry: WorkerTelemetry::default(),
             started_at,
+            progress: Mutex::new(None),
         });
         tracing::trace!(worker = id, process_id, "Extension worker process spawned.");
 
@@ -482,6 +499,7 @@ impl Worker {
 
         let worker = Arc::new(Self {
             inner,
+            host: options.host.clone(),
             request_timeout: options.request_timeout,
             shutdown_timeout: options.shutdown_timeout,
             reader_thread: Mutex::new(Some(reader_thread)),
@@ -530,15 +548,18 @@ impl Worker {
         let (sender, receiver) = mpsc::channel();
         let (request_id, starts) = self.inner.send_request(payload, sender)?;
 
-        // The deadline runs from the worker's start of the request or its last frame for it, as an HTTP client's read
-        // timeout runs from the last byte. A batch of many files' hooks, or a request that shares its worker's
-        // process with others, lives while it makes progress, and a hook that stops answering fails.
-        let mut progressed_at = starts.then(Instant::now);
+        // The deadline is the longest one file's hooks may run, as Jest's `testTimeout` bounds each test rather than
+        // the run: it runs from the request's start, and again from each progress frame the worker sends as it starts
+        // a file's hooks, for any of its requests, since one PHP process runs one hook at a time and a request waits
+        // while the worker runs another's. Nested requests are not progress, so a hook that keeps asking Mago for
+        // metadata and never finishes its file fails.
+        let mut started_at = starts.then(Instant::now);
         loop {
-            let event = match progressed_at {
-                Some(progressed_at) => {
+            let event = match started_at {
+                Some(started_at) => {
+                    let (progressed_at, file) = self.inner.progress_since(started_at);
                     let Some(remaining) = self.request_timeout.checked_sub(progressed_at.elapsed()) else {
-                        return Err(self.timeout(request_id));
+                        return Err(self.timeout(request_id, file));
                     };
                     receiver.recv_timeout(remaining)
                 }
@@ -547,14 +568,8 @@ impl Worker {
 
             match event {
                 Ok(PendingEvent::Started) => {
-                    progressed_at.get_or_insert_with(Instant::now);
+                    started_at.get_or_insert_with(Instant::now);
                 }
-                Ok(PendingEvent::Frame(_)) => progressed_at = Some(Instant::now()),
-                _ => {}
-            }
-
-            match event {
-                Ok(PendingEvent::Started) => {}
                 Ok(PendingEvent::Frame(frame)) => match frame.kind {
                     FrameKind::Response => {
                         if frame.flags.contains(FrameFlags::ERROR) {
@@ -621,9 +636,8 @@ impl Worker {
                 Ok(PendingEvent::Failure(failure)) => {
                     return Err(self.inner.disconnected(failure));
                 }
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    return Err(self.timeout(request_id));
-                }
+                // The worker may have made progress on another request in the meantime, which the next pass reads.
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
                     self.inner.take_pending(request_id);
                     return Err(self.inner.disconnected("response channel closed"));
@@ -632,7 +646,8 @@ impl Worker {
         }
     }
 
-    fn timeout(&self, request_id: u64) -> WorkerError {
+    /// Fails request `request_id`, which made no progress within the deadline on the hooks of `file`.
+    fn timeout(&self, request_id: u64, file: Option<String>) -> WorkerError {
         if self.inner.trace_enabled {
             self.inner.telemetry.timeouts.fetch_add(1, Ordering::Relaxed);
         }
@@ -641,7 +656,13 @@ impl Worker {
         let _result = self.inner.send(&Frame::cancel(request_id));
         self.inner.fail(format!("request {request_id} timed out"));
 
-        WorkerError::Timeout { worker: self.id(), request: request_id, duration: self.request_timeout }
+        WorkerError::Timeout {
+            host: self.host.clone(),
+            worker: self.id(),
+            request: request_id,
+            file,
+            duration: self.request_timeout,
+        }
     }
 
     pub fn reserve(self: &Arc<Self>) -> WorkerReservation {
@@ -764,12 +785,14 @@ impl Worker {
             trace_summary_emitted: AtomicBool::new(false),
             telemetry: WorkerTelemetry::default(),
             started_at: tracing::enabled!(tracing::Level::TRACE).then(Instant::now),
+            progress: Mutex::new(None),
         });
         let reader_inner = Arc::clone(&inner);
         let reader_thread = std::thread::spawn(move || read_worker_stream(&reader_inner, reader));
 
         Arc::new(Self {
             inner,
+            host: options.host.clone(),
             request_timeout: options.request_timeout,
             shutdown_timeout: options.shutdown_timeout,
             reader_thread: Mutex::new(Some(reader_thread)),
@@ -1193,26 +1216,35 @@ mod tests {
         worker.shutdown();
     }
 
-    /// A batch of many files' hooks runs longer than the deadline, and asks Mago for metadata as each hook runs.
-    #[test]
-    fn a_request_that_keeps_asking_for_metadata_lives_past_the_deadline() {
-        let deadline = Duration::from_millis(300);
-        let (worker, mut peer_reader, mut peer_writer) = connected_worker(deadline);
-        let peer = std::thread::spawn(move || {
+    /// A frame of `kind` the worker sends under request `parent_id`.
+    fn from_worker(kind: FrameKind, id: u64, parent_id: u64, payload: Vec<u8>) -> Frame {
+        Frame { version: crate::protocol::PROTOCOL_VERSION, kind, flags: FrameFlags::empty(), id, parent_id, payload }
+    }
+
+    /// A peer that runs six files' hooks for request `outer`, each for half of `deadline`. Before each file's hooks it
+    /// sends a progress frame naming the file when `progress` holds, and each hook asks Mago for metadata. It answers
+    /// the request unless Mago cancels it.
+    fn run_six_files(
+        mut peer_reader: TcpStream,
+        mut peer_writer: TcpStream,
+        deadline: Duration,
+        progress: bool,
+    ) -> std::thread::JoinHandle<()> {
+        std::thread::spawn(move || {
             let outer = Frame::read_from(&mut peer_reader, 1024)
                 .expect("outer request should decode")
                 .expect("outer request should be present");
             for id in 1..=6 {
+                if progress {
+                    let file = format!("app/F{id}.php").into_bytes();
+                    from_worker(FrameKind::Notification, 0, outer.id, file)
+                        .write_to(&mut peer_writer, 1024)
+                        .expect("progress should encode");
+                }
                 std::thread::sleep(deadline / 2);
-                let nested = Frame {
-                    version: crate::protocol::PROTOCOL_VERSION,
-                    kind: FrameKind::Request,
-                    flags: FrameFlags::empty(),
-                    id,
-                    parent_id: outer.id,
-                    payload: b"metadata?".to_vec(),
-                };
-                nested.write_to(&mut peer_writer, 1024).expect("nested request should encode");
+                from_worker(FrameKind::Request, id, outer.id, b"metadata?".to_vec())
+                    .write_to(&mut peer_writer, 1024)
+                    .expect("nested request should encode");
                 peer_writer.flush().expect("nested request should flush");
                 let answer = Frame::read_from(&mut peer_reader, 1024)
                     .expect("nested response should decode")
@@ -1225,7 +1257,16 @@ mod tests {
                 .write_to(&mut peer_writer, 1024)
                 .expect("outer response should encode");
             peer_writer.flush().expect("outer response should flush");
-        });
+        })
+    }
+
+    /// The deadline bounds one file's hooks, as Jest's `testTimeout` bounds one test: a batch of many files' hooks
+    /// lives past it while the worker starts each file within it.
+    #[test]
+    fn a_batch_whose_every_file_runs_within_the_deadline_lives_past_it() {
+        let deadline = Duration::from_millis(300);
+        let (worker, peer_reader, peer_writer) = connected_worker(deadline);
+        let peer = run_six_files(peer_reader, peer_writer, deadline, true);
 
         let started_at = Instant::now();
         let mut handler = |_: &Frame| Ok(b"metadata!".to_vec());
@@ -1233,6 +1274,55 @@ mod tests {
 
         assert_eq!(response.expect("the request should finish"), b"done");
         assert!(started_at.elapsed() > deadline * 2, "the request took {:?}", started_at.elapsed());
+        peer.join().expect("peer thread should join");
+        worker.shutdown();
+    }
+
+    /// A hook that keeps asking Mago for metadata and never finishes its file fails at the deadline, and the error
+    /// names the host, the file and the setting.
+    #[test]
+    fn a_hook_that_asks_for_metadata_but_never_finishes_its_file_fails_at_the_deadline() {
+        let deadline = Duration::from_millis(300);
+        let (worker, peer_reader, peer_writer) = connected_worker(deadline);
+        let peer = run_six_files(peer_reader, peer_writer, deadline, false);
+
+        let started_at = Instant::now();
+        let mut handler = |_: &Frame| Ok(b"metadata!".to_vec());
+        let error = worker.request_with_handler(b"analyze".to_vec(), &mut handler).expect_err("the request times out");
+
+        assert!(started_at.elapsed() < deadline * 2, "the request failed after {:?}", started_at.elapsed());
+        assert_eq!(
+            error.to_string(),
+            "extension host `acme` made no progress for 300 ms on request 1 (worker 0): raise its `request-timeout-ms` for hooks that run that long"
+        );
+        peer.join().expect("peer thread should join");
+        worker.shutdown();
+    }
+
+    #[test]
+    fn a_timeout_names_the_file_whose_hooks_made_no_progress() {
+        let deadline = Duration::from_millis(100);
+        let (worker, mut peer_reader, mut peer_writer) = connected_worker(deadline);
+        let peer = std::thread::spawn(move || {
+            let outer = Frame::read_from(&mut peer_reader, 1024)
+                .expect("request should decode")
+                .expect("request should be present");
+            from_worker(FrameKind::Notification, 0, outer.id, b"app/Hung.php".to_vec())
+                .write_to(&mut peer_writer, 1024)
+                .expect("progress should encode");
+            peer_writer.flush().expect("progress should flush");
+            let cancel = Frame::read_from(&mut peer_reader, 1024)
+                .expect("cancellation should decode")
+                .expect("cancellation should be present");
+            assert_eq!(cancel.kind, FrameKind::Cancel);
+        });
+
+        let error = worker.request(Vec::new()).expect_err("request should time out");
+
+        assert_eq!(
+            error.to_string(),
+            "extension host `acme` made no progress for 100 ms on the hooks of app/Hung.php (worker 0): raise its `request-timeout-ms` for hooks that run that long"
+        );
         peer.join().expect("peer thread should join");
         worker.shutdown();
     }
@@ -1283,6 +1373,7 @@ mod tests {
         let host_reader = host_stream.try_clone().expect("host stream should clone");
         let peer_reader = peer_stream.try_clone().expect("peer stream should clone");
         let options = WorkerPoolOptions {
+            host: "acme".to_owned(),
             maximum_payload_size: 1024,
             request_timeout: timeout,
             shutdown_timeout: Duration::from_millis(100),

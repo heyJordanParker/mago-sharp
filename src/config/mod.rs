@@ -859,7 +859,7 @@ environment = { APP_ENV = "test" }
         assert_eq!(command.arguments(), ["--verbose"]);
         assert_eq!(command.current_directory(), Some(directory.join("project").as_path()));
         assert_eq!(host.worker_count(configuration.threads).get(), 2);
-        assert_eq!(host.worker_pool_options().request_timeout, std::time::Duration::from_millis(1234));
+        assert_eq!(host.worker_pool_options("php").request_timeout, std::time::Duration::from_millis(1234));
     }
 
     #[test]

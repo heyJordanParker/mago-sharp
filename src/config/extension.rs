@@ -55,8 +55,8 @@ pub struct ExtensionHostConfiguration {
     /// Maximum bytes accepted in one extension protocol frame.
     pub maximum_payload_size: usize,
 
-    /// Longest one request may go without progress once the worker starts it, in milliseconds: each nested request
-    /// the worker makes for it starts the count again.
+    /// Longest one file's hooks may run, in milliseconds, or one request that runs no file's hooks once the worker
+    /// starts it.
     pub request_timeout_ms: u64,
 
     /// Grace period for worker shutdown, in milliseconds.
@@ -145,10 +145,11 @@ impl ExtensionHostConfiguration {
         Some(command)
     }
 
-    /// Builds the process and protocol limits for this host's worker pool.
+    /// Builds the process and protocol limits for the worker pool of this host, named `name`.
     #[must_use]
-    pub fn worker_pool_options(&self) -> WorkerPoolOptions {
+    pub fn worker_pool_options(&self, name: &str) -> WorkerPoolOptions {
         WorkerPoolOptions {
+            host: name.to_owned(),
             maximum_payload_size: self.maximum_payload_size,
             request_timeout: Duration::from_millis(self.request_timeout_ms),
             shutdown_timeout: Duration::from_millis(self.shutdown_timeout_ms),
