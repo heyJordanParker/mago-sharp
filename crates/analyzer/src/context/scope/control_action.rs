@@ -4,9 +4,12 @@ use mago_syntax::cst::Expression;
 use mago_syntax::cst::ForBody;
 use mago_syntax::cst::ForeachBody;
 use mago_syntax::cst::Literal;
+use mago_syntax::cst::LocalIdentifier;
 use mago_syntax::cst::PatternMatchArmBody;
 use mago_syntax::cst::Statement;
 use mago_syntax::cst::WhileBody;
+use mago_word::Word;
+use mago_word::word;
 
 use crate::artifacts::AnalysisArtifacts;
 
@@ -29,10 +32,10 @@ pub enum ControlAction {
 pub struct ControlActionSet(u8);
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Hash, Debug)]
-#[repr(u8)]
 pub enum BreakType {
-    Switch = 0b01,
-    Loop = 0b10,
+    Switch,
+    /// A loop, with the PHP# name it is written with, if any, which `break` and `continue` may name.
+    Loop(Option<Word>),
 }
 
 impl ControlAction {
@@ -96,7 +99,7 @@ impl ControlAction {
                 _ if statement.is_loop() => {
                     let has_enclosing_loop_break = control_actions.contains(ControlAction::BreakImmediateLoop);
 
-                    let (inner_statements, condition) = match statement {
+                    let (inner_statements, condition, label) = match statement {
                         Statement::For(for_loop) => (
                             match &for_loop.body {
                                 ForBody::Statement(statement) => vec![*statement],
@@ -105,6 +108,7 @@ impl ControlAction {
                                 }
                             },
                             None,
+                            for_loop.label,
                         ),
                         Statement::Foreach(foreach_loop) => (
                             match &foreach_loop.body {
@@ -114,9 +118,12 @@ impl ControlAction {
                                 }
                             },
                             None,
+                            foreach_loop.label,
                         ),
-                        Statement::ForOf(for_of) => (vec![for_of.body], None),
-                        Statement::DoWhile(do_while) => (vec![do_while.statement], Some(do_while.condition)),
+                        Statement::ForOf(for_of) => (vec![for_of.body], None, for_of.label),
+                        Statement::DoWhile(do_while) => {
+                            (vec![do_while.statement], Some(do_while.condition), do_while.label)
+                        }
                         Statement::While(while_loop) => (
                             match &while_loop.body {
                                 WhileBody::Statement(statement) => vec![*statement],
@@ -125,13 +132,14 @@ impl ControlAction {
                                 }
                             },
                             Some(while_loop.condition),
+                            while_loop.label,
                         ),
                         #[allow(clippy::unreachable)]
                         _ => unreachable!(),
                     };
 
                     let mut loop_break_types = break_type.clone();
-                    loop_break_types.push(BreakType::Loop);
+                    loop_break_types.push(BreakType::Loop(label.map(|label| word(label.name.value))));
 
                     let mut loop_actions =
                         ControlAction::from_statements(inner_statements, loop_break_types, artifacts, return_is_exit);
@@ -209,13 +217,7 @@ impl ControlAction {
                 Statement::Continue(continue_statement) => {
                     let break_type_len = break_type.len();
                     if break_type_len != 0 {
-                        let maybe_count = match continue_statement.level.as_ref() {
-                            None => Some(1),
-                            Some(Expression::Literal(Literal::Integer(lit_int))) => {
-                                lit_int.value.as_ref().map(|&value| value as usize)
-                            }
-                            _ => None,
-                        };
+                        let maybe_count = jump_count(&break_type, continue_statement.label, continue_statement.level);
 
                         if let Some(count) = maybe_count
                             && break_type_len >= count
@@ -232,16 +234,10 @@ impl ControlAction {
 
                     return control_actions;
                 }
-                Statement::Break(continue_statement) => {
+                Statement::Break(break_statement) => {
                     let break_type_len = break_type.len();
                     if break_type_len != 0 {
-                        let maybe_count = match continue_statement.level.as_ref() {
-                            None => Some(1),
-                            Some(Expression::Literal(Literal::Integer(lit_int))) => {
-                                lit_int.value.as_ref().map(|&value| value as usize)
-                            }
-                            _ => None,
-                        };
+                        let maybe_count = jump_count(&break_type, break_statement.label, break_statement.level);
 
                         if let Some(count) = maybe_count
                             && break_type_len >= count
@@ -509,6 +505,26 @@ impl BreakType {
     #[inline]
     pub const fn is_switch(self) -> bool {
         matches!(self, BreakType::Switch)
+    }
+}
+
+/// How many of the loops and switches `break_type` lists, innermost last, a `break` or `continue` leaves: those inside
+/// the loop its PHP# `label` names and that loop, or the count its `level` writes, one when it writes none. `None` when
+/// the jump leaves a loop outside the list, or writes a level that is no integer.
+fn jump_count(
+    break_type: &[BreakType],
+    label: Option<LocalIdentifier<'_>>,
+    level: Option<&Expression<'_>>,
+) -> Option<usize> {
+    match (label, level) {
+        (Some(label), _) => {
+            let name = Some(word(label.value));
+
+            break_type.iter().rev().position(|break_type| *break_type == BreakType::Loop(name)).map(|inner| inner + 1)
+        }
+        (None, None) => Some(1),
+        (None, Some(Expression::Literal(Literal::Integer(integer)))) => integer.value.map(|value| value as usize),
+        (None, Some(_)) => None,
     }
 }
 

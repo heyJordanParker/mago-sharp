@@ -644,6 +644,7 @@ where
         block_context.scope.get_class_like_name(),
         context.resolved_names,
         &context.type_resolution_context,
+        context.dialect,
     );
     populate_union_type(
         &mut hint_type,
@@ -696,6 +697,7 @@ where
         }),
     };
     let foreach = context.arena.alloc(Foreach {
+        label: for_of.label,
         foreach: for_of.r#for,
         left_parenthesis: for_of.left_parenthesis,
         expression: for_of.expression,

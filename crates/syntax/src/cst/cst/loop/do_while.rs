@@ -2,6 +2,7 @@ use mago_span::HasSpan;
 use mago_span::Span;
 
 use crate::cst::cst::expression::Expression;
+use crate::cst::cst::goto::Label;
 use crate::cst::cst::keyword::Keyword;
 use crate::cst::cst::statement::Statement;
 use crate::cst::cst::terminator::Terminator;
@@ -22,6 +23,9 @@ use crate::cst::cst::terminator::Terminator;
 #[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct DoWhile<'arena> {
+    /// The PHP# name the loop is written with, as `retries:` in `retries: do { … } while (failed);`, which
+    /// `break retries;` and `continue retries;` name. Always `None` in PHP.
+    pub label: Option<Label<'arena>>,
     pub r#do: Keyword<'arena>,
     pub statement: &'arena Statement<'arena>,
     pub r#while: Keyword<'arena>,
@@ -33,6 +37,6 @@ pub struct DoWhile<'arena> {
 
 impl HasSpan for DoWhile<'_> {
     fn span(&self) -> Span {
-        Span::between(self.r#do.span(), self.terminator.span())
+        Span::between(self.label.map_or_else(|| self.r#do.span(), |label| label.span()), self.terminator.span())
     }
 }

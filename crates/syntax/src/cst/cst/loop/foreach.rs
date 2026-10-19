@@ -4,6 +4,7 @@ use mago_span::HasSpan;
 use mago_span::Span;
 
 use crate::cst::cst::expression::Expression;
+use crate::cst::cst::goto::Label;
 use crate::cst::cst::keyword::Keyword;
 use crate::cst::cst::statement::Statement;
 use crate::cst::cst::terminator::Terminator;
@@ -23,6 +24,9 @@ use crate::cst::sequence::Sequence;
 #[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct Foreach<'arena> {
+    /// The PHP# name of the `for … of` loop the analyzer reads as this `foreach`, which `break orders;` and
+    /// `continue orders;` name. Always `None` in PHP.
+    pub label: Option<Label<'arena>>,
     pub foreach: Keyword<'arena>,
     pub left_parenthesis: Span,
     pub expression: &'arena Expression<'arena>,
@@ -138,7 +142,7 @@ impl<'arena> ForeachBody<'arena> {
 
 impl HasSpan for Foreach<'_> {
     fn span(&self) -> Span {
-        self.foreach.span().join(self.body.span())
+        self.label.map_or_else(|| self.foreach.span(), |label| label.span()).join(self.body.span())
     }
 }
 

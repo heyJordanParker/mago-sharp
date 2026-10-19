@@ -1364,6 +1364,7 @@ pub fn check_members<'ast, 'arena>(
     let class_like_fqcn = context.display_class_like_name(class_like_fqcn);
     let mut method_names: HashMap<Vec<u8>, (Span, &ClassLikeMember<'arena>)> = HashMap::new();
     let mut main_constructor: Option<Span> = None;
+    let mut static_constructor: Option<Span> = None;
     let mut constant_names: HashMap<&[u8], (bool, Span)> = HashMap::new();
     let mut property_names: HashMap<&[u8], (bool, Span)> = HashMap::new();
 
@@ -1395,7 +1396,20 @@ pub fn check_members<'ast, 'arena>(
                 if context.program.dialect.is_sharp()
                     && method.return_type_hint.is_none()
                     && method.name.value == class_like_name);
-            if is_sharp_constructor && let Some(main) = main_constructor {
+            let is_static_constructor =
+                is_sharp_constructor && matches!(member, ClassLikeMember::Method(method) if method.is_static());
+            if is_static_constructor && let Some(first) = static_constructor {
+                // Spec section 6: the static constructor runs once, so a class has one, as in C#.
+                context.report(
+                    Issue::error("A class has one static constructor.")
+                        .with_annotation(Annotation::primary(name_span).with_message("A second static constructor."))
+                        .with_annotation(Annotation::secondary(first).with_message("The static constructor."))
+                        .with_help("Move its body into the first one."),
+                );
+            } else if is_static_constructor {
+                // The static constructor runs with its class's statics, so it shares no name with a method either.
+                static_constructor = Some(name_span);
+            } else if is_sharp_constructor && let Some(main) = main_constructor {
                 context.report(
                     Issue::error("A class has one main constructor: PHP# has no overloading by argument types.")
                         .with_annotation(Annotation::primary(name_span).with_message("A second constructor."))

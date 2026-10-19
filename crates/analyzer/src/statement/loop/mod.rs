@@ -48,8 +48,10 @@ use mago_span::Span;
 use mago_syntax::cst::BinaryOperator;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::Foreach;
+use mago_syntax::cst::Label;
 use mago_syntax::cst::Literal;
 use mago_syntax::cst::LiteralInteger;
+use mago_syntax::cst::LocalIdentifier;
 use mago_syntax::cst::Node;
 use mago_syntax::cst::Statement;
 use mago_word::Word;
@@ -127,6 +129,19 @@ where
     Ok(1)
 }
 
+/// How many loops a `break` or `continue` naming the PHP# loop `label` leaves or continues: those inside that loop and
+/// the loop itself. A name no loop around it has, which the semantics check refuses, counts as the innermost loop.
+pub fn get_named_loop_levels(block_context: &BlockContext<'_>, label: &LocalIdentifier<'_>) -> u64 {
+    let name = word(label.value);
+
+    block_context
+        .break_types
+        .iter()
+        .rev()
+        .position(|break_context| break_context.is_loop_named(name))
+        .map_or(1, |inner_loops| inner_loops as u64 + 1)
+}
+
 fn get_ordinal_string(n: usize) -> String {
     match n {
         1 => "first".to_string(),
@@ -156,6 +171,7 @@ fn analyze_for_or_while_loop<'ctx, 'ast, 'arena, A>(
     increments: &'ast [&'arena Expression<'arena>],
     statements: &'ast [Statement<'arena>],
     span: Span,
+    label: Option<Label<'arena>>,
     infinite_loop: bool,
     keyword: &str,
 ) -> Result<(), AnalysisError>
@@ -172,7 +188,7 @@ where
 
     let mut loop_block_context = block_context.clone();
     loop_block_context.flags.set_inside_loop(true);
-    loop_block_context.break_types.push(BreakContext::Loop(span));
+    loop_block_context.break_types.push(BreakContext::of_loop(span, label));
     let previous_loop_bounds = loop_block_context.loop_bounds;
     loop_block_context.loop_bounds = span.to_offset_tuple();
 

@@ -193,7 +193,11 @@ where
             T!["echo"] => self.parse_echo().map(Statement::Echo),
             T!["goto"] => self.parse_goto().map(Statement::Goto),
             kind if kind.is_identifier_maybe_reserved() && matches!(self.stream.peek_kind(1)?, Some(T![":"])) => {
-                self.parse_label().map(Statement::Label)
+                if self.dialect.is_sharp() && matches!(self.stream.peek_kind(2)?, Some(T!["for" | "while" | "do"])) {
+                    self.parse_named_loop()
+                } else {
+                    self.parse_label().map(Statement::Label)
+                }
             }
             _ => Ok(Statement::Expression(ExpressionStatement {
                 expression: self.arena.alloc(self.parse_expression()?),

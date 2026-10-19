@@ -1288,7 +1288,14 @@ where
         check_foreign_statics(context, class_like_metadata);
     }
 
-    if has_complete_hierarchy && !class_like_metadata.kind.is_trait() && !class_like_metadata.flags.is_abstract() {
+    // A PHP# enum gives each member its interfaces state, each method by its own and each property by its own member or
+    // every case's field, though one whose cases carry data runs as an abstract PHP class over a class per case.
+    let is_sharp_enum =
+        context.dialect.is_sharp() && members.iter().any(|member| matches!(member, ClassLikeMember::EnumCase(_)));
+    if has_complete_hierarchy
+        && !class_like_metadata.kind.is_trait()
+        && (!class_like_metadata.flags.is_abstract() || is_sharp_enum)
+    {
         let without_defaults =
             report_missing_defaults(context, class_like_metadata, name_span.unwrap_or(declaration_span));
         for (method_name, method_id) in &class_like_metadata.declaring_method_ids {
@@ -1353,9 +1360,13 @@ where
                         ),
                     )
                     .with_note("When a concrete class extends an abstract class or implements an interface, it must provide an implementation for all inherited abstract methods.".to_string())
-                    .with_help(format!(
-                        "You can either implement the `{method_name}` method in `{name}`, or declare `{name}` as an abstract class.",
-                    )),
+                    .with_help(if is_sharp_enum {
+                        format!("Give `{name}` the method `{method_name}`, which each of its cases runs.")
+                    } else {
+                        format!(
+                            "You can either implement the `{method_name}` method in `{name}`, or declare `{name}` as an abstract class.",
+                        )
+                    }),
                 );
             }
         }
@@ -1416,7 +1427,20 @@ where
                             })
                         });
 
-                    if !is_implemented && context.dialect.is_sharp() {
+                    if !is_implemented && is_sharp_enum {
+                        // Each case's field gives the property for that case, so each case without it is reported.
+                        report_cases_without_property(
+                            context,
+                            class_like_metadata,
+                            members,
+                            parent_metadata,
+                            *property_name,
+                            parent_property,
+                            hook_metadata.span,
+                        );
+
+                        break;
+                    } else if !is_implemented && context.dialect.is_sharp() {
                         // PHP# states a property, not its hooks, so it reports the property once.
                         report_unstated_property(
                             context,
@@ -1851,6 +1875,57 @@ fn report_unstated_property<A>(
             .with_annotation(Annotation::primary(span).with_message("Declared here."))
             .with_annotation(Annotation::secondary(stated).with_message("Stated here.")),
     );
+}
+
+/// Reports each case of the PHP# enum `enum_metadata`, among its `members`, that gives no value to the property
+/// `property_name` that `parent` states at `stated`, which neither the enum nor the case declares: every case is a value
+/// of the interface, spec sections 20 and 22, and a case gives the property by a field of its name.
+fn report_cases_without_property<A>(
+    context: &mut Context<'_, '_, A>,
+    enum_metadata: &ClassLikeMetadata,
+    members: &[ClassLikeMember<'_>],
+    parent: &ClassLikeMetadata,
+    property_name: Word,
+    parent_property: &PropertyMetadata,
+    stated: Span,
+) where
+    A: Arena,
+{
+    let enum_name = display_class_like_name(context, enum_metadata.original_name);
+    let property = display_property_name(context, property_name);
+    let parent_name = display_class_like_name(context, parent.original_name);
+    let mixed = get_mixed();
+    let written = display_sharp_type(
+        context,
+        parent_property.type_metadata.as_ref().map_or(&mixed, |metadata| &metadata.type_union),
+    );
+    for member in members {
+        let ClassLikeMember::EnumCase(case) = member else {
+            continue;
+        };
+        let case_name = case.item.name();
+        let case_class = [enum_metadata.original_name.as_bytes(), b"\\", case_name.value].concat();
+        if context
+            .codebase
+            .get_class_like(&case_class)
+            .is_some_and(|case_class| case_class.properties.contains_key(&property_name))
+        {
+            continue;
+        }
+
+        context.collector.report_with_code(
+            IssueCode::UnimplementedAbstractPropertyHook,
+            Issue::error(format!(
+                "The case `{enum_name}.{}` does not give `{property}`, which `{parent_name}` states.",
+                BytesDisplay(case_name.value)
+            ))
+            .with_annotation(Annotation::primary(case_name.span).with_message("Declared here."))
+            .with_annotation(Annotation::secondary(stated).with_message("Stated here."))
+            .with_help(format!(
+                "Give the case the field `{written} {property}`, or give `{enum_name}` the property `public {written} {property} => …;`."
+            )),
+        );
+    }
 }
 
 #[allow(clippy::unwrap_used)]

@@ -926,6 +926,73 @@ fn break_and_continue_with_a_level_fail_as_a_typo_does_at_the_level() {
     );
 }
 
+/// Jordan's ruling of 10-18 on loop names: a `for`, `for … of`, `while` or `do` loop takes an optional name, which
+/// `break name;` and `continue name;` name from any loop inside it. Plain `break` and `continue` keep meaning the
+/// innermost loop.
+#[test]
+fn a_named_loop_is_left_or_continued_by_its_name_from_an_inner_loop() {
+    let code = leak(method(
+        "        let total = 0;\n        orders: for (const order of [1, 2]) {\n            rows: for (let i = 0; i < extra; i++) {\n                polling: while (i > 0) {\n                    retries: do {\n                        if (i == 1) { continue orders; }\n                        if (i == 2) { break rows; }\n                        if (i == 3) { continue polling; }\n                        if (i == 4) { break retries; }\n                        if (i == 5) { break; }\n                        continue;\n                    } while (false);\n                    break polling;\n                }\n                continue rows;\n            }\n            break orders;\n        }\n        return total;\n",
+    ));
+
+    assert_eq!(issues(code), Vec::<String>::new());
+}
+
+/// A loop name no `break` or `continue` names is an error at the name, as Go refuses a label it never jumps to. A
+/// `break` or `continue` in a lambda inside the loop leaves only a loop inside the lambda, so it names none.
+#[test]
+fn a_loop_name_no_break_or_continue_names_is_an_error() {
+    let code = leak(method(
+        "        unused: while (extra > 0) { extra -= 1; }\n        lambda: for (const value of [1]) {\n            const leave = () => { while (true) { break; } };\n        }\n        return extra;\n",
+    ));
+
+    assert_eq!(
+        issues(code),
+        [
+            "7:9 No `break` or `continue` names the loop `unused`.",
+            "8:9 No `break` or `continue` names the loop `lambda`.",
+        ]
+    );
+}
+
+/// A `break` or `continue` names a loop around it in its own method or lambda: a name nothing declares, the name of a
+/// loop beside it, and the name of a loop outside its lambda are each an error at the name. A loop inside a loop of
+/// its name is an error too, as Java and TypeScript refuse a label already in use, so each name means one loop.
+#[test]
+fn a_break_or_continue_names_a_loop_around_it_and_a_loop_name_is_used_once() {
+    let code = leak(method(
+        "        orders: while (extra > 0) {\n            break orders;\n        }\n        while (extra > 1) {\n            break orders;\n            continue missing;\n        }\n        outer: for (const value of [1]) {\n            const leave = () => { while (true) { break outer; } };\n            outer: while (true) { break outer; }\n            continue outer;\n        }\n        return extra;\n",
+    ));
+
+    assert_eq!(
+        issues(code),
+        [
+            "11:19 No loop around this `break` is named `orders`.",
+            "12:22 No loop around this `continue` is named `missing`.",
+            "15:56 No loop around this `break` is named `outer`.",
+            "16:13 A loop around this one is named `outer` already.",
+        ]
+    );
+}
+
+/// A name before any statement but a loop is PHP's `goto` label, which fails as a typo does, at the name.
+#[test]
+fn a_name_before_a_statement_that_is_no_loop_fails_as_a_typo_does() {
+    let code = leak(method("        checked: if (extra > 0) { extra = 0; }\n        return extra;\n"));
+
+    assert_eq!(issues(code), ["7:9 Parse error encountered during parsing"]);
+}
+
+/// A `break` or `continue` that names a loop outside a `finally` block leaves the block, even from a loop inside it.
+#[test]
+fn a_named_jump_from_a_loop_in_a_finally_block_to_a_loop_outside_it_leaves_the_block() {
+    let code = leak(method(
+        "        outer: while (extra > 0) {\n            try {\n                extra -= 1;\n            } finally {\n                inner: while (true) {\n                    if (extra > 3) { break inner; }\n                    break outer;\n                }\n            }\n        }\n        return extra;\n",
+    ));
+
+    assert_eq!(issues(code), ["13:21 `break` cannot leave a `finally` block."]);
+}
+
 #[test]
 fn a_for_loop_with_a_let_counter_or_expressions_is_in_the_slice() {
     let code = leak(method(
@@ -3563,10 +3630,30 @@ fn a_method_without_a_return_type_named_otherwise_is_an_error() {
 }
 
 #[test]
-fn a_static_constructor_is_not_supported_yet() {
-    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public static Report() {}\n}\n";
+fn a_static_constructor_compiles_beside_the_main_constructor_and_in_a_static_class() {
+    for code in [
+        "namespace App.Tenant;\n\nclass Report\n{\n    private static int made = 0;\n\n    static Report() { Report.made = 1; }\n\n    public Report() { }\n}\n",
+        "namespace App.Tenant;\n\npublic static class Rates\n{\n    private static Map<string, int> byCurrency = [:];\n\n    static Rates() { Rates.byCurrency[\"USD\"] = 100; }\n}\n",
+        "namespace App.Tenant;\n\nstruct Point\n{\n    private static int made = 0;\n\n    static Point() { Point.made = 1; }\n}\n",
+    ] {
+        assert_eq!(issues(code), Vec::<String>::new(), "{code}");
+    }
+}
 
-    assert_eq!(issues(code), ["5:19 A static constructor is not supported yet in PHP#."]);
+/// Spec section 6, as C# refuses them: a static constructor takes no modifier but `static` and no parameters, since the
+/// app runs it and no code calls it, and a class has one.
+#[test]
+fn a_static_constructor_takes_no_modifier_or_parameter_and_a_class_has_one() {
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    private static int made = 0;\n\n    public static Report(int start) { }\n\n    static Report() { }\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "9:12 A class has one static constructor.",
+            "7:5 A static constructor takes no modifier but `static`: remove `public`.",
+            "7:26 A static constructor takes no parameters: no code calls it.",
+        ]
+    );
 }
 
 #[test]
@@ -4073,9 +4160,9 @@ fn a_field_or_a_property_may_be_static_with_a_constant_initial_value() {
     assert_eq!(issues(code), Vec::<String>::new());
 }
 
-/// Spec section 6: no constructor sets a static, and a nullable member has no implicit starting value, so a static field
-/// or property with storage has an initial value whatever its type, `= null` included. A property without storage
-/// holds nothing to set.
+/// Spec section 6: a static holds a value of its type before any code reads it, and a nullable member has no implicit
+/// starting value, so a static field or property with storage has an initial value whatever its type, `= null`
+/// included. A property without storage holds nothing to set.
 #[test]
 fn a_static_needs_an_initial_value_whatever_its_type() {
     let code = "namespace App.Tenant;\n\nclass Report\n{\n    private static int hits = 0;\n    private static int misses;\n    public static string? region { get; set; }\n    public static string label { get; set; }\n    private static string? cached;\n    private static int|string key;\n    public static int twice { get => 2; }\n    private static string? none = null;\n}\n";
@@ -4083,11 +4170,11 @@ fn a_static_needs_an_initial_value_whatever_its_type() {
     assert_eq!(
         issues(code),
         [
-            "6:24 Give `misses` an initial value: no constructor sets a static.",
-            "7:27 Give `region` an initial value: no constructor sets a static.",
-            "8:26 Give `label` an initial value: no constructor sets a static.",
-            "9:28 Give `cached` an initial value: no constructor sets a static.",
-            "10:31 Give `key` an initial value: no constructor sets a static.",
+            "6:24 Give `misses` an initial value.",
+            "7:27 Give `region` an initial value.",
+            "8:26 Give `label` an initial value.",
+            "9:28 Give `cached` an initial value.",
+            "10:31 Give `key` an initial value.",
         ]
     );
 }
@@ -4134,7 +4221,7 @@ fn a_static_member_takes_any_initial_value_and_is_get_only_or_settable() {
     let code = "namespace App.Tenant;\n\nimport Lib.Calc;\n\nclass Report\n{\n    public static int id { get; }\n    public static int size { get; } = 3;\n    private static Calc calc = new Calc();\n    public static int views { get; set; } = Calc.make();\n    public static int next { get; } = Report.size + 1;\n}\n";
     let generic = "namespace App.Tenant;\n\nimport Lib.Calc;\n\nclass Box<T>\n{\n    private static Calc calc = new Calc();\n    private static int count = 0;\n    private static int next = Box<T>.count + 1;\n}\n";
 
-    assert_eq!(issues(code), ["7:23 Give `id` an initial value: no constructor sets a static."]);
+    assert_eq!(issues(code), ["7:23 Give `id` an initial value."]);
     assert_eq!(issues(generic), Vec::<String>::new());
 }
 
@@ -4334,7 +4421,7 @@ fn properties_outside_the_slice_are_an_error() {
         issues(code),
         [
             "8:12 Property `Report.d` cannot be declared abstract",
-            "6:23 Give `b` an initial value: no constructor sets a static.",
+            "6:23 Give `b` an initial value.",
             "7:20 Only `set` and `init` take an access level: `get` reads `c` at the property's own level.",
             "10:16 A property's initial value comes last: write it after the accessors, as in `public int views { get; set; } = 0;`.",
             "11:25 `set` takes no parameter list: its body reads the incoming value as `value`.",
@@ -6182,6 +6269,25 @@ fn an_enum_method_without_a_return_type_is_an_error() {
         [
             "7:12 An enum has no constructor: its cases are its only values.",
             "8:12 A PHP# method needs a return type: only the constructor, named after its class, has none.",
+        ]
+    );
+}
+
+/// Spec section 20: each case is its own type, with its fields and every member of its enum, so a field named like a
+/// property or a method of the enum gives the case two members of one name, an error that names both, as Kotlin refuses
+/// a property that hides one of its supertype's. A method compares ignoring case, as it is called. Two cases may give
+/// one field name, and a member of another name is no clash.
+#[test]
+fn a_case_field_named_like_a_member_of_its_enum_is_an_error_that_names_both() {
+    let code = "namespace App;\n\npublic enum Amount\n{\n    case Some(int cents, string currency, int total);\n    case Other(int cents);\n    case None;\n\n    public int cents => 7;\n\n    public string Currency() => \"USD\";\n\n    public static int total() => 1;\n\n    public int sum => 0;\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "5:19 The field `cents` of the case `Amount.Some` shares its name with the property `Amount.cents`, which every case has.",
+            "5:33 The field `currency` of the case `Amount.Some` shares its name with the method `Amount.Currency`, which every case has.",
+            "5:47 The field `total` of the case `Amount.Some` shares its name with the method `Amount.total`, which every case has.",
+            "6:20 The field `cents` of the case `Amount.Other` shares its name with the property `Amount.cents`, which every case has.",
         ]
     );
 }

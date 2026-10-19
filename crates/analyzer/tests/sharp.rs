@@ -3265,6 +3265,28 @@ fn check_throws_skips_sharp_files_and_keeps_reporting_in_php() {
     assert_eq!(issues(("src/Demo/Report.php", php), &others), ["11:16 unhandled-thrown-type"]);
 }
 
+/// Jordan's ruling of 10-18 on loop names: `break orders;` leaves the loop named `orders` from a loop inside it, so a
+/// `while (true)` that only a named `break` leaves ends, and the code after it runs with what the loop gave its locals.
+/// `continue orders;` goes on with the named loop, so an inner `while (true)` that only continues it never ends, and
+/// the statement after it in the named loop never runs.
+#[test]
+fn a_named_break_or_continue_leaves_or_continues_the_loop_it_names() {
+    let sharp = "namespace Demo;\n\nclass Flow\n{\n    public static int breaksOuter(List<int> items)\n    {\n        let found = 0;\n        orders: while (true) {\n            for (const item of items) {\n                found = item;\n                break orders;\n            }\n        }\n        return found;\n    }\n\n    public static void continuesOuter(bool again)\n    {\n        orders: do {\n            while (true) {\n                continue orders;\n            }\n            Halt.note(\"never\");\n        } while (again);\n    }\n\n    public static int leavesInner(bool again, bool more)\n    {\n        let rounds = 0;\n        while (again) {\n            do {\n                break;\n            } while (more);\n            rounds = rounds + 1;\n            again = rounds < 3;\n        }\n        return rounds;\n    }\n}\n";
+    let halt = "<?php\n\nnamespace Demo;\n\nfinal class Halt\n{\n    public static function note(int|string $value): void\n    {\n    }\n}\n";
+
+    assert_eq!(
+        refusals(("src/Demo/Flow.sharp", sharp), &[("src/Demo/Halt.php", halt)]),
+        [
+            "23:13 unevaluated-code This statement never runs, because line 20 ends the block. | Delete it, or move it above line 20."
+        ]
+    );
+
+    // A plain PHP level that is no integer literal says nothing about which loop the jump leaves, so the code after
+    // the inner `foreach` still runs.
+    let php = "<?php\n\nnamespace Demo;\n\nfinal class Levels\n{\n    public static function run(int $levels): int\n    {\n        while ($levels > 0) {\n            foreach ([1, 2] as $step) {\n                break $levels;\n            }\n            $levels--;\n        }\n        return $levels;\n    }\n}\n";
+    assert_eq!(issues(("src/Demo/Levels.php", php), &[]), ["11:23 invalid-break"]);
+}
+
 /// Spec section 7 refuses a statement that can never run, as Java and Zig do: one after `return`, `throw`, a call that
 /// never returns, `break` or `continue` in its block, one after an `if` whose every branch ends the block, one after
 /// a loop that never ends, and a block after a condition that never finishes, which is refused at the condition. The
@@ -5847,7 +5869,9 @@ fn a_call_of_no_function_is_refused_in_php_sharp_words() {
 }
 
 /// Spec section 14.1: one name covers every function type, so PHP's `Closure` is no name a `.sharp` file knows. It gets
-/// exactly what a name nothing declares gets, as `Closur`, bare, through `global` and imported.
+/// exactly what a name nothing declares gets, as `Closur`, bare, through `global`, imported, and imported then
+/// written, in a type and in each position an expression or a header names a class in, in a namespace and outside
+/// any.
 #[test]
 fn closure_gets_what_an_unknown_class_name_gets() {
     let written = |name: &str| -> &'static str {
@@ -5859,13 +5883,39 @@ fn closure_gets_what_an_unknown_class_name_gets() {
     let imported = |name: &str| -> &'static str {
         Box::leak(format!("namespace Demo;\n\nimport {name};\n\nclass Report\n{{\n}}\n").into_boxed_str())
     };
+    let imported_and_written = |name: &str| -> &'static str {
+        Box::leak(
+            format!("namespace Demo;\n\nimport {name};\n\nclass Report\n{{\n    public int take({name} f) => 1;\n\n    public {name}? keep() => null;\n\n    public int run(int n, {name}? f)\n    {{\n        {name}? g = f;\n        return n;\n    }}\n}}\n")
+                .into_boxed_str(),
+        )
+    };
+    // Each position an expression or a header names a class in.
+    let used = |name: &str, namespace: &str, import: &str| -> &'static str {
+        let import = import.replace("NAME", name);
+        Box::leak(
+            format!("{namespace}{import}class Report : {name}\n{{\n    public static bool test(Any value) => value is {name};\n\n    public static Any make() => {name}.fromCallable(\"strlen\");\n\n    public static Any made() => new {name}();\n\n    public static Any read() => {name}.LIMIT;\n\n    public static string named() => typeof({name}).name;\n\n    public static int matched(Any value) => match (value) {{ {name} c => 1, default => 0 }};\n\n    public static void caught()\n    {{\n        try {{\n            Report.test(1);\n        }} catch ({name} e) {{\n        }}\n    }}\n}}\n")
+                .into_boxed_str(),
+        )
+    };
     let worded_as = |code: &'static str, name: &str| -> Vec<String> {
         worded(("src/Demo/Report.sharp", code), &[]).into_iter().map(|issue| issue.replace(name, "NAME")).collect()
     };
 
+    for namespace in ["namespace Demo;\n\n", ""] {
+        for import in ["", "import NAME;\n\n"] {
+            // A name of the same length keeps each column after it.
+            let (closure, unknown) = (used("Closure", namespace, import), used("Closurx", namespace, import));
+            assert_eq!(worded_as(closure, "Closure"), worded_as(unknown, "Closurx"), "{closure}");
+            assert!(!worded_as(unknown, "Closurx").is_empty(), "{unknown}");
+        }
+    }
     assert_eq!(worded_as(written("Closure"), "Closure"), worded_as(written("Closur"), "Closur"));
     assert_eq!(worded_as(imported("Closure"), "Closure"), worded_as(imported("Closur"), "Closur"));
     assert!(!worded_as(imported("Closur"), "Closur").is_empty());
+    assert_eq!(
+        worded_as(imported_and_written("Closure"), "Closure"),
+        worded_as(imported_and_written("Closur"), "Closur")
+    );
 }
 
 /// A plain PHP library that takes a callback with no docblock takes any PHP# function value, as PHP does, in a
@@ -8032,6 +8082,23 @@ fn a_main_constructor_returns_no_value() {
     );
 }
 
+/// Spec section 6: the static constructor sets up its class's statics, and no code calls it, so `return;` ends it and
+/// a returned value is an error, whose fix compiles.
+#[test]
+fn a_static_constructor_returns_no_value() {
+    let sharp = "namespace Demo;\n\nclass Ticket\n{\n    private static int seats = 0;\n\n    static Ticket()\n    {\n        if (Ticket.seats == 0) {\n            return 5;\n        }\n    }\n}\n";
+    let fixed = "namespace Demo;\n\nclass Ticket\n{\n    private static int seats = 0;\n\n    static Ticket()\n    {\n        if (Ticket.seats == 0) {\n            return;\n        }\n    }\n}\n";
+
+    assert_messages(
+        sharp,
+        &[],
+        &[
+            "10:20 invalid-return-statement: A static constructor sets up its class's statics and returns nothing: write `return;`.",
+        ],
+    );
+    assert_messages(fixed, &[], &[]);
+}
+
 /// Spec section 9.1: a named constructor's body runs on the object its `: this(…)` creates, as `this`, so it reads
 /// and writes the object's members with their types and calls its base class's methods with `super.m()`. It returns
 /// that object, so `return;` ends it and a returned value is an error.
@@ -8167,6 +8234,20 @@ fn a_get_only_static_is_set_only_by_its_initial_value() {
             "13:18 invalid-property-write",
             "21:18 invalid-property-write"
         ]
+    );
+}
+
+/// Spec section 6: the static constructor sets up its class's statics, so it writes the get-only ones too, as C#'s
+/// static constructor assigns a `static readonly` field. It writes only its own class's, and a lambda in it is code
+/// that runs later, where the write is the error it is anywhere else.
+#[test]
+fn a_static_constructor_writes_its_class_s_get_only_statics() {
+    let sharp = "namespace Demo;\n\nclass Settings\n{\n    public static int limit { get; } = 10;\n\n    static Settings()\n    {\n        Settings.limit = 20;\n        Limits.total = 2;\n        Function<void()> later = () => { Settings.limit = 30; };\n    }\n}\n";
+    let limits = "namespace Demo;\n\nclass Limits\n{\n    public static int total { get; } = 1;\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Settings.sharp", sharp), &[("src/Demo/Limits.sharp", limits)]),
+        ["10:16 invalid-property-write", "11:51 invalid-property-write"]
     );
 }
 
@@ -8352,6 +8433,31 @@ fn an_enum_header_names_the_interfaces_as_implements_does_in_php() {
     assert_eq!(issues(("src/Demo/Status.sharp", sharp), &others), Vec::<String>::new());
 }
 
+/// Spec sections 20 and 22: every case of an enum is a value of each interface its enum names, so each case gives each
+/// property the interface states, by a field of that name or a property of the enum, and the enum gives each method.
+/// A case that gives a property no value is an error that names the case and the interface's property, and an enum
+/// that gives no method the interface states is the error a class gets.
+#[test]
+fn every_case_of_an_enum_gives_what_its_interfaces_state() {
+    let labelled =
+        "namespace Demo;\n\npublic interface Labelled\n{\n    string label { get; }\n\n    string show();\n}\n";
+    let sharp = "namespace Demo;\n\npublic enum Note : Labelled\n{\n    case Untitled;\n    case Titled(string label);\n    case Draft(string text);\n}\n";
+    let given = "namespace Demo;\n\npublic enum Note : Labelled\n{\n    case Titled(string label);\n    case Draft(string label);\n\n    public string show() => this.label;\n}\n";
+    let shared = "namespace Demo;\n\npublic enum Note : Labelled\n{\n    case Untitled;\n    case Draft(string text);\n\n    public string label => \"note\";\n\n    public string show() => this.label;\n}\n";
+    let others = [("src/Demo/Labelled.sharp", labelled)];
+
+    assert_eq!(
+        refusals(("src/Demo/Note.sharp", sharp), &others),
+        [
+            "3:13 unimplemented-abstract-method Class `Note` does not implement the abstract method `show`. | Give `Note` the method `show`, which each of its cases runs.",
+            "5:10 unimplemented-abstract-property-hook The case `Note.Untitled` does not give `label`, which `Labelled` states. | Give the case the field `string label`, or give `Note` the property `public string label => …;`.",
+            "7:10 unimplemented-abstract-property-hook The case `Note.Draft` does not give `label`, which `Labelled` states. | Give the case the field `string label`, or give `Note` the property `public string label => …;`.",
+        ]
+    );
+    assert_eq!(refusals(("src/Demo/Note.sharp", given), &others), Vec::<String>::new());
+    assert_eq!(refusals(("src/Demo/Note.sharp", shared), &others), Vec::<String>::new());
+}
+
 /// A case is read as `Status.Active` in a class, in the enum's own method, in a parameter default, in a constant, and
 /// with a method called on it, and a case's value reads another class's constant. Each is checked as the PHP twin's
 /// `::` read.
@@ -8440,13 +8546,14 @@ fn a_member_read_through_a_full_name_names_the_import_to_add() {
     assert_eq!(issues(analyzed, &others), ["7:16 non-existent-class-like"]);
 }
 
-/// What the checker's refusals of PHP forms name compiles: a `private static` field for a `static` local, `{ get; set; }`
-/// for `public(set)`, the constructor for `__construct`, `toString` for `__toString`, `with` for `__clone`, the base
-/// class for `parent`, a tuple unpacked into `const [a, b]` for `[a, b] = …` and `list()`, a lambda as `(x) => x * 2`
-/// for `fn` and `function`, a Map built and read by its key for `compact()` and `extract()`, and a class marked
-/// `[Attribute]` for a class attached as an attribute.
+/// The PHP# form of each PHP form PHP# has no syntax for compiles, while the PHP form fails as a typo does: a
+/// `private static` field for a `static` local, `{ get; set; }` for `public(set)`, the constructor for `__construct`,
+/// `toString` for `__toString`, `with` for `__clone`, the base class for `parent`, a tuple unpacked into
+/// `const [a, b]` for `[a, b] = …` and `list()`, a lambda as `(x) => x * 2` for `fn` and `function`, a Map built and
+/// read by its key for `compact()` and `extract()`, and a class marked `[Attribute]` for a class attached as an
+/// attribute.
 #[test]
-fn the_form_a_php_form_refusal_names_compiles() {
+fn the_php_sharp_form_of_each_php_form_compiles() {
     const BASE: &str = "namespace Demo;\n\npublic class Base\n{\n}\n";
     const FIELD: &str = "namespace Demo;\n\nimport Attribute;\n\n[Attribute]\npublic class Field\n{\n}\n";
     let named = "namespace Demo;\n\n[Field]\npublic class Named\n{\n    public int run(string name)\n    {\n        Function<int(int)> twice = (x) => x * 2;\n        Map<string, string> values = [\"name\": name];\n        return twice(values.get(\"name\") == name ? 1 : 0);\n    }\n}\n";

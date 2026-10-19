@@ -10,6 +10,7 @@ where
 {
     pub(crate) fn parse_do_while(&mut self) -> Result<DoWhile<'arena>, ParseError> {
         Ok(DoWhile {
+            label: None,
             r#do: self.expect_keyword(T!["do"])?,
             statement: self.arena.alloc(self.parse_statement()?),
             r#while: self.expect_keyword(T!["while"])?,

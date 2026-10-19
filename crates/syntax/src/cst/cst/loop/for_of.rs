@@ -4,6 +4,7 @@ use mago_span::HasSpan;
 use mago_span::Span;
 
 use crate::cst::cst::expression::Expression;
+use crate::cst::cst::goto::Label;
 use crate::cst::cst::identifier::LocalIdentifier;
 use crate::cst::cst::keyword::Keyword;
 use crate::cst::cst::statement::Statement;
@@ -15,6 +16,9 @@ use crate::cst::cst::type_hint::Hint;
 #[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct ForOf<'arena> {
+    /// The name the loop is written with, as `orders:` in `orders: for (const order of this.orders)`, which
+    /// `break orders;` and `continue orders;` name.
+    pub label: Option<Label<'arena>>,
     pub r#for: Keyword<'arena>,
     pub left_parenthesis: Span,
     pub keyword: Keyword<'arena>,
@@ -84,7 +88,7 @@ impl<'arena> ForOfTarget<'arena> {
 
 impl HasSpan for ForOf<'_> {
     fn span(&self) -> Span {
-        self.r#for.span().join(self.body.span())
+        self.label.map_or_else(|| self.r#for.span(), |label| label.span()).join(self.body.span())
     }
 }
 

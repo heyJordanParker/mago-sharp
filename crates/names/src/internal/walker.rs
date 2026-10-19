@@ -434,6 +434,12 @@ impl<'arena, 'classes> NameWalker<'arena, 'classes> {
         }
 
         let (fqn, imported) = context.resolve(NameKind::Default, name);
+        // Spec section 14.1: one name covers every function type, so PHP's `Closure` is no class a PHP# file names. Where
+        // the name would mean it, it means `\Closure`, a form no resolved name takes, so it names no class in any
+        // position, and each message, which shows a class name without its leading `\`, shows it as written.
+        if self.sharp && fqn.eq_ignore_ascii_case(b"Closure") {
+            return ((context.intern(&[b"\\", fqn].concat()), imported), None);
+        }
         if !self.sharp || imported || self.declared_classes.contains(&IgnoringCase(name)) {
             return ((fqn, imported), None);
         }

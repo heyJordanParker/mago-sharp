@@ -32,7 +32,8 @@ pub struct Goto<'arena> {
     pub terminator: Terminator<'arena>,
 }
 
-/// Represents a Go-To label statement in PHP.
+/// Represents a Go-To label statement in PHP, and the name of a PHP# loop, as `orders:` in
+/// `orders: for (const order of this.orders) { … }`.
 ///
 /// Example:
 ///
@@ -41,7 +42,7 @@ pub struct Goto<'arena> {
 ///
 /// foo:
 /// ```
-#[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct Label<'arena> {
     pub name: LocalIdentifier<'arena>,

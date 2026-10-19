@@ -1657,6 +1657,10 @@ generate_ast_walker! {
     }
 
     'arena Foreach as foreach => {
+        if let Some(label) = &foreach.label {
+            walker.walk_label(label, context);
+        }
+
         walker.walk_keyword(&foreach.foreach, context);
         walker.walk_expression(foreach.expression, context);
         walker.walk_keyword(&foreach.r#as, context);
@@ -1705,6 +1709,10 @@ generate_ast_walker! {
     }
 
     'arena For as r#for => {
+        if let Some(label) = &r#for.label {
+            walker.walk_label(label, context);
+        }
+
         walker.walk_keyword(&r#for.r#for, context);
 
         if let Some(declaration) = &r#for.declaration {
@@ -1747,6 +1755,10 @@ generate_ast_walker! {
     }
 
     'arena ForOf as for_of => {
+        if let Some(label) = &for_of.label {
+            walker.walk_label(label, context);
+        }
+
         walker.walk_keyword(&for_of.r#for, context);
         walker.walk_keyword(&for_of.keyword, context);
         walker.walk_expression(for_of.expression, context);
@@ -1776,6 +1788,10 @@ generate_ast_walker! {
     }
 
     'arena While as r#while => {
+        if let Some(label) = &r#while.label {
+            walker.walk_label(label, context);
+        }
+
         walker.walk_keyword(&r#while.r#while, context);
         walker.walk_expression(r#while.condition, context);
         walker.walk_while_body(&r#while.body, context);
@@ -1802,6 +1818,10 @@ generate_ast_walker! {
     }
 
     'arena DoWhile as do_while => {
+        if let Some(label) = &do_while.label {
+            walker.walk_label(label, context);
+        }
+
         walker.walk_keyword(&do_while.r#do, context);
         walker.walk_statement(do_while.statement, context);
         walker.walk_keyword(&do_while.r#while, context);
@@ -1811,6 +1831,10 @@ generate_ast_walker! {
 
     'arena Continue as r#continue => {
         walker.walk_keyword(&r#continue.r#continue, context);
+        if let Some(label) = &r#continue.label {
+            walker.walk_local_identifier(label, context);
+        }
+
         if let Some(level) = &r#continue.level {
             walker.walk_expression(level, context);
         }
@@ -1820,6 +1844,10 @@ generate_ast_walker! {
 
     'arena Break as r#break => {
         walker.walk_keyword(&r#break.r#break, context);
+        if let Some(label) = &r#break.label {
+            walker.walk_local_identifier(label, context);
+        }
+
         if let Some(level) = &r#break.level {
             walker.walk_expression(level, context);
         }

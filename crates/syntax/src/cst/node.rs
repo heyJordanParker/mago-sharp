@@ -2665,6 +2665,9 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 f(Node::Expression(node.r#else));
             }
             Node::DoWhile(node) => {
+                if let Some(label) = &node.label {
+                    f(Node::Label(label));
+                }
                 f(Node::Keyword(&node.r#do));
                 f(Node::Statement(node.statement));
                 f(Node::Keyword(&node.r#while));
@@ -2672,6 +2675,9 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 f(Node::Terminator(&node.terminator));
             }
             Node::Foreach(node) => {
+                if let Some(label) = &node.label {
+                    f(Node::Label(label));
+                }
                 f(Node::Keyword(&node.r#foreach));
                 f(Node::Expression(node.expression));
                 f(Node::Keyword(&node.r#as));
@@ -2700,6 +2706,9 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
             }),
             Node::ForeachValueTarget(node) => f(Node::Expression(node.value)),
             Node::For(node) => {
+                if let Some(label) = &node.label {
+                    f(Node::Label(label));
+                }
                 f(Node::Keyword(&node.r#for));
 
                 if let Some(declaration) = &node.declaration {
@@ -2728,6 +2737,9 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 f(Node::Terminator(&node.terminator));
             }
             Node::ForOf(node) => {
+                if let Some(label) = &node.label {
+                    f(Node::Label(label));
+                }
                 f(Node::Keyword(&node.r#for));
                 f(Node::Keyword(&node.keyword));
                 f(Node::ForOfTarget(&node.target));
@@ -2750,6 +2762,9 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 f(Node::LocalIdentifier(&node.name));
             }
             Node::While(node) => {
+                if let Some(label) = &node.label {
+                    f(Node::Label(label));
+                }
                 f(Node::Keyword(&node.r#while));
                 f(Node::Expression(node.condition));
                 f(Node::WhileBody(&node.body));
@@ -2768,6 +2783,10 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
             Node::Break(node) => {
                 f(Node::Keyword(&node.r#break));
 
+                if let Some(label) = &node.label {
+                    f(Node::LocalIdentifier(label));
+                }
+
                 if let Some(level) = &node.level {
                     f(Node::Expression(level));
                 }
@@ -2776,6 +2795,10 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
             }
             Node::Continue(node) => {
                 f(Node::Keyword(&node.r#continue));
+
+                if let Some(label) = &node.label {
+                    f(Node::LocalIdentifier(label));
+                }
 
                 if let Some(level) = &node.level {
                     f(Node::Expression(level));

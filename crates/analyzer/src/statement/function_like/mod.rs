@@ -2084,11 +2084,9 @@ where
     A: Arena,
 {
     for type_ref in type_union.get_all_child_nodes() {
-        let TypeRef::Atomic(TAtomic::Reference(TReference::Symbol { name, .. })) = type_ref else {
-            continue;
-        };
-
-        report_undefined_type(context, *name, span);
+        if let TypeRef::Atomic(TAtomic::Reference(TReference::Symbol { name, .. })) = type_ref {
+            report_undefined_type(context, *name, span);
+        }
     }
 }
 

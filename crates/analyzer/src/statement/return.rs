@@ -3,6 +3,7 @@ use std::rc::Rc;
 
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
+use mago_codex::metadata::function_like::FunctionLikeKind;
 use mago_codex::metadata::property::PropertyMetadata;
 use mago_codex::metadata::property_hook::PropertyHookMetadata;
 use mago_codex::ttype::TType;
@@ -76,7 +77,8 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Return<'arena> {
         A: Arena,
     {
         // A PHP# constructor creates the object, spec section 9.1, so its `return;` takes no value: a named constructor
-        // returns the object, and PHP discards a value the main constructor returns.
+        // returns the object, and PHP discards a value the main constructor returns. The static constructor, which
+        // runs as `#statics`, sets up its class's statics, spec section 6, and no code takes a value from it.
         if let Some(return_value) = self.value.as_ref()
             && let Some(function_like) = block_context.scope.get_function_like()
         {
@@ -86,6 +88,11 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Return<'arena> {
                 && function_like.method_metadata.as_ref().is_some_and(|method| method.is_constructor)
             {
                 Some("A constructor creates its object and returns nothing: write `return;`.")
+            } else if context.dialect.is_sharp()
+                && function_like.kind == FunctionLikeKind::Method
+                && function_like.name.as_bytes() == b"#statics"
+            {
+                Some("A static constructor sets up its class's statics and returns nothing: write `return;`.")
             } else {
                 None
             };

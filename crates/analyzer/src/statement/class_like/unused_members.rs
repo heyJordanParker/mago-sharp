@@ -190,6 +190,11 @@ fn collect_checkable_members(
             continue;
         }
 
+        // The engine runs the PHP# static constructor, `#statics`, when the app first uses the class's statics.
+        if method_name.as_bytes().starts_with(b"#") {
+            continue;
+        }
+
         // The engine runs a PHP# listener when an event it lists is raised, spec section 15.
         if method_meta.is_abstract || !method_metadata.listens.is_empty() {
             continue;

@@ -4,6 +4,7 @@ use mago_span::HasSpan;
 use mago_span::Span;
 
 use crate::cst::cst::expression::Expression;
+use crate::cst::cst::goto::Label;
 use crate::cst::cst::keyword::Keyword;
 use crate::cst::cst::local_declaration::LocalDeclaration;
 use crate::cst::cst::statement::Statement;
@@ -25,6 +26,9 @@ use crate::cst::sequence::TokenSeparatedSequence;
 #[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct For<'arena> {
+    /// The PHP# name the loop is written with, as `rows:` in `rows: for (let i = 0; i < n; i++)`, which
+    /// `break rows;` and `continue rows;` name. Always `None` in PHP.
+    pub label: Option<Label<'arena>>,
     pub r#for: Keyword<'arena>,
     pub left_parenthesis: Span,
     /// The PHP# local the loop declares, as in `for (let i = 0; i < n; i++)`. Its terminator is the
@@ -81,7 +85,7 @@ impl<'arena> ForBody<'arena> {
 
 impl HasSpan for For<'_> {
     fn span(&self) -> Span {
-        self.r#for.span().join(self.body.span())
+        self.label.map_or_else(|| self.r#for.span(), |label| label.span()).join(self.body.span())
     }
 }
 

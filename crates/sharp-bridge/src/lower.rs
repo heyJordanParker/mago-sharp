@@ -82,6 +82,7 @@ use mago_syntax::cst::Inheritance;
 use mago_syntax::cst::Instantiation;
 use mago_syntax::cst::Interface;
 use mago_syntax::cst::InterpolatedString;
+use mago_syntax::cst::Label;
 use mago_syntax::cst::Leave;
 use mago_syntax::cst::Literal;
 use mago_syntax::cst::LiteralStringPart;
@@ -132,6 +133,7 @@ use mago_syntax::cst::With;
 use mago_syntax::cst::Yield;
 use mago_syntax::cst::YieldValue;
 use mago_syntax::cst::built_in_generic_arity;
+use mago_syntax::dialect::Dialect;
 use mago_syntax::utils::block_has_yield;
 use mago_syntax::utils::pattern::PhpShape;
 use mago_syntax::utils::pattern::php_shape;
@@ -301,6 +303,8 @@ const STATICS: &[u8] = b"\0<sharp>\0statics";
 /// The hidden static method that runs the initial values of one type argument's entry, which the engine calls when it
 /// adds the entry.
 const STATICS_INIT: &[u8] = b"#init";
+/// The hidden static of a class with a static constructor, which holds how the constructor's run went.
+const STATIC_CONSTRUCTOR: &[u8] = b"\0<sharp>\0static constructor";
 const IS_LONG: u32 = 4;
 const IS_DOUBLE: u32 = 5;
 const IS_STRING: u32 = 6;
@@ -428,6 +432,21 @@ enum PlaceUse {
     Write,
 }
 
+/// A PHP loop that holds the code being lowered: the PHP# loop it belongs to, by that loop's span, and that loop's
+/// name, as `orders` in `orders: for (…)`, which `break orders;` and `continue orders;` reach.
+#[derive(Clone)]
+struct PhpLoop {
+    owner: Span,
+    name: Option<Vec<u8>>,
+}
+
+impl PhpLoop {
+    /// The PHP loop of the PHP# loop at `owner`, written with `label`, if any.
+    fn of(owner: Span, label: Option<Label>) -> Self {
+        Self { owner, name: label.map(|label| label.name.value.to_vec()) }
+    }
+}
+
 /// What a `List`'s search by `==` gives: whether an element equals the value, the index of the first one that does, or
 /// whether `remove` removed it.
 #[derive(Clone, Copy)]
@@ -535,11 +554,10 @@ struct Lowering<'lowering, 'arena> {
     tested_links: Vec<Span>,
     /// The declaration offsets of the locals a lambda captures by reference: those code writes.
     by_reference: HashSet<u32>,
-    /// How many loop bodies hold the statement being lowered, inside the innermost method or lambda.
-    loop_depth: u32,
-    /// Whether the innermost loop body being lowered runs inside the `do { … } while (false)` of a `for` whose counter
-    /// moves into a fresh variable after each pass, so a `break` of that loop leaves two PHP loops.
-    breaks_twice: bool,
+    /// The PHP loops that hold the code being lowered, innermost last, inside the innermost method or lambda: each PHP#
+    /// loop's own, around its condition, increments and body, and the `do { … } while (false)` that the body of a `for`
+    /// whose counter moves into a fresh variable after each pass runs in, which belongs to that `for` too.
+    loops: Vec<PhpLoop>,
     captures_type_arguments: bool,
     /// How many type parameters the generic class has whose static member is being lowered. Its static method has no
     /// `this` to read the class's type arguments from, so it takes them as its leading own ones.
@@ -589,8 +607,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             renumbered_places: Vec::new(),
             tested_links: Vec::new(),
             by_reference: HashSet::default(),
-            loop_depth: 0,
-            breaks_twice: false,
+            loops: Vec::new(),
             captures_type_arguments: false,
             static_type_parameters: None,
             property: Vec::new(),
@@ -1727,6 +1744,17 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 {
                     continue;
                 }
+                // Spec section 6: the static constructor of a generic class runs in `statics_init`, for each type
+                // argument, and any other's runs as `#statics`, right after the initial values it sets first.
+                ClassLikeMember::Method(method) if php_method_name(method) == b"#statics" => {
+                    members.push(self.static_constructor_state(method));
+                    if keeps_statics {
+                        continue;
+                    }
+                    let initial_values = self.static_initial_value_writes(class_members);
+
+                    self.method(method, ZEND_ACC_PRIVATE | ZEND_ACC_STATIC, &initial_values)
+                }
                 ClassLikeMember::Method(method) if php_method_name(method) == b"__construct" => {
                     has_constructor = true;
                     let promoted =
@@ -1821,7 +1849,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             ));
         }
         members.extend(self.copy_resets(class_members, parent_name.is_some(), keyword, right_brace));
-        if !keeps_statics {
+        if !keeps_statics && static_constructor(class_members).is_none() {
             members.extend(self.static_initial_values(class_members));
         }
 
@@ -1973,8 +2001,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// argument's entry, as C# runs a closed type's static initializer on its first use: `private static function
     /// '#init'($"\0<sharp>\0types") { \Sharp\Internal\statics(\App\Counter::class, <the text of #0>)['made'] = …; }`.
     /// It takes the type arguments in the hidden local a method keeps its own in, which the engine fills from the
-    /// entry's key. A throw leaves the entry's other fields as they are and runs nothing again, as a class's `#statics`
-    /// does. None for a class whose initial values are all constant.
+    /// entry's key. The static constructor's statements run after the initial values, spec section 6. A throw leaves
+    /// the entry's other fields as they are and runs nothing again, as a class's `#statics` does, and in a class with
+    /// a static constructor the engine keeps what it threw in place of the entry. None for a class whose initial values
+    /// are all constant and that has no static constructor.
     fn statics_init(&mut self, name: &LocalIdentifier, members: &Sequence<ClassLikeMember>) -> Option<u32> {
         let initial_values: Vec<&Property> = members
             .iter()
@@ -1983,7 +2013,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 _ => None,
             })
             .collect();
-        if initial_values.is_empty() {
+        let constructor = static_constructor(members);
+        if initial_values.is_empty() && constructor.is_none() {
             return None;
         }
 
@@ -2003,6 +2034,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             let value = self.expression(value);
             let field = self.statics_field(field_line, self.class, &own, variable.name, PlaceUse::Write);
             writes.push(self.node(SHARP_AST_ASSIGN, 0, field_line, &[field, value]));
+        }
+        if let Some(MethodBody::Concrete(block)) = constructor.map(|constructor| &constructor.body) {
+            for statement in &block.statements {
+                writes.push(self.statement(statement));
+            }
         }
         self.static_type_parameters = None;
 
@@ -2712,8 +2748,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             }
             None => (method.name.span, NULL),
         };
-        // Spec section 14.3: a method named without parentheses is a function value, a closure of the method.
-        let return_type = if php_method_name(method) == b"__construct" {
+        // Spec section 14.3: a method named without parentheses is a function value, a closure of the method. No code
+        // names a constructor or the static constructor so.
+        let return_type = if matches!(php_method_name(method), b"__construct" | b"#statics") {
             return_type
         } else {
             let function_type = self.types.method_type(self.class, php_method_name(method));
@@ -4193,30 +4230,15 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// default: `private static function #statics(): void { self::$a = …; }`. The engine runs it once each request,
     /// when it first builds the class's statics, after their constant defaults (`zend_class_init_sharp_statics`), so a
     /// preloaded class gets the values too. Each value fills the storage, so it runs neither a `set` body nor an
-    /// observer, spec section 6.2. None when each static's initial value is its default.
+    /// observer, spec section 6.2. None when each static's initial value is its default. A class with a static
+    /// constructor runs the writes as that constructor's first statements instead.
     fn static_initial_values(&mut self, members: &Sequence<ClassLikeMember>) -> Option<u32> {
-        let properties: Vec<&Property> = members
-            .iter()
-            .filter_map(|member| match member {
-                ClassLikeMember::Property(property) if property.initial_value_runs_after_class() => Some(property),
-                _ => None,
-            })
-            .collect();
-        let first = properties.first()?;
+        let first = members.iter().find_map(|member| match member {
+            ClassLikeMember::Property(property) if property.initial_value_runs_after_class() => Some(property),
+            _ => None,
+        })?;
         let line = self.line(first.first_variable());
-        let mut statements = Vec::new();
-        for property in &properties {
-            let variable = property.first_variable();
-            let Some(value) = property.initial_value() else {
-                unreachable!("a static whose initial value runs after its class has one");
-            };
-            let line = self.line(variable);
-            let class = self.string(ZEND_NAME_NOT_FQ, line, b"self");
-            let value = self.expression(value);
-            let member = self.string(0, line, variable.name);
-            let target = self.node(SHARP_AST_STATIC_PROP, 0, line, &[class, member]);
-            statements.push(self.node(SHARP_AST_ASSIGN, 0, line, &[target, value]));
-        }
+        let statements = self.static_initial_value_writes(members);
         let body = self.node(SHARP_AST_STMT_LIST, 0, line, &statements);
         let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &[]);
         let void = self.string(ZEND_NAME_NOT_FQ, line, b"void");
@@ -4230,6 +4252,50 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             b"#statics",
             &[parameters, NULL, body, void, NULL],
         ))
+    }
+
+    /// The write of each static whose initial value isn't constant, in declaration order: `self::$a = …;`.
+    fn static_initial_value_writes(&mut self, members: &Sequence<ClassLikeMember>) -> Vec<u32> {
+        let mut writes = Vec::new();
+        for member in members {
+            let ClassLikeMember::Property(property) = member else {
+                continue;
+            };
+            if !property.initial_value_runs_after_class() {
+                continue;
+            }
+            let variable = property.first_variable();
+            let Some(value) = property.initial_value() else {
+                unreachable!("a static whose initial value runs after its class has one");
+            };
+            let line = self.line(variable);
+            let class = self.string(ZEND_NAME_NOT_FQ, line, b"self");
+            let value = self.expression(value);
+            let member = self.string(0, line, variable.name);
+            let target = self.node(SHARP_AST_STATIC_PROP, 0, line, &[class, member]);
+            writes.push(self.node(SHARP_AST_ASSIGN, 0, line, &[target, value]));
+        }
+
+        writes
+    }
+
+    /// The hidden static that tells the engine the class has the static constructor `method`, spec section 6, and holds
+    /// how its run went: `public static $"\0<sharp>\0static constructor" = true;` with `ZEND_ACC_SHARP_HIDDEN`. The
+    /// engine sets it to null once the constructor returns, or to what it threw, which every later use of the class's
+    /// statics names, and caches no static's place while it is still true.
+    fn static_constructor_state(&mut self, method: &Method) -> u32 {
+        let line = self.line(method.name.span);
+        let name = self.string(0, line, STATIC_CONSTRUCTOR);
+        let running = self.zval(line, sharp_value::SHARP_TRUE, |_| {});
+        let element = self.node(SHARP_AST_PROP_ELEM, 0, line, &[name, running, NULL, NULL]);
+        let declaration = self.node(SHARP_AST_PROP_DECL, 0, line, &[element]);
+
+        self.node(
+            SHARP_AST_PROP_GROUP,
+            ZEND_ACC_PUBLIC | ZEND_ACC_STATIC | ZEND_ACC_SHARP_HIDDEN,
+            line,
+            &[NULL, declaration, NULL],
+        )
     }
 
     /// The members a static property with accessors runs as, decision 3: PHP has no hooks on a static, so its storage,
@@ -4805,21 +4871,33 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 let WhileBody::Statement(body) = &r#while.body else {
                     unreachable!("check_slice refuses a colon-delimited `while`");
                 };
-                let condition = self.expression(r#while.condition);
-                let body = self.loop_body(body);
+                let condition_and_body = self.in_loop(PhpLoop::of(statement.span(), r#while.label), |this| {
+                    [this.expression(r#while.condition), this.statement(body)]
+                });
 
-                self.node(SHARP_AST_WHILE, 0, self.line(r#while), &[condition, body])
+                self.node(SHARP_AST_WHILE, 0, self.line(r#while), &condition_and_body)
             }
             Statement::DoWhile(do_while) => {
-                let body = self.loop_body(do_while.statement);
-                let condition = self.expression(do_while.condition);
+                let body_and_condition = self.in_loop(PhpLoop::of(statement.span(), do_while.label), |this| {
+                    [this.statement(do_while.statement), this.expression(do_while.condition)]
+                });
 
-                self.node(SHARP_AST_DO_WHILE, 0, self.line(do_while), &[body, condition])
+                self.node(SHARP_AST_DO_WHILE, 0, self.line(do_while), &body_and_condition)
             }
             Statement::Try(r#try) => self.r#try(r#try),
             Statement::PatternMatch(_) => self.pattern(Node::Statement(statement)),
-            Statement::Break(r#break) => self.r#break(self.line(r#break)),
-            Statement::Continue(r#continue) => self.node(SHARP_AST_CONTINUE, 0, self.line(r#continue), &[NULL]),
+            Statement::Break(r#break) => {
+                let line = self.line(r#break);
+                let depth = self.jump_depth(line, r#break.label.as_ref(), false);
+
+                self.node(SHARP_AST_BREAK, 0, line, &[depth])
+            }
+            Statement::Continue(r#continue) => {
+                let line = self.line(r#continue);
+                let depth = self.jump_depth(line, r#continue.label.as_ref(), true);
+
+                self.node(SHARP_AST_CONTINUE, 0, line, &[depth])
+            }
             _ => unreachable!("check_slice refuses the statement `{statement}`"),
         })
     }
@@ -4899,7 +4977,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 (NULL, self.node(SHARP_AST_ARRAY, ZEND_ARRAY_SYNTAX_SHORT, line, &elements), None)
             }
         };
-        let body = self.loop_body(for_of.body);
+        let body = self.in_loop(PhpLoop::of(for_of.span(), for_of.label), |this| this.statement(for_of.body));
         let statements: Vec<u32> = entry.into_iter().chain(fresh).chain([body]).collect();
         let body = match statements.as_slice() {
             [body] => *body,
@@ -4910,28 +4988,38 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.node(SHARP_AST_FOREACH, 0, line, &[collection, value, key, body])
     }
 
-    fn loop_body(&mut self, body: &Statement) -> u32 {
-        self.loop_body_breaking(body, false)
+    /// Lowers what `lower` lowers inside the PHP loop `php_loop`.
+    fn in_loop<T>(&mut self, php_loop: PhpLoop, lower: impl FnOnce(&mut Self) -> T) -> T {
+        self.loops.push(php_loop);
+        let lowered = lower(self);
+        self.loops.pop();
+
+        lowered
     }
 
-    /// The body of a loop, whose `break` leaves `breaks_twice` PHP loops: the loop's own, and the `do { … } while
-    /// (false)` a `for` with a fresh counter runs its body in.
-    fn loop_body_breaking(&mut self, body: &Statement, breaks_twice: bool) -> u32 {
-        self.loop_depth += 1;
-        let around = std::mem::replace(&mut self.breaks_twice, breaks_twice);
-        let body = self.statement(body);
-        self.breaks_twice = around;
-        self.loop_depth -= 1;
+    /// The level of a `break`, or of a `continue` when `continues`, to the PHP# loop that `label` names, spec section
+    /// 17, or else to the innermost one: how many PHP loops it leaves. A `break` leaves every PHP loop of that loop,
+    /// and a `continue` goes on with the innermost of them, so a `for` with a fresh counter moves the counter before
+    /// its next pass. PHP's own level, `NULL`, is one.
+    fn jump_depth(&mut self, line: u32, label: Option<&LocalIdentifier>, continues: bool) -> u32 {
+        let target = match label {
+            Some(label) => self.loops.iter().rev().find(|php_loop| php_loop.name.as_deref() == Some(label.value)),
+            None => self.loops.last(),
+        };
+        let Some(owner) = target.map(|php_loop| php_loop.owner) else {
+            unreachable!("the analyzer refuses a `break` or `continue` outside the loop it leaves");
+        };
+        let level = if continues {
+            self.loops.iter().rev().position(|php_loop| php_loop.owner == owner).map(|inner| inner + 1)
+        } else {
+            self.loops.iter().position(|php_loop| php_loop.owner == owner).map(|outer| self.loops.len() - outer)
+        };
 
-        body
-    }
-
-    /// A `break`, which leaves the `do { … } while (false)` of a `for` with a fresh counter too, as `break 2`.
-    fn r#break(&mut self, line: u32) -> u32 {
-        let depth =
-            if self.breaks_twice { self.zval(line, sharp_value::SHARP_LONG, |node| node.long_value = 2) } else { NULL };
-
-        self.node(SHARP_AST_BREAK, 0, line, &[depth])
+        match level {
+            Some(1) => NULL,
+            Some(level) => self.zval(line, sharp_value::SHARP_LONG, |node| node.long_value = level as i64),
+            None => unreachable!("the target loop is among the loops that hold the jump"),
+        }
     }
 
     /// A `let` or `const` local is the assignment of its value to its variable, and an unpacked tuple, spec section 30,
@@ -4949,7 +5037,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// The `unset` statement that gives a local declared in a loop a fresh variable on each pass, or none when the
     /// local is outside a loop or no lambda captures it by reference.
     fn fresh_locals(&mut self, local: &LocalDeclaration) -> Option<u32> {
-        if self.loop_depth == 0 {
+        if self.loops.is_empty() {
             return None;
         }
         let line = self.line(local);
@@ -5027,10 +5115,6 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         }
 
         let initializations = self.expression_list(&initializations);
-        let conditions: Vec<u32> = r#for.conditions.iter().map(|condition| self.expression(condition)).collect();
-        let conditions = self.expression_list(&conditions);
-        let increments: Vec<u32> = r#for.increments.iter().map(|increment| self.expression(increment)).collect();
-        let increments = self.expression_list(&increments);
         let captured: Vec<&LocalIdentifier> = r#for
             .declaration
             .iter()
@@ -5038,8 +5122,18 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             .filter(|name| self.by_reference.contains(&name.span.start.offset))
             .collect();
         let line = self.line(r#for);
-        let body =
-            if captured.is_empty() { self.loop_body(body) } else { self.fresh_counter_body(line, body, &captured) };
+        let php_loop = PhpLoop::of(r#for.span(), r#for.label);
+        let (conditions, increments, body) = self.in_loop(php_loop.clone(), |this| {
+            let conditions: Vec<u32> = r#for.conditions.iter().map(|condition| this.expression(condition)).collect();
+            let increments: Vec<u32> = r#for.increments.iter().map(|increment| this.expression(increment)).collect();
+            let body = if captured.is_empty() {
+                this.statement(body)
+            } else {
+                this.fresh_counter_body(line, php_loop, body, &captured)
+            };
+
+            (this.expression_list(&conditions), this.expression_list(&increments), body)
+        });
         let r#for = self.node(SHARP_AST_FOR, 0, line, &[initializations, conditions, increments, body]);
         match fresh {
             Some(unset) => self.node(SHARP_AST_STMT_LIST, 0, line, &[unset, r#for]),
@@ -5051,11 +5145,17 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// counter, which starts as the last pass left it, as JavaScript copies a `let` counter, and PHP reuses one
     /// variable. PHP's increments take expressions, and `unset` is a statement, so the body runs inside
     /// `do { … } while (false)`, and each counter moves into a fresh variable after it, before the increments run:
-    /// `do { … } while (false); $step#1 = $step; unset($step); $step = $step#1;`. A `continue` leaves the `do` and
-    /// reaches the move, and a `break` leaves both loops.
-    fn fresh_counter_body(&mut self, line: u32, body: &Statement, counters: &[&LocalIdentifier]) -> u32 {
+    /// `do { … } while (false); $step#1 = $step; unset($step); $step = $step#1;`. The `do` is another PHP loop of the
+    /// `for`, `php_loop`, so a `continue` of the `for` leaves the `do` and reaches the move, and a `break` leaves both.
+    fn fresh_counter_body(
+        &mut self,
+        line: u32,
+        php_loop: PhpLoop,
+        body: &Statement,
+        counters: &[&LocalIdentifier],
+    ) -> u32 {
         let taken = self.temporaries;
-        let body = self.loop_body_breaking(body, true);
+        let body = self.in_loop(php_loop, |this| this.statement(body));
         let never = self.zval(line, sharp_value::SHARP_FALSE, |_| {});
         let mut statements = vec![self.node(SHARP_AST_DO_WHILE, 0, line, &[body, never])];
         for counter in counters {
@@ -5909,8 +6009,16 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             // middle of the expression, after the ZEND_SHARP_LEAVE that frees what the expression holds.
             Expression::Leave(Leave::Return(r#return)) => self.r#return(r#return),
             Expression::Propagate(propagate) => self.propagate(expression, propagate),
-            Expression::Leave(Leave::Continue(_)) => self.node(SHARP_AST_CONTINUE, 0, line, &[NULL]),
-            Expression::Leave(Leave::Break(_)) => self.r#break(line),
+            Expression::Leave(Leave::Continue(_)) => {
+                let depth = self.jump_depth(line, None, true);
+
+                self.node(SHARP_AST_CONTINUE, 0, line, &[depth])
+            }
+            Expression::Leave(Leave::Break(_)) => {
+                let depth = self.jump_depth(line, None, false);
+
+                self.node(SHARP_AST_BREAK, 0, line, &[depth])
+            }
             Expression::CompositeString(CompositeString::Interpolated(template)) => self.template(template),
             Expression::ArrowFunction(arrow_function) => self.arrow_function(arrow_function),
             Expression::Closure(closure) => self.closure(closure),
@@ -7173,13 +7281,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// gives whether the body, or a lambda in it, wrote a type text that names the method's own type parameter as
     /// `#i`, so the lambda captures the method's type arguments, as each lambda around it does.
     fn lambda_body<T>(&mut self, lower: impl FnOnce(&mut Self) -> T) -> (T, bool) {
-        let loop_depth = std::mem::replace(&mut self.loop_depth, 0);
-        let breaks_twice = std::mem::take(&mut self.breaks_twice);
+        let loops = std::mem::take(&mut self.loops);
         let returns = self.returns.take();
         let around = std::mem::take(&mut self.captures_type_arguments);
         let body = lower(self);
-        self.loop_depth = loop_depth;
-        self.breaks_twice = breaks_twice;
+        self.loops = loops;
         self.returns = returns;
         let captures_type_arguments = self.captures_type_arguments;
         self.captures_type_arguments |= around;
@@ -7523,7 +7629,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     fn hint_type(&self, hint: &Hint) -> TUnion {
         let class = (!self.class.is_empty()).then(|| word(self.class));
 
-        get_union_from_hint(hint, class, self.names, &TypeResolutionContext::new())
+        get_union_from_hint(hint, class, self.names, &TypeResolutionContext::new(), Dialect::Sharp)
     }
 
     /// The one collection `r#type` holds where the value holds a `Map` or a `Set`, at any depth, for [`Self::crossed`]
@@ -9218,6 +9324,16 @@ fn super_alias(interface: Word, method: Word) -> Vec<u8> {
 fn declares_equality(members: &Sequence<ClassLikeMember>) -> bool {
     members.iter().any(|member| {
         matches!(member, ClassLikeMember::Operator(operator) if matches!(operator.symbol, BinaryOperator::Equal(_)))
+    })
+}
+
+/// The static constructor among `members`, spec section 6, if any.
+fn static_constructor<'member, 'arena>(
+    members: &'member Sequence<ClassLikeMember<'arena>>,
+) -> Option<&'member Method<'arena>> {
+    members.iter().find_map(|member| match member {
+        ClassLikeMember::Method(method) if php_method_name(method) == b"#statics" => Some(method),
+        _ => None,
     })
 }
 

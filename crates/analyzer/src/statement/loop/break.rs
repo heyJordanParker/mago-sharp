@@ -28,14 +28,17 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Break<'arena> {
     where
         A: Arena,
     {
-        let levels = super::parse_control_flow_level(
-            self.level,
-            context,
-            block_context,
-            artifacts,
-            IssueCode::InvalidBreak,
-            "Break level must be an integer literal.",
-        )?;
+        let levels = match &self.label {
+            Some(label) => super::get_named_loop_levels(block_context, label),
+            None => super::parse_control_flow_level(
+                self.level,
+                context,
+                block_context,
+                artifacts,
+                IssueCode::InvalidBreak,
+                "Break level must be an integer literal.",
+            )?,
+        };
 
         let available_levels = block_context.break_types.len() as u64;
         if available_levels == 0 {
