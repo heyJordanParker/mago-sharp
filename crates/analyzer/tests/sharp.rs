@@ -22465,6 +22465,10 @@ fn a_class_gives_an_interface_property_stated_with_init_an_init() {
         "app/Shop/Tray.sharp",
         "namespace App.Shop;\n\npublic class Tray : Sized\n{\n    public int max { get; } = 1;\n}\n",
     );
+    let guarded = (
+        "app/Shop/Case.sharp",
+        "namespace App.Shop;\n\npublic class Case : Sized\n{\n    public int max { get; private set; } = 1;\n}\n",
+    );
     let missing = ("app/Shop/Bin.sharp", "namespace App.Shop;\n\npublic class Bin : Sized\n{\n}\n");
     let written = (
         "app/Shop/Resize.sharp",
@@ -22485,6 +22489,12 @@ fn a_class_gives_an_interface_property_stated_with_init_an_init() {
         worded(fixed, &[sized]),
         [
             "5:16 incompatible-property-access `Tray` gives `max` get-only, and `Sized` states it with `init`. | Given here. | Stated here. | Declare `max` with `{ get; init; }`."
+        ]
+    );
+    assert_eq!(
+        worded(guarded, &[sized]),
+        [
+            "5:16 incompatible-property-access `Case` gives `max` with `private set`, and `Sized` states it with `init`. | Given here. | Stated here. | Declare `max` with `{ get; init; }`."
         ]
     );
     assert_eq!(
