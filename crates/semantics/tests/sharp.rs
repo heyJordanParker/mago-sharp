@@ -646,10 +646,25 @@ fn an_intersection_joins_classes_and_interfaces_wherever_a_type_goes() {
             "24:9 `&` joins classes and interfaces only, and `int` is neither.",
         ]
     );
+    // A type written twice is redundant, as in a union, in any place of the intersection.
+    assert_eq!(
+        issues(
+            "namespace App.Tenant;\n\nclass Report\n{\n    private Lib & Other & Lib g;\n\n    private Lib<int> & Lib<int> h;\n}\n"
+        ),
+        ["5:27 Duplicate type `Lib` is redundant.", "7:24 Duplicate type `Lib<int>` is redundant."]
+    );
     // Parentheses around one member get the parentheses error, never the error that the member is no class.
     let parenthesized = issues("namespace App.Tenant;\n\nclass Report\n{\n    private (Lib) & Other g;\n}\n");
     assert!(parenthesized.contains(&"5:13 Write `Lib` without parentheses: they go only around a union or an intersection before `?`, as in `(int|string)?`.".to_owned()), "{parenthesized:?}");
     assert!(!parenthesized.iter().any(|issue| issue.contains("joins")), "{parenthesized:?}");
+    // `&` binds tighter than `|`, so a union holds an intersection, with or without parentheses, and the
+    // intersection's members are checked as they are alone.
+    assert_eq!(
+        issues(
+            "namespace App.Tenant;\n\nclass Report\n{\n    public void run(Lib & Other | Third a, (Lib & Other) | Third b, Third | Lib & int c) { }\n}\n"
+        ),
+        ["5:83 `&` joins classes and interfaces only, and `int` is neither."]
+    );
     // A plain PHP file keeps PHP's own rule on what an intersection joins.
     assert_eq!(
         issues_in("src/Report.php", "<?php\n\nfunction run(int&string $item): void {}\n"),
@@ -1625,11 +1640,12 @@ fn a_named_constructor_passes_control_with_this_and_its_arguments_cannot_use_thi
 /// Spec section 9.1: a named constructor is declared on its own class's name with an access modifier, and `required`
 /// when every subclass keeps it, spec section 11, and nothing else, a name that is neither its class's nor one PHP
 /// reserves, parameters that declare no property, and a body. An abstract class has no objects of its own, and named
-/// constructors are not inherited, so it declares none.
+/// constructors are not inherited, so it declares only `required` ones, which each subclass declares again.
 #[test]
 fn a_named_constructor_is_declared_on_its_class_with_an_access_modifier_a_name_and_a_body() {
     let code = "namespace App.Tenant;\n\npublic class Order\n{\n    public Order(int count) { }\n\n    public Other.copy() : this(1) { }\n    public Order.order() : this(1) { }\n    public Order.__make() : this(1) { }\n    public static Order.fixed() : this(1) { }\n    Order.bare() : this(1) { }\n    public Order.kept(public int count { get; }) : this(count) { }\n    public Order.empty() : this(1);\n    public required Order.parsed() : this(1) { }\n}\n";
-    let r#abstract = "namespace App.Tenant;\n\npublic abstract class Shape\n{\n    public Shape(int sides) { }\n\n    public Shape.triangle() : this(3) { }\n}\n";
+    // A `required` one is the contract each subclass keeps, so an abstract class declares it, spec section 11.
+    let r#abstract = "namespace App.Tenant;\n\npublic abstract class Shape\n{\n    public Shape(int sides) { }\n\n    public Shape.triangle() : this(3) { }\n    public required Shape.parsed() : this(3) { }\n}\n";
 
     assert_eq!(
         issues(code),
@@ -1644,7 +1660,9 @@ fn a_named_constructor_is_declared_on_its_class_with_an_access_modifier_a_name_a
     );
     assert_eq!(
         issues(r#abstract),
-        ["7:18 An abstract class has no objects of its own, so it declares no named constructor."]
+        [
+            "7:18 An abstract class has no objects of its own, so a named constructor it declares is `required`, for each subclass to declare its own."
+        ]
     );
 }
 
@@ -1761,29 +1779,14 @@ fn new_self_names_no_type_arguments() {
     assert_eq!(issues(code), ["11:36 `Self` already carries its class's type parameters."]);
 }
 
-/// Spec section 9.1: a named constructor belongs to the class that declares it and is not inherited, so `Self`, which
-/// can be any subclass, cannot name one. The help names the class, and that fix compiles.
+/// Spec section 11: `new Self.of(…)` calls the named constructor of the class the code is called on, which the analyzer
+/// accepts when `of` is `required`, so the checker lets it through, as it does in a class that inherits `of`.
 #[test]
-fn new_self_cannot_name_a_named_constructor() {
-    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public Report(int count)\n    {\n    }\n\n    public Report.of(int count) : this(count)\n    {\n    }\n\n    public static Report make() => new Self.of(1);\n}\n";
-    let fixed = code.replace("new Self.of(1)", "new Report.of(1)");
-
-    let issue = check_in_type_file(code).remove(0);
-    assert_eq!(
-        issue.message,
-        "`Self` cannot name a named constructor: a named constructor is not inherited, and `Self` can be any subclass."
-    );
-    assert_eq!(issue.help.as_deref(), Some("Name its class: write `new Report.of(1)`."));
-    assert_eq!(
-        issues(code),
-        [
-            "13:36 `Self` cannot name a named constructor: a named constructor is not inherited, and `Self` can be any subclass."
-        ]
-    );
-    assert_eq!(issues(leak(fixed)), Vec::<String>::new());
-
-    // A class that inherits `of` shows no declaring class here, so the analyzer reports it with that class's name.
+fn new_self_names_a_named_constructor() {
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public Report(int count)\n    {\n    }\n\n    public required Report.of(int count) : this(count)\n    {\n    }\n\n    public static Report make() => new Self.of(1);\n}\n";
     let inherited = "namespace App.Tenant;\n\nclass Summary : Report\n{\n    public Summary(int count) : super(count)\n    {\n    }\n\n    public static Report make() => new Self.of(1);\n}\n";
+
+    assert_eq!(issues(code), Vec::<String>::new());
     assert_eq!(issues(inherited), Vec::<String>::new());
 }
 
@@ -4859,7 +4862,6 @@ fn types_outside_the_slice_are_an_error_and_an_intersection_holds_null_only_as_a
             format!("3:40 {iterable}"),
             format!("3:52 {iterable}"),
             "3:64 Parse error encountered during parsing".to_owned(),
-            "3:76 Write `Lib&Other` without parentheses: they go only around a union or an intersection before `?`, as in `(int|string)?`.".to_owned(),
             "3:88 A type that holds null is written `(Lib&Other)?`.".to_owned(),
             "8:12 Parse error encountered during parsing".to_owned(),
         ]
@@ -6415,12 +6417,20 @@ fn a_nullable_type_pattern_or_as_to_a_nullable_type_is_an_error() {
     );
 }
 
-/// `void` and `Self` are only return types, so a pattern of either says so, as a local's type does.
+/// `void` and `Self` are only return types, so a pattern of either says so, as a local's type does. `Self.LIMIT` is a
+/// value, as `Report.LIMIT` is, spec section 25.
 #[test]
 fn a_pattern_of_void_or_self_is_only_a_return_type() {
     let code = leak(method(
-        "        const a = extra is void;\n        const b = extra is Self;\n        const c = extra as Self;\n        const d = match (extra) { Self s => 1, default => 2 };\n        return extra;\n",
+        "        const a = extra is void;\n        const b = extra is Self;\n        const c = extra as Self;\n        const d = match (extra) { Self s => 1, default => 2 };\n        const e = extra is Self.LIMIT or Report.LIMIT;\n        const f = match (extra) { Self.LIMIT => 1, default => 2 };\n        return extra;\n",
     ));
+    // A constant's value knows no class the code is called on.
+    assert_eq!(
+        issues(
+            "namespace App.Tenant;\n\nclass Report\n{\n    public const int LIMIT = 1;\n    public const bool TOP = match (1) { Self.LIMIT => true, default => false };\n}\n"
+        ),
+        ["6:41 `Self.LIMIT` is not a constant: it reads the class the code is called on."]
+    );
 
     assert_eq!(
         issues(code),

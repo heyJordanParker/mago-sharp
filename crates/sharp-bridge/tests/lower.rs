@@ -4338,6 +4338,58 @@ fn new_of_a_type_parameter_with_a_named_constructor_calls_it_on_the_type_argumen
 }
 
 /// ```php
+/// public static function parse($json): static {
+///     return static::fromJson($json);
+/// }
+/// public function copy(): static {
+///     return static::fromJson($this->id, /* type arguments "$0" */);
+/// }
+/// ```
+///
+/// Spec section 11: `new Self.fromJson(json)` calls the `required` named constructor of the class the code is called
+/// on, so a subclass's own `fromJson` builds the subclass, and a generic class passes `this`'s type arguments.
+#[test]
+fn new_of_self_with_a_named_constructor_calls_it_on_the_class_the_code_is_called_on() {
+    let record = Lowered::new(
+        "namespace App;\n\nclass Record\n{\n    public Record() { }\n\n    public required Record.fromJson(string json) : this() { }\n\n    public static Self parse(string json) => new Self.fromJson(json);\n}\n",
+    );
+
+    assert_eq!(
+        record.render(record.child(record.method_named("parse"), 2)),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                STATIC_CALL
+                  ZVAL [1] "static"
+                  ZVAL "fromJson"
+                  ARG_LIST
+                    VAR
+                      ZVAL "json"
+        "#}
+    );
+
+    let shelf = Lowered::new(
+        "namespace App;\n\nclass Shelf<T>\n{\n    public Shelf() { }\n\n    public required Shelf.fromJson(string json) : this() { }\n\n    public Self copy() => new Self.fromJson(\"{}\");\n}\n",
+    );
+
+    assert_eq!(
+        shelf.render(shelf.child(shelf.method_named("copy"), 2)),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                STATIC_CALL
+                  ZVAL [1] "static"
+                  ZVAL "fromJson"
+                  ARG_LIST
+                    ZVAL "{}"
+                    SHARP_TYPE_ARGS
+                      null
+                      ZVAL "$0"
+        "#}
+    );
+}
+
+/// ```php
 /// return /* $value is "App.Billable & App.Shippable" */;
 /// ```
 ///
@@ -17909,6 +17961,133 @@ fn a_static_property_or_method_in_a_parameter_default_runs_in_a_static_closure()
                 null
               ARG_LIST
         "#}
+    );
+}
+
+/// ```php
+/// public static function pick(string $table = (static function () { return static::TABLE; })()): string
+/// ```
+///
+/// Spec section 25: `Self.TABLE` in a default reads the class the call ran on, which no constant expression knows, so
+/// it runs in a static closure, which the engine binds to that class. `Report.TABLE` stays a constant expression.
+#[test]
+fn a_self_constant_in_a_parameter_default_runs_in_a_static_closure() {
+    let lowered = [Lowered::new(
+        "namespace App.Tenant;\n\nclass Report\n{\n    public const string TABLE = \"reports\";\n\n    public static string pick(string table = Self.TABLE) => table;\n\n    public static string named(string table = Report.TABLE) => table;\n}\n",
+    )];
+
+    assert_eq!(
+        member_in(&lowered, "Report", &[1, 0, 0, 2]),
+        indoc! {r#"
+            CALL
+              CLOSURE [16] "" @7-7
+                PARAM_LIST
+                null
+                STMT_LIST
+                  RETURN
+                    CLASS_CONST
+                      ZVAL [1] "static"
+                      ZVAL "TABLE"
+                null
+                null
+              ARG_LIST
+        "#}
+    );
+    assert_eq!(
+        member_in(&lowered, "Report", &[2, 0, 0, 2]),
+        indoc! {r#"
+            CLASS_CONST
+              ZVAL "App\\Tenant\\Report"
+              ZVAL "TABLE"
+        "#}
+    );
+}
+
+/// ```php
+/// public function sort((\App\Tenant\Shippable&\App\Tenant\Billable)|\App\Tenant\Report $item): void
+/// ```
+///
+/// Spec section 24: `&` binds tighter than `|`, so a union holds the intersection, and parentheses around it change
+/// nothing.
+#[test]
+fn a_union_that_holds_an_intersection_is_a_php_dnf_type() {
+    let lowered = [Lowered::with(
+        "namespace App.Tenant;\n\nclass Report\n{\n    public void sort(Shippable & Billable | Report item) { }\n\n    public void grouped((Shippable & Billable) | Report item) { }\n}\n",
+        &[
+            ("src/App/Tenant/Shippable.sharp", "namespace App.Tenant;\n\npublic interface Shippable\n{\n}\n"),
+            ("src/App/Tenant/Billable.sharp", "namespace App.Tenant;\n\npublic interface Billable\n{\n}\n"),
+        ],
+    )];
+    let dnf = indoc! {r#"
+        TYPE_UNION
+          TYPE_INTERSECTION
+            ZVAL "App\\Tenant\\Shippable"
+            ZVAL "App\\Tenant\\Billable"
+          ZVAL "App\\Tenant\\Report"
+    "#};
+
+    assert_eq!(member_in(&lowered, "Report", &[0, 0, 0, 0]), dnf);
+    assert_eq!(member_in(&lowered, "Report", &[1, 0, 0, 0]), dnf);
+}
+
+/// ```php
+/// public static function bumper(): \Closure {
+///     return (function ($receiver) use (/* the method's type arguments */) {
+///         return function () use ($receiver, /* the method's type arguments */) { return $receiver::bump(/* "#0" */); };
+///     })(static::class);
+/// }
+/// ```
+///
+/// Spec section 11: a static method of a generic class runs with its class's type arguments, so its value keeps them:
+/// `Self.bump` those of the call, as `#0`, on the class the code is called on.
+#[test]
+fn a_static_method_value_of_a_generic_class_keeps_its_type_arguments() {
+    let lowered = Lowered::new(
+        "namespace App.Tenant;\n\nclass Counter<T>\n{\n    public static int bump() => 1;\n\n    public static Function<int()> bumper() => Self.bump;\n}\n",
+    );
+
+    assert_eq!(
+        lowered.render(lowered.child(lowered.method_named("bumper"), 2)),
+        indoc! {r##"
+            STMT_LIST
+              RETURN
+                CALL
+                  CLOSURE "" @7-7
+                    PARAM_LIST
+                      PARAM
+                        null
+                        ZVAL "receiver"
+                        null
+                        null
+                        null
+                        null
+                    CLOSURE_USES
+                      ZVAL "\0<sharp>\0types"
+                    STMT_LIST
+                      RETURN
+                        CLOSURE "" @7-7
+                          PARAM_LIST
+                          CLOSURE_USES
+                            ZVAL "receiver"
+                            ZVAL "\0<sharp>\0types"
+                          STMT_LIST
+                            RETURN
+                              STATIC_CALL
+                                VAR
+                                  ZVAL "receiver"
+                                ZVAL "bump"
+                                ARG_LIST
+                                  SHARP_TYPE_ARGS
+                                    null
+                                    ZVAL "#0"
+                          null
+                          null
+                    null
+                    null
+                  ARG_LIST
+                    CLASS_NAME
+                      ZVAL [1] "static"
+        "##}
     );
 }
 

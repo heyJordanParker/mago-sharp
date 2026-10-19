@@ -47,6 +47,7 @@ use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_member;
 use crate::visibility::check_resolved_property_write_visibility;
 use crate::visibility::check_static_property_read_visibility;
+use crate::visibility::report_private_self_member;
 
 /// The parts of a static property access.
 ///
@@ -491,6 +492,19 @@ where
     ) {
         result.has_error_path = true;
         return None;
+    }
+
+    // The read keeps the property's type once reported, so nothing reports again on what it reads. A static accessor's
+    // `field` reads its own class's storage, through PHP's `self`.
+    if matches!(class_expr, Expression::Self_(keyword) if keyword.value == b"Self") && context.dialect.is_sharp() {
+        report_private_self_member(
+            context,
+            declaring_class_id,
+            property_name.as_bytes(),
+            property_metadata.read_visibility.is_private(),
+            class_expr.span().join(name_span),
+            IssueCode::InvalidPropertyRead,
+        );
     }
 
     if for_assignment

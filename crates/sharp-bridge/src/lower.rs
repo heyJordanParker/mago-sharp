@@ -3034,7 +3034,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// `new` on line `line`: `NEW` of the class by its full name, and `new Self(…)` is `new static(…)`, the name
     /// php-src's grammar writes with `ZEND_NAME_NOT_FQ`. `new Artifact.fromJson(…)` calls the static method the named
     /// constructor runs as, spec section 9.1, and `new TItem.fromJson(…)` calls it on the class of the type argument
-    /// the code runs with, as `TItem.make()` does, spec section 11. An object initializer then sets its values on the new object, spec
+    /// the code runs with, as `TItem.make()` does, spec section 11, and `new Self.fromJson(…)` on the class the code is
+    /// called on, as `static::fromJson(…)`. An object initializer then sets its values on the new object, spec
     /// section 16, and `new Point { x: 1 }` creates it with no arguments.
     ///
     /// A PHP# generic class's `new` carries the type arguments the checker found in a `SHARP_TYPE_ARGS` over the `NEW`,
@@ -3054,6 +3055,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             Expression::Identifier(class) if class_name.is_none() && instantiation.constructor.is_some() => {
                 self.types.type_parameter_classes(class).and_then(|classes| classes.first().copied())
             }
+            // `new Self.fromJson(…)` calls the `required` one of the class the code is called on, checked against this
+            // class's, which declares it or inherits the requirement, spec section 11.
+            Expression::Self_(_) if instantiation.constructor.is_some() => Some(self.class),
             _ => class_name,
         };
         let type_arguments = constructor_class.and_then(|name| self.types.type_arguments(name, instantiation.span()));
@@ -3137,7 +3141,13 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     None => self.node(SHARP_AST_NEW, ZEND_SHARP_NEW_CLASS_VALUE, line, &[class, arguments]),
                 }
             }
-            (Expression::Self_(keyword), _) => {
+            (Expression::Self_(keyword), Some(constructor)) => {
+                let class = self.string(ZEND_NAME_NOT_FQ, self.line(keyword), b"static");
+                let method = self.string(0, self.line(constructor), constructor.name.value);
+
+                self.node(SHARP_AST_STATIC_CALL, 0, line, &[class, method, arguments])
+            }
+            (Expression::Self_(keyword), None) => {
                 let class = self.string(ZEND_NAME_NOT_FQ, self.line(keyword), b"static");
                 let new = self.node(SHARP_AST_NEW, 0, line, &[class, arguments]);
 
@@ -3413,8 +3423,15 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             return true;
         }
         let node = &self.nodes[node as usize];
-        let reads_case = node.kind == SHARP_AST_PROP
-            && self.nodes[self.children[node.first_child as usize] as usize].kind == SHARP_AST_CLASS_CONST;
+        let first = || &self.nodes[self.children[node.first_child as usize] as usize];
+        // `Self.TABLE`, `static::TABLE`, reads the class the call ran on, which a constant expression never knows.
+        if node.kind == SHARP_AST_CLASS_CONST
+            && first().kind == SHARP_AST_ZVAL
+            && self.texts[first().text.offset as usize..(first().text.offset + first().text.len) as usize] == *b"static"
+        {
+            return false;
+        }
+        let reads_case = node.kind == SHARP_AST_PROP && first().kind == SHARP_AST_CLASS_CONST;
         let constant = reads_case
             || matches!(
                 node.kind,
@@ -4678,6 +4695,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             // Spec section 30: a tuple runs as a PHP list.
             Hint::Generic(_) | Hint::Tuple(_) => PhpType::Keyword(IS_ARRAY),
             Hint::Function(_) => PhpType::Classes(vec![b"Closure"]),
+            // Spec section 24: parentheses around an intersection in a union change nothing.
+            Hint::Parenthesized(parenthesized) => self.erase(parenthesized.hint),
             _ => unreachable!("check_slice refuses the type `{hint}`"),
         }
     }
@@ -6722,6 +6741,13 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
             return self.node(call, 0, line, &[target, member, callable]);
         };
+        // A class written by its name is read as `Counter::class`, and `Self` as `static::class`, the class the code is
+        // called on. A class value already holds its class.
+        let target = if self.nodes[target as usize].kind == SHARP_AST_ZVAL && call == SHARP_AST_STATIC_CALL {
+            self.node(SHARP_AST_CLASS_NAME, 0, line, &[target])
+        } else {
+            target
+        };
 
         self.receiver_closure(value, target, Some(&type_arguments), |this, receiver, arguments| {
             let arguments = this.node(SHARP_AST_ARG_LIST, 0, line, arguments);
@@ -6746,7 +6772,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         call: impl FnOnce(&mut Self, u32, &[u32]) -> u32,
     ) -> u32 {
         let line = self.line(value);
-        let names_method_type_arguments = type_arguments.is_some_and(|type_arguments| type_arguments.contains('#'));
+        // In a static member of a generic class, `Self.bump`'s `$0` is the member's own `#0`.
+        let names_method_type_arguments =
+            type_arguments.is_some_and(|type_arguments| self.engine_type_text(type_arguments).contains('#'));
         let mut parameters = self.types.value_parameters(value);
         if let Some(gathered) = parameters.iter().position(|parameter| parameter.variadic || parameter.optional) {
             parameters.truncate(gathered + 1);
@@ -9035,13 +9063,18 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// method's type arguments. In a static member of a generic class, the class's type parameter `$i` is the static
     /// method's `#i`, and its own `#i` comes after the class's.
     fn type_text(&mut self, line: u32, text: &str) -> u32 {
-        let text = match self.static_type_parameters {
-            Some(count) => static_type_text(text, count),
-            None => text.to_owned(),
-        };
+        let text = self.engine_type_text(text);
         self.captures_type_arguments |= text.contains('#');
 
         self.string(0, line, text.as_bytes())
+    }
+
+    /// `text` as [`Self::type_text`] writes it for the engine.
+    fn engine_type_text(&self, text: &str) -> String {
+        match self.static_type_parameters {
+            Some(count) => static_type_text(text, count),
+            None => text.to_owned(),
+        }
     }
 
     fn string(&mut self, attr: u32, line: u32, text: &[u8]) -> u32 {

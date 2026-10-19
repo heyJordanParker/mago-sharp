@@ -29,8 +29,10 @@ use mago_syntax::cst::Extension;
 use mago_syntax::cst::Extern;
 use mago_syntax::cst::Function;
 use mago_syntax::cst::FunctionCall;
+use mago_syntax::cst::Identifier;
 use mago_syntax::cst::If;
 use mago_syntax::cst::IfBody;
+use mago_syntax::cst::Instantiation;
 use mago_syntax::cst::Interface;
 use mago_syntax::cst::Method;
 use mago_syntax::cst::MethodBody;
@@ -1020,6 +1022,30 @@ where
     #[inline]
     fn walk_out_method(&mut self, _method: &'arena Method<'arena>, _context: &mut Context<'ctx, 'arena, A>) {
         self.template_constraints.pop().expect("Expected template stack to be non-empty");
+    }
+
+    /// Records `new TItem.fromJson(…)` of a type parameter on the class-like the code is in, spec section 11, so a type
+    /// argument that keeps no `fromJson` of its own is refused where it is written.
+    #[inline]
+    fn walk_in_instantiation(
+        &mut self,
+        instantiation: &'arena Instantiation<'arena>,
+        _context: &mut Context<'ctx, 'arena, A>,
+    ) {
+        let (Expression::Identifier(Identifier::Local(class)), Some(constructor)) =
+            (instantiation.class, &instantiation.constructor)
+        else {
+            return;
+        };
+        let Some((name, template)) =
+            self.template_constraints.iter().rev().flatten().find(|(name, _)| name.as_bytes() == class.value)
+        else {
+            return;
+        };
+        let call = (template.defining_entity, *name, word(constructor.name.value));
+        if let Some(class_like) = self.stack.last().and_then(|class| self.codebase.class_likes.get_mut(class)) {
+            class_like.type_parameter_named_constructors.push(call);
+        }
     }
 
     #[inline]

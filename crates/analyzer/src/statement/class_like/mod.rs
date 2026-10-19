@@ -3986,6 +3986,24 @@ where
     true
 }
 
+/// The class at `class` or above it that marks its named constructor `name` `required`, spec section 11. `required`
+/// passes down, so every class below it with objects of its own declares one, as Swift's `required init` does.
+pub(crate) fn requiring_class<'codebase>(
+    codebase: &'codebase CodebaseMetadata,
+    class: Option<Word>,
+    name: &[u8],
+) -> Option<&'codebase ClassLikeMetadata> {
+    std::iter::successors(class, |class| codebase.get_class_like(class.as_bytes())?.direct_parent_class).find_map(
+        |class| {
+            let method = codebase.get_method(class.as_bytes(), name)?;
+
+            (method.flags.is_named_constructor() && method.flags.is_required())
+                .then(|| codebase.get_class_like(class.as_bytes()))
+                .flatten()
+        },
+    )
+}
+
 /// Reports a PHP# class with objects of its own that inherits a `required` named constructor instead of declaring its
 /// own, spec section 11, as Swift requires each subclass to provide a `required init`. A named constructor is not
 /// inherited, and `new TItem.fromJson(…)` can create any class below the one that requires it.
@@ -4004,16 +4022,9 @@ fn check_required_named_constructors<A>(
         if declaring_method_id.get_class_name().as_bytes().eq_ignore_ascii_case(class_like_metadata.name.as_bytes()) {
             continue;
         }
-        let Some(requiring_class) = std::iter::successors(class_like_metadata.direct_parent_class, |class| {
-            context.codebase.get_class_like(class.as_bytes())?.direct_parent_class
-        })
-        .find_map(|class| {
-            let method = context.codebase.get_method(class.as_bytes(), method_name.as_bytes())?;
-
-            (method.flags.is_named_constructor() && method.flags.is_required())
-                .then(|| context.codebase.get_class_like(class.as_bytes()))
-                .flatten()
-        }) else {
+        let Some(requiring_class) =
+            requiring_class(context.codebase, class_like_metadata.direct_parent_class, method_name.as_bytes())
+        else {
             continue;
         };
 

@@ -109,6 +109,12 @@ fn check_listed_events<'arena, A>(
         let message = match listed_class(codebase, listed) {
             Some(class_like) => match unheard_class(context, class_like, &listener) {
                 Some(message) => message,
+                // The listener table names the event with its type arguments, and a type parameter is none.
+                None if listed.has_template_types() => format!(
+                    "`{}` names a type parameter, which no listener can know: name the type it hears, as in `{}<Order>`, or listen on an interface the event implements.",
+                    display_sharp_type(context, listed),
+                    BytesDisplay(name)
+                ),
                 None => {
                     report_invalid_template_arguments(
                         context,
@@ -277,6 +283,7 @@ where
         .zip(&method_metadata.listens)
         .filter(|(_, listed)| {
             listed_class(codebase, listed).is_some_and(|class_like| is_heard(codebase, class_like))
+                && names_its_type_arguments(codebase, listed)
                 && !union_comparator::is_contained_by(
                     codebase,
                     listed,
@@ -371,6 +378,16 @@ fn listed_class<'codebase>(
     listed: &TUnion,
 ) -> Option<&'codebase ClassLikeMetadata> {
     codebase.get_class_like(listed.get_single_named_object()?.name.as_bytes())
+}
+
+/// Whether the listed type names the type arguments of its event, a type parameter being none, so a bare `on Saved`
+/// and `on Saved<T>` get only [`check_listed_events`]' error.
+fn names_its_type_arguments(codebase: &CodebaseMetadata, listed: &TUnion) -> bool {
+    !listed.has_template_types()
+        && listed.get_single_named_object().is_some_and(|named| {
+            named.type_parameters.is_some()
+                || codebase.get_class_like(named.name.as_bytes()).is_none_or(|class| class.template_types.is_empty())
+        })
 }
 
 /// The name an `on` clause writes for a listed type, a generic event's without its type arguments.

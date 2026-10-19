@@ -62,7 +62,12 @@ pub fn check_hint(hint: &Hint, context: &mut Context<'_, '_, '_>) {
             }
         }
         Hint::Union(union_hint) => {
-            if !union_hint.left.is_unionable() {
+            // PHP#'s `&` binds tighter than `|`, so a PHP# union holds an intersection, which `check_slice` decides.
+            let is_unionable = |member: &Hint| {
+                member.is_unionable() || (context.program.dialect.is_sharp() && member.is_intersection())
+            };
+
+            if !is_unionable(union_hint.left) {
                 let val = BytesDisplay(context.get_code_snippet(union_hint.left));
 
                 context.report(
@@ -78,7 +83,7 @@ pub fn check_hint(hint: &Hint, context: &mut Context<'_, '_, '_>) {
                 );
             }
 
-            if !union_hint.right.is_unionable() {
+            if !is_unionable(union_hint.right) {
                 let val = BytesDisplay(context.get_code_snippet(union_hint.right));
 
                 context.report(

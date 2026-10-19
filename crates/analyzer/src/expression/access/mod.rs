@@ -1,6 +1,7 @@
 use mago_allocator::Arena;
 use mago_bytes::BytesDisplay;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
+use mago_codex::identifier::method::MethodIdentifier;
 use mago_codex::ttype::add_optional_union_type;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::object::TObject;
@@ -23,6 +24,7 @@ use mago_syntax::cst::Instantiation;
 use mago_syntax::cst::LocalIdentifier;
 use mago_syntax::cst::PropertyAccess;
 use mago_word::Word;
+use mago_word::ascii_lowercase_word;
 use mago_word::concat_word;
 use mago_word::word;
 
@@ -40,12 +42,15 @@ use crate::resolver::class_name::report_class_value_of_no_class;
 use crate::resolver::class_name::report_full_class_name;
 use crate::resolver::class_name::report_unknown_sharp_class;
 use crate::resolver::class_name::resolve_classnames_from_expression;
+use crate::resolver::class_name::statics_type_arguments;
 use crate::resolver::property::resolve_method_value;
+use crate::resolver::property::static_member_type_arguments;
 use crate::resolver::static_property::StaticProperty;
 use crate::resolver::static_property::StaticPropertyName;
 use crate::utils::names::and_list;
 use crate::utils::names::display_class_like_name;
 use crate::utils::names::member_namespace;
+use crate::visibility::report_private_self_member;
 use mago_names::short_name;
 
 pub mod class_constant_access;
@@ -95,6 +100,24 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Access<'arena> {
 
                 // `Self` is no value, so nothing before the member is analyzed.
                 let is_self = matches!(object, Expression::Self_(_));
+                if is_self
+                    && let Some(constant) = context
+                        .codebase
+                        .get_class_like(classes[0].as_bytes())
+                        .and_then(|class| class.constants.get(&word(name.value)))
+                    && report_private_self_member(
+                        context,
+                        classes[0],
+                        name.value,
+                        constant.visibility.is_private(),
+                        access.span(),
+                        IssueCode::UnavailableClassConstant,
+                    )
+                {
+                    artifacts.set_expression_type(&access.span(), TUnion::from_atomic(TAtomic::Error));
+
+                    return Ok(());
+                }
 
                 analyze_class_value_member(
                     context,
@@ -163,7 +186,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Access<'arena> {
                         false,
                     )
                 }
-                Some(StaticProperty { name: StaticPropertyName::Identifier(name), span, .. })
+                Some(StaticProperty { class: class_expression, name: StaticPropertyName::Identifier(name), span })
                     if let Some(class_name) = context.resolved_names.static_property_class(access)
                         && is_static_method_value(
                             context,
@@ -171,18 +194,23 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Access<'arena> {
                             name.value,
                         ) =>
                 {
-                    let class = TObject::new_named(word(context.resolved_names.get(&class_name.name)));
+                    // `Counter<int>.bump` names the type arguments the value runs `bump` with.
+                    if matches!(class_expression, Expression::GenericClass(_)) {
+                        class_expression.analyze(context, block_context, artifacts)?;
+                    }
+                    let class = word(context.resolved_names.get(&class_name.name));
                     let method_type = resolve_method_value(
                         context,
                         block_context,
                         artifacts,
-                        &class,
+                        &TObject::new_named(class),
                         None,
                         word(name.value),
                         span,
                         span,
                     )
                     .unwrap_or_else(get_mixed);
+                    record_class_type_arguments(context, block_context, artifacts, class_expression, class, name, span);
                     artifacts.set_expression_type(self, method_type);
 
                     Ok(())
@@ -509,6 +537,39 @@ where
     String::from_utf8_lossy(&context.source_file.contents[object.span().to_range_usize()]).into_owned()
 }
 
+/// Spec section 11: a static method of a generic PHP# class runs with its class's type arguments ahead of its own, so
+/// the value at `span` of the method `name` of `class`, read through `class_expression`, as `Counter<int>.bump` or
+/// `Self.bump`, keeps them, as a call through it does. A class written without its type arguments gives the value none.
+fn record_class_type_arguments<A>(
+    context: &Context<'_, '_, A>,
+    block_context: &BlockContext<'_>,
+    artifacts: &mut AnalysisArtifacts,
+    class_expression: &Expression<'_>,
+    class: Word,
+    name: &LocalIdentifier<'_>,
+    span: Span,
+) where
+    A: Arena,
+{
+    if !context.dialect.is_sharp() {
+        return;
+    }
+    let Some(type_arguments) = statics_type_arguments(context, block_context, artifacts, class_expression) else {
+        return;
+    };
+    let method = MethodIdentifier::new(class, ascii_lowercase_word(name.value));
+    let declaring_class = context.codebase.get_declaring_method_identifier(&method).get_class_name();
+    let Some(class_type_arguments) =
+        static_member_type_arguments(context, class, declaring_class, Some(&type_arguments))
+    else {
+        return;
+    };
+
+    let span = (span.start.offset, span.end.offset);
+    let own = artifacts.inferred_type_arguments.remove(&span).unwrap_or_default();
+    artifacts.inferred_type_arguments.insert(span, class_type_arguments.into_iter().chain(own).collect());
+}
+
 /// Analyzes PHP#'s `type.name` read through a class value as `Class.y` reads it on the classes the value holds: the
 /// constant or enum case, then the static method as a closure, then the static property, as PHP's `$type::name`. A
 /// class value the read analyzed to find it is one is `object_is_analyzed`, and a type parameter, `TItem.name`, is not.
@@ -567,13 +628,14 @@ where
                 object.analyze(context, block_context, artifacts)?;
             }
             let mut method_type = None;
-            for class in classes {
-                let class = TObject::new_named(class);
+            for class in &classes {
+                let class = TObject::new_named(*class);
                 let value =
                     resolve_method_value(context, block_context, artifacts, &class, None, word(name.value), span, span)
                         .unwrap_or_else(get_mixed);
                 method_type = Some(add_optional_union_type(value, method_type.as_ref(), context.codebase));
             }
+            record_class_type_arguments(context, block_context, artifacts, object, classes[0], name, span);
             artifacts.set_expression_type(&span, method_type.unwrap_or_else(get_mixed));
 
             Ok(())

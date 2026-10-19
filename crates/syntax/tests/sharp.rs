@@ -1429,6 +1429,50 @@ fn a_class_and_an_interface_declare_type_parameters_with_variance_and_bounds() {
     assert_eq!(source(CODE, bound), ": DatabaseEntity & Shareable");
 }
 
+/// The shape of `hint`: each union and intersection in parentheses, and the parentheses written in the code as `[…]`.
+fn type_grouping(code: &str, hint: &Hint) -> String {
+    match hint {
+        Hint::Union(union) => format!("({} | {})", type_grouping(code, union.left), type_grouping(code, union.right)),
+        Hint::Intersection(both) => {
+            format!("({} & {})", type_grouping(code, both.left), type_grouping(code, both.right))
+        }
+        Hint::Parenthesized(parenthesized) => format!("[{}]", type_grouping(code, parenthesized.hint)),
+        _ => source(code, hint).to_owned(),
+    }
+}
+
+/// Spec section 24: `&` binds tighter than `|`, as in TypeScript, so a union holds an intersection written without
+/// parentheses, and the parentheses change nothing. A plain PHP file keeps PHP's reading.
+#[test]
+fn an_intersection_binds_tighter_than_a_union() {
+    const CODE: &str = "public class Types\n{\n    public void a(A & B | C value) { }\n    public void b(A | B & C value) { }\n    public void c(A & B & C | D | E & F value) { }\n    public void d((A & B) | C value) { }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Types.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let [Statement::Class(class)] = program.statements.as_slice() else {
+        panic!("expected a class, got {:#?}", program.statements);
+    };
+    let shapes: Vec<String> = class
+        .members
+        .iter()
+        .filter_map(|member| match member {
+            ClassLikeMember::Method(method) => method.parameter_list.parameters.first(),
+            _ => None,
+        })
+        .map(|parameter| type_grouping(CODE, parameter.hint.as_ref().expect("a type")))
+        .collect();
+    assert_eq!(shapes, ["((A & B) | C)", "(A | (B & C))", "((A & (B & C)) | (D | (E & F)))", "([(A & B)] | C)"]);
+
+    const PHP: &str = "<?php\n\nfunction a(A&B|C $value) {}\n";
+    let program = parse(&arena, "src/types.php", PHP);
+    let Statement::Function(function) = &program.statements[1] else {
+        panic!("expected a function, got {:#?}", program.statements);
+    };
+    let hint = function.parameter_list.parameters.first().and_then(|parameter| parameter.hint.as_ref());
+    assert_eq!(type_grouping(PHP, hint.expect("a type")), "(A & (B | C))");
+}
+
 /// Spec section 11 writes a method's type parameters after its name, as C# does.
 #[test]
 fn a_method_declares_type_parameters_after_its_name() {

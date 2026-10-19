@@ -97,6 +97,7 @@ use mago_syntax::cst::Node;
 use mago_syntax::cst::NullSafeMethodCall;
 use mago_syntax::cst::NullableHint;
 use mago_syntax::cst::Operator;
+use mago_syntax::cst::ParenthesizedHint;
 use mago_syntax::cst::PartialArgument;
 use mago_syntax::cst::Pattern;
 use mago_syntax::cst::PatternMatch;
@@ -1945,6 +1946,14 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             Place::Pattern,
         ) => Some(Place::Pattern),
         // A value or a comparison's value is a constant value, as in C#.
+        // Spec section 25: `Self.TABLE` in a pattern in a body is the value of the class the code is called on, as
+        // `Shelf.TABLE` is `Shelf`'s. A constant's value knows no such class.
+        (Node::Expression(Expression::Access(Access::Property(access))), Place::Pattern)
+            if matches!(access.object, Expression::Self_(keyword) if is_sharp_self(keyword))
+                && !context.slice_places.contains(&Some(Constant)) =>
+        {
+            enter(node, Body, context)
+        }
         (Node::Expression(_), Place::Pattern) => enter(node, Constant, context),
 
         // PHP refuses the file at compile time, so the engine would too.
@@ -4811,24 +4820,33 @@ fn is_class_bound(hint: &Hint, context: &Context<'_, '_, '_>) -> bool {
 /// Decides each type an intersection joins with `&`, spec sections 11 and 24, as `Shippable & Billable` or the bound
 /// `<TItem : DatabaseEntity & Shareable>`: a class or an interface, written by its name and its type arguments. A bound
 /// at `place` [`Place::TypeParameter`] that joins `Object` is refused as `Object` alone, which holds any object, and
-/// `T?` among the types is the whole intersection with null, written `(A & B)?` as a union is. Returns whether every
-/// type is a class or an interface.
+/// `T?` among the types is the whole intersection with null, written `(A & B)?` as a union is. A type written twice is
+/// an error, as it is in a union. Returns whether every type is a class or an interface.
 fn check_intersection(intersection: &IntersectionHint, place: Place, context: &mut Context<'_, '_, '_>) -> bool {
-    let mut joined = true;
-    for member in [intersection.left, intersection.right] {
-        let message = match member {
-            Hint::Intersection(inner) => {
-                joined &= check_intersection(inner, place, context);
+    let mut members = Vec::new();
+    intersection_members(intersection, &mut members);
 
-                continue;
-            }
+    let mut joined = true;
+    for (index, member) in members.iter().enumerate() {
+        let message = match member {
             // The walk refuses parentheses around one type.
             Hint::Parenthesized(_) => continue,
-            Hint::Identifier(name) if !context.names.is_type_parameter(name) => continue,
-            Hint::Generic(generic)
-                if built_in_generic_arity(generic.name.value).is_none()
-                    && !context.names.is_type_parameter(&generic.name) =>
-            {
+            Hint::Identifier(_) | Hint::Generic(_) if is_class_bound(member, context) => {
+                let Some(first) = members[..index].iter().find(|earlier| is_same_type(earlier, member, context)) else {
+                    continue;
+                };
+
+                context.report(
+                    Issue::error(format!(
+                        "Duplicate type `{}` is redundant.",
+                        BytesDisplay(context.get_code_snippet(*member))
+                    ))
+                    .with_annotation(Annotation::primary(member.span()).with_message("Written again here."))
+                    .with_annotation(Annotation::secondary(first.span()).with_message("First written here."))
+                    .with_help("Remove the second one."),
+                );
+                joined = false;
+
                 continue;
             }
             Hint::Object(object) if place == Place::TypeParameter && object.value == OBJECT => {
@@ -4941,6 +4959,17 @@ fn check_union(union: &UnionHint, place: Place, context: &mut Context<'_, '_, '_
                 false
             }
             Hint::Void(_) | Hint::Never(_) | Hint::Nullable(_) => false,
+            // Spec section 24: `&` binds tighter than `|`, so `Shippable & Billable | Order` holds the intersection,
+            // which parentheses may group and change nothing.
+            Hint::Intersection(_) | Hint::Parenthesized(ParenthesizedHint { hint: Hint::Intersection(_), .. }) => {
+                let intersection = match member {
+                    Hint::Parenthesized(parenthesized) => parenthesized.hint,
+                    intersection => intersection,
+                };
+                enter_tree(Node::Hint(intersection), place, context);
+
+                continue;
+            }
             Hint::Self_(keyword) => check_self_type(keyword, place, context),
             Hint::Static(keyword) => {
                 report_unexpected(keyword.span, context);
@@ -5198,35 +5227,9 @@ fn check_instantiation(instantiation: &Instantiation, context: &mut Context<'_, 
         return None;
     }
 
-    // A named constructor belongs to the class that declares it, spec section 9.1, and `Self` can be any subclass. The
-    // file shows the class only when it declares the named constructor, and the analyzer names any other.
-    if let (Expression::Self_(_), Some(constructor), Some(arguments)) =
-        (instantiation.class, &instantiation.constructor, &instantiation.argument_list)
-    {
-        let Some(class) = enclosing_class(context.program, instantiation.span()).filter(|class| {
-            class.members.iter().any(|member| {
-                matches!(member, ClassLikeMember::NamedConstructor(declared)
-                    if declared.name.value.eq_ignore_ascii_case(constructor.name.value))
-            })
-        }) else {
-            return Some(Place::Instantiation);
-        };
-        let fix = format!(
-            "new {}.{}{}",
-            BytesDisplay(class.name.value),
-            BytesDisplay(constructor.name.value),
-            BytesDisplay(context.get_code_snippet(arguments))
-        );
-        context.report(
-            Issue::error("`Self` cannot name a named constructor: a named constructor is not inherited, and `Self` can be any subclass.")
-                .with_annotation(Annotation::primary(instantiation.span()).with_message("Created here."))
-                .with_help(format!("Name its class: write `{fix}`.")),
-        );
-
-        return None;
-    }
-
+    // `new Self.fromJson(…)` needs `fromJson` to be `required`, which the analyzer checks where it is declared.
     if matches!(instantiation.class, Expression::Self_(_))
+        && instantiation.constructor.is_none()
         && let Some(class) = enclosing_class(context.program, instantiation.span())
         && !has_required_constructor(&class)
     {
@@ -5267,7 +5270,8 @@ fn has_required_constructor(class: &ClassLike) -> bool {
     })
 }
 
-/// Checks a named constructor of `class`, spec section 9.1: its class has objects of its own, it is declared on its own
+/// Checks a named constructor of `class`, spec section 9.1: its class has objects of its own, unless the named
+/// constructor is `required`, the contract each subclass keeps, spec section 11, it is declared on its own
 /// class's name, as in `Artifact.fromJson`, takes only an access modifier, has a name that is neither its class's nor
 /// one PHP reserves, and passes control to the main constructor with `: this(…)`. `check_members` reports a name
 /// another member of the class has, as PHP's duplicate-method check, since the named constructor runs as the static
@@ -5284,9 +5288,11 @@ fn check_named_constructor(
         context.report(Issue::error(message).with_annotation(Annotation::primary(span).with_message(written)));
     };
 
-    if is_abstract {
+    // A `required` one is the contract every subclass keeps, which `new TItem.fromJson(…)` calls, spec section 11.
+    if is_abstract && !constructor.modifiers.iter().any(|modifier| matches!(modifier, Modifier::Required(_))) {
         report(
-            "An abstract class has no objects of its own, so it declares no named constructor.".to_owned(),
+            "An abstract class has no objects of its own, so a named constructor it declares is `required`, for each subclass to declare its own."
+                .to_owned(),
             constructor.name.span,
             "Declared here.",
         );
@@ -5381,6 +5387,19 @@ fn union_members<'ast, 'arena>(union: &'ast UnionHint<'arena>, members: &mut Vec
     for side in [union.left, union.right] {
         match side {
             Hint::Union(inner) => union_members(inner, members),
+            member => members.push(member),
+        }
+    }
+}
+
+/// The types an intersection joins, in the order they are written.
+fn intersection_members<'ast, 'arena>(
+    intersection: &'ast IntersectionHint<'arena>,
+    members: &mut Vec<&'ast Hint<'arena>>,
+) {
+    for side in [intersection.left, intersection.right] {
+        match side {
+            Hint::Intersection(inner) => intersection_members(inner, members),
             member => members.push(member),
         }
     }

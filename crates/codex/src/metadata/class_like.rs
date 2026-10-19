@@ -21,6 +21,7 @@ use crate::metadata::function_like::FunctionLikeMetadata;
 use crate::metadata::property::PropertyMetadata;
 use crate::metadata::ttype::TypeMetadata;
 use crate::metadata::version_constraint::VersionConstraint;
+use crate::misc::GenericParent;
 use crate::symbol::SymbolKind;
 use crate::ttype::atomic::TAtomic;
 use crate::ttype::template::GenericTemplate;
@@ -67,6 +68,10 @@ pub struct ClassLikeMetadata {
     pub template_type_extends_count: WordMap<usize>,
     pub template_type_implements_count: WordMap<usize>,
     pub template_type_uses_count: WordMap<usize>,
+    /// The PHP# named constructors this class-like's code calls through a type parameter, spec section 11, as the
+    /// `fromJson` of `new TItem.fromJson(json)`: each with the entity that declares the type parameter and its name.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub type_parameter_named_constructors: Vec<(GenericParent, Word, Word)>,
     pub methods: WordSet,
     pub pseudo_methods: WordSet,
     pub static_pseudo_methods: WordSet,
@@ -229,6 +234,7 @@ impl ClassLikeMetadata {
             template_extended_offsets: WordMap::default(),
             template_type_implements_count: WordMap::default(),
             template_type_uses_count: WordMap::default(),
+            type_parameter_named_constructors: Vec::new(),
             template_types: TemplateTypes::default(),
             used_traits: WordSet::default(),
             trait_alias_map: WordMap::default(),
