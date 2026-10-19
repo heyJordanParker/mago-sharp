@@ -478,8 +478,14 @@ where
         return false;
     }
 
-    // Spec section 6: a get-only static is set once, by its initial value, so its own class writes it nowhere either.
-    if context.dialect.is_sharp() && flags.is_static() && flags.is_readonly() {
+    // Spec section 6: a get-only static is set once, by its initial value or by its class's static constructor, which
+    // runs as `#statics`, so its own class writes it nowhere else either, a lambda in that constructor included.
+    let in_static_constructor = block_context
+        .scope
+        .get_function_like()
+        .is_some_and(|function_like| function_like.name.as_bytes() == b"#statics")
+        && block_context.scope.get_class_like_name() == Some(declaring_class_metadata.name);
+    if context.dialect.is_sharp() && flags.is_static() && flags.is_readonly() && !in_static_constructor {
         report_get_only_write(context, declaring_class_metadata, property_metadata, member_span.unwrap_or(access_span));
 
         return false;

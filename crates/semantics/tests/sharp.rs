@@ -4130,9 +4130,9 @@ fn a_field_or_a_property_may_be_static_with_a_constant_initial_value() {
     assert_eq!(issues(code), Vec::<String>::new());
 }
 
-/// Spec section 6: no constructor sets a static, and a nullable member has no implicit starting value, so a static field
-/// or property with storage has an initial value whatever its type, `= null` included. A property without storage
-/// holds nothing to set.
+/// Spec section 6: a static holds a value of its type before any code reads it, and a nullable member has no implicit
+/// starting value, so a static field or property with storage has an initial value whatever its type, `= null`
+/// included. A property without storage holds nothing to set.
 #[test]
 fn a_static_needs_an_initial_value_whatever_its_type() {
     let code = "namespace App.Tenant;\n\nclass Report\n{\n    private static int hits = 0;\n    private static int misses;\n    public static string? region { get; set; }\n    public static string label { get; set; }\n    private static string? cached;\n    private static int|string key;\n    public static int twice { get => 2; }\n    private static string? none = null;\n}\n";
@@ -4140,11 +4140,11 @@ fn a_static_needs_an_initial_value_whatever_its_type() {
     assert_eq!(
         issues(code),
         [
-            "6:24 Give `misses` an initial value: no constructor sets a static.",
-            "7:27 Give `region` an initial value: no constructor sets a static.",
-            "8:26 Give `label` an initial value: no constructor sets a static.",
-            "9:28 Give `cached` an initial value: no constructor sets a static.",
-            "10:31 Give `key` an initial value: no constructor sets a static.",
+            "6:24 Give `misses` an initial value.",
+            "7:27 Give `region` an initial value.",
+            "8:26 Give `label` an initial value.",
+            "9:28 Give `cached` an initial value.",
+            "10:31 Give `key` an initial value.",
         ]
     );
 }
@@ -4191,7 +4191,7 @@ fn a_static_member_takes_any_initial_value_and_is_get_only_or_settable() {
     let code = "namespace App.Tenant;\n\nimport Lib.Calc;\n\nclass Report\n{\n    public static int id { get; }\n    public static int size { get; } = 3;\n    private static Calc calc = new Calc();\n    public static int views { get; set; } = Calc.make();\n    public static int next { get; } = Report.size + 1;\n}\n";
     let generic = "namespace App.Tenant;\n\nimport Lib.Calc;\n\nclass Box<T>\n{\n    private static Calc calc = new Calc();\n    private static int count = 0;\n    private static int next = Box<T>.count + 1;\n}\n";
 
-    assert_eq!(issues(code), ["7:23 Give `id` an initial value: no constructor sets a static."]);
+    assert_eq!(issues(code), ["7:23 Give `id` an initial value."]);
     assert_eq!(issues(generic), Vec::<String>::new());
 }
 
@@ -4391,7 +4391,7 @@ fn properties_outside_the_slice_are_an_error() {
         issues(code),
         [
             "8:12 Property `Report.d` cannot be declared abstract",
-            "6:23 Give `b` an initial value: no constructor sets a static.",
+            "6:23 Give `b` an initial value.",
             "7:20 Only `set` and `init` take an access level: `get` reads `c` at the property's own level.",
             "10:16 A property's initial value comes last: write it after the accessors, as in `public int views { get; set; } = 0;`.",
             "11:25 `set` takes no parameter list: its body reads the incoming value as `value`.",

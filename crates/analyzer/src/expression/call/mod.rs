@@ -669,7 +669,7 @@ where
             let place = match php_name.rsplit_once('\\') {
                 Some((namespace, function)) => format!(
                     "declare `function {function}()` in a `.php` file of the namespace `{}`",
-                    namespace.replace('\\', ".")
+                    namespace.trim_start_matches('\\').replace('\\', ".")
                 ),
                 None => format!("declare `function {php_name}()` in a `.php` file outside any namespace"),
             };

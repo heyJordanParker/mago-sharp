@@ -244,7 +244,8 @@ pub(crate) fn analyze_namespace_constant<A>(
     let owner = if namespace.is_empty() {
         "PHP's root namespace".to_owned()
     } else {
-        format!("The namespace `{}`", String::from_utf8_lossy(namespace.as_bytes()).replace('\\', "."))
+        let namespace = mago_bytes::trim_start_byte(namespace.as_bytes(), b'\\');
+        format!("The namespace `{}`", String::from_utf8_lossy(namespace).replace('\\', "."))
     };
     context.collector.report_with_code(
         IssueCode::NonExistentConstant,

@@ -5870,7 +5870,8 @@ fn a_call_of_no_function_is_refused_in_php_sharp_words() {
 
 /// Spec section 14.1: one name covers every function type, so PHP's `Closure` is no name a `.sharp` file knows. It gets
 /// exactly what a name nothing declares gets, as `Closur`, bare, through `global`, imported, and imported then
-/// written.
+/// written, in a type and in each position an expression or a header names a class in, in a namespace and outside
+/// any.
 #[test]
 fn closure_gets_what_an_unknown_class_name_gets() {
     let written = |name: &str| -> &'static str {
@@ -5888,10 +5889,26 @@ fn closure_gets_what_an_unknown_class_name_gets() {
                 .into_boxed_str(),
         )
     };
+    // Each position an expression or a header names a class in.
+    let used = |name: &str, namespace: &str, import: &str| -> &'static str {
+        let import = import.replace("NAME", name);
+        Box::leak(
+            format!("{namespace}{import}class Report : {name}\n{{\n    public static bool test(Any value) => value is {name};\n\n    public static Any make() => {name}.fromCallable(\"strlen\");\n\n    public static Any made() => new {name}();\n\n    public static Any read() => {name}.LIMIT;\n\n    public static string named() => typeof({name}).name;\n\n    public static int matched(Any value) => match (value) {{ {name} c => 1, default => 0 }};\n\n    public static void caught()\n    {{\n        try {{\n            Report.test(1);\n        }} catch ({name} e) {{\n        }}\n    }}\n}}\n")
+                .into_boxed_str(),
+        )
+    };
     let worded_as = |code: &'static str, name: &str| -> Vec<String> {
         worded(("src/Demo/Report.sharp", code), &[]).into_iter().map(|issue| issue.replace(name, "NAME")).collect()
     };
 
+    for namespace in ["namespace Demo;\n\n", ""] {
+        for import in ["", "import NAME;\n\n"] {
+            // A name of the same length keeps each column after it.
+            let (closure, unknown) = (used("Closure", namespace, import), used("Closurx", namespace, import));
+            assert_eq!(worded_as(closure, "Closure"), worded_as(unknown, "Closurx"), "{closure}");
+            assert!(!worded_as(unknown, "Closurx").is_empty(), "{unknown}");
+        }
+    }
     assert_eq!(worded_as(written("Closure"), "Closure"), worded_as(written("Closur"), "Closur"));
     assert_eq!(worded_as(imported("Closure"), "Closure"), worded_as(imported("Closur"), "Closur"));
     assert!(!worded_as(imported("Closur"), "Closur").is_empty());
@@ -8070,6 +8087,23 @@ fn a_main_constructor_returns_no_value() {
     );
 }
 
+/// Spec section 6: the static constructor sets up its class's statics, and no code calls it, so `return;` ends it and
+/// a returned value is an error, whose fix compiles.
+#[test]
+fn a_static_constructor_returns_no_value() {
+    let sharp = "namespace Demo;\n\nclass Ticket\n{\n    private static int seats = 0;\n\n    static Ticket()\n    {\n        if (Ticket.seats == 0) {\n            return 5;\n        }\n    }\n}\n";
+    let fixed = "namespace Demo;\n\nclass Ticket\n{\n    private static int seats = 0;\n\n    static Ticket()\n    {\n        if (Ticket.seats == 0) {\n            return;\n        }\n    }\n}\n";
+
+    assert_messages(
+        sharp,
+        &[],
+        &[
+            "10:20 invalid-return-statement: A static constructor sets up its class's statics and returns nothing: write `return;`.",
+        ],
+    );
+    assert_messages(fixed, &[], &[]);
+}
+
 /// Spec section 9.1: a named constructor's body runs on the object its `: this(…)` creates, as `this`, so it reads
 /// and writes the object's members with their types and calls its base class's methods with `super.m()`. It returns
 /// that object, so `return;` ends it and a returned value is an error.
@@ -8205,6 +8239,20 @@ fn a_get_only_static_is_set_only_by_its_initial_value() {
             "13:18 invalid-property-write",
             "21:18 invalid-property-write"
         ]
+    );
+}
+
+/// Spec section 6: the static constructor sets up its class's statics, so it writes the get-only ones too, as C#'s
+/// static constructor assigns a `static readonly` field. It writes only its own class's, and a lambda in it is code
+/// that runs later, where the write is the error it is anywhere else.
+#[test]
+fn a_static_constructor_writes_its_class_s_get_only_statics() {
+    let sharp = "namespace Demo;\n\nclass Settings\n{\n    public static int limit { get; } = 10;\n\n    static Settings()\n    {\n        Settings.limit = 20;\n        Limits.total = 2;\n        Function<void()> later = () => { Settings.limit = 30; };\n    }\n}\n";
+    let limits = "namespace Demo;\n\nclass Limits\n{\n    public static int total { get; } = 1;\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Settings.sharp", sharp), &[("src/Demo/Limits.sharp", limits)]),
+        ["10:16 invalid-property-write", "11:51 invalid-property-write"]
     );
 }
 
@@ -8388,6 +8436,31 @@ fn an_enum_header_names_the_interfaces_as_implements_does_in_php() {
     let others = [("src/Lib/HasLabel.php", library)];
 
     assert_eq!(issues(("src/Demo/Status.sharp", sharp), &others), Vec::<String>::new());
+}
+
+/// Spec sections 20 and 22: every case of an enum is a value of each interface its enum names, so each case gives each
+/// property the interface states, by a field of that name or a property of the enum, and the enum gives each method.
+/// A case that gives a property no value is an error that names the case and the interface's property, and an enum
+/// that gives no method the interface states is the error a class gets.
+#[test]
+fn every_case_of_an_enum_gives_what_its_interfaces_state() {
+    let labelled =
+        "namespace Demo;\n\npublic interface Labelled\n{\n    string label { get; }\n\n    string show();\n}\n";
+    let sharp = "namespace Demo;\n\npublic enum Note : Labelled\n{\n    case Untitled;\n    case Titled(string label);\n    case Draft(string text);\n}\n";
+    let given = "namespace Demo;\n\npublic enum Note : Labelled\n{\n    case Titled(string label);\n    case Draft(string label);\n\n    public string show() => this.label;\n}\n";
+    let shared = "namespace Demo;\n\npublic enum Note : Labelled\n{\n    case Untitled;\n    case Draft(string text);\n\n    public string label => \"note\";\n\n    public string show() => this.label;\n}\n";
+    let others = [("src/Demo/Labelled.sharp", labelled)];
+
+    assert_eq!(
+        refusals(("src/Demo/Note.sharp", sharp), &others),
+        [
+            "3:13 unimplemented-abstract-method Class `Note` does not implement the abstract method `show`. | Give `Note` the method `show`, which each of its cases runs.",
+            "5:10 unimplemented-abstract-property-hook The case `Note.Untitled` does not give `label`, which `Labelled` states. | Give the case the field `string label`, or give `Note` the property `public string label => …;`.",
+            "7:10 unimplemented-abstract-property-hook The case `Note.Draft` does not give `label`, which `Labelled` states. | Give the case the field `string label`, or give `Note` the property `public string label => …;`.",
+        ]
+    );
+    assert_eq!(refusals(("src/Demo/Note.sharp", given), &others), Vec::<String>::new());
+    assert_eq!(refusals(("src/Demo/Note.sharp", shared), &others), Vec::<String>::new());
 }
 
 /// A case is read as `Status.Active` in a class, in the enum's own method, in a parameter default, in a constant, and

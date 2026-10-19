@@ -3500,8 +3500,8 @@ fn several_names(span: Span, kind: &str) -> Issue {
         .with_annotation(Annotation::primary(span).with_message("Several names here."))
 }
 
-/// Reports a static field or a static property with storage that has no initial value, spec section 6. No constructor
-/// sets a static, so it would be read before anything set it, and a `T?` one has no implicit `null` either.
+/// Reports a static field or a static property with storage that has no initial value, spec section 6, so each static
+/// holds a value of its type before any code reads it, and a `T?` one has no implicit `null` either.
 fn report_static_without_initial_value(property: &Property, context: &mut Context<'_, '_, '_>) {
     // An untyped member is the parser's error.
     if property.modifiers().get_static().is_none()
@@ -3515,7 +3515,7 @@ fn report_static_without_initial_value(property: &Property, context: &mut Contex
 
     let variable = property.first_variable();
     context.report(
-        Issue::error(format!("Give `{}` an initial value: no constructor sets a static.", BytesDisplay(variable.name)))
+        Issue::error(format!("Give `{}` an initial value.", BytesDisplay(variable.name)))
             .with_annotation(Annotation::primary(variable.span).with_message("Declared without a value here.")),
     );
 }
