@@ -13630,6 +13630,19 @@ fn a_plain_php_subclass_is_refused_replacing_a_closed_method_and_overrides_a_clo
     );
 }
 
+/// A PHP# type states a property, not its hooks, so a plain PHP class that lacks the property a PHP# interface states
+/// is told of the property as PHP writes it, `$label`, never of a `get` hook the PHP# source never writes.
+#[test]
+fn a_plain_php_class_missing_a_php_sharp_property_is_told_of_the_property() {
+    let labelled = "namespace App;\n\npublic interface Labelled\n{\n    string label { get; }\n}\n";
+    let note = "<?php\n\nnamespace App;\n\nfinal class Note implements Labelled\n{\n}\n";
+
+    assert_eq!(
+        messages(("src/App/Note.php", note), &[("src/App/Labelled.sharp", labelled)]),
+        ["Class `App\\Note` does not implement the property `$label`."]
+    );
+}
+
 /// The engine erases a PHP# class's type parameters whoever extends it, so a PHP class whose `@extends Box<Order>`
 /// narrows `put` to `Order` is refused as PHP refuses it when the class links: the bridge lowers only PHP#. A PHP#
 /// class narrowing the `mixed` parameter of a PHP `@template` class to its type argument is widened. A PHP class

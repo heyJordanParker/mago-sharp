@@ -1882,6 +1882,8 @@ mod tests {
     use super::GET_INFERRED_RETURN_TYPES;
     use super::GET_INFERRED_YIELD_KEY_TYPES;
     use super::GET_INFERRED_YIELD_VALUE_TYPES;
+    use super::analyzed_names;
+    use super::build_node_analysis_plan;
     use super::class_like_matches_hook;
     use super::encode_after_file_analysis_request;
     use super::handle_analysis_query;
@@ -2003,6 +2005,83 @@ mod tests {
                     "analysis query {operation}"
                 );
             }
+        });
+    }
+
+    /// A PHP# file whose calls mean a plain PHP function and an enum case, and whose pattern names a case.
+    const PAY: (&str, &str) = (
+        "src/App/Pay.sharp",
+        "namespace App;\n\nimport Vendor.Pdf;\n\npublic enum PaymentResult\n{\n    case Paid(string id);\n    case Declined(string reason);\n}\n\npublic class Pay\n{\n    public static PaymentResult decline() => PaymentResult.Declined(reason: \"expired\");\n\n    public static string id(PaymentResult result) => match (result) {\n        PaymentResult.Paid(string id) => id,\n        PaymentResult.Declined(string why) => why,\n    };\n\n    public static string render() => Pdf.render(\"x\");\n\n    public static int dpi() => Pdf.DEFAULT_DPI;\n}\n",
+    );
+
+    /// A plain PHP namespace with a function and a constant, and no class of its name.
+    const PDF: (&str, &str) = (
+        "src/Vendor/pdf.php",
+        "<?php\n\nnamespace Vendor\\Pdf;\n\nconst DEFAULT_DPI = 300;\n\nfunction render(string $html): string\n{\n    return $html;\n}\n",
+    );
+
+    /// A host reads each PHP# form as the PHP that means it: `Pdf.render("x")` calls the function `Vendor\Pdf\render`
+    /// and `PaymentResult.Declined(…)` builds the case, so their targets carry those kinds and reach the hooks of
+    /// function calls and of `new`. The snapshot names what only the codebase tells: the namespace and its members at
+    /// `Pdf.render` and `Pdf.DEFAULT_DPI`, the case's class at a built case, and the enum at a pattern of its case. A
+    /// plain PHP file names nothing more.
+    #[test]
+    fn a_sharp_file_sends_each_form_as_the_php_that_means_it() {
+        analyzed(&[PAY, PDF], |analysis| {
+            let mut targets = [false; NodeKind::COUNT];
+            let mut requirements = [0; NodeKind::COUNT];
+            for kind in [NodeKind::FunctionCall, NodeKind::Instantiation] {
+                targets[kind as usize] = true;
+                requirements[kind as usize] = NODE_REQUIREMENTS_ALL;
+            }
+            let requirements = NodeAnalysisRequirements::new(&targets, &requirements, Arc::from([]), Arc::from([]));
+            let plan = build_node_analysis_plan(
+                analysis.program,
+                analysis.artifacts,
+                analysis.names,
+                analysis.codebase,
+                &requirements,
+            );
+            let snapshot = FileAnalysisSnapshot::new(
+                analysis.file(),
+                analysis.program,
+                analysis.names,
+                analysis.artifacts,
+                analysis.codebase,
+                Some(&requirements),
+                true,
+            )
+            .expect("the file should snapshot");
+            let code = &analysis.file().contents;
+            let mut named = analyzed_names(analysis.program, analysis.names, analysis.codebase)
+                .into_iter()
+                .map(|(start, end, name, binding)| {
+                    let written = String::from_utf8_lossy(&code[start as usize..end as usize]).into_owned();
+                    (written, String::from_utf8_lossy(&name).into_owned(), binding)
+                })
+                .collect::<Vec<_>>();
+            named.sort();
+
+            assert_eq!(
+                plan.targets.iter().map(|target| target.meaning).collect::<Vec<_>>(),
+                [Some(NodeKind::Instantiation), Some(NodeKind::FunctionCall)]
+            );
+            assert!(snapshot.has_node_analysis_targets(), "both calls are node-analysis targets");
+            assert_eq!(
+                named,
+                [
+                    ("DEFAULT_DPI".to_owned(), "Vendor\\Pdf\\DEFAULT_DPI".to_owned(), 0),
+                    ("Declined".to_owned(), "App\\PaymentResult\\Declined".to_owned(), 1),
+                    ("PaymentResult".to_owned(), "App\\PaymentResult".to_owned(), 1),
+                    ("PaymentResult".to_owned(), "App\\PaymentResult".to_owned(), 1),
+                    ("Pdf".to_owned(), "Vendor\\Pdf".to_owned(), 0),
+                    ("Pdf".to_owned(), "Vendor\\Pdf".to_owned(), 0),
+                    ("render".to_owned(), "Vendor\\Pdf\\render".to_owned(), 0),
+                ]
+            );
+        });
+        analyzed(&[PDF], |analysis| {
+            assert!(analyzed_names(analysis.program, analysis.names, analysis.codebase).is_empty());
         });
     }
 
