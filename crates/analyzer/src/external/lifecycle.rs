@@ -313,17 +313,11 @@ fn analyzed_names(
         if let Node::TypePattern(pattern) = node
             && let Hint::Identifier(hint) = &pattern.hint
             && let Some(case) = data_case(codebase, resolved_names.get(hint))
+            && let Some(r#enum) = case.direct_parent_class.and_then(|name| codebase.get_class_like(name.as_bytes()))
             && let Some(dot) = hint.value().iter().rposition(|byte| *byte == b'.')
         {
             let start = hint.span().start.offset;
-            if let Some(r#enum) = case.direct_parent_class.and_then(|name| codebase.get_class_like(name.as_bytes())) {
-                names.push((
-                    start,
-                    start + dot as u32,
-                    r#enum.original_name.as_bytes().to_vec(),
-                    SNAPSHOT_CLASS_BINDING,
-                ));
-            }
+            names.push((start, start + dot as u32, r#enum.original_name.as_bytes().to_vec(), SNAPSHOT_CLASS_BINDING));
         }
 
         let class_member = match node {
@@ -2022,15 +2016,15 @@ mod tests {
 
     /// A host reads each PHP# form as the PHP that means it: `Pdf.render("x")` calls the function `Vendor\Pdf\render`
     /// and `PaymentResult.Declined(…)` builds the case, so their targets carry those kinds and reach the hooks of
-    /// function calls and of `new`. The snapshot names what only the codebase tells: the namespace and its members at
-    /// `Pdf.render` and `Pdf.DEFAULT_DPI`, the case's class at a built case, and the enum at a pattern of its case. A
-    /// plain PHP file names nothing more.
+    /// function calls and of `new`, while a class declaration means only itself. The snapshot names what only the
+    /// codebase tells: the namespace and its members at `Pdf.render` and `Pdf.DEFAULT_DPI`, the case's class at a
+    /// built case, and the enum at a pattern of its case. A plain PHP file names nothing more.
     #[test]
     fn a_sharp_file_sends_each_form_as_the_php_that_means_it() {
         analyzed(&[PAY, PDF], |analysis| {
             let mut targets = [false; NodeKind::COUNT];
             let mut requirements = [0; NodeKind::COUNT];
-            for kind in [NodeKind::FunctionCall, NodeKind::Instantiation] {
+            for kind in [NodeKind::FunctionCall, NodeKind::Instantiation, NodeKind::Class] {
                 targets[kind as usize] = true;
                 requirements[kind as usize] = NODE_REQUIREMENTS_ALL;
             }
@@ -2064,9 +2058,9 @@ mod tests {
 
             assert_eq!(
                 plan.targets.iter().map(|target| target.meaning).collect::<Vec<_>>(),
-                [Some(NodeKind::Instantiation), Some(NodeKind::FunctionCall)]
+                [None, Some(NodeKind::Instantiation), Some(NodeKind::FunctionCall)]
             );
-            assert!(snapshot.has_node_analysis_targets(), "both calls are node-analysis targets");
+            assert!(snapshot.has_node_analysis_targets(), "the class and the calls are node-analysis targets");
             assert_eq!(
                 named,
                 [
