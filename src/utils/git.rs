@@ -231,9 +231,17 @@ pub fn exclude(workspace: &Path, owner: &str, paths: &[PathBuf]) -> Result<(), E
     if after != before
         && let Err(error) = write_by_rename(&file, after.as_bytes())
     {
+        // A file an earlier block lists stays out of git.
+        let untracked: Vec<PathBuf> = paths
+            .iter()
+            .filter(|path| {
+                path.strip_prefix(top).is_ok_and(|relative| !before.lines().any(|line| line == pattern(relative)))
+            })
+            .cloned()
+            .collect();
         warn_untracked(
             workspace,
-            paths,
+            &untracked,
             &format!("{} can't be written: {error}", file.display()),
             &format!("Make {} writable", file.display()),
         );

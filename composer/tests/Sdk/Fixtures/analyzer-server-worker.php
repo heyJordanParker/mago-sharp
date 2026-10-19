@@ -180,9 +180,11 @@ final class ServerReadsPlugin implements Plugin, AfterFileAnalysisHook
             $visibility = $metadata->visibility->name ?? 'missing';
             $effects = '';
             foreach ($metadata->parameters ?? [] as $parameter) {
-                if ($parameter->flags->contains(1 << 63)) {
-                    $effects .= " `{$parameter->name}` takes on effects.";
+                if (!$parameter->flags->contains(1 << 63)) {
+                    continue;
                 }
+
+                $effects .= " `{$parameter->name}` takes on effects.";
             }
             $context->report(
                 Level::Warning,

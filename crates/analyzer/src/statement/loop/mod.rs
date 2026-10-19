@@ -916,7 +916,7 @@ where
     if !is_do && !does_sometimes_break {
         let body_actions = ControlAction::from_statements(statements.iter().collect(), vec![], Some(artifacts), true);
         if !body_actions.contains(ControlAction::None) && !body_actions.contains(ControlAction::Continue) {
-            continue_context.locals = loop_scope.parent_context_variables.clone();
+            continue_context.locals.clone_from(&loop_scope.parent_context_variables);
         }
     }
 

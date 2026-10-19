@@ -196,8 +196,10 @@ const OBJECT: &[u8] = b"Object";
 ///   and no body, as spec section 29 writes `Money quote(Cart cart);`, or a default body, a block or `=> expr;`, as
 ///   spec section 22 writes `string designKey() => …;`, checked as a class method's body. A property is written
 ///   `int orderId { get; }` or `List<string> claims { get; set; }`, and a computed property's expression is its
-///   default body. An interface holds no storage, so a property with an initial value is an error, and so is one with
-///   an accessor body, which the computed form writes. Every interface member is public, written bare, so an access
+///   default body. A property may state `init` in place of `set`, as `string kind { get; init; }`, which a class gives
+///   with `init`, as C# 9 lets an interface state it. Any other accessor list gets the errors a class property's gets.
+///   An interface holds no storage, so a property with an initial value is an error, and so is one with an accessor
+///   body, which the computed form writes. Every interface member is public, written bare, so an access
 ///   modifier on one is an error, and so is any other modifier on a method.
 /// - Type parameters, as spec section 11 declares them: on a class, an interface and a method, as in
 ///   `<out TItem : DatabaseEntity & Shareable, TKey>`. A name is `T`, or `T` and an uppercase ASCII letter, as in
@@ -438,9 +440,9 @@ const OBJECT: &[u8] = b"Object";
 /// list does not name. It reports each refusal once, at its outermost node, and skips the nodes inside the refusal's
 /// span. A node refused at a part, such as a method at its name or a cast at its operator, keeps its other parts
 /// checked. It does not run on a file with a parse error, which is the one error to fix first, except a keyword in
-/// another case, which reads as the keyword and leaves the tree whole. A node outside this list is a form
-/// `is_undecided` names, which is not supported yet, a PHP# form that breaks a rule of its place, which `broken_rule`
-/// names, or a form PHP# never writes, which fails as a typo does, at the first token PHP# has no place for. Such
+/// another case, which reads as the keyword and leaves the tree whole. A node outside this list is a PHP# form that
+/// breaks a rule of its place, which `broken_rule` names, or a form PHP# never writes, which fails as a typo does, at
+/// the first token PHP# has no place for. Such
 /// forms include `$` variables, `global`, `echo`, `print`, `switch`, the word operators `and`, `or` and `xor`,
 /// superglobals, magic constants and other `__Something__` names, every cast but `(int)`, `(float)` and `(string)`, and
 /// a method name that starts with `__`.
@@ -932,6 +934,15 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             check_member_name(hooked.modifiers(), variable.name, variable.span, "Property", context);
 
             Some(FieldOrProperty)
+        }
+        // Any other accessor list an interface property states gets the errors a class property's gets, as
+        // `{ get; set; init; }` does.
+        (Node::ClassLikeMember(ClassLikeMember::Property(Property::Hooked(property))), Interface)
+            if is_interface_property_statement(property) =>
+        {
+            check_accessors(&property.modifiers, &property.hook_list, property.item.variable(), context);
+
+            None
         }
         // Spec section 22: an interface holds no storage, so a property it states takes no initial value, and its
         // default body is a computed property's expression.
@@ -3290,33 +3301,52 @@ fn check_property_parameter(
     report_refusal(issue, parameter.span(), Place::Parameter, context)
 }
 
-/// Whether the slice has an interface property: a type, a name and `{ get; }` or `{ get; set; }`, which PHP runs as a
-/// public interface property its classes give, as an event's parameters give `OrderEvent`'s `orderId`, spec section
-/// 15. A class gives one stated with `set` a `set` too, which the analyzer checks. Each accessor may take attributes,
-/// which PHP keeps on its abstract hook, spec section 1. An access modifier, on the property or on an accessor, keeps
-/// it in the slice, and `enter` reports the modifier where the walk reaches it.
+/// Whether the slice has an interface property: a type, a name and `{ get; }`, `{ get; set; }` or `{ get; init; }`,
+/// which PHP runs as a public interface property its classes give, as an event's parameters give `OrderEvent`'s
+/// `orderId`, spec section 15. A class gives one stated with `set` a `set` too, and one stated with `init` an `init`,
+/// which the analyzer checks. Each accessor may take attributes, which PHP keeps on its abstract hook, spec section 1.
+/// An access modifier, on the property or on an accessor, keeps it in the slice, and `enter` reports the modifier
+/// where the walk reaches it.
 fn is_interface_property(property: &HookedProperty) -> bool {
-    let is_access = |modifier: &Modifier| {
-        matches!(modifier, Modifier::Public(_) | Modifier::Protected(_) | Modifier::Private(_) | Modifier::Internal(_))
-    };
-    let is_stated = |accessor: &PropertyHook, name: &[u8]| {
-        accessor.name.value == name
-            && accessor.ampersand.is_none()
-            && accessor.modifiers.iter().all(is_access)
-            && accessor.parameter_list.is_none()
-            && matches!(accessor.body, PropertyHookBody::Abstract(_))
-    };
+    is_interface_property_statement(property)
+        && match property.hook_list.hooks.as_slice() {
+            [get] => is_stated_accessor(get, b"get"),
+            [first, second] => {
+                let is_setter =
+                    |accessor| is_stated_accessor(accessor, b"set") || is_stated_accessor(accessor, b"init");
 
+                (is_stated_accessor(first, b"get") && is_setter(second))
+                    || (is_stated_accessor(second, b"get") && is_setter(first))
+            }
+            _ => false,
+        }
+}
+
+/// Whether `property` states an interface property but for its accessor list: a type, a name, no initial value and
+/// accessors without a body. An accessor list [`is_interface_property`] refuses breaks a rule [`check_accessors`]
+/// reports, since every list of bodiless accessors a class property takes is `{ get; }` with an optional `set` or
+/// `init`.
+fn is_interface_property_statement(property: &HookedProperty) -> bool {
     property.var.is_none()
-        && property.modifiers.iter().all(is_access)
+        && property.modifiers.iter().all(is_access_modifier)
         && property.hint.is_some()
         && matches!(property.item, PropertyItem::Abstract(_))
         && property.initial_value.is_none()
-        && match property.hook_list.hooks.as_slice() {
-            [get] => is_stated(get, b"get"),
-            [get, set] => is_stated(get, b"get") && is_stated(set, b"set"),
-            _ => false,
-        }
+        && property.hook_list.hooks.iter().all(|accessor| matches!(accessor.body, PropertyHookBody::Abstract(_)))
+}
+
+/// Whether `accessor` is the bodiless accessor `name` an interface property states, with no access modifier but one
+/// `enter` reports.
+fn is_stated_accessor(accessor: &PropertyHook, name: &[u8]) -> bool {
+    accessor.name.value == name
+        && accessor.ampersand.is_none()
+        && accessor.modifiers.iter().all(is_access_modifier)
+        && accessor.parameter_list.is_none()
+}
+
+/// Whether `modifier` is an access level PHP# writes: `public`, `protected`, `private` or `internal`.
+fn is_access_modifier(modifier: &Modifier) -> bool {
+    matches!(modifier, Modifier::Public(_) | Modifier::Protected(_) | Modifier::Private(_) | Modifier::Internal(_))
 }
 
 /// Reports an access modifier on an interface property's accessor, as on any interface member. A narrower `set` is
@@ -5824,23 +5854,12 @@ const fn is_slice_assignment_operator(operator: &AssignmentOperator) -> bool {
     }
 }
 
-/// Reports a node the slice does not have at its place. A form [`is_undecided`] names is not supported yet, a PHP#
-/// form that breaks a rule of its place gets the error [`broken_rule`] gives, any other expression in a constant value
-/// runs code, as `new Money(5)` and `Rates.current()` do there, and any other node is no PHP# syntax, which fails as a
-/// typo does, at the first token PHP# has no place for.
+/// Reports a node the slice does not have at its place. A PHP# form that breaks a rule of its place gets the error
+/// [`broken_rule`] gives, any other expression in a constant value runs code, as `new Money(5)` and `Rates.current()`
+/// do there, and any other node is no PHP# syntax, which fails as a typo does, at the first token PHP# has no place
+/// for.
 fn report_unsupported(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) {
-    let construct = match node {
-        Node::Statement(_) => "statement",
-        Node::Expression(_) | Node::ConstantAccess(_) => "expression",
-        Node::BinaryOperator(_) | Node::UnaryPrefixOperator(_) | Node::AssignmentOperator(_) => "operator",
-        Node::Hint(_) | Node::NullableHint(_) => "type",
-        Node::ClassLikeMember(_) => "class member",
-        _ => "construct",
-    };
-
-    if is_undecided(node, place) {
-        context.report(not_supported_yet(node.span(), construct, supported(place)));
-    } else if let Some(issue) = broken_rule(node, place, context) {
+    if let Some(issue) = broken_rule(node, place, context) {
         context.report(issue);
     } else if let Some(span) = unexpected_part(node) {
         report_unexpected(span, context);
@@ -5888,13 +5907,6 @@ fn unexpected_part(node: Node<'_, '_>) -> Option<Span> {
         }
         _ => None,
     }
-}
-
-/// Whether a node the slice does not have is a form PHP# has not decided, or that a later change builds, so it is not
-/// supported yet: an interface property in another form than `{ get; }`, `{ get; set; }` and `=> expr;`, as
-/// `{ get; init; }`.
-fn is_undecided(node: Node<'_, '_>, place: Place) -> bool {
-    matches!((node, place), (Node::ClassLikeMember(ClassLikeMember::Property(_)), Place::Interface))
 }
 
 /// The error for a PHP# form that breaks a rule of the place it is written at, as a modifier the declaration doesn't
@@ -6038,14 +6050,6 @@ fn supported(place: Place) -> &'static str {
             "A PHP# pattern is a type of `int`, `float`, `string`, `bool`, `Any`, `Object`, a class, a collection as in `List<int>`, a class value as in `Class<Order>`, a function type as in `Function<int(int)>`, or a union of them, a tuple among them, as in `int|[int, string]`, or classes and interfaces joined with `&`, as in `Shippable & Billable`, with an optional name, as in `int count`, a case with its fields, as in `PaymentResult.Paid(string transactionId)`, a class with properties, as in `Paid { amount: > 0 } big`, a constant, a comparison such as `< 10`, a properties pattern such as `{ total: > 0 }`, a list pattern such as `[Line first, ...List<Line> rest]`, or patterns joined by `and`, `or` and `not`."
         }
     }
-}
-
-/// The error for a construct PHP# has not decided, or that a later change builds, with what PHP# has where it is
-/// written.
-fn not_supported_yet(span: Span, construct: &str, supported: &str) -> Issue {
-    Issue::error(format!("This {construct} is not supported yet in PHP#."))
-        .with_annotation(Annotation::primary(span).with_message("Not supported yet."))
-        .with_note(supported)
 }
 
 #[inline]

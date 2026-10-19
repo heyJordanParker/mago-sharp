@@ -391,11 +391,19 @@ fn php_syntax_returns_a_parse_error_and_no_nodes() {
     assert_eq!(lowered.nodes().len(), 0);
 }
 
+/// An interface property stated `{ get; init; }` runs as PHP's `{ get; }`, since PHP gives the `set` hook of an
+/// interface only a public `set`, and the analyzer checks that each class gives `init`.
 #[test]
-fn a_construct_outside_the_slice_returns_its_not_supported_error() {
-    let lowered = Lowered::new("namespace App;\n\ninterface Sized\n{\n    int max { get; init; }\n}\n");
+fn an_interface_property_stated_with_init_runs_as_get_only() {
+    let files = lowered_each(
+        &[("src/App/Sized.sharp", "namespace App;\n\ninterface Sized\n{\n    int max { get; init; }\n}\n")],
+        &[],
+    );
 
-    assert_eq!(lowered.diagnostics(), ["5:5 compile error: This class member is not supported yet in PHP#."]);
+    assert_eq!(
+        member_in(&files, "Sized", &[0, 1, 0, 3]),
+        "STMT_LIST\n  PROPERTY_HOOK \"get\" @5-5\n    null\n    null\n    null\n    null\n    null\n"
+    );
 }
 
 /// Spec section 2: each of the 43 PHP keywords PHP# doesn't use is a plain name, and so is a word that means something

@@ -2225,8 +2225,8 @@ fn an_interface_property_takes_no_initial_value_and_no_accessor_body() {
 /// access modifier on an accessor is the error an access modifier on any interface member is. An accessor body is an
 /// error that writes the computed property, whose expression is the default body, spec section 22.
 #[test]
-fn an_interface_property_is_get_only_or_settable() {
-    let code = "namespace App.Tenant;\n\ninterface Named\n{\n    string name { get; }\n    string label { get => \"label\"; }\n    string title { get; set; }\n    string tag { get; private set; }\n    string code { protected get; set; }\n    string kind { get; set; init; }\n}\n";
+fn an_interface_property_is_get_only_settable_or_init() {
+    let code = "namespace App.Tenant;\n\ninterface Named\n{\n    string name { get; }\n    string label { get => \"label\"; }\n    string title { get; set; }\n    string tag { get; private set; }\n    string code { protected get; set; }\n    string kind { get; set; init; }\n    string state { get; init; }\n    string note { init; get; }\n    string slug { get; get; }\n    string size { init; }\n}\n";
 
     assert_eq!(
         issues(code),
@@ -2234,7 +2234,9 @@ fn an_interface_property_is_get_only_or_settable() {
             "6:20 An interface property's default body is an expression: write `string label => …;`.",
             "8:23 An interface member is always public, so it takes no access modifier.",
             "9:19 An interface member is always public, so it takes no access modifier.",
-            "10:5 This class member is not supported yet in PHP#."
+            "10:29 A PHP# property is written by `set` or by `init`, not both.",
+            "13:24 A PHP# property declares each accessor once.",
+            "14:12 A PHP# property needs a `get` accessor."
         ]
     );
     let helps: Vec<Option<String>> =
@@ -6915,7 +6917,7 @@ fn a_member_defined_twice_and_its_class_are_named_as_sharp_writes_them() {
 fn a_refusal_notes_what_php_sharp_has_where_it_is_written() {
     let class = "namespace App;\n\npublic class Order\n{\n    case Open;\n}\n";
     let pattern = leak(method("        const both = extra is int & Report;\n        return extra;\n"));
-    let interface = "namespace App;\n\npublic interface Sized\n{\n    int max { get; init; }\n}\n";
+    let interface = "namespace App;\n\npublic interface Sized\n{\n    law positive(int a) => a >= 0;\n}\n";
     let constant = "namespace App;\n\npublic class Limits\n{\n    final public const int MAX = 3;\n}\n";
     for (code, note) in [
         (

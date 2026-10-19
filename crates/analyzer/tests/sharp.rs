@@ -22440,6 +22440,67 @@ fn a_class_gives_an_interface_property_stated_with_set_a_set() {
     );
 }
 
+/// Team-lead's ruling of 10-19, as C# 9 lets an interface state an `init` accessor: a PHP# interface states a property
+/// `{ get; init; }`, and a class or a struct gives it `{ get; init; }`, as C# requires (CS8853). An event gives it
+/// through its parameter, set once, by `new`, as a C# record's positional property is `init`. A class that gives it
+/// with `set` or get-only is refused, and so is a write through the interface after the object is created.
+#[test]
+fn a_class_gives_an_interface_property_stated_with_init_an_init() {
+    let sized =
+        ("app/Shop/Sized.sharp", "namespace App.Shop;\n\npublic interface Sized\n{\n    int max { get; init; }\n}\n");
+    let boxed = (
+        "app/Shop/Boxed.sharp",
+        "namespace App.Shop;\n\npublic class Boxed : Sized\n{\n    public int max { get; init; } = 1;\n\n    public static int made()\n    {\n        const boxed = new Boxed { max: 3 };\n        return boxed.max;\n    }\n}\n",
+    );
+    let packed = (
+        "app/Shop/Packed.sharp",
+        "namespace App.Shop;\n\npublic struct Packed : Sized\n{\n    public int max { get; init; } = 1;\n}\n",
+    );
+    let event = ("app/Shop/Sizes.sharp", "namespace App.Shop;\n\npublic event Sizes(int max) : Sized;\n");
+    let settable = (
+        "app/Shop/Crate.sharp",
+        "namespace App.Shop;\n\npublic class Crate : Sized\n{\n    public int max { get; set; } = 1;\n}\n",
+    );
+    let fixed = (
+        "app/Shop/Tray.sharp",
+        "namespace App.Shop;\n\npublic class Tray : Sized\n{\n    public int max { get; } = 1;\n}\n",
+    );
+    let missing = ("app/Shop/Bin.sharp", "namespace App.Shop;\n\npublic class Bin : Sized\n{\n}\n");
+    let written = (
+        "app/Shop/Resize.sharp",
+        "namespace App.Shop;\n\npublic class Resize\n{\n    public static void grow(Sized sized)\n    {\n        sized.max = 2;\n    }\n}\n",
+    );
+
+    assert_eq!(worded(sized, &[]), Vec::<String>::new());
+    assert_eq!(worded(boxed, &[sized]), Vec::<String>::new());
+    assert_eq!(worded(packed, &[sized]), Vec::<String>::new());
+    assert_eq!(worded(event, &[sized]), Vec::<String>::new());
+    assert_eq!(
+        worded(settable, &[sized]),
+        [
+            "5:16 incompatible-property-access `Crate` gives `max` with `set`, and `Sized` states it with `init`. | Given here. | Stated here. | Declare `max` with `{ get; init; }`."
+        ]
+    );
+    assert_eq!(
+        worded(fixed, &[sized]),
+        [
+            "5:16 incompatible-property-access `Tray` gives `max` get-only, and `Sized` states it with `init`. | Given here. | Stated here. | Declare `max` with `{ get; init; }`."
+        ]
+    );
+    assert_eq!(
+        worded(missing, &[sized]),
+        [
+            "3:14 unimplemented-abstract-property-hook `Bin` does not give `max`, which `Sized` states. | Declared here. | Stated here. | Add the property `public int max { get; init; }`."
+        ]
+    );
+    assert_eq!(
+        worded(written, &[sized]),
+        [
+            "7:15 invalid-property-write `max` is set only while the object is created. | Written here. | Set it on `this` in a constructor or a named constructor."
+        ]
+    );
+}
+
 /// An interface member is public, written bare: a class gives a bare property and a bare method as public ones, an
 /// event gives the property, and other code reads and calls them through the interface.
 #[test]

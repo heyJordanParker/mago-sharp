@@ -1852,7 +1852,8 @@ fn report_unstated_property<A>(
         parent_property.type_metadata.as_ref().map_or(&mixed, |metadata| &metadata.type_union),
     );
     let parent_name = display_class_like_name(context, parent.original_name);
-    let settable = parent_property.hooks.contains_key(&word(b"set"));
+    let init = parent_property.flags.is_init();
+    let settable = !init && parent_property.hooks.contains_key(&word(b"set"));
     let issue = if class_like_metadata.flags.is_event() && settable {
         Issue::error(format!(
             "`{name}` cannot give `{property}`, which `{parent_name}` states with `set`: an event's properties are set once, by `new`."
@@ -1862,6 +1863,8 @@ fn report_unstated_property<A>(
             format!("Add the parameter `{written} {property}`.")
         } else if settable {
             format!("Add the property `public {written} {property} {{ get; set; }}`.")
+        } else if init {
+            format!("Add the property `public {written} {property} {{ get; init; }}`.")
         } else {
             format!("Add the property `public {written} {property} {{ get; }}`.")
         };
@@ -5660,7 +5663,21 @@ fn report_unfit_interface_property<A>(
         && !property.flags.is_init()
         && property.write_visibility == Visibility::Public
         && (!property.flags.is_virtual_property() || property.hooks.contains_key(&set));
-    if stated.hooks.contains_key(&set) && !given_settable {
+    // A property stated with `init` is given with `init`, as C# requires (CS8853), and an event's parameters are set
+    // once, by `new`, as a C# record's are by `init`.
+    if stated.flags.is_init() {
+        if !property.flags.is_init() && !owner.flags.is_event() {
+            let given = if given_settable {
+                "with `set`".to_owned()
+            } else if property.flags.is_readonly() || property.write_visibility == Visibility::Public {
+                "get-only".to_owned()
+            } else {
+                format!("with `{} set`", property.write_visibility)
+            };
+            let help = format!("Declare `{property_name}` with `{{ get; init; }}`{place}.");
+            report(context, IssueCode::IncompatiblePropertyAccess, given, "with `init`".to_owned(), help);
+        }
+    } else if stated.hooks.contains_key(&set) && !given_settable {
         let never_set_again = if owner.flags.is_event() {
             Some("an event's properties are set once, by `new`")
         } else if owner.flags.is_struct() {

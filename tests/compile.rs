@@ -720,6 +720,41 @@ fn compile_warns_when_the_repository_of_a_worktree_is_missing() {
     );
 }
 
+/// An `info/exclude` that can't be written, as in a read-only `.git`, leaves the new PHP files where git shows them, so
+/// the compile names them and how to fix it, and keeps quiet about the files the earlier block keeps out of git.
+#[cfg(unix)]
+#[test]
+fn compile_warns_when_the_exclude_file_cannot_be_written() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = project(ORDER, MONEY);
+    let root = std::fs::canonicalize(directory.path()).unwrap();
+    git(&root, &["init", "--quiet"]);
+    compile_succeeds(&root);
+    let info = root.join(".git/info");
+    std::fs::set_permissions(&info, std::fs::Permissions::from_mode(0o555)).unwrap();
+    write(&root, "app/Refund.sharp", "namespace App;\n\npublic class Refund\n{\n}\n");
+
+    let output = compile(&root);
+    std::fs::set_permissions(&info, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    assert!(output.status.success(), "{}", printed(&output));
+    let exclude = info.join("exclude");
+    assert!(
+        printed(&output).contains(&format!("{} can't be written: Permission denied", exclude.display())),
+        "{}",
+        printed(&output)
+    );
+    assert!(
+        printed(&output).contains(&format!(
+            ", so git shows app/Refund.php as untracked. Make {} writable, and run vendor/bin/mago compile again.",
+            exclude.display()
+        )),
+        "{}",
+        printed(&output)
+    );
+}
+
 /// The block of `info/exclude` that `mago compile` keeps for the workspace `place`, listing `paths`.
 fn excluded(place: &Path, paths: &str) -> String {
     format!("# mago compile: the files it writes in {}\n{paths}# mago compile: end\n", place.display())

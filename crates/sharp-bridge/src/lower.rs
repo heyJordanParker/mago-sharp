@@ -2318,7 +2318,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let line = self.line(variable);
         let hint = property.hint.as_ref().map_or(NULL, |hint| self.hint(hint));
         let name = self.string(0, line, variable.name);
-        let hooks = self.abstract_hooks(property);
+        let hooks = self.abstract_hooks(property, true);
         let element = self.node(SHARP_AST_PROP_ELEM, 0, line, &[name, NULL, NULL, hooks]);
         let declaration = self.node(SHARP_AST_PROP_DECL, 0, line, &[element]);
         let attributes = self.attributes(&property.attribute_lists, None, None);
@@ -3597,7 +3597,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             Property::Hooked(hooked) if hooked.modifiers.contains_abstract() => {
                 let flags = accessor_flags(&hooked.modifiers, &hooked.hook_list, self.names) & !ZEND_ACC_READONLY;
 
-                (flags, &hooked.attribute_lists, self.abstract_hooks(hooked))
+                (flags, &hooked.attribute_lists, self.abstract_hooks(hooked, false))
             }
             // A static property's accessors are its class's hidden static methods, which alone reach its storage, so
             // the storage is private whatever the property's access level, and plain PHP reaches it only through a
@@ -3749,13 +3749,17 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// The hooks of an interface property or an abstract one: each accessor is a hook with no body, as php-src's
-    /// grammar builds `{ get; set; }`. An `init` is the `set` hook, as it is on a property with a body.
-    fn abstract_hooks(&mut self, property: &HookedProperty) -> u32 {
+    /// grammar builds `{ get; set; }`. An `init` is the `set` hook, as it is on a property with a body, but in an
+    /// interface, whose `set` hook PHP gives only a public `set`, so an interface's `{ get; init; }` runs as
+    /// `{ get; }`, and the analyzer checks that each class gives `init`.
+    fn abstract_hooks(&mut self, property: &HookedProperty, in_interface: bool) -> u32 {
         let Some(hint) = &property.hint else {
             unreachable!("the PHP# parser gives every property its type");
         };
         let mut hooks = Vec::new();
-        for accessor in &property.hook_list.hooks {
+        for accessor in
+            property.hook_list.hooks.iter().filter(|accessor| !in_interface || accessor.name.value != b"init")
+        {
             let parameters = if accessor.is_setter() {
                 self.setter_parameters(accessor, property.item.variable(), hint, None)
             } else {
