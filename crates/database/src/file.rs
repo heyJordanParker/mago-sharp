@@ -107,6 +107,10 @@ pub enum FolderNamespace {
     Test,
 }
 
+/// The start of each PHP file `mago compile` writes beside a PHP# source, spec section 27, which tells it from a file
+/// someone wrote.
+pub const COMPANION_START: &str = "<?php\n\n// mago compile writes this file from ";
+
 pub trait HasFileId {
     /// Returns the unique identifier of the file.
     fn file_id(&self) -> FileId;
@@ -160,6 +164,14 @@ impl File {
     #[inline(always)]
     pub fn read(workspace: &Path, path: &Path, file_type: FileType) -> Result<Self, DatabaseError> {
         read_file(workspace, path, file_type)
+    }
+
+    /// Whether `mago compile` wrote this file beside a PHP# source, spec section 27. Its declaration names the PHP#
+    /// class to tools that read PHP source, so the database holds the source instead, as `tsc` reads `Order.ts` and
+    /// not the `Order.d.ts` beside it.
+    #[must_use]
+    pub fn is_companion(&self) -> bool {
+        self.name.ends_with(b".php") && self.contents.starts_with(COMPANION_START.as_bytes())
     }
 
     /// Creates an ephemeral, in-memory `File` from a name and content.

@@ -6,9 +6,9 @@
 //! or renamed source loses its compiled file.
 //!
 //! Beside each of the project's own PHP# sources that declares a type, outside `vendor/` and `autoload-dev` folders, it
-//! also writes a PHP file of the type's name that loads the source, so PHP code that finds classes by listing `*.php`
-//! files finds PHP# classes too, spec section 27. A removed source loses its PHP file, and git's `info/exclude` keeps
-//! the files no `.gitignore` covers out of git.
+//! also writes a PHP file of the type's name that loads the source and states the type's declaration, so PHP code that
+//! finds classes by listing `*.php` files or reading their source finds PHP# classes too, spec section 27. A removed
+//! source loses its PHP file, and git's `info/exclude` keeps the files no `.gitignore` covers out of git.
 
 use std::collections::BTreeSet;
 use std::collections::HashMap;
@@ -25,6 +25,7 @@ use clap::Parser;
 use mago_allocator::LocalArena;
 use mago_database::DatabaseReader;
 use mago_database::error::DatabaseError;
+use mago_database::file::COMPANION_START;
 use mago_database::file::File;
 use mago_database::file::FileType;
 use mago_database::file::FolderNamespace;
@@ -131,10 +132,11 @@ impl CompileCommand {
             if file.folder_namespace == Some(FolderNamespace::Test) {
                 continue;
             }
-            let Some((type_file, class)) = declared_type(&file) else {
+            let Some(declared) = declared_type(&file) else {
                 continue;
             };
-            let php = format!("{}.php", type_file.strip_suffix(".sharp").unwrap_or(&type_file));
+            let (type_file, class) = (&declared.file, &declared.name);
+            let php = format!("{}.php", type_file.strip_suffix(".sharp").unwrap_or(type_file));
             let listing = match listings.entry(folder.clone()) {
                 Entry::Occupied(listing) => listing.into_mut(),
                 Entry::Vacant(listing) => listing.insert(file_names(&folder).map_err(DatabaseError::from)?),
@@ -160,7 +162,7 @@ impl CompileCommand {
                 std::fs::remove_file(folder.join(name)).or_else(ignore_missing).map_err(DatabaseError::from)?;
             }
             let path = folder.join(&php);
-            let contents = beside(&type_file);
+            let contents = beside(&declared);
             if !listing.contains(&php) || std::fs::read(&path).map_err(DatabaseError::from)? != contents.as_bytes() {
                 write_by_rename(&path, contents.as_bytes()).map_err(DatabaseError::from)?;
             }
@@ -438,35 +440,51 @@ fn quoted(table: &mut Vec<u8>, text: &[u8]) {
     table.push(b'\'');
 }
 
-/// The start of each PHP file `mago compile` writes beside a PHP# source, which tells it from a file someone wrote.
-const BESIDE: &str = "<?php\n\n// mago compile writes this file from ";
+/// The PHP file beside the PHP# source `declared`, spec section 27, in `mago fmt`'s layout. PHP code that lists `*.php`
+/// files and names each class by its path finds the PHP# class through it, and Composer's PSR-4 loads it before the
+/// source. It loads the source through the engine, and on plain PHP it throws before any source can reach the output.
+/// Its last statement states the type's declaration and never runs, so a tool that reads PHP source, as Composer's
+/// class map and Symfony's attribute routing do, finds the type in it, and the engine declares the type once, from the
+/// source. Once the source is gone it declares nothing, as if it were not there, until the next compile deletes it.
+fn beside(declared: &DeclaredType) -> String {
+    let DeclaredType { file, keyword, .. } = declared;
+    let name = file.strip_suffix(".sharp").unwrap_or(file);
+    let namespace = match declared.name.rsplit_once('.') {
+        Some((namespace, _)) => format!("namespace {};\n\n", namespace.replace('.', "\\")),
+        None => String::new(),
+    };
 
-/// The PHP file beside the PHP# source `type_file`, spec section 27, in `mago fmt`'s layout. PHP code that lists
-/// `*.php` files and names each class by its path finds the PHP# class through it, and Composer's PSR-4 loads it before
-/// the source. It loads the source through the engine, and on plain PHP it throws before any source can reach the
-/// output. Once the source is gone it declares nothing, as if it were not there, until the next compile deletes it.
-fn beside(type_file: &str) -> String {
     format!(
-        "{BESIDE}{type_file}, so PHP code that lists *.php files finds its class.\n\ndeclare(strict_types=1);\n\nif (!is_file(__DIR__ . '/{type_file}')) {{\n    return;\n}}\n\nfunction_exists('Sharp\\Internal\\requireNative')\n    || throw new Error(\n        'This project needs the PHP# engine, and this is plain PHP. Install php-sharp, or run the ghcr.io/heyjordanparker/php-sharp image.',\n    );\n\nrequire_once __DIR__ . '/{type_file}';\n"
+        "{COMPANION_START}{file}, so PHP code that lists or reads *.php files finds its type.\n\ndeclare(strict_types=1);\n\n{namespace}if (!\\is_file(__DIR__ . '/{file}')) {{\n    return;\n}}\n\n\\function_exists('Sharp\\Internal\\requireNative')\n    || throw new \\Error(\n        'This project needs the PHP# engine, and this is plain PHP. Install php-sharp, or run the ghcr.io/heyjordanparker/php-sharp image.',\n    );\n\nrequire_once __DIR__ . '/{file}';\n\n// The engine declares {name} from {file}, and this declaration never runs.\nif (false) {{\n    {keyword} {name}\n    {{\n    }}\n}}\n"
     )
 }
 
-/// Whether the file at `path` is one `mago compile` wrote beside a source, which starts with [`BESIDE`].
+/// Whether the file at `path` is one `mago compile` wrote beside a source, which starts with [`COMPANION_START`].
 fn written_by_compile(path: &Path) -> std::io::Result<bool> {
-    let mut start = Vec::with_capacity(BESIDE.len());
+    let mut start = Vec::with_capacity(COMPANION_START.len());
     match std::fs::File::open(path) {
-        Ok(file) => file.take(BESIDE.len() as u64).read_to_end(&mut start)?,
+        Ok(file) => file.take(COMPANION_START.len() as u64).read_to_end(&mut start)?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(error) => return Err(error),
     };
 
-    Ok(start == BESIDE.as_bytes())
+    Ok(start == COMPANION_START.as_bytes())
 }
 
-/// The name of the PHP# source `file`, as `Order.sharp`, and the type it declares, as `App.Order`, when it declares a
-/// type named like it, spec section 27: a class, interface, enum, struct or event. A module's file and an `extern`
-/// declaration file declare none.
-fn declared_type(file: &File) -> Option<(String, String)> {
+/// The type a PHP# source declares named like its file, spec section 27.
+struct DeclaredType {
+    /// The source's file name, as `Order.sharp`.
+    file: String,
+    /// The type's PHP# name, as `App.Billing.Order`.
+    name: String,
+    /// The PHP keyword of the type the engine declares: `interface`, `enum` for an enum that runs as a PHP enum, or
+    /// `class` for a class, a struct, an event, and an enum whose cases are classes.
+    keyword: &'static str,
+}
+
+/// The type the PHP# source `file` declares, when it declares one named like it, spec section 27: a class, interface,
+/// enum, struct or event. A module's file and an `extern` declaration file declare none.
+fn declared_type(file: &File) -> Option<DeclaredType> {
     let name = String::from_utf8_lossy(&file.name);
     let type_file = name.rsplit('/').next()?;
     let stem = type_file.strip_suffix(".sharp")?;
@@ -477,20 +495,23 @@ fn declared_type(file: &File) -> Option<(String, String)> {
         _ => None,
     });
     let namespaced = namespace.map(|namespace| namespace.statements().iter());
-    let declares = program.statements.iter().chain(namespaced.into_iter().flatten()).any(|statement| match statement {
-        Statement::Class(class) => class.name.value == stem.as_bytes(),
-        Statement::Struct(r#struct) => r#struct.name.value == stem.as_bytes(),
-        Statement::Enum(r#enum) => r#enum.name.value == stem.as_bytes(),
-        Statement::Interface(interface) => interface.name.value == stem.as_bytes(),
-        Statement::Event(event) => event.name.value == stem.as_bytes(),
-        _ => false,
-    });
-    let class = match namespace.and_then(|namespace| namespace.name.as_ref()) {
+    let keyword =
+        program.statements.iter().chain(namespaced.into_iter().flatten()).find_map(|statement| match statement {
+            Statement::Class(class) if class.name.value == stem.as_bytes() => Some("class"),
+            Statement::Struct(r#struct) if r#struct.name.value == stem.as_bytes() => Some("class"),
+            Statement::Enum(r#enum) if r#enum.name.value == stem.as_bytes() => {
+                Some(if r#enum.runs_as_classes() { "class" } else { "enum" })
+            }
+            Statement::Interface(interface) if interface.name.value == stem.as_bytes() => Some("interface"),
+            Statement::Event(event) if event.name.value == stem.as_bytes() => Some("class"),
+            _ => None,
+        })?;
+    let name = match namespace.and_then(|namespace| namespace.name.as_ref()) {
         Some(namespace) => format!("{}.{stem}", String::from_utf8_lossy(namespace.value()).replace('\\', ".")),
         None => stem.to_string(),
     };
 
-    declares.then(|| (type_file.to_string(), class))
+    Some(DeclaredType { file: type_file.to_string(), name, keyword })
 }
 
 /// The names of the files in `folder`, exactly as the folder holds them, or none when it is gone.

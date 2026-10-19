@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -11,6 +12,7 @@ use crate::metadata::class_like::ClassLikeMetadata;
 use crate::misc::GenericParent;
 use crate::ttype::atomic::TAtomic;
 use crate::ttype::atomic::array::TArray;
+use crate::ttype::atomic::array::key::ArrayKey;
 use crate::ttype::atomic::array::keyed::TKeyedArray;
 use crate::ttype::atomic::array::list::TList;
 use crate::ttype::atomic::callable::TCallable;
@@ -1609,28 +1611,78 @@ pub fn get_php_passed_type(r#type: &TUnion, codebase: &CodebaseMetadata) -> TUni
 
 /// The type PHP# code receives where a plain PHP declaration gives `r#type`, the mirror of [`get_php_received_type`].
 ///
-/// It is a return or a property read. An `array<int, T>` it is, or may be, is a `List<T>`, spec section 12: plain
-/// PHP's array keyed by `int` alone holds a list whose keys may have gaps, such as what `array_filter` returns, and
-/// PHP# renumbers it where it arrives. An array keyed by `string` or by `int|string`, one whose keys PHP declares as a
-/// shape, and an array inside a collection stay as they are, since PHP# renumbers only the value that arrives.
+/// It is a return or a property read. Each array keyed by `int` alone that it is, may be or holds is a `List`, spec
+/// section 12: plain PHP's `array<int, T>` holds a list whose keys may have gaps, such as what `array_filter` returns,
+/// and PHP# renumbers it where it arrives, as a field of a shape and an element of a collection too. A shape whose keys
+/// are a list's, `array{0: int, 1: string}`, is that list's shape, and any other shape keyed by `int` alone is a `List`
+/// of its fields. An array keyed by `string` or by `int|string` stays a `Map`.
 #[must_use]
 pub fn get_sharp_received_type(r#type: &TUnion) -> TUnion {
     let types = r#type.types.iter().map(|atomic| match atomic {
-        TAtomic::Array(TArray::Keyed(TKeyedArray {
-            known_items: None,
-            parameters: Some((key_type, value_type)),
-            non_empty,
-            ..
-        })) if !key_type.types.is_empty() && key_type.types.iter().all(TAtomic::is_int) => {
-            let mut list = TList::new(Arc::clone(value_type));
-            list.non_empty = *non_empty;
-
-            TAtomic::Array(TArray::List(list))
-        }
+        TAtomic::Array(array) => TAtomic::Array(get_sharp_received_array(array)),
         atomic => atomic.clone(),
     });
 
     r#type.clone_with_types(types.collect())
+}
+
+/// `array` as [`get_sharp_received_type`] reads it.
+fn get_sharp_received_array(array: &TArray) -> TArray {
+    match array {
+        TArray::List(list) => {
+            let mut list = list.clone();
+            list.element_type = Arc::new(get_sharp_received_type(&list.element_type));
+            for (_, element) in list.known_elements.iter_mut().flat_map(BTreeMap::values_mut) {
+                *element = get_sharp_received_type(element);
+            }
+
+            TArray::List(list)
+        }
+        TArray::Keyed(keyed) => {
+            let mut keyed = keyed.clone();
+            for (_, value) in keyed.known_items.iter_mut().flat_map(BTreeMap::values_mut) {
+                *value = get_sharp_received_type(value);
+            }
+            if let Some((_, value)) = keyed.parameters.as_mut() {
+                *value = Arc::new(get_sharp_received_type(value));
+            }
+            let int_keyed = keyed.known_items.as_ref().is_none_or(|items| items.keys().all(ArrayKey::is_integer))
+                && keyed
+                    .parameters
+                    .as_ref()
+                    .is_none_or(|(key, _)| !key.types.is_empty() && key.types.iter().all(TAtomic::is_int))
+                && (keyed.known_items.is_some() || keyed.parameters.is_some());
+            if !int_keyed {
+                return TArray::Keyed(keyed);
+            }
+
+            let positions = keyed.known_items.as_ref().filter(|items| {
+                keyed.parameters.is_none()
+                    && items.keys().enumerate().all(|(index, key)| *key == ArrayKey::Integer(index as i64))
+            });
+            let mut list = match positions {
+                Some(items) => TList::from_known_elements(items.values().cloned().enumerate().collect()),
+                None => {
+                    let mut elements: Vec<TAtomic> = Vec::new();
+                    let values = keyed.known_items.iter().flat_map(BTreeMap::values).map(|(_, value)| value);
+                    for atomic in values
+                        .chain(keyed.parameters.as_ref().map(|(_, value)| value.as_ref()))
+                        .flat_map(|value| value.types.iter())
+                    {
+                        if !elements.contains(atomic) {
+                            elements.push(atomic.clone());
+                        }
+                    }
+                    TList::new(Arc::new(TUnion::from_vec(elements)))
+                }
+            };
+            list.non_empty |=
+                keyed.non_empty || keyed.known_items.iter().flat_map(BTreeMap::values).any(|(optional, _)| !optional);
+
+            TArray::List(list)
+        }
+        array => array.clone(),
+    }
 }
 
 /// The backed enum whose cases every value of `atomic` is.

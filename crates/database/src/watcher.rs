@@ -416,6 +416,7 @@ impl<'config> DatabaseWatcher<'config> {
                                 &self.include_base_paths,
                             );
                             match File::read(&workspace, &changed_file.path, new_file_type) {
+                                Ok(file) if file.is_companion() => {}
                                 Ok(mut file) => {
                                     mark_package(&mut file, &workspace, &mut manifests);
                                     self.database.add(file);

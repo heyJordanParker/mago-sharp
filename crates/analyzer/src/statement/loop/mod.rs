@@ -909,6 +909,17 @@ where
     debug_assert!(pre_conditions_applied, "Pre-conditions should have been applied at least once.");
 
     let does_sometimes_break = loop_scope.final_actions.contains(ControlAction::Break);
+
+    // A body that never ends a pass or breaks this loop, as one that always returns or leaves a loop around it, never
+    // reaches the condition again, so a `for` or `while` ends only when its condition fails before the first pass,
+    // with the locals it began with.
+    if !is_do && !does_sometimes_break {
+        let body_actions = ControlAction::from_statements(statements.iter().collect(), vec![], Some(artifacts), true);
+        if !body_actions.contains(ControlAction::None) && !body_actions.contains(ControlAction::Continue) {
+            continue_context.locals = loop_scope.parent_context_variables.clone();
+        }
+    }
+
     let does_sometimes_continue = loop_scope.final_actions.contains(ControlAction::Continue);
     let does_always_break = does_sometimes_break && loop_scope.final_actions.len() == 1;
     let preserve_array_shapes_for = continue_context

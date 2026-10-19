@@ -7619,6 +7619,22 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             let each = self.crossed(span, &element_type, &element, element_read);
             let each = self.hidden_arrow_function(span, &[&element], each);
             values = self.global_call(line, b"array_map", &[each, values]);
+        } else if element_type
+            .types
+            .iter()
+            .any(|atomic| matches!(atomic, TAtomic::Array(TArray::List(list)) if list.tuple_names.is_none()))
+        {
+            // Spec section 12: plain PHP's array keyed by int alone is a `List` where it sits in what crosses too, so
+            // each element renumbers as `\is_array($element#N) ? \array_values($element#N) : $element#N`.
+            let element = self.hidden("element");
+            let element_read = self.variable(span, &element);
+            let is_array = self.global_call(line, b"is_array", &[element_read]);
+            let element_read = self.variable(span, &element);
+            let renumbered = self.global_call(line, b"array_values", &[element_read]);
+            let itself = self.variable(span, &element);
+            let each = self.node(SHARP_AST_CONDITIONAL, 0, line, &[is_array, renumbered, itself]);
+            let each = self.hidden_arrow_function(span, &[&element], each);
+            values = self.global_call(line, b"array_map", &[each, values]);
         }
         let built = match (array, self.key_crossing(&key_type)) {
             (TArray::List(_), _) => values,

@@ -3287,6 +3287,21 @@ fn a_named_break_or_continue_leaves_or_continues_the_loop_it_names() {
     assert_eq!(issues(("src/Demo/Levels.php", php), &[]), ["11:23 invalid-break"]);
 }
 
+/// A loop whose body always leaves past it, through `return` or a `break` that names a loop around it, never checks
+/// its condition after a pass, so it ends only when the condition fails before the first one: the code after it runs
+/// with what the locals held before the loop, narrowed by the failed condition, and never with `never`. Plain PHP's
+/// `break 2` is the same.
+#[test]
+fn a_loop_whose_body_always_leaves_past_it_ends_with_the_locals_it_began_with() {
+    let sharp = "namespace Demo;\n\nclass Rows\n{\n    public static int named(List<int> rows, int? limit)\n    {\n        let total = 0;\n        orders: for (const row of rows) {\n            while (limit != null) {\n                total = row + limit;\n                break orders;\n            }\n            Rows.note(limit);\n        }\n        return total;\n    }\n\n    public static int returned(List<int> rows, int? limit)\n    {\n        for (const row of rows) {\n            while (limit != null) {\n                return row + limit;\n            }\n            Rows.note(limit);\n        }\n        return 0;\n    }\n\n    private static void note(int? limit)\n    {\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nfinal class Rows\n{\n    /** @param list<int> $rows */\n    public static function levels(array $rows, ?int $limit): int\n    {\n        $total = 0;\n        foreach ($rows as $row) {\n            while ($limit !== null) {\n                $total = $row + $limit;\n                break 2;\n            }\n            self::none($limit);\n        }\n        return $total;\n    }\n\n    public static function returned(?int $limit): int\n    {\n        while ($limit !== null) {\n            return $limit;\n        }\n        self::none($limit);\n        return 0;\n    }\n\n    public static function passes(?int $limit): void\n    {\n        while ($limit !== null) {\n            $limit = $limit > 3 ? null : $limit + 1;\n        }\n        self::none($limit);\n    }\n\n    private static function none(null $limit): void\n    {\n    }\n}\n";
+
+    assert_eq!(
+        (issues(("src/Demo/Rows.sharp", sharp), &[]), issues(("src/Demo/Rows.php", php), &[])),
+        (Vec::<String>::new(), Vec::<String>::new())
+    );
+}
+
 /// Spec section 7 refuses a statement that can never run, as Java and Zig do: one after `return`, `throw`, a call that
 /// never returns, `break` or `continue` in its block, one after an `if` whose every branch ends the block, one after
 /// a loop that never ends, and a block after a condition that never finishes, which is refused at the condition. The
@@ -9270,6 +9285,17 @@ fn a_plain_php_int_keyed_array_arrives_as_a_list() {
         issues(("src/App/Roster.sharp", sharp), &[("src/App/Users.php", users), ("src/App/Person.php", person)]),
         ["16:30 invalid-local-assignment-value", "17:31 invalid-local-assignment-value"]
     );
+}
+
+/// Spec section 12: plain PHP's array keyed by `int` alone arrives as a `List` wherever it sits in the value that
+/// arrives: a shape whose keys are all ints, as `array{0: int, 1: int}`, the field of a shape and the value of a
+/// collection typed `array<int, T>`. So a list pattern and `is List<int>` match it, as they match plain PHP's `list<int>`.
+#[test]
+fn a_plain_php_int_keyed_shape_or_field_arrives_as_a_list() {
+    let pivot = "<?php\n\nnamespace App;\n\nfinal class Pivot\n{\n    /** @return array{0: int, 1: int} */\n    public function pair(): array { return [5, 6]; }\n\n    /** @return array{attached: array<int, int>} */\n    public function changes(): array { return ['attached' => [5]]; }\n\n    /** @return array<string, array<int, int>> */\n    public function grouped(): array { return []; }\n\n    /** @return list{int, int} */\n    public function listed(): array { return [5, 6]; }\n}\n";
+    let sharp = "namespace App;\n\nclass Reader\n{\n    public int read(Pivot pivot, Any? changed)\n    {\n        List<int> pair = pivot.pair();\n        List<int> attached = pivot.changes().get(\"attached\") ?? [];\n        List<int> grouped = pivot.grouped()[\"a\"] ?? [];\n        const sum = match (pivot.pair()) { [int a, int b] => a + b, default => 0 };\n        const listed = match (pivot.listed()) { [int a, int b] => a + b, default => 0 };\n        return changed is List<int> ? sum + listed + pair[0] + attached.count() + grouped.count() : sum;\n    }\n}\n";
+
+    assert_eq!(issues(("src/App/Reader.sharp", sharp), &[("src/App/Pivot.php", pivot)]), [] as [&str; 0]);
 }
 
 /// Spec section 12: a `List` is not a `Map`, so a `List` value where only a `Map` is declared is refused, as a `List`

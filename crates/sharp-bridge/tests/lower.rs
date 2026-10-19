@@ -7585,7 +7585,7 @@ fn list_insert_remove_and_clear_change_the_list_where_it_lives() {
 /// change through it is a `Sharp\Collection` method on the index: `clear`, a `Set`'s `add`, and `put` for a write
 /// into a `Map` element, whose `??=` puts only for a missing key. An index that runs something is held in a hidden
 /// variable, so it runs once. A null-safe method that runs as PHP reads a missing `Map` key as null. Each parameter
-/// first makes each `Set` and `Map` plain PHP gave as an array the object.
+/// first makes each `Set` and `Map` plain PHP gave as an array the object, and renumbers each `List` a `Map` holds.
 #[test]
 fn a_change_through_a_list_index_runs_a_collection_method_on_the_index() {
     assert_eq!(
@@ -7744,14 +7744,14 @@ fn a_change_through_a_list_index_runs_a_collection_method_on_the_index() {
                                   PARAM_LIST
                                     PARAM
                                       null
-                                      ZVAL "key#1"
+                                      ZVAL "key#2"
                                       null
                                       null
                                       null
                                       null
                                     PARAM
                                       null
-                                      ZVAL "value#2"
+                                      ZVAL "value#3"
                                       null
                                       null
                                       null
@@ -7761,11 +7761,11 @@ fn a_change_through_a_list_index_runs_a_collection_method_on_the_index() {
                                     ARRAY_ELEM
                                       CAST [6]
                                         VAR
-                                          ZVAL "key#1"
+                                          ZVAL "key#2"
                                       null
                                     ARRAY_ELEM
                                       VAR
-                                        ZVAL "value#2"
+                                        ZVAL "value#3"
                                       null
                                   null
                                   null
@@ -7774,8 +7774,36 @@ fn a_change_through_a_list_index_runs_a_collection_method_on_the_index() {
                                   ARG_LIST
                                     VAR
                                       ZVAL "stock"
-                                VAR
-                                  ZVAL "stock"
+                                CALL
+                                  ZVAL "array_map"
+                                  ARG_LIST
+                                    ARROW_FUNC "" @7-7
+                                      PARAM_LIST
+                                        PARAM
+                                          null
+                                          ZVAL "element#1"
+                                          null
+                                          null
+                                          null
+                                          null
+                                      null
+                                      CONDITIONAL
+                                        CALL
+                                          ZVAL "is_array"
+                                          ARG_LIST
+                                            VAR
+                                              ZVAL "element#1"
+                                        CALL
+                                          ZVAL "array_values"
+                                          ARG_LIST
+                                            VAR
+                                              ZVAL "element#1"
+                                        VAR
+                                          ZVAL "element#1"
+                                      null
+                                      null
+                                    VAR
+                                      ZVAL "stock"
                   VAR
                     ZVAL "stock"
               METHOD_CALL

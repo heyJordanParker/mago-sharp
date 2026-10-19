@@ -176,12 +176,19 @@ final class ServerReadsPlugin implements Plugin, AfterFileAnalysisHook
             $start = $read + strlen('reads: ');
             $end = $start + strcspn($contents, " \t\n\v\f\r", $start);
             [$class, $method] = explode('::', substr($contents, $start, $end - $start));
-            $visibility = $context->codebase->getMethod($class, $method)->visibility->name ?? 'missing';
+            $metadata = $context->codebase->getMethod($class, $method);
+            $visibility = $metadata->visibility->name ?? 'missing';
+            $effects = '';
+            foreach ($metadata->parameters ?? [] as $parameter) {
+                if ($parameter->flags->contains(1 << 63)) {
+                    $effects .= " `{$parameter->name}` takes on effects.";
+                }
+            }
             $context->report(
                 Level::Warning,
                 'read',
                 Issue::at(
-                    "Run {$this->runs}: `{$class}::{$method}` is {$visibility}.",
+                    "Run {$this->runs}: `{$class}::{$method}` is {$visibility}.{$effects}",
                     new SourceLocation($context->analysis->file, new Span($start, $end)),
                 ),
             );

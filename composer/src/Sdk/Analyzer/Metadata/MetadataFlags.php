@@ -7,6 +7,9 @@ namespace Mago\Sdk\Analyzer\Metadata;
 /**
  * Immutable semantic flags attached to scanned metadata.
  *
+ * `$bits` holds all 64 bits the analyzer sets, so bit 63 is the sign bit of PHP's `int`, as a Java `long` holds a
+ * protobuf `fixed64`.
+ *
  * @api
  */
 final class MetadataFlags

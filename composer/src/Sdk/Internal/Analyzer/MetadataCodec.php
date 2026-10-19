@@ -70,7 +70,7 @@ final class MetadataCodec
             self::readClassLikeKind($reader),
             self::readLocation($reader),
             self::readOptionalLocation($reader),
-            new MetadataFlags($reader->readU64()),
+            self::readFlags($reader),
             $reader->readOptionalString(),
             self::readStrings($reader),
             self::readStrings($reader),
@@ -136,7 +136,7 @@ final class MetadataCodec
         $ifFalseAssertions = self::readAssertions($reader);
         $assertionsInferred = $reader->readBoolean();
         $hasDocblock = $reader->readBoolean();
-        $flags = new MetadataFlags($reader->readU64());
+        $flags = self::readFlags($reader);
         $availableVersions = self::readVersionRanges($reader);
         $visibility = null;
         $final = false;
@@ -252,7 +252,7 @@ final class MetadataCodec
 
         $globalsAccessed = ($fields & MethodFields::GLOBALS) !== 0 ? self::readStrings($reader) : null;
         $hasDocblock = ($fields & MethodFields::DOCBLOCK) !== 0 ? $reader->readBoolean() : null;
-        $flags = ($fields & MethodFields::FLAGS) !== 0 ? new MetadataFlags($reader->readU64()) : null;
+        $flags = ($fields & MethodFields::FLAGS) !== 0 ? self::readFlags($reader) : null;
         $availableVersions = ($fields & MethodFields::AVAILABLE_VERSIONS) !== 0
             ? self::readVersionRanges($reader)
             : null;
@@ -407,7 +407,7 @@ final class MetadataCodec
             self::readOptionalTypeMetadata($reader),
             self::readOptionalTypeMetadata($reader),
             self::readAttributes($reader),
-            new MetadataFlags($reader->readU64()),
+            self::readFlags($reader),
             self::readPropertyHooks($reader),
             self::readVersionRanges($reader),
         );
@@ -423,7 +423,7 @@ final class MetadataCodec
             $hooks[$name] = new PropertyHookMetadata(
                 $name,
                 self::readLocation($reader),
-                new MetadataFlags($reader->readU64()),
+                self::readFlags($reader),
                 $reader->readBoolean() ? self::readParameter($reader) : null,
                 $reader->readBoolean(),
                 $reader->readBoolean(),
@@ -446,7 +446,7 @@ final class MetadataCodec
             self::readOptionalTypeMetadata($reader),
             self::readOptionalType($reader),
             self::readAttributes($reader),
-            new MetadataFlags($reader->readU64()),
+            self::readFlags($reader),
             self::readVersionRanges($reader),
         );
     }
@@ -459,7 +459,7 @@ final class MetadataCodec
             self::readLocation($reader),
             self::readOptionalType($reader),
             self::readAttributes($reader),
-            new MetadataFlags($reader->readU64()),
+            self::readFlags($reader),
             self::readVersionRanges($reader),
         );
     }
@@ -472,7 +472,7 @@ final class MetadataCodec
             self::readOptionalTypeMetadata($reader),
             self::readOptionalType($reader),
             self::readAttributes($reader),
-            new MetadataFlags($reader->readU64()),
+            self::readFlags($reader),
             self::readVersionRanges($reader),
         );
     }
@@ -489,8 +489,13 @@ final class MetadataCodec
             self::readOptionalTypeMetadata($reader),
             self::readOptionalTypeMetadata($reader),
             self::readAttributes($reader),
-            new MetadataFlags($reader->readU64()),
+            self::readFlags($reader),
         );
+    }
+
+    private static function readFlags(PayloadReader $reader): MetadataFlags
+    {
+        return new MetadataFlags($reader->readI64());
     }
 
     private static function readTypeMetadata(PayloadReader $reader): TypeMetadata

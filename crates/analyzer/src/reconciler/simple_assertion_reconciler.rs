@@ -1621,7 +1621,16 @@ where
 
             if needs_replacement {
                 existing_var_type.remove_type(atomic);
-                if !element_type.is_never() {
+                // A sealed shape, as `list{int, int}`, holds its known elements alone, its optional ones or not.
+                let holds_count = match known_elements {
+                    Some(elements) if element_type.is_never() => {
+                        let required = elements.values().filter(|(optional, _)| !*optional).count();
+
+                        elements.len() >= count && (!exact || required <= count)
+                    }
+                    _ => !element_type.is_never(),
+                };
+                if holds_count {
                     let new_known_count = if exact { Some(count) } else { known_count.map(|_| count) };
 
                     existing_var_type.types.to_mut().push(TAtomic::Array(TArray::List(TList {

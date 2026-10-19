@@ -170,27 +170,27 @@ where
 /// has no block, and neither has one whose paths are all ignored. Every other line of the file stays as it is, except
 /// the blocks of `owner` for a folder that is gone or that git now ignores, which keep nothing out of git.
 ///
-/// `git rev-parse --git-path info/exclude` names the file, so a worktree and a submodule write the one git reads for
-/// them. The worktrees of a repository share that file, so each workspace keeps a block of its own, named by its path,
-/// and one worktree's compile never drops another's paths. The file is replaced by rename, so a compile that reads it
-/// while another writes it never reads part of it. A workspace outside a git repository, or with no `git` to run,
-/// writes nothing.
+/// [`repository`] names the file, so a worktree and a submodule write the one git reads for them, with or without a
+/// `git` to run. The worktrees of a repository share that file, so each workspace keeps a block of its own, named by its
+/// path, and one worktree's compile never drops another's paths. The file is replaced by rename, so a compile that reads
+/// it while another writes it never reads part of it. With no `git` to run, no `.gitignore` is read, so the block lists
+/// every path. A workspace outside a git repository writes nothing. One whose `.git` names a missing folder, or whose
+/// file can't be written, writes nothing and warns that git shows `paths` as untracked.
 pub fn exclude(workspace: &Path, owner: &str, paths: &[PathBuf]) -> Result<(), Error> {
-    let Ok(output) = Command::new("git")
-        .args(["rev-parse", "--show-toplevel", "--git-path", "info/exclude"])
-        .current_dir(workspace)
-        .output()
-    else {
-        return Ok(());
+    let (top, file) = match repository(workspace) {
+        Ok(Some(found)) => found,
+        Ok(None) => return Ok(()),
+        Err((dot_git, missing)) => {
+            warn_untracked(
+                workspace,
+                paths,
+                &format!("{} names {}, which is missing", dot_git.display(), missing.display()),
+                "Make the repository's .git folder reachable here",
+            );
+            return Ok(());
+        }
     };
-    let printed = String::from_utf8_lossy(&output.stdout);
-    let mut lines = printed.lines();
-    let (true, Some(top), Some(file)) = (output.status.success(), lines.next(), lines.next()) else {
-        return Ok(());
-    };
-    let top = Path::new(top).canonicalize().unwrap_or_else(|_| PathBuf::from(top));
     let top = top.as_path();
-    let file = workspace.join(file);
     let heading = format!("# {owner}: the files it writes in ");
     let end = format!("# {owner}: end");
 
@@ -228,11 +228,60 @@ pub fn exclude(workspace: &Path, owner: &str, paths: &[PathBuf]) -> Result<(), E
     if !block.is_empty() {
         after.push_str(&format!("{heading}{}\n{block}{end}\n", workspace.display()));
     }
-    if after == before {
-        return Ok(());
+    if after != before
+        && let Err(error) = write_by_rename(&file, after.as_bytes())
+    {
+        warn_untracked(
+            workspace,
+            paths,
+            &format!("{} can't be written: {error}", file.display()),
+            &format!("Make {} writable", file.display()),
+        );
     }
 
-    write_by_rename(&file, after.as_bytes()).map_err(|e| Error::Database(DatabaseError::IOError(e)))
+    Ok(())
+}
+
+/// Warns that git shows `paths`, files under `workspace`, as untracked because of `cause`, and that `fix` and another
+/// compile hide them.
+fn warn_untracked(workspace: &Path, paths: &[PathBuf], cause: &str, fix: &str) {
+    if paths.is_empty() {
+        return;
+    }
+    let listed: Vec<String> =
+        paths.iter().map(|path| path.strip_prefix(workspace).unwrap_or(path).display().to_string()).collect();
+    tracing::warn!(
+        "{cause}, so git shows {} as untracked. {fix}, and run vendor/bin/mago compile again.",
+        listed.join(", ")
+    );
+}
+
+/// The top folder of the git repository that holds `workspace`, and the `info/exclude` file git reads for it, found as
+/// git finds them: the nearest `.git` is the repository's folder, or a file that names it, as a linked worktree's and
+/// a submodule's is, and a `commondir` there names the folder every checkout of the repository shares. Reading the
+/// files needs no `git` to run, as libgit2 and JGit read a repository. `Err` holds a `.git` file and the missing folder
+/// it names.
+fn repository(workspace: &Path) -> Result<Option<(PathBuf, PathBuf)>, (PathBuf, PathBuf)> {
+    let Some(top) = workspace.ancestors().find(|folder| folder.join(".git").exists()) else {
+        return Ok(None);
+    };
+    let dot_git = top.join(".git");
+    let folder = if dot_git.is_dir() {
+        dot_git
+    } else {
+        let contents = std::fs::read_to_string(&dot_git).unwrap_or_default();
+        let named = top.join(contents.strip_prefix("gitdir:").unwrap_or(&contents).trim());
+        if !named.is_dir() {
+            return Err((dot_git, named));
+        }
+        named
+    };
+    let shared = match std::fs::read_to_string(folder.join("commondir")) {
+        Ok(common) => folder.join(common.trim()),
+        Err(_) => folder,
+    };
+
+    Ok(Some((top.to_path_buf(), shared.join("info").join("exclude"))))
 }
 
 /// Whether git, run in `folder`, ignores `path`.
@@ -247,13 +296,17 @@ fn ignores(folder: &Path, path: &Path) -> bool {
 
 /// The untracked files and folders under `workspace` that its repository's `.gitignore` files ignore, relative to it.
 /// `info/exclude` is not read, so the block [`exclude`] writes there never counts. A workspace git ignores as a whole
-/// is not listed: git refuses to list from inside one.
+/// is not listed: git refuses to list from inside one. With no `git` to run, none is listed.
 fn ignored_by_gitignore(workspace: &Path) -> Result<Vec<PathBuf>, Error> {
-    let output = Command::new("git")
+    let output = match Command::new("git")
         .args(["ls-files", "-z", "--others", "--ignored", "--directory", "--exclude-per-directory=.gitignore"])
         .current_dir(workspace)
         .output()
-        .map_err(|e| Error::Database(DatabaseError::IOError(e)))?;
+    {
+        Ok(output) => output,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(Error::Database(DatabaseError::IOError(error))),
+    };
     if !output.status.success() {
         return Err(Error::Database(DatabaseError::IOError(std::io::Error::other(format!(
             "git ls-files failed: {}",

@@ -332,7 +332,7 @@ fn compile_replaces_a_compiled_file_by_rename_so_no_reader_sees_a_partial_file()
 }
 
 /// The PHP file `mago compile` writes beside `app/Order.sharp`, spec section 27.
-const ORDER_PHP: &str = "<?php\n\n// mago compile writes this file from Order.sharp, so PHP code that lists *.php files finds its class.\n\ndeclare(strict_types=1);\n\nif (!is_file(__DIR__ . '/Order.sharp')) {\n    return;\n}\n\nfunction_exists('Sharp\\Internal\\requireNative')\n    || throw new Error(\n        'This project needs the PHP# engine, and this is plain PHP. Install php-sharp, or run the ghcr.io/heyjordanparker/php-sharp image.',\n    );\n\nrequire_once __DIR__ . '/Order.sharp';\n";
+const ORDER_PHP: &str = "<?php\n\n// mago compile writes this file from Order.sharp, so PHP code that lists or reads *.php files finds its type.\n\ndeclare(strict_types=1);\n\nnamespace App;\n\nif (!\\is_file(__DIR__ . '/Order.sharp')) {\n    return;\n}\n\n\\function_exists('Sharp\\Internal\\requireNative')\n    || throw new \\Error(\n        'This project needs the PHP# engine, and this is plain PHP. Install php-sharp, or run the ghcr.io/heyjordanparker/php-sharp image.',\n    );\n\nrequire_once __DIR__ . '/Order.sharp';\n\n// The engine declares Order from Order.sharp, and this declaration never runs.\nif (false) {\n    class Order\n    {\n    }\n}\n";
 
 /// Spec section 27: each of the project's PHP# sources that declares a type gets a PHP file of the type's name beside
 /// it, so PHP code that finds classes by listing `*.php` files finds it. A module's file declares none, and a package
@@ -383,22 +383,29 @@ fn compile_writes_no_php_file_beside_a_source_in_an_autoload_dev_folder() {
     assert_eq!(std::fs::read_to_string(root.join("app/Order.php")).unwrap(), ORDER_PHP);
 }
 
-/// The PHP file passes mago's own lint, so a project's lint reports nothing on a file nobody edits.
+/// mago reads the PHP# source and never the PHP file beside it, as `tsc` reads `Order.ts` and never the `Order.d.ts`
+/// beside it: the class has one declaration, and a project's lint reports nothing on a file nobody edits.
 #[test]
-fn the_php_file_beside_a_source_passes_lint() {
+fn mago_reads_the_source_and_never_the_php_file_beside_it() {
     let directory = project(ORDER, MONEY);
     let root = directory.path();
     compile_succeeds(root);
 
-    let output = Command::new(env!("CARGO_BIN_EXE_mago"))
-        .args(["--no-version-check", "--colors", "never", "lint", "app/Order.php"])
-        .env("XDG_CACHE_HOME", Path::new(env!("CARGO_TARGET_TMPDIR")).join("cache"))
-        .current_dir(root)
-        .output()
-        .unwrap();
+    let mago = |arguments: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_mago"))
+            .args(["--no-version-check", "--colors", "never"])
+            .args(arguments)
+            .env("XDG_CACHE_HOME", Path::new(env!("CARGO_TARGET_TMPDIR")).join("cache"))
+            .current_dir(root)
+            .output()
+            .unwrap()
+    };
+    let analyzed = mago(&["analyze", "app"]);
+    let linted = mago(&["lint", "app/Order.php"]);
 
-    assert!(output.status.success(), "{}", printed(&output));
-    assert!(printed(&output).contains("No issues found."), "{}", printed(&output));
+    assert!(analyzed.status.success(), "{}", printed(&analyzed));
+    assert!(!printed(&analyzed).contains("duplicate-definition"), "{}", printed(&analyzed));
+    assert!(printed(&linted).contains("No files found to lint."), "{}", printed(&linted));
 }
 
 /// The PHP file is in mago's own format, so a project's `mago fmt --check` passes on a file nobody edits.
@@ -663,6 +670,53 @@ fn compile_keeps_the_php_files_out_of_git_in_a_clone_and_in_a_worktree() {
         std::fs::read_to_string(clone.join(".git/info/exclude")).unwrap(),
         format!("{kept}{}", excluded(&worktree, "/app/Invoice.php\n/app/Order.php\n")),
         "a checkout with no PHP file left has no block"
+    );
+}
+
+/// A compile that can't run git, as in a runtime image that ships none, keeps the PHP files out of git all the same, in
+/// a clone and in a linked worktree, because it reads `.git` itself to find the `info/exclude` git reads.
+#[test]
+fn compile_keeps_the_php_files_out_of_git_with_no_git_to_run() {
+    let directory = project(ORDER, MONEY);
+    let clone = std::fs::canonicalize(directory.path()).unwrap();
+    git(&clone, &["init", "--quiet"]);
+    git(&clone, &["add", "--all"]);
+    git(&clone, &["commit", "--quiet", "--message", "project"]);
+    let worktrees = tempfile::tempdir().unwrap();
+    let worktree = std::fs::canonicalize(worktrees.path()).unwrap().join("feature");
+    git(&clone, &["worktree", "add", "--quiet", worktree.to_str().unwrap()]);
+
+    for checkout in [&clone, &worktree] {
+        let output = command(checkout, "never").env("PATH", "").output().unwrap();
+        assert!(output.status.success(), "{}", printed(&output));
+        assert!(checkout.join("app/Order.php").exists());
+        assert_eq!(
+            untracked(checkout),
+            "?? .sharp/app/Order.sharpc\n?? .sharp/listeners.php\n?? .sharp/vendor/acme/money/src/Money.sharpc\n",
+            "{}",
+            checkout.display()
+        );
+    }
+}
+
+/// A `.git` file that names a folder this machine doesn't have, as in a container that mounts a linked worktree
+/// without its repository, leaves the PHP files where git shows them, so the compile says so and how to fix it.
+#[test]
+fn compile_warns_when_the_repository_of_a_worktree_is_missing() {
+    let directory = project(ORDER, MONEY);
+    let root = std::fs::canonicalize(directory.path()).unwrap();
+    write(&root, ".git", "gitdir: /missing/repository/.git/worktrees/feature\n");
+
+    let output = compile(&root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(
+        printed(&output).contains(&format!(
+            "{}/.git names /missing/repository/.git/worktrees/feature, which is missing, so git shows app/Order.php as untracked. Make the repository's .git folder reachable here, and run vendor/bin/mago compile again.",
+            root.display()
+        )),
+        "{}",
+        printed(&output)
     );
 }
 

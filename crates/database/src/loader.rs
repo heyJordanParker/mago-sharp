@@ -438,6 +438,7 @@ impl<'config> DatabaseLoader<'config> {
             }
 
             match read_file(workspace, &path, file_type) {
+                Ok(file) if file.is_companion() => None,
                 Ok(file) => Some(Ok(FileWithSpecificity { file, specificity })),
                 Err(e) => Some(Err(e)),
             }

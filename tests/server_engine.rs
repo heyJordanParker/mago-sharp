@@ -213,6 +213,25 @@ fn a_hook_that_read_a_class_runs_again_when_the_class_signature_changes_and_not_
     assert_eq!(reads(&hidden, "read"), ["Run 2: `Box::value` is Private."]);
 }
 
+/// A PHP# parameter whose function type states no effects carries the codex's last flag, bit 63, which a hook reads
+/// with every other flag of the method.
+#[test]
+fn a_hook_reads_a_method_that_takes_a_function_with_every_flag() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if !common::php_sdk_is_available(repository, "the function parameter reads test") {
+        return;
+    }
+
+    let calls =
+        "namespace App;\n\npublic class Calls\n{\n    public static int apply(Function<int(int)> f) => f(1);\n}\n";
+    let mut server = server(
+        repository,
+        database(&[("src/reader.php", "<?php\n// reads: App\\Calls::apply\n"), ("src/Calls.sharp", calls)]),
+    );
+    let issues = server.analyze().expect("the analysis reads the method").issues;
+    assert_eq!(reads(&issues, "read"), ["Run 1: `App\\Calls::apply` is Public. `$f` takes on effects."]);
+}
+
 #[test]
 fn a_hook_that_listed_classes_sees_a_new_class_on_the_next_run_and_does_not_run_after_a_body_edit() {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
