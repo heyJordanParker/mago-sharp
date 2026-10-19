@@ -768,7 +768,13 @@ fn compile_keeps_the_php_files_out_of_git_where_git_refuses_the_repository() {
 
     for (root, owner) in [(&owned, "1"), (&broken, "0")] {
         write(root, ".git/info/exclude", "*.log\n");
-        let output = command(root, "never").env("GIT_TEST_ASSUME_DIFFERENT_OWNER", owner).output().unwrap();
+        // A CI runner's git config can trust every folder with `safe.directory = *`, so the compile reads none.
+        let output = command(root, "never")
+            .env("GIT_TEST_ASSUME_DIFFERENT_OWNER", owner)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .output()
+            .unwrap();
 
         assert!(output.status.success(), "{}: {}", root.display(), printed(&output));
         assert_eq!(
@@ -778,7 +784,7 @@ fn compile_keeps_the_php_files_out_of_git_where_git_refuses_the_repository() {
             root.display()
         );
         let warning = format!("git can't read the .gitignore files of {}: fatal: ", root.display());
-        assert_eq!(printed(&output).matches(&warning).count(), 1, "{}", printed(&output));
+        assert_eq!(printed(&output).matches(&warning).count(), 1, "{}: {}", root.display(), printed(&output));
         assert_eq!(printed(&output).matches("fatal: ").count(), 1, "git's own output stays out: {}", printed(&output));
         assert!(
             printed(&output).contains(". The repository's info/exclude lists every file mago compile writes there."),
