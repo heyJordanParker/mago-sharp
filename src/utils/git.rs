@@ -173,9 +173,9 @@ where
 /// [`repository`] names the file, so a worktree and a submodule write the one git reads for them, with or without a
 /// `git` to run. The worktrees of a repository share that file, so each workspace keeps a block of its own, named by its
 /// path, and one worktree's compile never drops another's paths. The file is replaced by rename, so a compile that reads
-/// it while another writes it never reads part of it. With no `git` to run, no `.gitignore` is read, so the block lists
-/// every path. A workspace outside a git repository writes nothing. One whose `.git` names a missing folder, or whose
-/// file can't be written, writes nothing and warns that git shows `paths` as untracked.
+/// it while another writes it never reads part of it. With no `git` to run, or one that fails there, no `.gitignore` is
+/// read, so the block lists every path. A workspace outside a git repository writes nothing. One whose `.git` names a
+/// missing folder, or whose file can't be written, writes nothing and warns that git shows `paths` as untracked.
 pub fn exclude(workspace: &Path, owner: &str, paths: &[PathBuf]) -> Result<(), Error> {
     let (top, file) = match repository(workspace) {
         Ok(Some(found)) => found,
@@ -214,7 +214,7 @@ pub fn exclude(workspace: &Path, owner: &str, paths: &[PathBuf]) -> Result<(), E
     }
     let mut block = String::new();
     if !paths.is_empty() && !ignores(workspace, workspace) {
-        let ignored = ignored_by_gitignore(workspace)?;
+        let ignored = ignored_by_gitignore(workspace);
         for path in paths {
             let (Ok(relative), Ok(local)) = (path.strip_prefix(top), path.strip_prefix(workspace)) else {
                 continue;
@@ -231,7 +231,8 @@ pub fn exclude(workspace: &Path, owner: &str, paths: &[PathBuf]) -> Result<(), E
     if after != before
         && let Err(error) = write_by_rename(&file, after.as_bytes())
     {
-        // A file an earlier block lists stays out of git.
+        // A file an earlier block lists stays out of git. The new file is written beside the old one and renamed over it,
+        // so it is the folder that must be writable, and the error's own path names the temporary file.
         let untracked: Vec<PathBuf> = paths
             .iter()
             .filter(|path| {
@@ -239,11 +240,12 @@ pub fn exclude(workspace: &Path, owner: &str, paths: &[PathBuf]) -> Result<(), E
             })
             .cloned()
             .collect();
+        let folder = file.parent().unwrap_or(&file).display();
         warn_untracked(
             workspace,
             &untracked,
-            &format!("{} can't be written: {error}", file.display()),
-            &format!("Make {} writable", file.display()),
+            &format!("{} can't be replaced, as {folder} can't be written: {}", file.display(), error.kind()),
+            &format!("Make {folder} writable"),
         );
     }
 
@@ -292,42 +294,48 @@ fn repository(workspace: &Path) -> Result<Option<(PathBuf, PathBuf)>, (PathBuf, 
     Ok(Some((top.to_path_buf(), shared.join("info").join("exclude"))))
 }
 
-/// Whether git, run in `folder`, ignores `path`.
+/// Whether git, run in `folder`, ignores `path`. A git that fails there ignores nothing, and [`ignored_by_gitignore`]
+/// gives its reason.
 fn ignores(folder: &Path, path: &Path) -> bool {
     Command::new("git")
         .args(["check-ignore", "--quiet", "--"])
         .arg(path)
         .current_dir(folder)
+        .stderr(Stdio::null())
         .status()
         .is_ok_and(|status| status.success())
 }
 
 /// The untracked files and folders under `workspace` that its repository's `.gitignore` files ignore, relative to it.
 /// `info/exclude` is not read, so the block [`exclude`] writes there never counts. A workspace git ignores as a whole
-/// is not listed: git refuses to list from inside one. With no `git` to run, none is listed.
-fn ignored_by_gitignore(workspace: &Path) -> Result<Vec<PathBuf>, Error> {
-    let output = match Command::new("git")
+/// is not listed: git refuses to list from inside one. With no `git` to run, none is listed. When git fails, as in a
+/// repository another user owns, none is listed either, and the warning gives git's reason, as cargo warns and goes on
+/// when it can't read a repository's status.
+fn ignored_by_gitignore(workspace: &Path) -> Vec<PathBuf> {
+    let reason = match Command::new("git")
         .args(["ls-files", "-z", "--others", "--ignored", "--directory", "--exclude-per-directory=.gitignore"])
         .current_dir(workspace)
         .output()
     {
-        Ok(output) => output,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(Error::Database(DatabaseError::IOError(error))),
+        Ok(output) if output.status.success() => {
+            return output
+                .stdout
+                .split(|byte| *byte == 0)
+                .filter(|entry| !entry.is_empty())
+                .map(|entry| PathBuf::from(String::from_utf8_lossy(entry).as_ref()))
+                .collect();
+        }
+        // Git's first line is its reason, and the lines after it are advice for its own command line.
+        Ok(output) => String::from_utf8_lossy(&output.stderr).lines().next().unwrap_or_default().trim().to_string(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(error) => error.to_string(),
     };
-    if !output.status.success() {
-        return Err(Error::Database(DatabaseError::IOError(std::io::Error::other(format!(
-            "git ls-files failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )))));
-    }
+    tracing::warn!(
+        "git can't read the .gitignore files of {}: {reason}. The repository's info/exclude lists every file mago compile writes there.",
+        workspace.display()
+    );
 
-    Ok(output
-        .stdout
-        .split(|byte| *byte == 0)
-        .filter(|entry| !entry.is_empty())
-        .map(|entry| PathBuf::from(String::from_utf8_lossy(entry).as_ref()))
-        .collect())
+    Vec::new()
 }
 
 /// The gitignore pattern that names exactly the path `relative` to the repository's top folder: anchored with `/`,

@@ -371,6 +371,29 @@ fn child_body(signature: &str, statements: &str, base: &str) -> String {
     Lowered::with(&method_in("Report : Base", signature, statements), &[("src/App/Tenant/Base.php", base)]).body()
 }
 
+/// A `match` arm the analysis finds never runs, past an arm every tuple matches or behind a guard that is always false,
+/// and the `default` a PHP# `match` needs there, lower with the rest: the analysis types them as it types any arm.
+#[test]
+fn an_arm_that_never_runs_lowers_as_any_arm() {
+    let lowered = body(
+        "        const [int, int] pair = [5, 6];\n        const first = match (pair) { [int a, ...List<int> rest] => a + rest.count(), default => -1 };\n        const second = match (extra) { int n when false => -n, default => 0 };\n        return first + match (pair) { [int a, ...List<int> rest] => a, [int a, int b] => -b, default => -extra };\n",
+    );
+
+    assert!(
+        lowered.contains("        MATCH_ARM\n          null\n          UNARY_MINUS\n            ZVAL 1\n  ASSIGN\n"),
+        "{lowered}"
+    );
+    assert!(
+        lowered
+            .contains("              ZVAL false\n          UNARY_MINUS\n            VAR\n              ZVAL \"n\"\n"),
+        "{lowered}"
+    );
+    assert!(
+        lowered.ends_with("            UNARY_MINUS\n              VAR\n                ZVAL \"b\"\n          MATCH_ARM\n            null\n            UNARY_MINUS\n              VAR\n                ZVAL \"extra\"\n"),
+        "{lowered}"
+    );
+}
+
 /// ```php
 /// $base = 2; $base = 3;
 /// ```

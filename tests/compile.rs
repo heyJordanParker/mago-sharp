@@ -721,7 +721,8 @@ fn compile_warns_when_the_repository_of_a_worktree_is_missing() {
 }
 
 /// An `info/exclude` that can't be written, as in a read-only `.git`, leaves the new PHP files where git shows them, so
-/// the compile names them and how to fix it, and keeps quiet about the files the earlier block keeps out of git.
+/// the compile names them and the folder to make writable, which the file is renamed into, and keeps quiet about the
+/// temporary file and the files the earlier block keeps out of git.
 #[cfg(unix)]
 #[test]
 fn compile_warns_when_the_exclude_file_cannot_be_written() {
@@ -739,19 +740,56 @@ fn compile_warns_when_the_exclude_file_cannot_be_written() {
     std::fs::set_permissions(&info, std::fs::Permissions::from_mode(0o755)).unwrap();
 
     assert!(output.status.success(), "{}", printed(&output));
-    let exclude = info.join("exclude");
-    assert!(
-        printed(&output).contains(&format!("{} can't be written: Permission denied", exclude.display())),
-        "{}",
-        printed(&output)
-    );
     assert!(
         printed(&output).contains(&format!(
-            ", so git shows app/Refund.php as untracked. Make {} writable, and run vendor/bin/mago compile again.",
-            exclude.display()
+            "{}/exclude can't be replaced, as {} can't be written: permission denied, so git shows app/Refund.php as untracked. Make {} writable, and run vendor/bin/mago compile again.",
+            info.display(),
+            info.display(),
+            info.display()
         )),
         "{}",
         printed(&output)
+    );
+    assert!(!printed(&output).contains(&format!("{}/.tmp", info.display())), "{}", printed(&output));
+}
+
+/// A repository git refuses to read, as a checkout another user owns in a container or a CI job, or a broken `.git`,
+/// fails no compile: the block lists every PHP file, as with no git to run, and the compile warns once with git's
+/// reason.
+#[test]
+fn compile_keeps_the_php_files_out_of_git_where_git_refuses_the_repository() {
+    let directory = project(ORDER, MONEY);
+    let owned = std::fs::canonicalize(directory.path()).unwrap();
+    git(&owned, &["init", "--quiet"]);
+    let broken = tempfile::tempdir().unwrap();
+    let broken = std::fs::canonicalize(broken.path()).unwrap();
+    project_in(&broken, ORDER, MONEY);
+    std::fs::create_dir(broken.join(".git")).unwrap();
+
+    for (root, owner) in [(&owned, "1"), (&broken, "0")] {
+        write(root, ".git/info/exclude", "*.log\n");
+        let output = command(root, "never").env("GIT_TEST_ASSUME_DIFFERENT_OWNER", owner).output().unwrap();
+
+        assert!(output.status.success(), "{}: {}", root.display(), printed(&output));
+        assert_eq!(
+            std::fs::read_to_string(root.join(".git/info/exclude")).unwrap(),
+            format!("*.log\n{}", excluded(root, "/app/Order.php\n")),
+            "{}",
+            root.display()
+        );
+        let warning = format!("git can't read the .gitignore files of {}: fatal: ", root.display());
+        assert_eq!(printed(&output).matches(&warning).count(), 1, "{}", printed(&output));
+        assert_eq!(printed(&output).matches("fatal: ").count(), 1, "git's own output stays out: {}", printed(&output));
+        assert!(
+            printed(&output).contains(". The repository's info/exclude lists every file mago compile writes there."),
+            "{}",
+            printed(&output)
+        );
+    }
+    assert_eq!(
+        untracked(&owned),
+        "?? .sharp/app/Order.sharpc\n?? .sharp/listeners.php\n?? .sharp/vendor/acme/money/src/Money.sharpc\n?? app/Legacy.php\n?? app/Order.sharp\n?? composer.lock\n?? mago.toml\n?? vendor/acme/money/src/Money.sharp\n",
+        "the owner's git reads the block"
     );
 }
 

@@ -157,10 +157,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for DoWhile<'arena> {
                 .into_iter()
                 .all(|action| !actions.contains(action))
         };
-        let infinite_loop = body_ends_the_block
-            || artifacts
-                .get_expression_type(self.condition)
-                .is_some_and(mago_codex::ttype::union::TUnion::is_always_truthy);
+        let infinite_loop = body_ends_the_block || r#loop::is_always_true(self.condition);
 
         r#loop::inherit_loop_block_context(
             context,

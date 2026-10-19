@@ -10,6 +10,8 @@ use mago_syntax::walker::Walker;
 use crate::internal::CheckingWalker;
 use crate::internal::context::Context;
 
+pub use crate::internal::checker::class_like::is_php_keyword;
+
 mod internal;
 
 /// The main entry point for performing semantic analysis on a PHP program's CST.

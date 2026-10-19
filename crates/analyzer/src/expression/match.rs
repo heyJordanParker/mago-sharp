@@ -484,21 +484,24 @@ where
         is_exhaustive: bool,
         apply_original_subject_assertions: bool,
     ) -> Result<(ArmExecutionStatus, Vec<Clause>), AnalysisError> {
-        if is_exhaustive {
-            self.report_unreachable_arm(
-                expression_arm,
-                "All possible types for the subject have been handled by previous arms.",
-            );
-
-            return Ok((ArmExecutionStatus::Never, Vec::new()));
-        }
-
         let arm_condition = new_synthetic_disjunctive_identity(
             self.context.arena,
             subject_expr,
             expression_arm.conditions.get(0).unwrap(),
             expression_arm.conditions.iter().skip(1).copied().collect(),
         );
+
+        if is_exhaustive {
+            self.report_unreachable_arm(
+                expression_arm,
+                "All possible types for the subject have been handled by previous arms.",
+            );
+            // The subject is `never` past an exhaustive arm, where every pattern's test is false, so the arm is typed
+            // where the `match` starts, and no pattern of it is reported as one that never matches.
+            self.analyze_unreachable_arm(&[&arm_condition, expression_arm.expression], None)?;
+
+            return Ok((ArmExecutionStatus::Never, Vec::new()));
+        }
 
         let was_inside_conditional = running_else_context.flags.inside_conditional();
         let was_inside_loop = running_else_context.flags.inside_loop();
@@ -526,6 +529,8 @@ where
         };
 
         if arm_status == ArmExecutionStatus::Never {
+            self.analyze_unreachable_arm(&[expression_arm.expression], Some(running_else_context))?;
+
             return Ok((ArmExecutionStatus::Never, Vec::new()));
         }
 
@@ -684,7 +689,7 @@ where
         if is_exhaustive {
             self.report_unreachable_default_arm(default_arm);
 
-            return Ok(());
+            return self.analyze_unreachable_arm(&[default_arm.expression], Some(running_else_context));
         }
 
         let mut default_context = running_else_context.clone();
@@ -700,6 +705,28 @@ where
         arm_exit_contexts.push(default_context);
 
         Ok(())
+    }
+
+    /// Types `parts`, in order in `context`, or where the `match` starts when it is `None`: the condition and the result
+    /// of an arm of a PHP# `match` that never runs, or the result alone. PHP# keeps the arm, a `default` included since
+    /// a PHP# `match` needs one, and the lowering reads the type of every expression it lowers, as TypeScript and C#
+    /// type code that never runs. The arm gives the match no type and no context, and what its analysis reports is
+    /// dropped, since the arm is reported as one that never runs, or is the `default` PHP# needs. Plain PHP's
+    /// unreachable arm stays unread, as upstream Mago leaves it.
+    fn analyze_unreachable_arm<'part>(
+        &mut self,
+        parts: &[&'part Expression<'arena>],
+        context: Option<&BlockContext<'ctx>>,
+    ) -> Result<(), AnalysisError> {
+        if !self.context.dialect.is_sharp() {
+            return Ok(());
+        }
+        let mut context = context.unwrap_or(&*self.block_context).clone();
+        self.context.collector.start_recording();
+        let analyzed = parts.iter().try_for_each(|part| part.analyze(self.context, &mut context, self.artifacts));
+        self.context.collector.finish_recording();
+
+        analyzed
     }
 
     fn set_unhandled_match_error(

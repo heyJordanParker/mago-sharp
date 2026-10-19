@@ -264,6 +264,7 @@ use types::PlainParameter;
 use types::Types;
 use types::agreed_kind;
 use types::class_value_classes;
+use types::every_array_is_list;
 use types::receiver_classes;
 use types::receiver_intersections;
 
@@ -7680,11 +7681,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             let each = self.crossed(span, &element_type, &element, element_read);
             let each = self.hidden_arrow_function(span, &[&element], each);
             values = self.global_call(line, b"array_map", &[each, values]);
-        } else if element_type
-            .types
-            .iter()
-            .any(|atomic| matches!(atomic, TAtomic::Array(TArray::List(list)) if list.tuple_names.is_none()))
-        {
+        } else if every_array_is_list(&element_type) {
             // Spec section 12: plain PHP's array keyed by int alone is a `List` where it sits in what crosses too, so
             // each element renumbers as `\is_array($element#N) ? \array_values($element#N) : $element#N`.
             let element = self.hidden("element");

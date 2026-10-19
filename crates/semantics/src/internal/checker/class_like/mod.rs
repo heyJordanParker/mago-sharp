@@ -44,15 +44,22 @@ mod inheritance;
 mod method;
 mod property;
 
-/// Whether PHP refuses `name` for a class-like as a keyword. A `.sharp` file reads a PHP keyword that PHP# doesn't
-/// use as a plain name, spec section 2, so a PHP# type may take it, and `check_class_name` refuses the type names the
-/// engine reserves.
+/// Whether this PHP file names a class-like `name`, which PHP refuses as a keyword. A `.sharp` file reads a PHP keyword
+/// that PHP# doesn't use as a plain name, spec section 2, so a PHP# type may take it, and `check_class_name` refuses the
+/// type names the engine reserves.
 fn is_php_keyword_name(name: &[u8], context: &Context<'_, '_, '_>) -> bool {
-    !context.program.dialect.is_sharp()
-        && RESERVED_KEYWORDS
-            .iter()
-            .chain(&SOFT_RESERVED_KEYWORDS_MINUS_SYMBOL_ALLOWED)
-            .any(|keyword| keyword.eq_ignore_ascii_case(name))
+    !context.program.dialect.is_sharp() && is_php_keyword(name)
+}
+
+/// Whether PHP refuses `name`, ignoring case, as a type's name because it is a keyword, as `Case` is.
+///
+/// No PHP source declares a class, interface, trait or enum of that name, and a PHP# type may take it, spec section 1.
+#[must_use]
+pub fn is_php_keyword(name: &[u8]) -> bool {
+    RESERVED_KEYWORDS
+        .iter()
+        .chain(&SOFT_RESERVED_KEYWORDS_MINUS_SYMBOL_ALLOWED)
+        .any(|keyword| keyword.eq_ignore_ascii_case(name))
 }
 
 #[inline]

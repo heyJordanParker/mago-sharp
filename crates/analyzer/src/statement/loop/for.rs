@@ -24,10 +24,9 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for For<'arena> {
             declaration.analyze(context, block_context, artifacts)?;
         }
 
-        let infinite_loop = self.declaration.is_none()
-            && self.initializations.is_empty()
-            && self.conditions.is_empty()
-            && self.increments.is_empty();
+        // The last condition decides whether the loop runs again, so a `for` with none, or whose last is always true,
+        // never ends on it, as `while (true)` doesn't.
+        let infinite_loop = self.conditions.last().is_none_or(|condition| r#loop::is_always_true(condition));
 
         r#loop::analyze_for_or_while_loop(
             context,

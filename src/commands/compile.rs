@@ -37,6 +37,7 @@ use mago_reporting::IssueCollection;
 use mago_reporting::color::ColorChoice as ReportingColorChoice;
 use mago_reporting::reporter::Reporter;
 use mago_reporting::reporter::ReporterConfig;
+use mago_semantics::is_php_keyword;
 use mago_server::Server;
 use mago_sharp_bridge::unit;
 use mago_sharp_lean::Lean;
@@ -445,17 +446,28 @@ fn quoted(table: &mut Vec<u8>, text: &[u8]) {
 /// source. It loads the source through the engine, and on plain PHP it throws before any source can reach the output.
 /// Its last statement states the type's declaration and never runs, so a tool that reads PHP source, as Composer's
 /// class map and Symfony's attribute routing do, finds the type in it, and the engine declares the type once, from the
-/// source. Once the source is gone it declares nothing, as if it were not there, until the next compile deletes it.
+/// source. PHP refuses a keyword as a type's name even in a declaration that never runs, so the file of a type named
+/// after one, as `Case`, states none and parses. Once the source is gone it declares nothing, as if it were not there,
+/// until the next compile deletes it.
 fn beside(declared: &DeclaredType) -> String {
     let DeclaredType { file, keyword, .. } = declared;
     let name = file.strip_suffix(".sharp").unwrap_or(file);
+    let (finds, declaration) = match keyword {
+        Some(keyword) => (
+            "lists or reads",
+            format!(
+                "\n// The engine declares {name} from {file}, and this declaration never runs.\nif (false) {{\n    {keyword} {name}\n    {{\n    }}\n}}\n"
+            ),
+        ),
+        None => ("lists", String::new()),
+    };
     let namespace = match declared.name.rsplit_once('.') {
         Some((namespace, _)) => format!("namespace {};\n\n", namespace.replace('.', "\\")),
         None => String::new(),
     };
 
     format!(
-        "{COMPANION_START}{file}, so PHP code that lists or reads *.php files finds its type.\n\ndeclare(strict_types=1);\n\n{namespace}if (!\\is_file(__DIR__ . '/{file}')) {{\n    return;\n}}\n\n\\function_exists('Sharp\\Internal\\requireNative')\n    || throw new \\Error(\n        'This project needs the PHP# engine, and this is plain PHP. Install php-sharp, or run the ghcr.io/heyjordanparker/php-sharp image.',\n    );\n\nrequire_once __DIR__ . '/{file}';\n\n// The engine declares {name} from {file}, and this declaration never runs.\nif (false) {{\n    {keyword} {name}\n    {{\n    }}\n}}\n"
+        "{COMPANION_START}{file}, so PHP code that {finds} *.php files finds its type.\n\ndeclare(strict_types=1);\n\n{namespace}if (!\\is_file(__DIR__ . '/{file}')) {{\n    return;\n}}\n\n\\function_exists('Sharp\\Internal\\requireNative')\n    || throw new \\Error(\n        'This project needs the PHP# engine, and this is plain PHP. Install php-sharp, or run the ghcr.io/heyjordanparker/php-sharp image.',\n    );\n\nrequire_once __DIR__ . '/{file}';\n{declaration}"
     )
 }
 
@@ -478,8 +490,9 @@ struct DeclaredType {
     /// The type's PHP# name, as `App.Billing.Order`.
     name: String,
     /// The PHP keyword of the type the engine declares: `interface`, `enum` for an enum that runs as a PHP enum, or
-    /// `class` for a class, a struct, an event, and an enum whose cases are classes.
-    keyword: &'static str,
+    /// `class` for a class, a struct, an event, and an enum whose cases are classes. It is none for a type PHP source
+    /// can't declare, one named after a PHP keyword.
+    keyword: Option<&'static str>,
 }
 
 /// The type the PHP# source `file` declares, when it declares one named like it, spec section 27: a class, interface,
@@ -510,6 +523,8 @@ fn declared_type(file: &File) -> Option<DeclaredType> {
         Some(namespace) => format!("{}.{stem}", String::from_utf8_lossy(namespace.value()).replace('\\', ".")),
         None => stem.to_string(),
     };
+
+    let keyword = (!is_php_keyword(stem.as_bytes())).then_some(keyword);
 
     Some(DeclaredType { file: type_file.to_string(), name, keyword })
 }

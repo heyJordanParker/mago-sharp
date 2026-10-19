@@ -2226,7 +2226,7 @@ fn an_interface_property_takes_no_initial_value_and_no_accessor_body() {
 /// error that writes the computed property, whose expression is the default body, spec section 22.
 #[test]
 fn an_interface_property_is_get_only_settable_or_init() {
-    let code = "namespace App.Tenant;\n\ninterface Named\n{\n    string name { get; }\n    string label { get => \"label\"; }\n    string title { get; set; }\n    string tag { get; private set; }\n    string code { protected get; set; }\n    string kind { get; set; init; }\n    string state { get; init; }\n    string note { init; get; }\n    string slug { get; get; }\n    string size { init; }\n}\n";
+    let code = "namespace App.Tenant;\n\ninterface Named\n{\n    string name { get; }\n    string label { get => \"label\"; }\n    string title { get; set; }\n    string tag { get; private set; }\n    string code { protected get; set; }\n    string kind { get; set; init; }\n    string state { get; init; }\n    string note { init; get; }\n    string slug { get; get; }\n    string size { init; }\n    string seal { get; private init; }\n}\n";
 
     assert_eq!(
         issues(code),
@@ -2236,16 +2236,21 @@ fn an_interface_property_is_get_only_settable_or_init() {
             "9:19 An interface member is always public, so it takes no access modifier.",
             "10:29 A PHP# property is written by `set` or by `init`, not both.",
             "13:24 A PHP# property declares each accessor once.",
-            "14:12 A PHP# property needs a `get` accessor."
+            "14:12 A PHP# property needs a `get` accessor.",
+            "15:24 An interface member is always public, so it takes no access modifier."
         ]
     );
-    let helps: Vec<Option<String>> =
-        check_in_type_file(code).into_iter().skip(1).take(2).map(|issue| issue.help).collect();
+    let helps: Vec<Option<String>> = check_in_type_file(code)
+        .into_iter()
+        .filter(|issue| issue.message.starts_with("An interface member is always public"))
+        .map(|issue| issue.help)
+        .collect();
     assert_eq!(
         helps,
         [
             Some("Declare `{ get; }` in the interface, and `{ get; private set; }` in the class.".to_owned()),
             Some("Remove `protected`.".to_owned()),
+            Some("Declare `{ get; }` in the interface, and `{ get; private init; }` in the class.".to_owned()),
         ]
     );
 

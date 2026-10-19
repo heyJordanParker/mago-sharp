@@ -142,6 +142,17 @@ pub fn get_named_loop_levels(block_context: &BlockContext<'_>, label: &LocalIden
         .map_or(1, |inner_loops| inner_loops as u64 + 1)
 }
 
+/// Whether the loop condition `condition` is a constant that always holds, `true` or an integer above zero, so the loop
+/// ends only through a jump out of its body. It is judged from the condition's words, never from its type after a
+/// pass, which the pass may have narrowed, as TypeScript and Kotlin judge an infinite loop.
+pub fn is_always_true(condition: &Expression<'_>) -> bool {
+    match condition {
+        Expression::Literal(Literal::True(_)) => true,
+        Expression::Literal(Literal::Integer(integer)) => integer.value.is_none_or(|value| value > 0),
+        _ => false,
+    }
+}
+
 fn get_ordinal_string(n: usize) -> String {
     match n {
         1 => "first".to_string(),
@@ -909,18 +920,19 @@ where
     debug_assert!(pre_conditions_applied, "Pre-conditions should have been applied at least once.");
 
     let does_sometimes_break = loop_scope.final_actions.contains(ControlAction::Break);
+    let does_sometimes_continue = loop_scope.final_actions.contains(ControlAction::Continue);
 
-    // A body that never ends a pass or breaks this loop, as one that always returns or leaves a loop around it, never
-    // reaches the condition again, so a `for` or `while` ends only when its condition fails before the first pass,
-    // with the locals it began with.
-    if !is_do && !does_sometimes_break {
+    // A body that never reaches its end, continues this loop or breaks it, as one that always returns or leaves a loop
+    // around it, never reaches the condition again, so a `for` or `while` ends only when its condition fails before the
+    // first pass, with the locals it began with. The loop's scope holds a `continue` of this loop alone, as one that
+    // names a loop around it continues that loop's scope.
+    if !is_do && !does_sometimes_break && !does_sometimes_continue {
         let body_actions = ControlAction::from_statements(statements.iter().collect(), vec![], Some(artifacts), true);
-        if !body_actions.contains(ControlAction::None) && !body_actions.contains(ControlAction::Continue) {
+        if !body_actions.contains(ControlAction::None) {
             continue_context.locals.clone_from(&loop_scope.parent_context_variables);
         }
     }
 
-    let does_sometimes_continue = loop_scope.final_actions.contains(ControlAction::Continue);
     let does_always_break = does_sometimes_break && loop_scope.final_actions.len() == 1;
     let preserve_array_shapes_for = continue_context
         .references_in_scope

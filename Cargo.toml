@@ -281,6 +281,7 @@ mago-codex = { workspace = true }
 mago-guard = { workspace = true, features = ["serde"] }
 mago-orchestrator = { workspace = true }
 mago-server = { workspace = true }
+mago-semantics = { workspace = true }
 mago-sharp-bridge = { workspace = true }
 mago-sharp-lean = { workspace = true }
 mago-extension = { workspace = true }

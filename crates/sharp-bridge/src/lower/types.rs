@@ -149,10 +149,9 @@ impl<'analysis> Types<'analysis> {
 
     /// Whether `value`, a call of plain PHP or a read of a property plain PHP declares, may be an `int`-keyed array
     /// whose keys have gaps, which the analysis reads as a `List`, as `get_sharp_received_type` says: plain PHP declares
-    /// a keyed array, and the analysis types the value as a `List`. A node the lowering builds has no type.
+    /// a keyed array, and the analysis types the value as a `List` and as no other array, as
+    /// [`every_array_is_list`] says. A node the lowering builds has no type.
     pub(crate) fn arrives_as_list(&self, value: &Expression) -> bool {
-        let is_list =
-            |atomic: &TAtomic| matches!(atomic, TAtomic::Array(TArray::List(list)) if list.tuple_names.is_none());
         let declared = match value.unparenthesized() {
             Expression::Call(_) => self
                 .plain_php_call(value)
@@ -163,7 +162,7 @@ impl<'analysis> Types<'analysis> {
 
         declared.is_some_and(|declared| {
             declared.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(TArray::Keyed(_))))
-        }) && self.artifacts.get_expression_type(value).is_some_and(|r#type| r#type.types.iter().any(is_list))
+        }) && self.artifacts.get_expression_type(value).is_some_and(every_array_is_list)
     }
 
     /// Whether the collection `expression` may hold a `Map`, whose element a loop reads as its entry, spec section 17.
@@ -1832,6 +1831,24 @@ pub(crate) fn receiver_intersections(r#type: &TUnion) -> Option<Vec<Vec<&[u8]>>>
     }
 
     (!receivers.is_empty()).then_some(receivers)
+}
+
+/// Whether a value of `r#type` that is a PHP array is a `List`, whatever array it is, so a plain PHP array keyed by
+/// `int` alone renumbers as one, spec section 12. A value that may also be a `Map`, a tuple with names or any other
+/// array keeps its keys, so renumbering never drops a `string` key.
+pub(crate) fn every_array_is_list(r#type: &TUnion) -> bool {
+    let mut holds_list = false;
+    for atomic in r#type.types.iter() {
+        match atomic {
+            TAtomic::Array(TArray::List(list)) if list.tuple_names.is_none() => holds_list = true,
+            TAtomic::Array(_) | TAtomic::Mixed(_) | TAtomic::Iterable(_) | TAtomic::GenericParameter(_) => {
+                return false;
+            }
+            _ => {}
+        }
+    }
+
+    holds_list
 }
 
 /// The fully qualified names of the classes a class value of `r#type` holds, leaving out `null`, or none when part of

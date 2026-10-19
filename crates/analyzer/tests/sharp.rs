@@ -3287,17 +3287,32 @@ fn a_named_break_or_continue_leaves_or_continues_the_loop_it_names() {
     assert_eq!(issues(("src/Demo/Levels.php", php), &[]), ["11:23 invalid-break"]);
 }
 
-/// A loop whose body always leaves past it, through `return` or a `break` that names a loop around it, never checks
-/// its condition after a pass, so it ends only when the condition fails before the first one: the code after it runs
-/// with what the locals held before the loop, narrowed by the failed condition, and never with `never`. Plain PHP's
-/// `break 2` is the same.
+/// A loop whose body always leaves past it, through `return`, or a `break` or `continue` that names a loop around it,
+/// never checks its condition after a pass, so it ends only when the condition fails before the first one: the code
+/// after it runs with what the locals held before the loop, narrowed by the failed condition, and never with `never`.
+/// Plain PHP's `break 2` and `continue 2` are the same.
 #[test]
 fn a_loop_whose_body_always_leaves_past_it_ends_with_the_locals_it_began_with() {
-    let sharp = "namespace Demo;\n\nclass Rows\n{\n    public static int named(List<int> rows, int? limit)\n    {\n        let total = 0;\n        orders: for (const row of rows) {\n            while (limit != null) {\n                total = row + limit;\n                break orders;\n            }\n            Rows.note(limit);\n        }\n        return total;\n    }\n\n    public static int returned(List<int> rows, int? limit)\n    {\n        for (const row of rows) {\n            while (limit != null) {\n                return row + limit;\n            }\n            Rows.note(limit);\n        }\n        return 0;\n    }\n\n    private static void note(int? limit)\n    {\n    }\n}\n";
-    let php = "<?php\n\nnamespace Demo;\n\nfinal class Rows\n{\n    /** @param list<int> $rows */\n    public static function levels(array $rows, ?int $limit): int\n    {\n        $total = 0;\n        foreach ($rows as $row) {\n            while ($limit !== null) {\n                $total = $row + $limit;\n                break 2;\n            }\n            self::none($limit);\n        }\n        return $total;\n    }\n\n    public static function returned(?int $limit): int\n    {\n        while ($limit !== null) {\n            return $limit;\n        }\n        self::none($limit);\n        return 0;\n    }\n\n    public static function passes(?int $limit): void\n    {\n        while ($limit !== null) {\n            $limit = $limit > 3 ? null : $limit + 1;\n        }\n        self::none($limit);\n    }\n\n    private static function none(null $limit): void\n    {\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Rows\n{\n    public static int named(List<int> rows, int? limit)\n    {\n        let total = 0;\n        orders: for (const row of rows) {\n            while (limit != null) {\n                total = row + limit;\n                break orders;\n            }\n            Rows.note(limit);\n        }\n        return total;\n    }\n\n    public static int returned(List<int> rows, int? limit)\n    {\n        for (const row of rows) {\n            while (limit != null) {\n                return row + limit;\n            }\n            Rows.note(limit);\n        }\n        return 0;\n    }\n\n    public static int continued(List<int> rows, int? limit)\n    {\n        let total = 0;\n        orders: for (const row of rows) {\n            while (limit != null) {\n                total = row + limit;\n                continue orders;\n            }\n            Rows.note(limit);\n        }\n        return total;\n    }\n\n    public static int stepped(List<int> rows, int? limit)\n    {\n        let total = 0;\n        orders: for (const row of rows) {\n            for (let step = 0; limit != null; step++) {\n                total = row + step;\n                continue orders;\n            }\n            Rows.note(limit);\n        }\n        return total;\n    }\n\n    private static void note(int? limit)\n    {\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nfinal class Rows\n{\n    /** @param list<int> $rows */\n    public static function levels(array $rows, ?int $limit): int\n    {\n        $total = 0;\n        foreach ($rows as $row) {\n            while ($limit !== null) {\n                $total = $row + $limit;\n                break 2;\n            }\n            self::none($limit);\n        }\n        return $total;\n    }\n\n    public static function returned(?int $limit): int\n    {\n        while ($limit !== null) {\n            return $limit;\n        }\n        self::none($limit);\n        return 0;\n    }\n\n    public static function passes(?int $limit): void\n    {\n        while ($limit !== null) {\n            $limit = $limit > 3 ? null : $limit + 1;\n        }\n        self::none($limit);\n    }\n\n    /** @param list<int> $rows */\n    public static function continued(array $rows, ?int $limit): int\n    {\n        $total = 0;\n        foreach ($rows as $row) {\n            while ($limit !== null) {\n                $total = $row + $limit;\n                continue 2;\n            }\n            self::none($limit);\n        }\n        return $total;\n    }\n\n    private static function none(null $limit): void\n    {\n    }\n}\n";
 
     assert_eq!(
         (issues(("src/Demo/Rows.sharp", sharp), &[]), issues(("src/Demo/Rows.php", php), &[])),
+        (Vec::<String>::new(), Vec::<String>::new())
+    );
+}
+
+/// A loop never ends on its condition only when that condition is the constant `true`, judged from its words before any
+/// pass, as TypeScript and Kotlin judge it: a `for` whose condition is `true` never ends, as `while (true)` doesn't, so
+/// it needs no `return` after it, and a `do … while` on a `bool` local ends once the local is false, whatever the last
+/// pass narrowed it to, so the statement after it runs. Plain PHP's loops are the same.
+#[test]
+fn a_loop_never_ends_on_its_condition_only_when_the_condition_is_true() {
+    let sharp = "namespace Demo;\n\nclass Passes\n{\n    public static int again(bool again)\n    {\n        let passes = 0;\n        do {\n            passes = passes + 1;\n        } while (again);\n        return passes;\n    }\n\n    public static int counted()\n    {\n        for (let step = 0; true; step++) {\n            return step;\n        }\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nfinal class Passes\n{\n    public static function again(bool $again): int\n    {\n        $passes = 0;\n        do {\n            $passes = $passes + 1;\n        } while ($again);\n        return $passes;\n    }\n\n    public static function counted(): int\n    {\n        for ($step = 0; true; $step++) {\n            return $step;\n        }\n    }\n}\n";
+
+    assert_eq!(
+        (refusals(("src/Demo/Passes.sharp", sharp), &[]), issues(("src/Demo/Passes.php", php), &[])),
         (Vec::<String>::new(), Vec::<String>::new())
     );
 }

@@ -3349,12 +3349,14 @@ fn is_access_modifier(modifier: &Modifier) -> bool {
     matches!(modifier, Modifier::Public(_) | Modifier::Protected(_) | Modifier::Private(_) | Modifier::Internal(_))
 }
 
-/// Reports an access modifier on an interface property's accessor, as on any interface member. A narrower `set` is
-/// the class's: the interface states the property `{ get; }`, and the class gives it with the narrower `set`.
+/// Reports an access modifier on an interface property's accessor, as on any interface member. A narrower `set` or
+/// `init` is the class's: the interface states the property `{ get; }`, and the class gives it with the narrower
+/// accessor, as a class gives `{ get; init; }` only for an interface's `init`.
 fn report_interface_accessor_access(accessor: &PropertyHook, modifier: &Modifier, context: &mut Context<'_, '_, '_>) {
     let keyword = BytesDisplay(modifier.get_keyword().value);
     let help = if accessor.is_setter() {
-        format!("Declare `{{ get; }}` in the interface, and `{{ get; {keyword} set; }}` in the class.")
+        let setter = BytesDisplay(accessor.name.value);
+        format!("Declare `{{ get; }}` in the interface, and `{{ get; {keyword} {setter}; }}` in the class.")
     } else {
         format!("Remove `{keyword}`.")
     };

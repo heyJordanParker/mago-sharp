@@ -1436,6 +1436,7 @@ dependencies = [
  "mago-php-version",
  "mago-prelude",
  "mago-reporting",
+ "mago-semantics",
  "mago-server",
  "mago-sharp-bridge",
  "mago-sharp-lean",
