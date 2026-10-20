@@ -19428,12 +19428,12 @@ fn a_call_of_an_interface_member_checks_its_result() {
     let body = Lowered::with(
         &method_with(
             "void run(Taggable owner, Source<Relation> source, Relation relation)",
-            "        Relation tags = owner.relate(\"tags\");\n        List<int> ids = owner.ids();\n        Relation read = source.read();\n        Any? raw = owner.raw();\n        owner.touch();\n        Relation again = relation.again();\n        const relate = owner.relate;\n        Relation named = relate(\"named\");\n",
+            "        Relation tags = owner.relate(\"tags\");\n        List<int> ids = owner.ids();\n        Set<string> names = owner.names();\n        Map<string, int> counts = owner.counts();\n        Iterable<int> stream = owner.stream();\n        Relation read = source.read();\n        Any? raw = owner.raw();\n        owner.touch();\n        Relation again = relation.again();\n        const relate = owner.relate;\n        Relation named = relate(\"named\");\n",
         ),
         &[
             (
                 "src/App/Tenant/Taggable.sharp",
-                "namespace App.Tenant;\n\npublic interface Taggable\n{\n    Relation relate(string name);\n\n    List<int> ids();\n\n    Any? raw();\n\n    void touch();\n}\n",
+                "namespace App.Tenant;\n\npublic interface Taggable\n{\n    Relation relate(string name);\n\n    List<int> ids();\n\n    Set<string> names();\n\n    Map<string, int> counts();\n\n    Iterable<int> stream();\n\n    Any? raw();\n\n    void touch();\n}\n",
             ),
             ("src/App/Tenant/Source.sharp", "namespace App.Tenant;\n\npublic interface Source<T>\n{\n    T read();\n}\n"),
             (
@@ -19455,8 +19455,11 @@ fn a_call_of_an_interface_member_checks_its_result() {
         "{body}"
     );
     assert!(body.contains("      ZVAL \"List<Any?>\"\n      ZVAL \"App.Tenant.Taggable.ids()\"\n"), "{body}");
+    assert!(body.contains("      ZVAL \"Set<Any?>\"\n      ZVAL \"App.Tenant.Taggable.names()\"\n"), "{body}");
+    assert!(body.contains("      ZVAL \"Map<Any?, Any?>\"\n      ZVAL \"App.Tenant.Taggable.counts()\"\n"), "{body}");
+    assert!(body.contains("      ZVAL \"Iterable<Any?>\"\n      ZVAL \"App.Tenant.Taggable.stream()\"\n"), "{body}");
     assert!(body.contains("      ZVAL \"App.Tenant.Relation\"\n      ZVAL \"App.Tenant.Source.read()\"\n"), "{body}");
-    assert_eq!(body.matches("VERIFY_TYPE_ARGS").count(), 4, "{body}");
+    assert_eq!(body.matches("VERIFY_TYPE_ARGS").count(), 7, "{body}");
 }
 
 /// ```php

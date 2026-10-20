@@ -2741,7 +2741,13 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
             self.function_type(return_type, function_type, crossing, self.line(start))
         };
-        let return_type = if caller_checked { self.caller_checked(return_type) } else { return_type };
+        if caller_checked {
+            let result = &mut self.nodes[return_type as usize];
+            if result.kind != SHARP_AST_SHARP_TYPE_ARGS {
+                unreachable!("a result PHP# writes carries its type text, not the result at {:?}", method.name.span);
+            }
+            result.attr |= ZEND_SHARP_RESULT_CALLER_CHECKED;
+        }
         self.static_type_parameters = None;
         // A sub-interface's body that replaces its parent's default body runs as a method of its trait of default
         // bodies, which has no parent, so only the interface's signature carries `#[\Override]`.
@@ -7171,20 +7177,6 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let attr = if crossing { ZEND_SHARP_RESULT_CROSSES } else { 0 };
 
         self.node(SHARP_AST_SHARP_TYPE_ARGS, attr, line, &[php_type, text])
-    }
-
-    /// The result type `return_type`, which declares a PHP type, as a `SHARP_TYPE_ARGS` whose attr holds
-    /// `ZEND_SHARP_RESULT_CALLER_CHECKED`, so the engine links a plain PHP method that declares no return type under it.
-    fn caller_checked(&mut self, return_type: u32) -> u32 {
-        let node = &mut self.nodes[return_type as usize];
-        if node.kind == SHARP_AST_SHARP_TYPE_ARGS {
-            node.attr |= ZEND_SHARP_RESULT_CALLER_CHECKED;
-
-            return return_type;
-        }
-        let line = node.line;
-
-        self.node(SHARP_AST_SHARP_TYPE_ARGS, ZEND_SHARP_RESULT_CALLER_CHECKED, line, &[return_type, NULL])
     }
 
     /// The parameters of the lambda at `lambda`, each with its type or a null type, as PHP writes a parameter without

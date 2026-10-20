@@ -747,11 +747,11 @@ impl<'analysis> Types<'analysis> {
             return needs_result_check(r#type)
                 .then(|| (text(r#type, self.codebase, Parameter::Index), format!("{name}()")));
         }
-        if let Some(member) = self.artifacts.get_callees(call).find_map(|target| match target {
+        if let Some((class, member)) = self.artifacts.get_callees(call).find_map(|target| match target {
             CallTarget::FunctionLike { callee, .. } => self.result_checked_member(callee),
             _ => None,
         }) {
-            return self.member_result_check(member, r#type);
+            return self.member_result_check(class, member, r#type);
         }
         let (name, metadata) = self.plain_php_call(call)?;
         let text = self.checked_text(r#type, metadata.flags.is_user_defined())?;
@@ -878,30 +878,33 @@ impl<'analysis> Types<'analysis> {
         (!method.flags.is_user_defined() && takes_function_value).then(|| method.original_name.to_string())
     }
 
-    /// `callee` when it is a member of a PHP# interface, whose result each PHP# call checks, spec section 22.
-    fn result_checked_member<'callee>(
+    /// The class and the metadata of `callee` when it is a member of a PHP# interface, whose result each PHP# call
+    /// checks, spec section 22.
+    fn result_checked_member(
         &self,
-        callee: &'callee FunctionLikeIdentifier,
-    ) -> Option<&'callee FunctionLikeIdentifier> {
+        callee: &FunctionLikeIdentifier,
+    ) -> Option<(Word, &'analysis FunctionLikeMetadata)> {
         let FunctionLikeIdentifier::Method(class, method) = callee else {
             return None;
         };
+        let member = self.codebase.get_method(class.as_bytes(), method.as_bytes())?;
 
-        self.checks_results_at_call(class.as_bytes(), method.as_bytes()).then_some(callee)
+        self.scanned(class.as_bytes()).checks_results_at_call(member).then_some((*class, member))
     }
 
-    /// The check a PHP# call of `member`, a PHP# interface's method, takes on its result of the type `r#type`, spec
-    /// section 22, and the member as PHP# writes it, `App.Taggable.morphToMany()`. A plain PHP class may implement the
-    /// member with a method that declares no return type, so the call checks the result as it checks a value plain PHP
-    /// gives, in a time that doesn't grow with the value: a `List`, a `Set`, a `Map` or an `Iterable` as the collection
-    /// alone, `List<Any?>`, and every other type whole. A result that holds a `float`, an `Any` or an `Object` is
-    /// checked whole, collections too, as [`Self::call_check`] checks any other call plain PHP may answer, since each
-    /// such part converts or refuses a value of its own. None for a result of any value, `Any?` or `void`.
-    fn member_result_check(&self, member: &FunctionLikeIdentifier, r#type: &TUnion) -> Option<(String, String)> {
-        let FunctionLikeIdentifier::Method(class, _) = member else {
-            return None;
-        };
-        let method = self.codebase.get_function_like(member)?;
+    /// The check a PHP# call of `member`, a method of the PHP# interface `class`, takes on its result of the type
+    /// `r#type`, spec section 22, and the member as PHP# writes it, `App.Taggable.morphToMany()`. A plain PHP class may
+    /// implement the member with a method that declares no return type, so the call checks the result as it checks a
+    /// value plain PHP gives, in a time that doesn't grow with the value: a `List`, a `Set`, a `Map` or an `Iterable`
+    /// as the collection alone, `List<Any?>`, and every other type whole. A result that holds a `float`, an `Any` or an
+    /// `Object` is checked whole, collections too, as [`Self::call_check`] checks any other call plain PHP may answer,
+    /// since each such part converts or refuses a value of its own. None for a result of any value, `Any?` or `void`.
+    fn member_result_check(
+        &self,
+        class: Word,
+        member: &FunctionLikeMetadata,
+        r#type: &TUnion,
+    ) -> Option<(String, String)> {
         if r#type.is_void() || r#type.is_never() || (r#type.is_mixed() && r#type.can_be_null()) {
             return None;
         }
@@ -909,7 +912,7 @@ impl<'analysis> Types<'analysis> {
 
         Some((
             text(&checked, self.codebase, Parameter::Index),
-            format!("{}.{}()", class_text(*class, self.codebase), method.original_name),
+            format!("{}.{}()", class_text(class, self.codebase), member.original_name),
         ))
     }
 
@@ -917,13 +920,13 @@ impl<'analysis> Types<'analysis> {
     /// member, as [`Self::member_result_check`] says.
     pub(crate) fn method_value_check(&self, value: &Expression) -> Option<(String, String)> {
         let Some(TAtomic::Callable(TCallable::Signature(signature))) =
-            self.artifacts.get_expression_type(value)?.types.iter().find(|atomic| atomic.is_callable())
+            self.expression_type(value).types.iter().find(|atomic| atomic.is_callable())
         else {
-            return None;
+            unreachable!("the analysis types a method value as its signature, not the value at {:?}", value.span());
         };
-        let source = signature.get_source()?;
+        let (class, member) = self.result_checked_member(&signature.get_source()?)?;
 
-        self.member_result_check(self.result_checked_member(&source)?, signature.get_return_type()?)
+        self.member_result_check(class, member, signature.get_return_type()?)
     }
 
     /// The name of the function value the call `call` runs, as the file writes it: the local of `f(2)` and `f?.(2)`,
