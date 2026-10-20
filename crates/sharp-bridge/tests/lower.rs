@@ -11448,28 +11448,55 @@ fn a_generic_call_carries_its_type_arguments_and_a_generic_method_its_metadata()
             type_arguments,
         )
     };
-    assert_eq!(lowered.body(), call(3, "App.Order"));
-    assert_eq!(lowered.body_of("inferred"), call(2, "App.Order"));
+    // Spec section 22: a call that gives a generic method its type arguments checks the result against the type they
+    // give, and one that gives its own method's type parameter leaves the check to the call of that method.
+    let checked = |count: u32| {
+        format!(
+            indoc! {r#"
+                STMT_LIST
+                  RETURN
+                    VERIFY_TYPE_ARGS
+                      STATIC_CALL
+                        ZVAL "App\\Repository"
+                        ZVAL "repeat"
+                        ARG_LIST
+                          VAR
+                            ZVAL "order"
+                          ZVAL {}
+                          SHARP_TYPE_ARGS
+                            null
+                            ZVAL "App.Order"
+                      ZVAL "List<Any?>, List<App.Order>"
+                      ZVAL "App.Repository.repeat()"
+            "#},
+            count,
+        )
+    };
+    assert_eq!(lowered.body(), checked(3));
+    assert_eq!(lowered.body_of("inferred"), checked(2));
     // `new Holder()` binds no `T`, so `get()` gives a type argument nothing chose, which the engine takes as `Any?`.
     assert_eq!(
         lowered.body_of("unbound"),
         indoc! {r#"
             STMT_LIST
               RETURN
-                STATIC_CALL
-                  ZVAL "App\\Repository"
-                  ZVAL "repeat"
-                  ARG_LIST
-                    METHOD_CALL
-                      NEW
-                        ZVAL "App\\Holder"
+                VERIFY_TYPE_ARGS
+                  STATIC_CALL
+                    ZVAL "App\\Repository"
+                    ZVAL "repeat"
+                    ARG_LIST
+                      METHOD_CALL
+                        NEW
+                          ZVAL "App\\Holder"
+                          ARG_LIST
+                        ZVAL "get"
                         ARG_LIST
-                      ZVAL "get"
-                      ARG_LIST
-                    ZVAL 4
-                    SHARP_TYPE_ARGS
-                      null
-                      ZVAL "Any?"
+                      ZVAL 4
+                      SHARP_TYPE_ARGS
+                        null
+                        ZVAL "Any?"
+                  ZVAL "List<Any?>"
+                  ZVAL "App.Repository.repeat()"
         "#}
     );
     assert_eq!(lowered.body_of("forward"), call(1, "#0"));
@@ -11974,23 +12001,28 @@ fn a_type_argument_a_plain_php_refinement_fixes_carries_its_php_sharp_text() {
 
     let body = lowered.body();
     assert_eq!(body.matches("SHARP_TYPE_ARGS").count(), 10, "{body}");
+    assert_eq!(body.matches("VERIFY_TYPE_ARGS").count(), 11, "{body}");
     for (text, calls) in [
         // Two type arguments, and the check of the list `Pager.list()` returns.
         ("List<int>", 3),
-        ("string", 1),
-        ("int", 1),
-        ("Class<Object>", 1),
+        // A type argument, and the check of the result of the call that gives it, spec section 22, which reads a
+        // collection alone and names the type argument.
+        ("string", 2),
+        ("int", 2),
+        ("Class<Object>", 2),
         ("Map<string, int>", 2),
-        ("int|string", 1),
+        ("Map<Any?, Any?>, Map<string, int>", 2),
+        ("int|string", 2),
         ("Map<string, List<int>>", 1),
         ("List<Set<string>>", 1),
+        ("List<Any?>, List<Set<string>>", 1),
     ] {
         assert_eq!(body.matches(&format!("ZVAL \"{text}\"\n")).count(), calls, "{text}: {body}");
     }
 }
 
 /// A value of a type parameter is a value of its bound, so a generic method called on it carries its type arguments as
-/// a call on the bound does.
+/// a call on the bound does, and checks the result against the type they give, spec section 22.
 #[test]
 fn a_generic_call_on_a_value_of_a_type_parameter_carries_its_type_arguments() {
     let lowered = Lowered::with(
@@ -12013,14 +12045,17 @@ fn a_generic_call_on_a_value_of_a_type_parameter_carries_its_type_arguments() {
         indoc! {r#"
             STMT_LIST
               RETURN
-                METHOD_CALL
-                  VAR
-                    ZVAL "shelf"
-                  ZVAL "make"
-                  ARG_LIST
-                    SHARP_TYPE_ARGS
-                      null
-                      ZVAL "App.Order"
+                VERIFY_TYPE_ARGS
+                  METHOD_CALL
+                    VAR
+                      ZVAL "shelf"
+                    ZVAL "make"
+                    ARG_LIST
+                      SHARP_TYPE_ARGS
+                        null
+                        ZVAL "App.Order"
+                  ZVAL "App.Box<App.Order>"
+                  ZVAL "App.Shelf.make()"
         "#}
     );
 }
@@ -14744,11 +14779,11 @@ fn super_calls_are_static_calls_on_parent() {
 }
 
 /// ```php
-/// return parent::pick($order);
+/// return \Sharp\verify(parent::pick($order), 'App.Order', 'App.Base.pick()');
 /// ```
 ///
 /// A generic `super` call carries its type arguments when PHP# declares the method, though the parent between is a plain
-/// PHP class that inherits it.
+/// PHP class that inherits it, and checks the result against the type they give, spec section 22.
 #[test]
 fn a_generic_super_call_through_a_plain_php_parent_carries_its_type_arguments() {
     let lowered = Lowered::with(
@@ -14775,15 +14810,18 @@ fn a_generic_super_call_through_a_plain_php_parent_carries_its_type_arguments() 
         indoc! {r#"
             STMT_LIST
               RETURN
-                STATIC_CALL
-                  ZVAL [1] "parent"
-                  ZVAL "pick"
-                  ARG_LIST
-                    VAR
-                      ZVAL "order"
-                    SHARP_TYPE_ARGS
-                      null
-                      ZVAL "App.Order"
+                VERIFY_TYPE_ARGS
+                  STATIC_CALL
+                    ZVAL [1] "parent"
+                    ZVAL "pick"
+                    ARG_LIST
+                      VAR
+                        ZVAL "order"
+                      SHARP_TYPE_ARGS
+                        null
+                        ZVAL "App.Order"
+                  ZVAL "App.Order"
+                  ZVAL "App.Base.pick()"
         "#}
     );
 }
@@ -15409,18 +15447,15 @@ fn an_iterable_or_a_tuple_constant_holds_its_list_literal() {
 }
 
 /// ```php
-/// class Bill extends \App\Record implements \App\Morphable
+/// class Bill extends \App\Record implements \App\Morphable, \App\Named
 /// {
-///     public function getMorphClass(...$arguments): string { return parent::getMorphClass(...$arguments); }
 /// }
 /// ```
 ///
-/// A method a PHP# interface requires, which the class takes from a plain PHP parent declaring no return type, is the
-/// parent's method with the interface's return type, so PHP takes it as the implementation, spec section 22. A
-/// result PHP# types as `Any?` declares no PHP type, so `getKey` needs no such method. A method two interfaces require
-/// is forwarded once.
+/// A method two PHP# interfaces require, which the class takes from a plain PHP parent declaring no return type, is the
+/// parent's own: the engine links it under each member, whose PHP# calls check its result, spec section 22.
 #[test]
-fn a_method_an_interface_types_and_a_plain_parent_leaves_untyped_is_forwarded_with_the_type() {
+fn a_method_an_interface_types_and_a_plain_parent_leaves_untyped_is_the_parents() {
     let lowered = Lowered::with(
         "namespace App;\n\npublic class Bill : Record, Morphable, Named\n{\n}\n",
         &[
@@ -15435,40 +15470,23 @@ fn a_method_an_interface_types_and_a_plain_parent_leaves_untyped_is_forwarded_wi
             ("src/App/Named.sharp", "namespace App;\n\npublic interface Named\n{\n    string getMorphClass();\n}\n"),
         ],
     );
-    let forwarders = lowered
-        .nodes()
-        .iter()
-        .filter(|node| node.kind == sharp_kind::SHARP_AST_METHOD && lowered.text(node.text) == "getMorphClass")
-        .count();
-    assert_eq!(forwarders, 1);
 
     assert_eq!(
-        lowered.declared("getMorphClass"),
-        indoc! {r#"
-            METHOD [1] "getMorphClass" @4-5
-              PARAM_LIST
-                PARAM [16]
+        lowered.tree(),
+        file_tree(
+            "App",
+            indoc! {r#"
+                CLASS "Bill" @3-5
+                  ZVAL "App\\Record"
+                  NAME_LIST
+                    ZVAL "App\\Morphable"
+                    ZVAL "App\\Named"
+                  STMT_LIST
                   null
-                  ZVAL "arguments"
                   null
-                  null
-                  null
-                  null
-              null
-              STMT_LIST
-                RETURN
-                  STATIC_CALL
-                    ZVAL [1] "parent"
-                    ZVAL "getMorphClass"
-                    ARG_LIST
-                      UNPACK
-                        VAR
-                          ZVAL "arguments"
-              ZVAL [1] "string"
-              null
-        "#}
+            "#}
+        )
     );
-    assert!(lowered.nodes().iter().all(|node| lowered.text(node.text) != "getKey"));
 }
 
 /// ```php
@@ -15497,62 +15515,6 @@ fn an_any_result_declares_mixed_only_where_a_typed_plain_php_method_requires_it(
     assert_eq!(
         lowered.render(lowered.child(lowered.method_named("raw"), 3)),
         "SHARP_TYPE_ARGS [1]\n  null\n  ZVAL \"Function<Any?()>\"\n"
-    );
-}
-
-/// A forwarded method declares the PHP type the interface's own method declares: a `Map` is `\Sharp\Map|array` and a
-/// `Set` `\Sharp\Set|array`, since plain PHP gets either as its PHP array, a `List` `array`, an `Iterable` `iterable`,
-/// a function type `\Closure` and `Self` `static`, the type the engine links the parent's method against. `[257]` on
-/// `string?` is `ZEND_TYPE_NULLABLE | ZEND_NAME_NOT_FQ`, PHP's `?string`. A `void` result calls the parent without
-/// `return`.
-#[test]
-fn a_forwarded_method_declares_the_php_type_of_the_interface_method() {
-    let names = ["label", "touch", "owner", "level", "record", "sizes", "tags", "ids", "stream", "make", "forget"];
-    let lowered = Lowered::with(
-        "namespace App;\n\npublic class Bill : Record, Shelved\n{\n}\n",
-        &[
-            (
-                "src/App/Record.php",
-                "<?php namespace App; class Record { public function label() {} public function touch() {} public function owner() {} public function level() {} public function record() {} public function sizes() {} public function tags() {} public function ids() {} public function stream() {} public function make() {} public function forget($relation) { return $this; } }",
-            ),
-            ("src/App/Level.php", "<?php namespace App; enum Level: string { case Low = 'low'; }"),
-            (
-                "src/App/Shelved.sharp",
-                "namespace App;\n\npublic interface Shelved\n{\n    string? label();\n    void touch();\n    Object owner();\n    Level level();\n    Record record();\n    Map<string, int> sizes();\n    Set<string> tags();\n    List<int> ids();\n    Iterable<int> stream();\n    Function<int()> make();\n    Self forget(string relation);\n}\n",
-            ),
-        ],
-    );
-
-    let declared: Vec<String> =
-        names.iter().map(|name| lowered.render(lowered.child(lowered.method_named(name), 3))).collect();
-    assert_eq!(
-        declared,
-        [
-            "ZVAL [257] \"string\"\n",
-            "ZVAL [1] \"void\"\n",
-            "ZVAL [1] \"object\"\n",
-            "ZVAL \"App\\\\Level\"\n",
-            "ZVAL \"App\\\\Record\"\n",
-            "TYPE_UNION\n  ZVAL \"Sharp\\\\Map\"\n  TYPE [7]\n",
-            "TYPE_UNION\n  ZVAL \"Sharp\\\\Set\"\n  TYPE [7]\n",
-            "TYPE [7]\n",
-            "ZVAL [1] \"iterable\"\n",
-            "ZVAL \"Closure\"\n",
-            "TYPE [15]\n",
-        ]
-    );
-    assert_eq!(
-        lowered.render(lowered.child(lowered.method_named("touch"), 2)),
-        indoc! {r#"
-            STMT_LIST
-              STATIC_CALL
-                ZVAL [1] "parent"
-                ZVAL "touch"
-                ARG_LIST
-                  UNPACK
-                    VAR
-                      ZVAL "arguments"
-        "#}
     );
 }
 
@@ -19401,11 +19363,11 @@ fn an_interface_method_and_a_collection_method_given_a_function_value_check_thei
 
 /// Spec section 22: each PHP# call of a PHP# interface's instance member checks its result, so `[2]`,
 /// `ZEND_SHARP_RESULT_CALLER_CHECKED`, marks each such member's PHP return type, and the engine links a plain PHP method
-/// that declares none under it.
+/// that declares none under it, a `void` or `never` member's included.
 #[test]
 fn an_interface_member_marks_its_return_type_as_checked_by_each_call() {
     let lowered = Lowered::with(
-        "namespace App;\n\nimport Lib.Relation;\n\npublic interface Taggable\n{\n    Relation relate(string name);\n\n    List<int> ids();\n\n    void touch();\n}\n",
+        "namespace App;\n\nimport Lib.Relation;\n\npublic interface Taggable\n{\n    Relation relate(string name);\n\n    List<int> ids();\n\n    void touch();\n\n    never fail(string reason);\n}\n",
         &[("src/Lib/Relation.php", "<?php namespace Lib; class Relation {}")],
     );
     let marked = |name: &str| lowered.render(lowered.child(lowered.method_named(name), 3));
@@ -19413,6 +19375,7 @@ fn an_interface_member_marks_its_return_type_as_checked_by_each_call() {
     assert_eq!(marked("relate"), "SHARP_TYPE_ARGS [2]\n  ZVAL \"Lib\\\\Relation\"\n  ZVAL \"Lib.Relation\"\n");
     assert_eq!(marked("ids"), "SHARP_TYPE_ARGS [2]\n  TYPE [7]\n  ZVAL \"List<int>\"\n");
     assert_eq!(marked("touch"), "SHARP_TYPE_ARGS [2]\n  ZVAL [1] \"void\"\n  ZVAL \"void\"\n");
+    assert_eq!(marked("fail"), "SHARP_TYPE_ARGS [2]\n  ZVAL [1] \"never\"\n  null\n");
 }
 
 /// ```php
@@ -19421,19 +19384,21 @@ fn an_interface_member_marks_its_return_type_as_checked_by_each_call() {
 ///
 /// Spec section 22: a plain PHP class implements a PHP# interface's member with a method that may declare no return
 /// type, so each PHP# call of the member checks its result, as is a call of its method value, named as PHP# writes the
-/// member. The check tests a collection alone, `List<Any?>`, and the type argument of a generic interface's member. A
-/// result of any value, a `void` one and a call of a PHP# class's own method check nothing.
+/// member. The check tests a collection alone, `List<Any?>`, inside a tuple too, and the type argument of a generic
+/// interface's member, and a second type in the text names the member's type for the error where the check reads less,
+/// a null-safe call's included. A result of any value, a `void` or `never` one and a call of a PHP# class's own method
+/// check nothing.
 #[test]
 fn a_call_of_an_interface_member_checks_its_result() {
     let body = Lowered::with(
         &method_with(
-            "void run(Taggable owner, Source<Relation> source, Relation relation)",
-            "        Relation tags = owner.relate(\"tags\");\n        List<int> ids = owner.ids();\n        Set<string> names = owner.names();\n        Map<string, int> counts = owner.counts();\n        Iterable<int> stream = owner.stream();\n        Relation read = source.read();\n        Any? raw = owner.raw();\n        owner.touch();\n        Relation again = relation.again();\n        const relate = owner.relate;\n        Relation named = relate(\"named\");\n",
+            "void run(Taggable owner, Taggable? maybe, Source<Relation> source, Relation relation)",
+            "        Relation tags = owner.relate(\"tags\");\n        List<int> ids = owner.ids();\n        Set<string> names = owner.names();\n        Map<string, int> counts = owner.counts();\n        Iterable<int> stream = owner.stream();\n        [List<int>, string] pair = owner.pair();\n        Relation? maybeTags = maybe?.relate(\"maybe\");\n        Relation read = source.read();\n        Any? raw = owner.raw();\n        owner.touch();\n        Relation again = relation.again();\n        const relate = owner.relate;\n        Relation named = relate(\"named\");\n        owner.fail(\"stopped\");\n",
         ),
         &[
             (
                 "src/App/Tenant/Taggable.sharp",
-                "namespace App.Tenant;\n\npublic interface Taggable\n{\n    Relation relate(string name);\n\n    List<int> ids();\n\n    Set<string> names();\n\n    Map<string, int> counts();\n\n    Iterable<int> stream();\n\n    Any? raw();\n\n    void touch();\n}\n",
+                "namespace App.Tenant;\n\npublic interface Taggable\n{\n    Relation relate(string name);\n\n    List<int> ids();\n\n    Set<string> names();\n\n    Map<string, int> counts();\n\n    Iterable<int> stream();\n\n    [List<int>, string] pair();\n\n    Any? raw();\n\n    void touch();\n\n    never fail(string reason);\n}\n",
             ),
             ("src/App/Tenant/Source.sharp", "namespace App.Tenant;\n\npublic interface Source<T>\n{\n    T read();\n}\n"),
             (
@@ -19454,12 +19419,131 @@ fn a_call_of_an_interface_member_checks_its_result() {
         ),
         "{body}"
     );
-    assert!(body.contains("      ZVAL \"List<Any?>\"\n      ZVAL \"App.Tenant.Taggable.ids()\"\n"), "{body}");
-    assert!(body.contains("      ZVAL \"Set<Any?>\"\n      ZVAL \"App.Tenant.Taggable.names()\"\n"), "{body}");
-    assert!(body.contains("      ZVAL \"Map<Any?, Any?>\"\n      ZVAL \"App.Tenant.Taggable.counts()\"\n"), "{body}");
-    assert!(body.contains("      ZVAL \"Iterable<Any?>\"\n      ZVAL \"App.Tenant.Taggable.stream()\"\n"), "{body}");
+    assert!(
+        body.contains("      ZVAL \"List<Any?>, List<int>\"\n      ZVAL \"App.Tenant.Taggable.ids()\"\n"),
+        "{body}"
+    );
+    assert!(
+        body.contains("      ZVAL \"Set<Any?>, Set<string>\"\n      ZVAL \"App.Tenant.Taggable.names()\"\n"),
+        "{body}"
+    );
+    assert!(
+        body.contains(
+            "      ZVAL \"Map<Any?, Any?>, Map<string, int>\"\n      ZVAL \"App.Tenant.Taggable.counts()\"\n"
+        ),
+        "{body}"
+    );
+    assert!(
+        body.contains("      ZVAL \"Iterable<Any?>, Iterable<int>\"\n      ZVAL \"App.Tenant.Taggable.stream()\"\n"),
+        "{body}"
+    );
+    assert!(
+        body.contains(
+            "      ZVAL \"[List<Any?>, string], [List<int>, string]\"\n      ZVAL \"App.Tenant.Taggable.pair()\"\n"
+        ),
+        "{body}"
+    );
+    assert!(
+        body.contains(
+            "ZVAL \"App.Tenant.Relation?, App.Tenant.Relation\"\n      ZVAL \"App.Tenant.Taggable.relate()\"\n"
+        ),
+        "{body}"
+    );
     assert!(body.contains("      ZVAL \"App.Tenant.Relation\"\n      ZVAL \"App.Tenant.Source.read()\"\n"), "{body}");
-    assert_eq!(body.matches("VERIFY_TYPE_ARGS").count(), 7, "{body}");
+    assert_eq!(body.matches("VERIFY_TYPE_ARGS").count(), 9, "{body}");
+}
+
+/// ```php
+/// $tags = \Sharp\verify($contact->relate('tags'), 'App.Tenant.Relation', 'App.Tenant.Taggable.relate()');
+/// ```
+///
+/// Spec section 22: a call of a plain PHP class's method that declares no return type, under a PHP# interface's member
+/// the class implements, is a call of the member: the checker types it by the member, and the call checks its result.
+/// A PHP# subclass's call on `this` is one too.
+#[test]
+fn a_call_of_a_plain_class_method_under_an_interface_member_checks_its_result() {
+    let library = [
+        (
+            "src/App/Tenant/Taggable.sharp",
+            "namespace App.Tenant;\n\npublic interface Taggable\n{\n    Relation relate(string name);\n}\n",
+        ),
+        (
+            "src/App/Tenant/Relation.sharp",
+            "namespace App.Tenant;\n\npublic class Relation\n{\n    public Relation() { }\n}\n",
+        ),
+        (
+            "src/App/Tenant/Contact.php",
+            "<?php namespace App\\Tenant; abstract class Model { public function relate($name) { return new Relation(); } } class Contact extends Model implements Taggable {}",
+        ),
+    ];
+    let body = body_in("Relation run(Contact contact)", "        return contact.relate(\"tags\");\n", &library);
+    let subclass = Lowered::with(
+        "namespace App.Tenant;\n\npublic class Article : Contact\n{\n    public Article() { }\n\n    public Relation run() => this.relate(\"this\");\n}\n",
+        &library,
+    )
+    .body();
+
+    for body in [body, subclass] {
+        assert!(body.contains("ZVAL \"App.Tenant.Relation\"\n      ZVAL \"App.Tenant.Taggable.relate()\"\n"), "{body}");
+    }
+}
+
+/// ```php
+/// $value = \Sharp\verify(Generic::readFrom($source, <int>), 'int', 'App.Tenant.Generic.readFrom()');
+/// ```
+///
+/// Spec section 22: a check in a generic method's body, or in a generic class's static method's, reads the type
+/// parameter as any type, `#0`, so the call that gives the type argument checks the result against it, as Java checks
+/// an erased generic method's result where its caller gives the type. A call that gives a type parameter of the method
+/// it is in leaves the check to the call of that method, and a call of a method whose result names no type parameter
+/// the call gives checks nothing.
+#[test]
+fn a_call_of_a_generic_method_checks_its_result_against_the_type_it_gives() {
+    let library = [
+        ("src/App/Tenant/Source.sharp", "namespace App.Tenant;\n\npublic interface Source<T>\n{\n    T read();\n}\n"),
+        (
+            "src/App/Tenant/Generic.sharp",
+            "namespace App.Tenant;\n\npublic static class Generic\n{\n    public static T readFrom<T>(Source<T> source) => source.read();\n\n    public static T again<T>(Source<T> source) => Generic.readFrom(source);\n\n    public static int plain(Source<int> source) => 1;\n}\n",
+        ),
+    ];
+    let again = Lowered::with(library[1].1, &[library[0]]).body_of("again");
+    let body = body_in(
+        "int run(Source<int> source)",
+        "        int value = Generic.readFrom(source);\n        int first = Repo<int>.first(source);\n        return Generic.plain(source);\n",
+        &[
+            library[0],
+            library[1],
+            (
+                "src/App/Tenant/Repo.sharp",
+                "namespace App.Tenant;\n\npublic class Repo<T>\n{\n    public Repo() { }\n\n    public static T first(Source<T> source) => source.read();\n}\n",
+            ),
+        ],
+    );
+    let repo = Lowered::with(
+        "namespace App.Tenant;\n\npublic class Repo<T>\n{\n    public Repo() { }\n\n    public static T first(Source<T> source) => source.read();\n}\n",
+        &[library[0]],
+    )
+    .body_of("first");
+
+    assert!(body.contains("      ZVAL \"int\"\n      ZVAL \"App.Tenant.Generic.readFrom()\"\n"), "{body}");
+    assert!(body.contains("      ZVAL \"int\"\n      ZVAL \"App.Tenant.Repo.first()\"\n"), "{body}");
+    assert_eq!(body.matches("VERIFY_TYPE_ARGS").count(), 2, "{body}");
+    assert!(!again.contains("VERIFY_TYPE_ARGS"), "{again}");
+    assert_eq!(
+        repo,
+        indoc! {r##"
+            STMT_LIST
+              RETURN
+                VERIFY_TYPE_ARGS
+                  METHOD_CALL
+                    VAR
+                      ZVAL "source"
+                    ZVAL "read"
+                    ARG_LIST
+                  ZVAL "#0"
+                  ZVAL "App.Tenant.Source.read()"
+        "##}
+    );
 }
 
 /// ```php
@@ -27670,20 +27754,23 @@ fn a_generic_extension_member_takes_the_type_arguments_of_its_block_and_its_own(
         indoc! {r#"
             STMT_LIST
               RETURN
-                STATIC_CALL
-                  ZVAL "App\\Lists\\ListExtensions"
-                  ZVAL "twice"
-                  ARG_LIST
-                    VAR
-                      ZVAL "names"
-                    SHARP_TYPE_ARGS
-                      null
-                      ZVAL "string"
+                VERIFY_TYPE_ARGS
+                  STATIC_CALL
+                    ZVAL "App\\Lists\\ListExtensions"
+                    ZVAL "twice"
+                    ARG_LIST
+                      VAR
+                        ZVAL "names"
+                      SHARP_TYPE_ARGS
+                        null
+                        ZVAL "string"
+                  ZVAL "List<Any?>, List<string>"
+                  ZVAL "App.Lists.ListExtensions.twice()"
         "#}
     );
     let converted = lowered.body_of("converted");
     assert!(
-        converted.ends_with("        SHARP_TYPE_ARGS\n          null\n          ZVAL \"App.Order, string\"\n"),
+        converted.contains("          SHARP_TYPE_ARGS\n            null\n            ZVAL \"App.Order, string\"\n"),
         "{converted}"
     );
 

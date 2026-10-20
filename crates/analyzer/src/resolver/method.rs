@@ -1094,6 +1094,12 @@ where
             }
         }
 
+        // Spec section 22: a call of a plain PHP method that declares no return type, under a PHP# interface's member,
+        // is a call of the member, which checks the result.
+        let method_id = untyped_implementations(context.codebase, class_metadata, function_like_metadata)
+            .first()
+            .copied()
+            .unwrap_or(method_id);
         candidates.push(MethodCandidate {
             metadata: class_metadata,
             method_identifier: method_id,
@@ -1240,6 +1246,35 @@ where
     candidates.retain(|candidate| seen.insert(candidate.method_identifier));
 
     candidates
+}
+
+/// The members of `class`'s PHP# interfaces that `method`, a method `class` declares or inherits, implements when it is a
+/// plain PHP method that declares no return type, sorted by name: each member checks the result of every PHP# call, spec
+/// section 22, so a call of `method` on `class` is a call of the first, and the link refuses a class whose members
+/// declare different results.
+pub(crate) fn untyped_implementations(
+    codebase: &CodebaseMetadata,
+    class: &ClassLikeMetadata,
+    method: &FunctionLikeMetadata,
+) -> Vec<MethodIdentifier> {
+    if method.flags.is_sharp() || method.return_type_declaration_metadata.is_some() {
+        return Vec::new();
+    }
+    let name = ascii_lowercase_word(method.name.as_bytes());
+    let mut members: Vec<MethodIdentifier> = class
+        .all_parent_interfaces
+        .iter()
+        .filter_map(|interface| codebase.get_class_like(interface.as_bytes())?.declaring_method_ids.get(&name).copied())
+        .filter(|member| {
+            codebase.get_class_like(member.get_class_name().as_bytes()).is_some_and(|interface| {
+                codebase.get_method_by_id(member).is_some_and(|member| interface.checks_results_at_call(member))
+            })
+        })
+        .collect();
+    members.sort();
+    members.dedup();
+
+    members
 }
 
 fn check_where_method_constraints<A>(

@@ -13691,6 +13691,57 @@ fn a_plain_php_class_takes_an_untyped_method_under_an_interface_member_and_is_re
     );
 }
 
+/// Spec section 22: a call of a plain PHP class's method that declares no return type, under a PHP# interface's member,
+/// is a call of the member, typed as the member declares it, on the class and on `this` of a PHP# subclass, with the
+/// member's type argument where the class gives one. The class takes one type for the method, so members of its
+/// interfaces that declare different results refuse it, as Kotlin refuses a class that inherits conflicting members, and
+/// members that agree, as a sub-interface's redeclaration of its parent's member does, take it.
+#[test]
+fn a_call_of_a_plain_class_method_under_an_interface_member_takes_the_members_type() {
+    let taggable = "namespace App;\n\npublic interface Taggable\n{\n    Relation relate(string name);\n}\n";
+    let named = "namespace App;\n\npublic interface Named\n{\n    string relate(string name);\n}\n";
+    let tagged = "namespace App;\n\npublic interface Tagged : Taggable\n{\n    Relation relate(string name);\n}\n";
+    let relation = "namespace App;\n\npublic class Relation\n{\n    public Relation() { }\n}\n";
+    let source = "namespace App;\n\npublic interface Source<T>\n{\n    T read();\n}\n";
+    let model = "<?php\n\nnamespace Acme;\n\nabstract class Model\n{\n    public function relate($name)\n    {\n        return null;\n    }\n\n    public function read()\n    {\n        return 1;\n    }\n}\n";
+    let contact = "<?php\n\nnamespace App;\n\n/** @implements Source<int> */\nclass Contact extends \\Acme\\Model implements Taggable, Tagged, Source\n{\n}\n";
+    let calls = "namespace App;\n\npublic static class Calls\n{\n    public static Relation relate(Contact contact) => contact.relate(\"tags\");\n\n    public static int read(Contact contact) => contact.read();\n}\n";
+    let article = "namespace App;\n\npublic class Article : Contact\n{\n    public Article() { }\n\n    public Relation tags() => this.relate(\"tags\");\n}\n";
+    let conflicting =
+        "<?php\n\nnamespace App;\n\nclass Conflicting extends \\Acme\\Model implements Taggable, Named\n{\n}\n";
+    let library: &[(&'static str, &'static str)] = &[
+        ("src/App/Taggable.sharp", taggable),
+        ("src/App/Tagged.sharp", tagged),
+        ("src/App/Relation.sharp", relation),
+        ("src/App/Source.sharp", source),
+        ("vendor/acme/model/src/Model.php", model),
+        ("src/App/Contact.php", contact),
+    ];
+
+    assert_eq!(issues(("src/App/Calls.sharp", calls), library), Vec::<String>::new());
+    assert_eq!(issues(("src/App/Article.sharp", article), library), Vec::<String>::new());
+    assert_eq!(issues(("src/App/Contact.php", contact), &library[..5]), Vec::<String>::new());
+    assert_eq!(
+        analyze(
+            &PLUGIN_REGISTRY,
+            settings(),
+            ("src/App/Conflicting.php", conflicting),
+            &[
+                ("src/App/Taggable.sharp", taggable),
+                ("src/App/Named.sharp", named),
+                ("src/App/Relation.sharp", relation),
+                ("vendor/acme/model/src/Model.php", model),
+            ],
+        )
+        .iter()
+        .map(|issue| format!("{} | {}", issue.message, issue.help.as_deref().unwrap_or_default()))
+        .collect::<Vec<_>>(),
+        [
+            "`App\\Conflicting` takes `relate()` from `Acme\\Model`, which declares no return type, under members that declare different return types: `string` of `App\\Named::relate()` and `App\\Relation` of `App\\Taggable::relate()`. | Make the members declare one return type, or declare `relate()` in the class with a return type."
+        ]
+    );
+}
+
 /// The engine links a plain PHP class against the PHP declaration the bridge writes for each PHP# method, by PHP's own
 /// rules, wherever the class's method is declared, so the analysis checks the same pair: what each side declares in
 /// PHP, without docblocks. A parameter taken by reference is refused, as is `array` where the bridge declares

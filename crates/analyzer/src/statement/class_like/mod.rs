@@ -90,6 +90,7 @@ use crate::error::AnalysisError;
 use crate::plugin::context::HookContext;
 use crate::resolver::class_name::report_missing_class;
 use crate::resolver::extension::class_member;
+use crate::resolver::method::untyped_implementations;
 use crate::statement::attributes::analyze_class_like_attributes;
 use crate::statement::class_like::method_signature::SignatureCompatibilityIssue;
 use crate::statement::function_like::FunctionLikeBody;
@@ -1278,6 +1279,9 @@ where
     }
     check_class_like_extends(context, class_like_metadata, &extended_types);
     check_class_like_implements(context, artifacts, class_like_metadata, &implemented_types, &mut checked_signatures);
+    if class_like_metadata.kind.is_class() {
+        check_untyped_implementations(context, class_like_metadata, class_span);
+    }
 
     for (_, used_types) in &trait_uses {
         check_class_like_use(context, class_like_metadata, used_types);
@@ -3962,6 +3966,66 @@ fn widens_parameter(
     true
 }
 
+/// Refuses a class that takes a plain PHP method declaring no return type under members of its PHP# interfaces that
+/// declare different results, spec section 22, as Kotlin refuses a class that inherits conflicting members: a PHP# call
+/// of the method checks its result against one member's type, so the members agree on it.
+fn check_untyped_implementations<A>(context: &mut Context<'_, '_, A>, class: &ClassLikeMetadata, class_span: Span)
+where
+    A: Arena,
+{
+    for (method_id, method) in class
+        .declaring_method_ids
+        .values()
+        .filter_map(|method_id| Some((method_id, context.codebase.get_method_by_id(method_id)?)))
+    {
+        let results: Vec<(Word, Span, TUnion)> = untyped_implementations(context.codebase, class, method)
+            .into_iter()
+            .filter_map(|member| {
+                let interface = context.codebase.get_class_like(member.get_class_name().as_bytes())?;
+                let metadata = context.codebase.get_method_by_id(&member)?;
+                let substituted = get_substituted_method(metadata, class, member.get_class_name(), context.codebase);
+
+                Some((
+                    interface.original_name,
+                    metadata.name_span.unwrap_or(metadata.span),
+                    substituted.return_type_metadata?.type_union,
+                ))
+            })
+            .collect();
+        if results.iter().all(|(_, _, result)| results.first().is_some_and(|(_, _, first)| result == first)) {
+            continue;
+        }
+
+        let declared = results
+            .iter()
+            .map(|(interface, _, result)| {
+                format!(
+                    "`{}` of `{}`",
+                    display_type(context, result),
+                    display_member(context, *interface, format!("{}()", method.original_name))
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" and ");
+        let mut issue = Issue::error(format!(
+            "`{}` takes `{}()` from `{}`, which declares no return type, under members that declare different return types: {declared}.",
+            display_class_like_name(context, class.original_name),
+            method.original_name,
+            display_class_like_name(context, method_id.get_class_name()),
+        ))
+        .with_annotation(Annotation::primary(class_span))
+        .with_note("Each PHP# call of the method checks its result against the member's return type, so the members declare one.")
+        .with_help(format!(
+            "Make the members declare one return type, or declare `{}()` in the class with a return type.",
+            method.original_name
+        ));
+        for (_, span, _) in &results {
+            issue = issue.with_annotation(Annotation::secondary(*span));
+        }
+        context.collector.report_with_code(IssueCode::IncompatibleReturnType, issue);
+    }
+}
+
 fn check_interface_method_signatures<'ctx, A>(
     context: &mut Context<'ctx, '_, A>,
     artifacts: &mut AnalysisArtifacts,
@@ -4047,12 +4111,6 @@ fn check_interface_method_signatures<'ctx, A>(
             &mut issues,
         );
 
-        // Spec section 22: a PHP# class forwards a method its PHP# interface types and its plain PHP parent leaves
-        // untyped, as Eloquent's `getKey()`, with the interface's type, so PHP checks the parent's result there.
-        let forwarded = class_like_metadata.flags.is_sharp()
-            && interface_metadata.flags.is_sharp()
-            && !class_method.flags.is_sharp()
-            && class_method.return_type_declaration_metadata.is_none();
         for incompatibility in issues {
             if widens_parameter(
                 artifacts,
@@ -4060,9 +4118,7 @@ fn check_interface_method_signatures<'ctx, A>(
                 class_method_id.get_class_name(),
                 class_method,
                 &incompatibility,
-            ) || (forwarded
-                && matches!(incompatibility, SignatureCompatibilityIssue::MissingReturnTypeDeclaration { .. }))
-            {
+            ) {
                 continue;
             }
             report_signature_compatibility_issue(

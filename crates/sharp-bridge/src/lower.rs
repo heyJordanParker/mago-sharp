@@ -890,7 +890,6 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             self.class_members(&class.members, parent_name, class.class.span, class.left_brace, class.right_brace);
         members.extend(self.parse_methods(&class.members, class.name.span));
         members.extend(self.string_conversion(class.members.as_slice(), class.left_brace, class.right_brace));
-        members.extend(self.forwarders(class.left_brace, class.right_brace));
         if self.tested {
             members.extend(self.test_hooks(class));
         }
@@ -944,62 +943,6 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             b"__toString",
             &[parameters, NULL, body, return_type, NULL],
         ))
-    }
-
-    /// Spec section 22: a method a PHP# interface requires, which the class takes from a plain PHP parent declaring no
-    /// return type, is the parent's method with the interface's type, so PHP takes it as the implementation:
-    /// `public function getMorphClass(...$arguments): string { return parent::getMorphClass(...$arguments); }`. PHP
-    /// checks the parent's result against that type, as `strict_types` does. A result PHP# types as `mixed` needs none.
-    fn forwarders(&mut self, start: Span, end: Span) -> Vec<u32> {
-        let line = self.line(start);
-        let mut forwarders = Vec::new();
-        for (name, result) in self.types.forwarded_methods(self.class) {
-            let Some(return_type) = self.forwarded_type(result, line) else {
-                continue;
-            };
-            let parameter_name = self.local_name(0, line, b"arguments");
-            let parameter =
-                self.node(SHARP_AST_PARAM, ZEND_PARAM_VARIADIC, line, &[NULL, parameter_name, NULL, NULL, NULL, NULL]);
-            let parameters = self.node(SHARP_AST_PARAM_LIST, 0, line, &[parameter]);
-            let arguments = self.variable(start, b"arguments");
-            let arguments = self.node(SHARP_AST_UNPACK, 0, line, &[arguments]);
-            let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[arguments]);
-            let parent = self.string(ZEND_NAME_NOT_FQ, line, b"parent");
-            let method = self.string(0, line, name.as_bytes());
-            let call = self.node(SHARP_AST_STATIC_CALL, 0, line, &[parent, method, arguments]);
-            let returns = !result.types.iter().all(|atomic| matches!(atomic, TAtomic::Void));
-            let statement = if returns { self.node(SHARP_AST_RETURN, 0, line, &[call]) } else { call };
-            let body = self.node(SHARP_AST_STMT_LIST, 0, line, &[statement]);
-
-            forwarders.push(self.declaration(
-                SHARP_AST_METHOD,
-                ZEND_ACC_PUBLIC,
-                start,
-                end,
-                name.as_bytes(),
-                &[parameters, NULL, body, return_type, NULL],
-            ));
-        }
-
-        forwarders
-    }
-
-    /// The PHP type the bridge declares for the PHP# result `r#type`, as [`Self::return_hint`] lowers it: the type the
-    /// codex's [`get_php_declared_type`] erases it to, with `array` beside a `\Sharp\Map` or `\Sharp\Set` where a plain
-    /// PHP caller gets its PHP array. None for a result PHP declares no type for, as `mixed`.
-    fn forwarded_type(&mut self, r#type: &TUnion, line: u32) -> Option<u32> {
-        let erased = get_php_declared_type(r#type, self.types.codebase());
-        if erased.types.iter().any(TAtomic::is_mixed) {
-            return None;
-        }
-        let mut members: Vec<(PhpType, u32)> =
-            erased.types.iter().filter(|atomic| !atomic.is_null()).map(|atomic| (PhpType::of(atomic), line)).collect();
-        // A plain PHP caller gets a `Map`'s or a `Set`'s PHP array, as `Self::result_hint` declares it.
-        if self.crosses_outward(r#type) && members.iter().any(|(php_type, _)| php_type.is_table()) {
-            members.push((PhpType::Keyword(IS_ARRAY), line));
-        }
-
-        Some(self.php_union(members, erased.has_null().then_some(line)))
     }
 
     /// A struct is a final class, spec section 10, whose members are a class's, with its header's interfaces and
@@ -2727,11 +2670,15 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             }
             None => (method.name.span, NULL),
         };
+        let mut attr = if crossing { ZEND_SHARP_RESULT_CROSSES } else { 0 };
         // Spec section 22: each PHP# call of an interface's member checks its result, so the engine links a plain PHP
         // method that declares no return type under it.
-        let caller_checked = return_type != NULL
+        if return_type != NULL
             && first_statements.is_none()
-            && self.types.checks_results_at_call(self.class, php_method_name(method));
+            && self.types.checks_results_at_call(self.class, php_method_name(method))
+        {
+            attr |= ZEND_SHARP_RESULT_CALLER_CHECKED;
+        }
         // Spec section 14.3: a method named without parentheses is a function value, a closure of the method. No code
         // names a constructor or the static constructor so.
         let return_type = if matches!(php_method_name(method), b"__construct" | b"#statics") {
@@ -2739,15 +2686,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         } else {
             let function_type = self.types.method_type(self.class, php_method_name(method));
 
-            self.function_type(return_type, function_type, crossing, self.line(start))
+            self.function_type(return_type, function_type, attr, self.line(start))
         };
-        if caller_checked {
-            let result = &mut self.nodes[return_type as usize];
-            if result.kind != SHARP_AST_SHARP_TYPE_ARGS {
-                unreachable!("a result PHP# writes carries its type text, not the result at {:?}", method.name.span);
-            }
-            result.attr |= ZEND_SHARP_RESULT_CALLER_CHECKED;
-        }
         self.static_type_parameters = None;
         // A sub-interface's body that replaces its parent's default body runs as a method of its trait of default
         // bodies, which has no parent, so only the interface's signature carries `#[\Override]`.
@@ -2902,7 +2842,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 // An extension member carries its result type, which a generator's elements are read from, spec
                 // section 12, and no function type, since no function value names it.
                 let result = self.types.method_result(self.class, method.name.value);
-                let return_type = self.carried_type(return_type, result, crossing, self.line(start));
+                let attr = if crossing { ZEND_SHARP_RESULT_CROSSES } else { 0 };
+                let return_type = self.carried_type(return_type, result, attr, self.line(start));
                 let attributes = self.attributes(&method.attribute_lists, None, None);
 
                 self.declaration(
@@ -3819,8 +3760,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// `lowered`, the lowered value, checked against the type text `text` once it enters PHP# from plain PHP, with
-    /// `target` naming what takes it, as `local counter`, for the engine's TypeError.
+    /// `target` naming what takes it, as `local counter`, for the engine's TypeError. The text is spelled for the
+    /// engine as [`Self::type_text`] spells it.
     fn verified(&mut self, line: u32, lowered: u32, text: &str, target: &[u8]) -> u32 {
+        let text = self.engine_type_text(text);
         let text = self.string(0, line, text.as_bytes());
         let target = self.string(0, line, target);
 
@@ -5260,13 +5203,14 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
         let lowered = self.unchecked_expression(line, expression);
         let arrives_as_list = self.arrives_as_list(expression);
+        let in_static = self.static_type_parameters.is_some();
         let (lowered, check) = match arrival {
             Arrival::Read if arrives_as_list => {
-                (self.renumbered(expression, lowered), self.types.call_check(expression))
+                (self.renumbered(expression, lowered), self.types.call_check(expression, in_static))
             }
-            Arrival::Map(map) if arrives_as_list => (lowered, self.types.call_check_as(expression, map)),
+            Arrival::Map(map) if arrives_as_list => (lowered, self.types.call_check_as(expression, map, in_static)),
             Arrival::Plain if arrives_as_list => (lowered, None),
-            _ => (lowered, self.types.call_check(expression)),
+            _ => (lowered, self.types.call_check(expression, in_static)),
         };
         match check {
             Some((text, target)) => self.verified(line, lowered, &text, target.as_bytes()),
@@ -7146,14 +7090,14 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let function_type = self.types.lambda_type(lambda);
         let crossing = self.types.lambda_result(lambda).is_some_and(|result| self.crosses_outward(result));
 
-        self.function_type(NULL, function_type, crossing, self.line(lambda))
+        self.function_type(NULL, function_type, if crossing { ZEND_SHARP_RESULT_CROSSES } else { 0 }, self.line(lambda))
     }
 
     /// The result type of a PHP# method or lambda declaration: a `SHARP_TYPE_ARGS` of `php_type` and `function_type`'s
     /// text, which `is` tests a closure of it by, or of its result type alone when no function type takes a closure of
-    /// it, or `php_type` alone when PHP# can't write either, as [`Self::carried_type`] gives it with `crossing`. The
-    /// unit lists the function type's fingerprint, or zero without one, since its effects come from other files' bodies.
-    fn function_type(&mut self, php_type: u32, function_type: FunctionType, crossing: bool, line: u32) -> u32 {
+    /// it, or `php_type` alone when PHP# can't write either, as [`Self::carried_type`] gives it with `attr`. The unit
+    /// lists the function type's fingerprint, or zero without one, since its effects come from other files' bodies.
+    fn function_type(&mut self, php_type: u32, function_type: FunctionType, attr: u32, line: u32) -> u32 {
         let FunctionType { name, text, result } = function_type;
         self.function_types.push(Read {
             name: name.into_bytes(),
@@ -7161,20 +7105,20 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         });
         // A function whose effects no function type can say carries its result type alone, which a generator's
         // elements and a map stage's are read from, spec section 12.
-        self.carried_type(php_type, text.or(result), crossing, line)
+        self.carried_type(php_type, text.or(result), attr, line)
     }
 
-    /// A `SHARP_TYPE_ARGS` of `php_type` and the type text `carried`, or `php_type` alone without one. A result plain PHP
-    /// gets with each `Map` and `Set` in it as its PHP array, `crossing`, as [`Self::crosses_outward`] says, takes
-    /// `ZEND_SHARP_RESULT_CROSSES` as its attr, without a text when it has none, and each of its returns and yields gives
-    /// a plain PHP caller that array, spec section 12.
-    fn carried_type(&mut self, php_type: u32, carried: Option<String>, crossing: bool, line: u32) -> u32 {
+    /// A `SHARP_TYPE_ARGS` of `php_type` and the type text `carried`, with `attr`, or `php_type` alone with neither. A
+    /// result plain PHP gets with each `Map` and `Set` in it as its PHP array, as [`Self::crosses_outward`] says, takes
+    /// `ZEND_SHARP_RESULT_CROSSES`, and each of its returns and yields gives a plain PHP caller that array, spec section
+    /// 12. The result of a member each PHP# call checks takes `ZEND_SHARP_RESULT_CALLER_CHECKED`, so the engine links a
+    /// plain PHP method that declares no return type under it, spec section 22.
+    fn carried_type(&mut self, php_type: u32, carried: Option<String>, attr: u32, line: u32) -> u32 {
         let text = match carried {
             Some(carried) => self.type_text(line, &carried),
-            None if crossing => NULL,
+            None if attr != 0 => NULL,
             None => return php_type,
         };
-        let attr = if crossing { ZEND_SHARP_RESULT_CROSSES } else { 0 };
 
         self.node(SHARP_AST_SHARP_TYPE_ARGS, attr, line, &[php_type, text])
     }
