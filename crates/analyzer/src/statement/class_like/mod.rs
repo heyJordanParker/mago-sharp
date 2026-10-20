@@ -3390,6 +3390,7 @@ fn check_abstract_method_signatures<'ctx, A>(
                 context.codebase,
                 class_like_metadata.name,
                 &substituted_appearing_method,
+                declaring_class_name,
                 &substituted_overridden_method,
                 context.dialect,
             );
@@ -3469,6 +3470,7 @@ fn check_trait_method_conflicts<'ctx, 'arena, A>(
                                 context.codebase,
                                 class_like_metadata.name,
                                 second_method,
+                                first_method_id.get_class_name(),
                                 first_method,
                                 context.dialect,
                             );
@@ -3528,6 +3530,7 @@ fn check_trait_method_conflicts<'ctx, 'arena, A>(
                                     context.codebase,
                                     class_like_metadata.name,
                                     second_method,
+                                    first_method_id.get_class_name(),
                                     first_method,
                                     context.dialect,
                                 );
@@ -4030,6 +4033,7 @@ fn check_interface_method_signatures<'ctx, A>(
             context.codebase,
             class_like_metadata.name,
             &substituted_class_method,
+            interface_method_id.get_class_name(),
             &substituted_interface_method,
             context.dialect,
         );
@@ -4699,15 +4703,29 @@ fn report_signature_compatibility_issue<'ctx, A>(
             );
         }
         SignatureCompatibilityIssue::MissingReturnTypeDeclaration { parent_type } => {
-            let parent_type = display_type(context, &parent_type);
+            // A plain PHP method links against the type PHP declares for a PHP# method.
+            let parent_type = if parent_class.flags.is_sharp() && !context.dialect.is_sharp() {
+                method_signature::display_erased(&parent_type, context)
+            } else {
+                format!("`{}`", display_type(context, &parent_type))
+            };
+            // A package's method is not the project's to change, so the class declares its own.
+            let help = if child_method.flags.is_user_defined() {
+                format!("Add a return type declaration compatible with {parent_type}.")
+            } else {
+                format!(
+                    "`{child_name}` takes `{}()` from a package, so declare it in `{child_name}` with a return type compatible with {parent_type}.",
+                    child_method.original_name
+                )
+            };
 
             context.collector.report_with_code(
                 IssueCode::IncompatibleReturnType,
                 Issue::error(format!(
-                    "`{child_display}` must declare a return type compatible with `{parent_type}` declared by `{parent_display}`"
+                    "`{child_display}` must declare a return type compatible with {parent_type} declared by `{parent_display}`"
                 ))
                 .with_annotation(Annotation::primary(primary_span).with_message(format!(
-                    "This method has no return type declaration, but the parent declares `{parent_type}`"
+                    "This method has no return type declaration, but the parent declares {parent_type}"
                 )))
                 .with_annotation(
                     Annotation::secondary(parent_class_span)
@@ -4717,7 +4735,7 @@ fn report_signature_compatibility_issue<'ctx, A>(
                     Annotation::secondary(child_class_span).with_message(format!("In class `{child_name}`")),
                 )
                 .with_note("PHP requires an overriding method to declare a return type when the overridden method declares one.")
-                .with_help(format!("Add a return type declaration compatible with `{parent_type}`.")),
+                .with_help(help),
             );
         }
         SignatureCompatibilityIssue::ParameterNameMismatch {

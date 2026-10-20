@@ -121,9 +121,16 @@ pub enum SignatureCompatibilityIssue {
 ///
 /// # Arguments
 ///
+/// A method the class takes from `vendor/` is checked only against a PHP# method, which the engine links the class
+/// against whatever declares the method it takes, spec section 22, and only on what PHP declares, since the package's
+/// docblocks and parameter names are not the project's to change.
+///
+/// # Arguments
+///
 /// * `codebase` - The codebase metadata for type lookups
 /// * `child_class_name` - The fully qualified name of the class containing the overriding method
 /// * `child_method` - The overriding method
+/// * `parent_class_name` - The fully qualified name of the class-like that declares `parent_method`
 /// * `parent_method` - The parent/interface method being overridden/implemented
 /// * `dialect` - The dialect of the file that declares the class
 ///
@@ -135,16 +142,25 @@ pub fn validate_method_signature_compatibility(
     codebase: &CodebaseMetadata,
     child_class_name: Word,
     child_method: &FunctionLikeMetadata,
+    parent_class_name: Word,
     parent_method: &FunctionLikeMetadata,
     dialect: Dialect,
 ) -> Vec<SignatureCompatibilityIssue> {
-    if !child_method.flags.is_user_defined() {
-        // The child method is not user-defined; skip validation.
+    let is_vendored = !child_method.flags.is_user_defined();
+    if is_vendored && !parent_method.flags.is_sharp() {
         return Vec::new();
     }
     if are_operators(child_method, parent_method) {
         return Vec::new();
     }
+
+    let declared_child_method;
+    let child_method = if is_vendored {
+        declared_child_method = as_declared(child_method);
+        &declared_child_method
+    } else {
+        child_method
+    };
 
     let (child_method, changed_bound) = if dialect.is_sharp() {
         match with_parent_type_parameters(codebase, child_method, parent_method) {
@@ -331,7 +347,7 @@ pub fn validate_method_signature_compatibility(
             continue;
         };
 
-        if parent_param.name != child_param.name {
+        if !is_vendored && parent_param.name != child_param.name {
             issues.push(SignatureCompatibilityIssue::ParameterNameMismatch {
                 parameter_index: index,
                 child_name: child_param.name.0,
@@ -340,9 +356,19 @@ pub fn validate_method_signature_compatibility(
         }
     }
 
+    if parent_method.flags.is_sharp()
+        && let Some(parent_return) = php_return_type(codebase, parent_class_name, parent_method)
+        && child_method.return_type_declaration_metadata.is_none()
+    {
+        // A plain PHP method links against the PHP declaration, so the error names the type as PHP writes it.
+        issues.push(SignatureCompatibilityIssue::MissingReturnTypeDeclaration { parent_type: parent_return });
+        return issues;
+    }
+
     if let Some(parent_return) = &parent_method.return_type_declaration_metadata
         && child_method.return_type_declaration_metadata.is_none()
         && !parent_method.flags.is_built_in()
+        && !parent_method.flags.is_sharp()
     {
         let mut expanded_parent_return_type = parent_return.type_union.clone();
 
@@ -531,6 +557,41 @@ fn are_operators(child_method: &FunctionLikeMetadata, parent_method: &FunctionLi
     child_method.flags.is_operator() && parent_method.flags.is_operator()
 }
 
+/// `method` as PHP declares it: each parameter and the result typed by its declaration alone, without its docblock.
+fn as_declared(method: &FunctionLikeMetadata) -> FunctionLikeMetadata {
+    let mut declared = method.clone();
+    for parameter in declared.get_parameters_mut() {
+        parameter.type_metadata = parameter.type_declaration_metadata.clone();
+    }
+    declared.return_type_metadata = declared.return_type_declaration_metadata.clone();
+
+    declared
+}
+
+/// The return type PHP declares for the PHP# method `method` of `class`, as the bridge's `return_hint` writes it: the
+/// type `erase` gives, or none where that is `mixed`, as for `Any`, `Any?` and a type parameter without a bound, so a
+/// plain PHP method without a return type fits it. A method that overrides a plain PHP method declaring a return type
+/// keeps `mixed`, which PHP requires of it.
+fn php_return_type(codebase: &CodebaseMetadata, class: Word, method: &FunctionLikeMetadata) -> Option<TUnion> {
+    let erased = erase(&method.return_type_declaration_metadata.as_ref()?.type_union, codebase);
+    let overrides_typed_result = || {
+        codebase
+            .get_class_like(class.as_bytes())
+            .and_then(|class| class.overridden_method_ids.get(&method.name))
+            .is_some_and(|overridden| {
+                overridden
+                    .values()
+                    .filter_map(|parent| codebase.get_method_by_id(parent))
+                    .any(|parent| !parent.flags.is_sharp() && parent.return_type_declaration_metadata.is_some())
+            })
+    };
+    if erased.types.iter().any(TAtomic::is_mixed) && !overrides_typed_result() {
+        return None;
+    }
+
+    Some(erased)
+}
+
 /// Adds to `issues` the parameter of a PHP# method that no longer links against the method it overrides or implements
 /// once generics are erased, as the engine links the class PHP# compiles to: each parameter takes at least the type the
 /// parent's parameter erases to. The engine links the erased declarations whenever `child_class` or `parent_class` is
@@ -692,7 +753,7 @@ pub(super) fn erase(r#type: &TUnion, codebase: &CodebaseMetadata) -> TUnion {
 }
 
 /// The type `erased`, which `erase` returns, in backticks, as a `dialect` file writes it. PHP writes it as in a
-/// declaration, `array`, `Closure`, `callable`, `mixed`, or a class by its full name. PHP# writes it as
+/// declaration, `array`, `Closure`, `callable`, `mixed`, `static` for PHP#'s `Self`, or a class by its full name. PHP# writes it as
 /// `display_sharp_type` does, `Order`, `Any?` or `Iterable<Any?>`, but has no `array`, `Closure` or `callable`, so a
 /// PHP# file writes a type with any of them in it as PHP's, as in PHP's `Closure` or PHP's `array|null`. No PHP#
 /// declaration erases to an `iterable`, and an `array` beside one joins it, so PHP's form never holds one.
@@ -712,6 +773,7 @@ where
             TAtomic::Array(_) => "array".to_owned(),
             TAtomic::Callable(callable) if callable.is_closure() => "Closure".to_owned(),
             TAtomic::Callable(_) => "callable".to_owned(),
+            TAtomic::Object(TObject::Named(object)) if object.is_static => "static".to_owned(),
             atomic => atomic.get_id().to_string(),
         })
         .collect();

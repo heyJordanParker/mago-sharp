@@ -312,6 +312,63 @@ fn compile_refuses_a_plain_php_class_that_does_not_satisfy_the_php_sharp_interfa
     compile_succeeds(root);
 }
 
+/// The engine links a plain PHP class against the PHP# interface it implements whatever declares each method the class
+/// takes: the class, a trait of the project, or a class or trait of a package in `vendor/`, as Eloquent's `Model` gives
+/// `unsetRelation()` from its `HasRelationships` trait. So the compile refuses an untyped method under a typed member
+/// from each of them, naming the member's type as PHP declares it. An `Any?` result declares no PHP type, so an untyped
+/// method fits it from each of them.
+#[test]
+fn compile_checks_each_method_a_plain_php_class_links_against_a_php_sharp_interface_wherever_it_is_declared() {
+    let directory = project(ORDER, MONEY);
+    let root = directory.path();
+    let untyped = |namespace: &str, name: &str| {
+        format!(
+            "<?php\n\nnamespace {namespace};\n\ntrait {name}\n{{\n    public function forget($relation)\n    {{\n        return $this;\n    }}\n\n    public function getMorphClass()\n    {{\n        return 'row';\n    }}\n}}\n"
+        )
+    };
+    write(root, "app/ForgetsInApp.php", &untyped("App", "ForgetsInApp"));
+    write(
+        root,
+        "app/AppRow.php",
+        "<?php\n\nnamespace App;\n\nclass AppRow implements Relates\n{\n    use ForgetsInApp;\n}\n",
+    );
+    write(root, "vendor/acme/model/src/ForgetsRelations.php", &untyped("Acme", "ForgetsRelations"));
+    write(
+        root,
+        "vendor/acme/model/src/Model.php",
+        "<?php\n\nnamespace Acme;\n\nabstract class Model\n{\n    use ForgetsRelations;\n}\n",
+    );
+    write(
+        root,
+        "app/VendorRow.php",
+        "<?php\n\nnamespace App;\n\nclass VendorRow extends \\Acme\\Model implements Relates\n{\n}\n",
+    );
+    let relates = |forget: &str| {
+        format!(
+            "namespace App;\n\npublic interface Relates\n{{\n    {forget} forget(string relation);\n\n    Any? getMorphClass();\n}}\n"
+        )
+    };
+    write(root, "app/Relates.sharp", &relates("Self"));
+
+    let output = compile(root);
+
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    for class in ["AppRow", "VendorRow"] {
+        assert!(
+            printed(&output).contains(&format!(
+                "`App\\{class}::forget()` must declare a return type compatible with `static` declared by `App\\Relates::forget()`"
+            )),
+            "{}",
+            printed(&output)
+        );
+    }
+    assert!(!printed(&output).contains("getMorphClass"), "{}", printed(&output));
+    assert!(printed(&output).contains("2 plain PHP files were refused"), "{}", printed(&output));
+
+    write(root, "app/Relates.sharp", &relates("Any?"));
+    compile_succeeds(root);
+}
+
 /// The compile checks a plain PHP file only where its class meets a PHP# type, as kotlinc checks a Java type only
 /// where it meets a Kotlin declaration. Every other error there stays `mago analyze`'s, as in a plain PHP project.
 #[test]
@@ -779,7 +836,6 @@ final class Typing implements Plugin, BeforeAnalysisHook
 
 (new Worker(new Extension('typing', 'Typing', '0.0.0', analyzerPlugins: [new Typing()])))->run();
 "#;
-
 #[test]
 fn compile_deletes_the_compiled_file_of_a_renamed_or_removed_source() {
     let directory = project(ORDER, MONEY);
