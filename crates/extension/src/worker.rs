@@ -1157,11 +1157,11 @@ mod tests {
         let deadline = Duration::from_secs(1);
         let (worker, mut peer_reader, mut peer_writer) = connected_worker(deadline);
         let peer = std::thread::spawn(move || {
-            for _ in 0..3 {
+            for _ in 0..6 {
                 let request = Frame::read_from(&mut peer_reader, 1024)
                     .expect("request should decode")
                     .expect("request should be present");
-                std::thread::sleep(deadline - Duration::from_millis(200));
+                std::thread::sleep(deadline / 5);
                 Frame::response(request.id, 0, request.payload)
                     .write_to(&mut peer_writer, 1024)
                     .expect("response should encode");
@@ -1169,9 +1169,11 @@ mod tests {
             }
         });
 
-        let responses = send_three_at_once(&worker);
+        let started_at = Instant::now();
+        let responses = send_at_once::<6>(&worker);
 
         assert!(responses.iter().all(Result::is_ok), "{responses:?}");
+        assert!(started_at.elapsed() > deadline, "the requests took {:?}", started_at.elapsed());
         peer.join().expect("peer thread should join");
         worker.shutdown();
     }
@@ -1201,7 +1203,7 @@ mod tests {
         });
 
         let started_at = Instant::now();
-        let responses = send_three_at_once(&worker);
+        let responses = send_at_once::<3>(&worker);
         let elapsed = started_at.elapsed();
 
         assert_eq!(responses.iter().filter(|response| response.is_ok()).count(), 1, "{responses:?}");
@@ -1221,13 +1223,13 @@ mod tests {
         Frame { version: crate::protocol::PROTOCOL_VERSION, kind, flags: FrameFlags::empty(), id, parent_id, payload }
     }
 
-    /// A peer that runs six files' hooks for request `outer`, each for half of `deadline`. Before each file's hooks it
-    /// sends a progress frame naming the file when `progress` holds, and each hook asks Mago for metadata. It answers
-    /// the request unless Mago cancels it.
+    /// A peer that runs six files' hooks for request `outer`, each for `per_file`. Before each file's hooks it sends a
+    /// progress frame naming the file when `progress` holds, and each hook asks Mago for metadata. It answers the
+    /// request unless Mago cancels it.
     fn run_six_files(
         mut peer_reader: TcpStream,
         mut peer_writer: TcpStream,
-        deadline: Duration,
+        per_file: Duration,
         progress: bool,
     ) -> std::thread::JoinHandle<()> {
         std::thread::spawn(move || {
@@ -1241,7 +1243,7 @@ mod tests {
                         .write_to(&mut peer_writer, 1024)
                         .expect("progress should encode");
                 }
-                std::thread::sleep(deadline / 2);
+                std::thread::sleep(per_file);
                 from_worker(FrameKind::Request, id, outer.id, b"metadata?".to_vec())
                     .write_to(&mut peer_writer, 1024)
                     .expect("nested request should encode");
@@ -1264,16 +1266,16 @@ mod tests {
     /// lives past it while the worker starts each file within it.
     #[test]
     fn a_batch_whose_every_file_runs_within_the_deadline_lives_past_it() {
-        let deadline = Duration::from_millis(300);
+        let deadline = Duration::from_secs(1);
         let (worker, peer_reader, peer_writer) = connected_worker(deadline);
-        let peer = run_six_files(peer_reader, peer_writer, deadline, true);
+        let peer = run_six_files(peer_reader, peer_writer, deadline / 5, true);
 
         let started_at = Instant::now();
         let mut handler = |_: &Frame| Ok(b"metadata!".to_vec());
         let response = worker.request_with_handler(b"analyze".to_vec(), &mut handler);
 
         assert_eq!(response.expect("the request should finish"), b"done");
-        assert!(started_at.elapsed() > deadline * 2, "the request took {:?}", started_at.elapsed());
+        assert!(started_at.elapsed() > deadline, "the request took {:?}", started_at.elapsed());
         peer.join().expect("peer thread should join");
         worker.shutdown();
     }
@@ -1284,7 +1286,7 @@ mod tests {
     fn a_hook_that_asks_for_metadata_but_never_finishes_its_file_fails_at_the_deadline() {
         let deadline = Duration::from_millis(300);
         let (worker, peer_reader, peer_writer) = connected_worker(deadline);
-        let peer = run_six_files(peer_reader, peer_writer, deadline, false);
+        let peer = run_six_files(peer_reader, peer_writer, deadline / 2, false);
 
         let started_at = Instant::now();
         let mut handler = |_: &Frame| Ok(b"metadata!".to_vec());
@@ -1351,10 +1353,10 @@ mod tests {
         peer.join().expect("peer thread should join");
     }
 
-    fn send_three_at_once(worker: &Arc<Worker>) -> [Result<Vec<u8>, WorkerError>; 3] {
-        let barrier = Barrier::new(3);
+    fn send_at_once<const N: usize>(worker: &Arc<Worker>) -> [Result<Vec<u8>, WorkerError>; N] {
+        let barrier = Barrier::new(N);
         std::thread::scope(|scope| {
-            let requests: [_; 3] = std::array::from_fn(|_| {
+            let requests: [_; N] = std::array::from_fn(|_| {
                 scope.spawn(|| {
                     barrier.wait();
                     worker.request(b"request".to_vec())
