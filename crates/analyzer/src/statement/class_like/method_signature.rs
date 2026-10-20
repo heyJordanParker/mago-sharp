@@ -9,22 +9,19 @@ use mago_codex::metadata::ttype::TypeMetadata;
 use mago_codex::misc::GenericParent;
 use mago_codex::ttype::TType;
 use mago_codex::ttype::atomic::TAtomic;
+use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::generic::TGenericParameter;
 use mago_codex::ttype::atomic::object::TObject;
-use mago_codex::ttype::atomic::scalar::TScalar;
-use mago_codex::ttype::combiner;
-use mago_codex::ttype::combiner::CombinerOptions;
 use mago_codex::ttype::comparator::ComparisonResult;
 use mago_codex::ttype::comparator::union_comparator;
+use mago_codex::ttype::crosses_outward;
 use mago_codex::ttype::expander::StaticClassType;
 use mago_codex::ttype::expander::TypeExpansionOptions;
 use mago_codex::ttype::expander::expand_union;
+use mago_codex::ttype::get_crossing_array;
 use mago_codex::ttype::get_mixed;
-use mago_codex::ttype::get_mixed_callable;
-use mago_codex::ttype::get_mixed_closure;
-use mago_codex::ttype::get_mixed_iterable;
 use mago_codex::ttype::get_mixed_keyed_array;
-use mago_codex::ttype::get_string;
+use mago_codex::ttype::get_php_declared_type;
 use mago_codex::ttype::template::TemplateResult;
 use mago_codex::ttype::template::inferred_type_replacer;
 use mago_codex::ttype::template::variance::Variance;
@@ -64,6 +61,11 @@ pub enum SignatureCompatibilityIssue {
         parameter_index: usize,
         child_type: TUnion,
         parent_type: TUnion,
+    },
+    /// A plain PHP method's parameter takes its argument by reference where the PHP declaration of the PHP# method it
+    /// links against takes it by value, which PHP refuses when it links the class.
+    ByReferenceMismatch {
+        parameter_index: usize,
     },
     /// Spec section 29: the parent's function parameter takes on each caller's effects, a plain PHP `callable` or
     /// `Closure` included, so a call through the parent may pass a function with any effect, and the child's parameter,
@@ -154,12 +156,15 @@ pub fn validate_method_signature_compatibility(
         return Vec::new();
     }
 
-    let declared_child_method;
-    let child_method = if is_vendored {
-        declared_child_method = as_declared(child_method);
-        &declared_child_method
+    // The engine links a plain PHP method against the PHP declaration the bridge writes for a PHP# method, so the
+    // pair is checked on what PHP declares on each side, as PHP checks it.
+    let links_to_php_declaration = parent_method.flags.is_sharp() && !child_method.flags.is_sharp();
+    let declared_methods;
+    let (child_method, parent_method) = if links_to_php_declaration {
+        declared_methods = (as_declared(child_method), as_lowered(codebase, parent_class_name, parent_method));
+        (&declared_methods.0, &declared_methods.1)
     } else {
-        child_method
+        (child_method, parent_method)
     };
 
     let (child_method, changed_bound) = if dialect.is_sharp() {
@@ -273,6 +278,19 @@ pub fn validate_method_signature_compatibility(
         return issues;
     }
 
+    // PHP refuses a parameter that takes its argument by reference where the declaration it links against takes it by
+    // value, and no PHP# parameter takes one by reference.
+    if links_to_php_declaration
+        && let Some(parameter_index) =
+            parent_method.parameters.iter().zip(&child_method.parameters).position(|(parent_param, child_param)| {
+                parent_param.flags.is_by_reference() != child_param.flags.is_by_reference()
+            })
+    {
+        issues.push(SignatureCompatibilityIssue::ByReferenceMismatch { parameter_index });
+
+        return issues;
+    }
+
     for (index, parent_param) in parent_method.parameters.iter().enumerate() {
         let Some(child_param) = child_method.parameters.get(index) else {
             continue;
@@ -331,6 +349,23 @@ pub fn validate_method_signature_compatibility(
             &mut ComparisonResult::for_dialect(dialect),
         );
 
+        if !is_compatible && links_to_php_declaration {
+            let declared = codebase.get_method(parent_class_name.as_bytes(), parent_method.name.as_bytes());
+            let declared = declared.and_then(|declared| declared.parameters.get(index));
+            issues.push(SignatureCompatibilityIssue::ErasedParameterNarrowed {
+                parameter_index: index,
+                bound: bound_example(
+                    codebase,
+                    declared.and_then(|declared| declared.type_declaration_metadata.as_ref()),
+                    &expanded_child_param_type,
+                ),
+                substitutes: false,
+                child_type: expanded_child_param_type,
+                parent_type: expanded_parent_param_type,
+            });
+
+            return issues;
+        }
         if !is_compatible {
             issues.push(SignatureCompatibilityIssue::IncompatibleParameterType {
                 parameter_index: index,
@@ -356,12 +391,14 @@ pub fn validate_method_signature_compatibility(
         }
     }
 
-    if parent_method.flags.is_sharp()
-        && let Some(parent_return) = php_return_type(codebase, parent_class_name, parent_method)
+    if links_to_php_declaration
+        && let Some(parent_return) = &parent_method.return_type_declaration_metadata
         && child_method.return_type_declaration_metadata.is_none()
     {
-        // A plain PHP method links against the PHP declaration, so the error names the type as PHP writes it.
-        issues.push(SignatureCompatibilityIssue::MissingReturnTypeDeclaration { parent_type: parent_return });
+        // The error names the type as PHP declares it.
+        issues.push(SignatureCompatibilityIssue::MissingReturnTypeDeclaration {
+            parent_type: parent_return.type_union.clone(),
+        });
         return issues;
     }
 
@@ -568,22 +605,57 @@ fn as_declared(method: &FunctionLikeMetadata) -> FunctionLikeMetadata {
     declared
 }
 
-/// The return type PHP declares for the PHP# method `method` of `class`, as the bridge's `return_hint` writes it: the
-/// type `erase` gives, or none where that is `mixed`, as for `Any`, `Any?` and a type parameter without a bound, so a
-/// plain PHP method without a return type fits it. A method that overrides a plain PHP method declaring a return type
-/// keeps `mixed`, which PHP requires of it.
-fn php_return_type(codebase: &CodebaseMetadata, class: Word, method: &FunctionLikeMetadata) -> Option<TUnion> {
-    let erased = erase(&method.return_type_declaration_metadata.as_ref()?.type_union, codebase);
-    let overrides_typed_result = || {
-        codebase
-            .get_class_like(class.as_bytes())
-            .is_some_and(|class| codebase.overrides_typed_php_method(class, method.name.as_bytes()))
-    };
-    if erased.types.iter().any(TAtomic::is_mixed) && !overrides_typed_result() {
-        return None;
-    }
+/// `method`, a PHP# method of `class`, as the PHP declaration the bridge writes for it, which the engine links a plain
+/// PHP class against, read from the method as declared, before any type arguments replace its class's type parameters.
+///
+/// Each parameter is typed as the codex's `get_php_declared_type` erases its type, with `array` beside the `Sharp\Map`
+/// or `Sharp\Set` it takes, as the bridge declares a parameter that takes the PHP array plain PHP passes. The result
+/// is typed the same way, with `array` where a plain PHP caller gets the PHP array, or untyped where it erases to
+/// `mixed`, as for `Any`, `Any?` and a type parameter without a bound, unless the method overrides a plain PHP method
+/// that declares a return type, which PHP requires it to keep.
+fn as_lowered(codebase: &CodebaseMetadata, class: Word, method: &FunctionLikeMetadata) -> FunctionLikeMetadata {
+    let method = codebase.get_method(class.as_bytes(), method.name.as_bytes()).unwrap_or(method);
+    let with_array = |mut erased: TUnion, takes_array: bool| {
+        if takes_array {
+            erased = TUnion::from_vec(
+                erased.types.iter().cloned().chain(get_mixed_keyed_array().types.into_owned()).collect(),
+            );
+        }
 
-    Some(erased)
+        erased
+    };
+    let mut lowered = method.clone();
+    for parameter in lowered.get_parameters_mut() {
+        parameter.type_declaration_metadata = parameter.type_declaration_metadata.take().map(|mut declared| {
+            let takes_array = get_crossing_array(&declared.type_union, codebase)
+                .is_some_and(|array| !matches!(array, TArray::List(_)));
+            declared.type_union = with_array(get_php_declared_type(&declared.type_union, codebase), takes_array);
+
+            declared
+        });
+        parameter.type_metadata = parameter.type_declaration_metadata.clone();
+    }
+    lowered.return_type_declaration_metadata = lowered.return_type_declaration_metadata.take().and_then(|mut declared| {
+        let erased = get_php_declared_type(&declared.type_union, codebase);
+        if erased.types.iter().any(TAtomic::is_mixed)
+            && !codebase
+                .get_class_like(class.as_bytes())
+                .is_some_and(|class| codebase.overrides_typed_php_method(class, method.name.as_bytes()))
+        {
+            return None;
+        }
+        let crosses = crosses_outward(&declared.type_union, codebase)
+            && erased.types.iter().any(|atomic| {
+                matches!(atomic, TAtomic::Object(TObject::Named(object))
+                    if [b"Sharp\\Map".as_slice(), b"Sharp\\Set"].iter().any(|table| object.name.as_bytes().eq_ignore_ascii_case(table)))
+            });
+        declared.type_union = with_array(erased, crosses);
+
+        Some(declared)
+    });
+    lowered.return_type_metadata = lowered.return_type_declaration_metadata.clone();
+
+    lowered
 }
 
 /// Adds to `issues` the parameter of a PHP# method that no longer links against the method it overrides or implements
@@ -592,7 +664,8 @@ fn php_return_type(codebase: &CodebaseMetadata, class: Word, method: &FunctionLi
 /// PHP#, and it checks them only when `issues`, found on the substituted signatures, hold at most renamed parameters,
 /// which hide no erased type. `child_method` and `parent_method` are the declarations as written, before the type
 /// arguments of the class's header replace the parent's type parameters. PHP links a constructor against its parent's
-/// only when the parent's is abstract.
+/// only when the parent's is abstract. A plain PHP method under a PHP# one is checked on the PHP declarations already,
+/// by [`validate_method_signature_compatibility`].
 ///
 /// A return type needs no check here: the substituted return type is contained by the parent's, and a type argument
 /// is contained by its bound, so the erased return type is contained by the parent's erased one.
@@ -605,6 +678,7 @@ pub fn validate_erased_signature_compatibility(
     issues: &mut Vec<SignatureCompatibilityIssue>,
 ) {
     if !(child_class.flags.is_sharp() || parent_class.flags.is_sharp())
+        || (parent_method.flags.is_sharp() && !child_method.flags.is_sharp())
         || !issues.iter().all(|issue| matches!(issue, SignatureCompatibilityIssue::ParameterNameMismatch { .. }))
         || are_operators(child_method, parent_method)
     {
@@ -622,7 +696,7 @@ pub fn validate_erased_signature_compatibility(
         let mut erased = parameter
             .type_declaration_metadata
             .as_ref()
-            .map_or_else(get_mixed, |declared| erase(&declared.type_union, codebase));
+            .map_or_else(get_mixed, |declared| get_php_declared_type(&declared.type_union, codebase));
         if erased.is_expandable() {
             expand_union(
                 codebase,
@@ -716,46 +790,24 @@ pub(super) fn erased_type_help(name: impl std::fmt::Display, erased_parent_type:
     }
 }
 
-/// The type PHP sees for `r#type`, a PHP# type, once generics are erased, as the bridge's `erase` writes it: a type
-/// parameter is its bound, or `mixed` without one, and its bound's classes joined with `&` one intersection; a generic
-/// class is its class; `Class<T>` is `string`; a `List` or a `Map` is `array`; a function type, which is a closure
-/// signature, is `Closure`, and PHP's `callable` stays `callable`; and `Any` is `mixed`. Members that erase to one type
-/// are one type.
-pub(super) fn erase(r#type: &TUnion, codebase: &CodebaseMetadata) -> TUnion {
-    let erased = r#type
-        .types
-        .iter()
-        .flat_map(|atomic| match atomic {
-            TAtomic::GenericParameter(parameter) => erase(&parameter.constraint, codebase).types.into_owned(),
-            TAtomic::Mixed(_) => get_mixed().types.into_owned(),
-            TAtomic::Array(_) => get_mixed_keyed_array().types.into_owned(),
-            TAtomic::Iterable(_) => get_mixed_iterable().types.into_owned(),
-            TAtomic::Callable(callable) if callable.is_closure() => get_mixed_closure().types.into_owned(),
-            TAtomic::Callable(_) => get_mixed_callable().types.into_owned(),
-            TAtomic::Scalar(TScalar::ClassLikeString(_)) => get_string().types.into_owned(),
-            TAtomic::Object(TObject::Named(object)) => {
-                let mut object = object.clone();
-                object.type_parameters = None;
-
-                vec![TAtomic::Object(TObject::Named(object))]
-            }
-            atomic => vec![atomic.clone()],
-        })
-        .collect();
-
-    TUnion::from_vec(combiner::combine(erased, codebase, CombinerOptions::default()))
-}
-
-/// The type `erased`, which `erase` returns, in backticks, as a `dialect` file writes it. PHP writes it as in a
-/// declaration, `array`, `Closure`, `callable`, `mixed`, `static` for PHP#'s `Self`, or a class by its full name. PHP# writes it as
-/// `display_sharp_type` does, `Order`, `Any?` or `Iterable<Any?>`, but has no `array`, `Closure` or `callable`, so a
-/// PHP# file writes a type with any of them in it as PHP's, as in PHP's `Closure` or PHP's `array|null`. No PHP#
-/// declaration erases to an `iterable`, and an `array` beside one joins it, so PHP's form never holds one.
+/// The type `erased`, which the codex's `get_php_declared_type` returns, in backticks, as a `dialect` file writes it.
+///
+/// PHP writes it as in a declaration, `array`, `Closure`, `callable`, `mixed`, `static` for PHP#'s `Self`, or a class
+/// by its full name, as `Sharp\Map`. PHP# writes it as `display_sharp_type` does, `Order`, `Any?` or `Iterable<Any?>`,
+/// but has no `array`, `Closure`, `callable`, `Sharp\Map` or `Sharp\Set`, so a PHP# file writes a type with any of
+/// them in it as PHP's, as in PHP's `Closure` or PHP's `array|null`. No PHP# declaration erases to an `iterable`, and
+/// an `array` beside one joins it, so PHP's form never holds one.
 pub(super) fn display_erased<A>(erased: &TUnion, context: &Context<'_, '_, A>) -> String
 where
     A: Arena,
 {
-    let is_php_only = erased.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(_) | TAtomic::Callable(_)));
+    let is_php_only = erased.types.iter().any(|atomic| match atomic {
+        TAtomic::Array(_) | TAtomic::Callable(_) => true,
+        TAtomic::Object(TObject::Named(object)) => [b"Closure".as_slice(), b"Sharp\\Map", b"Sharp\\Set"]
+            .iter()
+            .any(|php_class| object.name.as_bytes().eq_ignore_ascii_case(php_class)),
+        _ => false,
+    });
     if context.dialect.is_sharp() && !is_php_only {
         return format!("`{}`", display_sharp_type(context, erased));
     }
@@ -768,6 +820,10 @@ where
             TAtomic::Callable(callable) if callable.is_closure() => "Closure".to_owned(),
             TAtomic::Callable(_) => "callable".to_owned(),
             TAtomic::Object(TObject::Named(object)) if object.is_static => "static".to_owned(),
+            // A declaration names a class without type arguments, which the analysis may have given it.
+            TAtomic::Object(TObject::Named(object)) if object.get_intersection_types().is_none() => {
+                object.name.to_string()
+            }
             atomic => atomic.get_id().to_string(),
         })
         .collect();

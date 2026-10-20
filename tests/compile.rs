@@ -296,7 +296,7 @@ fn compile_refuses_a_plain_php_class_that_does_not_satisfy_the_php_sharp_interfa
     );
     assert!(printed(&output).contains("incompatible-return-type"), "{}", printed(&output));
     assert!(
-        printed(&output).contains("Parameter `item` of `App\\IntBox::put()` must take at least `mixed`"),
+        printed(&output).contains("Parameter `$item` of `App\\IntBox::put()` must take at least `mixed`"),
         "{}",
         printed(&output)
     );
@@ -366,6 +366,23 @@ fn compile_checks_each_method_a_plain_php_class_links_against_a_php_sharp_interf
     assert!(printed(&output).contains("2 plain PHP files were refused"), "{}", printed(&output));
 
     write(root, "app/Relates.sharp", &relates("Any?"));
+    compile_succeeds(root);
+}
+
+/// The engine erases a PHP# class's type parameters and reads no docblock, so it links a plain PHP class that implements
+/// a generic PHP# interface without the type argument an `@implements` tag would give it. The compile links it too, and
+/// the analysis keeps its error on the missing type argument.
+#[test]
+fn compile_links_a_plain_php_class_that_gives_a_php_sharp_interface_no_type_argument() {
+    let directory = project(ORDER, MONEY);
+    let root = directory.path();
+    write(root, "app/Morphs.sharp", "namespace App;\n\npublic interface Morphs<T>\n{\n    T morph();\n}\n");
+    write(
+        root,
+        "app/Bare.php",
+        "<?php\n\nnamespace App;\n\nclass Bare implements Morphs\n{\n    public function morph()\n    {\n        return 'row';\n    }\n}\n",
+    );
+
     compile_succeeds(root);
 }
 

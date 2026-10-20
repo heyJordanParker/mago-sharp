@@ -9,6 +9,7 @@ use xxhash_rust::xxh3::xxh3_64;
 
 use mago_allocator::LocalArena;
 use mago_analyzer::analysis_result::AnalysisResult;
+use mago_analyzer::code::IssueCode;
 use mago_analyzer::effects::EffectSummary;
 use mago_analyzer::effects::Effects;
 use mago_analyzer::external::ExternalAnalysisSession;
@@ -450,10 +451,23 @@ impl IncrementalAnalysisService {
     /// missing `Defaults` trait or a member whose signature doesn't fit the PHP# member it implements, a case the engine
     /// refuses when it links the class. The analysis names the class in each error of its declaration's checks. Every
     /// other error in a plain PHP file stays the analysis's, as kotlinc checks a Java type only where it meets a Kotlin
-    /// declaration and leaves every other Java error to javac.
+    /// declaration and leaves every other Java error to javac: the type arguments a docblock's `@implements` or
+    /// `@extends` gives a PHP# generic type among them, since the engine erases type parameters and reads no docblock.
     fn unlinkable_plain_php_classes(&self, errors: &HashMap<FileId, IssueCollection>) -> Vec<(FileId, Compilation)> {
         let in_sharp_file = |annotation: &Annotation| {
             self.database.get(&annotation.span.file_id).is_ok_and(|file| Dialect::of(&file).is_sharp())
+        };
+        let reads_docblock = |issue: &Issue| {
+            issue.code.as_deref().is_some_and(|code| {
+                [
+                    IssueCode::MissingTemplateParameter,
+                    IssueCode::ExcessTemplateParameter,
+                    IssueCode::InconsistentTemplate,
+                    IssueCode::InvalidTemplateParameter,
+                ]
+                .iter()
+                .any(|docblock| docblock.as_str() == code)
+            })
         };
         let names_sharp_type =
             |name: &Word| self.codebase.get_class_like(name.as_bytes()).is_some_and(|class| class.flags.is_sharp());
@@ -471,7 +485,7 @@ impl IncrementalAnalysisService {
             .collect();
 
         let mut refused: HashMap<FileId, IssueCollection> = HashMap::default();
-        for issue in errors.values().flat_map(IssueCollection::iter) {
+        for issue in errors.values().flat_map(IssueCollection::iter).filter(|issue| !reads_docblock(issue)) {
             if let Some(declaration) =
                 issue.annotations.iter().find(|annotation| declarations.contains(&annotation.span))
                 && issue.annotations.iter().any(in_sharp_file)

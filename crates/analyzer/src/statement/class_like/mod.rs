@@ -35,6 +35,7 @@ use mago_codex::ttype::expander::TypeExpansionOptions;
 use mago_codex::ttype::expander::expand_union;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_never;
+use mago_codex::ttype::get_php_declared_type;
 use mago_codex::ttype::get_specialized_template_type;
 use mago_codex::ttype::intersect_union_types;
 use mago_codex::ttype::resolution::TypeResolutionContext;
@@ -4531,6 +4532,28 @@ fn report_signature_compatibility_issue<'ctx, A>(
                 .with_help("Change the parameter type to be compatible with the parent method."),
             );
         }
+        SignatureCompatibilityIssue::ByReferenceMismatch { parameter_index } => {
+            let param_name = child_method.parameters.get(parameter_index).map_or_else(|| word("unknown"), |p| p.name.0);
+
+            context.collector.report_with_code(
+                IssueCode::IncompatibleParameterType,
+                Issue::error(format!(
+                    "Parameter `{param_name}` of `{child_display}` takes its argument by reference, and `{parent_display}` takes it by value."
+                ))
+                .with_annotation(
+                    Annotation::primary(primary_span).with_message(format!("`{param_name}` is taken by reference")),
+                )
+                .with_annotation(
+                    Annotation::secondary(parent_class_span)
+                        .with_message(format!("Parent method `{parent_display}` parameter defined here")),
+                )
+                .with_annotation(
+                    Annotation::secondary(child_class_span).with_message(format!("In class `{child_name}`")),
+                )
+                .with_note("PHP refuses a parameter taken by reference where the method it implements takes it by value, when it links the class.")
+                .with_help(format!("Take `{param_name}` by value, as `{parent_display}` does.")),
+            );
+        }
         SignatureCompatibilityIssue::TakesOnEffectsDropped { parameter_index, child_type } => {
             let Some(child_parameter) = child_method.parameters.get(parameter_index) else {
                 unreachable!("the signature check found this parameter on the override");
@@ -4601,8 +4624,12 @@ fn report_signature_compatibility_issue<'ctx, A>(
             ..
         } => {
             let parameter = child_method.parameters.get(parameter_index);
-            let param_name = parameter
-                .map_or_else(|| word("unknown"), |p| word(mago_bytes::trim_start_byte(p.name.0.as_bytes(), b'$')));
+            let param_name = parameter.map_or_else(|| word("unknown"), |p| p.name.0);
+            let param_name = if context.dialect.is_sharp() {
+                word(mago_bytes::trim_start_byte(param_name.as_bytes(), b'$'))
+            } else {
+                param_name
+            };
             let span = parameter
                 .map(|p| p.name_span)
                 .filter(|span| span.file_id == primary_span.file_id)
@@ -5396,8 +5423,8 @@ fn check_class_like_properties<'ctx, A>(
                                 .with_help(format!("Change the type of `{property}` to `{parent_type_id}` to match the parent property."))
                             );
                     } else if is_sharp {
-                        let erased_type = method_signature::erase(&declaring_type.type_union, context.codebase);
-                        let erased_parent_type = method_signature::erase(&parent_type.type_union, context.codebase);
+                        let erased_type = get_php_declared_type(&declaring_type.type_union, context.codebase);
+                        let erased_parent_type = get_php_declared_type(&parent_type.type_union, context.codebase);
 
                         if is_property_type_variance_invalid(
                             context.codebase,

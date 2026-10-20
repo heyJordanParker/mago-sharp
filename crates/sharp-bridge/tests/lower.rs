@@ -12705,7 +12705,7 @@ fn a_trait_type_is_object_and_its_test_reads_the_trait() {
             METHOD [1] "seed" @7-7
               PARAM_LIST
                 PARAM
-                  TYPE [8]
+                  ZVAL [1] "object"
                   ZVAL "owner"
                   null
                   null
@@ -12761,7 +12761,7 @@ fn a_trait_type_is_object_and_its_test_reads_the_trait() {
             METHOD [1] "bound" @7-7
               PARAM_LIST
                 PARAM
-                  TYPE [8]
+                  ZVAL [1] "object"
                   ZVAL "owner"
                   null
                   null
@@ -15496,23 +15496,24 @@ fn an_any_result_declares_mixed_only_where_a_typed_plain_php_method_requires_it(
 }
 
 /// A forwarded method declares the PHP type the interface's own method declares: a `Map` is `\Sharp\Map|array` and a
-/// `Set` `\Sharp\Set|array`, since plain PHP gets either as its PHP array, a `List` `array`, an `Iterable` `iterable`
-/// and a function type `\Closure`. `[257]` on `string?` is
-/// `ZEND_TYPE_NULLABLE | ZEND_NAME_NOT_FQ`, PHP's `?string`. A `void` result calls the parent without `return`.
+/// `Set` `\Sharp\Set|array`, since plain PHP gets either as its PHP array, a `List` `array`, an `Iterable` `iterable`,
+/// a function type `\Closure` and `Self` `static`, the type the engine links the parent's method against. `[257]` on
+/// `string?` is `ZEND_TYPE_NULLABLE | ZEND_NAME_NOT_FQ`, PHP's `?string`. A `void` result calls the parent without
+/// `return`.
 #[test]
 fn a_forwarded_method_declares_the_php_type_of_the_interface_method() {
-    let names = ["label", "touch", "owner", "level", "record", "sizes", "tags", "ids", "stream", "make"];
+    let names = ["label", "touch", "owner", "level", "record", "sizes", "tags", "ids", "stream", "make", "forget"];
     let lowered = Lowered::with(
         "namespace App;\n\npublic class Bill : Record, Shelved\n{\n}\n",
         &[
             (
                 "src/App/Record.php",
-                "<?php namespace App; class Record { public function label() {} public function touch() {} public function owner() {} public function level() {} public function record() {} public function sizes() {} public function tags() {} public function ids() {} public function stream() {} public function make() {} }",
+                "<?php namespace App; class Record { public function label() {} public function touch() {} public function owner() {} public function level() {} public function record() {} public function sizes() {} public function tags() {} public function ids() {} public function stream() {} public function make() {} public function forget($relation) { return $this; } }",
             ),
             ("src/App/Level.php", "<?php namespace App; enum Level: string { case Low = 'low'; }"),
             (
                 "src/App/Shelved.sharp",
-                "namespace App;\n\npublic interface Shelved\n{\n    string? label();\n    void touch();\n    Object owner();\n    Level level();\n    Record record();\n    Map<string, int> sizes();\n    Set<string> tags();\n    List<int> ids();\n    Iterable<int> stream();\n    Function<int()> make();\n}\n",
+                "namespace App;\n\npublic interface Shelved\n{\n    string? label();\n    void touch();\n    Object owner();\n    Level level();\n    Record record();\n    Map<string, int> sizes();\n    Set<string> tags();\n    List<int> ids();\n    Iterable<int> stream();\n    Function<int()> make();\n    Self forget(string relation);\n}\n",
             ),
         ],
     );
@@ -15532,6 +15533,7 @@ fn a_forwarded_method_declares_the_php_type_of_the_interface_method() {
             "TYPE [7]\n",
             "ZVAL [1] \"iterable\"\n",
             "ZVAL \"Closure\"\n",
+            "TYPE [15]\n",
         ]
     );
     assert_eq!(

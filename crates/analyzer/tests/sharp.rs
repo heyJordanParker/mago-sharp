@@ -2562,19 +2562,31 @@ fn an_override_of_a_plain_php_method_whose_return_type_fits_the_parents_docblock
     assert_eq!(issues(("src/Demo/Tally.sharp", sharp), &others), Vec::<String>::new());
 }
 
-/// A plain PHP subclass of a PHP# override meets the type the override writes, as a subclass of any PHP# method does,
-/// and inherits no `@return` from the plain PHP class above the override.
+/// A plain PHP subclass of a PHP# override meets the type the override's PHP declaration writes, `\Sharp\Map|array`
+/// for a `Map` plain PHP gets as its array, as a subclass of any PHP# method does, and inherits no `@return` from the
+/// plain PHP class above the override. So `array` links, as the engine links it, and `string` doesn't.
 #[test]
 fn a_plain_php_subclass_of_a_sharp_override_meets_the_type_the_override_writes() {
     let plain = "namespace Demo;\n\npublic class Tally\n{\n    public virtual Map<int, int> counts()\n    {\n        return [:];\n    }\n}\n";
-    let rush = "<?php\n\nnamespace Demo;\n\nclass Rush extends Tally\n{\n    #[\\Override]\n    public function counts(): array\n    {\n        return ['a' => 1];\n    }\n}\n";
+    let rush = |result: &str| -> &'static str {
+        let value = if result == "array" { "[1 => 1]" } else { "'one'" };
 
-    let below_plain = issues(("src/Demo/Rush.php", rush), &[("src/Demo/Tally.sharp", plain)]);
-    let below_override =
-        issues(("src/Demo/Rush.php", rush), &[("src/Demo/Tally.sharp", TALLY), ("src/Lib/Counter.php", COUNTER)]);
+        String::leak(format!(
+            "<?php\n\nnamespace Demo;\n\nclass Rush extends Tally\n{{\n    #[\\Override]\n    public function counts(): {result}\n    {{\n        return {value};\n    }}\n}}\n"
+        ))
+    };
 
-    assert_eq!(below_plain, ["8:21 incompatible-return-type"]);
-    assert_eq!(below_override, below_plain);
+    for result in ["array", "string"] {
+        let below_plain = issues(("src/Demo/Rush.php", rush(result)), &[("src/Demo/Tally.sharp", plain)]);
+        let below_override = issues(
+            ("src/Demo/Rush.php", rush(result)),
+            &[("src/Demo/Tally.sharp", TALLY), ("src/Lib/Counter.php", COUNTER)],
+        );
+
+        let expected: &[&str] = if result == "array" { &[] } else { &["8:21 incompatible-return-type"] };
+        assert_eq!(below_plain, expected, "counts(): {result}");
+        assert_eq!(below_override, below_plain, "counts(): {result}");
+    }
 }
 
 /// A PHP# override takes the parameter type it writes, so `tags` is a `Map` whose `get` takes its key. The signature
@@ -13570,8 +13582,8 @@ fn an_erased_parameter_help_names_a_bound_only_where_one_fits() {
     assert_eq!(
         explained(("src/Demo/Boxes.php", php_boxes), &boxes),
         [
-            "8:32 incompatible-parameter-type Parameter `item` of `Demo\\StatusBox::put()` must take at least `mixed`, the type `Demo\\Box::put()` erases it to. Write `item` with a type that erases to `mixed`, or bound the type parameter, as in `Box<TItem : Status>`, so both sides erase to the bound.",
-            "16:36 incompatible-parameter-type Parameter `item` of `Demo\\PairBox::put()` must take at least `mixed`, the type `Demo\\Box::put()` erases it to. Write `item` with a type that erases to `mixed`.",
+            "8:32 incompatible-parameter-type Parameter `$item` of `Demo\\StatusBox::put()` must take at least `mixed`, the type `Demo\\Box::put()` erases it to. Write `$item` with a type that erases to `mixed`, or bound the type parameter, as in `Box<TItem : Status>`, so both sides erase to the bound.",
+            "16:36 incompatible-parameter-type Parameter `$item` of `Demo\\PairBox::put()` must take at least `mixed`, the type `Demo\\Box::put()` erases it to. Write `$item` with a type that erases to `mixed`.",
         ]
     );
     assert_eq!(
@@ -13686,6 +13698,108 @@ fn a_plain_php_class_is_refused_an_untyped_method_under_a_typed_php_sharp_one_wh
     );
 }
 
+/// The engine links a plain PHP class against the PHP declaration the bridge writes for each PHP# method, by PHP's own
+/// rules, wherever the class's method is declared, so the analysis checks the same pair: what each side declares in
+/// PHP, without docblocks. A parameter taken by reference is refused, as is `array` where the bridge declares
+/// `\Sharp\Map|array`. `array` fits a `List<int>` or a plain PHP caller's `Map<string, int>` result, a `@param`
+/// docblock changes nothing, and an untyped method fits `Any` or a type parameter without a bound, which declare no
+/// type whatever type argument `@implements` gives it. Each verdict is the one the engine gives the class.
+#[test]
+fn a_plain_php_class_links_against_the_php_declaration_of_a_php_sharp_method() {
+    let interfaces = [
+        (
+            "src/App/Forgets.sharp",
+            "namespace App;\n\npublic interface Forgets\n{\n    Self forget(string relation);\n}\n",
+        ),
+        ("src/App/ListsItems.sharp", "namespace App;\n\npublic interface ListsItems\n{\n    List<int> items();\n}\n"),
+        (
+            "src/App/MapsItems.sharp",
+            "namespace App;\n\npublic interface MapsItems\n{\n    Map<string, int> items();\n}\n",
+        ),
+        ("src/App/MorphsGeneric.sharp", "namespace App;\n\npublic interface MorphsGeneric<T>\n{\n    T morph();\n}\n"),
+        ("src/App/MorphsAny.sharp", "namespace App;\n\npublic interface MorphsAny\n{\n    Any morph();\n}\n"),
+        (
+            "src/App/TakesMap.sharp",
+            "namespace App;\n\npublic interface TakesMap\n{\n    void take(Map<string, int> counts);\n}\n",
+        ),
+        (
+            "vendor/acme/model/src/Providers.php",
+            "<?php\n\nnamespace Acme;\n\nabstract class RefForget\n{\n    public function forget(&$relation): static\n    {\n        return $this;\n    }\n}\n\nabstract class StaticForget\n{\n    public function forget($relation): static\n    {\n        return $this;\n    }\n}\n\nabstract class ArrayItems\n{\n    public function items(): array\n    {\n        return [1];\n    }\n}\n\nabstract class UntypedMorph\n{\n    public function morph()\n    {\n        return 'row';\n    }\n}\n",
+        ),
+    ];
+    let row = |class: &str, body: &str| -> (&'static str, &'static str) {
+        (String::leak(format!("src/App/{class}.php")), String::leak(format!("<?php\n\nnamespace App;\n\n{body}\n")))
+    };
+    let rows = [
+        (
+            row(
+                "FProjectRef",
+                "class FProjectRef implements Forgets\n{\n    public function forget(&$relation): static\n    {\n        return $this;\n    }\n}",
+            ),
+            vec!["incompatible-parameter-type"],
+        ),
+        (
+            row("FRef", "class FRef extends \\Acme\\RefForget implements Forgets\n{\n}"),
+            vec!["incompatible-parameter-type"],
+        ),
+        (
+            row(
+                "FProjectDocblock",
+                "class FProjectDocblock implements Forgets\n{\n    /**\n     * @param int $relation\n     */\n    public function forget($relation): static\n    {\n        return $this;\n    }\n}",
+            ),
+            vec![],
+        ),
+        (row("FStatic", "class FStatic extends \\Acme\\StaticForget implements Forgets\n{\n}"), vec![]),
+        (
+            row(
+                "LArrayOwn",
+                "class LArrayOwn implements ListsItems\n{\n    public function items(): array\n    {\n        return [1];\n    }\n}",
+            ),
+            vec![],
+        ),
+        (row("LArrayVendor", "class LArrayVendor extends \\Acme\\ArrayItems implements ListsItems\n{\n}"), vec![]),
+        (
+            row(
+                "MapArrayOwn",
+                "class MapArrayOwn implements MapsItems\n{\n    public function items(): array\n    {\n        return ['a' => 1];\n    }\n}",
+            ),
+            vec![],
+        ),
+        (
+            row(
+                "TakeMapOwn",
+                "class TakeMapOwn implements TakesMap\n{\n    public function take(array $counts): void\n    {\n    }\n}",
+            ),
+            vec!["incompatible-parameter-type"],
+        ),
+        (
+            row(
+                "MGenericOwn",
+                "/**\n * @implements MorphsGeneric<string>\n */\nclass MGenericOwn implements MorphsGeneric\n{\n    public function morph()\n    {\n        return 'row';\n    }\n}",
+            ),
+            vec![],
+        ),
+        (
+            row(
+                "MGenericVendor",
+                "/**\n * @implements MorphsGeneric<string>\n */\nclass MGenericVendor extends \\Acme\\UntypedMorph implements MorphsGeneric\n{\n}",
+            ),
+            vec![],
+        ),
+        (row("MAnyVendor", "class MAnyVendor extends \\Acme\\UntypedMorph implements MorphsAny\n{\n}"), vec![]),
+    ];
+
+    for (analyzed, expected) in rows {
+        let refused: Vec<String> = analyze(&PLUGIN_REGISTRY, settings(), analyzed, &interfaces)
+            .into_iter()
+            .filter(|issue| issue.level == Level::Error)
+            .map(|issue| issue.code.unwrap_or_default())
+            .collect();
+
+        assert_eq!(refused, expected, "{}", analyzed.0);
+    }
+}
+
 /// A PHP# type states a property, not its hooks, so a plain PHP class that lacks the property a PHP# interface states
 /// is told of the property as PHP writes it, `$label`, never of a `get` hook the PHP# source never writes.
 #[test]
@@ -13714,7 +13828,7 @@ fn a_php_class_overriding_an_erased_sharp_method_is_refused_and_a_sharp_class_is
     assert_eq!(
         explained(("src/Demo/OrderBox.php", order_box), &[("src/Demo/Box.sharp", sharp_box)]),
         [
-            "8:31 incompatible-parameter-type Parameter `item` of `Demo\\OrderBox::put()` must take at least `mixed`, the type `Demo\\Box::put()` erases it to. Write `item` with a type that erases to `mixed`, or bound the type parameter, as in `Box<TItem : Order>`, so both sides erase to the bound.",
+            "8:31 incompatible-parameter-type Parameter `$item` of `Demo\\OrderBox::put()` must take at least `mixed`, the type `Demo\\Box::put()` erases it to. Write `$item` with a type that erases to `mixed`, or bound the type parameter, as in `Box<TItem : Order>`, so both sides erase to the bound.",
         ]
     );
     assert_eq!(

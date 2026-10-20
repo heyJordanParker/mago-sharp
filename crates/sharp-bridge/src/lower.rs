@@ -21,6 +21,7 @@ use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::crosses_outward;
 use mago_codex::ttype::get_crossing_array;
 use mago_codex::ttype::get_mixed;
+use mago_codex::ttype::get_php_declared_type;
 use mago_codex::ttype::keys_hold_in_array;
 use mago_codex::ttype::may_hold_collection;
 use mago_codex::ttype::resolution::TypeResolutionContext;
@@ -136,7 +137,6 @@ use mago_syntax::cst::WhileBody;
 use mago_syntax::cst::With;
 use mago_syntax::cst::Yield;
 use mago_syntax::cst::YieldValue;
-use mago_syntax::cst::built_in_generic_arity;
 use mago_syntax::dialect::Dialect;
 use mago_syntax::utils::block_has_yield;
 use mago_syntax::utils::pattern::PhpShape;
@@ -314,7 +314,6 @@ const IS_LONG: u32 = 4;
 const IS_DOUBLE: u32 = 5;
 const IS_STRING: u32 = 6;
 const IS_ARRAY: u32 = 7;
-const IS_OBJECT: u32 = 8;
 const ZEND_ARRAY_SYNTAX_SHORT: u32 = 3;
 const ZEND_ADD: u32 = 1;
 const ZEND_SUB: u32 = 2;
@@ -584,7 +583,7 @@ struct Lowering<'lowering, 'arena> {
     promoted_beside: bool,
     /// The type PHP writes for each type parameter, by the offset of its declared name: its bound, or `mixed` without
     /// one.
-    type_parameters: HashMap<u32, PhpType<'arena>>,
+    type_parameters: HashMap<u32, PhpType>,
     /// Whether the file declares a test module, so each of its classes starts and ends its tests.
     tested: bool,
     /// Whether the expression being lowered is one PHP evaluates as a constant expression, where a `Map` or a `Set`
@@ -984,48 +983,22 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         forwarders
     }
 
-    /// The PHP type the bridge declares for the PHP# result `r#type`, as [`Self::result_hint`] lowers it: a `Map` is
-    /// `\Sharp\Map`, a `Set` `\Sharp\Set`, each with `array` where a plain PHP caller gets its PHP array, any other
-    /// collection `array`, and a function type `\Closure`. None for a result PHP declares no type for, as `mixed`, or
-    /// that holds a type parameter.
+    /// The PHP type the bridge declares for the PHP# result `r#type`, as [`Self::return_hint`] lowers it: the type the
+    /// codex's [`get_php_declared_type`] erases it to, with `array` beside a `\Sharp\Map` or `\Sharp\Set` where a plain
+    /// PHP caller gets its PHP array. None for a result PHP declares no type for, as `mixed`.
     fn forwarded_type(&mut self, r#type: &TUnion, line: u32) -> Option<u32> {
-        let mut members = Vec::new();
-        let mut null_line = None;
-        for atomic in r#type.types.iter() {
-            let php_type = match atomic {
-                TAtomic::Null => {
-                    null_line = Some(line);
-                    continue;
-                }
-                TAtomic::Void => PhpType::Named(b"void"),
-                TAtomic::Scalar(scalar) if scalar.is_true() => PhpType::Named(b"true"),
-                TAtomic::Scalar(scalar) if scalar.is_false() => PhpType::Named(b"false"),
-                TAtomic::Scalar(scalar) if scalar.is_general_bool() => PhpType::Named(b"bool"),
-                TAtomic::Scalar(scalar) if scalar.is_int() => PhpType::Named(b"int"),
-                TAtomic::Scalar(scalar) if scalar.is_float() => PhpType::Named(b"float"),
-                TAtomic::Scalar(scalar) if scalar.is_string() => PhpType::Named(b"string"),
-                TAtomic::Object(TObject::Any) => PhpType::Named(b"object"),
-                TAtomic::Object(TObject::Enum(r#enum)) => PhpType::Classes(vec![r#enum.name.as_bytes()]),
-                TAtomic::Object(TObject::Named(object)) if object.get_intersection_types().is_none() => {
-                    PhpType::Classes(vec![object.name.as_bytes()])
-                }
-                TAtomic::Array(TArray::Keyed(_)) => PhpType::Classes(vec![b"Sharp\\Map"]),
-                TAtomic::Array(TArray::Set(_)) => PhpType::Classes(vec![b"Sharp\\Set"]),
-                TAtomic::Array(_) => PhpType::Keyword(IS_ARRAY),
-                TAtomic::Iterable(_) => PhpType::Named(b"iterable"),
-                TAtomic::Callable(_) => PhpType::Classes(vec![b"Closure"]),
-                _ => return None,
-            };
-            members.push((php_type, line));
+        let erased = get_php_declared_type(r#type, self.types.codebase());
+        if erased.types.iter().any(TAtomic::is_mixed) {
+            return None;
         }
+        let mut members: Vec<(PhpType, u32)> =
+            erased.types.iter().filter(|atomic| !atomic.is_null()).map(|atomic| (PhpType::of(atomic), line)).collect();
         // A plain PHP caller gets a `Map`'s or a `Set`'s PHP array, as `Self::result_hint` declares it.
-        if self.crosses_outward(r#type)
-            && r#type.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(TArray::Keyed(_) | TArray::Set(_))))
-        {
+        if self.crosses_outward(r#type) && members.iter().any(|(php_type, _)| php_type.is_table()) {
             members.push((PhpType::Keyword(IS_ARRAY), line));
         }
 
-        (!members.is_empty()).then(|| self.php_union(members, null_line))
+        Some(self.php_union(members, erased.has_null().then_some(line)))
     }
 
     /// A struct is a final class, spec section 10, whose members are a class's, with its header's interfaces and
@@ -4641,9 +4614,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         };
         let mut members: Vec<(PhpType, u32)> =
             union_members(union).into_iter().map(|member| (self.erase(member), self.line(member))).collect();
-        let table = members.iter().find(|(php_type, _)| {
-            matches!(php_type, PhpType::Classes(classes) if matches!(classes.as_slice(), [b"Sharp\\Map" | b"Sharp\\Set"]))
-        });
+        let table = members.iter().find(|(php_type, _)| php_type.is_table());
         if crossing && let Some(&(_, line)) = table {
             members.push((PhpType::Keyword(IS_ARRAY), line));
         }
@@ -4714,65 +4685,24 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.node(SHARP_AST_TYPE_UNION, 0, line, &nodes)
     }
 
-    /// The type PHP writes for a type that is not a union, with generics erased. A built-in type is its name, `Object`
-    /// is `object`, and `Any` is `mixed`. A class is its full name. `Self` is `static`. A `List` is a PHP array, so its type is `array`, and a
-    /// `Map` or a `Set` is the engine's `\Sharp\Map` or `\Sharp\Set`, and an `Iterable` is PHP's `iterable`. A generic class type is its class, and `Class<T>` is `string`, because plain PHP receives a class
-    /// value as its class-name string (spec section 25). A function type runs as PHP's `\Closure`. A type parameter is
-    /// its bound, or `mixed` without one, as the PHP twin written with `@template` declares it, and the classes a bound
-    /// joins with `&` are one intersection. A plain PHP trait is `object`, because no value is `instanceof` a trait, and
-    /// its PHP# type text checks it, spec section 22: in an intersection it leaves PHP's type to the classes beside it.
-    fn erase<'hint>(&self, hint: &'hint Hint<'_>) -> PhpType<'hint>
-    where
-        'arena: 'hint,
-    {
+    /// The type PHP writes for a type that is not a union, with generics erased, as the codex's
+    /// [`get_php_declared_type`] erases it, which the analyzer links a plain PHP class's methods against too. A type
+    /// parameter is its bound, or `mixed` without one, as the PHP twin written with `@template` declares it, which the
+    /// class's declaration erases once.
+    fn erase(&self, hint: &Hint) -> PhpType {
         match hint {
-            Hint::Integer(name)
-            | Hint::Float(name)
-            | Hint::Bool(name)
-            | Hint::String(name)
-            | Hint::Void(name)
-            | Hint::Never(name) => PhpType::Named(name.value),
-            Hint::Object(_) => PhpType::Named(b"object"),
-            Hint::Mixed(_) => PhpType::Mixed,
-            Hint::Identifier(name) => match self.names.binding(name) {
-                Some(Binding::TypeParameter { declaration }) => {
-                    match self.type_parameters.get(&declaration.start.offset) {
-                        Some(php_type) => php_type.clone(),
-                        None => unreachable!("the binder binds `{name}` to a type parameter the file declares"),
-                    }
+            Hint::Identifier(name) if let Some(Binding::TypeParameter { declaration }) = self.names.binding(name) => {
+                match self.type_parameters.get(&declaration.start.offset) {
+                    Some(php_type) => php_type.clone(),
+                    None => unreachable!("the binder binds `{name}` to a type parameter the file declares"),
                 }
-                _ if self.types.class_declaration(self.names.get(name)).kind == DeclarationKind::Trait => {
-                    PhpType::Keyword(IS_OBJECT)
-                }
-                _ => PhpType::Classes(vec![self.names.get(name)]),
-            },
-            // A plain PHP trait leaves the intersection, and the PHP# type text checks it.
-            Hint::Intersection(intersection) => match (self.erase(intersection.left), self.erase(intersection.right)) {
-                (PhpType::Classes(mut classes), PhpType::Classes(right)) => {
-                    classes.extend(right);
-
-                    PhpType::Classes(classes)
-                }
-                (classes @ PhpType::Classes(_), PhpType::Keyword(IS_OBJECT))
-                | (PhpType::Keyword(IS_OBJECT), classes @ (PhpType::Classes(_) | PhpType::Keyword(IS_OBJECT))) => {
-                    classes
-                }
-                _ => unreachable!("check_slice joins only classes and traits with `&`"),
-            },
-            Hint::Self_(_) => PhpType::Keyword(IS_STATIC),
-            Hint::Generic(generic) if built_in_generic_arity(generic.name.value).is_none() => {
-                PhpType::Classes(vec![self.names.get(&generic.name)])
             }
-            Hint::Generic(generic) if generic.name.value == b"Class" => PhpType::Named(b"string"),
-            Hint::Generic(generic) if generic.name.value == b"Map" => PhpType::Classes(vec![b"Sharp\\Map"]),
-            Hint::Generic(generic) if generic.name.value == b"Set" => PhpType::Classes(vec![b"Sharp\\Set"]),
-            Hint::Generic(generic) if generic.name.value == b"Iterable" => PhpType::Named(b"iterable"),
-            // Spec section 30: a tuple runs as a PHP list.
-            Hint::Generic(_) | Hint::Tuple(_) => PhpType::Keyword(IS_ARRAY),
-            Hint::Function(_) => PhpType::Classes(vec![b"Closure"]),
             // Spec section 24: parentheses around an intersection in a union change nothing.
             Hint::Parenthesized(parenthesized) => self.erase(parenthesized.hint),
-            _ => unreachable!("check_slice refuses the type `{hint}`"),
+            hint => match get_php_declared_type(&self.hint_type(hint), self.types.codebase()).types.as_ref() {
+                [atomic] => PhpType::of(atomic),
+                _ => unreachable!("one type `{hint}` erases to one PHP type"),
+            },
         }
     }
 
@@ -4797,33 +4727,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// The node of `r#type`, a type plain PHP declares, so it holds only PHP's own types: each as [`Self::php_type`]
     /// writes it, in a union when there are several.
     fn declared_type(&mut self, r#type: &TUnion, line: u32) -> u32 {
-        let mut nodes = Vec::new();
-        for atomic in r#type.types.iter() {
-            let php_type = match atomic {
-                TAtomic::Null => PhpType::Named(b"null"),
-                TAtomic::Mixed(_) => PhpType::Mixed,
-                TAtomic::Array(_) => PhpType::Keyword(IS_ARRAY),
-                TAtomic::Iterable(_) => PhpType::Named(b"iterable"),
-                TAtomic::Object(TObject::Any) => PhpType::Named(b"object"),
-                TAtomic::Object(TObject::Enum(r#enum)) => PhpType::Classes(vec![r#enum.name.as_bytes()]),
-                TAtomic::Object(TObject::Named(object)) => PhpType::Classes(
-                    std::iter::once(object.name.as_bytes())
-                        .chain(object.get_intersection_types().unwrap_or_default().iter().map(|part| match part {
-                            TAtomic::Object(TObject::Named(part)) => part.name.as_bytes(),
-                            _ => unreachable!("PHP intersects only classes, not `{}`", part.get_id()),
-                        }))
-                        .collect(),
-                ),
-                TAtomic::Scalar(scalar) if scalar.is_true() => PhpType::Named(b"true"),
-                TAtomic::Scalar(scalar) if scalar.is_false() => PhpType::Named(b"false"),
-                TAtomic::Scalar(scalar) if scalar.is_general_bool() => PhpType::Named(b"bool"),
-                TAtomic::Scalar(scalar) if scalar.is_int() => PhpType::Named(b"int"),
-                TAtomic::Scalar(scalar) if scalar.is_float() => PhpType::Named(b"float"),
-                TAtomic::Scalar(scalar) if scalar.is_string() => PhpType::Named(b"string"),
-                _ => unreachable!("PHP declares no property of the type `{}`", atomic.get_id()),
-            };
-            nodes.push(self.php_type(&php_type, line));
-        }
+        let nodes: Vec<u32> = r#type.types.iter().map(|atomic| self.php_type(&PhpType::of(atomic), line)).collect();
 
         match nodes[..] {
             [single] => single,
@@ -4840,7 +4744,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             PhpType::Named(name) => self.string(ZEND_NAME_NOT_FQ, line, name),
             PhpType::Keyword(code) => self.node(SHARP_AST_TYPE, *code, line, &[]),
             PhpType::Classes(classes) => {
-                let classes: Vec<u32> = classes.iter().map(|class| self.string(ZEND_NAME_FQ, line, class)).collect();
+                let classes: Vec<u32> =
+                    classes.iter().map(|class| self.string(ZEND_NAME_FQ, line, class.as_bytes())).collect();
                 match classes[..] {
                     [class] => class,
                     _ => self.node(SHARP_AST_TYPE_INTERSECTION, 0, line, &classes),
@@ -6935,8 +6840,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 TAtomic::Scalar(TScalar::Float(_)) => PhpType::Named(b"float"),
                 TAtomic::Scalar(TScalar::Bool(_)) => PhpType::Named(b"bool"),
                 TAtomic::Scalar(TScalar::String(_)) => PhpType::Named(b"string"),
-                TAtomic::Object(TObject::Named(object)) => PhpType::Classes(vec![object.name.as_bytes()]),
-                TAtomic::Callable(_) => PhpType::Classes(vec![b"Closure"]),
+                TAtomic::Object(TObject::Named(object)) => PhpType::Classes(vec![object.name]),
+                TAtomic::Callable(_) => PhpType::Classes(vec![word("Closure")]),
                 _ => return NULL,
             };
             members.push((php_type, line));
@@ -9258,19 +9163,67 @@ fn element_hint<'hint, 'arena>(member: &'hint Hint<'arena>, array: &TArray) -> O
 
 /// The type PHP writes for a PHP# type that is not a union, once generics are erased.
 #[derive(Clone)]
-enum PhpType<'name> {
+enum PhpType {
     /// `mixed`, which holds every value.
     Mixed,
     /// A built-in type php-src's grammar reads as a name, such as `int` or `string`.
-    Named(&'name [u8]),
+    Named(&'static [u8]),
     /// A type php-src's grammar reads as a keyword and builds as a `TYPE` node of its type code: `IS_ARRAY` for
     /// `array`, or `IS_STATIC` for `static`.
     Keyword(u32),
     /// One class, or the classes of an intersection, each by its full name.
-    Classes(Vec<&'name [u8]>),
+    Classes(Vec<Word>),
 }
 
-impl PhpType<'_> {
+impl PhpType {
+    /// The PHP type of `atomic`, one member of a type PHP declares, as the codex's [`get_php_declared_type`] gives a
+    /// PHP# type or plain PHP declares a property's: a built-in type by its name, `array` and `static` as keywords, and
+    /// a class, or an intersection of classes, by its full name. Neither has PHP's `callable`: a PHP# function type is
+    /// `\Closure`, and PHP declares no property `callable`.
+    fn of(atomic: &TAtomic) -> PhpType {
+        let classes = |name: Word, intersection_types: &Option<Vec<TAtomic>>| {
+            PhpType::Classes(
+                std::iter::once(name)
+                    .chain(intersection_types.iter().flatten().map(|part| match part {
+                        TAtomic::Object(TObject::Named(part)) => part.name,
+                        TAtomic::Reference(TReference::Symbol { name, .. }) => *name,
+                        _ => unreachable!("PHP intersects only classes, not `{}`", part.get_id()),
+                    }))
+                    .collect(),
+            )
+        };
+
+        match atomic {
+            TAtomic::Null => PhpType::Named(b"null"),
+            TAtomic::Void => PhpType::Named(b"void"),
+            TAtomic::Never => PhpType::Named(b"never"),
+            TAtomic::Mixed(_) => PhpType::Mixed,
+            TAtomic::Array(_) => PhpType::Keyword(IS_ARRAY),
+            TAtomic::Iterable(_) => PhpType::Named(b"iterable"),
+            TAtomic::Object(TObject::Any) => PhpType::Named(b"object"),
+            TAtomic::Object(TObject::Enum(r#enum)) => PhpType::Classes(vec![r#enum.name]),
+            TAtomic::Object(TObject::Named(object)) if object.is_static => PhpType::Keyword(IS_STATIC),
+            TAtomic::Object(TObject::Named(object)) => classes(object.name, &object.intersection_types),
+            TAtomic::Reference(TReference::Symbol { name, intersection_types, .. }) => {
+                classes(*name, intersection_types)
+            }
+            TAtomic::Scalar(scalar) if scalar.is_true() => PhpType::Named(b"true"),
+            TAtomic::Scalar(scalar) if scalar.is_false() => PhpType::Named(b"false"),
+            TAtomic::Scalar(scalar) if scalar.is_general_bool() => PhpType::Named(b"bool"),
+            TAtomic::Scalar(scalar) if scalar.is_int() => PhpType::Named(b"int"),
+            TAtomic::Scalar(scalar) if scalar.is_float() => PhpType::Named(b"float"),
+            TAtomic::Scalar(scalar) if scalar.is_string() => PhpType::Named(b"string"),
+            _ => unreachable!("PHP declares no type `{}`", atomic.get_id()),
+        }
+    }
+
+    /// Whether this type is the engine's `\Sharp\Map` or `\Sharp\Set` alone, which a plain PHP caller may get the PHP
+    /// array of.
+    fn is_table(&self) -> bool {
+        matches!(self, PhpType::Classes(classes) if matches!(classes.as_slice(), [class]
+            if [b"Sharp\\Map".as_slice(), b"Sharp\\Set"].iter().any(|table| class.as_bytes().eq_ignore_ascii_case(table))))
+    }
+
     /// Whether every value of `other` is a value of this type, so a union that holds this type needs no `other`. Names
     /// are compared as the engine compares them, ignoring case. No union holds two keyword types: the checker refuses
     /// two collections, which share PHP's `array`, and `Self` twice.
@@ -9278,9 +9231,9 @@ impl PhpType<'_> {
         match (self, other) {
             (PhpType::Mixed, _) => true,
             (PhpType::Named(name), PhpType::Named(other)) => name.eq_ignore_ascii_case(other),
-            (PhpType::Classes(classes), PhpType::Classes(others)) => {
-                classes.iter().all(|class| others.iter().any(|other| class.eq_ignore_ascii_case(other)))
-            }
+            (PhpType::Classes(classes), PhpType::Classes(others)) => classes
+                .iter()
+                .all(|class| others.iter().any(|other| class.as_bytes().eq_ignore_ascii_case(other.as_bytes()))),
             _ => false,
         }
     }

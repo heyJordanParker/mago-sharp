@@ -1523,6 +1523,85 @@ pub fn get_collection_object(array: &TArray, codebase: &CodebaseMetadata) -> Opt
     Some(TAtomic::Object(TObject::Named(TNamedObject::new_with_type_parameters(word(class), Some(parameters)))))
 }
 
+/// The type PHP declares for the PHP# type `r#type`, once generics are erased.
+///
+/// It is the type the bridge writes in a PHP declaration, and so the type the engine links a plain PHP class's method
+/// against. A type parameter is its bound, or `mixed` without one; a generic class is its class; `Self` is `static`;
+/// `Class<T>` is `string`; a `List` or a tuple is `array`; a `Map` or a `Set` is the engine's `Sharp\Map` or
+/// `Sharp\Set`; an `Iterable` is `iterable`; a function type is `Closure`, and PHP's `callable` stays `callable`; and
+/// `Any` is `mixed`. A plain PHP trait is
+/// `object`, since no value is `instanceof` a trait, so an intersection keeps its classes alone. Members that erase to
+/// one type are one type.
+#[must_use]
+pub fn get_php_declared_type(r#type: &TUnion, codebase: &CodebaseMetadata) -> TUnion {
+    let is_class = |atomic: &TAtomic| {
+        let name = match atomic {
+            TAtomic::Object(TObject::Named(object)) => object.name,
+            TAtomic::Reference(TReference::Symbol { name, .. }) => *name,
+            _ => return true,
+        };
+
+        !codebase.get_class_like(name.as_bytes()).is_some_and(|class_like| class_like.kind.is_trait())
+    };
+    // A class without its type arguments, and the classes it is intersected with apart.
+    let bare = |atomic: &TAtomic| match atomic {
+        TAtomic::Object(TObject::Named(object)) => {
+            let mut object = object.clone();
+            object.type_parameters = None;
+            object.intersection_types = None;
+
+            TAtomic::Object(TObject::Named(object))
+        }
+        TAtomic::Reference(TReference::Symbol { name, is_readonly, .. }) => TAtomic::Reference(TReference::Symbol {
+            name: *name,
+            parameters: None,
+            variances: None,
+            intersection_types: None,
+            is_readonly: *is_readonly,
+        }),
+        atomic => atomic.clone(),
+    };
+    let named = |name: &str| TAtomic::Object(TObject::Named(TNamedObject::new(word(name))));
+    let erased = r#type.types.iter().flat_map(|atomic| match atomic {
+        TAtomic::GenericParameter(parameter) => {
+            get_php_declared_type(&parameter.constraint, codebase).types.into_owned()
+        }
+        TAtomic::Mixed(_) => get_mixed().types.into_owned(),
+        TAtomic::Array(TArray::Keyed(_)) => vec![named("Sharp\\Map")],
+        TAtomic::Array(TArray::Set(_)) => vec![named("Sharp\\Set")],
+        TAtomic::Array(TArray::List(_)) => get_mixed_keyed_array().types.into_owned(),
+        TAtomic::Iterable(_) => get_mixed_iterable().types.into_owned(),
+        TAtomic::Callable(callable) if callable.is_closure() => vec![named("Closure")],
+        TAtomic::Callable(_) => get_mixed_callable().types.into_owned(),
+        TAtomic::Scalar(TScalar::ClassLikeString(_)) => get_string().types.into_owned(),
+        TAtomic::Object(TObject::Named(TNamedObject { intersection_types, .. }))
+        | TAtomic::Reference(TReference::Symbol { intersection_types, .. }) => {
+            let mut classes = std::iter::once(atomic)
+                .chain(intersection_types.iter().flatten())
+                .filter(|class| is_class(class))
+                .map(bare);
+            let Some(mut first) = classes.next() else {
+                return vec![TAtomic::Object(TObject::Any)];
+            };
+            let rest: Vec<TAtomic> = classes.collect();
+            if !rest.is_empty() {
+                match &mut first {
+                    TAtomic::Object(TObject::Named(object)) => object.intersection_types = Some(rest),
+                    TAtomic::Reference(TReference::Symbol { intersection_types, .. }) => {
+                        *intersection_types = Some(rest);
+                    }
+                    _ => {}
+                }
+            }
+
+            vec![first]
+        }
+        atomic => vec![atomic.clone()],
+    });
+
+    TUnion::from_vec(combiner::combine(erased.collect(), codebase, combiner::CombinerOptions::default()))
+}
+
 /// Whether plain PHP gets a value of `r#type` with each `Map` and `Set` in it as its PHP array, spec section 12.
 ///
 /// It does for a value that holds one at any depth, or can when it runs, as `Any`, an unbounded type parameter and an
