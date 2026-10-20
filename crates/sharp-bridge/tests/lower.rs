@@ -508,7 +508,7 @@ fn a_word_php_sharp_does_not_reserve_names_a_property_a_local_and_a_parameter() 
         assert_eq!(
             lowered.declared("read"),
             format!(
-                "METHOD [33] \"read\" @13-13\n  PARAM_LIST\n    PARAM\n      ZVAL [1] \"int\"\n      ZVAL \"{word}\"\n      null\n      null\n      null\n      null\n  null\n  STMT_LIST\n    RETURN\n      VAR\n        ZVAL \"{word}\"\n  SHARP_TYPE_ARGS\n    ZVAL [1] \"int\"\n    ZVAL \"Function<int(int)>\"\n  null\n"
+                "METHOD [1] \"read\" @13-13\n  PARAM_LIST\n    PARAM\n      ZVAL [1] \"int\"\n      ZVAL \"{word}\"\n      null\n      null\n      null\n      null\n  null\n  STMT_LIST\n    RETURN\n      VAR\n        ZVAL \"{word}\"\n  SHARP_TYPE_ARGS\n    ZVAL [1] \"int\"\n    ZVAL \"Function<int(int)>\"\n  null\n"
             ),
             "{word}"
         );
@@ -1274,14 +1274,13 @@ fn a_file_without_a_namespace_declares_its_classes_globally() {
 }
 
 /// ```php
-/// final public function run(int $extra): int
+/// public function run(int $extra): int
 /// {
 ///     return $extra;
 /// }
 /// ```
 ///
-/// `[33]` on the method is `ZEND_ACC_PUBLIC | ZEND_ACC_FINAL`, since a method that is not `virtual` is closed, spec
-/// section 22, and `[1]` on `int` is `ZEND_NAME_NOT_FQ`. The return type sits in a
+/// `[1]` on the method is `ZEND_ACC_PUBLIC`, and `[1]` on `int` is `ZEND_NAME_NOT_FQ`. The return type sits in a
 /// `SHARP_TYPE_ARGS` with the method's whole function type, which a closure of the method keeps for `is`, spec section
 /// 21.
 #[test]
@@ -1296,7 +1295,7 @@ fn a_method_is_a_public_function_with_its_return_type_after_its_parameters() {
               null
               null
               STMT_LIST
-                METHOD [33] "run" @7-10
+                METHOD [1] "run" @7-10
                   PARAM_LIST
                     PARAM
                       ZVAL [1] "int"
@@ -2046,7 +2045,7 @@ fn field_in_a_nested_block_keeps_a_property_backed_and_field_only_in_a_lambda_is
 ///     public static function {'total#get'}(): int { return self::$total; }
 ///     private static function {'total#set'}(int $value) { self::$total = $value + 1; }
 ///
-///     final public static function run(): int
+///     public static function run(): int
 ///     {
 ///         Tally::{'total#set'}($value#1 = 4) ?? $value#1;
 ///         Tally::{'total#set'}($value#1 = Tally::{'total#get'}() + 2) ?? $value#1;
@@ -2258,7 +2257,7 @@ fn a_static_property_runs_each_accessor_form_and_each_write_through_its_hidden_m
                               ZVAL "note"
                     null
                     null
-                  METHOD [49] "log" @9-11
+                  METHOD [17] "log" @9-11
                     PARAM_LIST
                       PARAM
                         ZVAL [257] "string"
@@ -2273,7 +2272,7 @@ fn a_static_property_runs_each_accessor_form_and_each_write_through_its_hidden_m
                       ZVAL [1] "void"
                       ZVAL "Function<void(string?)>"
                     null
-                  METHOD [49] "run" @13-20
+                  METHOD [17] "run" @13-20
                     PARAM_LIST
                     null
                     STMT_LIST
@@ -2447,7 +2446,7 @@ fn a_static_property_with_accessors_runs_them_as_hidden_static_methods() {
                         ZVAL 1
                   null
                   null
-                METHOD [49] "run" @6-11
+                METHOD [17] "run" @6-11
                   PARAM_LIST
                   null
                   STMT_LIST
@@ -5209,15 +5208,15 @@ fn a_nullable_member_s_initial_null_is_its_default() {
 }
 
 /// ```php
-/// final public static function make(): void {}
+/// public static function make(): void {}
 /// private function hide() {}
-/// final protected function share() {}
+/// protected function share() {}
 /// public function open(): void {}
 /// ```
 ///
-/// The flags are `ZEND_ACC_PUBLIC | ZEND_ACC_STATIC | ZEND_ACC_FINAL`, `ZEND_ACC_PRIVATE`,
-/// `ZEND_ACC_PROTECTED | ZEND_ACC_FINAL` and `ZEND_ACC_PUBLIC`: a method that is not `virtual`, abstract, an `override`
-/// or private is closed, spec section 22, and runs as a `final` one, as Kotlin emits a member that is not `open`.
+/// The flags are `ZEND_ACC_PUBLIC | ZEND_ACC_STATIC`, `ZEND_ACC_PRIVATE`, `ZEND_ACC_PROTECTED` and `ZEND_ACC_PUBLIC`. A
+/// method that is not `virtual` is closed, spec section 22, which the checker holds against every class it sees, and
+/// runs as an ordinary method, as a `virtual` one does, so a test double generated while tests run replaces it.
 #[test]
 fn method_modifiers_become_the_method_flags() {
     let lowered = Lowered::new(
@@ -5232,7 +5231,7 @@ fn method_modifiers_become_the_method_flags() {
 
     assert_eq!(
         methods,
-        [("make".to_owned(), 49), ("hide".to_owned(), 4), ("share".to_owned(), 34), ("open".to_owned(), 1)]
+        [("make".to_owned(), 17), ("hide".to_owned(), 4), ("share".to_owned(), 2), ("open".to_owned(), 1)]
     );
 }
 
@@ -9967,9 +9966,9 @@ fn a_function_type_taking_a_function_type_with_effects_is_the_closure_class() {
 ///         $this->rows = $rows;
 ///     }
 ///
-///     final public function first(): \Lib\DatabaseEntity { return $this->rows[0]; }
+///     public function first(): \Lib\DatabaseEntity { return $this->rows[0]; }
 ///
-///     final public function find(int $id): ?\Lib\DatabaseEntity { return null; }
+///     public function find(int $id): ?\Lib\DatabaseEntity { return null; }
 /// }
 /// ```
 ///
@@ -10044,7 +10043,7 @@ fn a_type_parameter_is_its_bound_and_its_list_lowers_to_nothing() {
                         ZVAL "rows"
                   null
                   null
-                METHOD [33] "first" @14-14
+                METHOD [1] "first" @14-14
                   PARAM_LIST
                   null
                   STMT_LIST
@@ -10059,7 +10058,7 @@ fn a_type_parameter_is_its_bound_and_its_list_lowers_to_nothing() {
                     ZVAL "Lib\\DatabaseEntity"
                     ZVAL "Function<$0()>"
                   null
-                METHOD [33] "find" @16-16
+                METHOD [1] "find" @16-16
                   PARAM_LIST
                     PARAM
                       ZVAL [1] "int"
@@ -12470,11 +12469,11 @@ fn abstract_and_final_classes_and_interfaces_are_class_declarations_with_their_f
 /// ```php
 /// final class Text
 /// {
-///     final public static function slug(string $title): string { return \Sharp\Internal\Text\Text\slug($title); }
+///     public static function slug(string $title): string { return \Sharp\Internal\Text\Text\slug($title); }
 /// }
 /// ```
 ///
-/// A static class is a final class, `[32]` `ZEND_ACC_FINAL`. An `extern` method is its closed `public static` method, `[49]`,
+/// A static class is a final class, `[32]` `ZEND_ACC_FINAL`. An `extern` method is its `public static` method, `[17]`,
 /// whose body returns the call of its native function: `Sharp\Internal`, then the class's full name after `Sharp\`,
 /// then the method's name, with `ZEND_NAME_FQ`, which is 0.
 #[test]
@@ -12502,7 +12501,7 @@ fn a_static_class_is_a_final_class_whose_extern_method_calls_its_native_function
                 null
                 null
                 STMT_LIST
-                  METHOD [49] "slug" @5-5
+                  METHOD [17] "slug" @5-5
                     PARAM_LIST
                       PARAM
                         ZVAL [1] "string"
@@ -12682,7 +12681,7 @@ fn a_parameter_of_a_methods_own_type_parameter_checks_its_bound_from_plain_php()
 }
 
 /// ```php
-/// final public function seed(object $owner): bool { return $owner instanceof \Lib\HasLabel; }
+/// public function seed(object $owner): bool { return $owner instanceof \Lib\HasLabel; }
 /// ```
 ///
 /// Spec section 22: a plain PHP trait is a type, and no PHP value is `instanceof` a trait. So a trait type is PHP's
@@ -12703,7 +12702,7 @@ fn a_trait_type_is_object_and_its_test_reads_the_trait() {
     assert_eq!(
         lowered.declared("seed"),
         indoc! {r#"
-            METHOD [33] "seed" @7-7
+            METHOD [1] "seed" @7-7
               PARAM_LIST
                 PARAM
                   TYPE [8]
@@ -12759,7 +12758,7 @@ fn a_trait_type_is_object_and_its_test_reads_the_trait() {
     assert_eq!(
         [lowered.declared("bound"), lowered.declared("both")].concat(),
         indoc! {r#"
-            METHOD [33] "bound" @7-7
+            METHOD [1] "bound" @7-7
               PARAM_LIST
                 PARAM
                   TYPE [8]
@@ -12783,7 +12782,7 @@ fn a_trait_type_is_object_and_its_test_reads_the_trait() {
                 ZVAL [1] "string"
                 ZVAL "string"
               null
-            METHOD [33] "both" @9-9
+            METHOD [1] "both" @9-9
               PARAM_LIST
                 PARAM
                   ZVAL "App\\Greeter"
@@ -13540,7 +13539,7 @@ fn an_event_header_entry_with_type_arguments_keeps_them() {
 /// }
 /// class Order
 /// {
-///     final public function pay(int $orderId): \App\OrderPaid { return new \App\OrderPaid($orderId); }
+///     public function pay(int $orderId): \App\OrderPaid { return new \App\OrderPaid($orderId); }
 /// }
 /// ```
 ///
@@ -13567,9 +13566,9 @@ fn an_event_header_entry_with_type_arguments_keeps_them() {
 /// }
 /// class Shop
 /// {
-///     final public function open(): \App\CheckoutState { return \App\CheckoutState\Open::instance(); }
-///     final public function pay(): \App\CheckoutState { return new \App\CheckoutState\Paying(gateway: 'stripe'); }
-///     final public function same(\App\CheckoutState $a, \App\CheckoutState $b): bool { return \App\CheckoutState::op_Equality($a, $b); }
+///     public function open(): \App\CheckoutState { return \App\CheckoutState\Open::instance(); }
+///     public function pay(): \App\CheckoutState { return new \App\CheckoutState\Paying(gateway: 'stripe'); }
+///     public function same(\App\CheckoutState $a, \App\CheckoutState $b): bool { return \App\CheckoutState::op_Equality($a, $b); }
 /// }
 /// ```
 ///
@@ -13751,7 +13750,7 @@ fn an_enum_with_data_is_an_abstract_class_and_each_case_a_final_subclass() {
                 null
                 null
                 STMT_LIST
-                  METHOD [33] "open" @5-5
+                  METHOD [1] "open" @5-5
                     PARAM_LIST
                     null
                     STMT_LIST
@@ -13764,7 +13763,7 @@ fn an_enum_with_data_is_an_abstract_class_and_each_case_a_final_subclass() {
                       ZVAL "App\\CheckoutState"
                       ZVAL "Function<App.CheckoutState()>"
                     null
-                  METHOD [33] "pay" @6-6
+                  METHOD [1] "pay" @6-6
                     PARAM_LIST
                     null
                     STMT_LIST
@@ -13779,7 +13778,7 @@ fn an_enum_with_data_is_an_abstract_class_and_each_case_a_final_subclass() {
                       ZVAL "App\\CheckoutState"
                       ZVAL "Function<App.CheckoutState()>"
                     null
-                  METHOD [33] "same" @7-7
+                  METHOD [1] "same" @7-7
                     PARAM_LIST
                       PARAM
                         ZVAL "App\\CheckoutState"
@@ -13914,7 +13913,7 @@ fn an_event_is_a_final_class_and_an_interface_property_has_an_abstract_get_hook(
                 null
                 null
                 STMT_LIST
-                  METHOD [33] "pay" @5-5
+                  METHOD [1] "pay" @5-5
                     PARAM_LIST
                       PARAM
                         ZVAL [1] "int"
@@ -14334,7 +14333,7 @@ fn an_override_with_accessor_bodies_and_an_abstract_property_are_their_php_hooks
 ///     public int $views = 0;
 ///     public int $stock = 0;
 ///     public protected(set) int $id = 0;
-///     final public function secret(): int { return 1; }
+///     public function secret(): int { return 1; }
 /// }
 /// ```
 ///
@@ -14391,7 +14390,7 @@ fn internal_runs_as_public() {
                       null
                       null
                   null
-                METHOD [33] "secret" @8-8
+                METHOD [1] "secret" @8-8
                   PARAM_LIST
                   null
                   STMT_LIST
@@ -14850,9 +14849,9 @@ fn a_generic_call_through_a_plain_php_parent_carries_its_type_arguments() {
 
 /// ```php
 /// public function __construct(\Lib\Row $row) {}
-/// final public static function fromSchema(\Lib\Row $row): static { return new static($row); }
-/// final public static function find(\Lib\Row $row): ?static { return $row->saved ? static::fromSchema($row) : null; }
-/// final public static function counted(\Lib\Row $row): static|int { return static::fromSchema($row); }
+/// public static function fromSchema(\Lib\Row $row): static { return new static($row); }
+/// public static function find(\Lib\Row $row): ?static { return $row->saved ? static::fromSchema($row) : null; }
+/// public static function counted(\Lib\Row $row): static|int { return static::fromSchema($row); }
 /// ```
 ///
 /// `Self` is `static`. As a return type it is a `TYPE` node with `IS_STATIC`, which is 15, and `Self?` adds
@@ -14882,7 +14881,7 @@ fn self_is_static_and_required_adds_no_flag() {
                 STMT_LIST
                 null
                 null
-              METHOD [49] "fromSchema" @11-14
+              METHOD [17] "fromSchema" @11-14
                 PARAM_LIST
                   PARAM
                     ZVAL "Lib\\Row"
@@ -14903,7 +14902,7 @@ fn self_is_static_and_required_adds_no_flag() {
                   TYPE [15]
                   ZVAL "Function<App.Tenant.DatabaseEntity(Lib.Row)>"
                 null
-              METHOD [49] "find" @16-16
+              METHOD [17] "find" @16-16
                 PARAM_LIST
                   PARAM
                     ZVAL "Lib\\Row"
@@ -14931,7 +14930,7 @@ fn self_is_static_and_required_adds_no_flag() {
                   TYPE [271]
                   ZVAL "Function<App.Tenant.DatabaseEntity?(Lib.Row)>"
                 null
-              METHOD [49] "counted" @18-18
+              METHOD [17] "counted" @18-18
                 PARAM_LIST
                   PARAM
                     ZVAL "Lib\\Row"
@@ -21332,10 +21331,9 @@ fn yield_is_a_yield_statement_and_yield_spread_is_a_loop_that_yields_each_elemen
     );
 }
 
-/// A method that yields is a generator: `[16777249]` is `ZEND_ACC_PUBLIC | ZEND_ACC_FINAL | ZEND_ACC_GENERATOR`, the
-/// last of which php-src's grammar puts on a function whose body holds a `yield`, so the engine compiles it to start
-/// with `GENERATOR_CREATE`. A yield nested in a loop or an `if` counts, and a method that returns an `Iterable<T>`
-/// without a yield stays `[33]`.
+/// A method that yields is a generator: `[16777217]` is `ZEND_ACC_PUBLIC | ZEND_ACC_GENERATOR`, which php-src's grammar
+/// puts on a function whose body holds a `yield`, so the engine compiles it to start with `GENERATOR_CREATE`. A yield
+/// nested in a loop or an `if` counts, and a method that returns an `Iterable<T>` without a yield stays `[1]`.
 #[test]
 fn a_method_that_yields_is_a_generator() {
     let lowered = Lowered::new(
@@ -21349,7 +21347,7 @@ fn a_method_that_yields_is_a_generator() {
         .filter(|node| node.kind == sharp_kind::SHARP_AST_METHOD)
         .map(|node| format!("{} [{}]", lowered.text(node.text), node.attr))
         .collect();
-    assert_eq!(methods, ["lines [16777249]", "all [16777249]", "kept [33]", "parse [17]", "tryParse [17]"]);
+    assert_eq!(methods, ["lines [16777217]", "all [16777217]", "kept [1]", "parse [17]", "tryParse [17]"]);
 }
 
 /// A function whose result can hold a `Map` or a `Set`, at any depth, as `Any`, a type parameter or an `Iterable` can,
@@ -22841,7 +22839,7 @@ fn a_template_over_several_lines_keeps_the_line_of_each_part() {
 ///     }
 ///
 ///     #[\Lib\Entity(true, \PHP_INT_MAX)]
-///     final public function run(#[\Lib\Field] int $extra): void
+///     public function run(#[\Lib\Field] int $extra): void
 ///     {
 ///     }
 /// }
@@ -22896,7 +22894,7 @@ fn attributes_are_attribute_lists_of_attribute_groups_on_their_declarations() {
                   STMT_LIST
                   null
                   null
-                METHOD [33] "run" @17-19
+                METHOD [1] "run" @17-19
                   PARAM_LIST
                     PARAM
                       ZVAL [1] "int"
@@ -30320,7 +30318,7 @@ fn parse_reads_each_field_as_its_type() {
 const SIZE: &str = "namespace App;\n\npublic struct Size\n{\n    public int width { get; init; }\n    public int depth { get; init; }\n}\n";
 
 /// ```php
-/// final public function copies(\App\Size $size, int $depth): \App\Size
+/// public function copies(\App\Size $size, int $depth): \App\Size
 /// {
 ///     $made = \Sharp\Internal\build(new \App\Size(),
 ///         function ($value#1, $value#2) { $this->width = $value#1; $this->depth = $value#2; return $this; }, 2, 1);
@@ -30343,7 +30341,7 @@ fn with_and_an_initializer_run_in_a_closure_bound_to_the_object() {
         )
         .declared("copies"),
         indoc! {r#"
-            METHOD [33] "copies" @7-11
+            METHOD [1] "copies" @7-11
               PARAM_LIST
                 PARAM
                   ZVAL "App\\Size"
@@ -30666,7 +30664,7 @@ const POINT: &str = "namespace App;\n\npublic struct Point\n{\n    public Point(
 /// {
 ///     public function __construct(public readonly int $x, public readonly float $y, public readonly ?\App\Money $total) {}
 ///
-///     final public function moved(int $dx): \App\Point { return new \App\Point($this->x + $dx, $this->y, $this->total); }
+///     public function moved(int $dx): \App\Point { return new \App\Point($this->x + $dx, $this->y, $this->total); }
 ///
 ///     public static function op_Equality(mixed $a, mixed $b): bool
 ///     {
@@ -30777,7 +30775,7 @@ fn a_struct_is_a_final_class_whose_op_equality_compares_each_property() {
                             null
                             null
                     null
-                  METHOD [33] "moved" @11-11
+                  METHOD [1] "moved" @11-11
                     PARAM_LIST
                       PARAM
                         ZVAL [1] "int"

@@ -4348,8 +4348,9 @@ fn report_signature_compatibility_issue<'ctx, A>(
     use method_signature::SignatureCompatibilityIssue;
 
     match incompatibility {
-        // A PHP# method is closed unless it is `virtual`, spec section 22, and only an override is written `final`. The
-        // engine runs a closed method as a `final` one, so a plain PHP subclass doesn't replace it either.
+        // A PHP# method is closed unless it is `virtual`, spec section 22, and only an override is written `final`. No
+        // class the checker sees replaces a closed method, a plain PHP one included, though the engine runs it as an
+        // ordinary method, so a test double generated while tests run replaces it.
         SignatureCompatibilityIssue::FinalMethodOverride if parent_class.flags.is_sharp() => {
             let reason = if parent_class.overridden_method_ids.contains_key(&method_name) {
                 "is `final`"

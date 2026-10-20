@@ -226,10 +226,10 @@ fn compile_refuses_a_package_file_with_an_error_and_names_its_package() {
 const KEYED: &str = "namespace App;\n\npublic interface Keyed\n{\n    int getKey();\n\n    string label() => `record:${this.getKey()}`;\n}\n";
 const RECORD: &str = "<?php\n\nnamespace App;\n\nclass Record\n{\n    public function getKey(): int|string|null\n    {\n        return 7;\n    }\n}\n";
 
-/// The engine refuses a plain PHP class that extends a PHP# struct, or replaces a PHP# method that is not `virtual`,
-/// static or not, which runs as a `final` one, as Kotlin emits a member that is not `open`. The compile refuses each
-/// such class, as it refuses every other class the engine refuses when it links it, and links one that replaces a
-/// `virtual` method.
+/// The engine refuses a plain PHP class that extends a PHP# struct when it links it, so the compile refuses that class
+/// first. A PHP# method that is not `virtual` is closed to every class the compile sees, static or not, so the
+/// compile refuses a plain PHP class that replaces it too, though the engine runs it as an ordinary method for the test
+/// doubles tests generate. The compile links a class that replaces a `virtual` method.
 #[test]
 fn compile_refuses_a_plain_php_class_that_extends_a_struct_or_replaces_a_closed_method() {
     let directory = project(ORDER, MONEY);
