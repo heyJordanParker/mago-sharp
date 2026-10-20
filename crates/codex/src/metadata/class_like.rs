@@ -142,6 +142,17 @@ pub struct ParsedField<'codebase> {
 }
 
 impl ClassLikeMetadata {
+    /// Whether each PHP# call of `method`, a method of this class-like, checks the result against the type the method
+    /// declares, spec section 22: an instance method of a PHP# interface, which a plain PHP method that declares no
+    /// return type implements. The bridge marks the return type of each such method, the engine links an untyped plain
+    /// PHP method under it, and the analysis refuses none. A static member runs from the interface's own trait.
+    #[must_use]
+    pub fn checks_results_at_call(&self, method: &FunctionLikeMetadata) -> bool {
+        self.flags.is_sharp()
+            && self.kind.is_interface()
+            && !method.method_metadata.as_ref().is_some_and(|method| method.is_static)
+    }
+
     /// The properties `==` compares on a PHP# struct, spec section 10: each one with storage that is not static, in the
     /// order the struct declares them.
     #[must_use]

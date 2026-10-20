@@ -394,6 +394,9 @@ pub fn validate_method_signature_compatibility(
     if links_to_php_declaration
         && let Some(parent_return) = &parent_method.return_type_declaration_metadata
         && child_method.return_type_declaration_metadata.is_none()
+        && !codebase
+            .get_class_like(parent_class_name.as_bytes())
+            .is_some_and(|parent_class| parent_class.checks_results_at_call(parent_method))
     {
         // The error names the type as PHP declares it.
         issues.push(SignatureCompatibilityIssue::MissingReturnTypeDeclaration {

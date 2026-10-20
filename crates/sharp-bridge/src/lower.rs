@@ -293,6 +293,7 @@ const ZEND_ACC_GENERATOR: u32 = 1 << 24;
 const ZEND_ACC_ENUM: u32 = 1 << 28;
 const ZEND_ACC_SHARP_HIDDEN: u32 = 1 << 13;
 const ZEND_SHARP_RESULT_CROSSES: u32 = 1;
+const ZEND_SHARP_RESULT_CALLER_CHECKED: u32 = 1 << 1;
 const ZEND_SHARP_TYPE_OF_LIST: u32 = 1;
 const ZEND_SHARP_NEW_CLASS_VALUE: u32 = 1;
 const ZEND_TYPE_NULLABLE: u32 = 1 << 8;
@@ -2726,6 +2727,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             }
             None => (method.name.span, NULL),
         };
+        // Spec section 22: each PHP# call of an interface's member checks its result, so the engine links a plain PHP
+        // method that declares no return type under it.
+        let caller_checked = return_type != NULL
+            && first_statements.is_none()
+            && self.types.checks_results_at_call(self.class, php_method_name(method));
         // Spec section 14.3: a method named without parentheses is a function value, a closure of the method. No code
         // names a constructor or the static constructor so.
         let return_type = if matches!(php_method_name(method), b"__construct" | b"#statics") {
@@ -2735,6 +2741,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
             self.function_type(return_type, function_type, crossing, self.line(start))
         };
+        let return_type = if caller_checked { self.caller_checked(return_type) } else { return_type };
         self.static_type_parameters = None;
         // A sub-interface's body that replaces its parent's default body runs as a method of its trait of default
         // bodies, which has no parent, so only the interface's signature carries `#[\Override]`.
@@ -6755,14 +6762,17 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// generic method's would run with no type arguments, so it is a closure that calls the method with those the
     /// checker took from the value's function type, on `target` read once where the value is read:
     /// `(function ($receiver) { return function (...$arguments) use ($receiver) { return
-    /// $receiver->member(...$arguments, <T>); }; })($object)`.
+    /// $receiver->member(...$arguments, <T>); }; })($object)`. A PHP# interface's member is such a closure too, whose
+    /// call checks its result as a call of the member does, spec section 22.
     fn method_value(&mut self, value: &Expression, call: sharp_kind, target: u32, member: u32) -> u32 {
         let line = self.line(value);
-        let Some(type_arguments) = self.types.method_value_type_arguments(value) else {
+        let check = self.types.method_value_check(value);
+        let type_arguments = self.types.method_value_type_arguments(value);
+        if type_arguments.is_none() && check.is_none() {
             let callable = self.node(SHARP_AST_CALLABLE_CONVERT, 0, line, &[]);
 
             return self.node(call, 0, line, &[target, member, callable]);
-        };
+        }
         // A class written by its name is read as `Counter::class`, and `Self` as `static::class`, the class the code is
         // called on. A class value already holds its class.
         let target = if self.nodes[target as usize].kind == SHARP_AST_ZVAL && call == SHARP_AST_STATIC_CALL {
@@ -6771,10 +6781,14 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             target
         };
 
-        self.receiver_closure(value, target, Some(&type_arguments), |this, receiver, arguments| {
+        self.receiver_closure(value, target, type_arguments.as_deref(), |this, receiver, arguments| {
             let arguments = this.node(SHARP_AST_ARG_LIST, 0, line, arguments);
+            let called = this.node(call, 0, line, &[receiver, member, arguments]);
 
-            this.node(call, 0, line, &[receiver, member, arguments])
+            match check {
+                Some((text, name)) => this.verified(line, called, &text, name.as_bytes()),
+                None => called,
+            }
         })
     }
 
@@ -7157,6 +7171,20 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let attr = if crossing { ZEND_SHARP_RESULT_CROSSES } else { 0 };
 
         self.node(SHARP_AST_SHARP_TYPE_ARGS, attr, line, &[php_type, text])
+    }
+
+    /// The result type `return_type`, which declares a PHP type, as a `SHARP_TYPE_ARGS` whose attr holds
+    /// `ZEND_SHARP_RESULT_CALLER_CHECKED`, so the engine links a plain PHP method that declares no return type under it.
+    fn caller_checked(&mut self, return_type: u32) -> u32 {
+        let node = &mut self.nodes[return_type as usize];
+        if node.kind == SHARP_AST_SHARP_TYPE_ARGS {
+            node.attr |= ZEND_SHARP_RESULT_CALLER_CHECKED;
+
+            return return_type;
+        }
+        let line = node.line;
+
+        self.node(SHARP_AST_SHARP_TYPE_ARGS, ZEND_SHARP_RESULT_CALLER_CHECKED, line, &[return_type, NULL])
     }
 
     /// The parameters of the lambda at `lambda`, each with its type or a null type, as PHP writes a parameter without

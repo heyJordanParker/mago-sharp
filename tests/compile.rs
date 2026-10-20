@@ -312,13 +312,13 @@ fn compile_refuses_a_plain_php_class_that_does_not_satisfy_the_php_sharp_interfa
     compile_succeeds(root);
 }
 
-/// The engine links a plain PHP class against the PHP# interface it implements whatever declares each method the class
-/// takes: the class, a trait of the project, or a class or trait of a package in `vendor/`, as Eloquent's `Model` gives
-/// `unsetRelation()` from its `HasRelationships` trait. So the compile refuses an untyped method under a typed member
-/// from each of them, naming the member's type as PHP declares it. An `Any?` result declares no PHP type, so an untyped
-/// method fits it from each of them.
+/// The engine links a plain PHP class against the PHP# types it extends whatever declares each method the class takes:
+/// the class, a trait of the project, or a class or trait of a package in `vendor/`, as Eloquent's `Model` gives
+/// `unsetRelation()` from its `HasRelationships` trait. Each PHP# call of a PHP# interface's member checks its result,
+/// spec section 22, so an untyped method implements a typed member from each of them. A PHP# class's method checks none,
+/// so the compile refuses an untyped method under a typed one from each of them, naming its type as PHP declares it.
 #[test]
-fn compile_checks_each_method_a_plain_php_class_links_against_a_php_sharp_interface_wherever_it_is_declared() {
+fn compile_takes_an_untyped_method_under_an_interface_member_and_refuses_one_under_a_class_method_wherever_declared() {
     let directory = project(ORDER, MONEY);
     let root = directory.path();
     let untyped = |namespace: &str, name: &str| {
@@ -343,30 +343,43 @@ fn compile_checks_each_method_a_plain_php_class_links_against_a_php_sharp_interf
         "app/VendorRow.php",
         "<?php\n\nnamespace App;\n\nclass VendorRow extends \\Acme\\Model implements Relates\n{\n}\n",
     );
-    let relates = |forget: &str| {
-        format!(
-            "namespace App;\n\npublic interface Relates\n{{\n    {forget} forget(string relation);\n\n    Any? getMorphClass();\n}}\n"
-        )
-    };
-    write(root, "app/Relates.sharp", &relates("Self"));
+    write(
+        root,
+        "app/Relates.sharp",
+        "namespace App;\n\npublic interface Relates\n{\n    Self forget(string relation);\n\n    string getMorphClass();\n}\n",
+    );
+
+    compile_succeeds(root);
+
+    write(
+        root,
+        "app/Record.sharp",
+        "namespace App;\n\npublic abstract class Record\n{\n    public abstract Self forget(string relation);\n}\n",
+    );
+    write(
+        root,
+        "app/AppRecord.php",
+        "<?php\n\nnamespace App;\n\nclass AppRecord extends Record\n{\n    use ForgetsInApp;\n}\n",
+    );
+    write(
+        root,
+        "app/VendorRecord.php",
+        "<?php\n\nnamespace App;\n\nclass VendorRecord extends Record\n{\n    use \\Acme\\ForgetsRelations;\n}\n",
+    );
 
     let output = compile(root);
 
     assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
-    for class in ["AppRow", "VendorRow"] {
+    for class in ["AppRecord", "VendorRecord"] {
         assert!(
             printed(&output).contains(&format!(
-                "`App\\{class}::forget()` must declare a return type compatible with `static` declared by `App\\Relates::forget()`"
+                "`App\\{class}::forget()` must declare a return type compatible with `static` declared by `App\\Record::forget()`"
             )),
             "{}",
             printed(&output)
         );
     }
-    assert!(!printed(&output).contains("getMorphClass"), "{}", printed(&output));
     assert!(printed(&output).contains("2 plain PHP files were refused"), "{}", printed(&output));
-
-    write(root, "app/Relates.sharp", &relates("Any?"));
-    compile_succeeds(root);
 }
 
 /// The engine erases a PHP# class's type parameters and reads no docblock, so it links a plain PHP class that implements

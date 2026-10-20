@@ -13650,13 +13650,13 @@ fn a_plain_php_subclass_is_refused_replacing_a_closed_method_and_overrides_a_clo
     );
 }
 
-/// The engine links a plain PHP class against the PHP# methods it implements or overrides whatever declares the method
-/// it takes, the class or a package in `vendor/`, so an untyped method under a typed one is refused from each, named as
-/// PHP declares the type: `Self` as `static`, and an `Any?` override of a typed plain PHP method as the `mixed` PHP
-/// requires of it. A package's docblock is not PHP's declaration, and an `Any?` result that overrides nothing declares
-/// no PHP type, so an untyped method fits it.
+/// Spec section 22: each PHP# call of a PHP# interface's member checks its result, so a plain PHP class implements a
+/// typed member with a method that declares no return type, whether the class or a package in `vendor/` declares it.
+/// The engine links a plain PHP class against the PHP# class methods it overrides as PHP does, so an untyped method under
+/// a typed one is refused, named as PHP declares the type: an `Any?` override of a typed plain PHP method as the `mixed`
+/// PHP requires of it.
 #[test]
-fn a_plain_php_class_is_refused_an_untyped_method_under_a_typed_php_sharp_one_wherever_it_is_declared() {
+fn a_plain_php_class_takes_an_untyped_method_under_an_interface_member_and_is_refused_one_under_a_class_method() {
     let relates = "namespace App;\n\npublic interface Relates\n{\n    Self forget(string relation);\n\n    Any? getMorphClass();\n}\n";
     let app_row = "<?php\n\nnamespace App;\n\nclass AppRow implements Relates\n{\n    public function forget($relation)\n    {\n        return $this;\n    }\n\n    public function getMorphClass()\n    {\n        return 'row';\n    }\n}\n";
     let model = "<?php\n\nnamespace Acme;\n\nabstract class Model\n{\n    /** @return $this */\n    public function forget($relation)\n    {\n        return $this;\n    }\n\n    public function getMorphClass()\n    {\n        return 'row';\n    }\n}\n";
@@ -13672,20 +13672,13 @@ fn a_plain_php_class_is_refused_an_untyped_method_under_a_typed_php_sharp_one_wh
             .collect()
     };
 
-    assert_eq!(
-        refused(("src/App/AppRow.php", app_row), &[("src/App/Relates.sharp", relates)]),
-        [
-            "`App\\AppRow::forget()` must declare a return type compatible with `static` declared by `App\\Relates::forget()` | Add a return type declaration compatible with `static`."
-        ]
-    );
+    assert_eq!(refused(("src/App/AppRow.php", app_row), &[("src/App/Relates.sharp", relates)]), Vec::<String>::new());
     assert_eq!(
         refused(
             ("src/App/VendorRow.php", vendor_row),
             &[("src/App/Relates.sharp", relates), ("vendor/acme/model/src/Model.php", model)]
         ),
-        [
-            "`App\\VendorRow::forget()` must declare a return type compatible with `static` declared by `App\\Relates::forget()` | `App\\VendorRow` takes `forget()` from a package, so declare it in `App\\VendorRow` with a return type compatible with `static`."
-        ]
+        Vec::<String>::new()
     );
     assert_eq!(
         refused(

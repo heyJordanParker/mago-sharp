@@ -12394,7 +12394,8 @@ fn an_object_type_is_the_object_name() {
 ///
 /// `[64]` is `ZEND_ACC_EXPLICIT_ABSTRACT_CLASS` on the class and `ZEND_ACC_ABSTRACT` on the method, `[32]`
 /// `ZEND_ACC_FINAL`, `[1]` `ZEND_ACC_INTERFACE` on the interface, and an interface method is `ZEND_ACC_PUBLIC`, `[1]`,
-/// as php-src's grammar writes it. An abstract method has no statement list.
+/// as php-src's grammar writes it. An abstract method has no statement list. `[2]` on an interface method's result is
+/// `ZEND_SHARP_RESULT_CALLER_CHECKED`.
 #[test]
 fn abstract_and_final_classes_and_interfaces_are_class_declarations_with_their_flags() {
     let tree = |declaration: &str| Lowered::new(&format!("namespace App.Tenant;\n\n{declaration}")).tree();
@@ -12455,7 +12456,7 @@ fn abstract_and_final_classes_and_interfaces_are_class_declarations_with_their_f
                         null
                     null
                     null
-                    SHARP_TYPE_ARGS
+                    SHARP_TYPE_ARGS [2]
                       ZVAL [1] "string"
                       ZVAL "string"
                     null
@@ -12743,7 +12744,7 @@ fn a_trait_type_is_object_and_its_test_reads_the_trait() {
     );
 
     // A method's type parameter bounded by the trait checks its bound, and the trait leaves an intersection to the
-    // classes beside it.
+    // classes beside it. A call of the PHP# interface's member checks its result, spec section 22.
     let lowered = Lowered::with(
         "namespace App;\n\nimport Lib.HasLabel;\n\npublic class Seeder\n{\n    public string bound<T : HasLabel>(T owner) => owner.label();\n\n    public string both<T : Greeter & HasLabel>(T owner) => owner.hi() + owner.label();\n}\n",
         &[
@@ -12798,11 +12799,14 @@ fn a_trait_type_is_object_and_its_test_reads_the_trait() {
               STMT_LIST
                 RETURN
                   BINARY_OP [8]
-                    METHOD_CALL
-                      VAR
-                        ZVAL "owner"
-                      ZVAL "hi"
-                      ARG_LIST
+                    VERIFY_TYPE_ARGS
+                      METHOD_CALL
+                        VAR
+                          ZVAL "owner"
+                        ZVAL "hi"
+                        ARG_LIST
+                      ZVAL "string"
+                      ZVAL "App.Greeter.hi()"
                     METHOD_CALL
                       VAR
                         ZVAL "owner"
@@ -12926,7 +12930,8 @@ fn super_of_an_interface_calls_a_protected_alias_of_its_default_body() {
 /// the default bodies of the interfaces it implements first are one `use`, its first member, and a subclass of a class
 /// that already uses them uses none. The `use` gives each default body the protected alias `super<Labeled>` calls,
 /// `[2]` `ZEND_ACC_PROTECTED`. An enum, an event, a struct and the class of an enum with a case that carries data use
-/// them too.
+/// them too. The interface's method marks its result `[2]` `ZEND_SHARP_RESULT_CALLER_CHECKED`, and the default body
+/// marks none.
 #[test]
 fn a_header_trait_and_the_traits_of_default_bodies_are_one_use_after_the_interface_and_its_trait() {
     let files = [
@@ -12982,7 +12987,7 @@ fn a_header_trait_and_the_traits_of_default_bodies_are_one_use_after_the_interfa
                     PARAM_LIST
                     null
                     null
-                    SHARP_TYPE_ARGS
+                    SHARP_TYPE_ARGS [2]
                       ZVAL [1] "string"
                       ZVAL "Function<string()>"
                     null
@@ -12990,7 +12995,7 @@ fn a_header_trait_and_the_traits_of_default_bodies_are_one_use_after_the_interfa
                     PARAM_LIST
                     null
                     null
-                    SHARP_TYPE_ARGS
+                    SHARP_TYPE_ARGS [2]
                       ZVAL [1] "string"
                       ZVAL "string"
                     null
@@ -13028,7 +13033,7 @@ fn a_header_trait_and_the_traits_of_default_bodies_are_one_use_after_the_interfa
                     PARAM_LIST
                     null
                     null
-                    SHARP_TYPE_ARGS
+                    SHARP_TYPE_ARGS [2]
                       ZVAL [1] "string"
                       ZVAL "Function<string()>"
                     null
@@ -19388,10 +19393,70 @@ fn an_interface_method_and_a_collection_method_given_a_function_value_check_thei
     )
     .body();
 
-    assert!(body.contains("      ZVAL \"Any\"\n      ZVAL \"App\\\\Tenant\\\\Source::read()\"\n"), "{body}");
+    assert!(body.contains("      ZVAL \"Any\"\n      ZVAL \"App.Tenant.Source.read()\"\n"), "{body}");
     assert!(body.contains("      ZVAL \"List<float>\"\n      ZVAL \"map()\"\n"), "{body}");
     assert!(body.contains("ZVAL \"apply\""), "{body}");
     assert_eq!(body.matches("VERIFY_TYPE_ARGS").count(), 2, "{body}");
+}
+
+/// Spec section 22: each PHP# call of a PHP# interface's instance member checks its result, so `[2]`,
+/// `ZEND_SHARP_RESULT_CALLER_CHECKED`, marks each such member's PHP return type, and the engine links a plain PHP method
+/// that declares none under it.
+#[test]
+fn an_interface_member_marks_its_return_type_as_checked_by_each_call() {
+    let lowered = Lowered::with(
+        "namespace App;\n\nimport Lib.Relation;\n\npublic interface Taggable\n{\n    Relation relate(string name);\n\n    List<int> ids();\n\n    void touch();\n}\n",
+        &[("src/Lib/Relation.php", "<?php namespace Lib; class Relation {}")],
+    );
+    let marked = |name: &str| lowered.render(lowered.child(lowered.method_named(name), 3));
+
+    assert_eq!(marked("relate"), "SHARP_TYPE_ARGS [2]\n  ZVAL \"Lib\\\\Relation\"\n  ZVAL \"Lib.Relation\"\n");
+    assert_eq!(marked("ids"), "SHARP_TYPE_ARGS [2]\n  TYPE [7]\n  ZVAL \"List<int>\"\n");
+    assert_eq!(marked("touch"), "SHARP_TYPE_ARGS [2]\n  ZVAL [1] \"void\"\n  ZVAL \"void\"\n");
+}
+
+/// ```php
+/// $tags = \Sharp\verify($owner->relate('tags'), 'App.Relation', 'App.Taggable.relate()');
+/// ```
+///
+/// Spec section 22: a plain PHP class implements a PHP# interface's member with a method that may declare no return
+/// type, so each PHP# call of the member checks its result, as is a call of its method value, named as PHP# writes the
+/// member. The check tests a collection alone, `List<Any?>`, and the type argument of a generic interface's member. A
+/// result of any value, a `void` one and a call of a PHP# class's own method check nothing.
+#[test]
+fn a_call_of_an_interface_member_checks_its_result() {
+    let body = Lowered::with(
+        &method_with(
+            "void run(Taggable owner, Source<Relation> source, Relation relation)",
+            "        Relation tags = owner.relate(\"tags\");\n        List<int> ids = owner.ids();\n        Relation read = source.read();\n        Any? raw = owner.raw();\n        owner.touch();\n        Relation again = relation.again();\n        const relate = owner.relate;\n        Relation named = relate(\"named\");\n",
+        ),
+        &[
+            (
+                "src/App/Tenant/Taggable.sharp",
+                "namespace App.Tenant;\n\npublic interface Taggable\n{\n    Relation relate(string name);\n\n    List<int> ids();\n\n    Any? raw();\n\n    void touch();\n}\n",
+            ),
+            ("src/App/Tenant/Source.sharp", "namespace App.Tenant;\n\npublic interface Source<T>\n{\n    T read();\n}\n"),
+            (
+                "src/App/Tenant/Relation.sharp",
+                "namespace App.Tenant;\n\npublic class Relation\n{\n    public Relation() { }\n\n    public Relation again() => this;\n}\n",
+            ),
+        ],
+    )
+    .body();
+
+    assert!(
+        body.contains("      ZVAL \"App.Tenant.Relation\"\n      ZVAL \"App.Tenant.Taggable.relate()\"\n"),
+        "{body}"
+    );
+    assert!(
+        body.contains(
+            "                    ZVAL \"App.Tenant.Relation\"\n                    ZVAL \"App.Tenant.Taggable.relate()\"\n"
+        ),
+        "{body}"
+    );
+    assert!(body.contains("      ZVAL \"List<Any?>\"\n      ZVAL \"App.Tenant.Taggable.ids()\"\n"), "{body}");
+    assert!(body.contains("      ZVAL \"App.Tenant.Relation\"\n      ZVAL \"App.Tenant.Source.read()\"\n"), "{body}");
+    assert_eq!(body.matches("VERIFY_TYPE_ARGS").count(), 4, "{body}");
 }
 
 /// ```php
