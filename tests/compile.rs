@@ -836,6 +836,98 @@ final class Typing implements Plugin, BeforeAnalysisHook
 
 (new Worker(new Extension('typing', 'Typing', '0.0.0', analyzerPlugins: [new Typing()])))->run();
 "#;
+
+/// An extension host that gives one plain PHP method its parameters, as a framework's host signs its query builder's
+/// methods, so the hosts may sign any method the analysis can't find.
+const SIGNING_HOST: &str = r#"<?php
+
+declare(strict_types=1);
+
+use Mago\Sdk\Analyzer\CallableSignatureProvider;
+use Mago\Sdk\Analyzer\CallableSignatureProviderContext;
+use Mago\Sdk\Analyzer\EffectiveCallableSignature;
+use Mago\Sdk\Analyzer\MethodReturnTypeProvider;
+use Mago\Sdk\Analyzer\MethodTarget;
+use Mago\Sdk\Analyzer\Plugin;
+use Mago\Sdk\Analyzer\PluginDefinition;
+use Mago\Sdk\Analyzer\PluginRegistry;
+use Mago\Sdk\Analyzer\ReturnTypeProviderContext;
+use Mago\Sdk\Analyzer\Type;
+use Mago\Sdk\Extension;
+use Mago\Sdk\Worker;
+
+require $argv[1];
+
+final class Signing implements Plugin, MethodReturnTypeProvider, CallableSignatureProvider
+{
+    public function getDefinition(): PluginDefinition
+    {
+        return new PluginDefinition('signing', 'Signing', 'Signs one builder method.');
+    }
+
+    public function register(PluginRegistry $registry): void
+    {
+        $registry->registerMethodReturnTypeProvider($this);
+    }
+
+    public function getTargets(): array
+    {
+        return [MethodTarget::exact('App\\Builder', 'where')];
+    }
+
+    public function getCallableSignature(CallableSignatureProviderContext $context): ?EffectiveCallableSignature
+    {
+        return null;
+    }
+
+    public function getReturnType(ReturnTypeProviderContext $context): ?Type
+    {
+        return null;
+    }
+}
+
+(new Worker(new Extension('signing', 'Signing', '0.0.0', analyzerPlugins: [new Signing()])))->run();
+"#;
+
+/// A method a `List`, a `Map`, a `Set` or an `Iterable` lacks is named on its type as PHP# writes it, never as the class
+/// the analyzer checks the collection's methods against, also when a host may sign methods the analysis can't find.
+#[test]
+fn a_missing_collection_method_names_the_collection_type_when_a_host_signs_methods() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if !common::php_sdk_is_available(repository, "the collection method message test") {
+        return;
+    }
+    let directory = project(ORDER, MONEY);
+    let root = directory.path();
+    write(
+        root,
+        "app/Shelf.sharp",
+        "namespace App;\n\npublic class Shelf\n{\n    public static void touch(List<int> sizes, Map<string, int> counts, Set<string> tags, Iterable<int> stream)\n    {\n        sizes.values();\n        counts.items();\n        tags.items();\n        stream.items();\n    }\n}\n",
+    );
+    write(root, "tools/host.php", SIGNING_HOST);
+    write(
+        root,
+        "mago.toml",
+        &format!(
+            "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.signing]\nworkers = 1\ncommand = [\"php\", \"tools/host.php\", {:?}]\n",
+            repository.join("vendor/autoload.php").display().to_string()
+        ),
+    );
+
+    let output = compile(root);
+
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    for missing in [
+        "Method `values` does not exist on `List<int>`.",
+        "Method `items` does not exist on `Map<string, int>`.",
+        "Method `items` does not exist on `Set<string>`.",
+        "Method `items` does not exist on `Iterable<int>`.",
+    ] {
+        assert!(printed(&output).contains(missing), "{missing}: {}", printed(&output));
+    }
+    assert!(!printed(&output).contains("Methods"), "{}", printed(&output));
+}
+
 #[test]
 fn compile_deletes_the_compiled_file_of_a_renamed_or_removed_source() {
     let directory = project(ORDER, MONEY);

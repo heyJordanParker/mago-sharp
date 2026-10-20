@@ -427,20 +427,8 @@ where
 
                             if resolved_magic_call_method.is_empty() {
                                 let identifier = FunctionLikeIdentifier::Method(classname, method_name);
-                                if context.external_analysis_session.is_some()
-                                    && context.plugin_registry.may_have_callable_signature_provider(&identifier)
-                                {
-                                    result.unresolved_methods.push(UnresolvedMethod {
-                                        classname,
-                                        method_name,
-                                        target_span: object.span(),
-                                        selector_span: selector.span(),
-                                        class_type: StaticClassType::Object(obj_type.clone()),
-                                    });
-                                    result.encountered_mixed |= has_incomplete_hierarchy;
-                                } else if has_incomplete_hierarchy {
-                                    result.encountered_mixed = true;
-                                } else if let Some(collection) = display_sharp_collection(context, obj_type) {
+                                // A PHP# collection has the methods spec section 12 gives it, which no host extends.
+                                if let Some(collection) = display_sharp_collection(context, obj_type) {
                                     report_non_existent_collection_method(
                                         context,
                                         object.span(),
@@ -455,6 +443,19 @@ where
 
                                     result.has_invalid_target = true;
                                     result.lacks_sharp_method = true;
+                                } else if context.external_analysis_session.is_some()
+                                    && context.plugin_registry.may_have_callable_signature_provider(&identifier)
+                                {
+                                    result.unresolved_methods.push(UnresolvedMethod {
+                                        classname,
+                                        method_name,
+                                        target_span: object.span(),
+                                        selector_span: selector.span(),
+                                        class_type: StaticClassType::Object(obj_type.clone()),
+                                    });
+                                    result.encountered_mixed |= has_incomplete_hierarchy;
+                                } else if has_incomplete_hierarchy {
+                                    result.encountered_mixed = true;
                                 } else {
                                     // A PHP# union of one generic class, as `Pair<int, Order>|Pair<string, Order>`,
                                     // misses the method once.
