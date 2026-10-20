@@ -11485,9 +11485,9 @@ fn a_map_whose_keys_can_collide_passes_where_plain_php_takes_an_array() {
 /// Spec sections 11 and 12 check a value from plain PHP where it enters PHP#. So where PHP# takes a `Map`, as a
 /// parameter or a property, instance or static, plain PHP passes or writes the keys a PHP array holds there: a
 /// backed enum's backing values, and an `int` beside a `string`, as PHP holds the key `'5'` as `5`, which PHP# turns
-/// back into the `string`. An index write through the property keeps it such an array. A `Map<Size, int>` of an
-/// `int`-backed enum refuses a `string` key. That border check does not look inside a collection yet, so a key that is
-/// no case fails when PHP# reads it back as `Status`.
+/// back into the `string`. An index write through the property keeps it such an array. A `Map<Status, int>` whose
+/// cases' values write no integer refuses an `int` key, and so does the engine, as a `Map<Size, int>` of an
+/// `int`-backed enum refuses a `string` key.
 #[test]
 fn a_plain_php_caller_passes_and_writes_the_keys_a_php_array_holds_where_php_sharp_takes_a_map() {
     let sharp = "namespace Demo;\n\nimport Lib.Size;\nimport Lib.Status;\n\npublic class Tally\n{\n    public Map<string, int> named { get; set; } = [:];\n    public static Map<string, int> shared { get; set; } = [:];\n    public Map<Status, int> counts { get; set; } = [:];\n    public Map<Size, int> sizes { get; set; } = [:];\n\n    public int total(Map<Status, int> counts) => counts.count();\n\n    public int name(Map<string, int> named) => named.count();\n\n    public int size(Map<Size, int> sizes) => sizes.count();\n}\n";
@@ -11495,7 +11495,12 @@ fn a_plain_php_caller_passes_and_writes_the_keys_a_php_array_holds_where_php_sha
 
     assert_eq!(
         issues(("src/Demo/Caller.php", php), &[("src/Demo/Tally.sharp", sharp), ("src/Lib/Status.php", STATUS)]),
-        ["15:25 invalid-property-assignment-value", "16:140 possibly-invalid-argument"]
+        [
+            "13:26 invalid-property-assignment-value",
+            "15:25 invalid-property-assignment-value",
+            "16:63 possibly-invalid-argument",
+            "16:140 possibly-invalid-argument"
+        ]
     );
 }
 
@@ -15492,8 +15497,8 @@ fn a_class_type_names_a_generic_class_without_its_type_arguments() {
 
 /// A plain PHP caller passes the backing values where a generic PHP# method takes a `Map<TKey, int>` with `TKey`
 /// bound by a backed enum, as it does where the method takes a `Map<Status, int>`: the method's key is read as PHP#
-/// writes it, and an `int` key passes for a `string` backing value, as PHP holds the key `"1"`. A plain PHP template
-/// bounded by the enum keeps upstream Mago's issues.
+/// writes it, so an `int` key, which no case's value writes, is refused. A plain PHP template bounded by the enum keeps
+/// upstream Mago's issues.
 #[test]
 fn a_plain_php_caller_passes_the_backing_values_where_a_generic_method_takes_a_map_keyed_by_its_type_parameter() {
     let keys = "namespace Demo;\n\nimport Lib.Status;\n\npublic class Keys\n{\n    public static int count<TKey : Status>(Map<TKey, int> counts) => 0;\n}\n";
@@ -15511,7 +15516,7 @@ fn a_plain_php_caller_passes_the_backing_values_where_a_generic_method_takes_a_m
     );
     assert_eq!(
         issues(("src/Demo/Caller.php", php), &[("src/Demo/Keys.sharp", keys), ("src/Lib/Status.php", STATUS)]),
-        Vec::<String>::new()
+        ["9:59 possibly-invalid-argument"]
     );
 }
 
@@ -18448,12 +18453,14 @@ fn a_php_caller_passes_null_as_the_left_operand_of_op_equality() {
 
 /// Plain PHP receives a PHP# `Map` or `Set` as the PHP array the engine gives it, spec section 12, from a return, a
 /// property, a static property and a callback's argument, at any depth: a `Map` as the array of its entries, each
-/// backed enum key its backing value, and a `Set` as the list of its elements. So `array_merge`, `ksort` and a backed
-/// enum's `tryFrom` take them, and a parameter that takes a `string` still refuses one. A `Map` keyed by an enum without
-/// backing values has no PHP array, so plain PHP receives the `Sharp\Map` object. A PHP# parameter or property takes
-/// the PHP array PHP# turns into a `Map` or a `Set`. A plain PHP parameter that names an object type the object has,
-/// as `Countable`, `Traversable`, `JsonSerializable`, `object` or `Sharp\Map`, takes a PHP# `Map` or `Set` that PHP#
-/// passes to it, and one the object lacks refuses it.
+/// backed enum key its backing value, and a `Set` as the list of its elements. A `string` key is `int|string`, as PHP
+/// holds `"5"` as `5`, and a case's value that writes no integer stays a `string`. So `array_merge`, `ksort` and a
+/// backed enum's `tryFrom` take them, and a parameter that takes a `string` still refuses one. Where a key, at any
+/// depth, has no PHP array form, as an enum without backing values, plain PHP receives the whole value as the
+/// `Sharp\Map` object, as the engine gives it. A PHP# parameter or property takes the `Sharp\Map` or `Sharp\Set`
+/// object, or the PHP array PHP# turns into one, and a function plain PHP passes may give either. A plain PHP
+/// parameter that names an object type the object has, as `Countable`, `Traversable`, `JsonSerializable`, `object` or
+/// `Sharp\Map`, takes a PHP# `Map` or `Set` that PHP# passes to it, and one the object lacks refuses it.
 #[test]
 fn plain_php_receives_a_map_or_a_set_as_a_php_array() {
     let sink = (
@@ -18472,26 +18479,28 @@ fn plain_php_receives_a_map_or_a_set_as_a_php_array() {
 
     let tally = (
         "src/Demo/Tally.sharp",
-        "namespace Demo;\n\npublic class Tally\n{\n    public Set<string> seen = [];\n    public static Map<string, List<Set<int>>> nested = [:];\n    public Map<string, int> kept { get; set => field = value; } = [:];\n\n    public Map<string, int> counts() => [\"a\": 1];\n\n    public Map<Size, int?> limits() => [Size.Small: 1];\n\n    public Map<Shade, int> shades() => [Shade.Dark: 1];\n\n    public int total(Map<string, int> counts) => counts.count();\n\n    public void each(Function<void(Map<string, int>)> visit)\n    {\n        visit(this.counts());\n    }\n\n    public int build(Function<Set<int>()> make) => make().count();\n}\n",
+        "namespace Demo;\n\npublic class Tally\n{\n    public Set<string> seen = [];\n    public static Map<string, List<Set<int>>> nested = [:];\n    public Map<string, int> kept { get; set => field = value; } = [:];\n\n    public Map<string, int> counts() => [\"a\": 1];\n\n    public Map<Size, int?> limits() => [Size.Small: 1];\n\n    public Map<Shade, int> shades() => [Shade.Dark: 1];\n\n    public Map<string, Map<Shade, int>> nestedShades() => [\"n\": [Shade.Dark: 1]];\n\n    public int total(Map<string, int> counts) => counts.count();\n\n    public void each(Function<void(Map<string, int>)> visit)\n    {\n        visit(this.counts());\n    }\n\n    public int build(Function<Set<int>()> make) => make().count();\n}\n",
     );
     let size =
         ("src/Demo/Size.php", "<?php\n\nnamespace Demo;\n\nenum Size: string\n{\n    case Small = 'small';\n}\n");
     let shade = ("src/Demo/Shade.sharp", "namespace Demo;\n\npublic enum Shade\n{\n    case Dark;\n}\n");
-    let php = "<?php\n\nnamespace Demo;\n\nfinal class Caller\n{\n    public function counts(Tally $tally): int\n    {\n        return $tally->counts();\n    }\n\n    public function seen(Tally $tally): int\n    {\n        return $tally->seen;\n    }\n\n    public function nested(): int\n    {\n        return Tally::$nested;\n    }\n\n    public function limits(Tally $tally): int\n    {\n        return $tally->limits();\n    }\n\n    public function shades(Tally $tally): int\n    {\n        return $tally->shades();\n    }\n\n    public function arrays(Tally $tally): int\n    {\n        $merged = array_merge(['a' => 0], $tally->counts());\n        $limits = $tally->limits();\n        ksort($limits);\n        foreach ($tally->limits() as $size => $limit) {\n            Size::tryFrom($size);\n        }\n        return count($merged) + count($limits) + strlen($tally->seen);\n    }\n\n    public function read(Tally $tally): string\n    {\n        return $tally->counts()['a'];\n    }\n\n    public function loop(Tally $tally): int\n    {\n        foreach ($tally->counts() as $key => $count) {\n            return $key;\n        }\n        foreach ($tally->seen as $position => $tag) {\n            return $tag;\n        }\n        return 0;\n    }\n\n    public function back(Tally $tally): int\n    {\n        $tally->seen = ['x'];\n        $tally->seen = $tally->seen;\n        $tally->kept = ['k' => 1];\n        Tally::$nested = ['n' => []];\n        $tally->each(function (\\Sharp\\Map $counts): void {});\n        $tally->each(function (array $counts): void {});\n        $tally->build(fn (): array => [1]);\n        return $tally->total($tally->counts()) + $tally->total(['b' => 2]);\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nfinal class Caller\n{\n    public function counts(Tally $tally): int\n    {\n        return $tally->counts();\n    }\n\n    public function seen(Tally $tally): int\n    {\n        return $tally->seen;\n    }\n\n    public function nested(): int\n    {\n        return Tally::$nested;\n    }\n\n    public function limits(Tally $tally): int\n    {\n        return $tally->limits();\n    }\n\n    public function shades(Tally $tally): int\n    {\n        return $tally->shades();\n    }\n\n    public function nestedShades(Tally $tally): int\n    {\n        return $tally->nestedShades();\n    }\n\n    public function arrays(Tally $tally): int\n    {\n        $merged = array_merge(['a' => 0], $tally->counts());\n        $limits = $tally->limits();\n        ksort($limits);\n        foreach ($tally->limits() as $size => $limit) {\n            Size::tryFrom($size);\n        }\n        return count($merged) + count($limits) + strlen($tally->seen) + count(array_merge([], $tally->nestedShades()));\n    }\n\n    public function read(Tally $tally): string\n    {\n        return $tally->counts()['a'];\n    }\n\n    public function loop(Tally $tally): int\n    {\n        foreach ($tally->counts() as $key => $count) {\n            return strlen($key);\n        }\n        foreach ($tally->seen as $position => $tag) {\n            return $tag;\n        }\n        return 0;\n    }\n\n    public function back(Tally $tally): int\n    {\n        $tally->seen = ['x'];\n        $tally->seen = $tally->seen;\n        $tally->kept = ['k' => 1];\n        Tally::$nested = ['n' => []];\n        $tally->each(function (\\Sharp\\Map $counts): void {});\n        $tally->each(function (array $counts): void {});\n        $tally->build(fn (): \\Sharp\\Set => new \\Sharp\\Set([1]));\n        $tally->build(fn (): array => [1]);\n        return $tally->total($tally->counts()) + $tally->total(['b' => 2]) + $tally->total(new \\Sharp\\Map(['c', 3]));\n    }\n}\n";
 
     assert_eq!(
         messages(("src/Demo/Caller.php", php), &[tally, size, shade]),
         [
-            "Invalid return type for function `Demo\\Caller::counts`: expected `int`, but found `array<string, int>`.",
+            "Invalid return type for function `Demo\\Caller::counts`: expected `int`, but found `array<int|string, int>`.",
             "Invalid return type for function `Demo\\Caller::seen`: expected `int`, but found `list<string>`.",
-            "Invalid return type for function `Demo\\Caller::nested`: expected `int`, but found `array<string, list<list<int>>>`.",
+            "Invalid return type for function `Demo\\Caller::nested`: expected `int`, but found `array<int|string, list<list<int>>>`.",
             "Invalid return type for function `Demo\\Caller::limits`: expected `int`, but found `array<string, int|null>`.",
             "Invalid return type for function `Demo\\Caller::shades`: expected `int`, but found `Sharp\\Map<enum(Demo\\Shade), int>`.",
+            "Invalid return type for function `Demo\\Caller::nestedShades`: expected `int`, but found `Sharp\\Map<string, Sharp\\Map<enum(Demo\\Shade), int>>`.",
             "Invalid argument type for argument #1 of `strlen`: expected `string`, but found `list<string>`.",
+            "Invalid argument type for argument #2 of `array_merge`: expected `array<('K.array_merge() extends array-key), ('V.array_merge() extends mixed)>`, but found `Sharp\\Map<string, Sharp\\Map<enum(Demo\\Shade), int>>`.",
             "Invalid return type for function `Demo\\Caller::read`: expected `string`, but found `int`.",
+            "Possible argument type mismatch for argument #1 of `strlen`: expected `string`, but possibly received `int|string`.",
             "Invalid return type for function `Demo\\Caller::loop`: expected `int`, but found `string`.",
-            "Invalid return type for function `Demo\\Caller::loop`: expected `int`, but found `string`.",
-            "Invalid argument type for argument #1 of `Demo\\Tally::each`: expected `(closure(array<string, int>): void)`, but found `(closure(Sharp\\Map<mixed, mixed>): void)`.",
+            "Invalid argument type for argument #1 of `Demo\\Tally::each`: expected `(closure(array<int|string, int>): void)`, but found `(closure(Sharp\\Map<mixed, mixed>): void)`.",
         ]
     );
 }
@@ -18514,7 +18523,7 @@ fn plain_php_knows_the_engine_s_container() {
 
 /// A PHP caller checks its arguments against the PHP method a PHP# method runs as, whose `List<int>` and
 /// `Map<string, int>` parameters keep their element types, so a wrongly typed list or map is still reported. The `Map`
-/// takes the PHP array PHP# turns into one, whose all-digit keys PHP holds as `int`s.
+/// takes a `Sharp\Map` or the PHP array PHP# turns into one, whose all-digit keys PHP holds as `int`s.
 #[test]
 fn a_php_caller_keeps_the_element_types_of_a_sharp_methods_collection_parameters() {
     let tally = (
@@ -18527,7 +18536,7 @@ fn a_php_caller_keeps_the_element_types_of_a_sharp_methods_collection_parameters
         messages(("src/Demo/Report.php", php), &[tally]),
         [
             "Possible argument type mismatch for argument #1 of `Demo\\Tally::total`: expected `list<int>`, but possibly received `list{string('a')}`.",
-            "Possible argument type mismatch for argument #2 of `Demo\\Tally::total`: expected `array<int|string, int>`, but possibly received `array{1: string('x')}`.",
+            "Possible argument type mismatch for argument #2 of `Demo\\Tally::total`: expected `Sharp\\Map<string, int>|array<int|string, int>`, but possibly received `array{1: string('x')}`.",
         ]
     );
 }

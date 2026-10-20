@@ -18,7 +18,11 @@ use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::object::named::TNamedObject;
 use mago_codex::ttype::atomic::reference::TReference;
 use mago_codex::ttype::atomic::scalar::TScalar;
+use mago_codex::ttype::crosses_outward;
+use mago_codex::ttype::get_crossing_array;
 use mago_codex::ttype::get_mixed;
+use mago_codex::ttype::keys_hold_in_array;
+use mago_codex::ttype::may_hold_collection;
 use mago_codex::ttype::resolution::TypeResolutionContext;
 use mago_codex::ttype::union::TUnion;
 use mago_names::INLINED_COLLECTION_METHODS;
@@ -7581,37 +7585,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.node(SHARP_AST_STATIC_CALL, 0, line, &[name, method, arguments])
     }
 
-    /// Whether plain PHP gets a value of `r#type` with each `Map` and `Set` in it as its PHP array, spec section 12: a
-    /// value that holds one at any depth, or can when it runs, as `Any`, an unbounded type parameter and an `Iterable` of
-    /// them can, where a PHP array holds each key of every `Map` the type names. Any other `Map` reaches plain PHP as the
-    /// object, and so does whatever holds it.
+    /// Whether plain PHP gets a value of `r#type` with each `Map` and `Set` in it as its PHP array, as the codex's
+    /// [`crosses_outward`] says, which the analyzer types plain PHP's code by too.
     fn crosses_outward(&self, r#type: &TUnion) -> bool {
-        self.keys_hold_in_array(r#type) && self.may_hold_collection(r#type)
-    }
-
-    /// Whether a value of `r#type` can hold a `Map` or a `Set` at any depth.
-    fn may_hold_collection(&self, r#type: &TUnion) -> bool {
-        r#type.types.iter().any(|atomic| match atomic {
-            TAtomic::Array(list @ TArray::List(_)) => self.may_hold_collection(&self.types.array_parameters(list).1),
-            TAtomic::Array(_) | TAtomic::Mixed(_) => true,
-            TAtomic::GenericParameter(parameter) => self.may_hold_collection(&parameter.constraint),
-            TAtomic::Iterable(iterable) => self.may_hold_collection(iterable.get_value_type()),
-            _ => false,
-        })
-    }
-
-    /// Whether a PHP array holds each key of every `Map` in `r#type`, at any depth, as a type without a `Map` does.
-    fn keys_hold_in_array(&self, r#type: &TUnion) -> bool {
-        r#type.types.iter().all(|atomic| match atomic {
-            TAtomic::Array(array) => {
-                let (key_type, element_type) = self.types.array_parameters(array);
-
-                (!matches!(array, TArray::Keyed(_)) || self.types.keys_hold_in_array(&key_type))
-                    && self.keys_hold_in_array(&element_type)
-            }
-            TAtomic::Iterable(iterable) => self.keys_hold_in_array(iterable.get_value_type()),
-            _ => true,
-        })
+        crosses_outward(r#type, self.types.codebase())
     }
 
     /// Whether plain PHP gets the result of the method `method` of the class being lowered, whose result type `hint`
@@ -7638,19 +7615,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// The one collection `r#type` holds where the value holds a `Map` or a `Set`, at any depth, for [`Self::crossed`]
-    /// to build. Where the value may be one of several collections, the array alone doesn't say which, and none is.
+    /// to build, as the codex's [`get_crossing_array`] finds it, which the analyzer types plain PHP's arguments by too.
     fn crossing_array<'r#type>(&self, r#type: &'r#type TUnion) -> Option<&'r#type TArray> {
-        let mut arrays = r#type.types.iter().filter_map(|atomic| match atomic {
-            TAtomic::Array(array) => Some(array),
-            _ => None,
-        });
-        let (Some(array), None) = (arrays.next(), arrays.next()) else {
-            return None;
-        };
-        let holds_collection =
-            !matches!(array, TArray::List(_)) || self.crossing_array(&self.types.array_parameters(array).1).is_some();
-
-        holds_collection.then_some(array)
+        get_crossing_array(r#type, self.types.codebase())
     }
 
     /// The value of the variable `name`, of `r#type`, with each `Map` and `Set` it holds made the object where plain PHP
@@ -7763,7 +7730,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             return self.zval(line, sharp_value::SHARP_NULL, |_| {});
         };
         let (key_type, element_type) = self.types.array_parameters(array);
-        let inner = if self.crossing_array(&element_type).is_none() && self.may_hold_collection(&element_type) {
+        let inner = if self.crossing_array(&element_type).is_none()
+            && may_hold_collection(&element_type, self.types.codebase())
+        {
             self.zval(line, sharp_value::SHARP_FALSE, |_| {})
         } else {
             self.crossing_plan(line, &element_type)
@@ -8957,14 +8926,15 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
     /// Whether `value`, passed to `parameter` of plain PHP, crosses as its PHP array: the parameter takes an array and
     /// the value's type holds a `Map` or a `Set` that plain PHP did not itself give, each with a PHP array, as
-    /// [`Self::keys_hold_in_array`] says. A value whose type says nothing of what it holds, as `Any`, passes as it is.
+    /// the codex's [`keys_hold_in_array`] says. A value whose type says nothing of what it holds, as `Any`, passes as it
+    /// is.
     fn argument_crosses(&self, value: &Expression, parameter: Option<PlainParameter>) -> bool {
         let r#type = self.types.expression_type(value);
 
         parameter.is_some_and(PlainParameter::takes_array)
             && !self.plain_value(value)
             && self.crossing_array(r#type).is_some()
-            && self.keys_hold_in_array(r#type)
+            && keys_hold_in_array(r#type, self.types.codebase())
     }
 
     /// Whether a value of `list` crosses into `parameters` as [`Self::argument_crosses`] says.

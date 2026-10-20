@@ -1523,102 +1523,253 @@ pub fn get_collection_object(array: &TArray, codebase: &CodebaseMetadata) -> Opt
     Some(TAtomic::Object(TObject::Named(TNamedObject::new_with_type_parameters(word(class), Some(parameters)))))
 }
 
+/// Whether plain PHP gets a value of `r#type` with each `Map` and `Set` in it as its PHP array, spec section 12.
+///
+/// It does for a value that holds one at any depth, or can when it runs, as `Any`, an unbounded type parameter and an
+/// `Iterable` of them can, where a PHP array holds each key of every `Map` the type names. Any other `Map` reaches
+/// plain PHP as the object, and so does whatever holds it. The bridge lowers each crossing by it, and the analyzer
+/// types it by it.
+#[must_use]
+pub fn crosses_outward(r#type: &TUnion, codebase: &CodebaseMetadata) -> bool {
+    keys_hold_in_array(r#type, codebase) && may_hold_collection(r#type, codebase)
+}
+
+/// Whether a value of `r#type` can hold a `Map` or a `Set` at any depth.
+#[must_use]
+pub fn may_hold_collection(r#type: &TUnion, codebase: &CodebaseMetadata) -> bool {
+    r#type.types.iter().any(|atomic| match atomic {
+        TAtomic::Array(list @ TArray::List(_)) => {
+            may_hold_collection(&get_array_parameters(list, codebase).1, codebase)
+        }
+        TAtomic::Array(_) | TAtomic::Mixed(_) => true,
+        TAtomic::GenericParameter(parameter) => may_hold_collection(&parameter.constraint, codebase),
+        TAtomic::Iterable(iterable) => may_hold_collection(iterable.get_value_type(), codebase),
+        _ => false,
+    })
+}
+
+/// Whether a PHP array holds each key of every `Map` in `r#type`, at any depth, as a type without a `Map` does.
+#[must_use]
+pub fn keys_hold_in_array(r#type: &TUnion, codebase: &CodebaseMetadata) -> bool {
+    r#type.types.iter().all(|atomic| match atomic {
+        TAtomic::Array(array) => {
+            let (key_type, element_type) = get_array_parameters(array, codebase);
+
+            (!matches!(array, TArray::Keyed(_)) || get_php_array_key_type(&key_type, codebase).is_some())
+                && keys_hold_in_array(&element_type, codebase)
+        }
+        TAtomic::Iterable(iterable) => keys_hold_in_array(iterable.get_value_type(), codebase),
+        _ => true,
+    })
+}
+
+/// The one collection `r#type` holds where a value of it holds a `Map` or a `Set`, at any depth.
+///
+/// It is the PHP array plain PHP passes for the value, which the bridge turns back into the collection. Where the value
+/// may be one of several collections, the array alone doesn't say which, and none is.
+#[must_use]
+pub fn get_crossing_array<'r#type>(r#type: &'r#type TUnion, codebase: &CodebaseMetadata) -> Option<&'r#type TArray> {
+    let mut arrays = r#type.types.iter().filter_map(|atomic| match atomic {
+        TAtomic::Array(array) => Some(array),
+        _ => None,
+    });
+    let (Some(array), None) = (arrays.next(), arrays.next()) else {
+        return None;
+    };
+    let holds_collection = !matches!(array, TArray::List(_))
+        || get_crossing_array(&get_array_parameters(array, codebase).1, codebase).is_some();
+
+    holds_collection.then_some(array)
+}
+
 /// The type plain PHP code receives where a PHP# declaration gives `r#type`.
 ///
-/// It is a return, a property or a callback's argument. Each `Map` and `Set` in it, also inside a collection and in a
-/// function's parameters and return, is the PHP array the engine gives plain PHP, spec section 12: a `Map` is the array
-/// of its entries, each backed enum key its backing value, and a `Set` the list of its elements. A `Map` whose keys
-/// have no PHP array form, as an enum without backing values, is the `Sharp\Map` object it runs as. A `List` stays a
-/// PHP array. A readonly value is the value it runs as, spec section 13: PHP# checks `readonly` in PHP# code only.
+/// It is a return, a property or a callback's argument. Where [`crosses_outward`] holds, each `Map` and `Set` in it,
+/// at any depth, is the PHP array the engine gives plain PHP, spec section 12: a `Map` is the array of its entries,
+/// keyed as [`get_php_array_key`] says, and a `Set` the list of its elements. Otherwise each is the `Sharp\Map` or
+/// `Sharp\Set` object it runs as. A `List` stays a PHP array. A function plain PHP receives takes what plain PHP may
+/// pass, and gives what plain PHP receives. A readonly value is the value it runs as, spec section 13: PHP# checks
+/// `readonly` in PHP# code only.
 #[must_use]
 pub fn get_php_received_type(r#type: &TUnion, codebase: &CodebaseMetadata) -> TUnion {
     let r#type = r#type.clone().without_readonly();
-    let convert = |inner: &TUnion| get_php_received_type(inner, codebase);
-    let mut types = Vec::with_capacity(r#type.types.len());
-    for atomic in r#type.types.iter() {
-        match atomic {
-            TAtomic::Array(TArray::List(list)) => {
-                let mut list = list.clone();
-                list.element_type = Arc::new(convert(&list.element_type));
 
-                types.push(TAtomic::Array(TArray::List(list)));
-            }
-            TAtomic::Array(TArray::Set(element_type)) => {
-                types.push(TAtomic::Array(TArray::List(TList::new(Arc::new(convert(element_type))))));
-            }
-            TAtomic::Array(map @ TArray::Keyed(_)) => {
-                let (key_type, value_type) = get_array_parameters(map, codebase);
-                let value_type = convert(&value_type);
-                let array_key_type = get_php_array_key_type(&key_type, codebase)
-                    .filter(|array_key_type| array_key_type.is_always_array_key(true));
-
-                types.push(match array_key_type {
-                    Some(array_key_type) => TAtomic::Array(TArray::Keyed(TKeyedArray::new_with_parameters(
-                        Arc::new(array_key_type.into_owned()),
-                        Arc::new(value_type),
-                    ))),
-                    None => TAtomic::Object(TObject::Named(TNamedObject::new_with_type_parameters(
-                        word("Sharp\\Map"),
-                        Some(vec![key_type, value_type]),
-                    ))),
-                });
-            }
-            TAtomic::Callable(TCallable::Signature(signature)) => {
-                let mut signature = signature.clone();
-                for parameter in signature.get_parameters_mut() {
-                    if let Some(parameter_type) = parameter.get_type_signature_mut() {
-                        *parameter_type = convert(parameter_type);
-                    }
-                }
-                if let Some(return_type) = signature.get_return_type_mut() {
-                    *return_type = convert(return_type);
-                }
-
-                types.push(TAtomic::Callable(TCallable::Signature(signature)));
-            }
-            atomic => types.push(atomic.clone()),
-        }
+    if crosses_outward(&r#type, codebase) {
+        get_php_array_form(&r#type, codebase)
+    } else {
+        get_php_object_form(&r#type, codebase, Crossing::Received)
     }
-
-    r#type.clone_with_types(types)
 }
 
 /// The type plain PHP code may pass where a PHP# declaration takes `r#type`.
 ///
-/// It is an argument or a property write. It takes what plain PHP receives, and where `r#type` itself is a `Map` or a
-/// `Set`, the PHP array PHP# turns into one there, a `List` for a `Set`, which holds the array plain PHP receives for
-/// one. That array's keys are the ones PHP holds: a backed enum's backing values, and an `int` beside a `string`, as
-/// PHP holds an all-digit `string` key as an `int`, which PHP# turns back into the `string`. A `Map` whose keys have
-/// no PHP array form also takes the `Sharp\Map` object plain PHP receives for it.
+/// It is an argument or a property write. It takes each `Map` and `Set` as the object it runs as, and where `r#type`
+/// holds one collection that holds a `Map` or a `Set`, as [`get_crossing_array`] finds it, the PHP array the bridge
+/// turns into that collection there, whose elements take what plain PHP may pass for them. A function plain PHP passes
+/// takes what plain PHP receives, and gives what plain PHP may pass. A readonly value is the value it runs as.
 #[must_use]
 pub fn get_php_passed_type(r#type: &TUnion, codebase: &CodebaseMetadata) -> TUnion {
-    let convert = |inner: &TUnion| Arc::new(get_php_received_type(inner, codebase));
-    let received = get_php_received_type(r#type, codebase);
-    let types = r#type.types.iter().flat_map(|atomic| {
-        let received = get_php_received_type(&TUnion::from_atomic(atomic.clone()), codebase).types.into_owned();
-        let array = match atomic {
-            TAtomic::Array(map @ TArray::Keyed(_)) => {
-                let (key_type, value_type) = get_array_parameters(map, codebase);
-                let mut held_key_type = get_backing_key_type(&key_type, codebase, Dialect::Sharp).into_owned();
-                if held_key_type.has_string() && !held_key_type.has_int() {
-                    held_key_type = TUnion::from_vec(held_key_type.types.iter().chain([INT_ATOMIC]).cloned().collect());
-                }
+    let r#type = &r#type.clone().without_readonly();
+    let objects = get_php_object_form(r#type, codebase, Crossing::Passed);
+    let array = get_crossing_array(r#type, codebase).and_then(|array| {
+        let (key_type, element_type) = get_array_parameters(array, codebase);
+        let element_type = Arc::new(get_php_passed_type(&element_type, codebase));
 
-                TAtomic::Array(TArray::Keyed(TKeyedArray::new_with_parameters(
-                    Arc::new(held_key_type),
-                    convert(&value_type),
-                )))
-            }
-            TAtomic::Array(TArray::Set(element_type)) => {
-                TAtomic::Array(TArray::List(TList::new(convert(element_type))))
-            }
-            _ => return received,
-        };
-
-        received.into_iter().filter(|atomic| !matches!(atomic, TAtomic::Array(_))).chain([array]).collect()
+        Some(match array {
+            TArray::Keyed(_) => TAtomic::Array(TArray::Keyed(TKeyedArray::new_with_parameters(
+                Arc::new(get_php_array_key(&key_type, codebase)?),
+                element_type,
+            ))),
+            TArray::List(_) | TArray::Set(_) => TAtomic::Array(TArray::List(TList::new(element_type))),
+        })
     });
 
-    received.clone_with_types(types.collect())
+    objects.clone_with_types(objects.types.iter().cloned().chain(array).collect())
+}
+
+/// The key type of the PHP array plain PHP holds for a `Map` keyed by `key_type`, as PHP holds each key: a backed
+/// case as its value, and a `string` that writes an integer, as `"5"`, as that `int`. So a `string` key PHP# does not
+/// know is `int|string`, and a case whose value writes no integer stays a `string`. A key decided when the code runs
+/// is any array key. None when a key has no PHP array form, as [`get_php_array_key_type`] says.
+fn get_php_array_key(key_type: &TUnion, codebase: &CodebaseMetadata) -> Option<TUnion> {
+    get_php_array_key_type(key_type, codebase)?;
+    let mut values = Vec::new();
+    for atomic in key_type.types.iter() {
+        let backed_enum = match atomic {
+            TAtomic::Reference(TReference::Symbol { name, .. }) => {
+                codebase.get_class_like(name.as_bytes()).filter(|class_like| class_like.enum_type.is_some())
+            }
+            atomic => get_backed_enum(atomic, codebase, Dialect::Sharp),
+        };
+        match (backed_enum, atomic) {
+            (Some(backed_enum), _) => {
+                values.extend(backed_enum.enum_cases.values().map(|case| case.value_type.as_ref()))
+            }
+            (None, TAtomic::Scalar(TScalar::Integer(_) | TScalar::String(_) | TScalar::ClassLikeString(_))) => {
+                values.push(Some(atomic));
+            }
+            (None, _) => return Some(get_arraykey()),
+        }
+    }
+    let (int, string) = values
+        .into_iter()
+        .map(|value| match value {
+            Some(TAtomic::Scalar(TScalar::String(text))) => match text.get_known_literal_value() {
+                Some(text) => (is_integer_key(text), !is_integer_key(text)),
+                None => (true, true),
+            },
+            Some(TAtomic::Scalar(TScalar::ClassLikeString(_))) => (false, true),
+            Some(_) => (true, false),
+            None => (true, true),
+        })
+        .fold((false, false), |(int, string), (value_int, value_string)| (int || value_int, string || value_string));
+
+    Some(TUnion::from_vec(
+        [(int, INT_ATOMIC), (string, STRING_ATOMIC)]
+            .into_iter()
+            .filter(|(held, _)| *held)
+            .map(|(_, atomic)| atomic.clone())
+            .collect(),
+    ))
+}
+
+/// Whether PHP holds an array key written `text` as an `int`: a decimal integer without a sign, leading zeros or
+/// spaces, as `"5"` or `"-5"`, which fits an `int`.
+fn is_integer_key(text: &[u8]) -> bool {
+    std::str::from_utf8(text).is_ok_and(|text| text.parse::<i64>().is_ok_and(|value| value.to_string() == text))
+}
+
+/// `r#type` with each `Map` and `Set` in it, at any depth, as its PHP array, keyed as [`get_php_array_key`] says.
+fn get_php_array_form(r#type: &TUnion, codebase: &CodebaseMetadata) -> TUnion {
+    let form = |inner: &TUnion| Arc::new(get_php_array_form(inner, codebase));
+    let types = r#type.types.iter().map(|atomic| match atomic {
+        TAtomic::Array(array) => {
+            let (key_type, element_type) = get_array_parameters(array, codebase);
+            match array {
+                TArray::Keyed(_) => TAtomic::Array(TArray::Keyed(TKeyedArray::new_with_parameters(
+                    Arc::new(get_php_array_key(&key_type, codebase).unwrap_or_else(get_arraykey)),
+                    form(&element_type),
+                ))),
+                TArray::List(list) => {
+                    let mut list = list.clone();
+                    list.element_type = form(&list.element_type);
+
+                    TAtomic::Array(TArray::List(list))
+                }
+                TArray::Set(_) => TAtomic::Array(TArray::List(TList::new(form(&element_type)))),
+            }
+        }
+        atomic => get_php_signature_form(atomic, codebase, Crossing::Received),
+    });
+
+    r#type.clone_with_types(types.collect())
+}
+
+/// Which way a value crosses between PHP# and plain PHP code.
+#[derive(Clone, Copy)]
+enum Crossing {
+    /// From PHP# to plain PHP, as [`get_php_received_type`] types it.
+    Received,
+    /// From plain PHP to PHP#, as [`get_php_passed_type`] types it.
+    Passed,
+}
+
+/// `r#type` with each `Map` and `Set` in it, at any depth, as the `Sharp\Map` or `Sharp\Set` object it runs as, and
+/// each function type as [`get_php_signature_form`] says of it, crossing as `crossing`.
+fn get_php_object_form(r#type: &TUnion, codebase: &CodebaseMetadata, crossing: Crossing) -> TUnion {
+    let form = |inner: &TUnion| get_php_object_form(inner, codebase, crossing);
+    let types = r#type.types.iter().map(|atomic| match atomic {
+        TAtomic::Array(array) => {
+            let array = match array {
+                TArray::List(list) => {
+                    let mut list = list.clone();
+                    list.element_type = Arc::new(form(&list.element_type));
+
+                    TArray::List(list)
+                }
+                TArray::Keyed(keyed) => {
+                    let mut keyed = keyed.clone();
+                    if let Some((key_type, value_type)) = &mut keyed.parameters {
+                        *key_type = Arc::new(form(key_type));
+                        *value_type = Arc::new(form(value_type));
+                    }
+
+                    TArray::Keyed(keyed)
+                }
+                TArray::Set(element_type) => TArray::Set(Arc::new(form(element_type))),
+            };
+
+            get_collection_object(&array, codebase).unwrap_or(TAtomic::Array(array))
+        }
+        atomic => get_php_signature_form(atomic, codebase, crossing),
+    });
+
+    r#type.clone_with_types(types.collect())
+}
+
+/// `atomic`, a function type that crosses as `crossing`, with each of its parameters and its return crossing on its
+/// own: the code that gets the function calls it, so a function plain PHP receives takes what plain PHP may pass and
+/// gives what plain PHP receives, and one plain PHP passes takes what plain PHP receives and gives what it may pass.
+fn get_php_signature_form(atomic: &TAtomic, codebase: &CodebaseMetadata, crossing: Crossing) -> TAtomic {
+    let TAtomic::Callable(TCallable::Signature(signature)) = atomic else {
+        return atomic.clone();
+    };
+    type Cross = fn(&TUnion, &CodebaseMetadata) -> TUnion;
+    let (takes, gives): (Cross, Cross) = match crossing {
+        Crossing::Received => (get_php_passed_type, get_php_received_type),
+        Crossing::Passed => (get_php_received_type, get_php_passed_type),
+    };
+    let mut signature = signature.clone();
+    for parameter in signature.get_parameters_mut() {
+        if let Some(parameter_type) = parameter.get_type_signature_mut() {
+            *parameter_type = takes(parameter_type, codebase);
+        }
+    }
+    if let Some(return_type) = signature.get_return_type_mut() {
+        *return_type = gives(return_type, codebase);
+    }
+
+    TAtomic::Callable(TCallable::Signature(signature))
 }
 
 /// The type PHP# code receives where a plain PHP declaration gives `r#type`, the mirror of [`get_php_received_type`].

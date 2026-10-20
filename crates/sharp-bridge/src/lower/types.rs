@@ -31,7 +31,6 @@ use mago_codex::ttype::comparator::union_comparator;
 use mago_codex::ttype::comparator::union_comparator::can_expression_types_be_identical;
 use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::get_mixed;
-use mago_codex::ttype::get_php_array_key_type;
 use mago_codex::ttype::get_sharp_type;
 use mago_codex::ttype::is_written_in_sharp;
 use mago_codex::ttype::template::variance::Variance;
@@ -128,6 +127,10 @@ impl<'analysis> Types<'analysis> {
 
     pub(crate) fn names(&self) -> &ResolvedNames<'analysis> {
         &self.names
+    }
+
+    pub(crate) fn codebase(&self) -> &'analysis CodebaseMetadata {
+        self.codebase
     }
 
     /// What the PHP of a pattern depends on, as the analysis answered it.
@@ -1396,11 +1399,6 @@ impl<'analysis> Types<'analysis> {
     /// The key type and the element type of a collection.
     pub(crate) fn array_parameters(&self, array: &TArray) -> (TUnion, TUnion) {
         get_array_parameters(array, self.codebase)
-    }
-
-    /// Whether a PHP array holds each key of a `Map` keyed by `key_type`, as the codex's `get_php_array_key_type` says.
-    pub(crate) fn keys_hold_in_array(&self, key_type: &TUnion) -> bool {
-        get_php_array_key_type(key_type, self.codebase).is_some()
     }
 
     /// The type of the elements a value of `r#type` holds, the `T` of a `List<T>`, leaving out `null`. The caller asks
