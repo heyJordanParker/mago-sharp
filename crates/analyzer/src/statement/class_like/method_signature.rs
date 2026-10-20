@@ -577,13 +577,7 @@ fn php_return_type(codebase: &CodebaseMetadata, class: Word, method: &FunctionLi
     let overrides_typed_result = || {
         codebase
             .get_class_like(class.as_bytes())
-            .and_then(|class| class.overridden_method_ids.get(&method.name))
-            .is_some_and(|overridden| {
-                overridden
-                    .values()
-                    .filter_map(|parent| codebase.get_method_by_id(parent))
-                    .any(|parent| !parent.flags.is_sharp() && parent.return_type_declaration_metadata.is_some())
-            })
+            .is_some_and(|class| codebase.overrides_typed_php_method(class, method.name.as_bytes()))
     };
     if erased.types.iter().any(TAtomic::is_mixed) && !overrides_typed_result() {
         return None;

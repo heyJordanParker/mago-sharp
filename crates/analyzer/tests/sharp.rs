@@ -41,6 +41,7 @@ use mago_codex::ttype::union::TUnion;
 use mago_database::DatabaseReader;
 use mago_database::file::File;
 use mago_database::file::FileId;
+use mago_database::file::FileType;
 use mago_names::CHANGING_COLLECTION_METHODS;
 use mago_names::INLINED_COLLECTION_METHODS;
 use mago_names::STANDARD_EXCEPTIONS;
@@ -145,6 +146,9 @@ fn analyze_with_artifacts(
         .map(|(name, code)| {
             let mut file = File::ephemeral(Cow::Borrowed(name.as_bytes()), Cow::Borrowed(code.as_bytes()));
             file.is_standard_library = name.starts_with(STANDARD_LIBRARY);
+            if name.starts_with("vendor/") {
+                file.file_type = FileType::Vendored;
+            }
 
             (*name, database.add(file))
         })
@@ -13626,6 +13630,54 @@ fn a_plain_php_subclass_is_refused_replacing_a_closed_method_and_overrides_a_clo
     assert_eq!(
         codes(&issues(("src/App/Square.sharp", sharp), &[("src/App/Shape.sharp", shape)])),
         ["override-final-method", "override-final-property"]
+    );
+}
+
+/// The engine links a plain PHP class against the PHP# methods it implements or overrides whatever declares the method
+/// it takes, the class or a package in `vendor/`, so an untyped method under a typed one is refused from each, named as
+/// PHP declares the type: `Self` as `static`, and an `Any?` override of a typed plain PHP method as the `mixed` PHP
+/// requires of it. A package's docblock is not PHP's declaration, and an `Any?` result that overrides nothing declares
+/// no PHP type, so an untyped method fits it.
+#[test]
+fn a_plain_php_class_is_refused_an_untyped_method_under_a_typed_php_sharp_one_wherever_it_is_declared() {
+    let relates = "namespace App;\n\npublic interface Relates\n{\n    Self forget(string relation);\n\n    Any? getMorphClass();\n}\n";
+    let app_row = "<?php\n\nnamespace App;\n\nclass AppRow implements Relates\n{\n    public function forget($relation)\n    {\n        return $this;\n    }\n\n    public function getMorphClass()\n    {\n        return 'row';\n    }\n}\n";
+    let model = "<?php\n\nnamespace Acme;\n\nabstract class Model\n{\n    /** @return $this */\n    public function forget($relation)\n    {\n        return $this;\n    }\n\n    public function getMorphClass()\n    {\n        return 'row';\n    }\n}\n";
+    let vendor_row = "<?php\n\nnamespace App;\n\nclass VendorRow extends \\Acme\\Model implements Relates\n{\n}\n";
+    let shaped =
+        "<?php\n\nnamespace Lib;\n\nabstract class Shaped\n{\n    abstract public function shape(): mixed;\n}\n";
+    let report = "namespace App;\n\nimport Lib.Shaped;\n\npublic class Report : Shaped\n{\n    public Report() { }\n\n    public override Any? shape() => null;\n}\n";
+    let legacy_report = "<?php\n\nnamespace App;\n\nclass LegacyReport extends Report\n{\n    public function shape()\n    {\n        return 1;\n    }\n}\n";
+    let refused = |analyzed: (&'static str, &'static str), others: &[(&'static str, &'static str)]| -> Vec<String> {
+        analyze(&PLUGIN_REGISTRY, settings(), analyzed, others)
+            .iter()
+            .map(|issue| format!("{} | {}", issue.message, issue.help.as_deref().unwrap_or_default()))
+            .collect()
+    };
+
+    assert_eq!(
+        refused(("src/App/AppRow.php", app_row), &[("src/App/Relates.sharp", relates)]),
+        [
+            "`App\\AppRow::forget()` must declare a return type compatible with `static` declared by `App\\Relates::forget()` | Add a return type declaration compatible with `static`."
+        ]
+    );
+    assert_eq!(
+        refused(
+            ("src/App/VendorRow.php", vendor_row),
+            &[("src/App/Relates.sharp", relates), ("vendor/acme/model/src/Model.php", model)]
+        ),
+        [
+            "`App\\VendorRow::forget()` must declare a return type compatible with `static` declared by `App\\Relates::forget()` | `App\\VendorRow` takes `forget()` from a package, so declare it in `App\\VendorRow` with a return type compatible with `static`."
+        ]
+    );
+    assert_eq!(
+        refused(
+            ("src/App/LegacyReport.php", legacy_report),
+            &[("src/App/Report.sharp", report), ("src/Lib/Shaped.php", shaped)]
+        ),
+        [
+            "`App\\LegacyReport::shape()` must declare a return type compatible with `mixed` declared by `App\\Report::shape()` | Add a return type declaration compatible with `mixed`."
+        ]
     );
 }
 

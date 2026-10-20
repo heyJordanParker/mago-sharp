@@ -54,7 +54,6 @@ use mago_syntax::cst::NullSafeFunctionCall;
 use mago_syntax::cst::NullSafePropertyAccess;
 use mago_syntax::cst::PropertyAccess;
 use mago_word::Word;
-use mago_word::ascii_lowercase_word;
 use mago_word::word;
 
 use super::inline::InlineForm;
@@ -561,17 +560,10 @@ impl<'analysis> Types<'analysis> {
         self.function_type(&function, &parameters, result)
     }
 
-    /// Whether the method `method` of `class` overrides or implements a plain PHP method that declares a PHP return type,
-    /// such as `JsonSerializable::jsonSerialize(): mixed`, which PHP requires its override to declare too.
+    /// Whether the method `method` of `class` overrides a plain PHP method that declares a return type, as
+    /// [`CodebaseMetadata::overrides_typed_php_method`] tells.
     pub(crate) fn overrides_typed_result(&self, class: &[u8], method: &[u8]) -> bool {
-        let Some(overridden) = self.scanned(class).overridden_method_ids.get(&ascii_lowercase_word(method)) else {
-            return false;
-        };
-
-        overridden
-            .values()
-            .filter_map(|parent| self.codebase.get_method_by_id(parent))
-            .any(|parent| !parent.flags.is_sharp() && parent.return_type_declaration_metadata.is_some())
+        self.codebase.overrides_typed_php_method(self.scanned(class), method)
     }
 
     /// Each method of a PHP# interface `class` implements that `class` takes from a plain PHP parent declaring no return

@@ -533,6 +533,18 @@ impl CodebaseMetadata {
         self.get_method_by_id(constructor)
     }
 
+    /// Whether the method `method` of `class_like` overrides or implements a plain PHP method that declares a return
+    /// type, such as `JsonSerializable::jsonSerialize(): mixed`, which PHP requires its override to declare too.
+    #[must_use]
+    pub fn overrides_typed_php_method(&self, class_like: &ClassLikeMetadata, method: &[u8]) -> bool {
+        class_like.overridden_method_ids.get(&ascii_lowercase_word(method)).is_some_and(|overridden| {
+            overridden
+                .values()
+                .filter_map(|parent| self.get_method_by_id(parent))
+                .any(|parent| !parent.flags.is_sharp() && parent.return_type_declaration_metadata.is_some())
+        })
+    }
+
     /// Retrieves the traits of default bodies a PHP# class-like uses itself, spec section 22: the trait of each
     /// interface its header names, or one of those extends, that has default bodies and that its parent class does not
     /// already implement, in name order. The populator merges them, and the bridge writes them in the class's `use`.
