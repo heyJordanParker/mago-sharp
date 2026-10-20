@@ -1344,8 +1344,8 @@ where
     let mut read_type = (for_assignment && (resolution.is_magic() || used_set_hook_param))
         .then(|| resolution.declared_type(context.codebase));
 
-    // Plain PHP reads a PHP# property's `Map` or `Set` as the object it runs as, and writes either the object or the
-    // PHP array PHP# turns into one.
+    // Plain PHP reads a PHP# property's `Map` or `Set` as the PHP array the engine gives it, and writes the PHP array
+    // PHP# turns into one.
     if !context.dialect.is_sharp() && resolution.declaring_class.flags.is_sharp() {
         property_type = if for_assignment {
             get_php_passed_type(&property_type, context.codebase)

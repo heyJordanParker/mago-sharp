@@ -3675,7 +3675,8 @@ pub(super) mod testing {
     /// A `Set` and a `Map` run as the objects `Sharp\Set` and `Sharp\Map`, so an external analyzer receives them as
     /// those objects, each key as itself. A keyed array is a `Map` in PHP# code, and in plain PHP code where its keys
     /// are objects, which no PHP array holds. A `List` and a plain PHP array stay arrays. Plain PHP code types a `Map`
-    /// a PHP# declaration gives it as `Sharp\Map<K, V>` already, which goes as that object too.
+    /// a PHP# declaration gives it as the PHP array the engine gives it, each backed enum key its backing value, which
+    /// goes as that array.
     #[test]
     fn a_map_and_a_set_are_sent_as_the_objects_they_run_as() {
         let codebase = string_backed_status();
@@ -3684,7 +3685,7 @@ pub(super) mod testing {
         let list = TArray::List(TList::new(Arc::new(get_int())));
         let received = get_php_received_type(&TUnion::from_atomic(TAtomic::Array(keyed(status()))), &codebase);
 
-        assert_eq!(sent_as_type(&received, &codebase, Dialect::Php), "Sharp\\Map<enum(Status), int>");
+        assert_eq!(sent_as_type(&received, &codebase, Dialect::Php), "array<string, int>");
 
         assert_eq!(sent_as(TArray::Set(status()), &codebase, Dialect::Php), "Sharp\\Set<enum(Status)>");
         assert_eq!(sent_as(keyed(status()), &codebase, Dialect::Php), "Sharp\\Map<enum(Status), int>");

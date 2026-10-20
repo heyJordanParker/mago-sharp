@@ -1526,8 +1526,10 @@ pub fn get_collection_object(array: &TArray, codebase: &CodebaseMetadata) -> Opt
 /// The type plain PHP code receives where a PHP# declaration gives `r#type`.
 ///
 /// It is a return, a property or a callback's argument. Each `Map` and `Set` in it, also inside a collection and in a
-/// function's parameters and return, is the object it runs as. A `List` stays a PHP array. A readonly value is the
-/// value it runs as, spec section 13: PHP# checks `readonly` in PHP# code only.
+/// function's parameters and return, is the PHP array the engine gives plain PHP, spec section 12: a `Map` is the array
+/// of its entries, each backed enum key its backing value, and a `Set` the list of its elements. A `Map` whose keys
+/// have no PHP array form, as an enum without backing values, is the `Sharp\Map` object it runs as. A `List` stays a
+/// PHP array. A readonly value is the value it runs as, spec section 13: PHP# checks `readonly` in PHP# code only.
 #[must_use]
 pub fn get_php_received_type(r#type: &TUnion, codebase: &CodebaseMetadata) -> TUnion {
     let r#type = r#type.clone().without_readonly();
@@ -1535,26 +1537,31 @@ pub fn get_php_received_type(r#type: &TUnion, codebase: &CodebaseMetadata) -> TU
     let mut types = Vec::with_capacity(r#type.types.len());
     for atomic in r#type.types.iter() {
         match atomic {
-            TAtomic::Array(array) => {
-                let array = match array {
-                    TArray::List(list) => {
-                        let mut list = list.clone();
-                        list.element_type = Arc::new(convert(&list.element_type));
+            TAtomic::Array(TArray::List(list)) => {
+                let mut list = list.clone();
+                list.element_type = Arc::new(convert(&list.element_type));
 
-                        TArray::List(list)
-                    }
-                    TArray::Keyed(keyed) => {
-                        let mut keyed = keyed.clone();
-                        if let Some((key_type, value_type)) = &mut keyed.parameters {
-                            *key_type = Arc::new(convert(key_type));
-                            *value_type = Arc::new(convert(value_type));
-                        }
+                types.push(TAtomic::Array(TArray::List(list)));
+            }
+            TAtomic::Array(TArray::Set(element_type)) => {
+                types.push(TAtomic::Array(TArray::List(TList::new(Arc::new(convert(element_type))))));
+            }
+            TAtomic::Array(map @ TArray::Keyed(_)) => {
+                let (key_type, value_type) = get_array_parameters(map, codebase);
+                let value_type = convert(&value_type);
+                let array_key_type = get_php_array_key_type(&key_type, codebase)
+                    .filter(|array_key_type| array_key_type.is_always_array_key(true));
 
-                        TArray::Keyed(keyed)
-                    }
-                    TArray::Set(element_type) => TArray::Set(Arc::new(convert(element_type))),
-                };
-                types.push(get_collection_object(&array, codebase).unwrap_or(TAtomic::Array(array)));
+                types.push(match array_key_type {
+                    Some(array_key_type) => TAtomic::Array(TArray::Keyed(TKeyedArray::new_with_parameters(
+                        Arc::new(array_key_type.into_owned()),
+                        Arc::new(value_type),
+                    ))),
+                    None => TAtomic::Object(TObject::Named(TNamedObject::new_with_type_parameters(
+                        word("Sharp\\Map"),
+                        Some(vec![key_type, value_type]),
+                    ))),
+                });
             }
             TAtomic::Callable(TCallable::Signature(signature)) => {
                 let mut signature = signature.clone();
@@ -1579,34 +1586,39 @@ pub fn get_php_received_type(r#type: &TUnion, codebase: &CodebaseMetadata) -> TU
 /// The type plain PHP code may pass where a PHP# declaration takes `r#type`.
 ///
 /// It is an argument or a property write. It takes what plain PHP receives, and where `r#type` itself is a `Map` or a
-/// `Set`, the PHP array PHP# turns into one there, a `List` for a `Set`. That array's keys are the ones PHP holds: a
-/// backed enum's backing values, and an `int` beside a `string`, as PHP holds an all-digit `string` key as an `int`,
-/// which PHP# turns back into the `string`.
+/// `Set`, the PHP array PHP# turns into one there, a `List` for a `Set`, which holds the array plain PHP receives for
+/// one. That array's keys are the ones PHP holds: a backed enum's backing values, and an `int` beside a `string`, as
+/// PHP holds an all-digit `string` key as an `int`, which PHP# turns back into the `string`. A `Map` whose keys have
+/// no PHP array form also takes the `Sharp\Map` object plain PHP receives for it.
 #[must_use]
 pub fn get_php_passed_type(r#type: &TUnion, codebase: &CodebaseMetadata) -> TUnion {
     let convert = |inner: &TUnion| Arc::new(get_php_received_type(inner, codebase));
-    let arrays = r#type.types.iter().filter_map(|atomic| match atomic {
-        TAtomic::Array(map @ TArray::Keyed(_)) => {
-            let (key_type, value_type) = get_array_parameters(map, codebase);
-            let mut held_key_type = get_backing_key_type(&key_type, codebase, Dialect::Sharp).into_owned();
-            if held_key_type.has_string() && !held_key_type.has_int() {
-                held_key_type = TUnion::from_vec(held_key_type.types.iter().chain([INT_ATOMIC]).cloned().collect());
-            }
-
-            Some(TAtomic::Array(TArray::Keyed(TKeyedArray::new_with_parameters(
-                Arc::new(held_key_type),
-                convert(&value_type),
-            ))))
-        }
-        TAtomic::Array(TArray::Set(element_type)) => {
-            Some(TAtomic::Array(TArray::List(TList::new(convert(element_type)))))
-        }
-        _ => None,
-    });
-    let arrays: Vec<TAtomic> = arrays.collect();
     let received = get_php_received_type(r#type, codebase);
+    let types = r#type.types.iter().flat_map(|atomic| {
+        let received = get_php_received_type(&TUnion::from_atomic(atomic.clone()), codebase).types.into_owned();
+        let array = match atomic {
+            TAtomic::Array(map @ TArray::Keyed(_)) => {
+                let (key_type, value_type) = get_array_parameters(map, codebase);
+                let mut held_key_type = get_backing_key_type(&key_type, codebase, Dialect::Sharp).into_owned();
+                if held_key_type.has_string() && !held_key_type.has_int() {
+                    held_key_type = TUnion::from_vec(held_key_type.types.iter().chain([INT_ATOMIC]).cloned().collect());
+                }
 
-    received.clone_with_types(received.types.iter().cloned().chain(arrays).collect())
+                TAtomic::Array(TArray::Keyed(TKeyedArray::new_with_parameters(
+                    Arc::new(held_key_type),
+                    convert(&value_type),
+                )))
+            }
+            TAtomic::Array(TArray::Set(element_type)) => {
+                TAtomic::Array(TArray::List(TList::new(convert(element_type))))
+            }
+            _ => return received,
+        };
+
+        received.into_iter().filter(|atomic| !matches!(atomic, TAtomic::Array(_))).chain([array]).collect()
+    });
+
+    received.clone_with_types(types.collect())
 }
 
 /// The type PHP# code receives where a plain PHP declaration gives `r#type`, the mirror of [`get_php_received_type`].
