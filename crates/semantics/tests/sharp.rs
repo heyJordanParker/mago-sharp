@@ -428,6 +428,18 @@ fn a_bare_member_in_a_law_is_written_through_the_class_name() {
     );
 }
 
+/// Spec section 28: a law's `when` condition, claim and body are checked as a static method's body, where a call of a
+/// law of its class is written bare.
+#[test]
+fn a_law_s_condition_claim_and_body_are_checked_as_a_static_method_s_body() {
+    let code = "namespace App.Shared;\n\npublic class Money\n{\n    private int cents = 0;\n\n    law positive(int a) when a > 0 => a >= 0;\n    law stays(int a) when a > 0 => a >= 0\n    {\n        if (a <= 1) {\n            return;\n        }\n        positive(a);\n    }\n    law reads(int a) when cents > a => true;\n}\n";
+
+    assert_eq!(
+        issues(code),
+        ["15:27 Write `Money.cents`: a static method reaches the members of its class through the class name."]
+    );
+}
+
 /// A law and a method share their class's member names, so a name is declared once.
 #[test]
 fn a_law_and_a_method_named_alike_are_a_duplicate_member() {

@@ -308,11 +308,11 @@ where
         }))
     }
 
-    /// Reads a `? :` written at the top of a `when` condition, as in `when strict ? forced : ready =>`. A `? :` needs
-    /// parentheses there, so this reports it and reads both branches as operands of `??`, so the arm's `=>` still ends
-    /// the condition and the rest of the file parses on, and returns the whole condition as an error expression. It
-    /// returns `condition` itself when no `?` follows it.
-    fn parse_conditional_in_guard(
+    /// Reads a `? :` written at the top of a `when` condition, of a `match` arm or of a law, as in
+    /// `when strict ? forced : ready =>`. A `? :` needs parentheses there, so this reports it and reads both branches as
+    /// operands of `??`, so the `=>` still ends the condition and the rest of the file parses on, and returns the whole
+    /// condition as an error expression. It returns `condition` itself when no `?` follows it.
+    pub(crate) fn parse_conditional_in_guard(
         &mut self,
         condition: &'arena Expression<'arena>,
     ) -> Result<&'arena Expression<'arena>, ParseError> {

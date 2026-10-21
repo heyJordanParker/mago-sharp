@@ -137,6 +137,7 @@ use crate::cst::cst::KeyValueArrayElement;
 use crate::cst::cst::Keyword;
 use crate::cst::cst::Label;
 use crate::cst::cst::Law;
+use crate::cst::cst::LawProof;
 use crate::cst::cst::Leave;
 use crate::cst::cst::LegacyArray;
 use crate::cst::cst::List;
@@ -1520,7 +1521,14 @@ generate_ast_walker! {
         walker.walk_keyword(&law.law, context);
         walker.walk_local_identifier(&law.name, context);
         walker.walk_function_like_parameter_list(&law.parameter_list, context);
-        walker.walk_method_expression_body(&law.body, context);
+        if let Some(condition) = &law.condition {
+            walker.walk_keyword(&condition.when, context);
+            walker.walk_expression(condition.expression, context);
+        }
+        walker.walk_expression(law.claim, context);
+        if let LawProof::Body(body) = &law.proof {
+            walker.walk_block(body, context);
+        }
     }
 
     'arena MethodAbstractBody as method_abstract_body => {

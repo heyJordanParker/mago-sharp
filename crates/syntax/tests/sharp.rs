@@ -4684,10 +4684,10 @@ fn extern_starting_a_php_statement_stays_a_call_or_a_constant() {
     assert_eq!(bare_name(expression(constant)), b"extern");
 }
 
-/// Spec section 28: a law states a fact about a class's values, written as its name, its typed parameters and an
-/// expression after `=>`.
+/// Spec section 28: a law states a fact about a class's values, written as its name, its typed parameters and its claim
+/// after `=>`. A `;` after the claim leaves its proof to the checker.
 #[test]
-fn a_law_in_a_class_is_its_name_its_parameters_and_an_expression_body() {
+fn a_law_in_a_class_is_its_name_its_parameters_and_a_claim_the_checker_proves() {
     const CODE: &str = "public class Money\n{\n    public Money(public int amount { get; }, public string currency { get; }) { }\n    public Money add(Money other) => new Money(this.amount + other.amount, this.currency);\n\n    law addKeepsCurrency(Money a, Money b) => a.add(b).currency == a.currency;\n}\n";
     let arena = LocalArena::new();
     let program = parse(&arena, "app/Shared/Money.sharp", CODE);
@@ -4702,8 +4702,109 @@ fn a_law_in_a_class_is_its_name_its_parameters_and_an_expression_body() {
     assert_eq!(law.law.value, b"law");
     assert_eq!(source(CODE, &law.name), "addKeepsCurrency");
     assert_eq!(parameters, ["Money a", "Money b"]);
-    assert_eq!(source(CODE, law.body.expression), "a.add(b).currency == a.currency");
+    assert!(law.condition.is_none());
+    assert_eq!(source(CODE, law.claim), "a.add(b).currency == a.currency");
+    assert!(matches!(law.proof, LawProof::Checker(_)), "{:#?}", law.proof);
     assert_eq!(source(CODE, law), "law addKeepsCurrency(Money a, Money b) => a.add(b).currency == a.currency;");
+}
+
+/// Spec section 28: a law's body after its claim is its proof, and `when` before the arrow states its condition, in a
+/// class, an enum and a module alike.
+#[test]
+fn a_law_holds_its_when_condition_its_claim_and_the_body_that_proves_it() {
+    const LAW: &str = "law timesKeepsCurrency(Money m, int n) when n >= 0 => m.times(n).currency == m.currency\n    {\n        if (n <= 0) {\n            return;\n        }\n        timesKeepsCurrency(m, n - 1);\n    }";
+    let class = format!("public class Money\n{{\n    {LAW}\n}}\n");
+    let r#enum = format!("public enum Status\n{{\n    case Open;\n\n    {LAW}\n}}\n");
+    let module = format!("namespace App.Shared;\n\nmodule\n{{\n    {LAW}\n}}\n");
+
+    for (name, code) in [("app/Money.sharp", class), ("app/Status.sharp", r#enum), ("app/Shared/Module.sharp", module)]
+    {
+        let code: &'static str = Box::leak(code.into_boxed_str());
+        let arena = LocalArena::new();
+        let program = parse(&arena, name, code);
+
+        assert!(program.errors.is_empty(), "{name}: {:#?}", program.errors);
+        let mut laws = Vec::new();
+        program.statements.iter().for_each(|statement| collect_laws(statement, &mut laws));
+        let [law] = laws.as_slice() else {
+            panic!("{name}: expected one law, got {laws:#?}");
+        };
+        let Some(condition) = &law.condition else {
+            panic!("{name}: expected a when condition, got {law:#?}");
+        };
+        let LawProof::Body(body) = &law.proof else {
+            panic!("{name}: expected a body, got {:#?}", law.proof);
+        };
+        assert_eq!(condition.when.value, b"when", "{name}");
+        assert_eq!(source(code, condition.expression), "n >= 0", "{name}");
+        assert_eq!(source(code, law.claim), "m.times(n).currency == m.currency", "{name}");
+        let statements: Vec<&str> = body.statements.iter().map(|statement| source(code, statement)).collect();
+        assert_eq!(
+            statements,
+            ["if (n <= 0) {\n            return;\n        }", "timesKeepsCurrency(m, n - 1);"],
+            "{name}"
+        );
+        assert_eq!(source(code, *law), LAW, "{name}");
+    }
+}
+
+/// A law's `when` condition reads as a `match` arm's: the law's `=>` ends it, after a name too, and a `? :` in it needs
+/// parentheses.
+#[test]
+fn a_law_s_when_condition_ends_at_the_law_s_arrow() {
+    const CODE: &str = "public class Money\n{\n    law below(int a, int b) when b > a => a < b;\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "app/Money.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let mut laws = Vec::new();
+    program.statements.iter().for_each(|statement| collect_laws(statement, &mut laws));
+    let [law] = laws.as_slice() else {
+        panic!("expected one law, got {laws:#?}");
+    };
+    assert_eq!(law.condition.as_ref().map(|condition| source(CODE, condition.expression)), Some("b > a"));
+    assert_eq!(source(CODE, law.claim), "a < b");
+
+    let conditional = "public class Money\n{\n    law below(int a, bool b) when b ? a > 0 : a < 0 => true;\n}\n";
+    let program = parse(&arena, "app/Money.sharp", conditional);
+    let messages: Vec<String> = program.errors.iter().map(|error| Issue::from(error).message).collect();
+    assert_eq!(
+        messages,
+        ["A `? :` in a `when` condition needs parentheses, as in `when (strict ? forced : ready) =>`."]
+    );
+}
+
+/// The laws `statement` holds: those of a class, an enum, or a module, under a namespace or not.
+fn collect_laws<'arena>(statement: &'arena Statement<'arena>, laws: &mut Vec<&'arena Law<'arena>>) {
+    match statement {
+        Statement::Namespace(namespace) => {
+            namespace.statements().iter().for_each(|statement| collect_laws(statement, laws));
+        }
+        Statement::Class(class) => laws.extend(class.members.iter().filter_map(|member| match member {
+            ClassLikeMember::Law(law) => Some(law),
+            _ => None,
+        })),
+        Statement::Enum(r#enum) => laws.extend(r#enum.members.iter().filter_map(|member| match member {
+            ClassLikeMember::Law(law) => Some(law),
+            _ => None,
+        })),
+        Statement::Module(module) => laws.extend(module.members.iter().filter_map(|member| match member {
+            ModuleMember::Law(law) => Some(law),
+            _ => None,
+        })),
+        _ => {}
+    }
+}
+
+/// A law with neither `;` nor a body after its claim is a parse error at the claim's end, as any member missing its
+/// end is.
+#[test]
+fn a_law_without_a_semicolon_or_a_body_after_its_claim_is_a_parse_error() {
+    const CODE: &str = "public class Money\n{\n    law reflexive(int a) => a == a\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "app/Money.sharp", CODE);
+
+    assert_eq!(program.errors.len(), 1, "{:#?}", program.errors);
 }
 
 /// Spec section 28 gives a state machine its laws on its status enum, beside the cases and the transition method.
@@ -4748,10 +4849,7 @@ fn a_module_is_its_keyword_and_its_laws_in_braces() {
     };
     assert_eq!(module.module.value, b"module");
     assert_eq!(source(CODE, &law.name), "receiptMatchesRefunds");
-    assert_eq!(
-        source(CODE, law.body.expression),
-        "Receipts.refundable(paid, refunded) == Refunds.remaining(paid, refunded)"
-    );
+    assert_eq!(source(CODE, law.claim), "Receipts.refundable(paid, refunded) == Refunds.remaining(paid, refunded)");
     assert_eq!(
         source(CODE, module),
         "module\n{\n    law receiptMatchesRefunds(int paid, int refunded) => Receipts.refundable(paid, refunded) == Refunds.remaining(paid, refunded);\n}"

@@ -37,12 +37,13 @@ pub(crate) const TOOLCHAIN: &str = include_str!("../lean/lean-toolchain");
 pub(crate) const NAMESPACE: &str = "Sharp";
 
 /// The library's Lake package, as `crates/sharp-lean/lean/` holds it.
-const PACKAGE: [(&str, &str); 8] = [
+const PACKAGE: [(&str, &str); 9] = [
     ("lakefile.toml", include_str!("../lean/lakefile.toml")),
     ("lean-toolchain", TOOLCHAIN),
     ("Sharp/Lean/Int.lean", include_str!("../lean/Sharp/Lean/Int.lean")),
     ("Sharp/Lean/Interface.lean", include_str!("../lean/Sharp/Lean/Interface.lean")),
     ("Sharp/Lean/Law.lean", include_str!("../lean/Sharp/Lean/Law.lean")),
+    ("Sharp/Lean/Proof.lean", include_str!("../lean/Sharp/Lean/Proof.lean")),
     ("Sharp/Lean/String.lean", include_str!("../lean/Sharp/Lean/String.lean")),
     ("Sharp/Lean/Facts.lean", include_str!("../lean/Sharp/Lean/Facts.lean")),
     ("Sharp/Lean/Runner.lean", include_str!("../lean/Sharp/Lean/Runner.lean")),

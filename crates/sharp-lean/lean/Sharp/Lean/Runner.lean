@@ -1,22 +1,22 @@
 /-
-`sharp-lean`: the program Mago runs to verify PHP# laws, propose the proofs Lean's own steps find, and check structure
-rules.
+`sharp-lean`: the program Mago runs to prove PHP# laws and check structure rules.
 
-Mago writes one request to standard input and reads the answer from standard output. A `Check` request names one law
-file's module: the proof module when Lake built it, or else the generated module of its code. The runner imports it, as
-`lake exe runLinter` imports a module, and answers for each law of the request: every theorem of the proof module whose
-type is exactly the law's statement, with the axioms its proof uses, and, when the request asks for one, the first
-automatic proof step that proves the law. A `Rules` request names every `Module.lean` that Lake built, with the facts of
-every `.sharp` file. The runner imports them all, runs each `@[rule]` over the facts under its namespace, and answers
-with every fact that breaks one. A rule that trusts more than Lean's kernel checks, or that builds a namespace from a
-string, does not run, and the answer says what it reached.
+Mago writes one request to standard input and reads the answer from standard output. A `Check` request names the
+generated modules of one `.sharp` file's code and the theorems of its laws, after the theorems of each law they call. The
+runner imports the modules, as `lake exe runLinter` imports a module, elaborates each theorem with the steps of
+`Sharp.Lean.Proof`, and answers for each law of the file: proven, each case and condition its proof left open with the
+goal, the law not proven it holds through, or Lean's error. A `Rules` request names every `Module.lean` that Lake built,
+with the facts of every `.sharp` file. The runner imports them all, runs each `@[rule]` over the facts under its
+namespace, and answers with every fact that breaks one. A rule that trusts more than Lean's kernel checks, or that builds
+a namespace from a string, does not run, and the answer says what it reached.
 
 One runner answers one request because Lean cannot free an imported environment while the tasks that elaborated a
-proposal may still hold parts of it. Lean's own server likewise restarts a file's worker to import anew.
+theorem may still hold parts of it. Lean's own server likewise restarts a file's worker to import anew.
 -/
 import Lean
 import Std.Async.Process
 import Sharp.Lean.Law
+import Sharp.Lean.Proof
 import Sharp.Lean.Facts
 
 open Lean Elab
@@ -94,114 +94,92 @@ def header (kind : UInt16) : ByteArray :=
 
 /-! The `Check` request and its answer. -/
 
-/-- One law of a request: its statement, whether to look for a proof, and the definitions a proof unfolds. -/
-structure Law where
+/-- One theorem of a request: the statement of the law it proves, its Lean text, and whether the answer judges it. -/
+structure Theorem where
   statement : Name
-  propose : Bool
-  unfold : Array Name
+  text : String
+  judged : Bool
 
-/-- A request: the module to import, the proof module whose theorems count, or `anonymous` for none, and the laws. -/
+/-- A request: the modules to import, and the theorems, each after every theorem it uses. -/
 structure Check where
-  module : Name
-  proofModule : Name
-  laws : Array Law
+  modules : Array Name
+  theorems : Array Theorem
 
-def law : Decode Law := do
-  return { statement := (← string).toName, propose := (← u8) != 0, unfold := (← many string).map String.toName }
+def theorem_ : Decode Theorem := do
+  return { statement := (← string).toName, text := ← string, judged := (← u8) != 0 }
 
 def check : Decode Check := do
-  return { module := (← string).toName, proofModule := (← string).toName, laws := ← many law }
-
-/-! Verifying a proof. -/
+  return { modules := (← many string).map String.toName, theorems := ← many theorem_ }
 
 /-- The axioms Lean's own `#print axioms` treats as standard. -/
 def standardAxioms : Array Name := #[``propext, ``Classical.choice, ``Quot.sound]
-
-/-- What a proof trusts beyond Lean's kernel. -/
-inductive Verdict where
-  | proved
-  | gap
-  | nativeDecide
-  | axiom_ (name : Name)
-
-def Verdict.code : Verdict → UInt8
-  | .proved => 0
-  | .gap => 1
-  | .nativeDecide => 2
-  | .axiom_ _ => 3
-
-def Verdict.axiomName : Verdict → String
-  | .axiom_ name => name.toString
-  | _ => ""
-
-/-- `native_decide` adds one axiom per call, named `<theorem>._native.native_decide.ax_1_1`. -/
-def verdict (axioms : Array Name) : Verdict :=
-  if axioms.contains ``sorryAx then .gap
-  else if axioms.any (·.components.contains `_native) then .nativeDecide
-  else match axioms.find? (!standardAxioms.contains ·) with
-    | some name => .axiom_ name
-    | none => .proved
 
 def runCore (env : Environment) (action : CoreM α) : IO α := do
   let (value, _) ← action.toIO { fileName := "sharp-lean", fileMap := default, maxHeartbeats := 0 } { env }
   return value
 
-/-- Every theorem of `proofModule` whose type is exactly the constant `statement`. -/
-def proofsOf (env : Environment) (proofModule : Name) (statement : Name) : Array Name := Id.run do
-  let some index := env.getModuleIdx? proofModule | return #[]
-  let mut proofs := #[]
-  for name in env.header.moduleData[index.toNat]!.constNames do
-    if let some (.thmInfo info) := env.find? name then
-      if info.type == .const statement [] then proofs := proofs.push name
-  return proofs
+/-- The step of a proof whose goal stays open, from the error `Sharp/Lean/Proof.lean` logs for it: `0` for a case and
+`1` for a call's condition, its index, and its goal as Mago's tree. -/
+def openStep (message : String) : Option (UInt8 × Nat × String) := do
+  let kind ← match message.splitOn " " with
+    | "sharp-case" :: _ => some (0 : UInt8)
+    | "sharp-condition" :: _ => some 1
+    | _ => none
+  let parts := message.splitOn " "
+  let index ← parts[1]? >>= String.toNat?
+  return (kind, index, " ".intercalate (parts.drop 2))
 
-/-- The line a declaration starts on, or `0` when Lean recorded none. -/
-def lineOf (env : Environment) (name : Name) : IO Nat := do
-  let ranges ← runCore env (findDeclarationRanges? name)
-  return ranges.map (·.range.pos.line) |>.getD 0
-
-/-! Proposing a proof. -/
-
-/-- Lean's own steps, tried in order: `simp` with the law and every definition it reaches, then `simp +contextual`
-with the same names, then that `simp` followed by `omega`, then `decide` on the unfolded law. -/
-def steps (law : Law) : Array String :=
-  let names := ", ".intercalate (#[law.statement].append law.unfold |>.map toString).toList
-  #[s!"simp [{names}]", s!"simp +contextual [{names}]", s!"simp [{names}] <;> omega",
-    s!"unfold {law.statement}\n  decide"]
-
-/-- Whether `step` proves the law in `env` with only the standard axioms. -/
-def proves (env : Environment) (law : Law) (step : String) : IO Bool := do
-  let text := s!"theorem «$proposal» : {law.statement} := by\n  {step}\n"
-  let input := Parser.mkInputContext text "<proposal>"
-  let state ← IO.processCommands input {} (Command.mkState env {} {})
-  if state.commandState.messages.hasErrors then return false
-  let env := state.commandState.env
-  unless env.contains `«$proposal» do return false
-  let axioms ← runCore env (collectAxioms `«$proposal»)
-  return match verdict axioms with
-    | .proved => true
-    | _ => false
-
-/-- The first step that proves the law, or `none`. -/
-def propose (env : Environment) (law : Law) : IO (Option String) := do
-  for step in steps law do
-    if ← proves env law step then return some step
+/-- The first of `targets` that `name`'s declaration reaches through the constants it uses, `name` itself apart. -/
+def reachedOf (env : Environment) (name : Name) (targets : Array Name) : Option Name := Id.run do
+  let mut seen : NameSet := {}
+  let mut pending := (env.find? name).map (·.getUsedConstantsAsSet.toArray) |>.getD #[]
+  repeat
+    let some next := pending.back? | break
+    pending := pending.pop
+    if seen.contains next || next == name then continue
+    seen := seen.insert next
+    if targets.contains next then return some next
+    for used in (env.find? next).map (·.getUsedConstantsAsSet.toArray) |>.getD #[] do
+      pending := pending.push used
   return none
 
-/-- The answer for each law: its proofs, each with its line, its verdict and the axiom that refused it, then the
-proposed step or an empty string. -/
+/-- Elaborates each theorem in order, each with the theorems before it in scope, and answers for each judged one: `0`
+when it is proven; `1` and each step whose goal stays open, as its kind, its index and its goal; `2` and the statement
+of the law not proven that it holds through; or `3` and Lean's first error, when Lean rejected the theorem. -/
 def answer (env : Environment) (request : Check) : IO ByteArray := do
-  let mut b := putU32 (header checkedResponse) request.laws.size.toUInt32
-  for law in request.laws do
-    let proofs := proofsOf env request.proofModule law.statement
-    b := putU32 b proofs.size.toUInt32
-    for proof in proofs do
-      let v := verdict (← runCore env (collectAxioms proof))
-      b := putString (putU8 (putU32 b (← lineOf env proof).toUInt32) v.code) v.axiomName
-    let proposal ← if law.propose && proofs.isEmpty then propose env law else pure none
-    b := putString b (proposal.getD "")
+  let mut env := env
+  let mut gaps : Array Name := #[]
+  let mut b := putU32 (header checkedResponse) (request.theorems.filter (·.judged)).size.toUInt32
+  for item in request.theorems do
+    let input := Parser.mkInputContext s!"open Sharp\n{item.text}" "<law>"
+    let state ← IO.processCommands input {} (Command.mkState env {} {})
+    env := state.commandState.env
+    let name := item.statement ++ `proof
+    let mut steps := #[]
+    let mut rejected := none
+    for message in state.commandState.messages.toList do
+      if message.severity != .error then continue
+      let text ← message.data.toString
+      match openStep text with
+      | some step => steps := steps.push step
+      | none => if rejected.isNone then rejected := some text
+    let declared := env.contains name
+    let gap := declared && (← runCore env (collectAxioms name)).contains ``sorryAx
+    if gap then gaps := gaps.push name
+    unless item.judged do continue
+    if let some message := rejected then
+      b := putString (putU8 b 3) message
+    else if !declared then
+      b := putString (putU8 b 3) s!"Lean declared no {name}"
+    else if !steps.isEmpty then
+      b := putU32 (putU8 b 1) steps.size.toUInt32
+      for (kind, index, goal) in steps do
+        b := putString (putU32 (putU8 b kind) index.toUInt32) goal
+    else if gap then
+      b := putString (putU8 b 2) ((reachedOf env name gaps).map (·.getPrefix.toString) |>.getD "")
+    else
+      b := putU8 b 0
   return b
-
 /-! The `Rules` request and its answer. -/
 
 /-- A `Module.lean` that Lake built, and the namespace its rules constrain. -/
@@ -447,7 +425,7 @@ unsafe def respond : IO Unit := do
   if requested == checkRequest then
     let request ← decode check
     let stdout ← IO.getStdout
-    stdout.write (← answer (← importModules #[{ module := request.module }] {} (loadExts := true)) request)
+    stdout.write (← answer (← importModules (request.modules.map ({ module := · })) {} (loadExts := true)) request)
     stdout.flush
   else if requested == rulesRequest then
     let request ← decode rules

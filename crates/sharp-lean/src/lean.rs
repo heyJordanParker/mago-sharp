@@ -1,26 +1,25 @@
-//! The Lean step of `mago compile`: proves each law, checks each structure rule, and refuses each `.sharp` file whose
-//! law is not proved or that breaks a rule.
+//! The Lean step of `mago compile`: proves each law from its `.sharp` file, checks each structure rule, and refuses each
+//! `.sharp` file whose law is not proven or that breaks a rule.
 
-use std::fmt::Write;
 use std::fs;
 use std::io;
-use std::ops::RangeInclusive;
 use std::path::Path;
 use std::path::PathBuf;
 
 use foldhash::HashMap;
+use foldhash::HashSet;
+use mago_analyzer::graph::strongly_connected_parts;
 use mago_database::file::FileId;
 use mago_reporting::Issue;
 use mago_reporting::IssueCollection;
 use mago_sharp_bridge::unit;
-use mago_span::Position;
-use mago_span::Span;
 use rayon::prelude::*;
 
+use crate::goal;
+use crate::goal::Names;
 use crate::issues;
 use crate::library;
 use crate::package;
-use crate::package::Module;
 use crate::package::Package;
 use crate::package::Program;
 use crate::package::Root;
@@ -28,18 +27,16 @@ use crate::package::Toolchain;
 use crate::rules;
 use crate::rules::Unbuilt;
 use crate::runner;
-use crate::runner::Answer;
-use crate::runner::Question;
-use crate::runner::Verdict;
+use crate::runner::Judgment;
+use crate::runner::Theorem;
 use crate::translate::Law;
 use crate::translate::Translation;
-use crate::translate::names;
 
-/// The folder Composer installs packages into. Mago never writes a proof there.
+/// The folder Composer installs packages into.
 pub(crate) const VENDOR: &[u8] = b"vendor/";
 
-/// The comment above a proof Lean's steps did not find.
-const NO_PROOF_FOUND: &str = "-- PHP#: no automatic proof found";
+/// The module of the steps every law's proof is written in.
+const PROOF_STEPS: &str = "Sharp.Lean.Proof";
 
 /// The Lean step of one workspace.
 #[derive(Debug)]
@@ -47,14 +44,62 @@ pub struct Lean {
     root: PathBuf,
 }
 
-/// A file the step proves: it states a law or has a proof file.
-struct Work<'work> {
-    translation: &'work Translation,
-    /// Its proof file, relative to the workspace root.
-    proof: Vec<u8>,
-    exists: bool,
-    /// Its proof file's Lean module.
-    module: String,
+/// Every law of the workspace, in an order where each comes after each law it calls.
+struct Laws<'laws> {
+    ordered: Vec<(&'laws Translation, &'laws Law)>,
+    /// The position of each law in `ordered`, by its statement.
+    position: HashMap<&'laws str, usize>,
+    /// The laws that call each other in a cycle.
+    cyclic: HashSet<&'laws str>,
+}
+
+impl<'laws> Laws<'laws> {
+    fn new(translations: &'laws [Translation]) -> Self {
+        let all: Vec<(&Translation, &Law)> = translations
+            .iter()
+            .flat_map(|translation| translation.laws.iter().map(move |law| (translation, law)))
+            .collect();
+        let index: HashMap<&str, usize> =
+            all.iter().enumerate().map(|(index, (_, law))| (law.statement.as_str(), index)).collect();
+        let successors: Vec<Vec<usize>> = all
+            .iter()
+            .map(|(_, law)| {
+                law.proof.laws.iter().filter_map(|(called, _)| index.get(called.as_str()).copied()).collect()
+            })
+            .collect();
+
+        let mut ordered = Vec::with_capacity(all.len());
+        let mut cyclic = HashSet::default();
+        for part in strongly_connected_parts(&successors) {
+            if part.len() > 1 {
+                cyclic.extend(part.iter().map(|node| all[*node].1.statement.as_str()));
+            }
+            ordered.extend(part.into_iter().map(|node| all[node]));
+        }
+        let position =
+            ordered.iter().enumerate().map(|(position, (_, law))| (law.statement.as_str(), position)).collect();
+
+        Self { ordered, position, cyclic }
+    }
+
+    /// `law` and each law it calls, transitively, in order.
+    fn closure(&self, law: &Law) -> Vec<usize> {
+        let mut reached = Vec::new();
+        let mut pending = vec![law.statement.as_str()];
+        while let Some(next) = pending.pop() {
+            let Some(&position) = self.position.get(next) else {
+                continue;
+            };
+            if reached.contains(&position) {
+                continue;
+            }
+            reached.push(position);
+            pending.extend(self.ordered[position].1.proof.laws.iter().map(|(called, _)| called.as_str()));
+        }
+        reached.sort_unstable();
+
+        reached
+    }
 }
 
 impl Lean {
@@ -69,15 +114,15 @@ impl Lean {
     /// breaks a rule. `namespaces` holds the namespace of every class-like the codebase declares, accepted or not,
     /// which a rule names.
     ///
-    /// A file whose `.sharpc` is current is proved: the `.sharpc` lists its proof file and every source its laws reach
-    /// as inputs, and the build ID it records covers the runtime library. Every rule runs over every file's facts
-    /// whenever one `.sharpc` is not current, the namespaces changed, or a workspace Lean file the check builds changed,
-    /// joined or left, so a compile checks every rule exactly. Every Lean file of a PSR-4 folder that no Lean file
-    /// imports is built then too, so a `@[rule]` outside a `Module.lean` is an error, though no `.sharpc` lists that
-    /// file. A `Module.lean` in no PSR-4 folder, and a Lean file in a PSR-4 folder under a root Lean or Mago owns, each
-    /// refuse every file under their folder. No Lean process starts when no file
-    /// states a law or has a proof file and no workspace Lean file is left to build, nor when each `.sharpc` is current
-    /// and neither the namespaces nor those Lean files changed. When none of those remains, `.sharp/.lean/` is deleted.
+    /// A file whose `.sharpc` is current is proved: the `.sharpc` lists every source its laws reach as inputs, and the
+    /// build ID it records covers the runtime library. Every rule runs over every file's facts whenever one `.sharpc`
+    /// is not current, the namespaces changed, or a workspace Lean file the check builds changed, joined or left, so a
+    /// compile checks every rule exactly. Every Lean file of a PSR-4 folder that no Lean file imports is built then too,
+    /// so a `@[rule]` outside a `Module.lean` is an error, though no `.sharpc` lists that file. A `Module.lean` in no
+    /// PSR-4 folder, and a Lean file in a PSR-4 folder under a root Lean or Mago owns, each refuse every file under
+    /// their folder. No Lean process starts when no file states a law and no workspace Lean file is left to build, nor
+    /// when each `.sharpc` is current and neither the namespaces nor those Lean files changed. When none of those
+    /// remains, `.sharp/.lean/` is deleted.
     ///
     /// # Errors
     ///
@@ -91,25 +136,6 @@ impl Lean {
         let mut package = Package::new(&self.root);
         let mut issues: HashMap<FileId, IssueCollection> = HashMap::default();
 
-        let mut candidates = Vec::new();
-        for translation in &translations {
-            let proof = proof_file(&translation.name);
-            let exists = self.path(&proof).is_file();
-            if exists && translation.class.is_none() {
-                // A file that states no class-like and no module any more states none of the laws its proof file
-                // proves.
-                let text = fs::read_to_string(self.path(&proof))?;
-                let file = String::from_utf8_lossy(&proof);
-                let start = Span::new(translation.file, Position::new(0), Position::new(0));
-                for (lines, statement) in theorems(&text) {
-                    let issue =
-                        issues::deleted_law(start, &file, *lines.start(), &statement, &source_name(translation));
-                    report(&mut issues, translation, issue);
-                }
-            } else if !translation.laws.is_empty() || exists {
-                candidates.push((translation, proof, exists));
-            }
-        }
         let roots = self.roots(translations.iter())?;
         let (files, unbuilt) = rules::find(&self.root, &roots, &translations)?;
         for unbuilt in &unbuilt {
@@ -127,7 +153,7 @@ impl Lean {
                 report(&mut issues, translation, issue);
             }
         }
-        if candidates.is_empty() && files.is_empty() {
+        if translations.iter().all(|translation| translation.laws.is_empty()) && files.is_empty() {
             match fs::remove_dir_all(&package.directory) {
                 Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
                 _ => return Ok(issues),
@@ -135,9 +161,9 @@ impl Lean {
         }
 
         let mut stale = Vec::new();
-        for candidate in candidates {
-            if self.is_stale(candidate.0)? {
-                stale.push(candidate);
+        for translation in translations.iter().filter(|translation| !translation.laws.is_empty()) {
+            if self.is_stale(translation)? {
+                stale.push(translation);
             }
         }
         let declared = package::namespaces(namespaces);
@@ -152,9 +178,10 @@ impl Lean {
         }
 
         let program = Program::new(&translations);
+        let laws = Laws::new(&translations);
         let translated: Vec<FileId> = translations.iter().map(|translation| translation.file).collect();
         let mut work = Vec::new();
-        for (translation, proof, exists) in stale {
+        for translation in stale {
             let mut sound = true;
             for law in &translation.laws {
                 let problems = program.problems(&law.statement);
@@ -169,26 +196,18 @@ impl Lean {
                     };
                     report(&mut issues, translation, issue);
                 }
-                sound &= problems.is_empty();
-            }
-            if !sound {
-                continue;
-            }
-
-            let file = String::from_utf8_lossy(&proof);
-            if let Some(owned) = package::owned_root(&roots, &self.path(&proof)) {
-                for law in &translation.laws {
-                    report(&mut issues, translation, issues::owned_proof(law, &owned.namespace, &file));
+                if laws.cyclic.contains(law.statement.as_str()) {
+                    for (called, span) in
+                        law.proof.laws.iter().filter(|(called, _)| laws.cyclic.contains(called.as_str()))
+                    {
+                        report(&mut issues, translation, issues::law_cycle(*span, called));
+                    }
                 }
-                continue;
+                sound &= problems.is_empty() && !laws.cyclic.contains(law.statement.as_str());
             }
-            let Some(module) = package::proof_module(&roots, &self.path(&proof)) else {
-                for law in &translation.laws {
-                    report(&mut issues, translation, issues::no_module(law, &file));
-                }
-                continue;
-            };
-            work.push(Work { translation, proof, exists, module });
+            if sound {
+                work.push(translation);
+            }
         }
         if work.is_empty() && !check_rules {
             return Ok(issues);
@@ -196,8 +215,8 @@ impl Lean {
 
         let toolchain = package.toolchain()?;
         if !matches!(toolchain, Toolchain::Ready) {
-            let mut waiting: Vec<(&Translation, Span)> =
-                work.iter().filter_map(|item| Some((item.translation, anchor(item.translation)?))).collect();
+            let mut waiting: Vec<(&Translation, mago_span::Span)> =
+                work.iter().filter_map(|translation| Some((*translation, translation.laws.first()?.span))).collect();
             for translation in &translations {
                 let judged = check_rules && files.iter().any(|file| rules::judges(file, translation));
                 if judged && !waiting.iter().any(|(waiting, _)| waiting.file == translation.file) {
@@ -217,13 +236,23 @@ impl Lean {
 
         let library = library::build(&package.lake)?;
         let mut modules = program.modules(
-            &work.iter().map(|item| item.translation.file).collect::<Vec<_>>(),
+            &work.iter().map(|translation| translation.file).collect::<Vec<_>>(),
             &files.iter().map(|file| file.module.as_str()).collect::<Vec<_>>(),
         );
         modules.push(declared);
         package.write(&library, &roots, &modules)?;
         if !work.is_empty() {
-            self.prove(&package, &library, &program, &modules, work, &mut issues)?;
+            let receivers: HashMap<String, bool> =
+                translations.iter().flat_map(|translation| translation.receivers.iter().cloned()).collect();
+            Proofs {
+                package: &package,
+                library: &library,
+                program: &program,
+                laws: &laws,
+                modules: &modules,
+                receivers,
+            }
+            .prove(work, &mut issues)?;
         }
         if check_rules {
             rules::check(&self.root, &roots, &library, &package, &files, &translations, &mut issues)?;
@@ -231,149 +260,6 @@ impl Lean {
         }
 
         Ok(issues)
-    }
-
-    /// Proves the laws of `work`, whose generated `modules` `package` holds, and reports each law not proved.
-    fn prove(
-        &self,
-        package: &Package,
-        library: &Path,
-        program: &Program<'_>,
-        modules: &[Module],
-        mut work: Vec<Work<'_>>,
-        issues: &mut HashMap<FileId, IssueCollection>,
-    ) -> io::Result<()> {
-        let mut hosts: Vec<&Module> = Vec::new();
-        for item in &work {
-            let name = package::module_name(item.translation);
-            if let Some(module) = modules.iter().find(|module| module.name == name)
-                && !hosts.iter().any(|host| host.name == module.host)
-                && let Some(host) = modules.iter().find(|host| host.name == module.host)
-            {
-                hosts.push(host);
-            }
-        }
-        let failed = package.build(&hosts.iter().map(|host| host.name.clone()).collect::<Vec<_>>())?;
-        let mut refused_hosts: HashMap<String, Vec<package::Message>> = HashMap::default();
-        for host in &failed.modules {
-            refused_hosts.insert(host.clone(), package.errors(host, &failed)?);
-        }
-        work.retain(|item| {
-            let name = package::module_name(item.translation);
-            let host = modules.iter().find(|module| module.name == name).map_or(name, |module| module.host.clone());
-            let Some(errors) = refused_hosts.get(&host) else {
-                return true;
-            };
-            let (line, message) =
-                errors.first().map_or((0, "Lake failed"), |error| (error.pos.line, error.data.as_str()));
-            for law in &item.translation.laws {
-                report(issues, item.translation, issues::generated_module_refused(law, &host, line, message));
-            }
-
-            false
-        });
-
-        let built: Vec<String> = work.iter().filter(|item| item.exists).map(|item| item.module.clone()).collect();
-        let failed = package.build(&built)?;
-        let mut checked = Vec::new();
-        for item in work {
-            if !item.exists && item.translation.name.starts_with(VENDOR) {
-                let file = String::from_utf8_lossy(&item.proof);
-                for law in &item.translation.laws {
-                    report(issues, item.translation, issues::no_proof(law, &file));
-                }
-            } else if failed.modules.contains(&item.module) {
-                let errors = package.errors(&item.module, &failed)?;
-                let text = fs::read_to_string(self.path(&item.proof))?;
-                for issue in proof_errors(item.translation, &item.proof, &text, &errors) {
-                    report(issues, item.translation, issue);
-                }
-            } else {
-                checked.push(item);
-            }
-        }
-        if checked.is_empty() {
-            return Ok(());
-        }
-
-        // One runner per file, run on Mago's thread pool, so `threads` caps how many run at once, each near 465 MB.
-        let answers: Vec<io::Result<Vec<Answer>>> = checked
-            .par_iter()
-            .map(|item| {
-                let vendor = item.translation.name.starts_with(VENDOR);
-                let questions: Vec<Question<'_>> = item
-                    .translation
-                    .laws
-                    .iter()
-                    .map(|law| Question {
-                        statement: &law.statement,
-                        propose: !vendor,
-                        unfold: program.definitions(&law.statement),
-                    })
-                    .collect();
-                let (module, proof_module) = if item.exists {
-                    (item.module.clone(), item.module.clone())
-                } else {
-                    (package::module_name(item.translation), String::new())
-                };
-
-                runner::check(library, package, &module, &proof_module, &questions)
-            })
-            .collect();
-
-        for (item, answers) in checked.into_iter().zip(answers) {
-            let answers = answers?;
-            let vendor = item.translation.name.starts_with(VENDOR);
-            let file = String::from_utf8_lossy(&item.proof).into_owned();
-            let mut text = if item.exists {
-                fs::read_to_string(self.path(&item.proof))?
-            } else {
-                format!("import {}\nopen Sharp\n", package::module_name(item.translation))
-            };
-            let original = text.len();
-            for (law, answer) in item.translation.laws.iter().zip(answers) {
-                if answer.proofs.iter().any(|proof| proof.verdict == Verdict::Proved) {
-                    continue;
-                }
-                if let Some(proof) = answer.proofs.first() {
-                    let issue = match &proof.verdict {
-                        Verdict::Gap => issues::gap(law, &file, proof.line),
-                        Verdict::NativeDecide => issues::native_decide(law, &file),
-                        Verdict::Axiom(axiom) => issues::axiom(law, &file, axiom),
-                        Verdict::Proved => continue,
-                    };
-                    report(issues, item.translation, issue);
-                    continue;
-                }
-                if vendor {
-                    report(issues, item.translation, issues::no_proof(law, &file));
-                    continue;
-                }
-
-                // A proof file is only ever appended to: an existing proof stays as its author wrote it.
-                if !text.ends_with('\n') {
-                    text.push('\n');
-                }
-                text.push('\n');
-                let theorem = format!("theorem {} : {} := by", names::identifier(law.name.as_bytes()), law.statement);
-                match answer.proposal {
-                    Some(step) => {
-                        let _ = write!(text, "{theorem}\n  {step}\n");
-                    }
-                    None => {
-                        let _ = write!(text, "{NO_PROOF_FOUND}\n{theorem}\n");
-                        let line = u32::try_from(text.lines().count() + 1).unwrap_or(u32::MAX);
-                        text.push_str("  sorry\n");
-                        report(issues, item.translation, issues::gap(law, &file, line));
-                    }
-                }
-            }
-            if text.len() != original || !item.exists {
-                fs::write(self.path(&item.proof), text)?;
-            }
-        }
-
-        Ok(())
     }
 
     /// Whether the `.sharpc` of one of `translations` is not current.
@@ -437,130 +323,145 @@ impl Lean {
     }
 }
 
-/// The proof file of the `.sharp` file `name`: the same path with `.lean` in place of `.sharp`.
-#[must_use]
-pub fn proof_file(name: &[u8]) -> Vec<u8> {
-    let stem = name.strip_suffix(b".sharp").unwrap_or(name);
-
-    [stem, b".lean"].concat()
+/// What proving the laws of the stale files reads: the package Lake builds, the runtime library, every declaration and
+/// law of the workspace, the generated modules, and how PHP# calls each member a goal names.
+struct Proofs<'proofs> {
+    package: &'proofs Package,
+    library: &'proofs Path,
+    program: &'proofs Program<'proofs>,
+    laws: &'proofs Laws<'proofs>,
+    modules: &'proofs [package::Module],
+    receivers: HashMap<String, bool>,
 }
 
-/// Lean's errors for a proof file that did not build. A theorem's errors give one issue, from its first error: on the
-/// law the theorem proves, or on the class name for the proof of a law the file no longer states, which Lean reports
-/// as an unknown name at the theorem's type. An error outside every theorem gives its own issue on the class name.
-fn proof_errors(translation: &Translation, proof: &[u8], text: &str, errors: &[package::Message]) -> Vec<Issue> {
-    let file = String::from_utf8_lossy(proof).into_owned();
-    let source = source_name(translation);
-    let theorems = theorems(text);
-    let class = translation.class.as_ref().map(|(class, _)| class.as_str());
-    let Some(anchor) = anchor(translation) else {
-        return Vec::new();
-    };
+impl Proofs<'_> {
+    /// The module of `translation`'s group that holds its declarations.
+    fn host_of(&self, translation: &Translation) -> String {
+        let name = package::module_name(translation);
 
-    let mut found = Vec::new();
-    let mut reported: Vec<u32> = Vec::new();
-    for error in errors {
-        let Some((lines, r#type)) = theorems.iter().find(|(lines, _)| lines.contains(&error.pos.line)) else {
-            found.push(issues::rejected_file(anchor, &file, error.pos.line, &error.data));
-            continue;
-        };
-        let line = lines.start();
-        if reported.contains(line) {
-            continue;
-        }
-        reported.push(*line);
-
-        let deleted = class.is_some_and(|class| {
-            r#type.strip_prefix(class).is_some_and(|member| member.starts_with('.'))
-                && !translation.laws.iter().any(|law| law.statement == *r#type)
-                && errors.iter().any(|error| unknown_name(&error.data) == Some(r#type.as_str()))
-        });
-        if deleted {
-            found.push(issues::deleted_law(anchor, &file, *line, r#type, &source));
-        } else if let Some(law) = translation.laws.iter().find(|law| law.statement == *r#type) {
-            found.push(issues::rejected(law, &file, error.pos.line, &error.data));
-        } else {
-            found.push(issues::rejected_file(anchor, &file, error.pos.line, &error.data));
-        }
+        self.modules.iter().find(|module| module.name == name).map_or(name, |module| module.host.clone())
     }
 
-    found
-}
-
-/// The name of `translation`'s `.sharp` file without its folders: `Money.sharp`.
-fn source_name(translation: &Translation) -> String {
-    let name = translation.name.rsplit(|byte| *byte == b'/').next().unwrap_or(&translation.name);
-
-    String::from_utf8_lossy(name).into_owned()
-}
-
-/// Each `theorem` of a proof file, with the lines it spans and its type as written. A theorem ends before the next line
-/// that starts at the margin, such as the next `theorem` or a `Module.lean`'s `@[rule]`.
-fn theorems(text: &str) -> Vec<(RangeInclusive<u32>, String)> {
-    let lines: Vec<&str> = text.lines().collect();
-    let number = |index: usize| u32::try_from(index + 1).unwrap_or(u32::MAX);
-    let mut theorems = Vec::new();
-    for (index, line) in lines.iter().enumerate() {
-        let Some(rest) = line.strip_prefix("theorem ") else {
-            continue;
-        };
-        let Some((_, r#type)) = rest.split_once(" : ") else {
-            continue;
-        };
-        let r#type = r#type.split_once(":=").map_or(r#type, |(r#type, _)| r#type).trim();
-        let end = lines[index + 1..]
+    /// Proves the laws of `work` and reports each law not proven. Each file's laws are elaborated with the theorem of
+    /// each law they call, transitively, before them. A law that calls a law that cannot be proven is not proven.
+    fn prove(&self, mut work: Vec<&Translation>, issues: &mut HashMap<FileId, IssueCollection>) -> io::Result<()> {
+        let called = work
             .iter()
-            .position(|line| !line.is_empty() && !line.starts_with(char::is_whitespace))
-            .map_or(lines.len() - 1, |next| index + next);
-        theorems.push((number(index)..=number(end), r#type.to_owned()));
+            .flat_map(|translation| &translation.laws)
+            .flat_map(|law| self.laws.closure(law))
+            .map(|position| self.laws.ordered[position].0);
+        let mut hosts: Vec<String> =
+            work.iter().copied().chain(called).map(|translation| self.host_of(translation)).collect();
+        hosts.sort();
+        hosts.dedup();
+        let failed = self.package.build(&hosts)?;
+        for host in &failed.modules {
+            let errors = self.package.errors(host, &failed)?;
+            let line = errors.first().map_or(0, |error| error.pos.line);
+            for translation in work.iter().filter(|translation| self.host_of(translation) == *host) {
+                for law in &translation.laws {
+                    report(issues, translation, issues::generated_module_refused(law, host, line));
+                }
+            }
+        }
+        work.retain(|translation| !failed.modules.contains(&self.host_of(translation)));
+
+        // One runner per file, run on Mago's thread pool, so `threads` caps how many run at once.
+        let answers: Vec<io::Result<Vec<(&Law, Judgment)>>> =
+            work.par_iter().map(|translation| self.judge(translation)).collect();
+        for (translation, answers) in work.into_iter().zip(answers) {
+            for (law, judgment) in answers? {
+                for issue in judged(law, judgment, &self.receivers) {
+                    report(issues, translation, issue);
+                }
+            }
+        }
+
+        Ok(())
     }
 
-    theorems
+    /// How the runner judges each law of `translation`.
+    fn judge<'law>(&self, translation: &'law Translation) -> io::Result<Vec<(&'law Law, Judgment)>> {
+        let laws = self.laws;
+        let mut theorems: Vec<usize> = Vec::new();
+        let mut judgments: Vec<(&Law, Judgment)> = Vec::new();
+        for law in &translation.laws {
+            let closure = laws.closure(law);
+            let unproven = closure.iter().map(|position| laws.ordered[*position].1).find(|called| {
+                called.statement != law.statement
+                    && (laws.cyclic.contains(called.statement.as_str())
+                        || !self.program.problems(&called.statement).is_empty())
+            });
+            match unproven {
+                Some(called) => judgments.push((law, Judgment::Through(called.statement.clone()))),
+                None => theorems.extend(closure),
+            }
+        }
+        theorems.sort_unstable();
+        theorems.dedup();
+        if theorems.is_empty() {
+            return Ok(judgments);
+        }
+
+        let judged: Vec<&Law> = translation
+            .laws
+            .iter()
+            .filter(|law| !judgments.iter().any(|(blocked, _)| blocked.statement == law.statement))
+            .collect();
+        let request: Vec<Theorem<'_>> = theorems
+            .iter()
+            .map(|position| {
+                let law = laws.ordered[*position].1;
+                Theorem {
+                    statement: &law.statement,
+                    text: &law.proof.text,
+                    judged: judged.iter().any(|judged| judged.statement == law.statement),
+                }
+            })
+            .collect();
+        let mut imports: Vec<String> =
+            theorems.iter().map(|position| self.host_of(laws.ordered[*position].0)).collect();
+        imports.sort();
+        imports.dedup();
+        imports.push(PROOF_STEPS.to_owned());
+        let imports: Vec<&str> = imports.iter().map(String::as_str).collect();
+
+        let answered = runner::check(self.library, self.package, &imports, &request)?;
+        let order = request.iter().filter(|theorem| theorem.judged).map(|theorem| theorem.statement);
+        for (statement, judgment) in order.zip(answered) {
+            if let Some(law) = judged.iter().find(|law| law.statement == statement) {
+                judgments.push((law, judgment));
+            }
+        }
+
+        Ok(judgments)
+    }
 }
 
-/// The name of Lean's ``Unknown identifier `X` `` or ``Unknown constant `X` `` message.
-fn unknown_name(message: &str) -> Option<&str> {
-    message
-        .strip_prefix("Unknown identifier `")
-        .or_else(|| message.strip_prefix("Unknown constant `"))?
-        .split_once('`')
-        .map(|(name, _)| name)
-}
-
-/// Where a file-wide issue sits: the file's class name, else its first law.
-fn anchor(translation: &Translation) -> Option<Span> {
-    translation.class.as_ref().map(|(_, span)| *span).or_else(|| translation.laws.first().map(|law: &Law| law.span))
+/// The issues of `law` the runner's `judgment` gives: one for each case and each call whose goal it left open, with
+/// the goal in PHP#.
+fn judged(law: &Law, judgment: Judgment, receivers: &HashMap<String, bool>) -> Vec<Issue> {
+    match judgment {
+        Judgment::Proved => Vec::new(),
+        Judgment::Through(called) => vec![issues::through(law, &called)],
+        Judgment::Rejected(_) => vec![issues::rejected_proof(law)],
+        Judgment::Open(steps) => steps
+            .iter()
+            .map(|step| {
+                if step.condition {
+                    let call = &law.proof.calls[step.index - 1];
+                    let names = Names { receivers, arguments: &call.arguments };
+                    issues::unshown_condition(law, call, goal::conjunction(&step.goal, &names).as_deref())
+                } else {
+                    let case = &law.proof.cases[step.index - 1];
+                    let names = Names { receivers, arguments: &[] };
+                    issues::unproven_case(law, case, goal::php(&step.goal, &names).as_deref())
+                }
+            })
+            .collect(),
+    }
 }
 
 fn report(issues: &mut HashMap<FileId, IssueCollection>, translation: &Translation, issue: Issue) {
     issues.entry(translation.file).or_default().push(issue);
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_proof_file_sits_beside_its_source() {
-        assert_eq!(proof_file(b"app/Shared/Money.sharp"), b"app/Shared/Money.lean");
-    }
-
-    #[test]
-    fn each_theorem_is_found_with_its_lines_and_type() {
-        let proof = "import Code.App.Shared.Money\nopen Sharp\n\ntheorem addKeepsCurrency : App.Shared.Money.addKeepsCurrency := by\n  simp\n";
-        let rules = "import Code.App.Shared.Module\nopen Sharp\n\ntheorem same : App.Shared.Module.same := by\n  simp\n\n@[rule] def neverReachesTenant : Rule := .neverImports App.Tenant\n";
-
-        for (text, expected) in
-            [(proof, (4..=5, "App.Shared.Money.addKeepsCurrency")), (rules, (4..=6, "App.Shared.Module.same"))]
-        {
-            assert_eq!(theorems(text), [(expected.0, expected.1.to_owned())], "{text}");
-        }
-    }
-
-    #[test]
-    fn the_name_of_an_unknown_name_message_is_read() {
-        assert_eq!(unknown_name("Unknown constant `App.Shared.Money.oldLaw`"), Some("App.Shared.Money.oldLaw"));
-        assert_eq!(unknown_name("Unknown identifier `App.Shared.Money.oldLaw`"), Some("App.Shared.Money.oldLaw"));
-        assert_eq!(unknown_name("unsolved goals"), None);
-    }
 }

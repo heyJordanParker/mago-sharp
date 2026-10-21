@@ -365,7 +365,7 @@ where
         ..MethodMetadata::default()
     });
 
-    if utils::expression_has_throws(law.body.expression) {
+    if utils::expression_has_throws(law.claim) {
         metadata.flags |= MetadataFlags::HAS_THROW;
     }
 

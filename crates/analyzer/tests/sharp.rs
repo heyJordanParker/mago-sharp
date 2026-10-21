@@ -22307,16 +22307,132 @@ fn this_in_a_law_is_refused_as_in_a_static_method() {
     assert_eq!(issues(static_method, &[]), ["7:42 undefined-variable"]);
 }
 
-/// Spec section 28: a law is checked and never runs, so a call of it names no method.
+/// Spec section 28: a law is checked and never runs, so a call of it outside a law's body names no method, whether it
+/// names the law's class or, in the class itself, the law alone.
 #[test]
-fn a_call_of_a_law_is_a_non_existent_method_that_names_the_law() {
+fn a_call_of_a_law_outside_a_law_body_is_a_non_existent_method_that_names_the_law() {
     let ledger = (
         "app/Shared/Ledger.sharp",
         "namespace App.Shared;\n\npublic class Ledger\n{\n    public static bool check(Money a, Money b) => Money.addKeepsCurrency(a, b);\n}\n",
     );
+    let money = (
+        "app/Shared/Money.sharp",
+        "namespace App.Shared;\n\npublic class Money\n{\n    public Money(public int amount { get; }) { }\n\n    public static bool check(Money a) => sameAmount(a);\n\n    law sameAmount(Money a) => a.amount == a.amount;\n}\n",
+    );
 
     assert_eq!(codes(&issues(ledger, &[LAWFUL_MONEY])), ["non-existent-method", "mixed-return-statement"]);
-    assert_eq!(messages(ledger, &[LAWFUL_MONEY])[0], "`Money.addKeepsCurrency` is a law, and a law is never called.");
+    assert_eq!(
+        messages(ledger, &[LAWFUL_MONEY])[0],
+        "`Money.addKeepsCurrency` is a law, and only a law's body calls a law, as a statement of its own."
+    );
+    assert_eq!(codes(&issues(money, &[]))[0], "non-existent-function");
+    assert_eq!(
+        messages(money, &[])[0],
+        "`Money.sameAmount` is a law, and only a law's body calls a law, as a statement of its own."
+    );
+}
+
+/// Spec section 28's `Money`, whose laws the checker proves alone, by a body that calls a law, by recursion on a
+/// smaller int and on a list's rest, and under a `when` condition.
+const PROVEN_MONEY: (&str, &str) = (
+    "app/Shared/Money.sharp",
+    "namespace App.Shared;\n\npublic class Money\n{\n    public Money(public int amount { get; }, public string currency { get; }) { }\n    public Money add(Money other) => new Money(this.amount + other.amount, this.currency);\n    public static int refundable(int paid, int refunded) => refunded > paid ? 0 : paid - refunded;\n\n    law addKeepsCurrency(Money a, Money b) => a.add(b).currency == a.currency;\n    law addTwiceKeepsCurrency(Money m, Money a, Money b) => m.add(a).add(b).currency == m.currency\n    {\n        addKeepsCurrency(m, a);\n        Money.addKeepsCurrency(m.add(a), b);\n    }\n    law neverAbovePaid(int paid, int refunded) when paid >= 0 && refunded >= 0\n        => Money.refundable(paid, refunded) <= paid;\n    law countsDown(int n) when n >= 0 => n >= 0\n    {\n        if (n <= 0) { return; }\n        countsDown(n - 1);\n        neverAbovePaid(n, 0);\n    }\n    law countNeverNegative(List<int> items) => items.count() >= 0\n    {\n        match (items) {\n            [int, ...List<int> rest] => { countNeverNegative(rest); },\n            default => { return; },\n        }\n    }\n}\n",
+);
+
+/// Spec section 28: a law's body is ordinary PHP#, where a call of a law is a statement, and a law calls itself on a
+/// smaller value.
+#[test]
+fn a_law_proven_by_its_body_reports_no_issue() {
+    assert_eq!(issues(PROVEN_MONEY, &[]), Vec::<String>::new());
+    assert_eq!(effect_issues(&[PROVEN_MONEY]), Vec::<String>::new());
+}
+
+/// The body of a law in `Count`, as `law f(int x, List<int> items) => true` states it.
+fn law_body(body: &str) -> (&'static str, &'static str) {
+    let code = format!(
+        "namespace App.Shared;\n\npublic class Count\n{{\n    law f(int x, List<int> items) => true\n    {{\n{body}\n    }}\n}}\n"
+    );
+
+    ("app/Shared/Count.sharp", Box::leak(code.into_boxed_str()))
+}
+
+/// Spec section 28: a law calls itself only on a smaller value, a list's rest from a pattern the body matched or an int
+/// one step towards a bound the body tested, so its proof ends. Any other call of itself is an error on the call.
+#[test]
+fn a_law_that_calls_itself_on_a_value_no_smaller_is_refused() {
+    let broken = (
+        "app/Shared/Count.sharp",
+        "namespace App.Shared;\n\npublic class Count\n{\n    law broken(int x) => x == x + 1 { broken(x); }\n}\n",
+    );
+
+    assert_eq!(issues(broken, &[]), ["5:39 law-recursion"]);
+    assert_eq!(
+        worded(broken, &[]),
+        [
+            "5:39 law-recursion a law calls itself only on a smaller value | This call passes no smaller value. | Call broken on a list's rest from a pattern the body matched, or on an int one step towards a bound the body tested, as `if (n <= 0) { return; }` tests 0 before `broken(n - 1);`."
+        ]
+    );
+    for body in [
+        "        f(x - 1, items);",
+        "        if (x <= 0) { return; }\n        f(x + 1, items);",
+        "        if (x >= 10) { return; }\n        f(x - 1, items);",
+        "        if (x < 0) { return; }\n        f(x - 1, items);",
+        "        match (items) {\n            [int, ...List<int> rest] => { f(x, items); },\n            default => { return; },\n        }",
+    ] {
+        assert_eq!(codes(&issues(law_body(body), &[])), ["law-recursion"], "{body}");
+    }
+    for body in [
+        "        if (x <= 0) { return; }\n        f(x - 1, items);",
+        "        if (x >= 10) { return; }\n        f(x + 1, items);",
+        "        if (x > 0) { f(x - 1, items); }",
+        "        match (items) {\n            [int first, ...List<int> rest] => { f(first, rest); },\n            default => { return; },\n        }",
+    ] {
+        assert_eq!(issues(law_body(body), &[]), Vec::<String>::new(), "{body}");
+    }
+}
+
+/// Spec section 28: a law's body holds `if`, `match` statements with block arms, locals, `return;` and calls of laws as
+/// statements, and nothing else.
+#[test]
+fn a_law_body_holds_only_conditions_matches_locals_returns_and_law_calls() {
+    for (body, at) in [
+        ("        for (const item of items) { f(item, items); }", "7:9"),
+        ("        return true;", "7:9"),
+        ("        int y = 0;\n        y = 1;", "8:9"),
+    ] {
+        assert_eq!(issues(law_body(body), &[]), [format!("{at} invalid-law")], "{body}");
+    }
+    assert_eq!(issues(law_body("        if (f(x, items)) { return; }"), &[]), ["7:13 non-existent-function"]);
+    assert_eq!(
+        messages(law_body("        return true;"), &[]),
+        [
+            "A law's body holds only `if`, `match`, locals, `return;` and calls of laws, each call a statement of its own."
+        ]
+    );
+    assert_eq!(
+        issues(law_body("        const y = x - 1;\n        if (x <= 0) { return; }"), &[]),
+        Vec::<String>::new()
+    );
+}
+
+/// A call of a law passes the law's parameters as any call does, so an argument of another type is an error.
+#[test]
+fn a_law_call_passes_the_law_s_parameter_types() {
+    let body = law_body("        Money.addKeepsCurrency(x, x);");
+
+    assert_eq!(codes(&issues(body, &[LAWFUL_MONEY])), ["invalid-argument", "invalid-argument"]);
+}
+
+/// Spec section 28: a law's `when` condition is a `bool`, as its claim is.
+#[test]
+fn a_law_s_when_condition_is_a_bool() {
+    let count = (
+        "app/Shared/Count.sharp",
+        "namespace App.Shared;\n\npublic class Count\n{\n    law positive(int a) when a + 1 => a + 1 > a;\n}\n",
+    );
+
+    assert_eq!(issues(count, &[]), ["5:30 invalid-law"]);
+    assert_eq!(messages(count, &[]), ["A law's `when` condition is a `bool`, and `a + 1` is an `int`."]);
 }
 
 /// A PHP caller of a law gets the same refusal, with the law named as PHP writes a static method.
@@ -22330,7 +22446,7 @@ fn a_php_call_of_a_law_is_a_non_existent_method_that_names_the_law_as_php_writes
     assert_eq!(codes(&issues(ledger, &[LAWFUL_MONEY]))[0], "non-existent-method");
     assert_eq!(
         messages(ledger, &[LAWFUL_MONEY])[0],
-        "`App\\Shared\\Money::addKeepsCurrency` is a law, and a law is never called."
+        "`App\\Shared\\Money::addKeepsCurrency` is a law, and only a law's body calls a law, as a statement of its own."
     );
 }
 

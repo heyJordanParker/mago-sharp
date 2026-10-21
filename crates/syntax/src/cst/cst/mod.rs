@@ -58,6 +58,8 @@ pub use crate::cst::cst::class_like::inheritance::Extends;
 pub use crate::cst::cst::class_like::inheritance::Implements;
 pub use crate::cst::cst::class_like::inheritance::Inheritance;
 pub use crate::cst::cst::class_like::law::Law;
+pub use crate::cst::cst::class_like::law::LawCondition;
+pub use crate::cst::cst::class_like::law::LawProof;
 pub use crate::cst::cst::class_like::member::ClassLikeConstantSelector;
 pub use crate::cst::cst::class_like::member::ClassLikeMember;
 pub use crate::cst::cst::class_like::member::ClassLikeMemberExpressionSelector;

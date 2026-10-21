@@ -2,9 +2,11 @@ use mago_allocator::prelude::*;
 
 use crate::T;
 use crate::cst::cst::Law;
-use crate::cst::cst::MethodExpressionBody;
+use crate::cst::cst::LawCondition;
+use crate::cst::cst::LawProof;
 use crate::error::ParseError;
 use crate::parser::Parser;
+use crate::token::Precedence;
 
 impl<'arena, A> Parser<'_, 'arena, A>
 where
@@ -20,17 +22,30 @@ where
         Ok(starts_with_law && named && self.stream.peek_kind(2)? == Some(T!["("]))
     }
 
-    /// Parses a PHP# law, spec section 28: `law`, its name, its parameters and an expression body.
+    /// Parses a PHP# law, spec section 28: `law`, its name, its parameters, an optional `when` condition, `=>` and its
+    /// claim, then `;` or the body that proves it. The `when` condition reads as a `match` arm's does, so the `=>`
+    /// after it ends it.
     pub(crate) fn parse_law(&mut self) -> Result<Law<'arena>, ParseError> {
-        Ok(Law {
-            law: self.expect_any_keyword()?,
-            name: self.parse_local_identifier()?,
-            parameter_list: self.parse_function_like_parameter_list()?,
-            body: MethodExpressionBody {
-                arrow: self.stream.eat_span(T!["=>"])?,
-                expression: self.parse_expression()?,
-                semicolon: self.stream.eat_span(T![";"])?,
-            },
-        })
+        let law = self.expect_any_keyword()?;
+        let name = self.parse_local_identifier()?;
+        let parameter_list = self.parse_function_like_parameter_list()?;
+        let condition = match self.stream.lookahead(0)? {
+            Some(token) if token.kind == T![Identifier] && token.value == b"when" => {
+                let when = self.expect_any_keyword()?;
+                let condition = self.parse_expression_with_precedence(Precedence::NullCoalesce)?;
+
+                Some(LawCondition { when, expression: self.parse_conditional_in_guard(condition)? })
+            }
+            _ => None,
+        };
+        let arrow = self.stream.eat_span(T!["=>"])?;
+        let claim = self.parse_expression()?;
+        let proof = if self.stream.is_at(T!["{"])? {
+            LawProof::Body(self.parse_block()?)
+        } else {
+            LawProof::Checker(self.stream.eat_span(T![";"])?)
+        };
+
+        Ok(Law { law, name, parameter_list, condition, arrow, claim, proof })
     }
 }

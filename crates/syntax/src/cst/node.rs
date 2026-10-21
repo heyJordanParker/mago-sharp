@@ -143,6 +143,7 @@ use crate::cst::cst::KeyValueArrayElement;
 use crate::cst::cst::Keyword;
 use crate::cst::cst::Label;
 use crate::cst::cst::Law;
+use crate::cst::cst::LawProof;
 use crate::cst::cst::Leave;
 use crate::cst::cst::LegacyArray;
 use crate::cst::cst::List;
@@ -1670,7 +1671,14 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
                 f(Node::Keyword(&node.law));
                 f(Node::LocalIdentifier(&node.name));
                 f(Node::FunctionLikeParameterList(&node.parameter_list));
-                f(Node::MethodExpressionBody(&node.body));
+                if let Some(condition) = &node.condition {
+                    f(Node::Keyword(&condition.when));
+                    f(Node::Expression(condition.expression));
+                }
+                f(Node::Expression(node.claim));
+                if let LawProof::Body(body) = &node.proof {
+                    f(Node::Block(body));
+                }
             }
             Node::Extension(node) => {
                 f(Node::Keyword(&node.extension));

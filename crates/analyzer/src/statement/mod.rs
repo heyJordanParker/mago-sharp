@@ -299,6 +299,15 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Statement<'arena> {
                 Statement::Block(block) => {
                     analyze_statements(block.statements.as_slice(), context, block_context, artifacts)
                 }
+                // Spec section 28: in a law's body, a call statement of a law states the law's claim for its arguments.
+                Statement::Expression(_)
+                    if block_context.flags.inside_law_body()
+                        && let Some(call) = class_like::law::law_call(self)
+                        && let Some(law) =
+                            class_like::law::called_law(context, block_context.scope.get_class_like(), call) =>
+                {
+                    class_like::law::analyze_law_call(context, block_context, artifacts, call, law)
+                }
                 // A statement's value is never used, even in a block that is itself part of a value.
                 Statement::Expression(expression) => {
                     let was_inside_general_use = block_context.flags.inside_general_use();
@@ -350,6 +359,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Statement<'arena> {
 
             if let Statement::Expression(expression) = self
                 && context.settings.find_unused_expressions
+                && !block_context.flags.inside_law_body()
             {
                 detect_unused_statement_expressions(expression.expression, self, context, artifacts);
             }

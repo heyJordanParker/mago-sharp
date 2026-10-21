@@ -13,6 +13,8 @@ use crate::runner::Refusal;
 use crate::runner::Refused;
 use crate::translate::Law;
 use crate::translate::Unmodeled;
+use crate::translate::proof::Case;
+use crate::translate::proof::LawCall;
 
 pub(crate) const FLOAT: &str = "A law cannot reason about float arithmetic, which rounds; use int.";
 pub(crate) const OVERRIDABLE: &str = "A law cannot know which implementation runs.";
@@ -24,7 +26,7 @@ pub(crate) const STATIC_PROPERTY: &str = "It is state outside the arguments.";
 pub(crate) const LAZY: &str = "A lazy sequence has no value to reason about.";
 pub(crate) const EXTERN: &str = "Its body is native code, which a law cannot read.";
 pub(crate) const RESERVED_NAME: &str =
-    "A `.lean` proof file gives every class a member of that name, so a law cannot reach a member that has it.";
+    "The checker gives every class a member of that name, so a law cannot reach a member that has it.";
 pub(crate) const PLAIN_PHP: &str = "A law cannot see inside plain PHP.";
 pub(crate) const COLLECTION: &str = "A law cannot reason about this use of a collection.";
 pub(crate) const LIBRARY: &str = "A law cannot reason about the standard library's code.";
@@ -78,103 +80,85 @@ pub(crate) fn untranslated(law: &Law, place: &str) -> Issue {
     )
 }
 
-/// A law whose proof file the PSR-4 map of `composer.json` names no Lean module for.
-pub(crate) fn no_module(law: &Law, file: &str) -> Issue {
+/// A case of `law`'s proof that the automatic steps did not close, with its conditions and the goal still to show in
+/// PHP#, and the call of the law itself on a smaller value when the case knows one and makes no such call.
+pub(crate) fn unproven_case(law: &Law, case: &Case, goal: Option<&str>) -> Issue {
+    let goal = goal.unwrap_or("the law's claim");
+    let issue = Issue::error(format!("law {} is not proven", law.name))
+        .with_code(IssueCode::LawUnproven.as_str())
+        .with_annotation(Annotation::primary(law.span))
+        .with_note(format!("{}still to show: {goal}", when(&case.conditions)));
+
+    match &case.smaller {
+        Some((parameter, call)) => issue.with_help(format!("the law for a smaller {parameter} is the call {call}")),
+        None => issue,
+    }
+}
+
+/// A call in `law`'s body of a law whose `when` condition the case of the call does not show, with the part of the
+/// condition still to show in PHP#.
+pub(crate) fn unshown_condition(law: &Law, call: &LawCall, goal: Option<&str>) -> Issue {
+    let goal = goal.unwrap_or("its `when` condition");
+
+    Issue::error(format!("law {} is not proven", law.name))
+        .with_code(IssueCode::LawUnproven.as_str())
+        .with_annotation(Annotation::primary(call.span).with_message("This call needs its law's `when` condition."))
+        .with_note(format!("{}still to show for the call {}: {goal}", when(&call.conditions), call.written))
+}
+
+/// A law whose proof calls the law `called` states, which is not proven.
+pub(crate) fn through(law: &Law, called: &str) -> Issue {
+    Issue::error(format!("law {} is not proven", law.name))
+        .with_code(IssueCode::LawUnproven.as_str())
+        .with_annotation(Annotation::primary(law.span))
+        .with_note(format!("it calls the law {}, which is not proven", place_of(called)))
+}
+
+/// A call of a law that calls back the law it is in, through the laws it calls.
+pub(crate) fn law_cycle(span: Span, called: &str) -> Issue {
+    Issue::error("a law calls itself only on a smaller value")
+        .with_code(IssueCode::LawRecursion.as_str())
+        .with_annotation(
+            Annotation::primary(span).with_message(format!("{} calls back the law this call is in.", place_of(called))),
+        )
+}
+
+/// A law whose proof the checker wrote wrong: a bug in the checker, never in the project.
+pub(crate) fn rejected_proof(law: &Law) -> Issue {
     unproven(
         law,
         format!(
-            "Law {} is not proven: {file} is in no PSR-4 folder of composer.json, so its proof file has no Lean module name.",
-            law.name
-        ),
-    )
-}
-
-pub(crate) fn gap(law: &Law, proof: &str, line: u32) -> Issue {
-    unproven(
-        law,
-        format!(
-            "Law {} is not proven: {proof} line {line} is a gap (sorry). Write the proof there, or change the law.",
-            law.name
-        ),
-    )
-}
-
-pub(crate) fn rejected(law: &Law, proof: &str, line: u32, message: &str) -> Issue {
-    let (first, rest) = message.split_once('\n').unwrap_or((message, ""));
-    let issue = unproven(
-        law,
-        format!("Law {} is not proven: Lean rejected its proof in {proof} line {line}: {first}", law.name),
-    );
-
-    if rest.trim().is_empty() { issue } else { issue.with_note(message.to_owned()) }
-}
-
-/// A package's law no theorem of its proof file has the type of. Mago adds a proof to a project's proof file, and never
-/// writes under `vendor/`.
-pub(crate) fn no_proof(law: &Law, proof: &str) -> Issue {
-    unproven(
-        law,
-        format!(
-            "Law {} has no proof in {proof}. Its package ships no proof for it, so report it to the package's maintainers.",
-            law.name
-        ),
-    )
-}
-
-pub(crate) fn native_decide(law: &Law, proof: &str) -> Issue {
-    unproven(
-        law,
-        format!(
-            "Law {} is not proven: its proof in {proof} uses native_decide, which trusts compiled code instead of Lean's kernel. Use decide.",
-            law.name
-        ),
-    )
-}
-
-pub(crate) fn axiom(law: &Law, proof: &str, axiom: &str) -> Issue {
-    unproven(
-        law,
-        format!(
-            "Law {} is not proven: its proof in {proof} uses the axiom {axiom}, which Lean's kernel does not check. Prove it without the axiom.",
+            "Law {} is not proven: the checker wrote a proof of it that does not check. This is a bug in the PHP# checker; report it to its maintainers.",
             law.name
         ),
     )
 }
 
 /// A law whose generated module Lean refused: a bug in the checker's translation, never in the project.
-pub(crate) fn generated_module_refused(law: &Law, module: &str, line: u32, message: &str) -> Issue {
-    let first = message.lines().next().unwrap_or(message);
+pub(crate) fn generated_module_refused(law: &Law, module: &str, line: u32) -> Issue {
     let place = if line == 0 { String::new() } else { format!(", at line {line}") };
 
     unproven(
         law,
         format!(
-            "Law {} is not proven: the module {module} the checker generated for it is wrong{place}: {first}. This is a bug in the PHP# checker; report it to its maintainers.",
+            "Law {} is not proven: the module {module} the checker generated for it is wrong{place}. This is a bug in the PHP# checker; report it to its maintainers.",
             law.name
         ),
     )
-    .with_note(message.to_owned())
 }
 
-/// An error in a proof file that no theorem for a law holds, or, at line 0, of the whole file.
-pub(crate) fn rejected_file(span: Span, proof: &str, line: u32, message: &str) -> Issue {
-    let first = message.lines().next().unwrap_or(message);
-    let place = if line == 0 { String::new() } else { format!(" line {line}") };
-
-    Issue::error(format!("Lean rejected {proof}{place}: {first}"))
-        .with_code(IssueCode::UnprovenLaw.as_str())
-        .with_annotation(Annotation::primary(span))
-        .with_note(message.to_owned())
+/// `when …, ` with `conditions` joined by `&&`, or nothing when there are none.
+fn when(conditions: &[String]) -> String {
+    if conditions.is_empty() { String::new() } else { format!("when {}, ", conditions.join(" && ")) }
 }
 
-/// A proof of a law the `.sharp` file no longer states, on the class's name, or at the start of a file that states no
-/// class-like any more.
-pub(crate) fn deleted_law(span: Span, proof: &str, line: u32, statement: &str, source: &str) -> Issue {
-    Issue::error(format!(
-        "{proof} line {line} proves {statement}, which {source} no longer states. Delete the proof, or restore the law."
-    ))
-    .with_code(IssueCode::NonExistentLaw.as_str())
-    .with_annotation(Annotation::primary(span))
+/// `Money.addKeepsCurrency` of the statement `App.Shared.Money.addKeepsCurrency`.
+fn place_of(statement: &str) -> String {
+    let mut parts = statement.rsplitn(3, '.');
+    match (parts.next(), parts.next()) {
+        (Some(law), Some(class)) => format!("{class}.{law}"),
+        _ => statement.to_owned(),
+    }
 }
 
 /// A fact that breaks a structure rule, on the code that holds it: `This import of App.Tenant.Store.Receipts breaks
@@ -307,11 +291,6 @@ pub(crate) fn owned_lean(span: Span, namespace: &str, file: &str) -> Issue {
         .with_annotation(Annotation::primary(span))
 }
 
-/// A law whose proof file sits under a root Lean or Mago owns, so it cannot be built.
-pub(crate) fn owned_proof(law: &Law, namespace: &str, file: &str) -> Issue {
-    unproven(law, format!("Law {} is not proven: {}.", law.name, owned_root(namespace, file)))
-}
-
 /// A `Module.lean` in no PSR-4 folder, on each file under its folder, since none of its rules can run.
 pub(crate) fn no_rules_module(span: Span, rules: &str) -> Issue {
     Issue::error(format!(
@@ -352,5 +331,5 @@ pub(crate) fn elan_failed(span: Span, message: &str) -> Issue {
 }
 
 fn unproven(law: &Law, message: String) -> Issue {
-    Issue::error(message).with_code(IssueCode::UnprovenLaw.as_str()).with_annotation(Annotation::primary(law.span))
+    Issue::error(message).with_code(IssueCode::LawUnproven.as_str()).with_annotation(Annotation::primary(law.span))
 }

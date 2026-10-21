@@ -1,5 +1,5 @@
 //! The `sharp-lean` runner, which reads one request in Mago's payload encoding from standard input and writes its
-//! answer to standard output: a law file's proofs, or the facts that break the structure rules.
+//! answer to standard output: how it judged the theorems of a file's laws, or the facts that break the structure rules.
 
 use std::io;
 use std::io::Write;
@@ -34,37 +34,35 @@ const PAST_LIMIT: i32 = 124;
 /// How the runner exits when a rule waits until `library::deadline()`: `pastDeadline` in `Runner.lean`.
 const PAST_DEADLINE: i32 = 125;
 
-/// One law a request asks about.
-pub(crate) struct Question<'question> {
-    /// The Lean name of the law's statement.
-    pub(crate) statement: &'question str,
-    /// Whether to look for a proof when the proof module has none.
-    pub(crate) propose: bool,
-    /// The definitions a proof step unfolds besides the law.
-    pub(crate) unfold: Vec<&'question str>,
+/// One theorem a request elaborates.
+pub(crate) struct Theorem<'theorem> {
+    /// The Lean name of the statement of the law it proves.
+    pub(crate) statement: &'theorem str,
+    /// Its Lean text.
+    pub(crate) text: &'theorem str,
+    /// Whether the answer judges it: a theorem of the file's own laws, after the theorems of the laws they call.
+    pub(crate) judged: bool,
 }
 
-/// What a proof trusts beyond Lean's kernel.
+/// How the runner judged one law's theorem.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Verdict {
+pub(crate) enum Judgment {
     Proved,
-    Gap,
-    NativeDecide,
-    Axiom(String),
+    /// Each case and condition of the proof whose goal stayed open.
+    Open(Vec<Open>),
+    /// The proof holds through the theorem of the law of this statement, which is not proven.
+    Through(String),
+    /// Lean rejected the theorem, with its first error: a bug of the checker's translation.
+    Rejected(String),
 }
 
-/// A theorem whose type is a law's statement.
-#[derive(Debug, Clone)]
-pub(crate) struct Proof {
-    pub(crate) line: u32,
-    pub(crate) verdict: Verdict,
-}
-
-/// The answer for one law: its proofs, and the proof step that proves it when it had none and one was asked for.
-#[derive(Debug, Clone)]
-pub(crate) struct Answer {
-    pub(crate) proofs: Vec<Proof>,
-    pub(crate) proposal: Option<String>,
+/// A step of a proof whose goal stayed open: the case or the call of its index, and the goal as the tree
+/// `Sharp/Lean/Proof.lean` writes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Open {
+    pub(crate) condition: bool,
+    pub(crate) index: usize,
+    pub(crate) goal: String,
 }
 
 /// A structure rule the runner judged: the facts that break it, or why it did not run.
@@ -108,18 +106,17 @@ pub(crate) enum Refusal {
     Stopped(Stop),
 }
 
-/// Runs the runner of `library` on the modules Lake built in `package`, which imports `module` and answers each
-/// question, counting only the theorems of `proof_module`, or none when it is empty.
+/// Runs the runner of `library` on the modules Lake built in `package`, which imports `modules`, elaborates each of
+/// `theorems` in order, and judges each judged one.
 pub(crate) fn check(
     library: &Path,
     package: &Package,
-    module: &str,
-    proof_module: &str,
-    questions: &[Question<'_>],
-) -> io::Result<Vec<Answer>> {
-    let output = run(library, package, &encode(module, proof_module, questions)?, library::processor_seconds())?;
+    modules: &[&str],
+    theorems: &[Theorem<'_>],
+) -> io::Result<Vec<Judgment>> {
+    let output = run(library, package, &encode(modules, theorems)?, library::processor_seconds())?;
 
-    decode(&answer(output)?, questions.len()).map_err(io::Error::other)
+    decode(&answer(output)?, theorems.iter().filter(|theorem| theorem.judged).count()).map_err(io::Error::other)
 }
 
 /// Runs the runner of `library` on the modules Lake built in `package`, which imports every rules module, each named
@@ -253,55 +250,61 @@ fn read_header(reader: &mut PayloadReader<'_>, kind: u16) -> Result<(), String> 
     Ok(())
 }
 
-fn encode(module: &str, proof_module: &str, questions: &[Question<'_>]) -> io::Result<Vec<u8>> {
+/// A `Check` request: each module to import, then each theorem's statement, text, and whether the answer judges it.
+fn encode(modules: &[&str], theorems: &[Theorem<'_>]) -> io::Result<Vec<u8>> {
     let mut writer = header(CHECK_REQUEST);
-    writer.write_string(module).map_err(io::Error::other)?;
-    writer.write_string(proof_module).map_err(io::Error::other)?;
-    writer.write_length(questions.len()).map_err(io::Error::other)?;
-    for question in questions {
-        writer.write_string(question.statement).map_err(io::Error::other)?;
-        writer.write_u8(u8::from(question.propose));
-        writer.write_length(question.unfold.len()).map_err(io::Error::other)?;
-        for name in &question.unfold {
-            writer.write_string(name).map_err(io::Error::other)?;
-        }
+    writer.write_length(modules.len()).map_err(io::Error::other)?;
+    for module in modules {
+        writer.write_string(module).map_err(io::Error::other)?;
+    }
+    writer.write_length(theorems.len()).map_err(io::Error::other)?;
+    for theorem in theorems {
+        writer.write_string(theorem.statement).map_err(io::Error::other)?;
+        writer.write_string(theorem.text).map_err(io::Error::other)?;
+        writer.write_u8(u8::from(theorem.judged));
     }
 
     Ok(writer.finish())
 }
 
-fn decode(payload: &[u8], questions: usize) -> Result<Vec<Answer>, String> {
+/// A `Checked` answer: for each of the `judged` theorems, its judgment.
+fn decode(payload: &[u8], judged: usize) -> Result<Vec<Judgment>, String> {
     let mut reader = PayloadReader::new(payload);
     let error = |error: mago_extension::PayloadError| error.to_string();
     read_header(&mut reader, CHECKED_RESPONSE)?;
 
-    let count = reader.read_count("answer count", reader.remaining()).map_err(error)?;
-    if count != questions {
-        return Err(format!("the runner answered {count} laws of {questions}"));
+    let count = reader.read_count("judgment count", reader.remaining()).map_err(error)?;
+    if count != judged {
+        return Err(format!("the runner judged {count} laws of {judged}"));
     }
-    let mut answers = Vec::with_capacity(count);
+    let mut judgments = Vec::with_capacity(count);
     for _ in 0..count {
-        let proof_count = reader.read_count("proof count", reader.remaining()).map_err(error)?;
-        let mut proofs = Vec::with_capacity(proof_count);
-        for _ in 0..proof_count {
-            let line = reader.read_u32("proof line").map_err(error)?;
-            let code = reader.read_u8("proof verdict").map_err(error)?;
-            let axiom = reader.read_string("proof axiom").map_err(error)?;
-            let verdict = match code {
-                0 => Verdict::Proved,
-                1 => Verdict::Gap,
-                2 => Verdict::NativeDecide,
-                3 => Verdict::Axiom(axiom),
-                code => return Err(format!("the runner answered with the unknown verdict {code}")),
-            };
-            proofs.push(Proof { line, verdict });
-        }
-        let proposal = reader.read_string("proposal").map_err(error)?;
-        answers.push(Answer { proofs, proposal: (!proposal.is_empty()).then_some(proposal) });
+        let judgment = match reader.read_u8("judgment").map_err(error)? {
+            0 => Judgment::Proved,
+            1 => {
+                let steps = reader.read_count("open step count", reader.remaining()).map_err(error)?;
+                let mut open = Vec::with_capacity(steps);
+                for _ in 0..steps {
+                    let condition = match reader.read_u8("open step kind").map_err(error)? {
+                        0 => false,
+                        1 => true,
+                        kind => return Err(format!("the runner answered with the unknown open step {kind}")),
+                    };
+                    let index = reader.read_u32("open step index").map_err(error)? as usize;
+                    let goal = reader.read_string("open step goal").map_err(error)?;
+                    open.push(Open { condition, index, goal });
+                }
+                Judgment::Open(open)
+            }
+            2 => Judgment::Through(reader.read_string("unproven law").map_err(error)?),
+            3 => Judgment::Rejected(reader.read_string("Lean error").map_err(error)?),
+            code => return Err(format!("the runner answered with the unknown judgment {code}")),
+        };
+        judgments.push(judgment);
     }
     reader.finish().map_err(error)?;
 
-    Ok(answers)
+    Ok(judgments)
 }
 
 /// A `Rules` request: each module and its namespace, then each file's path and facts, then each rule an earlier runner

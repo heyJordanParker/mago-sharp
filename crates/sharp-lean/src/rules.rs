@@ -17,7 +17,6 @@ use mago_sharp_bridge::unit;
 use crate::facts::Facts;
 use crate::issues;
 use crate::lean::VENDOR;
-use crate::lean::proof_file;
 use crate::package;
 use crate::package::Failed;
 use crate::package::Message;
@@ -45,8 +44,8 @@ pub(crate) enum Role {
     /// A Lean file a `Module.lean` imports, directly or through other Lean files. Lean's error in it is reported on the
     /// files of each namespace whose `Module.lean` imports it.
     Imported,
-    /// A Lean file in a PSR-4 folder that is neither a `Module.lean` nor the proof file of a `.sharp` file, and that no
-    /// Lean file imports. It is built so that a `@[rule]` in it is an error.
+    /// A Lean file in a PSR-4 folder that is no `Module.lean` and that no Lean file imports. It is built so that a
+    /// `@[rule]` in it is an error.
     Unreached,
 }
 
@@ -55,8 +54,7 @@ pub(crate) enum Role {
 pub(crate) enum Unbuilt {
     /// A `Module.lean` in no PSR-4 folder, whose rules have no Lean module name.
     Unnamed(String),
-    /// A Lean file, other than a proof file, in a PSR-4 folder under a root Lean or Mago owns, with the namespace of
-    /// that folder.
+    /// A Lean file in a PSR-4 folder under a root Lean or Mago owns, with the namespace of that folder.
     Owned(String, String),
 }
 
@@ -101,7 +99,7 @@ pub fn rules_files(root: &Path, name: &[u8]) -> io::Result<Vec<Vec<u8>>> {
 /// Every Lean file of the workspace the structure rules step builds, in path order: each of the `rules_files` of the
 /// `.sharp` files of `translations` outside `vendor/`, and each unreached Lean file in a PSR-4 folder of `roots`. Also
 /// returns each Lean file that cannot be built: each `Module.lean` of those `rules_files` that no PSR-4 folder names a
-/// module for, and each Lean file other than a proof file in a PSR-4 folder under a root Lean or Mago owns.
+/// module for, and each Lean file in a PSR-4 folder under a root Lean or Mago owns.
 pub(crate) fn find(
     root: &Path,
     roots: &[Root],
@@ -122,7 +120,7 @@ pub(crate) fn find(
             continue;
         }
         let role = if is_module_lean(&path) { Role::Rules } else { Role::Imported };
-        match package::proof_module(roots, &file) {
+        match package::workspace_module(roots, &file) {
             Some(module) => found.push(lean_file(path, module, role)),
             None if role == Role::Rules => unbuilt.push(Unbuilt::Unnamed(path)),
             None => {}
@@ -143,11 +141,10 @@ pub(crate) fn find(
             continue;
         };
         let path = slashed(relative);
-        let Some(module) = package::proof_module(roots, &file) else {
+        let Some(module) = package::workspace_module(roots, &file) else {
             continue;
         };
         if is_module_lean(&path)
-            || file.with_extension("sharp").is_file()
             || imported.contains(&module)
             || package::owned_root(roots, &file).is_some()
             || found.iter().any(|found| found.path == path)
@@ -165,9 +162,7 @@ pub(crate) fn find(
     owned.sort();
     owned.dedup();
     for file in owned {
-        if let (Ok(relative), Some(folder)) = (file.strip_prefix(root), package::owned_root(roots, &file))
-            && !file.with_extension("sharp").is_file()
-        {
+        if let (Ok(relative), Some(folder)) = (file.strip_prefix(root), package::owned_root(roots, &file)) {
             unbuilt.push(Unbuilt::Owned(slashed(relative), folder.namespace.clone()));
         }
     }
@@ -209,8 +204,6 @@ pub(crate) fn check(
     issues: &mut HashMap<FileId, IssueCollection>,
 ) -> io::Result<()> {
     let failed = package.build(&files.iter().map(|file| file.module.clone()).collect::<Vec<_>>())?;
-    // The law step reports Lean's errors in the `Module.lean` beside a `Module.sharp` on that `Module.sharp`.
-    let proved: HashSet<FileId> = issues.keys().copied().collect();
     let mut built = Vec::new();
     for file in files {
         if !failed.modules.contains(&file.module) {
@@ -220,13 +213,7 @@ pub(crate) fn check(
             continue;
         }
 
-        let judged: Vec<&Translation> = translations
-            .iter()
-            .filter(|translation| {
-                judges(file, translation)
-                    && !(proof_file(&translation.name) == file.path.as_bytes() && proved.contains(&translation.file))
-            })
-            .collect();
+        let judged: Vec<&Translation> = translations.iter().filter(|translation| judges(file, translation)).collect();
         if judged.is_empty() {
             continue;
         }

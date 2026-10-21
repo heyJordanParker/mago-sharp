@@ -76,6 +76,15 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Return<'arena> {
     where
         A: Arena,
     {
+        // Spec section 28: a law's `return;` closes the case it ends, and returns no value. The law's walk refuses a
+        // `return` with one.
+        if block_context.flags.inside_law_body() {
+            block_context.flags.set_has_returned(true);
+            block_context.control_actions.insert(ControlAction::Return);
+
+            return Ok(());
+        }
+
         // A PHP# constructor creates the object, spec section 9.1, so its `return;` takes no value: a named constructor
         // returns the object, and PHP discards a value the main constructor returns. The static constructor, which
         // runs as `#statics`, sets up its class's statics, spec section 6, and no code takes a value from it.

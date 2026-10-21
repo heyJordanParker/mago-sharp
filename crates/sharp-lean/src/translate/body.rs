@@ -166,6 +166,20 @@ impl<'body, 'program> Body<'body, 'program> {
         (self.lines, self.uses, self.unmodeled)
     }
 
+    /// The `do` statements that compute `values` after the local declarations `locals`, and the term of each value.
+    pub(crate) fn terms(
+        mut self,
+        locals: &[&Statement],
+        values: &[&Expression],
+    ) -> (Vec<String>, Vec<String>, Vec<Use>, Vec<Unmodeled>) {
+        for local in locals {
+            self.statement(local);
+        }
+        let terms = values.iter().map(|value| self.value(value)).collect();
+
+        (self.lines, terms, self.uses, self.unmodeled)
+    }
+
     /// The `do` statements of a block body. A body that may end without `return` ends in `pure ()`.
     pub(crate) fn block_body(mut self, block: &Block, void: bool) -> (Vec<String>, Vec<Use>, Vec<Unmodeled>) {
         for statement in &block.statements {

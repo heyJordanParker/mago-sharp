@@ -115,6 +115,7 @@ use crate::utils::template::find_template_uses;
 pub mod constant;
 pub mod enum_case;
 pub mod initialization;
+pub mod law;
 pub mod listener;
 pub mod method;
 pub mod method_signature;

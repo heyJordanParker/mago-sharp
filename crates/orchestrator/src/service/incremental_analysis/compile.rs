@@ -51,7 +51,6 @@ use mago_sharp_bridge::unit::key;
 use mago_sharp_bridge::unit::source_hash;
 use mago_sharp_lean::Reach;
 use mago_sharp_lean::Translation;
-use mago_sharp_lean::proof_file;
 use mago_sharp_lean::translate;
 use mago_syntax::dialect::Dialect;
 use mago_syntax::parser::parse_file_with_settings;
@@ -199,14 +198,13 @@ impl IncrementalAnalysisService {
     /// calls reach, whose effects its functions' types list, along every chain of such returns and calls, with that
     /// file's own inputs.
     ///
-    /// A file that states a law also lists its proof file and every source its laws reach. A file that declares a
+    /// A file that states a law also lists every source its laws reach. A file that declares a
     /// module or a listener also lists the module files its check resolves services through, each folder's
     /// `Module.sharp` whether or not a file is at it, as [`Self::module_inputs`] gives them. A file outside `vendor/`
     /// lists the workspace-relative Lean files `rules` gives for its name, whose structure rules may judge it. `check`
     /// gets the Lean translation of every accepted file and the namespace of every class-like PHP or PHP# code
     /// declares, in the project or `vendor/`, refused or not, and returns the issues of each file whose law is not proved or that breaks a structure rule, which refuse that
-    /// file whatever pragma, ignore entry or baseline the analysis honors. It runs before any input is stamped, so a
-    /// proof file it creates is stamped present.
+    /// file whatever pragma, ignore entry or baseline the analysis honors.
     ///
     /// `stamp` gives the size, modification time and hash of the file at a workspace-relative path, or none when no
     /// file is there. It is called once per input. An input no file is at is stored absent: its size, modification
@@ -349,7 +347,6 @@ impl IncrementalAnalysisService {
             sources.extend(reach.files(file.id));
             sources.insert(file.id);
 
-            let proof = (!reach.files(file.id).is_empty() && is_source(file)).then(|| proof_file(&file.name));
             let lean = if is_source(file) {
                 rules(&file.name).map_err(mago_database::error::DatabaseError::from)?
             } else {
@@ -383,7 +380,6 @@ impl IncrementalAnalysisService {
                 .filter_map(|source| self.database.get(&source).ok())
                 .filter(|source| source.id == file.id || is_source(source))
                 .map(|source| source.name.to_vec())
-                .chain(proof)
                 .chain(lean)
                 .chain(namespace_class_files)
                 .chain(namespace_files)
@@ -1913,19 +1909,20 @@ mod tests {
         ])
     }
 
+    /// Spec section 28: a law is proven from its `.sharp` file alone, so its file's inputs are the sources its laws
+    /// reach, and no Lean file beside it.
     #[test]
-    fn a_law_file_lists_its_proof_file_and_every_source_its_law_reaches_as_inputs() {
+    fn a_law_file_lists_every_source_its_law_reaches_as_inputs() {
         let database = lawful_project();
         let mut service = analyzed(&database);
 
         let compiled = compile(&mut service, empty_stamp);
 
         let money = input_paths(accepted(&compiled, "app/Shared/Money.sharp"));
-        for input in ["app/Shared/Money.lean", "app/Shared/Rounding.sharp", "app/Shared/Digits.sharp"] {
+        for input in ["app/Shared/Rounding.sharp", "app/Shared/Digits.sharp"] {
             assert!(money.iter().any(|path| path == input), "{input} is missing from {money:?}");
         }
-        let order = input_paths(accepted(&compiled, "app/Order.sharp"));
-        assert!(!order.iter().any(|path| path == "app/Order.lean"), "{order:?}");
+        assert!(!money.iter().any(|path| path == "app/Shared/Money.lean"), "{money:?}");
     }
 
     /// Spec section 32: a file whose check resolves services through modules names the module files of every folder
@@ -2014,38 +2011,6 @@ mod tests {
         // A listener names the modules its constructor's services come from.
         names_each("app/Shop/Tick.sharp", &["Module.sharp", "app/Module.sharp", "app/Shop/Module.sharp"]);
         assert_eq!(modules("app/Shop/Admin/Panel.sharp"), [], "a bound class's own check reads no module");
-    }
-
-    #[test]
-    fn the_proof_file_the_lean_step_creates_is_stamped_present() {
-        let database = lawful_project();
-        let mut service = analyzed(&database);
-        let created = std::cell::Cell::new(false);
-
-        let compiled = service
-            .compile(
-                |path| {
-                    let present = path != b"app/Shared/Money.lean" || created.get();
-                    Ok(present.then(|| Input { path: path.to_vec(), size: 1, mtime_ns: 0, hash: [1; 16] }))
-                },
-                module_leans,
-                |translations, _| {
-                    assert_eq!(translations.len(), 4);
-                    created.set(true);
-                    Ok(HashMap::default())
-                },
-                &Library::default(),
-                |issues| issues,
-            )
-            .expect("the compile runs");
-
-        let (_, Compilation::Accepted(bytes)) =
-            compiled.iter().find(|(file_id, _)| *file_id == FileId::new(b"app/Shared/Money.sharp")).unwrap()
-        else {
-            panic!("app/Shared/Money.sharp is refused: {compiled:?}");
-        };
-        let proof = inputs(bytes).into_iter().find(|input| input.path == b"app/Shared/Money.lean").unwrap();
-        assert_eq!(proof.size, 1, "the proof file is stamped absent");
     }
 
     #[test]

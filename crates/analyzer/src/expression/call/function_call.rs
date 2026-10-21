@@ -50,6 +50,7 @@ use crate::plugin::hook::NamedCall;
 use crate::resolver::class_name::report_keyword_in_another_case;
 use crate::resolver::extension::is_imported_by_default;
 use crate::resolver::property::check_redundant_nullsafe;
+use crate::statement::class_like::law::uncallable_law;
 use crate::utils::expression::get_bare_name_variable_id;
 use crate::utils::names::display_atomic;
 use crate::utils::names::display_class_like_name;
@@ -1338,13 +1339,17 @@ where
 }
 
 /// Spec section 4 writes every member as `this.m()` or `Class.m()`, so a bare call is the global function's. When the
-/// enclosing class declares a method of that name, returns the message that names the member call to write, for the
+/// enclosing class declares a method of that name, returns the message that names the member call to write, and when it
+/// states a law of that name, the refusal of the law's call outside a law's call statement, spec section 28, for the
 /// call that finds no function.
 fn bare_member_call<A>(context: &Context<'_, '_, A>, block_context: &BlockContext<'_>, name: &[u8]) -> Option<String>
 where
     A: Arena,
 {
     let class = block_context.scope.get_class_like()?;
+    if let Some(law) = class.laws.get(&ascii_lowercase_word(name)) {
+        return Some(uncallable_law(context, class, law, law.span).message);
+    }
     let method = context.codebase.get_method(class.name.as_bytes(), name)?;
 
     Some(if block_context.scope.is_static() {

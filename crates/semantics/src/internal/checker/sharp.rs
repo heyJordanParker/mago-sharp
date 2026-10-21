@@ -81,6 +81,7 @@ use mago_syntax::cst::Interface;
 use mago_syntax::cst::IntersectionHint;
 use mago_syntax::cst::Keyword;
 use mago_syntax::cst::Label;
+use mago_syntax::cst::LawProof;
 use mago_syntax::cst::Leave;
 use mago_syntax::cst::ListPatternElement;
 use mago_syntax::cst::Literal;
@@ -1099,8 +1100,19 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             Place::Extension,
         ) => enter(node, Class, context),
         (Node::ClassLikeMember(_), Place::Extension) => None,
-        // A law's parameters and body are checked as a method's. `check_members` refuses a default and a variadic one.
-        (Node::Law(_), Class | Enum | Place::Module) => Some(Method),
+        // A law's parameters are checked as a method's, and its `when` condition, claim and body as a method body.
+        // `check_members` refuses a default and a variadic parameter.
+        (Node::Law(law), Class | Enum | Place::Module) => {
+            enter_tree(Node::FunctionLikeParameterList(&law.parameter_list), Method, context);
+            for expression in law.condition.iter().map(|condition| condition.expression).chain([law.claim]) {
+                enter_tree(Node::Expression(expression), Body, context);
+            }
+            if let LawProof::Body(body) = &law.proof {
+                enter_tree(Node::Block(body), Method, context);
+            }
+
+            None
+        }
         (Node::ClassLikeMember(ClassLikeMember::Operator(_) | ClassLikeMember::NamedConstructor(_)), Class) => {
             Some(Class)
         }

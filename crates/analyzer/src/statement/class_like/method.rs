@@ -28,7 +28,6 @@ use mago_syntax::cst::ConstructorInitializer;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::Extension;
 use mago_syntax::cst::FunctionLikeParameter;
-use mago_syntax::cst::Law;
 use mago_syntax::cst::LocalIdentifier;
 use mago_syntax::cst::Method;
 use mago_syntax::cst::MethodBody;
@@ -720,73 +719,4 @@ where
         ))
         .with_annotation(Annotation::primary(operator).with_message("Declared here.")),
     );
-}
-
-/// Spec section 28: a law's body is analyzed as a static method's that returns `bool`, and records its effects, so the
-/// law rule refuses it when it is impure. A law is never one of the class's methods, so no method rule reaches it.
-impl<'ast, 'arena> Analyzable<'ast, 'arena> for Law<'arena> {
-    fn analyze<'ctx, A>(
-        &'ast self,
-        context: &mut Context<'ctx, 'arena, A>,
-        block_context: &mut BlockContext<'ctx>,
-        artifacts: &mut AnalysisArtifacts,
-    ) -> Result<(), AnalysisError>
-    where
-        A: Arena,
-    {
-        let Some(class_like_metadata) = block_context.scope.get_class_like() else {
-            tracing::error!(
-                "Attempted to analyze law `{}` without class-like context.",
-                mago_bytes::BytesDisplay(self.name.value)
-            );
-
-            return Ok(());
-        };
-
-        let lowercase_law_name = ascii_lowercase_word(self.name.value);
-        let Some(law_metadata) = class_like_metadata.laws.get(&lowercase_law_name) else {
-            tracing::error!(
-                "Failed to find law metadata for `{}` in class `{}`.",
-                mago_bytes::BytesDisplay(self.name.value),
-                class_like_metadata.original_name
-            );
-
-            return Ok(());
-        };
-
-        // Skip a second law of one name; semantics reports it.
-        if law_metadata.span != self.span() {
-            return Ok(());
-        }
-
-        let mut scope = ScopeContext::new(ReferenceOrigin::Symbol((class_like_metadata.name, lowercase_law_name)));
-        scope.set_class_like(Some(class_like_metadata));
-        scope.set_function_like(Some(law_metadata));
-        scope.set_static(true);
-
-        let body = FunctionLikeBody::Expression(self.body.expression);
-        let mut law_block_context = BlockContext::new(scope, context.settings.register_super_globals);
-        analyze_function_like(
-            context,
-            artifacts,
-            &mut law_block_context,
-            law_metadata,
-            &self.parameter_list,
-            None,
-            body,
-            None,
-        )?;
-
-        effects::summary::record(
-            context,
-            artifacts,
-            Body::Method(class_like_metadata.name, lowercase_law_name),
-            word(self.name.value),
-            self.parameter_list.parameters.iter().map(|parameter| parameter.variable.span).collect(),
-            None,
-            body,
-        );
-
-        Ok(())
-    }
 }
