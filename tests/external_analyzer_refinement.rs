@@ -321,8 +321,7 @@ fn compiled_consumer(
                 inputs.push(String::from_utf8_lossy(path).into_owned());
                 Ok(None)
             },
-            |_| Ok(Vec::new()),
-            |_, _| Ok(Default::default()),
+            |_| Ok(Default::default()),
             &Library::default(),
             |issues| issues,
         )

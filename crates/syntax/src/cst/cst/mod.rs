@@ -206,6 +206,7 @@ pub use crate::cst::cst::module::Binding;
 pub use crate::cst::cst::module::BindingClasses;
 pub use crate::cst::cst::module::BindingTarget;
 pub use crate::cst::cst::module::BindingValue;
+pub use crate::cst::cst::module::Imports;
 pub use crate::cst::cst::module::Lifetime;
 pub use crate::cst::cst::module::Module;
 pub use crate::cst::cst::module::ModuleMember;

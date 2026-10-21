@@ -1,8 +1,8 @@
 //! The `.sharpc` compiled file the engine runs.
 //!
-//! A file is a header, then the inputs, the tree, the texts and the facts, each section starting where the one before
-//! it ends. `ext/sharp` reads a file by casting its bytes, so every field and section is aligned for its type, padding
-//! is zero, and the file is little-endian.
+//! A file is a header, then the inputs, the tree and the texts, each section starting where the one before it ends.
+//! `ext/sharp` reads a file by casting its bytes, so every field and section is aligned for its type, padding is zero,
+//! and the file is little-endian.
 
 #![allow(clippy::big_endian_bytes, clippy::little_endian_bytes)]
 
@@ -60,7 +60,6 @@ pub struct sharp_unit_header {
     /// A `SHARP_AST_STMT_LIST`.
     pub root: u32,
     pub texts_size: u32,
-    pub facts_size: u32,
     /// The native fingerprint of the standard library the file was compiled against, which the engine compares with
     /// its own `SHARP_NATIVE`. All zero when the project holds no standard library.
     pub native_fingerprint: [u8; 16],
@@ -92,9 +91,8 @@ const _: () = {
     assert!(offset_of!(sharp_unit_header, children_count) == 88, "children_count is at 88");
     assert!(offset_of!(sharp_unit_header, root) == 92, "root is at 92");
     assert!(offset_of!(sharp_unit_header, texts_size) == 96, "texts_size is at 96");
-    assert!(offset_of!(sharp_unit_header, facts_size) == 100, "facts_size is at 100");
-    assert!(offset_of!(sharp_unit_header, native_fingerprint) == 104, "native_fingerprint is at 104");
-    assert!(offset_of!(sharp_unit_header, library_version) == 120, "library_version is at 120");
+    assert!(offset_of!(sharp_unit_header, native_fingerprint) == 100, "native_fingerprint is at 100");
+    assert!(offset_of!(sharp_unit_header, library_version) == 116, "library_version is at 116");
     assert!(size_of::<sharp_input>() == 40, "an input is 40 bytes");
     assert!(offset_of!(sharp_input, size) == 8, "an input's size is at 8");
     assert!(offset_of!(sharp_input, mtime_ns) == 16, "an input's mtime_ns is at 16");
@@ -218,7 +216,7 @@ fn key_of(compiler: &[&[u8]], source_hash: [u8; 16], reads: &Reads) -> [u8; 16] 
 ///
 /// Panics when a section holds more than a 32-bit size can say.
 #[must_use]
-pub fn encode(unit: &Unit, source: &[u8], key: [u8; 16], inputs: &[Input], facts: &[u8], library: &Library) -> Vec<u8> {
+pub fn encode(unit: &Unit, source: &[u8], key: [u8; 16], inputs: &[Input], library: &Library) -> Vec<u8> {
     let mut texts = unit.texts.clone();
     let library_version = store_text(&mut texts, &library.version);
     let inputs: Vec<sharp_input> = inputs
@@ -243,7 +241,6 @@ pub fn encode(unit: &Unit, source: &[u8], key: [u8; 16], inputs: &[Input], facts
         children_count: size("children", unit.children.len()),
         root: unit.root,
         texts_size: size("texts", texts.len()),
-        facts_size: size("facts", facts.len()),
         native_fingerprint: library.native_fingerprint,
         library_version,
     };
@@ -260,7 +257,6 @@ pub fn encode(unit: &Unit, source: &[u8], key: [u8; 16], inputs: &[Input], facts
         bytes.extend_from_slice(&child.to_le_bytes());
     }
     bytes.extend_from_slice(&texts);
-    bytes.extend_from_slice(facts);
 
     bytes
 }
@@ -304,7 +300,6 @@ pub fn header(bytes: &[u8]) -> Result<Header, FormatError> {
         children_count: word(offset_of!(sharp_unit_header, children_count)),
         root: word(offset_of!(sharp_unit_header, root)),
         texts_size: word(offset_of!(sharp_unit_header, texts_size)),
-        facts_size: word(offset_of!(sharp_unit_header, facts_size)),
         native_fingerprint: hash(offset_of!(sharp_unit_header, native_fingerprint)),
         library_version: sharp_str {
             offset: word(offset_of!(sharp_unit_header, library_version) + offset_of!(sharp_str, offset)),
@@ -495,7 +490,6 @@ fn length(header: &sharp_unit_header) -> u64 {
         + size_of::<sharp_node>() as u64 * u64::from(header.node_count)
         + size_of::<u32>() as u64 * u64::from(header.children_count)
         + u64::from(header.texts_size)
-        + u64::from(header.facts_size)
 }
 
 /// A section's size, which the header stores in 32 bits.
@@ -516,7 +510,6 @@ fn header_bytes(header: &sharp_unit_header) -> [u8; size_of::<sharp_unit_header>
     put(&mut bytes, offset_of!(sharp_unit_header, children_count), &header.children_count.to_le_bytes());
     put(&mut bytes, offset_of!(sharp_unit_header, root), &header.root.to_le_bytes());
     put(&mut bytes, offset_of!(sharp_unit_header, texts_size), &header.texts_size.to_le_bytes());
-    put(&mut bytes, offset_of!(sharp_unit_header, facts_size), &header.facts_size.to_le_bytes());
     put(&mut bytes, offset_of!(sharp_unit_header, native_fingerprint), &header.native_fingerprint);
     put_text(&mut bytes, offset_of!(sharp_unit_header, library_version), header.library_version);
 

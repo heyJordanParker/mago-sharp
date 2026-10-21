@@ -18798,7 +18798,7 @@ fn a_file_lowers_to_the_same_bytes_from_any_workspace_root_and_names_no_path() {
             "no text names the file"
         );
 
-        encode(&unit, &file.contents, [0; 16], &[], &[], &Library::default())
+        encode(&unit, &file.contents, [0; 16], &[], &Library::default())
     });
 
     assert_eq!(encoded[0], encoded[1]);

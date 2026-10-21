@@ -33,11 +33,8 @@ use sha2::Sha256;
 /// The library's Lean version, which `.sharp/.lean/lean-toolchain` pins too.
 pub(crate) const TOOLCHAIN: &str = include_str!("../lean/lean-toolchain");
 
-/// The Lean namespace that holds every module of the library.
-pub(crate) const NAMESPACE: &str = "Sharp";
-
 /// The library's Lake package, as `crates/sharp-lean/lean/` holds it.
-const PACKAGE: [(&str, &str); 9] = [
+const PACKAGE: [(&str, &str); 8] = [
     ("lakefile.toml", include_str!("../lean/lakefile.toml")),
     ("lean-toolchain", TOOLCHAIN),
     ("Sharp/Lean/Int.lean", include_str!("../lean/Sharp/Lean/Int.lean")),
@@ -45,7 +42,6 @@ const PACKAGE: [(&str, &str); 9] = [
     ("Sharp/Lean/Law.lean", include_str!("../lean/Sharp/Lean/Law.lean")),
     ("Sharp/Lean/Proof.lean", include_str!("../lean/Sharp/Lean/Proof.lean")),
     ("Sharp/Lean/String.lean", include_str!("../lean/Sharp/Lean/String.lean")),
-    ("Sharp/Lean/Facts.lean", include_str!("../lean/Sharp/Lean/Facts.lean")),
     ("Sharp/Lean/Runner.lean", include_str!("../lean/Sharp/Lean/Runner.lean")),
 ];
 
@@ -118,11 +114,6 @@ impl Lake {
     /// A command that runs this `lake`. On Unix it may use `processor_seconds()`, as may each Lean process it starts,
     /// which inherits the limit.
     pub(crate) fn command(&self) -> Command {
-        self.command_within(processor_seconds())
-    }
-
-    /// A command that runs this `lake`, which on Unix may use `seconds`, kept under the hard limit Mago inherits.
-    pub(crate) fn command_within(&self, seconds: u64) -> Command {
         let mut command = Command::new(&self.program);
         if let Some(home) = &self.home {
             command.env("ELAN_HOME", home);
@@ -131,11 +122,10 @@ impl Lake {
         {
             use std::os::unix::process::CommandExt;
 
+            let seconds = processor_seconds();
             // SAFETY: `getrlimit` and `setrlimit` are async-signal-safe, and the closure allocates nothing.
             unsafe { command.pre_exec(move || limit_processor_time(seconds)) };
         }
-        #[cfg(not(unix))]
-        let _ = seconds;
 
         command
     }
@@ -659,10 +649,8 @@ mod tests {
         let lake = Lake { program: PathBuf::from("/bin/sh"), home: None };
 
         let output = lake.command().args(["-c", "ulimit -t; ulimit -c"]).output()?;
-        let within = lake.command_within(360).args(["-c", "ulimit -t"]).output()?;
 
         assert_eq!(String::from_utf8_lossy(&output.stdout), "120\n0\n");
-        assert_eq!(String::from_utf8_lossy(&within.stdout), "360\n");
 
         Ok(())
     }

@@ -1,5 +1,5 @@
-//! The Lean step of `mago compile`: proves each law from its `.sharp` file, checks each structure rule, and refuses each
-//! `.sharp` file whose law is not proven or that breaks a rule.
+//! The Lean step of `mago compile`: proves each law from its `.sharp` file, and refuses each `.sharp` file whose law is
+//! not proven.
 
 use std::fs;
 use std::io;
@@ -22,18 +22,12 @@ use crate::library;
 use crate::package;
 use crate::package::Package;
 use crate::package::Program;
-use crate::package::Root;
 use crate::package::Toolchain;
-use crate::rules;
-use crate::rules::Unbuilt;
 use crate::runner;
 use crate::runner::Judgment;
 use crate::runner::Theorem;
 use crate::translate::Law;
 use crate::translate::Translation;
-
-/// The folder Composer installs packages into.
-pub(crate) const VENDOR: &[u8] = b"vendor/";
 
 /// The module of the steps every law's proof is written in.
 const PROOF_STEPS: &str = "Sharp.Lean.Proof";
@@ -109,51 +103,22 @@ impl Lean {
         Lean { root: root.to_path_buf() }
     }
 
-    /// Proves the laws of `translations`, which hold every accepted `.sharp` file, checks the structure rules of every
-    /// `Module.lean` over their facts, and returns the issues that refuse each file whose law is not proved or that
-    /// breaks a rule. `namespaces` holds the namespace of every class-like the codebase declares, accepted or not,
-    /// which a rule names.
+    /// Proves the laws of `translations`, which hold every accepted `.sharp` file, and returns the issues that refuse
+    /// each file whose law is not proven.
     ///
     /// A file whose `.sharpc` is current is proved: the `.sharpc` lists every source its laws reach as inputs, and the
-    /// build ID it records covers the runtime library. Every rule runs over every file's facts whenever one `.sharpc`
-    /// is not current, the namespaces changed, or a workspace Lean file the check builds changed, joined or left, so a
-    /// compile checks every rule exactly. Every Lean file of a PSR-4 folder that no Lean file imports is built then too,
-    /// so a `@[rule]` outside a `Module.lean` is an error, though no `.sharpc` lists that file. A `Module.lean` in no
-    /// PSR-4 folder, and a Lean file in a PSR-4 folder under a root Lean or Mago owns, each refuse every file under
-    /// their folder. No Lean process starts when no file states a law and no workspace Lean file is left to build, nor
-    /// when each `.sharpc` is current and neither the namespaces nor those Lean files changed. When none of those
-    /// remains, `.sharp/.lean/` is deleted.
+    /// build ID it records covers the runtime library. No Lean process starts when no file states a law, nor when the
+    /// `.sharpc` of each file that states one is current. When no file states a law, `.sharp/.lean/` is deleted.
     ///
     /// # Errors
     ///
     /// Returns an error when a file cannot be read or written, when the runtime library does not build, or when the
     /// runner fails.
-    pub fn check(
-        &self,
-        translations: Vec<Translation>,
-        namespaces: &[String],
-    ) -> io::Result<HashMap<FileId, IssueCollection>> {
+    pub fn check(&self, translations: Vec<Translation>) -> io::Result<HashMap<FileId, IssueCollection>> {
         let mut package = Package::new(&self.root);
         let mut issues: HashMap<FileId, IssueCollection> = HashMap::default();
 
-        let roots = self.roots(translations.iter())?;
-        let (files, unbuilt) = rules::find(&self.root, &roots, &translations)?;
-        for unbuilt in &unbuilt {
-            let (Unbuilt::Unnamed(path) | Unbuilt::Owned(path, _)) = unbuilt;
-            let folder = &path.as_bytes()[..path.rfind('/').map_or(0, |end| end + 1)];
-            for translation in translations
-                .iter()
-                .filter(|translation| translation.name.starts_with(folder) && !translation.name.starts_with(VENDOR))
-            {
-                let anchor = translation.facts.anchor;
-                let issue = match unbuilt {
-                    Unbuilt::Unnamed(path) => issues::no_rules_module(anchor, path),
-                    Unbuilt::Owned(path, namespace) => issues::owned_lean(anchor, namespace, path),
-                };
-                report(&mut issues, translation, issue);
-            }
-        }
-        if translations.iter().all(|translation| translation.laws.is_empty()) && files.is_empty() {
+        if translations.iter().all(|translation| translation.laws.is_empty()) {
             match fs::remove_dir_all(&package.directory) {
                 Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
                 _ => return Ok(issues),
@@ -166,14 +131,7 @@ impl Lean {
                 stale.push(translation);
             }
         }
-        let declared = package::namespaces(namespaces);
-        let sources = rules::sources(&self.root, &files)?;
-        let check_rules = !files.is_empty()
-            && (!stale.is_empty()
-                || !package.holds(&declared)
-                || !package.checked(&sources)
-                || self.any_stale(&translations)?);
-        if stale.is_empty() && !check_rules {
+        if stale.is_empty() {
             return Ok(issues);
         }
 
@@ -209,21 +167,15 @@ impl Lean {
                 work.push(translation);
             }
         }
-        if work.is_empty() && !check_rules {
+        if work.is_empty() {
             return Ok(issues);
         }
 
         let toolchain = package.toolchain()?;
         if !matches!(toolchain, Toolchain::Ready) {
-            let mut waiting: Vec<(&Translation, mago_span::Span)> =
-                work.iter().filter_map(|translation| Some((*translation, translation.laws.first()?.span))).collect();
-            for translation in &translations {
-                let judged = check_rules && files.iter().any(|file| rules::judges(file, translation));
-                if judged && !waiting.iter().any(|(waiting, _)| waiting.file == translation.file) {
-                    waiting.push((translation, translation.facts.anchor));
-                }
-            }
-            for (translation, span) in waiting {
+            for (translation, span) in
+                work.iter().filter_map(|translation| Some((*translation, translation.laws.first()?.span)))
+            {
                 let issue = match &toolchain {
                     Toolchain::Failed(message) => issues::elan_failed(span, message),
                     Toolchain::Missing(failure) => issues::lake_not_found(span, failure),
@@ -235,48 +187,27 @@ impl Lean {
         }
 
         let library = library::build(&package.lake)?;
-        let mut modules = program.modules(
-            &work.iter().map(|translation| translation.file).collect::<Vec<_>>(),
-            &files.iter().map(|file| file.module.as_str()).collect::<Vec<_>>(),
-        );
-        modules.push(declared);
-        package.write(&library, &roots, &modules)?;
-        if !work.is_empty() {
-            let receivers: HashMap<String, bool> =
-                translations.iter().flat_map(|translation| translation.receivers.iter().cloned()).collect();
-            let declared: HashSet<String> = translations
-                .iter()
-                .flat_map(|translation| &translation.declarations)
-                .map(|declaration| declaration.key.clone())
-                .collect();
-            Proofs {
-                package: &package,
-                library: &library,
-                program: &program,
-                laws: &laws,
-                modules: &modules,
-                receivers,
-                declared,
-            }
-            .prove(work, &mut issues)?;
+        let modules = program.modules(&work.iter().map(|translation| translation.file).collect::<Vec<_>>());
+        package.write(&library, &modules)?;
+        let receivers: HashMap<String, bool> =
+            translations.iter().flat_map(|translation| translation.receivers.iter().cloned()).collect();
+        let declared: HashSet<String> = translations
+            .iter()
+            .flat_map(|translation| &translation.declarations)
+            .map(|declaration| declaration.key.clone())
+            .collect();
+        Proofs {
+            package: &package,
+            library: &library,
+            program: &program,
+            laws: &laws,
+            modules: &modules,
+            receivers,
+            declared,
         }
-        if check_rules {
-            rules::check(&self.root, &roots, &library, &package, &files, &translations, &mut issues)?;
-            package.record_checked(&sources)?;
-        }
+        .prove(work, &mut issues)?;
 
         Ok(issues)
-    }
-
-    /// Whether the `.sharpc` of one of `translations` is not current.
-    fn any_stale(&self, translations: &[Translation]) -> io::Result<bool> {
-        for translation in translations {
-            if self.is_stale(translation)? {
-                return Ok(true);
-            }
-        }
-
-        Ok(false)
     }
 
     /// Whether `translation`'s `.sharpc` is missing, or one of its inputs changed since it was written.
@@ -291,36 +222,6 @@ impl Lean {
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(true),
             Err(error) => Err(error),
         }
-    }
-
-    /// The PSR-4 folders of the workspace's `composer.json` and of each package in `vendor/` one of `translations`
-    /// belongs to.
-    fn roots<'translation>(
-        &self,
-        translations: impl Iterator<Item = &'translation Translation>,
-    ) -> io::Result<Vec<Root>> {
-        let mut roots = package::roots(&self.root)?;
-        let mut packages: Vec<PathBuf> = Vec::new();
-        for translation in translations {
-            let Some(rest) = translation.name.strip_prefix(VENDOR) else {
-                continue;
-            };
-            let mut parts = rest.split(|byte| *byte == b'/');
-            if let (Some(vendor), Some(name), Some(_)) = (parts.next(), parts.next(), parts.next()) {
-                let package = self
-                    .path(VENDOR)
-                    .join(String::from_utf8_lossy(vendor).as_ref())
-                    .join(String::from_utf8_lossy(name).as_ref());
-                if !packages.contains(&package) {
-                    packages.push(package);
-                }
-            }
-        }
-        for package in packages {
-            roots.extend(package::roots(&package)?);
-        }
-
-        Ok(roots)
     }
 
     /// The workspace-relative `name` as a path.
@@ -364,11 +265,10 @@ impl Proofs<'_> {
         hosts.dedup();
         let failed = self.package.build(&hosts)?;
         for host in &failed.modules {
-            let errors = self.package.errors(host, &failed)?;
-            let line = errors.first().map_or(0, |error| error.pos.line);
+            let refusal = self.package.refusal(host, &failed)?;
             for translation in work.iter().filter(|translation| self.host_of(translation) == *host) {
                 for law in &translation.laws {
-                    report(issues, translation, issues::generated_module_refused(law, host, line));
+                    report(issues, translation, issues::generated_module_refused(law, host, &refusal));
                 }
             }
         }

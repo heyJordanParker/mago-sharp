@@ -16,14 +16,16 @@ use crate::cst::sequence::TokenSeparatedSequence;
 
 /// Represents a PHP# module, spec section 32: how the container builds the services of its folder's namespace.
 ///
-/// It has no name, because the folder names it. It binds services, and it states the laws that span its namespace's
-/// classes, spec section 28. An environment module or a test module names the module it overrides after `:`.
+/// It has no name, because the folder names it. It lists the namespaces its namespace imports from, it binds services,
+/// and it states the laws that span its namespace's classes, spec section 28. An environment module or a test module
+/// names the module it overrides after `:`.
 ///
 /// Example:
 ///
 /// ```csharp
 /// module
 /// {
+///     imports App.Tenant.Community, App.Shared.Schema;
 ///     singleton Mailer = SmtpMailer;
 ///     law receiptMatchesRefunds(int paid, int refunded) => Receipts.refundable(paid, refunded) == Refunds.remaining(paid, refunded);
 /// }
@@ -51,8 +53,28 @@ pub struct ModuleParent<'arena> {
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[cfg_attr(feature = "serde", serde(tag = "type", content = "value"))]
 pub enum ModuleMember<'arena> {
+    Imports(Imports<'arena>),
     Law(&'arena Law<'arena>),
     Binding(&'arena Binding<'arena>),
+}
+
+/// A module's `imports` line, spec section 32: the namespaces its code imports from.
+///
+/// The list covers the code of the module's namespace and of every namespace below it, which also imports from its own
+/// namespace and from `Sharp`. Listing a namespace lists every namespace below it.
+///
+/// Example:
+///
+/// ```csharp
+/// imports App.Tenant.Community, App.Shared.Schema, Illuminate.Support;
+/// ```
+#[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub struct Imports<'arena> {
+    /// `imports`, which stays a name everywhere else.
+    pub imports: Keyword<'arena>,
+    pub namespaces: TokenSeparatedSequence<'arena, Identifier<'arena>>,
+    pub terminator: Terminator<'arena>,
 }
 
 /// A service binding, spec section 32: its lifetime, the service, the services it needs as parameters, the one class
@@ -164,9 +186,16 @@ impl HasSpan for ModuleParent<'_> {
 impl HasSpan for ModuleMember<'_> {
     fn span(&self) -> Span {
         match self {
+            ModuleMember::Imports(imports) => imports.span(),
             ModuleMember::Law(law) => law.span(),
             ModuleMember::Binding(binding) => binding.span(),
         }
+    }
+}
+
+impl HasSpan for Imports<'_> {
+    fn span(&self) -> Span {
+        Span::between(self.imports.span(), self.terminator.span())
     }
 }
 

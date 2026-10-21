@@ -49,6 +49,7 @@ use crate::resolver::property::resolve_method_value;
 use crate::resolver::property::static_member_type_arguments;
 use crate::resolver::static_property::StaticProperty;
 use crate::resolver::static_property::StaticPropertyName;
+use crate::statement::module::check_listed_import;
 use crate::utils::expression::get_block_expression_id;
 use crate::utils::expression::get_non_nullsafe_expression_id;
 use crate::utils::expression::get_nullsafe_base_expressions;
@@ -367,6 +368,11 @@ where
             && index == 0
             && (context.codebase.function_exists(&member) || context.codebase.constant_exists(&member))
         {
+            // A full name counts as an import, spec section 32.
+            if !check_listed_import(context, &member, root.span().join(name.span)) {
+                return true;
+            }
+
             let namespace = String::from_utf8_lossy(&full_name).replace('\\', ".");
             let written = display_sharp_member(&full_name, BytesDisplay(name.value));
             context.collector.report_with_code(

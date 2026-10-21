@@ -4947,6 +4947,35 @@ fn a_module_binding_is_its_lifetime_service_parameters_target_and_value() {
     }
 }
 
+/// Spec section 32: a module's `imports` line lists the full name of each namespace its namespace imports from. A
+/// binding and a law after it still parse, and `imports` stays a name everywhere else, as a binding's service.
+#[test]
+fn a_module_lists_the_namespaces_it_imports() {
+    const CODE: &str = "namespace App.Tenant.Store;\n\nmodule\n{\n    imports App.Tenant.Community, App.Shared.Schema, Illuminate.Support;\n    singleton imports = Imports;\n    law same(int a) => a == a;\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "app/Tenant/Store/Module.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let Some(Statement::Namespace(namespace)) = program.statements.first() else {
+        panic!("expected a namespace, got {:#?}", program.statements);
+    };
+    let [Statement::Module(module)] = namespace.statements().as_slice() else {
+        panic!("expected one module, got {:#?}", namespace.statements());
+    };
+    let [ModuleMember::Imports(imports), ModuleMember::Binding(binding), ModuleMember::Law(law)] =
+        module.members.as_slice()
+    else {
+        panic!("expected an imports line, a binding and a law, got {:#?}", module.members);
+    };
+    assert_eq!(source(CODE, imports), "imports App.Tenant.Community, App.Shared.Schema, Illuminate.Support;");
+    assert_eq!(
+        imports.namespaces.iter().map(|namespace| source(CODE, namespace)).collect::<Vec<_>>(),
+        ["App.Tenant.Community", "App.Shared.Schema", "Illuminate.Support"]
+    );
+    assert_eq!(source(CODE, &binding.service), "imports");
+    assert_eq!(law.name.value, b"same");
+}
+
 /// Spec section 32: an environment or test module names the module it overrides after `:`, as a `namespace` line
 /// names its namespace.
 #[test]
@@ -4993,7 +5022,7 @@ fn a_module_member_other_than_a_binding_or_a_law_is_one_error_and_the_module_par
         };
         assert_eq!(
             error.to_string(),
-            "A module holds only service bindings and laws: give each binding one expression.",
+            "A module holds only its imports, service bindings and laws: give each binding one expression.",
             "{member}"
         );
         assert_eq!(source(code, error), member, "{member}");

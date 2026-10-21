@@ -818,7 +818,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let metadata = self.types.module(module.span());
         let written = module.members.iter().filter_map(|member| match member {
             ModuleMember::Binding(binding) => Some(*binding),
-            ModuleMember::Law(_) => None,
+            ModuleMember::Imports(_) | ModuleMember::Law(_) => None,
         });
         for (binding, binding_metadata) in written.zip(&metadata.bindings) {
             let line = self.line(binding);

@@ -75,6 +75,7 @@ use mago_syntax::cst::HookedProperty;
 use mago_syntax::cst::Identifier;
 use mago_syntax::cst::If;
 use mago_syntax::cst::IfBody;
+use mago_syntax::cst::Imports;
 use mago_syntax::cst::Inheritance;
 use mago_syntax::cst::Instantiation;
 use mago_syntax::cst::Interface;
@@ -798,6 +799,8 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         (Node::ModuleMember(_), Place::Module) => Some(Place::Module),
         // The header names the module it overrides, which `check_module_file_name` checked.
         (Node::ModuleParent(_), Place::Module) => None,
+        // An `imports` line lists namespaces by their full names, which `check_module` and the analyzer check.
+        (Node::Imports(_), Place::Module) => None,
         // A binding's parameters are checked as a method's, and its expression as a method's expression body. The
         // analyzer checks the expression as the lambda it runs as.
         (Node::Binding(_), Place::Module) => Some(Method),
@@ -6028,7 +6031,9 @@ fn supported(place: Place) -> &'static str {
         }
         Place::Event => unreachable!("`enter` places every part of an event, and its parameters are parameters"),
         Place::Struct => unreachable!("the walk enters every part of a struct"),
-        Place::Module => unreachable!("a module holds only its header, bindings and laws, and `enter` takes each one"),
+        Place::Module => {
+            unreachable!("a module holds only its header, its imports, bindings and laws, and `enter` takes each one")
+        }
         Place::Extension => unreachable!("`enter` places an extension's keyword, receiver and every member of it"),
         Place::FieldOrProperty => {
             "A PHP# field is `private` or `protected`, and a property has the accessors `get` and an optional `set` or `init`, each `;`, `=> expr;` or a block. Both may be `static`, and have a type of `int`, `float`, `bool`, `string`, `Any`, a class or a type parameter, a generic type as in `List<T>` or `PaginatedList<Order>`, `Function<R(P)>`, or a tuple as in `[Money, int]`, nullable as in `int?` or not, or a union of them as in `int|string`, or classes and interfaces joined with `&` as in `Shippable & Billable`, a name, and an optional initial value."
@@ -6441,13 +6446,20 @@ fn check_one_type(types: &[&LocalIdentifier], context: &mut Context<'_, '_, '_>)
     }
 }
 
-/// Checks a module's laws, spec section 28: each law's parameters as a class law's, and no two laws of one name,
-/// compared ignoring case, as a class's methods and laws are. Only a folder's `Module.sharp` states laws, because an
-/// environment or test module only overrides services, spec section 32.
+/// Checks a module's `imports` line and its laws. Spec section 32: a module lists its imports on one line, and lists
+/// no namespace under `Sharp`, which every namespace imports. Spec section 28: each law's parameters are checked as a
+/// class law's, and no two laws have one name, compared ignoring case, as a class's methods and laws are. Only a
+/// folder's `Module.sharp` lists imports and states laws, because an environment or test module only overrides
+/// services.
 #[inline]
 pub fn check_module(module: &Module, context: &mut Context<'_, '_, '_>) {
+    let mut listed: Option<&Imports> = None;
     let mut stated: Vec<&LocalIdentifier> = Vec::new();
     for member in &module.members {
+        if let ModuleMember::Imports(imports) = member {
+            check_imports(imports, module, listed, context);
+            listed = listed.or(Some(imports));
+        }
         let ModuleMember::Law(law) = member else {
             continue;
         };
@@ -6469,6 +6481,38 @@ pub fn check_module(module: &Module, context: &mut Context<'_, '_, '_>) {
             );
         } else {
             stated.push(&law.name);
+        }
+    }
+}
+
+/// Checks the `imports` line `imports` of `module`, spec section 32: only a folder's `Module.sharp` lists imports, a
+/// module lists them on one line, its first, `listed`, and it lists no namespace under `Sharp`.
+fn check_imports(imports: &Imports, module: &Module, listed: Option<&Imports>, context: &mut Context<'_, '_, '_>) {
+    if module.parent.is_some() {
+        context.report(
+            Issue::error("A module that overrides another lists no imports: list them in its folder's Module.sharp.")
+                .with_annotation(Annotation::primary(imports.span()).with_message("Listed here.")),
+        );
+
+        return;
+    }
+    if let Some(first) = listed {
+        context.report(
+            Issue::error("The module already lists its imports: list every namespace on one `imports` line.")
+                .with_annotation(Annotation::primary(imports.span()).with_message("Listed again here."))
+                .with_annotation(Annotation::secondary(first.span()).with_message("First listed here.")),
+        );
+    }
+    for namespace in &imports.namespaces {
+        let root = namespace.value().split(|byte| *byte == b'.').next().unwrap_or_default();
+        if root.eq_ignore_ascii_case(b"Sharp") {
+            context.report(
+                Issue::error(format!(
+                    "Every namespace imports from `Sharp`, the standard library: remove `{}` from the list.",
+                    BytesDisplay(namespace.value())
+                ))
+                .with_annotation(Annotation::primary(namespace.span()).with_message("Listed here.")),
+            );
         }
     }
 }

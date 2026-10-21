@@ -559,12 +559,22 @@ where
         None if context.file.is_standard_library => b"".as_slice(),
         None => scope.namespace_name().unwrap_or_default(),
     };
+    let imports = module
+        .members
+        .iter()
+        .filter_map(|member| match member {
+            ModuleMember::Imports(imports) => Some(imports.namespaces.iter()),
+            ModuleMember::Law(_) | ModuleMember::Binding(_) => None,
+        })
+        .flatten()
+        .map(|namespace| (word(context.resolved_names.get(namespace)), namespace.span()))
+        .collect();
     let bindings = module
         .members
         .iter()
         .filter_map(|member| match member {
             ModuleMember::Binding(binding) => Some(scan_binding(codebase, binding, context, scope)),
-            ModuleMember::Law(_) => None,
+            ModuleMember::Imports(_) | ModuleMember::Law(_) => None,
         })
         .collect();
     codebase.modules.push(ModuleMetadata {
@@ -572,6 +582,7 @@ where
         span: module.span(),
         namespace: ascii_lowercase_word(namespace),
         kind,
+        imports,
         bindings,
     });
 

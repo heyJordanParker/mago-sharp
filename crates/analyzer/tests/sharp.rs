@@ -23896,6 +23896,252 @@ fn an_environment_or_test_module_is_checked_with_the_base_bindings_it_changes() 
     }
 }
 
+/// The module of spec section 32's `imports` example: `App.Tenant.Store` imports only from `App.Tenant.Community`,
+/// `App.Shared.Schema` and `Illuminate.Support`.
+const STORE_MODULE: (&str, &str) = (
+    "app/Tenant/Store/Module.sharp",
+    "namespace App.Tenant.Store;\n\nmodule\n{\n    imports App.Tenant.Community, App.Shared.Schema, Illuminate.Support;\n}\n",
+);
+
+/// The classes the `imports` tests import, one in each namespace they reach.
+const LISTED_CLASSES: [(&str, &str); 7] = [
+    ("app/Tenant/Community/Member.sharp", "namespace App.Tenant.Community;\n\npublic class Member\n{\n}\n"),
+    ("app/Shared/Schema/Table.sharp", "namespace App.Shared.Schema;\n\npublic class Table\n{\n}\n"),
+    (
+        "app/Shared/Ledger/Entry.sharp",
+        "namespace App.Shared.Ledger;\n\npublic class Entry\n{\n    public static int record() => 1;\n}\n",
+    ),
+    ("app/Shared/Money.sharp", "namespace App.Shared;\n\npublic class Money\n{\n}\n"),
+    ("app/Tenant/Store/Receipts/Receipt.sharp", "namespace App.Tenant.Store.Receipts;\n\npublic class Receipt\n{\n}\n"),
+    ("app/Tenant/Store/Checkout/Cart.sharp", "namespace App.Tenant.Store.Checkout;\n\npublic class Cart\n{\n}\n"),
+    (
+        "vendor/laravel/framework/src/Illuminate/Support/Facades/DB.php",
+        "<?php\n\nnamespace Illuminate\\Support\\Facades;\n\nclass DB\n{\n}\n",
+    ),
+];
+
+/// A class of `namespace`, in the file `path`, that imports each of `imports` and takes each class as a property of its
+/// constructor, so every import is read.
+fn importing(path: &'static str, namespace: &str, imports: &[&str]) -> (&'static str, &'static str) {
+    let lines: Vec<String> = imports.iter().map(|import| format!("import {import};\n")).collect();
+    let lines = lines.concat();
+    let parameters: Vec<String> = imports
+        .iter()
+        .enumerate()
+        .map(|(index, import)| format!("public {} p{index} {{ get; }}", import.rsplit('.').next().unwrap_or(import)))
+        .collect();
+    let class = path.rsplit('/').next().unwrap_or(path).trim_end_matches(".sharp");
+
+    (
+        path,
+        leak(format!(
+            "namespace {namespace};\n\n{lines}\npublic class {class}\n{{\n    public {class}({}) {{ }}\n}}\n",
+            parameters.join(", ")
+        )),
+    )
+}
+
+/// Spec section 32's example: an `imports` line limits what its namespace's code imports, and an import outside it
+/// is refused at the import, naming the namespace and its list. Listing a namespace lists every namespace below it, so
+/// `Illuminate.Support.Facades.DB`, a plain PHP library's class, is under the listed `Illuminate.Support`.
+#[test]
+fn an_import_outside_the_list_of_its_namespace_is_refused_at_the_import() {
+    let service = importing(
+        "app/Tenant/Store/StoreService.sharp",
+        "App.Tenant.Store",
+        &["App.Tenant.Community.Member", "Illuminate.Support.Facades.DB", "App.Shared.Ledger.Entry"],
+    );
+    let others: Vec<_> = LISTED_CLASSES.iter().copied().chain([STORE_MODULE]).collect();
+
+    assert_eq!(
+        worded(service, &others),
+        [
+            "5:8 unlisted-import `App.Tenant.Store` imports only `App.Tenant.Community`, `App.Shared.Schema` and `Illuminate.Support`. | Imports `App.Shared.Ledger.Entry`. | The list is the `imports` line of app/Tenant/Store/Module.sharp."
+        ]
+    );
+}
+
+/// Spec section 32: a namespace with no `imports` line imports from any namespace, and so does one whose module lists
+/// nothing, as `App.Shared` and `App.Tenant`'s `Module.sharp`, which binds a service, show here, beside the list of
+/// `App.Tenant.Store`.
+#[test]
+fn a_namespace_with_no_list_imports_from_any_namespace() {
+    let tenant_module = (
+        "app/Tenant/Module.sharp",
+        "namespace App.Tenant;\n\nimport App.Tenant.Community.Member;\n\nmodule\n{\n    transient Member = Member;\n}\n",
+    );
+    let others: Vec<_> = LISTED_CLASSES.iter().copied().chain([STORE_MODULE, tenant_module]).collect();
+
+    for importer in [
+        importing(
+            "app/Shared/Report.sharp",
+            "App.Shared",
+            &["App.Tenant.Store.Receipts.Receipt", "App.Shared.Ledger.Entry"],
+        ),
+        importing(
+            "app/Tenant/Desk.sharp",
+            "App.Tenant",
+            &["App.Shared.Ledger.Entry", "App.Tenant.Store.Receipts.Receipt"],
+        ),
+    ] {
+        assert_eq!(refusals(importer, &others), Vec::<String>::new(), "{}", importer.0);
+    }
+}
+
+/// Spec section 32: a list covers its namespace and every namespace below it, and a namespace below may list its own
+/// imports, so an import passes every list above it. The list nearest the importing code that refuses it is named.
+/// Every namespace reaches its own namespace and every namespace below the namespace that lists, as
+/// `App.Tenant.Store.Checkout` reaches `App.Tenant.Store.Receipts`, and `Sharp` needs no listing.
+#[test]
+fn an_import_passes_the_list_of_its_namespace_and_of_each_namespace_above_it() {
+    let checkout_module = (
+        "app/Tenant/Store/Checkout/Module.sharp",
+        "namespace App.Tenant.Store.Checkout;\n\nmodule\n{\n    imports App.Tenant.Store, App.Shared.Schema, App.Shared.Ledger;\n}\n",
+    );
+    let others: Vec<_> = LISTED_CLASSES.iter().copied().chain([STORE_MODULE, checkout_module, DISPATCHER]).collect();
+    let store =
+        "`App.Tenant.Store` imports only `App.Tenant.Community`, `App.Shared.Schema` and `Illuminate.Support`. | ";
+    let checkout =
+        "`App.Tenant.Store.Checkout` imports only `App.Tenant.Store`, `App.Shared.Schema` and `App.Shared.Ledger`. | ";
+
+    for (importer, expected) in [
+        (
+            importing(
+                "app/Tenant/Store/Receipts/Printer.sharp",
+                "App.Tenant.Store.Receipts",
+                &[
+                    "App.Tenant.Store.Checkout.Cart",
+                    "App.Tenant.Community.Member",
+                    "Sharp.Dispatcher",
+                    "App.Shared.Money",
+                ],
+            ),
+            vec![format!("6:8 unlisted-import {store}")],
+        ),
+        (
+            importing(
+                "app/Tenant/Store/Checkout/Till.sharp",
+                "App.Tenant.Store.Checkout",
+                &[
+                    "App.Tenant.Store.Receipts.Receipt",
+                    "App.Shared.Schema.Table",
+                    "App.Shared.Ledger.Entry",
+                    "App.Tenant.Community.Member",
+                    "Illuminate.Support.Facades.DB",
+                ],
+            ),
+            vec![
+                format!("5:8 unlisted-import {store}"),
+                format!("6:8 unlisted-import {checkout}"),
+                format!("7:8 unlisted-import {checkout}"),
+            ],
+        ),
+    ] {
+        assert_eq!(refusals(importer, &others), expected, "{}", importer.0);
+    }
+}
+
+/// Spec section 32: a name written in full in code counts as an import, so a full name outside the list is refused as
+/// its import would be, and a full name the list allows keeps the refusal that names the import to write.
+#[test]
+fn a_full_name_in_code_counts_as_an_import() {
+    let service = (
+        "app/Tenant/Store/StoreService.sharp",
+        "namespace App.Tenant.Store;\n\npublic class StoreService\n{\n    public int recorded() => App.Shared.Ledger.Entry.record();\n    public void hold(App.Shared.Ledger.Entry entry, App.Tenant.Community.Member member) { }\n}\n",
+    );
+    let others: Vec<_> = LISTED_CLASSES.iter().copied().chain([STORE_MODULE]).collect();
+    let refused =
+        "`App.Tenant.Store` imports only `App.Tenant.Community`, `App.Shared.Schema` and `Illuminate.Support`. | ";
+
+    assert_eq!(
+        refusals(service, &others),
+        [
+            format!("5:30 unlisted-import {refused}"),
+            format!("6:22 unlisted-import {refused}"),
+            "6:53 non-existent-class-like Full names appear only in `import` lines: add `import App.Tenant.Community.Member;` and write `Member`. | In code, `.` is always member access, so a class is written by the short name its import brings in.".to_owned(),
+        ]
+    );
+}
+
+/// Spec section 32: the help for a short name the file doesn't import names the import to add only when the list of
+/// the file's namespace allows it. For a class outside the list, it names the list and the file that holds it.
+#[test]
+fn a_missing_import_is_suggested_only_when_the_list_allows_it() {
+    let service = (
+        "app/Tenant/Store/StoreService.sharp",
+        "namespace App.Tenant.Store;\n\npublic class StoreService\n{\n    public void hold(Entry entry, Member member) { }\n}\n",
+    );
+    let others: Vec<_> = LISTED_CLASSES.iter().copied().chain([STORE_MODULE]).collect();
+
+    assert_eq!(
+        refusals(service, &others),
+        [
+            "5:22 non-existent-class-like `Entry` is not imported. | `App.Shared.Ledger.Entry` is outside `App.Tenant.Store`'s list, the `imports` line of app/Tenant/Store/Module.sharp.",
+            "5:35 non-existent-class-like `Member` is not imported. | Add `import App.Tenant.Community.Member;` to the file.",
+        ]
+    );
+}
+
+/// Spec section 32: lists that name each other, directly or through a chain of lists, are refused at each `imports`
+/// line of the cycle, at the name that leads on. A list names the namespace it lists and every namespace below it. A
+/// namespace with no list ends every chain, so it is never part of a cycle.
+#[test]
+fn lists_that_name_each_other_are_refused_at_each_imports_line() {
+    let module = |namespace: &str, listed: &str| {
+        let path = leak(format!("app/{}/Module.sharp", namespace.trim_start_matches("App.").replace('.', "/")));
+
+        (path, leak(format!("namespace {namespace};\n\nmodule\n{{\n    imports {listed};\n}}\n")))
+    };
+    let store = module("App.Tenant.Store", "App.Tenant.Community, App.Shared");
+    let schema = module("App.Shared.Schema", "App.Tenant.Store");
+    let community = module("App.Tenant.Community", "App.Billing");
+    let billing = module("App.Billing", "App.Tenant.Store");
+    let invoices = ("app/Billing/Invoice.sharp", "namespace App.Billing;\n\npublic class Invoice\n{\n}\n");
+    let others: Vec<_> = LISTED_CLASSES.iter().copied().chain([invoices]).collect();
+    let with = |modules: &[(&'static str, &'static str)]| -> Vec<(&'static str, &'static str)> {
+        others.iter().copied().chain(modules.iter().copied()).collect()
+    };
+    let help = " | Remove one of these names, so the namespaces import one way.";
+
+    assert_eq!(
+        refusals(store, &with(&[schema])),
+        [format!(
+            "5:35 import-cycle `App.Tenant.Store` and `App.Shared.Schema` import from each other: `App.Tenant.Store` lists `App.Shared`, and `App.Shared.Schema` lists `App.Tenant.Store`.{help}"
+        )]
+    );
+    assert_eq!(
+        refusals(schema, &with(&[store])),
+        [format!(
+            "5:13 import-cycle `App.Shared.Schema` and `App.Tenant.Store` import from each other: `App.Shared.Schema` lists `App.Tenant.Store`, and `App.Tenant.Store` lists `App.Shared`.{help}"
+        )]
+    );
+    assert_eq!(
+        refusals(community, &with(&[store, billing])),
+        [format!(
+            "5:13 import-cycle `App.Tenant.Community`, `App.Billing` and `App.Tenant.Store` import from each other: `App.Tenant.Community` lists `App.Billing`, `App.Billing` lists `App.Tenant.Store`, and `App.Tenant.Store` lists `App.Tenant.Community`.{help}"
+        )]
+    );
+    // Neither `App.Tenant.Community` nor `App.Shared` has a list, so the chain from `App.Billing` ends at them.
+    assert_eq!(refusals(billing, &with(&[store])), Vec::<String>::new());
+}
+
+/// Spec section 32: a listed name that names no namespace of the project or its libraries is the ordinary error of an
+/// import that names nothing.
+#[test]
+fn a_listed_name_that_names_no_namespace_is_an_unknown_name() {
+    let module = (
+        "app/Tenant/Store/Module.sharp",
+        "namespace App.Tenant.Store;\n\nmodule\n{\n    imports App.Tenant.Community, App.Shared.Ledgr;\n}\n",
+    );
+
+    assert_eq!(
+        refusals(module, &LISTED_CLASSES),
+        [
+            "5:35 non-existent-use-import Imported namespace `App.Shared.Ledgr` does not exist. | Ensure that the namespace `App.Shared.Ledgr` is defined in the codebase."
+        ]
+    );
+}
+
 /// The classes the spec section 13 tests read and write through readonly values.
 const READONLY_CLASSES: [(&str, &str); 4] = [
     ("src/Customer.sharp", "namespace App;\n\npublic class Customer\n{\n    public int id { get; set; } = 1;\n}\n"),

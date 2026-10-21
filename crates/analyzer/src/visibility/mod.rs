@@ -4,6 +4,8 @@ use mago_word::word;
 
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
+use mago_codex::metadata::module::ModuleKind;
+use mago_codex::metadata::module::ModuleMetadata;
 use mago_codex::metadata::property::PropertyMetadata;
 use mago_codex::visibility::Visibility;
 use mago_php_version::PHPVersion;
@@ -61,6 +63,45 @@ pub(crate) fn is_within_namespace(inner: &[u8], namespace: &[u8]) -> bool {
 /// The namespace of the class named `class`, as PHP writes it.
 pub(crate) fn namespace_of(class: &[u8]) -> &[u8] {
     class.iter().rposition(|&byte| byte == b'\\').map_or(&b""[..], |end| &class[..end])
+}
+
+/// Spec section 32: the folder's module whose `imports` line leaves `name` out of what PHP# code in `namespace`
+/// imports, as PHP writes both, or none when every list that covers `namespace` lets it import `name`. A list covers
+/// its namespace and every namespace below it, and lets its code import from `Sharp`, from its own namespace and the
+/// namespaces below it, and from each namespace it lists and the namespaces below that one. Of two lists that leave
+/// `name` out, the one nearer `namespace` refuses it.
+pub(crate) fn list_refusing<'codebase>(
+    codebase: &'codebase CodebaseMetadata,
+    namespace: &[u8],
+    name: &[u8],
+) -> Option<&'codebase ModuleMetadata> {
+    if is_within_namespace(name, b"Sharp") {
+        return None;
+    }
+
+    codebase
+        .modules
+        .iter()
+        .filter(|module| module.kind == ModuleKind::Base && !module.imports.is_empty())
+        .filter(|module| is_within_namespace(namespace, module.namespace.as_bytes()))
+        .filter(|module| {
+            !is_within_namespace(name, module.namespace.as_bytes())
+                && !module.imports.iter().any(|(listed, _)| is_within_namespace(name, listed.as_bytes()))
+        })
+        .max_by_key(|module| module.namespace.as_bytes().len())
+}
+
+/// The namespace of the folder's module `module`, as its code writes it, dot separated: the namespace of the
+/// class-like `Module` the scanner registers for it, which keeps its case.
+pub(crate) fn display_namespace(codebase: &CodebaseMetadata, module: &ModuleMetadata) -> String {
+    let class = codebase.get_class_like(&[module.namespace.as_bytes(), b"\\module"].concat());
+
+    dotted(class.map_or(module.namespace.as_bytes(), |class| namespace_of(class.original_name.as_bytes())))
+}
+
+/// A PHP name as PHP# writes it, dot separated.
+pub(crate) fn dotted(name: &[u8]) -> String {
+    String::from_utf8_lossy(name).replace('\\', ".")
 }
 
 /// Spec section 25: `Self.name` reads the class the code is called on, which may be any subclass, and a private member
@@ -131,7 +172,6 @@ where
         }
         None => (class_name.to_string(), format!("`{class_name}` is internal.")),
     };
-    let dotted = |namespace: &[u8]| String::from_utf8_lossy(namespace).replace('\\', ".");
     let (namespace, caller) = (dotted(namespace), dotted(caller));
 
     context.collector.report_with_code(

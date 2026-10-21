@@ -114,25 +114,21 @@ impl Server {
 
     /// Compile each `.sharp` file of the last analysis into the bytes of its `.sharpc` file, or the errors that
     /// refuse it. `stamp` gives the size, modification time and hash of the file at a workspace-relative path, or
-    /// none when no file is there. `rules` gives the workspace-relative Lean files whose structure rules may judge the
-    /// `.sharp` file at a workspace-relative path. `check` gets the Lean translation of every accepted file and the
-    /// namespace of every PHP# class-like, and returns the issues of each file whose law is not proved or that breaks a
-    /// structure rule. Each compiled file's header names `standard_library`, the standard library the workspace
-    /// compiles against. `refusing` keeps the analysis's errors that refuse their file.
+    /// none when no file is there. `check` gets the Lean translation of every accepted file, and returns the issues of
+    /// each file whose law is not proved. Each compiled file's header names `standard_library`, the standard library
+    /// the workspace compiles against. `refusing` keeps the analysis's errors that refuse their file.
     ///
     /// # Errors
     ///
-    /// Returns [`ServerError`] when no analysis ran yet, or when re-analyzing a file, `stamp`, `rules` or `check`
-    /// fails.
+    /// Returns [`ServerError`] when no analysis ran yet, or when re-analyzing a file, `stamp` or `check` fails.
     pub fn compile(
         &mut self,
         stamp: impl FnMut(&[u8]) -> std::io::Result<Option<Input>>,
-        rules: impl FnMut(&[u8]) -> std::io::Result<Vec<Vec<u8>>>,
-        check: impl FnOnce(Vec<Translation>, &[String]) -> std::io::Result<HashMap<FileId, IssueCollection>>,
+        check: impl FnOnce(Vec<Translation>) -> std::io::Result<HashMap<FileId, IssueCollection>>,
         standard_library: &Library,
         refusing: impl FnOnce(IssueCollection) -> IssueCollection,
     ) -> Result<Vec<(FileId, Compilation)>, ServerError> {
-        self.service.compile(stamp, rules, check, standard_library, refusing).map_err(ServerError::from)
+        self.service.compile(stamp, check, standard_library, refusing).map_err(ServerError::from)
     }
 
     /// Every PHP# listener of the last analysis, in the order the engine runs them.

@@ -306,7 +306,7 @@ impl std::fmt::Display for ParseError {
                     .to_string()
             }
             ParseError::OtherMemberInSharpModule(_) => {
-                "A module holds only service bindings and laws: give each binding one expression.".to_string()
+                "A module holds only its imports, service bindings and laws: give each binding one expression.".to_string()
             }
             ParseError::ComputedParameterInSharp(_) => {
                 "A parameter cannot be a computed property: a computed property has no incoming value to receive.".to_string()

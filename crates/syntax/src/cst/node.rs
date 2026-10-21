@@ -128,6 +128,7 @@ use crate::cst::cst::IfStatementBody;
 use crate::cst::cst::IfStatementBodyElseClause;
 use crate::cst::cst::IfStatementBodyElseIfClause;
 use crate::cst::cst::Implements;
+use crate::cst::cst::Imports;
 use crate::cst::cst::IncludeConstruct;
 use crate::cst::cst::IncludeOnceConstruct;
 use crate::cst::cst::IndirectVariable;
@@ -537,6 +538,7 @@ pub enum NodeKind {
     Module,
     ModuleParent,
     ModuleMember,
+    Imports,
     Binding,
     BindingTarget,
     BindingValue,
@@ -839,6 +841,7 @@ pub enum Node<'ast, 'arena> {
     Module(&'ast Module<'arena>),
     ModuleParent(&'ast ModuleParent<'arena>),
     ModuleMember(&'ast ModuleMember<'arena>),
+    Imports(&'ast Imports<'arena>),
     Binding(&'ast Binding<'arena>),
     BindingTarget(&'ast BindingTarget<'arena>),
     BindingValue(&'ast BindingValue<'arena>),
@@ -1236,6 +1239,7 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
             Self::Module(_) => NodeKind::Module,
             Self::ModuleParent(_) => NodeKind::ModuleParent,
             Self::ModuleMember(_) => NodeKind::ModuleMember,
+            Self::Imports(_) => NodeKind::Imports,
             Self::Binding(_) => NodeKind::Binding,
             Self::BindingTarget(_) => NodeKind::BindingTarget,
             Self::BindingValue(_) => NodeKind::BindingValue,
@@ -2962,9 +2966,19 @@ impl<'ast, 'arena> Node<'ast, 'arena> {
             }
             Node::ModuleParent(node) => f(Node::Identifier(&node.name)),
             Node::ModuleMember(node) => match node {
+                ModuleMember::Imports(node) => f(Node::Imports(node)),
                 ModuleMember::Law(node) => f(Node::Law(node)),
                 ModuleMember::Binding(node) => f(Node::Binding(node)),
             },
+            Node::Imports(node) => {
+                f(Node::Keyword(&node.imports));
+
+                for namespace in &node.namespaces {
+                    f(Node::Identifier(namespace));
+                }
+
+                f(Node::Terminator(&node.terminator));
+            }
             Node::Binding(node) => {
                 f(Node::Keyword(&node.lifetime));
                 f(Node::Hint(&node.service));
@@ -3528,6 +3542,7 @@ impl HasSpan for Node<'_, '_> {
             Self::Module(node) => node.span(),
             Self::ModuleParent(node) => node.span(),
             Self::ModuleMember(node) => node.span(),
+            Self::Imports(node) => node.span(),
             Self::Binding(node) => node.span(),
             Self::BindingTarget(node) => node.span(),
             Self::BindingValue(node) => node.span(),

@@ -193,7 +193,9 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Statement<'arena> {
                         && let UseItems::Sequence(sequence) = &r#use.items
                     {
                         for item in &sequence.items {
-                            use_statement::check_sharp_import(context, &item.name);
+                            if !use_statement::check_sharp_import(context, &item.name) {
+                                module::check_listed_import(context, &php_name(&item.name), item.name.span());
+                            }
                             use_statement::check_internal_import(context, &item.name);
                             let imported_name = item
                                 .alias

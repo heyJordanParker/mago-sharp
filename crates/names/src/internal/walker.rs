@@ -45,6 +45,7 @@ use mago_syntax::cst::Identifier;
 use mago_syntax::cst::If;
 use mago_syntax::cst::IfBody;
 use mago_syntax::cst::Implements;
+use mago_syntax::cst::Imports;
 use mago_syntax::cst::Instantiation;
 use mago_syntax::cst::Interface;
 use mago_syntax::cst::Is;
@@ -849,6 +850,14 @@ where
         context: &mut NameResolutionContext<'arena, A>,
     ) {
         self.resolved_names.insert_at(module_parent.name.span(), arena_name(context, &module_parent.name), false);
+    }
+
+    /// Each namespace a module's `imports` line lists is named by its full name, spec section 32, as an `import` line
+    /// names a class.
+    fn walk_in_imports(&mut self, imports: &'ast Imports<'arena>, context: &mut NameResolutionContext<'arena, A>) {
+        for namespace in &imports.namespaces {
+            self.resolved_names.insert_at(namespace.span(), arena_name(context, namespace), false);
+        }
     }
 
     /// A service binding's parameters are locals of its value alone, spec section 32, as a law's are. The crate's own

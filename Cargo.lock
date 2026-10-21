@@ -1935,7 +1935,6 @@ dependencies = [
  "mago-analyzer",
  "mago-build-id",
  "mago-codex",
- "mago-composer",
  "mago-database",
  "mago-extension",
  "mago-names",

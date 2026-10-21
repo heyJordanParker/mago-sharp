@@ -971,9 +971,9 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Trait<'arena> {
     }
 }
 
-/// Spec sections 28 and 32: a module's bindings are checked where they are written. A folder's `Module.sharp` is also
-/// its namespace's class-like `Module`, and its laws are analyzed as a class's. Semantics already refused a module its
-/// file can't hold, and the scanner registered none.
+/// Spec sections 28 and 32: a module's bindings and its `imports` line are checked where they are written. A folder's
+/// `Module.sharp` is also its namespace's class-like `Module`, and its laws are analyzed as a class's. Semantics
+/// already refused a module its file can't hold, and the scanner registered none.
 impl<'ast, 'arena> Analyzable<'ast, 'arena> for Module<'arena> {
     fn analyze<'ctx, A>(
         &'ast self,
@@ -989,6 +989,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Module<'arena> {
             return Ok(());
         };
         crate::statement::module::analyze_bindings(context, artifacts, self, module)?;
+        crate::statement::module::analyze_imports(context, module);
 
         if module.kind != ModuleKind::Base {
             return Ok(());

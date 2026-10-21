@@ -18,7 +18,6 @@ foldhash = { workspace = true }
 mago-analyzer = { workspace = true }
 mago-build-id = { workspace = true }
 mago-codex = { workspace = true }
-mago-composer = { workspace = true }
 mago-database = { workspace = true }
 mago-extension = { workspace = true }
 mago-names = { workspace = true }

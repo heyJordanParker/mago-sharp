@@ -817,6 +817,12 @@ impl Fingerprintable for Module<'_> {
 
         for member in &self.members {
             match member {
+                ModuleMember::Imports(imports) => {
+                    "imports".hash(hasher);
+                    for namespace in &imports.namespaces {
+                        namespace.fingerprint_with_hasher(hasher, resolved_names, options);
+                    }
+                }
                 ModuleMember::Law(law) => law.fingerprint_with_hasher(hasher, resolved_names, options),
                 ModuleMember::Binding(binding) => binding.fingerprint_with_hasher(hasher, resolved_names, options),
             }

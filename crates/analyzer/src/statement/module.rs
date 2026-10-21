@@ -2,7 +2,13 @@
 //! binds. The checker proves the container can build every one, whether or not anything takes it, as Guice's
 //! `requireExplicitBindings()` does. As in .NET's scope validation and Dagger's graph check, it refuses a service
 //! nothing binds, a service that needs itself, and a `scoped` service a `singleton` would keep after its scope ends.
+//!
+//! A module also lists the namespaces its namespace imports from, as Java's `module-info.java` lists what a module
+//! `requires`, and the checker refuses an import outside the list and two lists that name each other.
 
+use std::collections::VecDeque;
+
+use foldhash::HashMap;
 use foldhash::HashSet;
 use mago_allocator::Arena;
 use mago_codex::metadata::CodebaseMetadata;
@@ -50,10 +56,17 @@ use crate::statement::function_like::FunctionLikeBody;
 use crate::statement::function_like::analyze_function_like;
 use crate::statement::function_like::report_undefined_type;
 use crate::statement::function_like::report_undefined_types;
+use crate::statement::use_statement::holds_function_or_constant;
+use crate::statement::use_statement::report_non_existent_import;
+use crate::utils::names::and_list;
 use crate::utils::names::article;
 use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_sharp_type;
 use crate::utils::names::display_variable_name;
+use crate::visibility::display_namespace;
+use crate::visibility::dotted;
+use crate::visibility::is_within_namespace;
+use crate::visibility::list_refusing;
 
 /// Checks each binding of `module` where it is written, with every service its class or its expression takes, then
 /// walks the services each one needs for a cycle and for a `scoped` service a `singleton` holds.
@@ -68,7 +81,7 @@ where
 {
     let written = module.members.iter().filter_map(|member| match member {
         ModuleMember::Binding(binding) => Some(binding),
-        ModuleMember::Law(_) => None,
+        ModuleMember::Imports(_) | ModuleMember::Law(_) => None,
     });
     let origin = ReferenceOrigin::File(word(&context.source_file.name));
     let services = Services::new(context.codebase, metadata);
@@ -710,6 +723,139 @@ where
         issue = issue.with_annotation(Annotation::secondary(span).with_message("The app's dispatcher is bound here."));
     }
     context.collector.report_with_code(IssueCode::InvalidBinding, issue.with_help(help));
+}
+
+/// Spec section 32: checks the `imports` line of `metadata`, a folder's module. Each namespace it lists is a namespace
+/// of the project or its libraries, and its list leads to no list that leads back to it.
+pub(crate) fn analyze_imports<A>(context: &mut Context<'_, '_, A>, metadata: &ModuleMetadata)
+where
+    A: Arena,
+{
+    if metadata.kind != ModuleKind::Base || metadata.imports.is_empty() {
+        return;
+    }
+
+    for (namespace, span) in &metadata.imports {
+        let namespace = namespace.as_bytes();
+        if !context.codebase.namespace_exists(namespace) && !holds_function_or_constant(context.codebase, namespace) {
+            report_non_existent_import(context, *span, namespace, "namespace");
+        }
+    }
+
+    let lists: Vec<&ModuleMetadata> = context
+        .codebase
+        .modules
+        .iter()
+        .filter(|module| module.kind == ModuleKind::Base && !module.imports.is_empty())
+        .collect();
+    let successors: Vec<Vec<usize>> = lists
+        .iter()
+        .map(|list| (0..lists.len()).filter(|other| names_list(list, lists[*other]).is_some()).collect())
+        .collect();
+    let Some(own) = lists.iter().position(|list| std::ptr::eq(*list, metadata)) else {
+        return;
+    };
+    let cycle: Vec<&ModuleMetadata> = cycle_through(own, &successors).into_iter().map(|index| lists[index]).collect();
+    if !cycle.is_empty() {
+        report_import_cycle(context, &cycle);
+    }
+}
+
+/// Spec section 32: whether the PHP# code of the analyzed file imports `name`, the full name of a class-like, of a
+/// namespace, or of a namespace's function or constant, past each list that covers its namespace. Reports at `span`,
+/// and returns false, when a [list refuses](list_refusing) it.
+pub(crate) fn check_listed_import<A>(context: &mut Context<'_, '_, A>, name: &[u8], span: Span) -> bool
+where
+    A: Arena,
+{
+    if !context.dialect.is_sharp() {
+        return true;
+    }
+    let Some(module) = list_refusing(context.codebase, context.scope.namespace_name().unwrap_or_default(), name) else {
+        return true;
+    };
+
+    let listed: Vec<Word> = module.imports.iter().map(|(listed, _)| word(dotted(listed.as_bytes()))).collect();
+    context.collector.report_with_code(
+        IssueCode::UnlistedImport,
+        Issue::error(format!("`{}` imports only {}.", display_namespace(context.codebase, module), and_list(&listed)))
+            .with_annotation(Annotation::primary(span).with_message(format!("Imports `{}`.", dotted(name))))
+            .with_note(format!("The list is the `imports` line of {}.", module.file)),
+    );
+
+    false
+}
+
+/// The name `list` lists that names the namespace of `other`, another module with a list: `other`'s namespace or a
+/// namespace above it, as listing a namespace lists every namespace below it. A namespace reaches the namespaces
+/// below it with no list, so a list never names a namespace above or below its own.
+fn names_list<'list>(list: &'list ModuleMetadata, other: &ModuleMetadata) -> Option<&'list (Word, Span)> {
+    let (own, namespace) = (list.namespace.as_bytes(), other.namespace.as_bytes());
+    if is_within_namespace(own, namespace) || is_within_namespace(namespace, own) {
+        return None;
+    }
+
+    list.imports.iter().find(|(listed, _)| is_within_namespace(namespace, listed.as_bytes()))
+}
+
+/// The shortest cycle of `successors` from `start` back to it, each node once, starting at `start`, or nothing when
+/// none leads back to it.
+fn cycle_through(start: usize, successors: &[Vec<usize>]) -> Vec<usize> {
+    let mut previous: HashMap<usize, usize> = HashMap::default();
+    let mut pending = VecDeque::from([start]);
+    while let Some(node) = pending.pop_front() {
+        for &next in &successors[node] {
+            if next == start {
+                let mut cycle = vec![node];
+                let mut at = node;
+                while let Some(&before) = previous.get(&at) {
+                    cycle.push(before);
+                    at = before;
+                }
+                cycle.reverse();
+
+                return cycle;
+            }
+            if let std::collections::hash_map::Entry::Vacant(entry) = previous.entry(next) {
+                entry.insert(node);
+                pending.push_back(next);
+            }
+        }
+    }
+
+    Vec::new()
+}
+
+/// Reports the cycle of lists `cycle` at the name the first one lists that names the next.
+fn report_import_cycle<A>(context: &mut Context<'_, '_, A>, cycle: &[&ModuleMetadata])
+where
+    A: Arena,
+{
+    let namespaces: Vec<Word> = cycle.iter().map(|module| word(display_namespace(context.codebase, module))).collect();
+    let steps: Vec<(Word, &(Word, Span))> = cycle
+        .iter()
+        .zip(cycle.iter().cycle().skip(1))
+        .zip(&namespaces)
+        .filter_map(|((module, next), namespace)| Some((*namespace, names_list(module, next)?)))
+        .collect();
+    let Some((_, (_, span))) = steps.first() else {
+        return;
+    };
+
+    let lists: Vec<String> = steps
+        .iter()
+        .map(|(namespace, (listed, _))| format!("`{namespace}` lists `{}`", dotted(listed.as_bytes())))
+        .collect();
+    let lists = match lists.split_last() {
+        Some((last, rest)) if !rest.is_empty() => format!("{}, and {last}", rest.join(", ")),
+        _ => lists.concat(),
+    };
+    context.collector.report_with_code(
+        IssueCode::ImportCycle,
+        Issue::error(format!("{} import from each other: {lists}.", and_list(&namespaces)))
+            .with_annotation(Annotation::primary(*span).with_message("Listed here."))
+            .with_help("Remove one of these names, so the namespaces import one way."),
+    );
 }
 
 /// Reports that `binding` needs itself through the classes of `cycle`, at the binding `at`.
