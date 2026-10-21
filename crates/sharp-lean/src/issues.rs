@@ -8,6 +8,7 @@ use mago_span::Span;
 use crate::library;
 use crate::library::Stop;
 use crate::package::Refusal;
+use crate::package::place_of;
 use crate::translate::Law;
 use crate::translate::Unmodeled;
 use crate::translate::proof::Case;
@@ -17,26 +18,29 @@ pub(crate) const FLOAT: &str = "A law cannot reason about float arithmetic, whic
 pub(crate) const OVERRIDABLE: &str = "A law cannot know which implementation runs.";
 pub(crate) const IDENTITY: &str = "A law sees an object as its values, so it has no identity to compare.";
 pub(crate) const PROPERTY_WRITE: &str = "A law sees an object as its values, so nothing changes it in place.";
-pub(crate) const EXCEPTION: &str = "An exception is a bug, and a law reasons about values.";
+pub(crate) const EXCEPTION: &str =
+    "Return a value that tells the failure apart, such as `null` or an enum case, in place of the exception.";
 pub(crate) const TYPE_TEST: &str = "It reads types while the code runs.";
 pub(crate) const STATIC_PROPERTY: &str = "It is state outside the arguments.";
 pub(crate) const LAZY: &str = "A lazy sequence has no value to reason about.";
 pub(crate) const EXTERN: &str = "Its body is native code, which a law cannot read.";
 pub(crate) const RESERVED_NAME: &str =
     "The checker gives every class a member of that name, so a law cannot reach a member that has it.";
-pub(crate) const PLAIN_PHP: &str = "A law cannot see inside plain PHP.";
-pub(crate) const COLLECTION: &str = "A law cannot reason about this use of a collection.";
-pub(crate) const LIBRARY: &str = "A law cannot reason about the standard library's code.";
+pub(crate) const PLAIN_PHP: &str =
+    "Write the code the law reaches in PHP#, or pass the value plain PHP computes to the law as a parameter.";
+pub(crate) const COLLECTION: &str =
+    "Hold the values in a List, and read it with `count()`, `map`, `filter`, a list pattern or a spread.";
+pub(crate) const LIBRARY: &str = "Write the code in a PHP# class of the project: of the standard library, a law reaches a List's `count()`, `map` and `filter`, and `Math.max` and `Math.min` on ints.";
 pub(crate) const LOOP: &str = "Write the method as recursion that calls itself on a smaller value.";
 pub(crate) const RECURSION: &str = "Write the method as recursion that calls itself on a smaller value: a list's rest from a list pattern, or an int one step towards a bound a condition tested.";
 pub(crate) const NAMED_PATTERN: &str =
     "Write the test as the condition of an if or a ?:, and read the value it names in the branch it decides.";
-pub(crate) const LAMBDA: &str = "A law cannot reason about this lambda.";
-pub(crate) const INHERITANCE: &str = "A law cannot reason about inheritance.";
-pub(crate) const INTERFACE_METHOD: &str =
-    "A law cannot reason about an interface method, because the implementation that runs is chosen at run time.";
-pub(crate) const ACCESSOR: &str = "A law cannot reason about an accessor's body.";
-pub(crate) const CONSTRUCTOR_BODY: &str = "A law cannot reason about a constructor's body.";
+pub(crate) const LAMBDA: &str = "Pass a lambda only to a List's `map` or `filter`, with a body that cannot throw, and call a PHP# method in place of any other function value.";
+pub(crate) const INHERITANCE: &str =
+    "Declare the members the law reaches in the class itself, in place of inheriting them.";
+pub(crate) const INTERFACE_METHOD: &str = "Call the method on a value of a class that implements the interface, since a law cannot know which implementation runs.";
+pub(crate) const ACCESSOR: &str = "Compute the value in a method, and give the property no accessor body.";
+pub(crate) const CONSTRUCTOR_BODY: &str = "Write the constructor with promoted properties and no body, and compute the values in a static method that calls `new`.";
 pub(crate) const TYPE: &str = "Give it a type a law reasons about: int, bool, string, a List, or a PHP# class, enum or interface, with or without `?`.";
 pub(crate) const MISSING_TYPE: &str = "Write its type.";
 pub(crate) const TUPLE: &str = "Hold the values in a class with one property for each, in place of a tuple.";
@@ -182,15 +186,6 @@ pub(crate) fn generated_module_refused(law: &Law, module: &str, refusal: &Refusa
 /// `when …, ` with `conditions` joined by `&&`, or nothing when there are none.
 fn when(conditions: &[String]) -> String {
     if conditions.is_empty() { String::new() } else { format!("when {}, ", conditions.join(" && ")) }
-}
-
-/// `Money.addKeepsCurrency` of the statement `App.Shared.Money.addKeepsCurrency`.
-fn place_of(statement: &str) -> String {
-    let mut parts = statement.rsplitn(3, '.');
-    match (parts.next(), parts.next()) {
-        (Some(law), Some(class)) => format!("{class}.{law}"),
-        _ => statement.to_owned(),
-    }
 }
 
 /// Why Lean did not finish a module: it ran past the processor-time limit Mago sets on each Lean process, or it waited

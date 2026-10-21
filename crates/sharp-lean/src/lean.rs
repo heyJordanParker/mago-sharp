@@ -23,6 +23,7 @@ use crate::package;
 use crate::package::Package;
 use crate::package::Program;
 use crate::package::Toolchain;
+use crate::package::place_of;
 use crate::runner;
 use crate::runner::Judgment;
 use crate::runner::Theorem;
@@ -154,6 +155,18 @@ impl Lean {
                     };
                     report(&mut issues, translation, issue);
                 }
+                // Every accepted file is translated, so a law a body calls that no translation states is in a file
+                // with errors.
+                let refused: Vec<&str> = law
+                    .proof
+                    .laws
+                    .iter()
+                    .map(|(called, _)| called.as_str())
+                    .filter(|called| !laws.position.contains_key(called))
+                    .collect();
+                for called in &refused {
+                    report(&mut issues, translation, issues::refused_reach(law, &place_of(called)));
+                }
                 if laws.cyclic.contains(law.statement.as_str()) {
                     for (called, span) in
                         law.proof.laws.iter().filter(|(called, _)| laws.cyclic.contains(called.as_str()))
@@ -161,7 +174,7 @@ impl Lean {
                         report(&mut issues, translation, issues::law_cycle(*span, called));
                     }
                 }
-                sound &= problems.is_empty() && !laws.cyclic.contains(law.statement.as_str());
+                sound &= problems.is_empty() && refused.is_empty() && !laws.cyclic.contains(law.statement.as_str());
             }
             if sound {
                 work.push(translation);

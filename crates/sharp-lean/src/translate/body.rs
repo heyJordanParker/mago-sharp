@@ -178,6 +178,11 @@ impl<'body, 'program> Body<'body, 'program> {
             Hint::Nullable(nullable) => format!("(Option {})", self.r#type(nullable.hint)),
             Hint::Parenthesized(parenthesized) => self.r#type(parenthesized.hint),
             Hint::Self_(_) => self.class_type(hint.span(), self.class),
+            Hint::Identifier(identifier) if self.checked.names().is_type_parameter(identifier) => self.unmodeled(
+                hint.span(),
+                format!("the type parameter {}", String::from_utf8_lossy(identifier.value())),
+                issues::TYPE,
+            ),
             Hint::Identifier(identifier) => {
                 let class = self.checked.names().get(identifier);
 
@@ -881,6 +886,15 @@ impl<'body, 'program> Body<'body, 'program> {
                     expression.span(),
                     "a call through a type parameter".to_owned(),
                     issues::TYPE_TEST,
+                );
+            }
+            // Spec section 23: `global.f(…)` calls the function `f` of PHP's root namespace.
+            if class.name.value() == b"global" {
+                let function = self.method_name(&call.method).map(String::from_utf8_lossy).unwrap_or_default();
+                return self.unmodeled(
+                    expression.span(),
+                    format!("the function `global.{function}` of PHP's root namespace"),
+                    issues::PLAIN_PHP,
                 );
             }
             let class = names.get(&class.name);

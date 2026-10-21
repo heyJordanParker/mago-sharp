@@ -2450,7 +2450,7 @@ fn a_law_that_calls_an_interface_method_is_refused() {
         let root = directory.path();
         let expected: Vec<String> = calls
             .iter()
-            .map(|at| format!("{file}:{at}:error - unmodeled-construct: Law {law}. A law cannot reason about an interface method, because the implementation that runs is chosen at run time."))
+            .map(|at| format!("{file}:{at}:error - unmodeled-construct: Law {law}. Call the method on a value of a class that implements the interface, since a law cannot know which implementation runs."))
             .collect();
 
         let output = compile_without_lean(root);
@@ -2998,7 +2998,7 @@ fn a_law_comparing_lists_of_objects_a_class_operator_compares_is_refused() {
 fn a_law_reaching_a_try_catch_is_refused() {
     assert_unmodeled(
         "namespace App.Shared;\n\nimport DivisionByZeroError;\n\npublic class Shape\n{\n    public static int share(int a)\n    {\n        try {\n            return 10 / a;\n        } catch (DivisionByZeroError e) {\n            return 0;\n        }\n    }\n\n    law shared(int a) => Shape.share(a) >= 0;\n}\n",
-        "Law shared reaches a try/catch in Shape.share. An exception is a bug, and a law reasons about values.",
+        "Law shared reaches a try/catch in Shape.share. Return a value that tells the failure apart, such as `null` or an enum case, in place of the exception.",
     );
 }
 
@@ -3022,7 +3022,7 @@ fn a_law_reaching_a_member_lean_reserves_is_refused() {
 fn a_law_reaching_a_map_is_refused() {
     assert_unmodeled(
         "namespace App.Shared;\n\npublic class Shape\n{\n    law sized(Map<string, int> items) => true;\n}\n",
-        "Law sized reaches a collection in Shape.sized. A law cannot reason about this use of a collection.",
+        "Law sized reaches a collection in Shape.sized. Hold the values in a List, and read it with `count()`, `map`, `filter`, a list pattern or a spread.",
     );
 }
 
@@ -3499,7 +3499,7 @@ fn a_law_body_s_match_on_a_value_that_runs_code_is_refused() {
 fn a_law_reaching_another_list_method_is_refused_by_name() {
     assert_unmodeled(
         "namespace App.Shared;\n\npublic class Shape\n{\n    public static bool known(List<int> items) => items.contains(3);\n\n    law knows(List<int> items) => Shape.known(items);\n}\n",
-        "Law knows reaches the List method contains in Shape.known. A law cannot reason about this use of a collection.",
+        "Law knows reaches the List method contains in Shape.known. Hold the values in a List, and read it with `count()`, `map`, `filter`, a list pattern or a spread.",
     );
 }
 
@@ -3509,7 +3509,7 @@ fn a_law_reaching_another_list_method_is_refused_by_name() {
 fn a_law_reaching_a_lambda_that_can_throw_is_refused() {
     assert_unmodeled(
         "namespace App.Shared;\n\npublic class Shape\n{\n    public static List<int> doubled(List<int> items) => items.map(x => x * 2);\n\n    law same(List<int> items) => Shape.doubled(items).count() == items.count();\n}\n",
-        "Law same reaches a lambda whose body can throw in Shape.doubled. A law cannot reason about this lambda.",
+        "Law same reaches a lambda whose body can throw in Shape.doubled. Pass a lambda only to a List's `map` or `filter`, with a body that cannot throw, and call a PHP# method in place of any other function value.",
     );
 }
 
@@ -3596,13 +3596,45 @@ fn each_refusal_a_law_reaches_says_what_to_write_instead() {
         "Law l6 reaches a guard that can throw in Shape.guard. Write the guard without calls or arithmetic, which can throw, and compute such a value in the arm.",
         "Law l7 reaches a default argument in Shape.callsDefault. Pass every argument, the ones with a default value included.",
         "Law l8 reaches a named or spread argument in Shape.named. Pass each argument by its position.",
-        "Law l9 reaches a throw in Shape.thrown. An exception is a bug, and a law reasons about values.",
+        "Law l9 reaches a throw in Shape.thrown. Return a value that tells the failure apart, such as `null` or an enum case, in place of the exception.",
         "Law l10 reaches the operator `**=` in Shape.compound. Update an int with `+=`, `-=`, `*=`, `/=` or `%=`, or a string with `+=`.",
         "Law l11 reaches an assignment inside an expression in Shape.inner. Assign the value in a statement of its own, before the expression that reads it.",
     ] {
         assert!(printed.contains(&format!("error - unmodeled-construct: {message}")), "{message}\n{printed}");
     }
     assert!(!printed.contains("A law cannot reason about it."), "{printed}");
+}
+
+/// The refusals of code a law cannot read say what to write instead, and name a type parameter as one and PHP's root
+/// namespace as `global.`, never as a plain PHP class.
+#[test]
+fn each_refusal_of_code_a_law_cannot_read_says_what_to_write_instead() {
+    let clock = (
+        "vendor/lib/clock/Clock.php",
+        "<?php\n\nnamespace Lib;\n\nfinal class Clock\n{\n    public static function hour(): int\n    {\n        return 1;\n    }\n}\n",
+    );
+    let stub = ("app/Stubs/Clock.sharp", "namespace App.Stubs;\n\nimport Lib.Clock;\n\nextern Clock;\n");
+    let shape = (
+        "app/Shared/Shape.sharp",
+        "namespace App.Shared;\n\nimport Lib.Clock;\n\npublic class Shape\n{\n    public Shape(public int raw { get; }) { }\n    public int doubled => this.raw * 2;\n\n    public static int parsed(string s) => Int.tryParse(s) ?? 0;\n    public static int hour(int a) => Clock.hour();\n    public static int length(string s) => global.strlen(s);\n    public static int kept<T>(T item) => 1;\n\n    law l1(string s) => Shape.parsed(s) == Shape.parsed(s);\n    law l2(int a) => Shape.hour(a) == Shape.hour(a);\n    law l3(string s) => Shape.length(s) == Shape.length(s);\n    law l4(int a) => Shape.kept(a) == 1;\n    law l5(Shape s) => s.doubled == s.doubled;\n}\n",
+    );
+    let directory = library_project(&[shape, clock, stub]);
+    let root = directory.path();
+
+    let output = compile_without_lean(root);
+
+    let printed = printed(&output);
+    assert_eq!(output.status.code(), Some(1), "{printed}");
+    for message in [
+        "Law l1 reaches the standard library class Int in Shape.parsed. Write the code in a PHP# class of the project: of the standard library, a law reaches a List's `count()`, `map` and `filter`, and `Math.max` and `Math.min` on ints.",
+        "Law l2 reaches the plain PHP class Clock in Shape.hour. Write the code the law reaches in PHP#, or pass the value plain PHP computes to the law as a parameter.",
+        "Law l3 reaches the function `global.strlen` of PHP's root namespace in Shape.length. Write the code the law reaches in PHP#, or pass the value plain PHP computes to the law as a parameter.",
+        "Law l4 reaches the type parameter T in Shape.kept. Give it a type a law reasons about: int, bool, string, a List, or a PHP# class, enum or interface, with or without `?`.",
+        "Law l5 reaches the accessor of Shape.doubled in Shape.l5. Compute the value in a method, and give the property no accessor body.",
+    ] {
+        assert!(printed.contains(&format!("error - unmodeled-construct: {message}")), "{message}\n{printed}");
+    }
+    assert!(!printed.contains("the plain PHP class T"), "{printed}");
 }
 
 /// A loop that reads the local it adds to, here in an `if`, does more than count or sum.
@@ -3634,7 +3666,7 @@ fn a_law_reaching_a_list_pattern_on_a_value_that_is_no_list_is_refused() {
 fn a_law_reaching_a_lambda_is_refused() {
     assert_unmodeled(
         "namespace App.Shared;\n\npublic class Shape\n{\n    public static int next(int a)\n    {\n        const step = (int x) => x + 1;\n        return step(a);\n    }\n\n    law grows(int a) => Shape.next(a) != a;\n}\n",
-        "Law grows reaches a lambda in Shape.next. A law cannot reason about this lambda.",
+        "Law grows reaches a lambda in Shape.next. Pass a lambda only to a List's `map` or `filter`, with a body that cannot throw, and call a PHP# method in place of any other function value.",
     );
 }
 
@@ -3643,7 +3675,7 @@ fn a_law_reaching_an_inherited_class_is_refused() {
     assert_unmodeled_beside(
         "namespace App.Shared;\n\npublic class Shape : Base\n{\n    law any(Shape s) => true;\n}\n",
         &[("app/Shared/Base.sharp", "namespace App.Shared;\n\npublic class Base\n{\n}\n")],
-        "Law any reaches the class Shape, which extends Base in Shape. A law cannot reason about inheritance.",
+        "Law any reaches the class Shape, which extends Base in Shape. Declare the members the law reaches in the class itself, in place of inheriting them.",
     );
 }
 
@@ -3651,7 +3683,7 @@ fn a_law_reaching_an_inherited_class_is_refused() {
 fn a_law_reaching_a_named_constructor_is_refused() {
     assert_unmodeled(
         "namespace App.Shared;\n\npublic class Shape\n{\n    public Shape(public int sides { get; }) { }\n    public Shape.triangle() : this(3) { }\n\n    law threeSides(int unused) => new Shape.triangle().sides == 3;\n}\n",
-        "Law threeSides reaches the named constructor Shape.triangle in Shape.threeSides. A law cannot reason about a constructor's body.",
+        "Law threeSides reaches the named constructor Shape.triangle in Shape.threeSides. Write the constructor with promoted properties and no body, and compute the values in a static method that calls `new`.",
     );
 }
 

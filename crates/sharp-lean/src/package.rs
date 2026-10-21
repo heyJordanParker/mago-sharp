@@ -323,7 +323,7 @@ pub(crate) fn source_of(module: &str) -> PathBuf {
 }
 
 /// `Money.add` of `App.Shared.Money.add`.
-fn place_of(key: &str) -> String {
+pub(crate) fn place_of(key: &str) -> String {
     let mut parts = key.rsplitn(3, '.');
     match (parts.next(), parts.next()) {
         (Some(member), Some(class)) => format!("{class}.{member}"),
