@@ -9377,9 +9377,9 @@ fn a_parent_s_property_read_through_this_arrives_as_through_any_other_receiver()
         "src/App/BaseJob.php",
         "<?php\n\nnamespace App;\n\nabstract class BaseJob\n{\n    /** @var array<int, string> */\n    public array $names = [];\n}\n",
     );
-    let job = "namespace App;\n\npublic class SendOptin : BaseJob\n{\n    public string? first() => this.names.getOrNull(0);\n\n    public static string? firstOf(SendOptin job) => job.names.getOrNull(0);\n}\n";
+    let job = "namespace App;\n\npublic class SendInvite : BaseJob\n{\n    public string? first() => this.names.getOrNull(0);\n\n    public static string? firstOf(SendInvite job) => job.names.getOrNull(0);\n}\n";
 
-    assert_eq!(issues(("src/App/SendOptin.sharp", job), &[base]), [] as [&str; 0]);
+    assert_eq!(issues(("src/App/SendInvite.sharp", job), &[base]), [] as [&str; 0]);
 
     let shelf = (
         "src/App/Shelf.sharp",
