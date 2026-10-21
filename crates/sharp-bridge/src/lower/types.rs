@@ -1686,8 +1686,53 @@ impl<'analysis> Types<'analysis> {
     /// Whether `target` reads a property plain PHP declares, which can hold a PHP array where PHP# reads a `Map` or a
     /// `Set`.
     pub(crate) fn plain_property(&self, target: &Expression) -> bool {
-        self.accessed_property(target)
-            .and_then(|(class, property)| self.codebase.get_declaring_property_class(class, &property))
+        self.accessed_property(target).is_some_and(|(class, property)| self.plain_declares(class, &property))
+    }
+
+    /// The type plain PHP declares for the place `target` writes, a property it declares, as [`Self::plain_property`]
+    /// says, or an element of one at any depth, as [`Self::plain_element_type`] gives it. `mixed` stands for a place
+    /// that declares no type. None for any other place, which PHP# declares or a local holds.
+    pub(crate) fn plain_place_type(&self, target: &Expression) -> Option<TUnion> {
+        if let Expression::ArrayAccess(access) = target.unparenthesized() {
+            return self.plain_element_type(access.array);
+        }
+        let (class, property) = self.accessed_property(target)?;
+
+        self.plain_property_type(class, &property[1..])
+    }
+
+    /// The type plain PHP declares for an element of the place `holder`, as [`Self::plain_place_type`] gives the
+    /// place: the value type of each array its type holds, and `mixed` where it holds none.
+    pub(crate) fn plain_element_type(&self, holder: &Expression) -> Option<TUnion> {
+        let holder = self.plain_place_type(holder)?;
+        let mut element = None;
+        for atomic in holder.types.iter() {
+            if let TAtomic::Array(array) = atomic {
+                let (_, value) = get_array_parameters(array, self.codebase);
+                element = Some(add_optional_union_type(value, element.as_ref(), self.codebase));
+            }
+        }
+
+        Some(element.unwrap_or_else(get_mixed))
+    }
+
+    /// The type plain PHP declares for the property `property` of the fully qualified class name `class`, as
+    /// [`Self::plain_place_type`] gives it. None for a property PHP# declares.
+    pub(crate) fn plain_property_type(&self, class: &[u8], property: &[u8]) -> Option<TUnion> {
+        let variable = [b"$", property].concat();
+        if !self.plain_declares(class, &variable) {
+            return None;
+        }
+
+        let declared = self.codebase.get_property(class, &variable)?.type_metadata.as_ref();
+
+        Some(declared.map_or_else(get_mixed, |declared| declared.type_union.clone()))
+    }
+
+    /// Whether plain PHP declares the property `variable`, `$`-prefixed, that `class` declares or inherits.
+    fn plain_declares(&self, class: &[u8], variable: &[u8]) -> bool {
+        self.codebase
+            .get_declaring_property_class(class, variable)
             .and_then(|declaring| self.codebase.get_class_like(declaring.as_bytes()))
             .is_some_and(|declaring| !declaring.flags.is_sharp())
     }
@@ -1979,6 +2024,15 @@ pub(crate) struct FunctionType {
     pub(crate) result: Option<String>,
 }
 
+/// Whether a place plain PHP declares of the type `declared`, a parameter, a property or an element of one, takes a
+/// PHP array, which a `Map` or a `Set` crosses into, spec section 12: the type names `array`, `iterable`, `mixed` or a
+/// template. A type that takes only objects, such as `\Countable` or an interface, takes the object.
+pub(crate) fn takes_array(declared: &TUnion) -> bool {
+    declared.types.iter().any(|atomic| {
+        matches!(atomic, TAtomic::Array(_) | TAtomic::Iterable(_) | TAtomic::Mixed(_) | TAtomic::GenericParameter(_))
+    })
+}
+
 /// A parameter of plain PHP code a call runs, which a `Map` or a `Set` crosses into: a declared function's, method's or
 /// constructor's, or one of the signature of a plain PHP closure a local holds.
 #[derive(Clone, Copy, Debug)]
@@ -2006,18 +2060,9 @@ impl<'analysis> PlainParameter<'analysis> {
         }
     }
 
-    /// Whether the parameter takes a PHP array, which a `Map` or a `Set` crosses into, spec section 12: it declares no
-    /// type, or one that names `array`, `iterable`, `mixed` or a template. A type that takes only objects, such as
-    /// `\Countable` or an interface, takes the object.
+    /// Whether the parameter takes a PHP array, as [`takes_array`] says of the type it declares, or it declares none.
     pub(crate) fn takes_array(self) -> bool {
-        self.declared_type().is_none_or(|declared| {
-            declared.types.iter().any(|atomic| {
-                matches!(
-                    atomic,
-                    TAtomic::Array(_) | TAtomic::Iterable(_) | TAtomic::Mixed(_) | TAtomic::GenericParameter(_)
-                )
-            })
-        })
+        self.declared_type().is_none_or(takes_array)
     }
 
     pub(crate) fn is_variadic(self) -> bool {

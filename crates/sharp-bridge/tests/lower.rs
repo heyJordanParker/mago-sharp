@@ -23939,6 +23939,87 @@ fn a_map_or_set_goes_into_a_plain_php_array_parameter_as_its_php_array() {
 }
 
 /// ```php
+/// $context->payload = \Sharp\Internal\arrayOf($stock);
+/// \Lib\Context::$registry = \Sharp\Internal\arrayOf($stock);
+/// $context->payloads['first'] = \Sharp\Internal\arrayOf($stock);
+/// $context->counted = $stock;
+/// $this->own = $stock;
+/// ```
+///
+/// A `Map` written into a property plain PHP declares, or an element of one, goes in as the PHP array a parameter of
+/// the property's type takes, spec section 12: as its PHP array where the type takes an array, and as itself where it
+/// takes only objects, as `\Countable` does. A property PHP# declares keeps the `Map`.
+#[test]
+fn a_map_written_into_plain_php_storage_goes_in_as_a_parameter_of_the_property_s_type_takes_it() {
+    let context = (
+        "src/Lib/Context.php",
+        "<?php namespace Lib; class Context { public array $payload = []; public static array $registry = []; public array $payloads = []; public ?\\Countable $counted = null; }",
+    );
+    let code = "namespace App.Tenant;\n\nimport Lib.Context;\n\nclass Report\n{\n    public Map<string, int> own { get; set; } = [:];\n\n    public void run(Context context)\n    {\n        Map<string, int> stock = this.stock();\n        context.payload = stock;\n        Context.registry = stock;\n        context.payloads[\"first\"] = stock;\n        context.counted = stock;\n        this.own = stock;\n    }\n\n    private Map<string, int> stock() => [:];\n}\n";
+
+    assert_eq!(
+        statements_at(code, &[context], 1..6),
+        [
+            indoc! {r#"
+                ASSIGN
+                  PROP
+                    VAR
+                      ZVAL "context"
+                    ZVAL "payload"
+                  CALL
+                    ZVAL "Sharp\\Internal\\arrayOf"
+                    ARG_LIST
+                      VAR
+                        ZVAL "stock"
+            "#},
+            indoc! {r#"
+                ASSIGN
+                  STATIC_PROP
+                    ZVAL "Lib\\Context"
+                    ZVAL "registry"
+                  CALL
+                    ZVAL "Sharp\\Internal\\arrayOf"
+                    ARG_LIST
+                      VAR
+                        ZVAL "stock"
+            "#},
+            indoc! {r#"
+                ASSIGN
+                  DIM
+                    PROP
+                      VAR
+                        ZVAL "context"
+                      ZVAL "payloads"
+                    ZVAL "first"
+                  CALL
+                    ZVAL "Sharp\\Internal\\arrayOf"
+                    ARG_LIST
+                      VAR
+                        ZVAL "stock"
+            "#},
+            indoc! {r#"
+                ASSIGN
+                  PROP
+                    VAR
+                      ZVAL "context"
+                    ZVAL "counted"
+                  VAR
+                    ZVAL "stock"
+            "#},
+            indoc! {r#"
+                ASSIGN
+                  PROP
+                    VAR
+                      ZVAL "this"
+                    ZVAL "own"
+                  VAR
+                    ZVAL "stock"
+            "#},
+        ]
+    );
+}
+
+/// ```php
 /// [$sorted = \Sharp\Internal\arrayOf($sorted), \Lib\Calc::sort($sorted), $sorted = \is_array($sorted) ? \Sharp\Map::from($sorted) : $sorted][1];
 /// [$filled = \Sharp\Internal\arrayOf($filled), \Lib\Calc::fill($filled), $filled = \is_array($filled) ? \Sharp\Map::from($filled) : $filled][1];
 /// \Lib\Calc::bump($count);
