@@ -13,7 +13,7 @@ Un workflow simple qui lance le formateur, le linter et l'analyseur à chaque pu
 Le workflow installe Mago via Composer, ajoutez-le donc d'abord à votre projet :
 
 ```sh
-composer require --dev "heyjordanparker/mago-sharp:^0.4.1"
+composer require --dev "heyjordanparker/mago-sharp:^0.4.2"
 ```
 
 Puis créez `.github/workflows/mago.yml` :

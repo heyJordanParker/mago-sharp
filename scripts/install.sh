@@ -295,7 +295,7 @@ fi
 
 separator
 
-# php-sharp tags a release as v0.4.1, and its assets carry the bare version
+# php-sharp tags a release as v0.4.2, and its assets carry the bare version
 version="${latest_tag#v}"
 file_name="${BIN_NAME}-${version}-${target_triple}"
 file_url="https://github.com/${REPO}/releases/download/v${version}/${file_name}.tar.gz"
