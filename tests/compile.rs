@@ -2871,16 +2871,11 @@ fn a_signal_that_ends_a_compile_ends_the_lean_it_waits_on() {
 
 #[test]
 fn compile_proves_a_law_over_locals_an_if_a_nullable_and_strings() {
-    let directory = lawful_project(&[(
-        "app/Shared/Label.sharp",
+    assert_proven(
+        "Label",
         "namespace App.Shared;\n\npublic class Label\n{\n    public static string tag(string? name, bool loud)\n    {\n        let text = name ?? \"item\";\n        if (loud) {\n            text = text + \"!\";\n        }\n        return text;\n    }\n\n    law quietKeepsName(string name) => Label.tag(name, false) == name;\n}\n",
-    )]);
-    let root = directory.path();
-
-    let output = compile(root);
-
-    assert!(output.status.success(), "{}", printed(&output));
-    assert!(compiled(root, "app/Shared/Label.sharp").exists());
+        "law loudKeepsName(string name) => Label.tag(name, true) == name;",
+    );
 }
 
 /// A package's law is proven from its `.sharp` file as a law of the project is, and the compile writes nothing under
@@ -3035,29 +3030,41 @@ fn a_law_reaching_a_map_is_refused() {
 /// `List.length`, so Mago proves a law over them with the proof it creates.
 #[test]
 fn compile_proves_a_law_over_map_filter_and_count() {
-    let directory = lawful_project(&[(
-        "app/Shared/Basket.sharp",
+    assert_proven(
+        "Basket",
         "namespace App.Shared;\n\npublic class Basket\n{\n    public static List<bool> flags(List<int> items) => items.map(x => x > 0);\n\n    public static List<int> positives(List<int> items) => items.filter(x => x > 0);\n\n    law flagsKeepCount(List<int> items) => Basket.flags(items).count() == items.count();\n\n    law positivesDropTheRest(int unused) => Basket.positives([1, -2, 3]) == [1, 3];\n}\n",
-    )]);
-    let root = directory.path();
-
-    let output = compile(root);
-
-    assert!(output.status.success(), "{}", printed(&output));
-    assert!(compiled(root, "app/Shared/Basket.sharp").exists());
+        "law positivesKeepAll(List<int> items) => Basket.positives(items).count() == items.count();",
+    );
 }
 
 /// Compiles `source` as `app/Shared/<class>.sharp` and checks that the compile proves every law it states with the proof
-/// it creates.
-fn assert_proven(class: &str, source: &str) {
+/// it creates, and that the class with `twin` added, a false law over the same code, is refused as `law-unproven`.
+fn assert_proven(class: &str, source: &str, twin: &str) {
     let name = format!("app/Shared/{class}.sharp");
-    let directory = lawful_project(&[(&name, source)]);
-    let root = directory.path();
+    let Some(end) = source.rfind('}') else {
+        panic!("{class} has no closing brace");
+    };
+    let with_twin = format!("{}    {twin}\n{}", &source[..end], &source[end..]);
+    let Some(law) = twin.strip_prefix("law ").and_then(|twin| twin.split('(').next()) else {
+        panic!("{twin} is no law");
+    };
 
-    let output = compile(root);
+    for (source, proven) in [(source, true), (with_twin.as_str(), false)] {
+        let directory = lawful_project(&[(&name, source)]);
+        let root = directory.path();
 
-    assert!(output.status.success(), "{}", printed(&output));
-    assert!(compiled(root, &name).exists());
+        let output = compile(root);
+
+        assert_eq!(output.status.success(), proven, "{source}: {}", printed(&output));
+        assert_eq!(compiled(root, &name).exists(), proven);
+        if !proven {
+            assert!(
+                printed(&output).contains(&format!("error[law-unproven]: law {law} is not proven")),
+                "{}",
+                printed(&output)
+            );
+        }
+    }
 }
 
 /// Spec section 28.1's `total`: a method that calls itself on a list's rest from a list pattern gets smaller on each call.
@@ -3066,6 +3073,7 @@ fn compile_proves_a_law_over_recursion_on_a_list_rest() {
     assert_proven(
         "Money",
         "namespace App.Shared;\n\npublic class Money\n{\n    public Money(public int amount { get; }, public string currency { get; }) { }\n\n    public static int total(List<Money> items) => match (items) {\n        [] => 0,\n        [Money first, ...List<Money> rest] => first.amount + Money.total(rest),\n        default => 0,\n    };\n\n    law totalOfTwo(int unused) => Money.total([new Money(1, \"EUR\"), new Money(2, \"EUR\")]) == 3;\n}\n",
+        "law totalOfTwoIsFour(int unused) => Money.total([new Money(1, \"EUR\"), new Money(2, \"EUR\")]) == 4;",
     );
 }
 
@@ -3075,6 +3083,7 @@ fn compile_proves_a_law_over_recursion_on_an_int_one_step_towards_a_bound_a_guar
     assert_proven(
         "Money",
         "namespace App.Shared;\n\npublic class Money\n{\n    public Money(public int amount { get; }, public string currency { get; }) { }\n    public Money add(Money other) => new Money(this.amount + other.amount, this.currency);\n    public Money times(int n) => n <= 0 ? new Money(0, this.currency) : this.add(this.times(n - 1));\n\n    law zeroTimesIsZero(Money m) => m.times(0).amount == 0;\n}\n",
+        "law oneTimeIsZero(Money m) => m.times(1).amount == 0;",
     );
 }
 
@@ -3085,6 +3094,7 @@ fn compile_proves_a_law_over_recursion_towards_a_bound_an_if_a_match_or_a_parame
     assert_proven(
         "Steps",
         "namespace App.Shared;\n\npublic class Steps\n{\n    public static int walk(int n)\n    {\n        if (n <= 0) {\n            return 0;\n        }\n        return 1 + Steps.walk(n - 1);\n    }\n\n    public static int fall(int n) => match (n) {\n        <= 0 => 0,\n        default => Steps.fall(n - 1),\n    };\n\n    public static int climb(int i, int top) => i >= top ? 0 : 1 + Steps.climb(i + 1, top);\n\n    law twoSteps(int unused) => Steps.walk(2) == 2;\n    law fallsToZero(int unused) => Steps.fall(2) == 0;\n    law climbsTwo(int unused) => Steps.climb(0, 2) == 2;\n}\n",
+        "law climbsThree(int unused) => Steps.climb(0, 2) == 3;",
     );
 }
 
@@ -3094,6 +3104,7 @@ fn compile_proves_a_law_over_mutual_recursion() {
     assert_proven(
         "Parity",
         "namespace App.Shared;\n\npublic class Parity\n{\n    public static bool isEven(int n) => n <= 0 ? true : Parity.isOdd(n - 1);\n    public static bool isOdd(int n) => n <= 0 ? false : Parity.isEven(n - 1);\n\n    law fourIsEven(int unused) => Parity.isEven(4);\n}\n",
+        "law threeIsEven(int unused) => Parity.isEven(3);",
     );
 }
 
@@ -3103,6 +3114,7 @@ fn compile_proves_a_law_over_list_patterns_with_a_binding_arm_and_a_type_only_ar
     assert_proven(
         "Basket",
         "namespace App.Shared;\n\npublic class Basket\n{\n    public Basket(public int amount { get; }) { }\n\n    public static int size(List<Basket> items) => match (items) {\n        [] => 0,\n        [Basket, ...List<Basket> rest] => 1 + Basket.size(rest),\n        default => 0,\n    };\n\n    public static int firstAmount(List<Basket> items) => match (items) {\n        [Basket first, ...] => first.amount,\n        default => 0,\n    };\n\n    public static int lastAmount(List<Basket> items) => match (items) {\n        [..., Basket last] => last.amount,\n        default => 0,\n    };\n\n    public static int backwards(List<Basket> items) => match (items) {\n        [...List<Basket> before, Basket last] => last.amount + Basket.backwards(before),\n        default => 0,\n    };\n\n    law sizeOfTwo(int unused) => Basket.size([new Basket(1), new Basket(2)]) == 2;\n    law firstOfTwo(int unused) => Basket.firstAmount([new Basket(1), new Basket(2)]) == 1;\n    law lastOfTwo(int unused) => Basket.lastAmount([new Basket(1), new Basket(2)]) == 2;\n    law backwardsOfTwo(int unused) => Basket.backwards([new Basket(1), new Basket(2)]) == 3;\n}\n",
+        "law lastOfTwoIsFirst(int unused) => Basket.lastAmount([new Basket(1), new Basket(2)]) == 1;",
     );
 }
 
@@ -3111,6 +3123,7 @@ fn compile_proves_a_law_over_a_match_statement_with_block_arms_and_a_when_guard(
     assert_proven(
         "Sign",
         "namespace App.Shared;\n\npublic class Sign\n{\n    public static int of(int n)\n    {\n        match (n) {\n            int m when m > 0 => { return 1; },\n            0 => { return 0; },\n            default => { return -1; },\n        }\n    }\n\n    law positive(int unused) => Sign.of(5) == 1;\n    law zero(int unused) => Sign.of(0) == 0;\n}\n",
+        "law negativeIsZero(int unused) => Sign.of(-5) == 0;",
     );
 }
 
@@ -3120,6 +3133,7 @@ fn compile_proves_a_law_over_an_is_test() {
     assert_proven(
         "Order",
         "namespace App.Shared;\n\npublic class Order\n{\n    public Order(public int total { get; }) { }\n\n    public static bool known(Order? order) => order is Order;\n    public static int totalOf(Order? order) => order is Order o ? o.total : 0;\n\n    law nullIsUnknown(int unused) => !Order.known(null);\n    law nullTotalIsZero(int unused) => Order.totalOf(null) == 0;\n    law totalIsKept(Order order) => Order.totalOf(order) == order.total;\n}\n",
+        "law totalIsZero(Order order) => Order.totalOf(order) == 0;",
     );
 }
 
@@ -3128,6 +3142,7 @@ fn compile_proves_a_law_over_a_spread() {
     assert_proven(
         "Joiner",
         "namespace App.Shared;\n\npublic class Joiner\n{\n    public static List<int> joined(List<int> a, List<int> b) => [...a, 0, ...b];\n\n    law joinedKeepsCount(List<int> a, List<int> b) => Joiner.joined(a, b).count() == a.count() + b.count() + 1;\n}\n",
+        "law joinedAddsNothing(List<int> a, List<int> b) => Joiner.joined(a, b).count() == a.count() + b.count();",
     );
 }
 
@@ -3137,6 +3152,7 @@ fn compile_proves_a_law_over_a_count_in_a_lambda_a_guard_and_a_condition() {
     assert_proven(
         "Lists",
         "namespace App.Shared;\n\npublic class Lists\n{\n    public static List<List<int>> nonEmpty(List<List<int>> lists) => lists.filter(list => list.count() > 0);\n\n    public static int size(List<int> xs) => match (xs) {\n        [int first, ...] when xs.count() > 2 => first,\n        default => xs.count() > 1 ? 1 : 0,\n    };\n\n    law dropsEmpty(int unused) => Lists.nonEmpty([[1], [2, 3]]).count() == 2;\n    law longFirst(int unused) => Lists.size([5, 6, 7]) == 5;\n    law shortIsOne(int unused) => Lists.size([5, 6]) == 1;\n}\n",
+        "law keepsEmpty(int unused) => Lists.nonEmpty([[1], []]).count() == 2;",
     );
 }
 
@@ -3146,6 +3162,7 @@ fn compile_proves_a_law_over_an_empty_list() {
     assert_proven(
         "More",
         "namespace App.Shared;\n\npublic class More\n{\n    public static int sizeOf(List<int> xs) => match (xs) {\n        [] => 0,\n        default => xs.count() > 2 ? 2 : 1,\n    };\n\n    public static List<int> none(int unused) => [];\n\n    law sizeOfEmpty(int unused) => More.sizeOf([]) == 0;\n    law noneIsEmpty(int unused) => More.none(0).count() == 0;\n    law noneIsTheEmptyList(int unused) => More.none(0) == [];\n}\n",
+        "law sizeOfEmptyIsOne(int unused) => More.sizeOf([]) == 1;",
     );
 }
 
@@ -3155,6 +3172,7 @@ fn compile_proves_a_law_over_a_counting_loop() {
     assert_proven(
         "Orders",
         "namespace App.Shared;\n\npublic class Orders\n{\n    public static int size(List<int> orders)\n    {\n        let count = 0;\n        for (const order of orders) {\n            count++;\n        }\n        return count;\n    }\n\n    law sizeIsCount(List<int> orders) => Orders.size(orders) == orders.count();\n}\n",
+        "law sizeIsOneMore(List<int> orders) => Orders.size(orders) == orders.count() + 1;",
     );
 }
 
@@ -3164,6 +3182,7 @@ fn compile_proves_a_law_over_a_summing_loop() {
     assert_proven(
         "Sums",
         "namespace App.Shared;\n\npublic class Sums\n{\n    public static int sumOf(List<int> xs)\n    {\n        let sum = 0;\n        for (const x of xs) {\n            sum += x;\n        }\n        return sum;\n    }\n\n    law sumJoins(List<int> a, List<int> b) => Sums.sumOf([...a, ...b]) == Sums.sumOf(a) + Sums.sumOf(b);\n}\n",
+        "law sumIsTheFirst(List<int> a, List<int> b) => Sums.sumOf([...a, ...b]) == Sums.sumOf(a);",
     );
 }
 
@@ -3174,6 +3193,7 @@ fn compile_proves_a_law_over_a_counting_loop_under_an_if() {
     assert_proven(
         "Order",
         "namespace App.Shared;\n\npublic class Order\n{\n    public Order(public bool open { get; }) { }\n\n    public static int openCount(List<Order> orders)\n    {\n        let count = 0;\n        for (const o of orders) {\n            if (o.open) {\n                count += 1;\n            }\n        }\n        return count;\n    }\n\n    law countAtMost(List<Order> orders) => Order.openCount(orders) <= orders.count();\n}\n",
+        "law countAll(List<Order> orders) => Order.openCount(orders) == orders.count();",
     );
 }
 
