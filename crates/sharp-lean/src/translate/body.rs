@@ -797,7 +797,7 @@ impl<'body, 'program> Body<'body, 'program> {
 
     /// What a comparison pattern of `pattern`'s shows about the `match`'s subject, the parameter `parameter`, where
     /// the pattern is `holds`.
-    fn pattern_facts(&self, parameter: Option<usize>, pattern: &Pattern, holds: bool) -> Vec<Fact> {
+    pub(super) fn pattern_facts(&self, parameter: Option<usize>, pattern: &Pattern, holds: bool) -> Vec<Fact> {
         match (parameter, pattern) {
             (Some(parameter), Pattern::Comparison(comparison)) if self.parameters[parameter].1 => {
                 smaller::comparison(self, parameter, &comparison.operator, comparison.value, holds, false)
@@ -877,7 +877,7 @@ impl<'body, 'program> Body<'body, 'program> {
     }
 
     /// The term of `expression`, which must not throw, or `None` after recording `what` and `reason` when it can.
-    fn pure(&mut self, expression: &Expression, what: &str, reason: &'static str) -> Option<String> {
+    pub(super) fn pure(&mut self, expression: &Expression, what: &str, reason: &'static str) -> Option<String> {
         let (lines, value) = self.nested(|body| body.value(expression));
         if lines.is_empty() {
             return Some(value);

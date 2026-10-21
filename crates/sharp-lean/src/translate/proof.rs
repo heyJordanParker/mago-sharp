@@ -5,9 +5,14 @@
 //! in scope, the theorem of the law it calls, and each case ends in `sharp_close`, which `Sharp/Lean/Proof.lean`
 //! defines. A call of the law itself is Lean's recursion on the theorem.
 
+use foldhash::HashMap;
+use mago_analyzer::smaller::Fact;
+use mago_analyzer::smaller::Step;
+use mago_names::binding::Binding;
 use mago_sharp_bridge::CheckedProgram;
 use mago_span::HasSpan;
 use mago_span::Span;
+use mago_syntax::cst::Access;
 use mago_syntax::cst::Argument;
 use mago_syntax::cst::BinaryOperator;
 use mago_syntax::cst::Block;
@@ -31,16 +36,19 @@ use crate::translate::Measure;
 use crate::translate::Unmodeled;
 use crate::translate::Use;
 use crate::translate::body::Body;
+use crate::translate::body::Kind;
 use crate::translate::body::indented;
 use crate::translate::names;
-use mago_analyzer::smaller::Fact;
-use mago_analyzer::smaller::Step;
+use crate::translate::pattern::Choice;
+use crate::translate::pattern::choice;
 
 /// The theorem of a law, and what its errors name.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Proof {
     /// The Lean theorem, `<statement>.proof`.
     pub(crate) text: String,
+    /// The law's claim as PHP# writes it, which a case's goal prints as when it holds a part PHP# writes no other way.
+    pub(crate) claim: String,
     /// Each case the proof closes, in the order of its index, from 1.
     pub(crate) cases: Vec<Case>,
     /// Each call of a law in the body, in the order of its index, from 1.
@@ -78,18 +86,6 @@ struct Rest<'arena> {
     offset: u32,
     name: &'arena [u8],
     parameter: usize,
-}
-
-/// One arm of a `match` on a list, as Lean matches the list.
-struct ListArm<'ast, 'arena> {
-    /// Its Lean pattern: `[]`, `first :: rest`, or `_` for every list the arms before it miss.
-    lean: String,
-    /// Its PHP# pattern, or `None` for `default`.
-    pattern: Option<String>,
-    /// What holds in it, in PHP#: `items is []`, or for `default`, that each pattern before it does not match.
-    condition: String,
-    block: Option<&'ast Block<'arena>>,
-    rest: Option<Rest<'arena>>,
 }
 
 /// What holds on one path through a body.
@@ -172,6 +168,7 @@ impl<'prover, 'program, 'ast, 'arena> Prover<'prover, 'program, 'ast, 'arena> {
             }
         }
 
+        self.proof.claim = self.source(self.law.claim.span());
         let applied = std::iter::once(self.statement.clone()).chain(parameters.iter().cloned()).collect::<Vec<_>>();
         self.proof.text = format!(
             "theorem {}.proof {} : {} := by\n{}",
@@ -254,7 +251,9 @@ impl<'prover, 'program, 'ast, 'arena> Prover<'prover, 'program, 'ast, 'arena> {
         }
     }
 
-    /// A `match` on a list parameter: each arm is the case of the list it matches, `[]` or an element before the rest.
+    /// A `match` statement: each arm is a case that knows its pattern and its `when` guard, as the pattern tests of a
+    /// method's `match` test them, and `default` is the case where no arm matches. The subject is a value the tactics
+    /// name, so each case split rewrites it where the claim reads it.
     fn r#match(
         &mut self,
         r#match: &'ast PatternMatch<'arena>,
@@ -262,88 +261,127 @@ impl<'prover, 'program, 'ast, 'arena> Prover<'prover, 'program, 'ast, 'arena> {
         scope: Scope<'ast, 'arena>,
         lines: &mut Vec<String>,
     ) {
-        let Some(subject) = parameter(self.law, r#match.expression) else {
-            self.unmodeled(r#match.span());
+        let mut body = self.body(&scope);
+        let (computed, subject) = body.nested(|body| body.value(r#match.expression));
+        if !computed.is_empty() || !self.names_value(&scope, r#match.expression) {
+            self.proof.unmodeled.push(Unmodeled {
+                span: r#match.expression.span(),
+                what: format!("a match on `{}`", self.source(r#match.expression.span())),
+                place: self.place.clone(),
+                reason: issues::LAW_MATCH,
+            });
             return;
-        };
+        }
+
+        let r#type = self.checked.types().expression_type(r#match.expression);
+        let parameter = parameter(self.law, r#match.expression);
         let written = self.source(r#match.expression.span());
-        let mut arms: Vec<ListArm<'ast, 'arena>> = Vec::new();
+        let statements = |block: Option<&'ast Block<'arena>>| -> Vec<&'ast Statement<'arena>> {
+            block.into_iter().flat_map(|block| block.statements.iter()).chain(rest.iter().copied()).collect()
+        };
+        let mut arms = Vec::new();
+        // What holds where no arm before matched: each arm's pattern failed, or its guard did.
+        let (mut missed, mut fails) = (Vec::new(), Vec::new());
+        let mut default = None;
+        let mut tested = true;
         for arm in r#match.arms.iter() {
             let PatternMatchArmBody::Block(block) = arm.body() else {
                 continue;
             };
             let PatternMatchArm::Pattern(arm) = arm else {
-                // A `default` after both shapes of a list never runs.
-                let missed: Vec<String> = arms
-                    .iter()
-                    .filter_map(|arm| arm.pattern.as_ref())
-                    .map(|pattern| format!("{written} is not {pattern}"))
-                    .collect();
-                if !(arms.iter().any(|arm| arm.lean == "[]") && arms.iter().any(|arm| arm.lean != "[]")) {
-                    arms.push(ListArm {
-                        lean: "_".to_owned(),
-                        pattern: None,
-                        condition: missed.join(" && "),
-                        block: Some(block),
-                        rest: None,
-                    });
-                }
+                default = Some(block);
                 continue;
             };
-            let (Pattern::List(list), None) = (arm.pattern, &arm.guard) else {
-                self.unmodeled(arm.span());
-                return;
+            let Some(mut test) = body.test(&subject, r#type, parameter, arm.pattern) else {
+                tested = false;
+                break;
             };
             let pattern = self.source(arm.pattern.span());
-            let condition = format!("{written} is {pattern}");
-            let elements: Vec<&ListPatternElement> = list.elements.iter().collect();
-            let (lean, rest) = match elements.as_slice() {
-                [] => ("[]".to_owned(), None),
-                [ListPatternElement::Pattern(first), ListPatternElement::Rest(tail)] => {
-                    let Some(head) = element(first) else {
-                        self.unmodeled(arm.span());
-                        return;
+            let (holds, fails_here) = match &arm.guard {
+                Some(guard) => {
+                    let Some(condition) = body.pure(guard.condition, "a guard that can throw", issues::GUARD) else {
+                        tested = false;
+                        break;
                     };
-                    let tail = tail.variable.as_ref();
-                    (
-                        format!(
-                            "{head} :: {}",
-                            tail.map_or_else(|| "_".to_owned(), |tail| names::identifier(tail.value))
-                        ),
-                        tail.map(|tail| Rest { offset: tail.span.start.offset, name: tail.value, parameter: subject }),
-                    )
+                    test.conditions.push(condition);
+                    let guarded = format!("{written} is {pattern} && {}", self.source(guard.condition.span()));
+                    (guarded.clone(), format!("!({guarded})"))
                 }
-                _ => {
-                    self.unmodeled(arm.span());
-                    return;
-                }
+                None => (format!("{written} is {pattern}"), format!("{written} is not {pattern}")),
             };
-            arms.push(ListArm { lean, pattern: Some(pattern), condition, block: Some(block), rest });
+
+            let mut case = scope.clone();
+            case.hypotheses.push((String::new(), holds));
+            case.facts.extend(fails.iter().copied().chain(body.pattern_facts(parameter, arm.pattern, true)));
+            case.rests.extend(rest_of(arm.pattern, &body.rests));
+            let mut tactics = Vec::new();
+            self.statements(&statements(Some(block)), case, &mut tactics);
+            arms.push((test, tactics));
+
+            missed.push(fails_here);
+            if arm.guard.is_none() {
+                fails.extend(body.pattern_facts(parameter, arm.pattern, false));
+            }
         }
-        let covers = |shape: fn(&str) -> bool| arms.iter().any(|arm| arm.lean == "_" || shape(&arm.lean));
-        if !covers(|lean| lean == "[]") || !covers(|lean| lean != "[]") {
-            arms.push(ListArm {
-                lean: "_".to_owned(),
-                pattern: None,
-                condition: String::new(),
-                block: None,
-                rest: None,
-            });
+        self.proof.uses.append(&mut body.uses);
+        self.proof.unmodeled.append(&mut body.unmodeled);
+        if !tested {
+            return;
         }
 
-        lines.push(format!("match {} with", self.parameter_name(subject)));
-        for ListArm { lean, condition, block, rest: tail, .. } in arms {
-            let mut arm = scope.clone();
-            if !condition.is_empty() {
-                arm.hypotheses.push((String::new(), condition));
+        let mut otherwise = scope;
+        if !missed.is_empty() {
+            otherwise.hypotheses.push((String::new(), missed.join(" && ")));
+        }
+        otherwise.facts.extend(fails);
+        let mut tactics = Vec::new();
+        self.statements(&statements(default), otherwise, &mut tactics);
+        // Where every arm failed on an enum, whose arms cover its cases, the cases show that no value is left.
+        let otherwise = if body.kind(r#type) == Kind::Enum {
+            let mut covered = vec![format!("try (cases {subject} <;> simp_all; done)"), "all_goals".to_owned()];
+            covered.extend(tactics.into_iter().map(|line| format!("  {line}")));
+            covered
+        } else {
+            tactics
+        };
+
+        lines.extend(self.tactics(&choice(arms, otherwise)));
+    }
+
+    /// The tactics of `choice`, the case split of a `match`'s arms: a named `match` for each Lean pattern an arm tests,
+    /// so the claim reads the value of each case, `by_cases` for each condition, and `obtain` for each name an arm gives
+    /// its value. A `_` after patterns that cover every value is left out, since Lean refuses an arm that never runs.
+    fn tactics(&mut self, choice: &Choice) -> Vec<String> {
+        self.hypotheses += 1;
+        let index = self.hypotheses;
+        match choice {
+            Choice::Branch(tactics) => tactics.clone(),
+            Choice::If(condition, then, otherwise) => {
+                let mut lines = vec![format!("by_cases «$c{index}» : ({condition}) = true")];
+                let then = self.tactics(then);
+                lines.extend(dotted(then));
+                let otherwise = self.tactics(otherwise);
+                lines.extend(dotted(otherwise));
+                lines
             }
-            arm.rests.extend(tail);
-            let statements: Vec<&Statement> =
-                block.into_iter().flat_map(|block| block.statements.iter()).chain(rest.iter().copied()).collect();
-            let mut tactics = Vec::new();
-            self.statements(&statements, arm, &mut tactics);
-            lines.push(format!("| {lean} =>"));
-            lines.extend(tactics.into_iter().map(|line| format!("  {line}")));
+            Choice::Match(term, alternatives) => {
+                let mut lines = vec![format!("match «$m{index}» : {term} with")];
+                let patterns: Vec<&str> = alternatives.iter().map(|(pattern, _)| pattern.as_str()).collect();
+                for (place, (pattern, alternative)) in alternatives.iter().enumerate() {
+                    if pattern == "_" && covers(&patterns[..place]) {
+                        continue;
+                    }
+                    lines.push(format!("| {pattern} =>"));
+                    let tactics = self.tactics(alternative);
+                    lines.extend(tactics.into_iter().map(|line| format!("  {line}")));
+                }
+                lines
+            }
+            Choice::Let(name, value, inner) => {
+                let mut lines = vec![format!("obtain ⟨{name}, «$l{index}»⟩ : ∃ value, value = {value} := ⟨_, rfl⟩")];
+                lines.extend(self.tactics(inner));
+                lines
+            }
         }
     }
 
@@ -483,20 +521,28 @@ impl<'prover, 'program, 'ast, 'arena> Prover<'prover, 'program, 'ast, 'arena> {
             .into_owned()
     }
 
-    fn parameter_name(&self, place: usize) -> String {
-        let parameter = &self.law.parameter_list.parameters.as_slice()[place];
-
-        names::identifier(parameter.variable.name.strip_prefix(b"$").unwrap_or(parameter.variable.name))
-    }
-
-    /// Records the `match` arm or statement at `span` as one the proof cannot split on.
-    fn unmodeled(&mut self, span: Span) {
-        self.proof.unmodeled.push(Unmodeled {
-            span,
-            what: format!("the statement `{}`", self.source(span)),
-            place: self.place.clone(),
-            reason: issues::LAW_MATCH,
-        });
+    /// Whether `expression` names a value the proof's tactics name: a parameter of the law, a value a pattern of its
+    /// body names, or a property of one. A local of the body is none of them, since only the code that computes a law
+    /// call's arguments declares it.
+    fn names_value(&self, scope: &Scope<'ast, 'arena>, expression: &Expression) -> bool {
+        match expression {
+            Expression::Parenthesized(parenthesized) => self.names_value(scope, parenthesized.expression),
+            Expression::Access(Access::Property(access)) => self.names_value(scope, access.object),
+            Expression::ConstantAccess(name) => match self.checked.names().binding(&name.name) {
+                Some(Binding::Local(local)) => !scope.locals.iter().any(|statement| {
+                    let Statement::LocalDeclaration(declaration) = statement else {
+                        return false;
+                    };
+                    declaration
+                        .target
+                        .names()
+                        .iter()
+                        .any(|name| name.span.start.offset == local.declaration.start.offset)
+                }),
+                _ => false,
+            },
+            _ => false,
+        }
     }
 
     fn source(&self, span: Span) -> String {
@@ -507,14 +553,41 @@ impl<'prover, 'program, 'ast, 'arena> Prover<'prover, 'program, 'ast, 'arena> {
     }
 }
 
-/// The name of a list pattern's element, `_` for a type pattern without one, or `None` for any other pattern.
-fn element(pattern: &Pattern) -> Option<String> {
-    match pattern {
-        Pattern::Type(r#type) if r#type.fields.is_none() && r#type.properties.is_none() => {
-            Some(r#type.variable.as_ref().map_or_else(|| "_".to_owned(), |variable| names::identifier(variable.value)))
-        }
-        _ => None,
-    }
+/// The rest of the list pattern `pattern` of the law's parameter at `parameter`, which `rests`, the rests the
+/// pattern tests found smaller than their list, holds.
+fn rest_of<'arena>(pattern: &Pattern<'arena>, rests: &HashMap<u32, usize>) -> Option<Rest<'arena>> {
+    let Pattern::List(list) = pattern else {
+        return None;
+    };
+
+    list.elements.iter().find_map(|element| {
+        let ListPatternElement::Rest(rest) = element else {
+            return None;
+        };
+        let variable = rest.variable.as_ref()?;
+        let parameter = *rests.get(&variable.span.start.offset)?;
+
+        Some(Rest { offset: variable.span.start.offset, name: variable.value, parameter })
+    })
+}
+
+/// Whether the Lean patterns `patterns` of one term cover every value of it: `_` or a name, or a list's `[]` beside an
+/// element before a rest that is a name or `_`.
+fn covers(patterns: &[&str]) -> bool {
+    let name =
+        |pattern: &str| pattern.chars().all(|character| character.is_alphanumeric() || "_«»$'".contains(character));
+
+    patterns.iter().any(|pattern| name(pattern))
+        || (patterns.contains(&"[]")
+            && patterns.iter().any(|pattern| pattern.split_once(" :: ").is_some_and(|(_, tail)| name(tail))))
+}
+
+/// `tactics` as one branch of a case split: `·` before the first.
+fn dotted(tactics: Vec<String>) -> impl Iterator<Item = String> {
+    tactics
+        .into_iter()
+        .enumerate()
+        .map(|(index, line)| if index == 0 { format!("· {line}") } else { format!("  {line}") })
 }
 
 /// The place of the law's parameter `expression` names.

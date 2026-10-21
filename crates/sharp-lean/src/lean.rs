@@ -453,9 +453,14 @@ fn judged(law: &Law, judgment: Judgment, receivers: &HashMap<String, bool>, decl
         Judgment::Proved => Vec::new(),
         Judgment::Through(called) => vec![issues::through(law, &called)],
         Judgment::Rejected(_) => vec![issues::rejected_proof(law)],
+        // A case a `match` reaches both where a guard fails and where a pattern does is one case, reported once.
         Judgment::Open(steps) => steps
             .iter()
-            .map(|step| {
+            .enumerate()
+            .filter(|(place, step)| {
+                !steps[..*place].iter().any(|before| before.index == step.index && before.condition == step.condition)
+            })
+            .map(|(_, step)| {
                 if step.condition {
                     let call = &law.proof.calls[step.index - 1];
                     let names = Names { receivers, declared, arguments: &call.arguments };

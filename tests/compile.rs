@@ -4197,7 +4197,15 @@ fn compile_proves_spec_section_28_s_money_from_its_sharp_file_alone() {
 fn a_case_a_law_s_body_leaves_open_names_its_conditions_and_its_goal_in_php_sharp() {
     let without_add = SPECIMEN_MONEY.replace("        Money.addKeepsCurrency(m, m.times(n - 1));\n", "");
     let without_calls = without_add.replace("        Money.timesKeepsCurrency(m, n - 1);\n", "");
+    let without_sum_calls = SPECIMEN_MONEY.replace(
+        "                Money.sumKeepsCurrency(total.add(first), rest);\n                Money.addKeepsCurrency(total, first);\n",
+        "",
+    );
     for (source, expected) in [
+        (
+            without_sum_calls.as_str(),
+            "app/Shared/Money.sharp:27:5: error[law-unproven]: law sumKeepsCurrency is not proven\n = when items is [Money first, ...List<Money> rest], still to show: Money.sum(total.add(first), rest).currency == total.currency\n = Help: the law for a smaller items is the call Money.sumKeepsCurrency(total, rest)\n",
+        ),
         (
             without_add.as_str(),
             "app/Shared/Money.sharp:12:5: error[law-unproven]: law timesKeepsCurrency is not proven\n = when n > 0, still to show: m.add(m.times(n - 1)).currency == m.currency\n",
@@ -4216,6 +4224,28 @@ fn a_case_a_law_s_body_leaves_open_names_its_conditions_and_its_goal_in_php_shar
         assert!(printed(&output).contains(expected), "{}", printed(&output));
         assert!(!compiled(root, "app/Shared/Money.sharp").exists());
     }
+}
+
+/// Spec section 28: every goal prints in PHP#. A goal whose `match` the case leaves open, as `Money.sum`'s on a list
+/// it knows nothing of, prints as the claim the law writes.
+#[test]
+fn a_goal_with_a_match_the_case_leaves_open_prints_as_the_law_s_claim() {
+    let money = SPECIMEN_MONEY.replace(
+        "    public static int refundable",
+        "    law sumIsEuro(Money total, List<Money> items) => Money.sum(total, items).currency == \"EUR\";\n\n    public static int refundable",
+    );
+    let directory = library_project(&[("app/Shared/Money.sharp", &money)]);
+
+    let output = compile(directory.path());
+
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    assert!(
+        printed(&output).contains(
+            "error[law-unproven]: law sumIsEuro is not proven\n = still to show: Money.sum(total, items).currency == \"EUR\"\n"
+        ),
+        "{}",
+        printed(&output)
+    );
 }
 
 /// Spec section 28: a law with `when` is called only where its condition holds, so a call where it is not known names
@@ -4263,13 +4293,46 @@ fn laws_that_call_each_other_in_a_cycle_are_refused() {
     );
 }
 
-/// A law's body splits its cases on a `match` of a list parameter, so a `match` arm of any other shape names what to
-/// write.
+/// Spec section 28: a `match` in a law's body takes every arm a `match` takes, and each arm is a case that knows its
+/// pattern and its `when` guard: a constant, a type pattern that names the value, an enum's cases, a comparison and
+/// `default`. A case an arm leaves open names its pattern. Spec section 28's `sumKeepsCurrency` covers a list.
 #[test]
-fn a_law_body_s_match_on_a_value_that_is_no_list_parameter_is_refused() {
+fn a_law_body_s_match_splits_its_cases_on_every_arm_a_match_takes() {
+    let status = "namespace App.Shared;\n\npublic enum Status\n{\n    case Open;\n    case Paid;\n\n    public int weight() => match (this) {\n        Status.Open => 1,\n        Status.Paid => 2,\n    };\n}\n";
+    let signs = |arms: &str| {
+        format!(
+            "namespace App.Shared;\n\npublic class Signs\n{{\n    public static int sign(int n) => n > 5 ? 2 : (n < 0 ? 0 : 1);\n\n    law signBounded(int n) => Signs.sign(n) >= 0 && Signs.sign(n) <= 2\n    {{\n        match (n) {{\n{arms}        }}\n    }}\n    law weighs(Status s) => s.weight() > 0\n    {{\n        match (s) {{\n            Status.Open => {{ return; }},\n            default => {{ return; }},\n        }}\n    }}\n}}\n"
+        )
+    };
+    let proven = signs(
+        "            int m when m > 5 => { return; },\n            < 0 => { return; },\n            0 => { return; },\n            default => { return; },\n",
+    );
+    let directory = lawful_project(&[("app/Shared/Signs.sharp", &proven), ("app/Shared/Status.sharp", status)]);
+    let output = compile(directory.path());
+    assert!(output.status.success(), "{}", printed(&output));
+
+    let positive = signs("            int m when m > 5 => { return; },\n            default => { return; },\n")
+        .replace(
+            "law signBounded(int n) => Signs.sign(n) >= 0 && Signs.sign(n) <= 2",
+            "law signBounded(int n) => Signs.sign(n) == 2",
+        );
+    let directory = lawful_project(&[("app/Shared/Signs.sharp", &positive), ("app/Shared/Status.sharp", status)]);
+    let output = compile(directory.path());
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    assert!(
+        printed(&output).contains(" = when !(n is int m && m > 5), still to show: (n > 5 ? 2 : n < 0 ? 0 : 1) == 2\n"),
+        "{}",
+        printed(&output)
+    );
+}
+
+/// A law's proof splits its cases on a value it can name without running code, so a `match` of any other value is
+/// refused with what to match instead.
+#[test]
+fn a_law_body_s_match_on_a_value_that_runs_code_is_refused() {
     assert_unmodeled(
-        "namespace App.Shared;\n\npublic class Shape\n{\n    law signs(int n) => true\n    {\n        match (n) {\n            0 => { return; },\n            default => { return; },\n        }\n    }\n}\n",
-        "Law signs reaches the statement `0 => { return; }` in Shape.signs. Match a list parameter of the law with the arms `[]`, `[first, ...rest]` and `default`.",
+        "namespace App.Shared;\n\npublic class Shape\n{\n    law signs(int n) => true\n    {\n        match (n + 1) {\n            0 => { return; },\n            default => { return; },\n        }\n    }\n}\n",
+        "Law signs reaches a match on `n + 1` in Shape.signs. Match a parameter of the law, a value a pattern of its body names, or a property of one.",
     );
 }
 

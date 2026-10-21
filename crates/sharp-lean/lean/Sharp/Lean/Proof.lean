@@ -159,11 +159,13 @@ private def unfoldOnce (definition : Name) : TacticM Unit := do
   try evalTactic (← `(tactic| unfold $(mkIdent definition):ident)) catch _ => pure ()
 
 /-- The automatic steps that close a goal: `simp_all` with `definitions` and every fact in scope, then `omega` or `grind`
-on what is left, or `decide`. A case hypothesis keeps its `¬ x ≤ y`, so it still decides the `if` the definition
-tests. -/
+on what is left, or `decide`. A case hypothesis keeps its `¬ x ≤ y` and its `¬ x < y`, so it still decides the `if`
+the definition tests. -/
 private def auto (definitions : Array Name) : TacticM Unit := do
   let kept : Array SimpItem := #[⟨(← `(Lean.Parser.Tactic.simpErase| -Int64.not_le)).raw⟩,
-    ⟨(← `(Lean.Parser.Tactic.simpErase| -Int.not_le)).raw⟩]
+    ⟨(← `(Lean.Parser.Tactic.simpErase| -Int.not_le)).raw⟩,
+    ⟨(← `(Lean.Parser.Tactic.simpErase| -Int64.not_lt)).raw⟩,
+    ⟨(← `(Lean.Parser.Tactic.simpErase| -Int.not_lt)).raw⟩]
   let items := (← definitions.mapM lemma) ++ kept
   evalTactic (← `(tactic| first
     | ((try simp_all [$items,*])

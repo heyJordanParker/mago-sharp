@@ -68,7 +68,7 @@ pub(crate) const CASE_FIELD: &str =
 pub(crate) const MEMBER: &str = "Read a property the class declares, or call one of its methods.";
 pub(crate) const RECEIVER: &str = "Call it on a value of a PHP# class, enum or interface.";
 pub(crate) const LAW_MATCH: &str =
-    "Match a list parameter of the law with the arms `[]`, `[first, ...rest]` and `default`.";
+    "Match a parameter of the law, a value a pattern of its body names, or a property of one.";
 pub(crate) const SELF_HOLDING: &str =
     "A law reasons only about a class whose properties never hold a value of the class itself.";
 
@@ -113,9 +113,10 @@ pub(crate) fn untranslated(law: &Law, place: &str) -> Issue {
 }
 
 /// A case of `law`'s proof that the automatic steps did not close, with its conditions and the goal still to show in
-/// PHP#, and the call of the law itself on a smaller value when the case knows one and makes no such call.
+/// PHP#, or the law's claim as written when the goal holds a part PHP# writes no other way, and the call of the law
+/// itself on a smaller value when the case knows one and makes no such call.
 pub(crate) fn unproven_case(law: &Law, case: &Case, goal: Option<&str>) -> Issue {
-    let goal = goal.unwrap_or("the law's claim");
+    let goal = goal.unwrap_or(&law.proof.claim);
     let issue = Issue::error(format!("law {} is not proven", law.name))
         .with_code(IssueCode::LawUnproven.as_str())
         .with_annotation(Annotation::primary(law.span))
