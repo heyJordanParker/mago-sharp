@@ -397,3 +397,44 @@ fn judged(law: &Law, judgment: Judgment, receivers: &HashMap<String, bool>, decl
 fn report(issues: &mut HashMap<FileId, IssueCollection>, translation: &Translation, issue: Issue) {
     issues.entry(translation.file).or_default().push(issue);
 }
+
+#[cfg(test)]
+mod tests {
+    use mago_span::Span;
+
+    use super::*;
+    use crate::package::Refusal;
+
+    fn law() -> Law {
+        Law {
+            name: "addKeepsCurrency".to_owned(),
+            statement: "App.Shared.Money.addKeepsCurrency".to_owned(),
+            span: Span::dummy(0, 0),
+            proof: crate::translate::proof::Proof::default(),
+        }
+    }
+
+    /// A proof or a module the checker wrote wrong is the checker's bug, which the message says in PHP#, naming no Lean
+    /// module and quoting no Lean error.
+    #[test]
+    fn a_proof_or_a_module_the_checker_wrote_wrong_names_no_lean() {
+        let rejected = judged(
+            &law(),
+            Judgment::Rejected("unknown identifier 'Code.App.Shared.Money.add'".to_owned()),
+            &HashMap::default(),
+            &HashSet::default(),
+        );
+        let refused = issues::generated_module_refused(&law(), "Code.App.Shared.Money", &Refusal::Rejected(26));
+
+        assert_eq!(
+            rejected.iter().map(|issue| issue.message.as_str()).collect::<Vec<_>>(),
+            [
+                "Law addKeepsCurrency is not proven: the checker wrote a proof of it that does not check. This is a bug in the PHP# checker; report it to its maintainers."
+            ]
+        );
+        assert_eq!(
+            refused.message,
+            "Law addKeepsCurrency is not proven: the checker translated the code it reaches wrongly. This is a bug in the PHP# checker; report it to its maintainers."
+        );
+    }
+}

@@ -135,7 +135,7 @@ impl HasSpan for FunctionLikeBody<'_, '_> {
         match self {
             FunctionLikeBody::Statements(_, span) => *span,
             FunctionLikeBody::Expression(expr) | FunctionLikeBody::ExpressionStatement(expr) => expr.span(),
-            FunctionLikeBody::Law(law) => law.claim.span(),
+            FunctionLikeBody::Law(_) => unreachable!("a law's issues are placed on its own parts, never on its code"),
         }
     }
 }

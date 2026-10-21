@@ -393,8 +393,15 @@ fn is_built(library: &Path) -> bool {
             .all(|(path, source)| fs::read(library.join(path)).is_ok_and(|bytes| bytes == source.as_bytes()))
 }
 
-/// The error of a build of the law checker that failed, whose output the debug log holds.
-const UNBUILT: &str = "the law checker could not be built in Mago's cache folder. Run vendor/bin/mago compile again to retry, with MAGO_LOG=debug to see why";
+/// The error of a build of the law checker that failed for `failure`, which only the debug log holds, so the error
+/// names no folder and no tool.
+fn unbuilt(failure: impl std::fmt::Display) -> io::Error {
+    tracing::debug!("The law checker's build failed: {failure}");
+
+    io::Error::other(
+        "the law checker could not be built in Mago's cache folder. Run vendor/bin/mago compile again to retry, with MAGO_LOG=debug to see why",
+    )
+}
 
 /// Writes the library's package to `lean/<build id>.staging` in Mago's cache folder, builds it with `lake` and renames
 /// it to `lean/<build id>`, once per build ID. Builds take turns under an exclusive lock on `lean/build.lock`, across
@@ -423,19 +430,11 @@ pub(crate) fn build(lake: &Lake) -> io::Result<PathBuf> {
 
     let output = lake.command().arg("build").current_dir(&staging).output()?;
     if !output.status.success() {
-        tracing::debug!(
-            "The law checker's build in {} failed:\n{}{}",
-            staging.display(),
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        return Err(io::Error::other(UNBUILT));
+        let printed = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        return Err(unbuilt(format!("lake build in {} printed:\n{printed}", staging.display())));
     }
 
-    fs::rename(&staging, &library).map_err(|error| {
-        tracing::debug!("The law checker could not move {} to {}: {error}", staging.display(), library.display());
-        io::Error::other(UNBUILT)
-    })?;
+    fs::rename(&staging, &library).map_err(unbuilt)?;
 
     for entry in fs::read_dir(&builds)? {
         let old = entry?.path();

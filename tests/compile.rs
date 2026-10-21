@@ -2131,9 +2131,11 @@ fn compile_runs_the_lake_on_the_path_and_installs_no_lean() {
     std::fs::set_permissions(lake.path().join("lake"), std::fs::Permissions::from_mode(0o755)).unwrap();
     let cache = tempfile::tempdir().unwrap();
 
+    // The debug log holds what the failed build printed.
     let output = command(directory.path(), "never")
         .env("PATH", lake.path())
         .env("XDG_CACHE_HOME", cache.path())
+        .env("MAGO_LOG", "debug")
         .output()
         .unwrap();
 
