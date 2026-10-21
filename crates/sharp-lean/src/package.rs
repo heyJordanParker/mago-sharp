@@ -126,7 +126,7 @@ impl<'program> Program<'program> {
                         .to_owned(),
                         // A type is placed by its own name, as a member is by its class's and its own.
                         place: if methods { place_of(key) } else { key.rsplit('.').next().unwrap_or(key).to_owned() },
-                        reason: if methods { issues::RECURSION } else { issues::NOT_TRANSLATED },
+                        reason: if methods { issues::RECURSION } else { issues::SELF_HOLDING },
                     },
                 );
             }

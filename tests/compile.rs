@@ -4298,8 +4298,47 @@ fn a_law_reaching_a_mutual_recursion_that_does_not_get_smaller_is_refused() {
 fn a_law_reaching_a_type_that_holds_itself_is_refused() {
     assert_unmodeled(
         "namespace App.Shared;\n\npublic class Shape\n{\n    public Shape(public int value { get; }, public Shape? next { get; }) { }\n\n    law keepsValue(Shape shape) => shape.value == shape.value;\n}\n",
-        "Law keepsValue reaches a type that holds itself in Shape. A law cannot reason about it.",
+        "Law keepsValue reaches a type that holds itself in Shape. A law reasons only about a class whose properties never hold a value of the class itself.",
     );
+}
+
+/// A value pattern tests a List by `==`, which a `when` guard writes, so the refusal says to write it there.
+#[test]
+fn a_law_reaching_a_value_pattern_on_a_list_is_refused() {
+    assert_unmodeled(
+        "namespace App.Shared;\n\npublic class Shape\n{\n    public const List<int> PAIR = [1, 2];\n\n    public static int pair(List<int> xs) => match (xs) {\n        Shape.PAIR => 1,\n        default => 0,\n    };\n\n    law pairHolds(List<int> xs) => Shape.pair(xs) == Shape.pair(xs);\n}\n",
+        "Law pairHolds reaches a match on this subject in Shape.pair. Compare the value with `==` in a `when` guard.",
+    );
+}
+
+/// Each refusal a law reaches names the construct and says, in one PHP# sentence, what to write in its place, or why
+/// the value is out of a law's reach.
+#[test]
+fn each_refusal_a_law_reaches_says_what_to_write_instead() {
+    let source = "namespace App.Shared;\n\nextern InvalidArgumentException;\n\npublic class Shape\n{\n    public Shape(public int value { get; }) { }\n    public static bool operator ==(Shape a, Shape b) => a.value == b.value;\n    public int hash() => this.value;\n\n    public static int union(int|string x) => 1;\n    public static int power(int a) => a ** 2;\n    public static int complement(int a) => ~a;\n    public static bool same(Shape a, Shape b) => a == b;\n    public static string template(int a) => `n ${a}`;\n    public static int guard(int a) => match (a) {\n        int m when m + 1 > 2 => 1,\n        default => 0,\n    };\n    public static int defaulted(int a = 1) => a;\n    public static int callsDefault(int a) => Shape.defaulted();\n    public static int named(int a) => Shape.defaulted(a: a);\n    public static int thrown(int a) => a > 0 ? a : throw new InvalidArgumentException(\"no\");\n    public static int compound(int a)\n    {\n        let x = a;\n        x **= 2;\n        return x;\n    }\n    public static int inner(int a)\n    {\n        let x = 0;\n        return (x = a) + 1;\n    }\n\n    law l1(int a) => Shape.union(a) == 1;\n    law l2(int a) => Shape.power(a) == Shape.power(a);\n    law l3(int a) => Shape.complement(a) == Shape.complement(a);\n    law l4(Shape a) => Shape.same(a, a);\n    law l5(int a) => Shape.template(a) == Shape.template(a);\n    law l6(int a) => Shape.guard(a) == Shape.guard(a);\n    law l7(int a) => Shape.callsDefault(a) == 1;\n    law l8(int a) => Shape.named(a) == a;\n    law l9(int a) => Shape.thrown(a) == Shape.thrown(a);\n    law l10(int a) => Shape.compound(a) == Shape.compound(a);\n    law l11(int a) => Shape.inner(a) == Shape.inner(a);\n}\n";
+    let directory = lawful_project(&[("app/Shared/Shape.sharp", source)]);
+    let root = directory.path();
+
+    let output = compile_without_lean(root);
+
+    let printed = printed(&output);
+    assert_eq!(output.status.code(), Some(1), "{printed}");
+    for message in [
+        "Law l1 reaches the type `int|string` in Shape.union. Give it a type a law reasons about: int, bool, string, a List, or a PHP# class, enum or interface, with or without `?`.",
+        "Law l2 reaches the operator `**` here in Shape.power. Write it with the operators a law reaches: `+ - * / %` on ints, `+` on strings, `< <= > >=` on ints and strings, `== !=`, `! && ||` and `??`.",
+        "Law l3 reaches the operator `~` in Shape.complement. Write it with the operators a law reaches: `+ - * / %` on ints, `+` on strings, `< <= > >=` on ints and strings, `== !=`, `! && ||` and `??`.",
+        "Law l4 reaches the class operator `==` in Shape.same. Compare the values the objects hold, such as their properties.",
+        "Law l5 reaches a string template in Shape.template. Join the strings with `+`.",
+        "Law l6 reaches a guard that can throw in Shape.guard. Write the guard without calls or arithmetic, which can throw, and compute such a value in the arm.",
+        "Law l7 reaches a default argument in Shape.callsDefault. Pass every argument, the ones with a default value included.",
+        "Law l8 reaches a named or spread argument in Shape.named. Pass each argument by its position.",
+        "Law l9 reaches a throw in Shape.thrown. An exception is a bug, and a law reasons about values.",
+        "Law l10 reaches the operator `**=` in Shape.compound. Update an int with `+=`, `-=`, `*=`, `/=` or `%=`, or a string with `+=`.",
+        "Law l11 reaches an assignment inside an expression in Shape.inner. Assign the value in a statement of its own, before the expression that reads it.",
+    ] {
+        assert!(printed.contains(&format!("error - unmodeled-construct: {message}")), "{message}\n{printed}");
+    }
+    assert!(!printed.contains("A law cannot reason about it."), "{printed}");
 }
 
 /// A loop that reads the local it adds to, here in an `if`, does more than count or sum.

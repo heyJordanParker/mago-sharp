@@ -182,9 +182,7 @@ impl<'body, 'program> Body<'body, 'program> {
             Hint::Function(_) => self.unmodeled(hint.span(), "a function type".to_owned(), issues::LAMBDA),
             Hint::Mixed(_) => self.unmodeled(hint.span(), "Any".to_owned(), issues::TYPE_TEST),
             Hint::Iterable(_) => self.unmodeled(hint.span(), "Iterable".to_owned(), issues::LAZY),
-            _ => {
-                self.unmodeled(hint.span(), format!("the type `{}`", self.source(hint.span())), issues::NOT_TRANSLATED)
-            }
+            _ => self.unmodeled(hint.span(), format!("the type `{}`", self.source(hint.span())), issues::TYPE),
         }
     }
 
@@ -193,7 +191,7 @@ impl<'body, 'program> Body<'body, 'program> {
     pub(crate) fn declared_type(&mut self, hint: Option<&Hint>, span: Span) -> String {
         match hint {
             Some(hint) => self.r#type(hint),
-            None => self.unmodeled(span, "a declaration without a type".to_owned(), issues::NOT_TRANSLATED),
+            None => self.unmodeled(span, "a declaration without a type".to_owned(), issues::MISSING_TYPE),
         }
     }
 
@@ -222,7 +220,8 @@ impl<'body, 'program> Body<'body, 'program> {
 
     /// The term of a constant's value, which Lean defines without `M`, so it must not throw.
     pub(crate) fn pure_value(&mut self, expression: &Expression) -> String {
-        self.pure(expression, "a constant whose value can throw").unwrap_or_else(|| "default".to_owned())
+        self.pure(expression, "a constant whose value can throw", issues::CONSTANT_VALUE)
+            .unwrap_or_else(|| "default".to_owned())
     }
 
     /// The body's statements so far, the declarations it uses, and each construct it cannot model.
@@ -256,7 +255,7 @@ impl<'body, 'program> Body<'body, 'program> {
             }
             Statement::LocalDeclaration(local) => {
                 let LocalTarget::Name(name) = &local.target else {
-                    self.unmodeled(statement.span(), "an unpacked tuple".to_owned(), issues::NOT_TRANSLATED);
+                    self.unmodeled(statement.span(), "an unpacked tuple".to_owned(), issues::TUPLE);
 
                     return;
                 };
@@ -275,8 +274,7 @@ impl<'body, 'program> Body<'body, 'program> {
             },
             Statement::If(r#if) => {
                 let IfBody::Statement(body) = &r#if.body else {
-                    self.unmodeled(r#if.span(), "a colon-delimited if".to_owned(), issues::NOT_TRANSLATED);
-                    return;
+                    unreachable!("PHP# parses no colon-delimited if, as {:?}", r#if.span());
                 };
                 // `if (x is Money m)` names `m` where the test holds, so it is a `match` on `x`.
                 if let Expression::Is(is) = unparenthesized(r#if.condition) {
@@ -311,7 +309,7 @@ impl<'body, 'program> Body<'body, 'program> {
                 self.unmodeled(statement.span(), "a loop".to_owned(), issues::LOOP);
             }
             Statement::Try(_) => {
-                self.unmodeled(statement.span(), "a try/catch".to_owned(), issues::TRY_CATCH);
+                self.unmodeled(statement.span(), "a try/catch".to_owned(), issues::EXCEPTION);
             }
             Statement::PatternMatch(r#match) => {
                 let Some((arms, otherwise)) = self.arms(r#match, Self::arm_statements) else {
@@ -324,7 +322,7 @@ impl<'body, 'program> Body<'body, 'program> {
                 self.unmodeled(
                     statement.span(),
                     format!("the statement `{}`", self.source(statement.span())),
-                    issues::NOT_TRANSLATED,
+                    issues::STATEMENT,
                 );
             }
         }
@@ -339,7 +337,7 @@ impl<'body, 'program> Body<'body, 'program> {
             return;
         };
         if !matches!(self.checked.names().binding(&target.name), Some(Binding::Local(_))) {
-            self.unmodeled(assignment.lhs.span(), "an assignment".to_owned(), issues::NOT_TRANSLATED);
+            self.unmodeled(assignment.lhs.span(), "an assignment".to_owned(), issues::LOCAL_ASSIGNMENT);
             return;
         }
 
@@ -357,7 +355,7 @@ impl<'body, 'program> Body<'body, 'program> {
             (_, Kind::Float) => self.unmodeled(assignment.span(), "a float".to_owned(), issues::FLOAT),
             (operator, _) => {
                 let what = format!("the operator `{}`", self.source(operator.span()));
-                self.unmodeled(assignment.span(), what, issues::NOT_TRANSLATED)
+                self.unmodeled(assignment.span(), what, issues::UPDATE)
             }
         };
         self.lines.push(format!("{local} := {assigned}"));
@@ -396,7 +394,7 @@ impl<'body, 'program> Body<'body, 'program> {
                         Box::new(Choice::Branch(otherwise)),
                     ))
                 }
-                None => self.unmodeled(expression.span(), "the operator `?:`".to_owned(), issues::NOT_TRANSLATED),
+                None => unreachable!("PHP# parses no `?:` with two operands, as {:?}", expression.span()),
             },
             Expression::PatternMatch(r#match) => self.pattern_match(r#match),
             Expression::Call(Call::Method(call)) => self.method_call(expression, call),
@@ -466,18 +464,18 @@ impl<'body, 'program> Body<'body, 'program> {
                 self.unmodeled(expression.span(), "a type test".to_owned(), issues::TYPE_TEST)
             }
             Expression::Yield(_) => self.unmodeled(expression.span(), "a lazy sequence".to_owned(), issues::LAZY),
-            Expression::Throw(_) => self.unmodeled(expression.span(), "a throw".to_owned(), issues::NOT_TRANSLATED),
+            Expression::Throw(_) => self.unmodeled(expression.span(), "a throw".to_owned(), issues::EXCEPTION),
             Expression::CompositeString(_) => {
-                self.unmodeled(expression.span(), "a string template".to_owned(), issues::NOT_TRANSLATED)
+                self.unmodeled(expression.span(), "a string template".to_owned(), issues::TEMPLATE)
             }
             Expression::Assignment(_) => self.unmodeled(
                 expression.span(),
                 "an assignment inside an expression".to_owned(),
-                issues::NOT_TRANSLATED,
+                issues::NESTED_ASSIGNMENT,
             ),
             _ => {
                 let what = format!("the expression `{}`", self.source(expression.span()));
-                self.unmodeled(expression.span(), what, issues::NOT_TRANSLATED)
+                self.unmodeled(expression.span(), what, issues::EXPRESSION)
             }
         }
     }
@@ -520,7 +518,7 @@ impl<'body, 'program> Body<'body, 'program> {
             Some(Binding::Member) => self.field("this".to_owned(), self.class, name.name.value(), expression),
             _ => {
                 let what = format!("the constant `{}`", self.source(name.name.span()));
-                self.unmodeled(expression.span(), what, issues::NOT_TRANSLATED)
+                self.unmodeled(expression.span(), what, issues::CONSTANT)
             }
         }
     }
@@ -559,7 +557,7 @@ impl<'body, 'program> Body<'body, 'program> {
             BinaryOperator::Equal(_) | BinaryOperator::NotEqual(_)
                 if kinds.0 == Kind::Object || kinds.1 == Kind::Object =>
             {
-                self.unmodeled(binary.span(), format!("the class operator `{operator}`"), issues::NOT_TRANSLATED)
+                self.unmodeled(binary.span(), format!("the class operator `{operator}`"), issues::CLASS_OPERATOR)
             }
             BinaryOperator::Equal(_) | BinaryOperator::Identical(_) => format!("({lhs} == {rhs})"),
             BinaryOperator::NotEqual(_) | BinaryOperator::NotIdentical(_) => format!("({lhs} != {rhs})"),
@@ -567,7 +565,7 @@ impl<'body, 'program> Body<'body, 'program> {
             BinaryOperator::LessThanOrEqual(_) if ordered => format!("(decide ({lhs} <= {rhs}))"),
             BinaryOperator::GreaterThan(_) if ordered => format!("(decide ({rhs} < {lhs}))"),
             BinaryOperator::GreaterThanOrEqual(_) if ordered => format!("(decide ({rhs} <= {lhs}))"),
-            _ => self.unmodeled(binary.span(), format!("the operator `{operator}` here"), issues::NOT_TRANSLATED),
+            _ => self.unmodeled(binary.span(), format!("the operator `{operator}` here"), issues::OPERATOR),
         }
     }
 
@@ -616,7 +614,7 @@ impl<'body, 'program> Body<'body, 'program> {
                         self.bind(format!("int.neg {operand}"))
                     }
                     Kind::Float => self.unmodeled(unary.span(), "a float".to_owned(), issues::FLOAT),
-                    _ => self.unmodeled(unary.span(), "the operator `-` here".to_owned(), issues::NOT_TRANSLATED),
+                    _ => self.unmodeled(unary.span(), "the operator `-` here".to_owned(), issues::OPERATOR),
                 }
             }
             UnaryPrefixOperator::Not(_) => {
@@ -626,7 +624,7 @@ impl<'body, 'program> Body<'body, 'program> {
             UnaryPrefixOperator::Plus(_) => self.value(unary.operand),
             operator => {
                 let what = format!("the operator `{}`", self.source(operator.span()));
-                self.unmodeled(unary.span(), what, issues::NOT_TRANSLATED)
+                self.unmodeled(unary.span(), what, issues::OPERATOR)
             }
         }
     }
@@ -667,7 +665,7 @@ impl<'body, 'program> Body<'body, 'program> {
 
             let mut test = self.test(&subject, r#type, parameter, arm.pattern)?;
             if let Some(guard) = &arm.guard {
-                test.conditions.push(self.pure(guard.condition, "a guard that can throw")?);
+                test.conditions.push(self.pure(guard.condition, "a guard that can throw", issues::GUARD)?);
             }
             let holds = self.pattern_facts(parameter, arm.pattern, true);
             arms.push((test, self.under(holds, |body| translate(body, &arm.body))));
@@ -876,16 +874,18 @@ impl<'body, 'program> Body<'body, 'program> {
                 if matches!(kind, Kind::Object | Kind::Other)
                     && !matches!(unparenthesized(value), Expression::Literal(Literal::Null(_))) =>
             {
-                self.unmodeled(pattern.span(), "a match on this subject".to_owned(), issues::NOT_TRANSLATED);
+                self.unmodeled(pattern.span(), "a match on this subject".to_owned(), issues::MATCH_SUBJECT);
                 None
             }
-            Pattern::Value(value) => Some(format!("({subject} == {})", self.pure(value, "a pattern that can throw")?)),
+            Pattern::Value(value) => {
+                Some(format!("({subject} == {})", self.pure(value, "a pattern that can throw", issues::PATTERN_VALUE)?))
+            }
             Pattern::Comparison(_) if matches!(kind, Kind::Object | Kind::Other) => {
-                self.unmodeled(pattern.span(), "a match on this subject".to_owned(), issues::NOT_TRANSLATED);
+                self.unmodeled(pattern.span(), "a match on this subject".to_owned(), issues::MATCH_SUBJECT);
                 None
             }
             Pattern::Comparison(comparison) => {
-                let value = self.pure(comparison.value, "a pattern that can throw")?;
+                let value = self.pure(comparison.value, "a pattern that can throw", issues::PATTERN_VALUE)?;
                 let condition = match comparison.operator {
                     BinaryOperator::Equal(_) | BinaryOperator::Identical(_) => format!("({subject} == {value})"),
                     BinaryOperator::NotEqual(_) | BinaryOperator::NotIdentical(_) => {
@@ -901,7 +901,7 @@ impl<'body, 'program> Body<'body, 'program> {
                     }
                     _ => {
                         let what = format!("the pattern `{}`", self.source(comparison.span()));
-                        self.unmodeled(comparison.span(), what, issues::NOT_TRANSLATED);
+                        self.unmodeled(comparison.span(), what, issues::COMPARISON_PATTERN);
                         return None;
                     }
                 };
@@ -923,14 +923,14 @@ impl<'body, 'program> Body<'body, 'program> {
         }
     }
 
-    /// The term of `expression`, which must not throw, or `None` after recording `what` when it can.
-    fn pure(&mut self, expression: &Expression, what: &str) -> Option<String> {
+    /// The term of `expression`, which must not throw, or `None` after recording `what` and `reason` when it can.
+    fn pure(&mut self, expression: &Expression, what: &str, reason: &'static str) -> Option<String> {
         let (lines, value) = self.nested(|body| body.value(expression));
         if lines.is_empty() {
             return Some(value);
         }
 
-        self.unmodeled(expression.span(), what.to_owned(), issues::NOT_TRANSLATED);
+        self.unmodeled(expression.span(), what.to_owned(), reason);
         None
     }
 
@@ -1164,7 +1164,7 @@ impl<'body, 'program> Body<'body, 'program> {
             return Some(method.value);
         }
 
-        self.unmodeled(selector.span(), "a dynamic member name".to_owned(), issues::NOT_TRANSLATED);
+        self.unmodeled(selector.span(), "a dynamic member name".to_owned(), issues::MEMBER_NAME);
         None
     }
 
@@ -1190,7 +1190,7 @@ impl<'body, 'program> Body<'body, 'program> {
             return self.unmodeled(
                 expression.span(),
                 format!("the method {}.{}", names::short_name(class), String::from_utf8_lossy(method)),
-                issues::NOT_TRANSLATED,
+                issues::BODYLESS,
             );
         };
 
@@ -1324,13 +1324,13 @@ impl<'body, 'program> Body<'body, 'program> {
                     arguments.push(self.value(argument.value));
                 }
                 argument => {
-                    self.unmodeled(argument.span(), "a named or spread argument".to_owned(), issues::NOT_TRANSLATED);
+                    self.unmodeled(argument.span(), "a named or spread argument".to_owned(), issues::ARGUMENT);
                     return None;
                 }
             }
         }
         if arguments.len() < parameters {
-            self.unmodeled(list.span(), "a default argument".to_owned(), issues::NOT_TRANSLATED);
+            self.unmodeled(list.span(), "a default argument".to_owned(), issues::DEFAULT_ARGUMENT);
             return None;
         }
 
@@ -1340,7 +1340,7 @@ impl<'body, 'program> Body<'body, 'program> {
     /// `object.y`, `Class.CASE` and `Class.CONSTANT`.
     fn property(&mut self, expression: &Expression, access: &PropertyAccess) -> String {
         let ClassLikeMemberSelector::Identifier(member) = &access.property else {
-            return self.unmodeled(access.property.span(), "a dynamic member name".to_owned(), issues::NOT_TRANSLATED);
+            return self.unmodeled(access.property.span(), "a dynamic member name".to_owned(), issues::MEMBER_NAME);
         };
         let names = self.checked.names();
         if let Some(class) = names.static_property_class(access) {
@@ -1407,7 +1407,7 @@ impl<'body, 'program> Body<'body, 'program> {
                 String::from_utf8_lossy(property)
             );
 
-            return self.unmodeled(expression.span(), format!("the field {place} of a case"), issues::NOT_TRANSLATED);
+            return self.unmodeled(expression.span(), format!("the field {place} of a case"), issues::CASE_FIELD);
         }
         let class_name = self.reached_name(class);
         let short = names::short_name(&class_name);
@@ -1421,7 +1421,7 @@ impl<'body, 'program> Body<'body, 'program> {
             return format!("({key} {object})");
         }
         if !matches!(declaration.kind, DeclarationKind::Property { .. }) {
-            return self.unmodeled(expression.span(), format!("the member {place}"), issues::NOT_TRANSLATED);
+            return self.unmodeled(expression.span(), format!("the member {place}"), issues::MEMBER);
         }
         if ascii_lowercase_word(declaration.class.as_bytes()) != ascii_lowercase_word(class) {
             return self.unmodeled(expression.span(), format!("the inherited property {place}"), issues::INHERITANCE);
@@ -1444,7 +1444,7 @@ impl<'body, 'program> Body<'body, 'program> {
     /// `object?.y`, null when `object` is.
     fn null_safe_property(&mut self, expression: &Expression, access: &NullSafePropertyAccess) -> String {
         let ClassLikeMemberSelector::Identifier(member) = &access.property else {
-            return self.unmodeled(access.property.span(), "a dynamic member name".to_owned(), issues::NOT_TRANSLATED);
+            return self.unmodeled(access.property.span(), "a dynamic member name".to_owned(), issues::MEMBER_NAME);
         };
         if let Some(extension) = self.checked.types().extension(expression) {
             if !self.is_translated_class(expression.span(), extension.class.as_bytes()) {
@@ -1492,7 +1492,7 @@ impl<'body, 'program> Body<'body, 'program> {
                     self.unmodeled(
                         object.span(),
                         format!("a value of the type `{}`", r#type.get_id()),
-                        issues::NOT_TRANSLATED,
+                        issues::RECEIVER,
                     );
                     return None;
                 }
