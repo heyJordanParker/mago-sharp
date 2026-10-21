@@ -263,12 +263,14 @@ pub(crate) mod types;
 
 use types::Declaration;
 use types::DeclarationKind;
+use types::Equality;
 use types::FunctionType;
 use types::PlainParameter;
 use types::Types;
 use types::agreed_kind;
 use types::class_value_classes;
 use types::every_array_is_list;
+use types::number_kinds;
 use types::receiver_classes;
 use types::receiver_intersections;
 use types::takes_array;
@@ -6231,58 +6233,41 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// collection search compares each element with its value through it, so a search never compares differently from
     /// `==`.
     fn equality(&mut self, line: u32, lhs: Side, rhs: Side, negated: bool) -> u32 {
-        let (lhs_type, rhs_type) = (self.side_type(&lhs), self.side_type(&rhs));
-        if compares_unchecked(lhs_type, rhs_type)
-            || compares_unchecked(rhs_type, lhs_type)
-            || compares_mixed_collection(lhs_type, rhs_type)
-            || [lhs_type, rhs_type].into_iter().any(|r#type| holds_class_value(r#type) || holds_type_parameter(r#type))
-        {
-            let function = self.string(ZEND_NAME_FQ, line, b"Sharp\\Internal\\equals");
-            let lhs = self.side(&lhs);
-            let rhs = self.side(&rhs);
-            let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[lhs, rhs]);
-            let call = self.node(SHARP_AST_CALL, 0, line, &[function, arguments]);
+        let call = match self.types.equality(self.side_type(&lhs), self.side_type(&rhs)) {
+            Equality::Running => {
+                let function = self.string(ZEND_NAME_FQ, line, b"Sharp\\Internal\\equals");
+                let lhs = self.side(&lhs);
+                let rhs = self.side(&rhs);
+                let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &[lhs, rhs]);
 
-            return if negated { self.node(SHARP_AST_UNARY_OP, ZEND_BOOL_NOT, line, &[call]) } else { call };
-        }
-        if let Some((owner, name)) = self.declared_equality(lhs_type, rhs_type) {
-            let operands = [self.side(&lhs), self.side(&rhs)];
-            let call = self.operator_call(line, owner, name, &operands);
+                self.node(SHARP_AST_CALL, 0, line, &[function, arguments])
+            }
+            Equality::Declared(owner, name) => {
+                let operands = [self.side(&lhs), self.side(&rhs)];
 
-            return if negated { self.node(SHARP_AST_UNARY_OP, ZEND_BOOL_NOT, line, &[call]) } else { call };
-        }
-        if mixes_numbers(lhs_type, rhs_type) {
-            return self.float_equality(line, &lhs, &rhs, negated);
-        }
-        // The engine compares two `Map`s or two `Set`s by PHP#'s `==`, regardless of order, and an object with null as
-        // unequal.
-        if holds_table(lhs_type) || holds_table(rhs_type) {
-            let lhs = self.side(&lhs);
-            let rhs = self.side(&rhs);
-            let attr = if negated { ZEND_IS_NOT_EQUAL } else { ZEND_IS_EQUAL };
+                self.operator_call(line, owner, name, &operands)
+            }
+            Equality::Numbers => return self.float_equality(line, &lhs, &rhs, negated),
+            // The engine compares two `Map`s or two `Set`s by PHP#'s `==`, regardless of order, and an object with null
+            // as unequal.
+            Equality::Tables => {
+                let lhs = self.side(&lhs);
+                let rhs = self.side(&rhs);
+                let attr = if negated { ZEND_IS_NOT_EQUAL } else { ZEND_IS_EQUAL };
 
-            return self.node(SHARP_AST_BINARY_OP, attr, line, &[lhs, rhs]);
-        }
-        if !self.compares_identically(lhs_type, rhs_type) {
-            return self.collection_equality(line, &lhs, &rhs, negated);
-        }
+                return self.node(SHARP_AST_BINARY_OP, attr, line, &[lhs, rhs]);
+            }
+            Equality::Elements => return self.collection_equality(line, &lhs, &rhs, negated),
+            Equality::Identical => {
+                let lhs = self.side(&lhs);
+                let rhs = self.side(&rhs);
+                let attr = if negated { ZEND_IS_NOT_IDENTICAL } else { ZEND_IS_IDENTICAL };
 
-        let lhs = self.side(&lhs);
-        let rhs = self.side(&rhs);
-        let attr = if negated { ZEND_IS_NOT_IDENTICAL } else { ZEND_IS_IDENTICAL };
+                return self.node(SHARP_AST_BINARY_OP, attr, line, &[lhs, rhs]);
+            }
+        };
 
-        self.node(SHARP_AST_BINARY_OP, attr, line, &[lhs, rhs])
-    }
-
-    /// The type whose `op_Equality` `==` runs on a value of `lhs_type` and one of `rhs_type`, as the checker chose it,
-    /// with the method's name, or none when `==` on them is `===` or two floats. `== null` runs none.
-    fn declared_equality(&self, lhs_type: &TUnion, rhs_type: &TUnion) -> Option<(Word, &'static [u8])> {
-        if lhs_type.is_null() || rhs_type.is_null() {
-            return None;
-        }
-        let name = php_operator_name(&BinaryOperator::Equal(Span::zero()), 2)?;
-
-        Some((self.types.operator_owner(name, &[lhs_type, rhs_type])?, name))
+        if negated { self.node(SHARP_AST_UNARY_OP, ZEND_BOOL_NOT, line, &[call]) } else { call }
     }
 
     /// The type of the value `side` holds.
@@ -6294,25 +6279,6 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             Side::Expression(expression) => self.types.expression_type(expression),
             Side::Hidden { r#type, .. } | Side::Property { r#type, .. } | Side::Index { r#type, .. } => r#type,
         }
-    }
-
-    /// Whether `==` on a value of `lhs_type` and one of `rhs_type` is PHP's `===`, spec section 19: true for every value
-    /// but a `List` or a value that may be a collection or another type, and for two lists whose elements compare so.
-    /// Elements compared by an `op_Equality`, as floats, or as `Map`s or `Set`s need their own `==`.
-    fn compares_identically(&self, lhs_type: &TUnion, rhs_type: &TUnion) -> bool {
-        if compares_mixed_collection(lhs_type, rhs_type) {
-            return false;
-        }
-        let (Some(lhs_lists), Some(rhs_lists)) = (collection_kind(lhs_type), collection_kind(rhs_type)) else {
-            return true;
-        };
-        let (lhs_element, rhs_element) = (self.types.element_type(lhs_type), self.types.element_type(rhs_type));
-
-        lhs_lists
-            && rhs_lists
-            && self.declared_equality(&lhs_element, &rhs_element).is_none()
-            && !mixes_numbers(&lhs_element, &rhs_element)
-            && self.compares_identically(&lhs_element, &rhs_element)
     }
 
     /// `lhs == rhs` of two `List`s, spec section 19, which holds when both hold as many elements and each element of
@@ -7894,11 +7860,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let line = self.line(call);
         let value_type = self.side_type(&value);
         // `\in_array` and `\array_search` read the value before the list, so they run only where neither side runs code.
-        let strict = self.declared_equality(element_type, value_type).is_none()
-            && !mixes_numbers(element_type, value_type)
-            && self.compares_identically(element_type, value_type)
-            && !holds_class_value(element_type)
-            && !holds_class_value(value_type)
+        let strict = self.types.equality(element_type, value_type) == Equality::Identical
             && !matches!(value, Side::Expression(expression) if !self.is_pure(expression))
             && self.runs_nothing(collection);
         let hidden = (matches!(search, Search::Remove) || (strict && matches!(search, Search::IndexOf))).then(|| {
@@ -9587,84 +9549,6 @@ fn accessor_flags(modifiers: &Sequence<Modifier>, accessors: &PropertyHookList, 
     } else {
         flags
     }
-}
-
-/// Whether every value of `r#type` but `null` is a collection, and then whether each is a `List`, or `None` when part of
-/// it is no collection.
-fn collection_kind(r#type: &TUnion) -> Option<bool> {
-    let mut lists = None;
-    for atomic in r#type.types.iter().filter(|atomic| !atomic.is_null()) {
-        let TAtomic::Array(array) = atomic else {
-            return None;
-        };
-        lists = Some(lists.unwrap_or(true) && matches!(array, TArray::List(_)));
-    }
-
-    lists
-}
-
-/// Whether a value of `r#type` may be a `Map` or a `Set`, which the engine holds as an object.
-fn holds_table(r#type: &TUnion) -> bool {
-    r#type.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(TArray::Keyed(_) | TArray::Set(_))))
-}
-
-/// Whether `==` compares a value of `lhs` with one of `rhs` as an int and a float: both are numbers, `null` aside, and
-/// one may hold an int where one may hold a float. The checker refuses every other pair of two different number kinds.
-fn mixes_numbers(lhs: &TUnion, rhs: &TUnion) -> bool {
-    let [Some([lhs_int, lhs_float]), Some([rhs_int, rhs_float])] = [lhs, rhs].map(number_kinds) else {
-        return false;
-    };
-
-    (lhs_int || rhs_int) && (lhs_float || rhs_float)
-}
-
-/// Whether a value of `union` may be a class value, which `==` compares by its whole type, type arguments included.
-fn holds_class_value(union: &TUnion) -> bool {
-    union.types.iter().any(|atomic| matches!(atomic, TAtomic::Scalar(TScalar::ClassLikeString(_))))
-}
-
-/// Whether `==` compares a value of `lhs` with one of `rhs` where a side may be a collection or a value of another type,
-/// another collection included, which only the running value tells apart. `== null` tests for null alone.
-fn compares_mixed_collection(lhs: &TUnion, rhs: &TUnion) -> bool {
-    let mixes_collection = |union: &TUnion| {
-        let mut values = union.types.iter().filter(|atomic| !atomic.is_null());
-
-        values.clone().any(|atomic| matches!(atomic, TAtomic::Array(_))) && values.nth(1).is_some()
-    };
-
-    !lhs.is_null() && !rhs.is_null() && (mixes_collection(lhs) || mixes_collection(rhs))
-}
-
-/// Whether a value of `union` may be a value of a type parameter, whose own `==` only the running code knows.
-fn holds_type_parameter(union: &TUnion) -> bool {
-    union.types.iter().any(|atomic| matches!(atomic, TAtomic::GenericParameter(_)))
-}
-
-/// Whether `==` on an unchecked `Any?` of `any` and a value of `other` needs the engine's `==`, spec section 24: a
-/// number equals an `int` or a `float` of the same value, and a collection, a struct or an object compares by value. A
-/// string, a `bool` or `null` equals only the same one, which PHP's `===` tests.
-fn compares_unchecked(any: &TUnion, other: &TUnion) -> bool {
-    any.is_mixed() && !other.types.iter().all(|atomic| atomic.is_any_string() || atomic.is_bool() || atomic.is_null())
-}
-
-/// The kinds of number the values of `union` are, `null` aside, as `[may hold an int, may hold a float]`, or `None`
-/// when a value is no number. A type parameter counts as its constraint.
-fn number_kinds(union: &TUnion) -> Option<[bool; 2]> {
-    let mut kinds = [false, false];
-    for atomic in union.types.iter() {
-        match atomic {
-            TAtomic::Null => {}
-            TAtomic::GenericParameter(parameter) => {
-                let [int, float] = number_kinds(&parameter.constraint)?;
-                kinds = [kinds[0] || int, kinds[1] || float];
-            }
-            atomic if atomic.is_int() => kinds[0] = true,
-            atomic if atomic.is_float() => kinds[1] = true,
-            _ => return None,
-        }
-    }
-
-    (kinds != [false, false]).then_some(kinds)
 }
 
 /// The binary operators of the slice, as php-src's grammar builds them. Every operator is named, so a new one does

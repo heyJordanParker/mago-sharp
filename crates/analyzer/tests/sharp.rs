@@ -22402,6 +22402,9 @@ fn a_law_that_calls_itself_on_a_value_no_smaller_is_refused() {
         "        if ((x <= -1)) { return; }\n        Count.f((x - 1), items);",
         "        if ((x) <= 0) { return; }\n        Count.f((x) - 1, items);",
         "        match (items) {\n            [int first, ...List<int> rest] => { Count.f(first, rest); },\n            default => { return; },\n        }",
+        "        match (x) {\n            <= 0 => { return; },\n            default => { Count.f(x - 1, items); },\n        }",
+        "        match (x) {\n            > 0 => { Count.f(x - 1, items); },\n            default => { return; },\n        }",
+        "        match (x) {\n            0 => { return; },\n            < 0 => { return; },\n            default => { Count.f(x - 1, items); },\n        }",
     ] {
         assert_eq!(issues(law_body(body), &[]), Vec::<String>::new(), "{body}");
     }

@@ -42,18 +42,12 @@ struct Destructure {
 
 impl Body<'_, '_> {
     /// What `subject`, a term of `r#type`, matching `pattern` tests, or `None` after recording why Lean cannot test
-    /// it. `parameter` is the parameter `subject` is, if it is one.
-    pub(super) fn test(
-        &mut self,
-        subject: &str,
-        r#type: &TUnion,
-        parameter: Option<usize>,
-        pattern: &Pattern,
-    ) -> Option<Test> {
+    /// it.
+    pub(super) fn test(&mut self, subject: &str, r#type: &TUnion, pattern: &Pattern) -> Option<Test> {
         match pattern {
             Pattern::Type(pattern) => self.type_test(subject, r#type, pattern),
-            Pattern::List(list) => self.list_test(subject, r#type, parameter, list),
-            Pattern::Parenthesized(parenthesized) => self.test(subject, r#type, parameter, parenthesized.pattern),
+            Pattern::List(list) => self.list_test(subject, r#type, list),
+            Pattern::Parenthesized(parenthesized) => self.test(subject, r#type, parenthesized.pattern),
             _ => {
                 let condition = self.pattern(subject, self.kind(r#type), pattern)?;
 
@@ -102,15 +96,8 @@ impl Body<'_, '_> {
     }
 
     /// A list pattern is Lean's `::` pattern of the elements before its rest. The elements after the rest are the last
-    /// ones of the list those leave, once it holds them all, and the rest is what comes before them. A rest of a list
-    /// parameter, beside at least one element, is smaller than the list.
-    fn list_test(
-        &mut self,
-        subject: &str,
-        r#type: &TUnion,
-        parameter: Option<usize>,
-        list: &ListPattern,
-    ) -> Option<Test> {
+    /// ones of the list those leave, once it holds them all, and the rest is what comes before them.
+    fn list_test(&mut self, subject: &str, r#type: &TUnion, list: &ListPattern) -> Option<Test> {
         let atomics: Vec<&TAtomic> = r#type.types.iter().filter(|atomic| !atomic.is_null()).collect();
         let [TAtomic::Array(TArray::List(list_type))] = atomics.as_slice() else {
             self.unmodeled(list.span(), "a list pattern on a value that is no List".to_owned(), issues::TYPE_TEST);
@@ -133,12 +120,6 @@ impl Body<'_, '_> {
             leading.push(self.element(element, pattern, &mut parts)?);
         }
         let name = rest.and_then(|rest| rest.variable.map(|variable| names::identifier(variable.value)));
-        if let (Some(parameter), Some(variable)) = (parameter, rest.and_then(|rest| rest.variable))
-            && (!before.is_empty() || !after.is_empty())
-            && !r#type.is_nullable()
-        {
-            self.rests.insert(variable.span.start.offset, parameter);
-        }
 
         let some = |pattern: String| if r#type.is_nullable() { format!("some ({pattern})") } else { pattern };
         let mut test = Test::default();
@@ -166,7 +147,7 @@ impl Body<'_, '_> {
                     unreachable!("a list pattern has at most one rest");
                 };
                 let term = format!("({tail}[List.length {tail} - {}]!)", count - place);
-                let tested = self.test(&term, element, None, pattern)?;
+                let tested = self.test(&term, element, pattern)?;
                 parts.matches.extend(tested.matches);
                 parts.lets.extend(tested.lets);
                 parts.conditions.extend(tested.conditions);
@@ -198,7 +179,7 @@ impl Body<'_, '_> {
         }
 
         let name = self.fresh();
-        let test = self.test(&name, r#type, None, pattern)?;
+        let test = self.test(&name, r#type, pattern)?;
         parts.matches.extend(test.matches);
         parts.lets.extend(test.lets);
         parts.conditions.extend(test.conditions);

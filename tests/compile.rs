@@ -2989,6 +2989,17 @@ fn a_law_testing_the_identity_of_objects_is_refused() {
     );
 }
 
+/// `==` on two Lists runs the elements' class operator `==` on each pair, as the bridge lowers it, so a law over it is
+/// refused: Lean's own `==` on Lists would compare every value the objects hold and prove this law, which is false
+/// when two amounts match and the currencies differ.
+#[test]
+fn a_law_comparing_lists_of_objects_a_class_operator_compares_is_refused() {
+    assert_unmodeled(
+        "namespace App.Shared;\n\npublic class Shape\n{\n    public Shape(public int amount { get; }, public string currency { get; }) { }\n    public static bool operator ==(Shape a, Shape b) => a.amount == b.amount;\n    public int hash() => this.amount;\n\n    law sameListSameCurrency(Shape a, Shape b) => !([a] == [b]) || a.currency == b.currency;\n}\n",
+        "Law sameListSameCurrency reaches the class operator `==` in Shape.sameListSameCurrency. Compare the values the objects hold, such as their properties.",
+    );
+}
+
 #[test]
 fn a_law_reaching_a_try_catch_is_refused() {
     assert_unmodeled(
@@ -3236,6 +3247,25 @@ fn compile_proves_spec_section_28_s_money_from_its_sharp_file_alone() {
     assert!(output.status.success(), "{}", printed(&output));
     assert!(compiled(root, "app/Shared/Money.sharp").exists());
     assert_eq!(source_lean_files(root), Vec::<PathBuf>::new());
+}
+
+/// Spec section 28: a `match` on an int parameter shows its bound as an `if` does: a comparison arm where it holds, and
+/// in each arm after it, where it failed. The analyzer and the proof read one walk of the body's paths, so the call of
+/// the law itself on `n - 1` after `<= 0` is smaller in both.
+#[test]
+fn compile_proves_a_law_whose_body_tests_its_bound_with_a_comparison_arm() {
+    let money = SPECIMEN_MONEY.replace(
+        "        if (n <= 0) {\n            return;\n        }\n        Money.timesKeepsCurrency(m, n - 1);\n        Money.addKeepsCurrency(m, m.times(n - 1));\n",
+        "        match (n) {\n            <= 0 => { return; },\n            default => {\n                Money.timesKeepsCurrency(m, n - 1);\n                Money.addKeepsCurrency(m, m.times(n - 1));\n            },\n        }\n",
+    );
+    assert_ne!(money, SPECIMEN_MONEY);
+    let directory = library_project(&[("app/Shared/Money.sharp", &money)]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(compiled(root, "app/Shared/Money.sharp").exists());
 }
 
 /// Spec section 28: a case the body leaves open is `law-unproven`, with the case's conditions and the goal still to

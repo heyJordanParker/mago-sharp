@@ -283,10 +283,11 @@ impl<'arena> Expression<'arena> {
         })
     }
 
+    /// The expression inside every pair of parentheses around this one: `x` of `((x))`.
     #[inline]
     #[must_use]
     pub const fn unparenthesized(&self) -> &Expression<'arena> {
-        if let Expression::Parenthesized(expression) = self { expression.expression } else { self }
+        if let Expression::Parenthesized(expression) = self { expression.expression.unparenthesized() } else { self }
     }
 
     #[inline]

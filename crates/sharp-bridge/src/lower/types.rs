@@ -119,6 +119,26 @@ pub enum DeclarationKind {
     },
 }
 
+/// How spec section 19's `==` compares two values, by their types.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Equality {
+    /// By what the running values are, through `\Sharp\Internal\equals`: an unchecked `Any?` against a value that may be
+    /// no string, `bool` or `null`, a value that may be a collection or a value of another type, a class value, or a
+    /// value of a type parameter.
+    Running,
+    /// By the `op_Equality` the class-like declares, with the method's name: a class's `operator ==`, or the one a
+    /// struct or an enum with a case that carries data gets.
+    Declared(Word, &'static [u8]),
+    /// An int and a float, as two floats.
+    Numbers,
+    /// Two `Map`s or two `Set`s, by what they hold in any order.
+    Tables,
+    /// Two `List`s, each element by its own `==`.
+    Elements,
+    /// By PHP's `===`.
+    Identical,
+}
+
 impl<'analysis> Types<'analysis> {
     pub(crate) fn new(
         file: &'analysis File,
@@ -1888,6 +1908,63 @@ impl<'analysis> Types<'analysis> {
         chosen_operator(self.codebase, name, operands).map(|owner| self.scanned(owner.as_bytes()).original_name)
     }
 
+    /// How `==` compares a value of `lhs` with one of `rhs`, spec section 19, as the lowering writes it and the law
+    /// checker reads it.
+    #[must_use]
+    pub fn equality(&self, lhs: &TUnion, rhs: &TUnion) -> Equality {
+        if compares_unchecked(lhs, rhs)
+            || compares_unchecked(rhs, lhs)
+            || compares_mixed_collection(lhs, rhs)
+            || [lhs, rhs].into_iter().any(|r#type| holds_class_value(r#type) || holds_type_parameter(r#type))
+        {
+            return Equality::Running;
+        }
+        if let Some((owner, name)) = self.declared_equality(lhs, rhs) {
+            return Equality::Declared(owner, name);
+        }
+        if mixes_numbers(lhs, rhs) {
+            return Equality::Numbers;
+        }
+        if holds_table(lhs) || holds_table(rhs) {
+            return Equality::Tables;
+        }
+        if !self.compares_identically(lhs, rhs) {
+            return Equality::Elements;
+        }
+
+        Equality::Identical
+    }
+
+    /// The type whose `op_Equality` `==` runs on a value of `lhs_type` and one of `rhs_type`, as the checker chose it,
+    /// with the method's name, or none when `==` on them is `===` or two floats. `== null` runs none.
+    fn declared_equality(&self, lhs_type: &TUnion, rhs_type: &TUnion) -> Option<(Word, &'static [u8])> {
+        if lhs_type.is_null() || rhs_type.is_null() {
+            return None;
+        }
+        let name = php_operator_name(&BinaryOperator::Equal(Span::zero()), 2)?;
+
+        Some((self.operator_owner(name, &[lhs_type, rhs_type])?, name))
+    }
+
+    /// Whether `==` on a value of `lhs_type` and one of `rhs_type` is PHP's `===`, spec section 19: true for every value
+    /// but a `List` or a value that may be a collection or another type, and for two lists whose elements compare so.
+    /// Elements compared by an `op_Equality`, as floats, or as `Map`s or `Set`s need their own `==`.
+    fn compares_identically(&self, lhs_type: &TUnion, rhs_type: &TUnion) -> bool {
+        if compares_mixed_collection(lhs_type, rhs_type) {
+            return false;
+        }
+        let (Some(lhs_lists), Some(rhs_lists)) = (collection_kind(lhs_type), collection_kind(rhs_type)) else {
+            return true;
+        };
+        let (lhs_element, rhs_element) = (self.element_type(lhs_type), self.element_type(rhs_type));
+
+        lhs_lists
+            && rhs_lists
+            && self.declared_equality(&lhs_element, &rhs_element).is_none()
+            && !mixes_numbers(&lhs_element, &rhs_element)
+            && self.compares_identically(&lhs_element, &rhs_element)
+    }
+
     /// The class-like whose `operator <=>` the PHP# `sortedBy` call `call` orders two keys by, as `<` on two values of
     /// the key type its function returns chooses it, spec section 19, so a `List<Priced>` sorts by `Priced`'s whatever
     /// classes it holds. None for any other call, and for keys of a type that declares none, such as strings.
@@ -1958,6 +2035,84 @@ pub(crate) fn receiver_intersections(r#type: &TUnion) -> Option<Vec<Vec<&[u8]>>>
     }
 
     (!receivers.is_empty()).then_some(receivers)
+}
+
+/// Whether every value of `r#type` but `null` is a collection, and then whether each is a `List`, or `None` when part of
+/// it is no collection.
+fn collection_kind(r#type: &TUnion) -> Option<bool> {
+    let mut lists = None;
+    for atomic in r#type.types.iter().filter(|atomic| !atomic.is_null()) {
+        let TAtomic::Array(array) = atomic else {
+            return None;
+        };
+        lists = Some(lists.unwrap_or(true) && matches!(array, TArray::List(_)));
+    }
+
+    lists
+}
+
+/// Whether a value of `r#type` may be a `Map` or a `Set`, which the engine holds as an object.
+fn holds_table(r#type: &TUnion) -> bool {
+    r#type.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(TArray::Keyed(_) | TArray::Set(_))))
+}
+
+/// Whether `==` compares a value of `lhs` with one of `rhs` as an int and a float: both are numbers, `null` aside, and
+/// one may hold an int where one may hold a float. The checker refuses every other pair of two different number kinds.
+fn mixes_numbers(lhs: &TUnion, rhs: &TUnion) -> bool {
+    let [Some([lhs_int, lhs_float]), Some([rhs_int, rhs_float])] = [lhs, rhs].map(number_kinds) else {
+        return false;
+    };
+
+    (lhs_int || rhs_int) && (lhs_float || rhs_float)
+}
+
+/// Whether a value of `union` may be a class value, which `==` compares by its whole type, type arguments included.
+fn holds_class_value(union: &TUnion) -> bool {
+    union.types.iter().any(|atomic| matches!(atomic, TAtomic::Scalar(TScalar::ClassLikeString(_))))
+}
+
+/// Whether `==` compares a value of `lhs` with one of `rhs` where a side may be a collection or a value of another type,
+/// another collection included, which only the running value tells apart. `== null` tests for null alone.
+fn compares_mixed_collection(lhs: &TUnion, rhs: &TUnion) -> bool {
+    let mixes_collection = |union: &TUnion| {
+        let mut values = union.types.iter().filter(|atomic| !atomic.is_null());
+
+        values.clone().any(|atomic| matches!(atomic, TAtomic::Array(_))) && values.nth(1).is_some()
+    };
+
+    !lhs.is_null() && !rhs.is_null() && (mixes_collection(lhs) || mixes_collection(rhs))
+}
+
+/// Whether a value of `union` may be a value of a type parameter, whose own `==` only the running code knows.
+fn holds_type_parameter(union: &TUnion) -> bool {
+    union.types.iter().any(|atomic| matches!(atomic, TAtomic::GenericParameter(_)))
+}
+
+/// Whether `==` on an unchecked `Any?` of `any` and a value of `other` needs the engine's `==`, spec section 24: a
+/// number equals an `int` or a `float` of the same value, and a collection, a struct or an object compares by value. A
+/// string, a `bool` or `null` equals only the same one, which PHP's `===` tests.
+fn compares_unchecked(any: &TUnion, other: &TUnion) -> bool {
+    any.is_mixed() && !other.types.iter().all(|atomic| atomic.is_any_string() || atomic.is_bool() || atomic.is_null())
+}
+
+/// The kinds of number the values of `union` are, `null` aside, as `[may hold an int, may hold a float]`, or `None`
+/// when a value is no number. A type parameter counts as its constraint.
+pub(crate) fn number_kinds(union: &TUnion) -> Option<[bool; 2]> {
+    let mut kinds = [false, false];
+    for atomic in union.types.iter() {
+        match atomic {
+            TAtomic::Null => {}
+            TAtomic::GenericParameter(parameter) => {
+                let [int, float] = number_kinds(&parameter.constraint)?;
+                kinds = [kinds[0] || int, kinds[1] || float];
+            }
+            atomic if atomic.is_int() => kinds[0] = true,
+            atomic if atomic.is_float() => kinds[1] = true,
+            _ => return None,
+        }
+    }
+
+    (kinds != [false, false]).then_some(kinds)
 }
 
 /// Whether a value of `r#type` that is a PHP array is a `List`, whatever array it is, so a plain PHP array keyed by

@@ -26,6 +26,7 @@ pub use lower::inline::inline_forms;
 pub use lower::lower;
 pub use lower::types::Declaration;
 pub use lower::types::DeclarationKind;
+pub use lower::types::Equality;
 pub use lower::types::Types;
 pub use lower::types::type_text;
 

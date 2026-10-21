@@ -1,6 +1,7 @@
 //! The loops a law reaches: a `for … of` loop over a `List` that only counts or sums, as the Lean list function it
 //! is.
 
+use mago_analyzer::smaller::literal;
 use mago_names::binding::Binding;
 use mago_span::HasSpan;
 use mago_syntax::cst::AssignmentOperator;
@@ -16,7 +17,6 @@ use mago_syntax::cst::UnaryPrefixOperator;
 use crate::issues;
 use crate::translate::body::Body;
 use crate::translate::body::Kind;
-use crate::translate::body::literal;
 use crate::translate::names;
 
 /// What a counting or summing loop adds to an int local: one, or a value, under the conditions on the element, each

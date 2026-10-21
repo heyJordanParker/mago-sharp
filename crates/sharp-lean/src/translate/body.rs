@@ -4,10 +4,8 @@
 //! effects run in the order PHP# runs them and every other term is pure. A branch that runs only on one side of a
 //! condition is a nested `do` block, so its effects run only there.
 
-use foldhash::HashMap;
 use foldhash::HashSet;
-use mago_analyzer::smaller;
-use mago_analyzer::smaller::Fact;
+use mago_analyzer::smaller::Path;
 use mago_analyzer::smaller::Smaller;
 use mago_analyzer::smaller::Step;
 use mago_codex::ttype::TType;
@@ -19,6 +17,7 @@ use mago_codex::ttype::union::TUnion;
 use mago_names::binding::Binding;
 use mago_sharp_bridge::CheckedProgram;
 use mago_sharp_bridge::DeclarationKind;
+use mago_sharp_bridge::Equality;
 use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::Access;
@@ -95,13 +94,9 @@ pub(crate) struct Body<'body, 'program> {
     temporaries: u32,
     /// Each local whose type takes `null`, by where its declaration's name starts.
     pub(super) nullable_locals: HashSet<u32>,
-    /// The parameters of a method whose calls of its own class may recurse, in order: where each one's name starts,
-    /// and whether it is an `int`.
-    parameters: Vec<(u32, bool)>,
-    /// What the conditions on the path to the code being translated show about the parameters.
-    facts: Vec<Fact>,
-    /// Each local a list pattern binds to the rest of a list parameter, by where its name starts, and the parameter.
-    pub(super) rests: HashMap<u32, usize>,
+    /// The parameters of a method whose calls of its own class may recurse, and what the conditions and patterns on the
+    /// path to the code being translated show about them.
+    path: Path<'body, 'program>,
     /// The locals the loop being translated adds to, by where their declarations' names start, which its conditions
     /// and the values it adds must not read.
     pub(super) accumulators: Vec<u32>,
@@ -124,29 +119,22 @@ impl<'body, 'program> Body<'body, 'program> {
             lines: Vec::new(),
             temporaries: 0,
             nullable_locals: HashSet::default(),
-            parameters: Vec::new(),
-            facts: Vec::new(),
-            rests: HashMap::default(),
+            path: Path::new(checked.names(), []),
             accumulators: Vec::new(),
         }
     }
 
     /// Lets the body's calls of methods of its own class pass smaller values of `parameters`, in order.
-    pub(crate) fn recurse_on<'parameter, 'arena, I>(&mut self, parameters: I)
-    where
-        'arena: 'parameter,
-        I: Iterator<Item = &'parameter FunctionLikeParameter<'arena>>,
-    {
-        self.parameters = parameters
-            .map(|parameter| (parameter.variable.span.start.offset, matches!(parameter.hint, Some(Hint::Integer(_)))))
-            .collect();
+    pub(crate) fn recurse_on<'parameter>(
+        &mut self,
+        parameters: impl IntoIterator<Item = &'parameter FunctionLikeParameter<'parameter>>,
+    ) {
+        self.path = Path::new(self.checked.names(), parameters);
     }
 
-    /// Lets the body's calls pass smaller values on a path of a law's body that showed `facts`, and where each local of
-    /// `rests`, by where its name starts, is the rest of a list pattern of the parameter beside it.
-    pub(crate) fn knowing(&mut self, facts: &[Fact], rests: impl Iterator<Item = (u32, usize)>) {
-        self.facts.extend_from_slice(facts);
-        self.rests.extend(rests);
+    /// Lets the body's calls pass the smaller values `path`, a path of a law's body, shows.
+    pub(crate) fn on_path(&mut self, path: Path<'body, 'program>) {
+        self.path = path;
     }
 
     /// The Lean type of `hint`.
@@ -245,7 +233,7 @@ impl<'body, 'program> Body<'body, 'program> {
 
     /// `statements` in order. The statements after an `if` whose block returns run where its condition does not hold.
     fn statements(&mut self, statements: &Sequence<'_, Statement<'_>>) {
-        let depth = self.facts.len();
+        let outer = self.path.clone();
         for statement in statements {
             self.statement(statement);
             if let Statement::If(r#if) = statement
@@ -253,11 +241,10 @@ impl<'body, 'program> Body<'body, 'program> {
                 && body.else_clause.is_none()
                 && returns(body.statement)
             {
-                let facts = self.facts(r#if.condition, false);
-                self.facts.extend(facts);
+                self.path = self.path.branch(r#if.condition, false);
             }
         }
-        self.facts.truncate(depth);
+        self.path = outer;
     }
 
     fn statement(&mut self, statement: &Statement) {
@@ -290,24 +277,24 @@ impl<'body, 'program> Body<'body, 'program> {
                 let IfBody::Statement(body) = &r#if.body else {
                     unreachable!("PHP# parses no colon-delimited if, as {:?}", r#if.span());
                 };
+                let holds = self.path.branch(r#if.condition, true);
                 // `if (x is Money m)` names `m` where the test holds, so it is a `match` on `x`.
-                if let Expression::Is(is) = unparenthesized(r#if.condition) {
+                if let Expression::Is(is) = r#if.condition.unparenthesized() {
                     let Some(test) = self.is_test(is) else {
                         return;
                     };
-                    let then = self.nested_statement(body.statement);
+                    let then = self.under(holds, |this| this.nested_statement(body.statement));
                     let otherwise = body.else_clause.as_ref().map(|clause| self.nested_statement(clause.statement));
                     let choice = choice(vec![(test, then)], otherwise.unwrap_or_default());
                     self.lines.extend(statements(&choice));
                     return;
                 }
                 let condition = self.value(r#if.condition);
-                let holds = self.facts(r#if.condition, true);
                 let then = self.under(holds, |this| this.nested_statement(body.statement));
                 self.lines.push(format!("if {condition} then"));
                 self.lines.extend(indented(&then, 2));
                 if let Some(clause) = &body.else_clause {
-                    let fails = self.facts(r#if.condition, false);
+                    let fails = self.path.branch(r#if.condition, false);
                     let otherwise = self.under(fails, |this| this.nested_statement(clause.statement));
                     self.lines.push("else".to_owned());
                     self.lines.extend(indented(&otherwise, 2));
@@ -387,19 +374,19 @@ impl<'body, 'program> Body<'body, 'program> {
             Expression::UnaryPrefix(unary) => self.prefix(unary),
             Expression::Conditional(conditional) => match conditional.then {
                 Some(then) => {
-                    if let Expression::Is(is) = unparenthesized(conditional.condition) {
+                    let holds = self.path.branch(conditional.condition, true);
+                    if let Expression::Is(is) = conditional.condition.unparenthesized() {
                         let Some(test) = self.is_test(is) else {
                             return "default".to_owned();
                         };
-                        let then = self.branch(then);
+                        let then = self.under(holds, |body| body.branch(then));
                         let otherwise = self.branch(conditional.r#else);
 
                         return self.choose(&choice(vec![(test, then)], otherwise));
                     }
                     let condition = self.value(conditional.condition);
-                    let holds = self.facts(conditional.condition, true);
                     let then = self.under(holds, |body| body.branch(then));
-                    let fails = self.facts(conditional.condition, false);
+                    let fails = self.path.branch(conditional.condition, false);
                     let otherwise = self.under(fails, |body| body.branch(conditional.r#else));
 
                     self.choose(&Choice::If(
@@ -563,18 +550,31 @@ impl<'body, 'program> Body<'body, 'program> {
             BinaryOperator::Multiplication(_) if ints => self.bind(format!("int.mul {lhs} {rhs}")),
             BinaryOperator::Division(_) if ints => self.bind(format!("int.div {lhs} {rhs}")),
             BinaryOperator::Modulo(_) if ints => self.bind(format!("int.mod {lhs} {rhs}")),
-            BinaryOperator::Identical(_) | BinaryOperator::NotIdentical(_)
-                if kinds.0 == Kind::Object || kinds.1 == Kind::Object =>
-            {
+            // `===` works on objects only, and asks whether both are the same one.
+            BinaryOperator::Identical(_) | BinaryOperator::NotIdentical(_) => {
                 self.unmodeled(binary.span(), format!("the identity test `{operator}`"), issues::IDENTITY)
             }
-            BinaryOperator::Equal(_) | BinaryOperator::NotEqual(_)
-                if kinds.0 == Kind::Object || kinds.1 == Kind::Object =>
-            {
-                self.unmodeled(binary.span(), format!("the class operator `{operator}`"), issues::CLASS_OPERATOR)
+            // Lean's `==` on the values a law sees is PHP's `===` on values that hold no object, the one comparison of
+            // the bridge's that runs no code a law cannot see.
+            BinaryOperator::Equal(_) | BinaryOperator::NotEqual(_) => {
+                let (what, reason) =
+                    match types.equality(types.expression_type(binary.lhs), types.expression_type(binary.rhs)) {
+                        Equality::Identical if binary.operator.is_negated_equality() => {
+                            return format!("({lhs} != {rhs})");
+                        }
+                        Equality::Identical => return format!("({lhs} == {rhs})"),
+                        Equality::Declared(..) | Equality::Elements => {
+                            (format!("the class operator `{operator}`"), issues::CLASS_OPERATOR)
+                        }
+                        Equality::Numbers => ("a float".to_owned(), issues::FLOAT),
+                        Equality::Tables => ("a collection".to_owned(), issues::COLLECTION),
+                        Equality::Running => {
+                            (format!("`{operator}` on values only the running code tells apart"), issues::TYPE_TEST)
+                        }
+                    };
+
+                self.unmodeled(binary.span(), what, reason)
             }
-            BinaryOperator::Equal(_) | BinaryOperator::Identical(_) => format!("({lhs} == {rhs})"),
-            BinaryOperator::NotEqual(_) | BinaryOperator::NotIdentical(_) => format!("({lhs} != {rhs})"),
             BinaryOperator::LessThan(_) if ordered => format!("(decide ({lhs} < {rhs}))"),
             BinaryOperator::LessThanOrEqual(_) if ordered => format!("(decide ({lhs} <= {rhs}))"),
             // `>` and `>=` stay Lean's `>` and `≥`, so a goal prints them as the code writes them.
@@ -587,8 +587,8 @@ impl<'body, 'program> Body<'body, 'program> {
     /// `&&` and `||`, which run their right side only when the left one does not decide.
     fn short_circuit(&mut self, binary: &Binary, and: bool) -> String {
         let lhs = self.value(binary.lhs);
-        let facts = self.facts(binary.lhs, and);
-        let rhs = self.under(facts, |body| body.branch(binary.rhs));
+        let path = self.path.branch(binary.lhs, and);
+        let rhs = self.under(path, |body| body.branch(binary.rhs));
         let operator = if and { "&&" } else { "||" };
         if let [only] = rhs.as_slice()
             && let Some(rhs) = only.strip_prefix("pure ")
@@ -668,29 +668,21 @@ impl<'body, 'program> Body<'body, 'program> {
         }
 
         let subject = self.value(r#match.expression);
-        let parameter = self.parameter(r#match.expression);
-        let depth = self.facts.len();
+        let (paths, _) = self.path.arms(r#match.expression, r#match.arms.as_slice());
         let mut arms = Vec::new();
         let mut otherwise = vec!["throw Throwable.UnhandledMatchError".to_owned()];
-        for arm in r#match.arms.iter() {
+        for (arm, path) in r#match.arms.iter().zip(paths) {
             let PatternMatchArm::Pattern(arm) = arm else {
-                otherwise = translate(self, arm.body());
+                otherwise = self.under(path, |body| translate(body, arm.body()));
                 continue;
             };
 
-            let mut test = self.test(&subject, r#type, parameter, arm.pattern)?;
+            let mut test = self.test(&subject, r#type, arm.pattern)?;
             if let Some(guard) = &arm.guard {
                 test.conditions.push(self.pure(guard.condition, "a guard that can throw", issues::GUARD)?);
             }
-            let holds = self.pattern_facts(parameter, arm.pattern, true);
-            arms.push((test, self.under(holds, |body| translate(body, &arm.body))));
-            // A later arm runs only where this one's pattern fails, unless its guard is what failed.
-            if arm.guard.is_none() {
-                let fails = self.pattern_facts(parameter, arm.pattern, false);
-                self.facts.extend(fails);
-            }
+            arms.push((test, self.under(path, |body| translate(body, &arm.body))));
         }
-        self.facts.truncate(depth);
 
         Some((arms, otherwise))
     }
@@ -722,9 +714,8 @@ impl<'body, 'program> Body<'body, 'program> {
     fn is_test(&mut self, is: &Is) -> Option<Test> {
         let r#type = self.checked.types().expression_type(is.value);
         let subject = self.value(is.value);
-        let parameter = self.parameter(is.value);
 
-        self.test(&subject, r#type, parameter, is.pattern)
+        self.test(&subject, r#type, is.pattern)
     }
 
     /// Whether `hint` names the type of every value of `atomic`.
@@ -778,42 +769,11 @@ impl<'body, 'program> Body<'body, 'program> {
         Some(names::member(&names::full_name(&self.reached_name(r#enum)), case))
     }
 
-    /// The parameter of the method being translated that `expression` reads, by position.
-    fn parameter(&self, expression: &Expression) -> Option<usize> {
-        let Expression::ConstantAccess(name) = unparenthesized(expression) else {
-            return None;
-        };
-        let Some(Binding::Local(local)) = self.checked.names().binding(&name.name) else {
-            return None;
-        };
-
-        self.parameters.iter().position(|(offset, _)| *offset == local.declaration.start.offset)
-    }
-
-    /// What `condition` shows about the parameters where it is `holds`, by spec section 28's smaller value rule.
-    pub(crate) fn facts(&self, condition: &Expression, holds: bool) -> Vec<Fact> {
-        smaller::facts(self, condition, holds)
-    }
-
-    /// What a comparison pattern of `pattern`'s shows about the `match`'s subject, the parameter `parameter`, where
-    /// the pattern is `holds`.
-    pub(super) fn pattern_facts(&self, parameter: Option<usize>, pattern: &Pattern, holds: bool) -> Vec<Fact> {
-        match (parameter, pattern) {
-            (Some(parameter), Pattern::Comparison(comparison)) if self.parameters[parameter].1 => {
-                smaller::comparison(self, parameter, &comparison.operator, comparison.value, holds, false)
-                    .into_iter()
-                    .collect()
-            }
-            _ => Vec::new(),
-        }
-    }
-
-    /// `translate` where the conditions on the path also show `facts`.
-    fn under<T>(&mut self, facts: Vec<Fact>, translate: impl FnOnce(&mut Self) -> T) -> T {
-        let depth = self.facts.len();
-        self.facts.extend(facts);
+    /// `translate` on `path`, a path into a branch of the code being translated.
+    fn under<T>(&mut self, path: Path<'body, 'program>, translate: impl FnOnce(&mut Self) -> T) -> T {
+        let outer = std::mem::replace(&mut self.path, path);
         let translated = translate(self);
-        self.facts.truncate(depth);
+        self.path = outer;
 
         translated
     }
@@ -825,7 +785,7 @@ impl<'body, 'program> Body<'body, 'program> {
             // nothing a law reasons about.
             Pattern::Value(value)
                 if matches!(kind, Kind::Object | Kind::Other)
-                    && !matches!(unparenthesized(value), Expression::Literal(Literal::Null(_))) =>
+                    && !matches!(value.unparenthesized(), Expression::Literal(Literal::Null(_))) =>
             {
                 self.unmodeled(pattern.span(), "a match on this subject".to_owned(), issues::MATCH_SUBJECT);
                 None
@@ -1205,7 +1165,7 @@ impl<'body, 'program> Body<'body, 'program> {
     /// its bound.
     pub(crate) fn smaller(&self, list: &ArgumentList) -> Option<(Smaller, Option<String>)> {
         let arguments: Vec<&Expression> = list.arguments.iter().map(Argument::value).collect();
-        let (smaller, operand) = smaller::smaller(self, &self.facts, &arguments)?;
+        let (smaller, operand) = self.path.smaller(&arguments)?;
         let term = operand.map(|operand| {
             let name = names::identifier(self.source(operand.span()).as_bytes());
             if matches!(smaller.step, Step::Down(_)) { format!("({name} - 1)") } else { format!("({name} + 1)") }
@@ -1623,27 +1583,6 @@ impl<'body, 'program> Body<'body, 'program> {
     }
 }
 
-/// The parameters of the method or the law being translated, by their bindings, and the rests of the list patterns on
-/// the path.
-impl smaller::Parameters for Body<'_, '_> {
-    fn parameter(&self, expression: &Expression<'_>) -> Option<(usize, bool)> {
-        let place = Body::parameter(self, expression)?;
-
-        Some((place, self.parameters[place].1))
-    }
-
-    fn rest_of(&self, expression: &Expression<'_>) -> Option<usize> {
-        let Expression::ConstantAccess(name) = expression else {
-            return None;
-        };
-        let Some(Binding::Local(local)) = self.checked.names().binding(&name.name) else {
-            return None;
-        };
-
-        self.rests.get(&local.declaration.start.offset).copied()
-    }
-}
-
 /// `choice` as a pure term, when each of its branches only returns one.
 fn term(choice: &Choice) -> Option<String> {
     Some(match choice {
@@ -1690,27 +1629,6 @@ fn statements(choice: &Choice) -> Vec<String> {
             lines.extend(statements(branch));
             lines
         }
-    }
-}
-
-/// `expression` without the parentheses around it.
-fn unparenthesized<'expression, 'arena>(
-    expression: &'expression Expression<'arena>,
-) -> &'expression Expression<'arena> {
-    match expression {
-        Expression::Parenthesized(parenthesized) => unparenthesized(parenthesized.expression),
-        expression => expression,
-    }
-}
-
-/// The value of an int literal, negated or not.
-pub(super) fn literal(expression: &Expression) -> Option<i64> {
-    match unparenthesized(expression) {
-        Expression::Literal(Literal::Integer(integer)) => integer.value.and_then(|value| i64::try_from(value).ok()),
-        Expression::UnaryPrefix(UnaryPrefix { operator: UnaryPrefixOperator::Negation(_), operand }) => {
-            literal(operand)?.checked_neg()
-        }
-        _ => None,
     }
 }
 

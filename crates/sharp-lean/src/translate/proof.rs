@@ -5,8 +5,7 @@
 //! in scope, the theorem of the law it calls, and each case ends in `sharp_close`, which `Sharp/Lean/Proof.lean`
 //! defines. A call of the law itself is Lean's recursion on the theorem.
 
-use foldhash::HashMap;
-use mago_analyzer::smaller::Fact;
+use mago_analyzer::smaller::Path;
 use mago_analyzer::smaller::Step;
 use mago_names::binding::Binding;
 use mago_sharp_bridge::CheckedProgram;
@@ -22,8 +21,6 @@ use mago_syntax::cst::Expression;
 use mago_syntax::cst::IfBody;
 use mago_syntax::cst::Law as LawNode;
 use mago_syntax::cst::LawProof;
-use mago_syntax::cst::ListPatternElement;
-use mago_syntax::cst::Pattern;
 use mago_syntax::cst::PatternMatch;
 use mago_syntax::cst::PatternMatchArm;
 use mago_syntax::cst::PatternMatchArmBody;
@@ -80,23 +77,14 @@ pub(crate) struct LawCall {
     pub(crate) conditions: Vec<String>,
 }
 
-/// The rest of a list pattern of a list parameter: where the local's name starts, its name, and the parameter's place.
-#[derive(Debug, Clone, Copy)]
-struct Rest<'arena> {
-    offset: u32,
-    name: &'arena [u8],
-    parameter: usize,
-}
-
 /// What holds on one path through a body.
-#[derive(Clone, Default)]
-struct Scope<'ast, 'arena> {
+#[derive(Clone)]
+struct Scope<'prover, 'program, 'ast, 'arena> {
     locals: Vec<&'ast Statement<'arena>>,
     /// Each case hypothesis, by its Lean name, with the condition it states in PHP#.
     hypotheses: Vec<(String, String)>,
-    /// What the conditions on the path show about the law's int parameters.
-    facts: Vec<Fact>,
-    rests: Vec<Rest<'arena>>,
+    /// What the conditions and patterns on the path show about the law's parameters.
+    path: Path<'prover, 'program>,
     /// Whether the path calls the law itself.
     recurses: bool,
 }
@@ -144,10 +132,9 @@ impl<'prover, 'program, 'ast, 'arena> Prover<'prover, 'program, 'ast, 'arena> {
 
     /// A translation of the law's code on the path `scope`, whose calls of the law's class pass the smaller values
     /// the path shows.
-    fn body(&self, scope: &Scope) -> Body<'prover, 'program> {
+    fn body(&self, scope: &Scope<'prover, 'program, 'ast, 'arena>) -> Body<'prover, 'program> {
         let mut body = Body::new(self.checked, self.reach, self.full, self.place.clone());
-        body.recurse_on(self.law.parameter_list.parameters.iter());
-        body.knowing(&scope.facts, scope.rests.iter().map(|rest| (rest.offset, rest.parameter)));
+        body.on_path(scope.path.clone());
 
         body
     }
@@ -155,7 +142,12 @@ impl<'prover, 'program, 'ast, 'arena> Prover<'prover, 'program, 'ast, 'arena> {
     /// The law's theorem: `theorem <statement>.proof (parameters) : <statement> parameters := by …`.
     pub(crate) fn prove(mut self, binders: &[String], parameters: &[String]) -> Proof {
         let mut lines = vec![format!("unfold {}", self.statement)];
-        let mut scope = Scope::default();
+        let mut scope = Scope {
+            locals: Vec::new(),
+            hypotheses: Vec::new(),
+            path: Path::new(self.checked.names(), self.law.parameter_list.parameters.iter()),
+            recurses: false,
+        };
         if let Some(condition) = &self.law.condition {
             lines.push("intro «when»".to_owned());
             scope.hypotheses.push(("«when»".to_owned(), self.source(condition.expression.span())));
@@ -189,7 +181,7 @@ impl<'prover, 'program, 'ast, 'arena> Prover<'prover, 'program, 'ast, 'arena> {
     fn statements(
         &mut self,
         statements: &[&'ast Statement<'arena>],
-        mut scope: Scope<'ast, 'arena>,
+        mut scope: Scope<'prover, 'program, 'ast, 'arena>,
         lines: &mut Vec<String>,
     ) {
         let Some((statement, rest)) = statements.split_first() else {
@@ -219,14 +211,13 @@ impl<'prover, 'program, 'ast, 'arena> Prover<'prover, 'program, 'ast, 'arena> {
 
                 let mut then = scope.clone();
                 then.hypotheses.push((hypothesis.clone(), written));
-                then.facts.extend(self.body(&scope).facts(r#if.condition, true));
+                then.path = scope.path.branch(r#if.condition, true);
                 let branch: Vec<&Statement> = std::iter::once(body.statement).chain(rest.iter().copied()).collect();
                 self.branch(&branch, then, lines);
 
                 let mut otherwise = scope;
                 otherwise.hypotheses.push((hypothesis, negated(self, r#if.condition)));
-                let fails = self.body(&otherwise).facts(r#if.condition, false);
-                otherwise.facts.extend(fails);
+                otherwise.path = otherwise.path.branch(r#if.condition, false);
                 let branch: Vec<&Statement> =
                     body.else_clause.iter().map(|clause| clause.statement).chain(rest.iter().copied()).collect();
                 self.branch(&branch, otherwise, lines);
@@ -243,7 +234,12 @@ impl<'prover, 'program, 'ast, 'arena> Prover<'prover, 'program, 'ast, 'arena> {
     }
 
     /// One branch of a case split: `·` and its tactics.
-    fn branch(&mut self, statements: &[&'ast Statement<'arena>], scope: Scope<'ast, 'arena>, lines: &mut Vec<String>) {
+    fn branch(
+        &mut self,
+        statements: &[&'ast Statement<'arena>],
+        scope: Scope<'prover, 'program, 'ast, 'arena>,
+        lines: &mut Vec<String>,
+    ) {
         let mut branch = Vec::new();
         self.statements(statements, scope, &mut branch);
         for (index, line) in branch.into_iter().enumerate() {
@@ -258,7 +254,7 @@ impl<'prover, 'program, 'ast, 'arena> Prover<'prover, 'program, 'ast, 'arena> {
         &mut self,
         r#match: &'ast PatternMatch<'arena>,
         rest: &[&'ast Statement<'arena>],
-        scope: Scope<'ast, 'arena>,
+        scope: Scope<'prover, 'program, 'ast, 'arena>,
         lines: &mut Vec<String>,
     ) {
         let mut body = self.body(&scope);
@@ -274,17 +270,17 @@ impl<'prover, 'program, 'ast, 'arena> Prover<'prover, 'program, 'ast, 'arena> {
         }
 
         let r#type = self.checked.types().expression_type(r#match.expression);
-        let parameter = parameter(self.law, r#match.expression);
         let written = self.source(r#match.expression.span());
         let statements = |block: Option<&'ast Block<'arena>>| -> Vec<&'ast Statement<'arena>> {
             block.into_iter().flat_map(|block| block.statements.iter()).chain(rest.iter().copied()).collect()
         };
+        let (paths, missed_path) = scope.path.arms(r#match.expression, r#match.arms.as_slice());
         let mut arms = Vec::new();
         // What holds where no arm before matched: each arm's pattern failed, or its guard did.
-        let (mut missed, mut fails) = (Vec::new(), Vec::new());
+        let mut missed = Vec::new();
         let mut default = None;
         let mut tested = true;
-        for arm in r#match.arms.iter() {
+        for (arm, path) in r#match.arms.iter().zip(paths) {
             let PatternMatchArmBody::Block(block) = arm.body() else {
                 continue;
             };
@@ -292,7 +288,7 @@ impl<'prover, 'program, 'ast, 'arena> Prover<'prover, 'program, 'ast, 'arena> {
                 default = Some(block);
                 continue;
             };
-            let Some(mut test) = body.test(&subject, r#type, parameter, arm.pattern) else {
+            let Some(mut test) = body.test(&subject, r#type, arm.pattern) else {
                 tested = false;
                 break;
             };
@@ -312,16 +308,12 @@ impl<'prover, 'program, 'ast, 'arena> Prover<'prover, 'program, 'ast, 'arena> {
 
             let mut case = scope.clone();
             case.hypotheses.push((String::new(), holds));
-            case.facts.extend(fails.iter().copied().chain(body.pattern_facts(parameter, arm.pattern, true)));
-            case.rests.extend(rest_of(arm.pattern, &body.rests));
+            case.path = path;
             let mut tactics = Vec::new();
             self.statements(&statements(Some(block)), case, &mut tactics);
             arms.push((test, tactics));
 
             missed.push(fails_here);
-            if arm.guard.is_none() {
-                fails.extend(body.pattern_facts(parameter, arm.pattern, false));
-            }
         }
         self.proof.uses.append(&mut body.uses);
         self.proof.unmodeled.append(&mut body.unmodeled);
@@ -333,7 +325,7 @@ impl<'prover, 'program, 'ast, 'arena> Prover<'prover, 'program, 'ast, 'arena> {
         if !missed.is_empty() {
             otherwise.hypotheses.push((String::new(), missed.join(" && ")));
         }
-        otherwise.facts.extend(fails);
+        otherwise.path = missed_path;
         let mut tactics = Vec::new();
         self.statements(&statements(default), otherwise, &mut tactics);
         // Where every arm failed on an enum, whose arms cover its cases, the cases show that no value is left.
@@ -388,7 +380,12 @@ impl<'prover, 'program, 'ast, 'arena> Prover<'prover, 'program, 'ast, 'arena> {
     /// A call statement of a law: the fact `have «$fN» := sharp_call% N (<law>.proof <arguments>)`, which proves the
     /// called law's `when` condition first. Arguments that compute are bound to `«$argN»`, which the fact holds for
     /// each value they compute.
-    fn call(&mut self, call: &'ast Call<'arena>, scope: &mut Scope<'ast, 'arena>, lines: &mut Vec<String>) {
+    fn call(
+        &mut self,
+        call: &'ast Call<'arena>,
+        scope: &mut Scope<'prover, 'program, 'ast, 'arena>,
+        lines: &mut Vec<String>,
+    ) {
         let Some((key, arguments)) = self.called(call) else {
             return;
         };
@@ -473,7 +470,11 @@ impl<'prover, 'program, 'ast, 'arena> Prover<'prover, 'program, 'ast, 'arena> {
     }
 
     /// `(do … return (c)) = pure true`, the condition `expression` as a case hypothesis.
-    fn condition(&mut self, scope: &Scope<'ast, 'arena>, expression: &'ast Expression<'arena>) -> String {
+    fn condition(
+        &mut self,
+        scope: &Scope<'prover, 'program, 'ast, 'arena>,
+        expression: &'ast Expression<'arena>,
+    ) -> String {
         let (lines, terms, uses, unmodeled) = self.body(scope).terms(&scope.locals, &[expression]);
         self.proof.uses.extend(uses);
         self.proof.unmodeled.extend(unmodeled);
@@ -483,7 +484,7 @@ impl<'prover, 'program, 'ast, 'arena> Prover<'prover, 'program, 'ast, 'arena> {
     }
 
     /// The step that closes a case: `sharp_close` with its index and its hypotheses.
-    fn close(&mut self, scope: &Scope<'ast, 'arena>, step: &str) -> String {
+    fn close(&mut self, scope: &Scope<'prover, 'program, 'ast, 'arena>, step: &str) -> String {
         let hypotheses: Vec<&str> =
             scope.hypotheses.iter().map(|(name, _)| name.as_str()).filter(|name| !name.is_empty()).collect();
         let smaller = (!scope.recurses).then(|| self.smaller_call(scope)).flatten();
@@ -496,10 +497,10 @@ impl<'prover, 'program, 'ast, 'arena> Prover<'prover, 'program, 'ast, 'arena> {
 
     /// The call of the law itself on the first smaller value the path `scope` shows, a list pattern's rest before an
     /// int one step towards its bound, and the parameter it makes smaller.
-    fn smaller_call(&self, scope: &Scope<'ast, 'arena>) -> Option<(String, String)> {
-        let rest = scope.rests.first().map(|rest| (rest.parameter, String::from_utf8_lossy(rest.name).into_owned()));
+    fn smaller_call(&self, scope: &Scope<'prover, 'program, 'ast, 'arena>) -> Option<(String, String)> {
+        let rest = scope.path.rests.first().map(|(rest, parameter)| (*parameter, self.source(*rest)));
         let (place, value) = rest.or_else(|| {
-            let fact = scope.facts.first()?;
+            let fact = scope.path.facts.first()?;
             let operator = match fact.step {
                 Step::Down(_) => "-",
                 Step::Up(_) => "+",
@@ -524,7 +525,7 @@ impl<'prover, 'program, 'ast, 'arena> Prover<'prover, 'program, 'ast, 'arena> {
     /// Whether `expression` names a value the proof's tactics name: a parameter of the law, a value a pattern of its
     /// body names, or a property of one. A local of the body is none of them, since only the code that computes a law
     /// call's arguments declares it.
-    fn names_value(&self, scope: &Scope<'ast, 'arena>, expression: &Expression) -> bool {
+    fn names_value(&self, scope: &Scope<'prover, 'program, 'ast, 'arena>, expression: &Expression) -> bool {
         match expression {
             Expression::Parenthesized(parenthesized) => self.names_value(scope, parenthesized.expression),
             Expression::Access(Access::Property(access)) => self.names_value(scope, access.object),
@@ -553,24 +554,6 @@ impl<'prover, 'program, 'ast, 'arena> Prover<'prover, 'program, 'ast, 'arena> {
     }
 }
 
-/// The rest of the list pattern `pattern` of the law's parameter at `parameter`, which `rests`, the rests the
-/// pattern tests found smaller than their list, holds.
-fn rest_of<'arena>(pattern: &Pattern<'arena>, rests: &HashMap<u32, usize>) -> Option<Rest<'arena>> {
-    let Pattern::List(list) = pattern else {
-        return None;
-    };
-
-    list.elements.iter().find_map(|element| {
-        let ListPatternElement::Rest(rest) = element else {
-            return None;
-        };
-        let variable = rest.variable.as_ref()?;
-        let parameter = *rests.get(&variable.span.start.offset)?;
-
-        Some(Rest { offset: variable.span.start.offset, name: variable.value, parameter })
-    })
-}
-
 /// Whether the Lean patterns `patterns` of one term cover every value of it: `_` or a name, or a list's `[]` beside an
 /// element before a rest that is a name or `_`.
 fn covers(patterns: &[&str]) -> bool {
@@ -588,17 +571,6 @@ fn dotted(tactics: Vec<String>) -> impl Iterator<Item = String> {
         .into_iter()
         .enumerate()
         .map(|(index, line)| if index == 0 { format!("· {line}") } else { format!("  {line}") })
-}
-
-/// The place of the law's parameter `expression` names.
-fn parameter(law: &LawNode, expression: &Expression) -> Option<usize> {
-    let Expression::ConstantAccess(name) = expression else {
-        return None;
-    };
-
-    law.parameter_list.parameters.iter().position(|parameter| {
-        parameter.variable.name.strip_prefix(b"$").unwrap_or(parameter.variable.name) == name.name.value()
-    })
 }
 
 /// `condition`'s negation as PHP# writes it: a comparison flipped, a `!` removed, or `!(…)` around anything else.

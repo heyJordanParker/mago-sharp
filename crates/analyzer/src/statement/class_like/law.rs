@@ -19,13 +19,10 @@ use mago_syntax::cst::Call;
 use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::FunctionCall;
-use mago_syntax::cst::Hint;
 use mago_syntax::cst::IfBody;
 use mago_syntax::cst::Law;
 use mago_syntax::cst::LawProof;
-use mago_syntax::cst::ListPatternElement;
 use mago_syntax::cst::MethodCall;
-use mago_syntax::cst::Pattern;
 use mago_syntax::cst::PatternMatchArm;
 use mago_syntax::cst::PatternMatchArmBody;
 use mago_syntax::cst::Statement;
@@ -47,8 +44,7 @@ use crate::invocation::Invocation;
 use crate::invocation::InvocationArgumentsSource;
 use crate::invocation::InvocationTarget;
 use crate::invocation::analyzer::analyze_invocation;
-use crate::smaller;
-use crate::smaller::Fact;
+use crate::smaller::Path;
 use crate::smaller::Step;
 use crate::statement::analyze_statements;
 use crate::statement::function_like::FunctionLikeBody;
@@ -124,14 +120,8 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Law<'arena> {
             analyze_condition(context, &mut body_context, artifacts, condition.expression)?;
         }
         if let LawProof::Body(body) = &self.proof {
-            let mut walk = BodyWalk {
-                context,
-                law: self,
-                class: class_like_metadata,
-                facts: Vec::new(),
-                rests: Vec::new(),
-                step: None,
-            };
+            let path = Path::new(context.resolved_names, self.parameter_list.parameters.iter());
+            let mut walk = BodyWalk { context, law: self, class: class_like_metadata, path, step: None };
             walk.statements(body.statements.as_slice());
             analyze_statements(body.statements.as_slice(), context, &mut body_context, artifacts)?;
         }
@@ -273,22 +263,20 @@ where
     context: &'walk mut Context<'ctx, 'arena, A>,
     law: &'ast Law<'arena>,
     class: &'ctx ClassLikeMetadata,
-    /// What the conditions on the path show about the law's int parameters.
-    facts: Vec<Fact>,
-    /// Each local a list pattern on the path binds to the rest of a list parameter, by name, and the parameter's place.
-    rests: Vec<(&'arena [u8], usize)>,
+    /// What the conditions and patterns on the way to the statement being walked show.
+    path: Path<'ctx, 'arena>,
     /// The parameter the first call of the law on itself makes smaller, and how.
     step: Option<(usize, Step)>,
 }
 
-impl<'ast, 'arena, A> BodyWalk<'_, '_, 'ast, 'arena, A>
+impl<'ctx, 'ast, 'arena, A> BodyWalk<'_, 'ctx, 'ast, 'arena, A>
 where
     A: Arena,
 {
     /// Walks `statements` in order. After an `if` whose branch ends the block, the statements that follow know its
     /// condition is false.
     fn statements(&mut self, statements: &'ast [Statement<'arena>]) {
-        let known = self.known();
+        let outer = self.path.clone();
         for statement in statements {
             self.statement(statement);
             if let Statement::If(r#if) = statement
@@ -296,26 +284,17 @@ where
                 && body.else_clause.is_none()
                 && ends(body.statement)
             {
-                self.learn(r#if.condition, false);
+                self.path = self.path.branch(r#if.condition, false);
             }
         }
-        self.forget(known);
+        self.path = outer;
     }
 
-    /// How many facts and rests the path knows, which `forget` returns to.
-    fn known(&self) -> (usize, usize) {
-        (self.facts.len(), self.rests.len())
-    }
-
-    fn forget(&mut self, (facts, rests): (usize, usize)) {
-        self.facts.truncate(facts);
-        self.rests.truncate(rests);
-    }
-
-    /// Learns what `condition` shows about the law's int parameters where it is `holds`.
-    fn learn(&mut self, condition: &Expression<'_>, holds: bool) {
-        let facts = smaller::facts(&*self, condition, holds);
-        self.facts.extend(facts);
+    /// Walks `statement` on `path`.
+    fn statement_on(&mut self, path: Path<'ctx, 'arena>, statement: &'ast Statement<'arena>) {
+        let outer = std::mem::replace(&mut self.path, path);
+        self.statement(statement);
+        self.path = outer;
     }
 
     fn statement(&mut self, statement: &'ast Statement<'arena>) {
@@ -325,45 +304,25 @@ where
             Statement::LocalDeclaration(_) => {}
             Statement::If(r#if) => match &r#if.body {
                 IfBody::Statement(body) if body.else_if_clauses.is_empty() => {
-                    let known = self.known();
-                    self.learn(r#if.condition, true);
-                    self.statement(body.statement);
-                    self.forget(known);
+                    self.statement_on(self.path.branch(r#if.condition, true), body.statement);
                     if let Some(clause) = &body.else_clause {
-                        self.learn(r#if.condition, false);
-                        self.statement(clause.statement);
-                        self.forget(known);
+                        self.statement_on(self.path.branch(r#if.condition, false), clause.statement);
                     }
                 }
                 _ => self.refuse(statement.span()),
             },
             Statement::PatternMatch(r#match) => {
-                let subject = smaller::Parameters::parameter(self, r#match.expression).map(|(place, _)| place);
-                for arm in r#match.arms.iter() {
+                let (paths, _) = self.path.arms(r#match.expression, r#match.arms.as_slice());
+                for (arm, path) in r#match.arms.iter().zip(paths) {
                     let (PatternMatchArm::Pattern(_) | PatternMatchArm::Default(_), PatternMatchArmBody::Block(block)) =
                         (arm, arm.body())
                     else {
                         self.refuse(arm.span());
                         continue;
                     };
-                    let known = self.known();
-                    if let (PatternMatchArm::Pattern(arm), Some(subject)) = (arm, subject)
-                        && let Pattern::List(list) = arm.pattern
-                    {
-                        let rest = list.elements.iter().find_map(|element| match element {
-                            ListPatternElement::Rest(rest) => rest.variable.as_ref(),
-                            ListPatternElement::Pattern(_) => None,
-                        });
-                        let elements =
-                            list.elements.iter().filter(|element| matches!(element, ListPatternElement::Pattern(_)));
-                        if let Some(rest) = rest
-                            && elements.count() > 0
-                        {
-                            self.rests.push((rest.value, subject));
-                        }
-                    }
+                    let outer = std::mem::replace(&mut self.path, path);
                     self.statements(block.statements.as_slice());
-                    self.forget(known);
+                    self.path = outer;
                 }
             }
             _ => match law_call(statement) {
@@ -384,7 +343,9 @@ where
     /// of the parameter every call of the law on itself makes smaller in the same way.
     fn call(&mut self, arguments: &'ast ArgumentList<'arena>, span: Span) {
         let values: Vec<&Expression<'arena>> = arguments.arguments.iter().map(|argument| argument.value()).collect();
-        let step = smaller::smaller(&*self, &self.facts, &values)
+        let step = self
+            .path
+            .smaller(&values)
             .filter(|(smaller, _)| smaller.parameter == smaller.argument)
             .map(|(smaller, _)| (smaller.parameter, smaller.step));
         let annotation = match (step, self.step) {
@@ -426,38 +387,5 @@ fn ends(statement: &Statement<'_>) -> bool {
         Statement::Return(_) => true,
         Statement::Block(block) => block.statements.last().is_some_and(ends),
         _ => false,
-    }
-}
-
-/// The law's parameters, by the names its body reads them by, and the rests of the list patterns on the path.
-impl<A> smaller::Parameters for BodyWalk<'_, '_, '_, '_, A>
-where
-    A: Arena,
-{
-    fn parameter(&self, expression: &Expression<'_>) -> Option<(usize, bool)> {
-        let Expression::ConstantAccess(name) = unparenthesized(expression) else {
-            return None;
-        };
-        let parameters = self.law.parameter_list.parameters.as_slice();
-        let place = parameters.iter().position(|parameter| {
-            parameter.variable.name.strip_prefix(b"$").unwrap_or(parameter.variable.name) == name.name.value()
-        })?;
-
-        Some((place, matches!(parameters[place].hint, Some(Hint::Integer(_)))))
-    }
-
-    fn rest_of(&self, expression: &Expression<'_>) -> Option<usize> {
-        let Expression::ConstantAccess(name) = expression else {
-            return None;
-        };
-
-        self.rests.iter().rev().find(|(rest, _)| *rest == name.name.value()).map(|(_, parameter)| *parameter)
-    }
-}
-
-fn unparenthesized<'ast, 'arena>(expression: &'ast Expression<'arena>) -> &'ast Expression<'arena> {
-    match expression {
-        Expression::Parenthesized(parenthesized) => unparenthesized(parenthesized.expression),
-        expression => expression,
     }
 }
