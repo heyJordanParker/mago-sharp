@@ -1,10 +1,14 @@
 use mago_allocator::Arena;
+use std::ops::Deref;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use foldhash::HashMap;
 
+use mago_algebra::find_satisfying_assignments;
+use mago_algebra::saturate_clauses;
 use mago_word::Word;
+use mago_word::WordSet;
 use mago_word::ascii_lowercase_word;
 use mago_word::concat_word;
 use mago_word::word;
@@ -67,6 +71,7 @@ use mago_syntax::cst::Block;
 use mago_syntax::cst::ConstructorInitializer;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::FunctionLikeParameterList;
+use mago_syntax::cst::Law;
 use mago_syntax::cst::LocalIdentifier;
 use mago_syntax::cst::Statement;
 use mago_syntax::walker::Walker;
@@ -84,6 +89,8 @@ use crate::error::AnalysisError;
 use crate::expression::array::check_sharp_literal_kind;
 use crate::expression::array::get_set_literal_type;
 use crate::expression::instantiation::report_missing_type_arguments;
+use crate::formula::get_formula;
+use crate::reconciler::reconcile_keyed_types;
 use crate::resolver::class_name::report_missing_class;
 use crate::resolver::property::localize_property_type;
 use crate::resolver::property::resolve_declared_property;
@@ -118,6 +125,9 @@ pub enum FunctionLikeBody<'ast, 'arena> {
     Expression(&'ast Expression<'arena>),
     /// A PHP# `void` method's or constructor's expression body, which runs the expression as a statement.
     ExpressionStatement(&'ast Expression<'arena>),
+    /// A PHP# law's code, spec section 28: its `when` condition, its claim, which it returns where the condition holds,
+    /// and its body.
+    Law(&'ast Law<'arena>),
 }
 
 impl HasSpan for FunctionLikeBody<'_, '_> {
@@ -125,6 +135,7 @@ impl HasSpan for FunctionLikeBody<'_, '_> {
         match self {
             FunctionLikeBody::Statements(_, span) => *span,
             FunctionLikeBody::Expression(expr) | FunctionLikeBody::ExpressionStatement(expr) => expr.span(),
+            FunctionLikeBody::Law(law) => law.claim.span(),
         }
     }
 }
@@ -648,28 +659,18 @@ where
                 analyze_statements(statements, context, block_context, &mut artifacts)?;
             }
             FunctionLikeBody::Expression(value) => {
-                let return_type = function_like_metadata.return_type_metadata.as_ref();
-                let declared = return_type
-                    .map(|return_type| return_type.type_union.clone())
-                    .or_else(|| artifacts.lambda_result.clone());
-                expect_type(context, &mut artifacts, value, declared.as_ref());
-
-                block_context.flags.set_inside_return(true);
-                value.analyze(context, block_context, &mut artifacts)?;
-                block_context.flags.set_inside_return(false);
-                // A lambda's result is checked against the function type that takes it, as a declared return type is.
-                if let Some(declared) = &declared {
-                    check_sharp_literal_kind(context, Some(block_context), &artifacts, value, declared);
-                }
-                block_context.conditionally_referenced_variable_ids.clear();
-
-                let value_type =
-                    artifacts.get_rc_expression_type(value).cloned().unwrap_or_else(|| Rc::new(get_mixed()));
-
-                handle_return_value(context, block_context, &mut artifacts, Some(value), value_type, value.span());
+                analyze_returned_expression(context, block_context, &mut artifacts, function_like_metadata, value)?;
             }
             FunctionLikeBody::ExpressionStatement(value) => {
                 value.analyze(context, block_context, &mut artifacts)?;
+            }
+            // The claim, and the body after it, read the parameters where the `when` condition holds.
+            FunctionLikeBody::Law(law) => {
+                if let Some(condition) = &law.condition {
+                    condition.expression.analyze(context, block_context, &mut artifacts)?;
+                    assume(context, block_context, &artifacts, condition.expression);
+                }
+                analyze_returned_expression(context, block_context, &mut artifacts, function_like_metadata, law.claim)?;
             }
         }
     }
@@ -728,6 +729,77 @@ where
     parent_artifacts.pending_readonly_property_writes.append(&mut artifacts.pending_readonly_property_writes);
 
     Ok(artifacts)
+}
+
+/// Analyzes `value`, an expression body, as the value the function-like returns, against its declared return type or
+/// the function type a lambda goes into.
+fn analyze_returned_expression<'ctx, 'arena, A>(
+    context: &mut Context<'ctx, 'arena, A>,
+    block_context: &mut BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+    function_like_metadata: &'ctx FunctionLikeMetadata,
+    value: &Expression<'arena>,
+) -> Result<(), AnalysisError>
+where
+    A: Arena,
+{
+    let return_type = function_like_metadata.return_type_metadata.as_ref();
+    let declared =
+        return_type.map(|return_type| return_type.type_union.clone()).or_else(|| artifacts.lambda_result.clone());
+    expect_type(context, artifacts, value, declared.as_ref());
+
+    block_context.flags.set_inside_return(true);
+    value.analyze(context, block_context, artifacts)?;
+    block_context.flags.set_inside_return(false);
+    // A lambda's result is checked against the function type that takes it, as a declared return type is.
+    if let Some(declared) = &declared {
+        check_sharp_literal_kind(context, Some(block_context), artifacts, value, declared);
+    }
+    block_context.conditionally_referenced_variable_ids.clear();
+
+    let value_type = artifacts.get_rc_expression_type(value).cloned().unwrap_or_else(|| Rc::new(get_mixed()));
+    handle_return_value(context, block_context, artifacts, Some(value), value_type, value.span());
+
+    Ok(())
+}
+
+/// Narrows `block_context` to where `condition`, which the analysis has typed, holds, as a branch it decides is.
+fn assume<'ctx, A>(
+    context: &mut Context<'ctx, '_, A>,
+    block_context: &mut BlockContext<'ctx>,
+    artifacts: &AnalysisArtifacts,
+    condition: &Expression<'_>,
+) where
+    A: Arena,
+{
+    let thresholds = context.settings.algebra_thresholds();
+    let clauses = get_formula(
+        condition.span(),
+        condition.span(),
+        condition,
+        context.get_assertion_context_from_block(block_context),
+        artifacts,
+        &thresholds,
+        context.settings.formula_size_threshold,
+    )
+    .unwrap_or_default();
+    let clauses = saturate_clauses(clauses.iter().chain(block_context.clauses.iter().map(Deref::deref)), &thresholds);
+    let mut referenced = WordSet::default();
+    let (types, active) = find_satisfying_assignments(&clauses, None, &mut referenced);
+    if !types.is_empty() {
+        let mut changed = WordSet::default();
+        reconcile_keyed_types(
+            context,
+            &types,
+            active,
+            block_context,
+            &mut changed,
+            &referenced,
+            &condition.span(),
+            false,
+            false,
+        );
+    }
 }
 
 fn add_parameter_types_to_context<'ctx, 'arena, A>(
@@ -1071,6 +1143,7 @@ where
                 .with_message("It returns here when no `throw` runs."),
         )
         .with_help("End every path with a `throw` or a call of a `never` method."),
+        FunctionLikeBody::Law(_) => unreachable!("a law returns a `bool`, never `never`"),
     };
 
     context.collector.report_with_code(IssueCode::MissingReturnStatement, issue);
@@ -1927,6 +2000,7 @@ pub fn check_unused_function_template_parameters<'ctx, A>(
         Some(FunctionLikeBody::Expression(expression) | FunctionLikeBody::ExpressionStatement(expression)) => {
             walker.walk_expression(expression, &mut named_in_body);
         }
+        Some(FunctionLikeBody::Law(_)) => unreachable!("a law declares no type parameter"),
         None => {}
     }
 

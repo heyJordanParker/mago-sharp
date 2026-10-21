@@ -878,6 +878,7 @@ where
             EscapeWalker.walk_expression(expression, escapes);
         }
         FunctionLikeBody::ExpressionStatement(expression) => EscapeWalker.walk_expression(expression, escapes),
+        FunctionLikeBody::Law(_) => unreachable!("only a method's body is walked for functions that escape"),
     }
 }
 

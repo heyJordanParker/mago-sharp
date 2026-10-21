@@ -37,6 +37,7 @@ use mago_syntax::cst::ForOf;
 use mago_syntax::cst::FunctionLikeParameterList;
 use mago_syntax::cst::Instantiation;
 use mago_syntax::cst::Is;
+use mago_syntax::cst::LawProof;
 use mago_syntax::cst::LocalDeclaration;
 use mago_syntax::cst::LocalTarget;
 use mago_syntax::cst::NullSafePropertyAccess;
@@ -362,6 +363,16 @@ where
             }
             FunctionLikeBody::Expression(expression) | FunctionLikeBody::ExpressionStatement(expression) => {
                 SummaryWalker.walk_expression(expression, &mut recorder);
+            }
+            // A law's effects are those of its condition, its claim and every statement of its body.
+            FunctionLikeBody::Law(law) => {
+                if let Some(condition) = &law.condition {
+                    SummaryWalker.walk_expression(condition.expression, &mut recorder);
+                }
+                SummaryWalker.walk_expression(law.claim, &mut recorder);
+                if let LawProof::Body(body) = &law.proof {
+                    SummaryWalker.walk_block(body, &mut recorder);
+                }
             }
         }
 

@@ -250,7 +250,7 @@ elab_rules : tactic
       if ← closes (do auto (← lawsInScope)) then continue
       open_ := open_.push (← goal.withContext do tree (← goal.getType))
       admitGoal goal
-    logError m!"sharp-condition {index.getNat} {(Json.arr open_).compress}"
+    unless open_.isEmpty do logError m!"sharp-condition {index.getNat} {(Json.arr open_).compress}"
 
 /-- The call `index` of a law, `proof`, the law's theorem applied to the call's arguments: the fact the law states, after
 its `when` condition is proven with `sharp_condition`. -/

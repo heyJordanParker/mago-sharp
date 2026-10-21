@@ -546,6 +546,7 @@ impl Translator<'_, '_> {
         if receiver.is_some() || !method.is_static() {
             self.translation.receivers.push((names::member(lean, method.name.value), false));
         }
+        body.takes(receiver.into_iter().chain(method.parameter_list.parameters.iter()));
         for parameter in receiver.into_iter().chain(method.parameter_list.parameters.iter()) {
             parameters.push(binder(&mut body, parameter));
         }
@@ -615,6 +616,7 @@ impl Translator<'_, '_> {
             body.unmodeled(property.variable.span, format!("the property {place}"), issues::RESERVED_NAME);
         }
 
+        body.takes([receiver]);
         let parameter = binder(&mut body, receiver);
         self.translation.receivers.push((names::member(lean, name), true));
         let returns = body.declared_type(property.hint.as_ref(), property.variable.span);
@@ -647,7 +649,7 @@ impl Translator<'_, '_> {
         let name = String::from_utf8_lossy(law.name.value).into_owned();
         let key = names::member(lean, law.name.value);
         let place = format!("{short}.{name}");
-        let mut body = Body::new(self.checked, self.reach, full, place.clone());
+        let mut body = Body::for_law(self.checked, self.reach, full, place.clone(), law);
         let binders: Vec<String> =
             law.parameter_list.parameters.iter().map(|parameter| binder(&mut body, parameter)).collect();
         let parameters: Vec<String> =
@@ -657,7 +659,7 @@ impl Translator<'_, '_> {
         let (mut uses, mut unmodeled) = (Vec::new(), Vec::new());
         if let Some(condition) = &law.condition {
             let (lines, terms, condition_uses, condition_unmodeled) =
-                Body::new(self.checked, self.reach, full, place.clone()).terms(&[], &[condition.expression]);
+                Body::for_law(self.checked, self.reach, full, place.clone(), law).terms(&[], &[condition.expression]);
             text.push_str("  ((do\n");
             text.extend(indented(&lines, 6).map(|line| format!("{line}\n")));
             text.push_str("      return (");
@@ -728,12 +730,9 @@ fn is_stored(property: &Property) -> bool {
     }
 }
 
-/// `parameter` as the binder `(name : Type)`, which `body` reads as a local.
+/// `parameter` as the binder `(name : Type)`, with its Lean type as `body` translates it.
 fn binder(body: &mut Body<'_, '_>, parameter: &FunctionLikeParameter) -> String {
     let r#type = body.declared_type(parameter.hint.as_ref(), parameter.span());
-    if matches!(parameter.hint, Some(Hint::Nullable(_))) {
-        body.nullable_parameter(parameter.variable.span.start.offset);
-    }
 
     format!("({} : {type})", parameter_name(parameter))
 }

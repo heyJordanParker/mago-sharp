@@ -57,9 +57,9 @@ use crate::utils::quoted_source;
 const BODY: &str =
     "A law's body holds only `if`, `match`, locals, `return;` and calls of laws, each call a statement of its own.";
 
-/// Spec section 28: a law's claim is analyzed as a static method's body that returns `bool`, and records its effects,
-/// so the law rule refuses it when it is impure. Its `when` condition and its body are analyzed in the same scope, where
-/// its parameters are locals. A law is never one of the class's methods, so no method rule reaches it.
+/// Spec section 28: a law's claim is analyzed as a static method's body that returns `bool`, after its `when` condition
+/// and where the condition holds, and so is its body. Its effects are those of all three, so the law rule refuses it
+/// when any is impure. A law is never one of the class's methods, so no method rule reaches it.
 impl<'ast, 'arena> Analyzable<'ast, 'arena> for Law<'arena> {
     fn analyze<'ctx, A>(
         &'ast self,
@@ -89,7 +89,8 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Law<'arena> {
         scope.set_function_like(Some(law_metadata));
         scope.set_static(true);
 
-        let claim = FunctionLikeBody::Expression(self.claim);
+        // The `when` condition, then the claim and the body where it holds.
+        let code = FunctionLikeBody::Law(self);
         let mut law_block_context = BlockContext::new(scope, context.settings.register_super_globals);
         analyze_function_like(
             context,
@@ -98,27 +99,17 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Law<'arena> {
             law_metadata,
             &self.parameter_list,
             None,
-            claim,
+            code,
             None,
         )?;
-
-        effects::summary::record(
-            context,
-            artifacts,
-            Body::Method(class_like_metadata.name, lowercase_law_name),
-            word(self.name.value),
-            self.parameter_list.parameters.iter().map(|parameter| parameter.variable.span).collect(),
-            None,
-            claim,
-        );
+        if let Some(condition) = &self.condition {
+            check_condition(context, artifacts, condition.expression);
+        }
 
         let mut body_context = law_block_context.clone();
         body_context.flags.set_has_returned(false);
         body_context.control_actions = ControlActionSet::new();
         body_context.flags.insert(BlockContextFlags::INSIDE_LAW_BODY);
-        if let Some(condition) = &self.condition {
-            analyze_condition(context, &mut body_context, artifacts, condition.expression)?;
-        }
         if let LawProof::Body(body) = &self.proof {
             let path = Path::new(context.resolved_names, self.parameter_list.parameters.iter());
             let mut walk = BodyWalk { context, law: self, class: class_like_metadata, path, step: None };
@@ -126,21 +117,26 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Law<'arena> {
             analyze_statements(body.statements.as_slice(), context, &mut body_context, artifacts)?;
         }
 
+        // Recorded once the whole law is analyzed, so the effects of every call it makes are known.
+        effects::summary::record(
+            context,
+            artifacts,
+            Body::Method(class_like_metadata.name, lowercase_law_name),
+            word(self.name.value),
+            self.parameter_list.parameters.iter().map(|parameter| parameter.variable.span).collect(),
+            None,
+            code,
+        );
+
         Ok(())
     }
 }
 
-/// Analyzes a law's `when` condition, which is a `bool`, as its claim is.
-fn analyze_condition<'ctx, 'arena, A>(
-    context: &mut Context<'ctx, 'arena, A>,
-    block_context: &mut BlockContext<'ctx>,
-    artifacts: &mut AnalysisArtifacts,
-    condition: &Expression<'arena>,
-) -> Result<(), AnalysisError>
+/// Refuses a law's `when` condition, which the analysis has typed, when it is no `bool`, as its claim is.
+fn check_condition<A>(context: &mut Context<'_, '_, A>, artifacts: &AnalysisArtifacts, condition: &Expression<'_>)
 where
     A: Arena,
 {
-    condition.analyze(context, block_context, artifacts)?;
     if let Some(condition_type) = artifacts.get_expression_type(condition)
         && !condition_type.is_bool()
         && !condition_type.is_never()
@@ -153,8 +149,6 @@ where
                 .with_annotation(Annotation::primary(condition.span()).with_message("The condition is written here.")),
         );
     }
-
-    Ok(())
 }
 
 /// The law `call` names, and the class that states it: `Class.name(…)` names a law of `Class`, as a static method is

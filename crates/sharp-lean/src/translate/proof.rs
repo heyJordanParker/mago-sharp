@@ -133,7 +133,7 @@ impl<'prover, 'program, 'ast, 'arena> Prover<'prover, 'program, 'ast, 'arena> {
     /// A translation of the law's code on the path `scope`, whose calls of the law's class pass the smaller values
     /// the path shows.
     fn body(&self, scope: &Scope<'prover, 'program, 'ast, 'arena>) -> Body<'prover, 'program> {
-        let mut body = Body::new(self.checked, self.reach, self.full, self.place.clone());
+        let mut body = Body::for_law(self.checked, self.reach, self.full, self.place.clone(), self.law);
         body.on_path(scope.path.clone());
 
         body

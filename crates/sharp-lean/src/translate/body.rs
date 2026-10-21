@@ -38,6 +38,7 @@ use mago_syntax::cst::Hint;
 use mago_syntax::cst::IfBody;
 use mago_syntax::cst::Instantiation;
 use mago_syntax::cst::Is;
+use mago_syntax::cst::Law as LawNode;
 use mago_syntax::cst::ListPatternElement;
 use mago_syntax::cst::Literal;
 use mago_syntax::cst::LocalTarget;
@@ -124,6 +125,35 @@ impl<'body, 'program> Body<'body, 'program> {
         }
     }
 
+    /// The translation of code of `law`, a law of `class`: its `when` condition, its claim or its body, which read its
+    /// parameters, and whose calls of the law itself pass smaller values of them.
+    pub(crate) fn for_law(
+        checked: &'body CheckedProgram<'program>,
+        reach: &'body Reach,
+        class: &'body [u8],
+        place: String,
+        law: &LawNode,
+    ) -> Self {
+        let mut body = Self::new(checked, reach, class, place);
+        body.takes(law.parameter_list.parameters.iter());
+        body.recurse_on(law.parameter_list.parameters.iter());
+
+        body
+    }
+
+    /// Reads each of `parameters` whose type takes `null` as Lean's `Option`, and as its value where the analysis
+    /// typed it as a value.
+    pub(crate) fn takes<'parameter>(
+        &mut self,
+        parameters: impl IntoIterator<Item = &'parameter FunctionLikeParameter<'parameter>>,
+    ) {
+        for parameter in parameters {
+            if matches!(parameter.hint, Some(Hint::Nullable(_))) {
+                self.nullable_locals.insert(parameter.variable.span.start.offset);
+            }
+        }
+    }
+
     /// Lets the body's calls of methods of its own class pass smaller values of `parameters`, in order.
     pub(crate) fn recurse_on<'parameter>(
         &mut self,
@@ -181,11 +211,6 @@ impl<'body, 'program> Body<'body, 'program> {
             Some(hint) => self.r#type(hint),
             None => self.unmodeled(span, "a declaration without a type".to_owned(), issues::MISSING_TYPE),
         }
-    }
-
-    /// Marks the parameter whose name starts at `offset` as one whose type takes `null`.
-    pub(crate) fn nullable_parameter(&mut self, offset: u32) {
-        self.nullable_locals.insert(offset);
     }
 
     /// The `do` statements of an expression body, which returns the expression's value.

@@ -75,6 +75,9 @@ pub fn check_unused_params<'ctx, 'ast, 'arena, A>(
                 }
             }
         }
+        FunctionLikeBody::Law(_) => {
+            unreachable!("only a method's, a function's or a lambda's parameters are checked for use")
+        }
     }
 }
 

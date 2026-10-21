@@ -22027,6 +22027,44 @@ fn a_law_reaching_a_method_with_an_effect_in_another_file_is_refused() {
     }
 }
 
+/// Spec section 28: the effect rule reads all of a law: its `when` condition and every statement of its body, a local
+/// no law call reads after it included, as well as its claim.
+#[test]
+fn an_effect_in_a_law_s_condition_or_body_is_refused() {
+    let timer = (
+        "src/Lib/Timer.php",
+        "<?php\n\nnamespace Lib;\n\nfinal class Timer\n{\n    public static function now(): int\n    {\n        return time();\n    }\n}\n",
+    );
+    let stub = ("app/Stubs/Timer.sharp", "namespace App.Stubs;\n\nimport Lib.Timer;\n\nextern Timer.now uses Clock;\n");
+
+    for (law, at) in [
+        (
+            (
+                "app/Shop/Clock.sharp",
+                "namespace App.Shop;\n\nimport Lib.Timer;\n\npublic class Clock\n{\n    law ticks(int x) => true\n    {\n        let now = Timer.now();\n    }\n}\n",
+            ),
+            "9:19",
+        ),
+        (
+            (
+                "app/Shop/Clock.sharp",
+                "namespace App.Shop;\n\nimport Lib.Timer;\n\npublic class Clock\n{\n    law ticks(int x) when Timer.now() > 0 => true;\n}\n",
+            ),
+            "7:27",
+        ),
+    ] {
+        assert_eq!(
+            effect_issues(&[law, stub, timer]),
+            [format!(
+                "{}:{at} impure-law: Law `ticks` calls `Timer.now`, which has the effect `Clock`. Laws hold only over pure code.",
+                law.0
+            )],
+            "{}",
+            law.1
+        );
+    }
+}
+
 /// A law that calls plain PHP with no `extern` names the declaration it lacks, as the getter rule does.
 #[test]
 fn a_law_calling_plain_php_with_no_extern_names_the_missing_declaration() {
@@ -22336,7 +22374,7 @@ fn a_call_of_a_law_outside_a_law_body_is_a_non_existent_method_that_names_the_la
 /// smaller int and on a list's rest, and under a `when` condition.
 const PROVEN_MONEY: (&str, &str) = (
     "app/Shared/Money.sharp",
-    "namespace App.Shared;\n\npublic class Money\n{\n    public Money(public int amount { get; }, public string currency { get; }) { }\n    public Money add(Money other) => new Money(this.amount + other.amount, this.currency);\n    public static int refundable(int paid, int refunded) => refunded > paid ? 0 : paid - refunded;\n\n    law addKeepsCurrency(Money a, Money b) => a.add(b).currency == a.currency;\n    law addTwiceKeepsCurrency(Money m, Money a, Money b) => m.add(a).add(b).currency == m.currency\n    {\n        Money.addKeepsCurrency(m, a);\n        Money.addKeepsCurrency(m.add(a), b);\n    }\n    law neverAbovePaid(int paid, int refunded) when paid >= 0 && refunded >= 0\n        => Money.refundable(paid, refunded) <= paid;\n    law countsDown(int n) when n >= 0 => n >= 0\n    {\n        if (n <= 0) { return; }\n        Money.countsDown(n - 1);\n        Money.neverAbovePaid(n, 0);\n    }\n    law countNeverNegative(List<int> items) => items.count() >= 0\n    {\n        match (items) {\n            [int, ...List<int> rest] => { Money.countNeverNegative(rest); },\n            default => { return; },\n        }\n    }\n}\n",
+    "namespace App.Shared;\n\npublic class Money\n{\n    public Money(public int amount { get; }, public string currency { get; }) { }\n    public Money add(Money other) => new Money(this.amount + other.amount, this.currency);\n    public static int refundable(int paid, int refunded) => refunded > paid ? 0 : paid - refunded;\n\n    law addKeepsCurrency(Money a, Money b) => a.add(b).currency == a.currency;\n    law addTwiceKeepsCurrency(Money m, Money a, Money b) => m.add(a).add(b).currency == m.currency\n    {\n        Money.addKeepsCurrency(m, a);\n        Money.addKeepsCurrency(m.add(a), b);\n    }\n    law neverAbovePaid(int paid, int refunded) when paid >= 0 && refunded >= 0\n        => Money.refundable(paid, refunded) <= paid;\n    law countsDown(int n) when n >= 0 => Money.refundable(n, 0) <= n\n    {\n        if (n <= 0) { return; }\n        Money.countsDown(n - 1);\n        Money.neverAbovePaid(n, 0);\n    }\n    law countNeverNegative(List<int> items) => items.count() >= 0\n    {\n        match (items) {\n            [int, ...List<int> rest] => { Money.countNeverNegative(rest); },\n            default => { return; },\n        }\n    }\n}\n",
 );
 
 /// Spec section 28: a law's body is ordinary PHP#, where a call of a law is a statement, and a law calls itself on a
@@ -22516,6 +22554,18 @@ fn a_law_s_when_condition_is_a_bool() {
 
     assert_eq!(issues(count, &[]), ["5:30 invalid-law"]);
     assert_eq!(messages(count, &[]), ["A law's `when` condition is a `bool`, and `a + 1` is an `int`."]);
+}
+
+/// Spec section 28: a law's `when` condition holds for its claim and its body, so a condition that tests a parameter
+/// for null lets the claim and the body read it as a value.
+#[test]
+fn a_law_s_claim_and_body_read_what_its_when_condition_shows() {
+    let order = (
+        "app/Shared/Order.sharp",
+        "namespace App.Shared;\n\npublic class Order\n{\n    public Order(public int total { get; }) { }\n\n    law sameTotal(Order o) => o.total == o.total;\n    law known(Order? o) when o != null => o.total == o.total\n    {\n        Order.sameTotal(o);\n    }\n}\n",
+    );
+
+    assert_eq!(issues(order, &[]), Vec::<String>::new());
 }
 
 /// A PHP caller of a law gets the same refusal, with the law named as PHP writes a static method.

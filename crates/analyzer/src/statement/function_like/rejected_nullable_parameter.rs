@@ -70,6 +70,7 @@ pub fn check_rejected_nullable_parameters<'ctx, 'arena, A>(
             FunctionLikeBody::Expression(expression) | FunctionLikeBody::ExpressionStatement(expression) => {
                 ParameterWalker.walk_expression(expression, &mut uses);
             }
+            FunctionLikeBody::Law(_) => unreachable!("only a method's parameters are checked for a rejected null"),
         }
 
         let is_rejected = !uses.assigned

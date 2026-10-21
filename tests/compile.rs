@@ -3348,6 +3348,39 @@ fn a_call_of_a_when_law_where_its_condition_is_not_known_names_the_condition_to_
     );
 }
 
+/// Spec section 28: a call of a `when` law where the conditions on the path show each part of its condition proves,
+/// with nothing left to show for the call.
+#[test]
+fn a_call_of_a_when_law_where_each_part_of_its_condition_is_known_proves() {
+    let money = SPECIMEN_MONEY.replace(
+        "        => Money.refundable(paid, refunded) <= paid;\n",
+        "        => Money.refundable(paid, refunded) <= paid;\n    law refundOfKnown(int p, int r) => p < 0 || r < 0 || Money.refundable(p, r) <= p\n    {\n        if (p < 0) {\n            return;\n        }\n        if (r < 0) {\n            return;\n        }\n        Money.neverAbovePaid(p, r);\n    }\n",
+    );
+    let directory = library_project(&[("app/Shared/Money.sharp", &money)]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(compiled(root, "app/Shared/Money.sharp").exists());
+}
+
+/// Spec section 28: a law's `when` condition and its body read a nullable parameter as its claim does, so a value the
+/// condition or an `if` tests for null is a value.
+#[test]
+fn compile_proves_a_law_whose_condition_or_body_reads_a_nullable_parameter() {
+    let directory = lawful_project(&[(
+        "app/Shared/Box.sharp",
+        "namespace App.Shared;\n\npublic class Box\n{\n    law somePositive(int? x) when x != null && x + 1 > 0 => true;\n    law anything(int x) => true;\n    law someAnything(int? x) => true\n    {\n        if (x != null) {\n            Box.anything(x);\n        }\n    }\n}\n",
+    )]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(compiled(root, "app/Shared/Box.sharp").exists());
+}
+
 /// Spec section 28: laws that call each other in a cycle never end, so the call that closes the cycle is the error of
 /// a law that calls itself on no smaller value.
 #[test]
