@@ -536,6 +536,13 @@ where
         let (typed, _) = context.record(|context| access.array.analyze(context, &mut typing, artifacts));
         typed?;
     }
+    // Each arm of a `match` reads a local it tests anew, so the PHP never reads the local where the `match` writes it,
+    // and the translation to Lean reads its type there: it is typed there too, in the same way.
+    if let Expression::ConstantAccess(_) = tested_value(node).unparenthesized() {
+        let mut typing = block_context.clone();
+        let (typed, _) = context.record(|context| tested_value(node).analyze(context, &mut typing, artifacts));
+        typed?;
+    }
 
     let Some(PhpShape { php, temporaries, tests }) =
         context.get_assertion_context_from_block(block_context).php_shape(node, artifacts)
