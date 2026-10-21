@@ -91,7 +91,8 @@ pub(crate) struct Declaration {
     pub(crate) text: String,
     pub(crate) uses: Vec<Use>,
     pub(crate) unmodeled: Vec<Unmodeled>,
-    /// Whether a proposed proof names it to `simp`: a definition other than a constructor, which is `@[simp]` already.
+    /// Whether it is a definition that computes, a method or a law, rather than a type: a cycle of definitions is a
+    /// recursion, and a cycle of types a type that holds itself.
     pub(crate) unfolds: bool,
     /// What a method makes smaller on each call it makes of itself or of a method that calls it back.
     pub(crate) measure: Option<Measure>,
@@ -671,7 +672,9 @@ impl Translator<'_, '_> {
         self.translation.declarations.push(Declaration { key, span, text, uses, unmodeled, unfolds: true, measure });
     }
 
-    /// `@[law] def Class.law : Prop := ∀ (a : A), holds do …`: the law holds unless its body finishes with `false`.
+    /// `@[law] def Class.law (a : A) : Prop := [condition = pure true →] holds do …`: the law holds for every value of
+    /// its parameters that meets its `when` condition, unless its claim finishes with `false`. Its theorem, which its
+    /// body proves, comes from [`Prover`].
     fn law(&mut self, full: &[u8], lean: &str, short: &str, law: &LawNode) {
         let name = String::from_utf8_lossy(law.name.value).into_owned();
         let key = names::member(lean, law.name.value);
