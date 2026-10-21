@@ -2214,10 +2214,10 @@ fn compile_refuses_an_unproven_law_every_time_and_never_leaves_a_current_compile
 #[test]
 fn compile_reports_missing_lean_on_each_file_that_needs_lean_and_whose_compiled_file_is_not_current() {
     let missing = if cfg!(target_env = "musl") {
-        "error - missing-lean: Laws and structure rules need Lean 4.34.1, and no lake is on the PATH. This musl build of the checker can't install Lean, because Lean has no musl build. On glibc Linux, the checker's glibc build installs Lean itself.".to_owned()
+        "error - missing-lean: Laws and structure rules need the law checker, and this musl build of the checker can't install it, because the law checker has no musl build. On glibc Linux, the checker's glibc build installs it itself.".to_owned()
     } else {
         format!(
-            "error - missing-lean: Laws and structure rules need Lean 4.34.1, and no lake is on the PATH. The checker could not install Lean into {}: File exists (os error 17). Run vendor/bin/mago compile again to retry.",
+            "error - missing-lean: The law checker could not be installed into {}: File exists (os error 17). Run vendor/bin/mago compile again to retry.",
             unwritable_cache().join("mago/elan").display()
         )
     };
@@ -2292,8 +2292,7 @@ fn compile_deletes_the_lean_package_once_no_law_remains() {
 #[test]
 fn compile_reads_no_lean_file_beside_a_class_and_proves_its_law() {
     let leftover = "import Code.App.Shared.Money\nopen Sharp\n\ntheorem addKeepsCurrency : App.Shared.Money.addKeepsCurrency := by\n  simp [App.Shared.Money.addKeepsCurrency, App.Shared.Money.add]\n";
-    let directory =
-        lawful_project(&[("app/Shared/Money.sharp", LAWFUL_MONEY), ("app/Shared/Money.lean", leftover)]);
+    let directory = lawful_project(&[("app/Shared/Money.sharp", LAWFUL_MONEY), ("app/Shared/Money.lean", leftover)]);
     let root = directory.path();
 
     let output = compile(root);
@@ -3642,7 +3641,7 @@ fn looping(steps: u64) -> String {
 #[test]
 fn lean_work_that_never_ends_stops_once_at_its_limit_or_deadline_and_every_other_rule_runs() {
     compile_succeeds(lawful_project(&[("app/Shared/Money.sharp", LAWFUL_MONEY)]).path());
-    let stopped = "it ran past 30 processor seconds, the limit the checker sets on each Lean process";
+    let stopped = "it ran past 30 processor seconds, the limit the checker sets on each check";
     let waited = "it waited 40 seconds without finishing";
     let store_breaks = "app/Tenant/Store/StoreService.sharp:3:8:error - broken-rule: This import of App.Shared.Ledger breaks the structure rule importsOnly in app/Tenant/Store/Module.lean.";
     let refused = |file: &str, rule: &str, why: &str| {

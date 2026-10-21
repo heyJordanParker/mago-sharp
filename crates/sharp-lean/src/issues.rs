@@ -282,7 +282,7 @@ fn rejected_lean_error(span: Span, rejection: String, at: &str, error: &Message)
 pub(crate) fn stopped(stop: Stop, what: &str) -> String {
     match stop {
         Stop::Processor => format!(
-            "it ran past {} processor seconds, the limit the checker sets on each Lean process. Make {what} end sooner",
+            "it ran past {} processor seconds, the limit the checker sets on each check. Make {what} end sooner",
             library::processor_seconds()
         ),
         Stop::Waited => {
@@ -332,10 +332,11 @@ pub(crate) fn no_rules_module(span: Span, rules: &str) -> Issue {
     .with_annotation(Annotation::primary(span))
 }
 
-/// No `lake` is on the `PATH`, and Mago could not install Lean, with what failed.
+/// No `lake` is on the `PATH`, and Mago could not install Lean, with where and what failed. The message names Lean,
+/// lake and elan as the law checker, which is all a PHP# developer needs to know of them.
 pub(crate) fn lake_not_found(span: Span, failure: &str) -> Issue {
     Issue::error(format!(
-        "Laws and structure rules need Lean 4.34.1, and no lake is on the PATH. {failure}. Run vendor/bin/mago compile again to retry."
+        "The law checker could not be installed into {failure}. Run vendor/bin/mago compile again to retry."
     ))
     .with_code(IssueCode::MissingLean.as_str())
     .with_annotation(Annotation::primary(span))
@@ -346,18 +347,19 @@ pub(crate) fn lake_not_found(span: Span, failure: &str) -> Issue {
 /// glibc Linux, where Lean runs, and on Alpine, where neither Mago's glibc build nor Lean starts.
 pub(crate) fn uninstallable_lean(span: Span) -> Issue {
     let reason = if cfg!(target_env = "musl") {
-        "This musl build of the checker can't install Lean, because Lean has no musl build. On glibc Linux, the checker's glibc build installs Lean itself.".to_owned()
+        "this musl build of the checker can't install it, because the law checker has no musl build. On glibc Linux, the checker's glibc build installs it itself.".to_owned()
     } else {
-        format!("This {} {} build of the checker can't install Lean.", std::env::consts::OS, std::env::consts::ARCH)
+        format!("this {} {} build of the checker can't install it.", std::env::consts::OS, std::env::consts::ARCH)
     };
 
-    Issue::error(format!("Laws and structure rules need Lean 4.34.1, and no lake is on the PATH. {reason}"))
+    Issue::error(format!("Laws and structure rules need the law checker, and {reason}"))
         .with_code(IssueCode::MissingLean.as_str())
         .with_annotation(Annotation::primary(span))
 }
 
+/// The pinned Lean version could not be installed, with the reason.
 pub(crate) fn elan_failed(span: Span, message: &str) -> Issue {
-    Issue::error(format!("Laws and structure rules need Lean 4.34.1, and elan could not install it: {message}."))
+    Issue::error(format!("The law checker could not be installed: {message}."))
         .with_code(IssueCode::MissingLean.as_str())
         .with_annotation(Annotation::primary(span))
 }

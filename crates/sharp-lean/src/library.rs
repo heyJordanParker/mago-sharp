@@ -333,7 +333,7 @@ extern "C" fn forward(signal: libc::c_int) {
 
 /// What `child` wrote and how it exited, and whether Mago ended its group at `deadline()`.
 fn wait_before_deadline(child: &mut Child) -> io::Result<(Output, bool)> {
-    let missing = || io::Error::other("a Lean process has no output stream");
+    let missing = || io::Error::other("a law checker process has no output stream");
     let (stdout, stderr) = (child.stdout.take().ok_or_else(missing)?, child.stderr.take().ok_or_else(missing)?);
     let (wrote, written) = mpsc::channel();
     let stdout = read_all(stdout, wrote.clone());
@@ -353,7 +353,7 @@ fn wait_before_deadline(child: &mut Child) -> io::Result<(Output, bool)> {
     };
     let status = child.wait()?;
     let joined = |reader: thread::JoinHandle<io::Result<Vec<u8>>>| {
-        reader.join().map_err(|_| io::Error::other("a reader of a Lean process panicked"))?
+        reader.join().map_err(|_| io::Error::other("a reader of a law checker process panicked"))?
     };
 
     Ok((Output { status, stdout: joined(stdout)?, stderr: joined(stderr)? }, waited))
@@ -431,7 +431,7 @@ pub(crate) fn build(lake: &Lake) -> io::Result<PathBuf> {
     let output = lake.command().arg("build").current_dir(&staging).output()?;
     if !output.status.success() {
         return Err(io::Error::other(format!(
-            "Lake could not build the Lean runtime library in {}:\n{}{}",
+            "The law checker could not be built in {}:\n{}{}",
             staging.display(),
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
@@ -440,7 +440,7 @@ pub(crate) fn build(lake: &Lake) -> io::Result<PathBuf> {
 
     fs::rename(&staging, &library).map_err(|error| {
         io::Error::other(format!(
-            "The checker could not move the Lean runtime library from {} to {}: {error}",
+            "The checker could not move the law checker it built from {} to {}: {error}",
             staging.display(),
             library.display()
         ))
@@ -466,9 +466,9 @@ pub(crate) fn install() -> io::Result<Option<Lake>> {
         format!("https://github.com/leanprover/elan/releases/download/v{ELAN_VERSION}/elan-{}.tar.gz", archive.target);
     let cache = cache_root()?;
 
-    install_from(&url, archive, &cache).map(Some).map_err(|error| {
-        io::Error::other(format!("The checker could not install Lean into {}: {error}", cache.join("elan").display()))
-    })
+    install_from(&url, archive, &cache)
+        .map(Some)
+        .map_err(|error| io::Error::other(format!("{}: {error}", cache.join("elan").display())))
 }
 
 /// Installs elan from the archive at `url` into `elan/` in `cache`, then the library's Lean version with it, each once.
@@ -485,9 +485,9 @@ fn install_from(url: &str, archive: &Archive, cache: &Path) -> io::Result<Lake> 
         return Ok(lake);
     }
 
-    let lean = format!("Lean {} ({})", TOOLCHAIN.trim().trim_start_matches("leanprover/lean4:v"), archive.lean_size);
-    let downloads = if has_elan { lean } else { format!("elan {ELAN_VERSION} ({}) and {lean}", archive.size) };
-    tracing::info!("Downloading {downloads} into {}, once, because no lake is on the PATH.", home.display());
+    let size =
+        if has_elan { archive.lean_size.to_owned() } else { format!("{} and {}", archive.size, archive.lean_size) };
+    tracing::info!("Downloading the law checker ({size}) into {}, once.", home.display());
     if !has_elan {
         install_elan(url, archive, &home)?;
     }
@@ -496,8 +496,7 @@ fn install_from(url: &str, archive: &Archive, cache: &Path) -> io::Result<Lake> 
     let output = elan(&home).args(["toolchain", "install", TOOLCHAIN.trim()]).output()?;
     if !output.status.success() {
         return Err(io::Error::other(format!(
-            "elan could not install {}: {}",
-            TOOLCHAIN.trim(),
+            "its download failed: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         )));
     }
@@ -554,7 +553,7 @@ fn install_elan(url: &str, archive: &Archive, home: &Path) -> io::Result<()> {
         .entries()?
         .filter_map(Result::ok)
         .find(|entry| entry.path().is_ok_and(|path| path == Path::new("elan-init")))
-        .ok_or_else(|| io::Error::other(format!("{url} holds no elan-init")))?;
+        .ok_or_else(|| io::Error::other(format!("{url} holds no installer")))?;
     entry.unpack_in(unpacked.path())?;
 
     let staging = home.with_extension("staging");
@@ -567,7 +566,10 @@ fn install_elan(url: &str, archive: &Archive, home: &Path) -> io::Result<()> {
             .env("ELAN_HOME", &staging),
     )?;
     if !output.status.success() {
-        return Err(io::Error::other(format!("elan-init failed: {}", String::from_utf8_lossy(&output.stderr).trim())));
+        return Err(io::Error::other(format!(
+            "the installer failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
     }
 
     fs::rename(&staging, home)
@@ -818,7 +820,7 @@ fi
                 "an elan-init that fails after it installed",
                 digest,
                 true,
-                "elan-init failed: elan-init broke".to_owned(),
+                "the installer failed: elan-init broke".to_owned(),
             ),
         ] {
             let cache = tempfile::tempdir()?;

@@ -177,15 +177,12 @@ fn answer(output: Output) -> io::Result<Vec<u8>> {
     let stderr = String::from_utf8_lossy(&output.stderr);
     let message: Vec<&str> = stderr.lines().filter(|line| !line.starts_with(JUDGING)).collect();
     let failure = if library::stopped(output.status) {
-        format!(
-            "ran past {} processor seconds, the limit the checker sets on each Lean process",
-            library::processor_seconds()
-        )
+        format!("ran past {} processor seconds, the limit the checker sets on each check", library::processor_seconds())
     } else {
         format!("failed with {}", output.status)
     };
 
-    Err(io::Error::other(format!("the Lean runner {failure}: {}", message.join("\n").trim())))
+    Err(io::Error::other(format!("the law checker {failure}: {}", message.join("\n").trim())))
 }
 
 /// Runs the runner on one request, under a limit of `seconds` of processor time, and returns how it exited and what it
@@ -207,7 +204,7 @@ fn run(library: &Path, package: &Package, request: &[u8], seconds: u64) -> io::R
         .spawn()?;
     // The runner reads the whole request before it writes, so writing it all first cannot fill a pipe both wait on. A
     // runner that fails before it reads the request is reported by its exit status and standard error.
-    let mut input = runner.stdin.take().ok_or_else(|| io::Error::other("the Lean runner has no standard input"))?;
+    let mut input = runner.stdin.take().ok_or_else(|| io::Error::other("the law checker has no standard input"))?;
     let written = input.write_all(request);
     drop(input);
 
