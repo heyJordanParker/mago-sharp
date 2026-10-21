@@ -394,7 +394,7 @@ fn is_built(library: &Path) -> bool {
 }
 
 /// The error of a build of the law checker that failed, whose output the debug log holds.
-const UNBUILT: &str = "The law checker could not be built in Mago's cache folder. Run vendor/bin/mago compile again to retry, with MAGO_LOG=debug to see why.";
+const UNBUILT: &str = "the law checker could not be built in Mago's cache folder. Run vendor/bin/mago compile again to retry, with MAGO_LOG=debug to see why";
 
 /// Writes the library's package to `lean/<build id>.staging` in Mago's cache folder, builds it with `lake` and renames
 /// it to `lean/<build id>`, once per build ID. Builds take turns under an exclusive lock on `lean/build.lock`, across

@@ -107,6 +107,13 @@ def check : Decode Check := do
 /-- The axioms Lean's own `#print axioms` treats as standard. -/
 def standardAxioms : Array Name := #[``propext, ``Classical.choice, ``Quot.sound]
 
+/-- Whether a theorem that rests on `axioms` has a gap: an axiom outside the standard set, `sorryAx` among them. -/
+def hasGap (axioms : Array Name) : Bool := axioms.any (!standardAxioms.contains ·)
+
+#guard !hasGap #[``propext, ``Classical.choice, ``Quot.sound]
+#guard hasGap #[``sorryAx]
+#guard hasGap #[`Sharp.unproven]
+
 def runCore (env : Environment) (action : CoreM α) : IO α := do
   let (value, _) ← action.toIO { fileName := "sharp-lean", fileMap := default, maxHeartbeats := 0 } { env }
   return value
@@ -138,7 +145,8 @@ def reachedOf (env : Environment) (name : Name) (targets : Array Name) : Option 
 
 /-- Elaborates each theorem in order, each with the theorems before it in scope, and answers for each judged one: `0`
 when it is proven; `1` and each step whose goal stays open, as its kind, its index and its goal; `2` and the statement
-of the law not proven that it holds through; or `3` and Lean's first error, when Lean rejected the theorem. -/
+of the law not proven that it holds through; or `3` and Lean's first error, when Lean rejected the theorem, or the
+axioms it rests on, when it has a gap no law it holds through explains. -/
 def answer (env : Environment) (request : Check) : IO ByteArray := do
   let mut env := env
   let mut gaps : Array Name := #[]
@@ -157,7 +165,8 @@ def answer (env : Environment) (request : Check) : IO ByteArray := do
       | some step => steps := steps.push step
       | none => if rejected.isNone then rejected := some text
     let declared := env.contains name
-    let gap := declared && (← runCore env (collectAxioms name)).contains ``sorryAx
+    let axioms ← if declared then runCore env (collectAxioms name) else pure #[]
+    let gap := hasGap axioms
     if gap then gaps := gaps.push name
     unless item.judged do continue
     if let some message := rejected then
@@ -169,7 +178,9 @@ def answer (env : Environment) (request : Check) : IO ByteArray := do
       for (kind, index, goal) in steps do
         b := putString (putU32 (putU8 b kind) index.toUInt32) goal
     else if gap then
-      b := putString (putU8 b 2) ((reachedOf env name gaps).map (·.getPrefix.toString) |>.getD "")
+      b := match reachedOf env name gaps with
+        | some law => putString (putU8 b 2) law.getPrefix.toString
+        | none => putString (putU8 b 3) s!"{name} rests on the axioms {axioms}"
     else
       b := putU8 b 0
   return b

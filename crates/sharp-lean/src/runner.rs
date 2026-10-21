@@ -81,7 +81,7 @@ fn answer(output: Output) -> io::Result<Vec<u8>> {
     };
 
     Err(io::Error::other(format!(
-        "The law checker {failure}. Run vendor/bin/mago compile with MAGO_LOG=debug to see why."
+        "the law checker {failure}. Run vendor/bin/mago compile with MAGO_LOG=debug to see why"
     )))
 }
 
