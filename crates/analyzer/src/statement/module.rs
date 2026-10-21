@@ -63,7 +63,10 @@ use crate::utils::names::article;
 use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_sharp_type;
 use crate::utils::names::display_variable_name;
+use crate::visibility::display_namespace;
+use crate::visibility::dotted;
 use crate::visibility::is_within_namespace;
+use crate::visibility::list_refusing;
 
 /// Checks each binding of `module` where it is written, with every service its class or its expression takes, then
 /// walks the services each one needs for a cycle and for a `scoped` service a `singleton` holds.
@@ -783,32 +786,6 @@ where
     false
 }
 
-/// Spec section 32: the folder's module whose `imports` line leaves `name` out of what PHP# code in `namespace`
-/// imports, as PHP writes both, or none when every list that covers `namespace` lets it import `name`. A list covers
-/// its namespace and every namespace below it, and lets its code import from `Sharp`, from its own namespace and the
-/// namespaces below it, and from each namespace it lists and the namespaces below that one. Of two lists that leave
-/// `name` out, the one nearer `namespace` refuses it.
-pub(crate) fn list_refusing<'codebase>(
-    codebase: &'codebase CodebaseMetadata,
-    namespace: &[u8],
-    name: &[u8],
-) -> Option<&'codebase ModuleMetadata> {
-    if is_within_namespace(name, b"Sharp") {
-        return None;
-    }
-
-    codebase
-        .modules
-        .iter()
-        .filter(|module| module.kind == ModuleKind::Base && !module.imports.is_empty())
-        .filter(|module| is_within_namespace(namespace, module.namespace.as_bytes()))
-        .filter(|module| {
-            !is_within_namespace(name, module.namespace.as_bytes())
-                && !module.imports.iter().any(|(listed, _)| is_within_namespace(name, listed.as_bytes()))
-        })
-        .max_by_key(|module| module.namespace.as_bytes().len())
-}
-
 /// The name `list` lists that names the namespace of `other`, another module with a list: `other`'s namespace or a
 /// namespace above it, as listing a namespace lists every namespace below it. A namespace reaches the namespaces
 /// below it with no list, so a list never names a namespace above or below its own.
@@ -879,23 +856,6 @@ where
             .with_annotation(Annotation::primary(*span).with_message("Listed here."))
             .with_help("Remove one of these names, so the namespaces import one way."),
     );
-}
-
-/// The namespace of the folder's module `module`, as its code writes it, dot separated: the namespace of the
-/// class-like `Module` the scanner registers for it, which keeps its case.
-pub(crate) fn display_namespace(codebase: &CodebaseMetadata, module: &ModuleMetadata) -> String {
-    let class = codebase.get_class_like(&[module.namespace.as_bytes(), b"\\module"].concat());
-
-    dotted(
-        class.map_or(module.namespace.as_bytes(), |class| {
-            crate::visibility::namespace_of(class.original_name.as_bytes())
-        }),
-    )
-}
-
-/// A PHP name as PHP# writes it, dot separated.
-fn dotted(name: &[u8]) -> String {
-    String::from_utf8_lossy(name).replace('\\', ".")
 }
 
 /// Reports that `binding` needs itself through the classes of `cycle`, at the binding `at`.

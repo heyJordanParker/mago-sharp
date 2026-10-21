@@ -40,8 +40,8 @@ use mago_word::ascii_lowercase_word;
 use mago_word::word;
 
 use crate::context::Context;
-use crate::statement::module::display_namespace;
-use crate::statement::module::list_refusing;
+use crate::visibility::display_namespace;
+use crate::visibility::list_refusing;
 
 /// Returns the case-preserved name of a class-like as the analyzed file writes it: as [`sharp_class_like_name`] names
 /// it in a `.sharp` file, and its full name in PHP. Falls back to the input if no metadata is available.
