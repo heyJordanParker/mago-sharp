@@ -446,23 +446,24 @@ fn compiled_with_inputs(root: &Path, names: &[&str]) -> Vec<u8> {
 fn a_compiled_file_is_current_until_one_of_its_inputs_changes() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
+    let money = "namespace App;\n\npublic class Money\n{\n}\n";
     write(root, "app/Report.sharp", SOURCE);
-    write(root, "app/Report.lean", "theorem a : True := trivial\n");
-    let bytes = compiled_with_inputs(root, &["app/Report.sharp", "app/Report.lean", "app/Absent.lean"]);
+    write(root, "app/Money.sharp", money);
+    let bytes = compiled_with_inputs(root, &["app/Report.sharp", "app/Money.sharp", "app/Absent.sharp"]);
 
     assert!(!is_stale(root, &bytes).unwrap(), "every input is as it was stamped");
 
-    write(root, "app/Report.lean", "theorem a : True := by trivial\n");
+    write(root, "app/Money.sharp", "namespace App;\n\npublic class Money\n{\n    public int amount = 0;\n}\n");
     assert!(is_stale(root, &bytes).unwrap(), "an input's bytes changed");
 
-    write(root, "app/Report.lean", "theorem a : True := trivial\n");
+    write(root, "app/Money.sharp", money);
     assert!(!is_stale(root, &bytes).unwrap(), "rewriting the same bytes keeps it current");
 
-    write(root, "app/Absent.lean", "theorem b : True := trivial\n");
+    write(root, "app/Absent.sharp", "namespace App;\n\npublic class Absent\n{\n}\n");
     assert!(is_stale(root, &bytes).unwrap(), "a file appeared where an input was absent");
 
-    fs::remove_file(root.join("app/Absent.lean")).unwrap();
-    fs::remove_file(root.join("app/Report.lean")).unwrap();
+    fs::remove_file(root.join("app/Absent.sharp")).unwrap();
+    fs::remove_file(root.join("app/Money.sharp")).unwrap();
     assert!(is_stale(root, &bytes).unwrap(), "an input that was there is gone");
 }
 
