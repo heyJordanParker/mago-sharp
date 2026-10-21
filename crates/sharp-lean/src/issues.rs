@@ -28,8 +28,10 @@ pub(crate) const RESERVED_NAME: &str =
 pub(crate) const PLAIN_PHP: &str = "A law cannot see inside plain PHP.";
 pub(crate) const COLLECTION: &str = "A law cannot reason about this use of a collection.";
 pub(crate) const LIBRARY: &str = "A law cannot reason about the standard library's code.";
-pub(crate) const LOOP: &str = "A law cannot reason about a loop.";
-pub(crate) const RECURSION: &str = "A law cannot reason about recursion.";
+pub(crate) const LOOP: &str = "Write the method as recursion that calls itself on a smaller value.";
+pub(crate) const RECURSION: &str = "Write the method as recursion that calls itself on a smaller value: a list's rest from a list pattern, or an int one step towards a bound a condition tested.";
+pub(crate) const NAMED_PATTERN: &str =
+    "Write the test as the condition of an if or a ?:, and read the value it names in the branch it decides.";
 pub(crate) const LAMBDA: &str = "A law cannot reason about this lambda.";
 pub(crate) const INHERITANCE: &str = "A law cannot reason about inheritance.";
 pub(crate) const INTERFACE_METHOD: &str =

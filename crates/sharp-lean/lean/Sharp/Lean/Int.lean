@@ -66,6 +66,83 @@ theorem toInt_bounds (x : int) :
 
 grind_pattern toInt_bounds => x.toInt
 
+/-! A law's automatic steps read an `int` result as the exact `Int` it holds, so `simp` and `omega` reason about it, and
+two `int`s as equal when their `Int`s are. -/
+
+private theorem pure_ne_throw (x : int) (e : Throwable) : (pure x : M int) ≠ throw e := by
+  intro h
+  have := congrArg ExceptT.run h
+  simp [ExceptT.run_pure, ExceptT.run_throw] at this
+
+@[simp] theorem ofInt_eq_pure {i : Int} {x : int} :
+    ofInt i = pure x ↔ (-9223372036854775808 ≤ i ∧ i ≤ 9223372036854775807) ∧ x.toInt = i := by
+  unfold ofInt
+  split
+  · rename_i h
+    simp only [minValue_toInt, maxValue_toInt] at h
+    constructor
+    · intro e
+      have := congrArg ExceptT.run e
+      simp [ExceptT.run_pure] at this
+      subst this
+      exact ⟨h, by simp⟩
+    · rintro ⟨_, hx⟩
+      congr 1
+      apply Int64.toInt_inj.mp
+      simp [hx]
+  · rename_i h
+    simp only [minValue_toInt, maxValue_toInt] at h
+    constructor
+    · intro e
+      exact absurd e.symm (pure_ne_throw _ _)
+    · rintro ⟨inside, _⟩
+      exact absurd inside h
+
+@[simp] theorem add_eq_pure {x y z : int} :
+    add x y = pure z ↔ (-9223372036854775808 ≤ x.toInt + y.toInt ∧ x.toInt + y.toInt ≤ 9223372036854775807) ∧
+      z.toInt = x.toInt + y.toInt := by
+  simp [add]
+
+@[simp] theorem sub_eq_pure {x y z : int} :
+    sub x y = pure z ↔ (-9223372036854775808 ≤ x.toInt - y.toInt ∧ x.toInt - y.toInt ≤ 9223372036854775807) ∧
+      z.toInt = x.toInt - y.toInt := by
+  simp [sub]
+
+@[simp] theorem mul_eq_pure {x y z : int} :
+    mul x y = pure z ↔ (-9223372036854775808 ≤ x.toInt * y.toInt ∧ x.toInt * y.toInt ≤ 9223372036854775807) ∧
+      z.toInt = x.toInt * y.toInt := by
+  simp [mul]
+
+@[simp] theorem neg_eq_pure {x z : int} :
+    neg x = pure z ↔ (-9223372036854775808 ≤ -x.toInt ∧ -x.toInt ≤ 9223372036854775807) ∧ z.toInt = -x.toInt := by
+  simp [neg]
+
+attribute [simp] Int64.le_iff_toInt_le Int64.lt_iff_toInt_lt
+attribute [simp ←] Int64.toInt_inj
+
+/-! A method that calls itself on `n - 1` where a condition has shown `n` above a bound, or on `n + 1` where one has
+shown it below, passes that step as `Int64`'s own `-` or `+`, which cannot leave the `int` range there, so Lean sees the
+argument it recurses on. -/
+
+theorem toInt_sub_one {x : int} (h : -9223372036854775808 < x.toInt) : (x - 1).toInt = x.toInt - 1 := by
+  have := toInt_bounds x
+  rw [Int64.toInt_sub, Int.bmod_eq_of_le] <;> simp <;> omega
+
+theorem toInt_add_one {x : int} (h : x.toInt < 9223372036854775807) : (x + 1).toInt = x.toInt + 1 := by
+  have := toInt_bounds x
+  rw [Int64.toInt_add, Int.bmod_eq_of_le] <;> simp <;> omega
+
 end int
+
+/-- Proves a recursive call's argument smaller than the value it replaces, in the measure `termination_by` names: an
+`int` one step towards a bound that a condition on the call's path tested, or the rest of a list pattern. -/
+macro "smaller_value" : tactic => `(tactic| (
+  simp_all only [decide_eq_true_eq, Bool.not_eq_true, decide_eq_false_iff_not, Bool.and_eq_true,
+    Bool.or_eq_false_iff, Bool.or_eq_true, beq_iff_eq, Int64.le_iff_toInt_le, Int64.lt_iff_toInt_lt, List.length_cons,
+    List.length_take]
+  first
+    | omega
+    | (rw [Sharp.int.toInt_sub_one (by grind)]; grind)
+    | (rw [Sharp.int.toInt_add_one (by grind)]; grind)))
 
 end Sharp

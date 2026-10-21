@@ -4100,6 +4100,118 @@ fn compile_proves_a_law_over_map_filter_and_count() {
     assert!(compiled(root, "app/Shared/Basket.sharp").exists());
 }
 
+/// Compiles `source` as `app/Shared/<class>.sharp` and checks that the compile proves every law it states with the proof
+/// it creates.
+fn assert_proven(class: &str, source: &str) {
+    let name = format!("app/Shared/{class}.sharp");
+    let directory = lawful_project(&[(&name, source)]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(compiled(root, &name).exists());
+}
+
+/// Spec section 28.1's `total`: a method that calls itself on a list's rest from a list pattern gets smaller on each call.
+#[test]
+fn compile_proves_a_law_over_recursion_on_a_list_rest() {
+    assert_proven(
+        "Money",
+        "namespace App.Shared;\n\npublic class Money\n{\n    public Money(public int amount { get; }, public string currency { get; }) { }\n\n    public static int total(List<Money> items) => match (items) {\n        [] => 0,\n        [Money first, ...List<Money> rest] => first.amount + Money.total(rest),\n        default => 0,\n    };\n\n    law totalOfTwo(int unused) => Money.total([new Money(1, \"EUR\"), new Money(2, \"EUR\")]) == 3;\n}\n",
+    );
+}
+
+/// Spec section 28.1's `times`: `n - 1` where `n <= 0` failed is one step towards the bound 0.
+#[test]
+fn compile_proves_a_law_over_recursion_on_an_int_one_step_towards_a_bound_a_guard_tested() {
+    assert_proven(
+        "Money",
+        "namespace App.Shared;\n\npublic class Money\n{\n    public Money(public int amount { get; }, public string currency { get; }) { }\n    public Money add(Money other) => new Money(this.amount + other.amount, this.currency);\n    public Money times(int n) => n <= 0 ? new Money(0, this.currency) : this.add(this.times(n - 1));\n\n    law zeroTimesIsZero(Money m) => m.times(0).amount == 0;\n}\n",
+    );
+}
+
+/// An `if` that returns, a `match` arm's comparison, and a `?:` each show the bound a step moves towards, a literal or a
+/// parameter the call passes on unchanged.
+#[test]
+fn compile_proves_a_law_over_recursion_towards_a_bound_an_if_a_match_or_a_parameter_sets() {
+    assert_proven(
+        "Steps",
+        "namespace App.Shared;\n\npublic class Steps\n{\n    public static int walk(int n)\n    {\n        if (n <= 0) {\n            return 0;\n        }\n        return 1 + Steps.walk(n - 1);\n    }\n\n    public static int fall(int n) => match (n) {\n        <= 0 => 0,\n        default => Steps.fall(n - 1),\n    };\n\n    public static int climb(int i, int top) => i >= top ? 0 : 1 + Steps.climb(i + 1, top);\n\n    law twoSteps(int unused) => Steps.walk(2) == 2;\n    law fallsToZero(int unused) => Steps.fall(2) == 0;\n    law climbsTwo(int unused) => Steps.climb(0, 2) == 2;\n}\n",
+    );
+}
+
+/// Two methods of one class that call each other on `n - 1` under the same bound are one Lean `mutual` block.
+#[test]
+fn compile_proves_a_law_over_mutual_recursion() {
+    assert_proven(
+        "Parity",
+        "namespace App.Shared;\n\npublic class Parity\n{\n    public static bool isEven(int n) => n <= 0 ? true : Parity.isOdd(n - 1);\n    public static bool isOdd(int n) => n <= 0 ? false : Parity.isEven(n - 1);\n\n    law fourIsEven(int unused) => Parity.isEven(4);\n}\n",
+    );
+}
+
+/// A list pattern names an element or only its type, and has a rest anywhere: before the last element, or bare.
+#[test]
+fn compile_proves_a_law_over_list_patterns_with_a_binding_arm_and_a_type_only_arm() {
+    assert_proven(
+        "Basket",
+        "namespace App.Shared;\n\npublic class Basket\n{\n    public Basket(public int amount { get; }) { }\n\n    public static int size(List<Basket> items) => match (items) {\n        [] => 0,\n        [Basket, ...List<Basket> rest] => 1 + Basket.size(rest),\n        default => 0,\n    };\n\n    public static int firstAmount(List<Basket> items) => match (items) {\n        [Basket first, ...] => first.amount,\n        default => 0,\n    };\n\n    public static int lastAmount(List<Basket> items) => match (items) {\n        [..., Basket last] => last.amount,\n        default => 0,\n    };\n\n    public static int backwards(List<Basket> items) => match (items) {\n        [...List<Basket> before, Basket last] => last.amount + Basket.backwards(before),\n        default => 0,\n    };\n\n    law sizeOfTwo(int unused) => Basket.size([new Basket(1), new Basket(2)]) == 2;\n    law firstOfTwo(int unused) => Basket.firstAmount([new Basket(1), new Basket(2)]) == 1;\n    law lastOfTwo(int unused) => Basket.lastAmount([new Basket(1), new Basket(2)]) == 2;\n    law backwardsOfTwo(int unused) => Basket.backwards([new Basket(1), new Basket(2)]) == 3;\n}\n",
+    );
+}
+
+#[test]
+fn compile_proves_a_law_over_a_match_statement_with_block_arms_and_a_when_guard() {
+    assert_proven(
+        "Sign",
+        "namespace App.Shared;\n\npublic class Sign\n{\n    public static int of(int n)\n    {\n        match (n) {\n            int m when m > 0 => { return 1; },\n            0 => { return 0; },\n            default => { return -1; },\n        }\n    }\n\n    law positive(int unused) => Sign.of(5) == 1;\n    law zero(int unused) => Sign.of(0) == 0;\n}\n",
+    );
+}
+
+/// `is` tests the type a value of a nullable type holds when it is not null, and names it in the `?:` it decides.
+#[test]
+fn compile_proves_a_law_over_an_is_test() {
+    assert_proven(
+        "Order",
+        "namespace App.Shared;\n\npublic class Order\n{\n    public Order(public int total { get; }) { }\n\n    public static bool known(Order? order) => order is Order;\n    public static int totalOf(Order? order) => order is Order o ? o.total : 0;\n\n    law nullIsUnknown(int unused) => !Order.known(null);\n    law nullTotalIsZero(int unused) => Order.totalOf(null) == 0;\n    law totalIsKept(Order order) => Order.totalOf(order) == order.total;\n}\n",
+    );
+}
+
+#[test]
+fn compile_proves_a_law_over_a_spread() {
+    assert_proven(
+        "Joiner",
+        "namespace App.Shared;\n\npublic class Joiner\n{\n    public static List<int> joined(List<int> a, List<int> b) => [...a, 0, ...b];\n\n    law joinedKeepsCount(List<int> a, List<int> b) => Joiner.joined(a, b).count() == a.count() + b.count() + 1;\n}\n",
+    );
+}
+
+/// A loop that only counts is the list's length.
+#[test]
+fn compile_proves_a_law_over_a_counting_loop() {
+    assert_proven(
+        "Orders",
+        "namespace App.Shared;\n\npublic class Orders\n{\n    public static int size(List<int> orders)\n    {\n        let count = 0;\n        for (const order of orders) {\n            count++;\n        }\n        return count;\n    }\n\n    law sizeIsCount(List<int> orders) => Orders.size(orders) == orders.count();\n}\n",
+    );
+}
+
+/// A loop that adds each element is `List.sum`, so Lean's `List.sum_append` proves that it joins.
+#[test]
+fn compile_proves_a_law_over_a_summing_loop() {
+    assert_proven(
+        "Sums",
+        "namespace App.Shared;\n\npublic class Sums\n{\n    public static int sumOf(List<int> xs)\n    {\n        let sum = 0;\n        for (const x of xs) {\n            sum += x;\n        }\n        return sum;\n    }\n\n    law sumJoins(List<int> a, List<int> b) => Sums.sumOf([...a, ...b]) == Sums.sumOf(a) + Sums.sumOf(b);\n}\n",
+    );
+}
+
+/// A loop that counts the elements an `if` tests is `List.countP`, so Lean's `List.countP_le_length` proves it counts no
+/// more than the list holds.
+#[test]
+fn compile_proves_a_law_over_a_counting_loop_under_an_if() {
+    assert_proven(
+        "Order",
+        "namespace App.Shared;\n\npublic class Order\n{\n    public Order(public bool open { get; }) { }\n\n    public static int openCount(List<Order> orders)\n    {\n        let count = 0;\n        for (const o of orders) {\n            if (o.open) {\n                count += 1;\n            }\n        }\n        return count;\n    }\n\n    law countAtMost(List<Order> orders) => Order.openCount(orders) <= orders.count();\n}\n",
+    );
+}
+
 /// A law reaches only `map`, `filter` and `count` of a `List`, so any other method of one is refused by its name.
 #[test]
 fn a_law_reaching_another_list_method_is_refused_by_name() {
@@ -4123,15 +4235,68 @@ fn a_law_reaching_a_lambda_that_can_throw_is_refused() {
 fn a_law_reaching_a_loop_is_refused() {
     assert_unmodeled(
         "namespace App.Shared;\n\npublic class Shape\n{\n    public static int sum(int n)\n    {\n        let total = 0;\n        for (let i = 0; i < n; i++) {\n            total += i;\n        }\n        return total;\n    }\n\n    law summed(int n) => Shape.sum(n) >= 0;\n}\n",
-        "Law summed reaches a loop in Shape.sum. A law cannot reason about a loop.",
+        "Law summed reaches a loop in Shape.sum. Write the method as recursion that calls itself on a smaller value.",
     );
 }
 
 #[test]
-fn a_law_reaching_a_recursion_is_refused() {
+fn a_law_reaching_a_while_loop_is_refused() {
     assert_unmodeled(
-        "namespace App.Shared;\n\npublic class Shape\n{\n    public static int down(int n) => n <= 0 ? 0 : Shape.down(n - 1);\n\n    law reachesZero(int n) => Shape.down(n) == 0;\n}\n",
-        "Law reachesZero reaches a recursion in Shape.down. A law cannot reason about recursion.",
+        "namespace App.Shared;\n\npublic class Shape\n{\n    public static int steps(int n)\n    {\n        let left = n;\n        let steps = 0;\n        while (left > 0) {\n            left -= 1;\n            steps += 1;\n        }\n        return steps;\n    }\n\n    law counted(int n) => Shape.steps(n) >= 0;\n}\n",
+        "Law counted reaches a loop in Shape.steps. Write the method as recursion that calls itself on a smaller value.",
+    );
+}
+
+/// A `for … of` loop is a law's only when it only adds to int locals, so one that adds to a string is refused.
+#[test]
+fn a_law_reaching_a_loop_that_writes_a_string_local_is_refused() {
+    assert_unmodeled(
+        "namespace App.Shared;\n\npublic class Shape\n{\n    public static string joined(List<string> names)\n    {\n        let text = \"\";\n        for (const name of names) {\n            text += name;\n        }\n        return text;\n    }\n\n    law joinedText(List<string> names) => Shape.joined(names) == Shape.joined(names);\n}\n",
+        "Law joinedText reaches a loop that does more than count or sum in Shape.joined. Write the method as recursion that calls itself on a smaller value.",
+    );
+}
+
+/// `n + 1` under `n <= 0` moves away from the bound the condition tested, so the recursion never gets smaller.
+#[test]
+fn a_law_reaching_a_recursion_that_does_not_get_smaller_is_refused() {
+    assert_unmodeled(
+        "namespace App.Shared;\n\npublic class Shape\n{\n    public static int up(int n) => n <= 0 ? 0 : Shape.up(n + 1);\n\n    law reachesZero(int n) => Shape.up(n) == 0;\n}\n",
+        "Law reachesZero reaches a recursion that does not get smaller in Shape.up. Write the method as recursion that calls itself on a smaller value: a list's rest from a list pattern, or an int one step towards a bound a condition tested.",
+    );
+}
+
+/// Mutual recursion ends only when every call among the methods passes a smaller value, so a call on `n` itself is
+/// refused.
+#[test]
+fn a_law_reaching_a_mutual_recursion_that_does_not_get_smaller_is_refused() {
+    assert_unmodeled(
+        "namespace App.Shared;\n\npublic class Shape\n{\n    public static bool isEven(int n) => n <= 0 ? true : Shape.isOdd(n - 1);\n    public static bool isOdd(int n) => n <= 0 ? false : Shape.isEven(n);\n\n    law fourIsEven(int unused) => Shape.isEven(4);\n}\n",
+        "Law fourIsEven reaches a recursion that does not get smaller in Shape.isOdd. Write the method as recursion that calls itself on a smaller value: a list's rest from a list pattern, or an int one step towards a bound a condition tested.",
+    );
+}
+
+/// A loop that reads the local it adds to, here in an `if`, does more than count or sum.
+#[test]
+fn a_law_reaching_a_loop_that_reads_a_local_it_adds_to_is_refused() {
+    assert_unmodeled(
+        "namespace App.Shared;\n\npublic class Shape\n{\n    public static int capped(List<int> xs)\n    {\n        let sum = 0;\n        for (const x of xs) {\n            if (sum < 10) {\n                sum += x;\n            }\n        }\n        return sum;\n    }\n\n    law cappedHolds(List<int> xs) => Shape.capped(xs) == Shape.capped(xs);\n}\n",
+        "Law cappedHolds reaches a loop that reads a local it adds to in Shape.capped. Write the method as recursion that calls itself on a smaller value.",
+    );
+}
+
+#[test]
+fn a_law_reaching_a_pattern_that_names_a_value_outside_an_if_or_a_conditional_is_refused() {
+    assert_unmodeled(
+        "namespace App.Shared;\n\npublic class Shape\n{\n    public Shape(public int total { get; }) { }\n\n    public static bool big(Shape? shape) => shape is Shape found && found.total > 10;\n\n    law nullIsSmall(int unused) => !Shape.big(null);\n}\n",
+        "Law nullIsSmall reaches a pattern that names a value outside the condition of an if or a ?: in Shape.big. Write the test as the condition of an if or a ?:, and read the value it names in the branch it decides.",
+    );
+}
+
+#[test]
+fn a_law_reaching_a_list_pattern_on_a_value_that_is_no_list_is_refused() {
+    assert_unmodeled(
+        "namespace App.Shared;\n\npublic class Shape\n{\n    public static int first(Any? value) => match (value) {\n        [int first, ...] => first,\n        default => 0,\n    };\n\n    law firstOfNull(int unused) => Shape.first(null) == 0;\n}\n",
+        "Law firstOfNull reaches a list pattern on a value that is no List in Shape.first. It reads types while the code runs.",
     );
 }
 
@@ -4168,6 +4333,6 @@ fn a_law_reaching_an_extension_member_lean_cannot_see_is_refused() {
             "app/Shared/ShapeMath.sharp",
             "namespace App.Shared;\n\npublic static class ShapeMath\n{\n    extension(Shape shape)\n    {\n        public int sum()\n        {\n            let total = 0;\n            for (let i = 0; i < shape.sides; i++) {\n                total += i;\n            }\n            return total;\n        }\n    }\n}\n",
         )],
-        "Law summed reaches a loop in ShapeMath.sum. A law cannot reason about a loop.",
+        "Law summed reaches a loop in ShapeMath.sum. Write the method as recursion that calls itself on a smaller value.",
     );
 }

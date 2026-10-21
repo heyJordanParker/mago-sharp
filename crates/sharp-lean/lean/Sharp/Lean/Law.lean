@@ -45,6 +45,10 @@ private theorem eq_pure {α : Type} (x : M α) (a : α) : x = pure a ↔ x.run =
   | none => simp
   | some r => cases r <;> simp [Except.map]
 
+/-! A counting loop is `List.countP` of its list, so a law over it reads that it counts no more than the list holds. -/
+
+attribute [simp] List.countP_le_length
+
 end Sharp
 
 deriving instance DecidableEq for Except
