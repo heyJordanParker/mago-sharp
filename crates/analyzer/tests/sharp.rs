@@ -22443,9 +22443,35 @@ fn a_law_that_calls_itself_on_a_value_no_smaller_is_refused() {
         "        match (x) {\n            <= 0 => { return; },\n            default => { Count.f(x - 1, items); },\n        }",
         "        match (x) {\n            > 0 => { Count.f(x - 1, items); },\n            default => { return; },\n        }",
         "        match (x) {\n            0 => { return; },\n            < 0 => { return; },\n            default => { Count.f(x - 1, items); },\n        }",
+        // A guarded arm shows nothing where it fails, since its guard may be what failed.
+        "        match (x) {\n            <= 0 when items.count() == 0 => { return; },\n            <= 0 => { return; },\n            default => { Count.f(x - 1, items); },\n        }",
+        "        match (items) {\n            ([int, ...List<int> rest]) => { Count.f(x, rest); },\n            default => { return; },\n        }",
+        "        if (items is [int, ...List<int> rest]) { Count.f(x, rest); }",
     ] {
         assert_eq!(issues(law_body(body), &[]), Vec::<String>::new(), "{body}");
     }
+
+    // A type pattern binds the list itself, which is no smaller. A name that reads no local reads no parameter, so a
+    // comparison with it shows no bound, and passing it passes no smaller value.
+    assert_eq!(
+        issues(
+            law_body(
+                "        match (items) {\n            List<int> all when all.count() > 2 => { Count.f(x, all); },\n            default => { return; },\n        }"
+            ),
+            &[]
+        ),
+        ["8:53 law-recursion"]
+    );
+    assert_eq!(
+        issues(law_body("        if (x < unknown) { return; }\n        Count.f(unknown, items);"), &[]),
+        [
+            "8:9 law-recursion",
+            "7:17 non-existent-constant",
+            "7:17 mixed-operand",
+            "8:17 non-existent-constant",
+            "8:17 mixed-argument"
+        ]
+    );
 
     // A call passes its smaller value in the parameter's own place, though an argument before it passes one too.
     let shifted = (

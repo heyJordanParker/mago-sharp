@@ -27801,6 +27801,103 @@ fn every_operand_shape_the_checker_accepts_calls_the_class_that_declares_the_ope
     );
 }
 
+/// Spec section 19: two lists whose elements may each be a list or a string compare element by element, each pair by
+/// the running values, since only the running value tells a list from a string.
+/// ```php
+/// return (fn (${'lhs#1'}, ${'rhs#2'}) => \count(${'lhs#1'}) === \count(${'rhs#2'})
+///     && \array_all(${'lhs#1'}, fn (${'element#3'}, ${'key#4'}) => \array_key_exists(${'key#4'}, ${'rhs#2'})
+///         && \Sharp\Internal\equals(${'element#3'}, ${'rhs#2'}[${'key#4'}])))($a, $b);
+/// ```
+#[test]
+fn equality_of_lists_whose_elements_may_be_a_list_or_a_string_compares_each_pair_when_the_code_runs() {
+    assert_eq!(
+        body_in("bool run(List<List<int>|string> a, List<List<int>|string> b)", "        return a == b;\n", &[]),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                CALL
+                  ARROW_FUNC "" @9-9
+                    PARAM_LIST
+                      PARAM
+                        null
+                        ZVAL "lhs#1"
+                        null
+                        null
+                        null
+                        null
+                      PARAM
+                        null
+                        ZVAL "rhs#2"
+                        null
+                        null
+                        null
+                        null
+                    null
+                    AND
+                      BINARY_OP [16]
+                        CALL
+                          ZVAL "count"
+                          ARG_LIST
+                            VAR
+                              ZVAL "lhs#1"
+                        CALL
+                          ZVAL "count"
+                          ARG_LIST
+                            VAR
+                              ZVAL "rhs#2"
+                      CALL
+                        ZVAL "array_all"
+                        ARG_LIST
+                          VAR
+                            ZVAL "lhs#1"
+                          ARROW_FUNC "" @9-9
+                            PARAM_LIST
+                              PARAM
+                                null
+                                ZVAL "element#3"
+                                null
+                                null
+                                null
+                                null
+                              PARAM
+                                null
+                                ZVAL "key#4"
+                                null
+                                null
+                                null
+                                null
+                            null
+                            AND
+                              CALL
+                                ZVAL "array_key_exists"
+                                ARG_LIST
+                                  VAR
+                                    ZVAL "key#4"
+                                  VAR
+                                    ZVAL "rhs#2"
+                              CALL
+                                ZVAL "Sharp\\Internal\\equals"
+                                ARG_LIST
+                                  VAR
+                                    ZVAL "element#3"
+                                  DIM
+                                    VAR
+                                      ZVAL "rhs#2"
+                                    VAR
+                                      ZVAL "key#4"
+                            null
+                            null
+                    null
+                    null
+                  ARG_LIST
+                    VAR
+                      ZVAL "a"
+                    VAR
+                      ZVAL "b"
+        "#}
+    );
+}
+
 /// Spec section 10: the struct `Point`, whose `==` compares an `int`, a `float` and a nullable `Money`.
 /// ```php
 /// $a = …;

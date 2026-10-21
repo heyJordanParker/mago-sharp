@@ -313,15 +313,22 @@ impl<'names, 'arena> Path<'names, 'arena> {
 
     /// The place and the shape of the parameter `expression` reads.
     fn shaped(&self, expression: &Expression<'_>) -> Option<(usize, Shape)> {
+        let declared = self.declared(expression)?;
+        let place = self.parameters.iter().position(|(offset, _)| *offset == declared)?;
+
+        Some((place, self.parameters[place].1))
+    }
+
+    /// Where the local that `expression`, a bare name, reads is declared, or `None` when it reads no local.
+    fn declared(&self, expression: &Expression<'_>) -> Option<u32> {
         let Expression::ConstantAccess(name) = expression.unparenthesized() else {
             return None;
         };
         let Some(Binding::Local(local)) = self.names.binding(&name.name) else {
             return None;
         };
-        let place = self.parameters.iter().position(|(offset, _)| *offset == local.declaration.start.offset)?;
 
-        Some((place, self.parameters[place].1))
+        Some(local.declaration.start.offset)
     }
 
     fn int_parameter(&self, expression: &Expression<'_>) -> Option<usize> {
@@ -330,18 +337,9 @@ impl<'names, 'arena> Path<'names, 'arena> {
 
     /// The place of the list parameter whose rest, from a list pattern on the path, `expression` reads.
     fn rest_of(&self, expression: &Expression<'_>) -> Option<usize> {
-        let Expression::ConstantAccess(name) = expression else {
-            return None;
-        };
-        let Some(Binding::Local(local)) = self.names.binding(&name.name) else {
-            return None;
-        };
+        let declared = self.declared(expression)?;
 
-        self.rests
-            .iter()
-            .rev()
-            .find(|(rest, _)| rest.start.offset == local.declaration.start.offset)
-            .map(|(_, parameter)| *parameter)
+        self.rests.iter().rev().find(|(rest, _)| rest.start.offset == declared).map(|(_, parameter)| *parameter)
     }
 }
 

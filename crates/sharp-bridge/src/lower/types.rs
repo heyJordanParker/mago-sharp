@@ -2096,16 +2096,13 @@ fn compares_unchecked(any: &TUnion, other: &TUnion) -> bool {
 }
 
 /// The kinds of number the values of `union` are, `null` aside, as `[may hold an int, may hold a float]`, or `None`
-/// when a value is no number. A type parameter counts as its constraint.
+/// when a value is no number. A type parameter is none, since spec section 11 bounds one by a class, an interface or
+/// another type parameter.
 pub(crate) fn number_kinds(union: &TUnion) -> Option<[bool; 2]> {
     let mut kinds = [false, false];
     for atomic in union.types.iter() {
         match atomic {
             TAtomic::Null => {}
-            TAtomic::GenericParameter(parameter) => {
-                let [int, float] = number_kinds(&parameter.constraint)?;
-                kinds = [kinds[0] || int, kinds[1] || float];
-            }
             atomic if atomic.is_int() => kinds[0] = true,
             atomic if atomic.is_float() => kinds[1] = true,
             _ => return None,
