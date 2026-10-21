@@ -63,19 +63,26 @@ pub(crate) fn check(
     decode(&answer(output)?, theorems.iter().filter(|theorem| theorem.judged).count()).map_err(io::Error::other)
 }
 
-/// The answer the runner wrote, or an error with its exit status and its standard error.
+/// The answer the runner wrote, or an error with its exit status. The debug log holds its standard error.
 fn answer(output: Output) -> io::Result<Vec<u8>> {
     if output.status.success() {
         return Ok(output.stdout);
     }
 
+    tracing::debug!(
+        "The law checker's runner exited with {}: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
     let failure = if library::stopped(output.status) {
         format!("ran past {} processor seconds, the limit the checker sets on each check", library::processor_seconds())
     } else {
         format!("failed with {}", output.status)
     };
 
-    Err(io::Error::other(format!("the law checker {failure}: {}", String::from_utf8_lossy(&output.stderr).trim())))
+    Err(io::Error::other(format!(
+        "The law checker {failure}. Run vendor/bin/mago compile with MAGO_LOG=debug to see why."
+    )))
 }
 
 /// Runs the runner on one request, under `library::processor_seconds()` of processor time, and returns how it exited

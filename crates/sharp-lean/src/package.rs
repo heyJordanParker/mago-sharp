@@ -407,11 +407,10 @@ pub(crate) enum Refusal {
 /// What `lake` answered when asked its version.
 pub(crate) enum Toolchain {
     Ready,
-    /// No `lake` is on the `PATH`, and Mago could not install Lean, with what failed.
-    Missing(String),
     /// No `lake` is on the `PATH`, and the Mago build pins no elan for its target.
     Unsupported,
-    /// elan could not install the pinned Lean version, with its message.
+    /// Mago could not install Lean where no `lake` is on the `PATH`, or `lake` could not install the pinned Lean
+    /// version, with what failed.
     Failed(String),
 }
 
@@ -441,7 +440,7 @@ impl Package {
                 self.lake = match library::install() {
                     Ok(Some(lake)) => lake,
                     Ok(None) => return Ok(Toolchain::Unsupported),
-                    Err(error) => return Ok(Toolchain::Missing(error.to_string())),
+                    Err(error) => return Ok(Toolchain::Failed(error.to_string())),
                 };
                 self.lake.command().arg("--version").current_dir(&self.directory).output()?
             }

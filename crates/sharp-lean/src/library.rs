@@ -393,6 +393,9 @@ fn is_built(library: &Path) -> bool {
             .all(|(path, source)| fs::read(library.join(path)).is_ok_and(|bytes| bytes == source.as_bytes()))
 }
 
+/// The error of a build of the law checker that failed, whose output the debug log holds.
+const UNBUILT: &str = "The law checker could not be built in Mago's cache folder. Run vendor/bin/mago compile again to retry, with MAGO_LOG=debug to see why.";
+
 /// Writes the library's package to `lean/<build id>.staging` in Mago's cache folder, builds it with `lake` and renames
 /// it to `lean/<build id>`, once per build ID. Builds take turns under an exclusive lock on `lean/build.lock`, across
 /// threads and processes alike. A build that lost its runner or a package file, as a cache cleaner leaves it, is
@@ -420,20 +423,18 @@ pub(crate) fn build(lake: &Lake) -> io::Result<PathBuf> {
 
     let output = lake.command().arg("build").current_dir(&staging).output()?;
     if !output.status.success() {
-        return Err(io::Error::other(format!(
-            "The law checker could not be built in {}:\n{}{}",
+        tracing::debug!(
+            "The law checker's build in {} failed:\n{}{}",
             staging.display(),
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
-        )));
+        );
+        return Err(io::Error::other(UNBUILT));
     }
 
     fs::rename(&staging, &library).map_err(|error| {
-        io::Error::other(format!(
-            "The checker could not move the law checker it built from {} to {}: {error}",
-            staging.display(),
-            library.display()
-        ))
+        tracing::debug!("The law checker could not move {} to {}: {error}", staging.display(), library.display());
+        io::Error::other(UNBUILT)
     })?;
 
     for entry in fs::read_dir(&builds)? {
@@ -477,7 +478,8 @@ fn install_from(url: &str, archive: &Archive, cache: &Path) -> io::Result<Lake> 
 
     let size =
         if has_elan { archive.lean_size.to_owned() } else { format!("{} and {}", archive.size, archive.lean_size) };
-    tracing::info!("Downloading the law checker ({size}) into {}, once.", home.display());
+    tracing::info!("Downloading the law checker ({size}) into Mago's cache folder, once.");
+    tracing::debug!("The law checker installs into {}.", home.display());
     if !has_elan {
         install_elan(url, archive, &home)?;
     }

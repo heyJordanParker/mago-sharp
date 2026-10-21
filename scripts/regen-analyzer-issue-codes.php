@@ -372,7 +372,7 @@ final class AnalyzerCodeModuleGenerator
         'law-unproven',
         'law-recursion',
         'invalid-law',
-        'missing-lean',
+        'law-checker-unavailable',
         'unmodeled-construct',
         'missing-super-call',
         'named-constructor-without-new',

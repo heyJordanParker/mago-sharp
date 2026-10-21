@@ -165,15 +165,14 @@ pub(crate) fn rejected_proof(law: &Law) -> Issue {
 }
 
 /// A law whose generated module Lean did not build: it stopped at the checker's limit, or Lean rejected it, which is a
-/// bug in the checker's translation, never in the project.
+/// bug in the checker's translation, never in the project. The debug log names the module and the line.
 pub(crate) fn generated_module_refused(law: &Law, module: &str, refusal: &Refusal) -> Issue {
     let reason = match refusal {
         Refusal::Stopped(stop) => format!("{}.", stopped(*stop, "the code it reaches")),
         Refusal::Rejected(line) => {
-            let place = if *line == 0 { String::new() } else { format!(", at line {line}") };
-            format!(
-                "the module {module} the checker generated for it is wrong{place}. This is a bug in the PHP# checker; report it to its maintainers."
-            )
+            tracing::debug!("The law checker rejected the module {module} of law {}, at line {line}.", law.name);
+
+            "the checker translated the code it reaches wrongly. This is a bug in the PHP# checker; report it to its maintainers.".to_owned()
         }
     };
 
@@ -208,13 +207,13 @@ fn stopped(stop: Stop, what: &str) -> String {
     }
 }
 
-/// No `lake` is on the `PATH`, and Mago could not install Lean, with where and what failed. The message names Lean,
-/// lake and elan as the law checker, which is all a PHP# developer needs to know of them.
-pub(crate) fn lake_not_found(span: Span, failure: &str) -> Issue {
-    Issue::error(format!(
-        "The law checker could not be installed into {failure}. Run vendor/bin/mago compile again to retry."
-    ))
-    .with_code(IssueCode::MissingLean.as_str())
+/// The law checker could not be installed or does not start. The message names it only as the law checker, which is
+/// all a PHP# developer needs to know of it, and the debug log holds what failed.
+pub(crate) fn uninstalled_checker(span: Span) -> Issue {
+    Issue::error(
+        "The law checker could not be installed. Run vendor/bin/mago compile again to retry, with MAGO_LOG=debug to see why.",
+    )
+    .with_code(IssueCode::LawCheckerUnavailable.as_str())
     .with_annotation(Annotation::primary(span))
 }
 
@@ -229,14 +228,7 @@ pub(crate) fn uninstallable_lean(span: Span) -> Issue {
     };
 
     Issue::error(format!("Laws need the law checker, and {reason}"))
-        .with_code(IssueCode::MissingLean.as_str())
-        .with_annotation(Annotation::primary(span))
-}
-
-/// The pinned Lean version could not be installed, with the reason.
-pub(crate) fn elan_failed(span: Span, message: &str) -> Issue {
-    Issue::error(format!("The law checker could not be installed: {message}."))
-        .with_code(IssueCode::MissingLean.as_str())
+        .with_code(IssueCode::LawCheckerUnavailable.as_str())
         .with_annotation(Annotation::primary(span))
 }
 

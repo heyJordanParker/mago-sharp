@@ -2213,16 +2213,14 @@ fn compile_refuses_an_unproven_law_every_time_and_never_leaves_a_current_compile
 }
 
 /// A file whose law needs proving needs the law checker; with no `lake` and no Lean Mago can install, each such file is
-/// refused with `missing-lean`, which names what failed, and every other file compiles.
+/// refused with `law-checker-unavailable`, a fixed sentence that names no tool and no folder of one, and every other
+/// file compiles. The debug log holds what failed.
 #[test]
-fn compile_reports_missing_lean_on_each_file_that_needs_lean_and_whose_compiled_file_is_not_current() {
-    let missing = if cfg!(target_env = "musl") {
-        "error - missing-lean: Laws need the law checker, and this musl build of the checker can't install it, because the law checker has no musl build. On glibc Linux, the checker's glibc build installs it itself.".to_owned()
+fn compile_reports_an_unavailable_law_checker_on_each_file_that_needs_it_and_whose_compiled_file_is_not_current() {
+    let unavailable = if cfg!(target_env = "musl") {
+        "error - law-checker-unavailable: Laws need the law checker, and this musl build of the checker can't install it, because the law checker has no musl build. On glibc Linux, the checker's glibc build installs it itself."
     } else {
-        format!(
-            "error - missing-lean: The law checker could not be installed into {}: File exists (os error 17). Run vendor/bin/mago compile again to retry.",
-            unwritable_cache().join("mago/elan").display()
-        )
+        "error - law-checker-unavailable: The law checker could not be installed. Run vendor/bin/mago compile again to retry, with MAGO_LOG=debug to see why."
     };
     let directory = lawful_project(&[("app/Shared/Money.sharp", LAWFUL_MONEY), ("app/Order.sharp", ORDER)]);
     let root = directory.path();
@@ -2230,7 +2228,8 @@ fn compile_reports_missing_lean_on_each_file_that_needs_lean_and_whose_compiled_
     let output = compile_without_lean(root);
 
     assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
-    assert_eq!(issue_lines(&output), [format!("app/Shared/Money.sharp:8:5:{missing}")], "{}", printed(&output));
+    assert_eq!(issue_lines(&output), [format!("app/Shared/Money.sharp:8:5:{unavailable}")], "{}", printed(&output));
+    assert!(!printed(&output).contains("elan"), "{}", printed(&output));
     assert!(compiled(root, "app/Order.sharp").exists());
 }
 
