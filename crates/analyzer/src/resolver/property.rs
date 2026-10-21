@@ -50,6 +50,7 @@ use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::LocalIdentifier;
 use mago_syntax::cst::Variable;
+use mago_syntax::dialect::Dialect;
 use mago_text_edit::TextEdit;
 use mago_word::Word;
 use mago_word::WordSet;
@@ -837,6 +838,19 @@ impl DeclaredProperty<'_> {
         self.declared_type_impl(codebase, true)
     }
 
+    /// The type code of `dialect` reads from the property, as [`Self::declared_type`] declares it, spec section 12:
+    /// plain PHP reads a PHP# property's `Map` or `Set` as the PHP array the engine gives it, and PHP# reads a plain PHP
+    /// property's array keyed by `int` alone as a `List`, as [`get_sharp_received_type`] says.
+    pub(crate) fn read_type(&self, codebase: &CodebaseMetadata, dialect: Dialect) -> TUnion {
+        let declared = self.declared_type(codebase);
+
+        match (dialect.is_sharp(), self.declaring_class.flags.is_sharp()) {
+            (false, true) => get_php_received_type(&declared, codebase),
+            (true, false) => get_sharp_received_type(&declared),
+            _ => declared,
+        }
+    }
+
     /// [`Self::declared_write_type`] when `for_assignment`, otherwise [`Self::declared_type`].
     pub(crate) fn declared_type_for(&self, codebase: &CodebaseMetadata, for_assignment: bool) -> TUnion {
         self.declared_type_impl(codebase, for_assignment)
@@ -1334,7 +1348,7 @@ where
             resolution.declared_write_type(context.codebase)
         }
     } else {
-        resolution.declared_type(context.codebase)
+        resolution.read_type(context.codebase, context.dialect)
     };
 
     // When writes diverge from reads — a magic property or a hook with a `set` parameter — the
@@ -1344,17 +1358,11 @@ where
     let mut read_type = (for_assignment && (resolution.is_magic() || used_set_hook_param))
         .then(|| resolution.declared_type(context.codebase));
 
-    // Plain PHP reads a PHP# property's `Map` or `Set` as the PHP array the engine gives it, and writes the PHP array
-    // PHP# turns into one.
-    if !context.dialect.is_sharp() && resolution.declaring_class.flags.is_sharp() {
-        property_type = if for_assignment {
-            get_php_passed_type(&property_type, context.codebase)
-        } else {
-            get_php_received_type(&property_type, context.codebase)
-        };
+    // Plain PHP writes a PHP# property's `Map` or `Set` as the PHP array PHP# turns into one, and reads it as the PHP
+    // array, as `read_type` gives a read.
+    if for_assignment && !context.dialect.is_sharp() && resolution.declaring_class.flags.is_sharp() {
+        property_type = get_php_passed_type(&property_type, context.codebase);
         read_type = read_type.map(|read_type| get_php_received_type(&read_type, context.codebase));
-    } else if context.dialect.is_sharp() && !for_assignment && !resolution.declaring_class.flags.is_sharp() {
-        property_type = get_sharp_received_type(&property_type);
     }
 
     let expand_and_localize = |ty: &mut TUnion| {

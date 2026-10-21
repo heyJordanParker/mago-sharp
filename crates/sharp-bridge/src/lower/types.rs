@@ -588,12 +588,10 @@ impl<'analysis> Types<'analysis> {
         Some(&self.codebase.get_method(class, method)?.return_type_metadata.as_ref()?.type_union)
     }
 
-    /// The declared type of the property `property` of the class `class` declares or inherits, with a type parameter as
-    /// itself.
-    pub(crate) fn declared_property_type(&self, class: &[u8], property: &[u8]) -> Option<&'analysis TUnion> {
-        let metadata = self.codebase.get_declaring_property(class, &[b"$", property].concat())?;
-
-        Some(&metadata.type_metadata.as_ref()?.type_union)
+    /// The declared type of the property `variable`, `$`-prefixed, that the class `class` declares or inherits, with a
+    /// type parameter as itself.
+    pub(crate) fn declared_property_type(&self, class: &[u8], variable: &[u8]) -> Option<&'analysis TUnion> {
+        Some(&self.codebase.get_declaring_property(class, variable)?.type_metadata.as_ref()?.type_union)
     }
 
     /// The type text of the result of the method `class::method`, as [`FunctionType::result`] writes it.
@@ -1676,11 +1674,12 @@ impl<'analysis> Types<'analysis> {
     }
 
     /// The declared type of the property `target` writes, `object.property`, `object?.property` or `Class.property`,
-    /// as the class, or the first class its object can be, declares it. None for any other target.
+    /// as the class, or the first class its object can be, declares or inherits it, as
+    /// [`Self::declared_property_type`] gives it. None for any other target.
     pub(crate) fn property_type(&self, target: &Expression) -> Option<&'analysis TUnion> {
-        let (class, property) = self.accessed_property(target)?;
+        let (class, variable) = self.accessed_property(target)?;
 
-        self.codebase.get_property(class, &property)?.type_metadata.as_ref().map(|declared| &declared.type_union)
+        self.declared_property_type(class, &variable)
     }
 
     /// Whether `target` reads a property plain PHP declares, which can hold a PHP array where PHP# reads a `Map` or a

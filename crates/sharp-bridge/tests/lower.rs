@@ -24218,6 +24218,133 @@ fn a_map_a_method_stores_in_a_plain_php_collection_goes_in_as_its_element_takes_
 }
 
 /// ```php
+/// $this->stock = \is_array($crossing = \Lib\Prices::all())
+///     ? new \Sharp\Map(\array_merge([], ...\array_map(fn ($key, $value) => [(string) $key, $value], \array_keys($crossing), $crossing)))
+///     : $crossing;
+/// $this->names = \is_array($renumbered = \Lib\Calc::names()) ? \array_values($renumbered) : $renumbered;
+/// ```
+///
+/// Plain PHP's array a PHP# subclass writes into a property its PHP# base declares crosses as the property's declared
+/// type says, as it does into a property the class declares itself: into a `Map` as the `Map` of its entries, and into
+/// a `List` renumbered.
+#[test]
+fn plain_php_s_array_written_into_a_php_sharp_base_s_property_crosses_as_its_type_declares() {
+    let base = (
+        "src/App/Tenant/Shelf.sharp",
+        "namespace App.Tenant;\n\npublic abstract class Shelf\n{\n    public Map<string, int> stock { get; set; } = [:];\n\n    public List<string> names { get; set; } = [];\n}\n",
+    );
+    let prices = (
+        "src/Lib/Prices.php",
+        "<?php namespace Lib; final class Prices { /** @return array<string, int> */ public static function all(): array { return []; } }",
+    );
+    let code = "namespace App.Tenant;\n\nimport Lib.Calc;\nimport Lib.Prices;\n\nclass Pantry : Shelf\n{\n    public void run()\n    {\n        this.stock = Prices.all();\n        this.names = Calc.names();\n    }\n}\n";
+
+    assert_eq!(
+        statements_at(code, &[base, prices], 0..2),
+        [
+            indoc! {r#"
+                ASSIGN
+                  PROP
+                    VAR
+                      ZVAL "this"
+                    ZVAL "stock"
+                  CONDITIONAL
+                    CALL
+                      ZVAL "is_array"
+                      ARG_LIST
+                        ASSIGN
+                          VAR
+                            ZVAL "crossing#1"
+                          VERIFY_TYPE_ARGS
+                            STATIC_CALL
+                              ZVAL "Lib\\Prices"
+                              ZVAL "all"
+                              ARG_LIST
+                            ZVAL "Map<string, int>"
+                            ZVAL "Lib\\Prices::all()"
+                    NEW
+                      ZVAL "Sharp\\Map"
+                      ARG_LIST
+                        CALL
+                          ZVAL "array_merge"
+                          ARG_LIST
+                            ARRAY [3]
+                            UNPACK
+                              CALL
+                                ZVAL "array_map"
+                                ARG_LIST
+                                  ARROW_FUNC "" @10-10
+                                    PARAM_LIST
+                                      PARAM
+                                        null
+                                        ZVAL "key#2"
+                                        null
+                                        null
+                                        null
+                                        null
+                                      PARAM
+                                        null
+                                        ZVAL "value#3"
+                                        null
+                                        null
+                                        null
+                                        null
+                                    null
+                                    ARRAY [3]
+                                      ARRAY_ELEM
+                                        CAST [6]
+                                          VAR
+                                            ZVAL "key#2"
+                                        null
+                                      ARRAY_ELEM
+                                        VAR
+                                          ZVAL "value#3"
+                                        null
+                                    null
+                                    null
+                                  CALL
+                                    ZVAL "array_keys"
+                                    ARG_LIST
+                                      VAR
+                                        ZVAL "crossing#1"
+                                  VAR
+                                    ZVAL "crossing#1"
+                    VAR
+                      ZVAL "crossing#1"
+            "#},
+            indoc! {r#"
+                ASSIGN
+                  PROP
+                    VAR
+                      ZVAL "this"
+                    ZVAL "names"
+                  VERIFY_TYPE_ARGS
+                    CONDITIONAL
+                      CALL
+                        ZVAL "is_array"
+                        ARG_LIST
+                          ASSIGN
+                            VAR
+                              ZVAL "renumbered#1"
+                            STATIC_CALL
+                              ZVAL "Lib\\Calc"
+                              ZVAL "names"
+                              ARG_LIST
+                      CALL
+                        ZVAL "array_values"
+                        ARG_LIST
+                          VAR
+                            ZVAL "renumbered#1"
+                      VAR
+                        ZVAL "renumbered#1"
+                    ZVAL "List<string>"
+                    ZVAL "Lib\\Calc::names()"
+            "#},
+        ]
+    );
+}
+
+/// ```php
 /// [$sorted = \Sharp\Internal\arrayOf($sorted), \Lib\Calc::sort($sorted), $sorted = \is_array($sorted) ? \Sharp\Map::from($sorted) : $sorted][1];
 /// [$filled = \Sharp\Internal\arrayOf($filled), \Lib\Calc::fill($filled), $filled = \is_array($filled) ? \Sharp\Map::from($filled) : $filled][1];
 /// \Lib\Calc::bump($count);

@@ -4111,7 +4111,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     fn crossing_attribute(&mut self, property: &[u8], hint: Option<&Hint>) -> Option<u32> {
         let hint = hint?;
         let r#type = self.hint_type(hint);
-        let outward = self.crosses_outward(self.types.declared_property_type(self.class, property).unwrap_or(&r#type));
+        let declared = self.types.declared_property_type(self.class, &[b"$", property].concat());
+        let outward = self.crosses_outward(declared.unwrap_or(&r#type));
         if !outward && self.crossing_array(&r#type).is_none() {
             return None;
         }

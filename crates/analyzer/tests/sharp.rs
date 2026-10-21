@@ -9368,6 +9368,34 @@ fn a_plain_php_int_keyed_array_arrives_as_a_list() {
     );
 }
 
+/// Spec section 12: a class reads a property its parent declares through `this` as it reads it through any other
+/// receiver. So a PHP# subclass reads its plain PHP parent's `array<int, T>` as a `List<T>`, and a plain PHP subclass
+/// reads its PHP# parent's `Map` as the PHP array the engine gives it.
+#[test]
+fn a_parent_s_property_read_through_this_arrives_as_through_any_other_receiver() {
+    let base = (
+        "src/App/BaseJob.php",
+        "<?php\n\nnamespace App;\n\nabstract class BaseJob\n{\n    /** @var array<int, string> */\n    public array $names = [];\n}\n",
+    );
+    let job = "namespace App;\n\npublic class SendOptin : BaseJob\n{\n    public string? first() => this.names.getOrNull(0);\n\n    public static string? firstOf(SendOptin job) => job.names.getOrNull(0);\n}\n";
+
+    assert_eq!(issues(("src/App/SendOptin.sharp", job), &[base]), [] as [&str; 0]);
+
+    let shelf = (
+        "src/App/Shelf.sharp",
+        "namespace App;\n\npublic abstract class Shelf\n{\n    public Map<string, int> stock { get; set; } = [:];\n}\n",
+    );
+    let pantry = "<?php\n\nnamespace App;\n\nfinal class Pantry extends Shelf\n{\n    public function own(): int\n    {\n        return $this->stock;\n    }\n\n    public function of(Pantry $pantry): int\n    {\n        return $pantry->stock;\n    }\n}\n";
+
+    assert_eq!(
+        messages(("src/App/Pantry.php", pantry), &[shelf]),
+        [
+            "Invalid return type for function `App\\Pantry::own`: expected `int`, but found `array<int|string, int>`.",
+            "Invalid return type for function `App\\Pantry::of`: expected `int`, but found `array<int|string, int>`.",
+        ]
+    );
+}
+
 /// Spec section 12: plain PHP's array keyed by `int` alone arrives as a `List` wherever it sits in the value that
 /// arrives: a shape whose keys are all ints, as `array{0: int, 1: int}`, the field of a shape and the value of a
 /// collection typed `array<int, T>`. So a list pattern and `is List<int>` match it, as they match plain PHP's `list<int>`.

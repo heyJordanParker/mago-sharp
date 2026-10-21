@@ -1178,7 +1178,7 @@ where
             continue;
         }
 
-        let mut property_type = resolution.declared_type(context.codebase);
+        let mut property_type = resolution.read_type(context.codebase, context.dialect);
 
         let property_name_bytes = property_name.as_bytes();
         let raw_property_name = property_name_bytes.strip_prefix(b"$").unwrap_or(property_name_bytes);
