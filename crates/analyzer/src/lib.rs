@@ -45,6 +45,7 @@ pub mod external;
 pub mod graph;
 pub mod plugin;
 pub mod settings;
+pub mod smaller;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod telemetry;
 

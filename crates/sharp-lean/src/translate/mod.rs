@@ -13,6 +13,9 @@ pub(crate) mod proof;
 
 use std::path::PathBuf;
 
+use mago_analyzer::smaller::Bound;
+use mago_analyzer::smaller::Smaller;
+use mago_analyzer::smaller::Step;
 use mago_database::file::FileId;
 use mago_names::binding::php_method_name;
 use mago_sharp_bridge::CheckedProgram;
@@ -108,35 +111,6 @@ pub(crate) struct Use {
     pub(crate) place: String,
     /// The smaller value the use passes, when it is a call of a method of the same class.
     pub(crate) smaller: Option<Smaller>,
-}
-
-/// A call of a method of the caller's own class that passes, as one argument, a smaller value of one of the caller's
-/// parameters.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Smaller {
-    /// The caller's parameter, by position.
-    pub(crate) parameter: usize,
-    /// The argument that passes the smaller value, by position.
-    pub(crate) argument: usize,
-    pub(crate) step: Step,
-}
-
-/// How a parameter's value gets smaller.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Step {
-    /// A list parameter's rest from a list pattern that holds at least one element besides the rest.
-    Rest,
-    /// An int parameter minus one, where a condition on the path to the call showed it above the bound.
-    Down(Bound),
-    /// An int parameter plus one, where a condition on the path to the call showed it below the bound.
-    Up(Bound),
-}
-
-/// The value an int parameter steps towards: an int literal, or a parameter every such call passes on unchanged.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Bound {
-    Literal(i64),
-    Parameter(usize),
 }
 
 /// The parameter a recursive method's calls each make smaller, by the same step, and the `termination_by` that tells

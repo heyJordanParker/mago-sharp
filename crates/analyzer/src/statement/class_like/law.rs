@@ -15,7 +15,6 @@ use mago_reporting::Issue;
 use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::ArgumentList;
-use mago_syntax::cst::BinaryOperator;
 use mago_syntax::cst::Call;
 use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Expression;
@@ -24,12 +23,10 @@ use mago_syntax::cst::IfBody;
 use mago_syntax::cst::Law;
 use mago_syntax::cst::LawProof;
 use mago_syntax::cst::ListPatternElement;
-use mago_syntax::cst::Literal;
 use mago_syntax::cst::Pattern;
 use mago_syntax::cst::PatternMatchArm;
 use mago_syntax::cst::PatternMatchArmBody;
 use mago_syntax::cst::Statement;
-use mago_syntax::cst::UnaryPrefixOperator;
 use mago_word::WordMap;
 use mago_word::ascii_lowercase_word;
 use mago_word::word;
@@ -47,6 +44,9 @@ use crate::invocation::Invocation;
 use crate::invocation::InvocationArgumentsSource;
 use crate::invocation::InvocationTarget;
 use crate::invocation::analyzer::analyze_invocation;
+use crate::smaller;
+use crate::smaller::Fact;
+use crate::smaller::Step;
 use crate::statement::analyze_statements;
 use crate::statement::function_like::FunctionLikeBody;
 use crate::statement::function_like::analyze_function_like;
@@ -132,7 +132,14 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Law<'arena> {
             analyze_condition(context, &mut body_context, artifacts, condition.expression)?;
         }
         if let LawProof::Body(body) = &self.proof {
-            let mut walk = BodyWalk { context, law: self, class: class_like_metadata, smaller: Vec::new(), step: None };
+            let mut walk = BodyWalk {
+                context,
+                law: self,
+                class: class_like_metadata,
+                facts: Vec::new(),
+                rests: Vec::new(),
+                step: None,
+            };
             walk.statements(body.statements.as_slice());
             analyze_statements(body.statements.as_slice(), context, &mut body_context, artifacts)?;
         }
@@ -271,33 +278,6 @@ where
         .with_annotation(Annotation::secondary(law.span).with_message("The law is stated here."))
 }
 
-/// A value a call of the law on itself may pass and be smaller, which the body learned from a pattern or a test.
-#[derive(Debug, Clone, Copy)]
-enum Smaller<'arena> {
-    /// The rest of the list parameter at this place, from a list pattern with an element before the rest.
-    Rest(usize, &'arena [u8]),
-    /// The int parameter at this place is above the bound, so one less is nearer it.
-    Down(usize, Bound),
-    /// The int parameter at this place is below the bound, so one more is nearer it.
-    Up(usize, Bound),
-}
-
-/// The value an int parameter steps towards: an int literal, or the parameter at a place, which every call of the law
-/// on itself passes on unchanged.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Bound {
-    Literal(i64),
-    Parameter(usize),
-}
-
-/// How a call of the law on itself makes the parameter at a place smaller, which every such call shares.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Step {
-    Rest,
-    Down(Bound),
-    Up(Bound),
-}
-
 /// The walk of a law's body that refuses what a body may not hold, and each call of the law on itself that passes no
 /// smaller value.
 struct BodyWalk<'walk, 'ctx, 'ast, 'arena, A>
@@ -307,7 +287,10 @@ where
     context: &'walk mut Context<'ctx, 'arena, A>,
     law: &'ast Law<'arena>,
     class: &'ctx ClassLikeMetadata,
-    smaller: Vec<Smaller<'arena>>,
+    /// What the conditions on the path show about the law's int parameters.
+    facts: Vec<Fact>,
+    /// Each local a list pattern on the path binds to the rest of a list parameter, by name, and the parameter's place.
+    rests: Vec<(&'arena [u8], usize)>,
     /// The parameter the first call of the law on itself makes smaller, and how.
     step: Option<(usize, Step)>,
 }
@@ -319,7 +302,7 @@ where
     /// Walks `statements` in order. After an `if` whose branch ends the block, the statements that follow know its
     /// condition is false.
     fn statements(&mut self, statements: &'ast [Statement<'arena>]) {
-        let known = self.smaller.len();
+        let known = self.known();
         for statement in statements {
             self.statement(statement);
             if let Statement::If(r#if) = statement
@@ -330,7 +313,23 @@ where
                 self.learn(r#if.condition, false);
             }
         }
-        self.smaller.truncate(known);
+        self.forget(known);
+    }
+
+    /// How many facts and rests the path knows, which `forget` returns to.
+    fn known(&self) -> (usize, usize) {
+        (self.facts.len(), self.rests.len())
+    }
+
+    fn forget(&mut self, (facts, rests): (usize, usize)) {
+        self.facts.truncate(facts);
+        self.rests.truncate(rests);
+    }
+
+    /// Learns what `condition` shows about the law's int parameters where it is `holds`.
+    fn learn(&mut self, condition: &Expression<'_>, holds: bool) {
+        let facts = smaller::facts(&*self, condition, holds);
+        self.facts.extend(facts);
     }
 
     fn statement(&mut self, statement: &'ast Statement<'arena>) {
@@ -345,18 +344,18 @@ where
                 if !body.else_if_clauses.is_empty() {
                     return self.refuse(statement.span());
                 }
-                let known = self.smaller.len();
+                let known = self.known();
                 self.learn(r#if.condition, true);
                 self.statement(body.statement);
-                self.smaller.truncate(known);
+                self.forget(known);
                 if let Some(clause) = &body.else_clause {
                     self.learn(r#if.condition, false);
                     self.statement(clause.statement);
-                    self.smaller.truncate(known);
+                    self.forget(known);
                 }
             }
             Statement::PatternMatch(r#match) => {
-                let subject = self.parameter(r#match.expression);
+                let subject = smaller::Parameters::parameter(self, r#match.expression).map(|(place, _)| place);
                 for arm in r#match.arms.iter() {
                     let (PatternMatchArm::Pattern(_) | PatternMatchArm::Default(_), PatternMatchArmBody::Block(block)) =
                         (arm, arm.body())
@@ -364,7 +363,7 @@ where
                         self.refuse(arm.span());
                         continue;
                     };
-                    let known = self.smaller.len();
+                    let known = self.known();
                     if let (PatternMatchArm::Pattern(arm), Some(subject)) = (arm, subject)
                         && let Pattern::List(list) = arm.pattern
                     {
@@ -377,11 +376,11 @@ where
                         if let Some(rest) = rest
                             && elements.count() > 0
                         {
-                            self.smaller.push(Smaller::Rest(subject, rest.value));
+                            self.rests.push((rest.value, subject));
                         }
                     }
                     self.statements(block.statements.as_slice());
-                    self.smaller.truncate(known);
+                    self.forget(known);
                 }
             }
             _ => match law_call(statement) {
@@ -402,8 +401,9 @@ where
     /// of the parameter every call of the law on itself makes smaller in the same way.
     fn call(&mut self, arguments: &'ast ArgumentList<'arena>, span: Span) {
         let values: Vec<&Expression<'arena>> = arguments.arguments.iter().map(|argument| argument.value()).collect();
-        let step =
-            values.iter().enumerate().find_map(|(place, value)| Some((place, self.step(&values, place, value)?)));
+        let step = smaller::smaller(&*self, &self.facts, &values)
+            .filter(|(smaller, _)| smaller.parameter == smaller.argument)
+            .map(|(smaller, _)| (smaller.parameter, smaller.step));
         let annotation = match (step, self.step) {
             (Some(step), None) => {
                 self.step = Some(step);
@@ -428,136 +428,6 @@ where
         );
     }
 
-    /// How `value`, the argument at `place` of a call of the law on itself among `values`, makes the parameter at
-    /// `place` smaller: it is the rest of its list pattern, or it is one step from it towards a bound, which a parameter
-    /// bound's own argument passes on unchanged.
-    fn step(&self, values: &[&Expression<'arena>], place: usize, value: &Expression<'arena>) -> Option<Step> {
-        let value = unparenthesized(value);
-        let passes_on = |bound: Bound| match bound {
-            Bound::Literal(_) => true,
-            Bound::Parameter(index) => values.get(index).is_some_and(|value| self.parameter(value) == Some(index)),
-        };
-        let down = match value {
-            Expression::ConstantAccess(name) => {
-                return self
-                    .smaller
-                    .iter()
-                    .any(|known| matches!(known, Smaller::Rest(parameter, rest) if *parameter == place && name.name.value() == *rest))
-                    .then_some(Step::Rest);
-            }
-            Expression::Binary(binary) => match binary.operator {
-                BinaryOperator::Subtraction(_)
-                    if literal(binary.rhs) == Some(1) && self.parameter(binary.lhs) == Some(place) =>
-                {
-                    true
-                }
-                BinaryOperator::Addition(_)
-                    if literal(binary.rhs) == Some(1) && self.parameter(binary.lhs) == Some(place) =>
-                {
-                    false
-                }
-                BinaryOperator::Addition(_)
-                    if literal(binary.lhs) == Some(1) && self.parameter(binary.rhs) == Some(place) =>
-                {
-                    false
-                }
-                _ => return None,
-            },
-            _ => return None,
-        };
-
-        self.smaller.iter().rev().find_map(|known| match *known {
-            Smaller::Down(parameter, bound) if down && parameter == place && passes_on(bound) => {
-                Some(Step::Down(bound))
-            }
-            Smaller::Up(parameter, bound) if !down && parameter == place && passes_on(bound) => Some(Step::Up(bound)),
-            _ => None,
-        })
-    }
-
-    /// Learns what `condition` tells of the law's int parameters where it is `holds`: a comparison of one with an int
-    /// literal or another int parameter, under `!`, `&&` where it holds, and `||` where it fails.
-    fn learn(&mut self, condition: &'ast Expression<'arena>, holds: bool) {
-        match unparenthesized(condition) {
-            Expression::UnaryPrefix(prefix) if matches!(prefix.operator, UnaryPrefixOperator::Not(_)) => {
-                self.learn(prefix.operand, !holds);
-            }
-            Expression::Binary(binary) => match binary.operator {
-                BinaryOperator::And(_) if holds => {
-                    self.learn(binary.lhs, true);
-                    self.learn(binary.rhs, true);
-                }
-                BinaryOperator::Or(_) if !holds => {
-                    self.learn(binary.lhs, false);
-                    self.learn(binary.rhs, false);
-                }
-                _ => {
-                    let learned = match (self.int_parameter(binary.lhs), self.int_parameter(binary.rhs)) {
-                        (Some(parameter), _) => self.bound(parameter, &binary.operator, binary.rhs, holds, false),
-                        (None, Some(parameter)) => self.bound(parameter, &binary.operator, binary.lhs, holds, true),
-                        (None, None) => None,
-                    };
-                    self.smaller.extend(learned);
-                }
-            },
-            _ => {}
-        }
-    }
-
-    /// What `parameter OPERATOR other`, or `other OPERATOR parameter` when `swapped`, shows where it is `holds`: that the
-    /// int parameter at `parameter` is above or below `other`, an int literal or another int parameter. A literal bound
-    /// takes `>=` and `<=` as one step past it, and a parameter only `>` and `<`, since a parameter may be the end of the
-    /// range, where one step further leaves it.
-    fn bound(
-        &self,
-        parameter: usize,
-        operator: &BinaryOperator,
-        other: &Expression<'arena>,
-        holds: bool,
-        swapped: bool,
-    ) -> Option<Smaller<'arena>> {
-        let (above, inclusive) = match (operator, swapped) {
-            (BinaryOperator::GreaterThan(_), false) | (BinaryOperator::LessThan(_), true) => (true, false),
-            (BinaryOperator::GreaterThanOrEqual(_), false) | (BinaryOperator::LessThanOrEqual(_), true) => (true, true),
-            (BinaryOperator::LessThan(_), false) | (BinaryOperator::GreaterThan(_), true) => (false, false),
-            (BinaryOperator::LessThanOrEqual(_), false) | (BinaryOperator::GreaterThanOrEqual(_), true) => {
-                (false, true)
-            }
-            _ => return None,
-        };
-        // Where the comparison fails, the opposite one holds: not `>` is `<=`.
-        let (above, inclusive) = if holds { (above, inclusive) } else { (!above, !inclusive) };
-        let bound = match (self.int_parameter(other), literal(other)) {
-            (Some(bound), _) if !inclusive && bound != parameter => Bound::Parameter(bound),
-            (_, Some(value)) => Bound::Literal(match (inclusive, above) {
-                (false, _) => value,
-                (true, true) => value.checked_sub(1)?,
-                (true, false) => value.checked_add(1)?,
-            }),
-            _ => return None,
-        };
-
-        Some(if above { Smaller::Down(parameter, bound) } else { Smaller::Up(parameter, bound) })
-    }
-
-    /// The place of the law's parameter `expression` names.
-    fn parameter(&self, expression: &Expression<'arena>) -> Option<usize> {
-        let Expression::ConstantAccess(name) = unparenthesized(expression) else {
-            return None;
-        };
-
-        self.law.parameter_list.parameters.iter().position(|parameter| {
-            parameter.variable.name.strip_prefix(b"$").unwrap_or(parameter.variable.name) == name.name.value()
-        })
-    }
-
-    /// The place of the law's `int` parameter `expression` names.
-    fn int_parameter(&self, expression: &Expression<'arena>) -> Option<usize> {
-        self.parameter(expression).filter(|place| {
-            matches!(self.law.parameter_list.parameters.as_slice()[*place].hint, Some(Hint::Integer(_)))
-        })
-    }
-
     fn refuse(&mut self, span: Span) {
         self.context.collector.report_with_code(
             IssueCode::InvalidLaw,
@@ -576,14 +446,29 @@ fn ends(statement: &Statement<'_>) -> bool {
     }
 }
 
-/// The value of `expression` when it is an int literal, negated or not.
-fn literal(expression: &Expression<'_>) -> Option<i64> {
-    match unparenthesized(expression) {
-        Expression::Literal(Literal::Integer(integer)) => integer.value.and_then(|value| i64::try_from(value).ok()),
-        Expression::UnaryPrefix(prefix) if matches!(prefix.operator, UnaryPrefixOperator::Negation(_)) => {
-            literal(prefix.operand)?.checked_neg()
-        }
-        _ => None,
+/// The law's parameters, by the names its body reads them by, and the rests of the list patterns on the path.
+impl<A> smaller::Parameters for BodyWalk<'_, '_, '_, '_, A>
+where
+    A: Arena,
+{
+    fn parameter(&self, expression: &Expression<'_>) -> Option<(usize, bool)> {
+        let Expression::ConstantAccess(name) = unparenthesized(expression) else {
+            return None;
+        };
+        let parameters = self.law.parameter_list.parameters.as_slice();
+        let place = parameters.iter().position(|parameter| {
+            parameter.variable.name.strip_prefix(b"$").unwrap_or(parameter.variable.name) == name.name.value()
+        })?;
+
+        Some((place, matches!(parameters[place].hint, Some(Hint::Integer(_)))))
+    }
+
+    fn rest_of(&self, expression: &Expression<'_>) -> Option<usize> {
+        let Expression::ConstantAccess(name) = expression else {
+            return None;
+        };
+
+        self.rests.iter().rev().find(|(rest, _)| *rest == name.name.value()).map(|(_, parameter)| *parameter)
     }
 }
 

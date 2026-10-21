@@ -28,13 +28,13 @@ use mago_syntax::cst::UnaryPrefixOperator;
 use crate::issues;
 use crate::reach::Reach;
 use crate::translate::Measure;
-use crate::translate::Step;
 use crate::translate::Unmodeled;
 use crate::translate::Use;
 use crate::translate::body::Body;
-use crate::translate::body::Fact;
 use crate::translate::body::indented;
 use crate::translate::names;
+use mago_analyzer::smaller::Fact;
+use mago_analyzer::smaller::Step;
 
 /// The theorem of a law, and what its errors name.
 #[derive(Debug, Clone, Default)]

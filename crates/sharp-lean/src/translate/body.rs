@@ -6,6 +6,10 @@
 
 use foldhash::HashMap;
 use foldhash::HashSet;
+use mago_analyzer::smaller;
+use mago_analyzer::smaller::Fact;
+use mago_analyzer::smaller::Smaller;
+use mago_analyzer::smaller::Step;
 use mago_codex::ttype::TType;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
@@ -54,9 +58,6 @@ use mago_word::ascii_lowercase_word;
 
 use crate::issues;
 use crate::reach::Reach;
-use crate::translate::Bound;
-use crate::translate::Smaller;
-use crate::translate::Step;
 use crate::translate::Unmodeled;
 use crate::translate::Use;
 use crate::translate::names;
@@ -79,14 +80,6 @@ pub(super) enum Kind {
 
 /// One branch of a choice: its statements, the last of which gives the branch's value.
 pub(super) type Branch = Vec<String>;
-
-/// What the conditions on the path to the code being translated show about an int parameter: a call may pass it
-/// one step towards `step`'s bound.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct Fact {
-    pub(crate) parameter: usize,
-    pub(crate) step: Step,
-}
 
 /// The translation of one body: its `do` statements, the declarations it uses, and each construct it cannot model.
 pub(crate) struct Body<'body, 'program> {
@@ -797,31 +790,9 @@ impl<'body, 'program> Body<'body, 'program> {
         self.parameters.iter().position(|(offset, _)| *offset == local.declaration.start.offset)
     }
 
-    /// What `condition` shows about the parameters where it is `holds`: a comparison of an int parameter with an int
-    /// literal or another parameter, under `!`, `&&` where it holds, and `||` where it fails.
+    /// What `condition` shows about the parameters where it is `holds`, by spec section 28's smaller value rule.
     pub(crate) fn facts(&self, condition: &Expression, holds: bool) -> Vec<Fact> {
-        match unparenthesized(condition) {
-            Expression::UnaryPrefix(UnaryPrefix { operator: UnaryPrefixOperator::Not(_), operand }) => {
-                self.facts(operand, !holds)
-            }
-            Expression::Binary(binary) => match binary.operator {
-                BinaryOperator::And(_) | BinaryOperator::LowAnd(_) if holds => {
-                    [self.facts(binary.lhs, true), self.facts(binary.rhs, true)].concat()
-                }
-                BinaryOperator::Or(_) if !holds => {
-                    [self.facts(binary.lhs, false), self.facts(binary.rhs, false)].concat()
-                }
-                _ => {
-                    let fact = match (self.int_parameter(binary.lhs), self.int_parameter(binary.rhs)) {
-                        (Some(parameter), _) => self.fact(parameter, &binary.operator, binary.rhs, holds, false),
-                        (None, Some(parameter)) => self.fact(parameter, &binary.operator, binary.lhs, holds, true),
-                        (None, None) => None,
-                    };
-                    fact.into_iter().collect()
-                }
-            },
-            _ => Vec::new(),
-        }
+        smaller::facts(self, condition, holds)
     }
 
     /// What a comparison pattern of `pattern`'s shows about the `match`'s subject, the parameter `parameter`, where
@@ -829,52 +800,12 @@ impl<'body, 'program> Body<'body, 'program> {
     fn pattern_facts(&self, parameter: Option<usize>, pattern: &Pattern, holds: bool) -> Vec<Fact> {
         match (parameter, pattern) {
             (Some(parameter), Pattern::Comparison(comparison)) if self.parameters[parameter].1 => {
-                self.fact(parameter, &comparison.operator, comparison.value, holds, false).into_iter().collect()
+                smaller::comparison(self, parameter, &comparison.operator, comparison.value, holds, false)
+                    .into_iter()
+                    .collect()
             }
             _ => Vec::new(),
         }
-    }
-
-    /// What `parameter OPERATOR other`, or `other OPERATOR parameter` when `swapped`, shows where it is `holds`: that
-    /// the parameter is above or below `other`, an int literal or another parameter. A literal bound takes `>=` and
-    /// `<=` as one step past it, and a parameter only `>` and `<`, since a parameter may be the end of the range, where
-    /// one step further leaves it.
-    fn fact(
-        &self,
-        parameter: usize,
-        operator: &BinaryOperator,
-        other: &Expression,
-        holds: bool,
-        swapped: bool,
-    ) -> Option<Fact> {
-        // (above, inclusive) for `parameter > other`, `>=`, `<`, `<=`.
-        let (above, inclusive) = match (operator, swapped) {
-            (BinaryOperator::GreaterThan(_), false) | (BinaryOperator::LessThan(_), true) => (true, false),
-            (BinaryOperator::GreaterThanOrEqual(_), false) | (BinaryOperator::LessThanOrEqual(_), true) => (true, true),
-            (BinaryOperator::LessThan(_), false) | (BinaryOperator::GreaterThan(_), true) => (false, false),
-            (BinaryOperator::LessThanOrEqual(_), false) | (BinaryOperator::GreaterThanOrEqual(_), true) => {
-                (false, true)
-            }
-            _ => return None,
-        };
-        // Where the comparison fails, the opposite one holds: not `>` is `<=`.
-        let (above, inclusive) = if holds { (above, inclusive) } else { (!above, !inclusive) };
-        let bound = match (self.int_parameter(other), literal(other)) {
-            (Some(bound), _) if !inclusive && bound != parameter => Bound::Parameter(bound),
-            (_, Some(value)) => Bound::Literal(match (inclusive, above) {
-                (false, _) => value,
-                (true, true) => value.checked_sub(1)?,
-                (true, false) => value.checked_add(1)?,
-            }),
-            _ => return None,
-        };
-
-        Some(Fact { parameter, step: if above { Step::Down(bound) } else { Step::Up(bound) } })
-    }
-
-    /// The int parameter `expression` reads, by position.
-    fn int_parameter(&self, expression: &Expression) -> Option<usize> {
-        self.parameter(expression).filter(|parameter| self.parameters[*parameter].1)
     }
 
     /// `translate` where the conditions on the path also show `facts`.
@@ -1269,57 +1200,18 @@ impl<'body, 'program> Body<'body, 'program> {
         self.bind(parts.join(" "))
     }
 
-    /// The smaller value a call of a method of the body's own class passes, and the pure term of an int one, which
-    /// cannot leave the `int` range where a condition showed it is above or below its bound: the rest of a list
-    /// parameter's list pattern, or an int parameter one step towards a bound, at the first argument that passes one.
+    /// The smaller value a call of a method of the body's own class passes, by spec section 28's smaller value rule,
+    /// and the pure term of an int one, which cannot leave the `int` range where a condition showed it is above or below
+    /// its bound.
     pub(crate) fn smaller(&self, list: &ArgumentList) -> Option<(Smaller, Option<String>)> {
         let arguments: Vec<&Expression> = list.arguments.iter().map(Argument::value).collect();
-        for (argument, value) in arguments.iter().enumerate() {
-            let value = unparenthesized(value);
-            if let Expression::ConstantAccess(name) = value
-                && let Some(Binding::Local(local)) = self.checked.names().binding(&name.name)
-                && let Some(&parameter) = self.rests.get(&local.declaration.start.offset)
-            {
-                return Some((Smaller { parameter, argument, step: Step::Rest }, None));
-            }
-            let Expression::Binary(binary) = value else {
-                continue;
-            };
-            let (operand, down) = match binary.operator {
-                BinaryOperator::Subtraction(_) if literal(binary.rhs) == Some(1) => (binary.lhs, true),
-                BinaryOperator::Addition(_) if literal(binary.rhs) == Some(1) => (binary.lhs, false),
-                BinaryOperator::Addition(_) if literal(binary.lhs) == Some(1) => (binary.rhs, false),
-                _ => continue,
-            };
-            let (Some(parameter), Expression::ConstantAccess(name)) =
-                (self.int_parameter(operand), unparenthesized(operand))
-            else {
-                continue;
-            };
-            // A parameter bound is the same value on every call, so the call passes it on unchanged.
-            let passes_on = |bound: Bound| match bound {
-                Bound::Literal(_) => true,
-                Bound::Parameter(index) => {
-                    arguments.get(index).is_some_and(|value| self.parameter(value) == Some(index))
-                }
-            };
-            let Some(fact) = self.facts.iter().rev().find(|fact| {
-                fact.parameter == parameter
-                    && match fact.step {
-                        Step::Down(bound) => down && passes_on(bound),
-                        Step::Up(bound) => !down && passes_on(bound),
-                        Step::Rest => false,
-                    }
-            }) else {
-                continue;
-            };
-            let name = names::identifier(name.name.value());
-            let term = if down { format!("({name} - 1)") } else { format!("({name} + 1)") };
+        let (smaller, operand) = smaller::smaller(self, &self.facts, &arguments)?;
+        let term = operand.map(|operand| {
+            let name = names::identifier(self.source(operand.span()).as_bytes());
+            if matches!(smaller.step, Step::Down(_)) { format!("({name} - 1)") } else { format!("({name} + 1)") }
+        });
 
-            return Some((Smaller { parameter, argument, step: fact.step }, Some(term)));
-        }
-
-        None
+        Some((smaller, term))
     }
 
     /// `new Class(…)`, which runs the class's constructor. A named constructor runs a body, which Mago does not
@@ -1728,6 +1620,27 @@ impl<'body, 'program> Body<'body, 'program> {
         self.temporaries += 1;
 
         format!("«${}»", self.temporaries)
+    }
+}
+
+/// The parameters of the method or the law being translated, by their bindings, and the rests of the list patterns on
+/// the path.
+impl smaller::Parameters for Body<'_, '_> {
+    fn parameter(&self, expression: &Expression<'_>) -> Option<(usize, bool)> {
+        let place = Body::parameter(self, expression)?;
+
+        Some((place, self.parameters[place].1))
+    }
+
+    fn rest_of(&self, expression: &Expression<'_>) -> Option<usize> {
+        let Expression::ConstantAccess(name) = expression else {
+            return None;
+        };
+        let Some(Binding::Local(local)) = self.checked.names().binding(&name.name) else {
+            return None;
+        };
+
+        self.rests.get(&local.declaration.start.offset).copied()
     }
 }
 
