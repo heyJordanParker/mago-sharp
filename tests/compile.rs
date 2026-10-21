@@ -2287,6 +2287,22 @@ fn compile_deletes_the_lean_package_once_no_law_remains() {
     assert_eq!(files_under(&root.join(".sharp")), [Path::new("app/Order.sharpc"), Path::new("listeners.php")]);
 }
 
+/// A `Money.lean` a 0.4.2 compile left beside `Money.sharp` is an ordinary unused file: the compile builds none of it,
+/// and the law it once proved is proven from `Money.sharp` alone.
+#[test]
+fn compile_reads_no_lean_file_beside_a_class_and_proves_its_law() {
+    let leftover = "import Code.App.Shared.Money\nopen Sharp\n\ntheorem addKeepsCurrency : App.Shared.Money.addKeepsCurrency := by\n  simp [App.Shared.Money.addKeepsCurrency, App.Shared.Money.add]\n";
+    let directory =
+        lawful_project(&[("app/Shared/Money.sharp", LAWFUL_MONEY), ("app/Shared/Money.lean", leftover)]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(compiled(root, "app/Shared/Money.sharp").exists());
+    assert_eq!(read(root, "app/Shared/Money.lean"), leftover);
+}
+
 #[test]
 fn compile_proves_a_law_an_edit_adds_from_the_sharp_file_alone() {
     let directory = lawful_project(&[("app/Shared/Money.sharp", LAWFUL_MONEY)]);
@@ -3036,8 +3052,9 @@ fn a_structure_rule_that_reaches_more_than_lean_checks_does_not_run() {
 /// cannot be built, which refuses each file that needs one, naming the root, and every other rule still runs. Each row
 /// is a project with `App\` in `app/`: the reviewer's helper in a `Code\Evil\` root that reaches `Rule.breaks`, a
 /// `code\` root whose module differs from a generated one only in case, so on a disk that ignores case both would build
-/// to one file, a `Std\Evil\` file that a `Module.lean` imports, a `Module.lean` and a Lean file nothing imports in a
-/// `Code\Evil\` root inside `app/`, and a law there, which needs no Lean file of the project and is proven.
+/// to one file, a `Std\Evil\` file that a `Module.lean` imports, a `Module.lean` in a `Code\Evil\` root inside `app/`
+/// beside a Lean file nothing imports, which is never read, and a law there, which needs no Lean file of the project and
+/// is proven.
 #[test]
 fn a_lean_file_under_a_root_lean_or_mago_owns_is_refused_and_every_other_rule_runs() {
     let outside = "{\"autoload\": {\"psr-4\": {\"App\\\\\": \"app/\", \"Code\\\\Evil\\\\\": \"code-evil/\", \"Std\\\\Evil\\\\\": \"std-evil/\"}}}\n";
@@ -3106,10 +3123,6 @@ fn a_lean_file_under_a_root_lean_or_mago_owns_is_refused_and_every_other_rule_ru
                 ("app/Evil/Helper.lean", "def Code.Evil.Helper.answer : Nat := 42\n"),
             ],
             vec![
-                format!(
-                    "app/Evil/Thing.sharp:1:11:error - broken-rule: {}.",
-                    owned("Code", "Code\\Evil\\", "app/Evil/Helper.lean")
-                ),
                 format!(
                     "app/Evil/Thing.sharp:1:11:error - broken-rule: {}.",
                     owned("Code", "Code\\Evil\\", "app/Evil/Module.lean")
@@ -3347,29 +3360,23 @@ fn a_module_lean_that_lean_rejects_refuses_every_file_of_its_namespace() {
 }
 
 /// The design note's decision 3: a rule constrains the namespace of the `Module.lean` that holds it, so a `@[rule]` in
-/// any other Lean file is a Lean error at the attribute. In a Lean file that nothing imports it refuses each file of its
-/// folder's namespace, and in one a `Module.lean` imports each file that `Module.lean`'s rules judge, naming the file
-/// and its error.
+/// any other Lean file a `Module.lean` imports is a Lean error at the attribute, on each file that `Module.lean`'s rules
+/// judge, naming the file and its error. A Lean file that nothing imports is never read, so it refuses nothing.
 #[test]
 fn a_structure_rule_outside_a_module_lean_is_refused_at_its_attribute() {
     let rule = "@[rule] def neverReachesTenant : Rule := .neverImports App.Tenant";
     let stray = format!("import Code.App.Shared.Rules\nopen Sharp\n\n{rule}\n");
     let attribute = "`@[rule]` belongs in a Module.lean: a structure rule constrains the namespace of the Module.lean that holds it";
     for (files, refused) in [
-        (
-            vec![("app/Shared/Rules.lean", stray.as_str())],
-            format!(
-                "app/Shared/Ledger.sharp:1:11:error - broken-rule: This file is in App.Shared, and Lean rejected app/Shared/Rules.lean line 4, column 3: {attribute}."
-            ),
-        ),
+        (vec![("app/Shared/Rules.lean", stray.as_str())], vec![]),
         (
             vec![
                 ("app/Shared/Rules.lean", stray.as_str()),
                 ("app/Shared/Module.lean", "import Code.App.Shared.Module\nimport App.Shared.Rules\nopen Sharp\n"),
             ],
-            format!(
+            vec![format!(
                 "app/Shared/Ledger.sharp:1:11:error - broken-rule: This file is in App.Shared, whose structure rules app/Shared/Module.lean holds, and app/Shared/Module.lean imports app/Shared/Rules.lean, which Lean rejected at line 4, column 3: {attribute}."
-            ),
+            )],
         ),
     ] {
         let mut all = vec![("app/Shared/Ledger.sharp", LEDGER), ("app/Tenant/Store/Receipts.sharp", RECEIPTS)];
@@ -3378,16 +3385,14 @@ fn a_structure_rule_outside_a_module_lean_is_refused_at_its_attribute() {
 
         let output = compile_lines(directory.path());
 
-        assert_eq!(issue_lines(&output), [refused], "{files:?}: {}", printed(&output));
+        assert_eq!(issue_lines(&output), refused, "{files:?}: {}", printed(&output));
     }
 }
 
 /// Spec section 27: "At deploy, `mago compile` checks every rule exactly." Each `.sharpc` lists the `Module.lean` of
 /// its folder and of each folder above it and every workspace Lean file they import, so any edit that changes a rule
-/// makes the files it judges stale, and the compile checks every rule again over the facts of every file. A Lean file
-/// that no Lean file imports is listed by no `.sharpc`, and the compile checks again when one joins or changes, so a
-/// `@[rule]` written there is refused at once. Each row is an edit to a project that compiled, and the next compile
-/// refuses exactly the files a compile from nothing refuses.
+/// makes the files it judges stale, and the compile checks every rule again over the facts of every file. Each row is
+/// an edit to a project that compiled, and the next compile refuses exactly the files a compile from nothing refuses.
 #[test]
 fn compile_checks_every_rule_exactly_after_any_edit() {
     let fine = rules("App.Shared", "");
@@ -3422,19 +3427,6 @@ fn compile_checks_every_rule_exactly_after_any_edit() {
     );
     let closing = class("App.C", "Z", "import App.A.X;\n\n");
     let forbidding = "app/Shared/Ledger.sharp:3:8:error - broken-rule: This import of App.Tenant.Store.Receipts breaks the structure rule neverReachesForbidden in app/Shared/Module.lean.";
-    let unreached = |declaration: &str| format!("import Code.App.Shared.Rules\nopen Sharp\n\n{declaration}\n");
-    let (helper, straying) = (
-        unreached("def helper : Nat := 1"),
-        unreached("@[rule] def neverReachesTenant : Rule := .neverImports App.Tenant"),
-    );
-    let refused_at_attribute = |file: &str| {
-        format!(
-            "{file}:1:11:error - broken-rule: This file is in App.Shared, and Lean rejected app/Shared/Rules.lean line 4, column 3: `@[rule]` belongs in a Module.lean: a structure rule constrains the namespace of the Module.lean that holds it."
-        )
-    };
-    let attributes =
-        [refused_at_attribute("app/Shared/Ledger.sharp"), refused_at_attribute("app/Shared/Schema/Entity.sharp")];
-    let attributes: Vec<&str> = attributes.iter().map(String::as_str).collect();
     for (files, edits, refused) in [
         (
             vec![("app/Shared/Module.lean", fine.as_str())],
@@ -3494,16 +3486,6 @@ fn compile_checks_every_rule_exactly_after_any_edit() {
             vec![
                 "app/Tenant/Ledger.sharp:3:8:error - broken-rule: This import of App.Tenant.Store.Receipts breaks the structure rule neverReachesStore in app/Tenant/Module.lean.",
             ],
-        ),
-        (
-            vec![("app/Shared/Module.lean", fine.as_str())],
-            vec![("app/Shared/Rules.lean", Some(straying.as_str()))],
-            attributes.clone(),
-        ),
-        (
-            vec![("app/Shared/Module.lean", fine.as_str()), ("app/Shared/Rules.lean", helper.as_str())],
-            vec![("app/Shared/Rules.lean", Some(straying.as_str()))],
-            attributes,
         ),
     ] {
         let mut all = vec![("app/Tenant/Store/Module.lean", open.as_str())];

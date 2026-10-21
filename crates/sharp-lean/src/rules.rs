@@ -6,10 +6,8 @@ use std::fmt::Write;
 use std::fs;
 use std::io;
 use std::path::Path;
-use std::path::PathBuf;
 
 use foldhash::HashMap;
-use foldhash::HashSet;
 use mago_database::file::FileId;
 use mago_reporting::IssueCollection;
 use mago_sharp_bridge::unit;
@@ -44,9 +42,6 @@ pub(crate) enum Role {
     /// A Lean file a `Module.lean` imports, directly or through other Lean files. Lean's error in it is reported on the
     /// files of each namespace whose `Module.lean` imports it.
     Imported,
-    /// A Lean file in a PSR-4 folder that is no `Module.lean` and that no Lean file imports. It is built so that a
-    /// `@[rule]` in it is an error.
-    Unreached,
 }
 
 /// A Lean file of the workspace that cannot be built, which refuses each `.sharp` file under its folder.
@@ -97,9 +92,9 @@ pub fn rules_files(root: &Path, name: &[u8]) -> io::Result<Vec<Vec<u8>>> {
 }
 
 /// Every Lean file of the workspace the structure rules step builds, in path order: each of the `rules_files` of the
-/// `.sharp` files of `translations` outside `vendor/`, and each unreached Lean file in a PSR-4 folder of `roots`. Also
-/// returns each Lean file that cannot be built: each `Module.lean` of those `rules_files` that no PSR-4 folder names a
-/// module for, and each Lean file in a PSR-4 folder under a root Lean or Mago owns.
+/// `.sharp` files of `translations` outside `vendor/`. No other Lean file of the workspace is read. Also returns each of
+/// those files that cannot be built: a `Module.lean` that no PSR-4 folder names a module for, and a file in a PSR-4
+/// folder under a root Lean or Mago owns.
 pub(crate) fn find(
     root: &Path,
     roots: &[Root],
@@ -116,7 +111,11 @@ pub(crate) fn find(
     let mut unbuilt = Vec::new();
     for path in paths {
         let file = root.join(&path);
-        if !file.is_file() || package::owned_root(roots, &file).is_some() {
+        if !file.is_file() {
+            continue;
+        }
+        if let Some(folder) = package::owned_root(roots, &file) {
+            unbuilt.push(Unbuilt::Owned(path, folder.namespace.clone()));
             continue;
         }
         let role = if is_module_lean(&path) { Role::Rules } else { Role::Imported };
@@ -127,51 +126,11 @@ pub(crate) fn find(
         }
     }
 
-    let vendor = root.join("vendor");
-    let mut walked = Vec::new();
-    for linked in package::linked_roots(roots) {
-        walk(&linked.directory, &vendor, &mut walked)?;
-    }
-    let mut imported = HashSet::default();
-    for file in &walked {
-        imported.extend(imports(&fs::read_to_string(file)?).map(|(_, import)| import.to_owned()));
-    }
-    for file in walked {
-        let Ok(relative) = file.strip_prefix(root) else {
-            continue;
-        };
-        let path = slashed(relative);
-        let Some(module) = package::workspace_module(roots, &file) else {
-            continue;
-        };
-        if is_module_lean(&path)
-            || imported.contains(&module)
-            || package::owned_root(roots, &file).is_some()
-            || found.iter().any(|found| found.path == path)
-        {
-            continue;
-        }
-        found.push(lean_file(path, module, Role::Unreached));
-    }
-    found.sort_by(|a, b| a.path.cmp(&b.path));
-
-    let mut owned = Vec::new();
-    for folder in package::owned_roots(roots).filter(|owned| owned.directory.is_dir()) {
-        walk(&folder.directory, &vendor, &mut owned)?;
-    }
-    owned.sort();
-    owned.dedup();
-    for file in owned {
-        if let (Ok(relative), Some(folder)) = (file.strip_prefix(root), package::owned_root(roots, &file)) {
-            unbuilt.push(Unbuilt::Owned(slashed(relative), folder.namespace.clone()));
-        }
-    }
-
     Ok((found, unbuilt))
 }
 
-/// Each of `files` with the hash of its source, one per line. The structure rules check reads them, and an unreached
-/// Lean file is the input of no `.sharpc`, so the check runs again whenever they differ from what the last check read.
+/// Each of `files` with the hash of its source, one per line. The structure rules check reads them, so it runs again
+/// whenever they differ from what the last check read.
 pub(crate) fn sources(root: &Path, files: &[LeanFile]) -> io::Result<String> {
     let mut sources = String::new();
     for file in files {
@@ -184,14 +143,14 @@ pub(crate) fn sources(root: &Path, files: &[LeanFile]) -> io::Result<String> {
     Ok(sources)
 }
 
-/// Whether `file` judges `translation`: `file` is a `Module.lean` or an unreached Lean file, and `translation`'s
-/// namespace is the namespace of its folder or sits inside it.
+/// Whether `file` judges `translation`: `file` is a `Module.lean`, and `translation`'s namespace is the namespace of its
+/// folder or sits inside it.
 pub(crate) fn judges(file: &LeanFile, translation: &Translation) -> bool {
-    file.role != Role::Imported && under(&translation.facts.namespace, &file.namespace)
+    file.role == Role::Rules && under(&translation.facts.namespace, &file.namespace)
 }
 
-/// Builds every one of `files` in `package`, refuses every file under the namespace of a `Module.lean` or an unreached
-/// Lean file Lean rejects, and runs every rule of the other `Module.lean` files over the facts of every file of
+/// Builds every one of `files` in `package`, refuses every file under the namespace of a `Module.lean` Lean rejects,
+/// and runs every rule of the other `Module.lean` files over the facts of every file of
 /// `translations`. A rule the runner does not run refuses every file its `Module.lean` judges. `root` is the
 /// workspace's, and `roots` its PSR-4 folders.
 pub(crate) fn check(
@@ -337,25 +296,6 @@ fn file_in(root: &Path, folder: &Root, module: &str) -> Option<String> {
     let file = rest.split('.').fold(folder.directory.clone(), |path, name| path.join(name)).with_extension("lean");
 
     Some(slashed(file.strip_prefix(root).ok()?))
-}
-
-/// Each `.lean` file under `folder`, apart from hidden entries, linked folders and the `vendor` folder.
-fn walk(folder: &Path, vendor: &Path, found: &mut Vec<PathBuf>) -> io::Result<()> {
-    for entry in fs::read_dir(folder)? {
-        let entry = entry?;
-        let path = entry.path();
-        let kind = entry.file_type()?;
-        if entry.file_name().to_string_lossy().starts_with('.') || path == vendor {
-            continue;
-        }
-        if kind.is_dir() {
-            walk(&path, vendor, found)?;
-        } else if path.extension().is_some_and(|extension| extension == "lean") {
-            found.push(path);
-        }
-    }
-
-    Ok(())
 }
 
 /// `path` with `/` separators.
