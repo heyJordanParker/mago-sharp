@@ -132,6 +132,21 @@ theorem toInt_add_one {x : int} (h : x.toInt < 9223372036854775807) : (x + 1).to
   have := toInt_bounds x
   rw [Int64.toInt_add, Int.bmod_eq_of_le] <;> simp <;> omega
 
+/-- A List's `count()`. No list PHP holds has more elements than an `int` counts, so a longer Lean list counts
+`PHP_INT_MAX`, and every count is a value that can be read anywhere, in a lambda as in a condition. -/
+def count {α : Type} (l : List α) : int := Int64.ofNat (min l.length 9223372036854775807)
+
+@[simp] theorem toInt_count {α : Type} (l : List α) :
+    (count l).toInt = min (l.length : Int) 9223372036854775807 := by
+  unfold count
+  rw [Int64.toInt_ofNat_of_lt (by omega)]
+  omega
+
+/-! A count is the list's length wherever the length is known to fit an `int`: for a list the law writes out, and
+under a condition that bounds it. -/
+
+attribute [simp] Int.le_min Int.min_eq_left
+
 end int
 
 /-- Proves a recursive call's argument smaller than the value it replaces, in the measure `termination_by` names: an

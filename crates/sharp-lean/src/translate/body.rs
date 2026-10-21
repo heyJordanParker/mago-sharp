@@ -1247,9 +1247,9 @@ impl<'body, 'program> Body<'body, 'program> {
         types.peek().is_some() && types.all(TAtomic::is_list)
     }
 
-    /// A `List` method a law reasons about, as the Lean function it is: `count()` is `List.length`, and `map` and
-    /// `filter` of a lambda are `List.map` and `List.filter`. Every other method of a collection is refused by name.
-    /// No list PHP holds has more elements than an `int` counts, so a longer Lean list's count throws.
+    /// A `List` method a law reasons about, as the Lean function it is: `count()` is `int.count`, the list's length,
+    /// and `map` and `filter` of a lambda are `List.map` and `List.filter`. Every other method of a collection is
+    /// refused by name.
     fn list_call(&mut self, expression: &Expression, call: &MethodCall) -> String {
         let Some(method) = self.method_name(&call.method) else {
             return "default".to_owned();
@@ -1259,7 +1259,7 @@ impl<'body, 'program> Body<'body, 'program> {
             (b"count", 0) => {
                 let list = self.value(call.object);
 
-                self.bind(format!("int.ofInt (List.length {list})"))
+                format!("(int.count {list})")
             }
             (b"map" | b"filter", 1) => {
                 let list = self.value(call.object);

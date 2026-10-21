@@ -4184,6 +4184,15 @@ fn compile_proves_a_law_over_a_spread() {
     );
 }
 
+/// `count()` is a value, so a lambda, a `when` guard and a `?:` condition read it.
+#[test]
+fn compile_proves_a_law_over_a_count_in_a_lambda_a_guard_and_a_condition() {
+    assert_proven(
+        "Lists",
+        "namespace App.Shared;\n\npublic class Lists\n{\n    public static List<List<int>> nonEmpty(List<List<int>> lists) => lists.filter(list => list.count() > 0);\n\n    public static int size(List<int> xs) => match (xs) {\n        [int first, ...] when xs.count() > 2 => first,\n        default => xs.count() > 1 ? 1 : 0,\n    };\n\n    law dropsEmpty(int unused) => Lists.nonEmpty([[1], [2, 3]]).count() == 2;\n    law longFirst(int unused) => Lists.size([5, 6, 7]) == 5;\n    law shortIsOne(int unused) => Lists.size([5, 6]) == 1;\n}\n",
+    );
+}
+
 /// A loop that only counts is the list's length.
 #[test]
 fn compile_proves_a_law_over_a_counting_loop() {
