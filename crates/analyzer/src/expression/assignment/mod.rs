@@ -55,6 +55,7 @@ use crate::context::scope::var_has_root;
 use crate::context::scope::var_references_dynamic;
 use crate::effects::summary::record_function_values;
 use crate::error::AnalysisError;
+use crate::expression::access::analyze_rest_of_chain;
 use crate::expression::array::check_sharp_literal_kind;
 use crate::expression::array::get_empty_literal_type;
 use crate::expression::array::get_set_literal_type;
@@ -95,7 +96,9 @@ pub(crate) mod static_property_assignment;
 
 /// Runs `read`, the read of `target` by an assignment operation, `+=`, `??=`, `++` or `--`, and returns what it reported
 /// in a PHP# file for [`write_after_read`]. A PHP# write through `?.` happens only where every `?.` receiver on its left
-/// is not null, spec section 14.4, so its read of `target` is never the `null` those links give.
+/// is not null, spec section 14.4, so its read of `target` is never the `null` those links give, and may run where the
+/// receivers read as not null. The write judges each `?.` of `target` with the receivers' own types, so the read
+/// reports none of them as redundant.
 pub(crate) fn read_before_write<'ctx, 'arena, A, T>(
     context: &mut Context<'ctx, 'arena, A>,
     artifacts: &mut AnalysisArtifacts,
@@ -112,6 +115,13 @@ where
     let outer_target = artifacts.null_safe_write_target.replace(target.span());
     let (result, issues) = context.record(|context| read(context, artifacts));
     artifacts.null_safe_write_target = outer_target;
+    let issues: IssueCollection = issues
+        .into_iter()
+        .filter(|issue| {
+            issue.code.as_deref() != Some(IssueCode::RedundantNullsafeOperator.as_str())
+                || issue.primary_span().is_none_or(|span| !target.span().contains(&span.start))
+        })
+        .collect();
     context.collector.extend(issues.iter().cloned());
 
     (result, Some(issues))
@@ -259,7 +269,15 @@ where
                     declared_target_type(target_expression, target_variable_id.as_ref(), context, block_context);
                 expect_type(context, artifacts, source_expression, declared_type.as_deref());
 
-                source_expression.analyze(context, block_context, artifacts)?;
+                let analyzed = analyze_rest_of_chain(
+                    context,
+                    block_context,
+                    artifacts,
+                    target_expression,
+                    false,
+                    |context, block_context, artifacts| source_expression.analyze(context, block_context, artifacts),
+                );
+                analyzed?;
             }
             // this rewrites $a += 4 and $a ??= 4 to $a = $a + 4 and $a = $a ?? 4 respectively
             Some(assignment_operator) => {
@@ -290,7 +308,16 @@ where
 
                 let (analyzed, read) =
                     read_before_write(context, artifacts, target_expression, |context, artifacts| {
-                        binary_expression.analyze(context, block_context, artifacts)
+                        analyze_rest_of_chain(
+                            context,
+                            block_context,
+                            artifacts,
+                            target_expression,
+                            false,
+                            |context, block_context, artifacts| {
+                                binary_expression.analyze(context, block_context, artifacts)
+                            },
+                        )
                     });
                 analyzed?;
                 read_issues = read;

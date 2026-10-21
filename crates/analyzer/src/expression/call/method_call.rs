@@ -46,6 +46,7 @@ use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::effects::check::check_foreign_static_write;
 use crate::error::AnalysisError;
+use crate::expression::access::analyze_rest_of_chain;
 use crate::expression::access::analyze_through_value;
 use crate::expression::access::refuse_statics_of_no_class;
 use crate::expression::array_access::check_change_through_index;
@@ -352,16 +353,25 @@ where
     if let Some(extension) = method_resolution.extension {
         context.collector.extend(receiver_issues);
 
-        return analyze_extension_access(
+        return analyze_rest_of_chain(
             context,
             block_context,
             artifacts,
-            extension,
             object,
-            type_arguments,
-            Some(argument_list),
             is_null_safe,
-            span,
+            |context, block_context, artifacts| {
+                analyze_extension_access(
+                    context,
+                    block_context,
+                    artifacts,
+                    extension,
+                    object,
+                    type_arguments,
+                    Some(argument_list),
+                    is_null_safe,
+                    span,
+                )
+            },
         );
     }
 
@@ -531,19 +541,28 @@ where
 
     let lacks_sharp_method = method_resolution.lacks_sharp_method;
     if has_resolved_methods || method_resolution.undocumented_methods.is_empty() {
-        analyze_invocation_targets(
+        analyze_rest_of_chain(
             context,
             block_context,
             artifacts,
-            method_resolution.template_result,
-            invocation_targets,
-            InvocationArgumentsSource::ArgumentList(argument_list),
-            span,
-            this_variable,
-            method_resolution.has_invalid_target,
-            method_resolution.encountered_mixed,
-            is_null_safe && method_resolution.encountered_null,
-            artifacts.get_expression_type(object).is_some_and(|t| t.has_nullsafe_null()),
+            object,
+            is_null_safe,
+            |context, block_context, artifacts| {
+                analyze_invocation_targets(
+                    context,
+                    block_context,
+                    artifacts,
+                    method_resolution.template_result,
+                    invocation_targets,
+                    InvocationArgumentsSource::ArgumentList(argument_list),
+                    span,
+                    this_variable,
+                    method_resolution.has_invalid_target,
+                    method_resolution.encountered_mixed,
+                    is_null_safe && method_resolution.encountered_null,
+                    artifacts.get_expression_type(object).is_some_and(|t| t.has_nullsafe_null()),
+                )
+            },
         )?;
     }
 
@@ -584,16 +603,25 @@ where
     }
 
     if !method_resolution.undocumented_methods.is_empty() {
-        analyze_undocumented_method_return_type(
+        analyze_rest_of_chain(
             context,
             block_context,
             artifacts,
-            method_resolution.undocumented_methods,
-            undocumented_template_result.as_ref().expect("undocumented calls have a template result"),
-            argument_list,
-            span,
-            MethodInvocationKind::Instance,
-            !has_resolved_methods,
+            object,
+            is_null_safe,
+            |context, block_context, artifacts| {
+                analyze_undocumented_method_return_type(
+                    context,
+                    block_context,
+                    artifacts,
+                    method_resolution.undocumented_methods,
+                    undocumented_template_result.as_ref().expect("undocumented calls have a template result"),
+                    argument_list,
+                    span,
+                    MethodInvocationKind::Instance,
+                    !has_resolved_methods,
+                )
+            },
         )?;
     }
 

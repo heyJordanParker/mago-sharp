@@ -828,6 +828,61 @@ fn null_safe_access_skips_the_rest_of_its_chain_through_an_index() {
     );
 }
 
+/// Spec section 14.4: a null receiver skips the rest of its chain, the arguments and indexes after its `?.` and the
+/// value a write through it stores included, so they read the receiver as not null, as C# does, and a `?.` on it there
+/// is redundant. A call in them that may change `this.current` ends that for it. After the chain the receiver may be
+/// null again, whatever the skipped part tested or wrote. Plain PHP keeps mago's own reading.
+#[test]
+fn a_null_safe_receiver_is_not_null_in_the_rest_of_its_chain() {
+    let sharp = "namespace Demo;\n\nimport App.Shared.Text.TextExtensions;\nimport Lib.Magic;\n\nclass Router\n{\n    public string route(string label) => label;\n    public string label() => \"router\";\n}\n\npublic abstract class Shape\n{\n    public string draw(string kind) => kind;\n    public string name() => \"shape\";\n    public string check(bool flag) => \"\";\n}\n\npublic class Square : Shape\n{\n}\n\nclass Step\n{\n    public const int MAX = 3;\n    public string title { get; set; } = \"\";\n    public string? note { get; set; } = null;\n    public int count { get; set; } = 0;\n    public Router child { get; } = new Router();\n    public Router? spare { get; set; } = null;\n    public List<string> items { get; set; } = [];\n    public string label() => this.title;\n    public int index() => 0;\n    public string route(string label) => label;\n    public string join(string first, string second) => `${first}${second}`;\n    public void run(Function<void()> action) { action(); }\n    public static int twice(int value) => value * 2;\n}\n\nclass Flow\n{\n    private Step? current = null;\n\n    public void start(Step step) { this.current = step; }\n    public string reset() { this.current = null; return \"\"; }\n\n    public string? call(Step? step) => step?.route(step.label());\n    public string? chain(Step? step) => step?.child.route(step.label());\n    public string? index(Step? step) => step?.items[step.index()];\n    public string? field() => this.current?.route(this.current.label());\n    public string? fieldIndex() => this.current?.items[this.current.index()];\n    public string? reread() => this.current?.join(this.reset(), this.current.label());\n    public string? spareChild(Step? step) => step?.spare?.route(step.spare.label());\n    public string? extension(string? title) => title?.slug(title);\n    public void magic(Magic? magic) { magic?.anything(magic.name()); }\n\n    public int? classValue(bool flag)\n    {\n        const type = flag ? typeof(Step) : null;\n        return type?.twice(type.MAX);\n    }\n\n    public void writes(Step? step)\n    {\n        step?.title = step.label();\n        step?.items[step.index()] = \"x\";\n        step?.note ??= step.label();\n    }\n\n    public string? redundant(Step? step) => step?.route(step?.label() ?? \"\");\n\n    public void known(Step known)\n    {\n        known?.note ??= known.label();\n        known?.title += known.label();\n        known?.items[known.index()] = \"x\";\n        known?.count++;\n        --known?.count;\n    }\n\n    public string after(Step? step)\n    {\n        step?.route(\"x\");\n        return step.label();\n    }\n\n    public string afterTypeTest(Shape? shape)\n    {\n        shape?.draw(shape is Square ? \"square\" : \"other\");\n        return shape.name();\n    }\n\n    public string afterMatch(Shape? shape, bool flag)\n    {\n        shape?.draw(match (flag) { true => (shape = new Square()).name(), default => \"other\" });\n        return shape.name();\n    }\n\n    public string afterOr(Shape? shape, bool a, bool b, bool c, bool d)\n    {\n        shape?.check(a || b || c || d || shape is Square);\n        return shape.name();\n    }\n\n    public string afterLambda(Step? step)\n    {\n        step?.run(() => { step = new Step(); });\n        return step.label();\n    }\n\n    public string afterReference(Step? step)\n    {\n        step?.route(Magic.clear(step));\n        return step.label();\n    }\n\n    public string afterProperty(Step? step)\n    {\n        step?.route(step.title);\n        return step.title;\n    }\n\n    public string afterField()\n    {\n        this.current?.route(this.current.title);\n        return this.current.title;\n    }\n}\n";
+    let magic = "<?php\n\nnamespace Lib;\n\nfinal class Magic\n{\n    public function name(): string\n    {\n        return 'm';\n    }\n\n    public function __call(string $method, array $arguments): mixed\n    {\n        return null;\n    }\n\n    public static function clear(?object &$value): string\n    {\n        $value = null;\n\n        return '';\n    }\n}\n";
+
+    assert_eq!(
+        issues(
+            ("src/Demo/Flow.sharp", sharp),
+            &[("src/App/Shared/Text/TextExtensions.sharp", TEXT_EXTENSIONS), ("src/Lib/Magic.php", magic)]
+        ),
+        [
+            "52:65 possible-method-access-on-null",
+            "52:65 mixed-argument",
+            "55:46 non-documented-method",
+            "70:61 redundant-nullsafe-operator",
+            "70:57 redundant-null-coalesce",
+            "74:14 redundant-nullsafe-operator",
+            "75:14 redundant-nullsafe-operator",
+            "76:14 redundant-nullsafe-operator",
+            "77:14 redundant-nullsafe-operator",
+            "78:16 redundant-nullsafe-operator",
+            "84:16 possible-method-access-on-null",
+            "84:16 mixed-return-statement",
+            "90:16 possible-method-access-on-null",
+            "90:16 mixed-return-statement",
+            "96:16 possible-method-access-on-null",
+            "96:16 mixed-return-statement",
+            "102:16 possible-method-access-on-null",
+            "102:16 mixed-return-statement",
+            "108:16 possible-method-access-on-null",
+            "108:16 mixed-return-statement",
+            "114:16 possible-method-access-on-null",
+            "114:21 ambiguous-object-method-access",
+            "114:16 mixed-return-statement",
+            "120:16 possibly-null-property-access",
+            "120:16 nullable-return-statement",
+            "120:16 invalid-return-statement",
+            "126:16 possibly-null-property-access",
+            "126:16 nullable-return-statement",
+            "126:16 invalid-return-statement",
+        ]
+    );
+
+    let php = "<?php\n\nnamespace Demo;\n\nfinal class Step\n{\n    public function label(): string\n    {\n        return 'step';\n    }\n\n    public function route(string $label): string\n    {\n        return $label;\n    }\n\n    public static function next(?self $step): ?string\n    {\n        return $step?->route($step->label());\n    }\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Step.php", php), &[]),
+        ["19:30 possible-method-access-on-null", "19:30 mixed-argument"]
+    );
+}
+
 /// Spec section 14.4: a write through `?.` that a null receiver skips leaves the member as it was, so a read through the
 /// same `?.` after it may be null, in every write form, as it is with no write before it.
 #[test]
