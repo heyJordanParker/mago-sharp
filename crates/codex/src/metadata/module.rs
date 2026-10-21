@@ -23,6 +23,9 @@ pub struct ModuleMetadata {
     /// module.
     pub namespace: Word,
     pub kind: ModuleKind,
+    /// The namespaces its `imports` line lists, each by its full name as written and with where it is written. Empty
+    /// when it has no `imports` line, and then its namespace imports from any namespace.
+    pub imports: Vec<(Word, Span)>,
     /// Its bindings, in the order it declares them.
     pub bindings: Vec<BindingMetadata>,
 }

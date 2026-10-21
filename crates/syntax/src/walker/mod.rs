@@ -122,6 +122,7 @@ use crate::cst::cst::IfStatementBody;
 use crate::cst::cst::IfStatementBodyElseClause;
 use crate::cst::cst::IfStatementBodyElseIfClause;
 use crate::cst::cst::Implements;
+use crate::cst::cst::Imports;
 use crate::cst::cst::IncludeConstruct;
 use crate::cst::cst::IncludeOnceConstruct;
 use crate::cst::cst::IndirectVariable;
@@ -706,9 +707,20 @@ generate_ast_walker! {
 
     'arena ModuleMember as module_member => {
         match module_member {
+            ModuleMember::Imports(imports) => walker.walk_imports(imports, context),
             ModuleMember::Law(law) => walker.walk_law(law, context),
             ModuleMember::Binding(binding) => walker.walk_binding(binding, context),
         }
+    }
+
+    'arena Imports as imports => {
+        walker.walk_keyword(&imports.imports, context);
+
+        for namespace in &imports.namespaces {
+            walker.walk_identifier(namespace, context);
+        }
+
+        walker.walk_terminator(&imports.terminator, context);
     }
 
     'arena Binding as binding => {

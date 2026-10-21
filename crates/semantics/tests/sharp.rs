@@ -284,6 +284,47 @@ fn a_module_that_overrides_another_states_no_laws() {
     }
 }
 
+/// Spec section 32: a folder's `Module.sharp` lists its namespace's imports on one `imports` line, which never lists
+/// `Sharp`, the standard library every namespace imports from. An environment or test module only overrides
+/// services, so it lists none.
+#[test]
+fn a_module_lists_its_imports_once_in_its_folders_module_sharp() {
+    for (path, header, members, expected) in [
+        ("app/Shop/Module.sharp", "", "    imports App.Mail, Illuminate.Support;", vec![]),
+        (
+            "app/Shop/Module.sharp",
+            "",
+            "    imports App.Mail;\n    imports Illuminate.Support;",
+            vec!["6:5 The module already lists its imports: list every namespace on one `imports` line."],
+        ),
+        (
+            "app/Shop/Module.sharp",
+            "",
+            "    imports App.Mail, Sharp.Text, Sharp;",
+            vec![
+                "5:23 Every namespace imports from `Sharp`, the standard library: remove `Sharp.Text` from the list.",
+                "5:35 Every namespace imports from `Sharp`, the standard library: remove `Sharp` from the list.",
+            ],
+        ),
+        (
+            "app/Shop/Module.Production.sharp",
+            " : App.Shop",
+            "    imports App.Mail;",
+            vec!["5:5 A module that overrides another lists no imports: list them in its folder's Module.sharp."],
+        ),
+        (
+            "app/Shop/CheckoutTest.sharp",
+            " : App.Shop",
+            "    imports App.Mail;",
+            vec!["5:5 A module that overrides another lists no imports: list them in its folder's Module.sharp."],
+        ),
+    ] {
+        let code = leak(format!("namespace App.Shop;\n\nmodule{header}\n{{\n{members}\n}}\n"));
+
+        assert_eq!(issues_in(path, code), expected, "{path}: {members}");
+    }
+}
+
 /// Spec section 32: `Module.sharp` holds its namespace, its imports and one module, and nothing else.
 #[test]
 fn module_sharp_holds_only_its_folders_module() {

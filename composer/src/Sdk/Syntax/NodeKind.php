@@ -240,6 +240,7 @@ enum NodeKind: string
     case Module = 'Module';
     case ModuleParent = 'ModuleParent';
     case ModuleMember = 'ModuleMember';
+    case Imports = 'Imports';
     case Binding = 'Binding';
     case BindingTarget = 'BindingTarget';
     case BindingValue = 'BindingValue';

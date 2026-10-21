@@ -68,6 +68,9 @@ const VENDOR: &[u8] = b"vendor/";
 /// The input that changes whenever Composer changes `vendor/`.
 const COMPOSER_LOCK: &[u8] = b"composer.lock";
 
+/// The file of a folder's module, spec section 32.
+const MODULE_FILE: &str = "Module.sharp";
+
 /// What [`IncrementalAnalysisService::compile`] made of one `.sharp` file, or of a plain PHP file whose class the
 /// engine would refuse to link.
 #[derive(Debug)]
@@ -202,11 +205,10 @@ impl IncrementalAnalysisService {
     /// A file that states a law also lists its proof file and every source its laws reach. A file that declares a
     /// module or a listener also lists the module files its check resolves services through, each folder's
     /// `Module.sharp` whether or not a file is at it, as [`Self::module_inputs`] gives them. A file outside `vendor/`
-    /// lists the workspace-relative Lean files `rules` gives for its name, whose structure rules may judge it. `check`
-    /// gets the Lean translation of every accepted file and the namespace of every class-like PHP or PHP# code
-    /// declares, in the project or `vendor/`, refused or not, and returns the issues of each file whose law is not proved or that breaks a structure rule, which refuse that
-    /// file whatever pragma, ignore entry or baseline the analysis honors. It runs before any input is stamped, so a
-    /// proof file it creates is stamped present.
+    /// lists the `Module.sharp` of its own folder and of each folder above it, whose `imports` line limits what it
+    /// imports. `check` gets the Lean translation of every accepted file, and returns the issues of each file whose law
+    /// is not proved, which refuse that file whatever pragma, ignore entry or baseline the analysis honors. It runs
+    /// before any input is stamped, so a proof file it creates is stamped present.
     ///
     /// `stamp` gives the size, modification time and hash of the file at a workspace-relative path, or none when no
     /// file is there. It is called once per input. An input no file is at is stored absent: its size, modification
@@ -221,13 +223,12 @@ impl IncrementalAnalysisService {
     ///
     /// # Errors
     ///
-    /// Returns [`OrchestratorError`] when no analysis ran yet, when re-analyzing a file fails, or when `stamp`, `rules`
-    /// or `check` fails.
+    /// Returns [`OrchestratorError`] when no analysis ran yet, when re-analyzing a file fails, or when `stamp` or
+    /// `check` fails.
     pub fn compile(
         &mut self,
         mut stamp: impl FnMut(&[u8]) -> std::io::Result<Option<Input>>,
-        mut rules: impl FnMut(&[u8]) -> std::io::Result<Vec<Vec<u8>>>,
-        check: impl FnOnce(Vec<Translation>, &[String]) -> std::io::Result<HashMap<FileId, IssueCollection>>,
+        check: impl FnOnce(Vec<Translation>) -> std::io::Result<HashMap<FileId, IssueCollection>>,
         standard_library: &Library,
         refusing: impl FnOnce(IssueCollection) -> IssueCollection,
     ) -> Result<Vec<(FileId, Compilation)>, OrchestratorError> {
@@ -293,23 +294,7 @@ impl IncrementalAnalysisService {
                 )
             })
             .collect();
-        let mut namespaces: Vec<String> = self
-            .codebase
-            .class_likes
-            .values()
-            // A case of an enum whose cases carry data runs as a class in the namespace named as its enum, which Lean
-            // declares as the enum's inductive type, spec section 20.
-            .filter(|class_like| !class_like.flags.is_built_in() && !class_like.flags.is_enum_case_class())
-            .filter_map(|class_like| {
-                let name = class_like.original_name.as_str_lossy();
-                let (namespace, _) = name.rsplit_once('\\')?;
-
-                Some(namespace.replace('\\', "."))
-            })
-            .collect();
-        namespaces.sort_unstable();
-        namespaces.dedup();
-        let mut refused = check(translations, &namespaces)
+        let mut refused = check(translations)
             .map_err(|error| OrchestratorError::General(format!("The Lean step failed: {error}.")))?;
 
         let mut reads = self.reads(&effects);
@@ -350,11 +335,10 @@ impl IncrementalAnalysisService {
             sources.insert(file.id);
 
             let proof = (!reach.files(file.id).is_empty() && is_source(file)).then(|| proof_file(&file.name));
-            let lean = if is_source(file) {
-                rules(&file.name).map_err(mago_database::error::DatabaseError::from)?
-            } else {
-                Vec::new()
-            };
+            // Spec section 32: the `imports` line of the module of the file's folder or of a folder above it limits
+            // what the file imports.
+            let lists =
+                folders(&file.name).filter(|_| is_source(file)).map(|folder| [folder, MODULE_FILE.as_bytes()].concat());
             // Spec section 27 puts a class-like of the file's namespace in the file's folder, under its own name, so the
             // files that would declare one are inputs, stamped absent while the namespace lacks it.
             let folder = folder_of(&file.name);
@@ -384,7 +368,7 @@ impl IncrementalAnalysisService {
                 .filter(|source| source.id == file.id || is_source(source))
                 .map(|source| source.name.to_vec())
                 .chain(proof)
-                .chain(lean)
+                .chain(lists)
                 .chain(namespace_class_files)
                 .chain(namespace_files)
                 .chain(self.module_inputs(file, &dependencies))
@@ -624,7 +608,7 @@ impl IncrementalAnalysisService {
                 namespace == module.namespace.as_bytes()
             })
         });
-        let mut names = vec![b"Module.sharp".to_vec()];
+        let mut names = vec![MODULE_FILE.as_bytes().to_vec()];
         for module in &modules {
             if let ModuleKind::Environment(environment) = module.kind {
                 names.push([b"Module.", environment.as_bytes(), b".sharp"].concat());
@@ -637,9 +621,7 @@ impl IncrementalAnalysisService {
             .filter_map(|class| self.database.get(&class.span.file_id).ok())
             .filter(|declaring| is_source(declaring));
         for name in std::iter::once(file.name.to_vec()).chain(declaring.map(|declaring| declaring.name.to_vec())) {
-            let folders = std::iter::once(&name[..0])
-                .chain(name.iter().enumerate().filter(|(_, byte)| **byte == b'/').map(|(end, _)| &name[..=end]));
-            for folder in folders {
+            for folder in folders(&name) {
                 paths.extend(names.iter().map(|module| [folder, module.as_slice()].concat()));
             }
         }
@@ -755,6 +737,13 @@ fn is_source(file: &File) -> bool {
 /// The workspace-relative folder of the file `name`, with its trailing `/`, or nothing for a file at the root.
 fn folder_of(name: &[u8]) -> &[u8] {
     &name[..name.iter().rposition(|byte| *byte == b'/').map_or(0, |slash| slash + 1)]
+}
+
+/// Each workspace-relative folder that holds the file `name`, from the root to its own, each with its trailing `/`:
+/// nothing, `app/` and `app/Orders/` of `app/Orders/Order.sharp`.
+fn folders(name: &[u8]) -> impl Iterator<Item = &[u8]> {
+    std::iter::once(&name[..0])
+        .chain(name.iter().enumerate().filter(|(_, byte)| **byte == b'/').map(|(end, _)| &name[..=end]))
 }
 
 /// The cascade's edges, indexed to walk backward from a file to the source files whose signature edit makes the warm
@@ -1038,14 +1027,8 @@ mod tests {
         }
     }
 
-    /// The Lean files whose structure rules may judge the file `name`, as `mago compile` lists them, in a workspace whose
-    /// folders hold no Lean file.
-    fn module_leans(name: &[u8]) -> std::io::Result<Vec<Vec<u8>>> {
-        mago_sharp_lean::rules_files(Path::new("/project"), name)
-    }
-
     /// Proves every law, as a Lean step that refuses nothing.
-    fn proved(_: Vec<Translation>, _: &[String]) -> std::io::Result<HashMap<FileId, IssueCollection>> {
+    fn proved(_: Vec<Translation>) -> std::io::Result<HashMap<FileId, IssueCollection>> {
         Ok(HashMap::default())
     }
 
@@ -1054,9 +1037,7 @@ mod tests {
         service: &mut IncrementalAnalysisService,
         stamp: impl FnMut(&[u8]) -> std::io::Result<Option<Input>>,
     ) -> std::collections::BTreeMap<String, Compilation> {
-        let compiled = service
-            .compile(stamp, module_leans, proved, &Library::default(), |issues| issues)
-            .expect("the compile runs");
+        let compiled = service.compile(stamp, proved, &Library::default(), |issues| issues).expect("the compile runs");
         let database = service.database();
 
         compiled
@@ -1125,8 +1106,7 @@ mod tests {
         let mut service = analyzed(&database);
         let library = Library { native_fingerprint: [0x2d; 16], version: b"0.3.2".to_vec() };
 
-        let compiled =
-            service.compile(empty_stamp, module_leans, proved, &library, |issues| issues).expect("the compile runs");
+        let compiled = service.compile(empty_stamp, proved, &library, |issues| issues).expect("the compile runs");
 
         assert_eq!(compiled.len(), 1, "{compiled:?}");
         let (file_id, Compilation::Accepted(bytes)) = &compiled[0] else {
@@ -1187,7 +1167,7 @@ mod tests {
     }
 
     #[test]
-    fn a_file_names_its_source_its_folders_module_lean_files_each_file_whose_edit_reanalyzes_it_and_composer_lock() {
+    fn a_file_names_its_source_its_folders_module_files_each_file_whose_edit_reanalyzes_it_and_composer_lock() {
         let database = shop_project(&shop(MONEY, RATE));
         let mut service = analyzed(&database);
 
@@ -1195,12 +1175,12 @@ mod tests {
 
         assert_eq!(
             input_paths(accepted(&compiled, "app/Order.sharp")),
-            ["Module.lean", "app/Module.lean", "app/Money.sharp", "app/Order.sharp", "composer.lock", "lib/Rate.php"],
+            ["Module.sharp", "app/Module.sharp", "app/Money.sharp", "app/Order.sharp", "composer.lock", "lib/Rate.php"],
             "a vendor file is left to composer.lock"
         );
         assert_eq!(
             input_paths(accepted(&compiled, "app/Unrelated.sharp")),
-            ["Module.lean", "app/Module.lean", "app/Unrelated.sharp", "composer.lock"]
+            ["Module.sharp", "app/Module.sharp", "app/Unrelated.sharp", "composer.lock"]
         );
     }
 
@@ -1213,7 +1193,7 @@ mod tests {
         assert_eq!(input_paths(accepted(&compiled, TEXT_PATH)), ["composer.lock", TEXT_PATH]);
         assert_eq!(
             input_paths(accepted(&compiled, "app/Title.sharp")),
-            ["Module.lean", "app/Module.lean", "app/Title.sharp", "composer.lock"]
+            ["Module.sharp", "app/Module.sharp", "app/Title.sharp", "composer.lock"]
         );
     }
 
@@ -1228,8 +1208,8 @@ mod tests {
         assert_eq!(
             inputs(accepted(&compiled, "app/Order.sharp")),
             [
-                Input { path: b"Module.lean".to_vec(), size: 0, mtime_ns: 0, hash: [0; 16] },
-                Input { path: b"app/Module.lean".to_vec(), size: 0, mtime_ns: 0, hash: [0; 16] },
+                Input { path: b"Module.sharp".to_vec(), size: 0, mtime_ns: 0, hash: [0; 16] },
+                Input { path: b"app/Module.sharp".to_vec(), size: 0, mtime_ns: 0, hash: [0; 16] },
                 Input {
                     path: b"app/Order.sharp".to_vec(),
                     size: ORDER.len() as u64,
@@ -1282,7 +1262,7 @@ mod tests {
 
         assert_eq!(
             input_paths(accepted(&compiled, "app/Unrelated.sharp")),
-            ["Module.lean", "app/Module.lean", "app/Unrelated.sharp", "composer.lock", "lib/aliases.php"]
+            ["Module.sharp", "app/Module.sharp", "app/Unrelated.sharp", "composer.lock", "lib/aliases.php"]
         );
     }
 
@@ -1308,10 +1288,10 @@ mod tests {
         assert_eq!(
             input_paths(accepted(&compiled, "app/Page.sharp")),
             [
-                "Module.lean",
+                "Module.sharp",
                 "app/HasDesign.sharp",
                 "app/HasSlug.php",
-                "app/Module.lean",
+                "app/Module.sharp",
                 "app/Page.sharp",
                 "composer.lock"
             ]
@@ -2013,7 +1993,16 @@ mod tests {
         );
         // A listener names the modules its constructor's services come from.
         names_each("app/Shop/Tick.sharp", &["Module.sharp", "app/Module.sharp", "app/Shop/Module.sharp"]);
-        assert_eq!(modules("app/Shop/Admin/Panel.sharp"), [], "a bound class's own check reads no module");
+        // A bound class's own check reads only the modules of its own folders, whose `imports` lines limit its imports.
+        assert_eq!(
+            modules("app/Shop/Admin/Panel.sharp"),
+            [
+                ("Module.sharp".to_owned(), false),
+                ("app/Module.sharp".to_owned(), false),
+                ("app/Shop/Admin/Module.sharp".to_owned(), true),
+                ("app/Shop/Module.sharp".to_owned(), true),
+            ]
+        );
     }
 
     #[test]
@@ -2028,8 +2017,7 @@ mod tests {
                     let present = path != b"app/Shared/Money.lean" || created.get();
                     Ok(present.then(|| Input { path: path.to_vec(), size: 1, mtime_ns: 0, hash: [1; 16] }))
                 },
-                module_leans,
-                |translations, _| {
+                |translations| {
                     assert_eq!(translations.len(), 4);
                     created.set(true);
                     Ok(HashMap::default())
@@ -2057,8 +2045,7 @@ mod tests {
         let compiled = service
             .compile(
                 empty_stamp,
-                module_leans,
-                |_, _| {
+                |_| {
                     let mut issues = IssueCollection::default();
                     issues.push(Issue::error("Law addKeepsCurrency is not proven."));
                     Ok(HashMap::from_iter([(money, issues)]))
@@ -2085,51 +2072,10 @@ mod tests {
         let mut service = analyzed(&database);
 
         let error = service
-            .compile(
-                empty_stamp,
-                module_leans,
-                |_, _| Err(std::io::Error::other("lake crashed")),
-                &Library::default(),
-                |issues| issues,
-            )
+            .compile(empty_stamp, |_| Err(std::io::Error::other("lake crashed")), &Library::default(), |issues| issues)
             .expect_err("the Lean step failed");
 
         assert_eq!(error.to_string(), "The Lean step failed: lake crashed.");
-    }
-
-    /// A structure rule judges every import of PHP# code, of plain PHP too, so the Lean step gets the namespace of
-    /// every class-like the project and `vendor/` declare, a refused file's too: a type error in the only file of
-    /// `App.Shared.Schema` keeps the namespace a rule names. A built-in class-like names none.
-    #[test]
-    fn the_lean_step_gets_the_namespace_of_every_class_like_the_codebase_declares_a_refused_one_too() {
-        let refused = ORDER.replace("namespace App;", "namespace App.Shared.Schema;").replace("extra + 1", "\"one\"");
-        let database = project(&[
-            ("app/Order.sharp", ORDER),
-            ("app/Shared/Schema/Order.sharp", &refused),
-            ("app/Legacy/Rate.php", "<?php\n\nnamespace App\\Legacy;\n\nfinal class Rate {}\n"),
-            (
-                "vendor/illuminate/support/Facades/DB.php",
-                "<?php\n\nnamespace Illuminate\\Support\\Facades;\n\nclass DB {}\n",
-            ),
-        ]);
-        let mut service = analyzed(&database);
-        let mut given = Vec::new();
-
-        service
-            .compile(
-                empty_stamp,
-                module_leans,
-                |translations, namespaces| {
-                    assert_eq!(translations.len(), 1);
-                    given = namespaces.to_vec();
-                    Ok(HashMap::default())
-                },
-                &Library::default(),
-                |issues| issues,
-            )
-            .expect("the compile runs");
-
-        assert_eq!(given, ["App", "App.Legacy", "App.Shared.Schema", "Illuminate.Support.Facades"]);
     }
 
     /// A project whose `Report` reads what the headers of `Invoice`, `Taxable` and `Status` say they inherit, and whose
@@ -2280,9 +2226,9 @@ mod tests {
         assert_eq!(
             input_paths(accepted(&compiled, "app/Shop/Report.sharp")),
             [
-                "Module.lean",
-                "app/Module.lean",
-                "app/Shop/Module.lean",
+                "Module.sharp",
+                "app/Module.sharp",
+                "app/Shop/Module.sharp",
                 "app/Shop/Report.sharp",
                 "composer.lock",
                 "lib/Pdf.php",
@@ -2795,12 +2741,12 @@ mod tests {
         assert_eq!(
             inputs.iter().map(|input| String::from_utf8_lossy(&input.path)).collect::<Vec<_>>(),
             [
-                "Module.lean",
+                "Module.sharp",
                 "app/App/Environment.php",
                 "app/App/Environment.sharp",
                 "app/App/Here.sharp",
-                "app/App/Module.lean",
-                "app/Module.lean",
+                "app/App/Module.sharp",
+                "app/Module.sharp",
                 "composer.lock"
             ]
         );
@@ -2834,18 +2780,18 @@ mod tests {
         assert_eq!(
             input_paths(accepted(&compiled, "app/App/Report.sharp")),
             [
-                "Module.lean",
+                "Module.sharp",
                 "app/App/*.sharp",
-                "app/App/Module.lean",
+                "app/App/Module.sharp",
                 "app/App/Plain.sharp",
                 "app/App/Report.sharp",
-                "app/Module.lean",
+                "app/Module.sharp",
                 "composer.lock"
             ]
         );
         assert_eq!(
             input_paths(accepted(&compiled, "app/App/Plain.sharp")),
-            ["Module.lean", "app/App/Module.lean", "app/App/Plain.sharp", "app/Module.lean", "composer.lock"]
+            ["Module.sharp", "app/App/Module.sharp", "app/App/Plain.sharp", "app/Module.sharp", "composer.lock"]
         );
         assert_eq!(input_paths(accepted(&compiled, packaged)), ["composer.lock", packaged]);
     }

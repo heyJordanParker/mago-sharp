@@ -1,5 +1,4 @@
-//! A checked PHP# file as the Lean declarations of the code laws reach, of its own laws, and as the facts structure
-//! rules judge.
+//! A checked PHP# file as the Lean declarations of the code laws reach and of its own laws.
 //!
 //! The translation reads the same `CheckedProgram` the bridge lowers to the `.sharpc` file: one checked tree, two back
 //! ends. It translates only what a law reaches, and records each construct Lean does not model where it stands, so a
@@ -41,14 +40,12 @@ use mago_syntax::cst::PropertyHookBody;
 use mago_syntax::cst::Sequence;
 use mago_syntax::cst::Statement;
 
-use crate::facts;
-use crate::facts::Facts;
 use crate::issues;
 use crate::reach::Reach;
 use crate::translate::body::Body;
 use crate::translate::body::indented;
 
-/// The Lean translation of one accepted `.sharp` file: its laws, the declarations laws reach in it, and its facts.
+/// The Lean translation of one accepted `.sharp` file: its laws and the declarations laws reach in it.
 #[derive(Debug)]
 pub struct Translation {
     pub(crate) file: FileId,
@@ -59,8 +56,6 @@ pub struct Translation {
     pub(crate) class: Option<(String, Span)>,
     pub(crate) laws: Vec<Law>,
     pub(crate) declarations: Vec<Declaration>,
-    /// What structure rules judge in the file.
-    pub(crate) facts: Facts,
 }
 
 /// A law the file states.
@@ -193,7 +188,6 @@ pub fn translate(checked: &CheckedProgram<'_>, reach: &Reach) -> Translation {
             class: None,
             laws: Vec::new(),
             declarations: Vec::new(),
-            facts: facts::collect(checked),
         },
     };
 

@@ -41,6 +41,7 @@ use crate::error::AnalysisError;
 use crate::expression::is_refused_type;
 use crate::resolver::property::type_parameters;
 use crate::statement::get_type_from_hint;
+use crate::statement::module::check_listed_import;
 use crate::utils::expression::expression_is_nullsafe;
 use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_type;
@@ -1021,11 +1022,16 @@ where
 }
 
 /// Reports the full class name `full_name`, written at `span` in a PHP# file's code, which spec section 23 keeps in
-/// `import` lines, with the import to add. Returns true.
+/// `import` lines, with the import to add. A full name counts as an import, spec section 32, so a class outside the
+/// lists of the file's namespace is reported as that import would be. Returns true.
 pub(crate) fn report_full_class_name<A>(context: &mut Context<'_, '_, A>, full_name: &[u8], span: Span) -> bool
 where
     A: Arena,
 {
+    if !check_listed_import(context, full_name, span) {
+        return true;
+    }
+
     let class = short_name(full_name);
     let full_name = String::from_utf8_lossy(full_name).replace('\\', ".");
     context.collector.report_with_code(

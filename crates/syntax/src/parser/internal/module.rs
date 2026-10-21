@@ -12,6 +12,7 @@ use crate::cst::cst::ConstantAccess;
 use crate::cst::cst::Expression;
 use crate::cst::cst::FunctionLikeParameterList;
 use crate::cst::cst::Identifier;
+use crate::cst::cst::Imports;
 use crate::cst::cst::Module;
 use crate::cst::cst::ModuleMember;
 use crate::cst::cst::ModuleParent;
@@ -25,8 +26,8 @@ where
     A: Arena,
 {
     /// Parses a PHP# module, spec section 32: `module`, the module it overrides after `:`, and its members in braces.
-    /// A member is a service binding or a law, spec section 28. It reads any other member, a statement or a class
-    /// member, drops it, and reports it once at its span.
+    /// A member is an `imports` line, a service binding or a law, spec section 28. It reads any other member, a
+    /// statement or a class member, drops it, and reports it once at its span.
     pub(crate) fn parse_module(&mut self) -> Result<Module<'arena>, ParseError> {
         let module = self.expect_any_keyword()?;
         let parent = if self.stream.is_at(T![":"])? {
@@ -41,7 +42,12 @@ where
             && token.kind != T!["}"]
         {
             let position_before = self.stream.current_position();
-            if self.is_at_binding()? {
+            if self.is_at_imports()? {
+                match self.parse_imports() {
+                    Ok(imports) => members.push(ModuleMember::Imports(imports)),
+                    Err(error) => self.errors.push(error),
+                }
+            } else if self.is_at_binding()? {
                 match self.parse_binding() {
                     Ok(binding) => members.push(ModuleMember::Binding(self.arena.alloc(binding))),
                     Err(error) => self.errors.push(error),
@@ -71,6 +77,37 @@ where
             left_brace,
             members: Sequence::new(members),
             right_brace: self.stream.eat_span(T!["}"])?,
+        })
+    }
+
+    /// Whether an `imports` line starts here: `imports`, which stays a name everywhere else, followed by a name.
+    fn is_at_imports(&mut self) -> Result<bool, ParseError> {
+        let starts_with_imports =
+            self.stream.lookahead(0)?.is_some_and(|token| token.kind == T![Identifier] && token.value == b"imports");
+
+        Ok(starts_with_imports && self.stream.peek_kind(1)?.is_some_and(|kind| kind.is_identifier_maybe_reserved()))
+    }
+
+    /// Parses an `imports` line, spec section 32: `imports`, the full name of each namespace it lists, separated by
+    /// commas, and `;`.
+    fn parse_imports(&mut self) -> Result<Imports<'arena>, ParseError> {
+        let imports = self.expect_any_keyword()?;
+        let mut namespaces = self.new_vec();
+        let mut commas = self.new_vec();
+        loop {
+            namespaces.push(self.parse_dotted_identifier()?);
+
+            if let Some(T![","]) = self.stream.peek_kind(0)? {
+                commas.push(self.stream.consume()?);
+            } else {
+                break;
+            }
+        }
+
+        Ok(Imports {
+            imports,
+            namespaces: TokenSeparatedSequence::new(namespaces, commas),
+            terminator: self.parse_terminator()?,
         })
     }
 

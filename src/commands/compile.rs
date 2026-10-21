@@ -48,7 +48,6 @@ use mago_server::Server;
 use mago_sharp_bridge::unit;
 use mago_sharp_lean::Lean;
 use mago_sharp_lean::PACKAGE_FOLDER;
-use mago_sharp_lean::rules_files;
 use mago_syntax::cst::Statement;
 use mago_syntax::dialect::Dialect;
 use mago_syntax::parser::parse_file;
@@ -169,8 +168,7 @@ fn compile_into(configuration: &Configuration, root: &Path, folder: &Path) -> Re
     std::panic::set_hook(Box::new(|panic| tracing::debug!("{panic}")));
     let compilations = server.compile(
         |path| unit::stamp(root, path),
-        |_| Ok(Vec::new()),
-        |_, _| Ok(Default::default()),
+        |_| Ok(Default::default()),
         &library,
         |_| IssueCollection::default(),
     );
@@ -385,8 +383,7 @@ fn compile(configuration: &Configuration, color_choice: ColorChoice) -> Result<C
     let lean = Lean::new(&root);
     let compilations = server.compile(
         |path| unit::stamp(&root, path),
-        |name| rules_files(&root, name),
-        |translations, namespaces| lean.check(translations, namespaces),
+        |translations| lean.check(translations),
         &library,
         |mut issues| {
             issues.filter_out_ignored(&ignored, |file_id| {

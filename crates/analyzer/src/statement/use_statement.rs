@@ -86,8 +86,8 @@ where
 /// and constants. A single function or constant is read through its namespace instead, a namespace of classes only is
 /// imported class by class, and an import that names nothing is refused. A capitalized last part names a class, as
 /// spec section 24 capitalizes every type, so `import Log;` never names PHP's `log()`, and PHP's `Closure` is no class
-/// it names.
-pub(crate) fn check_sharp_import<A>(context: &mut Context<'_, '_, A>, name: &Identifier<'_>)
+/// it names. Returns whether it reported.
+pub(crate) fn check_sharp_import<A>(context: &mut Context<'_, '_, A>, name: &Identifier<'_>) -> bool
 where
     A: Arena,
 {
@@ -95,7 +95,7 @@ where
     if (context.codebase.class_like_exists(&fqn) && !is_php_closure(&fqn))
         || holds_function_or_constant(context.codebase, &fqn)
     {
-        return;
+        return false;
     }
 
     let (namespace, last) = match fqn.iter().rposition(|byte| *byte == b'\\') {
@@ -148,14 +148,16 @@ where
     } else {
         report_non_existent_import(context, name.span(), &fqn, "class, interface, trait, or enum");
 
-        return;
+        return true;
     };
 
     context.collector.report_with_code(code, issue);
+
+    true
 }
 
 /// Whether the namespace `namespace` holds a plain PHP function or constant directly, as `Vendor\Pdf` holds `render`.
-fn holds_function_or_constant(codebase: &CodebaseMetadata, namespace: &[u8]) -> bool {
+pub(crate) fn holds_function_or_constant(codebase: &CodebaseMetadata, namespace: &[u8]) -> bool {
     let in_namespace = |name: &[u8]| {
         name.len() > namespace.len()
             && name[..namespace.len()].eq_ignore_ascii_case(namespace)
@@ -261,7 +263,7 @@ fn check_maybe_typed_import<A>(
     }
 }
 
-fn report_non_existent_import<A>(context: &mut Context<'_, '_, A>, span: Span, fqn: &[u8], symbol_type: &str)
+pub(crate) fn report_non_existent_import<A>(context: &mut Context<'_, '_, A>, span: Span, fqn: &[u8], symbol_type: &str)
 where
     A: Arena,
 {
