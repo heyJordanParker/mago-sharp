@@ -4122,13 +4122,65 @@ fn compile_proves_a_law_over_a_counting_loop_under_an_if() {
 
 /// Spec section 28's `Money`: a law the checker proves alone, a law its body proves by recursion on a smaller int, one
 /// proven by recursion on a list's rest, and one under a `when` condition.
-const SPECIMEN_MONEY: &str = "namespace App.Shared;\n\npublic class Money\n{\n    public Money(public int amount { get; }, public string currency { get; }) { }\n    public Money add(Money other) => new Money(this.amount + other.amount, this.currency);\n    public Money times(int n) => n <= 0 ? new Money(0, this.currency) : this.add(this.times(n - 1));\n\n    law addKeepsCurrency(Money a, Money b) => a.add(b).currency == a.currency;\n    law timesKeepsCurrency(Money m, int n) => m.times(n).currency == m.currency\n    {\n        if (n <= 0) {\n            return;\n        }\n        Money.timesKeepsCurrency(m, n - 1);\n        Money.addKeepsCurrency(m, m.times(n - 1));\n    }\n\n    public static Money sum(Money total, List<Money> items) => match (items) {\n        [] => total,\n        [Money first, ...List<Money> rest] => Money.sum(total.add(first), rest),\n        default => total,\n    };\n\n    law sumKeepsCurrency(Money total, List<Money> items) => Money.sum(total, items).currency == total.currency\n    {\n        match (items) {\n            [] => { return; },\n            [Money first, ...List<Money> rest] => {\n                Money.sumKeepsCurrency(total.add(first), rest);\n                Money.addKeepsCurrency(total, first);\n            },\n            default => { return; },\n        }\n    }\n\n    public static int refundable(int paid, int refunded) => paid < refunded ? 0 : paid - refunded;\n\n    law neverAbovePaid(int paid, int refunded) when paid >= 0 && refunded >= 0\n        => Money.refundable(paid, refunded) <= paid;\n}\n";
+const SPECIMEN_MONEY: &str = "namespace App.Shared;\n\nimport Sharp.Math.Math;\n\npublic class Money\n{\n    public Money(public int amount { get; }, public string currency { get; }) { }\n    public Money add(Money other) => new Money(this.amount + other.amount, this.currency);\n    public Money times(int n) => n <= 0 ? new Money(0, this.currency) : this.add(this.times(n - 1));\n\n    law addKeepsCurrency(Money a, Money b) => a.add(b).currency == a.currency;\n    law timesKeepsCurrency(Money m, int n) => m.times(n).currency == m.currency\n    {\n        if (n <= 0) {\n            return;\n        }\n        Money.timesKeepsCurrency(m, n - 1);\n        Money.addKeepsCurrency(m, m.times(n - 1));\n    }\n\n    public static Money sum(Money total, List<Money> items) => match (items) {\n        [] => total,\n        [Money first, ...List<Money> rest] => Money.sum(total.add(first), rest),\n        default => total,\n    };\n\n    law sumKeepsCurrency(Money total, List<Money> items) => Money.sum(total, items).currency == total.currency\n    {\n        match (items) {\n            [] => { return; },\n            [Money first, ...List<Money> rest] => {\n                Money.sumKeepsCurrency(total.add(first), rest);\n                Money.addKeepsCurrency(total, first);\n            },\n            default => { return; },\n        }\n    }\n\n    public static int refundable(int paid, int refunded) => Math.max(paid - refunded, 0);\n\n    law neverAbovePaid(int paid, int refunded) when paid >= 0 && refunded >= 0\n        => Money.refundable(paid, refunded) <= paid;\n}\n";
+
+/// A project that installs the whole standard library, as every project does, holding `files`.
+fn library_project(files: &[(&str, &str)]) -> tempfile::TempDir {
+    let directory = lawful_project(files);
+    let package = Path::new(env!("CARGO_MANIFEST_DIR")).join("../composer");
+    write(
+        directory.path(),
+        "vendor/heyjordanparker/php-sharp-composer/composer.json",
+        "{\"name\": \"heyjordanparker/php-sharp-composer\", \"autoload\": {\"psr-4\": {\"Sharp\\\\\": \"library/Sharp/\"}}}\n",
+    );
+    for file in files_under(&package.join("library")) {
+        let source = std::fs::read_to_string(package.join("library").join(&file)).unwrap();
+        write(
+            directory.path(),
+            &format!("vendor/heyjordanparker/php-sharp-composer/library/{}", file.display()),
+            &source,
+        );
+    }
+
+    directory
+}
+
+/// The standard library's `Math.max` and `Math.min` on ints are pure and reach laws with no `extern`: the checker
+/// knows what they compute, with a spread argument as with one written out, and a claim they break is not proven.
+#[test]
+fn a_law_reasons_about_math_max_and_math_min_as_the_largest_and_the_smallest_int() {
+    let bounds = |law: &str| {
+        format!(
+            "namespace App.Shared;\n\nimport Sharp.Math.Math;\n\npublic class Bounds\n{{\n    public static int clamp(int x, int low, int high) => Math.min(Math.max(x, low), high);\n    public static int largest(int first, List<int> rest) => Math.max(first, ...rest);\n\n    {law}\n}}\n"
+        )
+    };
+    for (law, proven) in [
+        ("law clampAtMostHigh(int x, int low, int high) => Bounds.clamp(x, low, high) <= high;", true),
+        ("law clampAtLeastLow(int x, int low, int high) when low <= high => Bounds.clamp(x, low, high) >= low;", true),
+        ("law largestOfThree(int unused) => Bounds.largest(1, [5, 3]) == 5;", true),
+        ("law clampAtMostLow(int x, int low, int high) => Bounds.clamp(x, low, high) <= low;", false),
+    ] {
+        let directory = library_project(&[("app/Shared/Bounds.sharp", &bounds(law))]);
+        let root = directory.path();
+
+        let output = compile(root);
+
+        assert_eq!(output.status.success(), proven, "{law}: {}", printed(&output));
+        if !proven {
+            assert!(
+                printed(&output).contains("error[law-unproven]: law clampAtMostLow is not proven"),
+                "{}",
+                printed(&output)
+            );
+        }
+    }
+}
 
 /// Spec section 28: every law of a project with only `.sharp` files is proven, and no `.lean` file is in the project
 /// before the compile or after it.
 #[test]
 fn compile_proves_spec_section_28_s_money_from_its_sharp_file_alone() {
-    let directory = lawful_project(&[("app/Shared/Money.sharp", SPECIMEN_MONEY)]);
+    let directory = library_project(&[("app/Shared/Money.sharp", SPECIMEN_MONEY)]);
     let root = directory.path();
     assert_eq!(source_lean_files(root), Vec::<PathBuf>::new());
 
@@ -4148,14 +4200,14 @@ fn a_case_a_law_s_body_leaves_open_names_its_conditions_and_its_goal_in_php_shar
     for (source, expected) in [
         (
             without_add.as_str(),
-            "app/Shared/Money.sharp:10:5: error[law-unproven]: law timesKeepsCurrency is not proven\n = when n > 0, still to show: m.add(m.times(n - 1)).currency == m.currency\n",
+            "app/Shared/Money.sharp:12:5: error[law-unproven]: law timesKeepsCurrency is not proven\n = when n > 0, still to show: m.add(m.times(n - 1)).currency == m.currency\n",
         ),
         (
             without_calls.as_str(),
-            "app/Shared/Money.sharp:10:5: error[law-unproven]: law timesKeepsCurrency is not proven\n = when n > 0, still to show: m.add(m.times(n - 1)).currency == m.currency\n = Help: the law for a smaller n is the call Money.timesKeepsCurrency(m, n - 1)\n",
+            "app/Shared/Money.sharp:12:5: error[law-unproven]: law timesKeepsCurrency is not proven\n = when n > 0, still to show: m.add(m.times(n - 1)).currency == m.currency\n = Help: the law for a smaller n is the call Money.timesKeepsCurrency(m, n - 1)\n",
         ),
     ] {
-        let directory = lawful_project(&[("app/Shared/Money.sharp", source)]);
+        let directory = library_project(&[("app/Shared/Money.sharp", source)]);
         let root = directory.path();
 
         let output = compile(root);
@@ -4174,7 +4226,7 @@ fn a_call_of_a_when_law_where_its_condition_is_not_known_names_the_condition_to_
         "        => Money.refundable(paid, refunded) <= paid;\n",
         "        => Money.refundable(paid, refunded) <= paid;\n    law refundOfAnything(int p, int r) => p < 0 || Money.refundable(p, r) <= p\n    {\n        Money.neverAbovePaid(p, r);\n    }\n",
     );
-    let directory = lawful_project(&[("app/Shared/Money.sharp", &money)]);
+    let directory = library_project(&[("app/Shared/Money.sharp", &money)]);
     let root = directory.path();
 
     let output = compile(root);
@@ -4182,7 +4234,7 @@ fn a_call_of_a_when_law_where_its_condition_is_not_known_names_the_condition_to_
     assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
     assert!(
         printed(&output).contains(
-            "error[law-unproven]: law refundOfAnything is not proven\n = still to show for the call Money.neverAbovePaid(p, r): 0 <= p && 0 <= r\n"
+            "error[law-unproven]: law refundOfAnything is not proven\n = still to show for the call Money.neverAbovePaid(p, r): p >= 0 && r >= 0\n"
         ),
         "{}",
         printed(&output)

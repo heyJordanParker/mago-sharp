@@ -584,8 +584,9 @@ impl<'body, 'program> Body<'body, 'program> {
             BinaryOperator::NotEqual(_) | BinaryOperator::NotIdentical(_) => format!("({lhs} != {rhs})"),
             BinaryOperator::LessThan(_) if ordered => format!("(decide ({lhs} < {rhs}))"),
             BinaryOperator::LessThanOrEqual(_) if ordered => format!("(decide ({lhs} <= {rhs}))"),
-            BinaryOperator::GreaterThan(_) if ordered => format!("(decide ({rhs} < {lhs}))"),
-            BinaryOperator::GreaterThanOrEqual(_) if ordered => format!("(decide ({rhs} <= {lhs}))"),
+            // `>` and `>=` stay Lean's `>` and `≥`, so a goal prints them as the code writes them.
+            BinaryOperator::GreaterThan(_) if ordered => format!("(decide ({lhs} > {rhs}))"),
+            BinaryOperator::GreaterThanOrEqual(_) if ordered => format!("(decide ({lhs} >= {rhs}))"),
             _ => self.unmodeled(binary.span(), format!("the operator `{operator}` here"), issues::OPERATOR),
         }
     }
@@ -916,9 +917,9 @@ impl<'body, 'program> Body<'body, 'program> {
                     BinaryOperator::LessThanOrEqual(_) if kind == Kind::Int => {
                         format!("(decide ({subject} <= {value}))")
                     }
-                    BinaryOperator::GreaterThan(_) if kind == Kind::Int => format!("(decide ({value} < {subject}))"),
+                    BinaryOperator::GreaterThan(_) if kind == Kind::Int => format!("(decide ({subject} > {value}))"),
                     BinaryOperator::GreaterThanOrEqual(_) if kind == Kind::Int => {
-                        format!("(decide ({value} <= {subject}))")
+                        format!("(decide ({subject} >= {value}))")
                     }
                     _ => {
                         let what = format!("the pattern `{}`", self.source(comparison.span()));
@@ -967,6 +968,16 @@ impl<'body, 'program> Body<'body, 'program> {
                 );
             }
             let class = names.get(&class.name);
+            if class.eq_ignore_ascii_case(b"Sharp\\Math\\Math")
+                && let ClassLikeMemberSelector::Identifier(method) = &call.method
+                && let Some(lean) = match method.value {
+                    b"max" => Some("max"),
+                    b"min" => Some("min"),
+                    _ => None,
+                }
+            {
+                return self.extremum(lean, &call.argument_list);
+            }
             if !self.is_translated_class(call.object.span(), class) {
                 return "default".to_owned();
             }
@@ -1102,6 +1113,29 @@ impl<'body, 'program> Body<'body, 'program> {
                 self.unmodeled(expression.span(), what, issues::COLLECTION)
             }
         }
+    }
+
+    /// The standard library's `Math.max(…)` or `Math.min(…)`, as Lean's `max` or `min` on `int`, named by `lean`. The
+    /// checker knows what they compute, so a law reasons about them as it does about `<`, and they need no `extern`.
+    /// Each argument after the first joins with `lean`, and a spread one joins each element of its List.
+    fn extremum(&mut self, lean: &str, list: &ArgumentList) -> String {
+        let mut joined: Option<String> = None;
+        for argument in &list.arguments {
+            let Argument::Positional(argument) = argument else {
+                return self.unmodeled(argument.span(), "a named or spread argument".to_owned(), issues::ARGUMENT);
+            };
+            let value = self.value(argument.value);
+            joined = Some(match (joined, argument.ellipsis.is_some()) {
+                (None, false) => value,
+                (Some(joined), false) => format!("({lean} {joined} {value})"),
+                (Some(joined), true) => format!("(List.foldl {lean} {joined} {value})"),
+                (None, true) => {
+                    return self.unmodeled(argument.span(), "a named or spread argument".to_owned(), issues::ARGUMENT);
+                }
+            });
+        }
+
+        joined.unwrap_or_else(|| unreachable!("the checker refuses `Math.{lean}()`, as at {:?}", list.span()))
     }
 
     /// A lambda `map` or `filter` takes, as a Lean `fun`. Its body is one expression that cannot throw, so the function

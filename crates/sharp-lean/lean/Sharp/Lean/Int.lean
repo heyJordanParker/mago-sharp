@@ -147,6 +147,23 @@ under a condition that bounds it. -/
 
 attribute [simp] Int.le_min Int.min_eq_left
 
+/-! The standard library's `Math.max` and `Math.min` are Lean's `max` and `min` on `int`, which never leave the `int`
+range. A law's automatic steps read each as `max` and `min` of the `Int`s, which `omega` reasons about. -/
+
+@[simp] theorem toInt_max (x y : int) : (max x y).toInt = max x.toInt y.toInt := by
+  show (if x ≤ y then y else x).toInt = _
+  rw [Int.max_def]
+  by_cases h : x ≤ y
+  · rw [ite_eq_left h, ite_eq_left (Int64.le_iff_toInt_le.mp h)]
+  · rw [ite_eq_right h, ite_eq_right (fun e => h (Int64.le_iff_toInt_le.mpr e))]
+
+@[simp] theorem toInt_min (x y : int) : (min x y).toInt = min x.toInt y.toInt := by
+  show (if x ≤ y then x else y).toInt = _
+  rw [Int.min_def]
+  by_cases h : x ≤ y
+  · rw [ite_eq_left h, ite_eq_left (Int64.le_iff_toInt_le.mp h)]
+  · rw [ite_eq_right h, ite_eq_right (fun e => h (Int64.le_iff_toInt_le.mpr e))]
+
 end int
 
 /-- Proves a recursive call's argument smaller than the value it replaces, in the measure `termination_by` names: an
