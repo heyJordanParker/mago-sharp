@@ -758,33 +758,17 @@ where
     }
 }
 
-/// Spec section 32: whether PHP# code in `namespace` imports `name`, the full name of a class-like, of a namespace, or
-/// of a namespace's function or constant, past each list that covers `namespace`. Reports at `span`, and returns
-/// false, when the list of `namespace` or of a namespace above it leaves `name` out. A list covers its namespace and
-/// every namespace below it, and lets its code import from `Sharp`, from its own namespace and the namespaces below
-/// it, and from each namespace it lists and the namespaces below that one. Of two lists that leave `name` out, the
-/// one nearer `namespace` is reported.
+/// Spec section 32: whether the PHP# code of the analyzed file imports `name`, the full name of a class-like, of a
+/// namespace, or of a namespace's function or constant, past each list that covers its namespace. Reports at `span`,
+/// and returns false, when a [list refuses](list_refusing) it.
 pub(crate) fn check_listed_import<A>(context: &mut Context<'_, '_, A>, name: &[u8], span: Span) -> bool
 where
     A: Arena,
 {
-    if !context.dialect.is_sharp() || is_within_namespace(name, b"Sharp") {
+    if !context.dialect.is_sharp() {
         return true;
     }
-
-    let namespace = context.scope.namespace_name().unwrap_or_default();
-    let refusing = context
-        .codebase
-        .modules
-        .iter()
-        .filter(|module| module.kind == ModuleKind::Base && !module.imports.is_empty())
-        .filter(|module| is_within_namespace(namespace, module.namespace.as_bytes()))
-        .filter(|module| {
-            !is_within_namespace(name, module.namespace.as_bytes())
-                && !module.imports.iter().any(|(listed, _)| is_within_namespace(name, listed.as_bytes()))
-        })
-        .max_by_key(|module| module.namespace.as_bytes().len());
-    let Some(module) = refusing else {
+    let Some(module) = list_refusing(context.codebase, context.scope.namespace_name().unwrap_or_default(), name) else {
         return true;
     };
 
@@ -797,6 +781,32 @@ where
     );
 
     false
+}
+
+/// Spec section 32: the folder's module whose `imports` line leaves `name` out of what PHP# code in `namespace`
+/// imports, as PHP writes both, or none when every list that covers `namespace` lets it import `name`. A list covers
+/// its namespace and every namespace below it, and lets its code import from `Sharp`, from its own namespace and the
+/// namespaces below it, and from each namespace it lists and the namespaces below that one. Of two lists that leave
+/// `name` out, the one nearer `namespace` refuses it.
+pub(crate) fn list_refusing<'codebase>(
+    codebase: &'codebase CodebaseMetadata,
+    namespace: &[u8],
+    name: &[u8],
+) -> Option<&'codebase ModuleMetadata> {
+    if is_within_namespace(name, b"Sharp") {
+        return None;
+    }
+
+    codebase
+        .modules
+        .iter()
+        .filter(|module| module.kind == ModuleKind::Base && !module.imports.is_empty())
+        .filter(|module| is_within_namespace(namespace, module.namespace.as_bytes()))
+        .filter(|module| {
+            !is_within_namespace(name, module.namespace.as_bytes())
+                && !module.imports.iter().any(|(listed, _)| is_within_namespace(name, listed.as_bytes()))
+        })
+        .max_by_key(|module| module.namespace.as_bytes().len())
 }
 
 /// The name `list` lists that names the namespace of `other`, another module with a list: `other`'s namespace or a
@@ -873,7 +883,7 @@ where
 
 /// The namespace of the folder's module `module`, as its code writes it, dot separated: the namespace of the
 /// class-like `Module` the scanner registers for it, which keeps its case.
-fn display_namespace(codebase: &CodebaseMetadata, module: &ModuleMetadata) -> String {
+pub(crate) fn display_namespace(codebase: &CodebaseMetadata, module: &ModuleMetadata) -> String {
     let class = codebase.get_class_like(&[module.namespace.as_bytes(), b"\\module"].concat());
 
     dotted(

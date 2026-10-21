@@ -23916,6 +23916,25 @@ fn a_full_name_in_code_counts_as_an_import() {
     );
 }
 
+/// Spec section 32: the help for a short name the file doesn't import names the import to add only when the list of
+/// the file's namespace allows it. For a class outside the list, it names the list and the file that holds it.
+#[test]
+fn a_missing_import_is_suggested_only_when_the_list_allows_it() {
+    let service = (
+        "app/Tenant/Store/StoreService.sharp",
+        "namespace App.Tenant.Store;\n\npublic class StoreService\n{\n    public void hold(Entry entry, Member member) { }\n}\n",
+    );
+    let others: Vec<_> = LISTED_CLASSES.iter().copied().chain([STORE_MODULE]).collect();
+
+    assert_eq!(
+        refusals(service, &others),
+        [
+            "5:22 non-existent-class-like `Entry` is not imported. | `App.Shared.Ledger.Entry` is outside `App.Tenant.Store`'s list, the `imports` line of app/Tenant/Store/Module.sharp.",
+            "5:35 non-existent-class-like `Member` is not imported. | Add `import App.Tenant.Community.Member;` to the file.",
+        ]
+    );
+}
+
 /// Spec section 32: lists that name each other, directly or through a chain of lists, are refused at each `imports`
 /// line of the cycle, at the name that leads on. A list names the namespace it lists and every namespace below it. A
 /// namespace with no list ends every chain, so it is never part of a cycle.

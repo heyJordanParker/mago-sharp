@@ -9,6 +9,7 @@ use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::metadata::function_like::FunctionLikeKind;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
+use mago_codex::metadata::module::ModuleMetadata;
 use mago_codex::ttype::SharpType;
 use mago_codex::ttype::TType;
 use mago_codex::ttype::atomic::TAtomic;
@@ -39,6 +40,8 @@ use mago_word::ascii_lowercase_word;
 use mago_word::word;
 
 use crate::context::Context;
+use crate::statement::module::display_namespace;
+use crate::statement::module::list_refusing;
 
 /// Returns the case-preserved name of a class-like as the analyzed file writes it: as [`sharp_class_like_name`] names
 /// it in a `.sharp` file, and its full name in PHP. Falls back to the input if no metadata is available.
@@ -143,22 +146,37 @@ where
 /// imports and namespace, needs before code that names `class_names` as [`sharp_code_class_name`] writes them
 /// compiles, as `Add `import Sharp.Text.Regex;` to the file.`: one line for each class-like the file doesn't
 /// [bind](binds_class_like), once each, in the order given, under its [alias](sharp_import_alias) when the file binds
-/// its short name to another class-like, as in `import Vendor.Clock as VendorClock;`. Returns `None` when the file
-/// binds them all.
+/// its short name to another class-like, as in `import Vendor.Clock as VendorClock;`. A line the `imports` line of
+/// the file's namespace refuses (spec section 32) is left out. When it leaves out every line, the sentence names the
+/// class-likes outside the list and the file of that `imports` line instead. Returns `None` when the file binds them
+/// all.
 pub(crate) fn sharp_missing_imports(
     codebase: &CodebaseMetadata,
     imported_names: &WordMap<Word>,
     scope: &NamespaceScope,
     class_names: impl IntoIterator<Item = Word>,
 ) -> Option<String> {
+    let namespace = scope.namespace_name().unwrap_or_default();
     let mut imports: Vec<String> = Vec::new();
+    let mut unlisted: Vec<(&ModuleMetadata, Vec<Word>)> = Vec::new();
     for class_name in class_names {
         let name = codebase.get_class_like(class_name.as_bytes()).map_or(class_name, |m| m.original_name);
         if binds_class_like(imported_names, scope, name) {
             continue;
         }
 
-        let full_name = String::from_utf8_lossy(mago_bytes::trim_start_byte(name.as_bytes(), b'\\')).replace('\\', ".");
+        let php_name = mago_bytes::trim_start_byte(name.as_bytes(), b'\\');
+        let full_name = String::from_utf8_lossy(php_name).replace('\\', ".");
+        if let Some(list) = list_refusing(codebase, namespace, php_name) {
+            let full_name = word(&full_name);
+            match unlisted.iter_mut().find(|(other, _)| std::ptr::eq(*other, list)) {
+                Some((_, names)) if !names.contains(&full_name) => names.push(full_name),
+                Some(_) => {}
+                None => unlisted.push((list, vec![full_name])),
+            }
+            continue;
+        }
+
         let import = match sharp_import_alias(codebase, imported_names, scope, name) {
             Some(alias) => format!("`import {full_name} as {alias};`"),
             None => format!("`import {full_name};`"),
@@ -168,7 +186,22 @@ pub(crate) fn sharp_missing_imports(
         }
     }
 
-    let (last, others) = imports.split_last()?;
+    let Some((last, others)) = imports.split_last() else {
+        let sentences: Vec<String> = unlisted
+            .iter()
+            .map(|(list, names)| {
+                format!(
+                    "{} {} outside `{}`'s list, the `imports` line of {}.",
+                    and_list(names),
+                    if names.len() == 1 { "is" } else { "are" },
+                    display_namespace(codebase, list),
+                    list.file
+                )
+            })
+            .collect();
+
+        return (!sentences.is_empty()).then(|| sentences.join(" "));
+    };
     let imports = if others.is_empty() { last.clone() } else { format!("{} and {last}", others.join(", ")) };
 
     Some(format!("Add {imports} to the file."))

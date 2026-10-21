@@ -53,14 +53,12 @@ fn lowered(source: &str) -> Unit {
     common::checked("src/Report.sharp", source, &[], lower).expect("the checker accepts the source")
 }
 
-/// The compiled file of `source`, with the test key, inputs, facts and standard library.
+/// The compiled file of `source`, with the test key, inputs and standard library.
 fn encoded(source: &str) -> Vec<u8> {
-    encode(&lowered(source), source.as_bytes(), KEY, &inputs(), FACTS, &library())
+    encode(&lowered(source), source.as_bytes(), KEY, &inputs(), &library())
 }
 
 const KEY: [u8; 16] = *b"0123456789abcdef";
-
-const FACTS: &[u8] = b"facts the engine skips";
 
 fn library() -> Library {
     Library { native_fingerprint: *b"fedcba9876543210", version: b"0.3.2".to_vec() }
@@ -81,9 +79,8 @@ struct Decoded {
     nodes: Vec<sharp_node>,
     children: Vec<u32>,
     texts: Vec<u8>,
-    facts: Vec<u8>,
-    /// Where each section starts: inputs, nodes, children, texts, facts, and the end.
-    offsets: [usize; 6],
+    /// Where each section starts: inputs, nodes, children, texts, and the end.
+    offsets: [usize; 5],
 }
 
 impl Decoded {
@@ -100,9 +97,8 @@ impl Decoded {
         let nodes_at = inputs_at + size_of::<sharp_input>() * header.input_count as usize;
         let children_at = nodes_at + size_of::<sharp_node>() * header.node_count as usize;
         let texts_at = children_at + size_of::<u32>() * header.children_count as usize;
-        let facts_at = texts_at + header.texts_size as usize;
-        let end = facts_at + header.facts_size as usize;
-        assert_eq!(end, bytes.len(), "the file is as long as its header says");
+        let end = texts_at + header.texts_size as usize;
+        assert_eq!(end, bytes.len(), "the file ends with its texts");
 
         Self {
             header,
@@ -110,8 +106,7 @@ impl Decoded {
             nodes: section(&memory, nodes_at, header.node_count as usize),
             children: section(&memory, children_at, header.children_count as usize),
             texts: section(&memory, texts_at, header.texts_size as usize),
-            facts: section(&memory, facts_at, header.facts_size as usize),
-            offsets: [inputs_at, nodes_at, children_at, texts_at, facts_at, end],
+            offsets: [inputs_at, nodes_at, children_at, texts_at, end],
         }
     }
 
@@ -159,7 +154,7 @@ fn every_text_of_a_lowered_unit_is_an_offset_into_its_texts() {
 fn an_absent_input_reads_back_as_an_all_zero_stamp_that_no_existing_file_has() {
     let absent = Input { path: b"composer.lock".to_vec(), size: 0, mtime_ns: 0, hash: [0; 16] };
 
-    let decoded = Decoded::new(&encode(&lowered(SOURCE), SOURCE.as_bytes(), KEY, &[absent], FACTS, &library()));
+    let decoded = Decoded::new(&encode(&lowered(SOURCE), SOURCE.as_bytes(), KEY, &[absent], &library()));
 
     let [input] = decoded.inputs[..] else { panic!("one input: {:?}", decoded.inputs.len()) };
     assert_eq!(decoded.text(input.path), b"composer.lock");
@@ -170,7 +165,7 @@ fn an_absent_input_reads_back_as_an_all_zero_stamp_that_no_existing_file_has() {
 #[test]
 fn a_compiled_file_reads_back_through_the_c_layout() {
     let lowered = lowered(SOURCE);
-    let decoded = Decoded::new(&encode(&lowered, SOURCE.as_bytes(), KEY, &inputs(), FACTS, &library()));
+    let decoded = Decoded::new(&encode(&lowered, SOURCE.as_bytes(), KEY, &inputs(), &library()));
     let header = decoded.header;
 
     assert_eq!(header.magic, *b"SHARPC\0\0");
@@ -222,7 +217,6 @@ fn a_compiled_file_reads_back_through_the_c_layout() {
         [&b"strict_types"[..], b"App\\Tenant", b"weekly", b"string", b"Function<string()>", b"title", b"Report"]
     );
     assert_eq!(decoded.children, lowered.children());
-    assert_eq!(decoded.facts, FACTS);
 }
 
 #[test]
@@ -256,7 +250,6 @@ fn every_header_field_and_section_starts_aligned_for_its_type() {
         ("children_count", offset_of!(sharp_unit_header, children_count), align_of::<u32>()),
         ("root", offset_of!(sharp_unit_header, root), align_of::<u32>()),
         ("texts_size", offset_of!(sharp_unit_header, texts_size), align_of::<u32>()),
-        ("facts_size", offset_of!(sharp_unit_header, facts_size), align_of::<u32>()),
         ("library_version", offset_of!(sharp_unit_header, library_version), align_of::<sharp_str>()),
         ("sharp_input.size", offset_of!(sharp_input, size), align_of::<u64>()),
         ("sharp_input.mtime_ns", offset_of!(sharp_input, mtime_ns), align_of::<i64>()),
@@ -266,7 +259,7 @@ fn every_header_field_and_section_starts_aligned_for_its_type() {
 
     let lowered = lowered(SOURCE);
     for count in 0..=inputs().len() {
-        let decoded = Decoded::new(&encode(&lowered, SOURCE.as_bytes(), KEY, &inputs()[..count], FACTS, &library()));
+        let decoded = Decoded::new(&encode(&lowered, SOURCE.as_bytes(), KEY, &inputs()[..count], &library()));
         let [inputs_at, nodes_at, children_at, ..] = decoded.offsets;
 
         assert_eq!(inputs_at % align_of::<sharp_input>(), 0, "{count} inputs");
@@ -282,6 +275,9 @@ fn encoding_one_lowering_twice_gives_the_same_bytes_with_zero_padding() {
     assert_eq!(first, second);
 
     let decoded = Decoded::new(&first);
+    let after_header =
+        offset_of!(sharp_unit_header, library_version) + size_of::<sharp_str>()..size_of::<sharp_unit_header>();
+    assert!(first[after_header].iter().all(|&byte| byte == 0), "the header ends in zero padding");
     let after_kind = offset_of!(sharp_node, kind) + size_of::<u16>()..offset_of!(sharp_node, attr);
     let after_value = offset_of!(sharp_node, value) + size_of::<u8>()..offset_of!(sharp_node, long_value);
     for index in 0..decoded.nodes.len() {
@@ -324,7 +320,7 @@ fn header_refuses_a_short_file_a_wrong_magic_a_wrong_abi_a_wrong_length_and_a_li
     assert_eq!(header(&longer), Err(FormatError::Length));
     assert_eq!(header(&bytes[..bytes.len() - 1]), Err(FormatError::Length));
     assert_eq!(header(&changed(offset_of!(sharp_unit_header, node_count))), Err(FormatError::Length));
-    assert_eq!(header(&changed(offset_of!(sharp_unit_header, facts_size))), Err(FormatError::Length));
+    assert_eq!(header(&changed(offset_of!(sharp_unit_header, texts_size))), Err(FormatError::Length));
     assert_eq!(
         header(&changed(offset_of!(sharp_unit_header, library_version) + offset_of!(sharp_str, len) + 3)),
         Err(FormatError::Length)
@@ -443,7 +439,7 @@ fn compiled_with_inputs(root: &Path, names: &[&str]) -> Vec<u8> {
         })
         .collect();
 
-    encode(&lowered(SOURCE), SOURCE.as_bytes(), KEY, &inputs, &[], &library())
+    encode(&lowered(SOURCE), SOURCE.as_bytes(), KEY, &inputs, &library())
 }
 
 #[test]
@@ -595,7 +591,6 @@ fn the_c_header_lays_out_every_type_as_the_bridge_does() {
         ("offsetof(sharp_unit_header, children_count)", offset_of!(sharp_unit_header, children_count)),
         ("offsetof(sharp_unit_header, root)", offset_of!(sharp_unit_header, root)),
         ("offsetof(sharp_unit_header, texts_size)", offset_of!(sharp_unit_header, texts_size)),
-        ("offsetof(sharp_unit_header, facts_size)", offset_of!(sharp_unit_header, facts_size)),
         ("offsetof(sharp_unit_header, native_fingerprint)", offset_of!(sharp_unit_header, native_fingerprint)),
         ("offsetof(sharp_unit_header, library_version)", offset_of!(sharp_unit_header, library_version)),
         ("sizeof(sharp_input)", size_of::<sharp_input>()),
@@ -792,7 +787,7 @@ fn the_unit_abi_changes_with_the_kind_table_the_tokens_and_the_layouts() {
             generated_abi(
                 ZEND_AST_H,
                 ZEND_LANGUAGE_PARSER_H,
-                Some(("unit.rs", "pub facts_size: u32,", "pub facts_size: u64,")),
+                Some(("unit.rs", "pub texts_size: u32,", "pub texts_size: u64,")),
             ),
         ),
         (

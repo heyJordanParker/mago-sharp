@@ -419,7 +419,7 @@ impl IncrementalAnalysisService {
                         inputs.push(input);
                     }
 
-                    Compilation::Accepted(encode(&unit, &file.contents, key, &inputs, &[], standard_library))
+                    Compilation::Accepted(encode(&unit, &file.contents, key, &inputs, standard_library))
                 }
             };
 
