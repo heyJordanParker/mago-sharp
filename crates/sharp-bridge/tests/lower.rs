@@ -873,8 +873,9 @@ fn a_foreign_class_lowers_to_the_nodes_of_the_plain_class() {
     );
 }
 
-/// A law, spec section 28, is checked and never runs, so the engine gets the same tree without it. A module of laws
-/// alone binds no service, so its `Module.sharp` lowers to its namespace alone.
+/// A law, spec section 28, is checked and never runs, so the engine gets the same tree without it, whether the
+/// checker proves it alone or its `when` condition and body prove it. A module of laws alone binds no service, so its
+/// `Module.sharp` lowers to its namespace alone.
 #[test]
 fn a_class_an_enum_or_a_module_with_a_law_lowers_to_the_nodes_it_lowers_to_without_it() {
     for (path, with, without) in [
@@ -882,6 +883,11 @@ fn a_class_an_enum_or_a_module_with_a_law_lowers_to_the_nodes_it_lowers_to_witho
             "src/Money.sharp",
             "namespace App.Shared;\n\npublic class Money\n{\n    public Money(public int amount { get; }) { }\n\n    law amountIsItself(Money a) => a.amount == a.amount;\n}\n",
             "namespace App.Shared;\n\npublic class Money\n{\n    public Money(public int amount { get; }) { }\n\n\n}\n",
+        ),
+        (
+            "src/Money.sharp",
+            "namespace App.Shared;\n\npublic class Money\n{\n    public Money(public int amount { get; }) { }\n    public int times(int n) => n <= 0 ? 0 : this.amount + this.times(n - 1);\n\n    law timesStays(Money m, int n) when n >= 0 => m.times(n) == m.times(n)\n    {\n        if (n <= 0) {\n            return;\n        }\n        Money.timesStays(m, n - 1);\n    }\n}\n",
+            "namespace App.Shared;\n\npublic class Money\n{\n    public Money(public int amount { get; }) { }\n    public int times(int n) => n <= 0 ? 0 : this.amount + this.times(n - 1);\n\n\n\n\n\n\n\n\n}\n",
         ),
         (
             "src/Status.sharp",

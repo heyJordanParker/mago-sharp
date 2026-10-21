@@ -7,8 +7,9 @@ use crate::cst::cst::function_like::parameter::FunctionLikeParameterList;
 use crate::cst::cst::identifier::LocalIdentifier;
 use crate::cst::cst::keyword::Keyword;
 
-/// Represents a PHP# law, spec section 28: a claim about every value of its parameters, or of those that meet its
-/// `when` condition. The checker proves a law alone, or by its body, and the law never runs.
+/// Represents a PHP# law, spec section 28: a claim about every value of its parameters that meets its `when` condition.
+///
+/// The checker proves a law alone, or by its body, and the law never runs.
 ///
 /// Example:
 ///
@@ -19,8 +20,8 @@ use crate::cst::cst::keyword::Keyword;
 ///     if (n <= 0) {
 ///         return;
 ///     }
-///     timesKeepsCurrency(m, n - 1);
-///     addKeepsCurrency(m, m.times(n - 1));
+///     Money.timesKeepsCurrency(m, n - 1);
+///     Money.addKeepsCurrency(m, m.times(n - 1));
 /// }
 /// ```
 #[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]

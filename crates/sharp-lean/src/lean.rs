@@ -244,6 +244,11 @@ impl Lean {
         if !work.is_empty() {
             let receivers: HashMap<String, bool> =
                 translations.iter().flat_map(|translation| translation.receivers.iter().cloned()).collect();
+            let declared: HashSet<String> = translations
+                .iter()
+                .flat_map(|translation| &translation.declarations)
+                .map(|declaration| declaration.key.clone())
+                .collect();
             Proofs {
                 package: &package,
                 library: &library,
@@ -251,6 +256,7 @@ impl Lean {
                 laws: &laws,
                 modules: &modules,
                 receivers,
+                declared,
             }
             .prove(work, &mut issues)?;
         }
@@ -332,6 +338,8 @@ struct Proofs<'proofs> {
     laws: &'proofs Laws<'proofs>,
     modules: &'proofs [package::Module],
     receivers: HashMap<String, bool>,
+    /// The Lean name of every declaration of the workspace.
+    declared: HashSet<String>,
 }
 
 impl Proofs<'_> {
@@ -371,7 +379,7 @@ impl Proofs<'_> {
             work.par_iter().map(|translation| self.judge(translation)).collect();
         for (translation, answers) in work.into_iter().zip(answers) {
             for (law, judgment) in answers? {
-                for issue in judged(law, judgment, &self.receivers) {
+                for issue in judged(law, judgment, &self.receivers, &self.declared) {
                     report(issues, translation, issue);
                 }
             }
@@ -439,8 +447,8 @@ impl Proofs<'_> {
 }
 
 /// The issues of `law` the runner's `judgment` gives: one for each case and each call whose goal it left open, with
-/// the goal in PHP#.
-fn judged(law: &Law, judgment: Judgment, receivers: &HashMap<String, bool>) -> Vec<Issue> {
+/// the goal in PHP#, which names the members of the code as `receivers` and `declared` hold them.
+fn judged(law: &Law, judgment: Judgment, receivers: &HashMap<String, bool>, declared: &HashSet<String>) -> Vec<Issue> {
     match judgment {
         Judgment::Proved => Vec::new(),
         Judgment::Through(called) => vec![issues::through(law, &called)],
@@ -450,11 +458,11 @@ fn judged(law: &Law, judgment: Judgment, receivers: &HashMap<String, bool>) -> V
             .map(|step| {
                 if step.condition {
                     let call = &law.proof.calls[step.index - 1];
-                    let names = Names { receivers, arguments: &call.arguments };
+                    let names = Names { receivers, declared, arguments: &call.arguments };
                     issues::unshown_condition(law, call, goal::conjunction(&step.goal, &names).as_deref())
                 } else {
                     let case = &law.proof.cases[step.index - 1];
-                    let names = Names { receivers, arguments: &[] };
+                    let names = Names { receivers, declared, arguments: &[] };
                     issues::unproven_case(law, case, goal::php(&step.goal, &names).as_deref())
                 }
             })

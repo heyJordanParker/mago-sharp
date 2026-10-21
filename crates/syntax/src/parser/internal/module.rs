@@ -54,7 +54,7 @@ where
                 self.state.members_name = None;
                 self.state.type_parameters_of = None;
                 match self.parse_classlike_member() {
-                    Ok(ClassLikeMember::Law(law)) => members.push(ModuleMember::Law(law)),
+                    Ok(ClassLikeMember::Law(law)) => members.push(ModuleMember::Law(self.arena.alloc(law))),
                     Ok(member) => self.errors.push(ParseError::OtherMemberInSharpModule(member.span())),
                     Err(error) => self.errors.push(error),
                 }

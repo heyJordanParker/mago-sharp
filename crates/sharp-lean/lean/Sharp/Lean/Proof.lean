@@ -118,6 +118,14 @@ private def definitionsIn (e : Expr) : MetaM (Array Name) := do
       found := found.push name
   return found
 
+/-- What `name` is defined as: the body its equation states for a recursive definition, which Lean compiles into a
+term that names its recursion's helpers rather than the definitions it calls, and else its value. -/
+private def definedAs (name : Name) : MetaM (Option Expr) := do
+  if ← isRecursiveDefinition name then
+    let some equation ← getUnfoldEqnFor? name (nonRec := true) | return none
+    return some (← inferType (← mkConstWithLevelParams equation))
+  return (← getEnv).find? name |>.bind (·.value?)
+
 /-- Each definition `e` names, and each one those definitions name, transitively. -/
 private partial def reached (e : Expr) : MetaM (Array Name) := do
   let mut found := #[]
@@ -127,8 +135,8 @@ private partial def reached (e : Expr) : MetaM (Array Name) := do
     pending := pending.pop
     if found.contains name then continue
     found := found.push name
-    if let some value := (← getEnv).find? name |>.bind (·.value?) then
-      pending := pending ++ (← definitionsIn value)
+    if let some body ← definedAs name then
+      pending := pending ++ (← definitionsIn body)
   return found
 
 /-- The statement of each law a fact in scope of the main goal is the theorem of. -/
@@ -198,17 +206,21 @@ private def report (index : TSyntax `num) (conditions : Array Ident) : TacticM U
   admitGoal (← getMainGoal)
 
 /-- Proves a law without a body, whose case `index` is its whole claim: unfolds a recursive definition the claim reaches
-once, and every other one as `simp` rewrites, then runs the automatic steps. -/
+once, and every other one as `simp` rewrites, then runs the automatic steps. A claim over values the law writes out,
+as `Money.total([new Money(1, "EUR")])`, needs each recursion unfolded until it ends, so the steps then run with the
+recursive definitions as `simp` rewrites too. -/
 syntax "sharp_prove " num " [" ident,* "]" : tactic
 
 elab_rules : tactic
   | `(tactic| sharp_prove $index [$conditions,*]) => do
     let definitions ← reached (← getMainTarget)
     let recursive ← definitions.filterM fun definition => isRecursiveDefinition definition
-    let step : TacticM Unit := do
+    let laws ← lawsInScope
+    let once : TacticM Unit := do
       for definition in recursive do unfoldOnce definition
-      auto ((definitions.filter (!recursive.contains ·)) ++ (← lawsInScope))
-    unless ← closes step do report index conditions.getElems
+      auto ((definitions.filter (!recursive.contains ·)) ++ laws)
+    let ended : TacticM Unit := auto (definitions ++ laws)
+    unless ← closes once <||> (pure !recursive.isEmpty <&&> closes ended) do report index conditions.getElems
 
 /-- Closes the case `index` of a body with the automatic steps and the laws of the facts in scope: on the claim as the
 facts state it, else with each definition the claim calls unfolded once. -/

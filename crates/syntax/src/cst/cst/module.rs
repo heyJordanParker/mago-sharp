@@ -51,7 +51,7 @@ pub struct ModuleParent<'arena> {
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[cfg_attr(feature = "serde", serde(tag = "type", content = "value"))]
 pub enum ModuleMember<'arena> {
-    Law(Law<'arena>),
+    Law(&'arena Law<'arena>),
     Binding(&'arena Binding<'arena>),
 }
 

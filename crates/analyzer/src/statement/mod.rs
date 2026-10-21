@@ -303,8 +303,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Statement<'arena> {
                 Statement::Expression(_)
                     if block_context.flags.inside_law_body()
                         && let Some(call) = class_like::law::law_call(self)
-                        && let Some(law) =
-                            class_like::law::called_law(context, block_context.scope.get_class_like(), call) =>
+                        && let Some(law) = class_like::law::called_law(context, call) =>
                 {
                     class_like::law::analyze_law_call(context, block_context, artifacts, call, law)
                 }

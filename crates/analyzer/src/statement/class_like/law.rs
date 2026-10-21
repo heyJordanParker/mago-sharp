@@ -14,11 +14,12 @@ use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_span::HasSpan;
 use mago_span::Span;
-use mago_syntax::cst::Argument;
+use mago_syntax::cst::ArgumentList;
 use mago_syntax::cst::BinaryOperator;
 use mago_syntax::cst::Call;
 use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Expression;
+use mago_syntax::cst::Hint;
 use mago_syntax::cst::IfBody;
 use mago_syntax::cst::Law;
 use mago_syntax::cst::LawProof;
@@ -131,7 +132,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Law<'arena> {
             analyze_condition(context, &mut body_context, artifacts, condition.expression)?;
         }
         if let LawProof::Body(body) = &self.proof {
-            let mut walk = BodyWalk { context, law: self, class: class_like_metadata, smaller: Vec::new() };
+            let mut walk = BodyWalk { context, law: self, class: class_like_metadata, smaller: Vec::new(), step: None };
             walk.statements(body.statements.as_slice());
             analyze_statements(body.statements.as_slice(), context, &mut body_context, artifacts)?;
         }
@@ -167,39 +168,42 @@ where
     Ok(())
 }
 
-/// The law `call` names, and the class that states it: a bare name names a law of `class`, the class the call is in,
-/// and `Class.name(…)` a law of `Class`. `None` when the call names no law, as a call of a local's function does.
+/// The law `call` names, and the class that states it: `Class.name(…)` names a law of `Class`, as a static method is
+/// reached through its class's name, the law's own class included. `None` when the call names no law.
 pub(crate) fn called_law<'ctx, A>(
     context: &Context<'ctx, '_, A>,
-    class: Option<&'ctx ClassLikeMetadata>,
     call: &Call<'_>,
 ) -> Option<(&'ctx ClassLikeMetadata, &'ctx FunctionLikeMetadata)>
 where
     A: Arena,
 {
-    let (class, name) = match call {
-        Call::Function(call) => {
-            let Expression::Identifier(name) = call.function else {
-                return None;
-            };
-            if matches!(context.resolved_names.binding(name), Some(Binding::Local(_) | Binding::This)) {
-                return None;
-            }
+    let Call::Method(call) = call else {
+        return None;
+    };
+    let class = context.resolved_names.static_call_class(call)?;
+    let ClassLikeMemberSelector::Identifier(name) = &call.method else {
+        return None;
+    };
+    let class = context.codebase.get_class_like(context.resolved_names.get(&class.name))?;
 
-            (class?, name.value())
-        }
-        Call::Method(call) => {
-            let class = context.resolved_names.static_call_class(call)?;
-            let ClassLikeMemberSelector::Identifier(name) = &call.method else {
-                return None;
-            };
+    Some((class, class.laws.get(&ascii_lowercase_word(name.value))?))
+}
 
-            (context.codebase.get_class_like(context.resolved_names.get(&class.name))?, name.value)
-        }
-        _ => return None,
+/// Whether `call` is a bare call of a law of `class`, which a law's body writes through the class name, as it writes a
+/// static method. The bare call's own analysis names the call to write.
+fn is_bare_law_call<A>(context: &Context<'_, '_, A>, class: &ClassLikeMetadata, call: &Call<'_>) -> bool
+where
+    A: Arena,
+{
+    let Call::Function(call) = call else {
+        return false;
+    };
+    let Expression::Identifier(name) = call.function else {
+        return false;
     };
 
-    Some((class, class.laws.get(&ascii_lowercase_word(name))?))
+    !matches!(context.resolved_names.binding(name), Some(Binding::Local(_) | Binding::This))
+        && class.laws.contains_key(&ascii_lowercase_word(name.value()))
 }
 
 /// The call a statement of a law's body is, when it calls a law.
@@ -226,12 +230,7 @@ pub(crate) fn analyze_law_call<'ctx, 'arena, A>(
 where
     A: Arena,
 {
-    let argument_list = match call {
-        Call::Function(call) => &call.argument_list,
-        Call::Method(call) => &call.argument_list,
-        _ => return Ok(()),
-    };
-
+    let argument_list = call.get_argument_list();
     artifacts.symbol_references.add_reference_to_class_member(&block_context.scope, (class.name, law.name), false);
     let target = InvocationTarget::FunctionLike {
         identifier: FunctionLikeIdentifier::Method(class.name, law.name),
@@ -277,10 +276,26 @@ where
 enum Smaller<'arena> {
     /// The rest of the list parameter at this place, from a list pattern with an element before the rest.
     Rest(usize, &'arena [u8]),
-    /// The int parameter at this place is above a bound the body tested, so one less is nearer the bound.
-    Above(usize),
-    /// The int parameter at this place is below a bound the body tested, so one more is nearer the bound.
-    Below(usize),
+    /// The int parameter at this place is above the bound, so one less is nearer it.
+    Down(usize, Bound),
+    /// The int parameter at this place is below the bound, so one more is nearer it.
+    Up(usize, Bound),
+}
+
+/// The value an int parameter steps towards: an int literal, or the parameter at a place, which every call of the law
+/// on itself passes on unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Bound {
+    Literal(i64),
+    Parameter(usize),
+}
+
+/// How a call of the law on itself makes the parameter at a place smaller, which every such call shares.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Step {
+    Rest,
+    Down(Bound),
+    Up(Bound),
 }
 
 /// The walk of a law's body that refuses what a body may not hold, and each call of the law on itself that passes no
@@ -293,9 +308,11 @@ where
     law: &'ast Law<'arena>,
     class: &'ctx ClassLikeMetadata,
     smaller: Vec<Smaller<'arena>>,
+    /// The parameter the first call of the law on itself makes smaller, and how.
+    step: Option<(usize, Step)>,
 }
 
-impl<'ctx, 'ast, 'arena, A> BodyWalk<'_, 'ctx, 'ast, 'arena, A>
+impl<'ast, 'arena, A> BodyWalk<'_, '_, 'ast, 'arena, A>
 where
     A: Arena,
 {
@@ -310,7 +327,7 @@ where
                 && body.else_clause.is_none()
                 && ends(body.statement)
             {
-                self.learn(r#if.condition, true);
+                self.learn(r#if.condition, false);
             }
         }
         self.smaller.truncate(known);
@@ -329,11 +346,11 @@ where
                     return self.refuse(statement.span());
                 }
                 let known = self.smaller.len();
-                self.learn(r#if.condition, false);
+                self.learn(r#if.condition, true);
                 self.statement(body.statement);
                 self.smaller.truncate(known);
                 if let Some(clause) = &body.else_clause {
-                    self.learn(r#if.condition, true);
+                    self.learn(r#if.condition, false);
                     self.statement(clause.statement);
                     self.smaller.truncate(known);
                 }
@@ -367,114 +384,165 @@ where
                     self.smaller.truncate(known);
                 }
             }
-            _ => match law_call(statement)
-                .and_then(|call| Some((call, called_law(self.context, Some(self.class), call)?)))
-            {
-                Some((call, (class, law))) => {
-                    self.call(call, class.name == self.class.name && law.span == self.law.span())
-                }
+            _ => match law_call(statement) {
+                Some(call) => match called_law(self.context, call) {
+                    Some((class, law)) if class.name == self.class.name && law.span == self.law.span() => {
+                        self.call(call.get_argument_list(), call.span());
+                    }
+                    Some(_) => {}
+                    None if is_bare_law_call(self.context, self.class, call) => {}
+                    None => self.refuse(statement.span()),
+                },
                 None => self.refuse(statement.span()),
             },
         }
     }
 
-    /// Checks a call statement of a law: a call of this law itself, when `is_self`, passes a smaller value at one place.
-    fn call(&mut self, call: &'ast Call<'arena>, is_self: bool) {
-        let arguments = match call {
-            Call::Function(function) => &function.argument_list,
-            Call::Method(method) => &method.argument_list,
-            _ => return,
+    /// Checks `arguments`, those of a call statement of this law itself, at `span`: one of them passes a smaller value,
+    /// of the parameter every call of the law on itself makes smaller in the same way.
+    fn call(&mut self, arguments: &'ast ArgumentList<'arena>, span: Span) {
+        let values: Vec<&Expression<'arena>> = arguments.arguments.iter().map(|argument| argument.value()).collect();
+        let step =
+            values.iter().enumerate().find_map(|(place, value)| Some((place, self.step(&values, place, value)?)));
+        let annotation = match (step, self.step) {
+            (Some(step), None) => {
+                self.step = Some(step);
+                return;
+            }
+            (Some(step), Some(first)) if step == first => return,
+            (Some(_), Some(_)) => {
+                "This call makes a value smaller other than the one the law's first call of itself does."
+            }
+            (None, _) => "This call passes no smaller value.",
         };
-        if !is_self {
-            return;
-        }
 
-        let smaller = arguments.arguments.iter().enumerate().any(|(place, argument)| {
-            let Argument::Positional(argument) = argument else {
-                return false;
-            };
-            self.smaller.iter().any(|known| match (known, argument.value) {
-                (Smaller::Rest(parameter, rest), Expression::ConstantAccess(value)) => {
-                    *parameter == place && value.name.value() == *rest
-                }
-                (Smaller::Above(parameter), Expression::Binary(binary))
-                    if matches!(binary.operator, BinaryOperator::Subtraction(_)) =>
-                {
-                    *parameter == place && self.names_parameter(binary.lhs, place) && is_one(binary.rhs)
-                }
-                (Smaller::Below(parameter), Expression::Binary(binary))
-                    if matches!(binary.operator, BinaryOperator::Addition(_)) =>
-                {
-                    *parameter == place && self.names_parameter(binary.lhs, place) && is_one(binary.rhs)
-                }
-                _ => false,
-            })
-        });
-        if smaller {
-            return;
-        }
-
-        let name = String::from_utf8_lossy(self.law.name.value);
+        let name =
+            display_code_member(self.context, self.class.original_name, String::from_utf8_lossy(self.law.name.value));
         self.context.collector.report_with_code(
             IssueCode::LawRecursion,
             Issue::error("a law calls itself only on a smaller value")
-                .with_annotation(Annotation::primary(call.span()).with_message("This call passes no smaller value."))
+                .with_annotation(Annotation::primary(span).with_message(annotation))
                 .with_help(format!(
                     "Call {name} on a list's rest from a pattern the body matched, or on an int one step towards a bound the body tested, as `if (n <= 0) {{ return; }}` tests 0 before `{name}(n - 1);`."
                 )),
         );
     }
 
-    /// Learns what `condition`, or its negation when `negated`, tells of the law's int parameters.
-    fn learn(&mut self, condition: &'ast Expression<'arena>, negated: bool) {
-        match condition {
-            Expression::Parenthesized(parenthesized) => self.learn(parenthesized.expression, negated),
-            Expression::UnaryPrefix(prefix) if matches!(prefix.operator, UnaryPrefixOperator::Not(_)) => {
-                self.learn(prefix.operand, !negated);
+    /// How `value`, the argument at `place` of a call of the law on itself among `values`, makes the parameter at
+    /// `place` smaller: it is the rest of its list pattern, or it is one step from it towards a bound, which a parameter
+    /// bound's own argument passes on unchanged.
+    fn step(&self, values: &[&Expression<'arena>], place: usize, value: &Expression<'arena>) -> Option<Step> {
+        let value = unparenthesized(value);
+        let passes_on = |bound: Bound| match bound {
+            Bound::Literal(_) => true,
+            Bound::Parameter(index) => values.get(index).is_some_and(|value| self.parameter(value) == Some(index)),
+        };
+        let down = match value {
+            Expression::ConstantAccess(name) => {
+                return self
+                    .smaller
+                    .iter()
+                    .any(|known| matches!(known, Smaller::Rest(parameter, rest) if *parameter == place && name.name.value() == *rest))
+                    .then_some(Step::Rest);
             }
             Expression::Binary(binary) => match binary.operator {
-                BinaryOperator::And(_) if !negated => {
-                    self.learn(binary.lhs, false);
-                    self.learn(binary.rhs, false);
+                BinaryOperator::Subtraction(_)
+                    if literal(binary.rhs) == Some(1) && self.parameter(binary.lhs) == Some(place) =>
+                {
+                    true
                 }
-                BinaryOperator::Or(_) if negated => {
+                BinaryOperator::Addition(_)
+                    if literal(binary.rhs) == Some(1) && self.parameter(binary.lhs) == Some(place) =>
+                {
+                    false
+                }
+                BinaryOperator::Addition(_)
+                    if literal(binary.lhs) == Some(1) && self.parameter(binary.rhs) == Some(place) =>
+                {
+                    false
+                }
+                _ => return None,
+            },
+            _ => return None,
+        };
+
+        self.smaller.iter().rev().find_map(|known| match *known {
+            Smaller::Down(parameter, bound) if down && parameter == place && passes_on(bound) => {
+                Some(Step::Down(bound))
+            }
+            Smaller::Up(parameter, bound) if !down && parameter == place && passes_on(bound) => Some(Step::Up(bound)),
+            _ => None,
+        })
+    }
+
+    /// Learns what `condition` tells of the law's int parameters where it is `holds`: a comparison of one with an int
+    /// literal or another int parameter, under `!`, `&&` where it holds, and `||` where it fails.
+    fn learn(&mut self, condition: &'ast Expression<'arena>, holds: bool) {
+        match unparenthesized(condition) {
+            Expression::UnaryPrefix(prefix) if matches!(prefix.operator, UnaryPrefixOperator::Not(_)) => {
+                self.learn(prefix.operand, !holds);
+            }
+            Expression::Binary(binary) => match binary.operator {
+                BinaryOperator::And(_) if holds => {
                     self.learn(binary.lhs, true);
                     self.learn(binary.rhs, true);
                 }
-                BinaryOperator::LessThan(_)
-                | BinaryOperator::LessThanOrEqual(_)
-                | BinaryOperator::GreaterThan(_)
-                | BinaryOperator::GreaterThanOrEqual(_) => {
-                    // `n < b` and `n <= b` hold `n` below `b`, strictly for `<`, and a negation flips both.
-                    let below =
-                        matches!(binary.operator, BinaryOperator::LessThan(_) | BinaryOperator::LessThanOrEqual(_));
-                    let strict =
-                        matches!(binary.operator, BinaryOperator::LessThan(_) | BinaryOperator::GreaterThan(_));
-                    if strict == negated {
-                        return;
-                    }
-                    let (left, right) = (self.parameter(binary.lhs), self.parameter(binary.rhs));
-                    let held = [
-                        left.filter(|_| right.is_some() || is_bound(binary.rhs)).map(|parameter| (parameter, below)),
-                        right.filter(|_| left.is_some() || is_bound(binary.lhs)).map(|parameter| (parameter, !below)),
-                    ];
-                    for (parameter, below) in held.into_iter().flatten() {
-                        self.smaller.push(if below != negated {
-                            Smaller::Below(parameter)
-                        } else {
-                            Smaller::Above(parameter)
-                        });
-                    }
+                BinaryOperator::Or(_) if !holds => {
+                    self.learn(binary.lhs, false);
+                    self.learn(binary.rhs, false);
                 }
-                _ => {}
+                _ => {
+                    let learned = match (self.int_parameter(binary.lhs), self.int_parameter(binary.rhs)) {
+                        (Some(parameter), _) => self.bound(parameter, &binary.operator, binary.rhs, holds, false),
+                        (None, Some(parameter)) => self.bound(parameter, &binary.operator, binary.lhs, holds, true),
+                        (None, None) => None,
+                    };
+                    self.smaller.extend(learned);
+                }
             },
             _ => {}
         }
     }
 
+    /// What `parameter OPERATOR other`, or `other OPERATOR parameter` when `swapped`, shows where it is `holds`: that the
+    /// int parameter at `parameter` is above or below `other`, an int literal or another int parameter. A literal bound
+    /// takes `>=` and `<=` as one step past it, and a parameter only `>` and `<`, since a parameter may be the end of the
+    /// range, where one step further leaves it.
+    fn bound(
+        &self,
+        parameter: usize,
+        operator: &BinaryOperator,
+        other: &Expression<'arena>,
+        holds: bool,
+        swapped: bool,
+    ) -> Option<Smaller<'arena>> {
+        let (above, inclusive) = match (operator, swapped) {
+            (BinaryOperator::GreaterThan(_), false) | (BinaryOperator::LessThan(_), true) => (true, false),
+            (BinaryOperator::GreaterThanOrEqual(_), false) | (BinaryOperator::LessThanOrEqual(_), true) => (true, true),
+            (BinaryOperator::LessThan(_), false) | (BinaryOperator::GreaterThan(_), true) => (false, false),
+            (BinaryOperator::LessThanOrEqual(_), false) | (BinaryOperator::GreaterThanOrEqual(_), true) => {
+                (false, true)
+            }
+            _ => return None,
+        };
+        // Where the comparison fails, the opposite one holds: not `>` is `<=`.
+        let (above, inclusive) = if holds { (above, inclusive) } else { (!above, !inclusive) };
+        let bound = match (self.int_parameter(other), literal(other)) {
+            (Some(bound), _) if !inclusive && bound != parameter => Bound::Parameter(bound),
+            (_, Some(value)) => Bound::Literal(match (inclusive, above) {
+                (false, _) => value,
+                (true, true) => value.checked_sub(1)?,
+                (true, false) => value.checked_add(1)?,
+            }),
+            _ => return None,
+        };
+
+        Some(if above { Smaller::Down(parameter, bound) } else { Smaller::Up(parameter, bound) })
+    }
+
     /// The place of the law's parameter `expression` names.
     fn parameter(&self, expression: &Expression<'arena>) -> Option<usize> {
-        let Expression::ConstantAccess(name) = expression else {
+        let Expression::ConstantAccess(name) = unparenthesized(expression) else {
             return None;
         };
 
@@ -483,8 +551,11 @@ where
         })
     }
 
-    fn names_parameter(&self, expression: &Expression<'arena>, place: usize) -> bool {
-        self.parameter(expression) == Some(place)
+    /// The place of the law's `int` parameter `expression` names.
+    fn int_parameter(&self, expression: &Expression<'arena>) -> Option<usize> {
+        self.parameter(expression).filter(|place| {
+            matches!(self.law.parameter_list.parameters.as_slice()[*place].hint, Some(Hint::Integer(_)))
+        })
     }
 
     fn refuse(&mut self, span: Span) {
@@ -505,17 +576,20 @@ fn ends(statement: &Statement<'_>) -> bool {
     }
 }
 
-fn is_one(expression: &Expression<'_>) -> bool {
-    matches!(expression, Expression::Literal(Literal::Integer(integer)) if integer.value == Some(1))
+/// The value of `expression` when it is an int literal, negated or not.
+fn literal(expression: &Expression<'_>) -> Option<i64> {
+    match unparenthesized(expression) {
+        Expression::Literal(Literal::Integer(integer)) => integer.value.and_then(|value| i64::try_from(value).ok()),
+        Expression::UnaryPrefix(prefix) if matches!(prefix.operator, UnaryPrefixOperator::Negation(_)) => {
+            literal(prefix.operand)?.checked_neg()
+        }
+        _ => None,
+    }
 }
 
-/// Whether `expression` is a bound an int parameter steps towards besides another parameter: an int literal.
-fn is_bound(expression: &Expression<'_>) -> bool {
+fn unparenthesized<'ast, 'arena>(expression: &'ast Expression<'arena>) -> &'ast Expression<'arena> {
     match expression {
-        Expression::Literal(Literal::Integer(_)) => true,
-        Expression::UnaryPrefix(prefix) => {
-            matches!(prefix.operator, UnaryPrefixOperator::Negation(_)) && is_bound(prefix.operand)
-        }
-        _ => false,
+        Expression::Parenthesized(parenthesized) => unparenthesized(parenthesized.expression),
+        expression => expression,
     }
 }

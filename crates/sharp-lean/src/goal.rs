@@ -2,6 +2,7 @@
 //! through the names the translation gave the code.
 
 use foldhash::HashMap;
+use foldhash::HashSet;
 use serde_json::Value;
 
 /// How tightly a PHP# expression binds, loosest first.
@@ -19,6 +20,8 @@ const POSTFIX: u8 = 9;
 pub(crate) struct Names<'names> {
     /// Each member PHP# calls on a value, by its Lean name, and whether it is a property.
     pub(crate) receivers: &'names HashMap<String, bool>,
+    /// The Lean name of every declaration the translation wrote, which PHP# calls on its class.
+    pub(crate) declared: &'names HashSet<String>,
     /// The PHP# of each argument of the call a condition belongs to, which its goal names as `$argN`.
     pub(crate) arguments: &'names [String],
 }
@@ -41,11 +44,14 @@ impl Php {
     }
 }
 
-/// `tree`, a goal `Sharp/Lean/Proof.lean` wrote as JSON, in PHP#, or `None` when it is no tree.
+/// `tree`, a goal `Sharp/Lean/Proof.lean` wrote as JSON, in PHP#, or `None` when it is no tree or holds a part PHP#
+/// has no expression for.
 pub(crate) fn php(tree: &str, names: &Names<'_>) -> Option<String> {
     let tree: Value = serde_json::from_str(tree).ok()?;
+    let mut printer = Printer { names, bound: Vec::new(), complete: true };
+    let goal = printer.print(&tree);
 
-    Some(Printer { names, bound: Vec::new() }.print(&tree).text)
+    printer.complete.then_some(goal.text)
 }
 
 /// The PHP# of each goal of a condition `tree` holds, joined by `&&`.
@@ -53,22 +59,24 @@ pub(crate) fn conjunction(tree: &str, names: &Names<'_>) -> Option<String> {
     let Value::Array(goals) = serde_json::from_str(tree).ok()? else {
         return None;
     };
-    let printed: Vec<String> =
-        goals.iter().map(|goal| Printer { names, bound: Vec::new() }.print(goal).at(AND)).collect();
+    let mut printer = Printer { names, bound: Vec::new(), complete: true };
+    let parts: Vec<String> = goals.iter().map(|goal| printer.print(goal).at(AND)).collect();
 
-    Some(printed.join(" && "))
+    printer.complete.then(|| parts.join(" && "))
 }
 
 struct Printer<'printer, 'names> {
     names: &'printer Names<'names>,
     /// Each value a step bound, innermost last, by the name its body reads it by.
     bound: Vec<(String, Php)>,
+    /// Whether every part of the goal so far has a PHP# expression.
+    complete: bool,
 }
 
 impl Printer<'_, '_> {
     fn print(&mut self, tree: &Value) -> Php {
         let Some(parts) = tree.as_array() else {
-            return unknown();
+            return self.unknown();
         };
         let text = |index: usize| parts.get(index).and_then(Value::as_str).unwrap_or_default();
         match text(0) {
@@ -81,7 +89,7 @@ impl Printer<'_, '_> {
             }
             "let" => self.bind(text(1), &parts[2], &parts[3]),
             "app" => self.application(text(1), &parts[2..]),
-            _ => unknown(),
+            _ => self.unknown(),
         }
     }
 
@@ -114,7 +122,7 @@ impl Printer<'_, '_> {
             ("Sharp.holds" | "Pure.pure" | "Decidable.decide" | "Option.some", [value]) => self.print(value),
             ("Bind.bind", [value, lambda]) => match lambda.as_array().map(Vec::as_slice) {
                 Some([kind, name, body]) if kind == "lam" => self.bind(name.as_str().unwrap_or_default(), value, body),
-                _ => unknown(),
+                _ => self.unknown(),
             },
             ("ite", [condition, then, otherwise]) => {
                 let (condition, then, otherwise) = (self.print(condition), self.print(then), self.print(otherwise));
@@ -173,20 +181,15 @@ impl Printer<'_, '_> {
     fn list(&mut self, arguments: &[Value]) -> Php {
         let mut elements = Vec::new();
         let mut rest = arguments;
-        loop {
-            match rest {
-                [head, tail] => {
-                    elements.push(self.print(head).at(TERNARY));
-                    match tail.as_array().map(Vec::as_slice) {
-                        Some([kind, function, inner @ ..]) if kind == "app" && function == "List.cons" => rest = inner,
-                        Some([kind, function]) if kind == "app" && function == "List.nil" => break,
-                        _ => {
-                            elements.push(format!("...{}", self.print(tail).at(TERNARY)));
-                            break;
-                        }
-                    }
+        while let [head, tail] = rest {
+            elements.push(self.print(head).at(TERNARY));
+            match tail.as_array().map(Vec::as_slice) {
+                Some([kind, function, inner @ ..]) if kind == "app" && function == "List.cons" => rest = inner,
+                Some([kind, function]) if kind == "app" && function == "List.nil" => break,
+                _ => {
+                    elements.push(format!("...{}", self.print(tail).at(TERNARY)));
+                    break;
                 }
-                _ => break,
             }
         }
 
@@ -210,9 +213,17 @@ impl Printer<'_, '_> {
             (Some(false), Some((receiver, rest))) => {
                 Php::new(format!("{}.{name}({})", receiver.at(POSTFIX), list(rest)), POSTFIX)
             }
+            _ if !self.names.declared.contains(member) => self.unknown(),
             _ if printed.is_empty() => Php::new(format!("{class}.{name}"), POSTFIX),
             _ => Php::new(format!("{class}.{name}({})", list(&printed)), POSTFIX),
         }
+    }
+
+    /// A part of a goal PHP# has no expression for, which leaves the whole goal unprinted.
+    fn unknown(&mut self) -> Php {
+        self.complete = false;
+
+        Php::new(String::new(), POSTFIX + 1)
     }
 }
 
@@ -241,11 +252,6 @@ fn is(tree: &Value, name: &str) -> bool {
     tree.as_array().is_some_and(|parts| parts.len() == 2 && parts[0] == "app" && parts[1] == name)
 }
 
-/// A part of a goal PHP# has no expression for.
-fn unknown() -> Php {
-    Php::new("…", POSTFIX + 1)
-}
-
 /// `text` as a PHP# string literal.
 fn quoted(text: &str) -> String {
     format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
@@ -255,12 +261,22 @@ fn quoted(text: &str) -> String {
 mod tests {
     use super::*;
 
+    /// The members of spec section 28.1's `Money` that its laws reach.
+    const DECLARED: [&str; 5] = [
+        "App.Shared.Money.__construct",
+        "App.Shared.Money.add",
+        "App.Shared.Money.times",
+        "App.Shared.Money.total",
+        "App.Shared.Money.refundable",
+    ];
+
     fn printed(tree: &str, receivers: &[(&str, bool)], arguments: &[&str]) -> Option<String> {
         let receivers: HashMap<String, bool> =
             receivers.iter().map(|(name, property)| ((*name).to_owned(), *property)).collect();
+        let declared: HashSet<String> = DECLARED.iter().map(|name| (*name).to_owned()).collect();
         let arguments: Vec<String> = arguments.iter().map(|argument| (*argument).to_owned()).collect();
 
-        php(tree, &Names { receivers: &receivers, arguments: &arguments })
+        php(tree, &Names { receivers: &receivers, declared: &declared, arguments: &arguments })
     }
 
     /// The goal of `timesKeepsCurrency` without its call of `addKeepsCurrency`, as Lean leaves it once `times` is
@@ -283,12 +299,27 @@ mod tests {
     #[test]
     fn a_condition_names_the_arguments_of_its_call() {
         let condition = r#"[["app","Eq",["app","Decidable.decide",["app","LE.le",["lit","0"],["var","$arg1"]]],["app","Bool.true"]]]"#;
-        let receivers = HashMap::default();
+        let (receivers, declared) = (HashMap::default(), HashSet::default());
         let arguments = vec!["p".to_owned()];
 
         assert_eq!(
-            conjunction(condition, &Names { receivers: &receivers, arguments: &arguments }).as_deref(),
+            conjunction(condition, &Names { receivers: &receivers, declared: &declared, arguments: &arguments })
+                .as_deref(),
             Some("0 <= p")
+        );
+    }
+
+    /// A goal that holds a part only Lean writes, as the `match` of `total` that Lean names `total.match_1`, has no
+    /// PHP# form, so it is not printed.
+    #[test]
+    fn a_goal_with_a_part_php_sharp_has_no_expression_for_is_not_printed() {
+        let goal = r#"["app","BEq.beq",["app","App.Shared.Money.total.match_1",["?"],["var","b"]],["app","App.Shared.Money.total",["var","b"]]]"#;
+
+        assert_eq!(printed(goal, &[], &[]), None);
+        assert_eq!(
+            printed(r#"["app","BEq.beq",["app","App.Shared.Money.total",["var","b"]],["lit","0"]]"#, &[], &[])
+                .as_deref(),
+            Some("Money.total(b) == 0")
         );
     }
 }

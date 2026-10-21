@@ -4,6 +4,7 @@
 //! effects run in the order PHP# runs them and every other term is pure. A branch that runs only on one side of a
 //! condition is a nested `do` block, so its effects run only there.
 
+use foldhash::HashMap;
 use foldhash::HashSet;
 use mago_codex::ttype::TType;
 use mago_codex::ttype::atomic::TAtomic;
@@ -29,9 +30,15 @@ use mago_syntax::cst::Call;
 use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::ConstantAccess;
 use mago_syntax::cst::Expression;
+use mago_syntax::cst::ForOf;
+use mago_syntax::cst::ForOfTarget;
+use mago_syntax::cst::FunctionLikeParameter;
 use mago_syntax::cst::Hint;
 use mago_syntax::cst::IfBody;
 use mago_syntax::cst::Instantiation;
+use mago_syntax::cst::Is;
+use mago_syntax::cst::ListPattern;
+use mago_syntax::cst::ListPatternElement;
 use mago_syntax::cst::Literal;
 use mago_syntax::cst::LocalTarget;
 use mago_syntax::cst::MethodCall;
@@ -42,13 +49,19 @@ use mago_syntax::cst::PatternMatch;
 use mago_syntax::cst::PatternMatchArm;
 use mago_syntax::cst::PatternMatchArmBody;
 use mago_syntax::cst::PropertyAccess;
+use mago_syntax::cst::Sequence;
 use mago_syntax::cst::Statement;
+use mago_syntax::cst::TypePattern;
+use mago_syntax::cst::UnaryPostfixOperator;
 use mago_syntax::cst::UnaryPrefix;
 use mago_syntax::cst::UnaryPrefixOperator;
 use mago_word::ascii_lowercase_word;
 
 use crate::issues;
 use crate::reach::Reach;
+use crate::translate::Bound;
+use crate::translate::Smaller;
+use crate::translate::Step;
 use crate::translate::Unmodeled;
 use crate::translate::Use;
 use crate::translate::names;
@@ -69,6 +82,48 @@ enum Kind {
 /// One branch of a choice: its statements, the last of which gives the branch's value.
 type Branch = Vec<String>;
 
+/// Which branch runs, as Lean writes it: `if`s, `match`es that bind a pattern's locals, and `let`s.
+#[derive(Clone)]
+enum Choice {
+    Branch(Branch),
+    If(String, Box<Choice>, Box<Choice>),
+    /// The term matched, and each pattern with its branch.
+    Match(String, Vec<(String, Choice)>),
+    Let(String, String, Box<Choice>),
+}
+
+/// What a `match` arm or an `is` tests, as Lean tests it: the Lean patterns its subject and parts of the subject match,
+/// outermost first, the locals it binds from them, and the conditions it adds.
+#[derive(Default)]
+struct Test {
+    matches: Vec<Destructure>,
+    lets: Vec<(String, String)>,
+    conditions: Vec<String>,
+}
+
+/// One Lean `match` of a test: the term, and the pattern.
+struct Destructure {
+    term: String,
+    pattern: String,
+}
+
+/// What the conditions on the path to the code being translated show about an int parameter: a call may pass it
+/// one step towards `step`'s bound.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Fact {
+    pub(crate) parameter: usize,
+    pub(crate) step: Step,
+}
+
+/// What a counting or summing loop adds to an int local: one, or a value, under the conditions on the element, each
+/// with whether it holds.
+struct Addition<'expression, 'arena> {
+    /// The local's name, as the loop writes it.
+    local: &'expression Expression<'arena>,
+    amount: Option<&'expression Expression<'arena>>,
+    conditions: Vec<(&'expression Expression<'arena>, bool)>,
+}
+
 /// The translation of one body: its `do` statements, the declarations it uses, and each construct it cannot model.
 pub(crate) struct Body<'body, 'program> {
     checked: &'body CheckedProgram<'program>,
@@ -83,6 +138,16 @@ pub(crate) struct Body<'body, 'program> {
     temporaries: u32,
     /// Each local whose type takes `null`, by where its declaration's name starts.
     nullable_locals: HashSet<u32>,
+    /// The parameters of a method whose calls of its own class may recurse, in order: where each one's name starts,
+    /// and whether it is an `int`.
+    parameters: Vec<(u32, bool)>,
+    /// What the conditions on the path to the code being translated show about the parameters.
+    facts: Vec<Fact>,
+    /// Each local a list pattern binds to the rest of a list parameter, by where its name starts, and the parameter.
+    rests: HashMap<u32, usize>,
+    /// The locals the loop being translated adds to, by where their declarations' names start, which its conditions
+    /// and the values it adds must not read.
+    accumulators: Vec<u32>,
 }
 
 impl<'body, 'program> Body<'body, 'program> {
@@ -102,7 +167,29 @@ impl<'body, 'program> Body<'body, 'program> {
             lines: Vec::new(),
             temporaries: 0,
             nullable_locals: HashSet::default(),
+            parameters: Vec::new(),
+            facts: Vec::new(),
+            rests: HashMap::default(),
+            accumulators: Vec::new(),
         }
+    }
+
+    /// Lets the body's calls of methods of its own class pass smaller values of `parameters`, in order.
+    pub(crate) fn recurse_on<'parameter, 'arena, I>(&mut self, parameters: I)
+    where
+        'arena: 'parameter,
+        I: Iterator<Item = &'parameter FunctionLikeParameter<'arena>>,
+    {
+        self.parameters = parameters
+            .map(|parameter| (parameter.variable.span.start.offset, matches!(parameter.hint, Some(Hint::Integer(_)))))
+            .collect();
+    }
+
+    /// Lets the body's calls pass smaller values on a path of a law's body that showed `facts`, and where each local of
+    /// `rests`, by where its name starts, is the rest of a list pattern of the parameter beside it.
+    pub(crate) fn knowing(&mut self, facts: &[Fact], rests: impl Iterator<Item = (u32, usize)>) {
+        self.facts.extend_from_slice(facts);
+        self.rests.extend(rests);
     }
 
     /// The Lean type of `hint`.
@@ -182,9 +269,7 @@ impl<'body, 'program> Body<'body, 'program> {
 
     /// The `do` statements of a block body. A body that may end without `return` ends in `pure ()`.
     pub(crate) fn block_body(mut self, block: &Block, void: bool) -> (Vec<String>, Vec<Use>, Vec<Unmodeled>) {
-        for statement in &block.statements {
-            self.statement(statement);
-        }
+        self.statements(&block.statements);
         if void || self.lines.is_empty() {
             self.lines.push("pure ()".to_owned());
         }
@@ -202,13 +287,26 @@ impl<'body, 'program> Body<'body, 'program> {
         (self.lines, self.uses, self.unmodeled)
     }
 
+    /// `statements` in order. The statements after an `if` whose block returns run where its condition does not hold.
+    fn statements(&mut self, statements: &Sequence<'_, Statement<'_>>) {
+        let depth = self.facts.len();
+        for statement in statements {
+            self.statement(statement);
+            if let Statement::If(r#if) = statement
+                && let IfBody::Statement(body) = &r#if.body
+                && body.else_clause.is_none()
+                && returns(body.statement)
+            {
+                let facts = self.facts(r#if.condition, false);
+                self.facts.extend(facts);
+            }
+        }
+        self.facts.truncate(depth);
+    }
+
     fn statement(&mut self, statement: &Statement) {
         match statement {
-            Statement::Block(block) => {
-                for statement in &block.statements {
-                    self.statement(statement);
-                }
-            }
+            Statement::Block(block) => self.statements(&block.statements),
             Statement::Return(r#return) => {
                 let value = r#return.value.map_or_else(|| "()".to_owned(), |value| self.value(value));
                 self.lines.push(format!("return {value}"));
@@ -237,18 +335,31 @@ impl<'body, 'program> Body<'body, 'program> {
                     self.unmodeled(r#if.span(), "a colon-delimited if".to_owned(), issues::NOT_TRANSLATED);
                     return;
                 };
+                // `if (x is Money m)` names `m` where the test holds, so it is a `match` on `x`.
+                if let Expression::Is(is) = unparenthesized(r#if.condition) {
+                    let Some(test) = self.is_test(is) else {
+                        return;
+                    };
+                    let then = self.nested_statement(body.statement);
+                    let otherwise = body.else_clause.as_ref().map(|clause| self.nested_statement(clause.statement));
+                    let choice = choice(vec![(test, then)], otherwise.unwrap_or_default());
+                    self.lines.extend(statements(&choice));
+                    return;
+                }
                 let condition = self.value(r#if.condition);
-                let then = self.nested_statement(body.statement);
+                let holds = self.facts(r#if.condition, true);
+                let then = self.under(holds, |this| this.nested_statement(body.statement));
                 self.lines.push(format!("if {condition} then"));
                 self.lines.extend(indented(&then, 2));
                 if let Some(clause) = &body.else_clause {
-                    let otherwise = self.nested_statement(clause.statement);
+                    let fails = self.facts(r#if.condition, false);
+                    let otherwise = self.under(fails, |this| this.nested_statement(clause.statement));
                     self.lines.push("else".to_owned());
                     self.lines.extend(indented(&otherwise, 2));
                 }
             }
+            Statement::ForOf(for_of) => self.counting_loop(for_of),
             Statement::For(_)
-            | Statement::ForOf(_)
             | Statement::Foreach(_)
             | Statement::While(_)
             | Statement::DoWhile(_)
@@ -259,8 +370,12 @@ impl<'body, 'program> Body<'body, 'program> {
             Statement::Try(_) => {
                 self.unmodeled(statement.span(), "a try/catch".to_owned(), issues::TRY_CATCH);
             }
-            Statement::PatternMatch(_) => {
-                self.unmodeled(statement.span(), "a match statement".to_owned(), issues::NOT_TRANSLATED);
+            Statement::PatternMatch(r#match) => {
+                let Some((arms, otherwise)) = self.arms(r#match, Self::arm_statements) else {
+                    return;
+                };
+                let choice = choice(arms, otherwise);
+                self.lines.extend(statements(&choice));
             }
             _ => {
                 self.unmodeled(
@@ -317,11 +432,26 @@ impl<'body, 'program> Body<'body, 'program> {
             Expression::UnaryPrefix(unary) => self.prefix(unary),
             Expression::Conditional(conditional) => match conditional.then {
                 Some(then) => {
-                    let condition = self.value(conditional.condition);
-                    let then = self.branch(then);
-                    let otherwise = self.branch(conditional.r#else);
+                    if let Expression::Is(is) = unparenthesized(conditional.condition) {
+                        let Some(test) = self.is_test(is) else {
+                            return "default".to_owned();
+                        };
+                        let then = self.branch(then);
+                        let otherwise = self.branch(conditional.r#else);
 
-                    self.choose(vec![(condition, then)], otherwise)
+                        return self.choose(&choice(vec![(test, then)], otherwise));
+                    }
+                    let condition = self.value(conditional.condition);
+                    let holds = self.facts(conditional.condition, true);
+                    let then = self.under(holds, |body| body.branch(then));
+                    let fails = self.facts(conditional.condition, false);
+                    let otherwise = self.under(fails, |body| body.branch(conditional.r#else));
+
+                    self.choose(&Choice::If(
+                        condition,
+                        Box::new(Choice::Branch(then)),
+                        Box::new(Choice::Branch(otherwise)),
+                    ))
                 }
                 None => self.unmodeled(expression.span(), "the operator `?:`".to_owned(), issues::NOT_TRANSLATED),
             },
@@ -335,16 +465,34 @@ impl<'body, 'program> Body<'body, 'program> {
             Expression::Instantiation(instantiation) => self.instantiation(instantiation),
             Expression::Access(Access::Property(access)) => self.property(expression, access),
             Expression::Access(Access::NullSafeProperty(access)) => self.null_safe_property(expression, access),
+            // A spread is Lean's `++`: `[x, ...rest]` is `[x] ++ rest`.
             Expression::Array(array) if self.is_list(expression) => {
-                let mut elements = Vec::new();
+                let mut parts: Vec<String> = Vec::new();
+                let mut elements: Vec<String> = Vec::new();
                 for element in &array.elements {
-                    let ArrayElement::Value(element) = element else {
-                        return self.unmodeled(element.span(), "a spread in a list".to_owned(), issues::COLLECTION);
-                    };
-                    elements.push(self.value(element.value));
+                    match element {
+                        ArrayElement::Value(element) => elements.push(self.value(element.value)),
+                        ArrayElement::Variadic(spread) => {
+                            if !elements.is_empty() {
+                                parts.push(format!("[{}]", elements.join(", ")));
+                                elements.clear();
+                            }
+                            parts.push(self.value(spread.value));
+                        }
+                        element => unreachable!(
+                            "the checker accepts a List literal of values and spreads of Lists, not {:?}",
+                            element.span()
+                        ),
+                    }
+                }
+                if !elements.is_empty() || parts.is_empty() {
+                    parts.push(format!("[{}]", elements.join(", ")));
                 }
 
-                format!("[{}]", elements.join(", "))
+                match parts.as_slice() {
+                    [only] => only.clone(),
+                    _ => format!("({})", parts.join(" ++ ")),
+                }
             }
             Expression::Array(_)
             | Expression::LegacyArray(_)
@@ -356,7 +504,21 @@ impl<'body, 'program> Body<'body, 'program> {
             Expression::Closure(_) | Expression::ArrowFunction(_) | Expression::PartialApplication(_) => {
                 self.unmodeled(expression.span(), "a lambda".to_owned(), issues::LAMBDA)
             }
-            Expression::Is(_) | Expression::As(_) | Expression::TypeOf(_) => {
+            Expression::Is(is) => {
+                if names_values(is.pattern) {
+                    return self.unmodeled(
+                        expression.span(),
+                        "a pattern that names a value outside the condition of an if or a ?:".to_owned(),
+                        issues::NAMED_PATTERN,
+                    );
+                }
+                let Some(test) = self.is_test(is) else {
+                    return "default".to_owned();
+                };
+
+                self.choose(&choice(vec![(test, vec!["pure true".to_owned()])], vec!["pure false".to_owned()]))
+            }
+            Expression::As(_) | Expression::TypeOf(_) => {
                 self.unmodeled(expression.span(), "a type test".to_owned(), issues::TYPE_TEST)
             }
             Expression::Yield(_) => self.unmodeled(expression.span(), "a lazy sequence".to_owned(), issues::LAZY),
@@ -394,6 +556,13 @@ impl<'body, 'program> Body<'body, 'program> {
     fn name(&mut self, expression: &Expression, name: &ConstantAccess) -> String {
         match self.checked.names().binding(&name.name) {
             Some(Binding::Local(local)) => {
+                if self.accumulators.contains(&local.declaration.start.offset) {
+                    return self.unmodeled(
+                        expression.span(),
+                        "a loop that reads a local it adds to".to_owned(),
+                        issues::LOOP,
+                    );
+                }
                 let lean = names::identifier(name.name.value());
                 if self.nullable_locals.contains(&local.declaration.start.offset)
                     && !self.checked.types().expression_type(expression).is_nullable()
@@ -461,7 +630,8 @@ impl<'body, 'program> Body<'body, 'program> {
     /// `&&` and `||`, which run their right side only when the left one does not decide.
     fn short_circuit(&mut self, binary: &Binary, and: bool) -> String {
         let lhs = self.value(binary.lhs);
-        let rhs = self.branch(binary.rhs);
+        let facts = self.facts(binary.lhs, and);
+        let rhs = self.under(facts, |body| body.branch(binary.rhs));
         let operator = if and { "&&" } else { "||" };
         if let [only] = rhs.as_slice()
             && let Some(rhs) = only.strip_prefix("pure ")
@@ -469,11 +639,9 @@ impl<'body, 'program> Body<'body, 'program> {
             return format!("({lhs} {operator} {rhs})");
         }
 
-        if and {
-            self.choose(vec![(lhs, rhs)], vec!["pure false".to_owned()])
-        } else {
-            self.choose(vec![(lhs, vec!["pure true".to_owned()])], rhs)
-        }
+        let (then, otherwise) =
+            if and { (rhs, vec!["pure false".to_owned()]) } else { (vec!["pure true".to_owned()], rhs) };
+        self.choose(&Choice::If(lhs, Box::new(Choice::Branch(then)), Box::new(Choice::Branch(otherwise))))
     }
 
     /// `a ?? b`, which runs `b` only when `a` is null.
@@ -483,7 +651,11 @@ impl<'body, 'program> Body<'body, 'program> {
         let rhs = self.branch(binary.rhs);
         let present = if keeps_null { lhs.clone() } else { format!("({lhs}.getD default)") };
 
-        self.choose(vec![(format!("{lhs}.isSome"), vec![format!("pure {present}")])], rhs)
+        self.choose(&Choice::If(
+            format!("{lhs}.isSome"),
+            Box::new(Choice::Branch(vec![format!("pure {present}")])),
+            Box::new(Choice::Branch(rhs)),
+        ))
     }
 
     fn prefix(&mut self, unary: &UnaryPrefix) -> String {
@@ -515,52 +687,418 @@ impl<'body, 'program> Body<'body, 'program> {
         }
     }
 
-    /// A `match` tests its subject against each arm's pattern and guard in order, and throws when no arm matches.
+    /// A `match` in an expression gives the value of the first arm whose pattern and guard hold, and throws when none
+    /// does.
     fn pattern_match(&mut self, r#match: &PatternMatch) -> String {
-        let kind = self.kind(self.checked.types().expression_type(r#match.expression));
-        match kind {
-            Kind::Float => return self.unmodeled(r#match.span(), "a float".to_owned(), issues::FLOAT),
-            Kind::Object | Kind::Other => {
-                return self.unmodeled(r#match.span(), "a match on this subject".to_owned(), issues::NOT_TRANSLATED);
-            }
-            Kind::Int | Kind::Bool | Kind::String | Kind::Enum | Kind::Null => {}
+        let Some((arms, otherwise)) = self.arms(r#match, Self::arm_value) else {
+            return "default".to_owned();
+        };
+
+        self.choose(&choice(arms, otherwise))
+    }
+
+    /// The test and the branch of each arm of `r#match`, in order, each branch as `translate` gives it, and the branch
+    /// that runs when no arm matches: the `default` arm's, else a throw. `None` after recording why an arm has no test.
+    fn arms(
+        &mut self,
+        r#match: &PatternMatch,
+        mut translate: impl FnMut(&mut Self, &PatternMatchArmBody) -> Branch,
+    ) -> Option<(Vec<(Test, Branch)>, Branch)> {
+        let r#type = self.checked.types().expression_type(r#match.expression);
+        if self.kind(r#type) == Kind::Float {
+            self.unmodeled(r#match.span(), "a float".to_owned(), issues::FLOAT);
+            return None;
         }
 
         let subject = self.value(r#match.expression);
+        let parameter = self.parameter(r#match.expression);
+        let depth = self.facts.len();
         let mut arms = Vec::new();
         let mut otherwise = vec!["throw Throwable.UnhandledMatchError".to_owned()];
         for arm in r#match.arms.iter() {
-            let body = match arm {
-                PatternMatchArm::Pattern(arm) => &arm.body,
-                PatternMatchArm::Default(arm) => &arm.body,
-            };
-            let PatternMatchArmBody::Expression(body) = body else {
-                return self.unmodeled(arm.span(), "a match arm with a block".to_owned(), issues::NOT_TRANSLATED);
-            };
             let PatternMatchArm::Pattern(arm) = arm else {
-                otherwise = self.branch(body);
+                otherwise = translate(self, arm.body());
                 continue;
             };
 
-            let Some(mut condition) = self.pattern(&subject, kind, arm.pattern) else {
-                return "default".to_owned();
-            };
+            let mut test = self.test(&subject, r#type, parameter, arm.pattern)?;
             if let Some(guard) = &arm.guard {
-                let Some(guard) = self.pure(guard.condition, "a guard that can throw") else {
-                    return "default".to_owned();
-                };
-                condition = format!("({condition} && {guard})");
+                test.conditions.push(self.pure(guard.condition, "a guard that can throw")?);
             }
-            arms.push((condition, self.branch(body)));
+            let holds = self.pattern_facts(parameter, arm.pattern, true);
+            arms.push((test, self.under(holds, |body| translate(body, &arm.body))));
+            // A later arm runs only where this one's pattern fails, unless its guard is what failed.
+            if arm.guard.is_none() {
+                let fails = self.pattern_facts(parameter, arm.pattern, false);
+                self.facts.extend(fails);
+            }
+        }
+        self.facts.truncate(depth);
+
+        Some((arms, otherwise))
+    }
+
+    /// The branch of an arm of a `match` in an expression, which ends in the arm's value.
+    fn arm_value(&mut self, body: &PatternMatchArmBody) -> Branch {
+        match body {
+            PatternMatchArmBody::Expression(expression) => self.branch(expression),
+            PatternMatchArmBody::Block(block) => {
+                vec![self.unmodeled(block.span(), "a match arm with a block".to_owned(), issues::NOT_TRANSLATED)]
+            }
+        }
+    }
+
+    /// The statements of an arm of a `match` statement.
+    fn arm_statements(&mut self, body: &PatternMatchArmBody) -> Branch {
+        let outer = std::mem::take(&mut self.lines);
+        match body {
+            PatternMatchArmBody::Expression(expression) => {
+                self.value(expression);
+            }
+            PatternMatchArmBody::Block(block) => self.statements(&block.statements),
         }
 
-        self.choose(arms, otherwise)
+        std::mem::replace(&mut self.lines, outer)
+    }
+
+    /// The test of `x is P`, of the value of `x`.
+    fn is_test(&mut self, is: &Is) -> Option<Test> {
+        let r#type = self.checked.types().expression_type(is.value);
+        let subject = self.value(is.value);
+        let parameter = self.parameter(is.value);
+
+        self.test(&subject, r#type, parameter, is.pattern)
+    }
+
+    /// What `subject`, a term of `r#type`, matching `pattern` tests, or `None` after recording why Lean cannot test
+    /// it. `parameter` is the parameter `subject` is, if it is one.
+    fn test(&mut self, subject: &str, r#type: &TUnion, parameter: Option<usize>, pattern: &Pattern) -> Option<Test> {
+        match pattern {
+            Pattern::Type(pattern) => self.type_test(subject, r#type, pattern),
+            Pattern::List(list) => self.list_test(subject, r#type, parameter, list),
+            Pattern::Parenthesized(parenthesized) => self.test(subject, r#type, parameter, parenthesized.pattern),
+            _ => {
+                let condition = self.pattern(subject, self.kind(r#type), pattern)?;
+
+                Some(Test { conditions: vec![condition], ..Test::default() })
+            }
+        }
+    }
+
+    /// A type pattern holds for a value of the type it names, and a case's for a value of that case. Lean knows nothing
+    /// else about a value's type while the code runs.
+    fn type_test(&mut self, subject: &str, r#type: &TUnion, pattern: &TypePattern) -> Option<Test> {
+        let atomics: Vec<&TAtomic> = r#type.types.iter().filter(|atomic| !atomic.is_null()).collect();
+        let [atomic] = atomics.as_slice() else {
+            self.unmodeled(pattern.span(), "a type test".to_owned(), issues::TYPE_TEST);
+            return None;
+        };
+        let case = if pattern.fields.is_some() || pattern.properties.is_some() {
+            None
+        } else if self.names_type(&pattern.hint, atomic) {
+            Some(None)
+        } else {
+            self.case(&pattern.hint, atomic).map(Some)
+        };
+        let Some(case) = case else {
+            self.unmodeled(pattern.span(), "a type test".to_owned(), issues::TYPE_TEST);
+            return None;
+        };
+
+        let name = pattern.variable.map(|variable| names::identifier(variable.value));
+        let whole = match (&case, &name) {
+            (None, Some(name)) => name.clone(),
+            (None, None) => "_".to_owned(),
+            (Some(case), Some(name)) => format!("{name}@({case} ..)"),
+            (Some(case), None) => format!("({case} ..)"),
+        };
+        let mut test = Test::default();
+        if r#type.is_nullable() {
+            test.matches.push(Destructure { term: subject.to_owned(), pattern: format!("some {whole}") });
+        } else if case.is_some() {
+            test.matches.push(Destructure { term: subject.to_owned(), pattern: whole });
+        } else if let Some(name) = name {
+            test.lets.push((name, subject.to_owned()));
+        }
+
+        Some(test)
+    }
+
+    /// A list pattern is Lean's `::` pattern of the elements before its rest. The elements after the rest are the last
+    /// ones of the list those leave, once it holds them all, and the rest is what comes before them. A rest of a list
+    /// parameter, beside at least one element, is smaller than the list.
+    fn list_test(
+        &mut self,
+        subject: &str,
+        r#type: &TUnion,
+        parameter: Option<usize>,
+        list: &ListPattern,
+    ) -> Option<Test> {
+        let atomics: Vec<&TAtomic> = r#type.types.iter().filter(|atomic| !atomic.is_null()).collect();
+        let [TAtomic::Array(TArray::List(list_type))] = atomics.as_slice() else {
+            self.unmodeled(list.span(), "a list pattern on a value that is no List".to_owned(), issues::TYPE_TEST);
+            return None;
+        };
+        let element = &list_type.element_type;
+        let rest = list.elements.iter().position(|element| matches!(element, ListPatternElement::Rest(_)));
+        let (before, after) = match rest {
+            Some(rest) => (&list.elements.as_slice()[..rest], &list.elements.as_slice()[rest + 1..]),
+            None => (list.elements.as_slice(), &[][..]),
+        };
+        let rest = rest.and_then(|rest| match &list.elements.as_slice()[rest] {
+            ListPatternElement::Rest(rest) => Some(rest),
+            ListPatternElement::Pattern(_) => None,
+        });
+
+        let mut parts = Test::default();
+        let mut leading = Vec::new();
+        for pattern in before {
+            leading.push(self.element(element, pattern, &mut parts)?);
+        }
+        let name = rest.and_then(|rest| rest.variable.map(|variable| names::identifier(variable.value)));
+        if let (Some(parameter), Some(variable)) = (parameter, rest.and_then(|rest| rest.variable))
+            && (!before.is_empty() || !after.is_empty())
+            && !r#type.is_nullable()
+        {
+            self.rests.insert(variable.span.start.offset, parameter);
+        }
+
+        let some = |pattern: String| if r#type.is_nullable() { format!("some ({pattern})") } else { pattern };
+        let mut test = Test::default();
+        if after.is_empty() {
+            let pattern = match rest {
+                None => format!("[{}]", leading.join(", ")),
+                Some(_) => {
+                    leading.push(name.unwrap_or_else(|| "_".to_owned()));
+                    leading.join(" :: ")
+                }
+            };
+            test.matches.push(Destructure { term: subject.to_owned(), pattern: some(pattern) });
+        } else {
+            // The elements after the rest are the last ones of the list after the leading ones, read by their place
+            // once the list holds them all.
+            let mut tail = subject.to_owned();
+            if !leading.is_empty() || r#type.is_nullable() {
+                tail = self.fresh();
+                leading.push(tail.clone());
+                test.matches.push(Destructure { term: subject.to_owned(), pattern: some(leading.join(" :: ")) });
+            }
+            let count = after.len();
+            for (place, pattern) in after.iter().enumerate() {
+                let ListPatternElement::Pattern(pattern) = pattern else {
+                    unreachable!("a list pattern has at most one rest");
+                };
+                let term = format!("({tail}[List.length {tail} - {}]!)", count - place);
+                let tested = self.test(&term, element, None, pattern)?;
+                parts.matches.extend(tested.matches);
+                parts.lets.extend(tested.lets);
+                parts.conditions.extend(tested.conditions);
+            }
+            test.conditions.push(format!("(decide ({count} ≤ List.length {tail}))"));
+            if let Some(name) = name {
+                test.lets.push((name, format!("(List.take (List.length {tail} - {count}) {tail})")));
+            }
+        }
+        test.matches.extend(parts.matches);
+        test.lets.extend(parts.lets);
+        test.conditions.extend(parts.conditions);
+
+        Some(test)
+    }
+
+    /// The Lean pattern of one element of a list pattern, whose elements are of `r#type`: the element's name, or `_`,
+    /// when the pattern holds for every element, else a fresh name whose test `parts` takes.
+    fn element(&mut self, r#type: &TUnion, pattern: &ListPatternElement, parts: &mut Test) -> Option<String> {
+        let ListPatternElement::Pattern(pattern) = pattern else {
+            unreachable!("a list pattern has at most one rest");
+        };
+        if let Pattern::Type(TypePattern { hint, fields: None, properties: None, variable }) = pattern
+            && !r#type.is_nullable()
+            && let [atomic] = r#type.types.as_ref()
+            && self.names_type(hint, atomic)
+        {
+            return Some(variable.map_or_else(|| "_".to_owned(), |variable| names::identifier(variable.value)));
+        }
+
+        let name = self.fresh();
+        let test = self.test(&name, r#type, None, pattern)?;
+        parts.matches.extend(test.matches);
+        parts.lets.extend(test.lets);
+        parts.conditions.extend(test.conditions);
+
+        Some(name)
+    }
+
+    /// Whether `hint` names the type of every value of `atomic`.
+    fn names_type(&self, hint: &Hint, atomic: &TAtomic) -> bool {
+        let class = match hint {
+            Hint::Integer(_) => return matches!(atomic, TAtomic::Scalar(TScalar::Integer(_))),
+            Hint::String(_) => return matches!(atomic, TAtomic::Scalar(TScalar::String(_))),
+            Hint::Bool(_) => return matches!(atomic, TAtomic::Scalar(TScalar::Bool(_))),
+            Hint::Parenthesized(parenthesized) => return self.names_type(parenthesized.hint, atomic),
+            Hint::Generic(generic) => {
+                let name = self.checked.names().resolve(&generic.name).unwrap_or(generic.name.value);
+                if names::short_name(name) == "List"
+                    && let TAtomic::Array(TArray::List(list)) = atomic
+                    && let [element] = generic.type_arguments.arguments.as_slice()
+                    && !list.element_type.is_nullable()
+                    && let [element_type] = list.element_type.types.as_ref()
+                {
+                    return self.names_type(element, element_type);
+                }
+                return false;
+            }
+            Hint::Self_(_) => self.class,
+            Hint::Identifier(identifier) => self.checked.names().get(identifier),
+            _ => return false,
+        };
+
+        match atomic {
+            TAtomic::Object(TObject::Named(named)) => named.name.as_bytes().eq_ignore_ascii_case(class),
+            TAtomic::Object(TObject::Enum(r#enum)) => r#enum.name.as_bytes().eq_ignore_ascii_case(class),
+            _ => false,
+        }
+    }
+
+    /// The Lean constructor of the case of an enum `hint` names, when `atomic` is that enum.
+    fn case(&self, hint: &Hint, atomic: &TAtomic) -> Option<String> {
+        let Hint::Identifier(identifier) = hint else {
+            return None;
+        };
+        let class = self.checked.names().get(identifier);
+        let separator = class.iter().rposition(|&byte| byte == b'\\')?;
+        let (r#enum, case) = (&class[..separator], &class[separator + 1..]);
+        let named = match atomic {
+            TAtomic::Object(TObject::Named(named)) => named.name.as_bytes(),
+            TAtomic::Object(TObject::Enum(r#enum)) => r#enum.name.as_bytes(),
+            _ => return None,
+        };
+        if !named.eq_ignore_ascii_case(r#enum) || self.checked.types().enum_case_class(r#enum, case).is_none() {
+            return None;
+        }
+
+        Some(names::member(&names::full_name(&self.reached_name(r#enum)), case))
+    }
+
+    /// The parameter of the method being translated that `expression` reads, by position.
+    fn parameter(&self, expression: &Expression) -> Option<usize> {
+        let Expression::ConstantAccess(name) = unparenthesized(expression) else {
+            return None;
+        };
+        let Some(Binding::Local(local)) = self.checked.names().binding(&name.name) else {
+            return None;
+        };
+
+        self.parameters.iter().position(|(offset, _)| *offset == local.declaration.start.offset)
+    }
+
+    /// What `condition` shows about the parameters where it is `holds`: a comparison of an int parameter with an int
+    /// literal or another parameter, under `!`, `&&` where it holds, and `||` where it fails.
+    pub(crate) fn facts(&self, condition: &Expression, holds: bool) -> Vec<Fact> {
+        match unparenthesized(condition) {
+            Expression::UnaryPrefix(UnaryPrefix { operator: UnaryPrefixOperator::Not(_), operand }) => {
+                self.facts(operand, !holds)
+            }
+            Expression::Binary(binary) => match binary.operator {
+                BinaryOperator::And(_) | BinaryOperator::LowAnd(_) if holds => {
+                    [self.facts(binary.lhs, true), self.facts(binary.rhs, true)].concat()
+                }
+                BinaryOperator::Or(_) if !holds => {
+                    [self.facts(binary.lhs, false), self.facts(binary.rhs, false)].concat()
+                }
+                _ => {
+                    let fact = match (self.int_parameter(binary.lhs), self.int_parameter(binary.rhs)) {
+                        (Some(parameter), _) => self.fact(parameter, &binary.operator, binary.rhs, holds, false),
+                        (None, Some(parameter)) => self.fact(parameter, &binary.operator, binary.lhs, holds, true),
+                        (None, None) => None,
+                    };
+                    fact.into_iter().collect()
+                }
+            },
+            _ => Vec::new(),
+        }
+    }
+
+    /// What a comparison pattern of `pattern`'s shows about the `match`'s subject, the parameter `parameter`, where
+    /// the pattern is `holds`.
+    fn pattern_facts(&self, parameter: Option<usize>, pattern: &Pattern, holds: bool) -> Vec<Fact> {
+        match (parameter, pattern) {
+            (Some(parameter), Pattern::Comparison(comparison)) if self.parameters[parameter].1 => {
+                self.fact(parameter, &comparison.operator, comparison.value, holds, false).into_iter().collect()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// What `parameter OPERATOR other`, or `other OPERATOR parameter` when `swapped`, shows where it is `holds`: that
+    /// the parameter is above or below `other`, an int literal or another parameter. A literal bound takes `>=` and
+    /// `<=` as one step past it, and a parameter only `>` and `<`, since a parameter may be the end of the range, where
+    /// one step further leaves it.
+    fn fact(
+        &self,
+        parameter: usize,
+        operator: &BinaryOperator,
+        other: &Expression,
+        holds: bool,
+        swapped: bool,
+    ) -> Option<Fact> {
+        // (above, inclusive) for `parameter > other`, `>=`, `<`, `<=`.
+        let (above, inclusive) = match (operator, swapped) {
+            (BinaryOperator::GreaterThan(_), false) | (BinaryOperator::LessThan(_), true) => (true, false),
+            (BinaryOperator::GreaterThanOrEqual(_), false) | (BinaryOperator::LessThanOrEqual(_), true) => (true, true),
+            (BinaryOperator::LessThan(_), false) | (BinaryOperator::GreaterThan(_), true) => (false, false),
+            (BinaryOperator::LessThanOrEqual(_), false) | (BinaryOperator::GreaterThanOrEqual(_), true) => {
+                (false, true)
+            }
+            _ => return None,
+        };
+        // Where the comparison fails, the opposite one holds: not `>` is `<=`.
+        let (above, inclusive) = if holds { (above, inclusive) } else { (!above, !inclusive) };
+        let bound = match (self.int_parameter(other), literal(other)) {
+            (Some(bound), _) if !inclusive && bound != parameter => Bound::Parameter(bound),
+            (_, Some(value)) => Bound::Literal(match (inclusive, above) {
+                (false, _) => value,
+                (true, true) => value.checked_sub(1)?,
+                (true, false) => value.checked_add(1)?,
+            }),
+            _ => return None,
+        };
+
+        Some(Fact { parameter, step: if above { Step::Down(bound) } else { Step::Up(bound) } })
+    }
+
+    /// The int parameter `expression` reads, by position.
+    fn int_parameter(&self, expression: &Expression) -> Option<usize> {
+        self.parameter(expression).filter(|parameter| self.parameters[*parameter].1)
+    }
+
+    /// `translate` where the conditions on the path also show `facts`.
+    fn under<T>(&mut self, facts: Vec<Fact>, translate: impl FnOnce(&mut Self) -> T) -> T {
+        let depth = self.facts.len();
+        self.facts.extend(facts);
+        let translated = translate(self);
+        self.facts.truncate(depth);
+
+        translated
     }
 
     /// The condition that `subject`, a value of `kind`, matches `pattern`, or `None` after recording why it has none.
     fn pattern(&mut self, subject: &str, kind: Kind, pattern: &Pattern) -> Option<String> {
         match pattern {
+            // A value an object is compared with is `null`: a pattern takes constants, and an object's identity is
+            // nothing a law reasons about.
+            Pattern::Value(value)
+                if matches!(kind, Kind::Object | Kind::Other)
+                    && !matches!(unparenthesized(value), Expression::Literal(Literal::Null(_))) =>
+            {
+                self.unmodeled(pattern.span(), "a match on this subject".to_owned(), issues::NOT_TRANSLATED);
+                None
+            }
             Pattern::Value(value) => Some(format!("({subject} == {})", self.pure(value, "a pattern that can throw")?)),
+            Pattern::Comparison(_) if matches!(kind, Kind::Object | Kind::Other) => {
+                self.unmodeled(pattern.span(), "a match on this subject".to_owned(), issues::NOT_TRANSLATED);
+                None
+            }
             Pattern::Comparison(comparison) => {
                 let value = self.pure(comparison.value, "a pattern that can throw")?;
                 let condition = match comparison.operator {
@@ -633,7 +1171,8 @@ impl<'body, 'program> Body<'body, 'program> {
             {
                 let class_name = self.reached_name(class);
                 let lean = names::full_name(&class_name);
-                let Some(arguments) = self.arguments(&call.argument_list, call.argument_list.arguments.len()) else {
+                let Some(arguments) = self.arguments(&call.argument_list, call.argument_list.arguments.len(), None)
+                else {
                     return "default".to_owned();
                 };
                 self.uses(class, &lean, names::short_name(&class_name));
@@ -729,8 +1268,9 @@ impl<'body, 'program> Body<'body, 'program> {
         types.peek().is_some() && types.all(TAtomic::is_list)
     }
 
-    /// A `List` method a law reasons about, as the Lean function it is: `count()` is `List.length`, and `map` and
-    /// `filter` of a lambda are `List.map` and `List.filter`. Every other method of a collection is refused by name.
+    /// A `List` method a law reasons about, as the Lean function it is: `count()` is `int.count`, the list's length,
+    /// and `map` and `filter` of a lambda are `List.map` and `List.filter`. Every other method of a collection is
+    /// refused by name.
     fn list_call(&mut self, expression: &Expression, call: &MethodCall) -> String {
         let Some(method) = self.method_name(&call.method) else {
             return "default".to_owned();
@@ -740,7 +1280,7 @@ impl<'body, 'program> Body<'body, 'program> {
             (b"count", 0) => {
                 let list = self.value(call.object);
 
-                format!("(Int64.ofNat (List.length {list}))")
+                format!("(int.count {list})")
             }
             (b"map" | b"filter", 1) => {
                 let list = self.value(call.object);
@@ -826,7 +1366,11 @@ impl<'body, 'program> Body<'body, 'program> {
             if returns_null { called } else { format!("(some {called})") }
         });
 
-        self.choose(vec![(format!("{receiver}.isSome"), present)], vec!["pure none".to_owned()])
+        self.choose(&Choice::If(
+            format!("{receiver}.isSome"),
+            Box::new(Choice::Branch(present)),
+            Box::new(Choice::Branch(vec!["pure none".to_owned()])),
+        ))
     }
 
     /// The name a member selector spells, or `None` after recording a name computed while the code runs.
@@ -869,14 +1413,73 @@ impl<'body, 'program> Body<'body, 'program> {
         let key = names::member(&names::full_name(&class_name), facts.name.as_bytes());
         let mut parts = vec![key.clone()];
         parts.extend(receiver);
-        let Some(arguments) = arguments.map_or_else(|| Some(Vec::new()), |list| self.arguments(list, facts.parameters))
+        let smaller = arguments
+            .filter(|_| ascii_lowercase_word(class) == ascii_lowercase_word(self.class))
+            .and_then(|list| self.smaller(list));
+        let stepped = smaller.as_ref().and_then(|(smaller, term)| Some((smaller.argument, term.clone()?)));
+        let Some(arguments) =
+            arguments.map_or_else(|| Some(Vec::new()), |list| self.arguments(list, facts.parameters, stepped))
         else {
             return "default".to_owned();
         };
         parts.extend(arguments);
-        self.uses(class, &key, format!("{}.{}", names::short_name(&class_name), facts.name));
+        let place = format!("{}.{}", names::short_name(&class_name), facts.name);
+        self.use_of(class, &key, place, smaller.map(|(smaller, _)| smaller));
 
         self.bind(parts.join(" "))
+    }
+
+    /// The smaller value a call of a method of the body's own class passes, and the pure term of an int one, which
+    /// cannot leave the `int` range where a condition showed it is above or below its bound: the rest of a list
+    /// parameter's list pattern, or an int parameter one step towards a bound, at the first argument that passes one.
+    pub(crate) fn smaller(&self, list: &ArgumentList) -> Option<(Smaller, Option<String>)> {
+        let arguments: Vec<&Expression> = list.arguments.iter().map(Argument::value).collect();
+        for (argument, value) in arguments.iter().enumerate() {
+            let value = unparenthesized(value);
+            if let Expression::ConstantAccess(name) = value
+                && let Some(Binding::Local(local)) = self.checked.names().binding(&name.name)
+                && let Some(&parameter) = self.rests.get(&local.declaration.start.offset)
+            {
+                return Some((Smaller { parameter, argument, step: Step::Rest }, None));
+            }
+            let Expression::Binary(binary) = value else {
+                continue;
+            };
+            let (operand, down) = match binary.operator {
+                BinaryOperator::Subtraction(_) if literal(binary.rhs) == Some(1) => (binary.lhs, true),
+                BinaryOperator::Addition(_) if literal(binary.rhs) == Some(1) => (binary.lhs, false),
+                BinaryOperator::Addition(_) if literal(binary.lhs) == Some(1) => (binary.rhs, false),
+                _ => continue,
+            };
+            let (Some(parameter), Expression::ConstantAccess(name)) =
+                (self.int_parameter(operand), unparenthesized(operand))
+            else {
+                continue;
+            };
+            // A parameter bound is the same value on every call, so the call passes it on unchanged.
+            let passes_on = |bound: Bound| match bound {
+                Bound::Literal(_) => true,
+                Bound::Parameter(index) => {
+                    arguments.get(index).is_some_and(|value| self.parameter(value) == Some(index))
+                }
+            };
+            let Some(fact) = self.facts.iter().rev().find(|fact| {
+                fact.parameter == parameter
+                    && match fact.step {
+                        Step::Down(bound) => down && passes_on(bound),
+                        Step::Up(bound) => !down && passes_on(bound),
+                        Step::Rest => false,
+                    }
+            }) else {
+                continue;
+            };
+            let name = names::identifier(name.name.value());
+            let term = if down { format!("({name} - 1)") } else { format!("({name} + 1)") };
+
+            return Some((Smaller { parameter, argument, step: fact.step }, Some(term)));
+        }
+
+        None
     }
 
     /// `new Class(…)`, which runs the class's constructor. A named constructor runs a body, which Mago does not
@@ -907,7 +1510,7 @@ impl<'body, 'program> Body<'body, 'program> {
         let parameters = self.reach.method(class, b"__construct").map_or(0, |method| method.parameters);
         let mut parts = vec![key.clone()];
         if let Some(arguments) = &instantiation.argument_list {
-            let Some(arguments) = self.arguments(arguments, parameters) else {
+            let Some(arguments) = self.arguments(arguments, parameters, None) else {
                 return "default".to_owned();
             };
             parts.extend(arguments);
@@ -918,10 +1521,19 @@ impl<'body, 'program> Body<'body, 'program> {
     }
 
     /// The terms of a call's arguments, or `None` when one cannot be translated. Each argument is passed by position,
-    /// and the call passes every parameter.
-    fn arguments(&mut self, list: &ArgumentList, parameters: usize) -> Option<Vec<String>> {
+    /// and the call passes every parameter. `stepped` is an argument's position and the term that stands for it.
+    fn arguments(
+        &mut self,
+        list: &ArgumentList,
+        parameters: usize,
+        stepped: Option<(usize, String)>,
+    ) -> Option<Vec<String>> {
         let mut arguments = Vec::new();
-        for argument in list.arguments.iter() {
+        for (position, argument) in list.arguments.iter().enumerate() {
+            if let Some((_, term)) = stepped.as_ref().filter(|(at, _)| *at == position) {
+                arguments.push(term.clone());
+                continue;
+            }
             match argument {
                 Argument::Positional(argument) if argument.ellipsis.is_none() => {
                     arguments.push(self.value(argument.value));
@@ -1163,8 +1775,13 @@ impl<'body, 'program> Body<'body, 'program> {
 
     /// Records that the body uses the declaration `key` of `class`, which messages name `place`.
     fn uses(&mut self, class: &[u8], key: &str, place: String) {
+        self.use_of(class, key, place, None);
+    }
+
+    /// [`Body::uses`], for a call that passes the `smaller` value.
+    fn use_of(&mut self, class: &[u8], key: &str, place: String, smaller: Option<Smaller>) {
         let file = self.reach.class(class).map(|reached| reached.file);
-        self.uses.push(Use { key: key.to_owned(), file, place });
+        self.uses.push(Use { key: key.to_owned(), file, place, smaller });
     }
 
     /// The source text at `span`, as messages quote it.
@@ -1252,44 +1869,299 @@ impl<'body, 'program> Body<'body, 'program> {
         lines
     }
 
-    /// The value of the first branch whose condition holds, else `otherwise`'s. Branches that only return a pure term
-    /// are an `if` term, and any other is bound from a nested `do` block, which runs only its own branch's effects.
-    fn choose(&mut self, arms: Vec<(String, Branch)>, otherwise: Branch) -> String {
-        let pure = |branch: &Branch| match branch.as_slice() {
-            [only] => only.strip_prefix("pure ").map(str::to_owned),
-            _ => None,
-        };
-        if let Some(mut term) = pure(&otherwise)
-            && arms.iter().all(|(_, branch)| pure(branch).is_some())
-        {
-            for (condition, branch) in arms.iter().rev() {
-                term = format!("(if {condition} then {} else {term})", pure(branch).unwrap_or_default());
-            }
-
+    /// The value of the branch `choice` runs. A choice whose branches only return a pure term is a term, and any other
+    /// is bound from a nested `do` block, which runs only its own branch's effects.
+    fn choose(&mut self, choice: &Choice) -> String {
+        if let Some(term) = term(choice) {
             return term;
         }
 
-        self.temporaries += 1;
-        let temporary = format!("«${}»", self.temporaries);
-        let mut lines = Vec::new();
-        for (index, (condition, branch)) in arms.iter().enumerate() {
-            if index == 0 {
-                lines.push(format!("let {temporary} ← if {condition} then do"));
-            } else {
-                lines.push(format!("  else if {condition} then do"));
-            }
-            lines.extend(indented(branch, 4));
-        }
-        if arms.is_empty() {
-            lines.push(format!("let {temporary} ← do"));
-            lines.extend(indented(&otherwise, 4));
-        } else {
-            lines.push("  else do".to_owned());
-            lines.extend(indented(&otherwise, 4));
-        }
-        self.lines.extend(lines);
+        let temporary = self.fresh();
+        self.lines.push(format!("let {temporary} ← do"));
+        self.lines.extend(indented(&statements(choice), 4));
 
         temporary
+    }
+
+    /// A name no PHP# name is: `«$n»`.
+    fn fresh(&mut self) -> String {
+        self.temporaries += 1;
+
+        format!("«${}»", self.temporaries)
+    }
+
+    /// A `for … of` loop over a `List` whose body only adds to int locals, each addition optionally under an `if` on
+    /// the element, as each local's new value: the `List.countP` of the elements it counts, or the `List.sum` of the
+    /// values it adds. That sum throws only when it leaves the `int` range, and the loop PHP runs throws there or on an
+    /// earlier partial sum, where a law holds, so a law proven of the sum holds of the loop. Any other loop is refused.
+    fn counting_loop(&mut self, for_of: &ForOf) {
+        let refuse = |body: &mut Self| {
+            body.unmodeled(for_of.span(), "a loop that does more than count or sum".to_owned(), issues::LOOP);
+        };
+        let ForOfTarget::Value(element) = &for_of.target else {
+            return refuse(self);
+        };
+        let mut additions = Vec::new();
+        if !self.is_list(for_of.expression) || !additions_of(for_of.body, &mut Vec::new(), &mut additions) {
+            return refuse(self);
+        }
+        let mut accumulators: Vec<u32> = Vec::new();
+        let mut locals: Vec<String> = Vec::new();
+        for addition in &additions {
+            let Expression::ConstantAccess(name) = addition.local else {
+                return refuse(self);
+            };
+            let Some(Binding::Local(local)) = self.checked.names().binding(&name.name) else {
+                return refuse(self);
+            };
+            let declaration = local.declaration.start.offset;
+            let r#type = self.checked.types().expression_type(addition.local);
+            if self.kind(r#type) != Kind::Int || r#type.is_nullable() || self.nullable_locals.contains(&declaration) {
+                return refuse(self);
+            }
+            if !accumulators.contains(&declaration) {
+                accumulators.push(declaration);
+            }
+            locals.push(names::identifier(name.name.value()));
+        }
+
+        let list = self.value(for_of.expression);
+        let element = names::identifier(element.name.value);
+        let outer = std::mem::replace(&mut self.accumulators, accumulators);
+        let mut sums: Vec<(String, Vec<String>)> = Vec::new();
+        for (addition, local) in additions.iter().zip(locals) {
+            let Some(added) = self.added(&element, &list, addition) else {
+                self.accumulators = outer;
+                return refuse(self);
+            };
+            match sums.iter_mut().find(|(name, _)| *name == local) {
+                Some((_, terms)) => terms.push(added),
+                None => sums.push((local, vec![added])),
+            }
+        }
+        self.accumulators = outer;
+
+        for (local, terms) in sums {
+            let sum = self.bind(format!("int.ofInt ({local}.toInt + {})", terms.join(" + ")));
+            self.lines.push(format!("{local} := {sum}"));
+        }
+    }
+
+    /// The `Int` that `addition` adds over the elements of `list`, each named `element`, or `None` when a condition or
+    /// the value it adds is no pure term.
+    fn added(&mut self, element: &str, list: &str, addition: &Addition) -> Option<String> {
+        let mut conditions = Vec::new();
+        for (condition, holds) in &addition.conditions {
+            let (lines, condition) = self.nested(|body| body.value(condition));
+            if !lines.is_empty() {
+                return None;
+            }
+            conditions.push(if *holds { condition } else { format!("(!{condition})") });
+        }
+        let filtered = match conditions.as_slice() {
+            [] => list.to_owned(),
+            _ => format!("(List.filter (fun {element} => {}) {list})", conditions.join(" && ")),
+        };
+
+        let Some(amount) = addition.amount else {
+            return Some(match conditions.as_slice() {
+                [] => format!("(List.length {list} : Int)"),
+                _ => format!("(List.countP (fun {element} => {}) {list} : Int)", conditions.join(" && ")),
+            });
+        };
+        if self.kind(self.checked.types().expression_type(amount)) != Kind::Int {
+            return None;
+        }
+        let (lines, amount) = self.nested(|body| body.value(amount));
+        if !lines.is_empty() {
+            return None;
+        }
+
+        Some(format!("(List.map (fun {element} => {amount}.toInt) {filtered}).sum"))
+    }
+}
+
+/// The additions to locals of a counting or summing loop's `body`, under `conditions`, or `false` when the body does
+/// anything else: `x += e`, `x++` and `++x`, in blocks and under an `if` with or without an `else`.
+fn additions_of<'expression, 'arena>(
+    body: &'expression Statement<'arena>,
+    conditions: &mut Vec<(&'expression Expression<'arena>, bool)>,
+    additions: &mut Vec<Addition<'expression, 'arena>>,
+) -> bool {
+    match body {
+        Statement::Block(block) => {
+            block.statements.iter().all(|statement| additions_of(statement, conditions, additions))
+        }
+        Statement::If(r#if) => {
+            let IfBody::Statement(body) = &r#if.body else {
+                return false;
+            };
+            conditions.push((r#if.condition, true));
+            let then = additions_of(body.statement, conditions, additions);
+            conditions.pop();
+            let Some(clause) = &body.else_clause else {
+                return then;
+            };
+            conditions.push((r#if.condition, false));
+            let otherwise = additions_of(clause.statement, conditions, additions);
+            conditions.pop();
+
+            then && otherwise
+        }
+        Statement::Expression(statement) => {
+            let (local, amount) = match statement.expression {
+                Expression::Assignment(assignment)
+                    if matches!(assignment.operator, AssignmentOperator::Addition(_)) =>
+                {
+                    (assignment.lhs, (literal(assignment.rhs) != Some(1)).then_some(assignment.rhs))
+                }
+                Expression::UnaryPostfix(postfix)
+                    if matches!(postfix.operator, UnaryPostfixOperator::PostIncrement(_)) =>
+                {
+                    (postfix.operand, None)
+                }
+                Expression::UnaryPrefix(UnaryPrefix { operator: UnaryPrefixOperator::PreIncrement(_), operand }) => {
+                    (*operand, None)
+                }
+                _ => return false,
+            };
+            additions.push(Addition { local, amount, conditions: conditions.clone() });
+
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Which branch runs: the first arm whose test holds, else `otherwise`. An arm whose test is one Lean pattern of the
+/// same term as the arm after it joins that arm's `match`. An arm whose test fails after a pattern of it matched runs
+/// the arms after it there too.
+fn choice(arms: Vec<(Test, Branch)>, otherwise: Branch) -> Choice {
+    let mut next = Choice::Branch(otherwise);
+    for (test, branch) in arms.into_iter().rev() {
+        let simple = test.matches.len() == 1 && test.lets.is_empty() && test.conditions.is_empty();
+        let mut inner = Choice::Branch(branch);
+        if !test.conditions.is_empty() {
+            inner = Choice::If(test.conditions.join(" && "), Box::new(inner), Box::new(next.clone()));
+        }
+        for (name, value) in test.lets.into_iter().rev() {
+            inner = Choice::Let(name, value, Box::new(inner));
+        }
+        for destructure in test.matches.into_iter().rev() {
+            if simple
+                && let Choice::Match(term, alternatives) = &mut next
+                && *term == destructure.term
+            {
+                alternatives.insert(0, (destructure.pattern, inner));
+                inner = next.clone();
+                continue;
+            }
+            inner = Choice::Match(destructure.term, vec![(destructure.pattern, inner), ("_".to_owned(), next.clone())]);
+        }
+        next = inner;
+    }
+
+    next
+}
+
+/// `choice` as a pure term, when each of its branches only returns one.
+fn term(choice: &Choice) -> Option<String> {
+    Some(match choice {
+        Choice::Branch(branch) => match branch.as_slice() {
+            [only] => only.strip_prefix("pure ")?.to_owned(),
+            _ => return None,
+        },
+        Choice::If(condition, then, otherwise) => {
+            format!("(if {condition} then {} else {})", term(then)?, term(otherwise)?)
+        }
+        Choice::Match(matched, alternatives) => {
+            let mut arms = Vec::new();
+            for (pattern, branch) in alternatives {
+                arms.push(format!("| {pattern} => {}", term(branch)?));
+            }
+            format!("(match {matched} with {})", arms.join(" "))
+        }
+        Choice::Let(name, value, branch) => format!("(let {name} := {value}; {})", term(branch)?),
+    })
+}
+
+/// `choice` as the statements of a `do` block.
+fn statements(choice: &Choice) -> Vec<String> {
+    match choice {
+        Choice::Branch(branch) if branch.is_empty() => vec!["pure ()".to_owned()],
+        Choice::Branch(branch) => branch.clone(),
+        Choice::If(condition, then, otherwise) => {
+            let mut lines = vec![format!("if {condition} then")];
+            lines.extend(indented(&statements(then), 2));
+            lines.push("else".to_owned());
+            lines.extend(indented(&statements(otherwise), 2));
+            lines
+        }
+        Choice::Match(matched, alternatives) => {
+            let mut lines = vec![format!("match {matched} with")];
+            for (pattern, branch) in alternatives {
+                lines.push(format!("| {pattern} =>"));
+                lines.extend(indented(&statements(branch), 2));
+            }
+            lines
+        }
+        Choice::Let(name, value, branch) => {
+            let mut lines = vec![format!("let {name} := {value}")];
+            lines.extend(statements(branch));
+            lines
+        }
+    }
+}
+
+/// `expression` without the parentheses around it.
+fn unparenthesized<'expression, 'arena>(
+    expression: &'expression Expression<'arena>,
+) -> &'expression Expression<'arena> {
+    match expression {
+        Expression::Parenthesized(parenthesized) => unparenthesized(parenthesized.expression),
+        expression => expression,
+    }
+}
+
+/// The value of an int literal, negated or not.
+fn literal(expression: &Expression) -> Option<i64> {
+    match unparenthesized(expression) {
+        Expression::Literal(Literal::Integer(integer)) => integer.value.and_then(|value| i64::try_from(value).ok()),
+        Expression::UnaryPrefix(UnaryPrefix { operator: UnaryPrefixOperator::Negation(_), operand }) => {
+            literal(operand)?.checked_neg()
+        }
+        _ => None,
+    }
+}
+
+/// Whether `statement` always returns: a `return`, or a block that ends in one.
+fn returns(statement: &Statement) -> bool {
+    match statement {
+        Statement::Return(_) => true,
+        Statement::Block(block) => block.statements.last().is_some_and(returns),
+        _ => false,
+    }
+}
+
+/// Whether `pattern` names a value it matches, which exists only where the pattern holds.
+fn names_values(pattern: &Pattern) -> bool {
+    match pattern {
+        Pattern::Type(pattern) => {
+            pattern.variable.is_some()
+                || pattern.fields.is_some_and(|fields| fields.fields.iter().any(|field| names_values(field)))
+                || pattern.properties.is_some_and(|properties| {
+                    properties.properties.iter().any(|property| names_values(property.pattern))
+                })
+        }
+        Pattern::Not(not) => names_values(not.pattern),
+        Pattern::Binary(binary) => names_values(binary.left) || names_values(binary.right),
+        Pattern::Parenthesized(parenthesized) => names_values(parenthesized.pattern),
+        Pattern::Properties(properties) => properties.properties.iter().any(|property| names_values(property.pattern)),
+        Pattern::List(list) => list.elements.iter().any(|element| match element {
+            ListPatternElement::Pattern(pattern) => names_values(pattern),
+            ListPatternElement::Rest(rest) => rest.variable.is_some(),
+        }),
+        Pattern::Value(_) | Pattern::Comparison(_) => false,
     }
 }
 

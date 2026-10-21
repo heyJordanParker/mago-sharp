@@ -22336,7 +22336,7 @@ fn a_call_of_a_law_outside_a_law_body_is_a_non_existent_method_that_names_the_la
 /// smaller int and on a list's rest, and under a `when` condition.
 const PROVEN_MONEY: (&str, &str) = (
     "app/Shared/Money.sharp",
-    "namespace App.Shared;\n\npublic class Money\n{\n    public Money(public int amount { get; }, public string currency { get; }) { }\n    public Money add(Money other) => new Money(this.amount + other.amount, this.currency);\n    public static int refundable(int paid, int refunded) => refunded > paid ? 0 : paid - refunded;\n\n    law addKeepsCurrency(Money a, Money b) => a.add(b).currency == a.currency;\n    law addTwiceKeepsCurrency(Money m, Money a, Money b) => m.add(a).add(b).currency == m.currency\n    {\n        addKeepsCurrency(m, a);\n        Money.addKeepsCurrency(m.add(a), b);\n    }\n    law neverAbovePaid(int paid, int refunded) when paid >= 0 && refunded >= 0\n        => Money.refundable(paid, refunded) <= paid;\n    law countsDown(int n) when n >= 0 => n >= 0\n    {\n        if (n <= 0) { return; }\n        countsDown(n - 1);\n        neverAbovePaid(n, 0);\n    }\n    law countNeverNegative(List<int> items) => items.count() >= 0\n    {\n        match (items) {\n            [int, ...List<int> rest] => { countNeverNegative(rest); },\n            default => { return; },\n        }\n    }\n}\n",
+    "namespace App.Shared;\n\npublic class Money\n{\n    public Money(public int amount { get; }, public string currency { get; }) { }\n    public Money add(Money other) => new Money(this.amount + other.amount, this.currency);\n    public static int refundable(int paid, int refunded) => refunded > paid ? 0 : paid - refunded;\n\n    law addKeepsCurrency(Money a, Money b) => a.add(b).currency == a.currency;\n    law addTwiceKeepsCurrency(Money m, Money a, Money b) => m.add(a).add(b).currency == m.currency\n    {\n        Money.addKeepsCurrency(m, a);\n        Money.addKeepsCurrency(m.add(a), b);\n    }\n    law neverAbovePaid(int paid, int refunded) when paid >= 0 && refunded >= 0\n        => Money.refundable(paid, refunded) <= paid;\n    law countsDown(int n) when n >= 0 => n >= 0\n    {\n        if (n <= 0) { return; }\n        Money.countsDown(n - 1);\n        Money.neverAbovePaid(n, 0);\n    }\n    law countNeverNegative(List<int> items) => items.count() >= 0\n    {\n        match (items) {\n            [int, ...List<int> rest] => { Money.countNeverNegative(rest); },\n            default => { return; },\n        }\n    }\n}\n",
 );
 
 /// Spec section 28: a law's body is ordinary PHP#, where a call of a law is a statement, and a law calls itself on a
@@ -22357,38 +22357,69 @@ fn law_body(body: &str) -> (&'static str, &'static str) {
 }
 
 /// Spec section 28: a law calls itself only on a smaller value, a list's rest from a pattern the body matched or an int
-/// one step towards a bound the body tested, so its proof ends. Any other call of itself is an error on the call.
+/// one step towards a bound the body tested, so its proof ends. Any other call of itself is an error on the call. A
+/// literal bound takes `<=` and `>=` as one step past it, and a parameter bound only `<` and `>`, as a method's recursion
+/// does, and every call makes the same value smaller.
 #[test]
 fn a_law_that_calls_itself_on_a_value_no_smaller_is_refused() {
     let broken = (
         "app/Shared/Count.sharp",
-        "namespace App.Shared;\n\npublic class Count\n{\n    law broken(int x) => x == x + 1 { broken(x); }\n}\n",
+        "namespace App.Shared;\n\npublic class Count\n{\n    law broken(int x) => x == x + 1 { Count.broken(x); }\n}\n",
     );
 
     assert_eq!(issues(broken, &[]), ["5:39 law-recursion"]);
     assert_eq!(
         worded(broken, &[]),
         [
-            "5:39 law-recursion a law calls itself only on a smaller value | This call passes no smaller value. | Call broken on a list's rest from a pattern the body matched, or on an int one step towards a bound the body tested, as `if (n <= 0) { return; }` tests 0 before `broken(n - 1);`."
+            "5:39 law-recursion a law calls itself only on a smaller value | This call passes no smaller value. | Call Count.broken on a list's rest from a pattern the body matched, or on an int one step towards a bound the body tested, as `if (n <= 0) { return; }` tests 0 before `Count.broken(n - 1);`."
         ]
     );
     for body in [
-        "        f(x - 1, items);",
-        "        if (x <= 0) { return; }\n        f(x + 1, items);",
-        "        if (x >= 10) { return; }\n        f(x - 1, items);",
-        "        if (x < 0) { return; }\n        f(x - 1, items);",
-        "        match (items) {\n            [int, ...List<int> rest] => { f(x, items); },\n            default => { return; },\n        }",
+        "        Count.f(x - 1, items);",
+        "        if (x <= 0) { return; }\n        Count.f(x + 1, items);",
+        "        if (x >= 10) { return; }\n        Count.f(x - 1, items);",
+        "        match (items) {\n            [int, ...List<int> rest] => { Count.f(x, items); },\n            default => { return; },\n        }",
     ] {
         assert_eq!(codes(&issues(law_body(body), &[])), ["law-recursion"], "{body}");
     }
     for body in [
-        "        if (x <= 0) { return; }\n        f(x - 1, items);",
-        "        if (x >= 10) { return; }\n        f(x + 1, items);",
-        "        if (x > 0) { f(x - 1, items); }",
-        "        match (items) {\n            [int first, ...List<int> rest] => { f(first, rest); },\n            default => { return; },\n        }",
+        "        if (x <= 0) { return; }\n        Count.f(x - 1, items);",
+        "        if (x < 0) { return; }\n        Count.f(x - 1, items);",
+        "        if (x >= 10) { return; }\n        Count.f(x + 1, items);",
+        "        if (x > 0) { Count.f(x - 1, items); }",
+        "        match (items) {\n            [int first, ...List<int> rest] => { Count.f(first, rest); },\n            default => { return; },\n        }",
     ] {
         assert_eq!(issues(law_body(body), &[]), Vec::<String>::new(), "{body}");
     }
+
+    let mixed = law_body(
+        "        if (x <= 0) { return; }\n        Count.f(x - 1, items);\n        match (items) {\n            [int, ...List<int> rest] => { Count.f(x, rest); },\n            default => { return; },\n        }",
+    );
+    assert_eq!(
+        worded(mixed, &[]),
+        [
+            "10:43 law-recursion a law calls itself only on a smaller value | This call makes a value smaller other than the one the law's first call of itself does. | Call Count.f on a list's rest from a pattern the body matched, or on an int one step towards a bound the body tested, as `if (n <= 0) { return; }` tests 0 before `Count.f(n - 1);`."
+        ]
+    );
+
+    let bounded = (
+        "app/Shared/Count.sharp",
+        "namespace App.Shared;\n\npublic class Count\n{\n    law climbs(int i, int top) => true\n    {\n        if (i >= top) { return; }\n        Count.climbs(i + 1, top);\n    }\n    law slips(int i, int top) => true\n    {\n        if (i >= top) { return; }\n        Count.slips(i + 1, top - 1);\n    }\n}\n",
+    );
+    assert_eq!(issues(bounded, &[]), ["13:9 law-recursion"]);
+}
+
+/// Spec section 28: a law's body reaches a law through its class's name, as a static method reaches the members of its
+/// class.
+#[test]
+fn a_bare_call_of_a_law_in_a_law_body_names_the_call_to_write() {
+    let bare = law_body("        if (x <= 0) { return; }\n        f(x - 1, items);");
+
+    assert_eq!(issues(bare, &[]), ["8:9 non-existent-function"]);
+    assert_eq!(
+        messages(bare, &[]),
+        ["Write `Count.f()`: a static method reaches the members of its class through the class name."]
+    );
 }
 
 /// Spec section 28: a law's body holds `if`, `match` statements with block arms, locals, `return;` and calls of laws as
@@ -22396,7 +22427,7 @@ fn a_law_that_calls_itself_on_a_value_no_smaller_is_refused() {
 #[test]
 fn a_law_body_holds_only_conditions_matches_locals_returns_and_law_calls() {
     for (body, at) in [
-        ("        for (const item of items) { f(item, items); }", "7:9"),
+        ("        for (const item of items) { Count.f(item, items); }", "7:9"),
         ("        return true;", "7:9"),
         ("        int y = 0;\n        y = 1;", "8:9"),
     ] {
