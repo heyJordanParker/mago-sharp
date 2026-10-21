@@ -1,4 +1,6 @@
 use mago_allocator::Arena;
+use std::rc::Rc;
+
 use mago_bytes::BytesDisplay;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::identifier::method::MethodIdentifier;
@@ -47,6 +49,9 @@ use crate::resolver::property::resolve_method_value;
 use crate::resolver::property::static_member_type_arguments;
 use crate::resolver::static_property::StaticProperty;
 use crate::resolver::static_property::StaticPropertyName;
+use crate::utils::expression::get_block_expression_id;
+use crate::utils::expression::get_non_nullsafe_expression_id;
+use crate::utils::expression::get_nullsafe_base_expressions;
 use crate::utils::names::and_list;
 use crate::utils::names::display_class_like_name;
 use crate::utils::names::member_namespace;
@@ -688,6 +693,52 @@ where
     block_context.assigned_variable_ids.extend(assigned);
     let member_type = artifacts.get_expression_type(&span).cloned().unwrap_or_else(get_mixed);
     artifacts.set_expression_type(&span, member_type.as_nullable());
+
+    Ok(())
+}
+
+/// Analyzes with `analyze` the arguments or the index a PHP# chain reaches after `object`, or after `object?.` when
+/// `is_null_safe`. Spec section 14.4: a null receiver of `?.` skips the rest of its chain, so `analyze` runs with each
+/// such receiver the block tracks, a local, a parameter or a `this.field` read before, typed as its values that are
+/// not null, as `if (step != null)` narrows it. After the chain, a receiver `analyze` didn't write has its own type.
+pub(crate) fn analyze_rest_of_chain<'ctx, 'arena, A>(
+    context: &mut Context<'ctx, 'arena, A>,
+    block_context: &mut BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+    object: &Expression<'arena>,
+    is_null_safe: bool,
+    analyze: impl FnOnce(
+        &mut Context<'ctx, 'arena, A>,
+        &mut BlockContext<'ctx>,
+        &mut AnalysisArtifacts,
+    ) -> Result<(), AnalysisError>,
+) -> Result<(), AnalysisError>
+where
+    A: Arena,
+{
+    let mut narrowed = vec![];
+    if context.dialect.is_sharp() {
+        for receiver in is_null_safe.then_some(object).into_iter().chain(get_nullsafe_base_expressions(object)) {
+            let Some(id) = get_block_expression_id(receiver, context, block_context) else {
+                continue;
+            };
+            let id = get_non_nullsafe_expression_id(id).unwrap_or(id);
+            let Some(own) = block_context.locals.get(&id).cloned() else {
+                continue;
+            };
+            let not_null = Rc::new(own.to_non_nullable());
+            block_context.locals.insert(id, Rc::clone(&not_null));
+            narrowed.push((id, own, not_null));
+        }
+    }
+
+    analyze(context, block_context, artifacts)?;
+
+    for (id, own, not_null) in narrowed.into_iter().rev() {
+        if block_context.locals.get(&id).is_some_and(|current| Rc::ptr_eq(current, &not_null)) {
+            block_context.locals.insert(id, own);
+        }
+    }
 
     Ok(())
 }

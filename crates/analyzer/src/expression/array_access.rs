@@ -20,6 +20,7 @@ use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
+use crate::expression::access::analyze_rest_of_chain;
 use crate::expression::is_refused_type;
 use crate::resolver::method::get_declared_collection;
 use crate::resolver::method::with_declared_kinds;
@@ -63,7 +64,14 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for ArrayAccess<'arena> {
         block_context.flags.set_inside_general_use(true);
         block_context.flags.set_inside_unset(false);
 
-        self.index.analyze(context, block_context, artifacts)?;
+        analyze_rest_of_chain(
+            context,
+            block_context,
+            artifacts,
+            self.array,
+            false,
+            |context, block_context, artifacts| self.index.analyze(context, block_context, artifacts),
+        )?;
 
         block_context.flags.set_inside_isset(was_inside_isset);
         block_context.flags.set_inside_unset(was_inside_unset);

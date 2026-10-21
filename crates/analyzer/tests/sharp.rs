@@ -828,6 +828,30 @@ fn null_safe_access_skips_the_rest_of_its_chain_through_an_index() {
     );
 }
 
+/// Spec section 14.4: a null receiver skips the rest of its chain, the arguments and indexes after its `?.` included,
+/// so they read the receiver as not null, as C# does. After the chain, the receiver may be null again. Plain PHP keeps
+/// mago's own reading.
+#[test]
+fn a_null_safe_receiver_is_not_null_in_the_rest_of_its_chain() {
+    let sharp = "namespace Demo;\n\nimport App.Shared.Text.TextExtensions;\nimport Lib.Magic;\n\nclass Router\n{\n    public string route(string label) => label;\n}\n\nclass Step\n{\n    public const int MAX = 3;\n    public string title { get; set; } = \"\";\n    public Router child { get; } = new Router();\n    public List<string> items { get; set; } = [];\n    public string label() => this.title;\n    public int index() => 0;\n    public string route(string label) => label;\n    public static int twice(int value) => value * 2;\n}\n\nclass Flow\n{\n    private Step? current = null;\n\n    public void start(Step step) { this.current = step; }\n\n    public string? call(Step? step) => step?.route(step.label());\n    public string? chain(Step? step) => step?.child.route(step.label());\n    public string? index(Step? step) => step?.items[step.index()];\n    public string? field() => this.current?.route(this.current.label());\n    public string? fieldIndex() => this.current?.items[this.current.index()];\n    public string? extension(string? title) => title?.slug(title);\n    public void magic(Magic? magic) { magic?.anything(magic.name()); }\n\n    public int? classValue(bool flag)\n    {\n        const type = flag ? typeof(Step) : null;\n        return type?.twice(type.MAX);\n    }\n\n    public string after(Step? step)\n    {\n        step?.route(\"x\");\n        return step.label();\n    }\n}\n";
+    let magic = "<?php\n\nnamespace Lib;\n\nfinal class Magic\n{\n    public function name(): string\n    {\n        return 'm';\n    }\n\n    public function __call(string $method, array $arguments): mixed\n    {\n        return null;\n    }\n}\n";
+
+    assert_eq!(
+        issues(
+            ("src/Demo/Flow.sharp", sharp),
+            &[("src/App/Shared/Text/TextExtensions.sharp", TEXT_EXTENSIONS), ("src/Lib/Magic.php", magic)]
+        ),
+        ["35:46 non-documented-method", "46:16 possible-method-access-on-null", "46:16 mixed-return-statement"]
+    );
+
+    let php = "<?php\n\nnamespace Demo;\n\nfinal class Step\n{\n    public function label(): string\n    {\n        return 'step';\n    }\n\n    public function route(string $label): string\n    {\n        return $label;\n    }\n\n    public static function next(?self $step): ?string\n    {\n        return $step?->route($step->label());\n    }\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Step.php", php), &[]),
+        ["19:30 possible-method-access-on-null", "19:30 mixed-argument"]
+    );
+}
+
 /// Spec section 14.4: a write through `?.` that a null receiver skips leaves the member as it was, so a read through the
 /// same `?.` after it may be null, in every write form, as it is with no write before it.
 #[test]
