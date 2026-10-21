@@ -489,12 +489,13 @@ impl<'prover, 'program, 'ast, 'arena> Prover<'prover, 'program, 'ast, 'arena> {
         names::identifier(parameter.variable.name.strip_prefix(b"$").unwrap_or(parameter.variable.name))
     }
 
+    /// Records the `match` arm or statement at `span` as one the proof cannot split on.
     fn unmodeled(&mut self, span: Span) {
         self.proof.unmodeled.push(Unmodeled {
             span,
             what: format!("the statement `{}`", self.source(span)),
             place: self.place.clone(),
-            reason: issues::NOT_TRANSLATED,
+            reason: issues::LAW_MATCH,
         });
     }
 

@@ -20,7 +20,7 @@ pub(crate) const FLOAT: &str = "A law cannot reason about float arithmetic, whic
 pub(crate) const OVERRIDABLE: &str = "A law cannot know which implementation runs.";
 pub(crate) const IDENTITY: &str = "A law sees an object as its values, so it has no identity to compare.";
 pub(crate) const PROPERTY_WRITE: &str = "A law sees an object as its values, so nothing changes it in place.";
-pub(crate) const TRY_CATCH: &str = "An exception is a bug, and a law reasons about values.";
+pub(crate) const EXCEPTION: &str = "An exception is a bug, and a law reasons about values.";
 pub(crate) const TYPE_TEST: &str = "It reads types while the code runs.";
 pub(crate) const STATIC_PROPERTY: &str = "It is state outside the arguments.";
 pub(crate) const LAZY: &str = "A lazy sequence has no value to reason about.";
@@ -40,7 +40,37 @@ pub(crate) const INTERFACE_METHOD: &str =
     "A law cannot reason about an interface method, because the implementation that runs is chosen at run time.";
 pub(crate) const ACCESSOR: &str = "A law cannot reason about an accessor's body.";
 pub(crate) const CONSTRUCTOR_BODY: &str = "A law cannot reason about a constructor's body.";
-pub(crate) const NOT_TRANSLATED: &str = "A law cannot reason about it.";
+pub(crate) const TYPE: &str = "Give it a type a law reasons about: int, bool, string, a List, or a PHP# class, enum or interface, with or without `?`.";
+pub(crate) const MISSING_TYPE: &str = "Write its type.";
+pub(crate) const TUPLE: &str = "Hold the values in a class with one property for each, in place of a tuple.";
+pub(crate) const STATEMENT: &str = "Write the method with the statements a law reaches: `let` and `const`, assignments to locals, `if`, `match`, `return`, and loops that only count or sum.";
+pub(crate) const LOCAL_ASSIGNMENT: &str = "Assign the value to a local declared with `let`.";
+pub(crate) const UPDATE: &str = "Update an int with `+=`, `-=`, `*=`, `/=` or `%=`, or a string with `+=`.";
+pub(crate) const OPERATOR: &str = "Write it with the operators a law reaches: `+ - * / %` on ints, `+` on strings, `< <= > >=` on ints and strings, `== !=`, `! && ||` and `??`.";
+pub(crate) const CLASS_OPERATOR: &str = "Compare the values the objects hold, such as their properties.";
+pub(crate) const TEMPLATE: &str = "Join the strings with `+`.";
+pub(crate) const NESTED_ASSIGNMENT: &str =
+    "Assign the value in a statement of its own, before the expression that reads it.";
+pub(crate) const EXPRESSION: &str = "Write the value with what a law reaches: literals, locals, operators, `new`, calls of PHP# methods, `match`, `is`, `?:` and `??`.";
+pub(crate) const CONSTANT: &str = "Declare the value as a constant of a PHP# class, and read it as `Class.NAME`.";
+pub(crate) const MATCH_SUBJECT: &str = "Compare the value with `==` in a `when` guard.";
+pub(crate) const COMPARISON_PATTERN: &str = "Compare the value with `<`, `<=`, `>` or `>=` in a `when` guard.";
+pub(crate) const GUARD: &str =
+    "Write the guard without calls or arithmetic, which can throw, and compute such a value in the arm.";
+pub(crate) const PATTERN_VALUE: &str = "Write the pattern's value as a literal or a constant.";
+pub(crate) const CONSTANT_VALUE: &str = "Write the constant's value without calls or arithmetic, which can throw.";
+pub(crate) const MEMBER_NAME: &str = "Name the member in the code.";
+pub(crate) const BODYLESS: &str = "A law reads a method's body, and this method has none it can read.";
+pub(crate) const ARGUMENT: &str = "Pass each argument by its position.";
+pub(crate) const DEFAULT_ARGUMENT: &str = "Pass every argument, the ones with a default value included.";
+pub(crate) const CASE_FIELD: &str =
+    "A law tells the cases of an enum apart, and reads none of the data a case carries.";
+pub(crate) const MEMBER: &str = "Read a property the class declares, or call one of its methods.";
+pub(crate) const RECEIVER: &str = "Call it on a value of a PHP# class, enum or interface.";
+pub(crate) const LAW_MATCH: &str =
+    "Match a list parameter of the law with the arms `[]`, `[first, ...rest]` and `default`.";
+pub(crate) const SELF_HOLDING: &str =
+    "A law reasons only about a class whose properties never hold a value of the class itself.";
 
 /// A construct the translation does not model, which `law` reaches: on the construct when the law's file holds it, and
 /// else on the law, pointing to the construct.
