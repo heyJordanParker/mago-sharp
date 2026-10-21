@@ -726,7 +726,7 @@ where
 }
 
 /// Spec section 32: checks the `imports` line of `metadata`, a folder's module. Each namespace it lists is a namespace
-/// of the project or its libraries, and its list leads to no list that leads back to it.
+/// of the project or its libraries that each list above it allows, and its list leads to no list that leads back to it.
 pub(crate) fn analyze_imports<A>(context: &mut Context<'_, '_, A>, metadata: &ModuleMetadata)
 where
     A: Arena,
@@ -739,6 +739,17 @@ where
         let namespace = namespace.as_bytes();
         if !context.codebase.namespace_exists(namespace) && !holds_function_or_constant(context.codebase, namespace) {
             report_non_existent_import(context, *span, namespace, "namespace");
+        } else if let Some(parent) = list_refusing(context.codebase, metadata.namespace.as_bytes(), namespace) {
+            let parent = display_namespace(context.codebase, parent);
+            context.collector.report_with_code(
+                IssueCode::UnlistedImport,
+                Issue::error(format!(
+                    "`{}` is outside `{parent}`'s list, so this entry allows nothing.",
+                    dotted(namespace)
+                ))
+                .with_annotation(Annotation::primary(*span))
+                .with_help(format!("Add `{}` to `{parent}`'s list, or remove this entry.", dotted(namespace))),
+            );
         }
     }
 
@@ -783,16 +794,19 @@ where
     false
 }
 
-/// The name `list` lists that names the namespace of `other`, another module with a list: `other`'s namespace or a
-/// namespace above it, as listing a namespace lists every namespace below it. A namespace reaches the namespaces
-/// below it with no list, so a list never names a namespace above or below its own.
+/// The name `list` lists that names the namespace of `other`, another module with a list: `other`'s namespace, a
+/// namespace above it, as listing a namespace lists every namespace below it, or a namespace below it, which `other`
+/// reaches with no list. A namespace reaches the namespaces below it with no list, so a list never names a namespace
+/// above or below its own.
 fn names_list<'list>(list: &'list ModuleMetadata, other: &ModuleMetadata) -> Option<&'list (Word, Span)> {
     let (own, namespace) = (list.namespace.as_bytes(), other.namespace.as_bytes());
     if is_within_namespace(own, namespace) || is_within_namespace(namespace, own) {
         return None;
     }
 
-    list.imports.iter().find(|(listed, _)| is_within_namespace(namespace, listed.as_bytes()))
+    list.imports.iter().find(|(listed, _)| {
+        is_within_namespace(namespace, listed.as_bytes()) || is_within_namespace(listed.as_bytes(), namespace)
+    })
 }
 
 /// The shortest cycle of `successors` from `start` back to it, each node once, starting at `start`, or nothing when

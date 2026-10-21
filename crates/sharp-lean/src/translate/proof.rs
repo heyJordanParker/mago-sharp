@@ -386,9 +386,10 @@ impl<'prover, 'program, 'ast, 'arena> Prover<'prover, 'program, 'ast, 'arena> {
         scope: &mut Scope<'prover, 'program, 'ast, 'arena>,
         lines: &mut Vec<String>,
     ) {
-        let Some((key, arguments)) = self.called(call) else {
+        let Some((class, name, arguments)) = self.called(call) else {
             return;
         };
+        let key = names::member(&names::full_name(class), name);
         // A call of the law itself passes the smaller value the path shows as its pure term, which Lean's recursion on
         // the theorem ends by, as a method's recursion does.
         let mut stepped = None;
@@ -403,6 +404,14 @@ impl<'prover, 'program, 'ast, 'arena> Prover<'prover, 'program, 'ast, 'arena> {
             }
         } else if !self.proof.laws.iter().any(|(law, _)| *law == key) {
             self.proof.laws.push((key.clone(), call.span()));
+            // The called law's theorem is a declaration the proof uses, so a law of a file with errors is reported as
+            // any code of that file a law reaches.
+            self.proof.uses.push(Use {
+                key: key.clone(),
+                file: self.reach.class(class).map(|reached| reached.file),
+                place: format!("{}.{}", names::short_name(class), String::from_utf8_lossy(name)),
+                smaller: None,
+            });
         }
 
         let values: Vec<&Expression> = arguments.iter().map(Argument::value).collect();
@@ -455,8 +464,9 @@ impl<'prover, 'program, 'ast, 'arena> Prover<'prover, 'program, 'ast, 'arena> {
         lines.push(format!("    sharp_call% {index} ({key}.proof {})", applied(true).join(" ")));
     }
 
-    /// The Lean name of the law `call` calls, `Class.law(…)` a law of `Class`, and its arguments.
-    fn called(&self, call: &'ast Call<'arena>) -> Option<(String, &'ast [Argument<'arena>])> {
+    /// The fully qualified PHP name of the class whose law `call` calls, `Class.law(…)` a law of `Class`, the law's
+    /// name, and the call's arguments.
+    fn called(&self, call: &'ast Call<'arena>) -> Option<(&'program [u8], &'arena [u8], &'ast [Argument<'arena>])> {
         let Call::Method(call) = call else {
             return None;
         };
@@ -464,9 +474,8 @@ impl<'prover, 'program, 'ast, 'arena> Prover<'prover, 'program, 'ast, 'arena> {
         let ClassLikeMemberSelector::Identifier(name) = &call.method else {
             return None;
         };
-        let full = self.checked.names().get(&class.name);
 
-        Some((names::member(&names::full_name(full), name.value), call.argument_list.arguments.as_slice()))
+        Some((self.checked.names().get(&class.name), name.value, call.argument_list.arguments.as_slice()))
     }
 
     /// `(do … return (c)) = pure true`, the condition `expression` as a case hypothesis.

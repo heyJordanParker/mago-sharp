@@ -22507,6 +22507,25 @@ fn a_second_law_of_one_name_is_analyzed_once() {
     assert_eq!(issues(count, &[]), Vec::<String>::new());
 }
 
+/// Spec section 28: a call of a law passes each argument by its position, which is the parameter it states the law
+/// for, so a named or a spread argument is refused.
+#[test]
+fn a_law_call_passes_each_argument_by_its_position() {
+    let count = (
+        "app/Shared/Count.sharp",
+        "namespace App.Shared;\n\npublic class Count\n{\n    law g(int x) => true;\n    law named(int x) => true\n    {\n        Count.g(x: x);\n    }\n    law spread(int x) => true\n    {\n        Count.g(...[x]);\n    }\n}\n",
+    );
+
+    assert_eq!(issues(count, &[]), ["8:17 invalid-law", "12:17 invalid-law"]);
+    assert_eq!(
+        messages(count, &[]),
+        [
+            "A law call passes each argument by its position, which is the parameter of the law it stands for.",
+            "A law call passes each argument by its position, which is the parameter of the law it stands for.",
+        ]
+    );
+}
+
 /// Spec section 28: a law's body holds `if`, `match` statements with block arms, locals, `return;` and calls of laws as
 /// statements, and nothing else.
 #[test]
@@ -24212,6 +24231,27 @@ fn a_help_names_each_class_outside_the_list_once() {
     );
 }
 
+/// Spec section 32: the list of a namespace below one with a list allows only what the list above it allows, so an
+/// entry the list above it leaves out allows nothing.
+#[test]
+fn a_nested_list_entry_outside_its_parent_s_list_is_refused() {
+    let tenant = ("app/Tenant/Module.sharp", "namespace App.Tenant;\n\nmodule\n{\n    imports App.Shared;\n}\n");
+    let store = (
+        "app/Tenant/Store/Module.sharp",
+        "namespace App.Tenant.Store;\n\nmodule\n{\n    imports App.Shared.Schema, App.Billing;\n}\n",
+    );
+    let invoices = ("app/Billing/Invoice.sharp", "namespace App.Billing;\n\npublic class Invoice\n{\n}\n");
+    let schema = ("app/Shared/Schema/Table.sharp", "namespace App.Shared.Schema;\n\npublic class Table\n{\n}\n");
+    let files: Vec<_> = LISTED_CLASSES.iter().copied().chain([invoices, schema, tenant]).collect();
+
+    assert_eq!(
+        refusals(store, &files),
+        [
+            "5:32 unlisted-import `App.Billing` is outside `App.Tenant`'s list, so this entry allows nothing. | Add `App.Billing` to `App.Tenant`'s list, or remove this entry."
+        ]
+    );
+}
+
 /// Spec section 32: lists that name each other, directly or through a chain of lists, are refused at each `imports`
 /// line of the cycle, at the name that leads on. A list names the namespace it lists and every namespace below it. A
 /// namespace with no list ends every chain, so it is never part of a cycle.
@@ -24253,6 +24293,19 @@ fn lists_that_name_each_other_are_refused_at_each_imports_line() {
     );
     // Neither `App.Tenant.Community` nor `App.Shared` has a list, so the chain from `App.Billing` ends at them.
     assert_eq!(refusals(billing, &with(&[store])), Vec::<String>::new());
+
+    // A listed name below the other list's namespace leads to it too.
+    let columns = (
+        "app/Shared/Schema/Columns/Column.sharp",
+        "namespace App.Shared.Schema.Columns;\n\npublic class Column\n{\n}\n",
+    );
+    let store_to_columns = module("App.Tenant.Store", "App.Tenant.Community, App.Shared.Schema.Columns");
+    assert_eq!(
+        refusals(store_to_columns, &with(&[schema, columns])),
+        [format!(
+            "5:35 import-cycle `App.Tenant.Store` and `App.Shared.Schema` import from each other: `App.Tenant.Store` lists `App.Shared.Schema.Columns`, and `App.Shared.Schema` lists `App.Tenant.Store`.{help}"
+        )]
+    );
 
     // Two chains from `App.Tenant.Store` meet at `App.Tenant.Community` before it leads back, and one cycle is refused.
     let branching = module("App.Tenant.Store", "App.Billing, App.Shared.Schema");

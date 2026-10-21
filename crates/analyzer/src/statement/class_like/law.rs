@@ -14,6 +14,7 @@ use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_span::HasSpan;
 use mago_span::Span;
+use mago_syntax::cst::Argument;
 use mago_syntax::cst::ArgumentList;
 use mago_syntax::cst::Call;
 use mago_syntax::cst::ClassLikeMemberSelector;
@@ -321,6 +322,20 @@ where
             }
             _ => match law_call(statement) {
                 Some(call) => match called_law(self.context, call) {
+                    Some(_)
+                        if let Some(argument) = call.get_argument_list().arguments.iter().find(|argument| {
+                            matches!(argument, Argument::Named(_))
+                                || matches!(argument, Argument::Positional(positional) if positional.ellipsis.is_some())
+                        }) =>
+                    {
+                        self.context.collector.report_with_code(
+                            IssueCode::InvalidLaw,
+                            Issue::error(
+                                "A law call passes each argument by its position, which is the parameter of the law it stands for.",
+                            )
+                            .with_annotation(Annotation::primary(argument.span()).with_message("Passed here.")),
+                        );
+                    }
                     Some((class, law)) if class.name == self.class.name && law.span == self.law.span() => {
                         self.call(call.get_argument_list(), call.span());
                     }

@@ -3381,6 +3381,35 @@ fn compile_proves_a_law_whose_condition_or_body_reads_a_nullable_parameter() {
     assert!(compiled(root, "app/Shared/Box.sharp").exists());
 }
 
+/// A law that calls a law of a file with errors is not proven until those errors are fixed, which the error says, as it
+/// says of any code of such a file a law reaches.
+#[test]
+fn a_call_of_a_law_whose_file_has_errors_names_the_errors_to_fix() {
+    let money = LAWFUL_MONEY.replace(
+        "    law addKeepsCurrency",
+        "    public int broken() => \"text\";\n    law same(int x) => x == x;\n\n    law addKeepsCurrency",
+    );
+    let directory = lawful_project(&[
+        ("app/Shared/Money.sharp", &money),
+        (
+            "app/Shared/Ledger.sharp",
+            "namespace App.Shared;\n\npublic class Ledger\n{\n    law usesMoney(int x) => true\n    {\n        Money.same(x);\n    }\n}\n",
+        ),
+    ]);
+    let root = directory.path();
+
+    let output = compile_lines(root);
+
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    assert!(
+        printed(&output).contains(
+            "app/Shared/Ledger.sharp:5:5:error - law-unproven: Law usesMoney is not proven: it reaches Money.same, whose file has errors. Fix them, then run vendor/bin/mago compile again."
+        ),
+        "{}",
+        printed(&output)
+    );
+}
+
 /// Spec section 28: laws that call each other in a cycle never end, so the call that closes the cycle is the error of
 /// a law that calls itself on no smaller value.
 #[test]

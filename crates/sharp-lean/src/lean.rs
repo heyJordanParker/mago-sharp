@@ -352,7 +352,11 @@ fn judged(law: &Law, judgment: Judgment, receivers: &HashMap<String, bool>, decl
     match judgment {
         Judgment::Proved => Vec::new(),
         Judgment::Through(called) => vec![issues::through(law, &called)],
-        Judgment::Rejected(_) => vec![issues::rejected_proof(law)],
+        Judgment::Rejected(error) => {
+            tracing::debug!("The law checker rejected the proof of law {}: {error}", law.name);
+
+            vec![issues::rejected_proof(law)]
+        }
         // A case a `match` reaches both where a guard fails and where a pattern does is one case, reported once.
         Judgment::Open(steps) => steps
             .iter()
