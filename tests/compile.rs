@@ -4193,6 +4193,15 @@ fn compile_proves_a_law_over_a_count_in_a_lambda_a_guard_and_a_condition() {
     );
 }
 
+/// `[]` is the empty List wherever the code expects a List: an argument, a returned value, and a compared one.
+#[test]
+fn compile_proves_a_law_over_an_empty_list() {
+    assert_proven(
+        "More",
+        "namespace App.Shared;\n\npublic class More\n{\n    public static int sizeOf(List<int> xs) => match (xs) {\n        [] => 0,\n        default => xs.count() > 2 ? 2 : 1,\n    };\n\n    public static List<int> none(int unused) => [];\n\n    law sizeOfEmpty(int unused) => More.sizeOf([]) == 0;\n    law noneIsEmpty(int unused) => More.none(0).count() == 0;\n    law noneIsTheEmptyList(int unused) => More.none(0) == [];\n}\n",
+    );
+}
+
 /// A loop that only counts is the list's length.
 #[test]
 fn compile_proves_a_law_over_a_counting_loop() {

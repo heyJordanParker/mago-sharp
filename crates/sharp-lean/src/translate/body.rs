@@ -408,8 +408,9 @@ impl<'body, 'program> Body<'body, 'program> {
             Expression::Instantiation(instantiation) => self.instantiation(instantiation),
             Expression::Access(Access::Property(access)) => self.property(expression, access),
             Expression::Access(Access::NullSafeProperty(access)) => self.null_safe_property(expression, access),
-            // A spread is Lean's `++`: `[x, ...rest]` is `[x] ++ rest`.
-            Expression::Array(array) if self.is_list(expression) => {
+            // A spread is Lean's `++`: `[x, ...rest]` is `[x] ++ rest`. `[]` types as no array in particular, and Lean
+            // reads it as the empty List the code around it expects.
+            Expression::Array(array) if array.elements.is_empty() || self.is_list(expression) => {
                 let mut parts: Vec<String> = Vec::new();
                 let mut elements: Vec<String> = Vec::new();
                 for element in &array.elements {
