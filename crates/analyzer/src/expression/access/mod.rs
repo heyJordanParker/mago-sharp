@@ -7,6 +7,7 @@ use mago_codex::identifier::method::MethodIdentifier;
 use mago_codex::ttype::add_optional_union_type;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::object::TObject;
+use mago_codex::ttype::combine_union_types_rc;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_never;
 use mago_codex::ttype::union::TUnion;
@@ -37,7 +38,6 @@ use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
-use crate::expression::binary::logical::merge_short_circuited_assignments;
 use crate::expression::constant_access::analyze_namespace_constant;
 use crate::resolver::class_name::holds_no_class;
 use crate::resolver::class_name::report_class_value_of_no_class;
@@ -652,12 +652,11 @@ where
     }
 }
 
-/// Analyzes a PHP# read or call through `object`, a class value or a function, which is analyzed, with `analyze`.
-/// Through `?.`, `type?.y`, `type?.m()` or `f?.(x)`, the member is reached or the function called only when `object`
-/// is not null, so `analyze` runs with `object` typed as its values that are not null, as `if (type !== null)` narrows
-/// a local, and the result at `span` can also be the `null` the access stops at. `object` keeps its own type
-/// afterwards. A null receiver skips a call's arguments, so the locals afterwards are the ones from before, with each
-/// local an argument writes merged as the short-circuited right-hand side of `&&` merges it.
+/// Analyzes a PHP# read or call through `object`, a class value or a function, which is analyzed, with `analyze`, as
+/// the rest of its chain. Through `?.`, `type?.y`, `type?.m()` or `f?.(x)`, the member is reached or the function
+/// called only when `object` is not null, so `analyze` also runs with the type of `object` itself as its values that
+/// are not null, and the result at `span` can also be the `null` the access stops at. `object` keeps its own type
+/// afterwards.
 pub(crate) fn analyze_through_value<'ctx, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
     block_context: &mut BlockContext<'ctx>,
@@ -675,32 +674,29 @@ where
     A: Arena,
 {
     if !is_null_safe {
-        return analyze(context, block_context, artifacts);
+        return analyze_rest_of_chain(context, block_context, artifacts, object, false, analyze);
     }
 
-    let before = block_context.locals.clone();
-    let assigned_before = std::mem::take(&mut block_context.assigned_variable_ids);
     let Some(object_type) = artifacts.get_rc_expression_type(object).cloned() else {
         unreachable!("a class value's object is analyzed, and its type is how the class value was found");
     };
     artifacts.set_expression_type(object, object_type.to_non_nullable());
 
-    analyze(context, block_context, artifacts)?;
+    analyze_rest_of_chain(context, block_context, artifacts, object, true, analyze)?;
     artifacts.set_rc_expression_type(object, object_type);
-    let after = std::mem::replace(&mut block_context.locals, before.clone());
-    let assigned = std::mem::replace(&mut block_context.assigned_variable_ids, assigned_before);
-    merge_short_circuited_assignments(context, block_context, &before, &after, &assigned);
-    block_context.assigned_variable_ids.extend(assigned);
     let member_type = artifacts.get_expression_type(&span).cloned().unwrap_or_else(get_mixed);
     artifacts.set_expression_type(&span, member_type.as_nullable());
 
     Ok(())
 }
 
-/// Analyzes with `analyze` the arguments or the index a PHP# chain reaches after `object`, or after `object?.` when
-/// `is_null_safe`. Spec section 14.4: a null receiver of `?.` skips the rest of its chain, so `analyze` runs with each
-/// such receiver the block tracks, a local, a parameter or a `this.field` read before, typed as its values that are
-/// not null, as `if (step != null)` narrows it. After the chain, a receiver `analyze` didn't write has its own type.
+/// Analyzes with `analyze` the part of a PHP# chain a null receiver skips: the arguments or the index after `object`,
+/// or after `object?.` when `is_null_safe`, and the value a write through `object` stores. Spec section 14.4: a null
+/// receiver of `?.` skips the rest of its chain, so `analyze` runs with each such receiver the block tracks, a local, a
+/// parameter or a member read before, typed as its values that are not null, as `if (step != null)` narrows it. The
+/// part may not run, so the locals afterwards join the ones from before as an `if` with no `else` joins them: a local
+/// it changed holds its type from before or its new one, a local it removed stays removed, and a local it added is
+/// gone. Nothing the narrowing proved outlives the chain.
 pub(crate) fn analyze_rest_of_chain<'ctx, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
     block_context: &mut BlockContext<'ctx>,
@@ -716,29 +712,37 @@ pub(crate) fn analyze_rest_of_chain<'ctx, 'arena, A>(
 where
     A: Arena,
 {
-    let mut narrowed = vec![];
-    if context.dialect.is_sharp() {
-        for receiver in is_null_safe.then_some(object).into_iter().chain(get_nullsafe_base_expressions(object)) {
-            let Some(id) = get_block_expression_id(receiver, context, block_context) else {
-                continue;
-            };
-            let id = get_non_nullsafe_expression_id(id).unwrap_or(id);
-            let Some(own) = block_context.locals.get(&id).cloned() else {
-                continue;
-            };
-            let not_null = Rc::new(own.to_non_nullable());
-            block_context.locals.insert(id, Rc::clone(&not_null));
-            narrowed.push((id, own, not_null));
-        }
+    let receivers: Vec<&Expression<'arena>> =
+        is_null_safe.then_some(object).into_iter().chain(get_nullsafe_base_expressions(object)).collect();
+    if !context.dialect.is_sharp() || receivers.is_empty() {
+        return analyze(context, block_context, artifacts);
     }
+
+    // A `?.` read stores its member under its own id, as `$step?->spare`, and a `.` read of it takes `$step->spare`.
+    let before = block_context.locals.clone();
+    let narrowed: Vec<(Word, Rc<TUnion>)> = receivers
+        .into_iter()
+        .filter_map(|receiver| get_block_expression_id(receiver, context, block_context))
+        .filter_map(|id| {
+            let not_null = Rc::new(before.get(&id)?.to_non_nullable());
+            Some((get_non_nullsafe_expression_id(id).unwrap_or(id), not_null))
+        })
+        .collect();
+    block_context.locals.extend(narrowed);
 
     analyze(context, block_context, artifacts)?;
 
-    for (id, own, not_null) in narrowed.into_iter().rev() {
-        if block_context.locals.get(&id).is_some_and(|current| Rc::ptr_eq(current, &not_null)) {
-            block_context.locals.insert(id, own);
-        }
-    }
+    let after = std::mem::take(&mut block_context.locals);
+    let options = context.settings.combiner_options();
+    block_context.locals = before
+        .into_iter()
+        .filter_map(|(id, own)| {
+            let current = after.get(&id)?;
+            let joined =
+                if *current == own { own } else { combine_union_types_rc(&own, current, context.codebase, options) };
+            Some((id, joined))
+        })
+        .collect();
 
     Ok(())
 }

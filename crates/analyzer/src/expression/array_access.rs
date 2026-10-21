@@ -64,14 +64,15 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for ArrayAccess<'arena> {
         block_context.flags.set_inside_general_use(true);
         block_context.flags.set_inside_unset(false);
 
-        analyze_rest_of_chain(
+        let analyzed = analyze_rest_of_chain(
             context,
             block_context,
             artifacts,
             self.array,
             false,
             |context, block_context, artifacts| self.index.analyze(context, block_context, artifacts),
-        )?;
+        );
+        analyzed?;
 
         block_context.flags.set_inside_isset(was_inside_isset);
         block_context.flags.set_inside_unset(was_inside_unset);

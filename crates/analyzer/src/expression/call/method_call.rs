@@ -378,30 +378,20 @@ where
     // PHP# calls a static method through a class value, `type.m()`, as PHP's `$type::m()`, spec section 25.
     if method_resolution.class_value {
         context.collector.extend(receiver_issues);
+        if refuse_statics_of_no_class(context, artifacts, object, span) {
+            return argument_list.analyze(context, block_context, artifacts);
+        }
+        let call = StaticCall { class: object, method: selector, argument_list, span };
 
-        return analyze_rest_of_chain(
+        return analyze_through_value(
             context,
             block_context,
             artifacts,
             object,
             is_null_safe,
+            span,
             |context, block_context, artifacts| {
-                if refuse_statics_of_no_class(context, artifacts, object, span) {
-                    return argument_list.analyze(context, block_context, artifacts);
-                }
-                let call = StaticCall { class: object, method: selector, argument_list, span };
-
-                analyze_through_value(
-                    context,
-                    block_context,
-                    artifacts,
-                    object,
-                    is_null_safe,
-                    span,
-                    |context, block_context, artifacts| {
-                        analyze_static_method_call(context, block_context, artifacts, call, type_arguments, true)
-                    },
-                )
+                analyze_static_method_call(context, block_context, artifacts, call, type_arguments, true)
             },
         );
     }

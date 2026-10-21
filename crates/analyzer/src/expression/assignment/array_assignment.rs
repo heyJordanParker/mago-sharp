@@ -46,6 +46,7 @@ use crate::context::block::BlockContext;
 use crate::context::block::ReferenceConstraintSource;
 use crate::effects::summary::record_function_values;
 use crate::error::AnalysisError;
+use crate::expression::access::analyze_rest_of_chain;
 use crate::expression::array::check_sharp_literal_kind;
 use crate::expression::array::get_set_literal_type;
 use crate::expression::array_access::check_change_through_index;
@@ -881,7 +882,15 @@ where
             if artifacts.get_expression_type(&index).is_none() {
                 let was_inside_general_use = block_context.flags.inside_general_use();
                 block_context.flags.set_inside_general_use(true);
-                index.analyze(context, block_context, artifacts)?;
+                let analyzed = analyze_rest_of_chain(
+                    context,
+                    block_context,
+                    artifacts,
+                    array_target.get_array(),
+                    false,
+                    |context, block_context, artifacts| index.analyze(context, block_context, artifacts),
+                );
+                analyzed?;
                 block_context.flags.set_inside_general_use(was_inside_general_use);
             }
 
