@@ -176,7 +176,7 @@ fn step<'expression, 'arena>(
             && match fact.step {
                 Step::Down(bound) => down && passes_on(bound),
                 Step::Up(bound) => !down && passes_on(bound),
-                Step::Rest => false,
+                Step::Rest => unreachable!("a condition shows an int parameter's bound, never a list's rest"),
             }
     })?;
 

@@ -18,11 +18,13 @@ use mago_syntax::cst::ArgumentList;
 use mago_syntax::cst::Call;
 use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Expression;
+use mago_syntax::cst::FunctionCall;
 use mago_syntax::cst::Hint;
 use mago_syntax::cst::IfBody;
 use mago_syntax::cst::Law;
 use mago_syntax::cst::LawProof;
 use mago_syntax::cst::ListPatternElement;
+use mago_syntax::cst::MethodCall;
 use mago_syntax::cst::Pattern;
 use mago_syntax::cst::PatternMatchArm;
 use mago_syntax::cst::PatternMatchArmBody;
@@ -72,23 +74,12 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Law<'arena> {
         A: Arena,
     {
         let Some(class_like_metadata) = block_context.scope.get_class_like() else {
-            tracing::error!(
-                "Attempted to analyze law `{}` without class-like context.",
-                mago_bytes::BytesDisplay(self.name.value)
-            );
-
-            return Ok(());
+            unreachable!("a class-like or a module analyzes its laws in its own scope");
         };
 
         let lowercase_law_name = ascii_lowercase_word(self.name.value);
         let Some(law_metadata) = class_like_metadata.laws.get(&lowercase_law_name) else {
-            tracing::error!(
-                "Failed to find law metadata for `{}` in class `{}`.",
-                mago_bytes::BytesDisplay(self.name.value),
-                class_like_metadata.original_name
-            );
-
-            return Ok(());
+            unreachable!("the codex scans each law the analyzer analyzes");
         };
 
         // Skip a second law of one name; semantics reports it.
@@ -184,13 +175,10 @@ pub(crate) fn called_law<'ctx, A>(
 where
     A: Arena,
 {
-    let Call::Method(call) = call else {
+    let Call::Method(call @ MethodCall { method: ClassLikeMemberSelector::Identifier(name), .. }) = call else {
         return None;
     };
     let class = context.resolved_names.static_call_class(call)?;
-    let ClassLikeMemberSelector::Identifier(name) = &call.method else {
-        return None;
-    };
     let class = context.codebase.get_class_like(context.resolved_names.get(&class.name))?;
 
     Some((class, class.laws.get(&ascii_lowercase_word(name.value))?))
@@ -202,10 +190,7 @@ fn is_bare_law_call<A>(context: &Context<'_, '_, A>, class: &ClassLikeMetadata, 
 where
     A: Arena,
 {
-    let Call::Function(call) = call else {
-        return false;
-    };
-    let Expression::Identifier(name) = call.function else {
+    let Call::Function(FunctionCall { function: Expression::Identifier(name), .. }) = call else {
         return false;
     };
 
@@ -337,23 +322,20 @@ where
             Statement::Block(block) => self.statements(block.statements.as_slice()),
             Statement::Return(r#return) if r#return.value.is_none() => {}
             Statement::LocalDeclaration(_) => {}
-            Statement::If(r#if) => {
-                let IfBody::Statement(body) = &r#if.body else {
-                    return self.refuse(statement.span());
-                };
-                if !body.else_if_clauses.is_empty() {
-                    return self.refuse(statement.span());
-                }
-                let known = self.known();
-                self.learn(r#if.condition, true);
-                self.statement(body.statement);
-                self.forget(known);
-                if let Some(clause) = &body.else_clause {
-                    self.learn(r#if.condition, false);
-                    self.statement(clause.statement);
+            Statement::If(r#if) => match &r#if.body {
+                IfBody::Statement(body) if body.else_if_clauses.is_empty() => {
+                    let known = self.known();
+                    self.learn(r#if.condition, true);
+                    self.statement(body.statement);
                     self.forget(known);
+                    if let Some(clause) = &body.else_clause {
+                        self.learn(r#if.condition, false);
+                        self.statement(clause.statement);
+                        self.forget(known);
+                    }
                 }
-            }
+                _ => self.refuse(statement.span()),
+            },
             Statement::PatternMatch(r#match) => {
                 let subject = smaller::Parameters::parameter(self, r#match.expression).map(|(place, _)| place);
                 for arm in r#match.arms.iter() {

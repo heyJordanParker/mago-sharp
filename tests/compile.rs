@@ -45,11 +45,14 @@ fn write(root: &Path, name: &str, contents: &str) {
     std::fs::write(path, contents).unwrap();
 }
 
+/// `mago compile` in `root`, which prints its issues in the medium format wherever it runs: mago would pick another
+/// one under GitHub Actions or GitLab CI.
 fn command(root: &Path, colors: &str) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_mago"));
     command
         .args(["--no-version-check", "--colors", colors, "compile"])
         .env("MAGO_LOG", "info")
+        .env("MAGO_REPORTING_FORMAT", "medium")
         .env("XDG_CACHE_HOME", Path::new(env!("CARGO_TARGET_TMPDIR")).join("cache"))
         .current_dir(root);
     command

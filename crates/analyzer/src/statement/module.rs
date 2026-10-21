@@ -753,7 +753,7 @@ where
         .map(|list| (0..lists.len()).filter(|other| names_list(list, lists[*other]).is_some()).collect())
         .collect();
     let Some(own) = lists.iter().position(|list| std::ptr::eq(*list, metadata)) else {
-        return;
+        unreachable!("a module with a list is one of the codebase's modules with a list");
     };
     let cycle: Vec<&ModuleMetadata> = cycle_through(own, &successors).into_iter().map(|index| lists[index]).collect();
     if !cycle.is_empty() {
@@ -768,9 +768,6 @@ pub(crate) fn check_listed_import<A>(context: &mut Context<'_, '_, A>, name: &[u
 where
     A: Arena,
 {
-    if !context.dialect.is_sharp() {
-        return true;
-    }
     let Some(module) = list_refusing(context.codebase, context.scope.namespace_name().unwrap_or_default(), name) else {
         return true;
     };
@@ -838,18 +835,14 @@ where
         .zip(&namespaces)
         .filter_map(|((module, next), namespace)| Some((*namespace, names_list(module, next)?)))
         .collect();
-    let Some((_, (_, span))) = steps.first() else {
-        return;
-    };
-
     let lists: Vec<String> = steps
         .iter()
         .map(|(namespace, (listed, _))| format!("`{namespace}` lists `{}`", dotted(listed.as_bytes())))
         .collect();
-    let lists = match lists.split_last() {
-        Some((last, rest)) if !rest.is_empty() => format!("{}, and {last}", rest.join(", ")),
-        _ => lists.concat(),
+    let (Some((_, (_, span))), Some((last, rest))) = (steps.first(), lists.split_last()) else {
+        unreachable!("a cycle holds two lists at least, each naming the next");
     };
+    let lists = format!("{}, and {last}", rest.join(", "));
     context.collector.report_with_code(
         IssueCode::ImportCycle,
         Issue::error(format!("{} import from each other: {lists}.", and_list(&namespaces)))
