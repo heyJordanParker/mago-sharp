@@ -3005,8 +3005,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// php-src's grammar writes with `ZEND_NAME_NOT_FQ`. `new Artifact.fromJson(…)` calls the static method the named
     /// constructor runs as, spec section 9.1, and `new TItem.fromJson(…)` calls it on the class of the type argument
     /// the code runs with, as `TItem.make()` does, spec section 11, and `new Self.fromJson(…)` on the class the code is
-    /// called on, as `static::fromJson(…)`. An object initializer then sets its values on the new object, spec
-    /// section 16, and `new Point { x: 1 }` creates it with no arguments.
+    /// called on, as `static::fromJson(…)`. An object initializer then sets its values on the new object `expression`
+    /// gives, spec section 16, and `new Point { x: 1 }` creates it with no arguments.
     ///
     /// A PHP# generic class's `new` carries the type arguments the checker found in a `SHARP_TYPE_ARGS` over the `NEW`,
     /// and its named constructor takes them after its arguments, as a generic call does. `new TItem(…)` creates the type
@@ -3014,7 +3014,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// (type)(…)` creates an object from the class value `type`, spec section 25, under the type arguments it names,
     /// or with those the value carries. In a generic class `new Self(…)` gives the new object `this`'s type arguments: a
     /// `SHARP_TYPE_ARGS` without a text.
-    fn instantiation(&mut self, line: u32, instantiation: &Instantiation) -> u32 {
+    fn instantiation(&mut self, line: u32, expression: &Expression, instantiation: &Instantiation) -> u32 {
         let class_name = match instantiation.class {
             Expression::Identifier(class) if !self.names.is_type_parameter(class) => Some(self.names.get(class)),
             _ => None,
@@ -3135,7 +3135,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
         // `\Sharp\Internal\build(new \App\Point(), function ($value#1) { $this->x = $value#1; return $this; }, 1)`: the
         // object is built once the initializer ends, so its writes run no observer, spec section 6.2.
-        self.bound_to(instantiation.span(), created, class_name, initializer, true, |lowering, span, values| {
+        self.bound_to(instantiation.span(), created, expression, initializer, true, |lowering, span, values| {
             let line = lowering.line(span);
             let mut statements = Vec::new();
             for (name, value) in values {
@@ -3167,10 +3167,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// being built, so the writes run no observer, spec section 6.2.
     fn with(&mut self, with: &With) -> u32 {
         let object = self.expression(with.object);
-        let class =
-            receiver_classes(self.types.expression_type(with.object)).and_then(|classes| classes.first().copied());
 
-        self.bound_to(with.span(), object, class, &with.initializer, false, |lowering, span, values| {
+        self.bound_to(with.span(), object, with.object, &with.initializer, false, |lowering, span, values| {
             let line = lowering.line(span);
             let mut entries = Vec::new();
             for (name, value) in values {
@@ -3194,13 +3192,13 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// class's own access, so a write runs an `init` or `set` accessor wherever the code is, as a named constructor's
     /// body runs (`Lowering::named_constructor`). Each value of `initializer` runs in the caller, in order after
     /// `object`, as an argument, and `body` reads it through the hidden parameter it gets beside the property's name.
-    /// A property plain PHP declares on `class`, the object's class, takes its value as plain PHP receives it in a
-    /// parameter of the property's type, spec section 12.
+    /// A property plain PHP declares on the class of the object `built` gives, or the first class it can be, takes its
+    /// value as plain PHP receives it in a parameter of the property's type, spec section 12.
     fn bound_to(
         &mut self,
         span: Span,
         object: u32,
-        class: Option<&[u8]>,
+        built: &Expression,
         initializer: &ObjectInitializer,
         builds: bool,
         body: impl FnOnce(&mut Self, Span, Vec<(&[u8], u32)>) -> Vec<u32>,
@@ -3210,8 +3208,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let mut parameters = Vec::new();
         let mut arguments = vec![object];
         let mut values = Vec::new();
+        let class = receiver_classes(self.types.expression_type(built)).and_then(|classes| classes.first().copied());
         for value in initializer.values.iter() {
-            let declared = class.and_then(|class| self.types.plain_property_type(class, value.name.value));
+            let variable = [b"$", value.name.value].concat();
+            let declared = class.and_then(|class| self.types.plain_property_type(class, &variable));
             let stored = self.stored_in_plain_place(line, value.value, declared);
             arguments.push(stored.unwrap_or_else(|| self.expression(value.value)));
 
@@ -5539,10 +5539,19 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                         this.list_write(line, access, ListWrite::Assignment(assignment))
                     });
                 }
+                // An element plain PHP declares holds a PHP array, which PHP's own write changes where it lives, once
+                // a plain PHP property the checker reads as a `List` is renumbered, as a write to its index is.
+                if let Expression::ArrayAccess(access) = assignment.lhs
+                    && self.renumbered_root(access.array).is_some()
+                {
+                    return self.renumbered_first(access.array, |this| this.unchecked_expression(line, expression));
+                }
                 if let Expression::ArrayAccess(access) = assignment.lhs
                     && match access.array.unparenthesized() {
                         array if self.static_accessor(array).is_some() => true,
-                        Expression::ArrayAccess(element) => self.is_list(element.array),
+                        Expression::ArrayAccess(element) => {
+                            self.is_list(element.array) && self.types.plain_place_type(element.array).is_none()
+                        }
                         // `Class.name` is a static property, which PHP gives no hooks.
                         Expression::Access(Access::Property(
                             property @ PropertyAccess {
@@ -5607,12 +5616,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                         };
                         let lhs = self.target(assignment.lhs, place_use);
                         let rhs = match operator {
-                            AssignmentOperator::Assign(_) | AssignmentOperator::Coalesce(_)
-                                if let Some(stored) = self.stored_in_plain_place(
-                                    line,
-                                    assignment.rhs,
-                                    self.types.plain_place_type(assignment.lhs),
-                                ) =>
+                            _ if let Some(stored) = self.stored_in_plain_place(
+                                line,
+                                assignment.rhs,
+                                self.types.plain_place_type(assignment.lhs),
+                            ) =>
                             {
                                 stored
                             }
@@ -5695,7 +5703,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             Expression::Construct(Construct::Exit(_)) => {
                 unreachable!("the checker refuses a bare call of PHP's `exit`, spec section 23")
             }
-            Expression::Instantiation(instantiation) => self.instantiation(line, instantiation),
+            Expression::Instantiation(instantiation) => self.instantiation(line, expression, instantiation),
             Expression::With(with) => self.with(with),
             // `global.PHP_EOL` and `Pdf.DEFAULT_DPI` read the plain PHP constant the checker found, spec section 23.
             Expression::Access(Access::Property(_))
@@ -8577,24 +8585,14 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let element = self.types.plain_element_type(receiver);
         let mut arguments = Vec::new();
         for argument in &list.arguments {
-            let value = match argument {
-                Argument::Positional(positional) if positional.ellipsis.is_some() => {
-                    arguments.push(self.positional_argument(positional));
-                    continue;
-                }
-                _ => argument.value(),
-            };
+            let value = argument.value();
             let line = self.line(value);
             let lowered =
                 self.stored_in_plain_place(line, value, element.clone()).unwrap_or_else(|| self.expression(value));
             arguments.push(match argument {
-                Argument::Named(named) if list.arguments.len() > 1 => {
-                    let line = self.line(named.name.span);
-                    let name = self.local_name(0, line, named.name.value);
-
-                    self.node(SHARP_AST_NAMED_ARG, 0, line, &[name, lowered])
-                }
-                _ => lowered,
+                Argument::Positional(positional) => self.positional(positional, lowered),
+                Argument::Named(_) if list.arguments.len() == 1 => lowered,
+                Argument::Named(named) => self.named(named, lowered),
             });
         }
         if let Some(owner) = self.types.sorting_operator(call)
@@ -8708,7 +8706,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// otherwise `parameters` are the parameters of the plain PHP one, and `type_arguments` the type arguments of a
     /// generic method, which go last, as [`Self::type_arguments_argument`] writes them. A value that holds a `Map` or a
     /// `Set`, or can, crosses into a plain PHP parameter whose type takes an array, such as `array`, `iterable`, `mixed`
-    /// or none, as its PHP array, spec section 12, as [`Self::array_of`] gives it and [`Self::argument_crosses`] says. A
+    /// or none, as its PHP array, spec section 12, as [`Self::received_value`] gives it. A
     /// parameter whose type takes no array, such as `object` or an interface, takes the object, and so does any
     /// parameter when the value is itself what plain PHP gave or its `Map` has no PHP array. A local passed to a reference
     /// parameter crosses back after the call, and before it too when the parameter takes an array,
@@ -9012,6 +9010,12 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// A spread argument is an `UNPACK` of its value, as php-src's grammar builds `...$list`.
     fn positional_argument(&mut self, argument: &PositionalArgument) -> u32 {
         let value = self.expression(argument.value);
+
+        self.positional(argument, value)
+    }
+
+    /// `value`, the lowered value of the positional `argument`, as the argument: an `UNPACK` of it for a spread.
+    fn positional(&mut self, argument: &PositionalArgument, value: u32) -> u32 {
         if argument.ellipsis.is_none() {
             return value;
         }
@@ -9022,9 +9026,15 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// A named argument, `name: value`. Only a PHP# parameter can have a superglobal's name, which runs hidden, so its
     /// label does too.
     fn named_argument(&mut self, argument: &NamedArgument) -> u32 {
+        let value = self.expression(argument.value);
+
+        self.named(argument, value)
+    }
+
+    /// `value`, the lowered value of the named `argument`, under its name, as [`Self::named_argument`] gives it.
+    fn named(&mut self, argument: &NamedArgument, value: u32) -> u32 {
         let line = self.line(argument.name.span);
         let name = self.local_name(0, line, argument.name.value);
-        let value = self.expression(argument.value);
 
         self.node(SHARP_AST_NAMED_ARG, 0, line, &[name, value])
     }

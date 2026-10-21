@@ -1132,12 +1132,12 @@ impl<'analysis> Types<'analysis> {
 
     /// The declaration `member` of the fully qualified class name `class` resolves to when code reads it: an enum case,
     /// a constant, a property, then a method, which the read takes as a first-class callable. Only when the class
-    /// declares none of them is it a property its `__get` serves. A read of an object is [`Self::read_member`]'s, and a
-    /// call is [`Self::call_target`]'s.
+    /// declares none of them is it a property its `__get` serves, or its `__set` takes a write to. A read of an object
+    /// is [`Self::read_member`]'s, and a call is [`Self::call_target`]'s.
     #[must_use]
     pub fn member_declaration(&self, class: &[u8], member: &[u8]) -> Declaration {
         self.declared_member(class, member).unwrap_or_else(|| {
-            if !self.codebase.method_exists(class, b"__get") {
+            if !self.codebase.method_exists(class, b"__get") && !self.codebase.method_exists(class, b"__set") {
                 unreachable!(
                     "the checker refuses `{}.{}`, which names no member",
                     String::from_utf8_lossy(class),
@@ -1696,9 +1696,9 @@ impl<'analysis> Types<'analysis> {
         if let Expression::ArrayAccess(access) = target.unparenthesized() {
             return self.plain_element_type(access.array);
         }
-        let (class, property) = self.accessed_property(target)?;
+        let (class, variable) = self.accessed_property(target)?;
 
-        self.plain_property_type(class, &property[1..])
+        self.plain_property_type(class, &variable)
     }
 
     /// The type plain PHP declares for an element of the place `holder`, as [`Self::plain_place_type`] gives the
@@ -1716,17 +1716,20 @@ impl<'analysis> Types<'analysis> {
         Some(element.unwrap_or_else(get_mixed))
     }
 
-    /// The type plain PHP declares for the property `property` of the fully qualified class name `class`, as
-    /// [`Self::plain_place_type`] gives it. None for a property PHP# declares.
-    pub(crate) fn plain_property_type(&self, class: &[u8], property: &[u8]) -> Option<TUnion> {
-        let variable = [b"$", property].concat();
-        if !self.plain_declares(class, &variable) {
-            return None;
-        }
+    /// The type plain PHP declares for the property `variable`, `$`-prefixed, that the fully qualified class name
+    /// `class` declares or inherits, as [`Self::plain_place_type`] gives it. A write to a name the class has no
+    /// property for runs its `__set`, so the place is the value parameter of a `__set` plain PHP declares, as Eloquent's
+    /// `Model` does. None for a property PHP# declares.
+    pub(crate) fn plain_property_type(&self, class: &[u8], variable: &[u8]) -> Option<TUnion> {
+        let declared = match self.codebase.get_declaring_property(class, variable) {
+            Some(_) if !self.plain_declares(class, variable) => return None,
+            Some(property) => property.type_metadata.as_ref().map(|declared| &declared.type_union),
+            None => {
+                plain_parameters(class, self.codebase.get_declaring_method(class, b"__set"))?.get(1)?.declared_type()
+            }
+        };
 
-        let declared = self.codebase.get_property(class, &variable)?.type_metadata.as_ref();
-
-        Some(declared.map_or_else(get_mixed, |declared| declared.type_union.clone()))
+        Some(declared.cloned().unwrap_or_else(get_mixed))
     }
 
     /// Whether plain PHP declares the property `variable`, `$`-prefixed, that `class` declares or inherits.

@@ -24020,6 +24020,204 @@ fn a_map_written_into_plain_php_storage_goes_in_as_a_parameter_of_the_property_s
 }
 
 /// ```php
+/// $this->payload = \Sharp\Internal\arrayOf($stock);
+/// \App\Tenant\Job::$registry = \Sharp\Internal\arrayOf($stock);
+/// $this->rows[0]['shelf'] = \Sharp\Internal\arrayOf($stock);
+/// [$context->kept = \is_array($renumbered#1 = $context->kept) ? \array_values($renumbered#1) : $renumbered#1,
+///     $context->kept[0]['shelf'] = \Sharp\Internal\arrayOf($stock)][1];
+/// $this->payload += \Sharp\Internal\arrayOf($stock);
+/// $attributes->meta = \Sharp\Internal\arrayOf($stock);
+/// ```
+///
+/// A property a plain PHP parent declares takes a `Map` as a property its class declares does, and so does an
+/// element of an element of a list it declares, which is PHP's own write, after the list is renumbered where the
+/// checker reads plain PHP's `array<int, …>` as a `List`. A compound assignment takes it the same way, and so does a
+/// name the class declares no property for, which its `__set` takes as its `mixed` value parameter does.
+#[test]
+fn a_map_written_into_a_plain_php_parent_s_or_set_s_storage_goes_in_as_its_type_takes_it() {
+    let library = (
+        "src/Lib/BaseJob.php",
+        "<?php namespace Lib; abstract class BaseJob { public array $payload = []; public static array $registry = []; /** @var list<array<string, mixed>> */ public array $rows = []; }
+        final class Context { /** @var array<int, array<string, mixed>> */ public array $kept = []; }
+        final class Attributes { public function __set(string $name, mixed $value): void {} }",
+    );
+    let code = "namespace App.Tenant;\n\nimport Lib.Attributes;\nimport Lib.BaseJob;\nimport Lib.Context;\n\nclass Job : BaseJob\n{\n    public void run(Context context, Attributes attributes)\n    {\n        Map<string, int> stock = this.stock();\n        this.payload = stock;\n        Job.registry = stock;\n        this.rows[0][\"shelf\"] = stock;\n        context.kept[0][\"shelf\"] = stock;\n        this.payload += stock;\n        attributes.meta = stock;\n    }\n\n    private Map<string, int> stock() => [:];\n}\n";
+
+    assert_eq!(
+        statements_at(code, &[library], 1..7),
+        [
+            indoc! {r#"
+                ASSIGN
+                  PROP
+                    VAR
+                      ZVAL "this"
+                    ZVAL "payload"
+                  CALL
+                    ZVAL "Sharp\\Internal\\arrayOf"
+                    ARG_LIST
+                      VAR
+                        ZVAL "stock"
+            "#},
+            indoc! {r#"
+                ASSIGN
+                  STATIC_PROP
+                    ZVAL "App\\Tenant\\Job"
+                    ZVAL "registry"
+                  CALL
+                    ZVAL "Sharp\\Internal\\arrayOf"
+                    ARG_LIST
+                      VAR
+                        ZVAL "stock"
+            "#},
+            indoc! {r#"
+                ASSIGN
+                  DIM
+                    DIM
+                      PROP
+                        VAR
+                          ZVAL "this"
+                        ZVAL "rows"
+                      ZVAL 0
+                    ZVAL "shelf"
+                  CALL
+                    ZVAL "Sharp\\Internal\\arrayOf"
+                    ARG_LIST
+                      VAR
+                        ZVAL "stock"
+            "#},
+            indoc! {r#"
+                DIM
+                  ARRAY [3]
+                    ARRAY_ELEM
+                      ASSIGN
+                        PROP
+                          VAR
+                            ZVAL "context"
+                          ZVAL "kept"
+                        CONDITIONAL
+                          CALL
+                            ZVAL "is_array"
+                            ARG_LIST
+                              ASSIGN
+                                VAR
+                                  ZVAL "renumbered#1"
+                                PROP
+                                  VAR
+                                    ZVAL "context"
+                                  ZVAL "kept"
+                          CALL
+                            ZVAL "array_values"
+                            ARG_LIST
+                              VAR
+                                ZVAL "renumbered#1"
+                          VAR
+                            ZVAL "renumbered#1"
+                      null
+                    ARRAY_ELEM
+                      ASSIGN
+                        DIM
+                          DIM
+                            PROP
+                              VAR
+                                ZVAL "context"
+                              ZVAL "kept"
+                            ZVAL 0
+                          ZVAL "shelf"
+                        CALL
+                          ZVAL "Sharp\\Internal\\arrayOf"
+                          ARG_LIST
+                            VAR
+                              ZVAL "stock"
+                      null
+                  ZVAL 1
+            "#},
+            indoc! {r#"
+                ASSIGN_OP [1]
+                  PROP
+                    VAR
+                      ZVAL "this"
+                    ZVAL "payload"
+                  CALL
+                    ZVAL "Sharp\\Internal\\arrayOf"
+                    ARG_LIST
+                      VAR
+                        ZVAL "stock"
+            "#},
+            indoc! {r#"
+                ASSIGN
+                  PROP
+                    VAR
+                      ZVAL "attributes"
+                    ZVAL "meta"
+                  CALL
+                    ZVAL "Sharp\\Internal\\arrayOf"
+                    ARG_LIST
+                      VAR
+                        ZVAL "stock"
+            "#},
+        ]
+    );
+}
+
+/// ```php
+/// $context->rows->add(\Sharp\Internal\arrayOf($stock));
+/// $context->rows->add(\Sharp\Internal\arrayOf($stock));
+/// $context->rows->insert(index: 0, value: \Sharp\Internal\arrayOf($stock));
+/// ```
+///
+/// A `Map` a collection method stores in a collection plain PHP declares goes in as an element of it takes it, spec
+/// section 12, whether the argument is positional or named.
+#[test]
+fn a_map_a_method_stores_in_a_plain_php_collection_goes_in_as_its_element_takes_it() {
+    let context = (
+        "src/Lib/Context.php",
+        "<?php namespace Lib; class Context { /** @var list<mixed> */ public array $rows = []; }",
+    );
+    let code = "namespace App.Tenant;\n\nimport Lib.Context;\n\nclass Report\n{\n    public void run(Context context)\n    {\n        Map<string, int> stock = this.stock();\n        context.rows.add(stock);\n        context.rows.add(value: stock);\n        context.rows.insert(index: 0, value: stock);\n    }\n\n    private Map<string, int> stock() => [:];\n}\n";
+    let added = indoc! {r#"
+        METHOD_CALL
+          PROP
+            VAR
+              ZVAL "context"
+            ZVAL "rows"
+          ZVAL "add"
+          ARG_LIST
+            CALL
+              ZVAL "Sharp\\Internal\\arrayOf"
+              ARG_LIST
+                VAR
+                  ZVAL "stock"
+    "#};
+
+    assert_eq!(
+        statements_at(code, &[context], 1..4),
+        [
+            added,
+            added,
+            indoc! {r#"
+                METHOD_CALL
+                  PROP
+                    VAR
+                      ZVAL "context"
+                    ZVAL "rows"
+                  ZVAL "insert"
+                  ARG_LIST
+                    NAMED_ARG
+                      ZVAL "index"
+                      ZVAL 0
+                    NAMED_ARG
+                      ZVAL "value"
+                      CALL
+                        ZVAL "Sharp\\Internal\\arrayOf"
+                        ARG_LIST
+                          VAR
+                            ZVAL "stock"
+            "#},
+        ]
+    );
+}
+
+/// ```php
 /// [$sorted = \Sharp\Internal\arrayOf($sorted), \Lib\Calc::sort($sorted), $sorted = \is_array($sorted) ? \Sharp\Map::from($sorted) : $sorted][1];
 /// [$filled = \Sharp\Internal\arrayOf($filled), \Lib\Calc::fill($filled), $filled = \is_array($filled) ? \Sharp\Map::from($filled) : $filled][1];
 /// \Lib\Calc::bump($count);
