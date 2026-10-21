@@ -30,14 +30,11 @@ use mago_syntax::cst::Call;
 use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::ConstantAccess;
 use mago_syntax::cst::Expression;
-use mago_syntax::cst::ForOf;
-use mago_syntax::cst::ForOfTarget;
 use mago_syntax::cst::FunctionLikeParameter;
 use mago_syntax::cst::Hint;
 use mago_syntax::cst::IfBody;
 use mago_syntax::cst::Instantiation;
 use mago_syntax::cst::Is;
-use mago_syntax::cst::ListPattern;
 use mago_syntax::cst::ListPatternElement;
 use mago_syntax::cst::Literal;
 use mago_syntax::cst::LocalTarget;
@@ -51,8 +48,6 @@ use mago_syntax::cst::PatternMatchArmBody;
 use mago_syntax::cst::PropertyAccess;
 use mago_syntax::cst::Sequence;
 use mago_syntax::cst::Statement;
-use mago_syntax::cst::TypePattern;
-use mago_syntax::cst::UnaryPostfixOperator;
 use mago_syntax::cst::UnaryPrefix;
 use mago_syntax::cst::UnaryPrefixOperator;
 use mago_word::ascii_lowercase_word;
@@ -65,10 +60,13 @@ use crate::translate::Step;
 use crate::translate::Unmodeled;
 use crate::translate::Use;
 use crate::translate::names;
+use crate::translate::pattern::Choice;
+use crate::translate::pattern::Test;
+use crate::translate::pattern::choice;
 
 /// What a value of a PHP# type is in Lean, as far as an operator cares.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Kind {
+pub(super) enum Kind {
     Int,
     Bool,
     String,
@@ -80,32 +78,7 @@ enum Kind {
 }
 
 /// One branch of a choice: its statements, the last of which gives the branch's value.
-type Branch = Vec<String>;
-
-/// Which branch runs, as Lean writes it: `if`s, `match`es that bind a pattern's locals, and `let`s.
-#[derive(Clone)]
-enum Choice {
-    Branch(Branch),
-    If(String, Box<Choice>, Box<Choice>),
-    /// The term matched, and each pattern with its branch.
-    Match(String, Vec<(String, Choice)>),
-    Let(String, String, Box<Choice>),
-}
-
-/// What a `match` arm or an `is` tests, as Lean tests it: the Lean patterns its subject and parts of the subject match,
-/// outermost first, the locals it binds from them, and the conditions it adds.
-#[derive(Default)]
-struct Test {
-    matches: Vec<Destructure>,
-    lets: Vec<(String, String)>,
-    conditions: Vec<String>,
-}
-
-/// One Lean `match` of a test: the term, and the pattern.
-struct Destructure {
-    term: String,
-    pattern: String,
-}
+pub(super) type Branch = Vec<String>;
 
 /// What the conditions on the path to the code being translated show about an int parameter: a call may pass it
 /// one step towards `step`'s bound.
@@ -115,18 +88,9 @@ struct Fact {
     step: Step,
 }
 
-/// What a counting or summing loop adds to an int local: one, or a value, under the conditions on the element, each
-/// with whether it holds.
-struct Addition<'expression, 'arena> {
-    /// The local's name, as the loop writes it.
-    local: &'expression Expression<'arena>,
-    amount: Option<&'expression Expression<'arena>>,
-    conditions: Vec<(&'expression Expression<'arena>, bool)>,
-}
-
 /// The translation of one body: its `do` statements, the declarations it uses, and each construct it cannot model.
 pub(crate) struct Body<'body, 'program> {
-    checked: &'body CheckedProgram<'program>,
+    pub(super) checked: &'body CheckedProgram<'program>,
     reach: &'body Reach,
     /// The fully qualified PHP name of the class the body belongs to.
     class: &'body [u8],
@@ -134,20 +98,20 @@ pub(crate) struct Body<'body, 'program> {
     place: String,
     pub(crate) uses: Vec<Use>,
     pub(crate) unmodeled: Vec<Unmodeled>,
-    lines: Vec<String>,
+    pub(super) lines: Vec<String>,
     temporaries: u32,
     /// Each local whose type takes `null`, by where its declaration's name starts.
-    nullable_locals: HashSet<u32>,
+    pub(super) nullable_locals: HashSet<u32>,
     /// The parameters of a method whose calls of its own class may recurse, in order: where each one's name starts,
     /// and whether it is an `int`.
     parameters: Vec<(u32, bool)>,
     /// What the conditions on the path to the code being translated show about the parameters.
     facts: Vec<Fact>,
     /// Each local a list pattern binds to the rest of a list parameter, by where its name starts, and the parameter.
-    rests: HashMap<u32, usize>,
+    pub(super) rests: HashMap<u32, usize>,
     /// The locals the loop being translated adds to, by where their declarations' names start, which its conditions
     /// and the values it adds must not read.
-    accumulators: Vec<u32>,
+    pub(super) accumulators: Vec<u32>,
 }
 
 impl<'body, 'program> Body<'body, 'program> {
@@ -749,167 +713,8 @@ impl<'body, 'program> Body<'body, 'program> {
         self.test(&subject, r#type, parameter, is.pattern)
     }
 
-    /// What `subject`, a term of `r#type`, matching `pattern` tests, or `None` after recording why Lean cannot test
-    /// it. `parameter` is the parameter `subject` is, if it is one.
-    fn test(&mut self, subject: &str, r#type: &TUnion, parameter: Option<usize>, pattern: &Pattern) -> Option<Test> {
-        match pattern {
-            Pattern::Type(pattern) => self.type_test(subject, r#type, pattern),
-            Pattern::List(list) => self.list_test(subject, r#type, parameter, list),
-            Pattern::Parenthesized(parenthesized) => self.test(subject, r#type, parameter, parenthesized.pattern),
-            _ => {
-                let condition = self.pattern(subject, self.kind(r#type), pattern)?;
-
-                Some(Test { conditions: vec![condition], ..Test::default() })
-            }
-        }
-    }
-
-    /// A type pattern holds for a value of the type it names, and a case's for a value of that case. Lean knows nothing
-    /// else about a value's type while the code runs.
-    fn type_test(&mut self, subject: &str, r#type: &TUnion, pattern: &TypePattern) -> Option<Test> {
-        let atomics: Vec<&TAtomic> = r#type.types.iter().filter(|atomic| !atomic.is_null()).collect();
-        let [atomic] = atomics.as_slice() else {
-            self.unmodeled(pattern.span(), "a type test".to_owned(), issues::TYPE_TEST);
-            return None;
-        };
-        let case = if pattern.fields.is_some() || pattern.properties.is_some() {
-            None
-        } else if self.names_type(&pattern.hint, atomic) {
-            Some(None)
-        } else {
-            self.case(&pattern.hint, atomic).map(Some)
-        };
-        let Some(case) = case else {
-            self.unmodeled(pattern.span(), "a type test".to_owned(), issues::TYPE_TEST);
-            return None;
-        };
-
-        let name = pattern.variable.map(|variable| names::identifier(variable.value));
-        let whole = match (&case, &name) {
-            (None, Some(name)) => name.clone(),
-            (None, None) => "_".to_owned(),
-            (Some(case), Some(name)) => format!("{name}@({case} ..)"),
-            (Some(case), None) => format!("({case} ..)"),
-        };
-        let mut test = Test::default();
-        if r#type.is_nullable() {
-            test.matches.push(Destructure { term: subject.to_owned(), pattern: format!("some {whole}") });
-        } else if case.is_some() {
-            test.matches.push(Destructure { term: subject.to_owned(), pattern: whole });
-        } else if let Some(name) = name {
-            test.lets.push((name, subject.to_owned()));
-        }
-
-        Some(test)
-    }
-
-    /// A list pattern is Lean's `::` pattern of the elements before its rest. The elements after the rest are the last
-    /// ones of the list those leave, once it holds them all, and the rest is what comes before them. A rest of a list
-    /// parameter, beside at least one element, is smaller than the list.
-    fn list_test(
-        &mut self,
-        subject: &str,
-        r#type: &TUnion,
-        parameter: Option<usize>,
-        list: &ListPattern,
-    ) -> Option<Test> {
-        let atomics: Vec<&TAtomic> = r#type.types.iter().filter(|atomic| !atomic.is_null()).collect();
-        let [TAtomic::Array(TArray::List(list_type))] = atomics.as_slice() else {
-            self.unmodeled(list.span(), "a list pattern on a value that is no List".to_owned(), issues::TYPE_TEST);
-            return None;
-        };
-        let element = &list_type.element_type;
-        let rest = list.elements.iter().position(|element| matches!(element, ListPatternElement::Rest(_)));
-        let (before, after) = match rest {
-            Some(rest) => (&list.elements.as_slice()[..rest], &list.elements.as_slice()[rest + 1..]),
-            None => (list.elements.as_slice(), &[][..]),
-        };
-        let rest = rest.and_then(|rest| match &list.elements.as_slice()[rest] {
-            ListPatternElement::Rest(rest) => Some(rest),
-            ListPatternElement::Pattern(_) => None,
-        });
-
-        let mut parts = Test::default();
-        let mut leading = Vec::new();
-        for pattern in before {
-            leading.push(self.element(element, pattern, &mut parts)?);
-        }
-        let name = rest.and_then(|rest| rest.variable.map(|variable| names::identifier(variable.value)));
-        if let (Some(parameter), Some(variable)) = (parameter, rest.and_then(|rest| rest.variable))
-            && (!before.is_empty() || !after.is_empty())
-            && !r#type.is_nullable()
-        {
-            self.rests.insert(variable.span.start.offset, parameter);
-        }
-
-        let some = |pattern: String| if r#type.is_nullable() { format!("some ({pattern})") } else { pattern };
-        let mut test = Test::default();
-        if after.is_empty() {
-            let pattern = match rest {
-                None => format!("[{}]", leading.join(", ")),
-                Some(_) => {
-                    leading.push(name.unwrap_or_else(|| "_".to_owned()));
-                    leading.join(" :: ")
-                }
-            };
-            test.matches.push(Destructure { term: subject.to_owned(), pattern: some(pattern) });
-        } else {
-            // The elements after the rest are the last ones of the list after the leading ones, read by their place
-            // once the list holds them all.
-            let mut tail = subject.to_owned();
-            if !leading.is_empty() || r#type.is_nullable() {
-                tail = self.fresh();
-                leading.push(tail.clone());
-                test.matches.push(Destructure { term: subject.to_owned(), pattern: some(leading.join(" :: ")) });
-            }
-            let count = after.len();
-            for (place, pattern) in after.iter().enumerate() {
-                let ListPatternElement::Pattern(pattern) = pattern else {
-                    unreachable!("a list pattern has at most one rest");
-                };
-                let term = format!("({tail}[List.length {tail} - {}]!)", count - place);
-                let tested = self.test(&term, element, None, pattern)?;
-                parts.matches.extend(tested.matches);
-                parts.lets.extend(tested.lets);
-                parts.conditions.extend(tested.conditions);
-            }
-            test.conditions.push(format!("(decide ({count} ≤ List.length {tail}))"));
-            if let Some(name) = name {
-                test.lets.push((name, format!("(List.take (List.length {tail} - {count}) {tail})")));
-            }
-        }
-        test.matches.extend(parts.matches);
-        test.lets.extend(parts.lets);
-        test.conditions.extend(parts.conditions);
-
-        Some(test)
-    }
-
-    /// The Lean pattern of one element of a list pattern, whose elements are of `r#type`: the element's name, or `_`,
-    /// when the pattern holds for every element, else a fresh name whose test `parts` takes.
-    fn element(&mut self, r#type: &TUnion, pattern: &ListPatternElement, parts: &mut Test) -> Option<String> {
-        let ListPatternElement::Pattern(pattern) = pattern else {
-            unreachable!("a list pattern has at most one rest");
-        };
-        if let Pattern::Type(TypePattern { hint, fields: None, properties: None, variable }) = pattern
-            && !r#type.is_nullable()
-            && let [atomic] = r#type.types.as_ref()
-            && self.names_type(hint, atomic)
-        {
-            return Some(variable.map_or_else(|| "_".to_owned(), |variable| names::identifier(variable.value)));
-        }
-
-        let name = self.fresh();
-        let test = self.test(&name, r#type, None, pattern)?;
-        parts.matches.extend(test.matches);
-        parts.lets.extend(test.lets);
-        parts.conditions.extend(test.conditions);
-
-        Some(name)
-    }
-
     /// Whether `hint` names the type of every value of `atomic`.
-    fn names_type(&self, hint: &Hint, atomic: &TAtomic) -> bool {
+    pub(super) fn names_type(&self, hint: &Hint, atomic: &TAtomic) -> bool {
         let class = match hint {
             Hint::Integer(_) => return matches!(atomic, TAtomic::Scalar(TScalar::Integer(_))),
             Hint::String(_) => return matches!(atomic, TAtomic::Scalar(TScalar::String(_))),
@@ -940,7 +745,7 @@ impl<'body, 'program> Body<'body, 'program> {
     }
 
     /// The Lean constructor of the case of an enum `hint` names, when `atomic` is that enum.
-    fn case(&self, hint: &Hint, atomic: &TAtomic) -> Option<String> {
+    pub(super) fn case(&self, hint: &Hint, atomic: &TAtomic) -> Option<String> {
         let Hint::Identifier(identifier) = hint else {
             return None;
         };
@@ -1062,7 +867,7 @@ impl<'body, 'program> Body<'body, 'program> {
     }
 
     /// The condition that `subject`, a value of `kind`, matches `pattern`, or `None` after recording why it has none.
-    fn pattern(&mut self, subject: &str, kind: Kind, pattern: &Pattern) -> Option<String> {
+    pub(super) fn pattern(&mut self, subject: &str, kind: Kind, pattern: &Pattern) -> Option<String> {
         match pattern {
             // A value an object is compared with is `null`: a pattern takes constants, and an object's identity is
             // nothing a law reasons about.
@@ -1240,7 +1045,7 @@ impl<'body, 'program> Body<'body, 'program> {
     }
 
     /// Whether `expression`'s value is a `List`, null aside.
-    fn is_list(&self, expression: &Expression) -> bool {
+    pub(super) fn is_list(&self, expression: &Expression) -> bool {
         let r#type = self.checked.types().expression_type(expression);
         let mut types = r#type.types.iter().filter(|atomic| !atomic.is_null()).peekable();
 
@@ -1779,7 +1584,7 @@ impl<'body, 'program> Body<'body, 'program> {
         "default".to_owned()
     }
 
-    fn kind(&self, r#type: &TUnion) -> Kind {
+    pub(super) fn kind(&self, r#type: &TUnion) -> Kind {
         let mut kinds = r#type.types.iter().filter(|atomic| !atomic.is_null()).map(|atomic| match atomic {
             TAtomic::Scalar(TScalar::Integer(_)) => Kind::Int,
             TAtomic::Scalar(TScalar::Bool(_)) => Kind::Bool,
@@ -1806,7 +1611,7 @@ impl<'body, 'program> Body<'body, 'program> {
     }
 
     /// Binds `effect` to a new temporary, and returns the temporary.
-    fn bind(&mut self, effect: String) -> String {
+    pub(super) fn bind(&mut self, effect: String) -> String {
         self.temporaries += 1;
         let temporary = format!("«${}»", self.temporaries);
         self.lines.push(format!("let {temporary} ← {effect}"));
@@ -1815,7 +1620,7 @@ impl<'body, 'program> Body<'body, 'program> {
     }
 
     /// The statements `translate` adds, apart from the body's own, and the term it returns.
-    fn nested(&mut self, translate: impl FnOnce(&mut Self) -> String) -> (Vec<String>, String) {
+    pub(super) fn nested(&mut self, translate: impl FnOnce(&mut Self) -> String) -> (Vec<String>, String) {
         let outer = std::mem::take(&mut self.lines);
         let term = translate(self);
         let lines = std::mem::replace(&mut self.lines, outer);
@@ -1863,184 +1668,11 @@ impl<'body, 'program> Body<'body, 'program> {
     }
 
     /// A name no PHP# name is: `«$n»`.
-    fn fresh(&mut self) -> String {
+    pub(super) fn fresh(&mut self) -> String {
         self.temporaries += 1;
 
         format!("«${}»", self.temporaries)
     }
-
-    /// A `for … of` loop over a `List` whose body only adds to int locals, each addition optionally under an `if` on
-    /// the element, as each local's new value: the `List.countP` of the elements it counts, or the `List.sum` of the
-    /// values it adds. That sum throws only when it leaves the `int` range, and the loop PHP runs throws there or on an
-    /// earlier partial sum, where a law holds, so a law proven of the sum holds of the loop. Any other loop is refused.
-    fn counting_loop(&mut self, for_of: &ForOf) {
-        let refuse = |body: &mut Self| {
-            body.unmodeled(for_of.span(), "a loop that does more than count or sum".to_owned(), issues::LOOP);
-        };
-        let ForOfTarget::Value(element) = &for_of.target else {
-            return refuse(self);
-        };
-        let mut additions = Vec::new();
-        if !self.is_list(for_of.expression) || !additions_of(for_of.body, &mut Vec::new(), &mut additions) {
-            return refuse(self);
-        }
-        let mut accumulators: Vec<u32> = Vec::new();
-        let mut locals: Vec<String> = Vec::new();
-        for addition in &additions {
-            let Expression::ConstantAccess(name) = addition.local else {
-                return refuse(self);
-            };
-            let Some(Binding::Local(local)) = self.checked.names().binding(&name.name) else {
-                return refuse(self);
-            };
-            let declaration = local.declaration.start.offset;
-            let r#type = self.checked.types().expression_type(addition.local);
-            if self.kind(r#type) != Kind::Int || r#type.is_nullable() || self.nullable_locals.contains(&declaration) {
-                return refuse(self);
-            }
-            if !accumulators.contains(&declaration) {
-                accumulators.push(declaration);
-            }
-            locals.push(names::identifier(name.name.value()));
-        }
-
-        let list = self.value(for_of.expression);
-        let element = names::identifier(element.name.value);
-        let outer = std::mem::replace(&mut self.accumulators, accumulators);
-        let mut sums: Vec<(String, Vec<String>)> = Vec::new();
-        for (addition, local) in additions.iter().zip(locals) {
-            let Some(added) = self.added(&element, &list, addition) else {
-                self.accumulators = outer;
-                return refuse(self);
-            };
-            match sums.iter_mut().find(|(name, _)| *name == local) {
-                Some((_, terms)) => terms.push(added),
-                None => sums.push((local, vec![added])),
-            }
-        }
-        self.accumulators = outer;
-
-        for (local, terms) in sums {
-            let sum = self.bind(format!("int.ofInt ({local}.toInt + {})", terms.join(" + ")));
-            self.lines.push(format!("{local} := {sum}"));
-        }
-    }
-
-    /// The `Int` that `addition` adds over the elements of `list`, each named `element`, or `None` when a condition or
-    /// the value it adds is no pure term.
-    fn added(&mut self, element: &str, list: &str, addition: &Addition) -> Option<String> {
-        let mut conditions = Vec::new();
-        for (condition, holds) in &addition.conditions {
-            let (lines, condition) = self.nested(|body| body.value(condition));
-            if !lines.is_empty() {
-                return None;
-            }
-            conditions.push(if *holds { condition } else { format!("(!{condition})") });
-        }
-        let filtered = match conditions.as_slice() {
-            [] => list.to_owned(),
-            _ => format!("(List.filter (fun {element} => {}) {list})", conditions.join(" && ")),
-        };
-
-        let Some(amount) = addition.amount else {
-            return Some(match conditions.as_slice() {
-                [] => format!("(List.length {list} : Int)"),
-                _ => format!("(List.countP (fun {element} => {}) {list} : Int)", conditions.join(" && ")),
-            });
-        };
-        if self.kind(self.checked.types().expression_type(amount)) != Kind::Int {
-            return None;
-        }
-        let (lines, amount) = self.nested(|body| body.value(amount));
-        if !lines.is_empty() {
-            return None;
-        }
-
-        Some(format!("(List.map (fun {element} => {amount}.toInt) {filtered}).sum"))
-    }
-}
-
-/// The additions to locals of a counting or summing loop's `body`, under `conditions`, or `false` when the body does
-/// anything else: `x += e`, `x++` and `++x`, in blocks and under an `if` with or without an `else`.
-fn additions_of<'expression, 'arena>(
-    body: &'expression Statement<'arena>,
-    conditions: &mut Vec<(&'expression Expression<'arena>, bool)>,
-    additions: &mut Vec<Addition<'expression, 'arena>>,
-) -> bool {
-    match body {
-        Statement::Block(block) => {
-            block.statements.iter().all(|statement| additions_of(statement, conditions, additions))
-        }
-        Statement::If(r#if) => {
-            let IfBody::Statement(body) = &r#if.body else {
-                return false;
-            };
-            conditions.push((r#if.condition, true));
-            let then = additions_of(body.statement, conditions, additions);
-            conditions.pop();
-            let Some(clause) = &body.else_clause else {
-                return then;
-            };
-            conditions.push((r#if.condition, false));
-            let otherwise = additions_of(clause.statement, conditions, additions);
-            conditions.pop();
-
-            then && otherwise
-        }
-        Statement::Expression(statement) => {
-            let (local, amount) = match statement.expression {
-                Expression::Assignment(assignment)
-                    if matches!(assignment.operator, AssignmentOperator::Addition(_)) =>
-                {
-                    (assignment.lhs, (literal(assignment.rhs) != Some(1)).then_some(assignment.rhs))
-                }
-                Expression::UnaryPostfix(postfix)
-                    if matches!(postfix.operator, UnaryPostfixOperator::PostIncrement(_)) =>
-                {
-                    (postfix.operand, None)
-                }
-                Expression::UnaryPrefix(UnaryPrefix { operator: UnaryPrefixOperator::PreIncrement(_), operand }) => {
-                    (*operand, None)
-                }
-                _ => return false,
-            };
-            additions.push(Addition { local, amount, conditions: conditions.clone() });
-
-            true
-        }
-        _ => false,
-    }
-}
-
-/// Which branch runs: the first arm whose test holds, else `otherwise`. An arm whose test is one Lean pattern of the
-/// same term as the arm after it joins that arm's `match`. An arm whose test fails after a pattern of it matched runs
-/// the arms after it there too.
-fn choice(arms: Vec<(Test, Branch)>, otherwise: Branch) -> Choice {
-    let mut next = Choice::Branch(otherwise);
-    for (test, branch) in arms.into_iter().rev() {
-        let simple = test.matches.len() == 1 && test.lets.is_empty() && test.conditions.is_empty();
-        let mut inner = Choice::Branch(branch);
-        if !test.conditions.is_empty() {
-            inner = Choice::If(test.conditions.join(" && "), Box::new(inner), Box::new(next.clone()));
-        }
-        for (name, value) in test.lets.into_iter().rev() {
-            inner = Choice::Let(name, value, Box::new(inner));
-        }
-        for destructure in test.matches.into_iter().rev() {
-            if simple
-                && let Choice::Match(term, alternatives) = &mut next
-                && *term == destructure.term
-            {
-                alternatives.insert(0, (destructure.pattern, inner));
-                inner = next.clone();
-                continue;
-            }
-            inner = Choice::Match(destructure.term, vec![(destructure.pattern, inner), ("_".to_owned(), next.clone())]);
-        }
-        next = inner;
-    }
-
-    next
 }
 
 /// `choice` as a pure term, when each of its branches only returns one.
@@ -2103,7 +1735,7 @@ fn unparenthesized<'expression, 'arena>(
 }
 
 /// The value of an int literal, negated or not.
-fn literal(expression: &Expression) -> Option<i64> {
+pub(super) fn literal(expression: &Expression) -> Option<i64> {
     match unparenthesized(expression) {
         Expression::Literal(Literal::Integer(integer)) => integer.value.and_then(|value| i64::try_from(value).ok()),
         Expression::UnaryPrefix(UnaryPrefix { operator: UnaryPrefixOperator::Negation(_), operand }) => {

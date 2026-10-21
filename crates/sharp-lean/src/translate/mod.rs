@@ -6,7 +6,9 @@
 //! law that reaches it is refused with the construct named.
 
 mod body;
+mod loops;
 pub(crate) mod names;
+mod pattern;
 
 use std::path::PathBuf;
 
