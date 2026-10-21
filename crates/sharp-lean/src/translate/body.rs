@@ -687,7 +687,7 @@ impl<'body, 'program> Body<'body, 'program> {
         match body {
             PatternMatchArmBody::Expression(expression) => self.branch(expression),
             PatternMatchArmBody::Block(block) => {
-                vec![self.unmodeled(block.span(), "a match arm with a block".to_owned(), issues::NOT_TRANSLATED)]
+                unreachable!("the checker accepts a block arm only in a match statement, not {:?}", block.span())
             }
         }
     }
