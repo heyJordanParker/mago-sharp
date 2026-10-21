@@ -4284,6 +4284,15 @@ fn a_law_reaching_a_mutual_recursion_that_does_not_get_smaller_is_refused() {
     );
 }
 
+/// A class whose property holds the class is a Lean structure that holds itself, which Lean refuses.
+#[test]
+fn a_law_reaching_a_type_that_holds_itself_is_refused() {
+    assert_unmodeled(
+        "namespace App.Shared;\n\npublic class Shape\n{\n    public Shape(public int value { get; }, public Shape? next { get; }) { }\n\n    law keepsValue(Shape shape) => shape.value == shape.value;\n}\n",
+        "Law keepsValue reaches a type that holds itself in Shape. A law cannot reason about it.",
+    );
+}
+
 /// A loop that reads the local it adds to, here in an `if`, does more than count or sum.
 #[test]
 fn a_law_reaching_a_loop_that_reads_a_local_it_adds_to_is_refused() {

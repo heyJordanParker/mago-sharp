@@ -124,7 +124,8 @@ impl<'program> Program<'program> {
                             "a type that holds itself"
                         }
                         .to_owned(),
-                        place: place_of(key),
+                        // A type is placed by its own name, as a member is by its class's and its own.
+                        place: if methods { place_of(key) } else { key.rsplit('.').next().unwrap_or(key).to_owned() },
                         reason: if methods { issues::RECURSION } else { issues::NOT_TRANSLATED },
                     },
                 );
