@@ -274,9 +274,4 @@ impl BlockContextFlags {
     pub fn set_inside_constant_expression(&mut self, value: bool) {
         self.set(Self::INSIDE_CONSTANT_EXPRESSION, value);
     }
-
-    #[inline(always)]
-    pub fn set_inside_law_body(&mut self, value: bool) {
-        self.set(Self::INSIDE_LAW_BODY, value);
-    }
 }

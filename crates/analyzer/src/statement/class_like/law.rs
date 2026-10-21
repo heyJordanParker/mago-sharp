@@ -38,6 +38,7 @@ use crate::artifacts::AnalysisArtifacts;
 use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
+use crate::context::block_flags::BlockContextFlags;
 use crate::context::scope::control_action::ControlActionSet;
 use crate::effects;
 use crate::effects::Body;
@@ -118,7 +119,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Law<'arena> {
         let mut body_context = law_block_context.clone();
         body_context.flags.set_has_returned(false);
         body_context.control_actions = ControlActionSet::new();
-        body_context.flags.set_inside_law_body(true);
+        body_context.flags.insert(BlockContextFlags::INSIDE_LAW_BODY);
         if let Some(condition) = &self.condition {
             analyze_condition(context, &mut body_context, artifacts, condition.expression)?;
         }

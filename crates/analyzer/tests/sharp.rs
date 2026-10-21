@@ -22382,6 +22382,7 @@ fn a_law_that_calls_itself_on_a_value_no_smaller_is_refused() {
         "        if (x == 0) { return; }\n        Count.f(x - 1, items);",
         "        if (items.count() == 0) { return; }\n        Count.f(x - 1, items);",
         "        match (items) {\n            [int, ...List<int> rest] => { Count.f(x, items); },\n            default => { return; },\n        }",
+        "        match (items) {\n            [...List<int> rest] => { Count.f(x, rest); },\n            default => { return; },\n        }",
     ] {
         assert_eq!(codes(&issues(law_body(body), &[])), ["law-recursion"], "{body}");
     }
