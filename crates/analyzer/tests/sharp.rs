@@ -3020,7 +3020,7 @@ fn a_plain_php_constant_is_read_through_its_namespace() {
     let pdf = "<?php\n\nnamespace Vendor\\Pdf;\n\nconst DEFAULT_DPI = 300;\n";
     let version = "<?php\n\nconst VERSION = 2;\n";
     let document = "<?php\n\nnamespace Vendor\\Pdf;\n\nfinal class Document\n{\n}\n";
-    let sharp = "namespace Demo;\n\nimport Vendor.Pdf;\n\nclass Layout\n{\n    public static int dpi() => Pdf.DEFAULT_DPI;\n    public static int release() => Pdf.VERSION;\n    public static Any? bareRelease() => VERSION;\n    public static Any? bare() => PHP_EOL;\n    public static Any? misspelled() => VERSIONN;\n}\n";
+    let sharp = "namespace Demo;\n\nimport Vendor.Pdf;\n\nclass Layout\n{\n    public static int dpi() => Pdf.DEFAULT_DPI;\n    public static int release() => Pdf.VERSION;\n    public static Any? bareRelease() => VERSION;\n    public static Any? bare() => PHP_EOL;\n    public static Any? misspelled() => RELEASE;\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nclass Layout\n{\n    public static function dpi(): int { return \\Vendor\\Pdf\\DEFAULT_DPI; }\n    public static function release(): int { return \\VERSION; }\n    public static function bareRelease(): int { return VERSION; }\n    public static function bare(string $text): string { return $text . PHP_EOL; }\n}\n";
     let others = [
         ("src/Vendor/Pdf/constants.php", pdf),
@@ -3036,7 +3036,7 @@ fn a_plain_php_constant_is_read_through_its_namespace() {
 
     assert_eq!(
         refusals(("src/Demo/Layout.sharp", sharp), &others),
-        [undefined("9:41", "VERSION"), undefined("10:34", "PHP_EOL"), undefined("11:40", "VERSIONN")]
+        [undefined("9:41", "VERSION"), undefined("10:34", "PHP_EOL"), undefined("11:40", "RELEASE")]
     );
     assert_eq!(issues(("src/Demo/Layout.php", php), &others), Vec::<String>::new());
 }

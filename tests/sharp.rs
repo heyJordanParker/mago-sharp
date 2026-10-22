@@ -562,9 +562,7 @@ fn compile_refuses_extern_under_library_sharp_without_the_composer_json_of_the_l
 #[test]
 fn analyze_reports_new_on_a_static_class() {
     assert_eq!(
-        page_errors(
-            "namespace App;\n\npublic class Page\n{\n    public Math make() => new Math();\n}\n"
-        ),
+        page_errors("namespace App;\n\npublic class Page\n{\n    public Math make() => new Math();\n}\n"),
         [
             "src/App/Page.sharp:5:31:error - abstract-instantiation: `Math` is a static class, so it has no instances: call its members on the class."
         ]
