@@ -239,15 +239,14 @@ fn union_from_hint(
             let left_types = left.types;
             let right_types = right.types;
             let mut intersection_types = vec![];
+            // A type that can't be intersected, as `int` in `int & string`, is the semantics checker's error.
             for left_type in left_types.into_owned() {
                 if !left_type.can_be_intersected() {
-                    // should be an error.
                     continue;
                 }
 
                 for right_type in right_types.as_ref() {
                     if !right_type.can_be_intersected() {
-                        // should be an error.
                         continue;
                     }
 
@@ -270,7 +269,9 @@ fn union_from_hint(
                 }
             }
 
-            TUnion::from_vec(intersection_types)
+            // With nothing left to join, the value takes any type, as a generic type with the wrong count of
+            // arguments does, so its one error is the checker's.
+            if intersection_types.is_empty() { get_mixed() } else { TUnion::from_vec(intersection_types) }
         }
         Hint::Iterable(_) => get_mixed_iterable(),
         // A generic class type is the docblock's `C<A, B>`, and `Class<T>` is its `class-string<T>`, spec section 25.

@@ -13585,6 +13585,15 @@ fn an_intersection_joins_at_most_one_class() {
     );
 }
 
+/// Spec section 24: `int & string` joins nothing a value can be, which the semantics checker refuses, so the parameter
+/// takes any value and a call to it adds no second error.
+#[test]
+fn an_intersection_of_types_that_never_join_adds_no_error_to_its_callers() {
+    let sharp = "namespace Demo;\n\npublic class Desk\n{\n    public int count(int & string amount) => 0;\n\n    public int run() => this.count(5);\n}\n";
+
+    assert_eq!(issues(("src/Demo/Desk.sharp", sharp), &[]), Vec::<String>::new());
+}
+
 /// `value is TItem`, `value as TItem` and a `match` arm of the type `TItem`, in an expression or in a statement, add no
 /// issue, and the other arms' types are checked as types anywhere: `Box<int>` is outside its bound.
 #[test]
