@@ -1605,14 +1605,19 @@ fn joined(mut lists: Vec<Values>) -> Vec<Values> {
                         && items[first.len()..].iter().all(|item| *item == every))
             })?;
 
-            Some((longer_at, shorter_at, *count - 1))
+            let widened = Values::Lists {
+                element: element.clone(),
+                length: Length::AtLeast(*count - 1),
+                first: first.clone(),
+                last: Vec::new(),
+            };
+
+            Some((longer_at, shorter_at, widened))
         });
-        let Some((longer_at, shorter_at, count)) = found else {
+        let Some((longer_at, shorter_at, widened)) = found else {
             return lists;
         };
-        if let Values::Lists { length, .. } = &mut lists[longer_at] {
-            *length = Length::AtLeast(count);
-        }
+        lists[longer_at] = widened;
         lists.remove(shorter_at);
     }
 }
