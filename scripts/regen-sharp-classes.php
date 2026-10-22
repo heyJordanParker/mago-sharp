@@ -30,15 +30,19 @@ function read(string $file): string
     return $source;
 }
 
-function namespaceOf(string $file, string $source): string
+function namespace_of(string $file, string $source): string
 {
+    $match = [];
     if (preg_match('/^namespace (Sharp(?:\.\w+)*);$/m', $source, $match) !== 1) {
         throw new RuntimeException("{$file} is in no namespace of the standard library.");
     }
 
-    return str_replace('.', '\\', $match[1]);
+    return str_replace('.', '\\', $match[1] ?? '');
 }
 
+/**
+ * @param list<string> $classes
+ */
 function rust(string $visibility, string $name, string $documentation, array $classes): string
 {
     $classes = array_unique($classes);
@@ -60,26 +64,31 @@ if ($files === false || $files === []) {
 $classes = [];
 foreach ($files as $file) {
     $source = read($file);
-    if (namespaceOf($file, $source) !== 'Sharp') {
+    if (namespace_of($file, $source) !== 'Sharp') {
         throw new RuntimeException("{$file} is not in the namespace `Sharp`.");
     }
 
+    $declarations = [];
     preg_match_all('/^public\s+(?:\w+\s+)*?(?:class|interface|enum|struct)\s+(\w+)/m', $source, $declarations);
     array_push($classes, ...array_map(static fn(string $class): string => "Sharp\\{$class}", $declarations[1]));
 }
 
 $prelude = dirname(__DIR__) . '/crates/prelude/assets/extensions/sharp.php';
+$namespace = [];
 preg_match('/^namespace Sharp;$(.*?)(?=^namespace |\z)/ms', read($prelude), $namespace);
 $body = $namespace[1] ?? throw new RuntimeException("Unable to locate `namespace Sharp;` in {$prelude}.");
+$declarations = [];
 preg_match_all('/^(?:\w+\s+)*?(?:class|interface|enum|trait)\s+(\w+)/m', $body, $declarations);
 array_push($classes, ...array_map(static fn(string $class): string => "Sharp\\{$class}", $declarations[1]));
 
 $builtins = read("{$library}/Sharp/Internal/Builtins.sharp");
+$imports = [];
 preg_match_all('/^import ([\w.]+)(?: as (\w+))?;$/m', $builtins, $imports, PREG_SET_ORDER);
-$imported = array_map(
-    static fn(array $import): string => $import[2] ?? substr(strrchr(".{$import[1]}", '.'), 1),
-    $imports,
-);
+$imported = [];
+foreach ($imports as $import) {
+    $imported[] = $import[2] ?? basename(str_replace('.', '/', $import[1] ?? ''));
+}
+$externs = [];
 preg_match_all('/^extern (\w+);$/m', $builtins, $externs);
 $roots = array_values(array_diff($externs[1], $imported));
 
@@ -87,14 +96,16 @@ $effects = [];
 $sources = new RecursiveIteratorIterator(
     new RecursiveDirectoryIterator("{$library}/Sharp", FilesystemIterator::SKIP_DOTS),
 );
-foreach ($sources as $file) {
-    if ($file->getExtension() !== 'sharp') {
+foreach ($sources as $entry) {
+    if (!$entry instanceof SplFileInfo || $entry->getExtension() !== 'sharp') {
         continue;
     }
-    $source = read($file->getPathname());
+    $path = $entry->getPathname();
+    $source = read($path);
+    $declarations = [];
     preg_match_all('/^public foreign class (\w+)/m', $source, $declarations);
     foreach ($declarations[1] as $class) {
-        $effects[] = namespaceOf($file->getPathname(), $source) . "\\{$class}";
+        $effects[] = namespace_of($path, $source) . "\\{$class}";
     }
 }
 
