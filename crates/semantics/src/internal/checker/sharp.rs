@@ -4583,22 +4583,21 @@ fn body_without_braces(statement: &Statement, context: &Context<'_, '_, '_>) -> 
 }
 
 /// Checks the arms of a `match`, and returns whether its children can be checked. Spec section 21 needs a `default`
-/// arm on a value that is not an enum or a sealed interface, and section 20 lets a `match` on one leave it out when its
-/// arms cover every case. Only the analyzer knows the value's type, so a `match` whose arms all name `Class.y` values,
-/// classes or `null` may leave out `default`, and the analyzer reports the cases it misses. A `match` without arms covers no case, so it needs
-/// `default`. A block arm is only in a `match` statement. The engine takes one `default` arm, as PHP's `match` does.
+/// arm on a value that is not an enum, a sealed interface or a `List`, and lets a `match` on one leave it out when its
+/// arms cover every case or length. Only the analyzer knows the value's type, so a `match` whose arms all name cases,
+/// as `Class.y` values, classes, `null` and lists, may leave out `default`, and the analyzer reports the cases it
+/// misses. A `match` without arms covers no case, so it needs `default`. A block arm is only in a `match` statement.
+/// The engine takes one `default` arm, as PHP's `match` does.
 fn check_pattern_match(pattern_match: &PatternMatch, is_expression: bool, context: &mut Context<'_, '_, '_>) -> bool {
     let mut defaults = pattern_match.arms.iter().filter(|arm| arm.is_default());
     match defaults.next() {
-        None if pattern_match.arms.is_empty()
-            || !pattern_match.arms.iter().all(|arm| names_class_values(arm, context)) =>
-        {
+        None if pattern_match.arms.is_empty() || !pattern_match.arms.iter().all(|arm| names_cases(arm, context)) => {
             context.report(
                 Issue::error("A `match` needs a `default` arm.")
                     .with_annotation(
                         Annotation::primary(pattern_match.r#match.span).with_message("This `match` has none."),
                     )
-                    .with_note("Only a `match` on an enum may leave out `default`, when its arms cover every case.")
+                    .with_note("A `match` may leave out `default` only when its arms handle every case of an enum or a sealed interface, or every value of a `List`.")
                     .with_help("Add `default => …` as the last arm."),
             );
 
@@ -4635,10 +4634,10 @@ fn check_pattern_match(pattern_match: &PatternMatch, is_expression: bool, contex
     true
 }
 
-/// Whether an arm's pattern names only `Class.y` values or `null`, joined by `or`, as the arms of a `match` on an enum
-/// do.
-fn names_class_values(arm: &PatternMatchArm, context: &Context<'_, '_, '_>) -> bool {
-    fn is_class_value(pattern: &Pattern, context: &Context<'_, '_, '_>) -> bool {
+/// Whether an arm's pattern names only cases: `Class.y` values, classes or `null`, joined by `or`, as the arms of a
+/// `match` on an enum do, or lists, joined by `or`, `and` and `not`, as the arms of a `match` on a `List` do.
+fn names_cases(arm: &PatternMatchArm, context: &Context<'_, '_, '_>) -> bool {
+    fn is_case(pattern: &Pattern, context: &Context<'_, '_, '_>) -> bool {
         match pattern {
             Pattern::Value(Expression::Access(Access::Property(access))) => {
                 context.names.static_property_class(access).is_some()
@@ -4647,15 +4646,25 @@ fn names_class_values(arm: &PatternMatchArm, context: &Context<'_, '_, '_>) -> b
             // A class, as a case of an enum with data or an implementer of a sealed interface, spec section 20.
             Pattern::Type(TypePattern { hint: Hint::Identifier(_), .. }) => true,
             Pattern::Binary(binary) if !binary.is_and() => {
-                is_class_value(binary.left, context) && is_class_value(binary.right, context)
+                is_case(binary.left, context) && is_case(binary.right, context)
             }
-            Pattern::Parenthesized(parenthesized) => is_class_value(parenthesized.pattern, context),
-            _ => false,
+            Pattern::Parenthesized(parenthesized) => is_case(parenthesized.pattern, context),
+            pattern => is_list(pattern),
+        }
+    }
+
+    fn is_list(pattern: &Pattern) -> bool {
+        match pattern {
+            Pattern::List(_) => true,
+            Pattern::Not(not) => is_list(not.pattern),
+            Pattern::Binary(binary) => is_list(binary.left) && is_list(binary.right),
+            Pattern::Parenthesized(parenthesized) => is_list(parenthesized.pattern),
+            Pattern::Type(_) | Pattern::Value(_) | Pattern::Comparison(_) | Pattern::Properties(_) => false,
         }
     }
 
     match arm {
-        PatternMatchArm::Pattern(arm) => is_class_value(arm.pattern, context),
+        PatternMatchArm::Pattern(arm) => is_case(arm.pattern, context),
         PatternMatchArm::Default(_) => true,
     }
 }
