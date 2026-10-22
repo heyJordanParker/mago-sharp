@@ -6676,17 +6676,17 @@ fn leave_on_null_leaves_the_method_or_the_loop() {
 /// elements after them. Each element and the rest are typed from the list.
 #[test]
 fn list_patterns_test_the_count_and_each_element() {
-    let sharp = "namespace Demo;\n\nimport Lib.Circle;\n\nclass Report\n{\n    public static float total(List<Circle> circles) => match (circles) {\n        [] => 0.0,\n        [Circle { radius: > 1.0 } only] => only.radius,\n        [Circle first, ...List<Circle> rest] => first.radius + rest.count(),\n        default => -1.0,\n    };\n\n    public static bool pair(List<int> values) => values is [> 0, not 5];\n\n    public static int first(List<int> values)\n    {\n        if (values is [int head, ...List<int> tail]) {\n            return head + tail.count();\n        }\n        return 0;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Circle;\n\nclass Report\n{\n    public static float total(List<Circle> circles) => match (circles) {\n        [] => 0.0,\n        [Circle { radius: > 1.0 } only] => only.radius,\n        [Circle first, ...List<Circle> rest] => first.radius + rest.count(),\n    };\n\n    public static bool pair(List<int> values) => values is [> 0, not 5];\n\n    public static int first(List<int> values)\n    {\n        if (values is [int head, ...List<int> tail]) {\n            return head + tail.count();\n        }\n        return 0;\n    }\n}\n";
 
     assert_eq!(issues(("src/Demo/Report.sharp", sharp), &[("src/Lib/Shapes.php", SHAPES)]), Vec::<String>::new());
 
     // A `List?` holds no list when it is null, and a nested list pattern tests an element.
-    let nullable = "namespace Demo;\n\nclass Report\n{\n    public static int size(List<int>? values) => match (values) {\n        null => -1,\n        [] => 0,\n        [int, ...List<int> rest] => 1 + rest.count(),\n        default => 2,\n    };\n\n    public static bool nested(List<List<int>> rows) => rows is [[1, int two]];\n}\n";
+    let nullable = "namespace Demo;\n\nclass Report\n{\n    public static int size(List<int>? values) => match (values) {\n        null => -1,\n        [] => 0,\n        [int, ...List<int> rest] => 1 + rest.count(),\n    };\n\n    public static bool nested(List<List<int>> rows) => rows is [[1, int two]];\n}\n";
     assert_eq!(issues(("src/Demo/Report.sharp", nullable), &[]), Vec::<String>::new());
 
     // A rest stands anywhere: the elements after it are counted from the end, and a bare rest names nothing. The last
-    // list arm before `default` covers every list it leaves, written alone, after `not` or in parentheses.
-    let anywhere = "namespace Demo;\n\nimport Lib.Circle;\n\nclass Report\n{\n    public static float last(List<Circle> circles) => match (circles) {\n        [...List<Circle> before, Circle last] => last.radius + before.count(),\n        default => 0.0,\n    };\n\n    public static int ends(List<int> values)\n    {\n        if (values is [int first, ..., int last]) {\n            return first + last;\n        }\n        return 0;\n    }\n\n    public static int middle(List<int> values) => match (values) {\n        [1, ...List<int> inner, int end] => inner.count() + end,\n        [..., > 9] => 9,\n        default => 0,\n    };\n\n    public static int negated(List<int> values) => match (values) {\n        [] => 0,\n        not [] => 1,\n        default => 2,\n    };\n\n    public static int grouped(List<int> values) => match (values) {\n        [] => 0,\n        ([..., int end]) => end,\n        default => 2,\n    };\n}\n";
+    // list arm covers every list the arms before it leave, written alone, after `not` or in parentheses.
+    let anywhere = "namespace Demo;\n\nimport Lib.Circle;\n\nclass Report\n{\n    public static float last(List<Circle> circles) => match (circles) {\n        [...List<Circle> before, Circle last] => last.radius + before.count(),\n        default => 0.0,\n    };\n\n    public static int ends(List<int> values)\n    {\n        if (values is [int first, ..., int last]) {\n            return first + last;\n        }\n        return 0;\n    }\n\n    public static int middle(List<int> values) => match (values) {\n        [1, ...List<int> inner, int end] => inner.count() + end,\n        [..., > 9] => 9,\n        default => 0,\n    };\n\n    public static int negated(List<int> values) => match (values) {\n        [] => 0,\n        not [] => 1,\n    };\n\n    public static int grouped(List<int> values) => match (values) {\n        [] => 0,\n        ([..., int end]) => end,\n    };\n}\n";
     assert_eq!(issues(("src/Demo/Report.sharp", anywhere), &[("src/Lib/Shapes.php", SHAPES)]), Vec::<String>::new());
 
     // An element a list's element type can never be names the element, the list and the type, before or after a rest.
@@ -6723,10 +6723,108 @@ fn list_patterns_test_the_count_and_each_element() {
             "7:61 impossible-type-comparison This pattern never matches the value it tests. | Remove the pattern, or test a value that can match it."
         ]
     );
+}
 
-    // Spec section 21 skips `default` only on an enum or a sealed interface, so a `match` on a list needs it.
-    let defaultless = "namespace Demo;\n\nclass Report\n{\n    public static int size(List<int> values) => match (values) {\n        [] => 0,\n        [int, ...List<int> rest] => 1,\n    };\n}\n";
-    assert_eq!(issues(("src/Demo/Report.sharp", defaultless), &[]), ["5:49 match-not-exhaustive"]);
+/// Spec section 21: a list pattern without a rest handles its count of items, and one with a rest, named or bare,
+/// handles its count and every longer list, alone or joined by `or`, `and` and `not`. Arms that together handle every
+/// length need no `default`.
+#[test]
+fn a_match_on_a_list_whose_arms_handle_every_length_needs_no_default() {
+    let sharp = "namespace Demo;\n\nimport Lib.Circle;\n\nclass Report\n{\n    public static float total(List<Circle> circles) => match (circles) {\n        [] => 0.0,\n        [Circle first, ...List<Circle> rest] => first.radius + Report.total(rest),\n    };\n\n    public static int ends(List<int> values) => match (values) {\n        [...List<int> before, int last] => last + before.count(),\n        [] => 0,\n    };\n\n    public static int pairs(List<int> values) => match (values) {\n        [] or [int] => 0,\n        [int first, int second, ...] => first + second,\n    };\n\n    public static int skipped(List<int> values) => match (values) {\n        [...] => 0,\n    };\n\n    public static int negated(List<int> values) => match (values) {\n        [] => 0,\n        not [] => 1,\n    };\n\n    public static int both(List<int> values) => match (values) {\n        [int first, ...] and [..., int last] => first + last,\n        [] => 0,\n    };\n}\n";
+
+    assert_eq!(issues(("src/Demo/Report.sharp", sharp), &[("src/Lib/Shapes.php", SHAPES)]), Vec::<String>::new());
+}
+
+/// Spec section 21: a `match` on a list without `default` names each length its arms miss, as it names each case of an
+/// enum, and says which values may leave out `default`.
+#[test]
+fn a_match_on_a_list_names_the_lengths_it_misses() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static string label(List<int> values) => match (values) {\n        [] => \"empty\",\n        [int only] => \"one\",\n    };\n\n    public static string one(List<int> values) => match (values) {\n        [int only] => \"one\",\n    };\n\n    public static string gap(List<int> values) => match (values) {\n        [] => \"empty\",\n        [int a, int b, int c, ...] => \"many\",\n    };\n\n    public static string empty(List<int> values) => match (values) {\n        [] => \"empty\",\n    };\n}\n";
+
+    assert_eq!(
+        refusals(("src/Demo/Report.sharp", sharp), &[]),
+        [
+            "5:53 match-not-exhaustive This `match` misses lists of 2 or more items. | Add an arm for each value it misses, or add `default => …` as the last arm.",
+            "10:51 match-not-exhaustive This `match` misses empty lists and lists of 2 or more items. | Add an arm for each value it misses, or add `default => …` as the last arm.",
+            "14:51 match-not-exhaustive This `match` misses lists of exactly 1 item and lists of exactly 2 items. | Add an arm for each value it misses, or add `default => …` as the last arm.",
+            "19:53 match-not-exhaustive This `match` misses lists of 1 or more items. | Add an arm for each value it misses, or add `default => …` as the last arm.",
+        ]
+    );
+    let notes: Vec<String> = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Report.sharp", sharp), &[])
+        .into_iter()
+        .flat_map(|issue| issue.notes)
+        .collect();
+    let note = "A `match` may leave out `default` only when its arms handle every case of an enum or a sealed interface, or every length of a `List`.";
+    assert_eq!(notes, [note; 4]);
+}
+
+/// Spec section 21: an arm handles a length only when each of its element patterns takes any element of the list's
+/// element type, and its rest any list of it. A value, a narrower type or a type without `null` for a nullable element
+/// handles no length.
+#[test]
+fn a_list_arm_that_tests_an_element_handles_no_length() {
+    let sharp = "namespace Demo;\n\nimport Lib.Shape;\nimport Lib.Circle;\n\nclass Report\n{\n    public static float narrower(List<Shape> shapes) => match (shapes) {\n        [] => 0.0,\n        [Circle c, ...List<Shape> rest] => c.radius,\n    };\n\n    public static int valued(List<int> values) => match (values) {\n        [] => 0,\n        [0, ...List<int> rest] => 1,\n    };\n\n    public static int nullable(List<int?> values) => match (values) {\n        [] => 0,\n        [int first, ...List<int?> rest] => first,\n    };\n\n    public static float rest(List<Shape> shapes) => match (shapes) {\n        [] => 0.0,\n        [Shape first, ...List<Circle> others] => 1.0,\n    };\n\n    public static float wider(List<Circle> circles) => match (circles) {\n        [] => 0.0,\n        [Shape first, ...List<Shape> others] => 1.0,\n    };\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Report.sharp", sharp), &[("src/Lib/Shapes.php", SHAPES)]),
+        [
+            "8:57 match-not-exhaustive",
+            "13:51 match-not-exhaustive",
+            "18:54 match-not-exhaustive",
+            "23:53 match-not-exhaustive"
+        ]
+    );
+}
+
+/// Spec section 21: an arm with `when` handles no length, as it handles no case of an enum.
+#[test]
+fn a_list_arm_with_when_handles_no_length() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static int guarded(List<int> values, bool test) => match (values) {\n        [] => 0,\n        [int first, ...List<int> rest] when test => first,\n    };\n}\n";
+
+    assert_eq!(
+        refusals(("src/Demo/Report.sharp", sharp), &[]),
+        [
+            "5:63 match-not-exhaustive This `match` misses lists of 1 or more items. | Add an arm for each value it misses, or add `default => …` as the last arm."
+        ]
+    );
+}
+
+/// Spec section 21: a `match` on a `List?` handles `null` too, as a `match` on a nullable enum does.
+#[test]
+fn a_match_on_a_nullable_list_handles_null_too() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static int size(List<int>? values) => match (values) {\n        [] => 0,\n        [int first, ...List<int> rest] => first,\n    };\n\n    public static int sized(List<int>? values) => match (values) {\n        null => -1,\n        [] => 0,\n        [int first, ...List<int> rest] => first,\n    };\n\n    public static int half(List<int>? values) => match (values) {\n        [int first, ...List<int> rest] => first,\n    };\n}\n";
+
+    assert_eq!(
+        refusals(("src/Demo/Report.sharp", sharp), &[]),
+        [
+            "5:50 match-not-exhaustive This `match` misses `null`. | Add an arm for each value it misses, or add `default => …` as the last arm.",
+            "16:50 match-not-exhaustive This `match` misses empty lists and `null`. | Add an arm for each value it misses, or add `default => …` as the last arm.",
+        ]
+    );
+}
+
+/// A `default` after arms that handle every length never runs, so the last arm is always true, as the last arm before
+/// the `default` of a `match` that handles every case of an enum is. Neither reports the `default` itself.
+#[test]
+fn a_default_after_arms_that_handle_every_length_is_reported_as_an_enum_s_is() {
+    let sharp = "namespace Demo;\n\nimport Lib.Status;\n\nclass Report\n{\n    public static int size(List<int> values) => match (values) {\n        [] => 0,\n        [int first, ...List<int> rest] => first,\n        default => -1,\n    };\n\n    public static string label(Status status) => match (status) {\n        Status.Open => \"open\",\n        Status.Closed => \"closed\",\n        Status.Archived => \"archived\",\n        default => \"other\",\n    };\n}\n";
+
+    let reported: Vec<String> =
+        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Report.sharp", sharp), &[("src/Lib/Status.php", TICKETS)])
+            .iter()
+            .filter(|issue| {
+                matches!(issue.code.as_deref(), Some("match-arm-always-true" | "unreachable-match-default-arm"))
+            })
+            .map(|issue| format!("{} {}", located(sharp, issue), issue.message))
+            .collect();
+
+    assert_eq!(
+        reported,
+        [
+            "9:9 match-arm-always-true This match arm is always `true`, making subsequent arms unreachable.",
+            "16:9 match-arm-always-true This match arm is always `true`, making subsequent arms unreachable.",
+        ]
+    );
 }
 
 /// Spec section 14.4: `f?.(x)` calls `f` only when it is not null. The call is checked against the function's
@@ -22420,7 +22518,7 @@ fn a_law_that_calls_itself_on_a_value_no_smaller_is_refused() {
         "        if (x == 0) { return; }\n        Count.f(x - 1, items);",
         "        if (items.count() == 0) { return; }\n        Count.f(x - 1, items);",
         "        match (items) {\n            [int, ...List<int> rest] => { Count.f(x, items); },\n            default => { return; },\n        }",
-        "        match (items) {\n            [...List<int> rest] => { Count.f(x, rest); },\n            default => { return; },\n        }",
+        "        match (items) {\n            [...List<int> rest] => { Count.f(x, rest); },\n        }",
     ] {
         assert_eq!(codes(&issues(law_body(body), &[])), ["law-recursion"], "{body}");
     }

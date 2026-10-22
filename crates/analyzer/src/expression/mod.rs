@@ -622,22 +622,6 @@ where
         }
         _ => None,
     };
-    // A `match` on a list has `default` even when its list patterns cover every list, as `[]` and `[Line first,
-    // ...List<Line> rest]` do, because spec section 21 skips `default` only on an enum or a sealed interface. The last
-    // list arm before that `default` is then always true, which is the shape the spec asks for, not a mistake.
-    let covering_list_arm: Option<u32> = match node {
-        Node::Expression(Expression::PatternMatch(pattern_match))
-        | Node::Statement(Statement::PatternMatch(pattern_match)) => {
-            let last = pattern_match.arms.iter().rposition(|arm| !arm.is_default());
-            last.and_then(|last| match &pattern_match.arms.as_slice()[last] {
-                PatternMatchArm::Pattern(arm) if arm.guard.is_none() && holds_list_pattern(arm.pattern) => {
-                    Some(arm.pattern.span().start.offset)
-                }
-                _ => None,
-            })
-        }
-        _ => None,
-    };
     // A type pattern with fields tests the type and then each field, whose test the type makes always true, as
     // `ChargeError.Declined(string reason)` binds a field that is always a `string`, so its `&&` is the pattern's shape.
     let tested_patterns: Vec<&Pattern> = match node {
@@ -705,8 +689,6 @@ where
                 && !reads_tested_value
                 && (!is_code(issue, IssueCode::RedundantLogicalOperation)
                     || span.is_none_or(|span| !field_tests.iter().any(|test| test.start == span.start)))
-                && (!is_code(issue, IssueCode::MatchArmAlwaysTrue)
-                    || span.is_none_or(|span| Some(span.start.offset) != covering_list_arm))
                 && (!(is_code(issue, IssueCode::ReplacedBySyntax)
                     || is_code(issue, IssueCode::BareFunctionCall)
                     || is_code(issue, IssueCode::WrappedFunction))
@@ -821,9 +803,9 @@ where
 }
 
 /// Reports what a PHP# `match` without `default` leaves unhandled. Spec section 21 gives `default` to every `match` on
-/// a value that is not an enum, and section 20 makes a `match` on an enum handle each of its cases. The value left is
-/// the value once every `handled` test is false, which Mago's reconciler narrows as it narrows the arms of PHP's
-/// `match`.
+/// a value that is not an enum, a sealed interface or a `List`, and makes a `match` on one handle each of its cases or
+/// lengths. The value left is the value once every `handled` test is false, which Mago's reconciler narrows as it
+/// narrows the arms of PHP's `match`.
 fn report_unhandled<'ctx, 'arena, A>(
     pattern_match: &PatternMatch<'arena>,
     handled: &[&Expression<'arena>],
@@ -845,6 +827,7 @@ fn report_unhandled<'ctx, 'arena, A>(
         matches!(atomic, TAtomic::Null)
             || enum_value(atomic, context.codebase).is_some()
             || closed_class(atomic, context.codebase).is_some()
+            || list_element_type(atomic).is_some()
     });
 
     let (missing, enums) = if is_closed {
@@ -855,12 +838,8 @@ fn report_unhandled<'ctx, 'arena, A>(
     let message = match missing.as_slice() {
         _ if !is_closed => "A `match` needs a `default` arm.".to_owned(),
         [] => return,
-        [only] => format!("This `match` misses `{only}`."),
-        [rest @ .., last] => {
-            let rest: Vec<String> = rest.iter().map(|case| format!("`{case}`")).collect();
-
-            format!("This `match` misses {} and `{last}`.", rest.join(", "))
-        }
+        [only] => format!("This `match` misses {only}."),
+        [rest @ .., last] => format!("This `match` misses {} and {last}.", rest.join(", ")),
     };
     let message = match display_missing_imports(context, enums) {
         Some(imports) => format!("{message} {imports}"),
@@ -873,13 +852,14 @@ fn report_unhandled<'ctx, 'arena, A>(
             .with_annotation(
                 Annotation::primary(pattern_match.r#match.span).with_message("This `match` has no `default`."),
             )
-            .with_note("Only a `match` on an enum may leave out `default`, when its arms cover every case.")
+            .with_note("A `match` may leave out `default` only when its arms handle every case of an enum or a sealed interface, or every length of a `List`.")
             .with_help("Add an arm for each value it misses, or add `default => …` as the last arm."),
     );
 }
 
-/// The cases of the enum `value_type` that no `handled` test of `pattern_match` matches, as PHP# writes them,
-/// `Status.Open`, in the order the enum declares them, and `null` last, with the enums those cases name.
+/// The cases of the enum `value_type` that no `handled` test of `pattern_match` matches, as PHP# writes them in
+/// backticks, in the order the enum declares them, then the lengths of a `List` that no arm without `when` handles, as
+/// "lists of 2 or more items", and null last, with the enums those cases name.
 fn missing_cases<'ctx, 'arena, A>(
     pattern_match: &PatternMatch<'arena>,
     value_type: &TUnion,
@@ -952,7 +932,7 @@ where
         declared.sort_by_key(|case| case.span.start.offset);
         for case in declared {
             if cases.iter().any(|(enum_name, left)| *enum_name == name && left.is_none_or(|left| left == case.name)) {
-                missing.push(display_code_member(context, metadata.original_name, case.name));
+                missing.push(format!("`{}`", display_code_member(context, metadata.original_name, case.name)));
                 if !named.contains(&metadata.original_name) {
                     named.push(metadata.original_name);
                 }
@@ -994,14 +974,27 @@ where
     }
     left_classes.sort_by_key(|class| (class.span.file_id, class.span.start.offset));
     for class in left_classes {
-        missing.push(
-            display_enum_case(context, class)
-                .unwrap_or_else(|| display_class_like_name(context, class.original_name).to_string()),
-        );
+        let name = display_enum_case(context, class)
+            .unwrap_or_else(|| display_class_like_name(context, class.original_name).to_string());
+        missing.push(format!("`{name}`"));
+    }
+
+    if let Some((list, element)) = atomics().find_map(|atomic| Some((atomic, list_element_type(atomic)?))) {
+        let list = TUnion::from_atomic(list.clone());
+        let lengths = pattern_match
+            .arms
+            .iter()
+            .filter_map(|arm| match arm {
+                PatternMatchArm::Pattern(arm) if arm.guard.is_none() => Some(arm.pattern),
+                _ => None,
+            })
+            .map(|pattern| list_lengths(pattern, &list, element, context, block_context, artifacts).0)
+            .fold(Lengths::NONE, |lengths, held| lengths.join(&held, |left, right| left || right));
+        missing.extend((!lengths).describe());
     }
 
     if atomics().any(|atomic| matches!(atomic, TAtomic::Null)) {
-        missing.push("null".to_owned());
+        missing.push("`null`".to_owned());
     }
 
     (missing, named)
@@ -1206,6 +1199,138 @@ fn holds_every_value(codebase: &CodebaseMetadata, held: &TUnion, declared: &TUni
     )
 }
 
+/// The lengths of a `List` a pattern holds: `short[n]` for each length `n` below `short.len()`, and `longer` for every
+/// length after them.
+#[derive(Clone)]
+struct Lengths {
+    short: Vec<bool>,
+    longer: bool,
+}
+
+impl Lengths {
+    const NONE: Lengths = Lengths { short: Vec::new(), longer: false };
+    const ALL: Lengths = Lengths { short: Vec::new(), longer: true };
+
+    /// The length of a list pattern of `count` elements, and every longer length when it has a rest.
+    fn of(count: usize, rest: bool) -> Lengths {
+        let mut short = vec![false; count];
+        short.push(true);
+
+        Lengths { short, longer: rest }
+    }
+
+    fn holds(&self, length: usize) -> bool {
+        self.short.get(length).copied().unwrap_or(self.longer)
+    }
+
+    /// The lengths `join` holds of whether `self` and `other` hold each length.
+    fn join(&self, other: &Lengths, join: impl Fn(bool, bool) -> bool) -> Lengths {
+        let short = (0..self.short.len().max(other.short.len()))
+            .map(|length| join(self.holds(length), other.holds(length)))
+            .collect();
+
+        Lengths { short, longer: join(self.longer, other.longer) }
+    }
+
+    /// The lengths held, in plain words: "empty lists", "lists of exactly 1 item" and "lists of 2 or more items".
+    fn describe(mut self) -> Vec<String> {
+        while self.short.len() > 1 && self.short.last() == Some(&self.longer) {
+            self.short.pop();
+        }
+        if self.short.is_empty() {
+            self.short.push(self.longer);
+        }
+
+        let mut described: Vec<String> = self
+            .short
+            .iter()
+            .enumerate()
+            .filter(|(_, held)| **held)
+            .map(|(length, _)| match length {
+                0 => "empty lists".to_owned(),
+                1 => "lists of exactly 1 item".to_owned(),
+                length => format!("lists of exactly {length} items"),
+            })
+            .collect();
+        if self.longer {
+            described.push(format!("lists of {} or more items", self.short.len()));
+        }
+
+        described
+    }
+}
+
+impl std::ops::Not for Lengths {
+    type Output = Lengths;
+
+    fn not(self) -> Lengths {
+        Lengths { short: self.short.into_iter().map(|held| !held).collect(), longer: !self.longer }
+    }
+}
+
+/// The lengths of a `List` of `element`s, of type `list`, at which `pattern` holds every list, and those at which it
+/// may hold one, spec section 21. A list pattern holds its count of elements, and every longer count with a rest, when
+/// each element's pattern holds every `element` and its rest every `list`. `or`, `and` and `not` join what their
+/// patterns hold, and any other pattern holds no length for sure.
+fn list_lengths<'ctx, A>(
+    pattern: &Pattern<'_>,
+    list: &TUnion,
+    element: &TUnion,
+    context: &Context<'ctx, '_, A>,
+    block_context: &BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+) -> (Lengths, Lengths)
+where
+    A: Arena,
+{
+    match pattern {
+        Pattern::List(list_pattern) => {
+            let rest =
+                list_pattern.elements.iter().any(|list_element| matches!(list_element, ListPatternElement::Rest(_)));
+            let lengths = Lengths::of(list_pattern.elements.len() - usize::from(rest), rest);
+            let holds_every_list = list_pattern.elements.iter().all(|list_element| match list_element {
+                ListPatternElement::Pattern(pattern) => held_type(pattern, element, context, block_context, artifacts)
+                    .is_some_and(|held| holds_every_value(context.codebase, &held, element)),
+                ListPatternElement::Rest(rest) => rest.hint.is_none_or(|hint| {
+                    let held = get_type_from_hint(context, block_context, artifacts, hint);
+
+                    holds_every_value(context.codebase, &held, list)
+                }),
+            });
+
+            (if holds_every_list { lengths.clone() } else { Lengths::NONE }, lengths)
+        }
+        Pattern::Not(not) => {
+            let (held, possible) = list_lengths(not.pattern, list, element, context, block_context, artifacts);
+
+            (!possible, !held)
+        }
+        Pattern::Binary(binary) => {
+            let (left_held, left_possible) =
+                list_lengths(binary.left, list, element, context, block_context, artifacts);
+            let (right_held, right_possible) =
+                list_lengths(binary.right, list, element, context, block_context, artifacts);
+            let join = |left: bool, right: bool| if binary.is_and() { left && right } else { left || right };
+
+            (left_held.join(&right_held, join), left_possible.join(&right_possible, join))
+        }
+        Pattern::Parenthesized(parenthesized) => {
+            list_lengths(parenthesized.pattern, list, element, context, block_context, artifacts)
+        }
+        Pattern::Type(_) | Pattern::Value(_) | Pattern::Comparison(_) | Pattern::Properties(_) => {
+            (Lengths::NONE, Lengths::ALL)
+        }
+    }
+}
+
+/// The type of the elements of a `List`, whose arms handle it by its lengths. A tuple, which has one length, has none.
+fn list_element_type(atomic: &TAtomic) -> Option<&TUnion> {
+    match atomic {
+        TAtomic::Array(TArray::List(TList { element_type, known_elements: None, .. })) => Some(element_type.as_ref()),
+        _ => None,
+    }
+}
+
 /// The class a value of `atomic` is in a closed set of, spec section 20: a case of an enum with data, an enum with
 /// data, a sealed interface, or a class its permitted inheritors name.
 fn closed_class<'codebase>(
@@ -1368,17 +1493,6 @@ impl<'ast, 'arena> Walker<'ast, 'arena, ListReads<'ast, 'arena>> for ListReadWal
         if let (BinaryOperator::Instanceof(_), Expression::Identifier(class)) = (binary.operator, binary.rhs) {
             reads.0.push((class.span(), binary.lhs));
         }
-    }
-}
-
-/// Whether a pattern holds a list pattern.
-fn holds_list_pattern(pattern: &Pattern<'_>) -> bool {
-    match pattern {
-        Pattern::List(_) => true,
-        Pattern::Not(not) => holds_list_pattern(not.pattern),
-        Pattern::Binary(binary) => holds_list_pattern(binary.left) || holds_list_pattern(binary.right),
-        Pattern::Parenthesized(parenthesized) => holds_list_pattern(parenthesized.pattern),
-        Pattern::Type(_) | Pattern::Value(_) | Pattern::Comparison(_) | Pattern::Properties(_) => false,
     }
 }
 
