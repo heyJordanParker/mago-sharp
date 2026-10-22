@@ -6,9 +6,9 @@ The steps of the proof Mago writes for a PHP# law, from its body or, for a law w
 
 A law without a body is proven by `sharp_prove`, which unfolds every definition its claim reaches. Each case of a body
 ends in `sharp_close`, which closes the case with Lean's automatic steps and the facts in scope, on the claim as it
-stands or with each definition the claim calls unfolded once. The facts are the law calls of the body before it, each
-`sharp_call%` of the theorem of the law it calls, which proves the called law's `when` condition first. A step that cannot close its goal reports the goal, as the
-law reads it, in an error that starts with `sharp-case` or `sharp-condition` and its index, then admits the goal, so
+stands, with each definition the claim calls unfolded once, or with those definitions as `simp` rewrites. The facts
+are the law calls of the body before it, each `sharp_call%` of the theorem of the law it calls, which proves the called
+law's `when` condition first. A step that cannot close its goal reports the goal, as the law reads it, in an error that starts with `sharp-case` or `sharp-condition` and its index, then admits the goal, so
 every theorem is declared and each failure is reported once. The runner reads those errors, and Mago prints each goal
 in PHP#.
 -/
@@ -70,7 +70,8 @@ private def written (name : Name) : String :=
 
 /-- `e` as a tree Mago prints in PHP#: `["app", constant, argument…]` with only the explicit arguments, `["var", name]`,
 `["lit", digits]`, `["str", text]`, `["field", name, value]`, `["lam", name, body]` and `["let", name, value, body]`.
-`++` of lists is `List.append`, apart from `++` of strings. Anything else is `["?"]`. -/
+`++` of lists is `List.append`, apart from `++` of strings. Anything else is `["?"]`. A `lam` or `let` names its value
+apart from every name in scope, as `x_1` inside an `x`, so each `var` reads the value it names. -/
 partial def tree (e : Expr) : MetaM Json := do
   match ← instantiateMVars e with
   | .mdata _ e => tree e
@@ -78,8 +79,10 @@ partial def tree (e : Expr) : MetaM Json := do
   | .lit (.natVal n) => return node "lit" #[.str (toString n)]
   | .lit (.strVal s) => return node "str" #[.str s]
   | .lam name type body _ =>
+    let name := (← getLCtx).getUnusedName name.eraseMacroScopes
     withLocalDeclD name type fun x => do return node "lam" #[.str (written name), ← tree (body.instantiate1 x)]
   | .letE name type value body _ =>
+    let name := (← getLCtx).getUnusedName name.eraseMacroScopes
     withLetDecl name type value fun x => do
       return node "let" #[.str (written name), ← tree value, ← tree (body.instantiate1 x)]
   | .proj struct index value =>
@@ -172,17 +175,19 @@ private def auto (definitions : Array Name) : TacticM Unit := do
        first | done | omega | grind)
     | decide))
 
-/-- Runs `step` on the proof state, and returns `true` when it closes every goal, or `false` with the state as it was. -/
+/-- Runs `step` on the proof state, and returns `true` when it closes every goal, or `false` with the state as it was. A
+step that reaches Lean's recursion limit, as `simp` does on a definition that calls itself on any value, fails too. -/
 private def closes (step : TacticM Unit) : TacticM Bool := do
   let saved ← saveState
-  try
-    step
-    if (← getUnsolvedGoals).isEmpty then return true
-    saved.restore
-    return false
-  catch _ =>
-    saved.restore
-    return false
+  tryCatchRuntimeEx
+    (do
+      step
+      if (← getUnsolvedGoals).isEmpty then return true
+      saved.restore
+      return false)
+    fun _ => do
+      saved.restore
+      return false
 
 /-- The main goal as the law reads it, as a tree: each definition the claim calls unfolded once, each of `conditions`
 applied, and each value a step binds written where it is used. -/
@@ -225,15 +230,20 @@ elab_rules : tactic
     unless ← closes once <||> (pure !recursive.isEmpty <&&> closes ended) do report index conditions.getElems
 
 /-- Closes the case `index` of a body with the automatic steps and the laws of the facts in scope: on the claim as the
-facts state it, else with each definition the claim calls unfolded once. -/
+facts state it, else with each definition the claim calls unfolded once, else with those definitions as `simp` rewrites.
+A rewrite of a recursive definition reads a call on a value its equation matches, as `total (first :: rest)`, and keeps
+a call on any other value, as `total b`, as the facts state it. -/
 syntax "sharp_close " num " [" ident,* "]" : tactic
 
 elab_rules : tactic
   | `(tactic| sharp_close $index [$conditions,*]) => do
+    let definitions ← definitionsIn (← getMainTarget)
+    let laws ← lawsInScope
     let unfolded : TacticM Unit := do
-      for definition in ← definitionsIn (← getMainTarget) do unfoldOnce definition
-      auto (← lawsInScope)
-    unless ← closes (do auto (← lawsInScope)) <||> closes unfolded do report index conditions.getElems
+      for definition in definitions do unfoldOnce definition
+      auto laws
+    unless ← closes (auto laws) <||> closes unfolded <||> closes (auto (definitions ++ laws)) do
+      report index conditions.getElems
 
 /-- Proves the condition of the law the call `index` calls with the automatic steps. Each part of a condition joined by
 `&&` that stays open is reported, as one goal of the call, and admitted. -/

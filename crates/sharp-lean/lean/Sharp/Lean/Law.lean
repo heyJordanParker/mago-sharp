@@ -6,6 +6,10 @@ The statement of a PHP# law.
 
 A law holds when its expression never finishes with `false`. A throw or a loop that never ends proves nothing about
 it, so it does not break the law: `a.add(b)` throws `ArithmeticError` on overflow, and `addKeepsCurrency` still holds.
+
+The law's claim and its condition compute ints as the exact `Int`s they hold, and check an int they pass on to code
+into the int range there. Wherever PHP runs them without throwing, each value is the exact one, so the law for a
+smaller value holds wherever the code it calls runs: `Money.total(a) + Money.total(b)` never overflows in the law.
 -/
 
 namespace Sharp

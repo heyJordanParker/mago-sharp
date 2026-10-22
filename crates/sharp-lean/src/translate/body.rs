@@ -101,6 +101,8 @@ pub(crate) struct Body<'body, 'program> {
     /// The locals the loop being translated adds to, by where their declarations' names start, which its conditions
     /// and the values it adds must not read.
     pub(super) accumulators: Vec<u32>,
+    /// Whether the body computes ints exactly, as [`Body::computes_exactly`] says.
+    exact: bool,
 }
 
 impl<'body, 'program> Body<'body, 'program> {
@@ -122,6 +124,7 @@ impl<'body, 'program> Body<'body, 'program> {
             nullable_locals: HashSet::default(),
             path: Path::new(checked.names(), []),
             accumulators: Vec::new(),
+            exact: false,
         }
     }
 
@@ -165,6 +168,14 @@ impl<'body, 'program> Body<'body, 'program> {
     /// Lets the body's calls pass the smaller values `path`, a path of a law's body, shows.
     pub(crate) fn on_path(&mut self, path: Path<'body, 'program>) {
         self.path = path;
+    }
+
+    /// Computes ints as the exact `Int`s they hold, as a law's claim and its `when` condition do: `+`, `-`, `*` and
+    /// comparisons read each int and each `count()` as its `Int`, and an int passed on to code is checked into the int
+    /// range there. Wherever PHP does not throw, each value is the exact one, so a law proven of exact values holds of
+    /// PHP's, and the law for a smaller value holds wherever the code it calls runs, as a proof by recursion needs.
+    pub(crate) fn computes_exactly(&mut self) {
+        self.exact = true;
     }
 
     /// The Lean type of `hint`.
@@ -561,6 +572,9 @@ impl<'body, 'program> Body<'body, 'program> {
             BinaryOperator::NullCoalesce(_) => return self.coalesce(binary),
             _ => {}
         }
+        if let Some(exact) = self.exactly(binary) {
+            return exact;
+        }
 
         let lhs = self.value(binary.lhs);
         let rhs = self.value(binary.rhs);
@@ -614,6 +628,83 @@ impl<'body, 'program> Body<'body, 'program> {
         }
     }
 
+    /// In a body that computes exactly, `+`, `-` or `*` of two ints as its exact `Int` checked into the int range, and a
+    /// comparison of two ints as the `Bool` that compares their exact `Int`s.
+    fn exactly(&mut self, binary: &Binary) -> Option<String> {
+        if !self.exact {
+            return None;
+        }
+        if let Some(exact) = self.exact_arithmetic(binary) {
+            return Some(self.bind(format!("int.ofInt {exact}")));
+        }
+        if !self.on_ints(binary) {
+            return None;
+        }
+
+        let operator = match binary.operator {
+            BinaryOperator::Equal(_) | BinaryOperator::NotEqual(_) if binary.operator.is_negated_equality() => "!=",
+            BinaryOperator::Equal(_) => "==",
+            BinaryOperator::LessThan(_) => "<",
+            BinaryOperator::LessThanOrEqual(_) => "<=",
+            BinaryOperator::GreaterThan(_) => ">",
+            BinaryOperator::GreaterThanOrEqual(_) => ">=",
+            _ => return None,
+        };
+        let lhs = self.exact_int(binary.lhs);
+        let rhs = self.exact_int(binary.rhs);
+
+        Some(match operator {
+            "==" | "!=" => format!("({lhs} {operator} {rhs})"),
+            _ => format!("(decide ({lhs} {operator} {rhs}))"),
+        })
+    }
+
+    /// `+`, `-` or `*` of two ints as the exact `Int` it computes.
+    fn exact_arithmetic(&mut self, binary: &Binary) -> Option<String> {
+        let operator = match binary.operator {
+            BinaryOperator::Addition(_) => "+",
+            BinaryOperator::Subtraction(_) => "-",
+            BinaryOperator::Multiplication(_) => "*",
+            _ => return None,
+        };
+        if !self.on_ints(binary) {
+            return None;
+        }
+        let lhs = self.exact_int(binary.lhs);
+        let rhs = self.exact_int(binary.rhs);
+
+        Some(format!("({lhs} {operator} {rhs})"))
+    }
+
+    /// `expression`, an int, as the exact `Int` it computes.
+    fn exact_int(&mut self, expression: &Expression) -> String {
+        match expression {
+            Expression::Parenthesized(parenthesized) => self.exact_int(parenthesized.expression),
+            Expression::Literal(Literal::Integer(integer)) => {
+                match integer.value.and_then(|value| i64::try_from(value).ok()) {
+                    Some(value) => format!("({value} : Int)"),
+                    None => format!("{}.toInt", self.value(expression)),
+                }
+            }
+            Expression::UnaryPrefix(UnaryPrefix { operator: UnaryPrefixOperator::Negation(_), operand }) => {
+                format!("(-{})", self.exact_int(operand))
+            }
+            Expression::Binary(binary) => match self.exact_arithmetic(binary) {
+                Some(exact) => exact,
+                None => format!("{}.toInt", self.value(expression)),
+            },
+            _ => format!("{}.toInt", self.value(expression)),
+        }
+    }
+
+    /// Whether both operands of `binary` are ints.
+    fn on_ints(&self, binary: &Binary) -> bool {
+        let types = self.checked.types();
+
+        (self.kind(types.expression_type(binary.lhs)), self.kind(types.expression_type(binary.rhs)))
+            == (Kind::Int, Kind::Int)
+    }
+
     /// `&&` and `||`, which run their right side only when the left one does not decide.
     fn short_circuit(&mut self, binary: &Binary, and: bool) -> String {
         let lhs = self.value(binary.lhs);
@@ -654,6 +745,10 @@ impl<'body, 'program> Body<'body, 'program> {
                     return format!("({} : int)", -value);
                 }
                 match self.kind(self.checked.types().expression_type(unary.operand)) {
+                    Kind::Int if self.exact => {
+                        let operand = self.exact_int(unary.operand);
+                        self.bind(format!("int.ofInt (-{operand})"))
+                    }
                     Kind::Int => {
                         let operand = self.value(unary.operand);
                         self.bind(format!("int.neg {operand}"))
@@ -868,13 +963,23 @@ impl<'body, 'program> Body<'body, 'program> {
 
     /// The term of `expression`, which must not throw, or `None` after recording `what` and `reason` when it can.
     pub(super) fn pure(&mut self, expression: &Expression, what: &str, reason: &'static str) -> Option<String> {
-        let (lines, value) = self.nested(|body| body.value(expression));
+        let (lines, value) = self.code_term(expression);
         if lines.is_empty() {
             return Some(value);
         }
 
         self.unmodeled(expression.span(), what.to_owned(), reason);
         None
+    }
+
+    /// The statements and the term of `expression` as code computes it, with ints in their range: the pure term a
+    /// guard, a pattern or a lambda holds, which must not bind a value.
+    fn code_term(&mut self, expression: &Expression) -> (Vec<String>, String) {
+        let exact = std::mem::replace(&mut self.exact, false);
+        let term = self.nested(|body| body.value(expression));
+        self.exact = exact;
+
+        term
     }
 
     /// `object.m(…)`, `Class.m(…)` and `Self.m(…)`.
@@ -1016,8 +1121,8 @@ impl<'body, 'program> Body<'body, 'program> {
     }
 
     /// A `List` method a law reasons about, as the Lean function it is: `count()` is `int.count`, the list's length,
-    /// and `map` and `filter` of a lambda are `List.map` and `List.filter`. Every other method of a collection is
-    /// refused by name.
+    /// or that length checked into the int range in a body that computes exactly, and `map` and `filter` of a lambda
+    /// are `List.map` and `List.filter`. Every other method of a collection is refused by name.
     fn list_call(&mut self, expression: &Expression, call: &MethodCall) -> String {
         let Some(method) = self.method_name(&call.method) else {
             return "default".to_owned();
@@ -1026,6 +1131,9 @@ impl<'body, 'program> Body<'body, 'program> {
         match (method, arguments.len()) {
             (b"count", 0) => {
                 let list = self.value(call.object);
+                if self.exact {
+                    return self.bind(format!("int.ofInt (List.length {list} : Int)"));
+                }
 
                 format!("(int.count {list})")
             }
@@ -1083,7 +1191,7 @@ impl<'body, 'program> Body<'body, 'program> {
                 names::identifier(parameter.variable.name.strip_prefix(b"$").unwrap_or(parameter.variable.name))
             })
             .collect();
-        let (lines, body) = self.nested(|body| body.value(arrow.expression));
+        let (lines, body) = self.code_term(arrow.expression);
         if !lines.is_empty() {
             self.unmodeled(arrow.expression.span(), "a lambda whose body can throw".to_owned(), issues::LAMBDA);
             return None;

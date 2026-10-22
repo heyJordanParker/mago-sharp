@@ -120,6 +120,8 @@ impl Printer<'_, '_> {
     fn application(&mut self, function: &str, arguments: &[Value]) -> Php {
         match (function, arguments) {
             ("Sharp.holds" | "Pure.pure" | "Decidable.decide" | "Option.some", [value]) => self.print(value),
+            // A law reads an int as the exact `Int` it holds, and checks one it passes on to code into the int range.
+            ("Int64.toInt" | "Sharp.int.ofInt" | "Nat.cast", [value]) => self.print(value),
             ("Bind.bind", [value, lambda]) => match lambda.as_array().map(Vec::as_slice) {
                 Some([kind, name, body]) if kind == "lam" => self.bind(name.as_str().unwrap_or_default(), value, body),
                 _ => self.unknown(),

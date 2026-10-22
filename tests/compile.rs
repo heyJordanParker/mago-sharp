@@ -3188,6 +3188,53 @@ fn compile_proves_a_law_over_a_summing_loop() {
     );
 }
 
+/// A recursive sum over a list's rest, and a law its body proves by calling itself on that rest.
+const SUMMED_MONEY: &str = "namespace App.Shared;\n\npublic class Money\n{\n    public Money(public int amount { get; }, public string currency { get; }) { }\n\n    public static int total(List<Money> items) => match (items) {\n        [] => 0,\n        [Money first, ...List<Money> rest] => first.amount + Money.total(rest),\n        default => 0,\n    };\n\n    law totalJoins(List<Money> a, List<Money> b) => Money.total([...a, ...b]) == Money.total(a) + Money.total(b)\n    {\n        match (a) {\n            [] => { return; },\n            [Money, ...List<Money> rest] => { Money.totalJoins(rest, b); },\n            default => { return; },\n        }\n    }\n}\n";
+
+const TOTAL_JOINS_FIRST: &str = "law totalJoinsFirst(List<Money> a, List<Money> b) => Money.total([...a, ...b]) == Money.total(a)\n    {\n        match (a) {\n            [] => { return; },\n            [Money, ...List<Money> rest] => { Money.totalJoinsFirst(rest, b); },\n            default => { return; },\n        }\n    }";
+
+/// Three recursive sums over a list, one of two fields of each element, and a law its body proves by calling itself on
+/// the list's rest.
+const LINES: &str = "namespace App.Shared;\n\npublic class Line\n{\n    public Line(public int net { get; }, public int tax { get; }) { }\n\n    public static int nets(List<Line> lines) => match (lines) {\n        [] => 0,\n        [Line first, ...List<Line> rest] => first.net + Line.nets(rest),\n        default => 0,\n    };\n\n    public static int taxes(List<Line> lines) => match (lines) {\n        [] => 0,\n        [Line first, ...List<Line> rest] => first.tax + Line.taxes(rest),\n        default => 0,\n    };\n\n    public static int gross(List<Line> lines) => match (lines) {\n        [] => 0,\n        [Line first, ...List<Line> rest] => first.net + first.tax + Line.gross(rest),\n        default => 0,\n    };\n\n    law grossIsNetsAndTaxes(List<Line> lines) => Line.gross(lines) == Line.nets(lines) + Line.taxes(lines)\n    {\n        match (lines) {\n            [] => { return; },\n            [Line, ...List<Line> rest] => { Line.grossIsNetsAndTaxes(rest); },\n            default => { return; },\n        }\n    }\n}\n";
+
+const GROSS_IS_NETS: &str = "law grossIsNets(List<Line> lines) => Line.gross(lines) == Line.nets(lines)\n    {\n        match (lines) {\n            [] => { return; },\n            [Line first, ...List<Line> rest] => { Line.grossIsNets(rest); },\n            default => { return; },\n        }\n    }";
+
+/// A law's claim reads ints as the exact `Int`s they hold, so the law for the list's rest holds wherever `total` runs,
+/// and the case `[Money, ...rest]` adds `first.amount` to both sides of it. Read with PHP's checked `+`, the law for the
+/// rest would hold only where `total(rest) + total(b)` fits an int, which that case cannot show.
+#[test]
+fn compile_proves_by_recursion_that_the_sum_of_a_joined_list_is_the_sum_of_its_parts() {
+    assert_proven("Money", SUMMED_MONEY, TOTAL_JOINS_FIRST);
+}
+
+/// A sum of two fields of each element is the sum of their two sums, which the law for the list's rest proves.
+#[test]
+fn compile_proves_by_recursion_that_a_sum_of_two_fields_is_the_sum_of_their_sums() {
+    assert_proven("Line", LINES, GROSS_IS_NETS);
+}
+
+/// A case a sum law leaves open prints its goal in PHP#: the claim's exact ints as the code writes them, and each value a
+/// step binds where it is used, though two steps bind theirs under one name.
+#[test]
+fn a_case_a_sum_law_leaves_open_names_its_goal_in_php_sharp() {
+    let with = |source: &str, twin: &str| format!("{}    {twin}\n}}\n", source.strip_suffix("}\n").unwrap_or(source));
+    let directory = lawful_project(&[
+        ("app/Shared/Money.sharp", &with(SUMMED_MONEY, TOTAL_JOINS_FIRST)),
+        ("app/Shared/Line.sharp", &with(LINES, GROSS_IS_NETS)),
+    ]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    for expected in [
+        "app/Shared/Money.sharp:21:5: error[law-unproven]: law totalJoinsFirst is not proven\n = when a is [], still to show: Money.total([...a, ...b]) == Money.total(a)\n",
+        "app/Shared/Line.sharp:33:5: error[law-unproven]: law grossIsNets is not proven\n = when lines is [Line first, ...List<Line> rest], still to show: first.net + first.tax + Line.gross(rest) == first.net + Line.nets(rest)\n",
+    ] {
+        assert!(printed(&output).contains(expected), "{}", printed(&output));
+    }
+}
+
 /// A loop that counts the elements an `if` tests is `List.countP`, so Lean's `List.countP_le_length` proves it counts no
 /// more than the list holds.
 #[test]

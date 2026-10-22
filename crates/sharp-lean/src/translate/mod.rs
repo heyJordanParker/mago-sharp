@@ -643,8 +643,9 @@ impl Translator<'_, '_> {
     }
 
     /// `@[law] def Class.law (a : A) : Prop := [condition = pure true →] holds do …`: the law holds for every value of
-    /// its parameters that meets its `when` condition, unless its claim finishes with `false`. Its theorem, which its
-    /// body proves, comes from [`Prover`].
+    /// its parameters that meets its `when` condition, unless its claim finishes with `false`. The condition and the
+    /// claim compute ints exactly, as [`Body::computes_exactly`] says. Its theorem, which its body proves, comes from
+    /// [`Prover`].
     fn law(&mut self, full: &[u8], lean: &str, short: &str, law: &LawNode) {
         let name = String::from_utf8_lossy(law.name.value).into_owned();
         let key = names::member(lean, law.name.value);
@@ -658,8 +659,9 @@ impl Translator<'_, '_> {
         let mut text = format!("@[law] def {key} {} : Prop :=\n", binders.join(" "));
         let (mut uses, mut unmodeled) = (Vec::new(), Vec::new());
         if let Some(condition) = &law.condition {
-            let (lines, terms, condition_uses, condition_unmodeled) =
-                Body::for_law(self.checked, self.reach, full, place.clone(), law).terms(&[], &[condition.expression]);
+            let mut computed = Body::for_law(self.checked, self.reach, full, place.clone(), law);
+            computed.computes_exactly();
+            let (lines, terms, condition_uses, condition_unmodeled) = computed.terms(&[], &[condition.expression]);
             text.push_str("  ((do\n");
             text.extend(indented(&lines, 6).map(|line| format!("{line}\n")));
             text.push_str("      return (");
@@ -668,6 +670,7 @@ impl Translator<'_, '_> {
             uses.extend(condition_uses);
             unmodeled.extend(condition_unmodeled);
         }
+        body.computes_exactly();
         let (lines, claim_uses, claim_unmodeled) = body.expression_body(law.claim);
         text.push_str("  holds do\n");
         text.push_str(&indented(&lines, 4).collect::<Vec<_>>().join("\n"));
