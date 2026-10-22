@@ -98,6 +98,6 @@ echo "//! `assets/extensions/sharp.php`.\n";
 echo "//! Do not edit.\n\n";
 echo rust('pub(crate)', 'SHARP_CLASSES', "/// The class-likes declared directly in `Sharp`: each public one of the standard library, and each one of the\n/// prelude, which the engine declares. Sorted.", $classes);
 echo "\n";
-echo rust('pub', 'STANDARD_ROOT_CLASSES', "/// The class-likes in PHP's root namespace that the standard library's `Builtins.sharp` declares, which a bare name in\n/// a `.sharp` file names by default, spec section 23: the exception classes, `Throwable`, `Attribute` and the\n/// interfaces a PHP# class implements for a plain PHP library. Sorted.", $roots);
+echo rust('pub', 'STANDARD_ROOT_CLASSES', "/// The PHP root classes a bare name in a `.sharp` file names by default, spec section 23.\n///\n/// `Builtins.sharp` declares each: the exception classes, `Throwable`, `Attribute` and the interfaces a PHP# class\n/// implements for a plain PHP library. Sorted.", $roots);
 echo "\n";
 echo rust('pub(crate)', 'STANDARD_EFFECTS', "/// The standard effects, spec section 29: each `foreign` class of the standard library, which a name in `uses` names\n/// whatever the file imports. Sorted.", $effects);

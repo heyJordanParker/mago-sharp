@@ -4,7 +4,7 @@
 
 /// The class-likes declared directly in `Sharp`: each public one of the standard library, and each one of the
 /// prelude, which the engine declares. Sorted.
-pub(crate) const SHARP_CLASSES: [&str; 23] = [
+pub(crate) const SHARP_CLASSES: [&str; 24] = [
     "Sharp\\Behavior",
     "Sharp\\Bool",
     "Sharp\\Class",
@@ -20,6 +20,7 @@ pub(crate) const SHARP_CLASSES: [&str; 23] = [
     "Sharp\\InvalidFields",
     "Sharp\\Key",
     "Sharp\\List",
+    "Sharp\\ListMembers",
     "Sharp\\Listening",
     "Sharp\\Map",
     "Sharp\\Math",
@@ -30,9 +31,10 @@ pub(crate) const SHARP_CLASSES: [&str; 23] = [
     "Sharp\\Set",
 ];
 
-/// The class-likes in PHP's root namespace that the standard library's `Builtins.sharp` declares, which a bare name in
-/// a `.sharp` file names by default, spec section 23: the exception classes, `Throwable`, `Attribute` and the
-/// interfaces a PHP# class implements for a plain PHP library. Sorted.
+/// The PHP root classes a bare name in a `.sharp` file names by default, spec section 23.
+///
+/// `Builtins.sharp` declares each: the exception classes, `Throwable`, `Attribute` and the interfaces a PHP# class
+/// implements for a plain PHP library. Sorted.
 pub const STANDARD_ROOT_CLASSES: [&str; 51] = [
     "ArgumentCountError",
     "ArithmeticError",
