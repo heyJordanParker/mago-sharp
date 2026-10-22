@@ -21,7 +21,7 @@ use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_never;
 use mago_codex::ttype::template::TemplateResult;
 use mago_codex::ttype::union::TUnion;
-use mago_names::INLINED_COLLECTION_METHODS;
+use mago_names::INLINED;
 use mago_names::binding::Binding;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
@@ -398,12 +398,10 @@ where
 
     let refused_on_object = context.dialect.is_sharp()
         && method_resolution.resolved_methods.iter().any(|method| {
-            let collection = sharp_collection_name(&TObject::new_named(method.classname));
-            let name = method.method_identifier.get_method_name();
-
-            INLINED_COLLECTION_METHODS.iter().any(|(inlined_collection, inlined)| {
-                collection == Some(*inlined_collection) && inlined.as_bytes().eq_ignore_ascii_case(name.as_bytes())
-            })
+            context
+                .codebase
+                .get_method(method.classname.as_bytes(), method.method_identifier.get_method_name().as_bytes())
+                .is_some_and(|metadata| metadata.has_attribute(INLINED.as_bytes()))
         })
         && report_collection_method_on_object(context, artifacts, object, selector);
     let searches_list = context.dialect.is_sharp()
@@ -644,7 +642,7 @@ where
     Ok(())
 }
 
-/// Reports one of the [`INLINED_COLLECTION_METHODS`] called on `object` when its value can also be an object, as
+/// Reports a collection method marked [`INLINED`] called on `object` when its value can also be an object, as
 /// `List<int>|Box`, as a method call on a value that is no object is reported. The bridge lowers such a call to PHP
 /// on the array, so an object the value holds would never reach its own method of that name. Returns whether it
 /// reported the call.

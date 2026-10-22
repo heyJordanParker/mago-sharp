@@ -313,6 +313,13 @@ impl FunctionLikeMetadata {
         &self.attributes
     }
 
+    /// Whether an attribute of the full name `name`, compared ignoring case, marks the function or method.
+    #[inline]
+    #[must_use]
+    pub fn has_attribute(&self, name: &[u8]) -> bool {
+        self.attributes.iter().any(|attribute| attribute.name.as_bytes().eq_ignore_ascii_case(name))
+    }
+
     /// Returns a mutable reference to the method-specific info, if this is a method.
     #[inline]
     pub fn get_method_metadata_mut(&mut self) -> Option<&mut MethodMetadata> {

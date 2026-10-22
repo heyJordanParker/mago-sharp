@@ -28,6 +28,8 @@ pub mod scope;
 mod internal;
 mod sharp_classes;
 
+pub use sharp_classes::STANDARD_ROOT_CLASSES;
+
 /// The methods of a PHP# `List`, `Map` or `Set` that change it.
 ///
 /// Spec section 12 runs them on the collection a local holds, so a call of one on a local writes the local, as
@@ -35,84 +37,20 @@ mod sharp_classes;
 /// writes its local too, which captures it by reference, as harmless.
 pub const CHANGING_COLLECTION_METHODS: [&str; 4] = ["add", "insert", "remove", "clear"];
 
-/// The methods of a PHP# `List` the bridge lowers from the checker's types, as `(collection, method)` pairs.
+/// The attribute the prelude marks each method of a PHP# `List` with that the bridge lowers from the checker's types.
 ///
-/// Each lowers to PHP functions or operators on the array. A `List` is a PHP array, which has no methods, so the
-/// checker refuses one on a value that can also be an object, whose own method would not run. A `Map` and a `Set` are
-/// engine objects, whose every method runs on `Sharp\Collection`.
-pub const INLINED_COLLECTION_METHODS: [(&str, &str); 11] = [
-    ("List", "count"),
-    ("List", "getOrNull"),
-    ("List", "contains"),
-    ("List", "indexOf"),
-    ("List", "last"),
-    ("List", "max"),
-    ("List", "min"),
-    ("List", "remove"),
-    ("List", "clear"),
-    ("List", "toSet"),
-    ("List", "toList"),
-];
-
-/// The exception classes in PHP's root namespace that the standard library's `Builtins.sharp` declares, which a bare
-/// name in a `.sharp` file names by default, spec section 23.
-pub const STANDARD_EXCEPTIONS: [&str; 47] = [
-    "ArgumentCountError",
-    "ArithmeticError",
-    "AssertionError",
-    "BadFunctionCallException",
-    "BadMethodCallException",
-    "CompileError",
-    "DOMException",
-    "DateError",
-    "DateException",
-    "DateInvalidOperationException",
-    "DateInvalidTimeZoneException",
-    "DateMalformedIntervalStringException",
-    "DateMalformedPeriodStringException",
-    "DateMalformedStringException",
-    "DateObjectError",
-    "DateRangeError",
-    "DivisionByZeroError",
-    "DomainException",
-    "ErrorException",
-    "Exception",
-    "FiberError",
-    "IntlException",
-    "InvalidArgumentException",
-    "JsonException",
-    "LengthException",
-    "LogicException",
-    "OutOfBoundsException",
-    "OutOfRangeException",
-    "OverflowException",
-    "PDOException",
-    "ParseError",
-    "PharException",
-    "RangeException",
-    "ReflectionException",
-    "RequestParseBodyException",
-    "RuntimeException",
-    "SNMPException",
-    "SQLite3Exception",
-    "SoapFault",
-    "SodiumException",
-    "TypeError",
-    "UnderflowException",
-    "UnexpectedValueException",
-    "UnhandledMatchError",
-    "ValueError",
-    "com_exception",
-    "mysqli_sql_exception",
-];
+/// Each marked method lowers to PHP functions or operators on the array. A `List` is a PHP array, which has no
+/// methods, so the checker refuses one on a value that can also be an object, whose own method would not run. A `Map`
+/// and a `Set` are engine objects, whose every method runs on `Sharp\Collection`.
+pub const INLINED: &str = "Sharp\\Internal\\Inlined";
 
 /// The class-likes that a bare name in a `.sharp` file names by default, spec section 23, and that a class-like of the
 /// file's namespace can win over: every class-like the standard library or the prelude declares directly in `Sharp`,
-/// then the [standard exceptions](STANDARD_EXCEPTIONS), but the [fixed one](fixed_default_class).
+/// then the [standard root classes](STANDARD_ROOT_CLASSES), but the [fixed one](fixed_default_class).
 pub(crate) fn default_classes() -> impl Iterator<Item = &'static str> {
     sharp_classes::SHARP_CLASSES
         .into_iter()
-        .chain(STANDARD_EXCEPTIONS)
+        .chain(STANDARD_ROOT_CLASSES)
         .filter(|class| fixed_default_class(default_short_name(class)).is_none())
 }
 
@@ -123,10 +61,20 @@ pub(crate) fn fixed_default_class(name: &[u8]) -> Option<&'static [u8]> {
     (name == b"Error").then_some(b"Sharp\\Error".as_slice())
 }
 
-/// The default class-like whose short name is `name`, as a `.sharp` file writes it: `Sharp\Cache` for `Cache`, and
+/// The default class-like whose short name is `name`, as a `.sharp` file writes it: `Sharp\Math` for `Math`, and
 /// `ValueError` for `ValueError`. A lowercase `int` is the built-in type, so the name is compared exactly.
 pub(crate) fn default_class(name: &[u8]) -> Option<&'static [u8]> {
     default_classes().find(|class| default_short_name(class) == name).map(str::as_bytes)
+}
+
+/// The standard effect whose short name is `name`, as a `uses` in a `.sharp` file writes it: `Sharp\Time\Clock` for
+/// `Clock`, spec section 29, or `Sharp\Events` for `Events`, the effect of `emit`, which no `foreign` class is.
+pub(crate) fn standard_effect(name: &[u8]) -> Option<&'static [u8]> {
+    sharp_classes::STANDARD_EFFECTS
+        .into_iter()
+        .chain(["Sharp\\Events"])
+        .find(|effect| default_short_name(effect) == name)
+        .map(str::as_bytes)
 }
 
 /// Whether a class-like whose short name is `name` wins over a default class-like in its namespace, compared ignoring
@@ -135,7 +83,7 @@ pub(crate) fn shadows_a_default_class(name: &[u8]) -> bool {
     default_classes().any(|class| default_short_name(class).eq_ignore_ascii_case(name))
 }
 
-/// The name a `.sharp` file writes the default class-like `class` by: `Cache` for `Sharp\Cache`.
+/// The name a `.sharp` file writes the default class-like `class` by: `Math` for `Sharp\Math`.
 pub(crate) fn default_short_name(class: &str) -> &[u8] {
     class.rsplit('\\').next().unwrap_or(class).as_bytes()
 }

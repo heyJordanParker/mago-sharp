@@ -45,6 +45,7 @@ use crate::statement::module::check_listed_import;
 use crate::utils::expression::expression_is_nullsafe;
 use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_type;
+use crate::utils::names::is_hidden_php_class;
 use crate::utils::names::is_php_closure;
 use crate::utils::names::is_sharp_internal;
 use crate::utils::names::sharp_missing_imports;
@@ -908,7 +909,8 @@ where
 /// - a keyword written in another case, as `THIS` (spec section 2),
 /// - a full name, which only an `import` line writes, as `App.Order` (spec section 23),
 /// - the short name of exactly one class-like the file doesn't import, as `Math` (spec section 23), which is never PHP's
-///   `Closure`, as [`is_php_closure`] says.
+///   `Closure`, as [`is_php_closure`] says, nor a class only the standard library names, as [`is_hidden_php_class`]
+///   says.
 pub(crate) fn report_unknown_sharp_class<A>(context: &mut Context<'_, '_, A>, name: &[u8], span: Span) -> bool
 where
     A: Arena,
@@ -931,7 +933,9 @@ where
     };
 
     if written.contains(&b'\\') {
-        return context.codebase.class_like_exists(written) && report_full_class_name(context, written, span);
+        return context.codebase.class_like_exists(written)
+            && !is_hidden_php_class(context, written)
+            && report_full_class_name(context, written, span);
     }
 
     // A capitalized keyword is a name, spec section 2, so a class of that name is what the code meant.
@@ -942,6 +946,7 @@ where
         .filter(|class| {
             short_name(class.original_name).as_bytes().eq_ignore_ascii_case(written)
                 && !is_php_closure(class.original_name.as_bytes())
+                && !is_hidden_php_class(context, class.original_name.as_bytes())
         })
         .map(|class| class.original_name)
         .collect();
@@ -986,7 +991,7 @@ where
         .into_iter()
         .filter_map(|(written_suffix, other)| Some([stem(written_suffix)?, other].concat()))
         .find(|other| {
-            context.codebase.class_like_exists(other)
+            (context.codebase.class_like_exists(other) && !is_hidden_php_class(context, other))
                 || context.codebase.class_like_exists(&[b"Sharp\\", other.as_slice()].concat())
         });
     let mut issue = Issue::error(format!("Cannot find type `{shown}`."))
@@ -1049,7 +1054,7 @@ where
 }
 
 /// Reports `name`, a short name written at `span` in a PHP# file that binds it to nothing, as the one class-like
-/// `class` of the codebase that has it, as `Math` names `Sharp.Math.Math` (spec section 23), with the import to add.
+/// `class` of the codebase that has it, as `Json` names `Sharp.Encoding.Json` (spec section 23), with the import to add.
 /// Returns whether it reported. A class of `Sharp.Internal`, which only the standard library imports (spec section
 /// 15), gets no import.
 fn report_not_imported<A>(context: &mut Context<'_, '_, A>, name: &[u8], class: Word, span: Span) -> bool

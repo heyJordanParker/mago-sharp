@@ -264,9 +264,24 @@ final class Listening
 namespace Sharp\Internal;
 
 /**
+ * Marks a method of `ListMethods` that the bridge lowers to PHP on the array, from the list's type, instead of a call.
+ * A `List` is a PHP array, which has no methods, so the checker refuses a marked method on a value that can also be an
+ * object, whose own method would not run.
+ */
+#[\Attribute(\Attribute::TARGET_METHOD)]
+final class Inlined {}
+
+/**
+ * Marks the parameter of a standard library method that writes its argument as JSON text, as `Json.encode`'s, so the
+ * checker refuses an argument holding a `Map` key with no JSON text.
+ */
+#[\Attribute(\Attribute::TARGET_PARAMETER)]
+final class EncodedAsJson {}
+
+/**
  * The methods a PHP# `List<T>` has. The analyzer checks a call on a list against them, and the engine runs them on
- * `Sharp\Collection`, except the methods `mago_names::INLINED_COLLECTION_METHODS` names, which the bridge lowers from
- * the list's type. A method without `@mutation-free` changes the list.
+ * `Sharp\Collection`, except the methods marked `Inlined`, which the bridge lowers from the list's type. A method
+ * without `@mutation-free` changes the list.
  *
  * @template T
  */
@@ -284,6 +299,7 @@ final class ListMethods
      *
      * @mutation-free
      */
+    #[Inlined]
     public function getOrNull(int $index): mixed {}
 
     /**
@@ -293,6 +309,7 @@ final class ListMethods
      *
      * @mutation-free
      */
+    #[Inlined]
     public function toSet(): array {}
 
     /**
@@ -307,6 +324,7 @@ final class ListMethods
      *
      * @mutation-free
      */
+    #[Inlined]
     public function count(): int {}
 
     /**
@@ -316,6 +334,7 @@ final class ListMethods
      *
      * @mutation-free
      */
+    #[Inlined]
     public function contains(mixed $value): bool {}
 
     /**
@@ -325,6 +344,7 @@ final class ListMethods
      *
      * @mutation-free
      */
+    #[Inlined]
     public function indexOf(mixed $value): ?int {}
 
     /**
@@ -334,6 +354,7 @@ final class ListMethods
      *
      * @mutation-free
      */
+    #[Inlined]
     public function last(): mixed {}
 
     /**
@@ -352,11 +373,13 @@ final class ListMethods
      *
      * @return bool whether an element equalled `$value`.
      */
+    #[Inlined]
     public function remove(mixed $value): bool {}
 
     /**
      * Removes every element.
      */
+    #[Inlined]
     public function clear(): void {}
 
     /**
@@ -395,6 +418,7 @@ final class ListMethods
      *
      * @mutation-free
      */
+    #[Inlined]
     public function toList(): array {}
 
     /**
@@ -417,6 +441,7 @@ final class ListMethods
      *
      * @mutation-free
      */
+    #[Inlined]
     public function max(): mixed {}
 
     /**
@@ -428,6 +453,7 @@ final class ListMethods
      *
      * @mutation-free
      */
+    #[Inlined]
     public function min(): mixed {}
 
     /**

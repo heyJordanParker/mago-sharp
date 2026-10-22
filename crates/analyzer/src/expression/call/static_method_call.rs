@@ -289,14 +289,18 @@ where
             )
         });
 
-    let encodes_json = context.dialect.is_sharp()
-        && invocation_targets.iter().any(|target| {
-            matches!(
-                target,
-                InvocationTarget::FunctionLike { identifier: FunctionLikeIdentifier::Method(class, method), .. }
-                    if class.as_bytes().eq_ignore_ascii_case(b"sharp\\json\\json") && method.as_bytes().eq_ignore_ascii_case(b"encode")
-            )
-        });
+    let json_encoder = invocation_targets.iter().filter(|_| context.dialect.is_sharp()).find_map(|target| {
+        let InvocationTarget::FunctionLike { identifier: FunctionLikeIdentifier::Method(class, _), metadata, .. } =
+            target
+        else {
+            return None;
+        };
+        let position = metadata.parameters.iter().position(|parameter| {
+            parameter.attributes.iter().any(|attribute| attribute.name.as_bytes().eq_ignore_ascii_case(ENCODED_AS_JSON))
+        })?;
+
+        Some((display_member(context, *class, metadata.original_name), position))
+    });
 
     record_external_method_call(context, artifacts, &invocation_targets, call.span);
     if !method_resolution.undocumented_methods.is_empty() {
@@ -358,8 +362,8 @@ where
         check_events_on(context, &listened.clone(), at);
     }
 
-    if encodes_json
-        && let Some(argument) = call.argument_list.arguments.first()
+    if let Some((encoder, position)) = json_encoder
+        && let Some(argument) = call.argument_list.arguments.get(position)
         && let Some(value) = artifacts.get_expression_type(argument.value())
         && let Some(key) = invalid_json_key(context, value, &mut Vec::new())
     {
@@ -367,12 +371,12 @@ where
             InvalidJsonKey::Class(class) => {
                 let class = display_class_like_name(context, class);
                 (
-                    format!("`Json.encode` writes each `Map` key as JSON text, and `{class}` has no `toString()`."),
+                    format!("`{encoder}` writes each `Map` key as JSON text, and `{class}` has no `toString()`."),
                     format!("Declare `public string toString()` on `{class}`, or encode a `Map` keyed by text."),
                 )
             }
             InvalidJsonKey::Scalar(scalar) => (
-                format!("`Json.encode` writes each `Map` key as JSON text, and a `{scalar}` key has none."),
+                format!("`{encoder}` writes each `Map` key as JSON text, and a `{scalar}` key has none."),
                 "Encode a `Map` keyed by an `int`, a `string`, a backed enum or a class with `toString()`.".to_owned(),
             ),
         };
@@ -409,7 +413,11 @@ where
     Ok(())
 }
 
-/// A `Map` key `Json.encode` can't write as JSON text.
+/// The attribute the standard library marks the parameter of a method that writes its argument as JSON text with, as
+/// `Json.encode`'s. The checker reads the mark, so it copies no library name.
+const ENCODED_AS_JSON: &[u8] = b"Sharp\\Internal\\EncodedAsJson";
+
+/// A `Map` key a JSON encoder can't write as JSON text.
 enum InvalidJsonKey {
     /// A class, a struct or a pure enum that declares no `toString()`.
     Class(Word),

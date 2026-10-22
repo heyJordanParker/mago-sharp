@@ -3,9 +3,13 @@
 declare(strict_types=1);
 
 /**
- * Prints the class-likes declared directly in `Sharp`, which a `.sharp` file names with no import, spec section 23:
- * each public one of php-sharp's standard library, `sharp/composer/library/Sharp/*.sharp`, and each one of the
- * prelude's `crates/prelude/assets/extensions/sharp.php`, which the engine declares.
+ * Prints the class-likes a `.sharp` file names with no import, read from php-sharp's standard library,
+ * `sharp/composer/library`, and the prelude's `crates/prelude/assets/extensions/sharp.php`, which the engine declares:
+ *
+ * - the class-likes declared directly in `Sharp`, spec section 23: each public one of `Sharp/*.sharp`, and each one of
+ *   the prelude;
+ * - the standard root classes, spec section 23: each class `Sharp/Internal/Builtins.sharp` declares with no import;
+ * - the standard effects, spec section 29: each `foreign` class of the standard library, in any of its namespaces.
  *
  * `just regen-sharp-classes <path to sharp/composer/library>` writes it to `crates/names/src/sharp_classes.rs`.
  */
@@ -14,53 +18,86 @@ $library = $argv[1] ?? throw new InvalidArgumentException('Pass the path to php-
 if (count($argv) > 2) {
     throw new InvalidArgumentException('Pass only the path to php-sharp\'s `sharp/composer/library`.');
 }
+$library = rtrim($library, '/');
 
-$files = glob(rtrim($library, '/') . '/Sharp/*.sharp');
+function read(string $file): string
+{
+    $source = file_get_contents($file);
+    if ($source === false) {
+        throw new RuntimeException("Unable to read {$file}.");
+    }
+
+    return $source;
+}
+
+function namespaceOf(string $file, string $source): string
+{
+    if (preg_match('/^namespace (Sharp(?:\.\w+)*);$/m', $source, $match) !== 1) {
+        throw new RuntimeException("{$file} is in no namespace of the standard library.");
+    }
+
+    return str_replace('.', '\\', $match[1]);
+}
+
+function rust(string $visibility, string $name, string $documentation, array $classes): string
+{
+    $classes = array_unique($classes);
+    sort($classes, SORT_STRING);
+    $count = count($classes);
+    $entries = implode('', array_map(static fn(string $class): string => '    "' . str_replace('\\', '\\\\', $class) . "\",\n", $classes));
+
+    return "{$documentation}\n{$visibility} const {$name}: [&str; {$count}] = [\n{$entries}];\n";
+}
+
+$files = glob("{$library}/Sharp/*.sharp");
 if ($files === false || $files === []) {
     throw new RuntimeException("Unable to find the standard library's files in {$library}/Sharp.");
 }
 
 $classes = [];
 foreach ($files as $file) {
-    $source = file_get_contents($file);
-    if ($source === false) {
-        throw new RuntimeException("Unable to read {$file}.");
-    }
-    if (preg_match('/^namespace Sharp;$/m', $source) !== 1) {
+    $source = read($file);
+    if (namespaceOf($file, $source) !== 'Sharp') {
         throw new RuntimeException("{$file} is not in the namespace `Sharp`.");
     }
 
-    $declarations = [];
     preg_match_all('/^public\s+(?:\w+\s+)*?(?:class|interface|enum|struct)\s+(\w+)/m', $source, $declarations);
-    array_push($classes, ...$declarations[1]);
+    array_push($classes, ...array_map(static fn(string $class): string => "Sharp\\{$class}", $declarations[1]));
 }
 
 $prelude = dirname(__DIR__) . '/crates/prelude/assets/extensions/sharp.php';
-$stub = file_get_contents($prelude);
-if ($stub === false) {
-    throw new RuntimeException("Unable to read {$prelude}.");
+preg_match('/^namespace Sharp;$(.*?)(?=^namespace |\z)/ms', read($prelude), $namespace);
+$body = $namespace[1] ?? throw new RuntimeException("Unable to locate `namespace Sharp;` in {$prelude}.");
+preg_match_all('/^(?:\w+\s+)*?(?:class|interface|enum|trait)\s+(\w+)/m', $body, $declarations);
+array_push($classes, ...array_map(static fn(string $class): string => "Sharp\\{$class}", $declarations[1]));
+
+$builtins = read("{$library}/Sharp/Internal/Builtins.sharp");
+preg_match_all('/^import ([\w.]+)(?: as (\w+))?;$/m', $builtins, $imports, PREG_SET_ORDER);
+$imported = array_map(
+    static fn(array $import): string => $import[2] ?? substr(strrchr(".{$import[1]}", '.'), 1),
+    $imports,
+);
+preg_match_all('/^extern (\w+);$/m', $builtins, $externs);
+$roots = array_values(array_diff($externs[1], $imported));
+
+$effects = [];
+$sources = new RecursiveIteratorIterator(new RecursiveDirectoryIterator("{$library}/Sharp", FilesystemIterator::SKIP_DOTS));
+foreach ($sources as $file) {
+    if ($file->getExtension() !== 'sharp') {
+        continue;
+    }
+    $source = read($file->getPathname());
+    preg_match_all('/^public foreign class (\w+)/m', $source, $declarations);
+    foreach ($declarations[1] as $class) {
+        $effects[] = namespaceOf($file->getPathname(), $source) . "\\{$class}";
+    }
 }
 
-$namespace = [];
-preg_match('/^namespace Sharp;$(.*?)(?=^namespace |\z)/ms', $stub, $namespace);
-$body = $namespace[1] ?? throw new RuntimeException("Unable to locate `namespace Sharp;` in {$prelude}.");
-$declarations = [];
-preg_match_all('/^(?:\w+\s+)*?(?:class|interface|enum|trait)\s+(\w+)/m', $body, $declarations);
-array_push($classes, ...$declarations[1]);
-
-$classes = array_unique($classes);
-sort($classes, SORT_STRING);
-$count = count($classes);
-$entries = implode('', array_map(static fn(string $class): string => "    \"Sharp\\\\{$class}\",\n", $classes));
-
-echo <<<RUST
-    //! Generated by `just regen-sharp-classes` from php-sharp's standard library and the prelude's
-    //! `assets/extensions/sharp.php`.
-    //! Do not edit.
-
-    /// The class-likes declared directly in `Sharp`: each public one of the standard library, and each one of the
-    /// prelude, which the engine declares. Sorted.
-    pub(crate) const SHARP_CLASSES: [&str; {$count}] = [
-    {$entries}];
-
-    RUST;
+echo "//! Generated by `just regen-sharp-classes` from php-sharp's standard library and the prelude's\n";
+echo "//! `assets/extensions/sharp.php`.\n";
+echo "//! Do not edit.\n\n";
+echo rust('pub(crate)', 'SHARP_CLASSES', "/// The class-likes declared directly in `Sharp`: each public one of the standard library, and each one of the\n/// prelude, which the engine declares. Sorted.", $classes);
+echo "\n";
+echo rust('pub', 'STANDARD_ROOT_CLASSES', "/// The class-likes in PHP's root namespace that the standard library's `Builtins.sharp` declares, which a bare name in\n/// a `.sharp` file names by default, spec section 23: the exception classes, `Throwable`, `Attribute` and the\n/// interfaces a PHP# class implements for a plain PHP library. Sorted.", $roots);
+echo "\n";
+echo rust('pub(crate)', 'STANDARD_EFFECTS', "/// The standard effects, spec section 29: each `foreign` class of the standard library, which a name in `uses` names\n/// whatever the file imports. Sorted.", $effects);

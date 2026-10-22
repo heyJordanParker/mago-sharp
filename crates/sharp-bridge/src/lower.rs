@@ -26,7 +26,6 @@ use mago_codex::ttype::keys_hold_in_array;
 use mago_codex::ttype::may_hold_collection;
 use mago_codex::ttype::resolution::TypeResolutionContext;
 use mago_codex::ttype::union::TUnion;
-use mago_names::INLINED_COLLECTION_METHODS;
 use mago_names::ResolvedNames;
 use mago_names::binding::Binding;
 use mago_names::binding::LocalKind;
@@ -7636,10 +7635,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.node(SHARP_AST_PROP, 0, line, &[this, property])
     }
 
-    /// The PHP a call of one of the [`INLINED_COLLECTION_METHODS`] runs on the array, or none for any other call. A
-    /// change reaches a property through the property, which runs its hooks, an element of a `List` through a
-    /// `Sharp\Collection` method, and a value that lives nowhere changes as a copy. A null-safe call tests its
-    /// receiver first and gives null for null, which a missing key of a `Map` reads as.
+    /// The PHP a call of a collection method marked [`INLINED`](mago_names::INLINED) runs on the array, or none for
+    /// any other call. A change reaches a property through the property, which runs its hooks, an element of a `List`
+    /// through a `Sharp\Collection` method, and a value that lives nowhere changes as a copy. A null-safe call tests
+    /// its receiver first and gives null for null, which a missing key of a `Map` reads as.
     fn collection_call(
         &mut self,
         call: &Expression,
@@ -7690,9 +7689,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         })
     }
 
-    /// The PHP the method `method` of `collection_name`, one of the [`INLINED_COLLECTION_METHODS`], runs on
-    /// `collection`, the collection `receiver` gives, with `element`, its argument, for a method that takes one. `at`
-    /// is the span of the call or the method value that runs it.
+    /// The PHP the method `method` of `collection_name`, one marked [`INLINED`](mago_names::INLINED), runs on
+    /// `collection`, the collection `receiver` gives, with `element`, its argument, for a method that takes one.
+    /// `at` is the span of the call or the method value that runs it.
     fn inlined_collection_method(
         &mut self,
         at: Span,
@@ -7793,10 +7792,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
     /// Spec section 14.3: the value `value` reads of the method of a `List`, `Map`, `Set` or `Iterable` the checker
     /// resolved it to, a function that runs the method on the collection `receiver` gave when the value was read, as
-    /// [`Self::receiver_closure`] holds it. One of the [`INLINED_COLLECTION_METHODS`] runs the PHP its call runs on the
-    /// array, with the method's parameter, if it has one, as `$value`. A lazy operation of an `Iterable` runs on
-    /// `\Sharp\Sequence::from($receiver)`, as its call does, and any other method runs on `Sharp\Collection`, as its
-    /// call does, each with the arguments the value is called with.
+    /// [`Self::receiver_closure`] holds it. A method marked [`INLINED`](mago_names::INLINED) runs the PHP its call
+    /// runs on the array, with the method's parameter, if it has one, as `$value`. A lazy operation of an `Iterable`
+    /// runs on `\Sharp\Sequence::from($receiver)`, as its call does, and any other method runs on `Sharp\Collection`,
+    /// as its call does, each with the arguments the value is called with.
     fn collection_method_value(&mut self, value: &Expression, receiver: &Expression) -> u32 {
         let line = self.line(value);
         let target = self.expression(receiver);
@@ -7959,7 +7958,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// The collection, `List`, `Map` or `Set`, and the name in lowercase of the method the method call `call` runs as
-    /// PHP on the array, one of the [`INLINED_COLLECTION_METHODS`], whether that PHP reads the receiver twice, and
+    /// PHP on the array, one marked [`INLINED`](mago_names::INLINED), whether that PHP reads the receiver twice, and
     /// whether the value may also be a `Map` or a `Set`, which runs its own method of that name. None for a call of any
     /// other method.
     fn php_collection_method(&self, call: &Expression) -> Option<(&'static str, Vec<u8>, bool, bool)> {
@@ -7967,9 +7966,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             Some((collection, method)) => (collection, method, false),
             None => ("List", self.types.list_method_on_several_collections(call)?, true),
         };
-        if !INLINED_COLLECTION_METHODS.iter().any(|(inlined_collection, inlined)| {
-            *inlined_collection == collection && inlined.as_bytes().eq_ignore_ascii_case(&method)
-        }) {
+        if !self.types.inlines(collection, &method) {
             return None;
         }
         let reads_twice = matches!(method.as_slice(), b"remove" | b"last" | b"max" | b"min");

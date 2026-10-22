@@ -73,6 +73,7 @@ use crate::utils::names::display_member;
 use crate::utils::names::display_sharp_parameter_type;
 use crate::utils::names::display_sharp_type;
 use crate::utils::names::is_imported_namespace;
+use crate::utils::names::is_sharp_namespace;
 use crate::utils::names::namespace_function;
 use crate::utils::names::sharp_class_like_name;
 use crate::utils::names::sharp_code_class_name;
@@ -590,8 +591,9 @@ pub(crate) fn check_uses<A>(
         }
 
         // The message names the `foreign` classes the file can name without another import: the standard library's,
-        // its namespace's and its imports'. The file depends on each class it could name, so the message follows a
-        // class that becomes `foreign` or stops being one, as a compile from scratch gives it.
+        // in any of its namespaces (spec section 29), its namespace's and its imports'. The file depends on each class
+        // it could name, so the message follows a class that becomes `foreign` or stops being one, as a compile from
+        // scratch gives it.
         let namespace = context.scope.namespace_name().unwrap_or_default();
         let nameable: Vec<_> = context
             .codebase
@@ -601,7 +603,7 @@ pub(crate) fn check_uses<A>(
                 let name = class.original_name.as_bytes();
                 let class_namespace = name.iter().rposition(|byte| *byte == b'\\').map_or(&b""[..], |end| &name[..end]);
 
-                class_namespace.eq_ignore_ascii_case(b"Sharp")
+                is_sharp_namespace(class_namespace)
                     || class_namespace.eq_ignore_ascii_case(namespace)
                     || context.imported_names.contains_key(&ascii_lowercase_word(name))
             })
@@ -613,7 +615,7 @@ pub(crate) fn check_uses<A>(
             .into_iter()
             .filter(|class| class.flags.is_foreign())
             .map(|class| {
-                sharp_class_like_name(
+                sharp_effect_name(
                     context.codebase,
                     &context.imported_names,
                     &context.short_name_counts,

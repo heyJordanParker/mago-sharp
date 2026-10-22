@@ -895,7 +895,7 @@ impl<'body, 'program> Body<'body, 'program> {
                 return self.unmodeled(expression.span(), what, issues::PLAIN_PHP);
             }
             let class = names.get(&class.name);
-            if class.eq_ignore_ascii_case(b"Sharp\\Math\\Math")
+            if class.eq_ignore_ascii_case(b"Sharp\\Math")
                 && let ClassLikeMemberSelector::Identifier(method) = &call.method
                 && let Some(lean) = match method.value {
                     b"max" => Some("max"),

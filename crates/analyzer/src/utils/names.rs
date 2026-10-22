@@ -24,7 +24,7 @@ use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::get_sharp_type;
 use mago_codex::ttype::union::TUnion;
 use mago_names::ResolvedNames;
-use mago_names::STANDARD_EXCEPTIONS;
+use mago_names::STANDARD_ROOT_CLASSES;
 use mago_names::binding::sharp_operator_symbol;
 use mago_names::display_sharp_member;
 use mago_names::kind::NameKind;
@@ -88,9 +88,10 @@ pub(crate) fn sharp_class_like_name(
 }
 
 /// Returns the effect `effect` as a `uses` in a `.sharp` file with the `imported_names` of its imports writes it. A
-/// standard effect, one of the `Sharp` namespace, is the name the file's import of it gives it, as in `Post` for
-/// `import Sharp.Mail as Post;`, or else its own name, which is that effect in every `uses` whatever class the file
-/// imports or declares under it, spec section 29. Any other effect is named as [`sharp_class_like_name`] names a class.
+/// standard effect, a `foreign` class of the standard library, is the name the file's import of it gives it, as in
+/// `Post` for `import Sharp.Net.Mail as Post;`, or else its own name, which is that effect in every `uses` whatever
+/// class the file imports or declares under it, spec section 29. Any other effect is named as [`sharp_class_like_name`]
+/// names a class.
 pub(crate) fn sharp_effect_name(
     codebase: &CodebaseMetadata,
     imported_names: &WordMap<Word>,
@@ -256,7 +257,7 @@ fn sharp_import_alias(
 
 /// Whether a `.sharp` file with the `imported_names` and `scope` of its imports and namespace binds the short name
 /// `name` to a class-like, as [`binds_class_like`] binds one: by an import, by a class-like of its namespace, or by the
-/// class-like of `Sharp` or standard exception it imports by default. A class-like the name would bind only by sharing
+/// class-like of `Sharp` or standard root class it imports by default. A class-like the name would bind only by sharing
 /// the namespace counts when it exists.
 fn binds_short_name(
     codebase: &CodebaseMetadata,
@@ -286,16 +287,40 @@ fn binds_class_like(imported_names: &WordMap<Word>, scope: &NamespaceScope, name
     bound.eq_ignore_ascii_case(full_name) || imports_by_default(scope, name)
 }
 
-/// Whether spec section 23's default import of `Sharp` and the standard exceptions binds the class-like `name` in a
-/// `.sharp` file with the `scope` of its imports and namespace: `name` is directly in `Sharp` or is a standard
-/// exception, and the file imports or declares no other class-like of its short name.
+/// Whether spec section 23's default import of `Sharp` and the standard root classes binds the class-like `name` in a
+/// `.sharp` file with the `scope` of its imports and namespace: `name` is directly in `Sharp` or is a standard root
+/// class, and the file imports or declares no other class-like of its short name.
 pub(crate) fn imports_by_default(scope: &NamespaceScope, name: Word) -> bool {
     let name = mago_bytes::trim_start_byte(name.as_bytes(), b'\\');
     let (_, imported) = scope.resolve(NameKind::Default, short_name(name));
 
     !imported
         && (name.iter().rposition(|byte| *byte == b'\\').is_some_and(|end| name[..end].eq_ignore_ascii_case(b"Sharp"))
-            || STANDARD_EXCEPTIONS.iter().any(|exception| exception.as_bytes().eq_ignore_ascii_case(name)))
+            || STANDARD_ROOT_CLASSES.iter().any(|class| class.as_bytes().eq_ignore_ascii_case(name)))
+}
+
+/// Whether the namespace `namespace` is `Sharp` or one under it, the standard library's (spec section 23), compared
+/// ignoring case.
+pub(crate) fn is_sharp_namespace(namespace: &[u8]) -> bool {
+    namespace.get(..5).is_some_and(|root| root.eq_ignore_ascii_case(b"Sharp"))
+        && matches!(namespace.get(5), None | Some(b'\\'))
+}
+
+/// Whether the class-like `name` is one PHP builds in that the `.sharp` file `context` analyzes cannot name, decision
+/// 83: PHP is reached only through the standard library, so outside the standard library's own files only the class-likes
+/// of `Sharp` and the standard root classes a bare name names are reached. The file then names it as it names a class
+/// no code declares.
+pub(crate) fn is_hidden_php_class<A>(context: &Context<'_, '_, A>, name: &[u8]) -> bool
+where
+    A: Arena,
+{
+    let name = mago_bytes::trim_start_byte(name, b'\\');
+
+    context.dialect.is_sharp()
+        && !context.source_file.is_standard_library
+        && context.codebase.get_class_like(name).is_some_and(|class| class.flags.is_built_in())
+        && !name.iter().rposition(|byte| *byte == b'\\').is_some_and(|end| is_sharp_namespace(&name[..end]))
+        && !STANDARD_ROOT_CLASSES.iter().any(|class| class.as_bytes().eq_ignore_ascii_case(name))
 }
 
 /// Whether the full name `name` is `Sharp\Internal`, the namespace of the engine's functions that only the standard

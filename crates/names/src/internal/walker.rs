@@ -118,6 +118,7 @@ use crate::resolver::NamespaceClasses;
 use crate::scope::concat_with_sep;
 use crate::scope::php_name;
 use crate::scope::trim_start_byte;
+use crate::standard_effect;
 
 /// A CST visitor (`MutWalker`) that traverses a PHP Concrete Syntax Tree
 /// to resolve names (classes, functions, constants, etc.) according to
@@ -708,12 +709,12 @@ where
         self.resolved_names.bind(target.span(), Binding::Class);
     }
 
-    /// A name in `uses` names an effect, spec section 29. A class name of the `Sharp` namespace is that class even where
-    /// the file imports or declares a class under it, as Laravel's `Http` facade, and any other name resolves as a class.
+    /// A name in `uses` names an effect, spec section 29. A standard effect's name is that effect even where the file
+    /// imports or declares a class under it, as Laravel's `Http` facade, and any other name resolves as a class.
     fn walk_in_uses(&mut self, uses: &'ast Uses<'arena>, context: &mut NameResolutionContext<'arena, A>) {
         for name in &uses.names {
-            let (fqn, imported) = match default_class(name.value) {
-                Some(class) => (class, false),
+            let (fqn, imported) = match standard_effect(name.value) {
+                Some(effect) => (effect, false),
                 None => self.resolve_class(context, name.value),
             };
 

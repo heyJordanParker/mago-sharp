@@ -96,7 +96,7 @@ pub const FLOAT: (&str, &str) = (
 /// a file whose nearest `composer.json` names the package.
 const STANDARD_LIBRARY: &str = "vendor/heyjordanparker/php-sharp-composer/";
 
-static PRELUDE: LazyLock<Prelude> = LazyLock::new(Prelude::build);
+pub static PRELUDE: LazyLock<Prelude> = LazyLock::new(Prelude::build);
 static PLUGIN_REGISTRY: LazyLock<PluginRegistry> = LazyLock::new(PluginRegistry::with_library_providers);
 
 /// Parses `code` as the PHP# file at `path`, runs the semantic checks, scans it with the prelude, the standard

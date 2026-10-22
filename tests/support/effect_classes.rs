@@ -14,18 +14,18 @@ macro_rules! library_file {
     };
 }
 
-pub const EFFECT_CLASSES: [(&str, &str); 19] = [
-    library_file!("Sharp/Environment.sharp"),
-    library_file!("Sharp/Clock.sharp"),
+pub const EFFECT_CLASSES: [(&str, &str); 18] = [
+    library_file!("Sharp/System/Environment.sharp"),
+    library_file!("Sharp/Time/Clock.sharp"),
     library_file!("Sharp/Random.sharp"),
-    library_file!("Sharp/Console.sharp"),
-    library_file!("Sharp/Process.sharp"),
-    library_file!("Sharp/ProcessResult.sharp"),
-    library_file!("Sharp/Files.sharp"),
-    library_file!("Sharp/Http.sharp"),
-    library_file!("Sharp/Cache.sharp"),
-    library_file!("Sharp/Mail.sharp"),
-    library_file!("Sharp/Database.sharp"),
+    library_file!("Sharp/IO/Console.sharp"),
+    library_file!("Sharp/System/Process.sharp"),
+    library_file!("Sharp/System/ProcessResult.sharp"),
+    library_file!("Sharp/IO/Files.sharp"),
+    library_file!("Sharp/Net/Http.sharp"),
+    library_file!("Sharp/Data/Cache.sharp"),
+    library_file!("Sharp/Net/Mail.sharp"),
+    library_file!("Sharp/Data/Database.sharp"),
     library_file!("Sharp/Time/Duration.sharp"),
     library_file!("Sharp/Net/HttpMethod.sharp"),
     library_file!("Sharp/Net/HttpRequest.sharp"),
@@ -33,5 +33,4 @@ pub const EFFECT_CLASSES: [(&str, &str); 19] = [
     library_file!("Sharp/Net/MailAddress.sharp"),
     library_file!("Sharp/Net/MailMessage.sharp"),
     library_file!("Sharp/Net/Url.sharp"),
-    library_file!("Sharp/Net/Email.sharp"),
 ];

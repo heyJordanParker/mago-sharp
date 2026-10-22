@@ -68,8 +68,8 @@ where
 /// The class-likes of a project whose short name `Sharp` imports by default.
 ///
 /// Spec section 23: a class-like in a file's own namespace wins over the default one, as a class of the same package
-/// does in Kotlin, C# and Java. With `App\Cache` among them, a bare `Cache` in the namespace `App` is `App\Cache`, and in
-/// any other namespace it stays `Sharp\Cache`.
+/// does in Kotlin, C# and Java. With `App\Math` among them, a bare `Math` in the namespace `App` is `App\Math`, and in
+/// any other namespace it stays `Sharp\Math`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NamespaceClasses(HashSet<std::vec::Vec<u8>>);
 

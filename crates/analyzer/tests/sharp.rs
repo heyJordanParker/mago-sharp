@@ -43,8 +43,7 @@ use mago_database::file::File;
 use mago_database::file::FileId;
 use mago_database::file::FileType;
 use mago_names::CHANGING_COLLECTION_METHODS;
-use mago_names::INLINED_COLLECTION_METHODS;
-use mago_names::STANDARD_EXCEPTIONS;
+use mago_names::STANDARD_ROOT_CLASSES;
 use mago_names::resolver::NameResolver;
 use mago_names::resolver::NamespaceClasses;
 use mago_php_version::PHPVersion;
@@ -384,17 +383,6 @@ fn the_binder_knows_every_changing_collection_method() {
         let known: Vec<&str> =
             changing.iter().copied().filter(|method| CHANGING_COLLECTION_METHODS.contains(method)).collect();
         assert_eq!(known, changing, "{class} changes the collection in a method CHANGING_COLLECTION_METHODS lacks");
-    }
-}
-
-/// The bridge and the checker read the methods that run as PHP on the array from one list, which must name methods the
-/// collection stubs declare, or neither would match a call.
-#[test]
-fn every_inlined_collection_method_is_a_method_of_its_collection() {
-    for (collection, method) in INLINED_COLLECTION_METHODS {
-        let class = format!("Sharp\\Internal\\{collection}Methods");
-
-        assert!(PRELUDE.metadata.get_method(class.as_bytes(), method.as_bytes()).is_some(), "{class} has no {method}");
     }
 }
 
@@ -4520,11 +4508,11 @@ fn position_current_has_the_types_of_the_sharp_library_class() {
 /// set, and `require`, which a module binding calls, throws instead.
 #[test]
 fn an_environment_variable_is_a_nullable_string_and_a_required_one_a_string() {
-    let sharp = "namespace Demo;\n\nclass Deploy\n{\n    public Deploy(private Environment environment) { }\n\n    public string region() => this.environment.variable(\"X\") ?? \"d\";\n\n    public int wrong() => this.environment.variable(\"X\") ?? \"d\";\n\n    public string url() => this.environment.require(\"X\");\n\n    public int port() => this.environment.require(\"X\");\n}\n";
+    let sharp = "namespace Demo;\n\nimport Sharp.System.Environment;\n\nclass Deploy\n{\n    public Deploy(private Environment environment) { }\n\n    public string region() => this.environment.variable(\"X\") ?? \"d\";\n\n    public int wrong() => this.environment.variable(\"X\") ?? \"d\";\n\n    public string url() => this.environment.require(\"X\");\n\n    public int port() => this.environment.require(\"X\");\n}\n";
 
     assert_eq!(
         issues(("src/Demo/Deploy.sharp", sharp), &[]),
-        ["9:27 invalid-return-statement", "13:26 invalid-return-statement"]
+        ["11:27 invalid-return-statement", "15:26 invalid-return-statement"]
     );
 }
 
@@ -4532,21 +4520,21 @@ fn an_environment_variable_is_a_nullable_string_and_a_required_one_a_string() {
 /// The current directory changes, so `currentDirectory()` and `changeDirectory(path)` are methods.
 #[test]
 fn the_environment_arguments_are_read_only_and_the_current_directory_is_a_method() {
-    let sharp = "namespace Demo;\n\nclass Deploy\n{\n    public Deploy(private Environment environment) { }\n\n    public List<string> arguments() => this.environment.arguments;\n\n    public string folder() => this.environment.currentDirectory();\n\n    public List<int> numbers() => this.environment.arguments;\n\n    public void change()\n    {\n        this.environment.changeDirectory(\"/tmp\");\n        this.environment.arguments = [\"deploy\"];\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Sharp.System.Environment;\n\nclass Deploy\n{\n    public Deploy(private Environment environment) { }\n\n    public List<string> arguments() => this.environment.arguments;\n\n    public string folder() => this.environment.currentDirectory();\n\n    public List<int> numbers() => this.environment.arguments;\n\n    public void change()\n    {\n        this.environment.changeDirectory(\"/tmp\");\n        this.environment.arguments = [\"deploy\"];\n    }\n}\n";
 
     assert_eq!(
         issues(("src/Demo/Deploy.sharp", sharp), &[]),
-        ["11:35 invalid-return-statement", "16:26 invalid-property-write"]
+        ["13:35 invalid-return-statement", "18:26 invalid-property-write"]
     );
     assert_eq!(
         messages(("src/Demo/Deploy.sharp", sharp), &[])[1..],
         ["Cannot initialize readonly property `Environment.arguments` from within `Deploy`."]
     );
 
-    let php = "<?php\n\nnamespace Demo;\n\nuse Sharp\\Environment;\n\nclass Deploy\n{\n    public function __construct(private Environment $environment) { }\n\n    public function change(): void\n    {\n        $this->environment->arguments = ['deploy'];\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nuse Sharp\\System\\Environment;\n\nclass Deploy\n{\n    public function __construct(private Environment $environment) { }\n\n    public function change(): void\n    {\n        $this->environment->arguments = ['deploy'];\n    }\n}\n";
     assert_eq!(
         messages(("src/Demo/Deploy.php", php), &[]),
-        ["Cannot initialize readonly property `Sharp\\Environment::$arguments` from within `Demo\\Deploy`."]
+        ["Cannot initialize readonly property `Sharp\\System\\Environment::$arguments` from within `Demo\\Deploy`."]
     );
 }
 
@@ -7441,8 +7429,9 @@ fn initial_values_in_the_constructor_under_a_base_class_constructor_with_paramet
         ),
         (
             "src/Lib/Legacy.php",
-            "<?php\n\nnamespace Lib;\n\nclass Legacy\n{\n    /**\n     * @param list<int> $ids\n     */\n    public function __construct($x, array $items = [], array $ids = [], ?\\DateTimeImmutable $at = null, string $sign = '$', int $after = 2)\n    {\n    }\n}\n",
+            "<?php\n\nnamespace Lib;\n\nclass Legacy\n{\n    /**\n     * @param list<int> $ids\n     */\n    public function __construct($x, array $items = [], array $ids = [], ?\\Lib\\Moment $at = null, string $sign = '$', int $after = 2)\n    {\n    }\n}\n",
         ),
+        ("src/Lib/Moment.php", "<?php\n\nnamespace Lib;\n\nfinal class Moment\n{\n}\n"),
         ("src/Billing/Money.php", "<?php\n\nnamespace Billing;\n\nclass Money\n{\n}\n"),
         (
             "src/Lib/Priced.php",
@@ -7451,7 +7440,7 @@ fn initial_values_in_the_constructor_under_a_base_class_constructor_with_paramet
         WORDS,
     ];
     let sharp = "namespace Demo;\n\nimport Lib.Ledger;\nimport Lib.Legacy;\nimport Lib.Priced;\nimport Lib.Words;\n\nclass Entity\n{\n    public Entity(public int id { get; }) { }\n}\n\nclass Labeled : Entity\n{\n    protected string label = Words.upper(\"x\");\n}\n\nclass Pinned : Entity\n{\n    public int pin { get; } = 1;\n}\n\nclass Totals : Ledger\n{\n    protected string label = Words.upper(\"x\");\n}\n\nclass Constant : Entity\n{\n    protected string label = \"x\";\n}\n\nclass Blank\n{\n    public Blank() { }\n}\n\nclass Filled : Blank\n{\n    protected string label = Words.upper(\"x\");\n}\n\nclass FromLegacy : Legacy\n{\n    protected string label = Words.upper(\"x\");\n}\n\nclass Bill : Priced\n{\n    protected string label = Words.upper(\"x\");\n}\n";
-    let fixed = "namespace Demo;\n\nimport Billing.Money;\nimport DateTimeImmutable;\nimport Lib.Ledger;\nimport Lib.Legacy;\nimport Lib.Priced;\nimport Lib.Words;\n\nclass Entity\n{\n    public Entity(public int id { get; }) { }\n}\n\nclass Labeled : Entity\n{\n    protected string label = Words.upper(\"x\");\n\n    public Labeled(int id) : super(id) { }\n}\n\nclass Pinned : Entity\n{\n    public int pin { get; } = 1;\n\n    public Pinned(int id) : super(id) { }\n}\n\nclass Totals : Ledger\n{\n    protected string label = Words.upper(\"x\");\n\n    public Totals(string name, int ...counts) : super(name, ...counts) { }\n}\n\nclass FromLegacy : Legacy\n{\n    protected string label = Words.upper(\"x\");\n\n    public FromLegacy(Any? x, Map<int|string, Any?> items = [:], List<int> ids = [], DateTimeImmutable? at = null) : super(x, items, ids, at) { }\n\n    public static FromLegacy make() => new FromLegacy(1);\n}\n\nclass Bill : Priced\n{\n    protected string label = Words.upper(\"x\");\n\n    public Bill(Money money, int count = 0, string label = \"each\", bool taxed = true, bool fixed = false) : super(money, count, label, taxed, fixed) { }\n\n    public static Bill make() => new Bill(new Money());\n}\n";
+    let fixed = "namespace Demo;\n\nimport Billing.Money;\nimport Lib.Ledger;\nimport Lib.Legacy;\nimport Lib.Moment;\nimport Lib.Priced;\nimport Lib.Words;\n\nclass Entity\n{\n    public Entity(public int id { get; }) { }\n}\n\nclass Labeled : Entity\n{\n    protected string label = Words.upper(\"x\");\n\n    public Labeled(int id) : super(id) { }\n}\n\nclass Pinned : Entity\n{\n    public int pin { get; } = 1;\n\n    public Pinned(int id) : super(id) { }\n}\n\nclass Totals : Ledger\n{\n    protected string label = Words.upper(\"x\");\n\n    public Totals(string name, int ...counts) : super(name, ...counts) { }\n}\n\nclass FromLegacy : Legacy\n{\n    protected string label = Words.upper(\"x\");\n\n    public FromLegacy(Any? x, Map<int|string, Any?> items = [:], List<int> ids = [], Moment? at = null) : super(x, items, ids, at) { }\n\n    public static FromLegacy make() => new FromLegacy(1);\n}\n\nclass Bill : Priced\n{\n    protected string label = Words.upper(\"x\");\n\n    public Bill(Money money, int count = 0, string label = \"each\", bool taxed = true, bool fixed = false) : super(money, count, label, taxed, fixed) { }\n\n    public static Bill make() => new Bill(new Money());\n}\n";
 
     let found: Vec<String> = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Entity.sharp", sharp), &library)
         .iter()
@@ -7465,7 +7454,7 @@ fn initial_values_in_the_constructor_under_a_base_class_constructor_with_paramet
             "13:7 missing-super-call: `Labeled` must declare a constructor that calls `Entity`'s with `: super(…)`. Write `public Labeled(int id) : super(id) { }`.",
             "18:7 missing-super-call: `Pinned` must declare a constructor that calls `Entity`'s with `: super(…)`. Write `public Pinned(int id) : super(id) { }`.",
             "23:7 missing-super-call: `Totals` must declare a constructor that calls `Ledger`'s with `: super(…)`. Write `public Totals(string name, int ...counts) : super(name, ...counts) { }`.",
-            "43:7 missing-super-call: `FromLegacy` must declare a constructor that calls `Legacy`'s with `: super(…)`. Write `public FromLegacy(Any? x, Map<int|string, Any?> items = [:], List<int> ids = [], DateTimeImmutable? at = null) : super(x, items, ids, at) { }`. Add `import DateTimeImmutable;` to the file.",
+            "43:7 missing-super-call: `FromLegacy` must declare a constructor that calls `Legacy`'s with `: super(…)`. Write `public FromLegacy(Any? x, Map<int|string, Any?> items = [:], List<int> ids = [], Moment? at = null) : super(x, items, ids, at) { }`. Add `import Lib.Moment;` to the file.",
             "48:7 missing-super-call: `Bill` must declare a constructor that calls `Priced`'s with `: super(…)`. Write `public Bill(Money money, int count = 0, string label = \"each\", bool taxed = true, bool fixed = false) : super(money, count, label, taxed, fixed) { }`. Add `import Billing.Money;` to the file.",
         ]
     );
@@ -8716,12 +8705,12 @@ fn compile_errors(analyzed: (&'static str, &'static str), others: &[(&'static st
 }
 
 /// Spec section 23 names what a name without its import needs: a standard library class its file doesn't import, as
-/// `Math`, names the import.
+/// `Json`, names the import. A PHP built-in class is no class the file can import, so it names no import.
 #[test]
 fn a_name_without_its_import_names_the_import() {
-    const MATH: &str = "namespace Sharp.Math;\n\npublic static class Math\n{\n    public static int max(int a, int b) => a > b ? a : b;\n}\n";
+    const JSON: &str = "namespace Sharp.Encoding;\n\npublic static class Json\n{\n    public static string encode(int value) => \"1\";\n}\n";
     let others = [
-        ("vendor/heyjordanparker/php-sharp-composer/library/Sharp/Math/Math.sharp", MATH),
+        ("vendor/heyjordanparker/php-sharp-composer/library/Sharp/Encoding/Json.sharp", JSON),
         ("src/App/Domain/Event.sharp", "namespace App.Domain;\n\npublic class Event\n{\n}\n"),
         ("src/App/Domain/Match.sharp", "namespace App.Domain;\n\npublic class Match\n{\n}\n"),
         ("src/App/Domain/Case.sharp", "namespace App.Domain;\n\npublic class Case\n{\n}\n"),
@@ -8745,20 +8734,20 @@ fn a_name_without_its_import_names_the_import() {
 
     for (code, message) in [
         (
-            "namespace App;\n\nclass Report\n{\n    public int largest(int a, int b) => Math.max(a, b);\n}\n",
-            "`Math` is not imported. | Used here without an import. | Add `import Sharp.Math.Math;` to the file.",
+            "namespace App;\n\nclass Report\n{\n    public string body(int a) => Json.encode(a);\n}\n",
+            "`Json` is not imported. | Used here without an import. | Add `import Sharp.Encoding.Json;` to the file.",
         ),
-        // Plain PHP extensions declare classes named `Event` too, so no one import is the advice.
-        (
-            keyword_named("Event").0,
-            "Cannot find type `App.Event`. | No type of this name is declared. | Check the name's spelling, and import the type with `import` when another namespace declares it.",
-        ),
+        // Plain PHP extensions declare classes named `Event` too, which only the standard library names (decision 83),
+        // so the one class a file can import is the advice.
+        keyword_named("Event"),
         keyword_named("Match"),
         keyword_named("Case"),
         keyword_named("Required"),
+        // PHP's `Override` is a class only the standard library names, so the name is the keyword `override` in
+        // another case, as a name no code declares is.
         (
             "namespace App;\n\nclass Report\n{\n    public void run(Override value)\n    {\n    }\n}\n",
-            "`Override` is not imported. | Used here without an import. | Add `import Override;` to the file.",
+            "Write the keyword `override` in lowercase. | Written here.",
         ),
     ] {
         let worded = worded(("src/App/Report.sharp", code), &others);
@@ -9401,13 +9390,13 @@ fn never_is_a_method_return_type() {
     );
 
     // The standard library's `Process.exit` is a `never` method too.
-    let stopper = "namespace App.Probe;\n\nimport Sharp.Process;\n\npublic class Stopper\n{\n    public Stopper(private Process process) { }\n\n    public int ends() { this.process.exit(1); }\n\n    public int after()\n    {\n        this.process.exit(1);\n        return 0;\n    }\n}\n";
+    let stopper = "namespace App.Probe;\n\nimport Sharp.System.Process;\n\npublic class Stopper\n{\n    public Stopper(private Process process) { }\n\n    public int ends() { this.process.exit(1); }\n\n    public int after()\n    {\n        this.process.exit(1);\n        return 0;\n    }\n}\n";
     assert_eq!(
         issues(
             ("src/App/Probe/Stopper.sharp", stopper),
             &[(
-                "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Process.sharp",
-                include_str!("../../../../composer/library/Sharp/Process.sharp"),
+                "vendor/heyjordanparker/php-sharp-composer/library/Sharp/System/Process.sharp",
+                include_str!("../../../../composer/library/Sharp/System/Process.sharp"),
             )]
         ),
         ["14:9 unevaluated-code"]
@@ -10566,7 +10555,7 @@ fn a_field_without_an_access_modifier_is_private_as_its_php_twin() {
 /// by its short name or its import's name, and any other by the name the file gives its class.
 #[test]
 fn a_sharp_message_names_a_function_type_with_its_effects_inside_its_brackets() {
-    let sharp = "namespace Demo;\n\nimport App.Effects.Payments as Billing;\nimport Sharp.Mail as Post;\n\nclass Receipt\n{\n    public string step(Function<int(int) uses Http, Post, Billing> step) => `Step: ${step}`;\n}\n";
+    let sharp = "namespace Demo;\n\nimport App.Effects.Payments as Billing;\nimport Sharp.Net.Mail as Post;\n\nclass Receipt\n{\n    public string step(Function<int(int) uses Http, Post, Billing> step) => `Step: ${step}`;\n}\n";
     let payments =
         ("src/App/Effects/Payments.sharp", "namespace App.Effects;\n\npublic foreign class Payments\n{\n}\n");
 
@@ -14073,13 +14062,15 @@ fn a_receiver_of_its_own_class_with_swapped_type_arguments_gives_them_swapped() 
 /// An object of a PHP# generic class carries its type arguments through serialization, which `Serializable` cannot
 /// do: its `serialize` writes a string the engine cannot add them to. So a generic PHP# class that is a
 /// `Serializable`, through its header or a parent's, is refused, and the refusal names the methods that carry them.
-/// A PHP# class without type parameters may be one.
+/// A PHP# class without type parameters may be one. PHP# code names no PHP built-in (decision 83), so a class is one
+/// through a plain PHP library's interface that extends it.
 #[test]
 fn a_generic_class_is_never_serializable() {
-    let sharp = "namespace Demo;\n\nimport Serializable;\n\npublic class Page<TItem> : Serializable\n{\n    public TItem? first() => null;\n\n    public string? serialize() => null;\n\n    public void unserialize(string data)\n    {\n    }\n}\n\npublic class OrderPage<TItem> : Page<TItem>\n{\n}\n\npublic class Plain : Serializable\n{\n    public string? serialize() => null;\n\n    public void unserialize(string data)\n    {\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Stored;\n\npublic class Page<TItem> : Stored\n{\n    public TItem? first() => null;\n\n    public string? serialize() => null;\n\n    public void unserialize(string data)\n    {\n    }\n}\n\npublic class OrderPage<TItem> : Page<TItem>\n{\n}\n\npublic class Plain : Stored\n{\n    public string? serialize() => null;\n\n    public void unserialize(string data)\n    {\n    }\n}\n";
+    let stored = ("src/Lib/Stored.php", "<?php\n\nnamespace Lib;\n\ninterface Stored extends \\Serializable\n{\n}\n");
 
     assert_eq!(
-        explained(("src/Demo/Page.sharp", sharp), &[]),
+        explained(("src/Demo/Page.sharp", sharp), &[stored]),
         [
             "5:14 invalid-implement `Page` has type parameters, so it cannot be a `Serializable`: `serialize` drops the type arguments its objects carry. Leave `Serializable` out: an object serialized as it is keeps its type arguments.",
             "16:14 invalid-implement `OrderPage` has type parameters, so it cannot be a `Serializable`: `serialize` drops the type arguments its objects carry. Leave `Serializable` out: an object serialized as it is keeps its type arguments.",
@@ -16001,15 +15992,25 @@ fn a_generic_method_over_a_map_keyed_by_a_backed_enum_infers_the_enum() {
     assert_eq!(issues(("src/Demo/Keys.sharp", sharp), &[("src/Lib/Status.php", STATUS)]), Vec::<String>::new());
 }
 
-/// A plain PHP class whose docblock declares templates, as `Traversable` and `Iterator` do, takes no PHP# type
+/// A plain PHP class whose docblock declares templates, as a library's `Cursor` and `Rows` do, takes no PHP# type
 /// arguments, so `is`, `as` and a `match` arm test it as any class. The PHP twin's `instanceof` keeps Mago's issues.
 #[test]
 fn a_type_test_of_a_php_class_with_docblock_templates_passes() {
-    let sharp = "namespace Demo;\n\nimport Iterator;\nimport Traversable;\n\npublic class Report\n{\n    public static bool each(Any? value) => value is Traversable;\n\n    public static Any? kept(Any? value) => value as Traversable;\n\n    public static int matched(Any? value) => match (value) { Iterator => 1, default => 0 };\n}\n";
-    let php = "<?php\n\nnamespace Demo;\n\nuse Traversable;\n\nclass Report\n{\n    public static function each(mixed $value): bool\n    {\n        return $value instanceof Traversable;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Cursor;\nimport Lib.Rows;\n\npublic class Report\n{\n    public static bool each(Any? value) => value is Rows;\n\n    public static Any? kept(Any? value) => value as Rows;\n\n    public static int matched(Any? value) => match (value) { Cursor => 1, default => 0 };\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nuse Lib\\Rows;\n\nclass Report\n{\n    public static function each(mixed $value): bool\n    {\n        return $value instanceof Rows;\n    }\n}\n";
+    let library = [
+        (
+            "src/Lib/Rows.php",
+            "<?php\n\nnamespace Lib;\n\n/**\n * @template TKey\n * @template TValue\n */\ninterface Rows\n{\n}\n",
+        ),
+        (
+            "src/Lib/Cursor.php",
+            "<?php\n\nnamespace Lib;\n\n/**\n * @template TKey\n * @template TValue\n *\n * @extends Rows<TKey, TValue>\n */\ninterface Cursor extends Rows\n{\n}\n",
+        ),
+    ];
 
-    assert_eq!(explained(("src/Demo/Report.php", php), &[]), Vec::<String>::new());
-    assert_eq!(explained(("src/Demo/Report.sharp", sharp), &[]), Vec::<String>::new());
+    assert_eq!(explained(("src/Demo/Report.php", php), &library), Vec::<String>::new());
+    assert_eq!(explained(("src/Demo/Report.sharp", sharp), &library), Vec::<String>::new());
 }
 
 /// Spec section 21: every type answers `is`, `as` and `match` the same way, function types included, so a lambda and a
@@ -17032,11 +17033,11 @@ fn a_uses_takes_a_standard_effect_in_a_file_that_declares_a_class_of_its_name() 
 }
 
 /// Spec section 23: a class of the file's own namespace wins over the class `Sharp` imports by default, as a class of
-/// the same package does in Kotlin, C# and Java, so another file of `App` names `App.Cache` with a bare `Cache` as a
+/// the same package does in Kotlin, C# and Java, so another file of `App` names `App.Random` with a bare `Random` as a
 /// type, a `new`, an `is` and a static call. A default name its namespace declares no class of stays the `Sharp` one.
 #[test]
 fn a_class_of_the_files_namespace_wins_over_a_default_class() {
-    for name in sharp_effect_names() {
+    for name in ["Math", "Random", "Events", "Scope", "Result"] {
         let shape = leak(format!(
             "namespace App;\n\npublic class Shape\n{{\n    public {name}? keep({name}? kept) => kept;\n\n    public {name} make() => new {name}();\n\n    public bool holds(Any value) => value is {name};\n\n    public int size() => {name}.size();\n}}\n"
         ));
@@ -17048,17 +17049,19 @@ fn a_class_of_the_files_namespace_wins_over_a_default_class() {
         assert_eq!(issues(("app/App/Shape.sharp", shape), &[declared]), Vec::<String>::new(), "{name}");
     }
 
-    let here = "namespace App;\n\npublic class Here\n{\n    public string folder(Environment environment) => environment.currentDirectory();\n}\n";
-    let cache = ("app/App/Cache.sharp", "namespace App;\n\npublic class Cache\n{\n}\n");
-    assert_eq!(issues(("app/App/Here.sharp", here), &[cache]), Vec::<String>::new());
+    let here =
+        "namespace App;\n\npublic class Here\n{\n    public string folder() => Position.current().directory;\n}\n";
+    let random = ("app/App/Random.sharp", "namespace App;\n\npublic class Random\n{\n}\n");
+    assert_eq!(issues(("app/App/Here.sharp", here), &[random]), Vec::<String>::new());
 }
 
-/// Spec section 23: `ProcessResult`, what `Process.run` gives back, is in `Sharp`, so a bare name names it.
+/// Spec section 23: `ProcessResult`, what `Process.run` gives back, is in `Sharp.System` beside `Process`, so a file
+/// names it after one import, as any class of a standard library namespace.
 #[test]
-fn the_result_of_a_process_needs_no_import() {
+fn the_result_of_a_process_is_imported_from_its_namespace() {
     let runner = (
         "app/App/Runner.sharp",
-        "namespace App;\n\npublic class Runner\n{\n    public int code(ProcessResult result) => result.exitCode;\n}\n",
+        "namespace App;\n\nimport Sharp.System.ProcessResult;\n\npublic class Runner\n{\n    public int code(ProcessResult result) => result.exitCode;\n}\n",
     );
 
     assert_eq!(issues(runner, &[]), Vec::<String>::new());
@@ -18182,21 +18185,21 @@ fn a_class_that_shares_its_short_name_only_with_a_built_in_class_keeps_its_short
     );
 }
 
-/// A `.sharp` file reaches the standard library's `Sharp.Environment` with no import, so it shares its short name with
-/// the project's own `App.Ops.Environment` and a message names it by its full dotted name. The file imports
-/// `App.Ops.Environment`, so a message names that class `Environment`, as the import does. The PHP twin keeps
+/// A `.sharp` file reaches the standard library's `Sharp.Random` with no import, so it shares its short name with
+/// the project's own `App.Ops.Random` and a message names it by its full dotted name. The file imports
+/// `App.Ops.Random`, so a message names that class `Random`, as the import does. The PHP twin keeps
 /// upstream's full names.
 #[test]
 fn a_standard_library_class_that_shares_its_short_name_is_named_by_its_full_name() {
-    let environment = ("src/App/Ops/Environment.php", "<?php\n\nnamespace App\\Ops;\n\nclass Environment\n{\n}\n");
+    let random = ("src/App/Ops/Random.php", "<?php\n\nnamespace App\\Ops;\n\nclass Random\n{\n}\n");
     let shell = (
         "src/Lib/Shell.php",
-        "<?php\n\nnamespace Lib;\n\nclass Shell\n{\n    public function environment(): \\Sharp\\Environment\n    {\n        return new \\Sharp\\Environment();\n    }\n}\n",
+        "<?php\n\nnamespace Lib;\n\nclass Shell\n{\n    public function random(): \\Sharp\\Random\n    {\n        return new \\Sharp\\Random();\n    }\n}\n",
     );
-    let sharp = "namespace App.Jobs;\n\nimport App.Ops.Environment;\nimport Lib.Shell;\n\nclass Job\n{\n    public Environment current(Shell shell) => shell.environment();\n}\n";
-    let php = "<?php\n\nnamespace App\\Jobs;\n\nuse App\\Ops\\Environment;\nuse Lib\\Shell;\n\nclass Job\n{\n    public function current(Shell $shell): Environment\n    {\n        return $shell->environment();\n    }\n}\n";
+    let sharp = "namespace App.Jobs;\n\nimport App.Ops.Random;\nimport Lib.Shell;\n\nclass Job\n{\n    public Random current(Shell shell) => shell.random();\n}\n";
+    let php = "<?php\n\nnamespace App\\Jobs;\n\nuse App\\Ops\\Random;\nuse Lib\\Shell;\n\nclass Job\n{\n    public function current(Shell $shell): Random\n    {\n        return $shell->random();\n    }\n}\n";
     let returned = |analyzed| -> Vec<String> {
-        worded(analyzed, &[environment, shell])
+        worded(analyzed, &[random, shell])
             .into_iter()
             .filter(|line| line.contains(" invalid-return-statement "))
             .collect()
@@ -18205,13 +18208,13 @@ fn a_standard_library_class_that_shares_its_short_name_is_named_by_its_full_name
     assert_eq!(
         returned(("src/App/Jobs/Job.php", php)),
         [
-            "12:16 invalid-return-statement Invalid return type for function `App\\Jobs\\Job::current`: expected `App\\Ops\\Environment`, but found `Sharp\\Environment`. | This has type `Sharp\\Environment` | The type `Sharp\\Environment` returned here is not compatible with the declared return type `App\\Ops\\Environment`. | Change the return value to match `App\\Ops\\Environment`, or update the function's return type declaration."
+            "12:16 invalid-return-statement Invalid return type for function `App\\Jobs\\Job::current`: expected `App\\Ops\\Random`, but found `Sharp\\Random`. | This has type `Sharp\\Random` | The type `Sharp\\Random` returned here is not compatible with the declared return type `App\\Ops\\Random`. | Change the return value to match `App\\Ops\\Random`, or update the function's return type declaration."
         ]
     );
     assert_eq!(
         returned(("src/App/Jobs/Job.sharp", sharp)),
         [
-            "8:48 invalid-return-statement Invalid return type for method `Job.current`: expected `Environment`, but found `Sharp.Environment`. | This has type `Sharp.Environment` | The type `Sharp.Environment` returned here is not compatible with the declared return type `Environment`. | Change the return value to match `Environment`, or update the method's return type declaration."
+            "8:43 invalid-return-statement Invalid return type for method `Job.current`: expected `Random`, but found `Sharp.Random`. | This has type `Sharp.Random` | The type `Sharp.Random` returned here is not compatible with the declared return type `Random`. | Change the return value to match `Random`, or update the method's return type declaration."
         ]
     );
 }
@@ -18922,13 +18925,12 @@ fn a_second_extern_of_a_target_in_another_file_is_refused_on_the_second() {
 }
 
 /// The standard library's `extern` of a target is always its first declaration, so a project's own one is refused on
-/// the project's line, whichever file name sorts first, and the message names the library's declaration.
+/// the project's line, whichever file name sorts first, and the message names the library's declaration. A project
+/// names no member the library declares, which are `DateTimeImmutable`'s, a class only the library names (decision 83).
 #[test]
 fn a_project_s_extern_of_what_the_standard_library_declares_is_refused_on_the_project_s_line() {
-    let stubs = (
-        "app/Stubs/Exceptions.sharp",
-        "namespace App.Stubs;\n\nimport DateTimeImmutable;\nimport LogicException;\n\nextern LogicException;\nextern DateTimeImmutable.modify uses Clock;\n",
-    );
+    let stubs =
+        ("app/Stubs/Exceptions.sharp", "namespace App.Stubs;\n\nimport LogicException;\n\nextern LogicException;\n");
 
     let refused: Vec<String> = analyze(&PLUGIN_REGISTRY, settings(), stubs, &[BUILTINS])
         .iter()
@@ -18936,10 +18938,7 @@ fn a_project_s_extern_of_what_the_standard_library_declares_is_refused_on_the_pr
         .collect();
     assert_eq!(
         refused,
-        [
-            "6:1 duplicate-extern `LogicException` is already declared pure by the standard library: delete this line.",
-            "7:1 duplicate-extern `DateTimeImmutable.modify` is already declared by the standard library, with `uses Clock`: delete this line.",
-        ]
+        ["5:1 duplicate-extern `LogicException` is already declared pure by the standard library: delete this line."]
     );
     assert_eq!(analyze(&PLUGIN_REGISTRY, settings(), BUILTINS, &[stubs]).len(), 0);
 }
@@ -20286,81 +20285,128 @@ fn an_object_a_declared_call_returns_carries_its_effect() {
 /// The standard library's declarations of PHP's built-in functions and exception classes, as `sharp/bin/builtins`
 /// writes them.
 const BUILTINS: (&str, &str) = (
-    "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Builtins.sharp",
-    include_str!("../../../../composer/library/Sharp/Builtins.sharp"),
+    "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Internal/Builtins.sharp",
+    include_str!("../../../../composer/library/Sharp/Internal/Builtins.sharp"),
 );
 
-/// Spec section 29: every PHP built-in exception class comes declared pure, so pure code may create and throw one, in
-/// the root namespace or another. Without the declaration the refusal names the class `new` names, not the class that
-/// declares its constructor.
+/// Spec section 29: every PHP built-in exception class comes declared pure, so pure code may create and throw one: a
+/// standard exception in a project, and one in a namespace in the standard library, the only code that names it
+/// (decision 83). Without the declaration the refusal names the class `new` names, not the class that declares its
+/// constructor.
 #[test]
 fn creating_a_built_in_exception_is_pure() {
     let gauge = (
         "app/Shop/Gauge.sharp",
-        "namespace App.Shop;\n\nimport JsonException;\nimport Random.RandomException;\nimport ValueError;\n\npublic class Gauge\n{\n    public int first(List<int> values) => values.count() > 0 ? values[0] : throw new ValueError(\"empty\");\n\n    public int seeded(int seed) => seed > 0 ? seed : throw new RandomException(\"no seed\");\n\n    public int parsed(string text) => text != \"\" ? 1 : throw new JsonException(\"blank\");\n\n    law first(Gauge gauge) => gauge.first([1]) == 1;\n\n    law seeded(Gauge gauge) => gauge.seeded(1) == 1;\n\n    law parsed(Gauge gauge) => gauge.parsed(\"1\") == 1;\n}\n",
+        "namespace App.Shop;\n\npublic class Gauge\n{\n    public int first(List<int> values) => values.count() > 0 ? values[0] : throw new ValueError(\"empty\");\n\n    public int parsed(string text) => text != \"\" ? 1 : throw new JsonException(\"blank\");\n\n    law first(Gauge gauge) => gauge.first([1]) == 1;\n\n    law parsed(Gauge gauge) => gauge.parsed(\"1\") == 1;\n}\n",
+    );
+    let seeds = (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/System/Seeds.sharp",
+        "namespace Sharp.System;\n\nimport Random.RandomException;\n\npublic class Seeds\n{\n    public int seeded(int seed) => seed > 0 ? seed : throw new RandomException(\"no seed\");\n\n    law seeded(Seeds seeds) => seeds.seeded(1) == 1;\n}\n",
     );
 
     assert_eq!(issues(gauge, &[BUILTINS]), Vec::<String>::new());
-    assert_eq!(effect_issues(&[gauge, BUILTINS]), Vec::<String>::new());
+    assert_eq!(issues(seeds, &[BUILTINS]), Vec::<String>::new());
+    assert_eq!(effect_issues(&[gauge, seeds, BUILTINS]), Vec::<String>::new());
     assert_eq!(
-        effect_issues(&[gauge]),
+        effect_issues(&[gauge, seeds]),
         [
-            "app/Shop/Gauge.sharp:9:82 impure-law: Law `first` calls `ValueError`, which has no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern ValueError;` when it has no effect, or name its effects after `uses`.",
-            "app/Shop/Gauge.sharp:11:60 impure-law: Law `seeded` calls `RandomException`, which has no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern RandomException;` when it has no effect, or name its effects after `uses`.",
-            "app/Shop/Gauge.sharp:13:62 impure-law: Law `parsed` calls `JsonException`, which has no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern JsonException;` when it has no effect, or name its effects after `uses`.",
+            "app/Shop/Gauge.sharp:5:82 impure-law: Law `first` calls `ValueError`, which has no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern ValueError;` when it has no effect, or name its effects after `uses`.",
+            "app/Shop/Gauge.sharp:7:62 impure-law: Law `parsed` calls `JsonException`, which has no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern JsonException;` when it has no effect, or name its effects after `uses`.",
+            "vendor/heyjordanparker/php-sharp-composer/library/Sharp/System/Seeds.sharp:7:60 impure-law: Law `seeded` calls `RandomException`, which has no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern RandomException;` when it has no effect, or name its effects after `uses`.",
         ]
     );
 }
 
 /// Spec section 29: a date is a value once created, so the standard library declares `DateTimeImmutable` pure, but
 /// each member that can read the clock is declared `uses Clock`: `modify`, the constructor and `createFromFormat`,
-/// whose text may say "now". Reading a date it is given keeps a method pure.
+/// whose text may say "now". Reading a date it is given keeps a method pure. Only the standard library names the
+/// class (decision 83), so its own files show it.
 #[test]
 fn a_date_member_that_can_read_the_clock_has_the_effect_clock() {
     let reading = (
-        "app/Shop/Reading.sharp",
-        "namespace App.Shop;\n\nimport DateTimeImmutable;\n\npublic interface Reading\n{\n    int moved(DateTimeImmutable given);\n\n    int made();\n\n    int read(DateTimeImmutable given);\n}\n",
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Time/Reading.sharp",
+        "namespace Sharp.Time;\n\nimport DateTimeImmutable;\n\npublic interface Reading\n{\n    int moved(DateTimeImmutable given);\n\n    int made();\n\n    int read(DateTimeImmutable given);\n}\n",
     );
     let stamped = (
-        "app/Shop/Stamped.sharp",
-        "namespace App.Shop;\n\nimport DateTimeImmutable;\n\npublic class Stamped : DateTimeImmutable\n{\n    public Stamped() : super(\"now\") { }\n}\n",
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Time/Stamped.sharp",
+        "namespace Sharp.Time;\n\nimport DateTimeImmutable;\n\npublic class Stamped : DateTimeImmutable\n{\n    public Stamped() : super(\"now\") { }\n}\n",
     );
     let pure = (
-        "app/Shop/PureReading.sharp",
-        "namespace App.Shop;\n\nimport DateTimeImmutable;\n\npublic class PureReading : Reading\n{\n    public int moved(DateTimeImmutable given) => given.modify(\"now\").getTimestamp();\n\n    public int made() => new Stamped().getTimestamp();\n\n    public int read(DateTimeImmutable given) => given.getTimestamp();\n}\n",
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Time/PureReading.sharp",
+        "namespace Sharp.Time;\n\nimport DateTimeImmutable;\n\npublic class PureReading : Reading\n{\n    public int moved(DateTimeImmutable given) => given.modify(\"now\").getTimestamp();\n\n    public int made() => new Stamped().getTimestamp();\n\n    public int read(DateTimeImmutable given) => given.getTimestamp();\n}\n",
     );
 
     assert_eq!(issues(pure, &[reading, stamped, BUILTINS]), Vec::<String>::new());
     assert_eq!(
         effect_issues(&[pure, reading, stamped, BUILTINS]),
         [
-            "app/Shop/PureReading.sharp:7:50 incompatible-effects: `PureReading.moved` calls `DateTimeImmutable.modify`, which has the effect `Clock`, so the pure `Reading.moved` cannot accept it.",
-            "app/Shop/PureReading.sharp:9:26 incompatible-effects: `PureReading.made` reaches `Stamped.Stamped`, which calls `DateTimeImmutable.__construct` with the effect `Clock`, so the pure `Reading.made` cannot accept it.",
+            "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Time/PureReading.sharp:7:50 incompatible-effects: `PureReading.moved` calls `DateTimeImmutable.modify`, which has the effect `Clock`, so the pure `Reading.moved` cannot accept it.",
+            "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Time/PureReading.sharp:9:26 incompatible-effects: `PureReading.made` reaches `Stamped.Stamped`, which calls `DateTimeImmutable.__construct` with the effect `Clock`, so the pure `Reading.made` cannot accept it.",
         ]
     );
 }
 
-/// Spec section 29: a PHP built-in class is a plain PHP class, so code imports it, names it to hold, pass, return and
-/// read what a library gives, and creates one, with `new` or a static factory, as any plain PHP class. Creating one has
-/// the effects its `extern` lists, as the test before this one shows for `DateTimeImmutable`'s `Clock`.
+/// Decision 83: PHP is reached only through the standard library, so a PHP built-in class, interface or namespace of
+/// them is the name a misspelled one is in a `.sharp` file: a type, `new`, a static call, `is` and a header with no
+/// import, and an import, each get the error the misspelling gets, with no message that recognizes PHP's class. The
+/// standard library's own files name and create them as any plain PHP class.
 #[test]
-fn a_php_built_in_class_is_named_and_created_as_any_plain_php_class() {
-    let calendar = (
-        "vendor/lib/src/Calendar.php",
-        "<?php\n\nnamespace Lib;\n\nfinal class Calendar\n{\n    public static function today(): \\DateTimeImmutable\n    {\n        return new \\DateTimeImmutable();\n    }\n}\n",
-    );
-    let stamp = (
-        "app/Shop/Stamp.sharp",
-        "namespace App.Shop;\n\nimport DateTimeImmutable;\nimport Lib.Calendar;\nimport PDO;\n\npublic class Stamp\n{\n    public DateTimeImmutable today() => Calendar.today();\n\n    public string year(DateTimeImmutable moment) => moment.format(\"Y\");\n\n    public int drivers() => PDO.getAvailableDrivers().count();\n\n    public DateTimeImmutable now() => new DateTimeImmutable();\n\n    public DateTimeImmutable? at(string text) => DateTimeImmutable.createFromFormat(\"Y-m-d\", text) ?: null;\n\n    public PDO open() => new PDO(\"sqlite::memory:\");\n}\n",
-    );
+fn a_php_built_in_class_is_the_name_a_misspelled_class_is() {
+    let used = |class: &str| {
+        leak(format!(
+            "namespace App.Shop;\n\npublic class Stamp : {class}\n{{\n    public {class} open() => new {class}(\"sqlite::memory:\");\n\n    public bool held(Any? value) => value is {class};\n\n    public int drivers() => {class}.getAvailableDrivers().count();\n}}\n"
+        ))
+    };
+    let imported =
+        |class: &str| leak(format!("namespace App.Shop;\n\nimport {class};\n\npublic class Stamp\n{{\n}}\n"));
 
-    assert_eq!(issues(stamp, &[calendar]), Vec::<String>::new());
+    let misspelled = refusals(("app/Shop/Stamp.sharp", used("PDQ")), &[]);
+    assert!(!misspelled.is_empty());
+    assert_eq!(
+        refusals(("app/Shop/Stamp.sharp", used("PDO")), &[]),
+        misspelled.iter().map(|refusal| refusal.replace("PDQ", "PDO")).collect::<Vec<_>>()
+    );
+    for (class, typo) in [
+        ("PDO", "PDQ"),
+        ("DateTimeImmutable", "DateTimeImmutabel"),
+        ("Random.Randomizer", "Random.Randomiser"),
+        ("Random", "Randon"),
+    ] {
+        let misspelled = refusals(("app/Shop/Stamp.sharp", imported(typo)), &[]);
+        assert!(!misspelled.is_empty(), "{typo}");
+        assert_eq!(
+            refusals(("app/Shop/Stamp.sharp", imported(class)), &[]),
+            misspelled.iter().map(|refusal| refusal.replace(typo, class)).collect::<Vec<_>>(),
+            "{class}"
+        );
+    }
+
+    let library = (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Data/Stamp.sharp",
+        "namespace Sharp.Data;\n\nimport DateTimeImmutable;\nimport PDO;\n\npublic class Stamp\n{\n    public string year(DateTimeImmutable moment) => moment.format(\"Y\");\n\n    public int drivers() => PDO.getAvailableDrivers().count();\n\n    public DateTimeImmutable? at(string text) => DateTimeImmutable.createFromFormat(\"Y-m-d\", text) ?: null;\n\n    public PDO open() => new PDO(\"sqlite::memory:\");\n}\n",
+    );
+    assert_eq!(issues(library, &[]), Vec::<String>::new());
 }
 
-/// The standard exceptions a bare name names are the exception classes in PHP's root namespace that `Builtins.sharp`
+/// Decision 83: the standard library names the interfaces a PHP# class implements for a plain PHP library, the root of
+/// every exception and the class that makes a class an attribute, as it names the standard exceptions, so a bare
+/// `Countable`, `JsonSerializable`, `Throwable` and `Attribute` name PHP's with no import.
+#[test]
+fn the_standard_library_names_the_interfaces_a_plain_php_library_needs_with_no_import() {
+    let tagged = ("app/Shop/Tagged.sharp", "namespace App.Shop;\n\n[Attribute]\npublic class Tagged\n{\n}\n");
+    let basket = (
+        "app/Shop/Basket.sharp",
+        "namespace App.Shop;\n\n[Tagged]\npublic class Basket : Countable, JsonSerializable\n{\n    public int count() => 0;\n\n    public Any? jsonSerialize() => null;\n\n    public static bool failed(Any? value) => value is Throwable;\n}\n",
+    );
+
+    assert_eq!(issues(tagged, &[]), Vec::<String>::new());
+    assert_eq!(issues(basket, &[tagged]), Vec::<String>::new());
+}
+
+/// The standard root classes a bare name names are the class-likes in PHP's root namespace that `Builtins.sharp`
 /// declares: each class it declares with no import, which is no function and no member.
 #[test]
-fn the_standard_exceptions_are_the_root_exception_classes_the_standard_library_declares() {
+fn the_standard_root_classes_are_the_root_classes_the_standard_library_declares() {
     let imported: HashSet<&str> = BUILTINS
         .1
         .lines()
@@ -20374,7 +20420,7 @@ fn the_standard_exceptions_are_the_root_exception_classes_the_standard_library_d
         .filter(|name| !name.contains('.') && !imported.contains(name))
         .collect();
     root.sort_unstable();
-    let mut standard = STANDARD_EXCEPTIONS.to_vec();
+    let mut standard = STANDARD_ROOT_CLASSES.to_vec();
     standard.sort_unstable();
 
     assert_eq!(standard, root);
@@ -20684,14 +20730,14 @@ fn a_static_method_value_has_its_method_s_effects_where_it_runs() {
 fn a_method_value_of_a_foreign_class_has_its_effect_where_it_runs() {
     let shelf = (
         "app/Shop/Shelf.sharp",
-        "namespace App.Shop;\n\npublic class Shelf\n{\n    public Shelf(private Environment environment) { }\n\n    public static string carried(Function<string(string)> body) => body(\"HOME\");\n\n    public string home => Shelf.carried(this.environment.require);\n\n    law reads(Shelf shelf) => shelf.home != \"\";\n}\n",
+        "namespace App.Shop;\n\nimport Sharp.System.Environment;\n\npublic class Shelf\n{\n    public Shelf(private Environment environment) { }\n\n    public static string carried(Function<string(string)> body) => body(\"HOME\");\n\n    public string home => Shelf.carried(this.environment.require);\n\n    law reads(Shelf shelf) => shelf.home != \"\";\n}\n",
     );
 
     assert_eq!(issues(shelf, &[]), Vec::<String>::new());
     assert_eq!(
         effect_issues(&[shelf]),
         [
-            "app/Shop/Shelf.sharp:11:31 impure-law: Law `reads` reaches `Shelf.home`, which calls `Environment.require` with the effect `Environment`. Laws hold only over pure code.",
+            "app/Shop/Shelf.sharp:13:31 impure-law: Law `reads` reaches `Shelf.home`, which calls `Environment.require` with the effect `Environment`. Laws hold only over pure code.",
         ]
     );
 }
@@ -20781,12 +20827,12 @@ const SERVICES_STUB: (&str, &str) = (
 
 /// A plain PHP method value runs the method, so a function type holds it only when it lists every effect the method's
 /// `extern` declares, as a call of the method has them. A method with no `extern` has an unknown effect, and a method
-/// of the `foreign` class `Sharp\Environment` has the effect `Environment`.
+/// of the `foreign` class `Sharp\System\Environment` has the effect `Environment`.
 #[test]
 fn a_plain_php_method_value_is_held_to_the_effects_its_extern_declares() {
     let pricing = (
         "app/Shop/Pricing.sharp",
-        "namespace App.Shop;\n\nimport Lib.Cache;\nimport Lib.Client;\nimport Lib.Store;\nimport Sharp.Environment;\n\npublic class Pricing\n{\n    public Pricing(private Client client, private Cache cache, private Store store, private Environment environment) { }\n\n    public static int apply(Function<int(int) uses Mail> step) => step(1);\n\n    public static string? read(Function<string?(string) uses Mail> lookup) => lookup(\"HOME\");\n\n    public int run() => Pricing.apply(this.client.get) + Pricing.apply(this.cache.get) + Pricing.apply(this.store.get);\n\n    public string? home() => Pricing.read(this.environment.variable);\n}\n",
+        "namespace App.Shop;\n\nimport Lib.Cache;\nimport Lib.Client;\nimport Lib.Store;\nimport Sharp.System.Environment;\n\npublic class Pricing\n{\n    public Pricing(private Client client, private Cache cache, private Store store, private Environment environment) { }\n\n    public static int apply(Function<int(int) uses Mail> step) => step(1);\n\n    public static string? read(Function<string?(string) uses Mail> lookup) => lookup(\"HOME\");\n\n    public int run() => Pricing.apply(this.client.get) + Pricing.apply(this.cache.get) + Pricing.apply(this.store.get);\n\n    public string? home() => Pricing.read(this.environment.variable);\n}\n",
     );
 
     assert_eq!(issues(pricing, &[SERVICES, SERVICES_STUB]), Vec::<String>::new());
@@ -21410,13 +21456,13 @@ fn a_law_whose_list_map_lambda_calls_an_undeclared_function_is_refused() {
 fn reading_the_environment_has_the_effect_environment() {
     let deploy = (
         "app/Ops/Deploy.sharp",
-        "namespace App.Ops;\n\npublic class Deploy\n{\n    public Deploy(private Environment environment) { }\n\n    public string region => this.environment.variable(\"AWS_REGION\") ?? \"us-east-1\";\n\n    law regional(Deploy deploy) => deploy.region != \"\";\n}\n",
+        "namespace App.Ops;\n\nimport Sharp.System.Environment;\n\npublic class Deploy\n{\n    public Deploy(private Environment environment) { }\n\n    public string region => this.environment.variable(\"AWS_REGION\") ?? \"us-east-1\";\n\n    law regional(Deploy deploy) => deploy.region != \"\";\n}\n",
     );
 
     assert_eq!(
         effect_issues(&[deploy]),
         [
-            "app/Ops/Deploy.sharp:9:36 impure-law: Law `regional` reaches `Deploy.region`, which calls `Environment.variable` with the effect `Environment`. Laws hold only over pure code."
+            "app/Ops/Deploy.sharp:11:36 impure-law: Law `regional` reaches `Deploy.region`, which calls `Environment.variable` with the effect `Environment`. Laws hold only over pure code."
         ]
     );
 }
@@ -21427,10 +21473,10 @@ fn reading_the_environment_has_the_effect_environment() {
 fn environment_require_is_called_on_an_environment_object() {
     let deploy = (
         "app/Ops/Deploy.sharp",
-        "namespace App.Ops;\n\npublic class Deploy\n{\n    public Deploy(private Environment environment) { }\n\n    public string key() => this.environment.require(\"APP_KEY\");\n\n    public string staticKey() => Environment.require(\"APP_KEY\");\n}\n",
+        "namespace App.Ops;\n\nimport Sharp.System.Environment;\n\npublic class Deploy\n{\n    public Deploy(private Environment environment) { }\n\n    public string key() => this.environment.require(\"APP_KEY\");\n\n    public string staticKey() => Environment.require(\"APP_KEY\");\n}\n",
     );
 
-    assert_eq!(issues(deploy, &[]), ["9:46 invalid-static-method-access", "9:34 mixed-return-statement"]);
+    assert_eq!(issues(deploy, &[]), ["11:46 invalid-static-method-access", "11:34 mixed-return-statement"]);
 }
 
 /// Spec section 29: code has a `foreign` class's effect by holding one of its objects, so a getter that calls or reads
@@ -21652,7 +21698,7 @@ fn a_foreign_object_is_an_ordinary_parameter_and_return_type() {
     );
     let stamp = (
         "app/Shop/Stamp.sharp",
-        "namespace App.Shop;\n\nimport Sharp.Time.Date;\n\npublic class Stamp\n{\n    public Stamp(private Clock clock) { }\n\n    public string stampedWith(Clock clock) => Date.format(clock.now(), \"Y-m-d\");\n\n    public Clock held() => this.clock;\n\n    public int later(Stamp other) => other.held().now() + 1;\n}\n",
+        "namespace App.Shop;\n\nimport Sharp.Time.Clock;\nimport Sharp.Time.Date;\n\npublic class Stamp\n{\n    public Stamp(private Clock clock) { }\n\n    public string stampedWith(Clock clock) => Date.format(clock.now(), \"Y-m-d\");\n\n    public Clock held() => this.clock;\n\n    public int later(Stamp other) => other.held().now() + 1;\n}\n",
     );
 
     assert_eq!(issues(stamp, &[date]), Vec::<String>::new());
@@ -21661,28 +21707,29 @@ fn a_foreign_object_is_an_ordinary_parameter_and_return_type() {
     let method = |name: &[u8]| {
         FunctionLikeIdentifier::Method(ascii_lowercase_word(b"App\\Shop\\Stamp"), ascii_lowercase_word(name))
     };
-    assert_eq!(effects.function_effects(&method(b"stampedWith")), Some(vec![word("Sharp\\Clock")]), "a parameter");
-    assert_eq!(effects.function_effects(&method(b"later")), Some(vec![word("Sharp\\Clock")]), "a returned one");
+    let clock = Some(vec![word("Sharp\\Time\\Clock")]);
+    assert_eq!(effects.function_effects(&method(b"stampedWith")), clock, "a parameter");
+    assert_eq!(effects.function_effects(&method(b"later")), clock, "a returned one");
 
     let stamps = (
         "app/Shop/Stamps.sharp",
-        "namespace App.Shop;\n\npublic interface Stamps\n{\n    int stamped(Clock clock);\n}\n",
+        "namespace App.Shop;\n\nimport Sharp.Time.Clock;\n\npublic interface Stamps\n{\n    int stamped(Clock clock);\n}\n",
     );
     let stamper = (
         "app/Shop/Stamper.sharp",
-        "namespace App.Shop;\n\npublic class Stamper : Stamps\n{\n    public int stamped(Clock clock) => clock.now();\n}\n",
+        "namespace App.Shop;\n\nimport Sharp.Time.Clock;\n\npublic class Stamper : Stamps\n{\n    public int stamped(Clock clock) => clock.now();\n}\n",
     );
     assert_eq!(
         effect_issues(&[stamps, stamper]),
         [
-            "app/Shop/Stamper.sharp:5:40 incompatible-effects: `Stamper.stamped` calls `Clock.now`, which has the effect `Clock`, so the pure `Stamps.stamped` cannot accept it."
+            "app/Shop/Stamper.sharp:7:40 incompatible-effects: `Stamper.stamped` calls `Clock.now`, which has the effect `Clock`, so the pure `Stamps.stamped` cannot accept it."
         ],
         "a pure interface method"
     );
 
     let kept = (
         "app/Shop/Kept.sharp",
-        "namespace App.Shop;\n\npublic class Kept\n{\n    public static Clock? clock = null;\n}\n",
+        "namespace App.Shop;\n\nimport Sharp.Time.Clock;\n\npublic class Kept\n{\n    public static Clock? clock = null;\n}\n",
     );
     assert!(
         issues(kept, &[]).iter().any(|issue| issue.ends_with(" foreign-in-static")),
@@ -21867,7 +21914,7 @@ fn the_files_a_call_reaches_are_its_methods_its_overrides_and_its_accessors() {
     );
     assert_eq!(callee_files.get(&file(b"App\\Shop\\Sale")), None);
     assert_eq!(effects.function_effects(&method(b"add")), Some(Vec::new()));
-    assert_eq!(effects.function_effects(&method(b"ring")), Some(vec![word("Sharp\\Clock")]));
+    assert_eq!(effects.function_effects(&method(b"ring")), Some(vec![word("Sharp\\Time\\Clock")]));
 }
 
 /// An operator on an instance runs the operator its class declares (spec section 19), so a getter that applies one
@@ -22065,7 +22112,7 @@ fn a_call_of_a_method_of_a_class_that_shares_its_short_name_names_the_class_in_f
     assert_eq!(
         effect_issues(&[timer, CLOCK_SOURCE, VENDOR_CLOCK, APP_CLOCK]),
         [
-            "app/Shop/Timer.sharp:9:32 impure-law: Law `begins` reaches `Timer.started`, which calls `Vendor.Clock.now` with no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern VendorClock;` when it has no effect, or name its effects after `uses`. Add `import Vendor.Clock as VendorClock;` to the file."
+            "app/Shop/Timer.sharp:9:32 impure-law: Law `begins` reaches `Timer.started`, which calls `Vendor.Clock.now` with no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern Clock;` when it has no effect, or name its effects after `uses`. Add `import Vendor.Clock;` to the file."
         ]
     );
 }
@@ -22139,7 +22186,7 @@ fn a_law_reaching_a_call_in_another_file_names_the_class_as_the_law_file_does() 
     assert_eq!(
         effect_issues(&[cart, order, VENDOR_CLOCK, APP_CLOCK]),
         [
-            "app/Shop/Cart.sharp:9:30 impure-law: Law `stamps` reaches `Order.stamp`, which calls `Vendor.Clock.now` with no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern VendorClock;` when it has no effect, or name its effects after `uses`. Add `import Vendor.Clock as VendorClock;` to the file."
+            "app/Shop/Cart.sharp:9:30 impure-law: Law `stamps` reaches `Order.stamp`, which calls `Vendor.Clock.now` with no `extern` declaration. Laws hold only over pure code. Help: Declare it in a .sharp file: `extern Clock;` when it has no effect, or name its effects after `uses`. Add `import Vendor.Clock;` to the file."
         ]
     );
 }
@@ -23356,8 +23403,8 @@ fn code_without_a_body_allows_emit_with_uses_events() {
 
 /// The standard library's `Json`, as `sharp/composer/` ships it.
 const JSON: (&str, &str) = (
-    "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Json/Json.sharp",
-    include_str!("../../../../composer/library/Sharp/Json/Json.sharp"),
+    "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Encoding/Json.sharp",
+    include_str!("../../../../composer/library/Sharp/Encoding/Json.sharp"),
 );
 
 /// Spec sections 10 and 24: `Json.encode` takes any value, and a JSON object's key is text, so a `Map` keyed by an
@@ -23371,7 +23418,7 @@ fn json_encode_refuses_a_map_keyed_by_an_object_without_to_string() {
     );
     let report = (
         "app/Shop/Report.sharp",
-        "namespace App.Shop;\n\nimport Sharp.Json.Json;\n\npublic class Report\n{\n    public static void run(Map<Point, int> points, Map<Tag, int> tags, List<Map<Point, int>> nested, Map<string, Point> values, Map<int, string> numbered, Any? raw, Board board, Map<float, int> floats, Map<Plain, int> plains, Map<bool, int> flags, Map<Coded, int> coded)\n    {\n        Report.keep(Json.encode(tags));\n        Report.keep(Json.encode(values));\n        Report.keep(Json.encode(numbered));\n        Report.keep(Json.encode(raw));\n        Report.keep(Json.encode(points));\n        Report.keep(Json.encode(nested));\n        Report.keep(Json.encode(board));\n        Report.keep(Json.encode(floats));\n        Report.keep(Json.encode(plains));\n        Report.keep(Json.encode(flags));\n        Report.keep(Json.encode(coded));\n    }\n\n    public static void keep(string json)\n    {\n    }\n}\n",
+        "namespace App.Shop;\n\nimport Sharp.Encoding.Json;\n\npublic class Report\n{\n    public static void run(Map<Point, int> points, Map<Tag, int> tags, List<Map<Point, int>> nested, Map<string, Point> values, Map<int, string> numbered, Any? raw, Board board, Map<float, int> floats, Map<Plain, int> plains, Map<bool, int> flags, Map<Coded, int> coded)\n    {\n        Report.keep(Json.encode(tags));\n        Report.keep(Json.encode(values));\n        Report.keep(Json.encode(numbered));\n        Report.keep(Json.encode(raw));\n        Report.keep(Json.encode(points));\n        Report.keep(Json.encode(nested));\n        Report.keep(Json.encode(board));\n        Report.keep(Json.encode(floats));\n        Report.keep(Json.encode(plains));\n        Report.keep(Json.encode(flags));\n        Report.keep(Json.encode(coded));\n    }\n\n    public static void keep(string json)\n    {\n    }\n}\n",
     );
     let point = "invalid-json-key `Json.encode` writes each `Map` key as JSON text, and `Point` has no `toString()`. | Declare `public string toString()` on `Point`, or encode a `Map` keyed by text.";
 
@@ -23385,6 +23432,29 @@ fn json_encode_refuses_a_map_keyed_by_an_object_without_to_string() {
             "16:33 invalid-json-key `Json.encode` writes each `Map` key as JSON text, and a `float` key has none. | Encode a `Map` keyed by an `int`, a `string`, a backed enum or a class with `toString()`.".to_owned(),
             "17:33 invalid-json-key `Json.encode` writes each `Map` key as JSON text, and `Plain` has no `toString()`. | Declare `public string toString()` on `Plain`, or encode a `Map` keyed by text.".to_owned(),
             "18:33 invalid-json-key `Json.encode` writes each `Map` key as JSON text, and a `bool` key has none. | Encode a `Map` keyed by an `int`, a `string`, a backed enum or a class with `toString()`.".to_owned(),
+        ]
+    );
+}
+
+/// The checker reads which method writes its argument as JSON text from the `EncodedAsJson` mark on its parameter,
+/// never from a copy of the library's names, so a marked parameter of any standard library method refuses a `Map` key
+/// with no JSON text, and the refusal names that method.
+#[test]
+fn a_parameter_marked_encoded_as_json_refuses_a_map_key_with_no_json_text() {
+    let feed = (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Encoding/Feed.sharp",
+        "namespace Sharp.Encoding;\n\nimport Sharp.Internal.EncodedAsJson;\n\npublic static class Feed\n{\n    public static string write(int indent, [EncodedAsJson] Any? value) => Json.encode(value);\n}\n",
+    );
+    let report = (
+        "app/Shop/Report.sharp",
+        "namespace App.Shop;\n\nimport Sharp.Encoding.Feed;\n\npublic class Report\n{\n    public static string run(Map<float, int> floats) => Feed.write(2, floats);\n}\n",
+    );
+
+    assert_eq!(worded(feed, &[JSON]), Vec::<String>::new());
+    assert_eq!(
+        refusals(report, &[feed, JSON]),
+        [
+            "7:71 invalid-json-key `Feed.write` writes each `Map` key as JSON text, and a `float` key has none. | Encode a `Map` keyed by an `int`, a `string`, a backed enum or a class with `toString()`."
         ]
     );
 }
@@ -23408,7 +23478,7 @@ const SCOPE: (&str, &str) = (
 fn scope_run_returns_what_its_body_returns_and_has_its_effects() {
     let worker = (
         "app/Jobs/Worker.sharp",
-        "namespace App.Jobs;\n\nimport Sharp.Scope;\n\npublic class Worker\n{\n    public Worker(private Environment environment) { }\n\n    public int counted => Scope.run(() => 1);\n\n    public string home => Scope.run(() => this.environment.require(\"HOME\"));\n\n    law pure(Worker worker) => worker.counted > 0;\n\n    law reads(Worker worker) => worker.home != \"\";\n}\n",
+        "namespace App.Jobs;\n\nimport Sharp.Scope;\nimport Sharp.System.Environment;\n\npublic class Worker\n{\n    public Worker(private Environment environment) { }\n\n    public int counted => Scope.run(() => 1);\n\n    public string home => Scope.run(() => this.environment.require(\"HOME\"));\n\n    law pure(Worker worker) => worker.counted > 0;\n\n    law reads(Worker worker) => worker.home != \"\";\n}\n",
     );
 
     assert_eq!(worded(SCOPE, &[]), Vec::<String>::new());
@@ -23416,7 +23486,7 @@ fn scope_run_returns_what_its_body_returns_and_has_its_effects() {
     assert_eq!(
         effect_issues(&[worker, SCOPE]),
         [
-            "app/Jobs/Worker.sharp:15:33 impure-law: Law `reads` reaches `Worker.home`, which calls `Environment.require` with the effect `Environment`. Laws hold only over pure code.",
+            "app/Jobs/Worker.sharp:16:33 impure-law: Law `reads` reaches `Worker.home`, which calls `Environment.require` with the effect `Environment`. Laws hold only over pure code.",
         ]
     );
 }
@@ -23689,7 +23759,7 @@ fn a_binding_gives_its_service_a_class_a_list_of_classes_or_one_expression_of_th
 /// it, the nearest one winning and a binding `for` the class before any other. A bound class's parameters resolve from
 /// its own namespace, and a binding's from its module's. The standard library's module binds
 /// `Environment` for every namespace. A class no module binds is ordinary code, checked by nothing here. Each row is
-/// the other modules of the project, `App.Shop`'s bindings from line 13, and the refusals they get.
+/// the other modules of the project, `App.Shop`'s bindings from line 14, and the refusals they get.
 #[test]
 fn every_parameter_of_a_bound_class_or_a_binding_needs_a_binding() {
     let margin_rule = (
@@ -23698,13 +23768,13 @@ fn every_parameter_of_a_bound_class_or_a_binding_needs_a_binding() {
     );
     let library = (
         "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Module.sharp",
-        "namespace Sharp;\n\nmodule\n{\n    singleton Environment = Environment;\n}\n",
+        "namespace Sharp;\n\nimport Sharp.System.Environment;\n\nmodule\n{\n    singleton Environment = Environment;\n}\n",
     );
     let module = |path: &'static str, namespace: &str, members: &str| {
         (
             path,
             leak(format!(
-                "namespace {namespace};\n\nimport App.Mail.Mailer;\nimport App.Mail.SmtpMailer;\nimport App.Pricing.PriceRule;\nimport App.Pricing.TaxRule;\nimport App.Pricing.MarginRule;\nimport App.Cache.RedisStore;\nimport App.Flags;\n\nmodule\n{{\n{members}\n}}\n"
+                "namespace {namespace};\n\nimport App.Mail.Mailer;\nimport App.Mail.SmtpMailer;\nimport App.Pricing.PriceRule;\nimport App.Pricing.TaxRule;\nimport App.Pricing.MarginRule;\nimport App.Cache.RedisStore;\nimport App.Flags;\nimport Sharp.System.Environment;\n\nmodule\n{{\n{members}\n}}\n"
             )),
         )
     };
@@ -23721,32 +23791,32 @@ fn every_parameter_of_a_bound_class_or_a_binding_needs_a_binding() {
         "app/Shop/CouponRule.sharp",
         "namespace App.Shop;\n\nimport App.Pricing.PriceRule;\n\npublic class CouponRule : PriceRule\n{\n    public CouponRule(private string code) { }\n}\n",
     );
-    let untyped = "13:24 missing-service `LegacyMailer` takes `dsn` with no type, which no binding can give: the container can't build `LegacyMailer`. | Bind `Mailer` to an expression that creates it, as in `singleton Mailer(…) = new LegacyMailer(…);`.";
-    let code = "13:43 missing-service `CouponRule` takes a `string`, which no binding can give: the container can't build `CouponRule`. | Bind `List<PriceRule>` to an expression that creates it, as in `singleton List<PriceRule>(…) = [new TaxRule(), new CouponRule(…)];`.";
+    let untyped = "14:24 missing-service `LegacyMailer` takes `dsn` with no type, which no binding can give: the container can't build `LegacyMailer`. | Bind `Mailer` to an expression that creates it, as in `singleton Mailer(…) = new LegacyMailer(…);`.";
+    let code = "14:43 missing-service `CouponRule` takes a `string`, which no binding can give: the container can't build `CouponRule`. | Bind `List<PriceRule>` to an expression that creates it, as in `singleton List<PriceRule>(…) = [new TaxRule(), new CouponRule(…)];`.";
     let mailer = |line: u32, column: u32| {
         format!(
             "{line}:{column} missing-service `SendReceipt` needs a `Mailer`, and no module binds one: the container can't build `SendReceipt`. | Bind `Mailer` in a module of `SendReceipt`'s namespace or one above it, as in `singleton Mailer = …;`."
         )
     };
-    let flags = "13:43 missing-service `MarginRule` needs a `Flags`, and no module binds one: the container can't build `MarginRule`. | Bind `Flags` in a module of `MarginRule`'s namespace or one above it, as in `transient Flags = Flags;`.";
-    let rules = "13:22 missing-service `Cart` needs a `List<PriceRule>`, and no module binds one: the container can't build `Cart`. | Bind `List<PriceRule>` in a module of `Cart`'s namespace or one above it, as in `singleton List<PriceRule> = …;`.";
-    let smtp = "13:22 missing-service `Mailer` needs a `SmtpMailer`, and no module binds one: the container can't build `Mailer`. | Bind `SmtpMailer` in a module of this namespace or one above it, as in `transient SmtpMailer = SmtpMailer;`.";
-    let environment = "13:26 missing-service `RedisStore` needs an `Environment`, and no module binds one: the container can't build `RedisStore`. | Bind `Environment` in a module of this namespace or one above it, as in `transient Environment = Environment;`.";
-    let url = "13:28 missing-service `RedisStore` takes a `string`, which no binding can give: the container can't build `RedisStore`. | Bind `RedisStore` to an expression that creates it, as in `transient RedisStore(…) = new RedisStore(…);`.";
-    let value = "13:22 missing-service `Mailer` takes a `string`, which no binding can give: the container can't build `Mailer`. | Take a service that gives the value, such as `Environment`, and read the value from it.";
+    let flags = "14:43 missing-service `MarginRule` needs a `Flags`, and no module binds one: the container can't build `MarginRule`. | Bind `Flags` in a module of `MarginRule`'s namespace or one above it, as in `transient Flags = Flags;`.";
+    let rules = "14:22 missing-service `Cart` needs a `List<PriceRule>`, and no module binds one: the container can't build `Cart`. | Bind `List<PriceRule>` in a module of `Cart`'s namespace or one above it, as in `singleton List<PriceRule> = …;`.";
+    let smtp = "14:22 missing-service `Mailer` needs a `SmtpMailer`, and no module binds one: the container can't build `Mailer`. | Bind `SmtpMailer` in a module of this namespace or one above it, as in `transient SmtpMailer = SmtpMailer;`.";
+    let environment = "14:26 missing-service `RedisStore` needs an `Environment`, and no module binds one: the container can't build `RedisStore`. | Bind `Environment` in a module of this namespace or one above it, as in `transient Environment = Environment;`.";
+    let url = "14:28 missing-service `RedisStore` takes a `string`, which no binding can give: the container can't build `RedisStore`. | Bind `RedisStore` to an expression that creates it, as in `transient RedisStore(…) = new RedisStore(…);`.";
+    let value = "14:22 missing-service `Mailer` takes a `string`, which no binding can give: the container can't build `Mailer`. | Take a service that gives the value, such as `Environment`, and read the value from it.";
     let store =
         "    singleton RedisStore(Environment environment) = new RedisStore(environment.require(\"REDIS_URL\"));";
 
     for (modules, members, expected) in [
         (vec![], "    singleton Mailer = SmtpMailer;", vec![]),
-        (vec![], "    transient SendReceipt = SendReceipt;", vec![mailer(13, 29)]),
+        (vec![], "    transient SendReceipt = SendReceipt;", vec![mailer(14, 29)]),
         (vec![], "    singleton Mailer = SmtpMailer;\n    transient SendReceipt = SendReceipt;", vec![]),
         (vec![parent], "    transient SendReceipt = SendReceipt;", vec![]),
-        (vec![sibling], "    transient SendReceipt = SendReceipt;", vec![mailer(13, 29)]),
+        (vec![sibling], "    transient SendReceipt = SendReceipt;", vec![mailer(14, 29)]),
         (
             vec![],
             "    singleton Mailer for Cart = SmtpMailer;\n    transient SendReceipt = SendReceipt;",
-            vec![mailer(14, 29)],
+            vec![mailer(15, 29)],
         ),
         (
             vec![],

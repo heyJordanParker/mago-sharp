@@ -18,7 +18,7 @@ use indoc::indoc;
 
 use mago_database::file::File;
 use mago_database::file::FileType;
-use mago_names::INLINED_COLLECTION_METHODS;
+use mago_names::INLINED;
 use mago_sharp_bridge::InlineForms;
 use mago_sharp_bridge::Unit;
 use mago_sharp_bridge::inline_forms;
@@ -1039,7 +1039,7 @@ fn a_module_returns_each_binding_as_its_namespace_service_class_lifetime_and_val
 /// names its own namespace. Each row is a module file, its code and the namespace its table names.
 #[test]
 fn the_standard_library_module_binds_its_services_for_the_root_namespace() {
-    let binding = "module\n{\n    singleton Environment = Environment;\n}\n";
+    let binding = "import Sharp.System.Environment;\n\nmodule\n{\n    singleton Environment = Environment;\n}\n";
     for (path, namespace, expected) in [
         ("vendor/heyjordanparker/php-sharp-composer/library/Sharp/Module.sharp", "Sharp", "ZVAL \"\"\n"),
         ("app/Module.sharp", "App", "ZVAL \"app\"\n"),
@@ -6754,11 +6754,24 @@ fn a_list_counts_with_php_count_and_a_map_with_its_method() {
     );
 }
 
-/// Each method `INLINED_COLLECTION_METHODS` names lowers to PHP on the array, never to a call of the method itself.
+/// Each method the prelude marks `Inlined`, each one of `List`, a PHP array, lowers to PHP on the array, never to a call
+/// of the method itself.
 #[test]
 fn every_inlined_collection_method_lowers_to_php_on_the_array() {
-    for (collection, method) in INLINED_COLLECTION_METHODS {
-        let argument = match method {
+    let inlined: Vec<(String, String)> = common::PRELUDE
+        .metadata
+        .function_likes
+        .iter()
+        .filter(|(_, metadata)| metadata.has_attribute(INLINED.as_bytes()))
+        .map(|((class, _), metadata)| {
+            (String::from_utf8_lossy(class.as_bytes()).into_owned(), metadata.original_name.to_string())
+        })
+        .collect();
+    assert_eq!(inlined.len(), 11, "{inlined:?}");
+    for (class, method) in &inlined {
+        assert!(class.eq_ignore_ascii_case("Sharp\\Internal\\ListMethods"), "{class}.{method}");
+        let collection = "List";
+        let argument = match method.as_str() {
             "remove" | "contains" | "indexOf" | "getOrNull" => "1",
             _ => "",
         };
@@ -9913,7 +9926,7 @@ fn a_function_type_is_the_closure_class() {
         indoc! {r#"
             SHARP_TYPE_ARGS
               ZVAL "Closure"
-              ZVAL "Function<Function<int(string, int) uses Sharp.Http>(Function<int(string, int) uses Sharp.Http>, Function<void()>?)>"
+              ZVAL "Function<Function<int(string, int) uses Sharp.Net.Http>(Function<int(string, int) uses Sharp.Net.Http>, Function<void()>?)>"
         "#}
     );
 }
@@ -9978,7 +9991,7 @@ fn a_map_of_function_types_with_two_effects_is_the_map_class() {
         indoc! {r#"
             SHARP_TYPE_ARGS
               ZVAL "Sharp\\Map"
-              ZVAL "Map<string, Function<App.Shop.Charge(App.Shop.Cart) uses Sharp.Http, Sharp.Mail>>"
+              ZVAL "Map<string, Function<App.Shop.Charge(App.Shop.Cart) uses Sharp.Net.Http, Sharp.Net.Mail>>"
         "#}
     );
     assert_eq!(declaration, "PROP_DECL\n  PROP_ELEM\n    ZVAL \"handlers\"\n    null\n    null\n    null\n");
@@ -18853,17 +18866,17 @@ fn a_file_lowers_to_the_same_bytes_from_any_workspace_root_and_names_no_path() {
 }
 
 /// ```php
-/// $settings = \Sharp\Environment::class;
+/// $settings = \Sharp\Random::class;
 /// $lines = \Sharp\List::wrap($extra);
 /// $type = \Sharp\Class::of($this);
 /// return 1;
 /// ```
 #[test]
-fn environment_list_and_class_are_the_classes_of_the_sharp_namespace() {
+fn random_list_and_class_are_the_classes_of_the_sharp_namespace() {
     assert_eq!(
         body_in(
             RUN,
-            "        const settings = typeof(Environment);\n        const lines = List.wrap(extra);\n        const type = Class.of(this);\n        return 1;\n",
+            "        const settings = typeof(Random);\n        const lines = List.wrap(extra);\n        const type = Class.of(this);\n        return 1;\n",
             &[]
         ),
         indoc! {r#"
@@ -18872,7 +18885,7 @@ fn environment_list_and_class_are_the_classes_of_the_sharp_namespace() {
                 VAR
                   ZVAL "settings"
                 CLASS_NAME
-                  ZVAL "Sharp\\Environment"
+                  ZVAL "Sharp\\Random"
               ASSIGN
                 VAR
                   ZVAL "lines"
@@ -24950,7 +24963,7 @@ fn a_test_of_a_function_type_is_the_engine_test_of_its_type_text() {
                 SHARP_IS_TYPE
                   VAR
                     ZVAL "extra"
-                  ZVAL "Function<int(int) uses Sharp.Http>"
+                  ZVAL "Function<int(int) uses Sharp.Net.Http>"
         "#}
     );
 }

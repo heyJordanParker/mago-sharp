@@ -20,6 +20,7 @@ use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
 use crate::utils::names::imports_by_default;
+use crate::utils::names::is_hidden_php_class;
 use crate::utils::names::is_php_closure;
 use crate::utils::names::is_sharp_internal;
 use crate::utils::names::library_namespace;
@@ -91,13 +92,14 @@ where
 /// and constants. A single function or constant is read through its namespace instead, a namespace of classes only is
 /// imported class by class, and an import that names nothing is refused. A capitalized last part names a class, as
 /// spec section 24 capitalizes every type, so `import Log;` never names PHP's `log()`, and PHP's `Closure` is no class
-/// it names. Returns whether it reported.
+/// it names. A class PHP builds in is one only the standard library names (decision 83), so outside it the import names
+/// nothing. Returns whether it reported.
 pub(crate) fn check_sharp_import<A>(context: &mut Context<'_, '_, A>, name: &Identifier<'_>) -> bool
 where
     A: Arena,
 {
     let fqn = php_name(name);
-    if (context.codebase.class_like_exists(&fqn) && !is_php_closure(&fqn))
+    if (context.codebase.class_like_exists(&fqn) && !is_php_closure(&fqn) && !is_hidden_php_class(context, &fqn))
         || holds_function_or_constant(context.codebase, &fqn)
     {
         return false;
@@ -197,8 +199,8 @@ pub(crate) fn holds_function_or_constant(codebase: &CodebaseMetadata, namespace:
 }
 
 /// The imports of the class-likes directly in the namespace `namespace` that a file imports to name, as
-/// `` `import Sharp.Json.Json;` ``, in the order of their names, or `None` when it holds no class-like. A module, which
-/// no code names, and a default name, which needs no import, are left out.
+/// `` `import Sharp.Encoding.Json;` ``, in the order of their names, or `None` when it holds no class-like the file can
+/// name. A module, which no code names, and a default name, which needs no import, are left out.
 fn imports_of_namespace<A>(context: &Context<'_, '_, A>, namespace: &[u8]) -> Option<Vec<String>>
 where
     A: Arena,
@@ -211,6 +213,7 @@ where
             let name = class.original_name.as_bytes();
 
             name.iter().rposition(|byte| *byte == b'\\').is_some_and(|end| name[..end].eq_ignore_ascii_case(namespace))
+                && !is_hidden_php_class(context, name)
         })
         .collect();
     if classes.is_empty() {
