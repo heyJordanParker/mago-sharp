@@ -98,6 +98,7 @@ impl Body<'_, '_> {
     /// A list pattern is Lean's `::` pattern of the elements before its rest. The elements after the rest are the last
     /// ones of the list those leave, once it holds them all, and the rest is what comes before them.
     fn list_test(&mut self, subject: &str, r#type: &TUnion, list: &ListPattern) -> Option<Test> {
+        let written = self.element_subject.take();
         let atomics: Vec<&TAtomic> = r#type.types.iter().filter(|atomic| !atomic.is_null()).collect();
         let [TAtomic::Array(TArray::List(list_type))] = atomics.as_slice() else {
             self.unmodeled(list.span(), "a list pattern on a value that is no List".to_owned(), issues::TYPE_TEST);
@@ -116,8 +117,9 @@ impl Body<'_, '_> {
 
         let mut parts = Test::default();
         let mut leading = Vec::new();
-        for pattern in before {
-            leading.push(self.element(element, pattern, &mut parts)?);
+        for (place, pattern) in before.iter().enumerate() {
+            let unnamed = written.as_ref().map_or_else(|| "_".to_owned(), |written| format!("«{written}[{place}]»"));
+            leading.push(self.element(element, pattern, unnamed, &mut parts)?);
         }
         let name = rest.and_then(|rest| rest.variable.map(|variable| names::identifier(variable.value)));
 
@@ -164,9 +166,15 @@ impl Body<'_, '_> {
         Some(test)
     }
 
-    /// The Lean pattern of one element of a list pattern, whose elements are of `r#type`: the element's name, or `_`,
-    /// when the pattern holds for every element, else a fresh name whose test `parts` takes.
-    fn element(&mut self, r#type: &TUnion, pattern: &ListPatternElement, parts: &mut Test) -> Option<String> {
+    /// The Lean pattern of one element of a list pattern, whose elements are of `r#type`: the element's name, or
+    /// `unnamed`, when the pattern holds for every element, else a fresh name whose test `parts` takes.
+    fn element(
+        &mut self,
+        r#type: &TUnion,
+        pattern: &ListPatternElement,
+        unnamed: String,
+        parts: &mut Test,
+    ) -> Option<String> {
         let ListPatternElement::Pattern(pattern) = pattern else {
             unreachable!("a list pattern has at most one rest");
         };
@@ -175,7 +183,7 @@ impl Body<'_, '_> {
             && let [atomic] = r#type.types.as_ref()
             && self.names_type(hint, atomic)
         {
-            return Some(variable.map_or_else(|| "_".to_owned(), |variable| names::identifier(variable.value)));
+            return Some(variable.map_or(unnamed, |variable| names::identifier(variable.value)));
         }
 
         let name = self.fresh();

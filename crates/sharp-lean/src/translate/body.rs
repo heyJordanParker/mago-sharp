@@ -103,6 +103,9 @@ pub(crate) struct Body<'body, 'program> {
     pub(super) accumulators: Vec<u32>,
     /// Whether the body computes ints exactly, as [`Body::computes_exactly`] says.
     exact: bool,
+    /// The subject, as PHP# writes it, whose next list pattern names each element it leaves unnamed, as
+    /// [`Body::names_elements_of`] says.
+    pub(super) element_subject: Option<String>,
 }
 
 impl<'body, 'program> Body<'body, 'program> {
@@ -125,6 +128,7 @@ impl<'body, 'program> Body<'body, 'program> {
             path: Path::new(checked.names(), []),
             accumulators: Vec::new(),
             exact: false,
+            element_subject: None,
         }
     }
 
@@ -176,6 +180,12 @@ impl<'body, 'program> Body<'body, 'program> {
     /// PHP's, and the law for a smaller value holds wherever the code it calls runs, as a proof by recursion needs.
     pub(crate) fn computes_exactly(&mut self) {
         self.exact = true;
+    }
+
+    /// Names each element the next list pattern leaves unnamed before its rest by its place in `subject`, as PHP#
+    /// writes it, so a goal of a law's case reads `lines[0]` where the arm `[Line, ...rest]` names no element.
+    pub(crate) fn names_elements_of(&mut self, subject: &str) {
+        self.element_subject = Some(subject.to_owned());
     }
 
     /// The Lean type of `hint`.

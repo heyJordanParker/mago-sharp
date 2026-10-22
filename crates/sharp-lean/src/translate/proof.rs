@@ -288,6 +288,7 @@ impl<'prover, 'program, 'ast, 'arena> Prover<'prover, 'program, 'ast, 'arena> {
                 default = Some(block);
                 continue;
             };
+            body.names_elements_of(&written);
             let Some(mut test) = body.test(&subject, r#type, arm.pattern) else {
                 tested = false;
                 break;

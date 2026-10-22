@@ -3197,7 +3197,7 @@ const TOTAL_JOINS_FIRST: &str = "law totalJoinsFirst(List<Money> a, List<Money> 
 /// the list's rest.
 const LINES: &str = "namespace App.Shared;\n\npublic class Line\n{\n    public Line(public int net { get; }, public int tax { get; }) { }\n\n    public static int nets(List<Line> lines) => match (lines) {\n        [] => 0,\n        [Line first, ...List<Line> rest] => first.net + Line.nets(rest),\n        default => 0,\n    };\n\n    public static int taxes(List<Line> lines) => match (lines) {\n        [] => 0,\n        [Line first, ...List<Line> rest] => first.tax + Line.taxes(rest),\n        default => 0,\n    };\n\n    public static int gross(List<Line> lines) => match (lines) {\n        [] => 0,\n        [Line first, ...List<Line> rest] => first.net + first.tax + Line.gross(rest),\n        default => 0,\n    };\n\n    law grossIsNetsAndTaxes(List<Line> lines) => Line.gross(lines) == Line.nets(lines) + Line.taxes(lines)\n    {\n        match (lines) {\n            [] => { return; },\n            [Line, ...List<Line> rest] => { Line.grossIsNetsAndTaxes(rest); },\n            default => { return; },\n        }\n    }\n}\n";
 
-const GROSS_IS_NETS: &str = "law grossIsNets(List<Line> lines) => Line.gross(lines) == Line.nets(lines)\n    {\n        match (lines) {\n            [] => { return; },\n            [Line first, ...List<Line> rest] => { Line.grossIsNets(rest); },\n            default => { return; },\n        }\n    }";
+const GROSS_IS_NETS: &str = "law grossIsNets(List<Line> lines) => Line.gross(lines) == Line.nets(lines)\n    {\n        match (lines) {\n            [] => { return; },\n            [Line, ...List<Line> rest] => { Line.grossIsNets(rest); },\n            default => { return; },\n        }\n    }";
 
 /// A law's claim reads ints as the exact `Int`s they hold, so the law for the list's rest holds wherever `total` runs,
 /// and the case `[Money, ...rest]` adds `first.amount` to both sides of it. Read with PHP's checked `+`, the law for the
@@ -3213,8 +3213,9 @@ fn compile_proves_by_recursion_that_a_sum_of_two_fields_is_the_sum_of_their_sums
     assert_proven("Line", LINES, GROSS_IS_NETS);
 }
 
-/// A case a sum law leaves open prints its goal in PHP#: the claim's exact ints as the code writes them, and each value a
-/// step binds where it is used, though two steps bind theirs under one name.
+/// A case a sum law leaves open prints its goal in PHP#: the claim's exact ints as the code writes them, each value a
+/// step binds where it is used, though two steps bind theirs under one name, and an element the arm leaves unnamed by
+/// its place in the list, as `lines[0]`.
 #[test]
 fn a_case_a_sum_law_leaves_open_names_its_goal_in_php_sharp() {
     let with = |source: &str, twin: &str| format!("{}    {twin}\n}}\n", source.strip_suffix("}\n").unwrap_or(source));
@@ -3229,7 +3230,7 @@ fn a_case_a_sum_law_leaves_open_names_its_goal_in_php_sharp() {
     assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
     for expected in [
         "app/Shared/Money.sharp:21:5: error[law-unproven]: law totalJoinsFirst is not proven\n = when a is [], still to show: Money.total([...a, ...b]) == Money.total(a)\n",
-        "app/Shared/Line.sharp:33:5: error[law-unproven]: law grossIsNets is not proven\n = when lines is [Line first, ...List<Line> rest], still to show: first.net + first.tax + Line.gross(rest) == first.net + Line.nets(rest)\n",
+        "app/Shared/Line.sharp:33:5: error[law-unproven]: law grossIsNets is not proven\n = when lines is [Line, ...List<Line> rest], still to show: lines[0].net + lines[0].tax + Line.gross(rest) == lines[0].net + Line.nets(rest)\n",
     ] {
         assert!(printed(&output).contains(expected), "{}", printed(&output));
     }
