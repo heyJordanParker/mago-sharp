@@ -1045,29 +1045,6 @@ pub(crate) fn library_namespace(codebase: &CodebaseMetadata, span: Span) -> Opti
     codebase.folder_namespaces(span).first().copied()
 }
 
-/// The member a `.sharp` file writes for `name`, a function or constant of PHP's root namespace declared at `span`,
-/// with the sentence that names the `import` the file lacks for it, spec section 23: `Foundation.abort` for Laravel's
-/// `abort()`, by the name the file imports its [library namespace](library_namespace) under, and `global.strlen` in the
-/// standard library, whose members are made of PHP's built-ins. None for a built-in outside the standard library,
-/// which PHP# code reaches only through the standard library's members.
-pub(crate) fn root_member_form<A>(
-    context: &Context<'_, '_, A>,
-    name: &[u8],
-    span: Span,
-) -> Option<(String, Option<String>)>
-where
-    A: Arena,
-{
-    let name = String::from_utf8_lossy(name);
-    if context.source_file.is_standard_library {
-        return Some((format!("global.{name}"), None));
-    }
-    let namespace = library_namespace(context.codebase, span)?;
-    let written = sharp_code_class_name(context.codebase, &context.imported_names, &context.scope, namespace);
-
-    Some((format!("{written}.{name}"), display_missing_imports(context, [namespace])))
-}
-
 /// Whether `name`, which resolves to `full_name`, names a namespace a file imports, as `Pdf` does after
 /// `import Vendor.Pdf;` when no class is named `Vendor\Pdf`. Its member is then one of the namespace's functions,
 /// spec section 23, whether or not that function exists.

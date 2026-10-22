@@ -399,8 +399,8 @@ fn analyze_fix_refuses_a_fix_that_would_edit_a_sharp_file() {
 }
 
 /// The standard library's `Text`, with a native body, spec section 29, and its extension on `string`, spec section 26,
-/// whose `trim` the checker names in place of PHP's, and whose `split` the library's `Http` calls.
-const TEXT: &str = "namespace Sharp.Text;\n\npublic static class Text\n{\n    public static extern string slug(string title);\n\n    public static string capitalized(string title) => global.ucfirst(title);\n\n    extension(string text)\n    {\n        public string trim() => global.trim(text);\n\n        public List<string> split(string delimiter, int limit = 0) => global.explode(delimiter, text, limit == 0 ? global.PHP_INT_MAX : limit);\n    }\n}\n";
+/// whose `split` the library's `Http` calls.
+const TEXT: &str = "namespace Sharp.Text;\n\npublic static class Text\n{\n    public static extern string slug(string title);\n\n    public static string capitalized(string title) => global.ucfirst(title);\n\n    extension(string text)\n    {\n        public List<string> split(string delimiter, int limit = 0) => global.explode(delimiter, text, limit == 0 ? global.PHP_INT_MAX : limit);\n    }\n}\n";
 
 /// The standard library's `Int`, `Float` and `Bool`, spec section 24, with the library's signatures. Their names are
 /// reserved, and only the standard library declares them.
@@ -419,32 +419,6 @@ const TYPE_CLASSES: [(&str, &str); 3] = [
     ),
 ];
 
-/// The standard library classes whose methods the checker names in place of PHP functions: `Date.format` for `date`
-/// and `gmdate`, `Regex.matches` and `Regex.match` both for `preg_match`, and `Email.isValid`, `Ip.isValid` and
-/// `Url.isValid` for `filter_var`, as `Bool.tryParse` is.
-const WRAPPERS: [(&str, &str); 5] = [
-    (
-        "Time/Date",
-        "namespace Sharp.Time;\n\npublic static class Date\n{\n    public static string format(int timestamp, string pattern) => global.date(pattern, timestamp);\n}\n",
-    ),
-    (
-        "Text/Regex",
-        "namespace Sharp.Text;\n\npublic static class Regex\n{\n    public static bool matches(string pattern, string text) => global.preg_match(pattern, text) is int found && found == 1;\n\n    public static bool match(string pattern, string text) => global.preg_match(pattern, text) is int found && found == 1;\n}\n",
-    ),
-    (
-        "Net/Email",
-        "namespace Sharp.Net;\n\npublic static class Email\n{\n    public static bool isValid(string address) => global.filter_var(address, global.FILTER_VALIDATE_EMAIL) is string;\n}\n",
-    ),
-    (
-        "Net/Ip",
-        "namespace Sharp.Net;\n\npublic static class Ip\n{\n    public static bool isValid(string address) => global.filter_var(address, global.FILTER_VALIDATE_IP) is string;\n}\n",
-    ),
-    (
-        "Net/Url",
-        "namespace Sharp.Net;\n\npublic static class Url\n{\n    public static bool isValid(string url) => global.filter_var(url, global.FILTER_VALIDATE_URL) is string;\n}\n",
-    ),
-];
-
 /// The `composer.json` of the standard library's package.
 const LIBRARY_PACKAGE: &str = "{\n    \"name\": \"heyjordanparker/php-sharp-composer\"\n}\n";
 
@@ -454,12 +428,12 @@ fn write(root: &Path, name: &str, contents: &str) {
     std::fs::write(path, contents).unwrap();
 }
 
-/// The standard library's package under `root`: its `composer.json`, its `Text`, its `Int`, `Float` and `Bool`, the
-/// classes whose methods the checker names in place of PHP functions, and its effect classes.
+/// The standard library's package under `root`: its `composer.json`, its `Text`, its `Int`, `Float` and `Bool`, and its
+/// effect classes.
 fn write_library(root: &Path) {
     write(root, "composer.json", LIBRARY_PACKAGE);
     write(root, "library/Sharp/Text/Text.sharp", TEXT);
-    for (class, source) in TYPE_CLASSES.into_iter().chain(WRAPPERS) {
+    for (class, source) in TYPE_CLASSES {
         write(root, &format!("library/Sharp/{class}.sharp"), source);
     }
     for (path, source) in EFFECT_CLASSES {
@@ -566,7 +540,7 @@ fn compile_treats_the_repository_of_the_standard_library_as_the_library() {
     let printed = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
 
     assert_eq!(output.status.code(), Some(1), "{printed}");
-    assert!(printed.contains("Compiled 27 PHP# files into .sharp/. 1 PHP# file was refused"), "{printed}");
+    assert!(printed.contains("Compiled 24 PHP# files into .sharp/. 1 PHP# file was refused"), "{printed}");
     assert!(root.join(".sharp/library/Sharp/Text/Text.sharpc").is_file(), "{printed}");
     assert!(root.join(".sharp/library/Sharp/Environment.sharpc").is_file(), "{printed}");
     let title = std::fs::read(root.join(".sharp/example/App/Title.sharpc")).unwrap();
@@ -753,97 +727,6 @@ fn analyze_trusts_a_vendored_file_of_another_package_under_sharp() {
     assert!(stderr.contains("No issues found."), "{stdout}{stderr}");
 }
 
-/// Decision 076: a bare call of a PHP function the standard library replaces names the library's method to write.
-#[test]
-fn analyze_reports_a_call_of_a_wrapped_function_with_the_method_that_replaces_it() {
-    assert_eq!(
-        page_errors("namespace App;\n\npublic class Page\n{\n    public string year() => date(\"Y\");\n}\n"),
-        [
-            "src/App/Page.sharp:5:29:error - wrapped-function: `date` is wrapped by the standard library: write `Date.format(…)`. Add `import Sharp.Time.Date;` to the file."
-        ]
-    );
-}
-
-#[test]
-fn analyze_names_both_methods_that_replace_a_function() {
-    assert_eq!(
-        page_errors(
-            "namespace App;\n\npublic class Page\n{\n    public bool found() => preg_match(\"/a/\", \"a\") is int;\n}\n"
-        ),
-        [
-            "src/App/Page.sharp:5:28:error - wrapped-function: `preg_match` is wrapped by the standard library: write `Regex.matches(…)` or `Regex.match(…)`. Add `import Sharp.Text.Regex;` to the file."
-        ]
-    );
-}
-
-/// Spec section 23: code names a class by the short name an import binds. A `.sharp` file that doesn't import the
-/// wrapping class gets the import to add with the method to write. Plain PHP keeps upstream's text: it reports no call.
-#[test]
-fn analyze_names_the_import_a_wrapped_function_call_needs_and_reports_nothing_in_php() {
-    let directory = library_workspace(
-        "namespace App;\n\npublic class Page\n{\n    public bool found() => preg_match(\"/a/\", \"a\") is int;\n}\n",
-    );
-    write(
-        directory.path(),
-        "src/App/Finder.php",
-        "<?php\n\ndeclare(strict_types=1);\n\nnamespace App;\n\nfinal class Finder\n{\n    public static function found(): bool\n    {\n        return preg_match('/a/', 'a') === 1;\n    }\n}\n",
-    );
-
-    let output = run(directory.path(), "analyze", &["--reporting-format", "emacs"]);
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let page: Vec<&str> = stdout.lines().filter(|line| line.starts_with("src/App/Page.sharp:")).collect();
-
-    assert_eq!(
-        page,
-        [
-            "src/App/Page.sharp:5:28:error - wrapped-function: `preg_match` is wrapped by the standard library: write `Regex.matches(…)` or `Regex.match(…)`. Add `import Sharp.Text.Regex;` to the file."
-        ],
-        "{stdout}"
-    );
-    assert_eq!(issues_in(&stdout, "src/App/Finder.php"), Vec::<String>::new(), "{stdout}");
-}
-
-/// Spec section 8: a PHP function the standard library wraps with an extension, spec section 26, is written as the
-/// extension's member of its first argument. Every file has the extensions on `string` with no import, spec section
-/// 23, so `trim` names `name.trim()` alone, and the member it names compiles.
-#[test]
-fn analyze_names_the_extension_member_that_replaces_a_wrapped_function() {
-    assert_eq!(
-        page_errors(
-            "namespace App;\n\npublic class Page\n{\n    public string label(string name) => trim(name);\n\n    public string clean(string name) => name.trim();\n}\n"
-        ),
-        [
-            "src/App/Page.sharp:5:41:error - wrapped-function: `trim` is wrapped by the standard library: write `name.trim()`."
-        ]
-    );
-}
-
-/// A file that already imports the wrapping class is told only the method to write.
-#[test]
-fn analyze_names_no_import_for_a_wrapping_class_the_file_imports() {
-    assert_eq!(
-        page_errors(
-            "namespace App;\n\nimport Sharp.Text.Regex;\n\npublic class Page\n{\n    public bool found() => preg_match(\"/a/\", \"a\") is int;\n}\n"
-        ),
-        [
-            "src/App/Page.sharp:7:28:error - wrapped-function: `preg_match` is wrapped by the standard library: write `Regex.matches(…)` or `Regex.match(…)`."
-        ]
-    );
-}
-
-/// Spec section 23: the code a message names to write uses the name the file imports the class as.
-#[test]
-fn analyze_names_the_methods_that_replace_a_function_by_the_name_the_file_imports_their_class_as() {
-    assert_eq!(
-        page_errors(
-            "namespace App;\n\nimport Sharp.Text.Regex as Rx;\n\npublic class Page\n{\n    public bool found() => preg_match(\"/a/\", \"a\") is int;\n}\n"
-        ),
-        [
-            "src/App/Page.sharp:7:28:error - wrapped-function: `preg_match` is wrapped by the standard library: write `Rx.matches(…)` or `Rx.match(…)`."
-        ]
-    );
-}
-
 /// Spec section 23's example: the renamed import leaves the bare `Key` to name the standard attribute.
 #[test]
 fn compile_accepts_a_struct_that_renames_an_import_to_keep_the_short_name_free() {
@@ -868,19 +751,6 @@ fn compile_accepts_a_struct_that_renames_an_import_to_keep_the_short_name_free()
 
     assert!(output.status.success(), "{printed}");
     assert!(root.join(".sharp/src/App/Entry.sharpc").is_file(), "{printed}");
-}
-
-/// The replacements come in the order the checker's table lists them.
-#[test]
-fn analyze_names_four_methods_that_replace_a_function_in_the_order_the_table_lists_them() {
-    assert_eq!(
-        page_errors(
-            "namespace App;\n\npublic class Page\n{\n    public bool valid(string address) => filter_var(address) is string;\n}\n"
-        ),
-        [
-            "src/App/Page.sharp:5:42:error - wrapped-function: `filter_var` is wrapped by the standard library: write `Bool.tryParse(…)`, `Email.isValid(…)`, `Ip.isValid(…)` or `Url.isValid(…)`. Add `import Sharp.Net.Email;`, `import Sharp.Net.Ip;` and `import Sharp.Net.Url;` to the file."
-        ]
-    );
 }
 
 /// A PHP# attribute class keeps the targets its `[Attribute(Attribute.TARGET_METHOD)]` reads, so the attribute on a
@@ -927,11 +797,12 @@ fn analyze_reports_a_php_attribute_on_a_target_or_a_repeat_its_flags_leave_out()
     );
 }
 
-/// Plain PHP keeps every PHP function: only a `.sharp` file's call of a wrapped function is refused.
+/// Plain PHP keeps every PHP function: only a `.sharp` file's bare call of one names no function, as a misspelled name
+/// does.
 #[test]
-fn analyze_reports_a_wrapped_function_in_a_sharp_file_and_not_in_a_php_file() {
+fn analyze_reports_a_bare_call_of_a_php_function_in_a_sharp_file_and_not_in_a_php_file() {
     let directory =
-        library_workspace("namespace App;\n\npublic class Page\n{\n    public string year() => date(\"Y\");\n}\n");
+        library_workspace("namespace App;\n\npublic class Page\n{\n    public Any? year() => date(\"Y\");\n}\n");
     write(
         directory.path(),
         "src/App/Clock.php",
@@ -941,7 +812,7 @@ fn analyze_reports_a_wrapped_function_in_a_sharp_file_and_not_in_a_php_file() {
     let output = run(directory.path(), "analyze", &["--reporting-format", "emacs"]);
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    assert_eq!(issues_in(&stdout, "src/App/Page.sharp"), ["5:29 wrapped-function"], "{stdout}");
+    assert_eq!(issues_in(&stdout, "src/App/Page.sharp"), ["5:27 non-existent-function"], "{stdout}");
     assert_eq!(issues_in(&stdout, "src/App/Clock.php"), Vec::<String>::new(), "{stdout}");
 }
 
@@ -1001,72 +872,15 @@ fn analyze_skips_the_code_after_a_throw_in_a_php_file() {
     assert_eq!(issues_in(&stdout, "src/App/Clock.php"), ["12:9 unevaluated-code"], "{stdout}");
 }
 
-/// A project page that calls every PHP function PHP# replaces with its own syntax.
-const REPLACED_CALLS: &str = "namespace App;\n\npublic class Page\n{\n    public bool text(Any? value) => is_string(value);\n    public bool whole(Any? value) => is_int(value);\n    public bool real(Any? value) => is_float(value);\n    public bool flag(Any? value) => is_bool(value);\n    public string label(int number) => strval(number);\n    public int half(int total, int count) => intdiv(total, count);\n    public List<int> join(List<int> first, List<int> second) => array_merge(first, second);\n    public Map<string, int> merge(Map<string, int> defaults, Map<string, int> overrides) => array_replace(defaults, overrides);\n    public bool walk(List<int> numbers) => array_walk_recursive(numbers, n => n);\n}\n";
-
-/// A PHP# file that calls a PHP function PHP# replaces with syntax names the form to write, and a PHP file calls each
-/// of them as before.
-#[test]
-fn analyze_reports_each_function_php_sharp_replaces_with_syntax_in_a_sharp_file_and_not_in_a_php_file() {
-    let directory = library_workspace(REPLACED_CALLS);
-    write(
-        directory.path(),
-        "src/App/Clock.php",
-        "<?php\n\ndeclare(strict_types=1);\n\nnamespace App;\n\nfinal class Clock\n{\n    /**\n     * @param list<int> $first\n     * @param list<int> $second\n     * @param array<string, int> $defaults\n     * @param array<string, int> $overrides\n     *\n     * @return list<mixed>\n     */\n    public static function all(mixed $value, int $total, int $count, array $first, array $second, array $defaults, array $overrides): array\n    {\n        $numbers = $first;\n        array_walk_recursive($numbers, static fn(int $number): int => $number);\n\n        return [\n            is_string($value),\n            is_int($value),\n            is_float($value),\n            is_bool($value),\n            strval($total),\n            intdiv($total, $count),\n            array_merge($first, $second),\n            array_replace($defaults, $overrides),\n            $numbers,\n        ];\n    }\n}\n",
-    );
-
-    let output = run(directory.path(), "analyze", &["--reporting-format", "emacs"]);
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let page: Vec<&str> = stdout.lines().filter(|line| line.starts_with("src/App/Page.sharp:")).collect();
-
-    assert_eq!(
-        page,
-        [
-            "src/App/Page.sharp:5:37:error - replaced-by-syntax: `is_string` is replaced by PHP# syntax: write `value is string`.",
-            "src/App/Page.sharp:6:38:error - replaced-by-syntax: `is_int` is replaced by PHP# syntax: write `value is int`.",
-            "src/App/Page.sharp:7:37:error - replaced-by-syntax: `is_float` is replaced by PHP# syntax: write `value is float`.",
-            "src/App/Page.sharp:8:37:error - replaced-by-syntax: `is_bool` is replaced by PHP# syntax: write `value is bool`.",
-            "src/App/Page.sharp:9:40:error - replaced-by-syntax: `strval` is replaced by PHP# syntax: write `(string)number`.",
-            "src/App/Page.sharp:10:46:error - replaced-by-syntax: `intdiv` is replaced by PHP# syntax: write `total / count`.",
-            "src/App/Page.sharp:11:65:error - replaced-by-syntax: `array_merge` is replaced by PHP# syntax: write `[...first, ...second]`.",
-            "src/App/Page.sharp:12:93:error - replaced-by-syntax: `array_replace` is replaced by PHP# syntax: write `[...defaults, ...overrides]`.",
-            "src/App/Page.sharp:13:44:error - replaced-by-syntax: `array_walk_recursive` is replaced by PHP# syntax: write a `for … of` loop.",
-        ],
-        "{stdout}"
-    );
-    assert_eq!(issues_in(&stdout, "src/App/Clock.php"), Vec::<String>::new(), "{stdout}");
-}
-
-/// The form names an argument that is one name or a member read as the call writes it, and any other argument by
-/// the form's own placeholder.
-#[test]
-fn analyze_names_a_name_or_member_read_argument_in_the_form_and_a_placeholder_for_any_other() {
-    assert_eq!(
-        page_errors(
-            "namespace App;\n\npublic class Page\n{\n    private Any? data = null;\n    public Any? read() => this.data;\n    public bool owned(Page other) => is_string(other.data);\n    public bool named() => is_string(this.read());\n    public int third(int total) => intdiv(total, 3);\n    public List<int> both(List<int> first) => array_merge(this.items(), first);\n    public List<int> all(List<int> first, List<int> second) => array_merge(first, this.items(), second);\n    public List<int> one(List<int> first) => array_merge(first);\n    public List<int> items() => [];\n}\n"
-        ),
-        [
-            "src/App/Page.sharp:7:38:error - replaced-by-syntax: `is_string` is replaced by PHP# syntax: write `other.data is string`.",
-            "src/App/Page.sharp:8:28:error - replaced-by-syntax: `is_string` is replaced by PHP# syntax: write `x is string`.",
-            "src/App/Page.sharp:9:36:error - replaced-by-syntax: `intdiv` is replaced by PHP# syntax: write `total / b`.",
-            "src/App/Page.sharp:10:47:error - replaced-by-syntax: `array_merge` is replaced by PHP# syntax: write `[...a, ...first]`.",
-            "src/App/Page.sharp:11:64:error - replaced-by-syntax: `array_merge` is replaced by PHP# syntax: write `[...first, ...b, ...second]`.",
-            "src/App/Page.sharp:12:46:error - replaced-by-syntax: `array_merge` is replaced by PHP# syntax: write `[...first]`.",
-        ]
-    );
-}
-
-/// `is`, `as` and `match` test a scalar type with the PHP function the table names, which no source the user wrote
-/// calls, and a call the user writes as the value an `is` tests is still reported.
+/// `is`, `as` and `match` test a scalar type with a PHP function, which no source the user wrote calls, so they compile,
+/// and a bare call the user writes as the value an `is` tests names no function, as a misspelled name does.
 #[test]
 fn analyze_reports_a_written_call_and_not_the_type_tests_of_is_as_and_match() {
     assert_eq!(
         page_errors(
             "namespace App;\n\npublic class Page\n{\n    public int? whole(Any? value) => value as int;\n    public string kind(Any? value) => match (value) {\n        string text => text,\n        default => \"\",\n    };\n    public bool both(Any? value) => is_string(value) is true;\n}\n"
         ),
-        [
-            "src/App/Page.sharp:10:37:error - replaced-by-syntax: `is_string` is replaced by PHP# syntax: write `value is string`."
-        ]
+        ["src/App/Page.sharp:10:37:error - non-existent-function: Function `is_string` does not exist."]
     );
 }
 

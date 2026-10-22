@@ -661,6 +661,13 @@ impl CodebaseMetadata {
         }
     }
 
+    /// The folder of the host or vendored file `file_id`, as [`Self::folder_namespaces`] groups files.
+    #[inline]
+    #[must_use]
+    pub fn folder(&self, file_id: FileId) -> Option<Word> {
+        self.folders.get(&file_id).copied()
+    }
+
     /// Whether the standard library, the PHP# Composer package, holds the file `file_id`.
     #[inline]
     #[must_use]
@@ -677,22 +684,26 @@ impl CodebaseMetadata {
         self.folders.get(&span.file_id).and_then(|folder| self.folder_namespaces.get(folder)).map_or(&[], Vec::as_slice)
     }
 
-    /// Gathers the namespaces of the class-likes in each folder [`Self::folder_namespaces`] answers for. A module is no
-    /// class, and a class-like of PHP's root namespace gives its folder no namespace PHP# code imports.
+    /// The folder of `class_like` and the namespace it gives the functions and constants of that folder, as
+    /// [`Self::folder_namespaces`] answers. None for a module, which is no class, for a class-like of PHP's root
+    /// namespace, which gives its folder no namespace PHP# code imports, and for a class-like of PHP's built-ins.
+    #[must_use]
+    pub fn folder_namespace(&self, class_like: &ClassLikeMetadata) -> Option<(Word, Word)> {
+        if class_like.flags.is_module() {
+            return None;
+        }
+        let name = class_like.original_name.as_bytes();
+        let separator = name.iter().rposition(|byte| *byte == b'\\')?;
+
+        Some((self.folder(class_like.span.file_id)?, word(&name[..separator])))
+    }
+
+    /// Gathers the namespaces of the class-likes in each folder [`Self::folder_namespaces`] answers for.
     pub(crate) fn populate_folder_namespaces(&mut self) {
         let mut folder_namespaces: HashMap<Word, Vec<Word>> = HashMap::default();
-        for class_like in self.class_likes.values() {
-            let name = class_like.original_name.as_bytes();
-            if class_like.flags.is_module() {
-                continue;
-            }
-            let (Some(folder), Some(separator)) =
-                (self.folders.get(&class_like.span.file_id), name.iter().rposition(|byte| *byte == b'\\'))
-            else {
-                continue;
-            };
-
-            folder_namespaces.entry(*folder).or_default().push(word(&name[..separator]));
+        for (folder, namespace) in self.class_likes.values().filter_map(|class_like| self.folder_namespace(class_like))
+        {
+            folder_namespaces.entry(folder).or_default().push(namespace);
         }
         for namespaces in folder_namespaces.values_mut() {
             namespaces.sort_unstable_by_key(|namespace| namespace.as_bytes().to_ascii_lowercase());

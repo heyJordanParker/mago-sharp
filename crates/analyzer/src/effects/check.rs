@@ -74,7 +74,6 @@ use crate::utils::names::display_sharp_parameter_type;
 use crate::utils::names::display_sharp_type;
 use crate::utils::names::is_imported_namespace;
 use crate::utils::names::namespace_function;
-use crate::utils::names::root_member_form;
 use crate::utils::names::sharp_class_like_name;
 use crate::utils::names::sharp_code_class_name;
 use crate::utils::names::sharp_collection_name;
@@ -489,25 +488,15 @@ where
     if class.is_empty() {
         // Spec section 23 names a plain PHP function through its namespace, in an `extern` as in a call, and the
         // standard library alone names one of PHP's root namespace through `global`, as `extern global.now`.
-        let function = context.codebase.get_function(member.as_bytes());
-        let issue = match function {
-            Some(_) if context.source_file.is_standard_library && written.starts_with("global.") => None,
-            Some(function) => Some((
-                IssueCode::BareFunctionCall,
-                match root_member_form(context, member.as_bytes(), function.span) {
-                    Some((form, import)) => format!(
-                        "An `extern` names a plain PHP function through its namespace: write `extern {form}`.{}",
-                        import.map(|import| format!(" {import}")).unwrap_or_default()
-                    ),
-                    None => format!("`{written}` belongs to no namespace PHP# code imports, so no `extern` names it."),
-                },
-            )),
-            None => Some((IssueCode::NonExistentFunction, format!("Function `{written}` does not exist."))),
-        };
-        if let Some((code, message)) = issue {
-            context
-                .collector
-                .report_with_code(code, Issue::error(message).with_annotation(Annotation::primary(target)));
+        let declared = context.source_file.is_standard_library
+            && written.starts_with("global.")
+            && context.codebase.function_exists(member.as_bytes());
+        if !declared {
+            context.collector.report_with_code(
+                IssueCode::NonExistentFunction,
+                Issue::error(format!("Function `{written}` does not exist."))
+                    .with_annotation(Annotation::primary(target)),
+            );
         }
 
         return;

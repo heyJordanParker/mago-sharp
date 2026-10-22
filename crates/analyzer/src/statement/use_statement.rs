@@ -9,6 +9,7 @@ use mago_syntax::cst::Identifier;
 use mago_syntax::cst::Use;
 use mago_syntax::cst::UseItems;
 use mago_syntax::cst::UseType;
+use mago_word::Word;
 use mago_word::concat_word;
 use mago_word::word;
 
@@ -106,31 +107,31 @@ where
         Some(separator) => (Some(word(&fqn[..separator])), &fqn[separator + 1..]),
         None => (None, &*fqn),
     };
-    // How PHP# code reaches the function or constant declared at `span`: through the namespace the import writes, or
-    // for one of PHP's root namespace, through the namespace of the class-likes in its library's folder.
-    let reach = |span: Span, form: &dyn Fn(&str) -> String| match namespace
-        .or_else(|| library_namespace(context.codebase, span))
-    {
-        Some(namespace) => {
-            let namespace = namespace.to_string().replace('\\', ".");
-            let short = namespace.rsplit('.').next().unwrap_or(&namespace).to_owned();
+    // The namespace PHP# code reaches the function or constant declared at `span` through: the namespace the import
+    // writes, or for one of PHP's root namespace, the namespace of the class-likes in its library's folder. One of
+    // PHP's built-ins has neither, so PHP# code names none of them.
+    let reached = |span: Span| namespace.or_else(|| library_namespace(context.codebase, span));
+    let reach = |namespace: Word, form: &dyn Fn(&str) -> String| {
+        let namespace = namespace.to_string().replace('\\', ".");
+        let short = namespace.rsplit('.').next().unwrap_or(&namespace).to_owned();
 
-            format!("import `{namespace}`, and {}", form(&short))
-        }
-        None => format!("`{}` belongs to no namespace PHP# code imports", BytesDisplay(last)),
+        format!("import `{namespace}`, and {}", form(&short))
     };
     let last_name = String::from_utf8_lossy(last);
     let function = match namespace {
         Some(namespace) => namespace_function(context.codebase, namespace, last),
         None => context.codebase.get_function(last),
-    };
+    }
+    .filter(|_| last.first().is_some_and(u8::is_ascii_lowercase))
+    .and_then(|function| reached(function.span));
     let constant = match namespace {
         Some(namespace) => namespace_constant(context.codebase, namespace, last),
         None => context.codebase.get_constant(last),
-    };
+    }
+    .and_then(|constant| reached(constant.span));
 
-    let (code, issue) = if let Some(function) = function.filter(|_| last.first().is_some_and(u8::is_ascii_lowercase)) {
-        let message = reach(function.span, &|short| format!("call `{short}.{last_name}(…)`"));
+    let (code, issue) = if let Some(function) = function {
+        let message = reach(function, &|short| format!("call `{short}.{last_name}(…)`"));
 
         (
             IssueCode::FunctionImport,
@@ -138,7 +139,7 @@ where
                 .with_annotation(Annotation::primary(name.span()).with_message("Imports one function.")),
         )
     } else if let Some(constant) = constant {
-        let message = reach(constant.span, &|short| format!("read `{short}.{last_name}`"));
+        let message = reach(constant, &|short| format!("read `{short}.{last_name}`"));
 
         (
             IssueCode::ConstantImport,

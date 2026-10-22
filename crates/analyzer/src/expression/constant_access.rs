@@ -34,14 +34,11 @@ use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
-use crate::expression::call::function_call::report_replaced_constant;
 use crate::expression::variable::read_variable;
 use crate::resolver::class_name::report_keyword_in_another_case;
 use crate::resolver::property::resolve_function_value;
 use crate::utils::expression::get_bare_name_variable_id;
-use crate::utils::names::namespace_constant;
 use crate::utils::names::namespace_member;
-use crate::utils::names::root_member_form;
 use mago_bytes::BytesDisplay;
 
 impl<'arena> Analyzable<'_, 'arena> for ConstantAccess<'arena> {
@@ -102,49 +99,7 @@ impl<'arena> Analyzable<'_, 'arena> for ConstantAccess<'arena> {
             let is_known = block_context.known_constants.contains(&word(name_bytes));
             let written = BytesDisplay(unqualified_name);
 
-            if is_known {
-                artifacts.set_expression_type(self, get_mixed());
-            } else if context.dialect.is_sharp()
-                && let Some(global) = context.codebase.get_constant(unqualified_name)
-            {
-                if report_replaced_constant(context, block_context, artifacts, unqualified_name, self.span()) {
-                    artifacts.set_expression_type(self, TUnion::from_atomic(TAtomic::Error));
-
-                    return Ok(());
-                }
-                let message = match root_member_form(context, unqualified_name, global.span) {
-                    Some((member, import)) => format!(
-                        "`{written}` is a plain PHP constant, and a bare name reads only this code's own: write `{member}`.{}",
-                        import.map(|import| format!(" {import}")).unwrap_or_default()
-                    ),
-                    None => {
-                        format!("`{written}` belongs to no namespace PHP# code imports: read it in a plain PHP class.")
-                    }
-                };
-                context.collector.report_with_code(
-                    IssueCode::NonExistentConstant,
-                    Issue::error(message)
-                        .with_annotation(Annotation::primary(self.span()).with_message("Reads PHP's root constant.")),
-                );
-                artifacts.set_expression_type(self, constant_type(context, global, unqualified_name));
-            } else if context.dialect.is_sharp()
-                && let Some((namespace, constant)) = context.imported_names.iter().find_map(|(imported, name)| {
-                    Some((*name, namespace_constant(context.codebase, *imported, unqualified_name)?))
-                })
-            {
-                // Spec section 23: an imported library's constant is read through its namespace, as `Pdf.DEFAULT_DPI`.
-                context.collector.report_with_code(
-                    IssueCode::NonExistentConstant,
-                    Issue::error(format!(
-                        "Read the library's constant through its namespace: write `{namespace}.{written}`."
-                    ))
-                    .with_annotation(
-                        Annotation::primary(self.span())
-                            .with_message("A bare name reads only this code's own constant."),
-                    ),
-                );
-                artifacts.set_expression_type(self, constant_type(context, constant, unqualified_name));
-            } else if report_keyword_in_another_case(context, unqualified_name, self.span()) {
+            if is_known || report_keyword_in_another_case(context, unqualified_name, self.span()) {
                 artifacts.set_expression_type(self, get_mixed());
             } else if context.dialect.is_sharp() {
                 context.collector.report_with_code(
