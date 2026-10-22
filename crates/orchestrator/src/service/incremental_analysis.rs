@@ -3354,17 +3354,20 @@ mod tests {
     /// getter.
     #[test]
     fn test_watch_body_edit_reaches_an_unchanged_files_law() {
-        let order =
-            |price: &str| format!("namespace App;\n\npublic class Order\n{{\n    public int price() => {price};\n}}\n");
+        let order = |price: &str| {
+            format!(
+                "namespace App;\n\nimport Acme.Chrono;\n\npublic class Order\n{{\n    public int price() => {price};\n}}\n"
+            )
+        };
         let cart = "namespace App;\n\npublic class Cart\n{\n    public Cart(private Order order) { }\n\n    public int total => this.order.price();\n\n    law totaled(Cart cart) => cart.total > 0;\n}\n";
-        let clock = "namespace App.Stubs;\n\nextern now uses Clock;\n";
-        let now = "<?php\nfunction now(): int { return time(); }\n";
+        let clock = "namespace App.Stubs;\n\nimport Acme.Chrono;\n\nextern Chrono.now uses Clock;\n";
+        let now = "<?php\nnamespace Acme\\Chrono;\nfunction now(): int { return time(); }\n";
         let order_id = FileId::new(b"src/Order.sharp");
         let mut db = make_database(vec![
             ("src/Order.sharp", order("1").as_str()),
             ("src/Cart.sharp", cart),
             ("src/Clock.sharp", clock),
-            ("src/now.php", now),
+            ("src/Acme/Chrono/now.php", now),
         ]);
         let impure_laws = |service: &IncrementalAnalysisService| {
             service
@@ -3379,13 +3382,13 @@ mod tests {
         service.analyze().expect("Initial analysis failed.");
         assert_eq!(impure_laws(&service), Vec::<String>::new());
 
-        db.update(order_id, Cow::Owned(order("now()").into_bytes()));
+        db.update(order_id, Cow::Owned(order("Chrono.now()").into_bytes()));
         service.update_database(db.read_only());
         service.analyze_incremental(Some(&[order_id])).expect("Incremental analysis failed.");
         assert_eq!(
             impure_laws(&service),
             [
-                "Law `totaled` reaches `Order.price`, which calls `global.now` with the effect `Clock`. Laws hold only over pure code."
+                "Law `totaled` reaches `Order.price`, which calls `Chrono.now` with the effect `Clock`. Laws hold only over pure code."
             ]
         );
         assert_eq!(service.analyzed_files, HashSet::from_iter([order_id]));

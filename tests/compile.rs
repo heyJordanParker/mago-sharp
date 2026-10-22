@@ -3607,20 +3607,27 @@ fn each_refusal_a_law_reaches_says_what_to_write_instead() {
     assert!(!printed.contains("A law cannot reason about it."), "{printed}");
 }
 
-/// The refusals of code a law cannot read say what to write instead, and name a type parameter as one and PHP's root
-/// namespace as `global.`, never as a plain PHP class.
+/// The refusals of code a law cannot read say what to write instead, and name a type parameter as one and a function a
+/// library declares in PHP's root namespace through the namespace of its classes, never as a plain PHP class.
 #[test]
 fn each_refusal_of_code_a_law_cannot_read_says_what_to_write_instead() {
     let clock = (
         "vendor/lib/clock/Clock.php",
         "<?php\n\nnamespace Lib;\n\nfinal class Clock\n{\n    public static function hour(): int\n    {\n        return 1;\n    }\n}\n",
     );
-    let stub = ("app/Stubs/Clock.sharp", "namespace App.Stubs;\n\nimport Lib.Clock;\n\nextern Clock;\n");
+    let helpers = (
+        "vendor/lib/clock/helpers.php",
+        "<?php\n\nfunction measure(string $text): int\n{\n    return strlen($text);\n}\n",
+    );
+    let stub = (
+        "app/Stubs/Clock.sharp",
+        "namespace App.Stubs;\n\nimport Lib;\nimport Lib.Clock;\n\nextern Clock;\nextern Lib.measure;\n",
+    );
     let shape = (
         "app/Shared/Shape.sharp",
-        "namespace App.Shared;\n\nimport Lib.Clock;\n\npublic class Shape\n{\n    public Shape(public int raw { get; }) { }\n    public int doubled => this.raw * 2;\n\n    public static int parsed(string s) => Int.tryParse(s) ?? 0;\n    public static int hour(int a) => Clock.hour();\n    public static int length(string s) => global.strlen(s);\n    public static int kept<T>(T item) => 1;\n\n    law l1(string s) => Shape.parsed(s) == Shape.parsed(s);\n    law l2(int a) => Shape.hour(a) == Shape.hour(a);\n    law l3(string s) => Shape.length(s) == Shape.length(s);\n    law l4(int a) => Shape.kept(a) == 1;\n    law l5(Shape s) => s.doubled == s.doubled;\n}\n",
+        "namespace App.Shared;\n\nimport Lib;\nimport Lib.Clock;\n\npublic class Shape\n{\n    public Shape(public int raw { get; }) { }\n    public int doubled => this.raw * 2;\n\n    public static int parsed(string s) => Int.tryParse(s) ?? 0;\n    public static int hour(int a) => Clock.hour();\n    public static int length(string s) => Lib.measure(s);\n    public static int kept<T>(T item) => 1;\n\n    law l1(string s) => Shape.parsed(s) == Shape.parsed(s);\n    law l2(int a) => Shape.hour(a) == Shape.hour(a);\n    law l3(string s) => Shape.length(s) == Shape.length(s);\n    law l4(int a) => Shape.kept(a) == 1;\n    law l5(Shape s) => s.doubled == s.doubled;\n}\n",
     );
-    let directory = library_project(&[shape, clock, stub]);
+    let directory = library_project(&[shape, clock, helpers, stub]);
     let root = directory.path();
 
     let output = compile_without_lean(root);
@@ -3630,7 +3637,7 @@ fn each_refusal_of_code_a_law_cannot_read_says_what_to_write_instead() {
     for message in [
         "Law l1 reaches the standard library class Int in Shape.parsed. Write the code in a PHP# class of the project: of the standard library, a law reaches a List's `count()`, `map` and `filter`, and `Math.max` and `Math.min` on ints.",
         "Law l2 reaches the plain PHP class Clock in Shape.hour. Write the code the law reaches in PHP#, or pass the value plain PHP computes to the law as a parameter.",
-        "Law l3 reaches the function `global.strlen` of PHP's root namespace in Shape.length. Write the code the law reaches in PHP#, or pass the value plain PHP computes to the law as a parameter.",
+        "Law l3 reaches the plain PHP function `Lib.measure` in Shape.length. Write the code the law reaches in PHP#, or pass the value plain PHP computes to the law as a parameter.",
         "Law l4 reaches the type parameter T in Shape.kept. Give it a type a law reasons about: int, bool, string, a List, or a PHP# class, enum or interface, with or without `?`.",
         "Law l5 reaches the accessor of Shape.doubled in Shape.l5. Compute the value in a method, and give the property no accessor body.",
     ] {

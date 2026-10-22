@@ -56,6 +56,7 @@ use crate::utils::expression::get_nullsafe_base_expressions;
 use crate::utils::names::and_list;
 use crate::utils::names::display_class_like_name;
 use crate::utils::names::member_namespace;
+use crate::utils::names::namespace_member;
 use crate::visibility::report_private_self_member;
 use mago_names::short_name;
 
@@ -142,8 +143,8 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Access<'arena> {
             // reads only the constant or enum case, as PHP's does, and so does a pattern, which spec section 21 says
             // takes constants only.
             Access::Property(access) => match StaticProperty::from_property_access(access, context.resolved_names) {
-                // Spec section 23: `global.PHP_EOL`, and `Pdf.DEFAULT_DPI` after `import Vendor.Pdf;`, read a plain
-                // PHP constant through its namespace, as a plain PHP function is called through it.
+                // Spec section 23: `Pdf.DEFAULT_DPI` after `import Vendor.Pdf;` reads a plain PHP constant through its
+                // namespace, as a plain PHP function is called through it.
                 Some(StaticProperty {
                     class: Expression::ConstantAccess(class_name),
                     name: StaticPropertyName::Identifier(name),
@@ -364,9 +365,11 @@ where
     // `written_parts` counts the parts of `full_name` the code writes: one in `Pdf.render` after `import Vendor.Pdf;`.
     for (written_parts, (index, name)) in (1..).zip(names.iter().enumerate().rev()) {
         let member = [full_name.as_slice(), b"\\", name.value].concat();
+        let reached = namespace_member(context.codebase, word(&full_name), name.value);
         if written_parts > 1
             && index == 0
-            && (context.codebase.function_exists(&member) || context.codebase.constant_exists(&member))
+            && (context.codebase.function_exists(reached.as_bytes())
+                || context.codebase.constant_exists(reached.as_bytes()))
         {
             // A full name counts as an import, spec section 32.
             if !check_listed_import(context, &member, root.span().join(name.span)) {
@@ -408,6 +411,16 @@ fn report_unknown_class_read<A>(
     A: Arena,
 {
     artifacts.set_expression_type(read, TUnion::from_atomic(TAtomic::Error));
+    report_unknown_member_owner(context, name);
+}
+
+/// Reports `name`, written before a member, as in `name.member` and `name.member(…)`, when it names no class, no
+/// namespace the file imports, and no namespace with a function or constant of that member's name: what the spec says
+/// the code meant, as [`report_unknown_sharp_class`] says, or else the name that names nothing.
+pub(crate) fn report_unknown_member_owner<A>(context: &mut Context<'_, '_, A>, name: &Identifier<'_>)
+where
+    A: Arena,
+{
     if report_unknown_sharp_class(context, context.resolved_names.get(name), name.span()) {
         return;
     }
@@ -418,7 +431,7 @@ fn report_unknown_class_read<A>(
         Issue::error(format!("`{written}` names no class, and no namespace this file imports."))
             .with_annotation(Annotation::primary(name.span()).with_message("Names nothing here."))
             .with_help(format!(
-                "Check the spelling of `{written}`, or import the class or the namespace whose member this reads."
+                "Check the spelling of `{written}`, or import the class or the namespace whose member this names."
             )),
     );
 }

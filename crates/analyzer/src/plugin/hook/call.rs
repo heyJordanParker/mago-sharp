@@ -23,8 +23,8 @@ use crate::utils::names::namespace_function_name;
 
 /// A call of a function by its name, as [`FunctionCallHook`] sees it.
 ///
-/// It is PHP's `name(…)`, and PHP#'s `global.name(…)` and `Pdf.render(…)`, which call a plain PHP function through its
-/// namespace. Every check that finds a call by its function's name reads this view, so the PHP# call gets each check
+/// It is PHP's `name(…)`, and PHP#'s `Pdf.render(…)` and `Foundation.abort(…)`, which call a plain PHP function through
+/// its namespace. Every check that finds a call by its function's name reads this view, so the PHP# call gets each check
 /// PHP's call gets.
 #[derive(Debug, Clone, Copy)]
 pub struct NamedCall<'ast, 'arena> {
@@ -83,7 +83,7 @@ fn function_name(resolved_names: &ResolvedNames<'_>, codebase: &CodebaseMetadata
 /// This hook receives the [`NamedCall`] view of a call of a function by its name and full mutable context,
 /// allowing hooks to inspect calls, report issues, modify analysis state,
 /// and optionally skip analysis with a custom return type. A PHP# call of a plain PHP function through its namespace,
-/// `global.intdiv(…)`, reaches the hook as PHP's `intdiv(…)` does.
+/// `Foundation.abort(…)`, reaches the hook as PHP's `abort(…)` does.
 pub trait FunctionCallHook: Provider {
     /// Called before a function call is analyzed.
     ///

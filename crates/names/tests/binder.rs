@@ -48,12 +48,12 @@ fn resolved<'arena>(names: &ResolvedNames<'arena>, code: &str, needle: &str, nth
 }
 
 /// A reader of the source, such as an extension host, gets the name each PHP# form means, the one the PHP that means it
-/// gives: the enum alone for the case pattern `Plan.Starter`, as for `Plan::Starter`, the root function and constant
-/// for `global.max` and `global.PHP_INT_MAX`, as for `\max` and `\PHP_INT_MAX`, and no name for a type parameter, a
-/// call of a local, or the functions a pattern's PHP calls. The PHP each form runs as keeps its own names.
+/// gives: the enum alone for the case pattern `Plan.Starter`, as for `Plan::Starter`, the class of a static call and a
+/// static read, as `Limits.max` and `Limits.TOP`, and no name for a type parameter, a call of a local, or the functions
+/// a pattern's PHP calls. The PHP each form runs as keeps its own names.
 #[test]
 fn the_source_names_what_each_form_means() {
-    const CODE: &str = "namespace App;\n\nclass Pricing<T>\n{\n    public int seats(Plan plan, T item, List<int> counts)\n    {\n        const twice = (int x) => x * 2;\n        const big = counts is [int first, ...List<int> rest] && item is int;\n        return match (plan) {\n            Plan.Starter => global.max(twice(1), global.PHP_INT_MAX),\n            Plan.Pro => 2,\n        };\n    }\n}\n";
+    const CODE: &str = "namespace App;\n\nclass Pricing<T>\n{\n    public int seats(Plan plan, T item, List<int> counts)\n    {\n        const twice = (int x) => x * 2;\n        const big = counts is [int first, ...List<int> rest] && item is int;\n        return match (plan) {\n            Plan.Starter => Limits.max(twice(1), Limits.TOP),\n            Plan.Pro => 2,\n        };\n    }\n}\n";
     let arena = LocalArena::new();
     let names = bind(&arena, CODE);
 
@@ -71,13 +71,12 @@ fn the_source_names_what_each_form_means() {
             ("Pricing", "App\\Pricing".to_owned()),
             ("Plan", "App\\Plan".to_owned()),
             ("Plan", "App\\Plan".to_owned()),
-            ("max", "max".to_owned()),
-            ("PHP_INT_MAX", "PHP_INT_MAX".to_owned()),
+            ("Limits", "App\\Limits".to_owned()),
+            ("Limits", "App\\Limits".to_owned()),
             ("Plan", "App\\Plan".to_owned()),
         ]
     );
     assert_eq!(resolved(&names, CODE, "Starter", 0), b"App\\Plan\\Starter");
-    assert_eq!(resolved(&names, CODE, "global", 0), b"App\\global");
     assert_eq!(resolved(&names, CODE, "T item", 0), b"T");
     assert_eq!(resolved(&names, CODE, "twice(1)", 0), b"App\\twice");
 }

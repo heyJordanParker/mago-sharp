@@ -2176,13 +2176,17 @@ mod tests {
         }
     }
 
-    /// A project whose `Report` reads a library's constant through its namespace, `Pdf.DEFAULT_DPI`, and a constant of
-    /// PHP's root namespace, `global.APP_VERSION`, spec section 23, each declared in a plain PHP file of the project.
+    /// A project whose `Report` reads a library's constant through its namespace, `Pdf.DEFAULT_DPI`, and a constant the
+    /// library declares in PHP's root namespace beside its classes, `Pdf.APP_VERSION`, spec section 23, each declared in
+    /// a plain PHP file of the project.
     fn constants() -> Vec<(&'static str, String)> {
         vec![
-            ("lib/Pdf.php", "<?php\n\nnamespace Vendor\\Pdf;\n\nconst DEFAULT_DPI = 300;\n".to_string()),
+            (
+                "lib/Pdf.php",
+                "<?php\n\nnamespace Vendor\\Pdf;\n\nconst DEFAULT_DPI = 300;\n\nfinal class Document\n{\n}\n".to_string(),
+            ),
             ("lib/version.php", "<?php\n\nconst APP_VERSION = 3;\n".to_string()),
-            ("app/Shop/Report.sharp", "namespace App.Shop;\n\nimport Vendor.Pdf;\n\npublic class Report\n{\n    public int dpi() => Pdf.DEFAULT_DPI;\n\n    public int version() => global.APP_VERSION;\n}\n".to_string()),
+            ("app/Shop/Report.sharp", "namespace App.Shop;\n\nimport Vendor.Pdf;\n\npublic class Report\n{\n    public int dpi() => Pdf.DEFAULT_DPI;\n\n    public int version() => Pdf.APP_VERSION;\n}\n".to_string()),
         ]
     }
 

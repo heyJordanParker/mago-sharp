@@ -1,5 +1,6 @@
 namespace App.Tenant;
 
+import Lib;
 import Lib.Calc;
 import Lib.Field;
 import Lib.Entity;
@@ -9,26 +10,26 @@ import Lib.Entity;
 public class Report
 {
     public const int MAX = 3;
-    protected const LIMIT = global.PHP_INT_MAX - 1;
+    protected const LIMIT = Lib.TOP - 1;
     protected const int NEXT = Calc.MAX + 1;
     private const string? NAME = "report";
     private static int made = 0;
     public static string? last { get; private set; } = "none";
     [Field] private int count = 0;
-    protected float rate = 2.5 * -global.PHP_INT_MAX;
+    protected float rate = 2.5 * -Lib.TOP;
     private string label = "";
-    [Field(label: "Views", limit: global.PHP_INT_MAX)] public int views { get; private set; } = 0;
+    [Field(label: "Views", limit: Lib.TOP)] public int views { get; private set; } = 0;
     public string name { get; set; }
     public int id { get; }
     private Calc calc = new Calc(Calc.make(), rate: 2);
-    public string slug => global.ucfirst(this.name);
+    public string slug => Lib.capitalize(this.name);
     private int|Calc|string key = 1;
     private (int|string)? code = null;
     public Calc? owner { get; set; } = null;
     public int? limit { get; } = null;
     private Map<string, int> sizes = [:];
     public List<Calc> lines { get; private set; } = [];
-    public string title { get => field; set => field = global.trim(value); } = "";
+    public string title { get => field; set => field = Lib.clean(value); } = "";
     public int stock { get; private set { if (value < 0) { return; } field = value; } } = 0;
     public int half { get { return this.stock / 2; } }
 
@@ -75,7 +76,7 @@ public class Report
         return Report.part(first: extra, second: 2) + this.scale(rate) + this.count;
     }
 
-    public static int part(int first, int second = 2 * 3 - -1, int limit = global.PHP_INT_MAX)
+    public static int part(int first, int second = 2 * 3 - -1, int limit = Lib.TOP)
     {
         return first * second;
     }
@@ -88,10 +89,10 @@ public class Report
     private string text(string text = 'none')
     {
         const plain = "${text} {$text} $text";
-        const line = `${text}: ${global.strlen(text) + 1} \u{41}\`
+        const line = `${text}: ${Lib.measure(text) + 1} \u{41}\`
 `;
         const constant = `v${1}${""}${`x`}`;
-        return `${global.sprintf("%s: %d", text, global.strlen(text))}${plain}${line}${constant}`;
+        return `${Lib.format("%s: %d", text, Lib.measure(text))}${plain}${line}${constant}`;
     }
 
     private string constantTemplate()
@@ -260,7 +261,7 @@ public class Report
         (int|string)? found = null;
         const made = new Calc(first, ...values);
         made.add(...values);
-        return label == null ? null : Report.part(2, ...values) + global.max(1, ...values);
+        return label == null ? null : Report.part(2, ...values) + Lib.largest(1, ...values);
     }
 
     [Entity(["a", "b"], ["x": 1])]
@@ -271,7 +272,7 @@ public class Report
         const Map<string, int> empty = [:];
         Map<int, string>? labels = null;
         sizes["a"] = (sizes["a"] ?? 0) + numbers[1];
-        this.sizes["b"] = global.array_sum(numbers);
+        this.sizes["b"] = Lib.total(numbers);
         const nested = [["a": items[1].rate]];
         nested[0]["a"] = items.getOrNull(0)?.rate ?? items[1].rate;
         for (const [string name, size] of sizes) {
@@ -299,14 +300,14 @@ public class Report
             mark();
             extra -= 1;
         }
-        count += twice(half(4)) + add(1, by: 2) + bump() + global.array_reduce([1, 2], (int total, int x) => total + x * 2, 0);
+        count += twice(half(4)) + add(1, by: 2) + bump() + Lib.fold([1, 2], (int total, int x) => total + x * 2, 0);
         return n => check("n", n) ? n + count : n;
     }
 
     public Function<(int|string)?(int|string, List<int>|Calc)> mixed(List<int>|string items, int ...values)
     {
         (List<int>|string)? maybe = items;
-        const pick = (int|string key, (int|Calc)? fallback, int ...rest) => global.array_sum(rest) + values[0];
+        const pick = (int|string key, (int|Calc)? fallback, int ...rest) => Lib.total(rest) + values[0];
         const total = pick(1, null, ...values) + pick(key: "a", fallback: null);
         return (a, b) => total > 0 ? a : null;
     }

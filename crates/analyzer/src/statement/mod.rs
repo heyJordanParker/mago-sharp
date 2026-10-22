@@ -1026,7 +1026,7 @@ fn detect_unused_statement_expressions<'ast, 'arena, A>(
             };
 
             // If the function has side effects, we don't report it as useless. A `.sharp` file's call into plain PHP
-            // has the effects its `extern` declares, spec section 29, as `global.apache_getenv` uses `Environment`.
+            // has the effects its `extern` declares, spec section 29, as `extern Foundation.now uses Clock;` declares.
             if !function.flags.is_pure()
                 || (context.dialect.is_sharp()
                     && extern_of(

@@ -7,6 +7,7 @@ use mago_allocator::Arena;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
+use mago_codex::metadata::constant::ConstantMetadata;
 use mago_codex::metadata::function_like::FunctionLikeKind;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::metadata::module::ModuleMetadata;
@@ -30,6 +31,8 @@ use mago_names::kind::NameKind;
 use mago_names::scope::NamespaceScope;
 use mago_names::short_name;
 use mago_span::HasPosition;
+use mago_span::HasSpan;
+use mago_span::Span;
 use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Identifier;
 use mago_syntax::cst::MethodCall;
@@ -966,7 +969,9 @@ pub(crate) fn is_prelude_stub(class: Word) -> bool {
 }
 
 /// Produces a user-facing display string for a `FunctionLikeIdentifier`: a method reads `Order::total` in PHP and
-/// `Order.total` in a `.sharp` file, and a namespace's function `Vendor\Pdf\render` reads `Pdf.render` there.
+/// `Order.total` in a `.sharp` file, and a namespace's function `Vendor\Pdf\render` reads `Pdf.render` there, as
+/// Laravel's `abort()` of PHP's root namespace reads `Foundation.abort`, through the namespace PHP# names it by. The
+/// standard library calls PHP's built-ins through `global`, so one reads `global.sprintf` in its files.
 #[must_use]
 pub(crate) fn display_function_like_identifier<A>(
     context: &Context<'_, '_, A>,
@@ -985,7 +990,17 @@ where
                     display_class_like_name(context, word(&name.as_bytes()[..separator])),
                     String::from_utf8_lossy(&name.as_bytes()[separator + 1..]),
                 ),
-                None if context.dialect.is_sharp() => format!("global.{name}"),
+                None if context.dialect.is_sharp() && context.source_file.is_standard_library => {
+                    format!("global.{name}")
+                }
+                None if context.dialect.is_sharp()
+                    && let Some(namespace) = context
+                        .codebase
+                        .get_function(name.as_bytes())
+                        .and_then(|function| library_namespace(context.codebase, function.span)) =>
+                {
+                    display_member(context, display_class_like_name(context, namespace), name)
+                }
                 _ => name.to_string(),
             }
         }
@@ -999,14 +1014,58 @@ where
 }
 
 /// The plain PHP function `member` of the namespace `namespace`, as PHP# calls one: `Pdf.render(html)` after
-/// `import Vendor.Pdf;`, spec section 23. The caller reads a name that is also a class's as the class.
+/// `import Vendor.Pdf;`, spec section 23, and Laravel's `abort()` in `Foundation.abort(404)` after
+/// `import Illuminate.Foundation;`, as [`namespace_member`] finds it. The caller reads a name that is also a class's as
+/// the class.
 #[must_use]
-pub(crate) fn namespace_function(
-    codebase: &CodebaseMetadata,
+pub(crate) fn namespace_function<'codebase>(
+    codebase: &'codebase CodebaseMetadata,
     namespace: Word,
-    member: Word,
-) -> Option<&FunctionLikeMetadata> {
-    codebase.get_function(&[namespace.as_bytes(), b"\\", member.as_bytes()].concat())
+    member: &[u8],
+) -> Option<&'codebase FunctionLikeMetadata> {
+    codebase.get_function(namespace_member(codebase, namespace, member).as_bytes())
+}
+
+/// The plain PHP constant `member` of the namespace `namespace`, as PHP# reads one: `Pdf.DEFAULT_DPI` after
+/// `import Vendor.Pdf;`, spec section 23, as [`namespace_member`] finds it.
+#[must_use]
+pub(crate) fn namespace_constant<'codebase>(
+    codebase: &'codebase CodebaseMetadata,
+    namespace: Word,
+    member: &[u8],
+) -> Option<&'codebase ConstantMetadata> {
+    codebase.get_constant(namespace_member(codebase, namespace, member).as_bytes())
+}
+
+/// The namespace PHP# code names the function or constant of PHP's root namespace that a library declares at `span`
+/// through, spec section 23: the first namespace of the class-likes in its folder, as `Illuminate\Foundation` for
+/// Laravel's `abort()`. None for one of PHP's built-ins, which PHP# code never names.
+#[must_use]
+pub(crate) fn library_namespace(codebase: &CodebaseMetadata, span: Span) -> Option<Word> {
+    codebase.folder_namespaces(span).first().copied()
+}
+
+/// The member a `.sharp` file writes for `name`, a function or constant of PHP's root namespace declared at `span`,
+/// with the sentence that names the `import` the file lacks for it, spec section 23: `Foundation.abort` for Laravel's
+/// `abort()`, by the name the file imports its [library namespace](library_namespace) under, and `global.strlen` in the
+/// standard library, whose members are made of PHP's built-ins. None for a built-in outside the standard library,
+/// which PHP# code reaches only through the standard library's members.
+pub(crate) fn root_member_form<A>(
+    context: &Context<'_, '_, A>,
+    name: &[u8],
+    span: Span,
+) -> Option<(String, Option<String>)>
+where
+    A: Arena,
+{
+    let name = String::from_utf8_lossy(name);
+    if context.source_file.is_standard_library {
+        return Some((format!("global.{name}"), None));
+    }
+    let namespace = library_namespace(context.codebase, span)?;
+    let written = sharp_code_class_name(context.codebase, &context.imported_names, &context.scope, namespace);
+
+    Some((format!("{written}.{name}"), display_missing_imports(context, [namespace])))
 }
 
 /// Whether `name`, which resolves to `full_name`, names a namespace a file imports, as `Pdf` does after
@@ -1025,9 +1084,10 @@ where
     resolved_names.is_imported(name) && !codebase.class_like_exists(full_name.as_bytes())
 }
 
-/// The namespace whose plain PHP function or constant the PHP# `name.member` names, spec section 23: PHP's root
-/// namespace, the empty word, for `global`, and the namespace `name` resolves to when the file imports it, or when
-/// that namespace has a function or a constant `member`, as long as no class has the namespace's name. None when
+/// The namespace whose plain PHP function or constant the PHP# `name.member` names, spec section 23: the namespace
+/// `name` resolves to when the file imports it, or when that namespace has a function or a constant `member`, as long
+/// as no class has the namespace's name. In the standard library alone, `global` names PHP's root namespace, the empty
+/// word, so its members are made of PHP's built-ins, and in any other file `global` is a name like any other. None when
 /// `name` is a class.
 #[must_use]
 pub(crate) fn member_namespace(
@@ -1036,24 +1096,25 @@ pub(crate) fn member_namespace(
     name: &Identifier<'_>,
     member: &[u8],
 ) -> Option<Word> {
-    if name.value() == b"global" {
+    if name.value() == b"global" && codebase.is_standard_library_file(name.span().file_id) {
         return Some(word(""));
     }
 
     let namespace = word(resolved_names.get(name));
-    let full_name = namespace_member(namespace, member);
+    if codebase.class_like_exists(namespace.as_bytes()) {
+        return None;
+    }
+    let full_name = namespace_member(codebase, namespace, member);
     let names_member = codebase.function_exists(full_name.as_bytes()) || codebase.constant_exists(full_name.as_bytes());
 
-    ((is_imported_namespace(resolved_names, codebase, name, namespace) || names_member)
-        && !codebase.class_like_exists(namespace.as_bytes()))
-    .then_some(namespace)
+    (is_imported_namespace(resolved_names, codebase, name, namespace) || names_member).then_some(namespace)
 }
 
-/// The plain PHP function a PHP# `Name.member(…)` calls, spec section 23: `global.now()` calls the function `now` of
-/// PHP's root namespace, and `Pdf.render(html)` after `import Vendor.Pdf;` the function `render` of that namespace,
-/// where no class is named `Vendor\Pdf`. An imported namespace names its function whether or not the function exists,
-/// so the call of a missing one is refused as a missing function. None for any other call, and for every call in a
-/// PHP file.
+/// The plain PHP function a PHP# `Name.member(…)` calls, spec section 23: `Pdf.render(html)` after
+/// `import Vendor.Pdf;` calls the function `render` of that namespace, where no class is named `Vendor\Pdf`, and
+/// `Foundation.abort(404)` after `import Illuminate.Foundation;` Laravel's `abort()` of PHP's root namespace, as
+/// [`namespace_member`] finds it. An imported namespace names its function whether or not the function exists, so the
+/// call of a missing one is refused as a missing function. None for any other call, and for every call in a PHP file.
 #[must_use]
 pub(crate) fn namespace_function_name(
     resolved_names: &ResolvedNames<'_>,
@@ -1066,12 +1127,35 @@ pub(crate) fn namespace_function_name(
     };
     let namespace = member_namespace(resolved_names, codebase, &name.name, member.value)?;
 
-    Some(namespace_member(namespace, member.value))
+    Some(namespace_member(codebase, namespace, member.value))
 }
 
-/// The full name of the function or constant `member` of `namespace`, which [`member_namespace`] found: the bare
-/// name in PHP's root namespace.
+/// The full name PHP gives the function or constant `member` of `namespace`, which [`member_namespace`] found, as the
+/// code writes it, spec section 23: the name inside `namespace` when the namespace declares it, else the bare name of
+/// the one a plain PHP library declares in PHP's root namespace beside the class-likes of `namespace`, as `abort` for
+/// `Foundation.abort` after `import Illuminate.Foundation;`, else the name inside `namespace`, which names nothing. The
+/// empty namespace, the standard library's `global`, gives the bare name.
 #[must_use]
-pub(crate) fn namespace_member(namespace: Word, member: &[u8]) -> Word {
-    if namespace.is_empty() { word(member) } else { word([namespace.as_bytes(), b"\\", member].concat()) }
+pub(crate) fn namespace_member(codebase: &CodebaseMetadata, namespace: Word, member: &[u8]) -> Word {
+    if namespace.is_empty() {
+        return word(member);
+    }
+
+    let full_name = word([namespace.as_bytes(), b"\\", member].concat());
+    if codebase.function_exists(full_name.as_bytes()) || codebase.constant_exists(full_name.as_bytes()) {
+        return full_name;
+    }
+    let beside_namespace = |span: Span| {
+        codebase
+            .folder_namespaces(span)
+            .iter()
+            .any(|beside| beside.as_bytes().eq_ignore_ascii_case(namespace.as_bytes()))
+    };
+    if codebase.get_function(member).is_some_and(|function| beside_namespace(function.span))
+        || codebase.get_constant(member).is_some_and(|constant| beside_namespace(constant.span))
+    {
+        return word(member);
+    }
+
+    full_name
 }

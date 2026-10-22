@@ -379,8 +379,8 @@ impl AnalysisArtifacts {
         self.expected_type.as_ref().filter(|(span, _)| *span == expression.span()).map(|(_, expected)| expected)
     }
 
-    /// The full name of the plain PHP constant the PHP# read `read` reaches through its namespace, as `global.PHP_EOL`
-    /// and `Pdf.DEFAULT_DPI` read one, spec section 23. None for any other read.
+    /// The full name of the plain PHP constant the PHP# read `read` reaches through its namespace, as `Pdf.DEFAULT_DPI`
+    /// reads one, spec section 23. None for any other read.
     pub fn get_namespace_constant<T>(&self, read: &T) -> Option<Word>
     where
         T: HasSpan,

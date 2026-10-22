@@ -5708,7 +5708,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             }
             Expression::Instantiation(instantiation) => self.instantiation(line, expression, instantiation),
             Expression::With(with) => self.with(with),
-            // `global.PHP_EOL` and `Pdf.DEFAULT_DPI` read the plain PHP constant the checker found, spec section 23.
+            // `Pdf.DEFAULT_DPI` reads the plain PHP constant the checker found, spec section 23.
             Expression::Access(Access::Property(_))
                 if let Some(constant) = self.types.namespace_constant(expression) =>
             {
@@ -5716,8 +5716,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
                 self.node(SHARP_AST_CONST, 0, line, &[constant])
             }
-            // Spec section 14.3: `global.ucfirst` and `Pdf.render`, read without `(…)`, are the plain PHP
-            // function's first-class callable, `\ucfirst(...)`.
+            // Spec section 14.3: `Pdf.render`, read without `(…)`, is the plain PHP function's first-class callable,
+            // `\Vendor\Pdf\render(...)`.
             Expression::Access(Access::Property(_)) if let Some(function) = self.types.function_value(expression) => {
                 let function = self.string(ZEND_NAME_FQ, line, function.as_bytes());
                 let callable = self.node(SHARP_AST_CALLABLE_CONVERT, 0, line, &[]);
@@ -8254,8 +8254,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// `static`, except the standard library's `Position.current()`, which is the position it is written at. Any other
     /// `object.m()` is an instance call, or a call of the function in the property `m` when the checker found that
     /// property, as spec section 14 calls one. A call of a standard library method with an inline form runs that form.
-    /// `Pdf.render(html)` and `global.now()` call the plain PHP function the checker found, spec section 23, which
-    /// takes each `Map` and `Set` as [`Self::call`] crosses them.
+    /// `Pdf.render(html)` and `Foundation.abort(404)` call the plain PHP function the checker found, spec section 23,
+    /// `\Vendor\Pdf\render` and `\abort`, which takes each `Map` and `Set` as [`Self::call`] crosses them.
     fn method_call(&mut self, expression: &Expression, call: &MethodCall) -> u32 {
         if let Expression::SuperOf(_) = call.object {
             return self.super_of_call(expression, call);

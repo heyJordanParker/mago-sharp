@@ -1,8 +1,10 @@
 namespace App.Tenant;
 
+import Lib;
+
 enum Rank : int
 {
     case Ace = 1;
     case Two = 1 + 1;
-    case Top = global.PHP_INT_MAX;
+    case Top = Lib.TOP;
 }

@@ -888,14 +888,11 @@ impl<'body, 'program> Body<'body, 'program> {
                     issues::TYPE_TEST,
                 );
             }
-            // Spec section 23: `global.f(…)` calls the function `f` of PHP's root namespace.
-            if class.name.value() == b"global" {
-                let function = self.method_name(&call.method).map(String::from_utf8_lossy).unwrap_or_default();
-                return self.unmodeled(
-                    expression.span(),
-                    format!("the function `global.{function}` of PHP's root namespace"),
-                    issues::PLAIN_PHP,
-                );
+            // Spec section 23: `Pdf.render(…)` calls a plain PHP function through its namespace.
+            if self.checked.types().namespace_function(expression).is_some() {
+                let what =
+                    format!("the plain PHP function `{}`", self.source(call.object.span().join(call.method.span())));
+                return self.unmodeled(expression.span(), what, issues::PLAIN_PHP);
             }
             let class = names.get(&class.name);
             if class.eq_ignore_ascii_case(b"Sharp\\Math\\Math")

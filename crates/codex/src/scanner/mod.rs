@@ -158,6 +158,7 @@ where
     let mut scanner = Scanner::new();
 
     scanner.walk_program(program, &mut context);
+    scanner.codebase.add_file(file);
 
     scanner.codebase
 }
@@ -590,12 +591,20 @@ where
     }
 
     /// Records a PHP# `extern` declaration. The binder decides whether its target is a class, with the member after
-    /// `.` when it names one, or a global function.
+    /// `.` when it names one, or a global function. In the standard library alone, `global.now` is the function `now`
+    /// of PHP's root namespace, spec section 23.
     #[inline]
     fn walk_in_extern(&mut self, r#extern: &'arena Extern<'arena>, context: &mut Context<'ctx, 'arena, A>) {
         let target = &r#extern.target;
         let name = ascii_lowercase_word(context.resolved_names.get(target));
-        let target = if context.resolved_names.binding(target) == Some(Binding::Class) {
+        let root_function = if context.file.is_standard_library && r#extern.event.is_none() {
+            target.value().strip_prefix(b"global.")
+        } else {
+            None
+        };
+        let target = if let Some(function) = root_function {
+            (empty_word(), ascii_lowercase_word(function))
+        } else if context.resolved_names.binding(target) == Some(Binding::Class) {
             (name, if target.is_dotted() { ascii_lowercase_word(target.last_segment()) } else { empty_word() })
         } else {
             (empty_word(), name)

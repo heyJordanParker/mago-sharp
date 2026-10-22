@@ -6,6 +6,7 @@ use foldhash::HashSet;
 
 use mago_database::file::File;
 use mago_database::file::FileId;
+use mago_database::file::FileType;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_reporting::IssueCollection;
@@ -146,6 +147,18 @@ pub struct CodebaseMetadata {
     pub patch_function_likes: HashMap<(Word, Word), FunctionLikeMetadata>,
     /// Per-patch constant metadata, keyed by FQN.
     pub patch_constants: WordMap<ConstantMetadata>,
+    /// The folder of each host or vendored file the scan read, keyed by the file. Spec section 23: a function or
+    /// constant a plain PHP library declares in PHP's root namespace belongs to the namespace of the class-likes in its
+    /// folder.
+    #[cfg_attr(feature = "serde", serde(default))]
+    folders: HashMap<FileId, Word>,
+    /// The namespaces of the class-likes in each folder of `folders`, sorted, which the populator gathers.
+    #[cfg_attr(feature = "serde", serde(default))]
+    folder_namespaces: HashMap<Word, Vec<Word>>,
+    /// The files of the standard library, the PHP# Composer package, the only code that reaches PHP's root namespace
+    /// through `global`, spec section 23.
+    #[cfg_attr(feature = "serde", serde(default))]
+    standard_library_files: HashSet<FileId>,
 }
 
 impl CodebaseMetadata {
@@ -633,6 +646,60 @@ impl CodebaseMetadata {
         }
 
         self.get_constant(name).map(|meta| meta.span)
+    }
+
+    /// Records the folder of the scanned file `file`, when it is a host or a vendored file, and whether the standard
+    /// library holds it.
+    pub(crate) fn add_file(&mut self, file: &File) {
+        if matches!(file.file_type, FileType::Host | FileType::Vendored) {
+            let name = file.name.as_ref();
+            let folder = name.iter().rposition(|byte| *byte == b'/').map_or(&name[..0], |separator| &name[..separator]);
+            self.folders.insert(file.id, word(folder));
+        }
+        if file.is_standard_library {
+            self.standard_library_files.insert(file.id);
+        }
+    }
+
+    /// Whether the standard library, the PHP# Composer package, holds the file `file_id`.
+    #[inline]
+    #[must_use]
+    pub fn is_standard_library_file(&self, file_id: FileId) -> bool {
+        self.standard_library_files.contains(&file_id)
+    }
+
+    /// The namespaces of the class-likes in the folder of the file that holds `span`, sorted. Spec section 23: a
+    /// function or constant a plain PHP library declares at `span`, in PHP's root namespace, belongs to each of them, as
+    /// Laravel's `abort()`, in `Illuminate/Foundation/helpers.php`, belongs to `Illuminate\Foundation`. Empty for a
+    /// file of PHP's built-ins.
+    #[must_use]
+    pub fn folder_namespaces(&self, span: Span) -> &[Word] {
+        self.folders.get(&span.file_id).and_then(|folder| self.folder_namespaces.get(folder)).map_or(&[], Vec::as_slice)
+    }
+
+    /// Gathers the namespaces of the class-likes in each folder [`Self::folder_namespaces`] answers for. A module is no
+    /// class, and a class-like of PHP's root namespace gives its folder no namespace PHP# code imports.
+    pub(crate) fn populate_folder_namespaces(&mut self) {
+        let mut folder_namespaces: HashMap<Word, Vec<Word>> = HashMap::default();
+        for class_like in self.class_likes.values() {
+            let name = class_like.original_name.as_bytes();
+            if class_like.flags.is_module() {
+                continue;
+            }
+            let (Some(folder), Some(separator)) =
+                (self.folders.get(&class_like.span.file_id), name.iter().rposition(|byte| *byte == b'\\'))
+            else {
+                continue;
+            };
+
+            folder_namespaces.entry(*folder).or_default().push(word(&name[..separator]));
+        }
+        for namespaces in folder_namespaces.values_mut() {
+            namespaces.sort_unstable_by_key(|namespace| namespace.as_bytes().to_ascii_lowercase());
+            namespaces.dedup_by(|namespace, other| namespace.as_bytes().eq_ignore_ascii_case(other.as_bytes()));
+        }
+
+        self.folder_namespaces = folder_namespaces;
     }
 
     /// Retrieves metadata for a class constant.
@@ -1390,6 +1457,8 @@ impl CodebaseMetadata {
         }
 
         self.file_signatures.extend(other.file_signatures);
+        self.folders.extend(other.folders);
+        self.standard_library_files.extend(other.standard_library_files);
         self.safe_symbols.extend(other.safe_symbols);
         self.safe_symbol_members.extend(other.safe_symbol_members);
         self.infer_types_from_usage |= other.infer_types_from_usage;
@@ -1480,6 +1549,8 @@ impl CodebaseMetadata {
         for (k, v) in &other.file_signatures {
             self.file_signatures.insert(*k, v.clone());
         }
+        self.folders.extend(other.folders.iter().map(|(file, folder)| (*file, *folder)));
+        self.standard_library_files.extend(other.standard_library_files.iter().copied());
         self.safe_symbols.extend(other.safe_symbols.iter().copied());
         self.safe_symbol_members.extend(other.safe_symbol_members.iter().copied());
         self.infer_types_from_usage |= other.infer_types_from_usage;
@@ -1751,8 +1822,10 @@ impl CodebaseMetadata {
             .map(|(name, _)| *name)
             .collect();
 
-        // A file signature is always owned by its file (there is at most one per file).
-        let file_ids = self.file_signatures.keys().copied().collect();
+        // A file signature and a folder are always owned by their file (there is at most one of each per file).
+        let mut file_ids: Vec<FileId> = self.file_signatures.keys().chain(self.folders.keys()).copied().collect();
+        file_ids.sort_unstable();
+        file_ids.dedup();
 
         CodebaseEntryKeys { class_like_names, class_like_aliases, function_like_keys, constant_names, file_ids }
     }
@@ -1786,6 +1859,8 @@ impl CodebaseMetadata {
 
         for k in &keys.file_ids {
             self.file_signatures.remove(k);
+            self.folders.remove(k);
+            self.standard_library_files.remove(k);
         }
 
         // Drop any patch entry that originated from a file signature we just removed; a patch

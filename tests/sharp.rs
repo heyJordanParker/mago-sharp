@@ -258,7 +258,7 @@ fn analyze_warns_on_a_public_member_nothing_outside_its_namespace_uses() {
 #[test]
 fn analyze_reports_only_the_refusal_on_each_refused_line() {
     let directory = workspace(
-        "namespace Demo;\n\nclass Report\n{\n    public const int LIMIT = __Foo__.y;\n\n    public void host()\n    {\n        const host = _SERVER[\"HTTP_HOST\"];\n    }\n\n    public void count()\n    {\n        _GET[\"n\"]++;\n    }\n\n    public void fallback(string host = _SERVER[\"x\"])\n    {\n    }\n\n    public void code()\n    {\n        global.exit(_SERVER[\"code\"]);\n    }\n\n    public void file()\n    {\n        global.exit(__FILE__);\n    }\n\n    public void call()\n    {\n        _SERVER.read();\n    }\n\n    public void rows(int row)\n    {\n        const data = (array)row;\n    }\n\n    public void names()\n    {\n        const all = GLOBALS;\n        const env = _ENV;\n        const magic = __Something__;\n        const dollar = $_SERVER[\"HTTP_HOST\"];\n        const member = _SERVER.x;\n        __Foo__.bar();\n    }\n\n    public void wrapped()\n    {\n        global.exit(\n            _SERVER[\"code\"]\n        );\n    }\n}\n",
+        "namespace Demo;\n\nclass Report\n{\n    public const int LIMIT = __Foo__.y;\n\n    public void host()\n    {\n        const host = _SERVER[\"HTTP_HOST\"];\n    }\n\n    public void count()\n    {\n        _GET[\"n\"]++;\n    }\n\n    public void fallback(string host = _SERVER[\"x\"])\n    {\n    }\n\n    public void code()\n    {\n        Report.stop(_SERVER[\"code\"]);\n    }\n\n    public void file()\n    {\n        Report.stop(__FILE__);\n    }\n\n    public void call()\n    {\n        _SERVER.read();\n    }\n\n    public void rows(int row)\n    {\n        const data = (array)row;\n    }\n\n    public void names()\n    {\n        const all = GLOBALS;\n        const env = _ENV;\n        const magic = __Something__;\n        const dollar = $_SERVER[\"HTTP_HOST\"];\n        const member = _SERVER.x;\n        __Foo__.bar();\n    }\n\n    public void wrapped()\n    {\n        Report.stop(\n            _SERVER[\"code\"]\n        );\n    }\n\n    public static void stop(Any? code)\n    {\n    }\n}\n",
     );
     std::fs::write(
         directory.path().join("src/Demo/Twin.php"),
@@ -875,7 +875,7 @@ fn compile_accepts_a_struct_that_renames_an_import_to_keep_the_short_name_free()
 fn analyze_names_four_methods_that_replace_a_function_in_the_order_the_table_lists_them() {
     assert_eq!(
         page_errors(
-            "namespace App;\n\npublic class Page\n{\n    public bool valid(string address) => filter_var(address, global.FILTER_VALIDATE_EMAIL) is string;\n}\n"
+            "namespace App;\n\npublic class Page\n{\n    public bool valid(string address) => filter_var(address) is string;\n}\n"
         ),
         [
             "src/App/Page.sharp:5:42:error - wrapped-function: `filter_var` is wrapped by the standard library: write `Bool.tryParse(…)`, `Email.isValid(…)`, `Ip.isValid(…)` or `Url.isValid(…)`. Add `import Sharp.Net.Email;`, `import Sharp.Net.Ip;` and `import Sharp.Net.Url;` to the file."
@@ -1428,7 +1428,7 @@ fn extern_workspace(stripe: &str) -> tempfile::TempDir {
     write(
         root,
         "app/Stubs/Clock.sharp",
-        "namespace App.Stubs;\n\nimport Carbon.Carbon;\nimport Brick.Math.BigDecimal;\n\nextern Carbon.now uses Clock;\nextern global.now uses Clock;\nextern BigDecimal;\n",
+        "namespace App.Stubs;\n\nimport Acme.Chrono;\nimport Carbon.Carbon;\nimport Brick.Math.BigDecimal;\n\nextern Carbon.now uses Clock;\nextern Chrono.now uses Clock;\nextern BigDecimal;\n",
     );
     write(root, "app/Lib/StripeClient.php", "<?php\n\nnamespace Stripe;\n\nclass StripeClient\n{\n}\n");
     write(
@@ -1437,7 +1437,8 @@ fn extern_workspace(stripe: &str) -> tempfile::TempDir {
         "<?php\n\nnamespace Carbon;\n\nclass Carbon\n{\n    public static function now(): self\n    {\n        return new self();\n    }\n}\n",
     );
     write(root, "app/Lib/BigDecimal.php", "<?php\n\nnamespace Brick\\Math;\n\nclass BigDecimal\n{\n}\n");
-    write(root, "app/Lib/now.php", "<?php\n\nfunction now(): int\n{\n    return time();\n}\n");
+    write(root, "app/Lib/Chrono/now.php", "<?php\n\nfunction now(): int\n{\n    return time();\n}\n");
+    write(root, "app/Lib/Chrono/Stopwatch.php", "<?php\n\nnamespace Acme\\Chrono;\n\nclass Stopwatch\n{\n}\n");
     directory
 }
 
@@ -1488,6 +1489,10 @@ fn compile_refuses_a_file_whose_getter_writes_this() {
     assert!(directory.path().join(".sharp/app/Stubs/Stripe.sharpc").exists(), "{printed}");
 }
 
+/// The members of `App\Shop\Stop` its tests call: `halt`, which never returns, and `say` and `size`, which do. The file
+/// imports `LogicException`.
+const STOP_MEMBERS: &str = "\n    public static never halt(int code)\n    {\n        throw new LogicException(\"halt\");\n    }\n\n    public static void say(string text)\n    {\n    }\n\n    public static int size(string text) => 1;\n";
+
 /// Spec section 7 refuses a statement that never runs. The analysis never reads one, so `mago compile` refuses its file
 /// before the bridge, which lowers only what the analysis read.
 #[test]
@@ -1498,14 +1503,16 @@ fn compile_refuses_a_file_with_a_statement_that_never_runs() {
     write(
         root,
         "app/Shop/Stop.sharp",
-        "namespace App.Shop;\n\npublic class Stop\n{\n    public static int run()\n    {\n        global.exit(1);\n        return global.strlen(\"never\");\n    }\n}\n",
+        &format!(
+            "namespace App.Shop;\n\nimport LogicException;\n\npublic class Stop\n{{\n    public static int run()\n    {{\n        Stop.halt(1);\n        return Stop.size(\"never\");\n    }}\n{STOP_MEMBERS}}}\n"
+        ),
     );
 
     let output = run(root, "compile", &[]);
     let printed = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
 
     assert_eq!(output.status.code(), Some(1), "{printed}");
-    assert!(printed.contains("This statement never runs, because line 7 ends the block."), "{printed}");
+    assert!(printed.contains("This statement never runs, because line 9 ends the block."), "{printed}");
     assert!(!root.join(".sharp/app/Shop/Stop.sharpc").exists());
 }
 
@@ -1519,7 +1526,9 @@ fn compile_accepts_the_code_the_help_for_a_condition_that_never_finishes_names()
     write(
         root,
         "app/Shop/Stop.sharp",
-        "namespace App.Shop;\n\npublic class Stop\n{\n    public static void first()\n    {\n        if (global.exit(1)) {\n            global.printf(\"never\");\n        } else {\n            global.printf(\"never either\");\n        }\n    }\n\n    public static void second(bool up)\n    {\n        if (up) {\n            global.printf(\"up\");\n        } else if (global.exit(1)) {\n            global.printf(\"never\");\n        } else {\n            global.printf(\"never either\");\n        }\n    }\n\n    public static void third()\n    {\n        for (const item of global.exit(1)) {\n            global.printf(\"never\");\n        }\n    }\n}\n",
+        &format!(
+            "namespace App.Shop;\n\nimport LogicException;\n\npublic class Stop\n{{\n    public static void first()\n    {{\n        if (Stop.halt(1)) {{\n            Stop.say(\"never\");\n        }} else {{\n            Stop.say(\"never either\");\n        }}\n    }}\n\n    public static void second(bool up)\n    {{\n        if (up) {{\n            Stop.say(\"up\");\n        }} else if (Stop.halt(1)) {{\n            Stop.say(\"never\");\n        }} else {{\n            Stop.say(\"never either\");\n        }}\n    }}\n\n    public static void third()\n    {{\n        for (const item of Stop.halt(1)) {{\n            Stop.say(\"never\");\n        }}\n    }}\n{STOP_MEMBERS}}}\n"
+        ),
     );
 
     let output = run(root, "compile", &[]);
@@ -1528,16 +1537,18 @@ fn compile_accepts_the_code_the_help_for_a_condition_that_never_finishes_names()
     assert_eq!(output.status.code(), Some(1), "{printed}");
     assert_eq!(printed.matches("This condition never finishes, so its block never runs.").count(), 3, "{printed}");
     assert_eq!(
-        printed.matches("Write `global.exit(1);` as its own statement, and delete the `if`.").count(),
+        printed.matches("Write `Stop.halt(1);` as its own statement, and delete the `if`.").count(),
         2,
         "{printed}"
     );
-    assert!(printed.contains("Write `global.exit(1);` as its own statement, and delete the `for`."), "{printed}");
+    assert!(printed.contains("Write `Stop.halt(1);` as its own statement, and delete the `for`."), "{printed}");
 
     write(
         root,
         "app/Shop/Stop.sharp",
-        "namespace App.Shop;\n\npublic class Stop\n{\n    public static void first()\n    {\n        global.exit(1);\n    }\n\n    public static void second(bool up)\n    {\n        if (up) {\n            global.printf(\"up\");\n        } else global.exit(1);\n    }\n\n    public static void third()\n    {\n        global.exit(1);\n    }\n}\n",
+        &format!(
+            "namespace App.Shop;\n\nimport LogicException;\n\npublic class Stop\n{{\n    public static void first()\n    {{\n        Stop.halt(1);\n    }}\n\n    public static void second(bool up)\n    {{\n        if (up) {{\n            Stop.say(\"up\");\n        }} else Stop.halt(1);\n    }}\n\n    public static void third()\n    {{\n        Stop.halt(1);\n    }}\n{STOP_MEMBERS}}}\n"
+        ),
     );
 
     // In an `else`, the statement the help names takes the braces PHP# writes around every body, as their help says.
@@ -1545,12 +1556,14 @@ fn compile_accepts_the_code_the_help_for_a_condition_that_never_finishes_names()
     let printed = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
 
     assert_eq!(output.status.code(), Some(1), "{printed}");
-    assert!(printed.contains("Write `{ global.exit(1); }`."), "{printed}");
+    assert!(printed.contains("Write `{ Stop.halt(1); }`."), "{printed}");
 
     write(
         root,
         "app/Shop/Stop.sharp",
-        "namespace App.Shop;\n\npublic class Stop\n{\n    public static void first()\n    {\n        global.exit(1);\n    }\n\n    public static void second(bool up)\n    {\n        if (up) {\n            global.printf(\"up\");\n        } else { global.exit(1); }\n    }\n\n    public static void third()\n    {\n        global.exit(1);\n    }\n}\n",
+        &format!(
+            "namespace App.Shop;\n\nimport LogicException;\n\npublic class Stop\n{{\n    public static void first()\n    {{\n        Stop.halt(1);\n    }}\n\n    public static void second(bool up)\n    {{\n        if (up) {{\n            Stop.say(\"up\");\n        }} else {{ Stop.halt(1); }}\n    }}\n\n    public static void third()\n    {{\n        Stop.halt(1);\n    }}\n{STOP_MEMBERS}}}\n"
+        ),
     );
 
     let output = run(root, "compile", &[]);
@@ -1560,10 +1573,11 @@ fn compile_accepts_the_code_the_help_for_a_condition_that_never_finishes_names()
     assert!(root.join(".sharp/app/Shop/Stop.sharpc").exists());
 }
 
-/// Spec section 23 reads a plain PHP constant through its namespace, so `mago compile` writes a file that reads
-/// `global.PHP_EOL`, `global.STDERR` and a library's constant. A function read without a call is the function's value,
-/// spec section 14.3, which compiles. A read that reaches neither is refused with status 1, never a panic: a root
-/// constant that does not exist, and a name that is no class and no namespace.
+/// Spec section 23 reads a plain PHP constant through its namespace, so `mago compile` writes a file that reads the
+/// constants a library declares in PHP's root namespace beside its classes, `Pdf.PDF_EOL` and `Pdf.PDF_ERRORS`, and a
+/// constant of the library's namespace. A function read without a call is the function's value, spec section 14.3,
+/// which compiles. A read that reaches neither is refused with status 1, never a panic: a constant the namespace does
+/// not hold, a name that is no class and no namespace, and `global`, which names neither in PHP# code.
 #[test]
 fn compile_writes_a_read_of_a_plain_php_constant_and_refuses_a_read_that_reaches_none() {
     let directory = tempfile::tempdir().unwrap();
@@ -1572,12 +1586,17 @@ fn compile_writes_a_read_of_a_plain_php_constant_and_refuses_a_read_that_reaches
     write(
         root,
         "lib/Pdf.php",
-        "<?php\n\nnamespace Vendor\\Pdf;\n\nconst DEFAULT_DPI = 300;\n\nfunction render(string $html): string\n{\n    return $html;\n}\n",
+        "<?php\n\nnamespace Vendor\\Pdf;\n\nconst DEFAULT_DPI = 300;\n\nfunction render(string $html): string\n{\n    return $html;\n}\n\nfinal class Document\n{\n}\n",
+    );
+    write(
+        root,
+        "lib/helpers.php",
+        "<?php\n\nconst PDF_EOL = \"\\n\";\n\ndefine('PDF_ERRORS', STDERR);\n\nfunction measure(string $text): int\n{\n    return strlen($text);\n}\n",
     );
     write(
         root,
         "app/Shop/Reads.sharp",
-        "namespace App.Shop;\n\nimport Vendor.Pdf;\n\npublic class Reads\n{\n    public static string line(string text) => text + global.PHP_EOL;\n\n    public static Any? errors() => global.STDERR;\n\n    public static int dpi() => Pdf.DEFAULT_DPI;\n}\n",
+        "namespace App.Shop;\n\nimport Vendor.Pdf;\n\npublic class Reads\n{\n    public static string line(string text) => text + Pdf.PDF_EOL;\n\n    public static Any? errors() => Pdf.PDF_ERRORS;\n\n    public static int dpi() => Pdf.DEFAULT_DPI;\n}\n",
     );
 
     let output = run(root, "compile", &[]);
@@ -1586,7 +1605,14 @@ fn compile_writes_a_read_of_a_plain_php_constant_and_refuses_a_read_that_reaches
     assert_eq!(output.status.code(), Some(0), "{printed}");
     assert!(root.join(".sharp/app/Shop/Reads.sharpc").exists());
 
-    for (read, status) in [("global.strlen", 0), ("Pdf.render", 0), ("global.NOPE", 1), ("Nope.render", 1)] {
+    for (read, status) in [
+        ("Pdf.measure", 0),
+        ("Pdf.render", 0),
+        ("Pdf.NOPE", 1),
+        ("Nope.render", 1),
+        ("global.PHP_EOL", 1),
+        ("global.strlen", 1),
+    ] {
         write(
             root,
             "app/Shop/Reads.sharp",

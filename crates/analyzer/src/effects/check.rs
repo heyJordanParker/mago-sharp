@@ -74,6 +74,7 @@ use crate::utils::names::display_sharp_parameter_type;
 use crate::utils::names::display_sharp_type;
 use crate::utils::names::is_imported_namespace;
 use crate::utils::names::namespace_function;
+use crate::utils::names::root_member_form;
 use crate::utils::names::sharp_class_like_name;
 use crate::utils::names::sharp_code_class_name;
 use crate::utils::names::sharp_collection_name;
@@ -417,8 +418,8 @@ fn impure(
 }
 
 /// The plain PHP function `function`, as the cause of a call of it names it, written as the code names it through its
-/// namespace, spec section 23: `global.trim`, which the cause already writes, or `Pdf.render` after
-/// `import Vendor.Pdf;`, with the namespace a function outside the root namespace is named through.
+/// namespace, spec section 23: `Pdf.render` after `import Vendor.Pdf;`, with the namespace it is named through, and
+/// one of PHP's built-ins by its bare name.
 fn written_function(function: Word, code_class_name: &dyn Fn(Word) -> String) -> (String, Option<Word>) {
     match function.as_bytes().iter().rposition(|byte| *byte == b'\\') {
         Some(separator) => {
@@ -486,21 +487,27 @@ where
     let target = r#extern.target.span();
     let (class, member) = own.target;
     if class.is_empty() {
-        // Spec section 23 names a function of PHP's root namespace as `global.now`, in an `extern` as in a call.
-        if !written.starts_with("global.") {
-            context.collector.report_with_code(
+        // Spec section 23 names a plain PHP function through its namespace, in an `extern` as in a call, and the
+        // standard library alone names one of PHP's root namespace through `global`, as `extern global.now`.
+        let function = context.codebase.get_function(member.as_bytes());
+        let issue = match function {
+            Some(_) if context.source_file.is_standard_library && written.starts_with("global.") => None,
+            Some(function) => Some((
                 IssueCode::BareFunctionCall,
-                Issue::error(format!(
-                    "An `extern` names a plain PHP function through its namespace: write `extern global.{written}`."
-                ))
-                .with_annotation(Annotation::primary(target)),
-            );
-        } else if context.codebase.get_function(member.as_bytes()).is_none() {
-            context.collector.report_with_code(
-                IssueCode::NonExistentFunction,
-                Issue::error(format!("Function `{written}` does not exist."))
-                    .with_annotation(Annotation::primary(target)),
-            );
+                match root_member_form(context, member.as_bytes(), function.span) {
+                    Some((form, import)) => format!(
+                        "An `extern` names a plain PHP function through its namespace: write `extern {form}`.{}",
+                        import.map(|import| format!(" {import}")).unwrap_or_default()
+                    ),
+                    None => format!("`{written}` belongs to no namespace PHP# code imports, so no `extern` names it."),
+                },
+            )),
+            None => Some((IssueCode::NonExistentFunction, format!("Function `{written}` does not exist."))),
+        };
+        if let Some((code, message)) = issue {
+            context
+                .collector
+                .report_with_code(code, Issue::error(message).with_annotation(Annotation::primary(target)));
         }
 
         return;
@@ -508,8 +515,8 @@ where
 
     let Some(class_metadata) = context.codebase.get_class_like(class.as_bytes()) else {
         // `extern Pdf.render` after `import Vendor.Pdf;` declares the function `render` of that namespace, spec
-        // section 23.
-        if namespace_function(context.codebase, class, member).is_some() {
+        // section 23, as `extern Foundation.now` declares Laravel's `now()`.
+        if namespace_function(context.codebase, class, member.as_bytes()).is_some() {
             return;
         }
 

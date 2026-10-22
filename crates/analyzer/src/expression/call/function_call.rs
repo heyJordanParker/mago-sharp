@@ -56,6 +56,8 @@ use crate::utils::names::display_atomic;
 use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_code_member;
 use crate::utils::names::display_missing_imports;
+use crate::utils::names::namespace_function;
+use crate::utils::names::root_member_form;
 use crate::utils::names::sharp_code_class_name;
 use crate::utils::quoted_source;
 
@@ -267,25 +269,19 @@ where
         false,
         false,
     )?;
-    // A call of a function the standard library replaces is refused once, naming the member to write, whatever the
-    // function takes by reference.
-    if let Some(metadata) = metadata
-        && !report_replaced_global_call(context, block_context, artifacts, metadata, &call.argument_list, call.span())
-    {
-        report_argument_by_reference(context, call, function, metadata);
+    if let Some(metadata) = metadata {
+        report_argument_by_reference(context, call, metadata);
     }
 
     Ok(())
 }
 
-/// Refuses a PHP# call that gives a plain PHP function an argument it takes by reference, as `global.sort(numbers)`,
-/// which would change `numbers`: PHP# passes every argument by value. The message writes the standard library method
-/// that does the work where there is one. The standard library alone passes one, as only it imports `Sharp.Internal`,
-/// to give its methods, as `Regex.match`, the results PHP gives only that way.
+/// Refuses a PHP# call that gives a plain PHP function an argument it takes by reference, as `Pdf.fill(pages)` for a
+/// `fill(array &$pages)`, which would change `pages`: PHP# passes every argument by value. The standard library alone
+/// passes one, to give its methods, as `Regex.match`, the results PHP gives only that way.
 fn report_argument_by_reference<A>(
     context: &mut Context<'_, '_, A>,
     call: &MethodCall<'_>,
-    function: Word,
     metadata: &FunctionLikeMetadata,
 ) where
     A: Arena,
@@ -312,21 +308,9 @@ fn report_argument_by_reference<A>(
 
     let written = quoted_source(context, call.object.span().join(call.method.span()));
     let given = quoted_source(context, argument.span());
-    let name = function.as_bytes().rsplit(|byte| *byte == b'\\').next().unwrap_or_default().to_ascii_lowercase();
-    let fix = match name.as_slice() {
-        b"array_push" => Some(format!("{given}.add(…)")),
-        b"array_unshift" => Some(format!("{given}.insert(0, …)")),
-        b"sort" | b"rsort" | b"usort" => Some(format!("{given} = {given}.sortedBy(…)")),
-        _ => None,
-    };
-    let message = match fix {
-        Some(fix) => format!(
-            "`{written}` changes the variable it is given, and PHP# passes every argument by value: write `{fix}`."
-        ),
-        None => format!(
-            "`{written}` changes the variable it is given, and PHP# passes every argument by value, so `{given}` can't go there."
-        ),
-    };
+    let message = format!(
+        "`{written}` changes the variable it is given, and PHP# passes every argument by value, so `{given}` can't go there."
+    );
     context.collector.report_with_code(
         IssueCode::InvalidPassByReference,
         Issue::error(message).with_annotation(Annotation::primary(argument.span()).with_message("Passed by value.")),
@@ -418,7 +402,7 @@ where
 }
 
 /// Reports a call of `function` by `used_name` in a casing other than its declared one, and a call of a function marked
-/// `@experimental`: the checks PHP's `name(…)` and PHP#'s `global.name(…)` both get at `span`.
+/// `@experimental`: the checks PHP's `name(…)` and PHP#'s `Pdf.render(…)` both get at `span`.
 fn check_function_use<A>(
     context: &mut Context<'_, '_, A>,
     block_context: &BlockContext<'_>,
@@ -893,8 +877,8 @@ pub(crate) fn report_wrapped_class<A>(
 }
 
 /// Spec section 23: PHP# calls a plain PHP function through its namespace, so a bare call of one is refused with the
-/// form to write: the replacement [`REPLACEMENTS`] gives it, or the call through its namespace, `global.strlen(…)` or
-/// `Pdf.render(…)`.
+/// form to write: the replacement [`REPLACEMENTS`] gives it, or the call through its namespace, as [`namespace_form`]
+/// writes it.
 pub(crate) fn report_bare_function_call<A>(
     context: &mut Context<'_, '_, A>,
     block_context: &BlockContext<'_>,
@@ -908,7 +892,7 @@ pub(crate) fn report_bare_function_call<A>(
     let name = function.original_name;
     let (code, message) = replacement_of(name)
         .and_then(|replacement| replacement_refusal(context, block_context, artifacts, name, replacement, arguments))
-        .unwrap_or_else(|| (IssueCode::BareFunctionCall, namespace_form(context, name)));
+        .unwrap_or_else(|| (IssueCode::BareFunctionCall, namespace_form(context, function)));
 
     context.collector.report_with_code(
         code,
@@ -916,62 +900,10 @@ pub(crate) fn report_bare_function_call<A>(
     );
 }
 
-/// Spec sections 8 and 23: a call through `global` of a function the standard library replaces is refused as its bare
-/// call is, so PHP# code never reaches around the library. A function PHP# syntax replaces keeps its `global.` call,
-/// and so does the standard library, whose members are made of those calls. Returns whether it reported one.
-fn report_replaced_global_call<A>(
-    context: &mut Context<'_, '_, A>,
-    block_context: &BlockContext<'_>,
-    artifacts: &mut AnalysisArtifacts,
-    function: &FunctionLikeMetadata,
-    arguments: &ArgumentList<'_>,
-    span: Span,
-) -> bool
-where
-    A: Arena,
-{
-    let Some((code, message)) = replaced_global_refusal(context, block_context, artifacts, function, Some(arguments))
-    else {
-        return false;
-    };
-    context.collector.report_with_code(
-        code,
-        Issue::error(message).with_annotation(Annotation::primary(span).with_message("Called here.")),
-    );
-
-    true
-}
-
-/// Spec sections 8 and 23: a read through `global` of a function the standard library replaces, as a value, as in
-/// `names.map(global.trim)`, is refused with the member to write, as its call is. Returns whether it reported one.
-pub(crate) fn report_replaced_function_value<A>(
-    context: &mut Context<'_, '_, A>,
-    block_context: &BlockContext<'_>,
-    artifacts: &mut AnalysisArtifacts,
-    function: &FunctionLikeMetadata,
-    span: Span,
-) -> bool
-where
-    A: Arena,
-{
-    let Some((code, message)) = replaced_global_refusal(context, block_context, artifacts, function, None) else {
-        return false;
-    };
-    let mut issue = Issue::error(message)
-        .with_annotation(Annotation::primary(span).with_message("Reads the function without calling it."));
-    // A lambda that calls a removed function is refused as the read is.
-    if !matches!(replacement_of(function.original_name), Some(Replacement::Removed(_))) {
-        issue = issue.with_help("Pass a lambda that makes the call in its place.");
-    }
-    context.collector.report_with_code(code, issue);
-
-    true
-}
-
-/// Spec sections 8 and 23: a read of a plain PHP constant the standard library replaces, `name` bare or through
-/// `global`, is refused at `span` with the member to write, as a call of a replaced function is. The standard library,
-/// whose members are made of those reads, keeps them, and a row matches the constant's whole name only, so a family of
-/// functions such as `curl_*` never takes PHP's `CURL_…` constants. Returns whether it reported one.
+/// Spec sections 8 and 23: a bare read of a plain PHP constant the standard library replaces, `name`, is refused at
+/// `span` with the member to write, as a bare call of a replaced function is. The standard library, whose members are
+/// made of those reads, keeps them, and a row matches the constant's whole name only, so a family of functions such
+/// as `curl_*` never takes PHP's `CURL_…` constants. Returns whether it reported one.
 pub(crate) fn report_replaced_constant<A>(
     context: &mut Context<'_, '_, A>,
     block_context: &BlockContext<'_>,
@@ -998,33 +930,6 @@ where
     );
 
     true
-}
-
-/// The refusal of a call or a read through `global` of `function`, outside the standard library, whose members are
-/// made of those calls, when the library replaces the function. A function PHP# syntax replaces keeps `global.`.
-fn replaced_global_refusal<A>(
-    context: &Context<'_, '_, A>,
-    block_context: &BlockContext<'_>,
-    artifacts: &mut AnalysisArtifacts,
-    function: &FunctionLikeMetadata,
-    arguments: Option<&ArgumentList<'_>>,
-) -> Option<(IssueCode, String)>
-where
-    A: Arena,
-{
-    if context.source_file.is_standard_library {
-        return None;
-    }
-    let name = function.original_name;
-    let replacement @ (Replacement::Members(_)
-    | Replacement::MembersOn(..)
-    | Replacement::CollectionMethod(_)
-    | Replacement::Removed(_)) = replacement_of(name)?
-    else {
-        return None;
-    };
-
-    replacement_refusal(context, block_context, artifacts, name, replacement, arguments)
 }
 
 /// The row of [`REPLACEMENTS`] that replaces the plain PHP function `name`: the row of its whole name, or else the row
@@ -1276,29 +1181,38 @@ where
         .replace("{...}", &spread.join(", "))
 }
 
-/// The call of the plain PHP function `name` through its namespace: `global.strlen(…)` for a function of PHP's root
-/// namespace, and `Pdf.render(…)` for one inside a namespace, by the name the file imports it under, with the import
-/// the file lacks.
-fn namespace_form<A>(context: &Context<'_, '_, A>, name: Word) -> String
+/// The call of the plain PHP function `function` through its namespace: `Pdf.render(…)` for one inside a namespace,
+/// and `Foundation.abort(…)` for one a library declares in PHP's root namespace, as [`root_member_form`] names it, by
+/// the name the file imports the namespace under, with the import the file lacks. One of PHP's built-ins belongs to no
+/// namespace PHP# code imports, so the refusal says to call it from a plain PHP class.
+fn namespace_form<A>(context: &Context<'_, '_, A>, function: &FunctionLikeMetadata) -> String
 where
     A: Arena,
 {
-    let call = match name.as_bytes().iter().rposition(|byte| *byte == b'\\') {
+    let name = function.original_name.as_bytes();
+    let (call, import) = match name.iter().rposition(|byte| *byte == b'\\') {
         Some(separator) => {
-            let namespace = word(&name.as_bytes()[..separator]);
-            let function = String::from_utf8_lossy(&name.as_bytes()[separator + 1..]);
-            let import =
-                display_missing_imports(context, [namespace]).map(|import| format!(" {import}")).unwrap_or_default();
+            let namespace = word(&name[..separator]);
+            let written = sharp_code_class_name(context.codebase, &context.imported_names, &context.scope, namespace);
 
-            format!(
-                "`{}.{function}(…)`.{import}",
-                sharp_code_class_name(context.codebase, &context.imported_names, &context.scope, namespace)
+            (
+                format!("{written}.{}", String::from_utf8_lossy(&name[separator + 1..])),
+                display_missing_imports(context, [namespace]),
             )
         }
-        None => format!("`global.{name}(…)`."),
+        None => match root_member_form(context, name, function.span) {
+            Some(form) => form,
+            None => {
+                return format!(
+                    "`{}` belongs to no namespace PHP# code imports: call it from a plain PHP class.",
+                    function.original_name
+                );
+            }
+        },
     };
+    let import = import.map(|import| format!(" {import}")).unwrap_or_default();
 
-    format!("A plain PHP function is called through its namespace: write {call}")
+    format!("A plain PHP function is called through its namespace: write `{call}(…)`.{import}")
 }
 
 /// The name a form gives the argument at `index` when it cannot write the argument itself: `a`, `b`, `c` and on
@@ -1376,9 +1290,10 @@ fn imported_namespace_function<A>(context: &Context<'_, '_, A>, name: &[u8]) -> 
 where
     A: Arena,
 {
-    context.imported_names.keys().find_map(|imported| {
-        Some(context.codebase.get_function(&[imported.as_bytes(), b"\\", name].concat())?.original_name)
-    })
+    context
+        .imported_names
+        .keys()
+        .find_map(|imported| Some(namespace_function(context.codebase, *imported, name)?.original_name))
 }
 
 #[cfg(test)]

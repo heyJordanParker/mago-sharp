@@ -1358,8 +1358,8 @@ impl<'analysis> Types<'analysis> {
             )
     }
 
-    /// The full name of the plain PHP function the read `read` gives the value of, spec section 14.3, as
-    /// `global.ucfirst` and `Pdf.render` read one, as the analysis resolved it. None for any other read.
+    /// The full name of the plain PHP function the read `read` gives the value of, spec section 14.3, as `Pdf.render`
+    /// reads one, as the analysis resolved it. None for any other read.
     pub(crate) fn function_value(&self, read: &Expression) -> Option<Word> {
         match self.artifacts.get_callees(read).next() {
             Some(CallTarget::FunctionLike { callee: FunctionLikeIdentifier::Function(function), .. })
@@ -1605,9 +1605,11 @@ impl<'analysis> Types<'analysis> {
         )
     }
 
-    /// The plain PHP function the method call `call` runs, as `Pdf.render(html)` and `global.now()` call one, spec
-    /// section 23, with the name its declaration writes. None for a call of a method.
-    pub(crate) fn namespace_function(&self, call: &Expression) -> Option<Word> {
+    /// The plain PHP function the method call `call` runs, as `Pdf.render(html)` calls one, spec section 23, with the
+    /// name its declaration writes, as `abort` for Laravel's `abort()` of PHP's root namespace in `Foundation.abort(404)`.
+    /// None for a call of a method.
+    #[must_use]
+    pub fn namespace_function(&self, call: &Expression) -> Option<Word> {
         let Some(CallTarget::FunctionLike { callee: FunctionLikeIdentifier::Function(function), .. }) =
             self.artifacts.get_callees(call).next()
         else {
@@ -1645,8 +1647,8 @@ impl<'analysis> Types<'analysis> {
         })
     }
 
-    /// The full name of the plain PHP constant the read `read` reaches through its namespace, as `global.PHP_EOL` and
-    /// `Pdf.DEFAULT_DPI` read one, spec section 23. None for any other read.
+    /// The full name of the plain PHP constant the read `read` reaches through its namespace, as `Pdf.DEFAULT_DPI` reads
+    /// one, spec section 23. None for any other read.
     pub(crate) fn namespace_constant(&self, read: &Expression) -> Option<Word> {
         self.artifacts.get_namespace_constant(read)
     }

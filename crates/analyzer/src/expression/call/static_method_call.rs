@@ -22,6 +22,7 @@ use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
+use crate::expression::access::report_unknown_member_owner;
 use crate::expression::call::analyze_invocation_targets;
 use crate::expression::call::function_call::report_wrapped_class;
 use crate::expression::call::method_call::add_called_property_targets;
@@ -40,7 +41,6 @@ use crate::plugin::ExpressionHookResult;
 use crate::plugin::context::HookContext;
 use crate::plugin::hook::StaticCall;
 use crate::resolver::class_name::generic_class_type;
-use crate::resolver::class_name::report_missing_class;
 use crate::resolver::class_name::statics_type_arguments;
 use crate::resolver::property::static_member_type_arguments;
 use crate::resolver::static_method::resolve_static_method_targets;
@@ -127,14 +127,14 @@ where
         }
     }
 
-    // A PHP# call on a name that names no class and no namespace the file imports, as `Gadget.count()`, is that
-    // class's one error, by its PHP# name, and the call is refused, so nothing that uses it reports again.
+    // A PHP# call on a name that names no class and no namespace the file imports, as `Gadget.count()`, is that name's
+    // one error, as a read of its member is, and the call is refused, so nothing that uses it reports again.
     if let Expression::ConstantAccess(class) = call.class
         && context.resolved_names.binding(&class.name) == Some(Binding::Class)
         && !context.resolved_names.is_imported(&class.name)
         && !context.codebase.class_like_exists(context.resolved_names.get(&class.name))
-        && report_missing_class(context, context.resolved_names.get(&class.name), class.span())
     {
+        report_unknown_member_owner(context, &class.name);
         artifacts.set_expression_type(&call.span, TUnion::from_atomic(TAtomic::Error));
 
         return Ok(());

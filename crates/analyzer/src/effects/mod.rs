@@ -231,9 +231,9 @@ impl Impurity {
     }
 }
 
-/// A class name and a member as a message writes them, the class named by `class_name`: `Clock.now`, `global.trim` or
-/// a function value's `step` as written with no class, `Pdf.render` for the function `Vendor\Pdf\render`, named
-/// through its namespace as spec section 23 calls it, and `Clock` with no member.
+/// A class name and a member as a message writes them, the class named by `class_name`: `Clock.now`, or a function
+/// value's `step` as written with no class, `Pdf.render` for the function `Vendor\Pdf\render`, named through its
+/// namespace as spec section 23 calls it, as `Foundation.now` for Laravel's `now()`, and `Clock` with no member.
 fn written((class, member): (Word, Word), class_name: &dyn Fn(Word) -> String) -> String {
     if class.is_empty() {
         let name = member.as_bytes();

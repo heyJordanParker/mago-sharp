@@ -263,9 +263,9 @@ impl Lowering<'_, '_> {
     }
 
     /// Appends what `expression` runs to `steps`, and whether the inlining rule takes all of it: a literal, a read of
-    /// one of the slots `names` names, a read of a plain PHP constant through its namespace, as `global.PHP_EOL` reads
-    /// one, and a call of a plain PHP function through its namespace, as `global.trim(x)` calls one, or of a method
-    /// whose receiver it takes. Both name their constant or function in full, so a copy in another namespace reaches
+    /// one of the slots `names` names, a read of a plain PHP constant through its namespace, as the standard library's
+    /// `global.PHP_EOL` reads one, and a call of a plain PHP function through its namespace, as its `global.trim(x)`
+    /// calls one, or of a method whose receiver it takes. Both name their constant or function in full, so a copy in another namespace reaches
     /// the same one. A bare constant is the library file's own, which a copy in another namespace would not find.
     fn steps(&self, expression: &Expression, names: &[&[u8]], steps: &mut Vec<Step>) -> bool {
         match expression {

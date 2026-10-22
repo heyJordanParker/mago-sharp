@@ -71,6 +71,7 @@ use crate::statement::function_like::FunctionLikeBody;
 use crate::utils::names::display_function_holder;
 use crate::utils::names::display_sharp_type;
 use crate::utils::names::is_prelude_stub;
+use crate::utils::names::library_namespace;
 
 /// Records the summary of the method, accessor or initial value `body`, which messages name by `member`, and whose
 /// parameters are declared at `parameters`, into `artifacts`, with the summary of each lambda written in it, and with
@@ -1007,7 +1008,7 @@ where
         }
     }
 
-    /// Records the function values plain PHP is given, as `global.usort(list, (a, b) => …)` gives one, since plain PHP
+    /// Records the function values plain PHP is given, as `Sorter.sort(list, (a, b) => …)` gives one, since plain PHP
     /// may run each.
     fn callbacks(&mut self, arguments: &'ast ArgumentList<'arena>) {
         for argument in arguments.arguments.iter() {
@@ -1127,7 +1128,7 @@ where
         }
     }
 
-    /// A method or function value, such as `this.label`, `Job.ping` or `global.trim`, passed to a call that runs it on
+    /// A method or function value, such as `this.label`, `Job.ping` or `Pdf.render`, passed to a call that runs it on
     /// `elements`: a call of each method or function its type names the analysis resolved it to, with the object it is
     /// read from as the receiver, which has the effects a call of it has. An extension method takes that object as its
     /// first argument, spec section 26.
@@ -1360,27 +1361,40 @@ where
     }
 }
 
-/// The plain PHP function `function` as the cause of its effects, with no class and the name the file calls it by, as
-/// `global.now` names one of PHP's root namespace, spec section 23, and the `extern` declaration a call of it falls
-/// under.
+/// The plain PHP function `function` as the cause of its effects, with no class and the full name PHP# names it by,
+/// and the `extern` declaration a call of it falls under. Spec section 23 names a function a library declares in PHP's
+/// root namespace through its [library namespace](library_namespace), as `Illuminate\Foundation\now` for Laravel's
+/// `now()`, which `extern Foundation.now` declares.
 fn function_extern(codebase: &CodebaseMetadata, function: Word) -> ((Word, Word), Option<&ExternMetadata>) {
-    let name = codebase.get_function(function.as_bytes()).map_or(function, |metadata| metadata.original_name);
-    let cause = if name.as_bytes().contains(&b'\\') { name } else { word([b"global.", name.as_bytes()].concat()) };
+    let metadata = codebase.get_function(function.as_bytes());
+    let name = metadata.map_or(function, |metadata| metadata.original_name);
+    let cause = match metadata.and_then(|metadata| library_namespace(codebase, metadata.span)) {
+        Some(namespace) if !name.as_bytes().contains(&b'\\') => {
+            word([namespace.as_bytes(), b"\\", name.as_bytes()].concat())
+        }
+        _ => name,
+    };
 
     ((empty_word(), cause), extern_of(codebase, empty_word(), ascii_lowercase_word(function.as_bytes())))
 }
 
 /// The `extern` declaration a call of `member` (empty for a function's own name) on `class` (empty for a function)
 /// falls under: the member's, then the class's, then the same for each parent class, nearest first. A function in a
-/// namespace is declared as `extern Pdf.render`, which the binder reads as a class and its member, spec section 23.
+/// namespace is declared as `extern Pdf.render`, which the binder reads as a class and its member, spec section 23,
+/// and so is one a library declares in PHP's root namespace, through a namespace of the class-likes in its folder, as
+/// `extern Foundation.now` declares Laravel's `now()`.
 pub(crate) fn extern_of(codebase: &CodebaseMetadata, class: Word, member: Word) -> Option<&ExternMetadata> {
     let declared = |key: (Word, Word)| codebase.externs.get(&key).and_then(|declarations| declarations.first());
     if class.is_empty() {
         return declared((empty_word(), member)).or_else(|| {
             let name = member.as_bytes();
-            let separator = name.iter().rposition(|byte| *byte == b'\\')?;
-
-            declared((word(&name[..separator]), word(&name[separator + 1..])))
+            match name.iter().rposition(|byte| *byte == b'\\') {
+                Some(separator) => declared((word(&name[..separator]), word(&name[separator + 1..]))),
+                None => codebase
+                    .folder_namespaces(codebase.get_function(name)?.span)
+                    .iter()
+                    .find_map(|namespace| declared((ascii_lowercase_word(namespace.as_bytes()), member))),
+            }
         });
     }
 

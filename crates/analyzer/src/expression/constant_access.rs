@@ -35,12 +35,13 @@ use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
 use crate::expression::call::function_call::report_replaced_constant;
-use crate::expression::call::function_call::report_replaced_function_value;
 use crate::expression::variable::read_variable;
 use crate::resolver::class_name::report_keyword_in_another_case;
 use crate::resolver::property::resolve_function_value;
 use crate::utils::expression::get_bare_name_variable_id;
+use crate::utils::names::namespace_constant;
 use crate::utils::names::namespace_member;
+use crate::utils::names::root_member_form;
 use mago_bytes::BytesDisplay;
 
 impl<'arena> Analyzable<'_, 'arena> for ConstantAccess<'arena> {
@@ -82,8 +83,8 @@ impl<'arena> Analyzable<'_, 'arena> for ConstantAccess<'arena> {
         let name_bytes = context.resolved_names.get(self);
         let unqualified_name = self.name.value();
 
-        // Spec section 23: a bare name in a `.sharp` file reads the code's own constant, of its namespace, and PHP's
-        // constants are read through their namespace, as `global.PHP_EOL`.
+        // Spec section 23: a bare name in a `.sharp` file reads the code's own constant, of its namespace, and a plain
+        // PHP library's constants are read through their namespace, as `Pdf.DEFAULT_DPI`.
         let constant_metadata = if context.dialect.is_sharp() {
             context.codebase.get_constant(name_bytes)
         } else {
@@ -111,19 +112,24 @@ impl<'arena> Analyzable<'_, 'arena> for ConstantAccess<'arena> {
 
                     return Ok(());
                 }
+                let message = match root_member_form(context, unqualified_name, global.span) {
+                    Some((member, import)) => format!(
+                        "`{written}` is a plain PHP constant, and a bare name reads only this code's own: write `{member}`.{}",
+                        import.map(|import| format!(" {import}")).unwrap_or_default()
+                    ),
+                    None => {
+                        format!("`{written}` belongs to no namespace PHP# code imports: read it in a plain PHP class.")
+                    }
+                };
                 context.collector.report_with_code(
                     IssueCode::NonExistentConstant,
-                    Issue::error(format!(
-                        "`{written}` is PHP's constant, and a bare name reads only this code's own: write `global.{written}`."
-                    ))
-                    .with_annotation(Annotation::primary(self.span()).with_message("Reads PHP's root constant.")),
+                    Issue::error(message)
+                        .with_annotation(Annotation::primary(self.span()).with_message("Reads PHP's root constant.")),
                 );
                 artifacts.set_expression_type(self, constant_type(context, global, unqualified_name));
             } else if context.dialect.is_sharp()
                 && let Some((namespace, constant)) = context.imported_names.iter().find_map(|(imported, name)| {
-                    let full_name = namespace_member(*imported, unqualified_name);
-
-                    Some((*name, context.codebase.get_constant(full_name.as_bytes())?))
+                    Some((*name, namespace_constant(context.codebase, *imported, unqualified_name)?))
                 })
             {
                 // Spec section 23: an imported library's constant is read through its namespace, as `Pdf.DEFAULT_DPI`.
@@ -150,7 +156,7 @@ impl<'arena> Analyzable<'_, 'arena> for ConstantAccess<'arena> {
                         )
                         .with_note("The constant might be misspelled or not defined.")
                         .with_help(format!(
-                            "Check `{written}` for typos. A bare name reads a constant of this file's namespace, declared in a `.php` file. A class constant is read through its class, as in `Limits.MAX`, and PHP's constant through its namespace, as in `global.CURLOPT_TIMEOUT`."
+                            "Check `{written}` for typos. A bare name reads a constant of this file's namespace, declared in a `.php` file. A class constant is read through its class, as in `Limits.MAX`, and a plain PHP library's constant through its namespace, as in `Pdf.DEFAULT_DPI`."
                         )),
                 );
             } else {
@@ -186,11 +192,10 @@ impl<'arena> Analyzable<'_, 'arena> for ConstantAccess<'arena> {
     }
 }
 
-/// Analyzes the PHP# read `read` of `namespace_name.member`, as `global.PHP_EOL`, or `Pdf.DEFAULT_DPI` after
-/// `import Vendor.Pdf;`, as a read of the plain PHP constant `member` of `namespace`, which [`member_namespace`] found
+/// Analyzes the PHP# read `read` of `namespace_name.member`, as `Pdf.DEFAULT_DPI` after `import Vendor.Pdf;`, as a read
+/// of the plain PHP constant `member` of `namespace`, which [`member_namespace`] found, as [`namespace_member`] names it
 /// (spec section 23). A read of a function of that name is the function's value, spec section 14.3, as
-/// `names.map(global.ucfirst)` passes it, unless the standard library replaces the function, when the read names
-/// the member to write. A read of neither is refused.
+/// `names.map(Pdf.render)` passes it. A read of neither is refused.
 ///
 /// [`member_namespace`]: crate::utils::names::member_namespace
 pub(crate) fn analyze_namespace_constant<A>(
@@ -207,13 +212,8 @@ pub(crate) fn analyze_namespace_constant<A>(
     // A refused read is refused once, so nothing that uses it reports again.
     let refused = || TUnion::from_atomic(TAtomic::Error);
     // The name as the import and the read write it, which PHP finds as the codebase did: its namespace in any case.
-    let full_name = namespace_member(namespace, member.value);
+    let full_name = namespace_member(context.codebase, namespace, member.value);
     if let Some(constant) = context.codebase.get_constant(full_name.as_bytes()) {
-        if report_replaced_constant(context, block_context, artifacts, full_name.as_bytes(), read.span()) {
-            artifacts.set_expression_type(read, refused());
-
-            return;
-        }
         let constant_type =
             read_constant(context, block_context, artifacts, constant, full_name.as_bytes(), read.span());
         artifacts.record_namespace_constant(read.span(), full_name);
@@ -224,12 +224,6 @@ pub(crate) fn analyze_namespace_constant<A>(
 
     let written = format!("{}.{}", BytesDisplay(namespace_name.value()), BytesDisplay(member.value));
     if let Some(function) = context.codebase.get_function(full_name.as_bytes()) {
-        if report_replaced_function_value(context, block_context, artifacts, function, read.span()) {
-            artifacts.set_expression_type(read, refused());
-
-            return;
-        }
-
         let value =
             resolve_function_value(context, block_context, artifacts, full_name, function, &written, read.span());
         artifacts.record_call_target(
