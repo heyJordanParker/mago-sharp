@@ -4597,7 +4597,7 @@ fn check_pattern_match(pattern_match: &PatternMatch, is_expression: bool, contex
                     .with_annotation(
                         Annotation::primary(pattern_match.r#match.span).with_message("This `match` has none."),
                     )
-                    .with_note("A `match` may leave out `default` only when its arms handle every case of an enum or a sealed interface, or every length of a `List`.")
+                    .with_note("A `match` may leave out `default` only when its arms handle every case of an enum or a sealed interface, or every value of a `List`.")
                     .with_help("Add `default => …` as the last arm."),
             );
 

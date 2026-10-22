@@ -24,6 +24,7 @@ use mago_codex::ttype::combiner::CombinerOptions;
 use mago_codex::ttype::comparator::ComparisonResult;
 use mago_codex::ttype::comparator::union_comparator;
 use mago_codex::ttype::get_false;
+use mago_codex::ttype::get_list;
 use mago_codex::ttype::get_literal_string;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_mixed_list;
@@ -607,21 +608,28 @@ where
         matches!(call.value, b"is_object" | b"count") || pattern_calls.element_tests.contains(&call.span)
     };
     // The last arm of a `match` without `default` takes every value the arms before it leave, as `default` does, so its
-    // test is always true and not redundant. An arm before it that is always true leaves nothing for the arms after it.
+    // test is always true and not redundant. Before `default`, the last arm with a pattern that is always true is
+    // reported once, as the arm, and not again for each part of its test. An arm before it that is always true leaves
+    // nothing for the arms after it.
     let last_arm_test: Option<Span> = match node {
         Node::Expression(Expression::PatternMatch(pattern_match))
-        | Node::Statement(Statement::PatternMatch(pattern_match))
-            if !pattern_match.arms.iter().any(PatternMatchArm::is_default) =>
-        {
-            pattern_match.arms.last().and_then(|arm| match arm {
-                PatternMatchArm::Pattern(arm) => {
-                    tests.iter().find(|(pattern, _)| *pattern == arm.pattern.span()).map(|(_, test)| test.span())
-                }
+        | Node::Statement(Statement::PatternMatch(pattern_match)) => {
+            let defaulted = pattern_match.arms.iter().any(PatternMatchArm::is_default);
+            pattern_match.arms.iter().rev().find_map(|arm| match arm {
+                PatternMatchArm::Pattern(arm) => Some((arm.pattern.span(), defaulted)),
                 PatternMatchArm::Default(_) => None,
             })
         }
         _ => None,
-    };
+    }
+    .filter(|(last, defaulted)| {
+        !defaulted
+            || issues.iter().any(|issue| {
+                issue.code.as_deref() == Some(IssueCode::MatchArmAlwaysTrue.as_str())
+                    && issue.primary_span().is_some_and(|span| span.start == last.start)
+            })
+    })
+    .and_then(|(last, _)| tests.iter().find(|(pattern, _)| *pattern == last).map(|(_, test)| test.span()));
     // A type pattern with fields tests the type and then each field, whose test the type makes always true, as
     // `ChargeError.Declined(string reason)` binds a field that is always a `string`, so its `&&` is the pattern's shape.
     let tested_patterns: Vec<&Pattern> = match node {
@@ -804,7 +812,7 @@ where
 
 /// Reports what a PHP# `match` without `default` leaves unhandled. Spec section 21 gives `default` to every `match` on
 /// a value that is not an enum, a sealed interface or a `List`, and makes a `match` on one handle each of its cases or
-/// lengths. The value left is the value once every `handled` test is false, which Mago's reconciler narrows as it
+/// lists. The value left is the value once every `handled` test is false, which Mago's reconciler narrows as it
 /// narrows the arms of PHP's `match`.
 fn report_unhandled<'ctx, 'arena, A>(
     pattern_match: &PatternMatch<'arena>,
@@ -852,13 +860,29 @@ fn report_unhandled<'ctx, 'arena, A>(
             .with_annotation(
                 Annotation::primary(pattern_match.r#match.span).with_message("This `match` has no `default`."),
             )
-            .with_note("A `match` may leave out `default` only when its arms handle every case of an enum or a sealed interface, or every length of a `List`.")
+            .with_note("A `match` may leave out `default` only when its arms handle every case of an enum or a sealed interface, or every value of a `List`.")
             .with_help("Add an arm for each value it misses, or add `default => …` as the last arm."),
     );
 }
 
+/// The PHP variable the PHP of `pattern_match` tests, as `php_shape` writes it: the local the `match` names, or the
+/// hidden `$match#N` that holds its value, numbered after the hidden variables of the forms around it.
+fn tested_variable<A>(pattern_match: &PatternMatch<'_>, context: &Context<'_, '_, A>) -> Word
+where
+    A: Arena,
+{
+    match pattern_match.expression {
+        Expression::ConstantAccess(access)
+            if matches!(context.resolved_names.binding(&access.name), Some(Binding::Local(_))) =>
+        {
+            php_variable_name(access.name.value())
+        }
+        _ => word(format!("$match#{}", context.temporaries + 1)),
+    }
+}
+
 /// The cases of the enum `value_type` that no `handled` test of `pattern_match` matches, as PHP# writes them in
-/// backticks, in the order the enum declares them, then the lengths of a `List` that no arm without `when` handles, as
+/// backticks, in the order the enum declares them, then the lists of a `List` that no arm without `when` holds, as
 /// "lists of 2 or more items", and null last, with the enums those cases name.
 fn missing_cases<'ctx, 'arena, A>(
     pattern_match: &PatternMatch<'arena>,
@@ -894,7 +918,7 @@ where
         find_satisfying_assignments(&saturate_clauses(clauses.iter(), &thresholds), None, &mut WordSet::default());
 
     let left = if assertions.is_empty() {
-        vec![value_type.clone()]
+        value_type.clone()
     } else {
         let mut unhandled_context = block_context.clone();
         reconcile_keyed_types(
@@ -909,10 +933,14 @@ where
             false,
         );
 
-        assertions.keys().filter_map(|id| unhandled_context.locals.get(id)).map(|left| (**left).clone()).collect()
+        // Only the tested value is left to handle: the PHP of a pattern narrows the hidden variables of its items too.
+        unhandled_context
+            .locals
+            .get(&tested_variable(pattern_match, context))
+            .map_or_else(|| value_type.clone(), |left| (**left).clone())
     };
 
-    let atomics = || left.iter().flat_map(|left| left.types.iter());
+    let atomics = || left.types.iter();
     let cases: Vec<(Word, Option<Word>)> =
         atomics().filter_map(|atomic| enum_value(atomic, context.codebase)).collect();
 
@@ -979,18 +1007,20 @@ where
         missing.push(format!("`{name}`"));
     }
 
-    if let Some((list, element)) = atomics().find_map(|atomic| Some((atomic, list_element_type(atomic)?))) {
-        let list = TUnion::from_atomic(list.clone());
-        let lengths = pattern_match
+    // The arms of a `match` on a `List` are joined on the declared `List`: the reconciler narrows a `List` that a list
+    // pattern's count tests to a tuple, which is no longer the `List` the arms cover.
+    if let Some(list) = value_type.types.iter().find(|atomic| list_element_type(atomic).is_some()) {
+        let patterns: Vec<&Pattern> = pattern_match
             .arms
             .iter()
             .filter_map(|arm| match arm {
                 PatternMatchArm::Pattern(arm) if arm.guard.is_none() => Some(arm.pattern),
                 _ => None,
             })
-            .map(|pattern| list_lengths(pattern, &list, element, context, block_context, artifacts).0)
-            .fold(Lengths::NONE, |lengths, held| lengths.join(&held, |left, right| left || right));
-        missing.extend((!lengths).describe());
+            .collect();
+        let mut coverage = ListCoverage { context, block_context, artifacts, shapes: Vec::new() };
+        let uncovered = coverage.uncovered(Values::Every(TUnion::from_atomic(list.clone())), &patterns);
+        missing.extend(joined(uncovered).iter().map(|lists| described_lists(lists, true, context)));
     }
 
     if atomics().any(|atomic| matches!(atomic, TAtomic::Null)) {
@@ -1102,10 +1132,10 @@ where
 }
 
 /// The type a field pattern that tests a value of `tested` holds every value of: a type pattern's type, without
-/// properties, whose fields each hold every value of their own type, the type of `null`, `true` or `false`, which is the
-/// value itself, and both sides' of `or`. A case of a generic enum has the type arguments `tested` gives it, so
-/// `Option.Some(int value)` holds every `Option<int>.Some` of an `Option<int>`. `None` for any other pattern, which holds
-/// only some values of a type.
+/// properties, whose fields each hold every value of their own type, the type of `null`, `true`, `false` or a case,
+/// which is the value itself, and both sides' of `or`. A case of a generic enum has the type arguments `tested` gives
+/// it, so `Option.Some(int value)` holds every `Option<int>.Some` of an `Option<int>`. `None` for any other pattern,
+/// which holds only some values of a type.
 fn held_type<'ctx, A>(
     pattern: &Pattern<'_>,
     tested: &TUnion,
@@ -1136,18 +1166,26 @@ where
         Pattern::Value(Expression::Literal(Literal::Null(_))) => Some(get_null()),
         Pattern::Value(Expression::Literal(Literal::True(_))) => Some(get_true()),
         Pattern::Value(Expression::Literal(Literal::False(_))) => Some(get_false()),
-        // A plain case of an enum with data, `Option.None`, whose class the binder resolves at the case's name.
-        Pattern::Value(Expression::Access(Access::Property(PropertyAccess {
-            property: ClassLikeMemberSelector::Identifier(case),
-            ..
-        }))) => {
-            let name = context.resolved_names.resolve(&case.span)?;
-            let class = context.codebase.get_class_like(name).filter(|class| class.flags.is_enum_case_class())?;
+        Pattern::Value(Expression::Access(Access::Property(
+            access @ PropertyAccess { property: ClassLikeMemberSelector::Identifier(case), .. },
+        ))) => {
+            // A plain case of an enum with data, `Option.None`, whose class the binder resolves at the case's name.
+            if let Some(name) = context.resolved_names.resolve(&case.span)
+                && let Some(class) =
+                    context.codebase.get_class_like(name).filter(|class| class.flags.is_enum_case_class())
+            {
+                return Some(
+                    case_type(context, name, tested)
+                        .map_or_else(|| get_named_object(class.original_name, None), |(case_type, _)| case_type),
+                );
+            }
 
-            Some(
-                case_type(context, name, tested)
-                    .map_or_else(|| get_named_object(class.original_name, None), |(case_type, _)| case_type),
-            )
+            // A case of an enum without data, `Status.Open`.
+            let class = context.resolved_names.static_property_class(access)?;
+            let r#enum = context.codebase.get_enum(context.resolved_names.get(&class.name))?;
+            let case = r#enum.enum_cases.values().find(|declared| declared.name.as_bytes() == case.value)?;
+
+            Some(TUnion::from_atomic(TAtomic::Object(TObject::Enum(TEnum::new_case(r#enum.name, case.name)))))
         }
         Pattern::Binary(binary) if !binary.is_and() => {
             let left = held_type(binary.left, tested, context, block_context, artifacts)?;
@@ -1199,127 +1237,467 @@ fn holds_every_value(codebase: &CodebaseMetadata, held: &TUnion, declared: &TUni
     )
 }
 
-/// The lengths of a `List` a pattern holds: `short[n]` for each length `n` below `short.len()`, and `longer` for every
-/// length after them.
-#[derive(Clone)]
-struct Lengths {
-    short: Vec<bool>,
-    longer: bool,
+/// Values of a `List` that a `match` tests, spec section 21: every value of a type, or the lists of a length whose first
+/// and last items are such values. Coverage splits values where an arm tells them apart, as Rust splits a pattern's
+/// constructors, so arms join per item over the cases an item can be: enum cases, sealed implementers, `null` and
+/// lengths.
+#[derive(Clone, PartialEq)]
+enum Values {
+    Every(TUnion),
+    Lists { element: TUnion, length: Length, first: Vec<Values>, last: Vec<Values> },
 }
 
-impl Lengths {
-    const NONE: Lengths = Lengths { short: Vec::new(), longer: false };
-    const ALL: Lengths = Lengths { short: Vec::new(), longer: true };
+/// The length of [`Values::Lists`]: exactly that many items, all of them in `first`, or that many or more, of which
+/// `first` holds the first ones and `last` the last ones.
+#[derive(Clone, Copy, PartialEq)]
+enum Length {
+    Exactly(usize),
+    AtLeast(usize),
+}
 
-    /// The length of a list pattern of `count` elements, and every longer length when it has a rest.
-    fn of(count: usize, rest: bool) -> Lengths {
-        let mut short = vec![false; count];
-        short.push(true);
+/// Whether a pattern holds all of some values, none of them, or some, with the place of the values whose split may
+/// tell the pattern's apart: the indexes of the items down to them.
+#[derive(Clone, PartialEq)]
+enum Holds {
+    All,
+    None,
+    Some(Option<Vec<usize>>),
+}
 
-        Lengths { short, longer: rest }
+impl Holds {
+    fn and(self, other: Holds) -> Holds {
+        match (self, other) {
+            (Holds::None, _) | (_, Holds::None) => Holds::None,
+            (Holds::All, other) | (other, Holds::All) => other,
+            (Holds::Some(place), Holds::Some(other)) => Holds::Some(place.or(other)),
+        }
     }
 
-    fn holds(&self, length: usize) -> bool {
-        self.short.get(length).copied().unwrap_or(self.longer)
-    }
-
-    /// The lengths `join` holds of whether `self` and `other` hold each length.
-    fn join(&self, other: &Lengths, join: impl Fn(bool, bool) -> bool) -> Lengths {
-        let short = (0..self.short.len().max(other.short.len()))
-            .map(|length| join(self.holds(length), other.holds(length)))
-            .collect();
-
-        Lengths { short, longer: join(self.longer, other.longer) }
-    }
-
-    /// The lengths held, in plain words: "empty lists", "lists of exactly 1 item" and "lists of 2 or more items".
-    fn describe(mut self) -> Vec<String> {
-        while self.short.len() > 1 && self.short.last() == Some(&self.longer) {
-            self.short.pop();
+    fn or(self, other: Holds) -> Holds {
+        match (self, other) {
+            (Holds::All, _) | (_, Holds::All) => Holds::All,
+            (Holds::None, other) | (other, Holds::None) => other,
+            (Holds::Some(place), Holds::Some(other)) => Holds::Some(place.or(other)),
         }
-        if self.short.is_empty() {
-            self.short.push(self.longer);
-        }
-
-        let mut described: Vec<String> = self
-            .short
-            .iter()
-            .enumerate()
-            .filter(|(_, held)| **held)
-            .map(|(length, _)| match length {
-                0 => "empty lists".to_owned(),
-                1 => "lists of exactly 1 item".to_owned(),
-                length => format!("lists of exactly {length} items"),
-            })
-            .collect();
-        if self.longer {
-            described.push(format!("lists of {} or more items", self.short.len()));
-        }
-
-        described
     }
 }
 
-impl std::ops::Not for Lengths {
-    type Output = Lengths;
+impl std::ops::Not for Holds {
+    type Output = Holds;
 
-    fn not(self) -> Lengths {
-        Lengths { short: self.short.into_iter().map(|held| !held).collect(), longer: !self.longer }
+    fn not(self) -> Holds {
+        match self {
+            Holds::All => Holds::None,
+            Holds::None => Holds::All,
+            some => some,
+        }
     }
 }
 
-/// The lengths of a `List` of `element`s, of type `list`, at which `pattern` holds every list, and those at which it
-/// may hold one, spec section 21. A list pattern holds its count of elements, and every longer count with a rest, when
-/// each element's pattern holds every `element` and its rest every `list`. `or`, `and` and `not` join what their
-/// patterns hold, and any other pattern holds no length for sure.
-fn list_lengths<'ctx, A>(
-    pattern: &Pattern<'_>,
-    list: &TUnion,
-    element: &TUnion,
-    context: &Context<'ctx, '_, A>,
-    block_context: &BlockContext<'ctx>,
-    artifacts: &mut AnalysisArtifacts,
-) -> (Lengths, Lengths)
+/// Finds the values of a `List` that no arm of a `match` holds.
+struct ListCoverage<'coverage, 'ctx, 'arena, A>
 where
     A: Arena,
 {
-    match pattern {
-        Pattern::List(list_pattern) => {
-            let rest =
-                list_pattern.elements.iter().any(|list_element| matches!(list_element, ListPatternElement::Rest(_)));
-            let lengths = Lengths::of(list_pattern.elements.len() - usize::from(rest), rest);
-            let holds_every_list = list_pattern.elements.iter().all(|list_element| match list_element {
-                ListPatternElement::Pattern(pattern) => held_type(pattern, element, context, block_context, artifacts)
-                    .is_some_and(|held| holds_every_value(context.codebase, &held, element)),
-                ListPatternElement::Rest(rest) => rest.hint.is_none_or(|hint| {
-                    let held = get_type_from_hint(context, block_context, artifacts, hint);
+    context: &'coverage Context<'ctx, 'arena, A>,
+    block_context: &'coverage BlockContext<'ctx>,
+    artifacts: &'coverage mut AnalysisArtifacts,
+    /// Each list pattern that met every value of a `List` at a place: the place, its items before the rest, or all of
+    /// them, and its items after the rest when it has one.
+    shapes: Vec<(Vec<usize>, usize, Option<usize>)>,
+}
 
-                    holds_every_value(context.codebase, &held, list)
-                }),
-            });
+impl<A> ListCoverage<'_, '_, '_, A>
+where
+    A: Arena,
+{
+    /// The parts of `values` that none of `patterns` holds.
+    fn uncovered(&mut self, values: Values, patterns: &[&Pattern<'_>]) -> Vec<Values> {
+        self.shapes.clear();
+        let mut split_at = None;
+        for pattern in patterns {
+            match self.holds(pattern, &values, &mut Vec::new()) {
+                Holds::All => return Vec::new(),
+                Holds::Some(Some(place)) => {
+                    split_at.get_or_insert(place);
+                }
+                Holds::Some(None) | Holds::None => {}
+            }
+        }
+        let Some(place) = split_at else {
+            return vec![values];
+        };
 
-            (if holds_every_list { lengths.clone() } else { Lengths::NONE }, lengths)
-        }
-        Pattern::Not(not) => {
-            let (held, possible) = list_lengths(not.pattern, list, element, context, block_context, artifacts);
+        let shapes = std::mem::take(&mut self.shapes);
+        split(&values, &place, &shapes, self.context.codebase)
+            .into_iter()
+            .flat_map(|part| self.uncovered(part, patterns))
+            .collect()
+    }
 
-            (!possible, !held)
-        }
-        Pattern::Binary(binary) => {
-            let (left_held, left_possible) =
-                list_lengths(binary.left, list, element, context, block_context, artifacts);
-            let (right_held, right_possible) =
-                list_lengths(binary.right, list, element, context, block_context, artifacts);
-            let join = |left: bool, right: bool| if binary.is_and() { left && right } else { left || right };
+    /// Whether `pattern` holds `values`, which sit at `place`.
+    fn holds(&mut self, pattern: &Pattern<'_>, values: &Values, place: &mut Vec<usize>) -> Holds {
+        match pattern {
+            Pattern::Parenthesized(parenthesized) => self.holds(parenthesized.pattern, values, place),
+            Pattern::Not(not) => !self.holds(not.pattern, values, place),
+            Pattern::Binary(binary) if binary.is_and() => {
+                let left = self.holds(binary.left, values, place);
 
-            (left_held.join(&right_held, join), left_possible.join(&right_possible, join))
+                left.and(self.holds(binary.right, values, place))
+            }
+            Pattern::Binary(binary) => {
+                // Both sides together may hold every value no split tells apart, as `true or false` holds a `bool`.
+                if self.holds_type(pattern, values, place) == Holds::All {
+                    return Holds::All;
+                }
+                let left = self.holds(binary.left, values, place);
+
+                left.or(self.holds(binary.right, values, place))
+            }
+            Pattern::List(list) => self.holds_list(list, values, place),
+            Pattern::Type(_) | Pattern::Value(_) | Pattern::Comparison(_) | Pattern::Properties(_) => {
+                self.holds_type(pattern, values, place)
+            }
         }
-        Pattern::Parenthesized(parenthesized) => {
-            list_lengths(parenthesized.pattern, list, element, context, block_context, artifacts)
+    }
+
+    /// Whether a pattern other than a list pattern holds `values`, by the type it holds every value of.
+    fn holds_type(&mut self, pattern: &Pattern<'_>, values: &Values, place: &[usize]) -> Holds {
+        let tested = values.r#type();
+        let Some(held) = held_type(pattern, &tested, self.context, self.block_context, self.artifacts) else {
+            return may_hold(values, place, self.context.codebase);
+        };
+
+        if holds_every_value(self.context.codebase, &held, &tested) {
+            Holds::All
+        } else if !union_comparator::can_expression_types_be_identical(
+            self.context.codebase,
+            &held,
+            &tested,
+            true,
+            false,
+        ) {
+            Holds::None
+        } else {
+            may_hold(values, place, self.context.codebase)
         }
-        Pattern::Type(_) | Pattern::Value(_) | Pattern::Comparison(_) | Pattern::Properties(_) => {
-            (Lengths::NONE, Lengths::ALL)
+    }
+
+    /// Whether a list pattern holds `values`: lists of a length it takes, whose items its patterns hold, and whose items
+    /// its rest takes, which a typed rest does when it takes any `List` of the item type.
+    fn holds_list(&mut self, list: &ListPattern<'_>, values: &Values, place: &mut Vec<usize>) -> Holds {
+        let patterns: Vec<&Pattern> = list
+            .elements
+            .iter()
+            .filter_map(|element| match element {
+                ListPatternElement::Pattern(pattern) => Some(*pattern),
+                ListPatternElement::Rest(_) => None,
+            })
+            .collect();
+        let rest = list.elements.iter().find_map(|element| match element {
+            ListPatternElement::Rest(rest) => Some(rest),
+            ListPatternElement::Pattern(_) => None,
+        });
+        let before = list
+            .elements
+            .iter()
+            .position(|element| matches!(element, ListPatternElement::Rest(_)))
+            .unwrap_or(patterns.len());
+
+        let Values::Lists { element, length, first, last } = values else {
+            if !values.r#type().types.iter().any(|atomic| list_element_type(atomic).is_some()) {
+                return if values.r#type().types.iter().any(may_be_list) { Holds::Some(None) } else { Holds::None };
+            }
+            self.shapes.push((place.clone(), before, rest.map(|_| patterns.len() - before)));
+
+            return Holds::Some(Some(place.clone()));
+        };
+
+        let fits = match (*length, rest) {
+            (Length::Exactly(count), None) => patterns.len() == count,
+            (Length::Exactly(count), Some(_)) => patterns.len() <= count,
+            (Length::AtLeast(_), rest) => rest.is_some(),
+        };
+        if !fits {
+            return Holds::None;
         }
+
+        let items: Vec<&Values> = first.iter().chain(last).collect();
+        let mut holds = Holds::All;
+        for (index, pattern) in patterns.iter().enumerate() {
+            let item = if index < before { index } else { items.len() - patterns.len() + index };
+            place.push(item);
+            holds = holds.and(self.holds(pattern, items[item], place));
+            place.pop();
+        }
+        if let Some(hint) = rest.and_then(|rest| rest.hint) {
+            let held = get_type_from_hint(self.context, self.block_context, self.artifacts, hint);
+            if !holds_every_value(self.context.codebase, &held, &get_list(element.clone())) {
+                holds = holds.and(Holds::Some(None));
+            }
+        }
+
+        holds
+    }
+}
+
+impl Values {
+    fn r#type(&self) -> TUnion {
+        match self {
+            Values::Every(r#type) => r#type.clone(),
+            Values::Lists { element, .. } => get_list(element.clone()),
+        }
+    }
+}
+
+/// That a pattern holds some of `values`, at `place` when splitting them may tell the pattern's apart.
+fn may_hold(values: &Values, place: &[usize], codebase: &CodebaseMetadata) -> Holds {
+    Holds::Some(matches!(values, Values::Every(r#type) if splits(r#type, codebase)).then(|| place.to_vec()))
+}
+
+/// Whether every value of `r#type` splits into cases a pattern other than a list pattern tells apart: one type each of
+/// a union, the cases of an enum, or the members of a closed set of classes. Only a list pattern tells the lengths of a
+/// `List` apart.
+fn splits(r#type: &TUnion, codebase: &CodebaseMetadata) -> bool {
+    r#type.types.len() > 1
+        || r#type
+            .types
+            .first()
+            .is_some_and(|atomic| enum_cases(atomic, codebase).is_some() || closed_members(atomic, codebase).is_some())
+}
+
+/// `values` with the values at `place` split into the cases they can be. A `List` splits into the lengths the
+/// `shapes` of its list patterns tell apart: each length below the longest pattern without a rest, or below the items
+/// around the longest rest, and every longer length.
+fn split(
+    values: &Values,
+    place: &[usize],
+    shapes: &[(Vec<usize>, usize, Option<usize>)],
+    codebase: &CodebaseMetadata,
+) -> Vec<Values> {
+    let Some((&item, inner)) = place.split_first() else {
+        let Values::Every(r#type) = values else {
+            unreachable!("only every value of a type splits");
+        };
+        return split_type(r#type, place, shapes, codebase);
+    };
+    let Values::Lists { element, length, first, last } = values else {
+        unreachable!("a place inside values is an item of lists");
+    };
+    let items: Vec<&Values> = first.iter().chain(last).collect();
+
+    split(items[item], inner, &shapes_inside(shapes, item), codebase)
+        .into_iter()
+        .map(|part| {
+            let (mut first, mut last) = (first.clone(), last.clone());
+            if item < first.len() {
+                first[item] = part;
+            } else {
+                last[item - first.len()] = part;
+            }
+
+            Values::Lists { element: element.clone(), length: *length, first, last }
+        })
+        .collect()
+}
+
+/// The `shapes` met inside the item at `item`, with their places from that item.
+fn shapes_inside(
+    shapes: &[(Vec<usize>, usize, Option<usize>)],
+    item: usize,
+) -> Vec<(Vec<usize>, usize, Option<usize>)> {
+    shapes
+        .iter()
+        .filter_map(|(place, before, after)| match place.split_first() {
+            Some((&at, inner)) if at == item => Some((inner.to_vec(), *before, *after)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Every value of `r#type` split into the cases it can be, as [`splits`] lists them.
+fn split_type(
+    r#type: &TUnion,
+    place: &[usize],
+    shapes: &[(Vec<usize>, usize, Option<usize>)],
+    codebase: &CodebaseMetadata,
+) -> Vec<Values> {
+    if r#type.types.len() > 1 {
+        return r#type.types.iter().map(|atomic| Values::Every(TUnion::from_atomic(atomic.clone()))).collect();
+    }
+    let atomic = r#type.get_single();
+    if let Some(element) = list_element_type(atomic) {
+        let here = shapes.iter().filter(|(at, ..)| at == place);
+        let fixed = here.clone().filter(|(.., after)| after.is_none()).map(|(_, count, _)| count + 1).max();
+        let before = here.clone().filter(|(.., after)| after.is_some()).map(|(_, before, _)| *before).max();
+        let after = here.filter_map(|(.., after)| *after).max();
+        let (before, after) = (before.unwrap_or(0), after.unwrap_or(0));
+        let longer = fixed.unwrap_or(0).max(before + after);
+        let every = Values::Every(element.clone());
+        let lists = |length, first, last| Values::Lists { element: element.clone(), length, first, last };
+
+        return (0..longer)
+            .map(|count| lists(Length::Exactly(count), vec![every.clone(); count], Vec::new()))
+            .chain([lists(Length::AtLeast(longer), vec![every.clone(); before], vec![every.clone(); after])])
+            .collect();
+    }
+
+    enum_cases(atomic, codebase)
+        .or_else(|| closed_members(atomic, codebase))
+        .unwrap_or_else(|| unreachable!("a value that splits is a union, a `List`, an enum or a closed set"))
+        .into_iter()
+        .map(|atomic| Values::Every(TUnion::from_atomic(atomic)))
+        .collect()
+}
+
+/// Each case of the enum `atomic` names every case of, in the order the enum declares them.
+fn enum_cases(atomic: &TAtomic, codebase: &CodebaseMetadata) -> Option<Vec<TAtomic>> {
+    let (name, None) = enum_value(atomic, codebase)? else {
+        return None;
+    };
+    let mut cases: Vec<_> = codebase.get_enum(name.as_bytes())?.enum_cases.values().collect();
+    cases.sort_by_key(|case| case.span.start.offset);
+
+    (!cases.is_empty()).then(|| {
+        cases.into_iter().map(|case| TAtomic::Object(TObject::Enum(TEnum::new_case(name, case.name)))).collect()
+    })
+}
+
+/// Each member of the closed set of classes `atomic` stands for, with its type arguments: a case of an enum with data,
+/// or an implementer of a sealed interface. `None` for a class that is a member itself.
+fn closed_members(atomic: &TAtomic, codebase: &CodebaseMetadata) -> Option<Vec<TAtomic>> {
+    let class = closed_class(atomic, codebase)?;
+    let inheritors = class.permitted_inheritors.as_ref().filter(|inheritors| !inheritors.contains(&class.name))?;
+    let TAtomic::Object(TObject::Named(object)) = atomic else {
+        unreachable!("a closed class is a named object");
+    };
+    let parameters = object.get_type_parameters().map(<[_]>::to_vec);
+    let mut members: Vec<&ClassLikeMetadata> =
+        inheritors.iter().filter_map(|inheritor| codebase.get_class_like(inheritor.as_bytes())).collect();
+    members.sort_by_key(|member| (member.span.file_id, member.span.start.offset));
+
+    Some(
+        members
+            .into_iter()
+            .map(|member| {
+                TAtomic::Object(TObject::Named(TNamedObject::new_with_type_parameters(member.name, parameters.clone())))
+            })
+            .collect(),
+    )
+}
+
+/// The lists of exactly `n` items joined to the lists of `n + 1` or more items whose first items they share, so `[null]`
+/// and `[null, …]` read as the lists whose first item is `null`.
+fn joined(mut lists: Vec<Values>) -> Vec<Values> {
+    loop {
+        let found = lists.iter().enumerate().find_map(|(longer_at, longer)| {
+            let Values::Lists { element, length: Length::AtLeast(count), first, last } = longer else {
+                return None;
+            };
+            if !last.is_empty() || *count <= first.len().max(1) {
+                return None;
+            }
+            let every = Values::Every(element.clone());
+            let shorter_at = lists.iter().position(|shorter| {
+                matches!(shorter, Values::Lists { length: Length::Exactly(shorter_count), first: items, .. }
+                    if *shorter_count + 1 == *count
+                        && items[..first.len()] == first[..]
+                        && items[first.len()..].iter().all(|item| *item == every))
+            })?;
+
+            Some((longer_at, shorter_at, *count - 1))
+        });
+        let Some((longer_at, shorter_at, count)) = found else {
+            return lists;
+        };
+        if let Values::Lists { length, .. } = &mut lists[longer_at] {
+            *length = Length::AtLeast(count);
+        }
+        lists.remove(shorter_at);
+    }
+}
+
+/// `values`, lists of a `List`, in plain words: "every list", "lists of 2 or more items" or "lists whose first item
+/// is a `Square`", or one such list when `plural` is false.
+fn described_lists<A>(values: &Values, plural: bool, context: &Context<'_, '_, A>) -> String
+where
+    A: Arena,
+{
+    let Values::Lists { element, length, first, last } = values else {
+        return if plural { "every list".to_owned() } else { "a list".to_owned() };
+    };
+
+    let every = Values::Every(element.clone());
+    let from_start = first.iter().enumerate().map(|(index, item)| (index + 1, 0, item));
+    let from_end = last.iter().enumerate().map(|(index, item)| (0, last.len() - index, item));
+    let constrained: Vec<(usize, usize, &Values)> =
+        from_start.chain(from_end).filter(|(.., item)| **item != every).collect();
+    let implied = constrained.iter().map(|(from_start, ..)| *from_start).max().unwrap_or(0)
+        + constrained.iter().map(|(_, from_end, _)| *from_end).max().unwrap_or(0);
+
+    let lists = if plural { "lists" } else { "a list" };
+    let length = match *length {
+        Length::Exactly(0) if plural => "empty lists".to_owned(),
+        Length::Exactly(0) => "an empty list".to_owned(),
+        Length::Exactly(1) => format!("{lists} of exactly 1 item"),
+        Length::Exactly(count) => format!("{lists} of exactly {count} items"),
+        Length::AtLeast(count) if !constrained.is_empty() && count <= implied => lists.to_owned(),
+        Length::AtLeast(count) => format!("{lists} of {count} or more items"),
+    };
+    let items: Vec<String> = constrained
+        .iter()
+        .map(|(from_start, from_end, item)| {
+            format!("whose {} is {}", item_place(*from_start, *from_end), described_item(item, context))
+        })
+        .collect();
+
+    if items.is_empty() { length } else { format!("{length} {}", items.join(" and ")) }
+}
+
+/// An item of a `List` in plain words: a value as itself, "`null`", "`Status.Open`" or "`PaymentResult.Paid`", and
+/// any other type with its article, "a `Square`", "an `int`" or "an empty list".
+fn described_item<A>(item: &Values, context: &Context<'_, '_, A>) -> String
+where
+    A: Arena,
+{
+    let Values::Every(r#type) = item else {
+        return described_lists(item, false, context);
+    };
+
+    let class = match r#type.get_single() {
+        TAtomic::Null => return "`null`".to_owned(),
+        TAtomic::Object(TObject::Enum(TEnum { name, case: Some(case) })) => {
+            let r#enum = context.codebase.get_enum(name.as_bytes()).map_or(*name, |r#enum| r#enum.original_name);
+
+            return format!("`{}`", display_code_member(context, r#enum, case));
+        }
+        TAtomic::Object(TObject::Named(object)) => context.codebase.get_class_like(object.name.as_bytes()),
+        _ => None,
+    };
+    if let Some(case) = class.and_then(|class| display_enum_case(context, class)) {
+        return format!("`{case}`");
+    }
+    let name = class.map_or_else(
+        || display_type(context, r#type),
+        |class| display_class_like_name(context, class.original_name).to_string(),
+    );
+
+    format!("{} `{name}`", article(&name))
+}
+
+/// The place of an item `from_start` items into a list, or `from_end` items from its end when `from_start` is 0, in
+/// plain words: "first item", "last item", "second-to-last item", and "item 11" or "item 11 from the end" past the
+/// tenth.
+fn item_place(from_start: usize, from_end: usize) -> String {
+    const ORDINALS: [&str; 10] =
+        ["first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth"];
+
+    match (from_start, ORDINALS.get(from_start.max(from_end) - 1)) {
+        (0, _) if from_end == 1 => "last item".to_owned(),
+        (0, Some(ordinal)) => format!("{ordinal}-to-last item"),
+        (0, None) => format!("item {from_end} from the end"),
+        (_, Some(ordinal)) => format!("{ordinal} item"),
+        (_, None) => format!("item {from_start}"),
     }
 }
 

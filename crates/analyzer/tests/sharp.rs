@@ -6754,7 +6754,7 @@ fn a_match_on_a_list_names_the_lengths_it_misses() {
         .into_iter()
         .flat_map(|issue| issue.notes)
         .collect();
-    let note = "A `match` may leave out `default` only when its arms handle every case of an enum or a sealed interface, or every length of a `List`.";
+    let note = "A `match` may leave out `default` only when its arms handle every case of an enum or a sealed interface, or every value of a `List`.";
     assert_eq!(notes, [note; 4]);
 }
 
@@ -6803,18 +6803,134 @@ fn a_match_on_a_nullable_list_handles_null_too() {
     );
 }
 
+/// Spec section 21: `not` handles the lists its pattern never matches, so a pattern that tests an element, which
+/// matches only some lists of its length, leaves that length to the other arms, alone or under `and`.
+#[test]
+fn a_list_arm_under_not_handles_only_the_lists_its_pattern_never_matches() {
+    let sharp = "namespace Demo;\n\nimport Lib.Shape;\nimport Lib.Circle;\n\nclass Report\n{\n    public static int negated(List<Shape> shapes) => match (shapes) {\n        not [Circle] => 1,\n    };\n\n    public static int joined(List<Shape> shapes) => match (shapes) {\n        [] => 0,\n        [Shape s, ...] and not [Circle] => 1,\n    };\n}\n";
+
+    assert_eq!(
+        refusals(("src/Demo/Report.sharp", sharp), &[("src/Lib/Shapes.php", SHAPES)]),
+        [
+            "8:54 match-not-exhaustive This `match` misses lists of exactly 1 item. | Add an arm for each value it misses, or add `default => …` as the last arm.",
+            "12:53 match-not-exhaustive This `match` misses lists of exactly 1 item. | Add an arm for each value it misses, or add `default => …` as the last arm.",
+        ]
+    );
+}
+
+const SEALED_SHAPE: (&str, &str) = ("src/App/Shape.sharp", "namespace App;\n\npublic sealed interface Shape\n{\n}\n");
+const SEALED_CIRCLE: (&str, &str) = ("src/App/Circle.sharp", "namespace App;\n\npublic class Circle : Shape\n{\n}\n");
+const SEALED_SQUARE: (&str, &str) = ("src/App/Square.sharp", "namespace App;\n\npublic class Square : Shape\n{\n}\n");
+
+/// Spec section 21: arms join per item, as Rust's do. An item of a sealed interface, an enum or a nullable type is
+/// covered by the same rules as a `match` on one such value, and a missing item is named in plain words.
+#[test]
+fn list_arms_join_per_item_over_the_cases_an_item_can_be() {
+    let covered = "namespace App;\n\nclass Report\n{\n    public static int shapes(List<Shape> shapes) => match (shapes) {\n        [] => 0,\n        [Circle c, ...List<Shape> rest] => 1,\n        [Square s, ...List<Shape> rest] => 2,\n    };\n\n    public static int statuses(List<Status> statuses) => match (statuses) {\n        [] => 0,\n        [Status.Open, ...] => 1,\n        [Status.Closed or Status.Archived, ...] => 2,\n    };\n\n    public static int numbers(List<int?> numbers) => match (numbers) {\n        [] => 0,\n        [null, ...] => 1,\n        [int n, ...] => n,\n    };\n\n    public static int rows(List<List<int>> rows) => match (rows) {\n        [] => 0,\n        [[], ...] => 1,\n        [[int first, ...], ...] => first,\n    };\n}\n";
+    let status = (
+        "src/App/Status.sharp",
+        "namespace App;\n\npublic enum Status\n{\n    case Open;\n    case Closed;\n    case Archived;\n}\n",
+    );
+
+    assert_eq!(
+        messages(("src/App/Report.sharp", covered), &[SEALED_SHAPE, SEALED_CIRCLE, SEALED_SQUARE, status]),
+        Vec::<String>::new()
+    );
+
+    let missing = "namespace App;\n\nclass Report\n{\n    public static int shapes(List<Shape> shapes) => match (shapes) {\n        [] => 0,\n        [Circle c, ...List<Shape> rest] => 1,\n    };\n\n    public static int statuses(List<Status> statuses) => match (statuses) {\n        [] => 0,\n        [Status.Open, ...] => 1,\n    };\n\n    public static int numbers(List<int?> numbers) => match (numbers) {\n        [] => 0,\n        [int n] => n,\n        [int n, ...] => n,\n    };\n\n    public static int rows(List<List<int>> rows) => match (rows) {\n        [] => 0,\n        [[int first, ...], ...] => first,\n    };\n\n    public static int present(List<int?> numbers) => match (numbers) {\n        [] => 0,\n        [null, ...] => 1,\n    };\n\n    public static int results(List<PaymentResult> results) => match (results) {\n        [] => 0,\n        [PaymentResult.Paid(string id), ...] => 1,\n    };\n\n    public static int optional(List<List<int>?> rows) => match (rows) {\n        [] => 0,\n        [[], ...] => 1,\n        [null, ...] => 2,\n    };\n\n    public static int anything(List<Any> values) => match (values) {\n        [] => 0,\n        [[], ...] => 1,\n    };\n}\n";
+    assert_eq!(
+        messages(
+            ("src/App/Report.sharp", missing),
+            &[SEALED_SHAPE, SEALED_CIRCLE, SEALED_SQUARE, status, PAYMENT_RESULT]
+        ),
+        [
+            "This `match` misses lists whose first item is a `Square`.",
+            "This `match` misses lists whose first item is `Status.Closed` and lists whose first item is `Status.Archived`.",
+            "This `match` misses lists whose first item is `null`.",
+            "This `match` misses lists whose first item is an empty list.",
+            "This `match` misses lists whose first item is an `int`.",
+            "This `match` misses lists whose first item is `PaymentResult.Declined` and lists whose first item is `PaymentResult.RequiresAction`.",
+            "This `match` misses lists whose first item is a list of 1 or more items.",
+            "This `match` misses lists of 1 or more items.",
+        ]
+    );
+}
+
+/// A missing item is named by its place, from the start or from the end, in words to the tenth and by number after,
+/// and the length it is missed at is named unless its place says it.
+#[test]
+fn a_missing_item_is_named_by_its_place_in_the_list() {
+    let shapes = |arms: &str| -> (&'static str, &'static str) {
+        let code = format!(
+            "namespace App;\n\nclass Report\n{{\n    public static int shapes(List<Shape> shapes) => match (shapes) {{\n{arms}    }};\n}}\n"
+        );
+
+        ("src/App/Report.sharp", Box::leak(code.into_boxed_str()))
+    };
+    let eleven = "Shape, Shape, Shape, Shape, Shape, Shape, Shape, Shape, Shape, Shape, Shape";
+    let ten = "Shape a, Shape b, Shape c, Shape d, Shape e, Shape f, Shape g, Shape h, Shape i, Shape j";
+    let sealed = [SEALED_SHAPE, SEALED_CIRCLE, SEALED_SQUARE];
+
+    for (arms, missing) in [
+        ("        [] => 0,\n        [...List<Shape> rest, Circle c] => 1,\n", "lists whose last item is a `Square`"),
+        (
+            "        [] => 0,\n        [Shape s] => 1,\n        [..., Circle c, Shape s] => 2,\n",
+            "lists whose second-to-last item is a `Square`",
+        ),
+        (
+            "        [] or [Shape] => 0,\n        [Shape s, Circle c, ...] => 1,\n",
+            "lists whose second item is a `Square`",
+        ),
+        (
+            "        [] => 0,\n        [Circle] or [Square] => 1,\n        [Circle c, ...] => 2,\n",
+            "lists of 2 or more items whose first item is a `Square`",
+        ),
+        (
+            &format!("        not [{eleven}, ...] => 0,\n        [{ten}, Circle k, ...] => 1,\n"),
+            "lists whose item 11 is a `Square`",
+        ),
+        (
+            &format!("        not [..., {eleven}] => 0,\n        [..., Circle k, {ten}] => 1,\n"),
+            "lists whose item 11 from the end is a `Square`",
+        ),
+    ] {
+        assert_eq!(messages(shapes(arms), &sealed), [format!("This `match` misses {missing}.")], "{arms}");
+    }
+}
+
+/// The lists a `match` misses are found on the value it tests alone, never on a variable a pattern's PHP narrows on
+/// the way, as the item `[null]` reads.
+#[test]
+fn a_match_on_a_list_reports_what_its_value_misses_and_no_item_s_type() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static int size(List<int?> values) => match (values) {\n        not [null] => 1,\n    };\n}\n";
+
+    assert_eq!(
+        messages(("src/Demo/Report.sharp", sharp), &[]),
+        ["This `match` misses lists of exactly 1 item whose first item is `null`."]
+    );
+}
+
+/// A `match` whose every arm has `when` handles no list, which its error says.
+#[test]
+fn a_match_on_a_list_whose_every_arm_has_when_misses_every_list() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static int size(List<int> values, bool test) => match (values) {\n        [] when test => 0,\n    };\n\n    public static int sized(List<int>? values, bool test) => match (values) {\n        [] when test => 0,\n    };\n}\n";
+
+    assert_eq!(
+        messages(("src/Demo/Report.sharp", sharp), &[]),
+        ["This `match` misses every list.", "This `match` misses every list and `null`."]
+    );
+}
+
 /// A `default` after arms that handle every length never runs, so the last arm is always true, as the last arm before
-/// the `default` of a `match` that handles every case of an enum is. Neither reports the `default` itself.
+/// the `default` of a `match` that handles every case of an enum is. That is the one issue: neither reports the
+/// `default` itself, nor the parts of the last arm's test, alone or joined by `or`.
 #[test]
 fn a_default_after_arms_that_handle_every_length_is_reported_as_an_enum_s_is() {
-    let sharp = "namespace Demo;\n\nimport Lib.Status;\n\nclass Report\n{\n    public static int size(List<int> values) => match (values) {\n        [] => 0,\n        [int first, ...List<int> rest] => first,\n        default => -1,\n    };\n\n    public static string label(Status status) => match (status) {\n        Status.Open => \"open\",\n        Status.Closed => \"closed\",\n        Status.Archived => \"archived\",\n        default => \"other\",\n    };\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Status;\n\nclass Report\n{\n    public static int size(List<int> values) => match (values) {\n        [] => 0,\n        [int first, ...List<int> rest] => first,\n        default => -1,\n    };\n\n    public static string label(Status status) => match (status) {\n        Status.Open => \"open\",\n        Status.Closed => \"closed\",\n        Status.Archived => \"archived\",\n        default => \"other\",\n    };\n\n    public static string joined(Status status) => match (status) {\n        Status.Open => \"open\",\n        Status.Closed or Status.Archived => \"done\",\n        default => \"other\",\n    };\n}\n";
 
     let reported: Vec<String> =
         analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Report.sharp", sharp), &[("src/Lib/Status.php", TICKETS)])
             .iter()
-            .filter(|issue| {
-                matches!(issue.code.as_deref(), Some("match-arm-always-true" | "unreachable-match-default-arm"))
-            })
             .map(|issue| format!("{} {}", located(sharp, issue), issue.message))
             .collect();
 
@@ -6823,6 +6939,7 @@ fn a_default_after_arms_that_handle_every_length_is_reported_as_an_enum_s_is() {
         [
             "9:9 match-arm-always-true This match arm is always `true`, making subsequent arms unreachable.",
             "16:9 match-arm-always-true This match arm is always `true`, making subsequent arms unreachable.",
+            "22:9 match-arm-always-true This match arm is always `true`, making subsequent arms unreachable.",
         ]
     );
 }

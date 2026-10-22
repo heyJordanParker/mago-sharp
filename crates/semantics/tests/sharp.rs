@@ -6536,11 +6536,11 @@ fn a_match_whose_arms_name_class_values_leaves_its_default_to_the_analyzer() {
     assert_eq!(issues(code), ["14:16 A `match` needs a `default` arm."]);
 }
 
-/// Arms that are lists, joined by `or`, `and` and `not`, or `null`, may cover every length of a `List`, so only the
-/// analyzer, which knows the value's type, can ask for `default`.
+/// Arms that are lists, in parentheses or joined by `or`, `and` and `not`, or `null`, may cover every value of a
+/// `List`, so only the analyzer, which knows the value's type, can ask for `default`.
 #[test]
 fn a_match_whose_arms_are_lists_leaves_its_default_to_the_analyzer() {
-    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public int size(List<int>? values)\n    {\n        match (values) {\n            null => {},\n            [] or [int] => {},\n            [int first, ...] and [..., int last] => {},\n            not ([]) => {},\n        }\n        return match (values) {\n            [] => 0,\n            0 => 1,\n        };\n    }\n}\n";
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public int size(List<int>? values)\n    {\n        match (values) {\n            null => {},\n            ([] or [int]) => {},\n            [int first, ...] and [..., int last] => {},\n            not ([]) => {},\n        }\n        return match (values) {\n            [] => 0,\n            0 => 1,\n        };\n    }\n}\n";
 
     assert_eq!(issues(code), ["13:16 A `match` needs a `default` arm."]);
 }
