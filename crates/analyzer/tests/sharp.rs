@@ -4330,16 +4330,10 @@ fn die_compact_extract_and_clone_are_functions_php_sharp_has_not() {
 }
 
 /// The standard library's `Int` and `Float`, with the library's signatures, which a project reads from `vendor/`.
-const LIBRARY_TYPE_CLASSES: [(&str, &str); 2] = [
-    (
-        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Int.sharp",
-        "namespace Sharp;\n\npublic static class Int\n{\n    public static int parse(Any? value) => 0;\n\n    public static int? tryParse(Any? value) => null;\n}\n",
-    ),
-    (
-        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Float.sharp",
-        "namespace Sharp;\n\npublic static class Float\n{\n    public static float parse(Any? value) => 0.0;\n\n    public static float? tryParse(Any? value) => null;\n}\n",
-    ),
-];
+const LIBRARY_TYPE_CLASSES: [(&str, &str); 1] = [(
+    "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Float.sharp",
+    include_str!("../../../../composer/library/Sharp/Float.sharp"),
+)];
 
 /// The semantic checks let any file whose namespace is `Sharp` declare `Int`, `Float` and `Bool`, as the engine does,
 /// and only the analyzer knows the file is not the standard library's. So it refuses `namespace Sharp` and every
@@ -4481,8 +4475,8 @@ fn a_class_that_shares_its_full_name_with_a_namespace_is_an_error() {
 
 #[test]
 fn int_and_float_parse_have_the_types_of_the_sharp_library_classes() {
-    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static int count(string text, int? fallback)\n    {\n        const price = Float.parse(text) + (Float.tryParse(fallback) ?? 0.0);\n        const count = Int.parse(text) + (Int.tryParse(null) ?? 0);\n        return price > 1.0 ? count : Int.tryParse(text);\n    }\n}\n";
-    let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    public static function count(string $text, ?int $fallback): int\n    {\n        $price = \\Sharp\\Float::parse($text) + (\\Sharp\\Float::tryParse($fallback) ?? 0.0);\n        $count = \\Sharp\\Int::parse($text) + (\\Sharp\\Int::tryParse(null) ?? 0);\n        return $price > 1.0 ? $count : \\Sharp\\Int::tryParse($text);\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static int count(string text, string fallback)\n    {\n        const price = Float.parse(text) + (Float.tryParse(fallback) ?? 0.0);\n        const count = Int.parse(text) + (Int.tryParse(fallback) ?? 0);\n        return price > 1.0 ? count : Int.tryParse(text);\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    public static function count(string $text, string $fallback): int\n    {\n        $price = \\Sharp\\Float::parse($text) + (\\Sharp\\Float::tryParse($fallback) ?? 0.0);\n        $count = \\Sharp\\Int::parse($text) + (\\Sharp\\Int::tryParse($fallback) ?? 0);\n        return $price > 1.0 ? $count : \\Sharp\\Int::tryParse($text);\n    }\n}\n";
 
     // `check_throws` skips `.sharp` files, so the PHP twin is analyzed without it.
     let sharp_issues = issues(("src/Demo/Report.sharp", sharp), &LIBRARY_TYPE_CLASSES);
@@ -7799,18 +7793,23 @@ fn an_issue_on_an_extension_call_names_the_member_on_its_type_and_counts_the_arg
 /// a call of one it lacks is an error that lists them, as a collection's lists its methods, and that names the type.
 #[test]
 fn a_method_a_string_or_a_number_lacks_is_an_error_that_lists_the_methods_it_has() {
-    let text = "namespace Sharp.Text;\n\npublic static class Text\n{\n    extension(string text)\n    {\n        public string trim() => global.trim(text);\n\n        public bool contains(string other) => global.str_contains(text, other);\n    }\n}\n";
-    let sharp = "namespace Demo;\n\npublic class Entity\n{\n    public int compared(string name) => name.shuffled(\"a\");\n    public int counted(int n) => n.missing();\n    public float rounded(float x) => x.round();\n    public bool flipped(bool flag) => flag.negate();\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Entity\n{\n    public int compared(string name) => name.shuffled(\"a\");\n    public int counted(int n) => n.missing();\n    public float rounded(float x) => x.missing();\n    public bool flipped(bool flag) => flag.negate();\n}\n";
 
     assert_eq!(
         refusals(
             ("src/Demo/Entity.sharp", sharp),
-            &[("vendor/heyjordanparker/php-sharp-composer/library/Sharp/Text/Text.sharp", text)]
+            &[
+                LIBRARY_TYPE_CLASSES[0],
+                (
+                    "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Text/StringMembers.sharp",
+                    include_str!("../../../../composer/library/Sharp/Text/StringMembers.sharp"),
+                ),
+            ]
         ),
         [
-            "5:46 non-existent-method Method `shuffled` does not exist on `string`. | A `string` has the methods `contains`, `trim`.",
-            "6:36 non-existent-method Method `missing` does not exist on `int`. | An `int` has no methods.",
-            "7:40 non-existent-method Method `round` does not exist on `float`. | A `float` has no methods.",
+            "5:46 non-existent-method Method `shuffled` does not exist on `string`. | A `string` has the methods `capitalized`, `characters`, `codePoints`, `contains`, `decapitalized`, `endsWith`, `indexOf`, `lastIndexOf`, `length`, `lines`, `lowercase`, `padEnd`, `padStart`, `parseCsv`, `removePrefix`, `removeSuffix`, `repeat`, `replace`, `slug`, `split`, `startsWith`, `substring`, `trimEnd`, `trimStart`, `trim`, `uppercase`.",
+            "6:36 non-existent-method Method `missing` does not exist on `int`. | An `int` has the methods `abs`, `ceil`, `clamp`, `floorDiv`, `floor`, `format`, `isFinite`, `mod`, `round`, `toByteString`, `toHex`.",
+            "7:40 non-existent-method Method `missing` does not exist on `float`. | A `float` has the methods `abs`, `ceil`, `clamp`, `floor`, `format`, `isFinite`, `round`.",
             "8:44 non-existent-method Method `negate` does not exist on `bool`. | A `bool` has no methods.",
         ]
     );
@@ -21692,17 +21691,17 @@ fn a_static_field_holding_a_foreign_object_is_refused() {
 /// none.
 #[test]
 fn a_foreign_object_is_an_ordinary_parameter_and_return_type() {
-    let date = (
-        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Time/Date.sharp",
-        include_str!("../../../../composer/library/Sharp/Time/Date.sharp"),
+    let instant = (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Time/Instant.sharp",
+        include_str!("../../../../composer/library/Sharp/Time/Instant.sharp"),
     );
     let stamp = (
         "app/Shop/Stamp.sharp",
-        "namespace App.Shop;\n\nimport Sharp.Time.Clock;\nimport Sharp.Time.Date;\n\npublic class Stamp\n{\n    public Stamp(private Clock clock) { }\n\n    public string stampedWith(Clock clock) => Date.format(clock.now(), \"Y-m-d\");\n\n    public Clock held() => this.clock;\n\n    public int later(Stamp other) => other.held().now() + 1;\n}\n",
+        "namespace App.Shop;\n\nimport Sharp.Time.Clock;\n\npublic class Stamp\n{\n    public Stamp(private Clock clock) { }\n\n    public string stampedWith(Clock clock) => clock.now().toString();\n\n    public Clock held() => this.clock;\n\n    public int later(Stamp other) => other.held().now().epochSeconds + 1;\n}\n",
     );
 
-    assert_eq!(issues(stamp, &[date]), Vec::<String>::new());
-    let (codebase, summaries) = summarized(&[stamp, date, BUILTINS]);
+    assert_eq!(issues(stamp, &[instant]), Vec::<String>::new());
+    let (codebase, summaries) = summarized(&[stamp, instant, BUILTINS]);
     let effects = Effects::solve(&codebase, &summaries);
     let method = |name: &[u8]| {
         FunctionLikeIdentifier::Method(ascii_lowercase_word(b"App\\Shop\\Stamp"), ascii_lowercase_word(name))

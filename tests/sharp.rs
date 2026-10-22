@@ -398,17 +398,9 @@ fn analyze_fix_refuses_a_fix_that_would_edit_a_sharp_file() {
     assert_eq!(report(directory.path()), source);
 }
 
-/// The standard library's `Text`, with a native body, spec section 29, and its extension on `string`, spec section 26,
-/// whose `split` the library's `Http` calls.
-const TEXT: &str = "namespace Sharp.Text;\n\npublic static class Text\n{\n    public static extern string slug(string title);\n\n    public static string capitalized(string title) => global.ucfirst(title);\n\n    extension(string text)\n    {\n        public List<string> split(string delimiter, int limit = 0) => global.explode(delimiter, text, limit == 0 ? global.PHP_INT_MAX : limit);\n    }\n}\n";
-
-/// The standard library's `Int`, `Float` and `Bool`, spec section 24, with the library's signatures. Their names are
-/// reserved, and only the standard library declares them.
-const TYPE_CLASSES: [(&str, &str); 3] = [
-    (
-        "Int",
-        "namespace Sharp;\n\nimport ValueError;\n\npublic static class Int\n{\n    public static int parse(Any? value)\n    {\n        const number = Int.tryParse(value);\n        if (number is int) {\n            return number;\n        }\n        throw new ValueError(\"Sharp\\\\Int::parse(): Argument #1 ($value) must hold an int\");\n    }\n\n    public static int? tryParse(Any? value)\n    {\n        return (value is string text) ? global.filter_var(text, global.FILTER_VALIDATE_INT, global.FILTER_NULL_ON_FAILURE) : null;\n    }\n}\n",
-    ),
+/// The standard library's `Float` and `Bool`, spec section 24, with the library's signatures. Their names are
+/// reserved, and only the standard library declares them. `Int` is among the effect classes, whose code calls it.
+const TYPE_CLASSES: [(&str, &str); 2] = [
     (
         "Float",
         "namespace Sharp;\n\nimport ValueError;\n\npublic static class Float\n{\n    public static float parse(Any? value)\n    {\n        const number = Float.tryParse(value);\n        if (number is float) {\n            return number;\n        }\n        throw new ValueError(\"Sharp\\\\Float::parse(): Argument #1 ($value) must hold a float\");\n    }\n\n    public static float? tryParse(Any? value)\n    {\n        const number = (value is string text) && global.is_numeric(text) ? global.floatval(text) : null;\n        return (number is float) && global.is_finite(number) ? number : null;\n    }\n}\n",
@@ -428,11 +420,14 @@ fn write(root: &Path, name: &str, contents: &str) {
     std::fs::write(path, contents).unwrap();
 }
 
-/// The standard library's package under `root`: its `composer.json`, its `Text`, its `Int`, `Float` and `Bool`, and its
-/// effect classes.
+/// The standard library's members of `string`, with a native body, spec section 29, and the `split` `Http` calls.
+const STRING_MEMBERS: &str = include_str!("../../composer/library/Sharp/Text/StringMembers.sharp");
+
+/// The standard library's package under `root`: its `composer.json`, its members of `string`, its `Float` and `Bool`,
+/// and its effect classes.
 fn write_library(root: &Path) {
     write(root, "composer.json", LIBRARY_PACKAGE);
-    write(root, "library/Sharp/Text/Text.sharp", TEXT);
+    write(root, "library/Sharp/Text/StringMembers.sharp", STRING_MEMBERS);
     for (class, source) in TYPE_CLASSES {
         write(root, &format!("library/Sharp/{class}.sharp"), source);
     }
@@ -469,9 +464,8 @@ fn page_errors(page: &str) -> Vec<String> {
 
 #[test]
 fn analyze_finds_no_issues_in_a_call_of_an_extern_method_of_the_standard_library() {
-    let directory = library_workspace(
-        "namespace App;\n\nimport Sharp.Text.Text;\n\npublic class Page\n{\n    public string slug() => Text.slug(\"Hello\");\n}\n",
-    );
+    let directory =
+        library_workspace("namespace App;\n\npublic class Page\n{\n    public string slug() => \"Hello\".slug();\n}\n");
 
     let output = run(directory.path(), "analyze", &[]);
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -485,26 +479,26 @@ fn analyze_finds_no_issues_in_a_call_of_an_extern_method_of_the_standard_library
 /// method compiles.
 #[test]
 fn compile_accepts_extern_methods_in_the_vendored_standard_library() {
-    let directory = library_workspace(
-        "namespace App;\n\nimport Sharp.Text.Text;\n\npublic class Page\n{\n    public string slug() => Text.slug(\"Hello\");\n}\n",
-    );
+    let directory =
+        library_workspace("namespace App;\n\npublic class Page\n{\n    public string slug() => \"Hello\".slug();\n}\n");
 
     let output = run(directory.path(), "compile", &[]);
     let printed = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
 
     assert!(output.status.success(), "{printed}");
-    for compiled in ["src/App/Page.sharpc", "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Text/Text.sharpc"]
+    for compiled in
+        ["src/App/Page.sharpc", "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Text/StringMembers.sharpc"]
     {
         assert!(directory.path().join(".sharp").join(compiled).is_file(), "{compiled}: {printed}");
     }
 }
 
 /// `mago compile` lowers the vendored library first, and a project file runs the library's one-call method as its
-/// body: `Text.capitalized(name)` compiles to `ucfirst($name)`.
+/// body: `name.capitalized()` compiles to `mb_ucfirst($name, "UTF-8")`.
 #[test]
 fn compile_inlines_a_vendored_library_form_into_a_project_caller() {
     let directory = library_workspace(
-        "namespace App;\n\nimport Sharp.Text.Text;\n\npublic class Page\n{\n    public string title(string name) => Text.capitalized(name);\n}\n",
+        "namespace App;\n\npublic class Page\n{\n    public string title(string name) => name.capitalized();\n}\n",
     );
 
     let output = run(directory.path(), "compile", &[]);
@@ -512,7 +506,7 @@ fn compile_inlines_a_vendored_library_form_into_a_project_caller() {
 
     assert!(output.status.success(), "{printed}");
     let page = std::fs::read(directory.path().join(".sharp/src/App/Page.sharpc")).unwrap();
-    assert!(page.windows(b"ucfirst".len()).any(|window| window == b"ucfirst"), "the form is inlined");
+    assert!(page.windows(b"mb_ucfirst".len()).any(|window| window == b"mb_ucfirst"), "the form is inlined");
 }
 
 /// In the standard library's own repository, whose root `composer.json` names the package, `library/Sharp/` is the
@@ -528,7 +522,7 @@ fn compile_treats_the_repository_of_the_standard_library_as_the_library() {
     write(
         root,
         "example/App/Title.sharp",
-        "namespace App;\n\nimport Sharp.Text.Text;\n\npublic class Title\n{\n    public string of(string name) => Text.capitalized(name);\n}\n",
+        "namespace App;\n\npublic class Title\n{\n    public string of(string name) => name.capitalized();\n}\n",
     );
     write(
         root,
@@ -540,11 +534,11 @@ fn compile_treats_the_repository_of_the_standard_library_as_the_library() {
     let printed = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
 
     assert_eq!(output.status.code(), Some(1), "{printed}");
-    assert!(printed.contains("Compiled 23 PHP# files into .sharp/. 1 PHP# file was refused"), "{printed}");
-    assert!(root.join(".sharp/library/Sharp/Text/Text.sharpc").is_file(), "{printed}");
+    assert!(printed.contains("Compiled 28 PHP# files into .sharp/. 1 PHP# file was refused"), "{printed}");
+    assert!(root.join(".sharp/library/Sharp/Text/StringMembers.sharpc").is_file(), "{printed}");
     assert!(root.join(".sharp/library/Sharp/System/Environment.sharpc").is_file(), "{printed}");
     let title = std::fs::read(root.join(".sharp/example/App/Title.sharpc")).unwrap();
-    assert!(title.windows(b"ucfirst".len()).any(|window| window == b"ucfirst"), "the form is inlined");
+    assert!(title.windows(b"mb_ucfirst".len()).any(|window| window == b"mb_ucfirst"), "the form is inlined");
     assert!(!root.join(".sharp/example/App/Native.sharpc").exists(), "{printed}");
     assert!(printed.contains("native-body-outside-library"), "{printed}");
 }
@@ -555,13 +549,13 @@ fn compile_refuses_extern_under_library_sharp_without_the_composer_json_of_the_l
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
     write(root, "mago.toml", "php-version = \"8.4\"\n");
-    write(root, "library/Sharp/Text/Text.sharp", TEXT);
+    write(root, "library/Sharp/Text/StringMembers.sharp", STRING_MEMBERS);
 
     let output = run(root, "compile", &[]);
     let printed = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
 
     assert_eq!(output.status.code(), Some(1), "{printed}");
-    assert!(!root.join(".sharp/library/Sharp/Text/Text.sharpc").exists(), "{printed}");
+    assert!(!root.join(".sharp/library/Sharp/Text/StringMembers.sharpc").exists(), "{printed}");
     assert!(printed.contains("native-body-outside-library"), "{printed}");
 }
 
@@ -569,10 +563,10 @@ fn compile_refuses_extern_under_library_sharp_without_the_composer_json_of_the_l
 fn analyze_reports_new_on_a_static_class() {
     assert_eq!(
         page_errors(
-            "namespace App;\n\nimport Sharp.Text.Text;\n\npublic class Page\n{\n    public Text make() => new Text();\n}\n"
+            "namespace App;\n\npublic class Page\n{\n    public Math make() => new Math();\n}\n"
         ),
         [
-            "src/App/Page.sharp:7:31:error - abstract-instantiation: `Text` is a static class, so it has no instances: call its members on the class."
+            "src/App/Page.sharp:5:31:error - abstract-instantiation: `Math` is a static class, so it has no instances: call its members on the class."
         ]
     );
 }
@@ -580,8 +574,8 @@ fn analyze_reports_new_on_a_static_class() {
 #[test]
 fn analyze_reports_a_class_that_extends_a_static_class() {
     assert_eq!(
-        page_errors("namespace App;\n\nimport Sharp.Text.Text;\n\npublic class Page : Text\n{\n}\n"),
-        ["src/App/Page.sharp:5:21:error - extend-final-class: `Text` is a static class, so no class can extend it."]
+        page_errors("namespace App;\n\npublic class Page : Math\n{\n}\n"),
+        ["src/App/Page.sharp:3:21:error - extend-final-class: `Math` is a static class, so no class can extend it."]
     );
 }
 
