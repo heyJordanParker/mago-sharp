@@ -311,6 +311,15 @@ mod tests {
         );
     }
 
+    /// A claim's exact ints print as the ints they read: `Int64.toInt` of a value, `Sharp.int.ofInt` of the value it
+    /// checks into the int range, and `Nat.cast` of a list's length.
+    #[test]
+    fn a_claim_s_exact_ints_print_as_the_ints_the_code_writes() {
+        let goal = r#"["app","Sharp.holds",["app","Bind.bind",["app","Sharp.int.ofInt",["app","Nat.cast",["app","List.length",["var","items"]]]],["lam","$1",["app","Pure.pure",["app","Decidable.decide",["app","LE.le",["app","HAdd.hAdd",["app","Int64.toInt",["app","App.Shared.Money.total",["var","a"]]],["app","Int64.toInt",["var","$1"]]],["lit","5"]]]]]]]"#;
+
+        assert_eq!(printed(goal, &[], &[]).as_deref(), Some("Money.total(a) + items.count() <= 5"));
+    }
+
     /// A goal that holds a part only Lean writes, as the `match` of `total` that Lean names `total.match_1`, has no
     /// PHP# form, so it is not printed.
     #[test]

@@ -3043,10 +3043,7 @@ fn compile_proves_a_law_over_map_filter_and_count() {
 /// it creates, and that the class with `twin` added, a false law over the same code, is refused as `law-unproven`.
 fn assert_proven(class: &str, source: &str, twin: &str) {
     let name = format!("app/Shared/{class}.sharp");
-    let Some(end) = source.rfind('}') else {
-        panic!("{class} has no closing brace");
-    };
-    let with_twin = format!("{}    {twin}\n{}", &source[..end], &source[end..]);
+    let with_twin = with_twin(source, twin);
     let Some(law) = twin.strip_prefix("law ").and_then(|twin| twin.split('(').next()) else {
         panic!("{twin} is no law");
     };
@@ -3067,6 +3064,15 @@ fn assert_proven(class: &str, source: &str, twin: &str) {
             );
         }
     }
+}
+
+/// `source` with `twin`, a law, stated last in its class.
+fn with_twin(source: &str, twin: &str) -> String {
+    let Some(end) = source.rfind('}') else {
+        panic!("{source} has no closing brace");
+    };
+
+    format!("{}    {twin}\n{}", &source[..end], &source[end..])
 }
 
 /// Spec section 28.1's `total`: a method that calls itself on a list's rest from a list pattern gets smaller on each call.
@@ -3199,12 +3205,41 @@ const LINES: &str = "namespace App.Shared;\n\npublic class Line\n{\n    public L
 
 const GROSS_IS_NETS: &str = "law grossIsNets(List<Line> lines) => Line.gross(lines) == Line.nets(lines)\n    {\n        match (lines) {\n            [] => { return; },\n            [Line, ...List<Line> rest] => { Line.grossIsNets(rest); },\n            default => { return; },\n        }\n    }";
 
-/// A law's claim reads ints as the exact `Int`s they hold, so the law for the list's rest holds wherever `total` runs,
-/// and the case `[Money, ...rest]` adds `first.amount` to both sides of it. Read with PHP's checked `+`, the law for the
-/// rest would hold only where `total(rest) + total(b)` fits an int, which that case cannot show.
+/// The law for the list's rest holds wherever `total` runs, since a claim computes ints exactly.
 #[test]
 fn compile_proves_by_recursion_that_the_sum_of_a_joined_list_is_the_sum_of_its_parts() {
     assert_proven("Money", SUMMED_MONEY, TOTAL_JOINS_FIRST);
+}
+
+/// A claim computes ints exactly, so a claim true only because its own `+` throws at `PHP_INT_MAX` is not proven.
+#[test]
+fn a_claim_true_only_because_its_own_arithmetic_overflows_is_not_proven() {
+    let directory = lawful_project(&[(
+        "app/Shared/Bound.sharp",
+        "namespace App.Shared;\n\npublic class Bound\n{\n    law fits(int x) => x + 1 <= 9223372036854775807;\n}\n",
+    )]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    assert!(
+        printed(&output).contains(
+            "app/Shared/Bound.sharp:5:5: error[law-unproven]: law fits is not proven\n = still to show: x + 1 <= 9223372036854775807\n"
+        ),
+        "{}",
+        printed(&output)
+    );
+}
+
+/// A nullable int is a value or null, so a claim compares it as code does, with no exact `Int` to read.
+#[test]
+fn compile_proves_a_law_that_compares_nullable_ints() {
+    assert_proven(
+        "Box",
+        "namespace App.Shared;\n\npublic class Box\n{\n    public static int? keep(int? x) => x;\n\n    law keepKeeps(int? x) => Box.keep(x) == x;\n}\n",
+        "law keepIsNull(int? x) => Box.keep(x) == null;",
+    );
 }
 
 /// A sum of two fields of each element is the sum of their two sums, which the law for the list's rest proves.
@@ -3218,10 +3253,9 @@ fn compile_proves_by_recursion_that_a_sum_of_two_fields_is_the_sum_of_their_sums
 /// its place in the list, as `lines[0]`.
 #[test]
 fn a_case_a_sum_law_leaves_open_names_its_goal_in_php_sharp() {
-    let with = |source: &str, twin: &str| format!("{}    {twin}\n}}\n", source.strip_suffix("}\n").unwrap_or(source));
     let directory = lawful_project(&[
-        ("app/Shared/Money.sharp", &with(SUMMED_MONEY, TOTAL_JOINS_FIRST)),
-        ("app/Shared/Line.sharp", &with(LINES, GROSS_IS_NETS)),
+        ("app/Shared/Money.sharp", &with_twin(SUMMED_MONEY, TOTAL_JOINS_FIRST)),
+        ("app/Shared/Line.sharp", &with_twin(LINES, GROSS_IS_NETS)),
     ]);
     let root = directory.path();
 

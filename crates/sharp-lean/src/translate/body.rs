@@ -103,9 +103,6 @@ pub(crate) struct Body<'body, 'program> {
     pub(super) accumulators: Vec<u32>,
     /// Whether the body computes ints exactly, as [`Body::computes_exactly`] says.
     exact: bool,
-    /// The subject, as PHP# writes it, whose next list pattern names each element it leaves unnamed, as
-    /// [`Body::names_elements_of`] says.
-    pub(super) element_subject: Option<String>,
 }
 
 impl<'body, 'program> Body<'body, 'program> {
@@ -128,7 +125,6 @@ impl<'body, 'program> Body<'body, 'program> {
             path: Path::new(checked.names(), []),
             accumulators: Vec::new(),
             exact: false,
-            element_subject: None,
         }
     }
 
@@ -174,18 +170,9 @@ impl<'body, 'program> Body<'body, 'program> {
         self.path = path;
     }
 
-    /// Computes ints as the exact `Int`s they hold, as a law's claim and its `when` condition do: `+`, `-`, `*` and
-    /// comparisons read each int and each `count()` as its `Int`, and an int passed on to code is checked into the int
-    /// range there. Wherever PHP does not throw, each value is the exact one, so a law proven of exact values holds of
-    /// PHP's, and the law for a smaller value holds wherever the code it calls runs, as a proof by recursion needs.
+    /// Computes ints exactly, as a law's claim and condition do (decision 057).
     pub(crate) fn computes_exactly(&mut self) {
         self.exact = true;
-    }
-
-    /// Names each element the next list pattern leaves unnamed before its rest by its place in `subject`, as PHP#
-    /// writes it, so a goal of a law's case reads `lines[0]` where the arm `[Line, ...rest]` names no element.
-    pub(crate) fn names_elements_of(&mut self, subject: &str) {
-        self.element_subject = Some(subject.to_owned());
     }
 
     /// The Lean type of `hint`.
@@ -582,12 +569,17 @@ impl<'body, 'program> Body<'body, 'program> {
             BinaryOperator::NullCoalesce(_) => return self.coalesce(binary),
             _ => {}
         }
-        if let Some(exact) = self.exactly(binary) {
-            return exact;
+        if self.exact
+            && let Some(exact) = self.exact_arithmetic(binary)
+        {
+            return self.bind(format!("int.ofInt {exact}"));
         }
 
-        let lhs = self.value(binary.lhs);
-        let rhs = self.value(binary.rhs);
+        let (lhs, rhs) = if self.exact && binary.operator.is_comparison() && self.on_ints(binary) {
+            (self.exact_int(binary.lhs), self.exact_int(binary.rhs))
+        } else {
+            (self.value(binary.lhs), self.value(binary.rhs))
+        };
         let types = self.checked.types();
         let kinds = (self.kind(types.expression_type(binary.lhs)), self.kind(types.expression_type(binary.rhs)));
         if kinds.0 == Kind::Float || kinds.1 == Kind::Float {
@@ -638,38 +630,7 @@ impl<'body, 'program> Body<'body, 'program> {
         }
     }
 
-    /// In a body that computes exactly, `+`, `-` or `*` of two ints as its exact `Int` checked into the int range, and a
-    /// comparison of two ints as the `Bool` that compares their exact `Int`s.
-    fn exactly(&mut self, binary: &Binary) -> Option<String> {
-        if !self.exact {
-            return None;
-        }
-        if let Some(exact) = self.exact_arithmetic(binary) {
-            return Some(self.bind(format!("int.ofInt {exact}")));
-        }
-        if !self.on_ints(binary) {
-            return None;
-        }
-
-        let operator = match binary.operator {
-            BinaryOperator::Equal(_) | BinaryOperator::NotEqual(_) if binary.operator.is_negated_equality() => "!=",
-            BinaryOperator::Equal(_) => "==",
-            BinaryOperator::LessThan(_) => "<",
-            BinaryOperator::LessThanOrEqual(_) => "<=",
-            BinaryOperator::GreaterThan(_) => ">",
-            BinaryOperator::GreaterThanOrEqual(_) => ">=",
-            _ => return None,
-        };
-        let lhs = self.exact_int(binary.lhs);
-        let rhs = self.exact_int(binary.rhs);
-
-        Some(match operator {
-            "==" | "!=" => format!("({lhs} {operator} {rhs})"),
-            _ => format!("(decide ({lhs} {operator} {rhs}))"),
-        })
-    }
-
-    /// `+`, `-` or `*` of two ints as the exact `Int` it computes.
+    /// `+`, `-` or `*` of two non-nullable ints as the exact `Int` it computes.
     fn exact_arithmetic(&mut self, binary: &Binary) -> Option<String> {
         let operator = match binary.operator {
             BinaryOperator::Addition(_) => "+",
@@ -707,12 +668,13 @@ impl<'body, 'program> Body<'body, 'program> {
         }
     }
 
-    /// Whether both operands of `binary` are ints.
+    /// Whether both operands of `binary` are ints that are never null, which have an exact `Int` to read.
     fn on_ints(&self, binary: &Binary) -> bool {
-        let types = self.checked.types();
+        [binary.lhs, binary.rhs].into_iter().all(|operand| {
+            let r#type = self.checked.types().expression_type(operand);
 
-        (self.kind(types.expression_type(binary.lhs)), self.kind(types.expression_type(binary.rhs)))
-            == (Kind::Int, Kind::Int)
+            self.kind(r#type) == Kind::Int && !r#type.is_nullable()
+        })
     }
 
     /// `&&` and `||`, which run their right side only when the left one does not decide.
@@ -754,8 +716,9 @@ impl<'body, 'program> Body<'body, 'program> {
                 {
                     return format!("({} : int)", -value);
                 }
-                match self.kind(self.checked.types().expression_type(unary.operand)) {
-                    Kind::Int if self.exact => {
+                let r#type = self.checked.types().expression_type(unary.operand);
+                match self.kind(r#type) {
+                    Kind::Int if self.exact && !r#type.is_nullable() => {
                         let operand = self.exact_int(unary.operand);
                         self.bind(format!("int.ofInt (-{operand})"))
                     }
@@ -812,7 +775,7 @@ impl<'body, 'program> Body<'body, 'program> {
                 continue;
             };
 
-            let mut test = self.test(&subject, r#type, arm.pattern)?;
+            let mut test = self.test(&subject, None, r#type, arm.pattern)?;
             if let Some(guard) = &arm.guard {
                 test.conditions.push(self.pure(guard.condition, "a guard that can throw", issues::GUARD)?);
             }
@@ -850,7 +813,7 @@ impl<'body, 'program> Body<'body, 'program> {
         let r#type = self.checked.types().expression_type(is.value);
         let subject = self.value(is.value);
 
-        self.test(&subject, r#type, is.pattern)
+        self.test(&subject, None, r#type, is.pattern)
     }
 
     /// Whether `hint` names the type of every value of `atomic`.
