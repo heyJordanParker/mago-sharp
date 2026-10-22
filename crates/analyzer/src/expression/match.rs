@@ -850,7 +850,8 @@ where
     }
 
     fn report_unreachable_default_arm(&mut self, arm: &MatchDefaultArm) {
-        // A PHP# `match` needs `default` until enums with data and sealed interfaces make one exhaustive without it.
+        // A PHP# `match` on a value that is not an enum, a sealed interface or a `List` needs `default` even where its
+        // arms leave no value, as `true` and `false` leave none of a `bool`.
         if self.context.dialect.is_sharp() {
             return;
         }

@@ -25609,6 +25609,164 @@ fn a_list_pattern_tests_the_count_then_each_element_then_takes_the_rest() {
 }
 
 /// ```php
+/// return match (true) {
+///     \is_array($values) && \count($values) === 0 => 0,
+///     \is_array($values) && \count($values) >= 1 && \is_int($first = $values[0]) => $first,
+/// };
+///
+/// $total = 0;
+/// if (\is_array($values) && \count($values) === 0) { $total = 1; }
+/// else if (\is_array($values) && \count($values) >= 1 && \is_int($first = $values[0])) { $total = $first; }
+/// return $total;
+/// ```
+///
+/// A `match` on a List whose arms handle every length has no `default`, and its PHP has none, as an expression or as
+/// a statement with block arms.
+#[test]
+fn a_match_on_a_list_whose_arms_handle_every_length_lowers_with_no_default() {
+    let lowered = Lowered::with(
+        &method_with(
+            "int run(List<int> values)",
+            "        return match (values) {\n            [] => 0,\n            [int first, ...] => first,\n        };\n",
+        ),
+        &[],
+    );
+
+    assert_eq!(lowered.diagnostics(), Vec::<String>::new());
+    assert_eq!(
+        lowered.body(),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                MATCH
+                  ZVAL true
+                  MATCH_ARM_LIST
+                    MATCH_ARM
+                      EXPR_LIST
+                        AND
+                          CALL
+                            ZVAL "is_array"
+                            ARG_LIST
+                              VAR
+                                ZVAL "values"
+                          BINARY_OP [16]
+                            CALL
+                              ZVAL "count"
+                              ARG_LIST
+                                VAR
+                                  ZVAL "values"
+                            ZVAL 0
+                      ZVAL 0
+                    MATCH_ARM
+                      EXPR_LIST
+                        AND
+                          AND
+                            CALL
+                              ZVAL "is_array"
+                              ARG_LIST
+                                VAR
+                                  ZVAL "values"
+                            GREATER_EQUAL
+                              CALL
+                                ZVAL "count"
+                                ARG_LIST
+                                  VAR
+                                    ZVAL "values"
+                              ZVAL 1
+                          CALL
+                            ZVAL "is_int"
+                            ARG_LIST
+                              ASSIGN
+                                VAR
+                                  ZVAL "first"
+                                DIM
+                                  VAR
+                                    ZVAL "values"
+                                  ZVAL 0
+                      VAR
+                        ZVAL "first"
+            "#}
+    );
+
+    let statement = Lowered::with(
+        &method_with(
+            "int run(List<int> values)",
+            "        let total = 0;\n        match (values) {\n            [] => { total = 1; },\n            [int first, ...] => { total = first; },\n        }\n        return total;\n",
+        ),
+        &[],
+    );
+
+    assert_eq!(statement.diagnostics(), Vec::<String>::new());
+    assert_eq!(
+        statement.body(),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "total"
+                ZVAL 0
+              IF
+                IF_ELEM
+                  AND
+                    CALL
+                      ZVAL "is_array"
+                      ARG_LIST
+                        VAR
+                          ZVAL "values"
+                    BINARY_OP [16]
+                      CALL
+                        ZVAL "count"
+                        ARG_LIST
+                          VAR
+                            ZVAL "values"
+                      ZVAL 0
+                  STMT_LIST
+                    ASSIGN
+                      VAR
+                        ZVAL "total"
+                      ZVAL 1
+                IF_ELEM
+                  null
+                  IF
+                    IF_ELEM
+                      AND
+                        AND
+                          CALL
+                            ZVAL "is_array"
+                            ARG_LIST
+                              VAR
+                                ZVAL "values"
+                          GREATER_EQUAL
+                            CALL
+                              ZVAL "count"
+                              ARG_LIST
+                                VAR
+                                  ZVAL "values"
+                            ZVAL 1
+                        CALL
+                          ZVAL "is_int"
+                          ARG_LIST
+                            ASSIGN
+                              VAR
+                                ZVAL "first"
+                              DIM
+                                VAR
+                                  ZVAL "values"
+                                ZVAL 0
+                      STMT_LIST
+                        ASSIGN
+                          VAR
+                            ZVAL "total"
+                          VAR
+                            ZVAL "first"
+              RETURN
+                VAR
+                  ZVAL "total"
+            "#}
+    );
+}
+
+/// ```php
 /// $a = $value is List<Any?> && \count($value) === 1 && \is_int($one = $value[0]);
 /// ```
 ///
