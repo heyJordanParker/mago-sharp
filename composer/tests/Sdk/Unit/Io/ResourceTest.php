@@ -6,6 +6,7 @@ namespace Mago\Tests\Sdk\Unit\Io;
 
 use Mago\Sdk\Internal\Io\ResourceReader;
 use Mago\Sdk\Internal\Io\ResourceWriter;
+use Mago\Tests\Sdk\Unit\StreamPair;
 use PHPUnit\Framework\TestCase;
 use Revolt\EventLoop;
 use RuntimeException;
@@ -15,20 +16,13 @@ use function fread;
 use function fwrite;
 use function str_repeat;
 use function stream_set_blocking;
-use function stream_socket_pair;
 use function strlen;
-
-use const PHP_OS_FAMILY;
-use const STREAM_IPPROTO_IP;
-use const STREAM_PF_INET;
-use const STREAM_PF_UNIX;
-use const STREAM_SOCK_STREAM;
 
 final class ResourceTest extends TestCase
 {
     public function testReaderWaitsForReadableStream(): void
     {
-        [$input, $output] = self::createStreamPair();
+        [$input, $output] = StreamPair::create();
         $reader = new ResourceReader($input);
         EventLoop::delay(0.001, static function () use ($output): void {
             fwrite($output, 'ready');
@@ -42,7 +36,7 @@ final class ResourceTest extends TestCase
 
     public function testWriterWritesAllBytes(): void
     {
-        [$output, $input] = self::createStreamPair();
+        [$output, $input] = StreamPair::create();
         $writer = new ResourceWriter($output);
 
         $writer->write('written');
@@ -55,7 +49,7 @@ final class ResourceTest extends TestCase
 
     public function testConcurrentBackpressuredWritesRemainOrdered(): void
     {
-        [$output, $input] = self::createStreamPair();
+        [$output, $input] = StreamPair::create();
         stream_set_blocking($input, false);
         $writer = new ResourceWriter($output);
         $firstWrite = str_repeat('a', 2_097_152);
@@ -95,19 +89,5 @@ final class ResourceTest extends TestCase
         $writer->close();
         fclose($output);
         fclose($input);
-    }
-
-    /**
-     * @return array{resource, resource}
-     */
-    private static function createStreamPair(): array
-    {
-        $domain = PHP_OS_FAMILY === 'Windows' ? STREAM_PF_INET : STREAM_PF_UNIX;
-        $streams = stream_socket_pair($domain, STREAM_SOCK_STREAM, STREAM_IPPROTO_IP);
-        if ($streams === false) {
-            throw new RuntimeException('Unable to create SDK test streams.');
-        }
-
-        return $streams;
     }
 }

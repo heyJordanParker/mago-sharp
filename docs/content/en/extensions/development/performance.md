@@ -92,7 +92,7 @@ The default `workers = 0` is adaptive. Mago starts at most three processes and m
 
 A positive worker count fixes the pool size. Use it for measured constraints, not as a default tuning ritual. While Mago threads wait for responses, the operating system can schedule worker processes on the same CPUs.
 
-Each worker serves one request at a time, so parallelism comes only from multiple processes. SDKs in other languages should still avoid oversubscribing the CPUs Mago uses.
+Each worker serves one request at a time, so parallelism comes only from multiple processes. A worker in any language should avoid starting threads that compete for the CPUs Mago uses.
 
 Do not turn hot semantic providers into network clients. A worker that waits on the network serves no other request meanwhile, and external state also makes results slow, fragile, and difficult to memoize.
 

@@ -573,10 +573,14 @@ final class Worker
                             $cancellation->throwIfCancelled();
                             $payload = $this->handleRequest($request->payload, $requestId, $host, $cancellation);
                             $response = $codec->encodeResponse($requestId, $payload);
-                        } catch (CancelledException) {
-                            unset($requests[$requestId]);
-                            continue;
                         } catch (Throwable $throwable) {
+                            // Only a request Mago cancelled goes unanswered. A callback that throws a cancellation of
+                            // its own fails like any other, or Mago would wait for it until the deadline.
+                            if ($throwable instanceof CancelledException && $cancellation->isCancelled()) {
+                                unset($requests[$requestId]);
+                                continue;
+                            }
+
                             $this->writeThrowable($throwable);
                             $response = $codec->encodeResponse($requestId, $throwable->getMessage(), Frame::ERROR_FLAG);
                         }

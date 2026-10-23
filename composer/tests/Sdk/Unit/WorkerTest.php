@@ -9,6 +9,7 @@ use Mago\Sdk\Analyzer\AfterFileAnalysisHook;
 use Mago\Sdk\Analyzer\Plugin;
 use Mago\Sdk\Analyzer\PluginDefinition;
 use Mago\Sdk\Analyzer\PluginRegistry;
+use Mago\Sdk\Exception\CancelledException;
 use Mago\Sdk\Exception\InvalidArgumentException;
 use Mago\Sdk\Extension;
 use Mago\Sdk\Internal\Analyzer\Protocol;
@@ -18,9 +19,12 @@ use Mago\Sdk\Internal\Protocol\Frame;
 use Mago\Sdk\Internal\Protocol\FrameCodec;
 use Mago\Sdk\Internal\Protocol\FrameKind;
 use Mago\Sdk\Internal\Protocol\PayloadWriter;
+use Mago\Sdk\Internal\Worker\Protocol as WorkerProtocol;
 use Mago\Sdk\PHPVersion;
 use Mago\Sdk\Syntax\NodeKind;
 use Mago\Sdk\Worker;
+use Mago\Sdk\WorkerReducer;
+use Mago\Sdk\WorkerReductionContext;
 use PHPUnit\Framework\TestCase;
 use Revolt\EventLoop;
 use RuntimeException;
@@ -29,22 +33,18 @@ use function array_diff;
 use function array_keys;
 use function fclose;
 use function pack;
-use function stream_socket_pair;
-
-use const PHP_OS_FAMILY;
-use const STREAM_IPPROTO_IP;
-use const STREAM_PF_INET;
-use const STREAM_PF_UNIX;
-use const STREAM_SOCK_STREAM;
 
 /**
  * @mago-expect lint:cyclomatic-complexity
+ * @mago-expect lint:kan-defect
  * @mago-expect lint:too-many-methods
  */
 final class WorkerTest extends TestCase
 {
     private const ANALYZER_MAGIC = 0x4D41_4E41;
     private const CODEBASE_QUERY_RESPONSE = 0x8004;
+    private const WORKER_MAGIC = 0x4D45_5854;
+    private const WORKER_VERSION = 0x0001_0000;
     private const GENERATION = 1;
     private const ROUTE_CLASS = 'App\Http\Routes';
     private const ROUTE_METHOD = 'index';
@@ -73,14 +73,34 @@ final class WorkerTest extends TestCase
     {
         [$sent] = self::analyze(['a.php', 'b.php']);
 
-        self::assertSame(['a.php: start', 'a.php: query', 'a.php: response', 'b.php: start', 'b.php: response'], $sent);
+        self::assertSame(
+            [
+                'describe: response',
+                'a.php: start',
+                'a.php: query',
+                'a.php: response',
+                'b.php: start',
+                'b.php: response',
+            ],
+            $sent,
+        );
     }
 
     public function testACancelledRequestThatHasNotStartedIsDroppedAndTheOneAfterItRuns(): void
     {
         [$sent, $routesByFile] = self::analyze(['a.php', 'b.php', 'c.php'], cancel: 'b.php');
 
-        self::assertSame(['a.php: start', 'a.php: query', 'a.php: response', 'c.php: start', 'c.php: response'], $sent);
+        self::assertSame(
+            [
+                'describe: response',
+                'a.php: start',
+                'a.php: query',
+                'a.php: response',
+                'c.php: start',
+                'c.php: response',
+            ],
+            $sent,
+        );
         self::assertSame(['a.php', 'c.php'], array_keys($routesByFile));
     }
 
@@ -89,6 +109,31 @@ final class WorkerTest extends TestCase
         [, $routesByFile] = self::analyze(['a.php', 'b.php']);
 
         self::assertSame(['a.php' => ['App\Http\Routes::index'], 'b.php' => ['App\Http\Routes::index']], $routesByFile);
+    }
+
+    public function testACallbackThatThrowsCancelledWhileMagoCancelledNothingGetsAnErrorResponse(): void
+    {
+        $reducer = new class implements WorkerReducer {
+            private bool $thrown = false;
+
+            public function collect(): string
+            {
+                if (!$this->thrown) {
+                    $this->thrown = true;
+
+                    throw new CancelledException();
+                }
+
+                return '';
+            }
+
+            public function reduce(WorkerReductionContext $context): void {}
+        };
+        $worker = new Worker(new Extension('acme/metrics', 'Metrics', '1.0.0', workerReducer: $reducer));
+
+        $sent = self::serve($worker, ['first' => self::collectRequest(), 'second' => self::collectRequest()]);
+
+        self::assertSame(['first: error The extension request was cancelled.', 'second: response'], $sent);
     }
 
     /**
@@ -157,65 +202,87 @@ final class WorkerTest extends TestCase
         $worker = new Worker(new Extension('acme/routes', 'Routes', '1.0.0', analyzerPlugins: [
             self::plugin(new PluginDefinition('routes', 'Routes', 'Checks routes.'), [$rule]),
         ]));
-        [$mago, $process] = self::createStreamPair();
+        $requests = ['describe' => self::describeRequest()];
+        foreach ($files as $file) {
+            $requests[$file] = self::afterFileRequest($file);
+        }
+
+        return [self::serve($worker, $requests, $cancel), $rule->routesByFile];
+    }
+
+    /**
+     * Runs `$worker` while Mago sends it every request in `$requests` at once, in order, and cancels the `$cancel`
+     * request when the first codebase query arrives.
+     *
+     * @param non-empty-array<non-empty-string, string> $requests each request's payload, by a label for it
+     *
+     * @return list<string> every frame the worker sent, in order, named by its request's label
+     */
+    private static function serve(Worker $worker, array $requests, ?string $cancel = null): array
+    {
+        [$mago, $process] = StreamPair::create();
+        $reader = new ResourceReader($mago);
+        $writer = new ResourceWriter($mago);
         $sent = [];
-        EventLoop::queue(static function () use ($mago, $files, $cancel, &$sent): void {
-            self::actAsMago($mago, $files, $cancel, $sent);
+        EventLoop::queue(static function () use ($reader, $writer, $requests, $cancel, &$sent): void {
+            self::actAsMago($reader, $writer, $requests, $cancel, $sent);
         });
         $timeout = EventLoop::delay(2.0, static function (): never {
             throw new RuntimeException('The worker did not answer every request within two seconds.');
         });
 
-        $worker->run($process, $process);
+        try {
+            $worker->run($process, $process);
+        } finally {
+            EventLoop::cancel($timeout);
+            $reader->close();
+            $writer->close();
+            fclose($mago);
+            fclose($process);
+        }
 
-        EventLoop::cancel($timeout);
-        fclose($mago);
-        fclose($process);
-
-        return [$sent, $rule->routesByFile];
+        return $sent;
     }
 
     /**
-     * Sends the worker one after-file request per file, answers every codebase query with one route, and shuts the
-     * worker down once every request that was not cancelled has responded.
+     * Sends the worker every request at once, answers every codebase query with one route, and shuts the worker down
+     * once every request that was not cancelled has responded.
      *
-     * @param resource $stream
-     * @param non-empty-list<non-empty-string> $files
+     * @param non-empty-array<non-empty-string, string> $requests
      * @param list<string> $sent
      */
-    private static function actAsMago(mixed $stream, array $files, ?string $cancel, array &$sent): void
-    {
+    private static function actAsMago(
+        ResourceReader $reader,
+        ResourceWriter $writer,
+        array $requests,
+        ?string $cancel,
+        array &$sent,
+    ): void {
         $codec = new FrameCodec();
-        $reader = new ResourceReader($stream);
-        $writer = new ResourceWriter($stream);
-        $writer->write($codec->encode(new Frame(FrameKind::Request, 0, 1, 0, self::describeRequest())));
-        $codec->read($reader);
-
-        $requests = [];
-        foreach ($files as $index => $file) {
-            $requests[$index + 2] = $file;
-            $writer->write($codec->encode(
-                new Frame(FrameKind::Request, 0, $index + 2, 0, self::afterFileRequest($file)),
-            ));
+        $labels = [];
+        $id = 0;
+        foreach ($requests as $label => $payload) {
+            $labels[++$id] = $label;
+            $writer->write($codec->encode(new Frame(FrameKind::Request, 0, $id, 0, $payload)));
         }
 
-        $awaited = array_diff($requests, [$cancel]);
+        $awaited = array_diff($labels, [$cancel]);
         while ($awaited !== []) {
             $frame = $codec->read($reader) ?? throw new RuntimeException('The worker closed its output.');
             if ($frame->kind === FrameKind::Response) {
-                $sent[] = "{$requests[$frame->id]}: " . ($frame->flags === 0 ? 'response' : "error {$frame->payload}");
+                $sent[] = "{$labels[$frame->id]}: " . ($frame->flags === 0 ? 'response' : "error {$frame->payload}");
                 unset($awaited[$frame->id]);
                 continue;
             }
 
             if ($frame->kind === FrameKind::Notification) {
-                $sent[] = "{$requests[$frame->parentId]}: start";
+                $sent[] = "{$labels[$frame->parentId]}: start";
                 continue;
             }
 
-            $sent[] = "{$requests[$frame->parentId]}: query";
+            $sent[] = "{$labels[$frame->parentId]}: query";
             if ($cancel !== null) {
-                foreach (array_keys($requests, $cancel, true) as $cancelled) {
+                foreach (array_keys($labels, $cancel, true) as $cancelled) {
                     $writer->write($codec->encode(new Frame(FrameKind::Cancel, 0, $cancelled, 0, '')));
                 }
                 $cancel = null;
@@ -227,8 +294,6 @@ final class WorkerTest extends TestCase
         }
 
         $writer->write($codec->encode(new Frame(FrameKind::Shutdown, 0, 0, 0, '')));
-        $reader->close();
-        $writer->close();
     }
 
     private static function describeRequest(): string
@@ -286,17 +351,8 @@ final class WorkerTest extends TestCase
         return new PayloadWriter(pack('N3', self::ANALYZER_MAGIC, Protocol::VERSION_U32, $kind << 16));
     }
 
-    /**
-     * @return array{resource, resource}
-     */
-    private static function createStreamPair(): array
+    private static function collectRequest(): string
     {
-        $domain = PHP_OS_FAMILY === 'Windows' ? STREAM_PF_INET : STREAM_PF_UNIX;
-        $streams = stream_socket_pair($domain, STREAM_SOCK_STREAM, STREAM_IPPROTO_IP);
-        if ($streams === false) {
-            throw new RuntimeException('Unable to create SDK test streams.');
-        }
-
-        return $streams;
+        return pack('N3', self::WORKER_MAGIC, self::WORKER_VERSION, WorkerProtocol::COLLECT_REQUEST << 16);
     }
 }
