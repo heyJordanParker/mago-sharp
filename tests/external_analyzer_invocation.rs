@@ -659,9 +659,10 @@ fn node_hooks_see_a_sharp_static_call_as_static_as_in_php() -> Result<(), Box<dy
     Ok(())
 }
 
-/// `global.largest(…)` calls the function `largest` of PHP's root namespace, spec section 23, as `largest(…)` does in
-/// PHP, so it reaches the hooks that target function calls, and only them, as a Roslyn analyzer registered for
-/// invocations of a kind receives each call the semantic model reads as that kind.
+/// `Tools.largest(…)` calls the function `largest` a library declares in PHP's root namespace beside its classes of
+/// `Tools`, spec section 23, as `largest(…)` does in PHP, so it reaches the hooks that target function calls, and only
+/// them, as a Roslyn analyzer registered for invocations of a kind receives each call the semantic model reads as that
+/// kind.
 #[test]
 fn node_hooks_see_a_sharp_call_of_a_global_function_as_a_function_call_as_in_php()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -669,18 +670,21 @@ fn node_hooks_see_a_sharp_call_of_a_global_function_as_a_function_call_as_in_php
         return Ok(());
     }
 
-    const LARGEST: (&str, &str) =
-        ("src/largest.php", "<?php\n\nfunction largest(int $a, int $b): int\n{\n    return $a > $b ? $a : $b;\n}\n");
+    const LARGEST: (&str, &str) = (
+        "src/Tools/largest.php",
+        "<?php\n\nfunction largest(int $a, int $b): int\n{\n    return $a > $b ? $a : $b;\n}\n",
+    );
+    const TALLY: (&str, &str) = ("src/Tools/Tally.php", "<?php\n\nnamespace Tools;\n\nfinal class Tally\n{\n}\n");
     const SHARP: (&str, &str) = (
         "src/Report.sharp",
-        "namespace Demo;\n\nclass Report\n{\n    public static int total(Calc calc)\n    {\n        return global.largest(calc.add(1), 2);\n    }\n}\n",
+        "namespace Demo;\n\nimport Tools;\n\nclass Report\n{\n    public static int total(Calc calc)\n    {\n        return Tools.largest(calc.add(1), 2);\n    }\n}\n",
     );
     const PHP: (&str, &str) = (
         "src/Report.php",
         "<?php\n\nnamespace Demo;\n\nclass Calc\n{\n    public function add(int $value): int\n    {\n        return $value;\n    }\n}\n\nclass Report\n{\n    public static function total(Calc $calc): int\n    {\n        return largest($calc->add(1), 2);\n    }\n}\n",
     );
 
-    for files in [&[LARGEST, CALC, SHARP][..], &[LARGEST, PHP]] {
+    for files in [&[LARGEST, TALLY, CALC, SHARP][..], &[LARGEST, PHP]] {
         let functions = analyze_files_with_fixture(files, &["MAGO_INVOCATION_FUNCTION_CALL_KINDS"])?;
         let methods = analyze_files_with_fixture(files, &["MAGO_INVOCATION_CALL_KINDS"])?;
 

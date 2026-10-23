@@ -4085,7 +4085,7 @@ fn extern_on_a_field_is_an_error() {
 fn the_error_control_operator_is_an_error_in_every_namespace() {
     for namespace in ["Sharp", "Sharp.Text", "App"] {
         let code = leak(format!(
-            "namespace {namespace};\n\npublic static class Text\n{{\n    public static string quiet(string title) => @(global.trim(title));\n}}\n"
+            "namespace {namespace};\n\npublic static class Text\n{{\n    public static string quiet(string title) => @(title.trim());\n}}\n"
         ));
 
         assert_eq!(issues(code), ["5:49 Parse error encountered during parsing"], "{namespace}");
@@ -4307,14 +4307,14 @@ fn a_constant_value_is_built_from_constants_wherever_php_sharp_takes_one() {
 /// constant's value, an enum case's value and a pattern's value. A static field's initial value may call code.
 #[test]
 fn a_call_in_a_constant_value_is_an_error_that_names_the_call() {
-    let code = "namespace App;\n\nclass Billing\n{\n    public const int RATE = Rates.current();\n    public const int TOTAL = Billing.TRIAL_DAYS + global.max(1, 2);\n    private static int rate = Rates.current();\n\n    public bool run(int days) => days is == Rates.current();\n}\n";
+    let code = "namespace App;\n\nclass Billing\n{\n    public const int RATE = Rates.current();\n    public const int TOTAL = Billing.TRIAL_DAYS + Limits.max(1, 2);\n    private static int rate = Rates.current();\n\n    public bool run(int days) => days is == Rates.current();\n}\n";
     let r#enum = "namespace App;\n\nenum Code : string\n{\n    case Rate = Rates.label();\n}\n";
 
     assert_eq!(
         issues(code),
         [
             "5:29 A constant's value is known before the code runs, and `Rates.current()` runs code: use a static field.",
-            "6:51 A constant's value is known before the code runs, and `global.max(1, 2)` runs code: use a static field.",
+            "6:51 A constant's value is known before the code runs, and `Limits.max(1, 2)` runs code: use a static field.",
             "9:45 A constant's value is known before the code runs, and `Rates.current()` runs code: compare with it in `when`.",
         ]
     );

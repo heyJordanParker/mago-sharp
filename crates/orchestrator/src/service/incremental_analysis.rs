@@ -970,6 +970,67 @@ impl IncrementalAnalysisService {
             return self.analyze();
         }
 
+        // A class-like gives its folder's functions and constants of PHP's root namespace its namespace, spec section
+        // 23, so adding or deleting one beside them changes what `Foundation.abort(…)` names in every unchanged file.
+        let folder_namespaces_before: HashSet<(mago_word::Word, mago_word::Word)> = self
+            .codebase
+            .class_likes
+            .values()
+            .filter(|class_like| rescanned.contains(&class_like.span.file_id))
+            .filter_map(|class_like| self.codebase.folder_namespace(class_like))
+            .collect();
+        let folder_namespaces_after: HashSet<(mago_word::Word, mago_word::Word)> = new_file_scans
+            .iter()
+            .flat_map(|(_, metadata)| {
+                metadata.class_likes.values().filter_map(|class_like| metadata.folder_namespace(class_like))
+            })
+            .collect();
+        let renamed_folders: HashSet<mago_word::Word> = folder_namespaces_before
+            .symmetric_difference(&folder_namespaces_after)
+            .map(|(folder, _)| *folder)
+            .collect();
+        let root_names_renamed = !renamed_folders.is_empty()
+            && std::iter::once(&self.codebase).chain(new_file_scans.iter().map(|(_, metadata)| metadata)).any(
+                |metadata| {
+                    metadata
+                        .function_likes
+                        .values()
+                        .filter(|function| function.kind.is_function())
+                        .map(|function| (function.original_name, function.span.file_id))
+                        .chain(metadata.constants.values().map(|constant| (constant.name, constant.span.file_id)))
+                        .any(|(name, file_id)| {
+                            !name.as_bytes().contains(&b'\\')
+                                && metadata.folder(file_id).is_some_and(|folder| renamed_folders.contains(&folder))
+                        })
+                },
+            );
+
+        if root_names_renamed {
+            return self.analyze();
+        }
+
+        // A function or constant of PHP's root namespace added or deleted beside class-likes takes their namespace, so
+        // it changes what `Foundation.abort(…)` names in every unchanged file, as a renamed folder namespace does.
+        let namespaced_root_names = |metadata: &CodebaseMetadata| -> HashSet<(mago_word::Word, mago_word::Word)> {
+            metadata
+                .function_likes
+                .values()
+                .filter(|function| function.kind.is_function())
+                .map(|function| (function.original_name, function.span.file_id))
+                .chain(metadata.constants.values().map(|constant| (constant.name, constant.span.file_id)))
+                .filter(|(name, file_id)| !name.as_bytes().contains(&b'\\') && rescanned.contains(file_id))
+                .filter_map(|(name, file_id)| Some((metadata.folder(file_id)?, name)))
+                .filter(|(folder, _)| self.codebase.folder_has_namespaces(*folder))
+                .collect()
+        };
+        let root_names_before = namespaced_root_names(&self.codebase);
+        let root_names_after: HashSet<(mago_word::Word, mago_word::Word)> =
+            new_file_scans.iter().flat_map(|(_, metadata)| namespaced_root_names(metadata)).collect();
+
+        if root_names_before != root_names_after {
+            return self.analyze();
+        }
+
         let body_only = diff.get_changed().is_empty() && deleted_count == 0;
 
         if !body_only {
@@ -3354,17 +3415,20 @@ mod tests {
     /// getter.
     #[test]
     fn test_watch_body_edit_reaches_an_unchanged_files_law() {
-        let order =
-            |price: &str| format!("namespace App;\n\npublic class Order\n{{\n    public int price() => {price};\n}}\n");
+        let order = |price: &str| {
+            format!(
+                "namespace App;\n\nimport Acme.Chrono;\n\npublic class Order\n{{\n    public int price() => {price};\n}}\n"
+            )
+        };
         let cart = "namespace App;\n\npublic class Cart\n{\n    public Cart(private Order order) { }\n\n    public int total => this.order.price();\n\n    law totaled(Cart cart) => cart.total > 0;\n}\n";
-        let clock = "namespace App.Stubs;\n\nextern now uses Clock;\n";
-        let now = "<?php\nfunction now(): int { return time(); }\n";
+        let clock = "namespace App.Stubs;\n\nimport Acme.Chrono;\n\nextern Chrono.now uses Clock;\n";
+        let now = "<?php\nnamespace Acme\\Chrono;\nfunction now(): int { return time(); }\n";
         let order_id = FileId::new(b"src/Order.sharp");
         let mut db = make_database(vec![
             ("src/Order.sharp", order("1").as_str()),
             ("src/Cart.sharp", cart),
             ("src/Clock.sharp", clock),
-            ("src/now.php", now),
+            ("src/Acme/Chrono/now.php", now),
         ]);
         let impure_laws = |service: &IncrementalAnalysisService| {
             service
@@ -3379,13 +3443,13 @@ mod tests {
         service.analyze().expect("Initial analysis failed.");
         assert_eq!(impure_laws(&service), Vec::<String>::new());
 
-        db.update(order_id, Cow::Owned(order("now()").into_bytes()));
+        db.update(order_id, Cow::Owned(order("Chrono.now()").into_bytes()));
         service.update_database(db.read_only());
         service.analyze_incremental(Some(&[order_id])).expect("Incremental analysis failed.");
         assert_eq!(
             impure_laws(&service),
             [
-                "Law `totaled` reaches `Order.price`, which calls `global.now` with the effect `Clock`. Laws hold only over pure code."
+                "Law `totaled` reaches `Order.price`, which calls `Chrono.now` with the effect `Clock`. Laws hold only over pure code."
             ]
         );
         assert_eq!(service.analyzed_files, HashSet::from_iter([order_id]));
@@ -3463,14 +3527,14 @@ mod tests {
     /// of every file that calls what it declares.
     #[test]
     fn test_watch_extern_edit_reaches_every_caller() {
-        let clock = |uses: &str| format!("namespace App.Stubs;\n\nextern now{uses};\n");
-        let report = "namespace App;\n\npublic class Report\n{\n    law stamped() => now() > 0;\n}\n";
-        let now = "<?php\nfunction now(): int { return time(); }\n";
+        let clock = |uses: &str| format!("namespace App.Stubs;\n\nimport Acme.Chrono;\n\nextern Chrono.now{uses};\n");
+        let report = "namespace App;\n\nimport Acme.Chrono;\n\npublic class Report\n{\n    law stamped() => Chrono.now() > 0;\n}\n";
+        let now = "<?php\n\nnamespace Acme\\Chrono;\n\nfunction now(): int { return time(); }\n";
         let clock_id = FileId::new(b"src/Clock.sharp");
         let mut db = make_database(vec![
             ("src/Clock.sharp", clock("").as_str()),
             ("src/Report.sharp", report),
-            ("src/now.php", now),
+            ("src/Acme/Chrono/now.php", now),
         ]);
         let impure_laws = |service: &IncrementalAnalysisService| {
             service.collect_all_issues().iter().filter(|issue| issue.code.as_deref() == Some("impure-law")).count()
@@ -3557,17 +3621,19 @@ mod tests {
     #[test]
     fn test_watch_signature_edit_keeps_the_effects_of_the_files_other_methods() {
         let order = |extra: &str| {
-            format!("namespace App;\n\npublic class Order\n{{\n    public int price() => now();\n{extra}}}\n")
+            format!(
+                "namespace App;\n\nimport Acme.Chrono;\n\npublic class Order\n{{\n    public int price() => Chrono.now();\n{extra}}}\n"
+            )
         };
         let cart = "namespace App;\n\npublic class Cart\n{\n    public Cart(private Order order) { }\n\n    public int total => this.order.price();\n\n    law totaled(Cart cart) => cart.total > 0;\n}\n";
-        let clock = "namespace App.Stubs;\n\nextern now uses Clock;\n";
-        let now = "<?php\nfunction now(): int { return time(); }\n";
+        let clock = "namespace App.Stubs;\n\nimport Acme.Chrono;\n\nextern Chrono.now uses Clock;\n";
+        let now = "<?php\n\nnamespace Acme\\Chrono;\n\nfunction now(): int { return time(); }\n";
         let order_id = FileId::new(b"src/Order.sharp");
         let mut db = make_database(vec![
             ("src/Order.sharp", order("").as_str()),
             ("src/Cart.sharp", cart),
             ("src/Clock.sharp", clock),
-            ("src/now.php", now),
+            ("src/Acme/Chrono/now.php", now),
         ]);
         let impure_laws = |service: &IncrementalAnalysisService| {
             service.collect_all_issues().iter().filter(|issue| issue.code.as_deref() == Some("impure-law")).count()
@@ -3584,8 +3650,8 @@ mod tests {
         assert_matches_full(&service, &db, "Order gains discount");
     }
 
-    /// A library edit that adds or drops the member the checker names in place of a PHP function changes the
-    /// diagnostics of a project file that calls the function, though nothing in the project file changed.
+    /// A library edit that adds or drops a member a project file calls changes that file's diagnostics, though nothing
+    /// in the project file changed.
     #[test]
     fn test_watch_library_member_change_reaches_a_project_caller() {
         let date = |member: &str| {
@@ -3594,8 +3660,8 @@ mod tests {
             )
         };
         let format = "public static string format(int timestamp, string pattern) => global.date(pattern, timestamp);";
-        let clock = "namespace App;\n\npublic class Clock\n{\n    public string year() => date(\"Y\");\n}\n";
-        // The test codebase has no PHP stubs, so it declares the PHP function the project calls.
+        let clock = "namespace App;\n\nimport Sharp.Time.Date;\n\npublic class Clock\n{\n    public string year() => Date.format(0, \"Y\");\n}\n";
+        // The test codebase has no PHP stubs, so it declares the PHP function the library calls.
         let php_date =
             "<?php\n\nfunction date(string $format, ?int $timestamp = null): string\n{\n    return $format;\n}\n";
 
@@ -3608,28 +3674,102 @@ mod tests {
         );
         file.is_standard_library = true;
         db.add(file);
-        let wrapped = |service: &IncrementalAnalysisService| {
+        let missing = |service: &IncrementalAnalysisService| {
             service
                 .collect_all_issues()
                 .iter()
-                .filter(|issue| issue.code.as_deref() == Some("wrapped-function"))
+                .filter(|issue| issue.code.as_deref() == Some("non-existent-method"))
                 .count()
         };
         let mut service = make_watch_service(&db);
         service.analyze().expect("Initial analysis failed.");
-        assert_eq!(wrapped(&service), 0);
+        assert_eq!(missing(&service), 1);
 
         db.update(FileId::new(b"library/Sharp/Time/Date.sharp"), Cow::Owned(date(format).into_bytes()));
         service.update_database(db.read_only());
         service.analyze_incremental(None).expect("Incremental failed.");
-        assert_eq!(wrapped(&service), 1);
+        assert_eq!(missing(&service), 0);
         assert_matches_full(&service, &db, "added member");
 
         db.update(FileId::new(b"library/Sharp/Time/Date.sharp"), Cow::Owned(date("").into_bytes()));
         service.update_database(db.read_only());
         service.analyze_incremental(None).expect("Incremental failed.");
-        assert_eq!(wrapped(&service), 0);
+        assert_eq!(missing(&service), 1);
         assert_matches_full(&service, &db, "removed member");
+    }
+
+    /// Spec section 23: a library's function in PHP's root namespace belongs to the namespace of the classes beside it, so
+    /// adding or deleting the class file beside the helpers changes what a project file's `Foundation.abort(…)` names,
+    /// though neither the project file nor the helpers changed.
+    #[test]
+    fn test_watch_a_class_added_beside_a_helpers_file_reaches_the_callers_of_its_functions() {
+        let helpers = "<?php\n\nfunction abort(int $code): int\n{\n    return $code;\n}\n";
+        let application = "<?php\n\nnamespace Vendor\\Foundation;\n\nclass Application\n{\n}\n";
+        let page = "namespace App;\n\nimport Vendor.Foundation;\n\npublic class Page\n{\n    public int missing() => Foundation.abort(404);\n}\n";
+        let application_id = FileId::new(b"vendor/laravel/Foundation/Application.php");
+        let mut db = make_database(vec![("src/Page.sharp", page), ("vendor/laravel/Foundation/helpers.php", helpers)]);
+        let errors = |service: &IncrementalAnalysisService| {
+            service.collect_all_issues().iter().filter(|issue| issue.level == mago_reporting::Level::Error).count()
+        };
+
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_ne!(errors(&service), 0, "no class gives the helpers a namespace");
+
+        db.add(File::new(
+            Cow::Borrowed(&b"vendor/laravel/Foundation/Application.php"[..]),
+            FileType::Host,
+            None,
+            Cow::Borrowed(application.as_bytes()),
+        ));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental analysis failed.");
+        assert_eq!(errors(&service), 0, "Application gives abort the namespace Vendor.Foundation");
+        assert_matches_full(&service, &db, "the class beside the helpers is added");
+
+        db.delete(application_id);
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental analysis failed.");
+        assert_ne!(errors(&service), 0, "the helpers lose their namespace again");
+        assert_matches_full(&service, &db, "the class beside the helpers is deleted");
+    }
+
+    /// Spec section 23: a root function added beside classes that already exist takes their namespace, so a project
+    /// file's `Foundation.abort(…)`, refused while no `abort` existed, compiles once the helpers file declares it, and
+    /// is refused again once an edit of the helpers drops it, though the project file never changed.
+    #[test]
+    fn test_watch_a_root_function_added_beside_classes_reaches_its_callers() {
+        let application = "<?php\n\nnamespace Vendor\\Foundation;\n\nclass Application\n{\n}\n";
+        let helpers = "<?php\n\nfunction abort(int $code): int\n{\n    return $code;\n}\n";
+        let other = "<?php\n\nfunction report(int $code): int\n{\n    return $code;\n}\n";
+        let page = "namespace App;\n\nimport Vendor.Foundation;\n\npublic class Page\n{\n    public int missing() => Foundation.abort(404);\n}\n";
+        let helpers_id = FileId::new(b"vendor/laravel/Foundation/helpers.php");
+        let mut db =
+            make_database(vec![("src/Page.sharp", page), ("vendor/laravel/Foundation/Application.php", application)]);
+        let errors = |service: &IncrementalAnalysisService| {
+            service.collect_all_issues().iter().filter(|issue| issue.level == mago_reporting::Level::Error).count()
+        };
+
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_ne!(errors(&service), 0, "no file declares abort");
+
+        db.add(File::new(
+            Cow::Borrowed(&b"vendor/laravel/Foundation/helpers.php"[..]),
+            FileType::Host,
+            None,
+            Cow::Borrowed(helpers.as_bytes()),
+        ));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental analysis failed.");
+        assert_eq!(errors(&service), 0, "the helpers declare abort beside Application");
+        assert_matches_full(&service, &db, "the helpers are added beside the class");
+
+        db.update(helpers_id, Cow::Borrowed(other.as_bytes()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental analysis failed.");
+        assert_ne!(errors(&service), 0, "the helpers no longer declare abort");
+        assert_matches_full(&service, &db, "abort is dropped from the helpers");
     }
 
     /// Parent changes return type making child's override incompatible.

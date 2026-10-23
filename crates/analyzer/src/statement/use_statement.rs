@@ -9,7 +9,9 @@ use mago_syntax::cst::Identifier;
 use mago_syntax::cst::Use;
 use mago_syntax::cst::UseItems;
 use mago_syntax::cst::UseType;
+use mago_word::Word;
 use mago_word::concat_word;
+use mago_word::word;
 
 use crate::analyzable::Analyzable;
 use crate::artifacts::AnalysisArtifacts;
@@ -18,8 +20,12 @@ use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
 use crate::utils::names::imports_by_default;
+use crate::utils::names::is_hidden_php_class;
 use crate::utils::names::is_php_closure;
 use crate::utils::names::is_sharp_internal;
+use crate::utils::names::library_namespace;
+use crate::utils::names::namespace_constant;
+use crate::utils::names::namespace_function;
 use mago_bytes::BytesDisplay;
 use mago_bytes::trim_start_byte;
 
@@ -86,43 +92,56 @@ where
 /// and constants. A single function or constant is read through its namespace instead, a namespace of classes only is
 /// imported class by class, and an import that names nothing is refused. A capitalized last part names a class, as
 /// spec section 24 capitalizes every type, so `import Log;` never names PHP's `log()`, and PHP's `Closure` is no class
-/// it names. Returns whether it reported.
+/// it names. A class PHP builds in is one only the standard library names (decision 83), so outside it the import names
+/// nothing. Returns whether it reported.
 pub(crate) fn check_sharp_import<A>(context: &mut Context<'_, '_, A>, name: &Identifier<'_>) -> bool
 where
     A: Arena,
 {
     let fqn = php_name(name);
-    if (context.codebase.class_like_exists(&fqn) && !is_php_closure(&fqn))
+    if (context.codebase.class_like_exists(&fqn) && !is_php_closure(&fqn) && !is_hidden_php_class(context, &fqn))
         || holds_function_or_constant(context.codebase, &fqn)
     {
         return false;
     }
 
     let (namespace, last) = match fqn.iter().rposition(|byte| *byte == b'\\') {
-        Some(separator) => (Some(&fqn[..separator]), &fqn[separator + 1..]),
+        Some(separator) => (Some(word(&fqn[..separator])), &fqn[separator + 1..]),
         None => (None, &*fqn),
     };
-    let namespace = namespace.map(|namespace| String::from_utf8_lossy(namespace).replace('\\', "."));
-    let short_namespace = namespace.as_deref().map(|namespace| namespace.rsplit('.').next().unwrap_or(namespace));
-    let last_name = String::from_utf8_lossy(last);
+    // The namespace PHP# code reaches the function or constant declared at `span` through: the namespace the import
+    // writes, or for one of PHP's root namespace, the namespace of the class-likes in its library's folder. One of
+    // PHP's built-ins has neither, so PHP# code names none of them.
+    let reached = |span: Span| namespace.or_else(|| library_namespace(context.codebase, span));
+    let reach = |namespace: Word, form: &dyn Fn(&str) -> String| {
+        let namespace = namespace.to_string().replace('\\', ".");
+        let short = namespace.rsplit('.').next().unwrap_or(&namespace).to_owned();
 
-    let (code, issue) = if last.first().is_some_and(u8::is_ascii_lowercase) && context.codebase.function_exists(&fqn) {
-        // A function of PHP's root namespace is called through `global`, which no file imports.
-        let message = match (&namespace, short_namespace) {
-            (Some(namespace), Some(short)) => format!("import `{namespace}`, and call `{short}.{last_name}(…)`"),
-            _ => format!("call `global.{last_name}(…)`"),
-        };
+        format!("import `{namespace}`, and {}", form(&short))
+    };
+    let last_name = String::from_utf8_lossy(last);
+    let function = match namespace {
+        Some(namespace) => namespace_function(context.codebase, namespace, last),
+        None => context.codebase.get_function(last),
+    }
+    .filter(|_| last.first().is_some_and(u8::is_ascii_lowercase))
+    .and_then(|function| reached(function.span));
+    let constant = match namespace {
+        Some(namespace) => namespace_constant(context.codebase, namespace, last),
+        None => context.codebase.get_constant(last),
+    }
+    .and_then(|constant| reached(constant.span));
+
+    let (code, issue) = if let Some(function) = function {
+        let message = reach(function, &|short| format!("call `{short}.{last_name}(…)`"));
 
         (
             IssueCode::FunctionImport,
             Issue::error(format!("An import names a class or a namespace, not a function: {message}."))
                 .with_annotation(Annotation::primary(name.span()).with_message("Imports one function.")),
         )
-    } else if context.codebase.constant_exists(&fqn) {
-        let message = match (&namespace, short_namespace) {
-            (Some(namespace), Some(short)) => format!("import `{namespace}`, and read `{short}.{last_name}`"),
-            _ => format!("read `global.{last_name}`"),
-        };
+    } else if let Some(constant) = constant {
+        let message = reach(constant, &|short| format!("read `{short}.{last_name}`"));
 
         (
             IssueCode::ConstantImport,
@@ -156,22 +175,32 @@ where
     true
 }
 
-/// Whether the namespace `namespace` holds a plain PHP function or constant directly, as `Vendor\Pdf` holds `render`.
+/// Whether the namespace `namespace` holds a plain PHP function or constant directly, as `Vendor\Pdf` holds `render`,
+/// or a library declares one in PHP's root namespace beside the class-likes of `namespace`, as Laravel declares
+/// `abort()` beside `Illuminate\Foundation`'s, spec section 23.
 pub(crate) fn holds_function_or_constant(codebase: &CodebaseMetadata, namespace: &[u8]) -> bool {
-    let in_namespace = |name: &[u8]| {
+    let in_namespace = |name: &[u8], span: Span| {
+        if !name.contains(&b'\\') {
+            return codebase
+                .folder_namespaces(span)
+                .iter()
+                .any(|beside| beside.as_bytes().eq_ignore_ascii_case(namespace));
+        }
+
         name.len() > namespace.len()
             && name[..namespace.len()].eq_ignore_ascii_case(namespace)
             && name[namespace.len()] == b'\\'
             && !name[namespace.len() + 1..].contains(&b'\\')
     };
 
-    codebase.function_likes.keys().any(|(class, function)| class.is_empty() && in_namespace(function.as_bytes()))
-        || codebase.constants.keys().any(|constant| in_namespace(constant.as_bytes()))
+    codebase.function_likes.iter().any(|((class, function), metadata)| {
+        class.is_empty() && metadata.kind.is_function() && in_namespace(function.as_bytes(), metadata.span)
+    }) || codebase.constants.iter().any(|(constant, metadata)| in_namespace(constant.as_bytes(), metadata.span))
 }
 
 /// The imports of the class-likes directly in the namespace `namespace` that a file imports to name, as
-/// `` `import Sharp.Json.Json;` ``, in the order of their names, or `None` when it holds no class-like. A module, which
-/// no code names, and a default name, which needs no import, are left out.
+/// `` `import Sharp.Encoding.Json;` ``, in the order of their names, or `None` when it holds no class-like the file can
+/// name. A module, which no code names, and a default name, which needs no import, are left out.
 fn imports_of_namespace<A>(context: &Context<'_, '_, A>, namespace: &[u8]) -> Option<Vec<String>>
 where
     A: Arena,
@@ -184,6 +213,7 @@ where
             let name = class.original_name.as_bytes();
 
             name.iter().rposition(|byte| *byte == b'\\').is_some_and(|end| name[..end].eq_ignore_ascii_case(namespace))
+                && !is_hidden_php_class(context, name)
         })
         .collect();
     if classes.is_empty() {

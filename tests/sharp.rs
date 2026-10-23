@@ -258,7 +258,7 @@ fn analyze_warns_on_a_public_member_nothing_outside_its_namespace_uses() {
 #[test]
 fn analyze_reports_only_the_refusal_on_each_refused_line() {
     let directory = workspace(
-        "namespace Demo;\n\nclass Report\n{\n    public const int LIMIT = __Foo__.y;\n\n    public void host()\n    {\n        const host = _SERVER[\"HTTP_HOST\"];\n    }\n\n    public void count()\n    {\n        _GET[\"n\"]++;\n    }\n\n    public void fallback(string host = _SERVER[\"x\"])\n    {\n    }\n\n    public void code()\n    {\n        global.exit(_SERVER[\"code\"]);\n    }\n\n    public void file()\n    {\n        global.exit(__FILE__);\n    }\n\n    public void call()\n    {\n        _SERVER.read();\n    }\n\n    public void rows(int row)\n    {\n        const data = (array)row;\n    }\n\n    public void names()\n    {\n        const all = GLOBALS;\n        const env = _ENV;\n        const magic = __Something__;\n        const dollar = $_SERVER[\"HTTP_HOST\"];\n        const member = _SERVER.x;\n        __Foo__.bar();\n    }\n\n    public void wrapped()\n    {\n        global.exit(\n            _SERVER[\"code\"]\n        );\n    }\n}\n",
+        "namespace Demo;\n\nclass Report\n{\n    public const int LIMIT = __Foo__.y;\n\n    public void host()\n    {\n        const host = _SERVER[\"HTTP_HOST\"];\n    }\n\n    public void count()\n    {\n        _GET[\"n\"]++;\n    }\n\n    public void fallback(string host = _SERVER[\"x\"])\n    {\n    }\n\n    public void code()\n    {\n        Report.stop(_SERVER[\"code\"]);\n    }\n\n    public void file()\n    {\n        Report.stop(__FILE__);\n    }\n\n    public void call()\n    {\n        _SERVER.read();\n    }\n\n    public void rows(int row)\n    {\n        const data = (array)row;\n    }\n\n    public void names()\n    {\n        const all = GLOBALS;\n        const env = _ENV;\n        const magic = __Something__;\n        const dollar = $_SERVER[\"HTTP_HOST\"];\n        const member = _SERVER.x;\n        __Foo__.bar();\n    }\n\n    public void wrapped()\n    {\n        Report.stop(\n            _SERVER[\"code\"]\n        );\n    }\n\n    public static void stop(Any? code)\n    {\n    }\n}\n",
     );
     std::fs::write(
         directory.path().join("src/Demo/Twin.php"),
@@ -398,17 +398,9 @@ fn analyze_fix_refuses_a_fix_that_would_edit_a_sharp_file() {
     assert_eq!(report(directory.path()), source);
 }
 
-/// The standard library's `Text`, with a native body, spec section 29, and its extension on `string`, spec section 26,
-/// whose `trim` the checker names in place of PHP's, and whose `split` the library's `Http` calls.
-const TEXT: &str = "namespace Sharp.Text;\n\npublic static class Text\n{\n    public static extern string slug(string title);\n\n    public static string capitalized(string title) => global.ucfirst(title);\n\n    extension(string text)\n    {\n        public string trim() => global.trim(text);\n\n        public List<string> split(string delimiter, int limit = 0) => global.explode(delimiter, text, limit == 0 ? global.PHP_INT_MAX : limit);\n    }\n}\n";
-
-/// The standard library's `Int`, `Float` and `Bool`, spec section 24, with the library's signatures. Their names are
-/// reserved, and only the standard library declares them.
-const TYPE_CLASSES: [(&str, &str); 3] = [
-    (
-        "Int",
-        "namespace Sharp;\n\nimport ValueError;\n\npublic static class Int\n{\n    public static int parse(Any? value)\n    {\n        const number = Int.tryParse(value);\n        if (number is int) {\n            return number;\n        }\n        throw new ValueError(\"Sharp\\\\Int::parse(): Argument #1 ($value) must hold an int\");\n    }\n\n    public static int? tryParse(Any? value)\n    {\n        return (value is string text) ? global.filter_var(text, global.FILTER_VALIDATE_INT, global.FILTER_NULL_ON_FAILURE) : null;\n    }\n}\n",
-    ),
+/// The standard library's `Float` and `Bool`, spec section 24, with the library's signatures. Their names are
+/// reserved, and only the standard library declares them. `Int` is among the effect classes, whose code calls it.
+const TYPE_CLASSES: [(&str, &str); 2] = [
     (
         "Float",
         "namespace Sharp;\n\nimport ValueError;\n\npublic static class Float\n{\n    public static float parse(Any? value)\n    {\n        const number = Float.tryParse(value);\n        if (number is float) {\n            return number;\n        }\n        throw new ValueError(\"Sharp\\\\Float::parse(): Argument #1 ($value) must hold a float\");\n    }\n\n    public static float? tryParse(Any? value)\n    {\n        const number = (value is string text) && global.is_numeric(text) ? global.floatval(text) : null;\n        return (number is float) && global.is_finite(number) ? number : null;\n    }\n}\n",
@@ -416,32 +408,6 @@ const TYPE_CLASSES: [(&str, &str); 3] = [
     (
         "Bool",
         "namespace Sharp;\n\npublic static class Bool\n{\n    public static bool? tryParse(Any? value) => global.filter_var(value, global.FILTER_VALIDATE_BOOLEAN, global.FILTER_NULL_ON_FAILURE);\n}\n",
-    ),
-];
-
-/// The standard library classes whose methods the checker names in place of PHP functions: `Date.format` for `date`
-/// and `gmdate`, `Regex.matches` and `Regex.match` both for `preg_match`, and `Email.isValid`, `Ip.isValid` and
-/// `Url.isValid` for `filter_var`, as `Bool.tryParse` is.
-const WRAPPERS: [(&str, &str); 5] = [
-    (
-        "Time/Date",
-        "namespace Sharp.Time;\n\npublic static class Date\n{\n    public static string format(int timestamp, string pattern) => global.date(pattern, timestamp);\n}\n",
-    ),
-    (
-        "Text/Regex",
-        "namespace Sharp.Text;\n\npublic static class Regex\n{\n    public static bool matches(string pattern, string text) => global.preg_match(pattern, text) is int found && found == 1;\n\n    public static bool match(string pattern, string text) => global.preg_match(pattern, text) is int found && found == 1;\n}\n",
-    ),
-    (
-        "Net/Email",
-        "namespace Sharp.Net;\n\npublic static class Email\n{\n    public static bool isValid(string address) => global.filter_var(address, global.FILTER_VALIDATE_EMAIL) is string;\n}\n",
-    ),
-    (
-        "Net/Ip",
-        "namespace Sharp.Net;\n\npublic static class Ip\n{\n    public static bool isValid(string address) => global.filter_var(address, global.FILTER_VALIDATE_IP) is string;\n}\n",
-    ),
-    (
-        "Net/Url",
-        "namespace Sharp.Net;\n\npublic static class Url\n{\n    public static bool isValid(string url) => global.filter_var(url, global.FILTER_VALIDATE_URL) is string;\n}\n",
     ),
 ];
 
@@ -454,12 +420,15 @@ fn write(root: &Path, name: &str, contents: &str) {
     std::fs::write(path, contents).unwrap();
 }
 
-/// The standard library's package under `root`: its `composer.json`, its `Text`, its `Int`, `Float` and `Bool`, the
-/// classes whose methods the checker names in place of PHP functions, and its effect classes.
+/// The standard library's members of `string`, with a native body, spec section 29, and the `split` `Http` calls.
+const STRING_MEMBERS: &str = include_str!("../../composer/library/Sharp/Text/StringMembers.sharp");
+
+/// The standard library's package under `root`: its `composer.json`, its members of `string`, its `Float` and `Bool`,
+/// and its effect classes.
 fn write_library(root: &Path) {
     write(root, "composer.json", LIBRARY_PACKAGE);
-    write(root, "library/Sharp/Text/Text.sharp", TEXT);
-    for (class, source) in TYPE_CLASSES.into_iter().chain(WRAPPERS) {
+    write(root, "library/Sharp/Text/StringMembers.sharp", STRING_MEMBERS);
+    for (class, source) in TYPE_CLASSES {
         write(root, &format!("library/Sharp/{class}.sharp"), source);
     }
     for (path, source) in EFFECT_CLASSES {
@@ -495,9 +464,8 @@ fn page_errors(page: &str) -> Vec<String> {
 
 #[test]
 fn analyze_finds_no_issues_in_a_call_of_an_extern_method_of_the_standard_library() {
-    let directory = library_workspace(
-        "namespace App;\n\nimport Sharp.Text.Text;\n\npublic class Page\n{\n    public string slug() => Text.slug(\"Hello\");\n}\n",
-    );
+    let directory =
+        library_workspace("namespace App;\n\npublic class Page\n{\n    public string slug() => \"Hello\".slug();\n}\n");
 
     let output = run(directory.path(), "analyze", &[]);
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -511,26 +479,26 @@ fn analyze_finds_no_issues_in_a_call_of_an_extern_method_of_the_standard_library
 /// method compiles.
 #[test]
 fn compile_accepts_extern_methods_in_the_vendored_standard_library() {
-    let directory = library_workspace(
-        "namespace App;\n\nimport Sharp.Text.Text;\n\npublic class Page\n{\n    public string slug() => Text.slug(\"Hello\");\n}\n",
-    );
+    let directory =
+        library_workspace("namespace App;\n\npublic class Page\n{\n    public string slug() => \"Hello\".slug();\n}\n");
 
     let output = run(directory.path(), "compile", &[]);
     let printed = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
 
     assert!(output.status.success(), "{printed}");
-    for compiled in ["src/App/Page.sharpc", "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Text/Text.sharpc"]
+    for compiled in
+        ["src/App/Page.sharpc", "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Text/StringMembers.sharpc"]
     {
         assert!(directory.path().join(".sharp").join(compiled).is_file(), "{compiled}: {printed}");
     }
 }
 
 /// `mago compile` lowers the vendored library first, and a project file runs the library's one-call method as its
-/// body: `Text.capitalized(name)` compiles to `ucfirst($name)`.
+/// body: `name.capitalized()` compiles to `mb_ucfirst($name, "UTF-8")`.
 #[test]
 fn compile_inlines_a_vendored_library_form_into_a_project_caller() {
     let directory = library_workspace(
-        "namespace App;\n\nimport Sharp.Text.Text;\n\npublic class Page\n{\n    public string title(string name) => Text.capitalized(name);\n}\n",
+        "namespace App;\n\npublic class Page\n{\n    public string title(string name) => name.capitalized();\n}\n",
     );
 
     let output = run(directory.path(), "compile", &[]);
@@ -538,7 +506,7 @@ fn compile_inlines_a_vendored_library_form_into_a_project_caller() {
 
     assert!(output.status.success(), "{printed}");
     let page = std::fs::read(directory.path().join(".sharp/src/App/Page.sharpc")).unwrap();
-    assert!(page.windows(b"ucfirst".len()).any(|window| window == b"ucfirst"), "the form is inlined");
+    assert!(page.windows(b"mb_ucfirst".len()).any(|window| window == b"mb_ucfirst"), "the form is inlined");
 }
 
 /// In the standard library's own repository, whose root `composer.json` names the package, `library/Sharp/` is the
@@ -554,7 +522,7 @@ fn compile_treats_the_repository_of_the_standard_library_as_the_library() {
     write(
         root,
         "example/App/Title.sharp",
-        "namespace App;\n\nimport Sharp.Text.Text;\n\npublic class Title\n{\n    public string of(string name) => Text.capitalized(name);\n}\n",
+        "namespace App;\n\npublic class Title\n{\n    public string of(string name) => name.capitalized();\n}\n",
     );
     write(
         root,
@@ -566,11 +534,11 @@ fn compile_treats_the_repository_of_the_standard_library_as_the_library() {
     let printed = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
 
     assert_eq!(output.status.code(), Some(1), "{printed}");
-    assert!(printed.contains("Compiled 27 PHP# files into .sharp/. 1 PHP# file was refused"), "{printed}");
-    assert!(root.join(".sharp/library/Sharp/Text/Text.sharpc").is_file(), "{printed}");
-    assert!(root.join(".sharp/library/Sharp/Environment.sharpc").is_file(), "{printed}");
+    assert!(printed.contains("Compiled 30 PHP# files into .sharp/. 1 PHP# file was refused"), "{printed}");
+    assert!(root.join(".sharp/library/Sharp/Text/StringMembers.sharpc").is_file(), "{printed}");
+    assert!(root.join(".sharp/library/Sharp/System/Environment.sharpc").is_file(), "{printed}");
     let title = std::fs::read(root.join(".sharp/example/App/Title.sharpc")).unwrap();
-    assert!(title.windows(b"ucfirst".len()).any(|window| window == b"ucfirst"), "the form is inlined");
+    assert!(title.windows(b"mb_ucfirst".len()).any(|window| window == b"mb_ucfirst"), "the form is inlined");
     assert!(!root.join(".sharp/example/App/Native.sharpc").exists(), "{printed}");
     assert!(printed.contains("native-body-outside-library"), "{printed}");
 }
@@ -581,24 +549,22 @@ fn compile_refuses_extern_under_library_sharp_without_the_composer_json_of_the_l
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
     write(root, "mago.toml", "php-version = \"8.4\"\n");
-    write(root, "library/Sharp/Text/Text.sharp", TEXT);
+    write(root, "library/Sharp/Text/StringMembers.sharp", STRING_MEMBERS);
 
     let output = run(root, "compile", &[]);
     let printed = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
 
     assert_eq!(output.status.code(), Some(1), "{printed}");
-    assert!(!root.join(".sharp/library/Sharp/Text/Text.sharpc").exists(), "{printed}");
+    assert!(!root.join(".sharp/library/Sharp/Text/StringMembers.sharpc").exists(), "{printed}");
     assert!(printed.contains("native-body-outside-library"), "{printed}");
 }
 
 #[test]
 fn analyze_reports_new_on_a_static_class() {
     assert_eq!(
-        page_errors(
-            "namespace App;\n\nimport Sharp.Text.Text;\n\npublic class Page\n{\n    public Text make() => new Text();\n}\n"
-        ),
+        page_errors("namespace App;\n\npublic class Page\n{\n    public Math make() => new Math();\n}\n"),
         [
-            "src/App/Page.sharp:7:31:error - abstract-instantiation: `Text` is a static class, so it has no instances: call its members on the class."
+            "src/App/Page.sharp:5:31:error - abstract-instantiation: `Math` is a static class, so it has no instances: call its members on the class."
         ]
     );
 }
@@ -606,8 +572,8 @@ fn analyze_reports_new_on_a_static_class() {
 #[test]
 fn analyze_reports_a_class_that_extends_a_static_class() {
     assert_eq!(
-        page_errors("namespace App;\n\nimport Sharp.Text.Text;\n\npublic class Page : Text\n{\n}\n"),
-        ["src/App/Page.sharp:5:21:error - extend-final-class: `Text` is a static class, so no class can extend it."]
+        page_errors("namespace App;\n\npublic class Page : Math\n{\n}\n"),
+        ["src/App/Page.sharp:3:21:error - extend-final-class: `Math` is a static class, so no class can extend it."]
     );
 }
 
@@ -753,97 +719,6 @@ fn analyze_trusts_a_vendored_file_of_another_package_under_sharp() {
     assert!(stderr.contains("No issues found."), "{stdout}{stderr}");
 }
 
-/// Decision 076: a bare call of a PHP function the standard library replaces names the library's method to write.
-#[test]
-fn analyze_reports_a_call_of_a_wrapped_function_with_the_method_that_replaces_it() {
-    assert_eq!(
-        page_errors("namespace App;\n\npublic class Page\n{\n    public string year() => date(\"Y\");\n}\n"),
-        [
-            "src/App/Page.sharp:5:29:error - wrapped-function: `date` is wrapped by the standard library: write `Date.format(…)`. Add `import Sharp.Time.Date;` to the file."
-        ]
-    );
-}
-
-#[test]
-fn analyze_names_both_methods_that_replace_a_function() {
-    assert_eq!(
-        page_errors(
-            "namespace App;\n\npublic class Page\n{\n    public bool found() => preg_match(\"/a/\", \"a\") is int;\n}\n"
-        ),
-        [
-            "src/App/Page.sharp:5:28:error - wrapped-function: `preg_match` is wrapped by the standard library: write `Regex.matches(…)` or `Regex.match(…)`. Add `import Sharp.Text.Regex;` to the file."
-        ]
-    );
-}
-
-/// Spec section 23: code names a class by the short name an import binds. A `.sharp` file that doesn't import the
-/// wrapping class gets the import to add with the method to write. Plain PHP keeps upstream's text: it reports no call.
-#[test]
-fn analyze_names_the_import_a_wrapped_function_call_needs_and_reports_nothing_in_php() {
-    let directory = library_workspace(
-        "namespace App;\n\npublic class Page\n{\n    public bool found() => preg_match(\"/a/\", \"a\") is int;\n}\n",
-    );
-    write(
-        directory.path(),
-        "src/App/Finder.php",
-        "<?php\n\ndeclare(strict_types=1);\n\nnamespace App;\n\nfinal class Finder\n{\n    public static function found(): bool\n    {\n        return preg_match('/a/', 'a') === 1;\n    }\n}\n",
-    );
-
-    let output = run(directory.path(), "analyze", &["--reporting-format", "emacs"]);
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let page: Vec<&str> = stdout.lines().filter(|line| line.starts_with("src/App/Page.sharp:")).collect();
-
-    assert_eq!(
-        page,
-        [
-            "src/App/Page.sharp:5:28:error - wrapped-function: `preg_match` is wrapped by the standard library: write `Regex.matches(…)` or `Regex.match(…)`. Add `import Sharp.Text.Regex;` to the file."
-        ],
-        "{stdout}"
-    );
-    assert_eq!(issues_in(&stdout, "src/App/Finder.php"), Vec::<String>::new(), "{stdout}");
-}
-
-/// Spec section 8: a PHP function the standard library wraps with an extension, spec section 26, is written as the
-/// extension's member of its first argument. Every file has the extensions on `string` with no import, spec section
-/// 23, so `trim` names `name.trim()` alone, and the member it names compiles.
-#[test]
-fn analyze_names_the_extension_member_that_replaces_a_wrapped_function() {
-    assert_eq!(
-        page_errors(
-            "namespace App;\n\npublic class Page\n{\n    public string label(string name) => trim(name);\n\n    public string clean(string name) => name.trim();\n}\n"
-        ),
-        [
-            "src/App/Page.sharp:5:41:error - wrapped-function: `trim` is wrapped by the standard library: write `name.trim()`."
-        ]
-    );
-}
-
-/// A file that already imports the wrapping class is told only the method to write.
-#[test]
-fn analyze_names_no_import_for_a_wrapping_class_the_file_imports() {
-    assert_eq!(
-        page_errors(
-            "namespace App;\n\nimport Sharp.Text.Regex;\n\npublic class Page\n{\n    public bool found() => preg_match(\"/a/\", \"a\") is int;\n}\n"
-        ),
-        [
-            "src/App/Page.sharp:7:28:error - wrapped-function: `preg_match` is wrapped by the standard library: write `Regex.matches(…)` or `Regex.match(…)`."
-        ]
-    );
-}
-
-/// Spec section 23: the code a message names to write uses the name the file imports the class as.
-#[test]
-fn analyze_names_the_methods_that_replace_a_function_by_the_name_the_file_imports_their_class_as() {
-    assert_eq!(
-        page_errors(
-            "namespace App;\n\nimport Sharp.Text.Regex as Rx;\n\npublic class Page\n{\n    public bool found() => preg_match(\"/a/\", \"a\") is int;\n}\n"
-        ),
-        [
-            "src/App/Page.sharp:7:28:error - wrapped-function: `preg_match` is wrapped by the standard library: write `Rx.matches(…)` or `Rx.match(…)`."
-        ]
-    );
-}
-
 /// Spec section 23's example: the renamed import leaves the bare `Key` to name the standard attribute.
 #[test]
 fn compile_accepts_a_struct_that_renames_an_import_to_keep_the_short_name_free() {
@@ -868,19 +743,6 @@ fn compile_accepts_a_struct_that_renames_an_import_to_keep_the_short_name_free()
 
     assert!(output.status.success(), "{printed}");
     assert!(root.join(".sharp/src/App/Entry.sharpc").is_file(), "{printed}");
-}
-
-/// The replacements come in the order the checker's table lists them.
-#[test]
-fn analyze_names_four_methods_that_replace_a_function_in_the_order_the_table_lists_them() {
-    assert_eq!(
-        page_errors(
-            "namespace App;\n\npublic class Page\n{\n    public bool valid(string address) => filter_var(address, global.FILTER_VALIDATE_EMAIL) is string;\n}\n"
-        ),
-        [
-            "src/App/Page.sharp:5:42:error - wrapped-function: `filter_var` is wrapped by the standard library: write `Bool.tryParse(…)`, `Email.isValid(…)`, `Ip.isValid(…)` or `Url.isValid(…)`. Add `import Sharp.Net.Email;`, `import Sharp.Net.Ip;` and `import Sharp.Net.Url;` to the file."
-        ]
-    );
 }
 
 /// A PHP# attribute class keeps the targets its `[Attribute(Attribute.TARGET_METHOD)]` reads, so the attribute on a
@@ -927,11 +789,12 @@ fn analyze_reports_a_php_attribute_on_a_target_or_a_repeat_its_flags_leave_out()
     );
 }
 
-/// Plain PHP keeps every PHP function: only a `.sharp` file's call of a wrapped function is refused.
+/// Plain PHP keeps every PHP function: only a `.sharp` file's bare call of one names no function, as a misspelled name
+/// does.
 #[test]
-fn analyze_reports_a_wrapped_function_in_a_sharp_file_and_not_in_a_php_file() {
+fn analyze_reports_a_bare_call_of_a_php_function_in_a_sharp_file_and_not_in_a_php_file() {
     let directory =
-        library_workspace("namespace App;\n\npublic class Page\n{\n    public string year() => date(\"Y\");\n}\n");
+        library_workspace("namespace App;\n\npublic class Page\n{\n    public Any? year() => date(\"Y\");\n}\n");
     write(
         directory.path(),
         "src/App/Clock.php",
@@ -941,7 +804,7 @@ fn analyze_reports_a_wrapped_function_in_a_sharp_file_and_not_in_a_php_file() {
     let output = run(directory.path(), "analyze", &["--reporting-format", "emacs"]);
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    assert_eq!(issues_in(&stdout, "src/App/Page.sharp"), ["5:29 wrapped-function"], "{stdout}");
+    assert_eq!(issues_in(&stdout, "src/App/Page.sharp"), ["5:27 non-existent-function"], "{stdout}");
     assert_eq!(issues_in(&stdout, "src/App/Clock.php"), Vec::<String>::new(), "{stdout}");
 }
 
@@ -1001,72 +864,15 @@ fn analyze_skips_the_code_after_a_throw_in_a_php_file() {
     assert_eq!(issues_in(&stdout, "src/App/Clock.php"), ["12:9 unevaluated-code"], "{stdout}");
 }
 
-/// A project page that calls every PHP function PHP# replaces with its own syntax.
-const REPLACED_CALLS: &str = "namespace App;\n\npublic class Page\n{\n    public bool text(Any? value) => is_string(value);\n    public bool whole(Any? value) => is_int(value);\n    public bool real(Any? value) => is_float(value);\n    public bool flag(Any? value) => is_bool(value);\n    public string label(int number) => strval(number);\n    public int half(int total, int count) => intdiv(total, count);\n    public List<int> join(List<int> first, List<int> second) => array_merge(first, second);\n    public Map<string, int> merge(Map<string, int> defaults, Map<string, int> overrides) => array_replace(defaults, overrides);\n    public bool walk(List<int> numbers) => array_walk_recursive(numbers, n => n);\n}\n";
-
-/// A PHP# file that calls a PHP function PHP# replaces with syntax names the form to write, and a PHP file calls each
-/// of them as before.
-#[test]
-fn analyze_reports_each_function_php_sharp_replaces_with_syntax_in_a_sharp_file_and_not_in_a_php_file() {
-    let directory = library_workspace(REPLACED_CALLS);
-    write(
-        directory.path(),
-        "src/App/Clock.php",
-        "<?php\n\ndeclare(strict_types=1);\n\nnamespace App;\n\nfinal class Clock\n{\n    /**\n     * @param list<int> $first\n     * @param list<int> $second\n     * @param array<string, int> $defaults\n     * @param array<string, int> $overrides\n     *\n     * @return list<mixed>\n     */\n    public static function all(mixed $value, int $total, int $count, array $first, array $second, array $defaults, array $overrides): array\n    {\n        $numbers = $first;\n        array_walk_recursive($numbers, static fn(int $number): int => $number);\n\n        return [\n            is_string($value),\n            is_int($value),\n            is_float($value),\n            is_bool($value),\n            strval($total),\n            intdiv($total, $count),\n            array_merge($first, $second),\n            array_replace($defaults, $overrides),\n            $numbers,\n        ];\n    }\n}\n",
-    );
-
-    let output = run(directory.path(), "analyze", &["--reporting-format", "emacs"]);
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let page: Vec<&str> = stdout.lines().filter(|line| line.starts_with("src/App/Page.sharp:")).collect();
-
-    assert_eq!(
-        page,
-        [
-            "src/App/Page.sharp:5:37:error - replaced-by-syntax: `is_string` is replaced by PHP# syntax: write `value is string`.",
-            "src/App/Page.sharp:6:38:error - replaced-by-syntax: `is_int` is replaced by PHP# syntax: write `value is int`.",
-            "src/App/Page.sharp:7:37:error - replaced-by-syntax: `is_float` is replaced by PHP# syntax: write `value is float`.",
-            "src/App/Page.sharp:8:37:error - replaced-by-syntax: `is_bool` is replaced by PHP# syntax: write `value is bool`.",
-            "src/App/Page.sharp:9:40:error - replaced-by-syntax: `strval` is replaced by PHP# syntax: write `(string)number`.",
-            "src/App/Page.sharp:10:46:error - replaced-by-syntax: `intdiv` is replaced by PHP# syntax: write `total / count`.",
-            "src/App/Page.sharp:11:65:error - replaced-by-syntax: `array_merge` is replaced by PHP# syntax: write `[...first, ...second]`.",
-            "src/App/Page.sharp:12:93:error - replaced-by-syntax: `array_replace` is replaced by PHP# syntax: write `[...defaults, ...overrides]`.",
-            "src/App/Page.sharp:13:44:error - replaced-by-syntax: `array_walk_recursive` is replaced by PHP# syntax: write a `for … of` loop.",
-        ],
-        "{stdout}"
-    );
-    assert_eq!(issues_in(&stdout, "src/App/Clock.php"), Vec::<String>::new(), "{stdout}");
-}
-
-/// The form names an argument that is one name or a member read as the call writes it, and any other argument by
-/// the form's own placeholder.
-#[test]
-fn analyze_names_a_name_or_member_read_argument_in_the_form_and_a_placeholder_for_any_other() {
-    assert_eq!(
-        page_errors(
-            "namespace App;\n\npublic class Page\n{\n    private Any? data = null;\n    public Any? read() => this.data;\n    public bool owned(Page other) => is_string(other.data);\n    public bool named() => is_string(this.read());\n    public int third(int total) => intdiv(total, 3);\n    public List<int> both(List<int> first) => array_merge(this.items(), first);\n    public List<int> all(List<int> first, List<int> second) => array_merge(first, this.items(), second);\n    public List<int> one(List<int> first) => array_merge(first);\n    public List<int> items() => [];\n}\n"
-        ),
-        [
-            "src/App/Page.sharp:7:38:error - replaced-by-syntax: `is_string` is replaced by PHP# syntax: write `other.data is string`.",
-            "src/App/Page.sharp:8:28:error - replaced-by-syntax: `is_string` is replaced by PHP# syntax: write `x is string`.",
-            "src/App/Page.sharp:9:36:error - replaced-by-syntax: `intdiv` is replaced by PHP# syntax: write `total / b`.",
-            "src/App/Page.sharp:10:47:error - replaced-by-syntax: `array_merge` is replaced by PHP# syntax: write `[...a, ...first]`.",
-            "src/App/Page.sharp:11:64:error - replaced-by-syntax: `array_merge` is replaced by PHP# syntax: write `[...first, ...b, ...second]`.",
-            "src/App/Page.sharp:12:46:error - replaced-by-syntax: `array_merge` is replaced by PHP# syntax: write `[...first]`.",
-        ]
-    );
-}
-
-/// `is`, `as` and `match` test a scalar type with the PHP function the table names, which no source the user wrote
-/// calls, and a call the user writes as the value an `is` tests is still reported.
+/// `is`, `as` and `match` test a scalar type with a PHP function, which no source the user wrote calls, so they compile,
+/// and a bare call the user writes as the value an `is` tests names no function, as a misspelled name does.
 #[test]
 fn analyze_reports_a_written_call_and_not_the_type_tests_of_is_as_and_match() {
     assert_eq!(
         page_errors(
             "namespace App;\n\npublic class Page\n{\n    public int? whole(Any? value) => value as int;\n    public string kind(Any? value) => match (value) {\n        string text => text,\n        default => \"\",\n    };\n    public bool both(Any? value) => is_string(value) is true;\n}\n"
         ),
-        [
-            "src/App/Page.sharp:10:37:error - replaced-by-syntax: `is_string` is replaced by PHP# syntax: write `value is string`."
-        ]
+        ["src/App/Page.sharp:10:37:error - non-existent-function: Function `is_string` does not exist."]
     );
 }
 
@@ -1428,7 +1234,7 @@ fn extern_workspace(stripe: &str) -> tempfile::TempDir {
     write(
         root,
         "app/Stubs/Clock.sharp",
-        "namespace App.Stubs;\n\nimport Carbon.Carbon;\nimport Brick.Math.BigDecimal;\n\nextern Carbon.now uses Clock;\nextern global.now uses Clock;\nextern BigDecimal;\n",
+        "namespace App.Stubs;\n\nimport Acme.Chrono;\nimport Carbon.Carbon;\nimport Brick.Math.BigDecimal;\n\nextern Carbon.now uses Clock;\nextern Chrono.now uses Clock;\nextern BigDecimal;\n",
     );
     write(root, "app/Lib/StripeClient.php", "<?php\n\nnamespace Stripe;\n\nclass StripeClient\n{\n}\n");
     write(
@@ -1437,7 +1243,8 @@ fn extern_workspace(stripe: &str) -> tempfile::TempDir {
         "<?php\n\nnamespace Carbon;\n\nclass Carbon\n{\n    public static function now(): self\n    {\n        return new self();\n    }\n}\n",
     );
     write(root, "app/Lib/BigDecimal.php", "<?php\n\nnamespace Brick\\Math;\n\nclass BigDecimal\n{\n}\n");
-    write(root, "app/Lib/now.php", "<?php\n\nfunction now(): int\n{\n    return time();\n}\n");
+    write(root, "app/Lib/Chrono/now.php", "<?php\n\nfunction now(): int\n{\n    return time();\n}\n");
+    write(root, "app/Lib/Chrono/Stopwatch.php", "<?php\n\nnamespace Acme\\Chrono;\n\nclass Stopwatch\n{\n}\n");
     directory
 }
 
@@ -1488,6 +1295,10 @@ fn compile_refuses_a_file_whose_getter_writes_this() {
     assert!(directory.path().join(".sharp/app/Stubs/Stripe.sharpc").exists(), "{printed}");
 }
 
+/// The members of `App\Shop\Stop` its tests call: `halt`, which never returns, and `say` and `size`, which do. The file
+/// imports `LogicException`.
+const STOP_MEMBERS: &str = "\n    public static never halt(int code)\n    {\n        throw new LogicException(\"halt\");\n    }\n\n    public static void say(string text)\n    {\n    }\n\n    public static int size(string text) => 1;\n";
+
 /// Spec section 7 refuses a statement that never runs. The analysis never reads one, so `mago compile` refuses its file
 /// before the bridge, which lowers only what the analysis read.
 #[test]
@@ -1498,14 +1309,16 @@ fn compile_refuses_a_file_with_a_statement_that_never_runs() {
     write(
         root,
         "app/Shop/Stop.sharp",
-        "namespace App.Shop;\n\npublic class Stop\n{\n    public static int run()\n    {\n        global.exit(1);\n        return global.strlen(\"never\");\n    }\n}\n",
+        &format!(
+            "namespace App.Shop;\n\nimport LogicException;\n\npublic class Stop\n{{\n    public static int run()\n    {{\n        Stop.halt(1);\n        return Stop.size(\"never\");\n    }}\n{STOP_MEMBERS}}}\n"
+        ),
     );
 
     let output = run(root, "compile", &[]);
     let printed = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
 
     assert_eq!(output.status.code(), Some(1), "{printed}");
-    assert!(printed.contains("This statement never runs, because line 7 ends the block."), "{printed}");
+    assert!(printed.contains("This statement never runs, because line 9 ends the block."), "{printed}");
     assert!(!root.join(".sharp/app/Shop/Stop.sharpc").exists());
 }
 
@@ -1519,7 +1332,9 @@ fn compile_accepts_the_code_the_help_for_a_condition_that_never_finishes_names()
     write(
         root,
         "app/Shop/Stop.sharp",
-        "namespace App.Shop;\n\npublic class Stop\n{\n    public static void first()\n    {\n        if (global.exit(1)) {\n            global.printf(\"never\");\n        } else {\n            global.printf(\"never either\");\n        }\n    }\n\n    public static void second(bool up)\n    {\n        if (up) {\n            global.printf(\"up\");\n        } else if (global.exit(1)) {\n            global.printf(\"never\");\n        } else {\n            global.printf(\"never either\");\n        }\n    }\n\n    public static void third()\n    {\n        for (const item of global.exit(1)) {\n            global.printf(\"never\");\n        }\n    }\n}\n",
+        &format!(
+            "namespace App.Shop;\n\nimport LogicException;\n\npublic class Stop\n{{\n    public static void first()\n    {{\n        if (Stop.halt(1)) {{\n            Stop.say(\"never\");\n        }} else {{\n            Stop.say(\"never either\");\n        }}\n    }}\n\n    public static void second(bool up)\n    {{\n        if (up) {{\n            Stop.say(\"up\");\n        }} else if (Stop.halt(1)) {{\n            Stop.say(\"never\");\n        }} else {{\n            Stop.say(\"never either\");\n        }}\n    }}\n\n    public static void third()\n    {{\n        for (const item of Stop.halt(1)) {{\n            Stop.say(\"never\");\n        }}\n    }}\n{STOP_MEMBERS}}}\n"
+        ),
     );
 
     let output = run(root, "compile", &[]);
@@ -1528,16 +1343,18 @@ fn compile_accepts_the_code_the_help_for_a_condition_that_never_finishes_names()
     assert_eq!(output.status.code(), Some(1), "{printed}");
     assert_eq!(printed.matches("This condition never finishes, so its block never runs.").count(), 3, "{printed}");
     assert_eq!(
-        printed.matches("Write `global.exit(1);` as its own statement, and delete the `if`.").count(),
+        printed.matches("Write `Stop.halt(1);` as its own statement, and delete the `if`.").count(),
         2,
         "{printed}"
     );
-    assert!(printed.contains("Write `global.exit(1);` as its own statement, and delete the `for`."), "{printed}");
+    assert!(printed.contains("Write `Stop.halt(1);` as its own statement, and delete the `for`."), "{printed}");
 
     write(
         root,
         "app/Shop/Stop.sharp",
-        "namespace App.Shop;\n\npublic class Stop\n{\n    public static void first()\n    {\n        global.exit(1);\n    }\n\n    public static void second(bool up)\n    {\n        if (up) {\n            global.printf(\"up\");\n        } else global.exit(1);\n    }\n\n    public static void third()\n    {\n        global.exit(1);\n    }\n}\n",
+        &format!(
+            "namespace App.Shop;\n\nimport LogicException;\n\npublic class Stop\n{{\n    public static void first()\n    {{\n        Stop.halt(1);\n    }}\n\n    public static void second(bool up)\n    {{\n        if (up) {{\n            Stop.say(\"up\");\n        }} else Stop.halt(1);\n    }}\n\n    public static void third()\n    {{\n        Stop.halt(1);\n    }}\n{STOP_MEMBERS}}}\n"
+        ),
     );
 
     // In an `else`, the statement the help names takes the braces PHP# writes around every body, as their help says.
@@ -1545,12 +1362,14 @@ fn compile_accepts_the_code_the_help_for_a_condition_that_never_finishes_names()
     let printed = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
 
     assert_eq!(output.status.code(), Some(1), "{printed}");
-    assert!(printed.contains("Write `{ global.exit(1); }`."), "{printed}");
+    assert!(printed.contains("Write `{ Stop.halt(1); }`."), "{printed}");
 
     write(
         root,
         "app/Shop/Stop.sharp",
-        "namespace App.Shop;\n\npublic class Stop\n{\n    public static void first()\n    {\n        global.exit(1);\n    }\n\n    public static void second(bool up)\n    {\n        if (up) {\n            global.printf(\"up\");\n        } else { global.exit(1); }\n    }\n\n    public static void third()\n    {\n        global.exit(1);\n    }\n}\n",
+        &format!(
+            "namespace App.Shop;\n\nimport LogicException;\n\npublic class Stop\n{{\n    public static void first()\n    {{\n        Stop.halt(1);\n    }}\n\n    public static void second(bool up)\n    {{\n        if (up) {{\n            Stop.say(\"up\");\n        }} else {{ Stop.halt(1); }}\n    }}\n\n    public static void third()\n    {{\n        Stop.halt(1);\n    }}\n{STOP_MEMBERS}}}\n"
+        ),
     );
 
     let output = run(root, "compile", &[]);
@@ -1560,10 +1379,11 @@ fn compile_accepts_the_code_the_help_for_a_condition_that_never_finishes_names()
     assert!(root.join(".sharp/app/Shop/Stop.sharpc").exists());
 }
 
-/// Spec section 23 reads a plain PHP constant through its namespace, so `mago compile` writes a file that reads
-/// `global.PHP_EOL`, `global.STDERR` and a library's constant. A function read without a call is the function's value,
-/// spec section 14.3, which compiles. A read that reaches neither is refused with status 1, never a panic: a root
-/// constant that does not exist, and a name that is no class and no namespace.
+/// Spec section 23 reads a plain PHP constant through its namespace, so `mago compile` writes a file that reads the
+/// constants a library declares in PHP's root namespace beside its classes, `Pdf.PDF_EOL` and `Pdf.PDF_ERRORS`, and a
+/// constant of the library's namespace. A function read without a call is the function's value, spec section 14.3,
+/// which compiles. A read that reaches neither is refused with status 1, never a panic: a constant the namespace does
+/// not hold, a name that is no class and no namespace, and `global`, which names neither in PHP# code.
 #[test]
 fn compile_writes_a_read_of_a_plain_php_constant_and_refuses_a_read_that_reaches_none() {
     let directory = tempfile::tempdir().unwrap();
@@ -1572,12 +1392,17 @@ fn compile_writes_a_read_of_a_plain_php_constant_and_refuses_a_read_that_reaches
     write(
         root,
         "lib/Pdf.php",
-        "<?php\n\nnamespace Vendor\\Pdf;\n\nconst DEFAULT_DPI = 300;\n\nfunction render(string $html): string\n{\n    return $html;\n}\n",
+        "<?php\n\nnamespace Vendor\\Pdf;\n\nconst DEFAULT_DPI = 300;\n\nfunction render(string $html): string\n{\n    return $html;\n}\n\nfinal class Document\n{\n}\n",
+    );
+    write(
+        root,
+        "lib/helpers.php",
+        "<?php\n\nconst PDF_EOL = \"\\n\";\n\ndefine('PDF_ERRORS', STDERR);\n\nfunction measure(string $text): int\n{\n    return strlen($text);\n}\n",
     );
     write(
         root,
         "app/Shop/Reads.sharp",
-        "namespace App.Shop;\n\nimport Vendor.Pdf;\n\npublic class Reads\n{\n    public static string line(string text) => text + global.PHP_EOL;\n\n    public static Any? errors() => global.STDERR;\n\n    public static int dpi() => Pdf.DEFAULT_DPI;\n}\n",
+        "namespace App.Shop;\n\nimport Vendor.Pdf;\n\npublic class Reads\n{\n    public static string line(string text) => text + Pdf.PDF_EOL;\n\n    public static Any? errors() => Pdf.PDF_ERRORS;\n\n    public static int dpi() => Pdf.DEFAULT_DPI;\n}\n",
     );
 
     let output = run(root, "compile", &[]);
@@ -1586,7 +1411,14 @@ fn compile_writes_a_read_of_a_plain_php_constant_and_refuses_a_read_that_reaches
     assert_eq!(output.status.code(), Some(0), "{printed}");
     assert!(root.join(".sharp/app/Shop/Reads.sharpc").exists());
 
-    for (read, status) in [("global.strlen", 0), ("Pdf.render", 0), ("global.NOPE", 1), ("Nope.render", 1)] {
+    for (read, status) in [
+        ("Pdf.measure", 0),
+        ("Pdf.render", 0),
+        ("Pdf.NOPE", 1),
+        ("Nope.render", 1),
+        ("global.PHP_EOL", 1),
+        ("global.strlen", 1),
+    ] {
         write(
             root,
             "app/Shop/Reads.sharp",

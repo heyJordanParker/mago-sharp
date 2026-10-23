@@ -48,12 +48,12 @@ fn resolved<'arena>(names: &ResolvedNames<'arena>, code: &str, needle: &str, nth
 }
 
 /// A reader of the source, such as an extension host, gets the name each PHP# form means, the one the PHP that means it
-/// gives: the enum alone for the case pattern `Plan.Starter`, as for `Plan::Starter`, the root function and constant
-/// for `global.max` and `global.PHP_INT_MAX`, as for `\max` and `\PHP_INT_MAX`, and no name for a type parameter, a
-/// call of a local, or the functions a pattern's PHP calls. The PHP each form runs as keeps its own names.
+/// gives: the enum alone for the case pattern `Plan.Starter`, as for `Plan::Starter`, the class of a static call and a
+/// static read, as `Limits.max` and `Limits.TOP`, and no name for a type parameter, a call of a local, or the functions
+/// a pattern's PHP calls. The PHP each form runs as keeps its own names.
 #[test]
 fn the_source_names_what_each_form_means() {
-    const CODE: &str = "namespace App;\n\nclass Pricing<T>\n{\n    public int seats(Plan plan, T item, List<int> counts)\n    {\n        const twice = (int x) => x * 2;\n        const big = counts is [int first, ...List<int> rest] && item is int;\n        return match (plan) {\n            Plan.Starter => global.max(twice(1), global.PHP_INT_MAX),\n            Plan.Pro => 2,\n        };\n    }\n}\n";
+    const CODE: &str = "namespace App;\n\nclass Pricing<T>\n{\n    public int seats(Plan plan, T item, List<int> counts)\n    {\n        const twice = (int x) => x * 2;\n        const big = counts is [int first, ...List<int> rest] && item is int;\n        return match (plan) {\n            Plan.Starter => Limits.max(twice(1), Limits.TOP),\n            Plan.Pro => 2,\n        };\n    }\n}\n";
     let arena = LocalArena::new();
     let names = bind(&arena, CODE);
 
@@ -71,13 +71,12 @@ fn the_source_names_what_each_form_means() {
             ("Pricing", "App\\Pricing".to_owned()),
             ("Plan", "App\\Plan".to_owned()),
             ("Plan", "App\\Plan".to_owned()),
-            ("max", "max".to_owned()),
-            ("PHP_INT_MAX", "PHP_INT_MAX".to_owned()),
+            ("Limits", "App\\Limits".to_owned()),
+            ("Limits", "App\\Limits".to_owned()),
             ("Plan", "App\\Plan".to_owned()),
         ]
     );
     assert_eq!(resolved(&names, CODE, "Starter", 0), b"App\\Plan\\Starter");
-    assert_eq!(resolved(&names, CODE, "global", 0), b"App\\global");
     assert_eq!(resolved(&names, CODE, "T item", 0), b"T");
     assert_eq!(resolved(&names, CODE, "twice(1)", 0), b"App\\twice");
 }
@@ -532,25 +531,25 @@ fn an_imported_int_is_the_imported_class() {
 
 #[test]
 fn a_bare_standard_library_name_is_the_class_in_the_sharp_namespace_wherever_a_class_is_named() {
-    const CODE: &str = "namespace App.Tenant.Store;\n\nclass Report\n{\n    public void run(Position here, Environment settings, string text)\n    {\n        Position.current();\n        Environment.current();\n        List.wrap(text);\n        Class.of(here);\n        new Int();\n        new Float();\n        new Bool();\n        new Position();\n        new Environment();\n        new List;\n        typeof(Position);\n        typeof(Environment);\n        typeof(List);\n        typeof(Int);\n        typeof(Bool);\n    }\n}\n";
+    const CODE: &str = "namespace App.Tenant.Store;\n\nclass Report\n{\n    public void run(Position here, Random settings, string text)\n    {\n        Position.current();\n        Random.current();\n        List.wrap(text);\n        Class.of(here);\n        new Int();\n        new Float();\n        new Bool();\n        new Position();\n        new Random();\n        new List;\n        typeof(Position);\n        typeof(Random);\n        typeof(List);\n        typeof(Int);\n        typeof(Bool);\n    }\n}\n";
     let arena = LocalArena::new();
     let names = bind(&arena, CODE);
 
     for (needle, class) in [
         ("Position here", "Sharp\\Position"),
-        ("Environment settings", "Sharp\\Environment"),
+        ("Random settings", "Sharp\\Random"),
         ("Position.current", "Sharp\\Position"),
-        ("Environment.current", "Sharp\\Environment"),
+        ("Random.current", "Sharp\\Random"),
         ("List.wrap", "Sharp\\List"),
         ("Class.of", "Sharp\\Class"),
         ("Int()", "Sharp\\Int"),
         ("Float()", "Sharp\\Float"),
         ("Bool()", "Sharp\\Bool"),
         ("Position()", "Sharp\\Position"),
-        ("Environment()", "Sharp\\Environment"),
+        ("Random()", "Sharp\\Random"),
         ("List;", "Sharp\\List"),
         ("Position)", "Sharp\\Position"),
-        ("Environment)", "Sharp\\Environment"),
+        ("Random)", "Sharp\\Random"),
         ("List)", "Sharp\\List"),
         ("Int)", "Sharp\\Int"),
         ("Bool)", "Sharp\\Bool"),
@@ -576,7 +575,7 @@ fn an_imported_name_is_the_imported_class_and_not_the_standard_library_one() {
 /// of its new name, as any import does, and leaves the standard library class of the old short name in place.
 #[test]
 fn a_renamed_import_names_the_imported_class_by_its_new_name() {
-    const CODE: &str = "namespace App;\n\nimport Sharp.Text.Regex as Rx;\nimport Lib.Store as Position;\nimport Lib.Cache as LibCache;\nimport Stripe.StripeClient as Client;\n\nextern Client uses Http;\n\nclass Report\n{\n    public bool run(string text, Position here, Cache store, LibCache other)\n    {\n        return Rx.matches(\"/a/\", text);\n    }\n}\n";
+    const CODE: &str = "namespace App;\n\nimport Sharp.Text.Regex as Rx;\nimport Lib.Store as Position;\nimport Lib.Random as LibRandom;\nimport Stripe.StripeClient as Client;\n\nextern Client uses Http;\n\nclass Report\n{\n    public bool run(string text, Position here, Random store, LibRandom other)\n    {\n        return Rx.matches(\"/a/\", text);\n    }\n}\n";
     let arena = LocalArena::new();
     let names = bind(&arena, CODE);
 
@@ -585,8 +584,8 @@ fn a_renamed_import_names_the_imported_class_by_its_new_name() {
     for (needle, class) in [
         ("Rx.matches", "Sharp\\Text\\Regex"),
         ("Position here", "Lib\\Store"),
-        ("Cache store", "Sharp\\Cache"),
-        ("LibCache other", "Lib\\Cache"),
+        ("Random store", "Sharp\\Random"),
+        ("LibRandom other", "Lib\\Random"),
         ("Client uses", "Stripe\\StripeClient"),
     ] {
         assert_eq!(String::from_utf8_lossy(resolved(&names, CODE, needle, 0)), class, "`{needle}`");
@@ -619,26 +618,26 @@ fn a_class_the_file_declares_after_its_use_is_the_class_and_not_the_standard_lib
 
 #[test]
 fn a_class_like_the_file_declares_matches_a_standard_library_name_as_php_matches_class_names() {
-    const CODE: &str = "namespace App.Tenant.Store;\n\ninterface environment\n{\n}\n\nclass Report\n{\n    public void run()\n    {\n        Environment.current();\n    }\n}\n";
+    const CODE: &str = "namespace App.Tenant.Store;\n\ninterface random\n{\n}\n\nclass Report\n{\n    public void run()\n    {\n        Random.current();\n    }\n}\n";
     let arena = LocalArena::new();
     let names = bind(&arena, CODE);
 
-    assert_eq!(resolved(&names, CODE, "Environment.current", 0), b"App\\Tenant\\Store\\Environment");
+    assert_eq!(resolved(&names, CODE, "Random.current", 0), b"App\\Tenant\\Store\\Random");
 }
 
 #[test]
 fn a_standard_library_name_in_a_catch_a_header_or_an_attribute_is_the_class_in_the_sharp_namespace() {
-    const CODE: &str = "namespace App.Tenant.Store;\n\n[Position]\nclass Report : Position, Environment\n{\n    public void run()\n    {\n        try {\n        } catch (Position failure) {\n        }\n    }\n}\n\nenum Suit : string, Position\n{\n}\n\ninterface Named : Environment\n{\n}\n";
+    const CODE: &str = "namespace App.Tenant.Store;\n\n[Position]\nclass Report : Position, Random\n{\n    public void run()\n    {\n        try {\n        } catch (Position failure) {\n        }\n    }\n}\n\nenum Suit : string, Position\n{\n}\n\ninterface Named : Random\n{\n}\n";
     let arena = LocalArena::new();
     let names = bind(&arena, CODE);
 
     for (needle, class) in [
         ("Position]", "Sharp\\Position"),
-        ("Position, Environment", "Sharp\\Position"),
-        ("Environment\n{\n    public", "Sharp\\Environment"),
+        ("Position, Random", "Sharp\\Position"),
+        ("Random\n{\n    public", "Sharp\\Random"),
         ("Position failure", "Sharp\\Position"),
         ("Position\n{\n}\n\ninterface", "Sharp\\Position"),
-        ("Environment\n{\n}\n", "Sharp\\Environment"),
+        ("Random\n{\n}\n", "Sharp\\Random"),
     ] {
         assert_eq!(String::from_utf8_lossy(resolved(&names, CODE, needle, 0)), class, "`{needle:?}`");
     }
@@ -762,19 +761,29 @@ fn a_bare_extern_target_that_is_not_imported_is_a_global_function() {
     assert_eq!(resolved(&names, CODE, "trim", 0), b"trim");
 }
 
-/// An effect name binds as a class name, so a standard effect is the class in the `Sharp` namespace and a project
-/// effect resolves through the imports.
+/// An effect name binds as a class name, so a standard effect is its class in the namespace of its domain, with no
+/// import, and a project effect resolves through the imports.
 #[test]
 fn an_effect_name_binds_as_a_class_name() {
     const CODE: &str = "namespace App.Stubs;\n\nimport App.Effects.Payments;\n\nextern now uses Http, Database, Files, Console, Process, Clock, Random, Cache, Mail, Environment, Events, Payments;\n";
     let arena = LocalArena::new();
     let names = bind(&arena, CODE);
 
-    for effect in
-        ["Http", "Database", "Files", "Console", "Process", "Clock", "Random", "Cache", "Mail", "Environment", "Events"]
-    {
+    for (effect, class) in [
+        ("Http", "Sharp\\Net\\Http"),
+        ("Database", "Sharp\\Data\\Database"),
+        ("Files", "Sharp\\IO\\Files"),
+        ("Console", "Sharp\\IO\\Console"),
+        ("Process", "Sharp\\System\\Process"),
+        ("Clock", "Sharp\\Time\\Clock"),
+        ("Random", "Sharp\\Random"),
+        ("Cache", "Sharp\\Data\\Cache"),
+        ("Mail", "Sharp\\Net\\Mail"),
+        ("Environment", "Sharp\\System\\Environment"),
+        ("Events", "Sharp\\Events"),
+    ] {
         assert_eq!(binding(&names, CODE, effect, 0), Some(Binding::Class), "`{effect}`");
-        assert_eq!(String::from_utf8_lossy(resolved(&names, CODE, effect, 0)), format!("Sharp\\{effect}"));
+        assert_eq!(String::from_utf8_lossy(resolved(&names, CODE, effect, 0)), class);
     }
     assert_eq!(resolved(&names, CODE, "Payments;", 1), b"App\\Effects\\Payments");
 }
@@ -789,12 +798,12 @@ fn a_standard_effect_name_in_uses_is_the_effect_where_a_class_has_its_name() {
 
     for (needle, nth, class) in [
         ("Http.post", 0, "Lib\\Http"),
-        ("Http,", 0, "Sharp\\Http"),
-        ("Clock;", 0, "Sharp\\Clock"),
+        ("Http,", 0, "Sharp\\Net\\Http"),
+        ("Clock;", 0, "Sharp\\Time\\Clock"),
         ("Http(", 0, "Lib\\Http"),
         ("Clock)", 0, "App\\Stubs\\Clock"),
-        ("Http,", 1, "Sharp\\Http"),
-        ("Clock>", 0, "Sharp\\Clock"),
+        ("Http,", 1, "Sharp\\Net\\Http"),
+        ("Clock>", 0, "Sharp\\Time\\Clock"),
     ] {
         assert_eq!(String::from_utf8_lossy(resolved(&names, CODE, needle, nth)), class, "`{needle}` #{nth}");
     }
@@ -808,7 +817,7 @@ fn an_effect_of_a_function_type_binds_as_a_class_name() {
     let names = bind(&arena, CODE);
 
     assert_eq!(binding(&names, CODE, "Http", 0), Some(Binding::Class));
-    assert_eq!(resolved(&names, CODE, "Http", 0), b"Sharp\\Http");
+    assert_eq!(resolved(&names, CODE, "Http", 0), b"Sharp\\Net\\Http");
     assert_eq!(binding(&names, CODE, "Payments>", 0), Some(Binding::Class));
     assert_eq!(resolved(&names, CODE, "Payments>", 0), b"App\\Effects\\Payments");
 }
@@ -830,28 +839,28 @@ fn a_collection_type_keeps_its_written_name_unresolved() {
 /// though PHP reserves `Int` as a class name.
 #[test]
 fn a_class_like_of_the_files_namespace_wins_over_a_default_one() {
-    const CODE: &str = "namespace App;\n\nclass Shape\n{\n    private Cache? cache = null;\n\n    public bool run(Any value, Environment environment)\n    {\n        const made = new Cache();\n        Cache.clear();\n        Int.parse(\"1\");\n        return value is Cache;\n    }\n}\n";
-    let namespace_classes = NamespaceClasses::new(["App\\Cache", "Shop\\Environment", "App\\Order"]);
+    const CODE: &str = "namespace App;\n\nclass Shape\n{\n    private Random? random = null;\n\n    public bool run(Any value, Position position)\n    {\n        const made = new Random();\n        Random.clear();\n        Int.parse(\"1\");\n        return value is Random;\n    }\n}\n";
+    let namespace_classes = NamespaceClasses::new(["App\\Random", "Shop\\Position", "App\\Order"]);
     let file = File::ephemeral(Cow::Borrowed(FILE_NAME), Cow::Borrowed(CODE.as_bytes()));
     let arena = LocalArena::new();
     let program = parse_file(&arena, &file);
     let names = NameResolver::new(&arena).resolve_in(program, &namespace_classes);
 
     for (needle, nth, class) in [
-        ("Cache?", 0, "App\\Cache"),
-        ("Cache()", 0, "App\\Cache"),
-        ("Cache.", 0, "App\\Cache"),
-        ("Cache;", 0, "App\\Cache"),
-        ("Environment environment", 0, "Sharp\\Environment"),
+        ("Random?", 0, "App\\Random"),
+        ("Random()", 0, "App\\Random"),
+        ("Random.", 0, "App\\Random"),
+        ("Random;", 0, "App\\Random"),
+        ("Position position", 0, "Sharp\\Position"),
     ] {
         assert_eq!(String::from_utf8_lossy(resolved(&names, CODE, needle, nth)), class, "`{needle}` #{nth}");
     }
     let mut recorded: Vec<_> = names.namespace_classes().map(String::from_utf8_lossy).collect();
     recorded.sort_unstable();
-    assert_eq!(recorded, ["App\\Cache", "App\\Environment", "App\\Int"]);
+    assert_eq!(recorded, ["App\\Int", "App\\Position", "App\\Random"]);
 
     let alone = NameResolver::new(&arena).resolve(program);
-    assert_eq!(resolved(&alone, CODE, "Cache?", 0), b"Sharp\\Cache");
+    assert_eq!(resolved(&alone, CODE, "Random?", 0), b"Sharp\\Random");
 }
 
 /// Spec section 23 imports all of `Sharp` by default, so a bare name of a class-like the standard library or the

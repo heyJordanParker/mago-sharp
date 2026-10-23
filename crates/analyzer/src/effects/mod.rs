@@ -16,6 +16,8 @@ use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_database::file::FileId;
+use mago_names::ACCEPTS_ANY_EFFECT;
+use mago_names::EMIT_EFFECT;
 use mago_names::display_sharp_member;
 use mago_names::scope::NamespaceScope;
 use mago_reporting::IssueCollection;
@@ -231,9 +233,9 @@ impl Impurity {
     }
 }
 
-/// A class name and a member as a message writes them, the class named by `class_name`: `Clock.now`, `global.trim` or
-/// a function value's `step` as written with no class, `Pdf.render` for the function `Vendor\Pdf\render`, named
-/// through its namespace as spec section 23 calls it, and `Clock` with no member.
+/// A class name and a member as a message writes them, the class named by `class_name`: `Clock.now`, or a function
+/// value's `step` as written with no class, `Pdf.render` for the function `Vendor\Pdf\render`, named through its
+/// namespace as spec section 23 calls it, as `Foundation.now` for Laravel's `now()`, and `Clock` with no member.
 fn written((class, member): (Word, Word), class_name: &dyn Fn(Word) -> String) -> String {
     if class.is_empty() {
         let name = member.as_bytes();
@@ -673,36 +675,25 @@ fn is_outside(effect: Effect, allowed: &[Word]) -> bool {
     !allowed.iter().any(|known| known.as_bytes().eq_ignore_ascii_case(named.as_bytes()))
 }
 
-/// The effect an `emit` has, `Sharp\Events`.
+/// The effect an `emit` has, the class the standard library marks `EffectOfEmit`.
 fn events() -> Word {
-    word(b"Sharp\\Events")
-}
-
-/// Whether the declaration of `method` in `class` lets an implementation have any effect, because the code that calls
-/// it carries the implementation's effects: `Sharp\Dispatcher::dispatch`, which the engine calls with the listeners of
-/// every event (spec section 15), and `Sharp\Behavior`'s `get` and `set`, which run as the accessors of a property
-/// that names the behavior (spec section 6.4).
-fn accepts_any_effect(class: Word, method: Word) -> bool {
-    let (class, method) = (class.as_bytes(), method.as_bytes());
-
-    (class.eq_ignore_ascii_case(b"Sharp\\Dispatcher") && method.eq_ignore_ascii_case(b"dispatch"))
-        || (class.eq_ignore_ascii_case(b"Sharp\\Behavior")
-            && (method.eq_ignore_ascii_case(b"get") || method.eq_ignore_ascii_case(b"set")))
+    word(EMIT_EFFECT)
 }
 
 /// The PHP# declaration without a body of `method` in `ancestor`, which holds each method that overrides it to its
-/// `uses`, spec section 29, or `None` when there is none or it accepts any effect.
+/// `uses`, spec section 29, or `None` when there is none or the standard library marks it
+/// [`ACCEPTS_ANY_EFFECT`], as `Dispatcher.dispatch`, which the engine calls with the listeners of every event (spec
+/// section 15), and `Behavior<T>`'s `get` and `set`, which run as the accessors of a property that names the behavior
+/// (spec section 6.4).
 pub(crate) fn holding_declaration(
     codebase: &CodebaseMetadata,
     ancestor: Word,
     method: Word,
 ) -> Option<&FunctionLikeMetadata> {
-    if accepts_any_effect(ancestor, method) {
-        return None;
-    }
-
     codebase.get_method(ancestor.as_bytes(), method.as_bytes()).filter(|declaration| {
-        declaration.flags.is_sharp() && declaration.method_metadata.as_ref().is_some_and(|method| method.is_abstract)
+        declaration.flags.is_sharp()
+            && declaration.method_metadata.as_ref().is_some_and(|method| method.is_abstract)
+            && !declaration.has_attribute(ACCEPTS_ANY_EFFECT.as_bytes())
     })
 }
 

@@ -26,7 +26,6 @@ use mago_codex::ttype::keys_hold_in_array;
 use mago_codex::ttype::may_hold_collection;
 use mago_codex::ttype::resolution::TypeResolutionContext;
 use mago_codex::ttype::union::TUnion;
-use mago_names::INLINED_COLLECTION_METHODS;
 use mago_names::ResolvedNames;
 use mago_names::binding::Binding;
 use mago_names::binding::LocalKind;
@@ -3279,7 +3278,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.node(SHARP_AST_IF, 0, line, &[branch])
     }
 
-    /// The call an `extern` method's body runs, as php-src's grammar builds `\Sharp\Internal\Text\Text\slug($title)`:
+    /// The call an `extern` method's body runs, as php-src's grammar builds `\Sharp\Internal\Text\StringMembers\slugOf($title)`:
     /// a call of the native function the engine registers under `Sharp\Internal`, then the class's full name after
     /// `Sharp\`, then the method's name. It passes each parameter on, a variadic one as a spread. The method returns it
     /// unless it is `void`, and a caller inlines it as the method's form.
@@ -4083,14 +4082,23 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         for &list in lists {
             let mut attributes = Vec::new();
             for attribute in &list.attributes {
+                let full_name = self.names.get(&attribute.name);
+                if is_checker_mark(full_name) {
+                    continue;
+                }
                 let line = self.line(attribute.name);
-                let name = self.string(ZEND_NAME_FQ, line, self.names.get(&attribute.name));
+                let name = self.string(ZEND_NAME_FQ, line, full_name);
                 let arguments = attribute.argument_list.as_ref().map_or(NULL, |list| self.attribute_arguments(list));
 
                 attributes.push(self.node(SHARP_AST_ATTRIBUTE, 0, line, &[name, arguments]));
             }
 
-            groups.push(self.node(SHARP_AST_ATTRIBUTE_GROUP, 0, self.line(list), &attributes));
+            if !attributes.is_empty() {
+                groups.push(self.node(SHARP_AST_ATTRIBUTE_GROUP, 0, self.line(list), &attributes));
+            }
+        }
+        if groups.is_empty() && r#override.is_none() && added.is_none() {
+            return NULL;
         }
 
         if let Some(r#override) = r#override {
@@ -5708,7 +5716,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             }
             Expression::Instantiation(instantiation) => self.instantiation(line, expression, instantiation),
             Expression::With(with) => self.with(with),
-            // `global.PHP_EOL` and `Pdf.DEFAULT_DPI` read the plain PHP constant the checker found, spec section 23.
+            // `Pdf.DEFAULT_DPI` reads the plain PHP constant the checker found, spec section 23.
             Expression::Access(Access::Property(_))
                 if let Some(constant) = self.types.namespace_constant(expression) =>
             {
@@ -5716,8 +5724,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
                 self.node(SHARP_AST_CONST, 0, line, &[constant])
             }
-            // Spec section 14.3: `global.ucfirst` and `Pdf.render`, read without `(…)`, are the plain PHP
-            // function's first-class callable, `\ucfirst(...)`.
+            // Spec section 14.3: `Pdf.render`, read without `(…)`, is the plain PHP function's first-class callable,
+            // `\Vendor\Pdf\render(...)`.
             Expression::Access(Access::Property(_)) if let Some(function) = self.types.function_value(expression) => {
                 let function = self.string(ZEND_NAME_FQ, line, function.as_bytes());
                 let callable = self.node(SHARP_AST_CALLABLE_CONVERT, 0, line, &[]);
@@ -7636,10 +7644,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.node(SHARP_AST_PROP, 0, line, &[this, property])
     }
 
-    /// The PHP a call of one of the [`INLINED_COLLECTION_METHODS`] runs on the array, or none for any other call. A
-    /// change reaches a property through the property, which runs its hooks, an element of a `List` through a
-    /// `Sharp\Collection` method, and a value that lives nowhere changes as a copy. A null-safe call tests its
-    /// receiver first and gives null for null, which a missing key of a `Map` reads as.
+    /// The PHP a call of a collection method marked [`INLINED`](mago_names::INLINED) runs on the array, or none for
+    /// any other call. A change reaches a property through the property, which runs its hooks, an element of a `List`
+    /// through a `Sharp\Collection` method, and a value that lives nowhere changes as a copy. A null-safe call tests
+    /// its receiver first and gives null for null, which a missing key of a `Map` reads as.
     fn collection_call(
         &mut self,
         call: &Expression,
@@ -7690,9 +7698,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         })
     }
 
-    /// The PHP the method `method` of `collection_name`, one of the [`INLINED_COLLECTION_METHODS`], runs on
-    /// `collection`, the collection `receiver` gives, with `element`, its argument, for a method that takes one. `at`
-    /// is the span of the call or the method value that runs it.
+    /// The PHP the method `method` of `collection_name`, one marked [`INLINED`](mago_names::INLINED), runs on
+    /// `collection`, the collection `receiver` gives, with `element`, its argument, for a method that takes one.
+    /// `at` is the span of the call or the method value that runs it.
     fn inlined_collection_method(
         &mut self,
         at: Span,
@@ -7793,10 +7801,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
     /// Spec section 14.3: the value `value` reads of the method of a `List`, `Map`, `Set` or `Iterable` the checker
     /// resolved it to, a function that runs the method on the collection `receiver` gave when the value was read, as
-    /// [`Self::receiver_closure`] holds it. One of the [`INLINED_COLLECTION_METHODS`] runs the PHP its call runs on the
-    /// array, with the method's parameter, if it has one, as `$value`. A lazy operation of an `Iterable` runs on
-    /// `\Sharp\Sequence::from($receiver)`, as its call does, and any other method runs on `Sharp\Collection`, as its
-    /// call does, each with the arguments the value is called with.
+    /// [`Self::receiver_closure`] holds it. A method marked [`INLINED`](mago_names::INLINED) runs the PHP its call
+    /// runs on the array, with the method's parameter, if it has one, as `$value`. A lazy operation of an `Iterable`
+    /// runs on `\Sharp\Sequence::from($receiver)`, as its call does, and any other method runs on `Sharp\Collection`,
+    /// as its call does, each with the arguments the value is called with.
     fn collection_method_value(&mut self, value: &Expression, receiver: &Expression) -> u32 {
         let line = self.line(value);
         let target = self.expression(receiver);
@@ -7959,7 +7967,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// The collection, `List`, `Map` or `Set`, and the name in lowercase of the method the method call `call` runs as
-    /// PHP on the array, one of the [`INLINED_COLLECTION_METHODS`], whether that PHP reads the receiver twice, and
+    /// PHP on the array, one marked [`INLINED`](mago_names::INLINED), whether that PHP reads the receiver twice, and
     /// whether the value may also be a `Map` or a `Set`, which runs its own method of that name. None for a call of any
     /// other method.
     fn php_collection_method(&self, call: &Expression) -> Option<(&'static str, Vec<u8>, bool, bool)> {
@@ -7967,9 +7975,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             Some((collection, method)) => (collection, method, false),
             None => ("List", self.types.list_method_on_several_collections(call)?, true),
         };
-        if !INLINED_COLLECTION_METHODS.iter().any(|(inlined_collection, inlined)| {
-            *inlined_collection == collection && inlined.as_bytes().eq_ignore_ascii_case(&method)
-        }) {
+        if !self.types.inlines(collection, &method) {
             return None;
         }
         let reads_twice = matches!(method.as_slice(), b"remove" | b"last" | b"max" | b"min");
@@ -8254,8 +8260,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// `static`, except the standard library's `Position.current()`, which is the position it is written at. Any other
     /// `object.m()` is an instance call, or a call of the function in the property `m` when the checker found that
     /// property, as spec section 14 calls one. A call of a standard library method with an inline form runs that form.
-    /// `Pdf.render(html)` and `global.now()` call the plain PHP function the checker found, spec section 23, which
-    /// takes each `Map` and `Set` as [`Self::call`] crosses them.
+    /// `Pdf.render(html)` and `Foundation.abort(404)` call the plain PHP function the checker found, spec section 23,
+    /// `\Vendor\Pdf\render` and `\abort`, which takes each `Map` and `Set` as [`Self::call`] crosses them.
     fn method_call(&mut self, expression: &Expression, call: &MethodCall) -> u32 {
         if let Expression::SuperOf(_) = call.object {
             return self.super_of_call(expression, call);
@@ -9463,6 +9469,15 @@ fn holds_entries(r#type: &TUnion) -> bool {
 /// or a behavior, spec section 9, which the constructor's write of the argument runs.
 fn runs_its_accessors(parameter: &FunctionLikeParameter) -> bool {
     parameter.behaviors.is_some() || parameter.hooks.as_ref().is_some_and(PropertyHookList::has_hooks)
+}
+
+/// Whether the attribute of the full name `name` is a mark of `Sharp\Internal`, such as
+/// [`INLINED`](mago_names::INLINED), which only the checker and the bridge read. No class declares one at run time, so
+/// the bridge lowers none.
+fn is_checker_mark(name: &[u8]) -> bool {
+    const MARKS: &[u8] = b"sharp\\internal\\";
+
+    name.len() > MARKS.len() && name[..MARKS.len()].eq_ignore_ascii_case(MARKS)
 }
 
 /// Whether `list` targets the value a parameter or a `set` takes, as `param:` in `[param: Trimmed]`, spec section 1.

@@ -3,7 +3,8 @@
 //! `extern` method's body is the call of its native function, so its call runs as that call.
 //!
 //! The orchestrator takes forms only from the standard library's files, those `File::is_standard_library` marks, and
-//! lowers each of them with an empty [`InlineForms`], so in v1 one library form never inlines another.
+//! lowers each of them with an empty [`InlineForms`], so in v1 one library form inlines no other, but the native call
+//! of an `extern` method of its own class.
 
 use std::collections::HashMap;
 
@@ -85,10 +86,11 @@ pub(crate) fn key(class: &[u8], method: &[u8]) -> Vec<u8> {
     [class.to_ascii_lowercase().as_slice(), b"::", method.to_ascii_lowercase().as_slice()].concat()
 }
 
-/// The inline form of each method of `checked` the inlining rule takes, with its name.
+/// The inline form of each public method of `checked` the inlining rule takes, with its name.
 ///
 /// A method's body is one expression built only from calls, literals and reads of its receiver and parameters, each
-/// read exactly once, or it is its native function's call.
+/// read exactly once, or it is its native function's call. The expression's call of an `extern` method of the same
+/// class, a private one among them, runs as that method's native call, so a copy in another class reaches it.
 #[must_use]
 pub fn inline_forms(checked: &CheckedProgram<'_>) -> Vec<(Vec<u8>, InlineForm)> {
     let lines = Lines::new(&checked.file().contents);
@@ -99,12 +101,31 @@ pub fn inline_forms(checked: &CheckedProgram<'_>) -> Vec<(Vec<u8>, InlineForm)> 
     });
     for class in classes {
         let name = checked.names().get(&class.name);
-        let lowering = || Lowering::new(&lines, checked.names(), checked.types());
+        let natives: InlineForms = class
+            .members
+            .iter()
+            .filter_map(|member| match member {
+                ClassLikeMember::Method(method)
+                    if method.modifiers.iter().any(|modifier| matches!(modifier, Modifier::Extern(_))) =>
+                {
+                    Lowering::new(&lines, checked.names(), checked.types())
+                        .method_form(name, method, None)
+                        .map(|form| (key(name, method.name.value), form))
+                }
+                _ => None,
+            })
+            .collect();
+        let types = checked.types().with_inline_forms(&natives);
+        let public = |member: &[u8]| checked.types().member_declaration(name, member).public;
+        let lowering = || Lowering::new(&lines, checked.names(), &types);
         for member in &class.members {
             match member {
                 ClassLikeMember::Method(method) => {
                     forms.extend(
-                        lowering().method_form(name, method, None).map(|form| (key(name, method.name.value), form)),
+                        lowering()
+                            .method_form(name, method, None)
+                            .filter(|_| public(method.name.value))
+                            .map(|form| (key(name, method.name.value), form)),
                     );
                 }
                 ClassLikeMember::Extension(extension) => {
@@ -127,7 +148,7 @@ pub fn inline_forms(checked: &CheckedProgram<'_>) -> Vec<(Vec<u8>, InlineForm)> 
                             ),
                             _ => unreachable!("semantics refuses the extension member `{member}`"),
                         };
-                        forms.extend(form.map(|form| (key(name, member), form)));
+                        forms.extend(form.filter(|_| public(member)).map(|form| (key(name, member), form)));
                     }
                 }
                 _ => {}
@@ -202,15 +223,11 @@ impl Lowering<'_, '_> {
             return None;
         }
 
-        let declaration = self.types.member_declaration(class, name);
-        let receiver = match declaration.kind {
+        let receiver = match self.types.member_declaration(class, name).kind {
             DeclarationKind::Method { overridable: false } => true,
             DeclarationKind::StaticMethod => false,
             _ => return None,
         };
-        if !declaration.public {
-            return None;
-        }
 
         let names: Vec<&[u8]> = receiver
             .then_some(b"this".as_slice())
@@ -263,9 +280,9 @@ impl Lowering<'_, '_> {
     }
 
     /// Appends what `expression` runs to `steps`, and whether the inlining rule takes all of it: a literal, a read of
-    /// one of the slots `names` names, a read of a plain PHP constant through its namespace, as `global.PHP_EOL` reads
-    /// one, and a call of a plain PHP function through its namespace, as `global.trim(x)` calls one, or of a method
-    /// whose receiver it takes. Both name their constant or function in full, so a copy in another namespace reaches
+    /// one of the slots `names` names, a read of a plain PHP constant through its namespace, as the standard library's
+    /// `global.PHP_EOL` reads one, and a call of a plain PHP function through its namespace, as its `global.trim(x)`
+    /// calls one, or of a method whose receiver it takes. Both name their constant or function in full, so a copy in another namespace reaches
     /// the same one. A bare constant is the library file's own, which a copy in another namespace would not find.
     fn steps(&self, expression: &Expression, names: &[&[u8]], steps: &mut Vec<Step>) -> bool {
         match expression {
@@ -291,7 +308,9 @@ impl Lowering<'_, '_> {
     }
 
     /// The steps of `Class.m()` or `object.m()`: the receiver's, then the arguments', then the call. `Position.current()`
-    /// is the position in the library's method, which a copy in the caller would not give.
+    /// is the position in the library's method, which a copy in the caller would not give. A private method is the
+    /// library class's own, which a copy in another class would not reach, unless it is an `extern` method of the same
+    /// class, whose call the form runs as its native call.
     fn method_call_steps(
         &self,
         expression: &Expression,
@@ -309,7 +328,7 @@ impl Lowering<'_, '_> {
         }
         let declaration = self.types.call_target(expression);
 
-        declaration.public
+        (declaration.public || self.types.inline_form(&declaration).is_some())
             && matches!(declaration.kind, DeclarationKind::Method { .. } | DeclarationKind::StaticMethod)
             && self.argument_steps(&call.argument_list, names, steps)
             && self.call_step(steps)

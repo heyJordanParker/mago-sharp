@@ -6,6 +6,9 @@ use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::expander::StaticClassType;
 use mago_codex::ttype::get_sharp_type;
 use mago_codex::ttype::union::TUnion;
+use mago_names::ENCODED_AS_JSON;
+use mago_names::PARSES_TYPE_ARGUMENT;
+use mago_names::STARTS_LISTENER;
 use mago_names::binding::Binding;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
@@ -22,8 +25,8 @@ use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
+use crate::expression::access::report_unknown_member_owner;
 use crate::expression::call::analyze_invocation_targets;
-use crate::expression::call::function_call::report_wrapped_class;
 use crate::expression::call::method_call::add_called_property_targets;
 use crate::expression::call::method_call::analyze_undocumented_method_return_type;
 use crate::expression::call::method_call::prepare_unresolved_method_targets;
@@ -40,11 +43,11 @@ use crate::plugin::ExpressionHookResult;
 use crate::plugin::context::HookContext;
 use crate::plugin::hook::StaticCall;
 use crate::resolver::class_name::generic_class_type;
-use crate::resolver::class_name::report_missing_class;
 use crate::resolver::class_name::statics_type_arguments;
 use crate::resolver::property::static_member_type_arguments;
 use crate::resolver::static_method::resolve_static_method_targets;
 use crate::statement::class_like::listener::check_events_on;
+use crate::statement::class_like::r#struct::check_parsed_type_argument;
 use crate::statement::class_like::r#struct::check_struct_parse;
 use crate::utils::expression::expression_is_nullsafe;
 use crate::utils::names::display_class_like_name;
@@ -127,14 +130,14 @@ where
         }
     }
 
-    // A PHP# call on a name that names no class and no namespace the file imports, as `Gadget.count()`, is that
-    // class's one error, by its PHP# name, and the call is refused, so nothing that uses it reports again.
+    // A PHP# call on a name that names no class and no namespace the file imports, as `Gadget.count()`, is that name's
+    // one error, as a read of its member is, and the call is refused, so nothing that uses it reports again.
     if let Expression::ConstantAccess(class) = call.class
         && context.resolved_names.binding(&class.name) == Some(Binding::Class)
         && !context.resolved_names.is_imported(&class.name)
         && !context.codebase.class_like_exists(context.resolved_names.get(&class.name))
-        && report_missing_class(context, context.resolved_names.get(&class.name), class.span())
     {
+        report_unknown_member_owner(context, &class.name);
         artifacts.set_expression_type(&call.span, TUnion::from_atomic(TAtomic::Error));
 
         return Ok(());
@@ -196,9 +199,6 @@ where
             resolved_method.method_identifier.get_method_name(),
         );
         crate::utils::availability::check_method_availability(context, method_metadata, &method_display, call.span);
-        if resolved_method.is_static {
-            report_wrapped_class(context, block_context, artifacts, metadata, Some(method_metadata), call.span);
-        }
 
         let method_name = resolved_method.method_identifier.get_method_name();
         if context.dialect.is_sharp()
@@ -284,23 +284,40 @@ where
     );
 
     let has_resolved_methods = !invocation_targets.is_empty();
-    let starts_a_listener = context.dialect.is_sharp()
-        && invocation_targets.iter().any(|target| {
-            matches!(
-                target,
-                InvocationTarget::FunctionLike { identifier: FunctionLikeIdentifier::Method(class, method), .. }
-                    if class.as_bytes().eq_ignore_ascii_case(b"sharp\\events") && method.as_bytes().eq_ignore_ascii_case(b"on")
-            )
-        });
+    let listener_starter = invocation_targets.iter().filter(|_| context.dialect.is_sharp()).find_map(|target| {
+        let InvocationTarget::FunctionLike { identifier: FunctionLikeIdentifier::Method(class, _), metadata, .. } =
+            target
+        else {
+            return None;
+        };
 
-    let encodes_json = context.dialect.is_sharp()
-        && invocation_targets.iter().any(|target| {
-            matches!(
-                target,
-                InvocationTarget::FunctionLike { identifier: FunctionLikeIdentifier::Method(class, method), .. }
-                    if class.as_bytes().eq_ignore_ascii_case(b"sharp\\json\\json") && method.as_bytes().eq_ignore_ascii_case(b"encode")
-            )
-        });
+        metadata
+            .has_attribute(STARTS_LISTENER.as_bytes())
+            .then(|| display_member(context, *class, metadata.original_name))
+    });
+    let parser = invocation_targets.iter().filter(|_| context.dialect.is_sharp()).find_map(|target| {
+        let InvocationTarget::FunctionLike { identifier: FunctionLikeIdentifier::Method(class, _), metadata, .. } =
+            target
+        else {
+            return None;
+        };
+
+        metadata
+            .has_attribute(PARSES_TYPE_ARGUMENT.as_bytes())
+            .then(|| display_member(context, *class, metadata.original_name))
+    });
+
+    let json_encoder = invocation_targets.iter().filter(|_| context.dialect.is_sharp()).find_map(|target| {
+        let InvocationTarget::FunctionLike { identifier: FunctionLikeIdentifier::Method(class, _), metadata, .. } =
+            target
+        else {
+            return None;
+        };
+        let position =
+            metadata.parameters.iter().position(|parameter| parameter.has_attribute(ENCODED_AS_JSON.as_bytes()))?;
+
+        Some((display_member(context, *class, metadata.original_name), position))
+    });
 
     record_external_method_call(context, artifacts, &invocation_targets, call.span);
     if !method_resolution.undocumented_methods.is_empty() {
@@ -350,7 +367,7 @@ where
     }
 
     // A type argument neither written nor inferred is `missing-template-parameter`'s to report.
-    if starts_a_listener
+    if let Some(starter) = listener_starter
         && let Some(listened) = artifacts
             .inferred_type_arguments
             .get(&(call.span.start.offset, call.span.end.offset))
@@ -359,11 +376,21 @@ where
     {
         let at =
             type_arguments.and_then(|type_arguments| type_arguments.arguments.first()).map_or(call.span, HasSpan::span);
-        check_events_on(context, &listened.clone(), at);
+        check_events_on(context, &starter, &listened.clone(), at);
     }
 
-    if encodes_json
-        && let Some(argument) = call.argument_list.arguments.first()
+    if let Some(parser) = parser
+        && let Some(parsed) = artifacts
+            .inferred_type_arguments
+            .get(&(call.span.start.offset, call.span.end.offset))
+            .and_then(|t| t.first())
+        && (type_arguments.is_some() || !parsed.is_mixed())
+    {
+        check_parsed_type_argument(context, &parser, &parsed.clone(), call.span);
+    }
+
+    if let Some((encoder, position)) = json_encoder
+        && let Some(argument) = call.argument_list.arguments.get(position)
         && let Some(value) = artifacts.get_expression_type(argument.value())
         && let Some(key) = invalid_json_key(context, value, &mut Vec::new())
     {
@@ -371,12 +398,12 @@ where
             InvalidJsonKey::Class(class) => {
                 let class = display_class_like_name(context, class);
                 (
-                    format!("`Json.encode` writes each `Map` key as JSON text, and `{class}` has no `toString()`."),
+                    format!("`{encoder}` writes each `Map` key as JSON text, and `{class}` has no `toString()`."),
                     format!("Declare `public string toString()` on `{class}`, or encode a `Map` keyed by text."),
                 )
             }
             InvalidJsonKey::Scalar(scalar) => (
-                format!("`Json.encode` writes each `Map` key as JSON text, and a `{scalar}` key has none."),
+                format!("`{encoder}` writes each `Map` key as JSON text, and a `{scalar}` key has none."),
                 "Encode a `Map` keyed by an `int`, a `string`, a backed enum or a class with `toString()`.".to_owned(),
             ),
         };
@@ -413,7 +440,7 @@ where
     Ok(())
 }
 
-/// A `Map` key `Json.encode` can't write as JSON text.
+/// A `Map` key a JSON encoder can't write as JSON text.
 enum InvalidJsonKey {
     /// A class, a struct or a pure enum that declares no `toString()`.
     Class(Word),

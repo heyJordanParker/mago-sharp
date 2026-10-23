@@ -96,7 +96,7 @@ pub const FLOAT: (&str, &str) = (
 /// a file whose nearest `composer.json` names the package.
 const STANDARD_LIBRARY: &str = "vendor/heyjordanparker/php-sharp-composer/";
 
-static PRELUDE: LazyLock<Prelude> = LazyLock::new(Prelude::build);
+pub static PRELUDE: LazyLock<Prelude> = LazyLock::new(Prelude::build);
 static PLUGIN_REGISTRY: LazyLock<PluginRegistry> = LazyLock::new(PluginRegistry::with_library_providers);
 
 /// Parses `code` as the PHP# file at `path`, runs the semantic checks, scans it with the prelude, the standard
@@ -151,7 +151,13 @@ pub fn checked_file<R>(
     let library: Vec<File> = library
         .iter()
         .chain(&effect_classes::EFFECT_CLASSES)
-        .map(|(path, code)| File::ephemeral(Cow::Owned(path.as_bytes().to_vec()), Cow::Owned(code.as_bytes().to_vec())))
+        .map(|(path, code)| {
+            let mut library_file =
+                File::ephemeral(Cow::Owned(path.as_bytes().to_vec()), Cow::Owned(code.as_bytes().to_vec()));
+            library_file.is_standard_library = path.starts_with(STANDARD_LIBRARY);
+
+            library_file
+        })
         .collect();
     let library: Vec<(&File, &Program)> = library
         .iter()

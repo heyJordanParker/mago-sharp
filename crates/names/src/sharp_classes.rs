@@ -4,37 +4,110 @@
 
 /// The class-likes declared directly in `Sharp`: each public one of the standard library, and each one of the
 /// prelude, which the engine declares. Sorted.
-pub(crate) const SHARP_CLASSES: [&str; 32] = [
+pub(crate) const SHARP_CLASSES: [&str; 24] = [
     "Sharp\\Behavior",
     "Sharp\\Bool",
-    "Sharp\\Cache",
     "Sharp\\Class",
     "Sharp\\ClassMembers",
-    "Sharp\\Clock",
-    "Sharp\\Console",
     "Sharp\\Container",
     "Sharp\\ContainerError",
-    "Sharp\\Database",
     "Sharp\\Dispatcher",
-    "Sharp\\Environment",
     "Sharp\\Error",
     "Sharp\\Events",
-    "Sharp\\Files",
     "Sharp\\Float",
-    "Sharp\\Http",
     "Sharp\\ImmediateDispatcher",
     "Sharp\\Int",
     "Sharp\\InvalidFields",
     "Sharp\\Key",
     "Sharp\\List",
+    "Sharp\\ListMembers",
     "Sharp\\Listening",
-    "Sharp\\Mail",
     "Sharp\\Map",
+    "Sharp\\Math",
     "Sharp\\Position",
-    "Sharp\\Process",
-    "Sharp\\ProcessResult",
     "Sharp\\Random",
     "Sharp\\Result",
     "Sharp\\Scope",
     "Sharp\\Set",
 ];
+
+/// The PHP root classes a bare name in a `.sharp` file names by default, spec section 23.
+///
+/// `Builtins.sharp` declares each: the exception classes, `Throwable`, `Attribute` and the interfaces a PHP# class
+/// implements for a plain PHP library. Sorted.
+pub const STANDARD_ROOT_CLASSES: [&str; 51] = [
+    "ArgumentCountError",
+    "ArithmeticError",
+    "AssertionError",
+    "Attribute",
+    "BadFunctionCallException",
+    "BadMethodCallException",
+    "CompileError",
+    "Countable",
+    "DOMException",
+    "DateError",
+    "DateException",
+    "DateInvalidOperationException",
+    "DateInvalidTimeZoneException",
+    "DateMalformedIntervalStringException",
+    "DateMalformedPeriodStringException",
+    "DateMalformedStringException",
+    "DateObjectError",
+    "DateRangeError",
+    "DivisionByZeroError",
+    "DomainException",
+    "ErrorException",
+    "Exception",
+    "FiberError",
+    "IntlException",
+    "InvalidArgumentException",
+    "JsonException",
+    "JsonSerializable",
+    "LengthException",
+    "LogicException",
+    "OutOfBoundsException",
+    "OutOfRangeException",
+    "OverflowException",
+    "PDOException",
+    "ParseError",
+    "PharException",
+    "RangeException",
+    "ReflectionException",
+    "RequestParseBodyException",
+    "RuntimeException",
+    "SNMPException",
+    "SQLite3Exception",
+    "SoapFault",
+    "SodiumException",
+    "Throwable",
+    "TypeError",
+    "UnderflowException",
+    "UnexpectedValueException",
+    "UnhandledMatchError",
+    "ValueError",
+    "com_exception",
+    "mysqli_sql_exception",
+];
+
+/// The standard effects, spec section 29: each `foreign` class of the standard library, which a name in `uses` names
+/// whatever the file imports. Sorted.
+pub(crate) const STANDARD_EFFECTS: [&str; 10] = [
+    "Sharp\\Data\\Cache",
+    "Sharp\\Data\\Database",
+    "Sharp\\IO\\Console",
+    "Sharp\\IO\\Files",
+    "Sharp\\Net\\Http",
+    "Sharp\\Net\\Mail",
+    "Sharp\\Random",
+    "Sharp\\System\\Environment",
+    "Sharp\\System\\Process",
+    "Sharp\\Time\\Clock",
+];
+
+/// The class the standard library marks `Sharp\Internal\EffectOfEmit`: the effect of `emit`, spec section
+/// 29.
+pub const EMIT_EFFECT: &str = "Sharp\\Events";
+
+/// The interface the standard library marks `Sharp\Internal\PropertyBehavior`: the one a property behavior
+/// implements, spec section 6.4.
+pub const PROPERTY_BEHAVIOR: &str = "Sharp\\Behavior";

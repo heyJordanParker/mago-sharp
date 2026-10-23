@@ -176,7 +176,7 @@ struct NodeAnalysisTarget<'ast, 'arena> {
     requirements: u8,
     targeted_hook_routes: Vec<u32>,
     /// The kind of node a PHP# method call means when it is not a method call: [`NodeKind::StaticMethodCall`] for
-    /// `Calc.make()`, [`NodeKind::FunctionCall`] for `global.max()` or `Pdf.render()`, and
+    /// `Calc.make()`, [`NodeKind::FunctionCall`] for `Pdf.render()` or `Foundation.abort()`, and
     /// [`NodeKind::Instantiation`] for `PaymentResult.Declined(…)`, which builds an enum case.
     meaning: Option<NodeKind>,
 }
@@ -222,8 +222,8 @@ fn build_node_analysis_plan<'ast, 'arena>(
         let span = node.span();
         let mut requested = requirements.requirements(kind);
         let mut targeted_hook_routes = Vec::new();
-        // A PHP# call is the kind of call it means, as the analyzer reads it: `global.max()` and `Pdf.render()` after
-        // `import Vendor.Pdf;` call a plain PHP function, and `Calc.make()`, whose object the binder bound to a class,
+        // A PHP# call is the kind of call it means, as the analyzer reads it: `Pdf.render()` after `import Vendor.Pdf;`
+        // calls a plain PHP function, and `Calc.make()`, whose object the binder bound to a class,
         // a static method. A hook that targets that kind receives it, as it receives `max()` or `Calc::make()` in PHP.
         // `PaymentResult.Declined(…)` builds an enum case, spec section 20, as `new PaymentResult\Declined(…)` does.
         let meaning = match node {
@@ -291,7 +291,8 @@ fn build_node_analysis_plan<'ast, 'arena>(
 ///
 /// - `Pdf.render()` and `Pdf.DEFAULT_DPI` after `import Vendor.Pdf;`, where no class is named `Vendor\Pdf`, name the
 ///   namespace `Vendor\Pdf` at `Pdf` and its function `Vendor\Pdf\render` or constant `Vendor\Pdf\DEFAULT_DPI` at the
-///   member, as `Pdf\render()` does in PHP. `global.max()` names `max` already, spec section 23.
+///   member, as `Pdf\render()` does in PHP, and `Foundation.abort()` names Laravel's `abort` of PHP's root namespace at
+///   the member, as `abort()` does, spec section 23.
 /// - `PaymentResult.Declined(reason: "expired")` builds the case `Declined` of the enum `PaymentResult`, spec section
 ///   20, so it names the class the case runs as at `Declined`, as `new PaymentResult\Declined(…)` does.
 /// - The pattern `PaymentResult.Paid(string id)` names the enum `PaymentResult` at `PaymentResult`, as the value
@@ -338,12 +339,12 @@ fn analyzed_names(
                     case.original_name.as_bytes().to_vec(),
                     SNAPSHOT_CLASS_BINDING,
                 ));
-            } else if class.name.value() != b"global"
-                && let Some(namespace) = member_namespace(resolved_names, codebase, &class.name, member.value)
+            } else if let Some(namespace) = member_namespace(resolved_names, codebase, &class.name, member.value)
+                && !namespace.is_empty()
             {
                 let span = class.name.span();
                 names.push((span.start.offset, span.end.offset, namespace.as_bytes().to_vec(), 0));
-                let full_name = namespace_member(namespace, member.value);
+                let full_name = namespace_member(codebase, namespace, member.value);
                 names.push((member_span.0, member_span.1, full_name.as_bytes().to_vec(), 0));
             }
         }

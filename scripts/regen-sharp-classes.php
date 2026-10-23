@@ -3,9 +3,15 @@
 declare(strict_types=1);
 
 /**
- * Prints the class-likes declared directly in `Sharp`, which a `.sharp` file names with no import, spec section 23:
- * each public one of php-sharp's standard library, `sharp/composer/library/Sharp/*.sharp`, and each one of the
- * prelude's `crates/prelude/assets/extensions/sharp.php`, which the engine declares.
+ * Prints the class-likes a `.sharp` file names with no import, read from php-sharp's standard library,
+ * `sharp/composer/library`, and the prelude's `crates/prelude/assets/extensions/sharp.php`, which the engine declares:
+ *
+ * - the class-likes declared directly in `Sharp`, spec section 23: each public one of `Sharp/*.sharp`, and each one of
+ *   the prelude;
+ * - the standard root classes, spec section 23: each class `Sharp/Internal/Builtins.sharp` declares with no import;
+ * - the standard effects, spec section 29: each `foreign` class of the standard library, in any of its namespaces;
+ * - the class marked `EffectOfEmit`, the effect of `emit`, and the interface marked `PropertyBehavior`, the one a
+ *   property behavior implements.
  *
  * `just regen-sharp-classes <path to sharp/composer/library>` writes it to `crates/names/src/sharp_classes.rs`.
  */
@@ -14,53 +20,146 @@ $library = $argv[1] ?? throw new InvalidArgumentException('Pass the path to php-
 if (count($argv) > 2) {
     throw new InvalidArgumentException('Pass only the path to php-sharp\'s `sharp/composer/library`.');
 }
+$library = rtrim($library, '/');
 
-$files = glob(rtrim($library, '/') . '/Sharp/*.sharp');
+function read(string $file): string
+{
+    $source = file_get_contents($file);
+    if ($source === false) {
+        throw new RuntimeException("Unable to read {$file}.");
+    }
+
+    return $source;
+}
+
+function namespace_of(string $file, string $source): string
+{
+    $match = [];
+    if (preg_match('/^namespace (Sharp(?:\.\w+)*);$/m', $source, $match) !== 1) {
+        throw new RuntimeException("{$file} is in no namespace of the standard library.");
+    }
+
+    return str_replace('.', '\\', $match[1] ?? '');
+}
+
+/**
+ * @param list<string> $classes
+ */
+function rust(string $visibility, string $name, string $documentation, array $classes): string
+{
+    $classes = array_unique($classes);
+    sort($classes, SORT_STRING);
+    $count = count($classes);
+    $entries = implode('', array_map(
+        static fn(string $class): string => '    "' . str_replace('\\', '\\\\', $class) . "\",\n",
+        $classes,
+    ));
+
+    return "{$documentation}\n{$visibility} const {$name}: [&str; {$count}] = [\n{$entries}];\n";
+}
+
+$files = glob("{$library}/Sharp/*.sharp");
 if ($files === false || $files === []) {
     throw new RuntimeException("Unable to find the standard library's files in {$library}/Sharp.");
 }
 
 $classes = [];
 foreach ($files as $file) {
-    $source = file_get_contents($file);
-    if ($source === false) {
-        throw new RuntimeException("Unable to read {$file}.");
-    }
-    if (preg_match('/^namespace Sharp;$/m', $source) !== 1) {
+    $source = read($file);
+    if (namespace_of($file, $source) !== 'Sharp') {
         throw new RuntimeException("{$file} is not in the namespace `Sharp`.");
     }
 
     $declarations = [];
     preg_match_all('/^public\s+(?:\w+\s+)*?(?:class|interface|enum|struct)\s+(\w+)/m', $source, $declarations);
-    array_push($classes, ...$declarations[1]);
+    array_push($classes, ...array_map(static fn(string $class): string => "Sharp\\{$class}", $declarations[1]));
 }
 
 $prelude = dirname(__DIR__) . '/crates/prelude/assets/extensions/sharp.php';
-$stub = file_get_contents($prelude);
-if ($stub === false) {
-    throw new RuntimeException("Unable to read {$prelude}.");
-}
-
 $namespace = [];
-preg_match('/^namespace Sharp;$(.*?)(?=^namespace |\z)/ms', $stub, $namespace);
+preg_match('/^namespace Sharp;$(.*?)(?=^namespace |\z)/ms', read($prelude), $namespace);
 $body = $namespace[1] ?? throw new RuntimeException("Unable to locate `namespace Sharp;` in {$prelude}.");
 $declarations = [];
 preg_match_all('/^(?:\w+\s+)*?(?:class|interface|enum|trait)\s+(\w+)/m', $body, $declarations);
-array_push($classes, ...$declarations[1]);
+array_push($classes, ...array_map(static fn(string $class): string => "Sharp\\{$class}", $declarations[1]));
 
-$classes = array_unique($classes);
-sort($classes, SORT_STRING);
-$count = count($classes);
-$entries = implode('', array_map(static fn(string $class): string => "    \"Sharp\\\\{$class}\",\n", $classes));
+$builtins = read("{$library}/Sharp/Internal/Builtins.sharp");
+$imports = [];
+preg_match_all('/^import ([\w.]+)(?: as (\w+))?;$/m', $builtins, $imports, PREG_SET_ORDER);
+$imported = [];
+foreach ($imports as $import) {
+    $imported[] = $import[2] ?? basename(str_replace('.', '/', $import[1] ?? ''));
+}
+$externs = [];
+preg_match_all('/^extern (\w+);$/m', $builtins, $externs);
+$roots = array_values(array_diff($externs[1], $imported));
 
-echo <<<RUST
-    //! Generated by `just regen-sharp-classes` from php-sharp's standard library and the prelude's
-    //! `assets/extensions/sharp.php`.
-    //! Do not edit.
+$effects = [];
+$marked = ['EffectOfEmit' => [], 'PropertyBehavior' => []];
+$sources = new RecursiveIteratorIterator(
+    new RecursiveDirectoryIterator("{$library}/Sharp", FilesystemIterator::SKIP_DOTS),
+);
+foreach ($sources as $entry) {
+    if (!$entry instanceof SplFileInfo || $entry->getExtension() !== 'sharp') {
+        continue;
+    }
+    $path = $entry->getPathname();
+    $source = read($path);
+    $declarations = [];
+    preg_match_all('/^public foreign class (\w+)/m', $source, $declarations);
+    foreach ($declarations[1] as $class) {
+        $effects[] = namespace_of($path, $source) . "\\{$class}";
+    }
+    $marks = [];
+    preg_match_all(
+        '/^\[(EffectOfEmit|PropertyBehavior)\]\n(?:\[.*\]\n)*public\s+(?:\w+\s+)*?(?:class|interface)\s+(\w+)/m',
+        $source,
+        $marks,
+        PREG_SET_ORDER,
+    );
+    foreach ($marks as $mark) {
+        $marked[$mark[1] ?? ''][] = namespace_of($path, $source) . '\\' . ($mark[2] ?? '');
+    }
+}
+foreach ($marked as $mark => $holders) {
+    if (count($holders) !== 1) {
+        throw new RuntimeException("The standard library marks `{$mark}` on " . count($holders) . ' classes, not one.');
+    }
+}
 
-    /// The class-likes declared directly in `Sharp`: each public one of the standard library, and each one of the
-    /// prelude, which the engine declares. Sorted.
-    pub(crate) const SHARP_CLASSES: [&str; {$count}] = [
-    {$entries}];
-
-    RUST;
+echo "//! Generated by `just regen-sharp-classes` from php-sharp's standard library and the prelude's\n";
+echo "//! `assets/extensions/sharp.php`.\n";
+echo "//! Do not edit.\n\n";
+echo
+    rust(
+        'pub(crate)',
+        'SHARP_CLASSES',
+        "/// The class-likes declared directly in `Sharp`: each public one of the standard library, and each one of the\n/// prelude, which the engine declares. Sorted.",
+        $classes,
+    );
+echo "\n";
+echo
+    rust(
+        'pub',
+        'STANDARD_ROOT_CLASSES',
+        "/// The PHP root classes a bare name in a `.sharp` file names by default, spec section 23.\n///\n/// `Builtins.sharp` declares each: the exception classes, `Throwable`, `Attribute` and the interfaces a PHP# class\n/// implements for a plain PHP library. Sorted.",
+        $roots,
+    );
+echo "\n";
+echo
+    rust(
+        'pub(crate)',
+        'STANDARD_EFFECTS',
+        "/// The standard effects, spec section 29: each `foreign` class of the standard library, which a name in `uses` names\n/// whatever the file imports. Sorted.",
+        $effects,
+    );
+$emit = str_replace('\\', '\\\\', $marked['EffectOfEmit'][0]);
+$behavior = str_replace('\\', '\\\\', $marked['PropertyBehavior'][0]);
+echo "\n";
+echo "/// The class the standard library marks `Sharp\\Internal\\EffectOfEmit`: the effect of `emit`, spec section\n";
+echo "/// 29.\n";
+echo "pub const EMIT_EFFECT: &str = \"{$emit}\";\n";
+echo "\n";
+echo "/// The interface the standard library marks `Sharp\\Internal\\PropertyBehavior`: the one a property behavior\n";
+echo "/// implements, spec section 6.4.\n";
+echo "pub const PROPERTY_BEHAVIOR: &str = \"{$behavior}\";\n";

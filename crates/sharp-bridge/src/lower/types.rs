@@ -9,6 +9,7 @@ use mago_codex::defaults_trait_name;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::identifier::method::MethodIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
+use mago_codex::metadata::attribute::ConstantExpression;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::metadata::class_like::ParsedField;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
@@ -42,6 +43,8 @@ use mago_codex::ttype::is_written_in_sharp;
 use mago_codex::ttype::template::variance::Variance;
 use mago_codex::ttype::union::TUnion;
 use mago_database::file::File;
+use mago_names::INLINED;
+use mago_names::LEAN_FUNCTION;
 use mago_names::ResolvedNames;
 use mago_names::binding::php_operator_name;
 use mago_span::HasSpan;
@@ -64,6 +67,13 @@ use mago_word::word;
 use super::inline::InlineForm;
 use super::inline::InlineForms;
 use super::inline::key;
+
+/// Each collection PHP# has, with the class of the methods the analyzer checks a call on it against.
+const COLLECTION_METHODS: [(&str, &[u8]); 3] = [
+    ("List", b"Sharp\\Internal\\ListMethods"),
+    ("Map", b"Sharp\\Internal\\MapMethods"),
+    ("Set", b"Sharp\\Internal\\SetMethods"),
+];
 
 /// The checker's types for one file. The lowering reads a type only through these queries, so `--assert-types` can
 /// turn each answer it used into a runtime guard.
@@ -149,6 +159,21 @@ impl<'analysis> Types<'analysis> {
         inline_forms: &'analysis InlineForms,
     ) -> Self {
         Self { file, names, artifacts, codebase, effects, inline_forms }
+    }
+
+    /// These types, with `inline_forms` as the forms the lowering may inline.
+    pub(crate) fn with_inline_forms<'forms>(&self, inline_forms: &'forms InlineForms) -> Types<'forms>
+    where
+        'analysis: 'forms,
+    {
+        Types {
+            file: self.file,
+            names: self.names.clone(),
+            artifacts: self.artifacts,
+            codebase: self.codebase,
+            effects: self.effects,
+            inline_forms,
+        }
     }
 
     pub(crate) fn names(&self) -> &ResolvedNames<'analysis> {
@@ -1358,8 +1383,8 @@ impl<'analysis> Types<'analysis> {
             )
     }
 
-    /// The full name of the plain PHP function the read `read` gives the value of, spec section 14.3, as
-    /// `global.ucfirst` and `Pdf.render` read one, as the analysis resolved it. None for any other read.
+    /// The full name of the plain PHP function the read `read` gives the value of, spec section 14.3, as `Pdf.render`
+    /// reads one, as the analysis resolved it. None for any other read.
     pub(crate) fn function_value(&self, read: &Expression) -> Option<Word> {
         match self.artifacts.get_callees(read).next() {
             Some(CallTarget::FunctionLike { callee: FunctionLikeIdentifier::Function(function), .. })
@@ -1536,16 +1561,21 @@ impl<'analysis> Types<'analysis> {
         else {
             return None;
         };
-        let methods: [(&str, &[u8]); 3] = [
-            ("List", b"Sharp\\Internal\\ListMethods"),
-            ("Map", b"Sharp\\Internal\\MapMethods"),
-            ("Set", b"Sharp\\Internal\\SetMethods"),
-        ];
-        let collection = methods
+        let collection = COLLECTION_METHODS
             .into_iter()
             .find_map(|(collection, methods)| class.as_bytes().eq_ignore_ascii_case(methods).then_some(collection))?;
 
         Some((collection, method.as_bytes().to_ascii_lowercase()))
+    }
+
+    /// Whether the prelude marks the method `method` of the collection `collection`, `List`, `Map` or `Set`,
+    /// [`INLINED`], so its call lowers to PHP on the array.
+    pub(crate) fn inlines(&self, collection: &str, method: &[u8]) -> bool {
+        COLLECTION_METHODS
+            .into_iter()
+            .find(|(name, _)| *name == collection)
+            .and_then(|(_, methods)| self.codebase.get_method(methods, method))
+            .is_some_and(|metadata| metadata.has_attribute(INLINED.as_bytes()))
     }
 
     /// The name in lowercase of the `List` method the method call `call` runs on a value that may also be a `Map` or a
@@ -1605,9 +1635,11 @@ impl<'analysis> Types<'analysis> {
         )
     }
 
-    /// The plain PHP function the method call `call` runs, as `Pdf.render(html)` and `global.now()` call one, spec
-    /// section 23, with the name its declaration writes. None for a call of a method.
-    pub(crate) fn namespace_function(&self, call: &Expression) -> Option<Word> {
+    /// The plain PHP function the method call `call` runs, as `Pdf.render(html)` calls one, spec section 23, with the
+    /// name its declaration writes, as `abort` for Laravel's `abort()` of PHP's root namespace in `Foundation.abort(404)`.
+    /// None for a call of a method.
+    #[must_use]
+    pub fn namespace_function(&self, call: &Expression) -> Option<Word> {
         let Some(CallTarget::FunctionLike { callee: FunctionLikeIdentifier::Function(function), .. }) =
             self.artifacts.get_callees(call).next()
         else {
@@ -1615,6 +1647,29 @@ impl<'analysis> Types<'analysis> {
         };
 
         Some(self.codebase.get_function(function.as_bytes()).map_or(*function, |metadata| metadata.original_name))
+    }
+
+    /// The Lean function the method the call `call` runs is marked [`LEAN_FUNCTION`] with, as `max` for `Math.max(…)`.
+    /// None for a call of an unmarked method.
+    #[must_use]
+    pub fn lean_function(&self, call: &Expression) -> Option<Word> {
+        let Some(CallTarget::FunctionLike { callee: FunctionLikeIdentifier::Method(class, method), .. }) =
+            self.artifacts.get_callees(call).next()
+        else {
+            return None;
+        };
+
+        let mark = self
+            .codebase
+            .get_method(class.as_bytes(), method.as_bytes())?
+            .attributes
+            .iter()
+            .find(|attribute| attribute.name.as_bytes().eq_ignore_ascii_case(LEAN_FUNCTION.as_bytes()))?;
+
+        match mark.arguments.first().and_then(|argument| argument.value.as_ref()) {
+            Some(ConstantExpression::String(function)) => Some(*function),
+            _ => unreachable!("the standard library writes a `LeanFunction` mark with a literal string: {mark:?}"),
+        }
     }
 
     /// Whether `function`, a plain PHP function, is one of PHP's built-ins whose declared return type holds its failure,
@@ -1645,8 +1700,8 @@ impl<'analysis> Types<'analysis> {
         })
     }
 
-    /// The full name of the plain PHP constant the read `read` reaches through its namespace, as `global.PHP_EOL` and
-    /// `Pdf.DEFAULT_DPI` read one, spec section 23. None for any other read.
+    /// The full name of the plain PHP constant the read `read` reaches through its namespace, as `Pdf.DEFAULT_DPI` reads
+    /// one, spec section 23. None for any other read.
     pub(crate) fn namespace_constant(&self, read: &Expression) -> Option<Word> {
         self.artifacts.get_namespace_constant(read)
     }

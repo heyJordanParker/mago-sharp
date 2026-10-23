@@ -167,10 +167,11 @@ where
     })
 }
 
-/// Spec section 15: `Events.on<T>` takes an event or an interface an event implements, ruling 1, and refuses any other
-/// type the call runs with, written at `at`, with the messages the `on` clause gives. A type parameter is the caller's
-/// to bound, and a class that doesn't exist was reported where it is written.
-pub fn check_events_on<A>(context: &mut Context<'_, '_, A>, listened: &TUnion, at: Span)
+/// Spec section 15: `starter`, the method the standard library marks `StartsListener`, as `Events.on<T>`, takes an event
+/// or an interface an event implements, ruling 1, and refuses any other type the call runs with, written at `at`, with
+/// the messages the `on` clause gives. A type parameter is the caller's to bound, and a class that doesn't exist was
+/// reported where it is written.
+pub fn check_events_on<A>(context: &mut Context<'_, '_, A>, starter: &str, listened: &TUnion, at: Span)
 where
     A: Arena,
 {
@@ -187,9 +188,9 @@ where
 
     context.collector.report_with_code(
         IssueCode::InvalidEvent,
-        Issue::error(message).with_annotation(Annotation::primary(at).with_message("Given here.")).with_note(
-            "`Events.on` takes an event, which `event` or `extern event` declares, or an interface an event implements.",
-        ),
+        Issue::error(message).with_annotation(Annotation::primary(at).with_message("Given here.")).with_note(format!(
+            "`{starter}` takes an event, which `event` or `extern event` declares, or an interface an event implements."
+        )),
     );
 }
 

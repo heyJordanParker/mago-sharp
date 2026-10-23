@@ -599,9 +599,8 @@ where
         artifacts.record_list_pattern_tuple(&left_bracket, Some(tuple));
     }
 
-    // The PHP of a pattern calls a type test that no source the user wrote calls. It is the PHP# syntax itself, so it is
-    // never a bare call to refuse. Some calls are the shape of the pattern, which no source the user wrote can drop, so
-    // C# reports nothing there when they always hold: a properties pattern's `is_object` and a list pattern's
+    // The PHP of a pattern calls a type test that no source the user wrote calls. Some calls are the shape of the
+    // pattern, which no source the user wrote can drop, so C# reports nothing there when they always hold: a properties pattern's `is_object` and a list pattern's
     // `is List<Any?>`, their null checks, a list pattern's `count`, and the type test of a list's element or rest, which
     // the list's own type can make always true, as `[int, ...List<int> rest]` writes "any element".
     let mut pattern_calls = PatternCalls::default();
@@ -708,10 +707,6 @@ where
                 && !reads_tested_value
                 && (!is_code(issue, IssueCode::RedundantLogicalOperation)
                     || span.is_none_or(|span| !field_tests.iter().any(|test| test.start == span.start)))
-                && (!(is_code(issue, IssueCode::ReplacedBySyntax)
-                    || is_code(issue, IssueCode::BareFunctionCall)
-                    || is_code(issue, IssueCode::WrappedFunction))
-                    || called.is_none())
                 && (!always_true || called.is_none_or(|call| !is_shape(call)))
                 && (!always_true
                     || span.is_none_or(|span| !list_reads.iter().any(|(_, read)| read.span().start == span.start)))

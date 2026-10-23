@@ -1,12 +1,9 @@
 use mago_allocator::Arena;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
-use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::ttype::atomic::TAtomic;
-use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::callable::TCallable;
 use mago_codex::ttype::atomic::callable::TCallableSignature;
-use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::cast::cast_atomic_to_callable;
 use mago_codex::ttype::expander::contains_parameter_variable;
 use mago_codex::ttype::get_mixed;
@@ -16,16 +13,12 @@ use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_span::HasSpan;
 use mago_span::Span;
-use mago_syntax::cst::Access;
 use mago_syntax::cst::Argument;
-use mago_syntax::cst::ArgumentList;
-use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::FunctionCall;
+use mago_syntax::cst::Identifier;
 use mago_syntax::cst::MethodCall;
 use mago_syntax::cst::NullSafeFunctionCall;
-use mago_syntax::cst::NullSafePropertyAccess;
-use mago_syntax::cst::PropertyAccess;
 use mago_word::Word;
 use mago_word::ascii_lowercase_word;
 use mago_word::word;
@@ -40,6 +33,7 @@ use crate::expression::access::analyze_through_value;
 use crate::expression::call::analyze_invocation_targets;
 use crate::expression::call::get_function_like_target;
 use crate::expression::call::get_function_like_target_with_skip;
+use crate::expression::call::report_missing_function;
 use crate::expression::is_refused_type;
 use crate::expression::variable::read_variable;
 use crate::invocation::InvocationArgumentsSource;
@@ -48,15 +42,11 @@ use crate::plugin::ExpressionHookResult;
 use crate::plugin::context::HookContext;
 use crate::plugin::hook::NamedCall;
 use crate::resolver::class_name::report_keyword_in_another_case;
-use crate::resolver::extension::is_imported_by_default;
 use crate::resolver::property::check_redundant_nullsafe;
 use crate::statement::class_like::law::uncallable_law;
 use crate::utils::expression::get_bare_name_variable_id;
 use crate::utils::names::display_atomic;
-use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_code_member;
-use crate::utils::names::display_missing_imports;
-use crate::utils::names::sharp_code_class_name;
 use crate::utils::quoted_source;
 
 impl<'ast, 'arena> Analyzable<'ast, 'arena> for FunctionCall<'arena> {
@@ -84,19 +74,6 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for FunctionCall<'arena> {
         let mut template_result = TemplateResult::default();
         let (invocation_targets, encountered_invalid_targets) =
             resolve_targets(context, block_context, artifacts, self.function, &mut template_result)?;
-        // Spec section 23 refuses a bare call of a plain PHP function once its arguments are analyzed, so the form it
-        // names fits the kind of collection a collection function is given.
-        let bare_function = match self.function {
-            Expression::Identifier(name)
-                if context.dialect.is_sharp() && get_bare_name_variable_id(name, context.resolved_names).is_none() =>
-            {
-                invocation_targets
-                    .first()
-                    .and_then(InvocationTarget::get_function_like_metadata)
-                    .map(|metadata| (metadata, name.span()))
-            }
-            _ => None,
-        };
 
         analyze_invocation_targets(
             context,
@@ -112,9 +89,6 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for FunctionCall<'arena> {
             false,
             false, // object_has_nullsafe_null - not applicable for function calls
         )?;
-        if let Some((function, span)) = bare_function {
-            report_bare_function_call(context, block_context, artifacts, function, Some(&self.argument_list), span);
-        }
 
         if let Some(callee_type) = artifacts.get_rc_expression_type(self.function).cloned()
             && is_refused_type(&callee_type)
@@ -267,25 +241,19 @@ where
         false,
         false,
     )?;
-    // A call of a function the standard library replaces is refused once, naming the member to write, whatever the
-    // function takes by reference.
-    if let Some(metadata) = metadata
-        && !report_replaced_global_call(context, block_context, artifacts, metadata, &call.argument_list, call.span())
-    {
-        report_argument_by_reference(context, call, function, metadata);
+    if let Some(metadata) = metadata {
+        report_argument_by_reference(context, call, metadata);
     }
 
     Ok(())
 }
 
-/// Refuses a PHP# call that gives a plain PHP function an argument it takes by reference, as `global.sort(numbers)`,
-/// which would change `numbers`: PHP# passes every argument by value. The message writes the standard library method
-/// that does the work where there is one. The standard library alone passes one, as only it imports `Sharp.Internal`,
-/// to give its methods, as `Regex.match`, the results PHP gives only that way.
+/// Refuses a PHP# call that gives a plain PHP function an argument it takes by reference, as `Pdf.fill(pages)` for a
+/// `fill(array &$pages)`, which would change `pages`: PHP# passes every argument by value. The standard library alone
+/// passes one, to give its methods, as `Regex.match`, the results PHP gives only that way.
 fn report_argument_by_reference<A>(
     context: &mut Context<'_, '_, A>,
     call: &MethodCall<'_>,
-    function: Word,
     metadata: &FunctionLikeMetadata,
 ) where
     A: Arena,
@@ -312,21 +280,9 @@ fn report_argument_by_reference<A>(
 
     let written = quoted_source(context, call.object.span().join(call.method.span()));
     let given = quoted_source(context, argument.span());
-    let name = function.as_bytes().rsplit(|byte| *byte == b'\\').next().unwrap_or_default().to_ascii_lowercase();
-    let fix = match name.as_slice() {
-        b"array_push" => Some(format!("{given}.add(…)")),
-        b"array_unshift" => Some(format!("{given}.insert(0, …)")),
-        b"sort" | b"rsort" | b"usort" => Some(format!("{given} = {given}.sortedBy(…)")),
-        _ => None,
-    };
-    let message = match fix {
-        Some(fix) => format!(
-            "`{written}` changes the variable it is given, and PHP# passes every argument by value: write `{fix}`."
-        ),
-        None => format!(
-            "`{written}` changes the variable it is given, and PHP# passes every argument by value, so `{given}` can't go there."
-        ),
-    };
+    let message = format!(
+        "`{written}` changes the variable it is given, and PHP# passes every argument by value, so `{given}` can't go there."
+    );
     context.collector.report_with_code(
         IssueCode::InvalidPassByReference,
         Issue::error(message).with_annotation(Annotation::primary(argument.span()).with_message("Passed by value.")),
@@ -349,6 +305,24 @@ where
         // A PHP# call of a local, `f(x)`, calls the closure the local holds, as PHP's `$f($x)` does.
         let local_type = read_variable(context, block_context, artifacts, variable_id.as_bytes(), function_name.span());
         artifacts.set_rc_expression_type(expression, local_type);
+    } else if let Expression::Identifier(function_name) = expression
+        && context.dialect.is_sharp()
+        && is_written(context, function_name)
+    {
+        // PHP# has no top-level functions, spec section 8, so a bare call that names no local calls nothing: a plain
+        // PHP function is called through its namespace, and a bare call of one is the error a misspelled name gets.
+        if let Some(member) = bare_member_call(context, block_context, function_name.value()) {
+            context.collector.report_with_code(
+                IssueCode::NonExistentFunction,
+                Issue::error(member)
+                    .with_annotation(Annotation::primary(function_name.span()).with_message("Used here.")),
+            );
+        } else {
+            let function = FunctionLikeIdentifier::Function(word(function_name.value()));
+            report_missing_function(context, &function, function_name.span());
+        }
+
+        return Ok((vec![], false));
     } else if let Expression::Identifier(function_name) = expression {
         let name = word(context.resolved_names.get(function_name));
         let unqualified_name = word(function_name.value());
@@ -362,41 +336,9 @@ where
 
         let lowercased_name = ascii_lowercase_word(name.as_bytes());
         let skip_error = block_context.known_functions.contains(&lowercased_name);
-        let member = if context.dialect.is_sharp() {
-            bare_member_call(context, block_context, function_name.value())
-        } else {
-            None
-        };
-        let imported = if context.dialect.is_sharp() && member.is_none() {
-            imported_namespace_function(context, function_name.value())
-        } else {
-            None
-        };
 
-        let target = get_function_like_target_with_skip(
-            context,
-            identifier,
-            alternative,
-            expression.span(),
-            None,
-            skip_error || member.is_some() || imported.is_some(),
-        )
-        .or_else(|| {
-            let imported = FunctionLikeIdentifier::Function(imported?);
-
-            get_function_like_target_with_skip(context, imported, None, expression.span(), None, true)
-        });
-
-        if target.is_none()
-            && !skip_error
-            && let Some(member) = member
-        {
-            context.collector.report_with_code(
-                IssueCode::NonExistentFunction,
-                Issue::error(member)
-                    .with_annotation(Annotation::primary(function_name.span()).with_message("Used here.")),
-            );
-        }
+        let target =
+            get_function_like_target_with_skip(context, identifier, alternative, expression.span(), None, skip_error);
 
         if let Some(metadata) = target.as_ref().and_then(InvocationTarget::get_function_like_metadata) {
             check_function_use(context, block_context, metadata, name, function_name.span());
@@ -418,7 +360,7 @@ where
 }
 
 /// Reports a call of `function` by `used_name` in a casing other than its declared one, and a call of a function marked
-/// `@experimental`: the checks PHP's `name(…)` and PHP#'s `global.name(…)` both get at `span`.
+/// `@experimental`: the checks PHP's `name(…)` and PHP#'s `Pdf.render(…)` both get at `span`.
 fn check_function_use<A>(
     context: &mut Context<'_, '_, A>,
     block_context: &BlockContext<'_>,
@@ -547,797 +489,6 @@ where
     (targets, encountered_invalid_targets)
 }
 
-/// What a `.sharp` file writes in place of a plain PHP function or constant that PHP# replaces, decision 076.
-enum Replacement {
-    /// The standard library's members that do the function's work, or give the constant's value, each by its class and
-    /// name: a static method, an extension member, a member of an effect class, or a class constant.
-    Members(&'static [(&'static str, &'static str)]),
-    /// As [`Replacement::Members`], but an extension member is written on the call's argument at this index instead of
-    /// its first: `explode`'s second argument is the text `split` runs on.
-    MembersOn(usize, &'static [(&'static str, &'static str)]),
-    /// The PHP# syntax for it: `is` (spec section 21), `(string)` and `/` on two ints (section 24), a spread literal
-    /// (section 12) or `for … of` (section 17). `{x}` stands for the call's first argument, `{a}` and `{b}` for its
-    /// first two, and `{...}` for every argument, each spread.
-    Syntax(&'static str),
-    /// A collection method of spec section 12, by the kinds of collection, `List`, `Map` and `Set`, that have it: each
-    /// group of kinds with the method written on the call's collection, with the placeholders of
-    /// [`Replacement::Syntax`]. The placeholder the method is written on, `{a}` or `{b}`, is the collection.
-    CollectionMethod(&'static [(&'static [&'static str], &'static str)]),
-    /// Nothing, as PHP# has no counterpart of the function: what PHP# code does instead.
-    Removed(&'static str),
-}
-
-/// Every kind of PHP# collection, spec section 12, for a method each of them has.
-const EVERY_COLLECTION: &[&str] = &["List", "Map", "Set"];
-
-/// Each plain PHP function and constant PHP# replaces or removes, with its replacement. A row that names a standard
-/// library member lands in the change that ships the member, and a test holds every row to the library. A name that
-/// ends in `*` is a family, every function whose name it begins, as `curl_*`, and a row of the function's whole name
-/// wins over it. A member named `__construct` is its class's constructor, and a member named with `$` is its class's
-/// property, as `$arguments`. A constant's row is its uppercase name, and its member the class constant that gives its
-/// value.
-const REPLACEMENTS: &[(&str, Replacement)] = &[
-    // Spec section 8: `die("…")` prints its message and exits with status 0, which reports success.
-    ("die", Replacement::Removed("write the message with `console.writeError(text)`, then `process.exit(1)`")),
-    ("compact", Replacement::Removed("PHP# code reads and writes a local only by its name")),
-    ("extract", Replacement::Removed("PHP# code reads and writes a local only by its name")),
-    // `clone` copies an object without running its constructor, and spec section 16 copies a value with `with`.
-    ("clone", Replacement::Removed("copy a value with `with`, as in `price with { amount: 400 }`")),
-    ("is_string", Replacement::Syntax("`{x} is string`")),
-    ("is_int", Replacement::Syntax("`{x} is int`")),
-    ("is_float", Replacement::Syntax("`{x} is float`")),
-    ("is_bool", Replacement::Syntax("`{x} is bool`")),
-    ("strval", Replacement::Syntax("`(string){x}`")),
-    ("intdiv", Replacement::Syntax("`{a} / {b}`")),
-    ("array_merge", Replacement::Syntax("`[{...}]`")),
-    ("array_replace", Replacement::Syntax("`[{...}]`")),
-    ("array_walk_recursive", Replacement::Syntax("a `for … of` loop")),
-    ("count", Replacement::CollectionMethod(&[(EVERY_COLLECTION, "{a}.count()")])),
-    ("sizeof", Replacement::CollectionMethod(&[(EVERY_COLLECTION, "{a}.count()")])),
-    ("array_filter", Replacement::CollectionMethod(&[(EVERY_COLLECTION, "{a}.filter({b})")])),
-    ("array_map", Replacement::CollectionMethod(&[(EVERY_COLLECTION, "{b}.map({a})")])),
-    ("array_any", Replacement::CollectionMethod(&[(EVERY_COLLECTION, "{a}.any({b})")])),
-    ("array_find", Replacement::CollectionMethod(&[(EVERY_COLLECTION, "{a}.first({b})")])),
-    (
-        "in_array",
-        Replacement::CollectionMethod(&[
-            (&["List", "Set"], "{b}.contains({a})"),
-            (&["Map"], "{b}.values().contains({a})"),
-        ]),
-    ),
-    ("array_search", Replacement::CollectionMethod(&[(&["List"], "{b}.indexOf({a})")])),
-    ("end", Replacement::CollectionMethod(&[(&["List"], "{a}.last()"), (&["Map"], "{a}.values().last()")])),
-    ("array_push", Replacement::CollectionMethod(&[(&["List", "Set"], "{a}.add({b})")])),
-    ("array_key_exists", Replacement::CollectionMethod(&[(&["Map"], "{b}.has({a})")])),
-    ("key_exists", Replacement::CollectionMethod(&[(&["Map"], "{b}.has({a})")])),
-    ("array_keys", Replacement::CollectionMethod(&[(&["Map"], "{a}.keys()")])),
-    ("array_values", Replacement::CollectionMethod(&[(&["Map"], "{a}.values()")])),
-    ("intval", Replacement::Members(&[("Sharp\\Int", "parse")])),
-    ("floatval", Replacement::Members(&[("Sharp\\Float", "parse")])),
-    (
-        "filter_var",
-        Replacement::Members(&[
-            ("Sharp\\Bool", "tryParse"),
-            ("Sharp\\Net\\Email", "isValid"),
-            ("Sharp\\Net\\Ip", "isValid"),
-            ("Sharp\\Net\\Url", "isValid"),
-        ]),
-    ),
-    ("base64_encode", Replacement::Members(&[("Sharp\\Data\\Base64", "encode")])),
-    ("base64_decode", Replacement::Members(&[("Sharp\\Data\\Base64", "decode")])),
-    ("pack", Replacement::Members(&[("Sharp\\Data\\Binary", "pack")])),
-    ("unpack", Replacement::Members(&[("Sharp\\Data\\Binary", "unpack")])),
-    ("gzcompress", Replacement::Members(&[("Sharp\\Data\\Compression", "compress")])),
-    ("gzuncompress", Replacement::Members(&[("Sharp\\Data\\Compression", "uncompress")])),
-    ("hash", Replacement::Members(&[("Sharp\\Data\\Hash", "of")])),
-    ("hash_hmac", Replacement::Members(&[("Sharp\\Data\\Hash", "hmac")])),
-    ("md5", Replacement::Members(&[("Sharp\\Data\\Hash", "md5")])),
-    ("sha1", Replacement::Members(&[("Sharp\\Data\\Hash", "sha1")])),
-    ("crc32", Replacement::Members(&[("Sharp\\Data\\Hash", "crc32")])),
-    ("hash_equals", Replacement::Members(&[("Sharp\\Data\\Hash", "equals")])),
-    ("bin2hex", Replacement::Members(&[("Sharp\\Data\\Hex", "encode")])),
-    ("hex2bin", Replacement::Members(&[("Sharp\\Data\\Hex", "decode")])),
-    ("password_hash", Replacement::Members(&[("Sharp\\Data\\Password", "hash")])),
-    ("password_verify", Replacement::Members(&[("Sharp\\Data\\Password", "verify")])),
-    ("serialize", Replacement::Members(&[("Sharp\\Data\\PhpSerializer", "serialize")])),
-    ("unserialize", Replacement::Members(&[("Sharp\\Data\\PhpSerializer", "unserialize")])),
-    ("var_export", Replacement::Members(&[("Sharp\\Data\\PhpSerializer", "export")])),
-    ("basename", Replacement::Members(&[("Sharp\\IO\\Path", "fileName")])),
-    ("dirname", Replacement::Members(&[("Sharp\\IO\\Path", "directory")])),
-    (
-        "pathinfo",
-        Replacement::Members(&[("Sharp\\IO\\Path", "extension"), ("Sharp\\IO\\Path", "fileNameWithoutExtension")]),
-    ),
-    ("json_decode", Replacement::Members(&[("Sharp\\Json\\Json", "decode")])),
-    ("json_encode", Replacement::Members(&[("Sharp\\Json\\Json", "encode")])),
-    ("ceil", Replacement::Members(&[("Sharp\\Math\\Math", "ceil")])),
-    ("floor", Replacement::Members(&[("Sharp\\Math\\Math", "floor")])),
-    ("sqrt", Replacement::Members(&[("Sharp\\Math\\Math", "sqrt")])),
-    ("log", Replacement::Members(&[("Sharp\\Math\\Math", "log")])),
-    ("round", Replacement::Members(&[("Sharp\\Math\\Math", "round")])),
-    ("pow", Replacement::Members(&[("Sharp\\Math\\Math", "pow")])),
-    ("max", Replacement::Members(&[("Sharp\\Math\\Math", "max")])),
-    ("min", Replacement::Members(&[("Sharp\\Math\\Math", "min")])),
-    ("inet_pton", Replacement::Members(&[("Sharp\\Net\\Ip", "toBinary")])),
-    ("rawurlencode", Replacement::Members(&[("Sharp\\Net\\Url", "encode")])),
-    ("urlencode", Replacement::Members(&[("Sharp\\Net\\Url", "encodeForm")])),
-    ("urldecode", Replacement::Members(&[("Sharp\\Net\\Url", "decode")])),
-    ("rawurldecode", Replacement::Members(&[("Sharp\\Net\\Url", "decode")])),
-    ("http_build_query", Replacement::Members(&[("Sharp\\Net\\Url", "buildQuery")])),
-    ("parse_str", Replacement::Members(&[("Sharp\\Net\\Url", "parseQuery")])),
-    ("htmlspecialchars", Replacement::Members(&[("Sharp\\Text\\Html", "escape")])),
-    ("htmlspecialchars_decode", Replacement::Members(&[("Sharp\\Text\\Html", "unescape")])),
-    ("html_entity_decode", Replacement::Members(&[("Sharp\\Text\\Html", "decodeEntities")])),
-    ("strip_tags", Replacement::Members(&[("Sharp\\Text\\Html", "stripTags")])),
-    ("preg_match", Replacement::Members(&[("Sharp\\Text\\Regex", "matches"), ("Sharp\\Text\\Regex", "match")])),
-    ("preg_match_all", Replacement::Members(&[("Sharp\\Text\\Regex", "matchAll")])),
-    ("preg_replace", Replacement::Members(&[("Sharp\\Text\\Regex", "replace")])),
-    ("preg_split", Replacement::Members(&[("Sharp\\Text\\Regex", "split")])),
-    ("preg_grep", Replacement::Members(&[("Sharp\\Text\\Regex", "filter")])),
-    ("preg_quote", Replacement::Members(&[("Sharp\\Text\\Regex", "escape")])),
-    ("chr", Replacement::Members(&[("Sharp\\Text\\Text", "fromByte")])),
-    ("trim", Replacement::Members(&[("Sharp\\Text\\Text", "trim")])),
-    ("str_contains", Replacement::Members(&[("Sharp\\Text\\Text", "contains")])),
-    ("strtolower", Replacement::Members(&[("Sharp\\Text\\Text", "lowercase")])),
-    ("mb_strtolower", Replacement::Members(&[("Sharp\\Text\\Text", "lowercase")])),
-    ("strtoupper", Replacement::Members(&[("Sharp\\Text\\Text", "uppercase")])),
-    ("mb_strtoupper", Replacement::Members(&[("Sharp\\Text\\Text", "uppercase")])),
-    ("str_starts_with", Replacement::Members(&[("Sharp\\Text\\Text", "startsWith")])),
-    ("str_ends_with", Replacement::Members(&[("Sharp\\Text\\Text", "endsWith")])),
-    ("str_replace", Replacement::MembersOn(2, &[("Sharp\\Text\\Text", "replace")])),
-    ("explode", Replacement::MembersOn(1, &[("Sharp\\Text\\Text", "split")])),
-    ("str_getcsv", Replacement::Members(&[("Sharp\\Text\\Text", "parseCsv")])),
-    ("date", Replacement::Members(&[("Sharp\\Time\\Date", "format")])),
-    ("gmdate", Replacement::Members(&[("Sharp\\Time\\Date", "format")])),
-    ("strtotime", Replacement::Members(&[("Sharp\\Time\\Date", "parse")])),
-    ("timezone_identifiers_list", Replacement::Members(&[("Sharp\\Time\\TimeZone", "names")])),
-    ("getenv", Replacement::Members(&[("Sharp\\Environment", "variable"), ("Sharp\\Environment", "variables")])),
-    ("apache_getenv", Replacement::Members(&[("Sharp\\Environment", "variable")])),
-    ("apache_setenv", Replacement::Members(&[("Sharp\\Environment", "setVariable")])),
-    ("getopt", Replacement::Members(&[("Sharp\\Environment", "$arguments")])),
-    ("getcwd", Replacement::Members(&[("Sharp\\Environment", "currentDirectory")])),
-    ("chdir", Replacement::Members(&[("Sharp\\Environment", "changeDirectory")])),
-    ("time", Replacement::Members(&[("Sharp\\Clock", "now")])),
-    ("gettimeofday", Replacement::Members(&[("Sharp\\Clock", "now")])),
-    ("hrtime", Replacement::Members(&[("Sharp\\Clock", "timestamp")])),
-    ("microtime", Replacement::Members(&[("Sharp\\Clock", "timestamp")])),
-    ("sleep", Replacement::Members(&[("Sharp\\Clock", "sleep")])),
-    ("usleep", Replacement::Members(&[("Sharp\\Clock", "sleep")])),
-    ("time_nanosleep", Replacement::Members(&[("Sharp\\Clock", "sleep")])),
-    ("time_sleep_until", Replacement::Members(&[("Sharp\\Clock", "sleep")])),
-    ("random_int", Replacement::Members(&[("Sharp\\Random", "nextInt")])),
-    ("rand", Replacement::Members(&[("Sharp\\Random", "nextInt")])),
-    ("mt_rand", Replacement::Members(&[("Sharp\\Random", "nextInt")])),
-    ("lcg_value", Replacement::Members(&[("Sharp\\Random", "nextFloat")])),
-    ("random_bytes", Replacement::Members(&[("Sharp\\Random", "nextBytes")])),
-    ("shuffle", Replacement::Members(&[("Sharp\\Random", "shuffle")])),
-    ("str_shuffle", Replacement::Members(&[("Sharp\\Random", "shuffle")])),
-    ("array_rand", Replacement::Members(&[("Sharp\\Random", "pick")])),
-    ("printf", Replacement::Members(&[("Sharp\\Console", "write")])),
-    ("vprintf", Replacement::Members(&[("Sharp\\Console", "write")])),
-    ("print_r", Replacement::Members(&[("Sharp\\Console", "write")])),
-    ("var_dump", Replacement::Members(&[("Sharp\\Console", "write")])),
-    ("fwrite", Replacement::Members(&[("Sharp\\Console", "write"), ("Sharp\\Console", "writeError")])),
-    ("fputs", Replacement::Members(&[("Sharp\\Console", "write"), ("Sharp\\Console", "writeError")])),
-    ("fprintf", Replacement::Members(&[("Sharp\\Console", "write"), ("Sharp\\Console", "writeError")])),
-    ("readline", Replacement::Members(&[("Sharp\\Console", "readLine")])),
-    ("fgets", Replacement::Members(&[("Sharp\\Console", "readLine")])),
-    ("exit", Replacement::Members(&[("Sharp\\Process", "exit")])),
-    ("getmypid", Replacement::Members(&[("Sharp\\Process", "id")])),
-    ("exec", Replacement::Members(&[("Sharp\\Process", "run")])),
-    ("shell_exec", Replacement::Members(&[("Sharp\\Process", "run")])),
-    ("system", Replacement::Members(&[("Sharp\\Process", "run")])),
-    ("passthru", Replacement::Members(&[("Sharp\\Process", "run")])),
-    ("proc_open", Replacement::Members(&[("Sharp\\Process", "run")])),
-    ("popen", Replacement::Members(&[("Sharp\\Process", "run")])),
-    ("file_get_contents", Replacement::Members(&[("Sharp\\Files", "read")])),
-    ("readfile", Replacement::Members(&[("Sharp\\Files", "read")])),
-    ("file", Replacement::Members(&[("Sharp\\Files", "readLines")])),
-    ("file_put_contents", Replacement::Members(&[("Sharp\\Files", "write"), ("Sharp\\Files", "append")])),
-    ("file_exists", Replacement::Members(&[("Sharp\\Files", "exists")])),
-    ("is_file", Replacement::Members(&[("Sharp\\Files", "exists")])),
-    ("is_readable", Replacement::Members(&[("Sharp\\Files", "exists")])),
-    ("is_dir", Replacement::Members(&[("Sharp\\Files", "isDirectory")])),
-    ("unlink", Replacement::Members(&[("Sharp\\Files", "delete")])),
-    ("copy", Replacement::Members(&[("Sharp\\Files", "copy")])),
-    ("rename", Replacement::Members(&[("Sharp\\Files", "move")])),
-    ("scandir", Replacement::Members(&[("Sharp\\Files", "list")])),
-    ("glob", Replacement::Members(&[("Sharp\\Files", "list")])),
-    ("opendir", Replacement::Members(&[("Sharp\\Files", "list")])),
-    ("readdir", Replacement::Members(&[("Sharp\\Files", "list")])),
-    ("mkdir", Replacement::Members(&[("Sharp\\Files", "createDirectory")])),
-    ("rmdir", Replacement::Members(&[("Sharp\\Files", "deleteDirectory")])),
-    ("filesize", Replacement::Members(&[("Sharp\\Files", "size")])),
-    ("filemtime", Replacement::Members(&[("Sharp\\Files", "lastModified")])),
-    ("filectime", Replacement::Members(&[("Sharp\\Files", "lastModified")])),
-    ("fileatime", Replacement::Members(&[("Sharp\\Files", "lastModified")])),
-    ("stat", Replacement::Members(&[("Sharp\\Files", "lastModified")])),
-    ("tempnam", Replacement::Members(&[("Sharp\\Files", "temporaryFile")])),
-    ("sys_get_temp_dir", Replacement::Members(&[("Sharp\\Files", "temporaryFile")])),
-    ("fopen", Replacement::Members(&[("Sharp\\Files", "readLinesLazily"), ("Sharp\\Files", "append")])),
-    ("fread", Replacement::Members(&[("Sharp\\Files", "read"), ("Sharp\\Files", "readLinesLazily")])),
-    ("fclose", Replacement::Members(&[("Sharp\\Files", "readLinesLazily")])),
-    ("feof", Replacement::Members(&[("Sharp\\Files", "readLinesLazily")])),
-    ("fseek", Replacement::Members(&[("Sharp\\Files", "readLinesLazily")])),
-    ("ftell", Replacement::Members(&[("Sharp\\Files", "readLinesLazily")])),
-    ("rewind", Replacement::Members(&[("Sharp\\Files", "readLinesLazily")])),
-    ("flock", Replacement::Members(&[("Sharp\\Files", "write"), ("Sharp\\Files", "append")])),
-    ("ftruncate", Replacement::Members(&[("Sharp\\Files", "write"), ("Sharp\\Files", "append")])),
-    ("fflush", Replacement::Members(&[("Sharp\\Files", "write"), ("Sharp\\Files", "append")])),
-    ("tmpfile", Replacement::Members(&[("Sharp\\Files", "temporaryFile")])),
-    ("curl_*", Replacement::Members(&[("Sharp\\Http", "send")])),
-    ("fsockopen", Replacement::Members(&[("Sharp\\Http", "send")])),
-    ("stream_socket_client", Replacement::Members(&[("Sharp\\Http", "send")])),
-    ("mail", Replacement::Members(&[("Sharp\\Mail", "send")])),
-    ("mb_send_mail", Replacement::Members(&[("Sharp\\Mail", "send")])),
-    ("mysqli_query", Replacement::Members(&[("Sharp\\Database", "query"), ("Sharp\\Database", "execute")])),
-    ("mysqli_real_query", Replacement::Members(&[("Sharp\\Database", "query"), ("Sharp\\Database", "execute")])),
-    ("mysqli_multi_query", Replacement::Members(&[("Sharp\\Database", "execute")])),
-    ("mysqli_execute_query", Replacement::Members(&[("Sharp\\Database", "query"), ("Sharp\\Database", "execute")])),
-    ("mysqli_prepare", Replacement::Members(&[("Sharp\\Database", "query"), ("Sharp\\Database", "execute")])),
-    ("mysqli_stmt_execute", Replacement::Members(&[("Sharp\\Database", "query"), ("Sharp\\Database", "execute")])),
-    ("mysqli_fetch_all", Replacement::Members(&[("Sharp\\Database", "query")])),
-    ("mysqli_fetch_assoc", Replacement::Members(&[("Sharp\\Database", "queryFirst")])),
-    ("mysqli_fetch_array", Replacement::Members(&[("Sharp\\Database", "queryFirst")])),
-    ("mysqli_fetch_row", Replacement::Members(&[("Sharp\\Database", "queryFirst")])),
-    ("mysqli_fetch_object", Replacement::Members(&[("Sharp\\Database", "queryFirst")])),
-    ("mysqli_fetch_column", Replacement::Members(&[("Sharp\\Database", "scalar")])),
-    ("mysqli_affected_rows", Replacement::Members(&[("Sharp\\Database", "execute")])),
-    ("mysqli_begin_transaction", Replacement::Members(&[("Sharp\\Database", "beginTransaction")])),
-    ("mysqli_autocommit", Replacement::Members(&[("Sharp\\Database", "beginTransaction")])),
-    ("mysqli_commit", Replacement::Members(&[("Sharp\\Database", "commit")])),
-    ("mysqli_rollback", Replacement::Members(&[("Sharp\\Database", "rollback")])),
-    ("mysqli_connect", Replacement::Members(&[("Sharp\\Database", "__construct")])),
-    ("mysqli_real_connect", Replacement::Members(&[("Sharp\\Database", "__construct")])),
-    ("mysqli_init", Replacement::Members(&[("Sharp\\Database", "__construct")])),
-    ("mysqli_*", Replacement::Members(&[("Sharp\\Database", "query"), ("Sharp\\Database", "execute")])),
-    ("pg_connect", Replacement::Members(&[("Sharp\\Database", "__construct")])),
-    ("pg_pconnect", Replacement::Members(&[("Sharp\\Database", "__construct")])),
-    ("pg_fetch_all", Replacement::Members(&[("Sharp\\Database", "query")])),
-    ("pg_fetch_all_columns", Replacement::Members(&[("Sharp\\Database", "query")])),
-    ("pg_select", Replacement::Members(&[("Sharp\\Database", "query")])),
-    ("pg_fetch_assoc", Replacement::Members(&[("Sharp\\Database", "queryFirst")])),
-    ("pg_fetch_array", Replacement::Members(&[("Sharp\\Database", "queryFirst")])),
-    ("pg_fetch_row", Replacement::Members(&[("Sharp\\Database", "queryFirst")])),
-    ("pg_fetch_object", Replacement::Members(&[("Sharp\\Database", "queryFirst")])),
-    ("pg_fetch_result", Replacement::Members(&[("Sharp\\Database", "scalar")])),
-    ("pg_affected_rows", Replacement::Members(&[("Sharp\\Database", "execute")])),
-    ("pg_cmdtuples", Replacement::Members(&[("Sharp\\Database", "execute")])),
-    ("pg_insert", Replacement::Members(&[("Sharp\\Database", "execute")])),
-    ("pg_update", Replacement::Members(&[("Sharp\\Database", "execute")])),
-    ("pg_delete", Replacement::Members(&[("Sharp\\Database", "execute")])),
-    ("pg_*", Replacement::Members(&[("Sharp\\Database", "query"), ("Sharp\\Database", "execute")])),
-    ("apcu_fetch", Replacement::Members(&[("Sharp\\Cache", "get")])),
-    ("apcu_exists", Replacement::Members(&[("Sharp\\Cache", "get")])),
-    ("apcu_key_info", Replacement::Members(&[("Sharp\\Cache", "get")])),
-    ("apcu_store", Replacement::Members(&[("Sharp\\Cache", "set")])),
-    ("apcu_add", Replacement::Members(&[("Sharp\\Cache", "set")])),
-    ("apcu_delete", Replacement::Members(&[("Sharp\\Cache", "remove")])),
-    ("apcu_entry", Replacement::Members(&[("Sharp\\Cache", "getOrCreate")])),
-    ("apcu_*", Replacement::Members(&[("Sharp\\Cache", "get"), ("Sharp\\Cache", "set"), ("Sharp\\Cache", "remove")])),
-    ("putenv", Replacement::Members(&[("Sharp\\Environment", "setVariable")])),
-    ("mt_srand", Replacement::Members(&[("Sharp\\Random", "__construct")])),
-    ("srand", Replacement::Members(&[("Sharp\\Random", "__construct")])),
-    ("PHP_INT_MAX", Replacement::Members(&[("Sharp\\Int", "MAX")])),
-    ("PHP_INT_MIN", Replacement::Members(&[("Sharp\\Int", "MIN")])),
-];
-
-/// Each PHP built-in class the standard library replaces, spec section 29, with the standard library members to write
-/// in place of creating one. A static member comes before an effect class's, which names the object it is called on.
-const WRAPPED_CLASSES: &[(&str, &[(&str, &str)])] = &[
-    ("PDO", &[("Sharp\\Database", "query"), ("Sharp\\Database", "execute")]),
-    ("PDOStatement", &[("Sharp\\Database", "query"), ("Sharp\\Database", "execute")]),
-    ("mysqli", &[("Sharp\\Database", "query"), ("Sharp\\Database", "execute")]),
-    ("SQLite3", &[("Sharp\\Database", "query"), ("Sharp\\Database", "execute")]),
-    ("DateTime", &[("Sharp\\Time\\Date", "parse"), ("Sharp\\Clock", "now")]),
-    ("DateTimeImmutable", &[("Sharp\\Time\\Date", "parse"), ("Sharp\\Clock", "now")]),
-    ("DateTimeZone", &[("Sharp\\Time\\Date", "format")]),
-    ("DateInterval", &[("Sharp\\Time\\Duration", "ofSeconds"), ("Sharp\\Time\\Duration", "ofMilliseconds")]),
-    ("CurlHandle", &[("Sharp\\Http", "send")]),
-    ("CurlMultiHandle", &[("Sharp\\Http", "send")]),
-    ("SplFileObject", &[("Sharp\\Files", "read"), ("Sharp\\Files", "readLines")]),
-    ("SplFileInfo", &[("Sharp\\Files", "exists"), ("Sharp\\Files", "size"), ("Sharp\\Files", "lastModified")]),
-    ("DirectoryIterator", &[("Sharp\\Files", "list")]),
-    ("FilesystemIterator", &[("Sharp\\Files", "list")]),
-    ("RecursiveDirectoryIterator", &[("Sharp\\Files", "list")]),
-    ("Random\\Randomizer", &[("Sharp\\Random", "nextInt")]),
-];
-
-/// Spec section 29: a `.sharp` file outside the standard library may name a class [`WRAPPED_CLASSES`] lists, but not
-/// create one, with `new` or a static factory, which is a static method that returns the class. The refusal names the
-/// members to write instead, and the code references each of them, so a change to one reaches it.
-pub(crate) fn report_wrapped_class<A>(
-    context: &mut Context<'_, '_, A>,
-    block_context: &BlockContext<'_>,
-    artifacts: &mut AnalysisArtifacts,
-    class: &ClassLikeMetadata,
-    factory: Option<&FunctionLikeMetadata>,
-    span: Span,
-) where
-    A: Arena,
-{
-    if !context.dialect.is_sharp() || context.source_file.is_standard_library {
-        return;
-    }
-    let Some((_, members)) =
-        WRAPPED_CLASSES.iter().find(|(wrapped, _)| wrapped.as_bytes().eq_ignore_ascii_case(class.name.as_bytes()))
-    else {
-        return;
-    };
-    if let Some(method) = factory
-        && !method.return_type_metadata.as_ref().is_some_and(|returned| {
-            returned.type_union.types.iter().any(|atomic| {
-                matches!(atomic, TAtomic::Object(TObject::Named(named))
-                    if named.name.as_bytes().eq_ignore_ascii_case(class.name.as_bytes()))
-            })
-        })
-    {
-        return;
-    }
-    for (member_class, method) in *members {
-        artifacts.symbol_references.add_reference_to_class_member(
-            &block_context.scope,
-            (ascii_lowercase_word(member_class.as_bytes()), ascii_lowercase_word(method.as_bytes())),
-            false,
-        );
-    }
-    // A project without the standard library has no member to name, and creating one is refused all the same.
-    let form = member_form(context, members, 0, None).map_or_else(|| ".".to_owned(), |form| format!(": write {form}"));
-    let name = display_class_like_name(context, class.original_name);
-
-    context.collector.report_with_code(
-        IssueCode::WrappedClass,
-        Issue::error(format!("Create no `{name}`{form}"))
-            .with_annotation(Annotation::primary(span).with_message("Created here.")),
-    );
-}
-
-/// Spec section 23: PHP# calls a plain PHP function through its namespace, so a bare call of one is refused with the
-/// form to write: the replacement [`REPLACEMENTS`] gives it, or the call through its namespace, `global.strlen(…)` or
-/// `Pdf.render(…)`.
-pub(crate) fn report_bare_function_call<A>(
-    context: &mut Context<'_, '_, A>,
-    block_context: &BlockContext<'_>,
-    artifacts: &mut AnalysisArtifacts,
-    function: &FunctionLikeMetadata,
-    arguments: Option<&ArgumentList<'_>>,
-    span: Span,
-) where
-    A: Arena,
-{
-    let name = function.original_name;
-    let (code, message) = replacement_of(name)
-        .and_then(|replacement| replacement_refusal(context, block_context, artifacts, name, replacement, arguments))
-        .unwrap_or_else(|| (IssueCode::BareFunctionCall, namespace_form(context, name)));
-
-    context.collector.report_with_code(
-        code,
-        Issue::error(message).with_annotation(Annotation::primary(span).with_message("Called here.")),
-    );
-}
-
-/// Spec sections 8 and 23: a call through `global` of a function the standard library replaces is refused as its bare
-/// call is, so PHP# code never reaches around the library. A function PHP# syntax replaces keeps its `global.` call,
-/// and so does the standard library, whose members are made of those calls. Returns whether it reported one.
-fn report_replaced_global_call<A>(
-    context: &mut Context<'_, '_, A>,
-    block_context: &BlockContext<'_>,
-    artifacts: &mut AnalysisArtifacts,
-    function: &FunctionLikeMetadata,
-    arguments: &ArgumentList<'_>,
-    span: Span,
-) -> bool
-where
-    A: Arena,
-{
-    let Some((code, message)) = replaced_global_refusal(context, block_context, artifacts, function, Some(arguments))
-    else {
-        return false;
-    };
-    context.collector.report_with_code(
-        code,
-        Issue::error(message).with_annotation(Annotation::primary(span).with_message("Called here.")),
-    );
-
-    true
-}
-
-/// Spec sections 8 and 23: a read through `global` of a function the standard library replaces, as a value, as in
-/// `names.map(global.trim)`, is refused with the member to write, as its call is. Returns whether it reported one.
-pub(crate) fn report_replaced_function_value<A>(
-    context: &mut Context<'_, '_, A>,
-    block_context: &BlockContext<'_>,
-    artifacts: &mut AnalysisArtifacts,
-    function: &FunctionLikeMetadata,
-    span: Span,
-) -> bool
-where
-    A: Arena,
-{
-    let Some((code, message)) = replaced_global_refusal(context, block_context, artifacts, function, None) else {
-        return false;
-    };
-    let mut issue = Issue::error(message)
-        .with_annotation(Annotation::primary(span).with_message("Reads the function without calling it."));
-    // A lambda that calls a removed function is refused as the read is.
-    if !matches!(replacement_of(function.original_name), Some(Replacement::Removed(_))) {
-        issue = issue.with_help("Pass a lambda that makes the call in its place.");
-    }
-    context.collector.report_with_code(code, issue);
-
-    true
-}
-
-/// Spec sections 8 and 23: a read of a plain PHP constant the standard library replaces, `name` bare or through
-/// `global`, is refused at `span` with the member to write, as a call of a replaced function is. The standard library,
-/// whose members are made of those reads, keeps them, and a row matches the constant's whole name only, so a family of
-/// functions such as `curl_*` never takes PHP's `CURL_…` constants. Returns whether it reported one.
-pub(crate) fn report_replaced_constant<A>(
-    context: &mut Context<'_, '_, A>,
-    block_context: &BlockContext<'_>,
-    artifacts: &mut AnalysisArtifacts,
-    name: &[u8],
-    span: Span,
-) -> bool
-where
-    A: Arena,
-{
-    if context.source_file.is_standard_library {
-        return false;
-    }
-    let Some((_, replacement)) = REPLACEMENTS.iter().find(|(replaced, _)| replaced.as_bytes() == name) else {
-        return false;
-    };
-    let Some((code, message)) = replacement_refusal(context, block_context, artifacts, word(name), replacement, None)
-    else {
-        return false;
-    };
-    context.collector.report_with_code(
-        code,
-        Issue::error(message).with_annotation(Annotation::primary(span).with_message("Read here.")),
-    );
-
-    true
-}
-
-/// The refusal of a call or a read through `global` of `function`, outside the standard library, whose members are
-/// made of those calls, when the library replaces the function. A function PHP# syntax replaces keeps `global.`.
-fn replaced_global_refusal<A>(
-    context: &Context<'_, '_, A>,
-    block_context: &BlockContext<'_>,
-    artifacts: &mut AnalysisArtifacts,
-    function: &FunctionLikeMetadata,
-    arguments: Option<&ArgumentList<'_>>,
-) -> Option<(IssueCode, String)>
-where
-    A: Arena,
-{
-    if context.source_file.is_standard_library {
-        return None;
-    }
-    let name = function.original_name;
-    let replacement @ (Replacement::Members(_)
-    | Replacement::MembersOn(..)
-    | Replacement::CollectionMethod(_)
-    | Replacement::Removed(_)) = replacement_of(name)?
-    else {
-        return None;
-    };
-
-    replacement_refusal(context, block_context, artifacts, name, replacement, arguments)
-}
-
-/// The row of [`REPLACEMENTS`] that replaces the plain PHP function `name`: the row of its whole name, or else the row
-/// of the family its name begins.
-fn replacement_of(name: Word) -> Option<&'static Replacement> {
-    let in_family = |replaced: &str| {
-        replaced.strip_suffix('*').is_some_and(|family| {
-            name.as_bytes().get(..family.len()).is_some_and(|start| start.eq_ignore_ascii_case(family.as_bytes()))
-        })
-    };
-
-    REPLACEMENTS
-        .iter()
-        .find(|(replaced, _)| replaced.as_bytes().eq_ignore_ascii_case(name.as_bytes()))
-        .or_else(|| REPLACEMENTS.iter().find(|(replaced, _)| in_family(replaced)))
-        .map(|(_, replacement)| replacement)
-}
-
-/// The refusal of a call of `name`, which `replacement` replaces, as its code and message. A member the codebase lacks
-/// is never named, so a row whose members it lacks gives none, and the call references each member the row names, so
-/// a change to one reaches the call.
-fn replacement_refusal<A>(
-    context: &Context<'_, '_, A>,
-    block_context: &BlockContext<'_>,
-    artifacts: &mut AnalysisArtifacts,
-    name: Word,
-    replacement: &Replacement,
-    arguments: Option<&ArgumentList<'_>>,
-) -> Option<(IssueCode, String)>
-where
-    A: Arena,
-{
-    let wrapped = |form: String| {
-        (IssueCode::WrappedFunction, format!("`{name}` is wrapped by the standard library: write {form}"))
-    };
-
-    match replacement {
-        Replacement::Syntax(form) => Some((
-            IssueCode::ReplacedBySyntax,
-            format!("`{name}` is replaced by PHP# syntax: write {}.", syntax_form(context, form, arguments)),
-        )),
-        Replacement::CollectionMethod(groups) => {
-            Some(wrapped(format!("{}.", collection_form(context, artifacts, groups, arguments))))
-        }
-        Replacement::Removed(instead) => {
-            Some((IssueCode::WrappedFunction, format!("PHP# has no `{name}`: {instead}.")))
-        }
-        Replacement::Members(members) | Replacement::MembersOn(_, members) => {
-            for (class, member) in *members {
-                let class = ascii_lowercase_word(class.as_bytes());
-                if member.starts_with('$') {
-                    artifacts.symbol_references.add_reference_for_property_read(
-                        &block_context.scope,
-                        class,
-                        word(member.as_bytes()),
-                    );
-                } else if context.codebase.class_constant_exists(class.as_bytes(), member.as_bytes()) {
-                    artifacts.symbol_references.add_reference_to_class_member(
-                        &block_context.scope,
-                        (class, word(member.as_bytes())),
-                        false,
-                    );
-                } else {
-                    artifacts.symbol_references.add_reference_to_class_member(
-                        &block_context.scope,
-                        (class, ascii_lowercase_word(member.as_bytes())),
-                        false,
-                    );
-                }
-            }
-
-            let receiver = if let Replacement::MembersOn(receiver, _) = replacement { *receiver } else { 0 };
-
-            member_form(context, members, receiver, arguments).map(wrapped)
-        }
-    }
-}
-
-/// The standard library members `members` names, as a `.sharp` file writes them, with the imports the file lacks. An
-/// extension's member, spec section 26, is written on the call's argument at the index `receiver` from `arguments`, and
-/// needs an import only where the file lacks its extensions by default. An effect class's member, spec section 29, is
-/// written on the object of that class a constructor takes, as in `clock.now()`, and a member named with `$` is its
-/// property, as in `environment.arguments`. None when the codebase declares none of them.
-fn member_form<A>(
-    context: &Context<'_, '_, A>,
-    members: &[(&str, &str)],
-    receiver: usize,
-    arguments: Option<&ArgumentList<'_>>,
-) -> Option<String>
-where
-    A: Arena,
-{
-    let codebase = context.codebase;
-    let receiver = arguments
-        .and_then(|arguments| arguments.arguments.get(receiver))
-        .and_then(|argument| argument_text(context, argument))
-        .unwrap_or_else(|| "x".to_owned());
-    let mut taken: Vec<String> = Vec::new();
-    let (classes, methods): (Vec<Option<Word>>, Vec<String>) = members
-        .iter()
-        .filter_map(|(class, member)| {
-            let class = codebase.get_class_like(class.as_bytes())?;
-            let mut on_taken_object = |member: String| {
-                let class_name = sharp_code_class_name(codebase, &context.imported_names, &context.scope, class.name);
-                let object = lower_first(class_name.rsplit('.').next().unwrap_or_default());
-                let held = format!("`{class_name}`");
-                if !taken.contains(&held) {
-                    taken.push(held);
-                }
-
-                (Some(class.original_name), format!("`{object}.{member}`"))
-            };
-            if let Some(property) = member.strip_prefix('$') {
-                codebase.get_property(class.name.as_bytes(), member.as_bytes())?;
-
-                return Some(on_taken_object(property.to_owned()));
-            }
-            if codebase.class_constant_exists(class.name.as_bytes(), member.as_bytes()) {
-                return Some((
-                    Some(class.original_name),
-                    format!("`{}`", display_code_member(context, class.original_name, member)),
-                ));
-            }
-            let method = codebase.get_method(class.name.as_bytes(), member.as_bytes())?;
-            let name = method.original_name;
-            let import = (!is_imported_by_default(context, class.name, method)).then_some(class.original_name);
-            let arguments = |taken_first: usize| if method.parameters.len() > taken_first { "…" } else { "" };
-
-            Some(if method.flags.is_extension_property() {
-                (import, format!("`{receiver}.{name}`"))
-            } else if method.flags.is_extension_method() {
-                (import, format!("`{receiver}.{name}({})`", arguments(1)))
-            } else if method.method_metadata.as_ref().is_some_and(|metadata| metadata.is_constructor) {
-                // A `foreign` object is created only in a module binding, spec section 32.
-                let class_name = sharp_code_class_name(codebase, &context.imported_names, &context.scope, class.name);
-                let place = if class.flags.is_foreign() { " in a module binding" } else { "" };
-
-                (Some(class.original_name), format!("`new {class_name}({})`{place}", arguments(0)))
-            } else if method.method_metadata.as_ref().is_none_or(|metadata| metadata.is_static) {
-                (Some(class.original_name), format!("`{}(…)`", display_code_member(context, class.original_name, name)))
-            } else {
-                on_taken_object(format!("{name}({})", arguments(0)))
-            })
-        })
-        .unzip();
-    let classes: Vec<Word> = classes.into_iter().flatten().collect();
-    let (last, others) = methods.split_last()?;
-    let methods = if others.is_empty() { last.clone() } else { format!("{} or {last}", others.join(", ")) };
-    let taken =
-        if taken.is_empty() { String::new() } else { format!(" on the {} your constructor takes", taken.join(" or ")) };
-    let imports = display_missing_imports(context, classes).map(|imports| format!(" {imports}")).unwrap_or_default();
-
-    Some(format!("{methods}{taken}.{imports}"))
-}
-
-/// `name` with its first letter in lowercase, the name PHP# code gives a local or a parameter of the class `name`.
-fn lower_first(name: &str) -> String {
-    let mut letters = name.chars();
-
-    letters.next().map(|first| first.to_lowercase().chain(letters).collect()).unwrap_or_default()
-}
-
-/// The collection method `groups` gives a call, spec section 12: the method of the group that holds every kind, or the
-/// kind of the call's collection, which the analyzed type of its argument gives, written on that collection. Otherwise
-/// each group's method on a collection `x`, with the kinds that have it, so the call's collection is never written into
-/// a method its kind lacks.
-fn collection_form<A>(
-    context: &Context<'_, '_, A>,
-    artifacts: &AnalysisArtifacts,
-    groups: &[(&[&str], &str)],
-    arguments: Option<&ArgumentList<'_>>,
-) -> String
-where
-    A: Arena,
-{
-    let receiver = groups.first().map_or(0, |(_, form)| usize::from(form.starts_with("{b}")));
-    let kind = arguments
-        .and_then(|arguments| arguments.arguments.get(receiver))
-        .and_then(|argument| artifacts.get_expression_type(argument.value()))
-        .and_then(collection_kind);
-    let chosen =
-        groups.iter().find(|(kinds, _)| *kinds == EVERY_COLLECTION || kind.is_some_and(|kind| kinds.contains(&kind)));
-
-    match chosen {
-        Some((_, form)) => format!("`{}`", collection_call(context, form, receiver, arguments)),
-        None => groups
-            .iter()
-            .map(|(kinds, form)| {
-                let kinds: Vec<String> = kinds.iter().map(|kind| format!("a `{kind}`")).collect();
-
-                format!("`{}` on {}", collection_call(context, form, receiver, None), kinds.join(" or "))
-            })
-            .collect::<Vec<_>>()
-            .join(", or "),
-    }
-}
-
-/// The collection method `form` written with the call's arguments: each that is a name or a member read as written,
-/// and each other one as `…`, the collection as `x`. A call whose arguments the method does not all take is written
-/// with none of them, so a dropped argument never reads as kept.
-fn collection_call<A>(
-    context: &Context<'_, '_, A>,
-    form: &str,
-    receiver: usize,
-    arguments: Option<&ArgumentList<'_>>,
-) -> String
-where
-    A: Arena,
-{
-    let taken = if form.contains("{b}") { 2 } else { 1 };
-    let arguments = arguments.filter(|arguments| arguments.arguments.len() <= taken);
-    let written = |index: usize| {
-        arguments
-            .and_then(|arguments| arguments.arguments.get(index))
-            .and_then(|argument| argument_text(context, argument))
-            .unwrap_or_else(|| if index == receiver { "x" } else { "…" }.to_owned())
-    };
-
-    form.replace("{a}", &written(0)).replace("{b}", &written(1))
-}
-
-/// The kind of PHP# collection, `List`, `Map` or `Set`, every type of `union` is, if one is.
-fn collection_kind(union: &TUnion) -> Option<&'static str> {
-    let kind = |atomic: &TAtomic| match atomic {
-        TAtomic::Array(TArray::List(_)) => Some("List"),
-        TAtomic::Array(TArray::Keyed(_)) => Some("Map"),
-        TAtomic::Array(TArray::Set(_)) => Some("Set"),
-        _ => None,
-    };
-    let first = kind(union.types.first()?)?;
-
-    union.types.iter().all(|atomic| kind(atomic) == Some(first)).then_some(first)
-}
-
-/// The PHP# syntax `form` with each argument that is a name or a member read written into it.
-fn syntax_form<A>(context: &Context<'_, '_, A>, form: &str, arguments: Option<&ArgumentList<'_>>) -> String
-where
-    A: Arena,
-{
-    let written: Vec<Option<String>> = arguments
-        .map(|arguments| arguments.arguments.iter().map(|argument| argument_text(context, argument)).collect())
-        .unwrap_or_default();
-    let argument = |index: usize| written.get(index).cloned().flatten().unwrap_or_else(|| placeholder(index));
-    let spread: Vec<String> = (0..written.len()).map(|index| format!("...{}", argument(index))).collect();
-
-    form.replace("{x}", &written.first().cloned().flatten().unwrap_or_else(|| "x".to_owned()))
-        .replace("{a}", &argument(0))
-        .replace("{b}", &argument(1))
-        .replace("{...}", &spread.join(", "))
-}
-
-/// The call of the plain PHP function `name` through its namespace: `global.strlen(…)` for a function of PHP's root
-/// namespace, and `Pdf.render(…)` for one inside a namespace, by the name the file imports it under, with the import
-/// the file lacks.
-fn namespace_form<A>(context: &Context<'_, '_, A>, name: Word) -> String
-where
-    A: Arena,
-{
-    let call = match name.as_bytes().iter().rposition(|byte| *byte == b'\\') {
-        Some(separator) => {
-            let namespace = word(&name.as_bytes()[..separator]);
-            let function = String::from_utf8_lossy(&name.as_bytes()[separator + 1..]);
-            let import =
-                display_missing_imports(context, [namespace]).map(|import| format!(" {import}")).unwrap_or_default();
-
-            format!(
-                "`{}.{function}(…)`.{import}",
-                sharp_code_class_name(context.codebase, &context.imported_names, &context.scope, namespace)
-            )
-        }
-        None => format!("`global.{name}(…)`."),
-    };
-
-    format!("A plain PHP function is called through its namespace: write {call}")
-}
-
-/// The name a form gives the argument at `index` when it cannot write the argument itself: `a`, `b`, `c` and on
-/// through the alphabet, then `argument27` and on.
-fn placeholder(index: usize) -> String {
-    u8::try_from(index)
-        .ok()
-        .filter(|index| *index < 26)
-        .map_or_else(|| format!("argument{}", index + 1), |index| char::from(b'a' + index).to_string())
-}
-
-/// The source text of a positional argument that is one name or a member read, such as `total` or `order.total`.
-fn argument_text<A>(context: &Context<'_, '_, A>, argument: &Argument<'_>) -> Option<String>
-where
-    A: Arena,
-{
-    if !argument.is_positional() || argument.is_unpacked() {
-        return None;
-    }
-
-    let mut receiver = argument.value();
-    loop {
-        receiver = match receiver {
-            Expression::ConstantAccess(_) => break,
-            Expression::Access(
-                Access::Property(PropertyAccess { object, property: ClassLikeMemberSelector::Identifier(_), .. })
-                | Access::NullSafeProperty(NullSafePropertyAccess {
-                    object,
-                    property: ClassLikeMemberSelector::Identifier(_),
-                    ..
-                }),
-            ) => object,
-            _ => return None,
-        };
-    }
-
-    Some(String::from_utf8_lossy(&context.source_file.contents[argument.value().span().to_range_usize()]).into_owned())
-}
-
 /// Spec section 4 writes every member as `this.m()` or `Class.m()`, so a bare call is the global function's. When the
 /// enclosing class declares a method of that name, returns the message that names the member call to write. When it
 /// states a law of that name, spec section 28, a law's body writes the call through the class name, as a static
@@ -1369,97 +520,22 @@ where
     })
 }
 
-/// Spec section 23: after `import Vendor.Pdf;`, a bare `render(html)` that finds no function means the namespace's
-/// `render`, which the call is refused as and checked against. Returns its name when an imported namespace declares
-/// `name`.
-fn imported_namespace_function<A>(context: &Context<'_, '_, A>, name: &[u8]) -> Option<Word>
+/// Whether the source holds `name` where it stands, as every name code writes does. The PHP a pattern runs as calls
+/// PHP's type tests by name, as `is_string` at the type `string`, spec section 21, and no source writes those names.
+fn is_written<A>(context: &Context<'_, '_, A>, name: &Identifier<'_>) -> bool
 where
     A: Arena,
 {
-    context.imported_names.keys().find_map(|imported| {
-        Some(context.codebase.get_function(&[imported.as_bytes(), b"\\", name].concat())?.original_name)
-    })
+    context.source_file.contents.get(name.span().to_range_usize()).is_some_and(|written| written == name.value())
 }
 
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
-    use std::borrow::Cow;
-    use std::path::Path;
-
-    use foldhash::HashSet;
     use indoc::indoc;
 
-    use mago_allocator::LocalArena;
-    use mago_codex::metadata::CodebaseMetadata;
-    use mago_codex::populator::populate_codebase;
-    use mago_codex::reference::SymbolReferences;
-    use mago_codex::scanner::scan_program;
-    use mago_database::file::File;
-    use mago_names::resolver::NameResolver;
-    use mago_php_version::PHPVersion;
-    use mago_syntax::parser::parse_file;
-    use mago_word::WordSet;
-
-    use super::REPLACEMENTS;
-    use super::Replacement;
-    use super::WRAPPED_CLASSES;
     use crate::code::IssueCode;
     use crate::test_analysis;
-
-    /// A bare call names the standard library members its row of [`REPLACEMENTS`] lists, creating a class names those
-    /// of its row of [`WRAPPED_CLASSES`], and `member_form` drops a member the codebase lacks. So every listed member
-    /// must be one the library declares, or the checker would name
-    /// less than its table says. The library is `sharp/composer/library`, beside this tree's `sharp/mago`. The test's
-    /// walk of the library and its failure message run only when the library changes shape, so coverage leaves it out.
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn every_member_a_replacement_names_is_declared_by_the_standard_library() {
-        let arena = LocalArena::new();
-        let mut codebase = CodebaseMetadata::new();
-        let mut folders = vec![Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../composer/library")];
-        while let Some(folder) = folders.pop() {
-            for entry in std::fs::read_dir(&folder).expect("the standard library sits beside sharp/mago") {
-                let path = entry.expect("a readable library entry").path();
-                if path.is_dir() {
-                    folders.push(path);
-                } else if path.extension().is_some_and(|extension| extension == "sharp") {
-                    let name = path.to_string_lossy().into_owned().into_bytes();
-                    let file =
-                        File::ephemeral(Cow::Owned(name), Cow::Owned(std::fs::read(&path).expect("a library file")));
-                    let program = parse_file(&arena, &file);
-                    let names = NameResolver::new(&arena).resolve(program);
-                    codebase.extend(scan_program(&arena, &file, program, &names, PHPVersion::LATEST));
-                }
-            }
-        }
-        populate_codebase(&mut codebase, &mut SymbolReferences::new(), WordSet::default(), HashSet::default());
-
-        let missing: Vec<String> = REPLACEMENTS
-            .iter()
-            .flat_map(|(function, replacement)| match replacement {
-                Replacement::Members(members) | Replacement::MembersOn(_, members) => {
-                    members.iter().map(|member| (*function, *member)).collect()
-                }
-                Replacement::Syntax(_) | Replacement::CollectionMethod(_) | Replacement::Removed(_) => Vec::new(),
-            })
-            .chain(WRAPPED_CLASSES.iter().flat_map(|(class, members)| members.iter().map(|member| (*class, *member))))
-            .filter(|(_, (class, member))| {
-                codebase.get_class_like(class.as_bytes()).is_none_or(|metadata| {
-                    let class = metadata.name.as_bytes();
-                    if member.starts_with('$') {
-                        codebase.get_property(class, member.as_bytes()).is_none()
-                    } else {
-                        codebase.get_method(class, member.as_bytes()).is_none()
-                            && !codebase.class_constant_exists(class, member.as_bytes())
-                    }
-                })
-            })
-            .map(|(function, (class, method))| format!("{function}: {class}.{method}"))
-            .collect();
-
-        assert_eq!(missing, Vec::<String>::new());
-    }
 
     test_analysis! {
         name = call_simple_addition,

@@ -53,7 +53,6 @@ use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
 use crate::expression::access::report_full_name;
-use crate::expression::call::function_call::report_wrapped_class;
 use crate::expression::is_refused_type;
 use crate::expression::with::analyze_object_initializer;
 use crate::invocation::Invocation;
@@ -508,7 +507,6 @@ where
 
     crate::utils::availability::check_class_like_availability(context, metadata, &classname_str, class_expression_span);
     check_foreign_outside_module(context, metadata, &classname_str, instantiation_span, class_expression_span);
-    report_wrapped_class(context, block_context, artifacts, metadata, None, instantiation_span);
 
     if metadata.kind.is_interface() && !classname.is_from_class_string() {
         context.collector.report_with_code(

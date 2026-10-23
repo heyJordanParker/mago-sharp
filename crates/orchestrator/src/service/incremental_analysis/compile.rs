@@ -947,11 +947,11 @@ mod tests {
         (metadata, symbol_references)
     }
 
-    /// The standard library's `Sharp\Environment`, the `foreign` class of the effect `Environment`, at the library's path,
-    /// with its `currentDirectory`.
+    /// The standard library's `Sharp\System\Environment`, the `foreign` class of the effect `Environment`, at the
+    /// library's path, with its `currentDirectory`.
     const ENVIRONMENT: (&str, &str) = (
-        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Environment.sharp",
-        "namespace Sharp;\n\npublic foreign class Environment\n{\n    public string currentDirectory() => \"/\";\n}\n",
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/System/Environment.sharp",
+        "namespace Sharp.System;\n\npublic foreign class Environment\n{\n    public string currentDirectory() => \"/\";\n}\n",
     );
 
     /// A project of files, each a workspace-relative name and its contents. A PHP file under `vendor/` is vendored, and
@@ -2176,13 +2176,17 @@ mod tests {
         }
     }
 
-    /// A project whose `Report` reads a library's constant through its namespace, `Pdf.DEFAULT_DPI`, and a constant of
-    /// PHP's root namespace, `global.APP_VERSION`, spec section 23, each declared in a plain PHP file of the project.
+    /// A project whose `Report` reads a library's constant through its namespace, `Pdf.DEFAULT_DPI`, and a constant the
+    /// library declares in PHP's root namespace beside its classes, `Pdf.APP_VERSION`, spec section 23, each declared in
+    /// a plain PHP file of the project.
     fn constants() -> Vec<(&'static str, String)> {
         vec![
-            ("lib/Pdf.php", "<?php\n\nnamespace Vendor\\Pdf;\n\nconst DEFAULT_DPI = 300;\n".to_string()),
+            (
+                "lib/Pdf.php",
+                "<?php\n\nnamespace Vendor\\Pdf;\n\nconst DEFAULT_DPI = 300;\n\nfinal class Document\n{\n}\n".to_string(),
+            ),
             ("lib/version.php", "<?php\n\nconst APP_VERSION = 3;\n".to_string()),
-            ("app/Shop/Report.sharp", "namespace App.Shop;\n\nimport Vendor.Pdf;\n\npublic class Report\n{\n    public int dpi() => Pdf.DEFAULT_DPI;\n\n    public int version() => global.APP_VERSION;\n}\n".to_string()),
+            ("app/Shop/Report.sharp", "namespace App.Shop;\n\nimport Vendor.Pdf;\n\npublic class Report\n{\n    public int dpi() => Pdf.DEFAULT_DPI;\n\n    public int version() => Pdf.APP_VERSION;\n}\n".to_string()),
         ]
     }
 
@@ -2543,27 +2547,27 @@ mod tests {
     }
 
     const SHAPE: &str =
-        "namespace App;\n\npublic class Shape\n{\n    public int size(Cache cache) => Cache.size();\n}\n";
-    const CACHE: &str = "namespace App;\n\npublic class Cache\n{\n    public static int size() => 1;\n}\n";
+        "namespace App;\n\npublic class Shape\n{\n    public int size(Random random) => Random.size();\n}\n";
+    const RANDOM: &str = "namespace App;\n\npublic class Random\n{\n    public static int size() => 1;\n}\n";
 
     /// Spec section 23: a class of the file's namespace wins over the class `Sharp` imports by default, so the unchanged
-    /// `Shape`, whose bare `Cache` meant the missing `Sharp.Cache`, compiles once `app/App/Cache.sharp` declares
-    /// `App.Cache`, and is refused again once it is removed, in a one-off compile and under `mago analyze --watch`. An
-    /// edit to `Shape` itself keeps its bare `Cache` naming `App.Cache`.
+    /// `Shape`, whose bare `Random` meant the missing `Sharp.Random`, compiles once `app/App/Random.sharp` declares
+    /// `App.Random`, and is refused again once it is removed, in a one-off compile and under `mago analyze --watch`. An
+    /// edit to `Shape` itself keeps its bare `Random` naming `App.Random`.
     #[test]
     fn a_compile_after_the_namespace_gains_or_loses_a_class_named_like_a_default_class_matches_a_clean_compile() {
         let alone = vec![("app/App/Shape.sharp", SHAPE.to_string())];
-        let beside = vec![("app/App/Shape.sharp", SHAPE.to_string()), ("app/App/Cache.sharp", CACHE.to_string())];
+        let beside = vec![("app/App/Shape.sharp", SHAPE.to_string()), ("app/App/Random.sharp", RANDOM.to_string())];
         let edited_shape = SHAPE.replace(
-            "Cache.size();\n",
-            "Cache.size();\n\n    public int twice(Cache cache) => this.size(cache) * 2;\n",
+            "Random.size();\n",
+            "Random.size();\n\n    public int twice(Random random) => this.size(random) * 2;\n",
         );
-        let shape_edited = vec![("app/App/Shape.sharp", edited_shape), ("app/App/Cache.sharp", CACHE.to_string())];
+        let shape_edited = vec![("app/App/Shape.sharp", edited_shape), ("app/App/Random.sharp", RANDOM.to_string())];
 
         for diff in [false, true] {
             for (name, before, after, accepted) in [
-                ("Cache added", &alone, &beside, true),
-                ("Cache removed", &beside, &alone, false),
+                ("Random added", &alone, &beside, true),
+                ("Random removed", &beside, &alone, false),
                 ("Shape edited", &beside, &shape_edited, true),
             ] {
                 let (base, edited) = (shop_project(before), shop_project(after));
@@ -2641,10 +2645,10 @@ mod tests {
         );
     }
 
-    /// An editor analyzes one file against the classes of its namespace too, so `Shape`'s bare `Cache` is `App.Cache`.
+    /// An editor analyzes one file against the classes of its namespace too, so `Shape`'s bare `Random` is `App.Random`.
     #[test]
     fn one_file_analyzed_alone_names_the_class_of_its_namespace() {
-        let database = project(&[("app/App/Shape.sharp", SHAPE), ("app/App/Cache.sharp", CACHE)]);
+        let database = project(&[("app/App/Shape.sharp", SHAPE), ("app/App/Random.sharp", RANDOM)]);
         let service = analyzed(&database);
         let shape = FileId::new(b"app/App/Shape.sharp");
 
@@ -2662,7 +2666,7 @@ mod tests {
         let position =
             "namespace App;\n\npublic class Position\n{\n    public Position(public string title { get; }) { }\n}\n";
         let environment = "namespace App;\n\npublic class Environment\n{\n    public int level() => 1;\n}\n";
-        let fixed = "namespace App;\n\nimport Sharp.Environment as SharpEnvironment;\nimport Sharp.Position as SharpPosition;\n\npublic class Fixed\n{\n    public string here() => SharpPosition.current().directory;\n\n    public string file() => SharpPosition.current().file;\n\n    public int line() => SharpPosition.current().line;\n\n    public string caller() => SharpPosition.current().function;\n\n    public string folder(SharpEnvironment environment) => environment.currentDirectory();\n\n    public string title(Position position) => position.title;\n\n    public int level(Environment environment) => environment.level();\n}\n";
+        let fixed = "namespace App;\n\nimport Sharp.System.Environment as SharpEnvironment;\nimport Sharp.Position as SharpPosition;\n\npublic class Fixed\n{\n    public string here() => SharpPosition.current().directory;\n\n    public string file() => SharpPosition.current().file;\n\n    public int line() => SharpPosition.current().line;\n\n    public string caller() => SharpPosition.current().function;\n\n    public string folder(SharpEnvironment environment) => environment.currentDirectory();\n\n    public string title(Position position) => position.title;\n\n    public int level(Environment environment) => environment.level();\n}\n";
         let database = project(&[
             ENVIRONMENT,
             ("app/App/Position.sharp", position),
@@ -2691,18 +2695,16 @@ mod tests {
         assert_eq!(warm.analyzed_files, HashSet::from_iter([FileId::new(b"app/App/Order.sharp")]));
     }
 
-    /// A file whose bare `Environment` means `Sharp.Environment` lists the files that would declare `App.Environment`
-    /// in its folder as inputs, stamped absent, so adding one makes its compiled file stale. A package file leaves them
-    /// to `composer.lock`, as the rest of its package.
+    /// A file whose bare `Position` means `Sharp.Position` lists the files that would declare `App.Position` in its
+    /// folder as inputs, stamped absent, so adding one makes its compiled file stale. A package file leaves them to
+    /// `composer.lock`, as the rest of its package.
     #[test]
     fn a_default_class_name_lists_the_files_its_namespace_would_declare_it_in_as_absent_inputs() {
-        let here = "namespace App;\n\npublic class Here\n{\n    public string folder(Environment environment) => environment.currentDirectory();\n}\n";
+        let here =
+            "namespace App;\n\npublic class Here\n{\n    public string folder() => Position.current().directory;\n}\n";
         let packaged = "vendor/acme/shapes/src/Here.sharp";
-        let database = project(&[
-            ENVIRONMENT,
-            ("app/App/Here.sharp", here),
-            (packaged, &here.replace("namespace App;", "namespace Acme;")),
-        ]);
+        let database =
+            project(&[("app/App/Here.sharp", here), (packaged, &here.replace("namespace App;", "namespace Acme;"))]);
 
         let compiled = compile(&mut analyzed(&database), database_stamp(&database));
 
@@ -2713,15 +2715,15 @@ mod tests {
             inputs.iter().map(|input| String::from_utf8_lossy(&input.path)).collect::<Vec<_>>(),
             [
                 "Module.sharp",
-                "app/App/Environment.php",
-                "app/App/Environment.sharp",
                 "app/App/Here.sharp",
                 "app/App/Module.sharp",
+                "app/App/Position.php",
+                "app/App/Position.sharp",
                 "app/Module.sharp",
                 "composer.lock"
             ]
         );
-        for input in &inputs[1..3] {
+        for input in &inputs[3..5] {
             assert_eq!((input.size, input.mtime_ns, input.hash), (0, 0, [0; 16]), "{input:?} is stamped absent");
         }
     }

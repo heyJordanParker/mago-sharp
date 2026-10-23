@@ -527,8 +527,9 @@ where
         Expression::Access(Access::Property(
             property_access @ PropertyAccess { property: ClassLikeMemberSelector::Identifier(constant), .. },
         )) if let Some(class) = context.resolved_names.static_property_class(property_access) => {
-            // Spec section 23: `global.PHP_INT_MAX` reads PHP's constant through its root namespace.
-            if class.name.value() == b"global" {
+            // Spec section 23: in the standard library, `global.PHP_INT_MAX` reads PHP's constant through its root
+            // namespace.
+            if context.file.is_standard_library && class.name.value() == b"global" {
                 return get_literal_constant_type(constant.value)
                     .or_else(|| get_platform_constant_type(constant.value));
             }

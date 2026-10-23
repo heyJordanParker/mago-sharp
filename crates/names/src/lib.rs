@@ -28,6 +28,10 @@ pub mod scope;
 mod internal;
 mod sharp_classes;
 
+pub use sharp_classes::EMIT_EFFECT;
+pub use sharp_classes::PROPERTY_BEHAVIOR;
+pub use sharp_classes::STANDARD_ROOT_CLASSES;
+
 /// The methods of a PHP# `List`, `Map` or `Set` that change it.
 ///
 /// Spec section 12 runs them on the collection a local holds, so a call of one on a local writes the local, as
@@ -35,84 +39,50 @@ mod sharp_classes;
 /// writes its local too, which captures it by reference, as harmless.
 pub const CHANGING_COLLECTION_METHODS: [&str; 4] = ["add", "insert", "remove", "clear"];
 
-/// The methods of a PHP# `List` the bridge lowers from the checker's types, as `(collection, method)` pairs.
+/// The attribute the prelude marks each method of a PHP# `List` with that the bridge lowers from the checker's types.
 ///
-/// Each lowers to PHP functions or operators on the array. A `List` is a PHP array, which has no methods, so the
-/// checker refuses one on a value that can also be an object, whose own method would not run. A `Map` and a `Set` are
-/// engine objects, whose every method runs on `Sharp\Collection`.
-pub const INLINED_COLLECTION_METHODS: [(&str, &str); 11] = [
-    ("List", "count"),
-    ("List", "getOrNull"),
-    ("List", "contains"),
-    ("List", "indexOf"),
-    ("List", "last"),
-    ("List", "max"),
-    ("List", "min"),
-    ("List", "remove"),
-    ("List", "clear"),
-    ("List", "toSet"),
-    ("List", "toList"),
-];
+/// Each marked method lowers to PHP functions or operators on the array. A `List` is a PHP array, which has no
+/// methods, so the checker refuses one on a value that can also be an object, whose own method would not run. A `Map`
+/// and a `Set` are engine objects, whose every method runs on `Sharp\Collection`.
+pub const INLINED: &str = "Sharp\\Internal\\Inlined";
 
-/// The exception classes in PHP's root namespace that the standard library's `Builtins.sharp` declares, which a bare
-/// name in a `.sharp` file names by default, spec section 23.
-pub const STANDARD_EXCEPTIONS: [&str; 47] = [
-    "ArgumentCountError",
-    "ArithmeticError",
-    "AssertionError",
-    "BadFunctionCallException",
-    "BadMethodCallException",
-    "CompileError",
-    "DOMException",
-    "DateError",
-    "DateException",
-    "DateInvalidOperationException",
-    "DateInvalidTimeZoneException",
-    "DateMalformedIntervalStringException",
-    "DateMalformedPeriodStringException",
-    "DateMalformedStringException",
-    "DateObjectError",
-    "DateRangeError",
-    "DivisionByZeroError",
-    "DomainException",
-    "ErrorException",
-    "Exception",
-    "FiberError",
-    "IntlException",
-    "InvalidArgumentException",
-    "JsonException",
-    "LengthException",
-    "LogicException",
-    "OutOfBoundsException",
-    "OutOfRangeException",
-    "OverflowException",
-    "PDOException",
-    "ParseError",
-    "PharException",
-    "RangeException",
-    "ReflectionException",
-    "RequestParseBodyException",
-    "RuntimeException",
-    "SNMPException",
-    "SQLite3Exception",
-    "SoapFault",
-    "SodiumException",
-    "TypeError",
-    "UnderflowException",
-    "UnexpectedValueException",
-    "UnhandledMatchError",
-    "ValueError",
-    "com_exception",
-    "mysqli_sql_exception",
-];
+/// The mark of a parameter whose argument a method writes as JSON text.
+///
+/// The standard library marks `Json.encode`'s, so the checker refuses a `Map` key JSON can't write. The checker reads
+/// the mark, so it copies no library name.
+pub const ENCODED_AS_JSON: &str = "Sharp\\Internal\\EncodedAsJson";
+
+/// The mark of a method without a body whose implementations may have any effect.
+///
+/// The code that calls the method carries the implementation's effects, as for `Dispatcher.dispatch` and
+/// `Behavior<T>`'s `get` and `set`.
+pub const ACCEPTS_ANY_EFFECT: &str = "Sharp\\Internal\\AcceptsAnyEffect";
+
+/// The attribute the standard library marks the method with whose call starts a listener of its first type argument,
+/// as `Events.on`.
+pub const STARTS_LISTENER: &str = "Sharp\\Internal\\StartsListener";
+
+/// The mark of a generic method that parses a value into its type argument.
+///
+/// The method runs the type's `parse`, as `Json.decode<T>` does, so each call's type argument gets the struct parse
+/// check.
+pub const PARSES_TYPE_ARGUMENT: &str = "Sharp\\Internal\\ParsesTypeArgument";
+
+/// The prelude class a type parameter with no class bound stands for in a method marked [`PARSES_TYPE_ARGUMENT`]: it
+/// declares the `parse` and `tryParse` each struct and PHP# class gets.
+pub const PARSED: &str = "Sharp\\Internal\\Parsed";
+
+/// The attribute the standard library marks a method with that a law's proof reads as the Lean function the
+/// attribute's argument names, folded over the call's arguments, as `Math.max` is Lean's `max`.
+pub const LEAN_FUNCTION: &str = "Sharp\\Internal\\LeanFunction";
 
 /// The class-likes that a bare name in a `.sharp` file names by default, spec section 23, and that a class-like of the
 /// file's namespace can win over: every class-like the standard library or the prelude declares directly in `Sharp`,
-/// then the [standard exceptions](STANDARD_EXCEPTIONS), but the [fixed one](fixed_default_class).
+/// then the [standard root classes](STANDARD_ROOT_CLASSES), but the [fixed one](fixed_default_class).
 pub(crate) fn default_classes() -> impl Iterator<Item = &'static str> {
     sharp_classes::SHARP_CLASSES
         .into_iter()
-        .chain(STANDARD_EXCEPTIONS)
+        .chain(STANDARD_ROOT_CLASSES)
         .filter(|class| fixed_default_class(default_short_name(class)).is_none())
 }
 
@@ -123,10 +93,20 @@ pub(crate) fn fixed_default_class(name: &[u8]) -> Option<&'static [u8]> {
     (name == b"Error").then_some(b"Sharp\\Error".as_slice())
 }
 
-/// The default class-like whose short name is `name`, as a `.sharp` file writes it: `Sharp\Cache` for `Cache`, and
+/// The default class-like whose short name is `name`, as a `.sharp` file writes it: `Sharp\Math` for `Math`, and
 /// `ValueError` for `ValueError`. A lowercase `int` is the built-in type, so the name is compared exactly.
 pub(crate) fn default_class(name: &[u8]) -> Option<&'static [u8]> {
     default_classes().find(|class| default_short_name(class) == name).map(str::as_bytes)
+}
+
+/// The standard effect whose short name is `name`, as a `uses` in a `.sharp` file writes it: `Sharp\Time\Clock` for
+/// `Clock`, spec section 29, or the [effect of `emit`](EMIT_EFFECT), which no `foreign` class is.
+pub(crate) fn standard_effect(name: &[u8]) -> Option<&'static [u8]> {
+    sharp_classes::STANDARD_EFFECTS
+        .into_iter()
+        .chain([EMIT_EFFECT])
+        .find(|effect| default_short_name(effect) == name)
+        .map(str::as_bytes)
 }
 
 /// Whether a class-like whose short name is `name` wins over a default class-like in its namespace, compared ignoring
@@ -135,7 +115,7 @@ pub(crate) fn shadows_a_default_class(name: &[u8]) -> bool {
     default_classes().any(|class| default_short_name(class).eq_ignore_ascii_case(name))
 }
 
-/// The name a `.sharp` file writes the default class-like `class` by: `Cache` for `Sharp\Cache`.
+/// The name a `.sharp` file writes the default class-like `class` by: `Math` for `Sharp\Math`.
 pub(crate) fn default_short_name(class: &str) -> &[u8] {
     class.rsplit('\\').next().unwrap_or(class).as_bytes()
 }
@@ -172,12 +152,11 @@ pub struct ResolvedNames<'arena> {
     /// Internal map: start offset -> (end offset, (resolved FQN, imported flag)).
     names: HashMap<u32, Resolved<'arena>>,
 
-    /// Start offset -> what a PHP# file writes there where `names` holds the PHP the form runs as instead, which the
-    /// checker, the analyzer and the bridge read: `None` where the source names nothing, as at `Starter` in the pattern
-    /// `Plan.Starter`, at the type parameter `T` or at `global`, and `Some` where it names what `names` holds nowhere,
-    /// as `ucfirst` in `global.ucfirst("tea")`. Empty for PHP.
-    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "HashMap::is_empty"))]
-    written: HashMap<u32, Option<Resolved<'arena>>>,
+    /// Start offset of every name of `names` that holds the PHP a PHP# form runs as, which the checker, the analyzer
+    /// and the bridge read, where the source names nothing, as at `Starter` in the pattern `Plan.Starter` and at the
+    /// type parameter `T`. Empty for PHP.
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "foldhash::HashSet::is_empty"))]
+    unwritten: foldhash::HashSet<u32>,
 
     /// Start offset of every bare PHP# name, and of every PHP# type name that names a type parameter -> what it refers
     /// to. Empty for PHP.
@@ -271,14 +250,13 @@ impl<'arena> ResolvedNames<'arena> {
 
     /// Iterates over every name the source writes as `(start, end, fqn, imported)`, as a reader of the source sees
     /// it: an extension host, or `mago cst --names`. In a PHP# file that is the name each form means, the same name the
-    /// PHP that means it gives: `App\Plan` alone for the pattern `Plan.Starter`, as for `Plan::Starter`, `ucfirst` for
-    /// `global.ucfirst`, as for `\ucfirst`, and no name for a local or a type parameter. The other methods read the PHP
-    /// each form runs as.
+    /// PHP that means it gives: `App\Plan` alone for the pattern `Plan.Starter`, as for `Plan::Starter`, and no name
+    /// for a local or a type parameter. The other methods read the PHP each form runs as.
     pub fn iter(&self) -> impl Iterator<Item = (u32, u32, &'arena [u8], bool)> + '_ {
-        let read = self.names.iter().filter(|(start, _)| !self.written.contains_key(start));
-        let written = self.written.iter().filter_map(|(start, name)| name.as_ref().map(|name| (start, name)));
-
-        read.chain(written).map(|(&start, &(end, (name, imported)))| (start, end, name, imported))
+        self.names
+            .iter()
+            .filter(|(start, _)| !self.unwritten.contains(*start))
+            .map(|(&start, &(end, (name, imported)))| (start, end, name, imported))
     }
 
     /// Byte ranges `(start, end)` of every entry whose resolved name matches
@@ -451,12 +429,7 @@ impl<'arena> ResolvedNames<'arena> {
     /// Inserts a name the PHP a PHP# form runs as reads at `span`, where the source names nothing.
     pub(crate) fn insert_lowered_at(&mut self, span: Span, name: &'arena [u8], imported: bool) {
         self.insert_at(span, name, imported);
-        self.written.insert(span.start.offset, None);
-    }
-
-    /// Inserts a name a PHP# file writes at `span`, where the PHP the form runs as reads none.
-    pub(crate) fn insert_written_at(&mut self, span: Span, name: &'arena [u8], imported: bool) {
-        self.written.insert(span.start.offset, Some((span.end.offset, (name, imported))));
+        self.unwritten.insert(span.start.offset);
     }
 }
 

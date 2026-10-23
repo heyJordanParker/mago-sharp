@@ -193,7 +193,7 @@ where
 
             Ok(())
         }
-        // PHP# calls a plain PHP function through its namespace, `Pdf.render(html)` or `global.now()`.
+        // PHP# calls a plain PHP function through its namespace, `Pdf.render(html)` or `Foundation.abort(404)`.
         Call::Method(call)
             if context.dialect.is_sharp()
                 && let Some(named_call) =
@@ -603,6 +603,40 @@ where
     )
 }
 
+/// Reports a `.sharp` file's call of `function`, which the codebase does not declare, at `span`: the error a misspelled
+/// name gets. A `.sharp` file calls a plain PHP function through its namespace, `Pdf.render` or `Foundation.abort`.
+pub(crate) fn report_missing_function<A>(
+    context: &mut Context<'_, '_, A>,
+    function: &FunctionLikeIdentifier,
+    span: Span,
+) where
+    A: Arena,
+{
+    let title_str = function.title_kind_str();
+    let kind_str = function.kind_str();
+    let name_str = display_function_like_identifier(context, function);
+    let php_name = function.as_string();
+    let place = php_name
+        .rsplit_once('\\')
+        .map(|(namespace, function)| {
+            format!(
+                ", or declare `function {function}()` in a `.php` file of the namespace `{}`",
+                namespace.trim_start_matches('\\').replace('\\', ".")
+            )
+        })
+        .unwrap_or_default();
+
+    context.collector.report_with_code(
+        IssueCode::NonExistentFunction,
+        Issue::error(format!("{title_str} `{name_str}` does not exist."))
+            .with_annotation(
+                Annotation::primary(span).with_message(format!("Undefined {kind_str} `{name_str}` called here")),
+            )
+            .with_note(format!("This often means the {kind_str} is misspelled, or not defined or autoloaded."))
+            .with_help(format!("Check the spelling of `{name_str}`{place}.")),
+    );
+}
+
 fn get_function_like_target_inner<'ctx, A>(
     context: &mut Context<'ctx, '_, A>,
     function_like: FunctionLikeIdentifier,
@@ -660,30 +694,7 @@ where
 
     let Some(metadata) = metadata else {
         if !skip_error_on_not_found && context.dialect.is_sharp() {
-            let title_str = function_like.title_kind_str();
-            let kind_str = function_like.kind_str();
-            let identifier = alternative.unwrap_or(function_like);
-            // A `.sharp` file calls a plain PHP function through its namespace, `global.now` or `Pdf.render`.
-            let name_str = display_function_like_identifier(context, &identifier);
-            let php_name = identifier.as_string();
-            let place = match php_name.rsplit_once('\\') {
-                Some((namespace, function)) => format!(
-                    "declare `function {function}()` in a `.php` file of the namespace `{}`",
-                    namespace.trim_start_matches('\\').replace('\\', ".")
-                ),
-                None => format!("declare `function {php_name}()` in a `.php` file outside any namespace"),
-            };
-
-            context.collector.report_with_code(
-                IssueCode::NonExistentFunction,
-                Issue::error(format!("{title_str} `{name_str}` does not exist."))
-                    .with_annotation(
-                        Annotation::primary(span)
-                            .with_message(format!("Undefined {kind_str} `{name_str}` called here")),
-                    )
-                    .with_note(format!("This often means the {kind_str} is misspelled, or not defined or autoloaded."))
-                    .with_help(format!("Check the spelling of `{name_str}`, or {place}.")),
-            );
+            report_missing_function(context, &alternative.unwrap_or(function_like), span);
         } else if !skip_error_on_not_found {
             let title_str = function_like.title_kind_str();
             let kind_str = function_like.kind_str();

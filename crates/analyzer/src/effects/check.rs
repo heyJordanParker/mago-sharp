@@ -73,6 +73,7 @@ use crate::utils::names::display_member;
 use crate::utils::names::display_sharp_parameter_type;
 use crate::utils::names::display_sharp_type;
 use crate::utils::names::is_imported_namespace;
+use crate::utils::names::is_sharp_namespace;
 use crate::utils::names::namespace_function;
 use crate::utils::names::sharp_class_like_name;
 use crate::utils::names::sharp_code_class_name;
@@ -417,8 +418,8 @@ fn impure(
 }
 
 /// The plain PHP function `function`, as the cause of a call of it names it, written as the code names it through its
-/// namespace, spec section 23: `global.trim`, which the cause already writes, or `Pdf.render` after
-/// `import Vendor.Pdf;`, with the namespace a function outside the root namespace is named through.
+/// namespace, spec section 23: `Pdf.render` after `import Vendor.Pdf;`, with the namespace it is named through, and
+/// one of PHP's built-ins by its bare name.
 fn written_function(function: Word, code_class_name: &dyn Fn(Word) -> String) -> (String, Option<Word>) {
     match function.as_bytes().iter().rposition(|byte| *byte == b'\\') {
         Some(separator) => {
@@ -486,16 +487,12 @@ where
     let target = r#extern.target.span();
     let (class, member) = own.target;
     if class.is_empty() {
-        // Spec section 23 names a function of PHP's root namespace as `global.now`, in an `extern` as in a call.
-        if !written.starts_with("global.") {
-            context.collector.report_with_code(
-                IssueCode::BareFunctionCall,
-                Issue::error(format!(
-                    "An `extern` names a plain PHP function through its namespace: write `extern global.{written}`."
-                ))
-                .with_annotation(Annotation::primary(target)),
-            );
-        } else if context.codebase.get_function(member.as_bytes()).is_none() {
+        // Spec section 23 names a plain PHP function through its namespace, in an `extern` as in a call, and the
+        // standard library alone names one of PHP's root namespace through `global`, as `extern global.now`.
+        let declared = context.source_file.is_standard_library
+            && written.starts_with("global.")
+            && context.codebase.function_exists(member.as_bytes());
+        if !declared {
             context.collector.report_with_code(
                 IssueCode::NonExistentFunction,
                 Issue::error(format!("Function `{written}` does not exist."))
@@ -508,8 +505,8 @@ where
 
     let Some(class_metadata) = context.codebase.get_class_like(class.as_bytes()) else {
         // `extern Pdf.render` after `import Vendor.Pdf;` declares the function `render` of that namespace, spec
-        // section 23.
-        if namespace_function(context.codebase, class, member).is_some() {
+        // section 23, as `extern Foundation.now` declares Laravel's `now()`.
+        if namespace_function(context.codebase, class, member.as_bytes()).is_some() {
             return;
         }
 
@@ -594,8 +591,9 @@ pub(crate) fn check_uses<A>(
         }
 
         // The message names the `foreign` classes the file can name without another import: the standard library's,
-        // its namespace's and its imports'. The file depends on each class it could name, so the message follows a
-        // class that becomes `foreign` or stops being one, as a compile from scratch gives it.
+        // in any of its namespaces (spec section 29), its namespace's and its imports'. The file depends on each class
+        // it could name, so the message follows a class that becomes `foreign` or stops being one, as a compile from
+        // scratch gives it.
         let namespace = context.scope.namespace_name().unwrap_or_default();
         let nameable: Vec<_> = context
             .codebase
@@ -605,7 +603,7 @@ pub(crate) fn check_uses<A>(
                 let name = class.original_name.as_bytes();
                 let class_namespace = name.iter().rposition(|byte| *byte == b'\\').map_or(&b""[..], |end| &name[..end]);
 
-                class_namespace.eq_ignore_ascii_case(b"Sharp")
+                is_sharp_namespace(class_namespace)
                     || class_namespace.eq_ignore_ascii_case(namespace)
                     || context.imported_names.contains_key(&ascii_lowercase_word(name))
             })
@@ -617,7 +615,7 @@ pub(crate) fn check_uses<A>(
             .into_iter()
             .filter(|class| class.flags.is_foreign())
             .map(|class| {
-                sharp_class_like_name(
+                sharp_effect_name(
                     context.codebase,
                     &context.imported_names,
                     &context.short_name_counts,

@@ -118,6 +118,7 @@ use crate::resolver::NamespaceClasses;
 use crate::scope::concat_with_sep;
 use crate::scope::php_name;
 use crate::scope::trim_start_byte;
+use crate::standard_effect;
 
 /// A CST visitor (`MutWalker`) that traverses a PHP Concrete Syntax Tree
 /// to resolve names (classes, functions, constants, etc.) according to
@@ -298,10 +299,7 @@ impl<'arena, 'classes> NameWalker<'arena, 'classes> {
 
     /// Marks a bare name written before `.` or `?.`, with or without type arguments, which binds as a class unless it
     /// names a local, `this` or a type parameter in scope.
-    ///
-    /// `global.member` names the function or constant `member` of PHP's root namespace, spec section 23, as `\member`
-    /// does, so the source names `member` there.
-    fn mark_member_object(&mut self, object: &Expression<'arena>, member: &ClassLikeMemberSelector<'arena>) {
+    fn mark_member_object(&mut self, object: &Expression<'arena>) {
         if !self.sharp {
             return;
         }
@@ -312,11 +310,6 @@ impl<'arena, 'classes> NameWalker<'arena, 'classes> {
         };
 
         self.member_objects.insert(object.name.span().start.offset);
-        if object.name.value() == b"global"
-            && let ClassLikeMemberSelector::Identifier(member) = member
-        {
-            self.resolved_names.insert_written_at(member.span, member.value, false);
-        }
     }
 
     /// Brings the type parameters of a class, an interface, an extension block or a method into scope until
@@ -692,20 +685,12 @@ where
     }
 
     /// An `extern` target is a class when it is `Class.member` or the file imports, declares or names it by default,
-    /// and a global function otherwise, since PHP# declares no functions. `Class.member` resolves its class and keeps the member as
-    /// written. `global.now` is the function `now` of PHP's root namespace, spec section 23, and `Pdf.render` binds as
-    /// a class whose member the analysis finds as a function when the import names a namespace.
+    /// and a global function otherwise, since PHP# declares no functions. `Class.member` resolves its class and keeps the
+    /// member as written. `Pdf.render` binds as a class whose member the analysis finds as a function when the import
+    /// names a namespace.
     fn walk_in_extern(&mut self, r#extern: &'ast Extern<'arena>, context: &mut NameResolutionContext<'arena, A>) {
         let target = &r#extern.target;
         let written = target.value();
-        if r#extern.event.is_none()
-            && let Some(function) = written.strip_prefix(b"global.")
-        {
-            self.resolved_names.insert_at(target.span(), function, false);
-
-            return;
-        }
-
         let class = written.split(|byte| *byte == b'.').next().unwrap_or(written);
         let (fqn, imported) = self.resolve_class(context, class);
         // An `extern event` always names a class, spec section 15.
@@ -724,12 +709,12 @@ where
         self.resolved_names.bind(target.span(), Binding::Class);
     }
 
-    /// A name in `uses` names an effect, spec section 29. A class name of the `Sharp` namespace is that class even where
-    /// the file imports or declares a class under it, as Laravel's `Http` facade, and any other name resolves as a class.
+    /// A name in `uses` names an effect, spec section 29. A standard effect's name is that effect even where the file
+    /// imports or declares a class under it, as Laravel's `Http` facade, and any other name resolves as a class.
     fn walk_in_uses(&mut self, uses: &'ast Uses<'arena>, context: &mut NameResolutionContext<'arena, A>) {
         for name in &uses.names {
-            let (fqn, imported) = match default_class(name.value) {
-                Some(class) => (class, false),
+            let (fqn, imported) = match standard_effect(name.value) {
+                Some(effect) => (effect, false),
                 None => self.resolve_class(context, name.value),
             };
 
@@ -1363,7 +1348,7 @@ where
         method_call: &'ast MethodCall<'arena>,
         _context: &mut NameResolutionContext<'arena, A>,
     ) {
-        self.mark_member_object(method_call.object, &method_call.method);
+        self.mark_member_object(method_call.object);
         self.record_changing_call(method_call.object, &method_call.method);
     }
 
@@ -1372,7 +1357,7 @@ where
         method_partial_application: &'ast MethodPartialApplication<'arena>,
         _context: &mut NameResolutionContext<'arena, A>,
     ) {
-        self.mark_member_object(method_partial_application.object, &method_partial_application.method);
+        self.mark_member_object(method_partial_application.object);
     }
 
     fn walk_in_property_access(
@@ -1380,7 +1365,7 @@ where
         property_access: &'ast PropertyAccess<'arena>,
         _context: &mut NameResolutionContext<'arena, A>,
     ) {
-        self.mark_member_object(property_access.object, &property_access.property);
+        self.mark_member_object(property_access.object);
     }
 
     fn walk_in_null_safe_method_call(
@@ -1388,7 +1373,7 @@ where
         null_safe_method_call: &'ast NullSafeMethodCall<'arena>,
         _context: &mut NameResolutionContext<'arena, A>,
     ) {
-        self.mark_member_object(null_safe_method_call.object, &null_safe_method_call.method);
+        self.mark_member_object(null_safe_method_call.object);
         self.record_changing_call(null_safe_method_call.object, &null_safe_method_call.method);
     }
 
@@ -1397,7 +1382,7 @@ where
         null_safe_property_access: &'ast NullSafePropertyAccess<'arena>,
         _context: &mut NameResolutionContext<'arena, A>,
     ) {
-        self.mark_member_object(null_safe_property_access.object, &null_safe_property_access.property);
+        self.mark_member_object(null_safe_property_access.object);
     }
 
     fn walk_in_interface(
@@ -1700,12 +1685,7 @@ where
                 (Binding::Constant, context.resolve(NameKind::Constant, name))
             };
 
-            // `global` names PHP's root namespace, which `mark_member_object` records as its member's namespace.
-            if is_member_object && name == b"global" {
-                self.resolved_names.insert_lowered_at(span, fqn, imported);
-            } else {
-                self.resolved_names.insert_at(span, fqn, imported);
-            }
+            self.resolved_names.insert_at(span, fqn, imported);
             self.resolved_names.bind(span, binding);
 
             return;
