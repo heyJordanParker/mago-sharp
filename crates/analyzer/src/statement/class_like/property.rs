@@ -16,6 +16,7 @@ use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_specialized_template_type;
 use mago_codex::ttype::union::TUnion;
 use mago_codex::ttype::wrap_atomic;
+use mago_names::PROPERTY_BEHAVIOR;
 use mago_names::binding::php_variable_name;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
@@ -303,8 +304,9 @@ pub(crate) fn analyze_behaviors<A>(
     effects::summary::record_behaviors(context, block_context, artifacts, property_name, &classes);
 }
 
-/// Spec section 6.4: a behavior runs a property's `get` and `set`, so it is a class that implements
-/// `Sharp\Behavior<T>` for the property's type `T`, which PHP# creates with `new` and no arguments. A generic one takes
+/// Spec section 6.4: a behavior runs a property's `get` and `set`, so it is a class that implements the
+/// [interface the standard library marks `PropertyBehavior`](PROPERTY_BEHAVIOR), `Behavior<T>`, for the property's
+/// type `T`, which PHP# creates with `new` and no arguments. A generic one takes
 /// its type arguments as any written type does, which the analysis records for the bridge's `new`, as it records a
 /// generic `new`'s. The behavior's class and where it is named, unless it names no class.
 fn check_behavior<A>(
@@ -368,11 +370,12 @@ where
                 .find(|parameter| !parameter.flags.has_default() && !parameter.flags.is_variadic())
         })
         .map(|parameter| word(mago_bytes::trim_start_byte(parameter.name.0.as_bytes(), b'$')));
+    let interface = display_class_like_name(context, word(PROPERTY_BEHAVIOR)).to_string();
     let (message, help) = if !class.kind.is_class() || class.flags.is_abstract() {
         (
             format!("`{behavior_name}` can't be created: PHP# creates each behavior with `new` for each object."),
             format!(
-                "Name a class that implements `Behavior` for the property's type, such as one that extends `{behavior_name}`."
+                "Name a class that implements `{interface}` for the property's type, such as one that extends `{behavior_name}`."
             ),
         )
     } else if let Some(parameter) = required {
@@ -395,7 +398,7 @@ where
         )
     } else {
         let expected = TUnion::from_atomic(TAtomic::Object(TObject::Named(
-            TNamedObject::new(word(b"Sharp\\Behavior")).with_type_parameters(Some(vec![property_type.clone()])),
+            TNamedObject::new(word(PROPERTY_BEHAVIOR)).with_type_parameters(Some(vec![property_type.clone()])),
         )));
         if union_comparator::is_contained_by(
             context.codebase,
@@ -415,23 +418,31 @@ where
         let TAtomic::Object(TObject::Named(named)) = behavior_type.get_single() else {
             unreachable!("a class written as a type is a named object");
         };
-        let implemented = get_specialized_template_type(
-            context.codebase,
-            word(b"T"),
-            word(b"Sharp\\Behavior"),
-            class,
-            named.type_parameters.as_deref(),
-        )
-        .filter(|_| context.codebase.class_implements(class.name.as_bytes(), b"Sharp\\Behavior"));
+        let implemented = context
+            .codebase
+            .get_class_like(PROPERTY_BEHAVIOR.as_bytes())
+            .and_then(|behavior| behavior.template_types.keys().next().copied())
+            .filter(|_| context.codebase.class_implements(class.name.as_bytes(), PROPERTY_BEHAVIOR.as_bytes()))
+            .and_then(|template| {
+                get_specialized_template_type(
+                    context.codebase,
+                    template,
+                    word(PROPERTY_BEHAVIOR),
+                    class,
+                    named.type_parameters.as_deref(),
+                )
+            });
         let message = match implemented {
             Some(implemented) => {
                 let implemented = display_sharp_type(context, &implemented);
                 format!(
-                    "`{behavior_name}` is a `Behavior<{implemented}>`, and `{property}` is {} `{property_type}`.",
+                    "`{behavior_name}` is a `{interface}<{implemented}>`, and `{property}` is {} `{property_type}`.",
                     article(&property_type)
                 )
             }
-            None => format!("`{behavior_name}` is no `Behavior`, so it can't run the `get` and `set` of `{property}`."),
+            None => {
+                format!("`{behavior_name}` is no `{interface}`, so it can't run the `get` and `set` of `{property}`.")
+            }
         };
 
         (
@@ -447,7 +458,7 @@ where
         IssueCode::InvalidPropertyBehavior,
         Issue::error(message)
             .with_annotation(Annotation::primary(behavior.span()).with_message("Named here."))
-            .with_note("A behavior runs the property's `get` and `set`: it is a class that implements `Behavior` for the property's type, and PHP# creates one for each object with no arguments.")
+            .with_note(format!("A behavior runs the property's `get` and `set`: it is a class that implements `{interface}` for the property's type, and PHP# creates one for each object with no arguments."))
             .with_help(help),
     );
 

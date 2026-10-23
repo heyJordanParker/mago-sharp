@@ -279,6 +279,63 @@ final class Inlined {}
 final class EncodedAsJson {}
 
 /**
+ * Marks the standard library class that is the effect of `emit`, as `Events` is. `just regen-sharp-classes` reads the
+ * mark, so the checker copies no library name.
+ */
+#[\Attribute(\Attribute::TARGET_CLASS)]
+final class EffectOfEmit {}
+
+/**
+ * Marks the standard library interface a property behavior implements, as `Behavior<T>` is. `just regen-sharp-classes`
+ * reads the mark, so the checker copies no library name.
+ */
+#[\Attribute(\Attribute::TARGET_CLASS)]
+final class PropertyBehavior {}
+
+/**
+ * Marks a standard library method without a body whose implementations may have any effect, because the code that
+ * calls it carries the implementation's effects, as `Dispatcher.dispatch` and `Behavior<T>`'s `get` and `set` are.
+ */
+#[\Attribute(\Attribute::TARGET_METHOD)]
+final class AcceptsAnyEffect {}
+
+/**
+ * Marks the standard library method whose call starts a listener of its first type argument, as `Events.on` does, so
+ * the checker refuses a type argument no event can be.
+ */
+#[\Attribute(\Attribute::TARGET_METHOD)]
+final class StartsListener {}
+
+/**
+ * Marks a standard library generic method that parses a value into its type argument with the type's `parse`, as
+ * `Json.decode<T>` does, so the checker gives each call's type argument the struct parse check.
+ */
+#[\Attribute(\Attribute::TARGET_METHOD)]
+final class ParsesTypeArgument {}
+
+/**
+ * The class a type parameter with no class bound stands for in a method marked `ParsesTypeArgument`, as `Json.decode<T>`
+ * is: each struct and PHP# class, whose `parse` and `tryParse` it declares, so `T.parse($value)` gives a `T`. Each call
+ * of the method gets the struct parse check for its type argument.
+ */
+abstract class Parsed
+{
+    public static function parse(mixed $value): static {}
+
+    public static function tryParse(mixed $value): ?static {}
+}
+
+/**
+ * Marks a standard library method that a law's proof reads as the Lean function `$function` folded over its
+ * arguments, as `Math.max` is Lean's `max`, so a law reasons about it as it does about `<`.
+ */
+#[\Attribute(\Attribute::TARGET_METHOD)]
+final class LeanFunction
+{
+    public function __construct(public string $function) {}
+}
+
+/**
  * The methods a PHP# `List<T>` has. The analyzer checks a call on a list against them, and the engine runs them on
  * `Sharp\Collection`, except the methods marked `Inlined`, which the bridge lowers from the list's type. A method
  * without `@mutation-free` changes the list.

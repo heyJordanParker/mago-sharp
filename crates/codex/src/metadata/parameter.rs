@@ -131,6 +131,13 @@ impl FunctionLikeParameterMetadata {
         self.default_type.as_ref()
     }
 
+    /// Whether an attribute of the full name `name`, compared ignoring case, marks the parameter.
+    #[inline]
+    #[must_use]
+    pub fn has_attribute(&self, name: &[u8]) -> bool {
+        self.attributes.iter().any(|attribute| attribute.name.as_bytes().eq_ignore_ascii_case(name))
+    }
+
     /// Sets the attributes, replacing any existing ones.
     pub fn set_attributes(&mut self, attributes: impl IntoIterator<Item = AttributeMetadata>) {
         self.attributes = attributes.into_iter().collect();

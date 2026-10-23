@@ -6,6 +6,9 @@ use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::expander::StaticClassType;
 use mago_codex::ttype::get_sharp_type;
 use mago_codex::ttype::union::TUnion;
+use mago_names::ENCODED_AS_JSON;
+use mago_names::PARSES_TYPE_ARGUMENT;
+use mago_names::STARTS_LISTENER;
 use mago_names::binding::Binding;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
@@ -44,6 +47,7 @@ use crate::resolver::class_name::statics_type_arguments;
 use crate::resolver::property::static_member_type_arguments;
 use crate::resolver::static_method::resolve_static_method_targets;
 use crate::statement::class_like::listener::check_events_on;
+use crate::statement::class_like::r#struct::check_parsed_type_argument;
 use crate::statement::class_like::r#struct::check_struct_parse;
 use crate::utils::expression::expression_is_nullsafe;
 use crate::utils::names::display_class_like_name;
@@ -280,14 +284,28 @@ where
     );
 
     let has_resolved_methods = !invocation_targets.is_empty();
-    let starts_a_listener = context.dialect.is_sharp()
-        && invocation_targets.iter().any(|target| {
-            matches!(
-                target,
-                InvocationTarget::FunctionLike { identifier: FunctionLikeIdentifier::Method(class, method), .. }
-                    if class.as_bytes().eq_ignore_ascii_case(b"sharp\\events") && method.as_bytes().eq_ignore_ascii_case(b"on")
-            )
-        });
+    let listener_starter = invocation_targets.iter().filter(|_| context.dialect.is_sharp()).find_map(|target| {
+        let InvocationTarget::FunctionLike { identifier: FunctionLikeIdentifier::Method(class, _), metadata, .. } =
+            target
+        else {
+            return None;
+        };
+
+        metadata
+            .has_attribute(STARTS_LISTENER.as_bytes())
+            .then(|| display_member(context, *class, metadata.original_name))
+    });
+    let parser = invocation_targets.iter().filter(|_| context.dialect.is_sharp()).find_map(|target| {
+        let InvocationTarget::FunctionLike { identifier: FunctionLikeIdentifier::Method(class, _), metadata, .. } =
+            target
+        else {
+            return None;
+        };
+
+        metadata
+            .has_attribute(PARSES_TYPE_ARGUMENT.as_bytes())
+            .then(|| display_member(context, *class, metadata.original_name))
+    });
 
     let json_encoder = invocation_targets.iter().filter(|_| context.dialect.is_sharp()).find_map(|target| {
         let InvocationTarget::FunctionLike { identifier: FunctionLikeIdentifier::Method(class, _), metadata, .. } =
@@ -295,9 +313,8 @@ where
         else {
             return None;
         };
-        let position = metadata.parameters.iter().position(|parameter| {
-            parameter.attributes.iter().any(|attribute| attribute.name.as_bytes().eq_ignore_ascii_case(ENCODED_AS_JSON))
-        })?;
+        let position =
+            metadata.parameters.iter().position(|parameter| parameter.has_attribute(ENCODED_AS_JSON.as_bytes()))?;
 
         Some((display_member(context, *class, metadata.original_name), position))
     });
@@ -350,7 +367,7 @@ where
     }
 
     // A type argument neither written nor inferred is `missing-template-parameter`'s to report.
-    if starts_a_listener
+    if let Some(starter) = listener_starter
         && let Some(listened) = artifacts
             .inferred_type_arguments
             .get(&(call.span.start.offset, call.span.end.offset))
@@ -359,7 +376,17 @@ where
     {
         let at =
             type_arguments.and_then(|type_arguments| type_arguments.arguments.first()).map_or(call.span, HasSpan::span);
-        check_events_on(context, &listened.clone(), at);
+        check_events_on(context, &starter, &listened.clone(), at);
+    }
+
+    if let Some(parser) = parser
+        && let Some(parsed) = artifacts
+            .inferred_type_arguments
+            .get(&(call.span.start.offset, call.span.end.offset))
+            .and_then(|t| t.first())
+        && (type_arguments.is_some() || !parsed.is_mixed())
+    {
+        check_parsed_type_argument(context, &parser, &parsed.clone(), call.span);
     }
 
     if let Some((encoder, position)) = json_encoder
@@ -412,10 +439,6 @@ where
 
     Ok(())
 }
-
-/// The attribute the standard library marks the parameter of a method that writes its argument as JSON text with, as
-/// `Json.encode`'s. The checker reads the mark, so it copies no library name.
-const ENCODED_AS_JSON: &[u8] = b"Sharp\\Internal\\EncodedAsJson";
 
 /// A `Map` key a JSON encoder can't write as JSON text.
 enum InvalidJsonKey {

@@ -324,6 +324,12 @@ const TEXT: (&str, &str) = (
     "namespace Sharp;\n\npublic class Text\n{\n    public static string capitalized(string text) => global.ucfirst(text);\n\n    public static string padded(string text, int width = 8) => global.str_pad(global.trim(text), width);\n\n    public static string twice(string text) => global.str_repeat(text, global.strlen(text));\n\n    public static string trimmed(string text)\n    {\n        const trimmed = global.trim(text);\n        return trimmed;\n    }\n\n    public static Text make() => new Text();\n\n    public string label() => \"text\";\n\n    public string wrapped(string format) => global.sprintf(format, this.label());\n\n    public string secret(string text) => this.hidden(text);\n\n    private string hidden(string text) => global.lcfirst(text);\n\n    public static string quiet(string text) => Text.muted(text);\n\n    protected static string muted(string text) => global.lcfirst(text);\n\n    public virtual string echoed(string text) => this.wrapped(text);\n\n    public static string again(string text) => Self.capitalized(text);\n}\n",
 );
 
+/// The standard library's `Behavior<T>`, which a property behavior implements.
+const BEHAVIOR_LIBRARY: (&str, &str) = (
+    "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Behavior.sharp",
+    include_str!("../../../../composer/library/Sharp/Behavior.sharp"),
+);
+
 /// `Lib\Loud`, a project file with a method the inlining rule would take in the standard library: a call of a plain
 /// PHP function through its namespace, `capitalize`, which `LOUD_HELPERS` declares beside it.
 const LOUD: (&str, &str) = (
@@ -2951,10 +2957,7 @@ fn a_static_constructor_of_a_generic_class_ends_its_init() {
 /// so it keeps its PHP type `string` and carries `ZEND_PARAM_WIDENED`, `[64]`, which skips PHP's variance check.
 #[test]
 fn behaviors_are_hidden_slots_the_hooks_call_in_order() {
-    let behavior = (
-        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Behavior.sharp",
-        "namespace Sharp;\n\npublic interface Behavior<T>\n{\n    T get(T value);\n\n    T set(T value);\n}\n",
-    );
+    let behavior = BEHAVIOR_LIBRARY;
     let upper = (
         "src/Upper.sharp",
         "namespace App;\n\nimport Sharp.Behavior;\n\npublic class Upper : Behavior<string>\n{\n    public string get(string value) => value;\n\n    public string set(string value) => value + \"!\";\n}\n",
@@ -3111,10 +3114,7 @@ fn behaviors_are_hidden_slots_the_hooks_call_in_order() {
 /// it with `new` before it sets the property from the argument through the hooks.
 #[test]
 fn a_promoted_parameter_s_behaviors_are_filled_before_its_argument_is_set() {
-    let behavior = (
-        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Behavior.sharp",
-        "namespace Sharp;\n\npublic interface Behavior<T>\n{\n    T get(T value);\n\n    T set(T value);\n}\n",
-    );
+    let behavior = BEHAVIOR_LIBRARY;
     let trimmed = (
         "src/Trimmed.sharp",
         "namespace App;\n\nimport Sharp.Behavior;\n\npublic class Trimmed : Behavior<string>\n{\n    public string get(string value) => value;\n\n    public string set(string value) => \"[\" + value;\n}\n",
@@ -3223,10 +3223,7 @@ fn a_promoted_parameter_s_behaviors_are_filled_before_its_argument_is_set() {
 /// so the two never share a behavior's state. A parent's own `__clone` runs first, when it has one.
 #[test]
 fn a_copy_gets_new_behaviors_after_its_parent_s_copy_runs() {
-    let behavior = (
-        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Behavior.sharp",
-        "namespace Sharp;\n\npublic interface Behavior<T>\n{\n    T get(T value);\n\n    T set(T value);\n}\n",
-    );
+    let behavior = BEHAVIOR_LIBRARY;
     let named = ("src/Named.sharp", "namespace App;\n\npublic abstract class Named\n{\n}\n");
     let trimmed = (
         "src/Trimmed.sharp",
@@ -3275,10 +3272,7 @@ fn a_copy_gets_new_behaviors_after_its_parent_s_copy_runs() {
 /// generic `new` does: `$this->{'level#via0'} = new \App\Kept<int>();`.
 #[test]
 fn a_generic_behavior_is_created_with_its_type_arguments() {
-    let behavior = (
-        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Behavior.sharp",
-        "namespace Sharp;\n\npublic interface Behavior<T>\n{\n    T get(T value);\n\n    T set(T value);\n}\n",
-    );
+    let behavior = BEHAVIOR_LIBRARY;
     let kept = (
         "src/Kept.sharp",
         "namespace App;\n\nimport Sharp.Behavior;\n\npublic class Kept<T> : Behavior<T>\n{\n    public T get(T value) => value;\n\n    public T set(T value) => value;\n}\n",
@@ -27138,10 +27132,11 @@ fn a_call_the_inlining_rule_does_not_take_keeps_its_call() {
     }
 }
 
-/// `Sharp\Slug` at the standard library's path, with two native bodies: one with plain parameters and one variadic.
+/// `Sharp\Slug` at the standard library's path, with three native bodies: one with plain parameters, one variadic and
+/// one private, which `cleaned` calls.
 const SLUG: (&str, &str) = (
     "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Slug.sharp",
-    "namespace Sharp;\n\npublic static class Slug\n{\n    public static extern string title(string text);\n\n    public static extern string join(string text, string ...words);\n}\n",
+    "namespace Sharp;\n\npublic static class Slug\n{\n    public static extern string title(string text);\n\n    public static extern string join(string text, string ...words);\n\n    public static string cleaned(string words) => Slug.clean(words);\n\n    private static extern string clean(string text);\n}\n",
 );
 
 /// The statements of `run`, which takes a `string name` and holds `statements` in a class that imports `Sharp.Slug`,
@@ -27169,6 +27164,28 @@ fn a_call_of_a_native_body_inlines_as_the_call_of_its_native_function() {
               RETURN
                 CALL
                   ZVAL "Sharp\\Internal\\Slug\\title"
+                  ARG_LIST
+                    VAR
+                      ZVAL "name"
+        "#}
+    );
+}
+
+/// ```php
+/// return \Sharp\Internal\Slug\clean($name);
+/// ```
+///
+/// A library method whose body calls a private `extern` method of its own class inlines as that method's native call,
+/// so the caller runs the native function with no PHP call before it.
+#[test]
+fn a_call_of_a_body_that_calls_a_private_native_body_inlines_as_the_native_call() {
+    assert_eq!(
+        native_body("        return Slug.cleaned(name);\n"),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                CALL
+                  ZVAL "Sharp\\Internal\\Slug\\clean"
                   ARG_LIST
                     VAR
                       ZVAL "name"

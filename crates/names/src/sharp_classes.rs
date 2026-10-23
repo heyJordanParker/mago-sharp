@@ -103,3 +103,11 @@ pub(crate) const STANDARD_EFFECTS: [&str; 10] = [
     "Sharp\\System\\Process",
     "Sharp\\Time\\Clock",
 ];
+
+/// The class the standard library marks `Sharp\Internal\EffectOfEmit`: the effect of `emit`, spec section
+/// 29.
+pub const EMIT_EFFECT: &str = "Sharp\\Events";
+
+/// The interface the standard library marks `Sharp\Internal\PropertyBehavior`: the one a property behavior
+/// implements, spec section 6.4.
+pub const PROPERTY_BEHAVIOR: &str = "Sharp\\Behavior";

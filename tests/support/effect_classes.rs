@@ -14,7 +14,7 @@ macro_rules! library_file {
     };
 }
 
-pub const EFFECT_CLASSES: [(&str, &str); 24] = [
+pub const EFFECT_CLASSES: [(&str, &str); 26] = [
     library_file!("Sharp/System/Environment.sharp"),
     library_file!("Sharp/Time/Clock.sharp"),
     library_file!("Sharp/Random.sharp"),
@@ -31,6 +31,8 @@ pub const EFFECT_CLASSES: [(&str, &str); 24] = [
     library_file!("Sharp/Time/DateTime.sharp"),
     library_file!("Sharp/Time/Date.sharp"),
     library_file!("Sharp/Time/TimeZone.sharp"),
+    library_file!("Sharp/Time/Weekday.sharp"),
+    library_file!("Sharp/Time/Month.sharp"),
     library_file!("Sharp/Int.sharp"),
     library_file!("Sharp/Math.sharp"),
     library_file!("Sharp/Net/HttpMethod.sharp"),

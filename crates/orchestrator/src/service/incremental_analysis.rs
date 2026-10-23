@@ -1009,6 +1009,28 @@ impl IncrementalAnalysisService {
             return self.analyze();
         }
 
+        // A function or constant of PHP's root namespace added or deleted beside class-likes takes their namespace, so
+        // it changes what `Foundation.abort(…)` names in every unchanged file, as a renamed folder namespace does.
+        let namespaced_root_names = |metadata: &CodebaseMetadata| -> HashSet<(mago_word::Word, mago_word::Word)> {
+            metadata
+                .function_likes
+                .values()
+                .filter(|function| function.kind.is_function())
+                .map(|function| (function.original_name, function.span.file_id))
+                .chain(metadata.constants.values().map(|constant| (constant.name, constant.span.file_id)))
+                .filter(|(name, file_id)| !name.as_bytes().contains(&b'\\') && rescanned.contains(file_id))
+                .filter_map(|(name, file_id)| Some((metadata.folder(file_id)?, name)))
+                .filter(|(folder, _)| self.codebase.folder_has_namespaces(*folder))
+                .collect()
+        };
+        let root_names_before = namespaced_root_names(&self.codebase);
+        let root_names_after: HashSet<(mago_word::Word, mago_word::Word)> =
+            new_file_scans.iter().flat_map(|(_, metadata)| namespaced_root_names(metadata)).collect();
+
+        if root_names_before != root_names_after {
+            return self.analyze();
+        }
+
         let body_only = diff.get_changed().is_empty() && deleted_count == 0;
 
         if !body_only {
@@ -3710,6 +3732,44 @@ mod tests {
         service.analyze_incremental(None).expect("Incremental analysis failed.");
         assert_ne!(errors(&service), 0, "the helpers lose their namespace again");
         assert_matches_full(&service, &db, "the class beside the helpers is deleted");
+    }
+
+    /// Spec section 23: a root function added beside classes that already exist takes their namespace, so a project
+    /// file's `Foundation.abort(…)`, refused while no `abort` existed, compiles once the helpers file declares it, and
+    /// is refused again once an edit of the helpers drops it, though the project file never changed.
+    #[test]
+    fn test_watch_a_root_function_added_beside_classes_reaches_its_callers() {
+        let application = "<?php\n\nnamespace Vendor\\Foundation;\n\nclass Application\n{\n}\n";
+        let helpers = "<?php\n\nfunction abort(int $code): int\n{\n    return $code;\n}\n";
+        let other = "<?php\n\nfunction report(int $code): int\n{\n    return $code;\n}\n";
+        let page = "namespace App;\n\nimport Vendor.Foundation;\n\npublic class Page\n{\n    public int missing() => Foundation.abort(404);\n}\n";
+        let helpers_id = FileId::new(b"vendor/laravel/Foundation/helpers.php");
+        let mut db =
+            make_database(vec![("src/Page.sharp", page), ("vendor/laravel/Foundation/Application.php", application)]);
+        let errors = |service: &IncrementalAnalysisService| {
+            service.collect_all_issues().iter().filter(|issue| issue.level == mago_reporting::Level::Error).count()
+        };
+
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_ne!(errors(&service), 0, "no file declares abort");
+
+        db.add(File::new(
+            Cow::Borrowed(&b"vendor/laravel/Foundation/helpers.php"[..]),
+            FileType::Host,
+            None,
+            Cow::Borrowed(helpers.as_bytes()),
+        ));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental analysis failed.");
+        assert_eq!(errors(&service), 0, "the helpers declare abort beside Application");
+        assert_matches_full(&service, &db, "the helpers are added beside the class");
+
+        db.update(helpers_id, Cow::Borrowed(other.as_bytes()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental analysis failed.");
+        assert_ne!(errors(&service), 0, "the helpers no longer declare abort");
+        assert_matches_full(&service, &db, "abort is dropped from the helpers");
     }
 
     /// Parent changes return type making child's override incompatible.

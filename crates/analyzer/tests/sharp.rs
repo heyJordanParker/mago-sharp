@@ -11936,6 +11936,28 @@ fn a_struct_that_declares_equality_compares_and_keys_by_it() {
     );
 }
 
+/// Spec section 24: `Json.decode<T>` reads a struct or a PHP# class through its `parse`, so each call gives its type
+/// argument the struct parse check: a field `parse` can't read is refused as `Rule.parse` refuses it, a type with no
+/// `parse` is refused, and so is a generic struct, whose `parse` takes type arguments that the call through `T` does not
+/// pass. A struct `parse` reads compiles.
+#[test]
+fn json_decode_gives_its_type_argument_the_struct_parse_check() {
+    let json = (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Encoding/Json.sharp",
+        include_str!("../../../../composer/library/Sharp/Encoding/Json.sharp"),
+    );
+    let sharp = "namespace Demo;\n\nimport Sharp.Encoding.Json;\n\nstruct Point\n{\n    public Point(public int x { get; }) { }\n}\n\nstruct Rule\n{\n    public Rule(public Function<bool(int)> check { get; }) { }\n}\n\nstruct Box<T>\n{\n    public Box(public T value { get; }) { }\n}\n\nclass Reader\n{\n    public Point point(string json) => Json.decode<Point>(json);\n\n    public Rule rule(string json) => Json.decode<Rule>(json);\n\n    public int number(string json) => Json.decode<int>(json);\n\n    public Box<int> box(string json) => Json.decode<Box<int>>(json);\n}\n";
+
+    assert_eq!(
+        written(sharp, &analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Reader.sharp", sharp), &[json])),
+        [
+            "24:38 invalid-struct `Rule.parse` can't read `check`: `Function<bool(int)>` is a function.",
+            "26:39 invalid-struct `Json.decode` parses its type argument with the type's `parse`, and `int` has none.",
+            "28:41 invalid-struct `Json.decode` can't read `Box<int>`: its `parse` takes the type arguments of a generic type, which the call through its type argument does not pass.",
+        ]
+    );
+}
+
 /// Spec section 16: `with` and an object initializer set only a property with `init` or `set`, each once, and the help
 /// of a get-only PHP# property, `{ get; init; }`, compiles. A plain PHP `readonly` property is get-only too, with no
 /// help, since its class isn't PHP#'s. `with` copies a struct or a class, so an enum and an event are refused.
@@ -18445,27 +18467,36 @@ fn a_standard_library_class_that_shares_its_short_name_is_named_by_its_full_name
     );
 }
 
-/// A message names a static property as the file writes it: `Order.count` in a `.sharp` file, with the class
-/// named by the same short-name rule as every other class in a message. The PHP twin keeps upstream's
-/// `App\Shop\Order::$count`.
+/// A message names a static property, written or read, as the file writes it: `Order.count` in a `.sharp` file, with
+/// the class named by the same short-name rule as every other class in a message. The read is an argument of a
+/// project's plain PHP assertion, as `is_string` is one in PHP. The PHP twin keeps upstream's `App\Shop\Order::$count`.
 #[test]
 fn a_message_names_a_static_property_as_sharp_writes_it() {
-    let sharp = "namespace App.Shop;\n\nclass Order\n{\n    public static int count = 0;\n\n    public void counted() { Order.count = \"many\"; }\n}\n";
-    let php = "<?php\n\nnamespace App\\Shop;\n\nclass Order\n{\n    public static int $count = 0;\n\n    public function counted(): void\n    {\n        Order::$count = \"many\";\n    }\n}\n";
+    let checks = (
+        "src/Lib/Checks.php",
+        "<?php\n\nnamespace Lib;\n\nfinal class Checks\n{\n    /** @psalm-assert-if-true string $value */\n    public static function isText(mixed $value): bool\n    {\n        return is_string($value);\n    }\n}\n",
+    );
+    let sharp = "namespace App.Shop;\n\nimport Lib.Checks;\n\nclass Order\n{\n    public static int count = 0;\n\n    public void counted() { Order.count = \"many\"; }\n\n    public bool read() => Checks.isText(Order.count);\n}\n";
+    let php = "<?php\n\nnamespace App\\Shop;\n\nclass Order\n{\n    public static int $count = 0;\n\n    public function counted(): void\n    {\n        Order::$count = \"many\";\n    }\n\n    public function read(): bool\n    {\n        return \\Lib\\Checks::isText(Order::$count);\n    }\n}\n";
     let compared = |analyzed| -> Vec<String> {
-        worded(analyzed, &[]).into_iter().filter(|line| line.contains("-assignment")).collect()
+        worded(analyzed, &[checks])
+            .into_iter()
+            .filter(|line| line.contains("-assignment") || line.contains("-type-comparison "))
+            .collect()
     };
 
     assert_eq!(
         compared(("src/App/Shop/Order.php", php)),
         [
-            "11:9 invalid-property-assignment-value Invalid property assignment value | app\\shop\\order::$count with declared type int, cannot be assigned type string('many')"
+            "11:9 invalid-property-assignment-value Invalid property assignment value | app\\shop\\order::$count with declared type int, cannot be assigned type string('many')",
+            "16:16 impossible-type-comparison Impossible type assertion: `App\\Shop\\Order::$count` of type `int` can never be `string`. | Argument `App\\Shop\\Order::$count` has type `int` | The assertion expects `App\\Shop\\Order::$count` to be `string`, but no value of type `int` can satisfy this. | Check that the correct variable is being passed, or update the assertion type."
         ]
     );
     assert_eq!(
         compared(("src/App/Shop/Order.sharp", sharp)),
         [
-            "7:29 invalid-property-assignment-value Invalid property assignment value | Order.count with declared type int, cannot be assigned type string"
+            "9:29 invalid-property-assignment-value Invalid property assignment value | Order.count with declared type int, cannot be assigned type string",
+            "11:27 impossible-type-comparison Impossible type assertion: `Order.count` of type `int` can never be `string`. | Argument `Order.count` has type `int` | The assertion expects `Order.count` to be `string`, but no value of type `int` can satisfy this. | Check that the correct variable is being passed, or update the assertion type."
         ]
     );
 }
@@ -21328,7 +21359,7 @@ fn a_use_of_a_class_s_statics_has_the_effects_of_their_initial_values() {
 
 const BEHAVIOR_LIBRARY: (&str, &str) = (
     "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Behavior.sharp",
-    "namespace Sharp;\n\npublic interface Behavior<T>\n{\n    T get(T value);\n\n    T set(T value);\n}\n",
+    include_str!("../../../../composer/library/Sharp/Behavior.sharp"),
 );
 
 /// Spec section 6.4: a behavior's `get` and `set` are the property's accessors. Each may have any effect, and `set`
@@ -21399,10 +21430,7 @@ fn a_generic_behavior_takes_its_type_arguments() {
 /// name that is no class is the error any unknown class is.
 #[test]
 fn a_behavior_implements_behavior_for_the_property_s_type() {
-    let behavior = (
-        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Behavior.sharp",
-        "namespace Sharp;\n\npublic interface Behavior<T>\n{\n    T get(T value);\n\n    T set(T value);\n}\n",
-    );
+    let behavior = BEHAVIOR_LIBRARY;
     let behaviors = (
         "src/Demo/Behaviors.sharp",
         "namespace Demo;\n\nimport Lib.Words;\nimport Sharp.Behavior;\n\npublic class Trimmed : Behavior<string>\n{\n    public string get(string value) => value;\n\n    public string set(string value) => Words.trim(value);\n}\n\npublic abstract class Base : Behavior<string>\n{\n    public string get(string value) => value;\n\n    public abstract string set(string value);\n}\n\npublic class Logged : Behavior<string>\n{\n    public Logged(private string prefix)\n    {\n    }\n\n    public string get(string value) => value;\n\n    public string set(string value) => this.prefix + value;\n}\n\npublic class Plain\n{\n}\n\npublic class Hidden : Behavior<string>\n{\n    private Hidden()\n    {\n    }\n\n    public string get(string value) => value;\n\n    public string set(string value) => value;\n}\n",

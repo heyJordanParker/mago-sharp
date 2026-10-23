@@ -684,6 +684,13 @@ impl CodebaseMetadata {
         self.folders.get(&span.file_id).and_then(|folder| self.folder_namespaces.get(folder)).map_or(&[], Vec::as_slice)
     }
 
+    /// Whether a class-like in `folder` gives the folder's functions and constants of PHP's root namespace a namespace,
+    /// as [`Self::folder_namespaces`] answers.
+    #[must_use]
+    pub fn folder_has_namespaces(&self, folder: Word) -> bool {
+        self.folder_namespaces.contains_key(&folder)
+    }
+
     /// The folder of `class_like` and the namespace it gives the functions and constants of that folder, as
     /// [`Self::folder_namespaces`] answers. None for a module, which is no class, for a class-like of PHP's root
     /// namespace, which gives its folder no namespace PHP# code imports, and for a class-like of PHP's built-ins.

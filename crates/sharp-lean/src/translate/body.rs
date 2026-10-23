@@ -895,15 +895,8 @@ impl<'body, 'program> Body<'body, 'program> {
                 return self.unmodeled(expression.span(), what, issues::PLAIN_PHP);
             }
             let class = names.get(&class.name);
-            if class.eq_ignore_ascii_case(b"Sharp\\Math")
-                && let ClassLikeMemberSelector::Identifier(method) = &call.method
-                && let Some(lean) = match method.value {
-                    b"max" => Some("max"),
-                    b"min" => Some("min"),
-                    _ => None,
-                }
-            {
-                return self.extremum(lean, &call.argument_list);
+            if let Some(lean) = self.checked.types().lean_function(expression) {
+                return self.folded(&String::from_utf8_lossy(lean.as_bytes()), &call.argument_list);
             }
             if !self.is_translated_class(call.object.span(), class) {
                 return "default".to_owned();
@@ -1042,10 +1035,11 @@ impl<'body, 'program> Body<'body, 'program> {
         }
     }
 
-    /// The standard library's `Math.max(…)` or `Math.min(…)`, as Lean's `max` or `min` on `int`, named by `lean`. The
-    /// checker knows what they compute, so a law reasons about them as it does about `<`, and they need no `extern`.
-    /// Each argument after the first joins with `lean`, and a spread one joins each element of its List.
-    fn extremum(&mut self, lean: &str, list: &ArgumentList) -> String {
+    /// A call of a standard library method marked `LeanFunction`, as `Math.max(…)` is Lean's `max` on `int`, as the Lean
+    /// function `lean` folded over the arguments. The checker knows what it computes, so a law reasons about it as it
+    /// does about `<`, and it needs no `extern`. Each argument after the first joins with `lean`, and a spread one joins
+    /// each element of its List.
+    fn folded(&mut self, lean: &str, list: &ArgumentList) -> String {
         let mut joined: Option<String> = None;
         for argument in &list.arguments {
             let Argument::Positional(argument) = argument else {
@@ -1062,7 +1056,9 @@ impl<'body, 'program> Body<'body, 'program> {
             });
         }
 
-        joined.unwrap_or_else(|| unreachable!("the checker refuses `Math.{lean}()`, as at {:?}", list.span()))
+        joined.unwrap_or_else(|| {
+            unreachable!("a method marked `LeanFunction(\"{lean}\")` takes an argument, as at {:?}", list.span())
+        })
     }
 
     /// A lambda `map` or `filter` takes, as a Lean `fun`. Its body is one expression that cannot throw, so the function

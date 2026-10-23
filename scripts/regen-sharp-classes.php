@@ -9,7 +9,9 @@ declare(strict_types=1);
  * - the class-likes declared directly in `Sharp`, spec section 23: each public one of `Sharp/*.sharp`, and each one of
  *   the prelude;
  * - the standard root classes, spec section 23: each class `Sharp/Internal/Builtins.sharp` declares with no import;
- * - the standard effects, spec section 29: each `foreign` class of the standard library, in any of its namespaces.
+ * - the standard effects, spec section 29: each `foreign` class of the standard library, in any of its namespaces;
+ * - the class marked `EffectOfEmit`, the effect of `emit`, and the interface marked `PropertyBehavior`, the one a
+ *   property behavior implements.
  *
  * `just regen-sharp-classes <path to sharp/composer/library>` writes it to `crates/names/src/sharp_classes.rs`.
  */
@@ -93,6 +95,7 @@ preg_match_all('/^extern (\w+);$/m', $builtins, $externs);
 $roots = array_values(array_diff($externs[1], $imported));
 
 $effects = [];
+$marked = ['EffectOfEmit' => [], 'PropertyBehavior' => []];
 $sources = new RecursiveIteratorIterator(
     new RecursiveDirectoryIterator("{$library}/Sharp", FilesystemIterator::SKIP_DOTS),
 );
@@ -106,6 +109,21 @@ foreach ($sources as $entry) {
     preg_match_all('/^public foreign class (\w+)/m', $source, $declarations);
     foreach ($declarations[1] as $class) {
         $effects[] = namespace_of($path, $source) . "\\{$class}";
+    }
+    $marks = [];
+    preg_match_all(
+        '/^\[(EffectOfEmit|PropertyBehavior)\]\n(?:\[.*\]\n)*public\s+(?:\w+\s+)*?(?:class|interface)\s+(\w+)/m',
+        $source,
+        $marks,
+        PREG_SET_ORDER,
+    );
+    foreach ($marks as $mark) {
+        $marked[$mark[1] ?? ''][] = namespace_of($path, $source) . '\\' . ($mark[2] ?? '');
+    }
+}
+foreach ($marked as $mark => $holders) {
+    if (count($holders) !== 1) {
+        throw new RuntimeException("The standard library marks `{$mark}` on " . count($holders) . ' classes, not one.');
     }
 }
 
@@ -135,3 +153,13 @@ echo
         "/// The standard effects, spec section 29: each `foreign` class of the standard library, which a name in `uses` names\n/// whatever the file imports. Sorted.",
         $effects,
     );
+$emit = str_replace('\\', '\\\\', $marked['EffectOfEmit'][0]);
+$behavior = str_replace('\\', '\\\\', $marked['PropertyBehavior'][0]);
+echo "\n";
+echo "/// The class the standard library marks `Sharp\\Internal\\EffectOfEmit`: the effect of `emit`, spec section\n";
+echo "/// 29.\n";
+echo "pub const EMIT_EFFECT: &str = \"{$emit}\";\n";
+echo "\n";
+echo "/// The interface the standard library marks `Sharp\\Internal\\PropertyBehavior`: the one a property behavior\n";
+echo "/// implements, spec section 6.4.\n";
+echo "pub const PROPERTY_BEHAVIOR: &str = \"{$behavior}\";\n";

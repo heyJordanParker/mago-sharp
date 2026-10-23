@@ -28,6 +28,8 @@ pub mod scope;
 mod internal;
 mod sharp_classes;
 
+pub use sharp_classes::EMIT_EFFECT;
+pub use sharp_classes::PROPERTY_BEHAVIOR;
 pub use sharp_classes::STANDARD_ROOT_CLASSES;
 
 /// The methods of a PHP# `List`, `Map` or `Set` that change it.
@@ -43,6 +45,36 @@ pub const CHANGING_COLLECTION_METHODS: [&str; 4] = ["add", "insert", "remove", "
 /// methods, so the checker refuses one on a value that can also be an object, whose own method would not run. A `Map`
 /// and a `Set` are engine objects, whose every method runs on `Sharp\Collection`.
 pub const INLINED: &str = "Sharp\\Internal\\Inlined";
+
+/// The mark of a parameter whose argument a method writes as JSON text.
+///
+/// The standard library marks `Json.encode`'s, so the checker refuses a `Map` key JSON can't write. The checker reads
+/// the mark, so it copies no library name.
+pub const ENCODED_AS_JSON: &str = "Sharp\\Internal\\EncodedAsJson";
+
+/// The mark of a method without a body whose implementations may have any effect.
+///
+/// The code that calls the method carries the implementation's effects, as for `Dispatcher.dispatch` and
+/// `Behavior<T>`'s `get` and `set`.
+pub const ACCEPTS_ANY_EFFECT: &str = "Sharp\\Internal\\AcceptsAnyEffect";
+
+/// The attribute the standard library marks the method with whose call starts a listener of its first type argument,
+/// as `Events.on`.
+pub const STARTS_LISTENER: &str = "Sharp\\Internal\\StartsListener";
+
+/// The mark of a generic method that parses a value into its type argument.
+///
+/// The method runs the type's `parse`, as `Json.decode<T>` does, so each call's type argument gets the struct parse
+/// check.
+pub const PARSES_TYPE_ARGUMENT: &str = "Sharp\\Internal\\ParsesTypeArgument";
+
+/// The prelude class a type parameter with no class bound stands for in a method marked [`PARSES_TYPE_ARGUMENT`]: it
+/// declares the `parse` and `tryParse` each struct and PHP# class gets.
+pub const PARSED: &str = "Sharp\\Internal\\Parsed";
+
+/// The attribute the standard library marks a method with that a law's proof reads as the Lean function the
+/// attribute's argument names, folded over the call's arguments, as `Math.max` is Lean's `max`.
+pub const LEAN_FUNCTION: &str = "Sharp\\Internal\\LeanFunction";
 
 /// The class-likes that a bare name in a `.sharp` file names by default, spec section 23, and that a class-like of the
 /// file's namespace can win over: every class-like the standard library or the prelude declares directly in `Sharp`,
@@ -68,11 +100,11 @@ pub(crate) fn default_class(name: &[u8]) -> Option<&'static [u8]> {
 }
 
 /// The standard effect whose short name is `name`, as a `uses` in a `.sharp` file writes it: `Sharp\Time\Clock` for
-/// `Clock`, spec section 29, or `Sharp\Events` for `Events`, the effect of `emit`, which no `foreign` class is.
+/// `Clock`, spec section 29, or the [effect of `emit`](EMIT_EFFECT), which no `foreign` class is.
 pub(crate) fn standard_effect(name: &[u8]) -> Option<&'static [u8]> {
     sharp_classes::STANDARD_EFFECTS
         .into_iter()
-        .chain(["Sharp\\Events"])
+        .chain([EMIT_EFFECT])
         .find(|effect| default_short_name(effect) == name)
         .map(str::as_bytes)
 }

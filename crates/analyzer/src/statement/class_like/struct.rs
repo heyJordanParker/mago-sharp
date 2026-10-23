@@ -28,6 +28,7 @@ use crate::expression::binary::utils::DeclaredOperator;
 use crate::expression::binary::utils::chosen_operator;
 use crate::expression::binary::utils::get_operator_method;
 use crate::expression::binary::utils::report_tied_operator;
+use crate::expression::is_refused_type;
 use crate::statement::attributes::analyze_class_like_attributes;
 use crate::statement::class_like::analyze_class_like;
 use crate::statement::class_like::override_attribute;
@@ -217,6 +218,52 @@ pub(crate) fn check_struct_parse<A>(
             ),
         );
     }
+}
+
+/// Reports the type argument `parsed` of a call of `parser`, a method the standard library marks `ParsesTypeArgument`,
+/// as `Json.decode<T>`, when the type's `parse` can't read it: the struct parse check's error for a struct or a PHP#
+/// class, and one error for any other type, which has no `parse`, spec section 10. A type parameter is the caller's to
+/// bound, and a class that doesn't exist was reported where it is written.
+pub(crate) fn check_parsed_type_argument<A>(context: &mut Context<'_, '_, A>, parser: &str, parsed: &TUnion, span: Span)
+where
+    A: Arena,
+{
+    let codebase = context.codebase;
+    let parsing = parsed
+        .get_single_named_object()
+        .and_then(|named| Some((named, codebase.get_class_like(named.name.as_bytes())?)))
+        .filter(|(_, class)| codebase.parses(class.name.as_bytes()));
+    if let Some((named, class)) = parsing {
+        if class.template_types.is_empty() {
+            check_struct_parse(context, class, named.type_parameters.as_deref().unwrap_or_default(), true, span);
+
+            return;
+        }
+
+        let parsed = display_sharp_type(context, parsed);
+        context.collector.report_with_code(
+            IssueCode::InvalidStruct,
+            Issue::error(format!(
+                "`{parser}` can't read `{parsed}`: its `parse` takes the type arguments of a generic type, which the call through its type argument does not pass."
+            ))
+            .with_annotation(Annotation::primary(span).with_message("Called here."))
+            .with_help(format!("Decode into a struct or a class with no type parameters, or call `{parsed}.parse(…)` on the parsed value.")),
+        );
+
+        return;
+    }
+    if parsed.has_template_types() || is_refused_type(parsed) {
+        return;
+    }
+
+    let parsed = display_sharp_type(context, parsed);
+    context.collector.report_with_code(
+        IssueCode::InvalidStruct,
+        Issue::error(format!("`{parser}` parses its type argument with the type's `parse`, and `{parsed}` has none."))
+            .with_annotation(Annotation::primary(span).with_message("Called here."))
+            .with_note("Each struct and PHP# class has a `parse`, which reads each field from a value.")
+            .with_help("Give it a struct or a PHP# class as its type argument."),
+    );
 }
 
 /// Whether the struct or class `name` declares `operator ==`, which replaces the `==` that compares a struct property by

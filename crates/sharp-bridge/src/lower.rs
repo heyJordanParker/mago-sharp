@@ -3278,7 +3278,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.node(SHARP_AST_IF, 0, line, &[branch])
     }
 
-    /// The call an `extern` method's body runs, as php-src's grammar builds `\Sharp\Internal\Text\Text\slug($title)`:
+    /// The call an `extern` method's body runs, as php-src's grammar builds `\Sharp\Internal\Text\StringMembers\slugOf($title)`:
     /// a call of the native function the engine registers under `Sharp\Internal`, then the class's full name after
     /// `Sharp\`, then the method's name. It passes each parameter on, a variadic one as a spread. The method returns it
     /// unless it is `void`, and a caller inlines it as the method's form.
@@ -4082,14 +4082,23 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         for &list in lists {
             let mut attributes = Vec::new();
             for attribute in &list.attributes {
+                let full_name = self.names.get(&attribute.name);
+                if is_checker_mark(full_name) {
+                    continue;
+                }
                 let line = self.line(attribute.name);
-                let name = self.string(ZEND_NAME_FQ, line, self.names.get(&attribute.name));
+                let name = self.string(ZEND_NAME_FQ, line, full_name);
                 let arguments = attribute.argument_list.as_ref().map_or(NULL, |list| self.attribute_arguments(list));
 
                 attributes.push(self.node(SHARP_AST_ATTRIBUTE, 0, line, &[name, arguments]));
             }
 
-            groups.push(self.node(SHARP_AST_ATTRIBUTE_GROUP, 0, self.line(list), &attributes));
+            if !attributes.is_empty() {
+                groups.push(self.node(SHARP_AST_ATTRIBUTE_GROUP, 0, self.line(list), &attributes));
+            }
+        }
+        if groups.is_empty() && r#override.is_none() && added.is_none() {
+            return NULL;
         }
 
         if let Some(r#override) = r#override {
@@ -9460,6 +9469,15 @@ fn holds_entries(r#type: &TUnion) -> bool {
 /// or a behavior, spec section 9, which the constructor's write of the argument runs.
 fn runs_its_accessors(parameter: &FunctionLikeParameter) -> bool {
     parameter.behaviors.is_some() || parameter.hooks.as_ref().is_some_and(PropertyHookList::has_hooks)
+}
+
+/// Whether the attribute of the full name `name` is a mark of `Sharp\Internal`, such as
+/// [`INLINED`](mago_names::INLINED), which only the checker and the bridge read. No class declares one at run time, so
+/// the bridge lowers none.
+fn is_checker_mark(name: &[u8]) -> bool {
+    const MARKS: &[u8] = b"sharp\\internal\\";
+
+    name.len() > MARKS.len() && name[..MARKS.len()].eq_ignore_ascii_case(MARKS)
 }
 
 /// Whether `list` targets the value a parameter or a `set` takes, as `param:` in `[param: Trimmed]`, spec section 1.

@@ -9,6 +9,7 @@ use mago_codex::defaults_trait_name;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::identifier::method::MethodIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
+use mago_codex::metadata::attribute::ConstantExpression;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::metadata::class_like::ParsedField;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
@@ -43,6 +44,7 @@ use mago_codex::ttype::template::variance::Variance;
 use mago_codex::ttype::union::TUnion;
 use mago_database::file::File;
 use mago_names::INLINED;
+use mago_names::LEAN_FUNCTION;
 use mago_names::ResolvedNames;
 use mago_names::binding::php_operator_name;
 use mago_span::HasSpan;
@@ -157,6 +159,21 @@ impl<'analysis> Types<'analysis> {
         inline_forms: &'analysis InlineForms,
     ) -> Self {
         Self { file, names, artifacts, codebase, effects, inline_forms }
+    }
+
+    /// These types, with `inline_forms` as the forms the lowering may inline.
+    pub(crate) fn with_inline_forms<'forms>(&self, inline_forms: &'forms InlineForms) -> Types<'forms>
+    where
+        'analysis: 'forms,
+    {
+        Types {
+            file: self.file,
+            names: self.names.clone(),
+            artifacts: self.artifacts,
+            codebase: self.codebase,
+            effects: self.effects,
+            inline_forms,
+        }
     }
 
     pub(crate) fn names(&self) -> &ResolvedNames<'analysis> {
@@ -1630,6 +1647,29 @@ impl<'analysis> Types<'analysis> {
         };
 
         Some(self.codebase.get_function(function.as_bytes()).map_or(*function, |metadata| metadata.original_name))
+    }
+
+    /// The Lean function the method the call `call` runs is marked [`LEAN_FUNCTION`] with, as `max` for `Math.max(…)`.
+    /// None for a call of an unmarked method.
+    #[must_use]
+    pub fn lean_function(&self, call: &Expression) -> Option<Word> {
+        let Some(CallTarget::FunctionLike { callee: FunctionLikeIdentifier::Method(class, method), .. }) =
+            self.artifacts.get_callees(call).next()
+        else {
+            return None;
+        };
+
+        self.codebase
+            .get_method(class.as_bytes(), method.as_bytes())?
+            .attributes
+            .iter()
+            .find(|attribute| attribute.name.as_bytes().eq_ignore_ascii_case(LEAN_FUNCTION.as_bytes()))?
+            .arguments
+            .first()
+            .and_then(|argument| match &argument.value {
+                Some(ConstantExpression::String(function)) => Some(*function),
+                _ => None,
+            })
     }
 
     /// Whether `function`, a plain PHP function, is one of PHP's built-ins whose declared return type holds its failure,
