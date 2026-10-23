@@ -73,6 +73,7 @@ use Revolt\EventLoop;
 use Throwable;
 
 use function array_key_exists;
+use function array_key_first;
 use function array_values;
 use function count;
 use function defined;
@@ -494,8 +495,11 @@ final class Worker
     /**
      * Serve requests until Mago closes the input stream or requests shutdown.
      *
-     * Each request runs in its own Fiber. CPU-bound callbacks remain sequential,
-     * while callbacks using cooperative Revolt I/O may interleave.
+     * The worker runs one request at a time, in the order Mago sends them: a request starts only after the one
+     * before it has written its response, failed, or been cancelled. A hook that waits on a codebase query keeps
+     * its turn, so a rule's own state is safe across its queries. Mago runs several workers for parallelism.
+     * Frames are read the whole time, so a running request still receives its query answers and cancellation, and a
+     * request cancelled before it starts is dropped.
      *
      * @param resource|null $input
      * @param resource|null $output
@@ -513,7 +517,7 @@ final class Worker
         $writer = new ResourceWriter($output ?? STDOUT);
         $host = new HostClient($codec, $writer);
 
-        /** @var array<int<0, max>, SignalCancellationToken> $requests */
+        /** @var array<int<1, max>, array{Frame, SignalCancellationToken}> $requests In the order Mago sent them. */
         $requests = [];
         $outputBufferLevel = $this->captureAccidentalOutput();
         try {
@@ -533,7 +537,7 @@ final class Worker
 
                 if ($frame->kind === FrameKind::Cancel) {
                     if (array_key_exists($frame->id, $requests)) {
-                        $requests[$frame->id]->cancel();
+                        $requests[$frame->id][1]->cancel();
                     }
 
                     continue;
@@ -555,22 +559,31 @@ final class Worker
                     throw new ProtocolException("Mago reused in-flight request identifier {$frame->id}.");
                 }
 
-                $cancellation = new SignalCancellationToken();
-                $requests[$frame->id] = $cancellation;
-                EventLoop::queue(function () use ($frame, $cancellation, $codec, $writer, $host, &$requests): void {
-                    try {
-                        $payload = $this->handleRequest($frame->payload, $frame->id, $host, $cancellation);
-                        $response = $codec->encodeResponse($frame->id, $payload);
-                    } catch (CancelledException) {
-                        return;
-                    } catch (Throwable $throwable) {
-                        $this->writeThrowable($throwable);
-                        $response = $codec->encodeResponse($frame->id, $throwable->getMessage(), Frame::ERROR_FLAG);
-                    } finally {
-                        unset($requests[$frame->id]);
-                    }
+                $requests[$frame->id] = [$frame, new SignalCancellationToken()];
+                // The loop below keeps each request in `$requests` until its response is written, and serves every
+                // request that arrives meanwhile, so only a request that finds the worker idle starts it.
+                if (count($requests) > 1) {
+                    continue;
+                }
 
-                    $writer->write($response);
+                EventLoop::queue(function () use ($codec, $writer, $host, &$requests): void {
+                    while (($requestId = array_key_first($requests)) !== null) {
+                        [$request, $cancellation] = $requests[$requestId];
+                        try {
+                            $cancellation->throwIfCancelled();
+                            $payload = $this->handleRequest($request->payload, $requestId, $host, $cancellation);
+                            $response = $codec->encodeResponse($requestId, $payload);
+                        } catch (CancelledException) {
+                            unset($requests[$requestId]);
+                            continue;
+                        } catch (Throwable $throwable) {
+                            $this->writeThrowable($throwable);
+                            $response = $codec->encodeResponse($requestId, $throwable->getMessage(), Frame::ERROR_FLAG);
+                        }
+
+                        $writer->write($response);
+                        unset($requests[$requestId]);
+                    }
                 });
             }
         } finally {
@@ -1445,12 +1458,12 @@ final class Worker
     }
 
     /**
-     * @param array<int<0, max>, SignalCancellationToken> $requests
+     * @param array<int<1, max>, array{Frame, SignalCancellationToken}> $requests
      */
     private function cancelRequests(array $requests): void
     {
-        foreach ($requests as $request) {
-            $request->cancel();
+        foreach ($requests as [, $cancellation]) {
+            $cancellation->cancel();
         }
     }
 

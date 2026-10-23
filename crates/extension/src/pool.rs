@@ -98,8 +98,8 @@ struct Bootstrap {
 /// Scheduling prefers the live worker with the fewest requests in flight.
 /// An adaptive pool starts small to avoid multiplying language-runtime startup
 /// costs, then grows toward its configured ceiling when completed requests
-/// prove the extension workload is CPU-heavy. Each process may cooperatively
-/// interleave multiple requests when its runtime supports that.
+/// prove the extension workload is CPU-heavy. Each process serves its requests
+/// one at a time, in the order they arrive.
 pub struct WorkerPool {
     command: WorkerCommand,
     options: WorkerPoolOptions,

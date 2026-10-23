@@ -59,9 +59,9 @@ The versioned binary protocol is the language-neutral extension ABI. The bundled
 
 Mago reserves the least-loaded available worker for ordinary requests. Analyzer requests may use a file-derived affinity key to break ties among equally loaded workers, improving process-local cache locality without sacrificing throughput.
 
-A worker pool provides parallelism by running multiple processes. CPU-bound work within one worker follows that language runtime's own execution model.
+A worker pool provides parallelism by running multiple processes. Each worker serves its requests one at a time, in the order Mago sends them: Mago starts a request's deadline only when the request before it on that worker ends, so a worker in any language must not interleave them.
 
-In the PHP SDK, Fibers provide concurrency rather than CPU parallelism, so CPU-bound callbacks in one process execute sequentially. Each request runs in a Fiber, allowing extension code using cooperative Revolt I/O to let another in-flight request progress.
+In the PHP SDK, a request that waits on a nested codebase query keeps its turn. The worker keeps reading frames, so the query's answer and any cancellation still reach it, but no other request starts until it responds, fails, or is cancelled.
 
 With `workers = 0`, an adaptive pool starts at the smaller of three processes and Mago's configured thread count. It may grow to that thread count when sustained request contention and observed callback time justify more processes. An analyzer host with parallel after-file or targeted work may proactively reach half of that capacity, rounded up. A positive `workers` value creates a fixed pool and starts exactly that many processes immediately, even when the value exceeds Mago's thread count.
 

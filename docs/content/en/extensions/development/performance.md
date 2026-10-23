@@ -92,9 +92,9 @@ The default `workers = 0` is adaptive. Mago starts at most three processes and m
 
 A positive worker count fixes the pool size. Use it for measured constraints, not as a default tuning ritual. While Mago threads wait for responses, the operating system can schedule worker processes on the same CPUs.
 
-For the PHP SDK, CPU-bound work needs multiple processes for parallelism because Fibers provide concurrency only. SDKs in other languages retain their own within-process execution model, but should still avoid oversubscribing the CPUs Mago uses.
+Each worker serves one request at a time, so parallelism comes only from multiple processes. SDKs in other languages should still avoid oversubscribing the CPUs Mago uses.
 
-Cooperative Revolt I/O can interleave inside one worker, but do not turn hot semantic providers into network clients. External state also makes results slow, fragile, and difficult to memoize.
+Do not turn hot semantic providers into network clients. A worker that waits on the network serves no other request meanwhile, and external state also makes results slow, fragile, and difficult to memoize.
 
 ## Process-local state
 

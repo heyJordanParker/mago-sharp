@@ -60,7 +60,7 @@ command = ["php", ".mago/database-worker.php"]
 workers = 2
 ```
 
-A fixed pool does not grow or shrink. Avoid configuring more workers than Mago threads unless the extension spends substantial time awaiting cooperative I/O.
+A fixed pool does not grow or shrink. Avoid configuring more workers than Mago threads.
 
 ## Environment isolation
 

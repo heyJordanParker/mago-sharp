@@ -38,7 +38,7 @@ Mago communicates with workers through a framed binary protocol. That protocol i
 
 PHP extension authors should use the bundled SDK, which handles registration, source snapshots, analyzer metadata requests, cancellation, and responses.
 
-One configured extension host owns a pool of identical processes. Each worker may expose one or more logical extensions. Mago uses multiple processes for CPU parallelism. The PHP SDK represents these concepts with `Worker` and `Extension`, and uses Revolt to interleave requests that cooperatively suspend.
+One configured extension host owns a pool of identical processes. Each worker may expose one or more logical extensions. Mago uses multiple processes for CPU parallelism, and each process serves one request at a time. The PHP SDK represents these concepts with `Worker` and `Extension`.
 
 ## Where to begin
 
