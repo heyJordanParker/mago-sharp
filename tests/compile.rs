@@ -3043,10 +3043,7 @@ fn compile_proves_a_law_over_map_filter_and_count() {
 /// it creates, and that the class with `twin` added, a false law over the same code, is refused as `law-unproven`.
 fn assert_proven(class: &str, source: &str, twin: &str) {
     let name = format!("app/Shared/{class}.sharp");
-    let Some(end) = source.rfind('}') else {
-        panic!("{class} has no closing brace");
-    };
-    let with_twin = format!("{}    {twin}\n{}", &source[..end], &source[end..]);
+    let with_twin = with_twin(source, twin);
     let Some(law) = twin.strip_prefix("law ").and_then(|twin| twin.split('(').next()) else {
         panic!("{twin} is no law");
     };
@@ -3067,6 +3064,15 @@ fn assert_proven(class: &str, source: &str, twin: &str) {
             );
         }
     }
+}
+
+/// `source` with `twin`, a law, stated last in its class.
+fn with_twin(source: &str, twin: &str) -> String {
+    let Some(end) = source.rfind('}') else {
+        panic!("{source} has no closing brace");
+    };
+
+    format!("{}    {twin}\n{}", &source[..end], &source[end..])
 }
 
 /// Spec section 28.1's `total`: a method that calls itself on a list's rest from a list pattern gets smaller on each call.
@@ -3186,6 +3192,82 @@ fn compile_proves_a_law_over_a_summing_loop() {
         "namespace App.Shared;\n\npublic class Sums\n{\n    public static int sumOf(List<int> xs)\n    {\n        let sum = 0;\n        for (const x of xs) {\n            sum += x;\n        }\n        return sum;\n    }\n\n    law sumJoins(List<int> a, List<int> b) => Sums.sumOf([...a, ...b]) == Sums.sumOf(a) + Sums.sumOf(b);\n}\n",
         "law sumIsTheFirst(List<int> a, List<int> b) => Sums.sumOf([...a, ...b]) == Sums.sumOf(a);",
     );
+}
+
+/// A recursive sum over a list's rest, and a law its body proves by calling itself on that rest.
+const SUMMED_MONEY: &str = "namespace App.Shared;\n\npublic class Money\n{\n    public Money(public int amount { get; }, public string currency { get; }) { }\n\n    public static int total(List<Money> items) => match (items) {\n        [] => 0,\n        [Money first, ...List<Money> rest] => first.amount + Money.total(rest),\n        default => 0,\n    };\n\n    law totalJoins(List<Money> a, List<Money> b) => Money.total([...a, ...b]) == Money.total(a) + Money.total(b)\n    {\n        match (a) {\n            [] => { return; },\n            [Money, ...List<Money> rest] => { Money.totalJoins(rest, b); },\n            default => { return; },\n        }\n    }\n}\n";
+
+const TOTAL_JOINS_FIRST: &str = "law totalJoinsFirst(List<Money> a, List<Money> b) => Money.total([...a, ...b]) == Money.total(a)\n    {\n        match (a) {\n            [] => { return; },\n            [Money, ...List<Money> rest] => { Money.totalJoinsFirst(rest, b); },\n            default => { return; },\n        }\n    }";
+
+/// Three recursive sums over a list, one of two fields of each element, and a law its body proves by calling itself on
+/// the list's rest.
+const LINES: &str = "namespace App.Shared;\n\npublic class Line\n{\n    public Line(public int net { get; }, public int tax { get; }) { }\n\n    public static int nets(List<Line> lines) => match (lines) {\n        [] => 0,\n        [Line first, ...List<Line> rest] => first.net + Line.nets(rest),\n        default => 0,\n    };\n\n    public static int taxes(List<Line> lines) => match (lines) {\n        [] => 0,\n        [Line first, ...List<Line> rest] => first.tax + Line.taxes(rest),\n        default => 0,\n    };\n\n    public static int gross(List<Line> lines) => match (lines) {\n        [] => 0,\n        [Line first, ...List<Line> rest] => first.net + first.tax + Line.gross(rest),\n        default => 0,\n    };\n\n    law grossIsNetsAndTaxes(List<Line> lines) => Line.gross(lines) == Line.nets(lines) + Line.taxes(lines)\n    {\n        match (lines) {\n            [] => { return; },\n            [Line, ...List<Line> rest] => { Line.grossIsNetsAndTaxes(rest); },\n            default => { return; },\n        }\n    }\n}\n";
+
+const GROSS_IS_NETS: &str = "law grossIsNets(List<Line> lines) => Line.gross(lines) == Line.nets(lines)\n    {\n        match (lines) {\n            [] => { return; },\n            [Line, ...List<Line> rest] => { Line.grossIsNets(rest); },\n            default => { return; },\n        }\n    }";
+
+/// The law for the list's rest holds wherever `total` runs, since a claim computes ints exactly.
+#[test]
+fn compile_proves_by_recursion_that_the_sum_of_a_joined_list_is_the_sum_of_its_parts() {
+    assert_proven("Money", SUMMED_MONEY, TOTAL_JOINS_FIRST);
+}
+
+/// A claim computes ints exactly, so a claim true only because its own `+` throws at `PHP_INT_MAX` is not proven.
+#[test]
+fn a_claim_true_only_because_its_own_arithmetic_overflows_is_not_proven() {
+    let directory = lawful_project(&[(
+        "app/Shared/Bound.sharp",
+        "namespace App.Shared;\n\npublic class Bound\n{\n    law fits(int x) => x + 1 <= 9223372036854775807;\n}\n",
+    )]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    assert!(
+        printed(&output).contains(
+            "app/Shared/Bound.sharp:5:5: error[law-unproven]: law fits is not proven\n = still to show: x + 1 <= 9223372036854775807\n"
+        ),
+        "{}",
+        printed(&output)
+    );
+}
+
+/// A nullable int is a value or null, so a claim compares it as code does, with no exact `Int` to read.
+#[test]
+fn compile_proves_a_law_that_compares_nullable_ints() {
+    assert_proven(
+        "Box",
+        "namespace App.Shared;\n\npublic class Box\n{\n    public static int? keep(int? x) => x;\n\n    law keepKeeps(int? x) => Box.keep(x) == x;\n}\n",
+        "law keepIsNull(int? x) => Box.keep(x) == null;",
+    );
+}
+
+/// A sum of two fields of each element is the sum of their two sums, which the law for the list's rest proves.
+#[test]
+fn compile_proves_by_recursion_that_a_sum_of_two_fields_is_the_sum_of_their_sums() {
+    assert_proven("Line", LINES, GROSS_IS_NETS);
+}
+
+/// A case a sum law leaves open prints its goal in PHP#: the claim's exact ints as the code writes them, each value a
+/// step binds where it is used, though two steps bind theirs under one name, and an element the arm leaves unnamed by
+/// its place in the list, as `lines[0]`.
+#[test]
+fn a_case_a_sum_law_leaves_open_names_its_goal_in_php_sharp() {
+    let directory = lawful_project(&[
+        ("app/Shared/Money.sharp", &with_twin(SUMMED_MONEY, TOTAL_JOINS_FIRST)),
+        ("app/Shared/Line.sharp", &with_twin(LINES, GROSS_IS_NETS)),
+    ]);
+    let root = directory.path();
+
+    let output = compile(root);
+
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    for expected in [
+        "app/Shared/Money.sharp:21:5: error[law-unproven]: law totalJoinsFirst is not proven\n = when a is [], still to show: Money.total([...a, ...b]) == Money.total(a)\n",
+        "app/Shared/Line.sharp:33:5: error[law-unproven]: law grossIsNets is not proven\n = when lines is [Line, ...List<Line> rest], still to show: lines[0].net + lines[0].tax + Line.gross(rest) == lines[0].net + Line.nets(rest)\n",
+    ] {
+        assert!(printed(&output).contains(expected), "{}", printed(&output));
+    }
 }
 
 /// A loop that counts the elements an `if` tests is `List.countP`, so Lean's `List.countP_le_length` proves it counts no

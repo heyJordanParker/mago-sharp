@@ -6,6 +6,8 @@ The statement of a PHP# law.
 
 A law holds when its expression never finishes with `false`. A throw or a loop that never ends proves nothing about
 it, so it does not break the law: `a.add(b)` throws `ArithmeticError` on overflow, and `addKeepsCurrency` still holds.
+
+The law's claim and its condition compute ints exactly (decision 057).
 -/
 
 namespace Sharp

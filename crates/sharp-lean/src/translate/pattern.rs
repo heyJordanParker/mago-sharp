@@ -42,12 +42,20 @@ struct Destructure {
 
 impl Body<'_, '_> {
     /// What `subject`, a term of `r#type`, matching `pattern` tests, or `None` after recording why Lean cannot test
-    /// it.
-    pub(super) fn test(&mut self, subject: &str, r#type: &TUnion, pattern: &Pattern) -> Option<Test> {
+    /// it. With `written`, the subject as PHP# writes it, a list pattern names each element before its rest that it
+    /// leaves unnamed by its place, so a goal of a law's case reads `lines[0]` where the arm `[Line, ...rest]` names
+    /// none.
+    pub(super) fn test(
+        &mut self,
+        subject: &str,
+        written: Option<&str>,
+        r#type: &TUnion,
+        pattern: &Pattern,
+    ) -> Option<Test> {
         match pattern {
             Pattern::Type(pattern) => self.type_test(subject, r#type, pattern),
-            Pattern::List(list) => self.list_test(subject, r#type, list),
-            Pattern::Parenthesized(parenthesized) => self.test(subject, r#type, parenthesized.pattern),
+            Pattern::List(list) => self.list_test(subject, written, r#type, list),
+            Pattern::Parenthesized(parenthesized) => self.test(subject, written, r#type, parenthesized.pattern),
             _ => {
                 let condition = self.pattern(subject, self.kind(r#type), pattern)?;
 
@@ -97,7 +105,7 @@ impl Body<'_, '_> {
 
     /// A list pattern is Lean's `::` pattern of the elements before its rest. The elements after the rest are the last
     /// ones of the list those leave, once it holds them all, and the rest is what comes before them.
-    fn list_test(&mut self, subject: &str, r#type: &TUnion, list: &ListPattern) -> Option<Test> {
+    fn list_test(&mut self, subject: &str, written: Option<&str>, r#type: &TUnion, list: &ListPattern) -> Option<Test> {
         let atomics: Vec<&TAtomic> = r#type.types.iter().filter(|atomic| !atomic.is_null()).collect();
         let [TAtomic::Array(TArray::List(list_type))] = atomics.as_slice() else {
             self.unmodeled(list.span(), "a list pattern on a value that is no List".to_owned(), issues::TYPE_TEST);
@@ -116,8 +124,9 @@ impl Body<'_, '_> {
 
         let mut parts = Test::default();
         let mut leading = Vec::new();
-        for pattern in before {
-            leading.push(self.element(element, pattern, &mut parts)?);
+        for (place, pattern) in before.iter().enumerate() {
+            let unnamed = written.map_or_else(|| "_".to_owned(), |written| format!("«{written}[{place}]»"));
+            leading.push(self.element(element, pattern, unnamed, &mut parts)?);
         }
         let name = rest.and_then(|rest| rest.variable.map(|variable| names::identifier(variable.value)));
 
@@ -147,7 +156,7 @@ impl Body<'_, '_> {
                     unreachable!("a list pattern has at most one rest");
                 };
                 let term = format!("({tail}[List.length {tail} - {}]!)", count - place);
-                let tested = self.test(&term, element, pattern)?;
+                let tested = self.test(&term, None, element, pattern)?;
                 parts.matches.extend(tested.matches);
                 parts.lets.extend(tested.lets);
                 parts.conditions.extend(tested.conditions);
@@ -164,9 +173,15 @@ impl Body<'_, '_> {
         Some(test)
     }
 
-    /// The Lean pattern of one element of a list pattern, whose elements are of `r#type`: the element's name, or `_`,
-    /// when the pattern holds for every element, else a fresh name whose test `parts` takes.
-    fn element(&mut self, r#type: &TUnion, pattern: &ListPatternElement, parts: &mut Test) -> Option<String> {
+    /// The Lean pattern of one element of a list pattern, whose elements are of `r#type`: the element's name, or
+    /// `unnamed`, when the pattern holds for every element, else a fresh name whose test `parts` takes.
+    fn element(
+        &mut self,
+        r#type: &TUnion,
+        pattern: &ListPatternElement,
+        unnamed: String,
+        parts: &mut Test,
+    ) -> Option<String> {
         let ListPatternElement::Pattern(pattern) = pattern else {
             unreachable!("a list pattern has at most one rest");
         };
@@ -175,11 +190,11 @@ impl Body<'_, '_> {
             && let [atomic] = r#type.types.as_ref()
             && self.names_type(hint, atomic)
         {
-            return Some(variable.map_or_else(|| "_".to_owned(), |variable| names::identifier(variable.value)));
+            return Some(variable.map_or(unnamed, |variable| names::identifier(variable.value)));
         }
 
         let name = self.fresh();
-        let test = self.test(&name, r#type, pattern)?;
+        let test = self.test(&name, None, r#type, pattern)?;
         parts.matches.extend(test.matches);
         parts.lets.extend(test.lets);
         parts.conditions.extend(test.conditions);
