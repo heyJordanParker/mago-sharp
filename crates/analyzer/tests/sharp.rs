@@ -281,6 +281,55 @@ fn a_public_member_nothing_outside_its_namespace_uses_is_too_wide() {
     );
 }
 
+/// Spec section 5: a use from plain PHP outside the namespace is an outside use, as one from PHP# is: a read in a
+/// class, and a callable array a routes file passes, as `[Carts::class, 'show']`. A plain PHP use inside the namespace
+/// is none, and a member no code names still warns.
+#[test]
+fn a_plain_php_use_outside_the_namespace_keeps_a_public_member() {
+    let event = "namespace App.Payments;\n\npublic struct Event\n{\n    public Event(public string rawBody { get; }, public string kind { get; }, public string source { get; }) { }\n}\n";
+    let carts = "namespace App.Payments;\n\npublic class Carts\n{\n    public string show() => \"cart\";\n\n    public string hidden() => \"none\";\n}\n";
+    let reader = "<?php\n\nnamespace App\\Gateways;\n\nuse App\\Payments\\Event;\n\nfinal class Reader\n{\n    public function read(Event $event): string\n    {\n        return $event->rawBody;\n    }\n}\n";
+    let inner = "<?php\n\nnamespace App\\Payments\\Gateways;\n\nuse App\\Payments\\Event;\n\nfinal class Inner\n{\n    public function source(Event $event): string\n    {\n        return $event->source;\n    }\n}\n";
+    let routes = "<?php\n\nuse App\\Payments\\Carts;\n\nfunction route(string $path, array $action): void\n{\n}\n\nroute('/cart', [Carts::class, 'show']);\n";
+
+    assert_eq!(
+        too_wide(&[
+            ("src/App/Payments/Event.sharp", event),
+            ("src/App/Payments/Carts.sharp", carts),
+            ("src/App/Gateways/Reader.php", reader),
+            ("src/App/Payments/Gateways/Inner.php", inner),
+            ("src/routes.php", routes),
+        ]),
+        [
+            "src/App/Payments/Event.sharp 5:64 `Event.kind` is public, and nothing outside `App.Payments` uses it.",
+            "src/App/Payments/Event.sharp 5:93 `Event.source` is public, and nothing outside `App.Payments` uses it.",
+            "src/App/Payments/Carts.sharp 7:19 `Carts.hidden` is public, and nothing outside `App.Payments` uses it.",
+        ]
+    );
+}
+
+/// Spec section 5: a member with an attribute is reached by the code that reads the attribute, through reflection,
+/// which no checker sees, so it never warns, as a `[Listen]` method or a `[Field]` property. The same members
+/// without an attribute still warn.
+#[test]
+fn a_public_member_with_an_attribute_is_not_too_wide() {
+    let listen = "<?php\n\nnamespace Lib;\n\n#[\\Attribute(\\Attribute::TARGET_METHOD)]\nfinal class Listen\n{\n}\n";
+    let field = "<?php\n\nnamespace Lib;\n\n#[\\Attribute(\\Attribute::TARGET_PROPERTY)]\nfinal class Field\n{\n}\n";
+    let hooks = "namespace App.Payments;\n\nimport Lib.Field;\nimport Lib.Listen;\n\npublic class Hooks\n{\n    [Field]\n    public string title { get; } = \"hooks\";\n\n    public string label { get; } = \"hooks\";\n\n    [Listen]\n    public void paid() { }\n\n    public void refunded() { }\n}\n";
+
+    assert_eq!(
+        too_wide(&[
+            ("src/Lib/Listen.php", listen),
+            ("src/Lib/Field.php", field),
+            ("src/App/Payments/Hooks.sharp", hooks),
+        ]),
+        [
+            "src/App/Payments/Hooks.sharp 11:19 `Hooks.label` is public, and nothing outside `App.Payments` uses it.",
+            "src/App/Payments/Hooks.sharp 16:17 `Hooks.refunded` is public, and nothing outside `App.Payments` uses it.",
+        ]
+    );
+}
+
 /// Asserts that no issue on a `.sharp` file of `names` names a word only PHP has, in its message, help, notes or
 /// annotations.
 fn assert_speaks_sharp<'name, 'issue>(

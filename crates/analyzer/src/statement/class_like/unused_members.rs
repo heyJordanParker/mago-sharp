@@ -592,8 +592,9 @@ where
 /// "project"`, of the files analyzed: a library's uses are in the projects that install it, which the analysis never
 /// sees. An `internal` class's members reach no further than it does (a member is never more visible than its class),
 /// interface members are exempt because they have no narrower form, and plain PHP has no `internal`. A member that
-/// overrides or implements another keeps that one's access, PHP calls a magic method itself, and `new` calls the
-/// constructor, which takes its class's reach, so none of them warns.
+/// overrides or implements another keeps that one's access, PHP calls a magic method itself, `new` calls the
+/// constructor, which takes its class's reach, and the code that reads a member's attribute reaches the member through
+/// reflection, which no use records, so none of them warns.
 #[must_use]
 pub fn too_wide_members(codebase: &CodebaseMetadata, references: &SymbolReferences) -> IssueCollection {
     // Each use of a member name: the class the code names it on, and the class or function the code is in, `None`
@@ -659,6 +660,7 @@ fn public_members(codebase: &CodebaseMetadata, class_name: Word, class: &ClassLi
     for (name, property) in &class.properties {
         if class.declaring_property_ids.get(name) == Some(&class_name)
             && property.read_visibility.is_public()
+            && property.attributes.is_empty()
             && !property.flags.is_internal_reach()
             && !class.overridden_property_ids.contains_key(name)
             && let Some(span) = property.name_span.or(property.span)
@@ -675,6 +677,7 @@ fn public_members(codebase: &CodebaseMetadata, class_name: Word, class: &ClassLi
         if method.span != class.span
             && class.declaring_method_ids.get(name).is_none_or(|declaring| declaring.get_class_name() == class_name)
             && method.method_metadata.as_ref().is_some_and(|metadata| metadata.visibility.is_public())
+            && method.attributes.is_empty()
             && !method.flags.is_internal_reach()
             && !name.as_bytes().starts_with(b"__")
             && !class.overridden_method_ids.contains_key(name)
@@ -684,7 +687,10 @@ fn public_members(codebase: &CodebaseMetadata, class_name: Word, class: &ClassLi
     }
 
     for (name, constant) in &class.constants {
-        if class.span.contains(&constant.span) && constant.visibility.is_public() && !constant.flags.is_internal_reach()
+        if class.span.contains(&constant.span)
+            && constant.visibility.is_public()
+            && constant.attributes.is_empty()
+            && !constant.flags.is_internal_reach()
         {
             members.push((*name, *name, constant.span));
         }
