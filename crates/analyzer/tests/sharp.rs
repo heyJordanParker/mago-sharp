@@ -18521,6 +18521,45 @@ fn a_message_names_a_static_property_as_sharp_writes_it() {
     );
 }
 
+/// The PHP of a `match`, an `is` or an `as` holds a tested value that is not a local in a hidden variable, `$match#N`
+/// or `$as#N`, which no source writes. A message names it as the file writes the value.
+#[test]
+fn a_message_names_a_tested_value_as_sharp_writes_it() {
+    let sharp = "namespace Demo;\n\nclass Order\n{\n    private int count = 0;\n\n    public int kind() => match (this.total()) { string => 1, default => 0 };\n\n    public bool positive() => this.total() is int and > 0;\n\n    public string? text() => this.total() as string;\n\n    public int total() => this.count;\n}\n";
+
+    assert_eq!(
+        worded(("src/Demo/Order.sharp", sharp), &[])
+            .into_iter()
+            .filter(|line| line.contains("-type-comparison "))
+            .collect::<Vec<_>>(),
+        [
+            "7:49 impossible-type-comparison Impossible type assertion: `this.total()` of type `int` can never be `string`. | Argument `this.total()` has type `int` | The assertion expects `this.total()` to be `string`, but no value of type `int` can satisfy this. | Check that the correct variable is being passed, or update the assertion type.",
+            "9:47 redundant-type-comparison Redundant type assertion: `this.total()` is already `int`. | Argument `this.total()` already has type `int` | The assertion against `int` always holds because `this.total()` is `int`. | Consider removing this assertion or replacing it with `default` if used in a `match` arm.",
+            "11:46 impossible-type-comparison Impossible type assertion: `this.total()` of type `int` can never be `string`. | Argument `this.total()` has type `int` | The assertion expects `this.total()` to be `string`, but no value of type `int` can satisfy this. | Check that the correct variable is being passed, or update the assertion type.",
+        ]
+    );
+}
+
+/// A property or an element a pattern tests is held in a hidden variable too, and a message names it as PHP# reads it:
+/// `line.quantity`, `lines[0].quantity`, and `lines[lines.count() - 1].quantity` for an element after a rest.
+#[test]
+fn a_message_names_a_value_a_pattern_reads_as_sharp_reads_it() {
+    let sharp = "namespace Demo;\n\nclass Line\n{\n    private int quantity = 0;\n\n    public bool counted(Line line) => line is { quantity: string };\n\n    public bool first(List<Line> lines) => lines is [{ quantity: string }, ...];\n\n    public bool last(List<Line> lines) => lines is [..., { quantity: string }];\n\n    public bool called() => this.lines() is [{ quantity: string }, ...];\n\n    public List<Line> lines() => [];\n}\n";
+
+    assert_eq!(
+        messages(("src/Demo/Line.sharp", sharp), &[])
+            .into_iter()
+            .filter(|message| message.starts_with("Impossible type assertion"))
+            .collect::<Vec<_>>(),
+        [
+            "Impossible type assertion: `line.quantity` of type `int` can never be `string`.",
+            "Impossible type assertion: `lines[0].quantity` of type `int` can never be `string`.",
+            "Impossible type assertion: `lines[lines.count() - 1].quantity` of type `int` can never be `string`.",
+            "Impossible type assertion: `this.lines()[0].quantity` of type `int` can never be `string`.",
+        ]
+    );
+}
+
 /// Code a help tells the developer to write names an enum by the short name its file binds, as PHP# refuses a full
 /// name in code (spec section 23). Prose keeps the dotted name that tells two enums of one short name apart. The PHP
 /// twin keeps upstream's text.

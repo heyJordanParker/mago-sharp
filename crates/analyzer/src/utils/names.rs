@@ -30,9 +30,20 @@ use mago_names::kind::NameKind;
 use mago_names::scope::NamespaceScope;
 use mago_names::short_name;
 use mago_span::HasPosition;
+use mago_span::HasSpan;
+use mago_syntax::cst::Access;
+use mago_syntax::cst::Argument;
+use mago_syntax::cst::Binary;
+use mago_syntax::cst::BinaryOperator;
+use mago_syntax::cst::Call;
 use mago_syntax::cst::ClassLikeMemberSelector;
+use mago_syntax::cst::Expression;
+use mago_syntax::cst::FunctionCall;
 use mago_syntax::cst::Identifier;
+use mago_syntax::cst::Literal;
 use mago_syntax::cst::MethodCall;
+use mago_syntax::cst::PropertyAccess;
+use mago_syntax::cst::Variable;
 use mago_syntax_core::utils::is_part_of_identifier;
 use mago_word::Word;
 use mago_word::WordMap;
@@ -40,6 +51,7 @@ use mago_word::ascii_lowercase_word;
 use mago_word::word;
 
 use crate::context::Context;
+use crate::utils::quoted_source;
 use crate::visibility::display_namespace;
 use crate::visibility::list_refusing;
 
@@ -335,7 +347,8 @@ pub(crate) fn sentence_article(name: &str) -> &'static str {
 /// Returns the variable `id` as the analyzed file writes it. The analyzer keys a variable, a parameter and a read
 /// through one by its PHP text, as `$order`, `$this->total` and `App\Shop\Order::$count`. A `.sharp` file writes them
 /// as `order`, `this.total` and `Order.count`: a property is named without `$`, and the class before `::` as
-/// [`sharp_class_like_name`] names it. PHP gets `id` unchanged. Text inside quotes, as the key of `$prices['$']`, is
+/// [`sharp_class_like_name`] names it. A hidden variable of a pattern's PHP, as `$match#1`, is the value it holds, as
+/// [`display_tested_value`] writes it. PHP gets `id` unchanged. Text inside quotes, as the key of `$prices['$']`, is
 /// kept as written.
 #[must_use]
 pub(crate) fn display_variable_name<A>(context: &Context<'_, '_, A>, id: impl AsRef<[u8]>) -> String
@@ -364,6 +377,16 @@ where
                 quote = Some(byte);
 
                 (&rest[..1], 1)
+            }
+            // `$match#1` is not the start of `$match#12`.
+            None if byte == b'$'
+                && let Some((name, value)) = context.hidden_variables.iter().find(|(name, _)| {
+                    rest.starts_with(name) && !rest.get(name.len()).is_some_and(u8::is_ascii_digit)
+                }) =>
+            {
+                written.extend_from_slice(display_tested_value(context, value).as_bytes());
+
+                (b"", name.len())
             }
             None if byte == b'$' => (b"", 1),
             None if rest.starts_with(b"?->") => (b"?.", 3),
@@ -396,6 +419,48 @@ where
     }
 
     String::from_utf8_lossy(&written).into_owned()
+}
+
+/// Returns `value`, which the PHP of a PHP# pattern tests, as the `.sharp` file writes it. That PHP reads a property, an
+/// element and a list's count of the tested value with tokens that span nothing, which no source writes, so such a read
+/// is written as PHP# reads it, as `line.quantity`, `lines[0]` and `lines[lines.count() - 1]`, and a hidden variable,
+/// which its first read assigns, as [`display_variable_name`] writes it. Any other value is its source.
+fn display_tested_value<A>(context: &Context<'_, '_, A>, value: &Expression<'_>) -> String
+where
+    A: Arena,
+{
+    match value {
+        Expression::Assignment(assignment) if assignment.operator.span().length() == 0 => {
+            display_tested_value(context, assignment.lhs)
+        }
+        Expression::Variable(Variable::Direct(variable)) => display_variable_name(context, variable.name),
+        Expression::Access(Access::Property(PropertyAccess {
+            object,
+            arrow,
+            property: ClassLikeMemberSelector::Identifier(property),
+        })) if arrow.length() == 0 => {
+            format!("{}.{}", display_tested_value(context, object), String::from_utf8_lossy(property.value))
+        }
+        Expression::ArrayAccess(access) if access.left_bracket.length() == 0 => {
+            format!("{}[{}]", display_tested_value(context, access.array), display_tested_value(context, access.index))
+        }
+        Expression::Binary(Binary { lhs, operator: BinaryOperator::Subtraction(minus), rhs })
+            if minus.length() == 0 =>
+        {
+            format!("{} - {}", display_tested_value(context, lhs), display_tested_value(context, rhs))
+        }
+        // The only call a tested value holds is the `count` of a list it reads an element of from the end.
+        Expression::Call(Call::Function(FunctionCall { argument_list, .. }))
+            if argument_list.left_parenthesis.length() == 0
+                && let Some(Argument::Positional(list)) = argument_list.arguments.first() =>
+        {
+            format!("{}.count()", display_tested_value(context, list.value))
+        }
+        Expression::Literal(Literal::Integer(integer)) if integer.span.length() == 0 => {
+            String::from_utf8_lossy(integer.raw).into_owned()
+        }
+        _ => quoted_source(context, value.span()),
+    }
 }
 
 /// Returns the case-preserved method name on the given class-like for

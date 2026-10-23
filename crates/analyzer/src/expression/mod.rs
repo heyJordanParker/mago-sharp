@@ -50,6 +50,7 @@ use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::Access;
 use mago_syntax::cst::As;
+use mago_syntax::cst::Assignment;
 use mago_syntax::cst::Binary;
 use mago_syntax::cst::BinaryOperator;
 use mago_syntax::cst::ClassLikeMemberSelector;
@@ -73,6 +74,7 @@ use mago_syntax::cst::RestPattern;
 use mago_syntax::cst::Statement;
 use mago_syntax::cst::TypePattern;
 use mago_syntax::cst::UnaryPrefixOperator;
+use mago_syntax::cst::Variable;
 use mago_syntax::utils::pattern::PatternNames;
 use mago_syntax::utils::pattern::PhpShape;
 use mago_syntax::utils::pattern::called_functions;
@@ -577,12 +579,21 @@ where
         expect_type(context, artifacts, php, Some(&expected));
     }
     context.temporaries += temporaries;
+    let hidden_variables = context.hidden_variables.len();
+    let mut assigned = HiddenVariables::default();
+    match php {
+        Node::Expression(expression) => HiddenVariableWalker.walk_expression(expression, &mut assigned),
+        Node::Statement(statement) => HiddenVariableWalker.walk_statement(statement, &mut assigned),
+        _ => {}
+    }
+    context.hidden_variables.extend(assigned.0);
     let (result, issues) = context.record(|context| match php {
         Node::Expression(expression) => expression.analyze(context, block_context, artifacts),
         Node::Statement(statement) => statement.analyze(context, block_context, artifacts),
         _ => Ok(()),
     });
     context.temporaries -= temporaries;
+    context.hidden_variables.truncate(hidden_variables);
     context.patterns.truncate(patterns);
     for (left_bracket, tuple) in tuples {
         artifacts.record_list_pattern_tuple(&left_bracket, Some(tuple));
@@ -1875,6 +1886,22 @@ impl<'ast, 'arena> Walker<'ast, 'arena, ListReads<'ast, 'arena>> for ListReadWal
     fn walk_in_binary(&self, binary: &'ast Binary<'arena>, reads: &mut ListReads<'ast, 'arena>) {
         if let (BinaryOperator::Instanceof(_), Expression::Identifier(class)) = (binary.operator, binary.rhs) {
             reads.0.push((class.span(), binary.lhs));
+        }
+    }
+}
+
+/// Each hidden variable a pattern's PHP assigns, `$match#N` or `$as#N`, with the value it holds.
+#[derive(Default)]
+struct HiddenVariables<'ast, 'arena>(Vec<(&'arena [u8], &'ast Expression<'arena>)>);
+
+struct HiddenVariableWalker;
+
+impl<'ast, 'arena> Walker<'ast, 'arena, HiddenVariables<'ast, 'arena>> for HiddenVariableWalker {
+    fn walk_in_assignment(&self, assignment: &'ast Assignment<'arena>, assigned: &mut HiddenVariables<'ast, 'arena>) {
+        if let Expression::Variable(Variable::Direct(variable)) = assignment.lhs
+            && variable.name.contains(&b'#')
+        {
+            assigned.0.push((variable.name, assignment.rhs));
         }
     }
 }

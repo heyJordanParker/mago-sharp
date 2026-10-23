@@ -80,6 +80,9 @@ where
     /// The patterns of the PHP# `is` and `match` forms being analyzed, each with the `is` written before it, so a
     /// report on their PHP names a pattern as the file writes it.
     pub(super) patterns: Vec<(Option<Keyword<'arena>>, &'arena Pattern<'arena>)>,
+    /// The hidden variables the PHP of the PHP# pattern forms being analyzed assigns, each with the value it holds, so a
+    /// report on their PHP names the value as the file writes it.
+    pub(super) hidden_variables: Vec<(&'arena [u8], &'arena Expression<'arena>)>,
     class_initializers: WordMap<WordSet>,
     /// How many class-likes of the codebase have each lowercase short name, counted the first time a message asks.
     pub(super) short_name_counts: OnceCell<HashMap<String, u32>>,
@@ -121,6 +124,7 @@ where
             additional_symbol_references,
             temporaries: 0,
             patterns: Vec::new(),
+            hidden_variables: Vec::new(),
             class_initializers: WordMap::default(),
             short_name_counts: OnceCell::new(),
         }
