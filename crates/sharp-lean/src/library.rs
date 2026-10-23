@@ -214,7 +214,8 @@ pub(crate) fn stopped_code(code: i32) -> bool {
 pub(crate) enum Stop {
     /// It ran past `processor_seconds()`.
     Processor,
-    /// It went `deadline()` without finishing: it waited, since work that computes reaches the processor limit first.
+    /// It went `deadline()` without finishing: it waited, or it computed on a machine too busy to give it a quarter of a
+    /// core.
     Waited,
 }
 

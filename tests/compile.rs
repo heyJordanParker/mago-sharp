@@ -2809,7 +2809,7 @@ fn lean_work_that_never_ends_stops_once_at_its_limit_or_deadline() {
     };
 
     std::thread::scope(|scope| {
-        let waits = scope.spawn(|| stops(10, "sleep 4000", &refused("it waited 40 seconds without finishing")));
+        let waits = scope.spawn(|| stops(10, "sleep 4000", &refused("it did not finish within 40 seconds")));
         stops(
             30,
             "exec awk 'BEGIN { while (1) if (++step % 1000000 == 0) { print step; fflush() } }'",
