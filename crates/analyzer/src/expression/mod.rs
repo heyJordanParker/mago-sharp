@@ -50,7 +50,6 @@ use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::Access;
 use mago_syntax::cst::As;
-use mago_syntax::cst::Assignment;
 use mago_syntax::cst::Binary;
 use mago_syntax::cst::BinaryOperator;
 use mago_syntax::cst::ClassLikeMemberSelector;
@@ -74,7 +73,6 @@ use mago_syntax::cst::RestPattern;
 use mago_syntax::cst::Statement;
 use mago_syntax::cst::TypePattern;
 use mago_syntax::cst::UnaryPrefixOperator;
-use mago_syntax::cst::Variable;
 use mago_syntax::utils::pattern::PatternNames;
 use mago_syntax::utils::pattern::PhpShape;
 use mago_syntax::utils::pattern::called_functions;
@@ -547,7 +545,7 @@ where
         typed?;
     }
 
-    let Some(PhpShape { php, temporaries, tests }) =
+    let Some(PhpShape { php, tests, hidden, .. }) =
         context.get_assertion_context_from_block(block_context).php_shape(node, artifacts)
     else {
         // A refused form is the error type, so nothing that reads it reports again.
@@ -578,22 +576,14 @@ where
     {
         expect_type(context, artifacts, php, Some(&expected));
     }
-    context.temporaries += temporaries;
-    let hidden_variables = context.hidden_variables.len();
-    let mut assigned = HiddenVariables::default();
-    match php {
-        Node::Expression(expression) => HiddenVariableWalker.walk_expression(expression, &mut assigned),
-        Node::Statement(statement) => HiddenVariableWalker.walk_statement(statement, &mut assigned),
-        _ => {}
-    }
-    context.hidden_variables.extend(assigned.0);
+    // A `match` that tests a value that is not a local assigns the hidden variable that holds it first.
+    let first_hidden = hidden.first().map(|(name, _)| word(name));
+    context.hidden_variables.extend(hidden);
     let (result, issues) = context.record(|context| match php {
         Node::Expression(expression) => expression.analyze(context, block_context, artifacts),
         Node::Statement(statement) => statement.analyze(context, block_context, artifacts),
         _ => Ok(()),
     });
-    context.temporaries -= temporaries;
-    context.hidden_variables.truncate(hidden_variables);
     context.patterns.truncate(patterns);
     for (left_bracket, tuple) in tuples {
         artifacts.record_list_pattern_tuple(&left_bracket, Some(tuple));
@@ -781,7 +771,7 @@ where
             .map(|test| handled_test(test, context.arena, artifacts))
             .collect();
 
-        report_unhandled(pattern_match, &handled, context, block_context, artifacts);
+        report_unhandled(pattern_match, first_hidden, &handled, context, block_context, artifacts);
     }
 
     // Reading (g) of spec section 21: a pattern that can never match is an error, as C#'s CS8121 is. Its test is then
@@ -819,9 +809,10 @@ where
 /// Reports what a PHP# `match` without `default` leaves unhandled. Spec section 21 gives `default` to every `match` on
 /// a value that is not an enum, a sealed interface or a `List`, and makes a `match` on one handle each of its cases or
 /// lists. The value left is the value once every `handled` test is false, which Mago's reconciler narrows as it
-/// narrows the arms of PHP's `match`.
+/// narrows the arms of PHP's `match`. `first_hidden` is the hidden variable the `match`'s PHP assigns first.
 fn report_unhandled<'ctx, 'arena, A>(
     pattern_match: &PatternMatch<'arena>,
+    first_hidden: Option<Word>,
     handled: &[&Expression<'arena>],
     context: &mut Context<'ctx, 'arena, A>,
     block_context: &BlockContext<'ctx>,
@@ -845,7 +836,7 @@ fn report_unhandled<'ctx, 'arena, A>(
     });
 
     let (missing, enums) = if is_closed {
-        missing_cases(pattern_match, &value_type, handled, context, block_context, artifacts)
+        missing_cases(pattern_match, first_hidden, &value_type, handled, context, block_context, artifacts)
     } else {
         (vec![], vec![])
     };
@@ -871,9 +862,13 @@ fn report_unhandled<'ctx, 'arena, A>(
     );
 }
 
-/// The PHP variable the PHP of `pattern_match` tests, as `php_shape` writes it: the local the `match` names, or the
-/// hidden `$match#N` that holds its value, numbered after the hidden variables of the forms around it.
-fn tested_variable<A>(pattern_match: &PatternMatch<'_>, context: &Context<'_, '_, A>) -> Word
+/// The PHP variable the PHP of `pattern_match` tests, as `php_shape` writes it: the local the `match` names, or
+/// `first_hidden`, the hidden variable its PHP assigns first, which holds its value.
+fn tested_variable<A>(
+    pattern_match: &PatternMatch<'_>,
+    first_hidden: Option<Word>,
+    context: &Context<'_, '_, A>,
+) -> Option<Word>
 where
     A: Arena,
 {
@@ -881,9 +876,9 @@ where
         Expression::ConstantAccess(access)
             if matches!(context.resolved_names.binding(&access.name), Some(Binding::Local(_))) =>
         {
-            php_variable_name(access.name.value())
+            Some(php_variable_name(access.name.value()))
         }
-        _ => word(format!("$match#{}", context.temporaries + 1)),
+        _ => first_hidden,
     }
 }
 
@@ -892,6 +887,7 @@ where
 /// "lists of 2 or more items", and null last, with the enums those cases name.
 fn missing_cases<'ctx, 'arena, A>(
     pattern_match: &PatternMatch<'arena>,
+    first_hidden: Option<Word>,
     value_type: &TUnion,
     handled: &[&Expression<'arena>],
     context: &mut Context<'ctx, 'arena, A>,
@@ -940,9 +936,8 @@ where
         );
 
         // Only the tested value is left to handle: the PHP of a pattern narrows the hidden variables of its items too.
-        unhandled_context
-            .locals
-            .get(&tested_variable(pattern_match, context))
+        tested_variable(pattern_match, first_hidden, context)
+            .and_then(|variable| unhandled_context.locals.get(&variable))
             .map_or_else(|| value_type.clone(), |left| (**left).clone())
     };
 
@@ -1881,22 +1876,6 @@ impl<'ast, 'arena> Walker<'ast, 'arena, ListReads<'ast, 'arena>> for ListReadWal
     fn walk_in_binary(&self, binary: &'ast Binary<'arena>, reads: &mut ListReads<'ast, 'arena>) {
         if let (BinaryOperator::Instanceof(_), Expression::Identifier(class)) = (binary.operator, binary.rhs) {
             reads.0.push((class.span(), binary.lhs));
-        }
-    }
-}
-
-/// Each hidden variable a pattern's PHP assigns, `$match#N` or `$as#N`, with the value it holds.
-#[derive(Default)]
-struct HiddenVariables<'ast, 'arena>(Vec<(&'arena [u8], &'ast Expression<'arena>)>);
-
-struct HiddenVariableWalker;
-
-impl<'ast, 'arena> Walker<'ast, 'arena, HiddenVariables<'ast, 'arena>> for HiddenVariableWalker {
-    fn walk_in_assignment(&self, assignment: &'ast Assignment<'arena>, assigned: &mut HiddenVariables<'ast, 'arena>) {
-        if let Expression::Variable(Variable::Direct(variable)) = assignment.lhs
-            && variable.name.contains(&b'#')
-        {
-            assigned.0.push((variable.name, assignment.rhs));
         }
     }
 }

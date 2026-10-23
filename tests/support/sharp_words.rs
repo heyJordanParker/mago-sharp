@@ -19,6 +19,7 @@ static BANNED: LazyLock<Vec<(&str, Regex)>> = LazyLock::new(|| {
         ("a spec section", r"(?i)\bsections?\s+\d|§"),
         ("the checker's own name", r"\bMago\b"),
         ("Lean as the checker's translation", r"\b(?:to|in) Lean\b|\bLean (?:models|declares|cannot (?:prove|see))\b"),
+        ("a hidden variable of a pattern's PHP", r"\b(?:match|as)#\d"),
     ]
     .into_iter()
     .map(|(name, pattern)| (name, Regex::new(pattern).expect("a valid pattern")))

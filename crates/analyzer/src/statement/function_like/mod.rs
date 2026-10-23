@@ -533,6 +533,8 @@ where
 
     let mut artifacts =
         AnalysisArtifacts::new().with_variable_definedness_targets(parent_artifacts.variable_definedness_targets());
+    // A lambda's hidden variables are named apart from those of the body around it, which a message may still name.
+    artifacts.last_hidden_variable = parent_artifacts.last_hidden_variable.clone();
     if context.dialect.is_sharp()
         && (function_like_metadata.kind.is_closure() || function_like_metadata.kind.is_arrow_function())
         && function_like_metadata.return_type_metadata.is_none()

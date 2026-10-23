@@ -1,3 +1,5 @@
+use std::cell::Cell;
+use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -19,6 +21,7 @@ use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::Node;
 use mago_syntax::cst::NodeKind;
+use mago_syntax::utils::pattern::PhpShape;
 
 use crate::context::block::BlockContext;
 use crate::context::block::ReferenceConstraintSource;
@@ -133,6 +136,11 @@ pub struct AnalysisArtifacts {
     variable_definedness_targets: Option<Arc<[bool; NodeKind::COUNT]>>,
     pub(crate) pending_readonly_property_writes: Vec<PendingReadonlyPropertyWrite>,
     pub(crate) static_local_types: Option<WordMap<TUnion>>,
+    /// The number each PHP# `is`, `as` and `match` of the body numbers its hidden variables after, keyed by its span.
+    /// Read through [`Self::numbered_php_shape`].
+    hidden_variable_starts: RefCell<HashMap<(u32, u32), u32>>,
+    /// The number of the last hidden variable the body numbered, which a lambda in the body numbers its own after.
+    pub(crate) last_hidden_variable: Cell<u32>,
 }
 
 impl Default for AnalysisArtifacts {
@@ -180,7 +188,32 @@ impl AnalysisArtifacts {
             variable_definedness_targets: None,
             pending_readonly_property_writes: Vec::new(),
             static_local_types: None,
+            hidden_variable_starts: RefCell::default(),
+            last_hidden_variable: Cell::default(),
         }
+    }
+
+    /// The PHP of the PHP# `is`, `as` or `match` at `form`, which `build` builds with its hidden variables numbered after
+    /// the number it takes. The form's first PHP numbers them after every hidden variable the body numbered before, so
+    /// each has a name of its own in the body, and its every later PHP numbers them alike, so a read of one names the
+    /// variable its first PHP assigned.
+    pub(crate) fn numbered_php_shape<'shape>(
+        &self,
+        form: Span,
+        build: impl FnOnce(u32) -> Option<PhpShape<'shape>>,
+    ) -> Option<PhpShape<'shape>> {
+        let range = get_expression_range(&form);
+        let start = self.hidden_variable_starts.borrow().get(&range).copied();
+        if let Some(start) = start {
+            return build(start);
+        }
+
+        let start = self.last_hidden_variable.get();
+        let shape = build(start)?;
+        self.hidden_variable_starts.borrow_mut().insert(range, start);
+        self.last_hidden_variable.set(start + shape.temporaries);
+
+        Some(shape)
     }
 
     pub(crate) fn record_static_local_types(

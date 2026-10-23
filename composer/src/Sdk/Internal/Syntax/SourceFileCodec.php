@@ -4,14 +4,15 @@ declare(strict_types=1);
 
 namespace Mago\Sdk\Internal\Syntax;
 
-use Composer\InstalledVersions;
 use Mago\Sdk\Exception\ProtocolException;
 use Mago\Sdk\Internal\Protocol\PayloadReader;
 use Mago\Sdk\PHPVersion;
 use Mago\Sdk\Syntax\NodeKind;
 use Mago\Sdk\Syntax\SourceFile;
+use RuntimeException;
 
 use function count;
+use function Mago\Internal\get_version;
 
 /**
  * Decodes the syntax snapshot shared by external linter and analyzer messages.
@@ -83,17 +84,19 @@ final class SourceFileCodec
 
     /**
      * The error for a `mago` whose node-kind table is not this SDK's: what each side holds, this SDK's version when
-     * Composer installed it, and the fix, since `mago` and the SDK are released together at one version.
+     * Composer gives one, and the fix, since `mago` and the SDK are released together at one version.
      */
     private static function differentNodeKinds(string $mago, string $sdk): ProtocolException
     {
-        $version = InstalledVersions::isInstalled(self::PACKAGE)
-            ? ' ' . (string) InstalledVersions::getPrettyVersion(self::PACKAGE)
-            : '';
         $package = self::PACKAGE;
+        try {
+            $named = "{$package} " . get_version();
+        } catch (RuntimeException) {
+            $named = $package;
+        }
 
         return new ProtocolException(
-            "`mago` {$mago}, and the extension SDK, {$package}{$version}, {$sdk}. `mago` and {$package} must be the "
+            "`mago` {$mago}, and the extension SDK, {$named}, {$sdk}. `mago` and {$package} must be the "
             . "same version: run the `mago` that {$package} installs, or require the {$package} version of your `mago`.",
         );
     }

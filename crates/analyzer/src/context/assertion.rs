@@ -1,5 +1,6 @@
 use mago_names::ResolvedNames;
 use mago_names::binding::Binding;
+use mago_span::HasSpan;
 use mago_span::Span;
 use mago_word::Word;
 
@@ -25,8 +26,6 @@ pub struct AssertionContext<'ctx, 'arena, A> {
     pub codebase: &'ctx CodebaseMetadata,
     pub this_class_name: Option<Word>,
     pub trust_existence_checks: bool,
-    /// How many hidden variables the PHP# pattern forms around the expression hold.
-    pub temporaries: u32,
     /// The language of the file, which decides what `==` tests.
     pub dialect: Dialect,
 }
@@ -43,14 +42,15 @@ where
     A: Arena,
 {
     /// The PHP a PHP# `is`, `as` or `match` runs as, which the analyzer analyzes and narrows on. `None` for any other
-    /// node, and for a form the slice refuses. `artifacts` hold the type of the value an index it tests reads.
+    /// node, and for a form the slice refuses. `artifacts` hold the type of the value an index it tests reads, and the
+    /// numbers of the body's hidden variables.
     pub fn php_shape<'shape>(&self, node: Node<'_, 'shape>, artifacts: &AnalysisArtifacts) -> Option<PhpShape<'shape>>
     where
         'arena: 'shape,
     {
         let names = CodebasePatternNames { names: self.resolved_names, codebase: self.codebase, artifacts };
 
-        php_shape(self.arena, node, self.temporaries, &names)
+        artifacts.numbered_php_shape(node.span(), |start| php_shape(self.arena, node, start, &names))
     }
 }
 

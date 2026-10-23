@@ -457,9 +457,6 @@ where
     A: Arena,
 {
     match value {
-        Expression::Assignment(assignment) if assignment.operator.span().length() == 0 => {
-            display_tested_value(context, assignment.lhs)
-        }
         Expression::Variable(Variable::Direct(variable)) => display_variable_name(context, variable.name),
         Expression::Access(Access::Property(PropertyAccess {
             object,
@@ -486,7 +483,11 @@ where
         Expression::Literal(Literal::Integer(integer)) if integer.span.length() == 0 => {
             String::from_utf8_lossy(integer.raw).into_owned()
         }
-        _ => quoted_source(context, value.span()),
+        _ => {
+            debug_assert!(value.span().length() > 0, "a tested value the source writes spans its text");
+
+            quoted_source(context, value.span())
+        }
     }
 }
 

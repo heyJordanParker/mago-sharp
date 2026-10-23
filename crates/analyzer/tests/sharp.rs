@@ -18572,6 +18572,42 @@ fn a_message_names_a_tested_value_as_sharp_writes_it() {
     );
 }
 
+/// The analysis of `||` reads an `is` again as its PHP after the `is` is analyzed, and a message from that reading names
+/// the tested value as the file writes it too.
+#[test]
+fn a_message_from_the_analysis_of_or_names_a_tested_value_as_sharp_writes_it() {
+    let sharp = "namespace Demo;\n\nclass Order\n{\n    private int count = 0;\n\n    public bool open() => this.total() is string || this.count > 0;\n\n    public int total() => this.count;\n}\n";
+
+    assert_eq!(
+        worded(("src/Demo/Order.sharp", sharp), &[]),
+        [
+            "7:43 impossible-type-comparison Impossible type assertion: `this.total()` of type `int` can never be `string`. | Argument `this.total()` has type `int` | The assertion expects `this.total()` to be `string`, but no value of type `int` can satisfy this. | Check that the correct variable is being passed, or update the assertion type.",
+            "7:27 impossible-type-comparison Impossible condition: variable `this.total()` (type `int`) can never be `string`. | This condition always evaluates to `false` | The type of variable `this.total()` (type `int`) is incompatible with the assertion that it is `string`. | This condition is impossible and the associated code block will never execute. Review the types and condition logic.",
+            "7:27 redundant-logical-operation Redundant `||` operation: left operand is always `false` and right operand is evaluated. | Left operand is always `false` | Right operand is evaluated | The `||` operator will always return the boolean value of the right-hand side in this case. | Consider simplifying this expression to just the right operand.",
+        ]
+    );
+}
+
+/// `?:`, `while` and `do` read an `is` in their condition again as its PHP, and `do` reads it before it analyzes it, so
+/// every reading names the hidden variable its first PHP assigned, and a message names the tested value as the file
+/// writes it.
+#[test]
+fn a_message_from_a_condition_names_a_tested_value_as_sharp_writes_it() {
+    let sharp = "namespace Demo;\n\nclass Order\n{\n    private int count = 0;\n\n    public int pick() => this.total() is string ? 1 : 2;\n\n    public int waits()\n    {\n        let passes = 0;\n        while (this.total() is string) {\n            passes += 1;\n        }\n        do {\n            passes += 1;\n        } while (this.total() is string);\n        return passes;\n    }\n\n    public int total() => this.count;\n}\n";
+
+    assert_eq!(
+        worded(("src/Demo/Order.sharp", sharp), &[]),
+        [
+            "7:42 impossible-type-comparison Impossible type assertion: `this.total()` of type `int` can never be `string`. | Argument `this.total()` has type `int` | The assertion expects `this.total()` to be `string`, but no value of type `int` can satisfy this. | Check that the correct variable is being passed, or update the assertion type.",
+            "7:26 impossible-condition Redundant ternary operator: condition is always `false`. | This condition (type `false`) is always `false` | This `then` branch will never be evaluated | This `else` branch is always evaluated, making it the result of the expression | The ternary operator `? :` evaluates the `then` branch only when the condition is `true`. | Consider replacing the entire expression with just this `else` branch.",
+            "12:32 impossible-type-comparison Impossible type assertion: `this.total()` of type `int` can never be `string`. | Argument `this.total()` has type `int` | The assertion expects `this.total()` to be `string`, but no value of type `int` can satisfy this. | Check that the correct variable is being passed, or update the assertion type.",
+            "12:16 impossible-condition This loop condition (type `false`) will always evaluate to `false`. | This condition is always `false`, the loop body will never execute | Check the logic of this loop condition. The loop body is unreachable.",
+            "17:34 impossible-type-comparison Impossible type assertion: `this.total()` of type `int` can never be `string`. | Argument `this.total()` has type `int` | The assertion expects `this.total()` to be `string`, but no value of type `int` can satisfy this. | Check that the correct variable is being passed, or update the assertion type.",
+            "17:18 impossible-type-comparison Impossible condition: variable `this.total()` (type `int`) can never be `string`. | This condition always evaluates to `false` | The type of variable `this.total()` (type `int`) is incompatible with the assertion that it is `string`. | This condition is impossible and the associated code block will never execute. Review the types and condition logic.",
+        ]
+    );
+}
+
 /// A property or an element a pattern tests is held in a hidden variable too, and a message names it as PHP# reads it:
 /// `line.quantity`, `lines[0].quantity`, and `lines[lines.count() - 1].quantity` for an element after a rest.
 #[test]

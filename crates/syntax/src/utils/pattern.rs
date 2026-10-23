@@ -90,11 +90,13 @@ use crate::cst::sequence::TokenSeparatedSequence;
 pub struct PhpShape<'arena> {
     /// An expression for an expression, and an `if` for a `match` that starts a statement.
     pub php: Node<'arena, 'arena>,
-    /// How many hidden variables the PHP numbered, which the caller adds to the `temporaries` it gives the forms
-    /// inside this one.
+    /// How many hidden variables the PHP numbered. The caller numbers the hidden variables of the forms inside this one
+    /// after them.
     pub temporaries: u32,
     /// Each pattern the form tests, or the type of an `as`, with the PHP that is true when the value matches it.
     pub tests: std::vec::Vec<(Span, &'arena Expression<'arena>)>,
+    /// Each hidden variable the PHP assigns, as `$match#1`, with the value it holds.
+    pub hidden: std::vec::Vec<(&'arena [u8], &'arena Expression<'arena>)>,
 }
 
 /// What the PHP of a pattern depends on beyond its own text, which the analyzer and the bridge answer from the names
@@ -116,8 +118,8 @@ pub trait PatternNames {
 /// Builds, in `arena`, the PHP a PHP# `is`, `as` or `match` runs as.
 ///
 /// Returns `None` for any other node, and for a form the slice refuses, such as a nullable type pattern or a case
-/// pattern whose fields are not the case's. `temporaries` is how many hidden variables the forms around this one hold,
-/// so the new ones are numbered after them.
+/// pattern whose fields are not the case's. `temporaries` is the number the form's hidden variables are numbered after,
+/// so they are named apart from those of the forms around it.
 pub fn php_shape<'arena, A>(
     arena: &'arena A,
     node: Node<'_, 'arena>,
@@ -127,7 +129,14 @@ pub fn php_shape<'arena, A>(
 where
     A: Arena,
 {
-    let mut shape = Shape { arena, names, temporaries, first: temporaries, tests: std::vec::Vec::new() };
+    let mut shape = Shape {
+        arena,
+        names,
+        temporaries,
+        first: temporaries,
+        tests: std::vec::Vec::new(),
+        hidden: std::vec::Vec::new(),
+    };
     let php = match node {
         Node::Expression(Expression::Is(is)) => Node::Expression(shape.is(is)?),
         Node::Expression(Expression::As(r#as)) => Node::Expression(shape.r#as(r#as)?),
@@ -136,7 +145,7 @@ where
         _ => return None,
     };
 
-    Some(PhpShape { php, temporaries: shape.temporaries - shape.first, tests: shape.tests })
+    Some(PhpShape { php, temporaries: shape.temporaries - shape.first, tests: shape.tests, hidden: shape.hidden })
 }
 
 /// The PHP functions a pattern node calls to test a value, as the identifiers its PHP calls.
@@ -236,6 +245,7 @@ struct Shape<'shape, 'arena, A> {
     temporaries: u32,
     first: u32,
     tests: std::vec::Vec<(Span, &'arena Expression<'arena>)>,
+    hidden: std::vec::Vec<(&'arena [u8], &'arena Expression<'arena>)>,
 }
 
 /// A value a pattern tests. Its first read, when it has one, is the value where it is written or the assignment of
@@ -754,6 +764,7 @@ where
             operator: AssignmentOperator::Assign(at),
             rhs: value,
         }));
+        self.hidden.push((name, value));
 
         Subject { first: Some(assignment), variable: Some(name) }
     }

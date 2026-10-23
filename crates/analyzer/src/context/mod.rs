@@ -75,14 +75,13 @@ where
     pub(super) plugin_registry: &'ctx PluginRegistry,
     pub(super) external_analysis_session: Option<&'ctx ExternalAnalysisSession>,
     pub(super) additional_symbol_references: Option<&'ctx SymbolReferences>,
-    /// How many hidden variables the PHP# pattern forms being analyzed hold, as `php_shape` numbers them.
-    pub(super) temporaries: u32,
     /// The patterns of the PHP# `is` and `match` forms being analyzed, each with the `is` written before it, so a
     /// report on their PHP names a pattern as the file writes it.
     pub(super) patterns: Vec<(Option<Keyword<'arena>>, &'arena Pattern<'arena>)>,
-    /// The hidden variables the PHP of the PHP# pattern forms being analyzed assigns, each with the value it holds, so a
-    /// report on their PHP names the value as the file writes it.
-    pub(super) hidden_variables: Vec<(&'arena [u8], &'arena Expression<'arena>)>,
+    /// Each hidden variable the PHP of a PHP# pattern form assigns, with the value it holds, so a report on that PHP
+    /// names the value as the file writes it, whenever the analysis of the body reads the form again. A body names each
+    /// of its hidden variables apart. A later body takes a name again only once the body that took it first is analyzed.
+    pub(super) hidden_variables: HashMap<&'arena [u8], &'arena Expression<'arena>>,
     class_initializers: WordMap<WordSet>,
     /// How many class-likes of the codebase have each lowercase short name, counted the first time a message asks.
     pub(super) short_name_counts: OnceCell<HashMap<String, u32>>,
@@ -122,9 +121,8 @@ where
             plugin_registry,
             external_analysis_session,
             additional_symbol_references,
-            temporaries: 0,
             patterns: Vec::new(),
-            hidden_variables: Vec::new(),
+            hidden_variables: HashMap::default(),
             class_initializers: WordMap::default(),
             short_name_counts: OnceCell::new(),
         }
@@ -239,7 +237,6 @@ where
             codebase: self.codebase,
             this_class_name,
             trust_existence_checks: self.settings.trust_existence_checks,
-            temporaries: self.temporaries,
             dialect: self.dialect,
         }
     }
