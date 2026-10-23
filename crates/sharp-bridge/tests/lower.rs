@@ -29,6 +29,9 @@ use mago_sharp_bridge::sharp_str;
 use mago_sharp_bridge::sharp_value;
 use mago_sharp_bridge::unit::Library;
 use mago_sharp_bridge::unit::encode;
+use mago_syntax::cst::Call;
+use mago_syntax::cst::Expression;
+use mago_syntax::cst::Node;
 use xxhash_rust::xxh3::xxh3_64;
 
 /// A file the checker accepted and its lowered unit, or the checker's refusal.
@@ -27191,6 +27194,87 @@ fn a_call_of_a_body_that_calls_a_private_native_body_inlines_as_the_native_call(
                       ZVAL "name"
         "#}
     );
+}
+
+/// A mark of `Sharp\Internal`, which only the checker and the bridge read, stays out of the PHP the engine runs, where
+/// no class declares it: `kept` and its parameter carry marks alone, so they lower with no attribute, and `noted` keeps
+/// its `#[NoDiscard]`.
+#[test]
+fn a_checker_mark_stays_out_of_the_lowered_attributes() {
+    let lowered = Lowered::named(
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Marked.sharp",
+        "namespace Sharp;\n\nimport NoDiscard;\nimport Sharp.Internal.EncodedAsJson;\nimport Sharp.Internal.StartsListener;\n\npublic static class Marked\n{\n    [StartsListener]\n    public static string kept([EncodedAsJson] string value) => value;\n\n    [NoDiscard]\n    [StartsListener]\n    public static string noted(string value) => value;\n}\n",
+    );
+
+    assert_eq!(
+        lowered.declared("kept"),
+        indoc! {r#"
+            METHOD [17] "kept" @10-10
+              PARAM_LIST
+                PARAM
+                  ZVAL [1] "string"
+                  ZVAL "value"
+                  null
+                  null
+                  null
+                  null
+              null
+              STMT_LIST
+                RETURN
+                  VAR
+                    ZVAL "value"
+              SHARP_TYPE_ARGS
+                ZVAL [1] "string"
+                ZVAL "Function<string(string)>"
+              null
+        "#}
+    );
+    assert_eq!(
+        lowered.declared("noted"),
+        indoc! {r#"
+            METHOD [17] "noted" @14-14
+              PARAM_LIST
+                PARAM
+                  ZVAL [1] "string"
+                  ZVAL "value"
+                  null
+                  null
+                  null
+                  null
+              null
+              STMT_LIST
+                RETURN
+                  VAR
+                    ZVAL "value"
+              SHARP_TYPE_ARGS
+                ZVAL [1] "string"
+                ZVAL "Function<string(string)>"
+              ATTRIBUTE_LIST
+                ATTRIBUTE_GROUP
+                  ATTRIBUTE
+                    ZVAL "NoDiscard"
+                    null
+        "#}
+    );
+}
+
+/// A call of a method the standard library marks `LeanFunction`, as `Math.max`, names the Lean function a law's proof
+/// reads it as. A call of an unmarked method, as `Math.sqrt`, and of a plain PHP function through its namespace, as
+/// `Lib.capitalize`, name none.
+#[test]
+fn a_call_names_the_lean_function_its_method_is_marked_with() {
+    let code = "namespace App;\n\nimport Lib;\n\nclass Bounds\n{\n    public int largest(int a, int b) => Math.max(a, b);\n\n    public float root(float x) => Math.sqrt(x);\n\n    public string loud(string text) => Lib.capitalize(text);\n}\n";
+    let functions = common::checked("src/App/Bounds.sharp", code, &[LOUD, LOUD_HELPERS], |checked| {
+        Node::Program(checked.program()).filter_map(|node| match node {
+            Node::Expression(expression @ Expression::Call(Call::Method(_))) => {
+                Some(checked.types().lean_function(expression).map(|function| function.to_string()))
+            }
+            _ => None,
+        })
+    })
+    .expect("Bounds is checked");
+
+    assert_eq!(functions, [Some("max".to_owned()), None, None]);
 }
 
 /// ```php

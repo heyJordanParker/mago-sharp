@@ -11939,14 +11939,15 @@ fn a_struct_that_declares_equality_compares_and_keys_by_it() {
 /// Spec section 24: `Json.decode<T>` reads a struct or a PHP# class through its `parse`, so each call gives its type
 /// argument the struct parse check: a field `parse` can't read is refused as `Rule.parse` refuses it, a type with no
 /// `parse` is refused, and so is a generic struct, whose `parse` takes type arguments that the call through `T` does not
-/// pass. A struct `parse` reads compiles.
+/// pass. A struct `parse` reads compiles. A class that doesn't exist is the unknown-class error alone, and the caller's
+/// own type parameter is the caller's to bound.
 #[test]
 fn json_decode_gives_its_type_argument_the_struct_parse_check() {
     let json = (
         "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Encoding/Json.sharp",
         include_str!("../../../../composer/library/Sharp/Encoding/Json.sharp"),
     );
-    let sharp = "namespace Demo;\n\nimport Sharp.Encoding.Json;\n\nstruct Point\n{\n    public Point(public int x { get; }) { }\n}\n\nstruct Rule\n{\n    public Rule(public Function<bool(int)> check { get; }) { }\n}\n\nstruct Box<T>\n{\n    public Box(public T value { get; }) { }\n}\n\nclass Reader\n{\n    public Point point(string json) => Json.decode<Point>(json);\n\n    public Rule rule(string json) => Json.decode<Rule>(json);\n\n    public int number(string json) => Json.decode<int>(json);\n\n    public Box<int> box(string json) => Json.decode<Box<int>>(json);\n}\n";
+    let sharp = "namespace Demo;\n\nimport Sharp.Encoding.Json;\n\nstruct Point\n{\n    public Point(public int x { get; }) { }\n}\n\nstruct Rule\n{\n    public Rule(public Function<bool(int)> check { get; }) { }\n}\n\nstruct Box<T>\n{\n    public Box(public T value { get; }) { }\n}\n\nclass Reader\n{\n    public Point point(string json) => Json.decode<Point>(json);\n\n    public Rule rule(string json) => Json.decode<Rule>(json);\n\n    public int number(string json) => Json.decode<int>(json);\n\n    public Box<int> box(string json) => Json.decode<Box<int>>(json);\n\n    public Missing missing(string json) => Json.decode<Missing>(json);\n\n    public TRead read<TRead>(string json) => Json.decode<TRead>(json);\n}\n";
 
     assert_eq!(
         written(sharp, &analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Reader.sharp", sharp), &[json])),
@@ -11954,6 +11955,8 @@ fn json_decode_gives_its_type_argument_the_struct_parse_check() {
             "24:38 invalid-struct `Rule.parse` can't read `check`: `Function<bool(int)>` is a function.",
             "26:39 invalid-struct `Json.decode` parses its type argument with the type's `parse`, and `int` has none.",
             "28:41 invalid-struct `Json.decode` can't read `Box<int>`: its `parse` takes the type arguments of a generic type, which the call through its type argument does not pass.",
+            "30:12 non-existent-class-like Cannot find type `Demo.Missing`.",
+            "30:56 non-existent-class-like Cannot find type `Demo.Missing`.",
         ]
     );
 }

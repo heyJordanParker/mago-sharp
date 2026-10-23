@@ -1659,17 +1659,17 @@ impl<'analysis> Types<'analysis> {
             return None;
         };
 
-        self.codebase
+        let mark = self
+            .codebase
             .get_method(class.as_bytes(), method.as_bytes())?
             .attributes
             .iter()
-            .find(|attribute| attribute.name.as_bytes().eq_ignore_ascii_case(LEAN_FUNCTION.as_bytes()))?
-            .arguments
-            .first()
-            .and_then(|argument| match &argument.value {
-                Some(ConstantExpression::String(function)) => Some(*function),
-                _ => None,
-            })
+            .find(|attribute| attribute.name.as_bytes().eq_ignore_ascii_case(LEAN_FUNCTION.as_bytes()))?;
+
+        match mark.arguments.first().and_then(|argument| argument.value.as_ref()) {
+            Some(ConstantExpression::String(function)) => Some(*function),
+            _ => unreachable!("the standard library writes a `LeanFunction` mark with a literal string: {mark:?}"),
+        }
     }
 
     /// Whether `function`, a plain PHP function, is one of PHP's built-ins whose declared return type holds its failure,

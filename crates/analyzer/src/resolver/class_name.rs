@@ -350,12 +350,21 @@ where
     A: Arena,
 {
     let mut parameter = get_type_from_hint(context, block_context, artifacts, &Hint::Identifier(*name));
-    if block_context
-        .scope
-        .get_function_like()
-        .is_some_and(|function| function.has_attribute(PARSES_TYPE_ARGUMENT.as_bytes()))
+    // In a method the standard library marks `PARSES_TYPE_ARGUMENT`, a type parameter with no bound is bounded by
+    // `PARSED`, which declares the `parse` and `tryParse` each struct and PHP# class gets, so `T.parse(value)` gives a
+    // `T`. Each call's type argument gets the struct parse check.
+    if let [TAtomic::GenericParameter(generic)] = parameter.types.as_ref()
+        && generic.constraint.is_mixed()
+        && block_context
+            .scope
+            .get_function_like()
+            .is_some_and(|function| function.has_attribute(PARSES_TYPE_ARGUMENT.as_bytes()))
     {
-        parameter = bounded_by_parsed(&parameter);
+        let parsed = TUnion::from_atomic(TAtomic::Object(TObject::Named(TNamedObject::new(word(PARSED)))));
+        parameter = TUnion::from_atomic(TAtomic::GenericParameter(TGenericParameter {
+            constraint: Arc::new(parsed),
+            ..generic.clone()
+        }));
     }
     artifacts.record_tested_type(name, parameter.clone());
 
@@ -381,26 +390,6 @@ where
     }
 
     classes
-}
-
-/// `parameter`, a type parameter of a method the standard library marks [`PARSES_TYPE_ARGUMENT`], with each part that has
-/// no bound bounded by [`PARSED`], which declares the `parse` and `tryParse` each struct and PHP# class gets, so
-/// `T.parse(value)` in the method gives a `T`. Each call's type argument gets the struct parse check.
-fn bounded_by_parsed(parameter: &TUnion) -> TUnion {
-    let parsed = Arc::new(TUnion::from_atomic(TAtomic::Object(TObject::Named(TNamedObject::new(word(PARSED))))));
-
-    TUnion::from_vec(
-        parameter
-            .types
-            .iter()
-            .map(|atomic| match atomic {
-                TAtomic::GenericParameter(generic) if generic.constraint.is_mixed() => {
-                    TAtomic::GenericParameter(TGenericParameter { constraint: Arc::clone(&parsed), ..generic.clone() })
-                }
-                other => other.clone(),
-            })
-            .collect(),
-    )
 }
 
 /// The classes a value of `class_value_type` holds when it is a PHP# class value, spec section 25, leaving out `null`,
