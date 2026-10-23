@@ -40,7 +40,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/heyJordan
 To install a specific version:
 
 ```sh
-curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/heyJordanParker/php-sharp/master/sharp/mago/scripts/install.sh | bash -s -- --version=0.4.2
+curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/heyJordanParker/php-sharp/master/sharp/mago/scripts/install.sh | bash -s -- --version=0.5.0
 ```
 
 For all other installation methods, including Composer, please refer to the **[Installation Guide](docs/content/en/guide/installation.md)**.
