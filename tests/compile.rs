@@ -2782,8 +2782,11 @@ fn stalling_lake(folder: &Path, work: &str) -> std::ffi::OsString {
 /// Lean work that runs past the processor-time limit, or waits until the deadline, stops there once instead of holding
 /// the compile, and refuses the law whose code it was checking with what stopped it. Each row runs after a compile that
 /// built the runtime library. Work that never ends runs under a limit of 30 seconds, and costs the compile less than two
-/// limits, which leaves room for the rest of the compile on a slow machine. Work that waits runs under a limit of 10
-/// seconds, so its deadline is 40 seconds. It uses almost no processor time, so it runs on its own thread meanwhile.
+/// limits, which leaves room for the rest of the compile on a slow machine. It writes a line every million steps, as
+/// `lake build` reports each module it builds, so the deadline, which counts from the last thing written, never stops
+/// it: on a machine busy enough to give it less than a quarter of a core, it would reach the deadline of 120 seconds
+/// before its 30 processor seconds. Work that waits runs under a limit of 10 seconds, so its deadline is 40 seconds. It
+/// uses almost no processor time, so it runs on its own thread meanwhile.
 #[cfg(unix)]
 #[test]
 fn lean_work_that_never_ends_stops_once_at_its_limit_or_deadline() {
@@ -2809,7 +2812,7 @@ fn lean_work_that_never_ends_stops_once_at_its_limit_or_deadline() {
         let waits = scope.spawn(|| stops(10, "sleep 4000", &refused("it waited 40 seconds without finishing")));
         stops(
             30,
-            "exec awk 'BEGIN { while (1) { } }'",
+            "exec awk 'BEGIN { while (1) if (++step % 1000000 == 0) { print step; fflush() } }'",
             &refused("it ran past 30 processor seconds, the limit the checker sets on each check"),
         );
         waits.join().unwrap();
@@ -3194,10 +3197,11 @@ fn compile_proves_a_law_over_a_summing_loop() {
     );
 }
 
-/// A recursive sum over a list's rest, and a law its body proves by calling itself on that rest.
-const SUMMED_MONEY: &str = "namespace App.Shared;\n\npublic class Money\n{\n    public Money(public int amount { get; }, public string currency { get; }) { }\n\n    public static int total(List<Money> items) => match (items) {\n        [] => 0,\n        [Money first, ...List<Money> rest] => first.amount + Money.total(rest),\n        default => 0,\n    };\n\n    law totalJoins(List<Money> a, List<Money> b) => Money.total([...a, ...b]) == Money.total(a) + Money.total(b)\n    {\n        match (a) {\n            [] => { return; },\n            [Money, ...List<Money> rest] => { Money.totalJoins(rest, b); },\n            default => { return; },\n        }\n    }\n}\n";
+/// A recursive sum over a list's rest, and a law its body proves by calling itself on that rest, as the laws design
+/// writes them: each `match` handles every length of the list, so neither has `default`.
+const SUMMED_MONEY: &str = "namespace App.Shared;\n\npublic class Money\n{\n    public Money(public int amount { get; }, public string currency { get; }) { }\n\n    public static int total(List<Money> items) => match (items) {\n        [] => 0,\n        [Money first, ...List<Money> rest] => first.amount + Money.total(rest),\n    };\n\n    law totalJoins(List<Money> a, List<Money> b) => Money.total([...a, ...b]) == Money.total(a) + Money.total(b)\n    {\n        match (a) {\n            [] => { return; },\n            [Money, ...List<Money> rest] => { Money.totalJoins(rest, b); },\n        }\n    }\n}\n";
 
-const TOTAL_JOINS_FIRST: &str = "law totalJoinsFirst(List<Money> a, List<Money> b) => Money.total([...a, ...b]) == Money.total(a)\n    {\n        match (a) {\n            [] => { return; },\n            [Money, ...List<Money> rest] => { Money.totalJoinsFirst(rest, b); },\n            default => { return; },\n        }\n    }";
+const TOTAL_JOINS_FIRST: &str = "law totalJoinsFirst(List<Money> a, List<Money> b) => Money.total([...a, ...b]) == Money.total(a)\n    {\n        match (a) {\n            [] => { return; },\n            [Money, ...List<Money> rest] => { Money.totalJoinsFirst(rest, b); },\n        }\n    }";
 
 /// Three recursive sums over a list, one of two fields of each element, and a law its body proves by calling itself on
 /// the list's rest.
@@ -3263,7 +3267,7 @@ fn a_case_a_sum_law_leaves_open_names_its_goal_in_php_sharp() {
 
     assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
     for expected in [
-        "app/Shared/Money.sharp:21:5: error[law-unproven]: law totalJoinsFirst is not proven\n = when a is [], still to show: Money.total([...a, ...b]) == Money.total(a)\n",
+        "app/Shared/Money.sharp:19:5: error[law-unproven]: law totalJoinsFirst is not proven\n = when a is [], still to show: Money.total([...a, ...b]) == Money.total(a)\n",
         "app/Shared/Line.sharp:33:5: error[law-unproven]: law grossIsNets is not proven\n = when lines is [Line, ...List<Line> rest], still to show: lines[0].net + lines[0].tax + Line.gross(rest) == lines[0].net + Line.nets(rest)\n",
     ] {
         assert!(printed(&output).contains(expected), "{}", printed(&output));
