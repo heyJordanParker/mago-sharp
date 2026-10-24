@@ -1431,7 +1431,7 @@ fn a_field_is_a_property_group_of_one_property() {
 
 /// ```php
 /// #[\Sharp\Crossing(['map', 'string', null])]
-/// private \Sharp\Map $cache = new \Sharp\Map();
+/// private \Sharp\Map $cache = (static function () { return new \Sharp\Map<string, App.Shop.Plan>(); })();
 /// private \Closure $priceOf;
 /// private \Closure $charge;
 /// public function __construct(\Closure $priceOf, \Closure $charge) { … }
@@ -1464,8 +1464,19 @@ fn a_field_without_an_access_modifier_is_a_private_property() {
                 PROP_DECL
                   PROP_ELEM
                     ZVAL "cache"
-                    NEW
-                      ZVAL "Sharp\\Map"
+                    CALL
+                      CLOSURE [16] "" @5-5
+                        PARAM_LIST
+                        null
+                        STMT_LIST
+                          RETURN
+                            SHARP_TYPE_ARGS
+                              NEW
+                                ZVAL "Sharp\\Map"
+                                ARG_LIST
+                              ZVAL "string, App.Shop.Plan"
+                        null
+                        null
                       ARG_LIST
                     null
                     null
@@ -2721,7 +2732,7 @@ fn a_static_initial_value_that_is_not_constant_runs_once_when_its_class_s_static
 /// ```php
 /// final class Rates
 /// {
-///     private static \Sharp\Map $byCurrency = new \Sharp\Map();
+///     private static \Sharp\Map $byCurrency = (static function () { return new \Sharp\Map<string, int>(); })();
 ///     private static string $name;
 ///     public static $"\0<sharp>\0static constructor" = true;
 ///
@@ -2770,8 +2781,19 @@ fn a_static_constructor_runs_as_the_statics_method_after_the_initial_values() {
                     PROP_DECL
                       PROP_ELEM
                         ZVAL "byCurrency"
-                        NEW
-                          ZVAL "Sharp\\Map"
+                        CALL
+                          CLOSURE [16] "" @7-7
+                            PARAM_LIST
+                            null
+                            STMT_LIST
+                              RETURN
+                                SHARP_TYPE_ARGS
+                                  NEW
+                                    ZVAL "Sharp\\Map"
+                                    ARG_LIST
+                                  ZVAL "string, int"
+                            null
+                            null
                           ARG_LIST
                         null
                         null
@@ -5363,7 +5385,7 @@ fn a_nullable_type_is_its_type_with_the_nullable_flag() {
 }
 
 /// ```php
-/// public function group(array $items, \Sharp\Map|array|null $sizes = new \Sharp\Map(['a', 1])): \Sharp\Map|array|null { return null; }
+/// public function group(array $items, \Sharp\Map|array|null $sizes = (static function () { return new \Sharp\Map<string, int>(['a', 1]); })()): \Sharp\Map|array|null { return null; }
 /// ```
 ///
 /// A `List` is a PHP array, so its type is `array`: a `TYPE` with `IS_ARRAY`, which is 7, as php-src's grammar builds
@@ -5395,16 +5417,27 @@ fn a_list_type_is_the_array_type_and_a_map_type_its_class() {
                   TYPE [7]
                   ZVAL [1] "null"
                 ZVAL "sizes"
-                NEW
-                  ZVAL "Sharp\\Map"
+                CALL
+                  CLOSURE [16] "" @5-5
+                    PARAM_LIST
+                    null
+                    STMT_LIST
+                      RETURN
+                        SHARP_TYPE_ARGS
+                          NEW
+                            ZVAL "Sharp\\Map"
+                            ARG_LIST
+                              ARRAY [3]
+                                ARRAY_ELEM
+                                  ZVAL "a"
+                                  null
+                                ARRAY_ELEM
+                                  ZVAL 1
+                                  null
+                          ZVAL "string, int"
+                    null
+                    null
                   ARG_LIST
-                    ARRAY [3]
-                      ARRAY_ELEM
-                        ZVAL "a"
-                        null
-                      ARRAY_ELEM
-                        ZVAL 1
-                        null
                 null
                 null
                 null
@@ -5480,7 +5513,7 @@ fn a_union_that_holds_a_set_or_a_map_takes_a_php_array_too() {
 }
 
 /// ```php
-/// public \Sharp\Set|int $picked = 0 { set(\Sharp\Set|int|array $value) { $value = \is_array($value) ? new \Sharp\Set($value) : $value; $this->picked = $value; } }
+/// public \Sharp\Set|int $picked = 0 { set(\Sharp\Set|int|array $value) { $value = \is_array($value) ? new \Sharp\Set<string>($value) : $value; $this->picked = $value; } }
 /// ```
 ///
 /// A `set` body on a property whose union type holds a `Set` takes plain PHP's array as a parameter of that type does,
@@ -5529,11 +5562,13 @@ fn a_set_body_on_a_union_that_holds_a_set_takes_a_php_array_too() {
                               ARG_LIST
                                 VAR
                                   ZVAL "value"
-                            NEW
-                              ZVAL "Sharp\\Set"
-                              ARG_LIST
-                                VAR
-                                  ZVAL "value"
+                            SHARP_TYPE_ARGS
+                              NEW
+                                ZVAL "Sharp\\Set"
+                                ARG_LIST
+                                  VAR
+                                    ZVAL "value"
+                              ZVAL "string"
                             VAR
                               ZVAL "value"
                         STMT_LIST
@@ -5622,7 +5657,7 @@ fn a_collection_with_a_nullable_type_argument_is_the_type_of_the_collection() {
 }
 
 /// ```php
-/// $counts = new \Sharp\Map([\Lib\Calc::Active, 1]);
+/// $counts = new \Sharp\Map<Lib.Calc, int>([\Lib\Calc::Active, 1]);
 /// $counts[\Lib\Calc::Closed] = 2;
 /// return $counts[\Lib\Calc::Active] ?? 0;
 /// ```
@@ -5641,18 +5676,20 @@ fn a_backed_enum_key_goes_into_a_map_as_its_case() {
               ASSIGN
                 VAR
                   ZVAL "counts"
-                NEW
-                  ZVAL "Sharp\\Map"
-                  ARG_LIST
-                    ARRAY [3]
-                      ARRAY_ELEM
-                        CLASS_CONST
-                          ZVAL "Lib\\Calc"
-                          ZVAL "Active"
-                        null
-                      ARRAY_ELEM
-                        ZVAL 1
-                        null
+                SHARP_TYPE_ARGS
+                  NEW
+                    ZVAL "Sharp\\Map"
+                    ARG_LIST
+                      ARRAY [3]
+                        ARRAY_ELEM
+                          CLASS_CONST
+                            ZVAL "Lib\\Calc"
+                            ZVAL "Active"
+                          null
+                        ARRAY_ELEM
+                          ZVAL 1
+                          null
+                  ZVAL "Lib.Calc, int"
               ASSIGN
                 DIM
                   VAR
@@ -5675,8 +5712,8 @@ fn a_backed_enum_key_goes_into_a_map_as_its_case() {
 }
 
 /// ```php
-/// $defaults = \is_array($defaults) ? new \Sharp\Map(\array_merge([], ...\array_map(fn ($key#1, $value#2) => [\Lib\Calc::from((string) $key#1), $value#2], \array_keys($defaults), $defaults))) : $defaults;
-/// return new \Sharp\Map([...\array_merge([], ...\array_map(null, $defaults->keys(), \iterator_to_array($defaults, false))), \Lib\Calc::Active, 1]);
+/// $defaults = \is_array($defaults) ? new \Sharp\Map<Lib.Calc, int>(\array_merge([], ...\array_map(fn ($key#1, $value#2) => [\Lib\Calc::from((string) $key#1), $value#2], \array_keys($defaults), $defaults))) : $defaults;
+/// return new \Sharp\Map<Lib.Calc, int>([...\array_merge([], ...\array_map(null, $defaults->keys(), \iterator_to_array($defaults, false))), \Lib\Calc::Active, 1]);
 /// ```
 ///
 /// A `Map` spread puts in each key of the spread `Map` followed by its value, and a backed enum key beside it goes in
@@ -5701,65 +5738,10 @@ fn a_backed_enum_key_beside_a_map_spread_goes_in_as_its_case() {
                     ARG_LIST
                       VAR
                         ZVAL "defaults"
-                  NEW
-                    ZVAL "Sharp\\Map"
-                    ARG_LIST
-                      CALL
-                        ZVAL "array_merge"
-                        ARG_LIST
-                          ARRAY [3]
-                          UNPACK
-                            CALL
-                              ZVAL "array_map"
-                              ARG_LIST
-                                ARROW_FUNC "" @7-7
-                                  PARAM_LIST
-                                    PARAM
-                                      null
-                                      ZVAL "key#1"
-                                      null
-                                      null
-                                      null
-                                      null
-                                    PARAM
-                                      null
-                                      ZVAL "value#2"
-                                      null
-                                      null
-                                      null
-                                      null
-                                  null
-                                  ARRAY [3]
-                                    ARRAY_ELEM
-                                      STATIC_CALL
-                                        ZVAL "Lib\\Calc"
-                                        ZVAL "from"
-                                        ARG_LIST
-                                          CAST [6]
-                                            VAR
-                                              ZVAL "key#1"
-                                      null
-                                    ARRAY_ELEM
-                                      VAR
-                                        ZVAL "value#2"
-                                      null
-                                  null
-                                  null
-                                CALL
-                                  ZVAL "array_keys"
-                                  ARG_LIST
-                                    VAR
-                                      ZVAL "defaults"
-                                VAR
-                                  ZVAL "defaults"
-                  VAR
-                    ZVAL "defaults"
-              RETURN
-                NEW
-                  ZVAL "Sharp\\Map"
-                  ARG_LIST
-                    ARRAY [3]
-                      UNPACK
+                  SHARP_TYPE_ARGS
+                    NEW
+                      ZVAL "Sharp\\Map"
+                      ARG_LIST
                         CALL
                           ZVAL "array_merge"
                           ARG_LIST
@@ -5768,32 +5750,91 @@ fn a_backed_enum_key_beside_a_map_spread_goes_in_as_its_case() {
                               CALL
                                 ZVAL "array_map"
                                 ARG_LIST
-                                  ZVAL null
-                                  METHOD_CALL
-                                    VAR
-                                      ZVAL "defaults"
-                                    ZVAL "keys"
-                                    ARG_LIST
+                                  ARROW_FUNC "" @7-7
+                                    PARAM_LIST
+                                      PARAM
+                                        null
+                                        ZVAL "key#1"
+                                        null
+                                        null
+                                        null
+                                        null
+                                      PARAM
+                                        null
+                                        ZVAL "value#2"
+                                        null
+                                        null
+                                        null
+                                        null
+                                    null
+                                    ARRAY [3]
+                                      ARRAY_ELEM
+                                        STATIC_CALL
+                                          ZVAL "Lib\\Calc"
+                                          ZVAL "from"
+                                          ARG_LIST
+                                            CAST [6]
+                                              VAR
+                                                ZVAL "key#1"
+                                        null
+                                      ARRAY_ELEM
+                                        VAR
+                                          ZVAL "value#2"
+                                        null
+                                    null
+                                    null
                                   CALL
-                                    ZVAL "iterator_to_array"
+                                    ZVAL "array_keys"
                                     ARG_LIST
                                       VAR
                                         ZVAL "defaults"
-                                      ZVAL false
-                      ARRAY_ELEM
-                        CLASS_CONST
-                          ZVAL "Lib\\Calc"
-                          ZVAL "Active"
-                        null
-                      ARRAY_ELEM
-                        ZVAL 1
-                        null
+                                  VAR
+                                    ZVAL "defaults"
+                    ZVAL "Lib.Calc, int"
+                  VAR
+                    ZVAL "defaults"
+              RETURN
+                SHARP_TYPE_ARGS
+                  NEW
+                    ZVAL "Sharp\\Map"
+                    ARG_LIST
+                      ARRAY [3]
+                        UNPACK
+                          CALL
+                            ZVAL "array_merge"
+                            ARG_LIST
+                              ARRAY [3]
+                              UNPACK
+                                CALL
+                                  ZVAL "array_map"
+                                  ARG_LIST
+                                    ZVAL null
+                                    METHOD_CALL
+                                      VAR
+                                        ZVAL "defaults"
+                                      ZVAL "keys"
+                                      ARG_LIST
+                                    CALL
+                                      ZVAL "iterator_to_array"
+                                      ARG_LIST
+                                        VAR
+                                          ZVAL "defaults"
+                                        ZVAL false
+                        ARRAY_ELEM
+                          CLASS_CONST
+                            ZVAL "Lib\\Calc"
+                            ZVAL "Active"
+                          null
+                        ARRAY_ELEM
+                          ZVAL 1
+                          null
+                  ZVAL "Lib.Calc, int"
         "#}
     );
 }
 
 /// ```php
-/// $counts = new \Sharp\Map();
+/// $counts = new \Sharp\Map<Lib.Calc, int>();
 /// $counts->remove($status);
 /// $counts->remove(\Lib\Calc::Closed);
 /// $maybe = $flag ? $counts : null;
@@ -5816,9 +5857,11 @@ fn a_map_method_runs_on_the_map_and_takes_a_named_argument_by_position() {
               ASSIGN
                 VAR
                   ZVAL "counts"
-                NEW
-                  ZVAL "Sharp\\Map"
-                  ARG_LIST
+                SHARP_TYPE_ARGS
+                  NEW
+                    ZVAL "Sharp\\Map"
+                    ARG_LIST
+                  ZVAL "Lib.Calc, int"
               METHOD_CALL
                 VAR
                   ZVAL "counts"
@@ -5892,12 +5935,13 @@ fn a_backed_enum_value_goes_into_list_add_as_its_case() {
 }
 
 /// ```php
-/// $tags = new \Sharp\Set(["vip", "new"]);
-/// $states = new \Sharp\Set([\Lib\Calc::Active, $status]);
-/// $names = new \Sharp\Set([\Lib\Calc::upper($name)]);
+/// $tags = new \Sharp\Set<string>(["vip", "new"]);
+/// $states = new \Sharp\Set<Lib.Calc>([\Lib\Calc::Active, $status]);
+/// $names = new \Sharp\Set<string>([\Lib\Calc::upper($name)]);
 /// ```
 ///
-/// Spec section 12: a `Set` literal is a new `Set` of its elements, each one as itself, a backed enum case too.
+/// Spec section 12: a `Set` literal is a new `Set` of its elements, each one as itself, a backed enum case too, made
+/// with the type arguments of the `Set` it lands in.
 #[test]
 fn a_set_literal_is_a_new_set_of_its_elements() {
     assert_eq!(
@@ -5914,55 +5958,61 @@ fn a_set_literal_is_a_new_set_of_its_elements() {
               ASSIGN
                 VAR
                   ZVAL "tags"
-                NEW
-                  ZVAL "Sharp\\Set"
-                  ARG_LIST
-                    ARRAY [3]
-                      ARRAY_ELEM
-                        ZVAL "vip"
-                        null
-                      ARRAY_ELEM
-                        ZVAL "new"
-                        null
+                SHARP_TYPE_ARGS
+                  NEW
+                    ZVAL "Sharp\\Set"
+                    ARG_LIST
+                      ARRAY [3]
+                        ARRAY_ELEM
+                          ZVAL "vip"
+                          null
+                        ARRAY_ELEM
+                          ZVAL "new"
+                          null
+                  ZVAL "string"
               ASSIGN
                 VAR
                   ZVAL "states"
-                NEW
-                  ZVAL "Sharp\\Set"
-                  ARG_LIST
-                    ARRAY [3]
-                      ARRAY_ELEM
-                        CLASS_CONST
-                          ZVAL "Lib\\Calc"
-                          ZVAL "Active"
-                        null
-                      ARRAY_ELEM
-                        VAR
-                          ZVAL "status"
-                        null
+                SHARP_TYPE_ARGS
+                  NEW
+                    ZVAL "Sharp\\Set"
+                    ARG_LIST
+                      ARRAY [3]
+                        ARRAY_ELEM
+                          CLASS_CONST
+                            ZVAL "Lib\\Calc"
+                            ZVAL "Active"
+                          null
+                        ARRAY_ELEM
+                          VAR
+                            ZVAL "status"
+                          null
+                  ZVAL "Lib.Calc"
               ASSIGN
                 VAR
                   ZVAL "names"
-                NEW
-                  ZVAL "Sharp\\Set"
-                  ARG_LIST
-                    ARRAY [3]
-                      ARRAY_ELEM
-                        STATIC_CALL
-                          ZVAL "Lib\\Calc"
-                          ZVAL "upper"
-                          ARG_LIST
-                            VAR
-                              ZVAL "name"
-                        null
+                SHARP_TYPE_ARGS
+                  NEW
+                    ZVAL "Sharp\\Set"
+                    ARG_LIST
+                      ARRAY [3]
+                        ARRAY_ELEM
+                          STATIC_CALL
+                            ZVAL "Lib\\Calc"
+                            ZVAL "upper"
+                            ARG_LIST
+                              VAR
+                                ZVAL "name"
+                          null
+                  ZVAL "string"
         "#}
     );
 }
 
 /// ```php
 /// $named = …;
-/// $sets = [new \Sharp\Set([1, 1]), new \Sharp\Set([2])];
-/// $named['b'] = new \Sharp\Set(['y']);
+/// $sets = [new \Sharp\Set<int>([1, 1]), new \Sharp\Set<int>([2])];
+/// $named['b'] = new \Sharp\Set<string>(['y']);
 /// ```
 ///
 /// A list literal inside a literal whose elements are declared `Set`s, or written into a `Map` entry declared a
@@ -5986,81 +6036,85 @@ fn a_list_literal_inside_a_literal_of_sets_is_a_set() {
                     ARG_LIST
                       VAR
                         ZVAL "named"
-                  NEW
-                    ZVAL "Sharp\\Map"
-                    ARG_LIST
-                      CALL
-                        ZVAL "array_merge"
-                        ARG_LIST
-                          ARRAY [3]
-                          UNPACK
-                            CALL
-                              ZVAL "array_map"
-                              ARG_LIST
-                                ARROW_FUNC "" @7-7
-                                  PARAM_LIST
-                                    PARAM
-                                      null
-                                      ZVAL "key#2"
-                                      null
-                                      null
-                                      null
-                                      null
-                                    PARAM
-                                      null
-                                      ZVAL "value#3"
-                                      null
-                                      null
-                                      null
-                                      null
-                                  null
-                                  ARRAY [3]
-                                    ARRAY_ELEM
-                                      CAST [6]
-                                        VAR
-                                          ZVAL "key#2"
-                                      null
-                                    ARRAY_ELEM
-                                      VAR
+                  SHARP_TYPE_ARGS
+                    NEW
+                      ZVAL "Sharp\\Map"
+                      ARG_LIST
+                        CALL
+                          ZVAL "array_merge"
+                          ARG_LIST
+                            ARRAY [3]
+                            UNPACK
+                              CALL
+                                ZVAL "array_map"
+                                ARG_LIST
+                                  ARROW_FUNC "" @7-7
+                                    PARAM_LIST
+                                      PARAM
+                                        null
+                                        ZVAL "key#2"
+                                        null
+                                        null
+                                        null
+                                        null
+                                      PARAM
+                                        null
                                         ZVAL "value#3"
-                                      null
-                                  null
-                                  null
-                                CALL
-                                  ZVAL "array_keys"
-                                  ARG_LIST
-                                    VAR
-                                      ZVAL "named"
-                                CALL
-                                  ZVAL "array_map"
-                                  ARG_LIST
-                                    ARROW_FUNC "" @7-7
-                                      PARAM_LIST
-                                        PARAM
-                                          null
-                                          ZVAL "element#1"
-                                          null
-                                          null
-                                          null
-                                          null
-                                      null
-                                      CONDITIONAL
-                                        CALL
-                                          ZVAL "is_array"
-                                          ARG_LIST
-                                            VAR
-                                              ZVAL "element#1"
-                                        NEW
-                                          ZVAL "Sharp\\Set"
-                                          ARG_LIST
-                                            VAR
-                                              ZVAL "element#1"
+                                        null
+                                        null
+                                        null
+                                        null
+                                    null
+                                    ARRAY [3]
+                                      ARRAY_ELEM
+                                        CAST [6]
+                                          VAR
+                                            ZVAL "key#2"
+                                        null
+                                      ARRAY_ELEM
                                         VAR
-                                          ZVAL "element#1"
-                                      null
-                                      null
-                                    VAR
-                                      ZVAL "named"
+                                          ZVAL "value#3"
+                                        null
+                                    null
+                                    null
+                                  CALL
+                                    ZVAL "array_keys"
+                                    ARG_LIST
+                                      VAR
+                                        ZVAL "named"
+                                  CALL
+                                    ZVAL "array_map"
+                                    ARG_LIST
+                                      ARROW_FUNC "" @7-7
+                                        PARAM_LIST
+                                          PARAM
+                                            null
+                                            ZVAL "element#1"
+                                            null
+                                            null
+                                            null
+                                            null
+                                        null
+                                        CONDITIONAL
+                                          CALL
+                                            ZVAL "is_array"
+                                            ARG_LIST
+                                              VAR
+                                                ZVAL "element#1"
+                                          SHARP_TYPE_ARGS
+                                            NEW
+                                              ZVAL "Sharp\\Set"
+                                              ARG_LIST
+                                                VAR
+                                                  ZVAL "element#1"
+                                            ZVAL "string"
+                                          VAR
+                                            ZVAL "element#1"
+                                        null
+                                        null
+                                      VAR
+                                        ZVAL "named"
+                    ZVAL "string, Set<string>"
                   VAR
                     ZVAL "named"
               ASSIGN
@@ -6068,45 +6122,51 @@ fn a_list_literal_inside_a_literal_of_sets_is_a_set() {
                   ZVAL "sets"
                 ARRAY [3]
                   ARRAY_ELEM
-                    NEW
-                      ZVAL "Sharp\\Set"
-                      ARG_LIST
-                        ARRAY [3]
-                          ARRAY_ELEM
-                            ZVAL 1
-                            null
-                          ARRAY_ELEM
-                            ZVAL 1
-                            null
+                    SHARP_TYPE_ARGS
+                      NEW
+                        ZVAL "Sharp\\Set"
+                        ARG_LIST
+                          ARRAY [3]
+                            ARRAY_ELEM
+                              ZVAL 1
+                              null
+                            ARRAY_ELEM
+                              ZVAL 1
+                              null
+                      ZVAL "int"
                     null
                   ARRAY_ELEM
-                    NEW
-                      ZVAL "Sharp\\Set"
-                      ARG_LIST
-                        ARRAY [3]
-                          ARRAY_ELEM
-                            ZVAL 2
-                            null
+                    SHARP_TYPE_ARGS
+                      NEW
+                        ZVAL "Sharp\\Set"
+                        ARG_LIST
+                          ARRAY [3]
+                            ARRAY_ELEM
+                              ZVAL 2
+                              null
+                      ZVAL "int"
                     null
               ASSIGN
                 DIM
                   VAR
                     ZVAL "named"
                   ZVAL "b"
-                NEW
-                  ZVAL "Sharp\\Set"
-                  ARG_LIST
-                    ARRAY [3]
-                      ARRAY_ELEM
-                        ZVAL "y"
-                        null
+                SHARP_TYPE_ARGS
+                  NEW
+                    ZVAL "Sharp\\Set"
+                    ARG_LIST
+                      ARRAY [3]
+                        ARRAY_ELEM
+                          ZVAL "y"
+                          null
+                  ZVAL "string"
         "#}
     );
 }
 
 /// ```php
-/// $tags = new \Sharp\Set([]);
-/// $tags = new \Sharp\Set(["b"]);
+/// $tags = new \Sharp\Set<string>([]);
+/// $tags = new \Sharp\Set<string>(["b"]);
 /// ```
 ///
 /// A list literal assigned to a local declared `Set`, as its initial value or later, is that `Set`.
@@ -6119,27 +6179,31 @@ fn a_list_literal_assigned_to_a_set_local_is_a_set() {
               ASSIGN
                 VAR
                   ZVAL "tags"
-                NEW
-                  ZVAL "Sharp\\Set"
-                  ARG_LIST
-                    ARRAY [3]
+                SHARP_TYPE_ARGS
+                  NEW
+                    ZVAL "Sharp\\Set"
+                    ARG_LIST
+                      ARRAY [3]
+                  ZVAL "string"
               ASSIGN
                 VAR
                   ZVAL "tags"
-                NEW
-                  ZVAL "Sharp\\Set"
-                  ARG_LIST
-                    ARRAY [3]
-                      ARRAY_ELEM
-                        ZVAL "b"
-                        null
+                SHARP_TYPE_ARGS
+                  NEW
+                    ZVAL "Sharp\\Set"
+                    ARG_LIST
+                      ARRAY [3]
+                        ARRAY_ELEM
+                          ZVAL "b"
+                          null
+                  ZVAL "string"
         "#}
     );
 }
 
 /// ```php
-/// $branch = new \Sharp\Set([]);
-/// if ($flag) { $branch = new \Sharp\Set(["d"]); } else { $branch = new \Sharp\Set(["e"]); }
+/// $branch = new \Sharp\Set<string>([]);
+/// if ($flag) { $branch = new \Sharp\Set<string>(["d"]); } else { $branch = new \Sharp\Set<string>(["e"]); }
 /// ```
 ///
 /// A list literal assigned in either branch of an `if` to a local declared `Set` is that `Set`.
@@ -6156,10 +6220,12 @@ fn a_list_literal_assigned_in_each_branch_of_an_if_to_a_set_local_is_a_set() {
               ASSIGN
                 VAR
                   ZVAL "branch"
-                NEW
-                  ZVAL "Sharp\\Set"
-                  ARG_LIST
-                    ARRAY [3]
+                SHARP_TYPE_ARGS
+                  NEW
+                    ZVAL "Sharp\\Set"
+                    ARG_LIST
+                      ARRAY [3]
+                  ZVAL "string"
               IF
                 IF_ELEM
                   VAR
@@ -6168,33 +6234,37 @@ fn a_list_literal_assigned_in_each_branch_of_an_if_to_a_set_local_is_a_set() {
                     ASSIGN
                       VAR
                         ZVAL "branch"
-                      NEW
-                        ZVAL "Sharp\\Set"
-                        ARG_LIST
-                          ARRAY [3]
-                            ARRAY_ELEM
-                              ZVAL "d"
-                              null
+                      SHARP_TYPE_ARGS
+                        NEW
+                          ZVAL "Sharp\\Set"
+                          ARG_LIST
+                            ARRAY [3]
+                              ARRAY_ELEM
+                                ZVAL "d"
+                                null
+                        ZVAL "string"
                 IF_ELEM
                   null
                   STMT_LIST
                     ASSIGN
                       VAR
                         ZVAL "branch"
-                      NEW
-                        ZVAL "Sharp\\Set"
-                        ARG_LIST
-                          ARRAY [3]
-                            ARRAY_ELEM
-                              ZVAL "e"
-                              null
+                      SHARP_TYPE_ARGS
+                        NEW
+                          ZVAL "Sharp\\Set"
+                          ARG_LIST
+                            ARRAY [3]
+                              ARRAY_ELEM
+                                ZVAL "e"
+                                null
+                        ZVAL "string"
         "#}
     );
 }
 
 /// ```php
-/// $maybe = \is_array($maybe) ? new \Sharp\Set($maybe) : $maybe;
-/// $maybe ??= new \Sharp\Set(["c"]);
+/// $maybe = \is_array($maybe) ? new \Sharp\Set<string>($maybe) : $maybe;
+/// $maybe ??= new \Sharp\Set<string>(["c"]);
 /// ```
 ///
 /// A list literal that `??=` assigns to a nullable `Set` is that `Set`.
@@ -6213,34 +6283,38 @@ fn a_list_literal_that_coalescing_assigns_to_a_nullable_set_is_a_set() {
                     ARG_LIST
                       VAR
                         ZVAL "maybe"
-                  NEW
-                    ZVAL "Sharp\\Set"
-                    ARG_LIST
-                      VAR
-                        ZVAL "maybe"
+                  SHARP_TYPE_ARGS
+                    NEW
+                      ZVAL "Sharp\\Set"
+                      ARG_LIST
+                        VAR
+                          ZVAL "maybe"
+                    ZVAL "string"
                   VAR
                     ZVAL "maybe"
               ASSIGN_COALESCE
                 VAR
                   ZVAL "maybe"
-                NEW
-                  ZVAL "Sharp\\Set"
-                  ARG_LIST
-                    ARRAY [3]
-                      ARRAY_ELEM
-                        ZVAL "c"
-                        null
+                SHARP_TYPE_ARGS
+                  NEW
+                    ZVAL "Sharp\\Set"
+                    ARG_LIST
+                      ARRAY [3]
+                        ARRAY_ELEM
+                          ZVAL "c"
+                          null
+                  ZVAL "string"
         "#}
     );
 }
 
 /// ```php
 /// #[\Sharp\Crossing(['set', null])]
-/// private \Sharp\Set $tags = new \Sharp\Set(["a"]);
+/// private \Sharp\Set $tags = (static function () { return new \Sharp\Set<string>(["a"]); })();
 /// ```
 ///
-/// A list literal that is the initial value of a property declared `Set` is that `Set`, a `new` the engine runs for
-/// each object.
+/// A list literal that is the initial value of a property declared `Set` is that `Set`, made with its type arguments,
+/// which no constant expression spells, so it runs in a closure the engine runs for each object.
 #[test]
 fn a_list_literal_initial_value_of_a_set_property_is_a_set() {
     assert_eq!(
@@ -6253,13 +6327,24 @@ fn a_list_literal_initial_value_of_a_set_property_is_a_set() {
               PROP_DECL
                 PROP_ELEM
                   ZVAL "tags"
-                  NEW
-                    ZVAL "Sharp\\Set"
+                  CALL
+                    CLOSURE [16] "" @3-3
+                      PARAM_LIST
+                      null
+                      STMT_LIST
+                        RETURN
+                          SHARP_TYPE_ARGS
+                            NEW
+                              ZVAL "Sharp\\Set"
+                              ARG_LIST
+                                ARRAY [3]
+                                  ARRAY_ELEM
+                                    ZVAL "a"
+                                    null
+                            ZVAL "string"
+                      null
+                      null
                     ARG_LIST
-                      ARRAY [3]
-                        ARRAY_ELEM
-                          ZVAL "a"
-                          null
                   null
                   null
               ATTRIBUTE_LIST
@@ -6279,9 +6364,9 @@ fn a_list_literal_initial_value_of_a_set_property_is_a_set() {
 }
 
 /// ```php
-/// $this->tags = new \Sharp\Set(["c"]);
-/// \Report::$shared = new \Sharp\Set(["d"]);
-/// $this->hooked = new \Sharp\Set(["e"]);
+/// $this->tags = new \Sharp\Set<string>(["c"]);
+/// \Report::$shared = new \Sharp\Set<string>(["d"]);
+/// $this->hooked = new \Sharp\Set<string>(["e"]);
 /// ```
 ///
 /// A list literal assigned to a field, a static field or a property with accessors declared `Set` is that `Set`.
@@ -6300,43 +6385,49 @@ fn a_list_literal_assigned_to_a_set_property_is_a_set() {
                   VAR
                     ZVAL "this"
                   ZVAL "tags"
-                NEW
-                  ZVAL "Sharp\\Set"
-                  ARG_LIST
-                    ARRAY [3]
-                      ARRAY_ELEM
-                        ZVAL "c"
-                        null
+                SHARP_TYPE_ARGS
+                  NEW
+                    ZVAL "Sharp\\Set"
+                    ARG_LIST
+                      ARRAY [3]
+                        ARRAY_ELEM
+                          ZVAL "c"
+                          null
+                  ZVAL "string"
               ASSIGN
                 STATIC_PROP
                   ZVAL "Report"
                   ZVAL "shared"
-                NEW
-                  ZVAL "Sharp\\Set"
-                  ARG_LIST
-                    ARRAY [3]
-                      ARRAY_ELEM
-                        ZVAL "d"
-                        null
+                SHARP_TYPE_ARGS
+                  NEW
+                    ZVAL "Sharp\\Set"
+                    ARG_LIST
+                      ARRAY [3]
+                        ARRAY_ELEM
+                          ZVAL "d"
+                          null
+                  ZVAL "string"
               ASSIGN
                 PROP
                   VAR
                     ZVAL "this"
                   ZVAL "hooked"
-                NEW
-                  ZVAL "Sharp\\Set"
-                  ARG_LIST
-                    ARRAY [3]
-                      ARRAY_ELEM
-                        ZVAL "e"
-                        null
+                SHARP_TYPE_ARGS
+                  NEW
+                    ZVAL "Sharp\\Set"
+                    ARG_LIST
+                      ARRAY [3]
+                        ARRAY_ELEM
+                          ZVAL "e"
+                          null
+                  ZVAL "string"
         "#}
     );
 }
 
 /// ```php
-/// public function run(): \Sharp\Set { return new \Sharp\Set(["a"]); }
-/// public function short(): \Sharp\Set { return new \Sharp\Set(["b"]); }
+/// public function run(): \Sharp\Set { return new \Sharp\Set<string>(["a"]); }
+/// public function short(): \Sharp\Set { return new \Sharp\Set<string>(["b"]); }
 /// ```
 ///
 /// A list literal a method declared to return a `Set` returns, from a block or as its expression body, is that `Set`.
@@ -6352,13 +6443,15 @@ fn a_list_literal_returned_where_a_set_is_declared_is_a_set() {
         indoc! {r#"
             STMT_LIST
               RETURN
-                NEW
-                  ZVAL "Sharp\\Set"
-                  ARG_LIST
-                    ARRAY [3]
-                      ARRAY_ELEM
-                        ZVAL "a"
-                        null
+                SHARP_TYPE_ARGS
+                  NEW
+                    ZVAL "Sharp\\Set"
+                    ARG_LIST
+                      ARRAY [3]
+                        ARRAY_ELEM
+                          ZVAL "a"
+                          null
+                  ZVAL "string"
         "#}
     );
     assert_eq!(
@@ -6366,22 +6459,25 @@ fn a_list_literal_returned_where_a_set_is_declared_is_a_set() {
         indoc! {r#"
             STMT_LIST
               RETURN
-                NEW
-                  ZVAL "Sharp\\Set"
-                  ARG_LIST
-                    ARRAY [3]
-                      ARRAY_ELEM
-                        ZVAL "b"
-                        null
+                SHARP_TYPE_ARGS
+                  NEW
+                    ZVAL "Sharp\\Set"
+                    ARG_LIST
+                      ARRAY [3]
+                        ARRAY_ELEM
+                          ZVAL "b"
+                          null
+                  ZVAL "string"
         "#}
     );
 }
 
 /// ```php
-/// public function run(\Sharp\Set|array $seed = new \Sharp\Set(["a"])): int { … }
+/// public function run(\Sharp\Set|array $seed = (static function () { return new \Sharp\Set<string>(["a"]); })()): int { … }
 /// ```
 ///
-/// A list literal that is the default of a parameter declared `Set` is that `Set`.
+/// A list literal that is the default of a parameter declared `Set` is that `Set`, made with its type arguments, which
+/// no constant expression spells, so it runs in a closure.
 #[test]
 fn a_list_literal_default_of_a_set_parameter_is_a_set() {
     let lowered = Lowered::new("class Report\n{\n    public int run(Set<string> seed = [\"a\"]) => seed.count();\n}\n");
@@ -6395,13 +6491,24 @@ fn a_list_literal_default_of_a_set_parameter_is_a_set() {
                   ZVAL "Sharp\\Set"
                   TYPE [7]
                 ZVAL "seed"
-                NEW
-                  ZVAL "Sharp\\Set"
+                CALL
+                  CLOSURE [16] "" @3-3
+                    PARAM_LIST
+                    null
+                    STMT_LIST
+                      RETURN
+                        SHARP_TYPE_ARGS
+                          NEW
+                            ZVAL "Sharp\\Set"
+                            ARG_LIST
+                              ARRAY [3]
+                                ARRAY_ELEM
+                                  ZVAL "a"
+                                  null
+                          ZVAL "string"
+                    null
+                    null
                   ARG_LIST
-                    ARRAY [3]
-                      ARRAY_ELEM
-                        ZVAL "a"
-                        null
                 null
                 null
                 null
@@ -6413,8 +6520,8 @@ fn a_list_literal_default_of_a_set_parameter_is_a_set() {
 }
 
 /// ```php
-/// $tags = \is_array($tags) ? new \Sharp\Set($tags) : $tags;
-/// $states = \is_array($states) ? new \Sharp\Set($states) : $states;
+/// $tags = \is_array($tags) ? new \Sharp\Set<string>($tags) : $tags;
+/// $states = \is_array($states) ? new \Sharp\Set<Lib.Calc>($states) : $states;
 /// $tags->add($name);
 /// $tags->remove(\Lib\Calc::upper($name));
 /// $states->add($status);
@@ -6447,11 +6554,13 @@ fn set_methods_run_on_the_set() {
                     ARG_LIST
                       VAR
                         ZVAL "tags"
-                  NEW
-                    ZVAL "Sharp\\Set"
-                    ARG_LIST
-                      VAR
-                        ZVAL "tags"
+                  SHARP_TYPE_ARGS
+                    NEW
+                      ZVAL "Sharp\\Set"
+                      ARG_LIST
+                        VAR
+                          ZVAL "tags"
+                    ZVAL "string"
                   VAR
                     ZVAL "tags"
               ASSIGN
@@ -6463,11 +6572,13 @@ fn set_methods_run_on_the_set() {
                     ARG_LIST
                       VAR
                         ZVAL "states"
-                  NEW
-                    ZVAL "Sharp\\Set"
-                    ARG_LIST
-                      VAR
-                        ZVAL "states"
+                  SHARP_TYPE_ARGS
+                    NEW
+                      ZVAL "Sharp\\Set"
+                      ARG_LIST
+                        VAR
+                          ZVAL "states"
+                    ZVAL "Lib.Calc"
                   VAR
                     ZVAL "states"
               METHOD_CALL
@@ -6521,7 +6632,7 @@ fn set_methods_run_on_the_set() {
 }
 
 /// ```php
-/// $tags = \is_array($tags) ? new \Sharp\Set($tags) : $tags;
+/// $tags = \is_array($tags) ? new \Sharp\Set<string>($tags) : $tags;
 /// $prices = …;
 /// $count = $tags->count();
 /// $kept = $tags->filter($keep);
@@ -6550,11 +6661,13 @@ fn set_and_map_methods_are_the_collection_methods_of_their_names() {
                     ARG_LIST
                       VAR
                         ZVAL "tags"
-                  NEW
-                    ZVAL "Sharp\\Set"
-                    ARG_LIST
-                      VAR
-                        ZVAL "tags"
+                  SHARP_TYPE_ARGS
+                    NEW
+                      ZVAL "Sharp\\Set"
+                      ARG_LIST
+                        VAR
+                          ZVAL "tags"
+                    ZVAL "string"
                   VAR
                     ZVAL "tags"
               ASSIGN
@@ -6566,53 +6679,55 @@ fn set_and_map_methods_are_the_collection_methods_of_their_names() {
                     ARG_LIST
                       VAR
                         ZVAL "prices"
-                  NEW
-                    ZVAL "Sharp\\Map"
-                    ARG_LIST
-                      CALL
-                        ZVAL "array_merge"
-                        ARG_LIST
-                          ARRAY [3]
-                          UNPACK
-                            CALL
-                              ZVAL "array_map"
-                              ARG_LIST
-                                ARROW_FUNC "" @7-7
-                                  PARAM_LIST
-                                    PARAM
-                                      null
-                                      ZVAL "key#1"
-                                      null
-                                      null
-                                      null
-                                      null
-                                    PARAM
-                                      null
-                                      ZVAL "value#2"
-                                      null
-                                      null
-                                      null
-                                      null
-                                  null
-                                  ARRAY [3]
-                                    ARRAY_ELEM
-                                      CAST [6]
-                                        VAR
-                                          ZVAL "key#1"
-                                      null
-                                    ARRAY_ELEM
-                                      VAR
+                  SHARP_TYPE_ARGS
+                    NEW
+                      ZVAL "Sharp\\Map"
+                      ARG_LIST
+                        CALL
+                          ZVAL "array_merge"
+                          ARG_LIST
+                            ARRAY [3]
+                            UNPACK
+                              CALL
+                                ZVAL "array_map"
+                                ARG_LIST
+                                  ARROW_FUNC "" @7-7
+                                    PARAM_LIST
+                                      PARAM
+                                        null
+                                        ZVAL "key#1"
+                                        null
+                                        null
+                                        null
+                                        null
+                                      PARAM
+                                        null
                                         ZVAL "value#2"
-                                      null
-                                  null
-                                  null
-                                CALL
-                                  ZVAL "array_keys"
-                                  ARG_LIST
-                                    VAR
-                                      ZVAL "prices"
-                                VAR
-                                  ZVAL "prices"
+                                        null
+                                        null
+                                        null
+                                        null
+                                    null
+                                    ARRAY [3]
+                                      ARRAY_ELEM
+                                        CAST [6]
+                                          VAR
+                                            ZVAL "key#1"
+                                        null
+                                      ARRAY_ELEM
+                                        VAR
+                                          ZVAL "value#2"
+                                        null
+                                    null
+                                    null
+                                  CALL
+                                    ZVAL "array_keys"
+                                    ARG_LIST
+                                      VAR
+                                        ZVAL "prices"
+                                  VAR
+                                    ZVAL "prices"
+                    ZVAL "string, int"
                   VAR
                     ZVAL "prices"
               ASSIGN
@@ -6684,53 +6799,55 @@ fn a_list_counts_with_php_count_and_a_map_with_its_method() {
                     ARG_LIST
                       VAR
                         ZVAL "counts"
-                  NEW
-                    ZVAL "Sharp\\Map"
-                    ARG_LIST
-                      CALL
-                        ZVAL "array_merge"
-                        ARG_LIST
-                          ARRAY [3]
-                          UNPACK
-                            CALL
-                              ZVAL "array_map"
-                              ARG_LIST
-                                ARROW_FUNC "" @7-7
-                                  PARAM_LIST
-                                    PARAM
-                                      null
-                                      ZVAL "key#1"
-                                      null
-                                      null
-                                      null
-                                      null
-                                    PARAM
-                                      null
-                                      ZVAL "value#2"
-                                      null
-                                      null
-                                      null
-                                      null
-                                  null
-                                  ARRAY [3]
-                                    ARRAY_ELEM
-                                      CAST [6]
-                                        VAR
-                                          ZVAL "key#1"
-                                      null
-                                    ARRAY_ELEM
-                                      VAR
+                  SHARP_TYPE_ARGS
+                    NEW
+                      ZVAL "Sharp\\Map"
+                      ARG_LIST
+                        CALL
+                          ZVAL "array_merge"
+                          ARG_LIST
+                            ARRAY [3]
+                            UNPACK
+                              CALL
+                                ZVAL "array_map"
+                                ARG_LIST
+                                  ARROW_FUNC "" @7-7
+                                    PARAM_LIST
+                                      PARAM
+                                        null
+                                        ZVAL "key#1"
+                                        null
+                                        null
+                                        null
+                                        null
+                                      PARAM
+                                        null
                                         ZVAL "value#2"
-                                      null
-                                  null
-                                  null
-                                CALL
-                                  ZVAL "array_keys"
-                                  ARG_LIST
-                                    VAR
-                                      ZVAL "counts"
-                                VAR
-                                  ZVAL "counts"
+                                        null
+                                        null
+                                        null
+                                        null
+                                    null
+                                    ARRAY [3]
+                                      ARRAY_ELEM
+                                        CAST [6]
+                                          VAR
+                                            ZVAL "key#1"
+                                        null
+                                      ARRAY_ELEM
+                                        VAR
+                                          ZVAL "value#2"
+                                        null
+                                    null
+                                    null
+                                  CALL
+                                    ZVAL "array_keys"
+                                    ARG_LIST
+                                      VAR
+                                        ZVAL "counts"
+                                  VAR
+                                    ZVAL "counts"
+                    ZVAL "string, int"
                   VAR
                     ZVAL "counts"
               RETURN
@@ -6788,7 +6905,7 @@ fn every_inlined_collection_method_lowers_to_php_on_the_array() {
 
 /// ```php
 /// $found = $sizes[$extra] ?? null;
-/// $unique = new \Sharp\Set($sizes);
+/// $unique = new \Sharp\Set<int>($sizes);
 /// $copy = $sizes;
 /// ```
 ///
@@ -6817,11 +6934,13 @@ fn get_or_null_to_set_and_to_list_lower_to_php_on_the_array() {
               ASSIGN
                 VAR
                   ZVAL "unique"
-                NEW
-                  ZVAL "Sharp\\Set"
-                  ARG_LIST
-                    VAR
-                      ZVAL "sizes"
+                SHARP_TYPE_ARGS
+                  NEW
+                    ZVAL "Sharp\\Set"
+                    ARG_LIST
+                      VAR
+                        ZVAL "sizes"
+                  ZVAL "int"
               ASSIGN
                 VAR
                   ZVAL "copy"
@@ -6996,53 +7115,55 @@ fn a_list_search_runs_the_equality_of_its_element_type_for_each_element() {
                             ARG_LIST
                               VAR
                                 ZVAL "element#1"
-                          NEW
-                            ZVAL "Sharp\\Map"
-                            ARG_LIST
-                              CALL
-                                ZVAL "array_merge"
-                                ARG_LIST
-                                  ARRAY [3]
-                                  UNPACK
-                                    CALL
-                                      ZVAL "array_map"
-                                      ARG_LIST
-                                        ARROW_FUNC "" @14-14
-                                          PARAM_LIST
-                                            PARAM
-                                              null
-                                              ZVAL "key#2"
-                                              null
-                                              null
-                                              null
-                                              null
-                                            PARAM
-                                              null
-                                              ZVAL "value#3"
-                                              null
-                                              null
-                                              null
-                                              null
-                                          null
-                                          ARRAY [3]
-                                            ARRAY_ELEM
-                                              CAST [6]
-                                                VAR
-                                                  ZVAL "key#2"
-                                              null
-                                            ARRAY_ELEM
-                                              VAR
+                          SHARP_TYPE_ARGS
+                            NEW
+                              ZVAL "Sharp\\Map"
+                              ARG_LIST
+                                CALL
+                                  ZVAL "array_merge"
+                                  ARG_LIST
+                                    ARRAY [3]
+                                    UNPACK
+                                      CALL
+                                        ZVAL "array_map"
+                                        ARG_LIST
+                                          ARROW_FUNC "" @14-14
+                                            PARAM_LIST
+                                              PARAM
+                                                null
+                                                ZVAL "key#2"
+                                                null
+                                                null
+                                                null
+                                                null
+                                              PARAM
+                                                null
                                                 ZVAL "value#3"
-                                              null
-                                          null
-                                          null
-                                        CALL
-                                          ZVAL "array_keys"
-                                          ARG_LIST
-                                            VAR
-                                              ZVAL "element#1"
-                                        VAR
-                                          ZVAL "element#1"
+                                                null
+                                                null
+                                                null
+                                                null
+                                            null
+                                            ARRAY [3]
+                                              ARRAY_ELEM
+                                                CAST [6]
+                                                  VAR
+                                                    ZVAL "key#2"
+                                                null
+                                              ARRAY_ELEM
+                                                VAR
+                                                  ZVAL "value#3"
+                                                null
+                                            null
+                                            null
+                                          CALL
+                                            ZVAL "array_keys"
+                                            ARG_LIST
+                                              VAR
+                                                ZVAL "element#1"
+                                          VAR
+                                            ZVAL "element#1"
+                            ZVAL "string, int"
                           VAR
                             ZVAL "element#1"
                         null
@@ -7060,53 +7181,55 @@ fn a_list_search_runs_the_equality_of_its_element_type_for_each_element() {
                     ARG_LIST
                       VAR
                         ZVAL "row"
-                  NEW
-                    ZVAL "Sharp\\Map"
-                    ARG_LIST
-                      CALL
-                        ZVAL "array_merge"
-                        ARG_LIST
-                          ARRAY [3]
-                          UNPACK
-                            CALL
-                              ZVAL "array_map"
-                              ARG_LIST
-                                ARROW_FUNC "" @14-14
-                                  PARAM_LIST
-                                    PARAM
-                                      null
-                                      ZVAL "key#1"
-                                      null
-                                      null
-                                      null
-                                      null
-                                    PARAM
-                                      null
-                                      ZVAL "value#2"
-                                      null
-                                      null
-                                      null
-                                      null
-                                  null
-                                  ARRAY [3]
-                                    ARRAY_ELEM
-                                      CAST [6]
-                                        VAR
-                                          ZVAL "key#1"
-                                      null
-                                    ARRAY_ELEM
-                                      VAR
+                  SHARP_TYPE_ARGS
+                    NEW
+                      ZVAL "Sharp\\Map"
+                      ARG_LIST
+                        CALL
+                          ZVAL "array_merge"
+                          ARG_LIST
+                            ARRAY [3]
+                            UNPACK
+                              CALL
+                                ZVAL "array_map"
+                                ARG_LIST
+                                  ARROW_FUNC "" @14-14
+                                    PARAM_LIST
+                                      PARAM
+                                        null
+                                        ZVAL "key#1"
+                                        null
+                                        null
+                                        null
+                                        null
+                                      PARAM
+                                        null
                                         ZVAL "value#2"
-                                      null
-                                  null
-                                  null
-                                CALL
-                                  ZVAL "array_keys"
-                                  ARG_LIST
-                                    VAR
-                                      ZVAL "row"
-                                VAR
-                                  ZVAL "row"
+                                        null
+                                        null
+                                        null
+                                        null
+                                    null
+                                    ARRAY [3]
+                                      ARRAY_ELEM
+                                        CAST [6]
+                                          VAR
+                                            ZVAL "key#1"
+                                        null
+                                      ARRAY_ELEM
+                                        VAR
+                                          ZVAL "value#2"
+                                        null
+                                    null
+                                    null
+                                  CALL
+                                    ZVAL "array_keys"
+                                    ARG_LIST
+                                      VAR
+                                        ZVAL "row"
+                                  VAR
+                                    ZVAL "row"
+                    ZVAL "string, int"
                   VAR
                     ZVAL "row"
               RETURN
@@ -7561,7 +7684,7 @@ fn last_is_the_last_element_and_throws_on_an_empty_list() {
 }
 
 /// ```php
-/// $stock = \is_array($stock) ? new \Sharp\Set($stock) : $stock;
+/// $stock = \is_array($stock) ? new \Sharp\Set<string>($stock) : $stock;
 /// $held = $listed ? $names : $stock;
 /// return (\is_array($held) ? \in_array('tea', $held, true) : $held->contains('tea')) && \count($held) > 0;
 /// ```
@@ -7587,11 +7710,13 @@ fn a_shared_list_method_on_a_value_that_may_be_another_collection_tests_for_the_
                     ARG_LIST
                       VAR
                         ZVAL "stock"
-                  NEW
-                    ZVAL "Sharp\\Set"
-                    ARG_LIST
-                      VAR
-                        ZVAL "stock"
+                  SHARP_TYPE_ARGS
+                    NEW
+                      ZVAL "Sharp\\Set"
+                      ARG_LIST
+                        VAR
+                          ZVAL "stock"
+                    ZVAL "string"
                   VAR
                     ZVAL "stock"
               ASSIGN
@@ -7876,11 +8001,13 @@ fn a_change_through_a_list_index_runs_a_collection_method_on_the_index() {
                             ARG_LIST
                               VAR
                                 ZVAL "element#1"
-                          NEW
-                            ZVAL "Sharp\\Set"
-                            ARG_LIST
-                              VAR
-                                ZVAL "element#1"
+                          SHARP_TYPE_ARGS
+                            NEW
+                              ZVAL "Sharp\\Set"
+                              ARG_LIST
+                                VAR
+                                  ZVAL "element#1"
+                            ZVAL "int"
                           VAR
                             ZVAL "element#1"
                         null
@@ -7917,53 +8044,55 @@ fn a_change_through_a_list_index_runs_a_collection_method_on_the_index() {
                             ARG_LIST
                               VAR
                                 ZVAL "element#1"
-                          NEW
-                            ZVAL "Sharp\\Map"
-                            ARG_LIST
-                              CALL
-                                ZVAL "array_merge"
-                                ARG_LIST
-                                  ARRAY [3]
-                                  UNPACK
-                                    CALL
-                                      ZVAL "array_map"
-                                      ARG_LIST
-                                        ARROW_FUNC "" @7-7
-                                          PARAM_LIST
-                                            PARAM
-                                              null
-                                              ZVAL "key#2"
-                                              null
-                                              null
-                                              null
-                                              null
-                                            PARAM
-                                              null
-                                              ZVAL "value#3"
-                                              null
-                                              null
-                                              null
-                                              null
-                                          null
-                                          ARRAY [3]
-                                            ARRAY_ELEM
-                                              CAST [6]
-                                                VAR
-                                                  ZVAL "key#2"
-                                              null
-                                            ARRAY_ELEM
-                                              VAR
+                          SHARP_TYPE_ARGS
+                            NEW
+                              ZVAL "Sharp\\Map"
+                              ARG_LIST
+                                CALL
+                                  ZVAL "array_merge"
+                                  ARG_LIST
+                                    ARRAY [3]
+                                    UNPACK
+                                      CALL
+                                        ZVAL "array_map"
+                                        ARG_LIST
+                                          ARROW_FUNC "" @7-7
+                                            PARAM_LIST
+                                              PARAM
+                                                null
+                                                ZVAL "key#2"
+                                                null
+                                                null
+                                                null
+                                                null
+                                              PARAM
+                                                null
                                                 ZVAL "value#3"
-                                              null
-                                          null
-                                          null
-                                        CALL
-                                          ZVAL "array_keys"
-                                          ARG_LIST
-                                            VAR
-                                              ZVAL "element#1"
-                                        VAR
-                                          ZVAL "element#1"
+                                                null
+                                                null
+                                                null
+                                                null
+                                            null
+                                            ARRAY [3]
+                                              ARRAY_ELEM
+                                                CAST [6]
+                                                  VAR
+                                                    ZVAL "key#2"
+                                                null
+                                              ARRAY_ELEM
+                                                VAR
+                                                  ZVAL "value#3"
+                                                null
+                                            null
+                                            null
+                                          CALL
+                                            ZVAL "array_keys"
+                                            ARG_LIST
+                                              VAR
+                                                ZVAL "element#1"
+                                          VAR
+                                            ZVAL "element#1"
+                            ZVAL "string, int"
                           VAR
                             ZVAL "element#1"
                         null
@@ -7981,81 +8110,83 @@ fn a_change_through_a_list_index_runs_a_collection_method_on_the_index() {
                     ARG_LIST
                       VAR
                         ZVAL "stock"
-                  NEW
-                    ZVAL "Sharp\\Map"
-                    ARG_LIST
-                      CALL
-                        ZVAL "array_merge"
-                        ARG_LIST
-                          ARRAY [3]
-                          UNPACK
-                            CALL
-                              ZVAL "array_map"
-                              ARG_LIST
-                                ARROW_FUNC "" @7-7
-                                  PARAM_LIST
-                                    PARAM
-                                      null
-                                      ZVAL "key#2"
-                                      null
-                                      null
-                                      null
-                                      null
-                                    PARAM
-                                      null
-                                      ZVAL "value#3"
-                                      null
-                                      null
-                                      null
-                                      null
-                                  null
-                                  ARRAY [3]
-                                    ARRAY_ELEM
-                                      CAST [6]
-                                        VAR
-                                          ZVAL "key#2"
-                                      null
-                                    ARRAY_ELEM
-                                      VAR
+                  SHARP_TYPE_ARGS
+                    NEW
+                      ZVAL "Sharp\\Map"
+                      ARG_LIST
+                        CALL
+                          ZVAL "array_merge"
+                          ARG_LIST
+                            ARRAY [3]
+                            UNPACK
+                              CALL
+                                ZVAL "array_map"
+                                ARG_LIST
+                                  ARROW_FUNC "" @7-7
+                                    PARAM_LIST
+                                      PARAM
+                                        null
+                                        ZVAL "key#2"
+                                        null
+                                        null
+                                        null
+                                        null
+                                      PARAM
+                                        null
                                         ZVAL "value#3"
-                                      null
-                                  null
-                                  null
-                                CALL
-                                  ZVAL "array_keys"
-                                  ARG_LIST
-                                    VAR
-                                      ZVAL "stock"
-                                CALL
-                                  ZVAL "array_map"
-                                  ARG_LIST
-                                    ARROW_FUNC "" @7-7
-                                      PARAM_LIST
-                                        PARAM
-                                          null
-                                          ZVAL "element#1"
-                                          null
-                                          null
-                                          null
-                                          null
-                                      null
-                                      CONDITIONAL
-                                        CALL
-                                          ZVAL "is_array"
-                                          ARG_LIST
-                                            VAR
-                                              ZVAL "element#1"
-                                        CALL
-                                          ZVAL "array_values"
-                                          ARG_LIST
-                                            VAR
-                                              ZVAL "element#1"
+                                        null
+                                        null
+                                        null
+                                        null
+                                    null
+                                    ARRAY [3]
+                                      ARRAY_ELEM
+                                        CAST [6]
+                                          VAR
+                                            ZVAL "key#2"
+                                        null
+                                      ARRAY_ELEM
                                         VAR
-                                          ZVAL "element#1"
-                                      null
-                                      null
-                                    VAR
-                                      ZVAL "stock"
+                                          ZVAL "value#3"
+                                        null
+                                    null
+                                    null
+                                  CALL
+                                    ZVAL "array_keys"
+                                    ARG_LIST
+                                      VAR
+                                        ZVAL "stock"
+                                  CALL
+                                    ZVAL "array_map"
+                                    ARG_LIST
+                                      ARROW_FUNC "" @7-7
+                                        PARAM_LIST
+                                          PARAM
+                                            null
+                                            ZVAL "element#1"
+                                            null
+                                            null
+                                            null
+                                            null
+                                        null
+                                        CONDITIONAL
+                                          CALL
+                                            ZVAL "is_array"
+                                            ARG_LIST
+                                              VAR
+                                                ZVAL "element#1"
+                                          CALL
+                                            ZVAL "array_values"
+                                            ARG_LIST
+                                              VAR
+                                                ZVAL "element#1"
+                                          VAR
+                                            ZVAL "element#1"
+                                        null
+                                        null
+                                      VAR
+                                        ZVAL "stock"
+                    ZVAL "string, List<int>"
                   VAR
                     ZVAL "stock"
               METHOD_CALL
@@ -8188,7 +8319,7 @@ fn a_change_through_a_list_index_runs_a_collection_method_on_the_index() {
 /// $rows[0]?->add(5);
 /// $maybe[1]?->insert(0, 6);
 /// $this->held[0]?->add(7);
-/// $maybe[0]?->entries();
+/// $maybe[0]?->entries('int, int');
 /// ($maybe[2] === null) ? null : $maybe[2]->clear();
 /// return ($maybe[3] === null) ? null : \in_array(4, $maybe[3], true);
 /// ```
@@ -8241,6 +8372,7 @@ fn a_null_safe_change_through_a_list_index_runs_on_the_index() {
                   ZVAL 0
                 ZVAL "entries"
                 ARG_LIST
+                  ZVAL "int, int"
               CONDITIONAL [1]
                 BINARY_OP [16]
                   DIM
@@ -8699,7 +8831,7 @@ fn a_set_method_changes_a_property_through_the_property() {
 }
 
 /// ```php
-/// $names = \is_array($names) ? new \Sharp\Set($names) : $names;
+/// $names = \is_array($names) ? new \Sharp\Set<string>($names) : $names;
 /// $names?->add("vip");
 /// $other?->tags?->remove("old");
 /// return $names?->contains("vip");
@@ -8726,11 +8858,13 @@ fn a_null_safe_set_method_tests_its_receiver_first() {
                     ARG_LIST
                       VAR
                         ZVAL "names"
-                  NEW
-                    ZVAL "Sharp\\Set"
-                    ARG_LIST
-                      VAR
-                        ZVAL "names"
+                  SHARP_TYPE_ARGS
+                    NEW
+                      ZVAL "Sharp\\Set"
+                      ARG_LIST
+                        VAR
+                          ZVAL "names"
+                    ZVAL "string"
                   VAR
                     ZVAL "names"
               NULLSAFE_METHOD_CALL
@@ -8763,8 +8897,8 @@ fn a_null_safe_set_method_tests_its_receiver_first() {
 /// public readonly \Sharp\Set $tags;
 /// public function __construct(\Sharp\Set|array $tags, \Sharp\Set|array $ids)
 /// {
-///     $this->tags = \is_array($tags) ? new \Sharp\Set($tags) : $tags;
-///     $ids = \is_array($ids) ? new \Sharp\Set($ids) : $ids;
+///     $this->tags = \is_array($tags) ? new \Sharp\Set<string>($tags) : $tags;
+///     $ids = \is_array($ids) ? new \Sharp\Set<int>($ids) : $ids;
 /// }
 /// ```
 ///
@@ -8851,11 +8985,13 @@ fn a_set_parameter_becomes_a_set_before_the_body_runs() {
                     ARG_LIST
                       VAR
                         ZVAL "tags"
-                  NEW
-                    ZVAL "Sharp\\Set"
-                    ARG_LIST
-                      VAR
-                        ZVAL "tags"
+                  SHARP_TYPE_ARGS
+                    NEW
+                      ZVAL "Sharp\\Set"
+                      ARG_LIST
+                        VAR
+                          ZVAL "tags"
+                    ZVAL "string"
                   VAR
                     ZVAL "tags"
               ASSIGN
@@ -8867,11 +9003,13 @@ fn a_set_parameter_becomes_a_set_before_the_body_runs() {
                     ARG_LIST
                       VAR
                         ZVAL "ids"
-                  NEW
-                    ZVAL "Sharp\\Set"
-                    ARG_LIST
-                      VAR
-                        ZVAL "ids"
+                  SHARP_TYPE_ARGS
+                    NEW
+                      ZVAL "Sharp\\Set"
+                      ARG_LIST
+                        VAR
+                          ZVAL "ids"
+                    ZVAL "int"
                   VAR
                     ZVAL "ids"
         "#}
@@ -8884,7 +9022,7 @@ fn a_set_parameter_becomes_a_set_before_the_body_runs() {
 /// public readonly int $id;
 /// public function __construct(\Sharp\Set|array $tags, int $id)
 /// {
-///     $tags = \is_array($tags) ? new \Sharp\Set($tags) : $tags;
+///     $tags = \is_array($tags) ? new \Sharp\Set<string>($tags) : $tags;
 ///     $this->tags = $tags;
 ///     $this->id = $id;
 /// }
@@ -8977,11 +9115,13 @@ fn an_event_or_a_case_makes_its_set_argument_a_set_before_it_sets_the_property()
                       ARG_LIST
                         VAR
                           ZVAL "tags"
-                    NEW
-                      ZVAL "Sharp\\Set"
-                      ARG_LIST
-                        VAR
-                          ZVAL "tags"
+                    SHARP_TYPE_ARGS
+                      NEW
+                        ZVAL "Sharp\\Set"
+                        ARG_LIST
+                          VAR
+                            ZVAL "tags"
+                      ZVAL "string"
                     VAR
                       ZVAL "tags"
                 ASSIGN
@@ -9057,11 +9197,13 @@ fn an_event_or_a_case_makes_its_set_argument_a_set_before_it_sets_the_property()
                       ARG_LIST
                         VAR
                           ZVAL "tags"
-                    NEW
-                      ZVAL "Sharp\\Set"
-                      ARG_LIST
-                        VAR
-                          ZVAL "tags"
+                    SHARP_TYPE_ARGS
+                      NEW
+                        ZVAL "Sharp\\Set"
+                        ARG_LIST
+                          VAR
+                            ZVAL "tags"
+                      ZVAL "string"
                     VAR
                       ZVAL "tags"
                 ASSIGN
@@ -9078,7 +9220,7 @@ fn an_event_or_a_case_makes_its_set_argument_a_set_before_it_sets_the_property()
 }
 
 /// ```php
-/// $rows = \is_array($rows) ? \array_map(fn ($element#1) => \is_array($element#1) ? new \Sharp\Set($element#1) : $element#1, $rows) : $rows;
+/// $rows = \is_array($rows) ? \array_map(fn ($element#1) => \is_array($element#1) ? new \Sharp\Set<int>($element#1) : $element#1, $rows) : $rows;
 /// $this->id = $id;
 /// $this->rows = $rows;
 /// ```
@@ -9132,11 +9274,13 @@ fn an_event_a_case_and_a_struct_make_each_nested_set_a_set_before_they_set_the_p
                               ARG_LIST
                                 VAR
                                   ZVAL "element#1"
-                            NEW
-                              ZVAL "Sharp\\Set"
-                              ARG_LIST
-                                VAR
-                                  ZVAL "element#1"
+                            SHARP_TYPE_ARGS
+                              NEW
+                                ZVAL "Sharp\\Set"
+                                ARG_LIST
+                                  VAR
+                                    ZVAL "element#1"
+                              ZVAL "int"
                             VAR
                               ZVAL "element#1"
                           null
@@ -9195,11 +9339,13 @@ fn an_event_a_case_and_a_struct_make_each_nested_set_a_set_before_they_set_the_p
                               ARG_LIST
                                 VAR
                                   ZVAL "element#1"
-                            NEW
-                              ZVAL "Sharp\\Set"
-                              ARG_LIST
-                                VAR
-                                  ZVAL "element#1"
+                            SHARP_TYPE_ARGS
+                              NEW
+                                ZVAL "Sharp\\Set"
+                                ARG_LIST
+                                  VAR
+                                    ZVAL "element#1"
+                              ZVAL "int"
                             VAR
                               ZVAL "element#1"
                           null
@@ -9253,11 +9399,13 @@ fn an_event_a_case_and_a_struct_make_each_nested_set_a_set_before_they_set_the_p
                               ARG_LIST
                                 VAR
                                   ZVAL "element#1"
-                            NEW
-                              ZVAL "Sharp\\Set"
-                              ARG_LIST
-                                VAR
-                                  ZVAL "element#1"
+                            SHARP_TYPE_ARGS
+                              NEW
+                                ZVAL "Sharp\\Set"
+                                ARG_LIST
+                                  VAR
+                                    ZVAL "element#1"
+                              ZVAL "int"
                             VAR
                               ZVAL "element#1"
                           null
@@ -9274,9 +9422,9 @@ fn an_event_a_case_and_a_struct_make_each_nested_set_a_set_before_they_set_the_p
 
 /// ```php
 /// $prefix = "v";
-/// $check = function (\Sharp\Set|array $tags) use ($prefix) { $tags = \is_array($tags) ? new \Sharp\Set($tags) : $tags; return $tags->contains($prefix); };
-/// $size = function (\Sharp\Set|array $tags) { $tags = \is_array($tags) ? new \Sharp\Set($tags) : $tags; return $tags->count(); };
-/// return $check(new \Sharp\Set(['a'])) ? $size(new \Sharp\Set(['b'])) : 0;
+/// $check = function (\Sharp\Set|array $tags) use ($prefix) { $tags = \is_array($tags) ? new \Sharp\Set<string>($tags) : $tags; return $tags->contains($prefix); };
+/// $size = function (\Sharp\Set|array $tags) { $tags = \is_array($tags) ? new \Sharp\Set<string>($tags) : $tags; return $tags->count(); };
+/// return $check(new \Sharp\Set<string>(['a'])) ? $size(new \Sharp\Set<string>(['b'])) : 0;
 /// ```
 ///
 /// A list literal passed to a lambda's `Set` parameter is a `Set`, and plain PHP may pass a PHP array, so a lambda
@@ -9326,11 +9474,13 @@ fn a_lambda_with_a_set_parameter_is_a_closure_that_makes_it_a_set_first() {
                           ARG_LIST
                             VAR
                               ZVAL "tags"
-                        NEW
-                          ZVAL "Sharp\\Set"
-                          ARG_LIST
-                            VAR
-                              ZVAL "tags"
+                        SHARP_TYPE_ARGS
+                          NEW
+                            ZVAL "Sharp\\Set"
+                            ARG_LIST
+                              VAR
+                                ZVAL "tags"
+                          ZVAL "string"
                         VAR
                           ZVAL "tags"
                     RETURN
@@ -9373,11 +9523,13 @@ fn a_lambda_with_a_set_parameter_is_a_closure_that_makes_it_a_set_first() {
                           ARG_LIST
                             VAR
                               ZVAL "tags"
-                        NEW
-                          ZVAL "Sharp\\Set"
-                          ARG_LIST
-                            VAR
-                              ZVAL "tags"
+                        SHARP_TYPE_ARGS
+                          NEW
+                            ZVAL "Sharp\\Set"
+                            ARG_LIST
+                              VAR
+                                ZVAL "tags"
+                          ZVAL "string"
                         VAR
                           ZVAL "tags"
                     RETURN
@@ -9396,24 +9548,28 @@ fn a_lambda_with_a_set_parameter_is_a_closure_that_makes_it_a_set_first() {
                     VAR
                       ZVAL "check"
                     ARG_LIST
-                      NEW
-                        ZVAL "Sharp\\Set"
-                        ARG_LIST
-                          ARRAY [3]
-                            ARRAY_ELEM
-                              ZVAL "a"
-                              null
+                      SHARP_TYPE_ARGS
+                        NEW
+                          ZVAL "Sharp\\Set"
+                          ARG_LIST
+                            ARRAY [3]
+                              ARRAY_ELEM
+                                ZVAL "a"
+                                null
+                        ZVAL "string"
                   CALL
                     VAR
                       ZVAL "size"
                     ARG_LIST
-                      NEW
-                        ZVAL "Sharp\\Set"
-                        ARG_LIST
-                          ARRAY [3]
-                            ARRAY_ELEM
-                              ZVAL "b"
-                              null
+                      SHARP_TYPE_ARGS
+                        NEW
+                          ZVAL "Sharp\\Set"
+                          ARG_LIST
+                            ARRAY [3]
+                              ARRAY_ELEM
+                                ZVAL "b"
+                                null
+                        ZVAL "string"
                   ZVAL 0
         "#}
     );
@@ -9638,12 +9794,12 @@ fn a_null_safe_lazy_operation_is_a_conditional_over_the_sequence_call() {
 /// ```php
 /// public function many(\Sharp\Set|array ...$groups): int
 /// {
-///     $groups = \array_map(fn ($collection#1) => \is_array($collection#1) ? new \Sharp\Set($collection#1) : $collection#1, $groups);
+///     $groups = \array_map(fn ($collection#1) => \is_array($collection#1) ? new \Sharp\Set<string>($collection#1) : $collection#1, $groups);
 ///     return \count($groups);
 /// }
 /// public static function op_Addition(\App\Tenant\Order $order, \Sharp\Set|array $tags): \App\Tenant\Order
 /// {
-///     $tags = \is_array($tags) ? new \Sharp\Set($tags) : $tags;
+///     $tags = \is_array($tags) ? new \Sharp\Set<string>($tags) : $tags;
 ///     return $order;
 /// }
 /// ```
@@ -9685,11 +9841,13 @@ fn a_variadic_or_operator_set_parameter_becomes_a_set_before_the_body_runs() {
                           ARG_LIST
                             VAR
                               ZVAL "collection#1"
-                        NEW
-                          ZVAL "Sharp\\Set"
-                          ARG_LIST
-                            VAR
-                              ZVAL "collection#1"
+                        SHARP_TYPE_ARGS
+                          NEW
+                            ZVAL "Sharp\\Set"
+                            ARG_LIST
+                              VAR
+                                ZVAL "collection#1"
+                          ZVAL "string"
                         VAR
                           ZVAL "collection#1"
                       null
@@ -9717,11 +9875,13 @@ fn a_variadic_or_operator_set_parameter_becomes_a_set_before_the_body_runs() {
                     ARG_LIST
                       VAR
                         ZVAL "tags"
-                  NEW
-                    ZVAL "Sharp\\Set"
-                    ARG_LIST
-                      VAR
-                        ZVAL "tags"
+                  SHARP_TYPE_ARGS
+                    NEW
+                      ZVAL "Sharp\\Set"
+                      ARG_LIST
+                        VAR
+                          ZVAL "tags"
+                    ZVAL "string"
                   VAR
                     ZVAL "tags"
               RETURN
@@ -9755,11 +9915,13 @@ fn a_variadic_or_operator_set_parameter_becomes_a_set_before_the_body_runs() {
                           ARG_LIST
                             VAR
                               ZVAL "collection#1"
-                        NEW
-                          ZVAL "Sharp\\Set"
-                          ARG_LIST
-                            VAR
-                              ZVAL "collection#1"
+                        SHARP_TYPE_ARGS
+                          NEW
+                            ZVAL "Sharp\\Set"
+                            ARG_LIST
+                              VAR
+                                ZVAL "collection#1"
+                          ZVAL "string"
                         VAR
                           ZVAL "collection#1"
                       null
@@ -10475,8 +10637,8 @@ fn a_generic_class_type_is_its_class_and_a_class_value_type_is_string() {
 
 /// ```php
 /// $numbers = [1, $extra];
-/// $named = new \Sharp\Map(['a', 1, 2, $numbers[0]]);
-/// $empty = new \Sharp\Map();
+/// $named = new \Sharp\Map<int|string, int>(['a', 1, 2, $numbers[0]]);
+/// $empty = new \Sharp\Map<string, int>();
 /// $named['b'] = $numbers[0];
 /// $this->sizes['a'] = ($this->sizes['a'] ?? 0) + 1;
 /// return $numbers[1];
@@ -10510,31 +10672,35 @@ fn literals_are_short_arrays_and_an_index_is_a_dim() {
               ASSIGN
                 VAR
                   ZVAL "named"
-                NEW
-                  ZVAL "Sharp\\Map"
-                  ARG_LIST
-                    ARRAY [3]
-                      ARRAY_ELEM
-                        ZVAL "a"
-                        null
-                      ARRAY_ELEM
-                        ZVAL 1
-                        null
-                      ARRAY_ELEM
-                        ZVAL 2
-                        null
-                      ARRAY_ELEM
-                        DIM
-                          VAR
-                            ZVAL "numbers"
-                          ZVAL 0
-                        null
+                SHARP_TYPE_ARGS
+                  NEW
+                    ZVAL "Sharp\\Map"
+                    ARG_LIST
+                      ARRAY [3]
+                        ARRAY_ELEM
+                          ZVAL "a"
+                          null
+                        ARRAY_ELEM
+                          ZVAL 1
+                          null
+                        ARRAY_ELEM
+                          ZVAL 2
+                          null
+                        ARRAY_ELEM
+                          DIM
+                            VAR
+                              ZVAL "numbers"
+                            ZVAL 0
+                          null
+                  ZVAL "int|string, int"
               ASSIGN
                 VAR
                   ZVAL "empty"
-                NEW
-                  ZVAL "Sharp\\Map"
-                  ARG_LIST
+                SHARP_TYPE_ARGS
+                  NEW
+                    ZVAL "Sharp\\Map"
+                    ARG_LIST
+                  ZVAL "string, int"
               ASSIGN
                 DIM
                   VAR
@@ -12058,19 +12224,21 @@ fn a_type_argument_a_plain_php_refinement_fixes_carries_its_php_sharp_text() {
     );
 
     let body = lowered.body();
-    assert_eq!(body.matches("SHARP_TYPE_ARGS").count(), 10, "{body}");
+    assert_eq!(body.matches("SHARP_TYPE_ARGS").count(), 12, "{body}");
     assert_eq!(body.matches("VERIFY_TYPE_ARGS").count(), 11, "{body}");
     for (text, calls) in [
         // Two type arguments, and the check of the list `Pager.list()` returns.
         ("List<int>", 3),
         // A type argument, and the check of the result of the call that gives it, spec section 22, which reads a
-        // collection alone and names the type argument.
-        ("string", 2),
+        // collection alone and names the type argument. The `Set` the parameter `tags` makes takes `string` too.
+        ("string", 3),
         ("int", 2),
         ("Class<Object>", 2),
         ("Map<string, int>", 2),
         ("Map<Any?, Any?>, Map<string, int>", 2),
         ("int|string", 2),
+        // The `Map` the literal makes, with its own type, since its place names the method's type parameter.
+        ("string, List<int>", 1),
         ("Map<string, List<int>>", 1),
         ("List<Set<string>>", 1),
         ("List<Any?>, List<Set<string>>", 1),
@@ -15367,7 +15535,7 @@ fn a_map_or_a_set_constant_is_its_php_array() {
 /// ```php
 /// return \Sharp\Internal\keep('App\Tenant\Report::CODES#constant')
 ///     ?? \Sharp\Internal\keep('App\Tenant\Report::CODES#constant', static fn () =>
-///         \is_array($crossing#1 = \App\Tenant\Report::CODES) ? new \Sharp\Set($crossing#1) : $crossing#1);
+///         \is_array($crossing#1 = \App\Tenant\Report::CODES) ? new \Sharp\Set<string>($crossing#1) : $crossing#1);
 /// ```
 ///
 /// A class constant holds no object, so the first read of a `Set` or a `Map` constant makes its PHP array the object
@@ -15412,11 +15580,13 @@ fn a_read_of_a_set_constant_makes_the_set_of_its_array() {
                                 CLASS_CONST
                                   ZVAL "App\\Tenant\\Report"
                                   ZVAL "CODES"
-                          NEW
-                            ZVAL "Sharp\\Set"
-                            ARG_LIST
-                              VAR
-                                ZVAL "crossing#1"
+                          SHARP_TYPE_ARGS
+                            NEW
+                              ZVAL "Sharp\\Set"
+                              ARG_LIST
+                                VAR
+                                  ZVAL "crossing#1"
+                            ZVAL "string"
                           VAR
                             ZVAL "crossing#1"
                         null
@@ -16186,7 +16356,7 @@ fn a_null_safe_write_is_a_conditional_on_its_receiver() {
 
 /// ```php
 /// (($nullsafe#1 = $other) === null ? null : $nullsafe#1->prices = \is_array($crossing#2 = <checked>(\Lib\Calc::prices()))
-///     ? new \Sharp\Map(…(string) $key#3…) : $crossing#2);
+///     ? new \Sharp\Map<string, int>(…(string) $key#3…) : $crossing#2);
 /// ```
 ///
 /// Spec section 14.4: a write through `?.` writes its value as a write through `.` does, so a plain PHP array written
@@ -16233,53 +16403,55 @@ fn a_null_safe_write_takes_its_value_as_a_write_through_a_dot() {
                               ARG_LIST
                             ZVAL "Map<string, int>"
                             ZVAL "Lib\\Calc::prices()"
-                    NEW
-                      ZVAL "Sharp\\Map"
-                      ARG_LIST
-                        CALL
-                          ZVAL "array_merge"
-                          ARG_LIST
-                            ARRAY [3]
-                            UNPACK
-                              CALL
-                                ZVAL "array_map"
-                                ARG_LIST
-                                  ARROW_FUNC "" @11-11
-                                    PARAM_LIST
-                                      PARAM
-                                        null
-                                        ZVAL "key#3"
-                                        null
-                                        null
-                                        null
-                                        null
-                                      PARAM
-                                        null
-                                        ZVAL "value#4"
-                                        null
-                                        null
-                                        null
-                                        null
-                                    null
-                                    ARRAY [3]
-                                      ARRAY_ELEM
-                                        CAST [6]
-                                          VAR
-                                            ZVAL "key#3"
-                                        null
-                                      ARRAY_ELEM
-                                        VAR
+                    SHARP_TYPE_ARGS
+                      NEW
+                        ZVAL "Sharp\\Map"
+                        ARG_LIST
+                          CALL
+                            ZVAL "array_merge"
+                            ARG_LIST
+                              ARRAY [3]
+                              UNPACK
+                                CALL
+                                  ZVAL "array_map"
+                                  ARG_LIST
+                                    ARROW_FUNC "" @11-11
+                                      PARAM_LIST
+                                        PARAM
+                                          null
+                                          ZVAL "key#3"
+                                          null
+                                          null
+                                          null
+                                          null
+                                        PARAM
+                                          null
                                           ZVAL "value#4"
-                                        null
-                                    null
-                                    null
-                                  CALL
-                                    ZVAL "array_keys"
-                                    ARG_LIST
-                                      VAR
-                                        ZVAL "crossing#2"
-                                  VAR
-                                    ZVAL "crossing#2"
+                                          null
+                                          null
+                                          null
+                                          null
+                                      null
+                                      ARRAY [3]
+                                        ARRAY_ELEM
+                                          CAST [6]
+                                            VAR
+                                              ZVAL "key#3"
+                                          null
+                                        ARRAY_ELEM
+                                          VAR
+                                            ZVAL "value#4"
+                                          null
+                                      null
+                                      null
+                                    CALL
+                                      ZVAL "array_keys"
+                                      ARG_LIST
+                                        VAR
+                                          ZVAL "crossing#2"
+                                    VAR
+                                      ZVAL "crossing#2"
+                      ZVAL "string, int"
                     VAR
                       ZVAL "crossing#2"
         "#}
@@ -17903,7 +18075,7 @@ fn a_null_safe_member_read_through_a_class_value_is_a_conditional_over_the_stati
 }
 
 /// ```php
-/// return new \Sharp\Map([...\array_merge([], ...\array_map(null, $defaults->keys(), \iterator_to_array($defaults, false))), 'root', 0, ...…]);
+/// return new \Sharp\Map<string, int>([...\array_merge([], ...\array_map(null, $defaults->keys(), \iterator_to_array($defaults, false))), 'root', 0, ...…]);
 /// ```
 ///
 /// A `Map` literal with a spread is a new `Map` of each key followed by its value, each spread `Map`'s and each
@@ -17927,53 +18099,55 @@ fn a_map_spread_puts_each_key_and_value_of_the_literal_parts_in_order() {
                     ARG_LIST
                       VAR
                         ZVAL "defaults"
-                  NEW
-                    ZVAL "Sharp\\Map"
-                    ARG_LIST
-                      CALL
-                        ZVAL "array_merge"
-                        ARG_LIST
-                          ARRAY [3]
-                          UNPACK
-                            CALL
-                              ZVAL "array_map"
-                              ARG_LIST
-                                ARROW_FUNC "" @7-7
-                                  PARAM_LIST
-                                    PARAM
-                                      null
-                                      ZVAL "key#1"
-                                      null
-                                      null
-                                      null
-                                      null
-                                    PARAM
-                                      null
-                                      ZVAL "value#2"
-                                      null
-                                      null
-                                      null
-                                      null
-                                  null
-                                  ARRAY [3]
-                                    ARRAY_ELEM
-                                      CAST [6]
-                                        VAR
-                                          ZVAL "key#1"
-                                      null
-                                    ARRAY_ELEM
-                                      VAR
+                  SHARP_TYPE_ARGS
+                    NEW
+                      ZVAL "Sharp\\Map"
+                      ARG_LIST
+                        CALL
+                          ZVAL "array_merge"
+                          ARG_LIST
+                            ARRAY [3]
+                            UNPACK
+                              CALL
+                                ZVAL "array_map"
+                                ARG_LIST
+                                  ARROW_FUNC "" @7-7
+                                    PARAM_LIST
+                                      PARAM
+                                        null
+                                        ZVAL "key#1"
+                                        null
+                                        null
+                                        null
+                                        null
+                                      PARAM
+                                        null
                                         ZVAL "value#2"
-                                      null
-                                  null
-                                  null
-                                CALL
-                                  ZVAL "array_keys"
-                                  ARG_LIST
-                                    VAR
-                                      ZVAL "defaults"
-                                VAR
-                                  ZVAL "defaults"
+                                        null
+                                        null
+                                        null
+                                        null
+                                    null
+                                    ARRAY [3]
+                                      ARRAY_ELEM
+                                        CAST [6]
+                                          VAR
+                                            ZVAL "key#1"
+                                        null
+                                      ARRAY_ELEM
+                                        VAR
+                                          ZVAL "value#2"
+                                        null
+                                    null
+                                    null
+                                  CALL
+                                    ZVAL "array_keys"
+                                    ARG_LIST
+                                      VAR
+                                        ZVAL "defaults"
+                                  VAR
+                                    ZVAL "defaults"
+                    ZVAL "string, int"
                   VAR
                     ZVAL "defaults"
               ASSIGN
@@ -17985,108 +18159,112 @@ fn a_map_spread_puts_each_key_and_value_of_the_literal_parts_in_order() {
                     ARG_LIST
                       VAR
                         ZVAL "overrides"
-                  NEW
-                    ZVAL "Sharp\\Map"
-                    ARG_LIST
-                      CALL
-                        ZVAL "array_merge"
-                        ARG_LIST
-                          ARRAY [3]
-                          UNPACK
-                            CALL
-                              ZVAL "array_map"
-                              ARG_LIST
-                                ARROW_FUNC "" @7-7
-                                  PARAM_LIST
-                                    PARAM
-                                      null
-                                      ZVAL "key#1"
-                                      null
-                                      null
-                                      null
-                                      null
-                                    PARAM
-                                      null
-                                      ZVAL "value#2"
-                                      null
-                                      null
-                                      null
-                                      null
-                                  null
-                                  ARRAY [3]
-                                    ARRAY_ELEM
-                                      CAST [6]
-                                        VAR
-                                          ZVAL "key#1"
-                                      null
-                                    ARRAY_ELEM
-                                      VAR
+                  SHARP_TYPE_ARGS
+                    NEW
+                      ZVAL "Sharp\\Map"
+                      ARG_LIST
+                        CALL
+                          ZVAL "array_merge"
+                          ARG_LIST
+                            ARRAY [3]
+                            UNPACK
+                              CALL
+                                ZVAL "array_map"
+                                ARG_LIST
+                                  ARROW_FUNC "" @7-7
+                                    PARAM_LIST
+                                      PARAM
+                                        null
+                                        ZVAL "key#1"
+                                        null
+                                        null
+                                        null
+                                        null
+                                      PARAM
+                                        null
                                         ZVAL "value#2"
-                                      null
-                                  null
-                                  null
-                                CALL
-                                  ZVAL "array_keys"
-                                  ARG_LIST
-                                    VAR
-                                      ZVAL "overrides"
-                                VAR
-                                  ZVAL "overrides"
-                  VAR
-                    ZVAL "overrides"
-              RETURN
-                NEW
-                  ZVAL "Sharp\\Map"
-                  ARG_LIST
-                    ARRAY [3]
-                      UNPACK
-                        CALL
-                          ZVAL "array_merge"
-                          ARG_LIST
-                            ARRAY [3]
-                            UNPACK
-                              CALL
-                                ZVAL "array_map"
-                                ARG_LIST
-                                  ZVAL null
-                                  METHOD_CALL
-                                    VAR
-                                      ZVAL "defaults"
-                                    ZVAL "keys"
-                                    ARG_LIST
+                                        null
+                                        null
+                                        null
+                                        null
+                                    null
+                                    ARRAY [3]
+                                      ARRAY_ELEM
+                                        CAST [6]
+                                          VAR
+                                            ZVAL "key#1"
+                                        null
+                                      ARRAY_ELEM
+                                        VAR
+                                          ZVAL "value#2"
+                                        null
+                                    null
+                                    null
                                   CALL
-                                    ZVAL "iterator_to_array"
-                                    ARG_LIST
-                                      VAR
-                                        ZVAL "defaults"
-                                      ZVAL false
-                      ARRAY_ELEM
-                        ZVAL "root"
-                        null
-                      ARRAY_ELEM
-                        ZVAL 0
-                        null
-                      UNPACK
-                        CALL
-                          ZVAL "array_merge"
-                          ARG_LIST
-                            ARRAY [3]
-                            UNPACK
-                              CALL
-                                ZVAL "array_map"
-                                ARG_LIST
-                                  ZVAL null
-                                  METHOD_CALL
-                                    VAR
-                                      ZVAL "overrides"
-                                    ZVAL "keys"
-                                    ARG_LIST
-                                  CALL
-                                    ZVAL "iterator_to_array"
+                                    ZVAL "array_keys"
                                     ARG_LIST
                                       VAR
                                         ZVAL "overrides"
-                                      ZVAL false
+                                  VAR
+                                    ZVAL "overrides"
+                    ZVAL "string, int"
+                  VAR
+                    ZVAL "overrides"
+              RETURN
+                SHARP_TYPE_ARGS
+                  NEW
+                    ZVAL "Sharp\\Map"
+                    ARG_LIST
+                      ARRAY [3]
+                        UNPACK
+                          CALL
+                            ZVAL "array_merge"
+                            ARG_LIST
+                              ARRAY [3]
+                              UNPACK
+                                CALL
+                                  ZVAL "array_map"
+                                  ARG_LIST
+                                    ZVAL null
+                                    METHOD_CALL
+                                      VAR
+                                        ZVAL "defaults"
+                                      ZVAL "keys"
+                                      ARG_LIST
+                                    CALL
+                                      ZVAL "iterator_to_array"
+                                      ARG_LIST
+                                        VAR
+                                          ZVAL "defaults"
+                                        ZVAL false
+                        ARRAY_ELEM
+                          ZVAL "root"
+                          null
+                        ARRAY_ELEM
+                          ZVAL 0
+                          null
+                        UNPACK
+                          CALL
+                            ZVAL "array_merge"
+                            ARG_LIST
+                              ARRAY [3]
+                              UNPACK
+                                CALL
+                                  ZVAL "array_map"
+                                  ARG_LIST
+                                    ZVAL null
+                                    METHOD_CALL
+                                      VAR
+                                        ZVAL "overrides"
+                                      ZVAL "keys"
+                                      ARG_LIST
+                                    CALL
+                                      ZVAL "iterator_to_array"
+                                      ARG_LIST
+                                        VAR
+                                          ZVAL "overrides"
+                                        ZVAL false
+                  ZVAL "string, int"
         "#}
     );
 }
@@ -20537,53 +20715,55 @@ fn null_safe_access_reads_a_missing_map_key_as_null_and_a_list_index_bare() {
                     ARG_LIST
                       VAR
                         ZVAL "named"
-                  NEW
-                    ZVAL "Sharp\\Map"
-                    ARG_LIST
-                      CALL
-                        ZVAL "array_merge"
-                        ARG_LIST
-                          ARRAY [3]
-                          UNPACK
-                            CALL
-                              ZVAL "array_map"
-                              ARG_LIST
-                                ARROW_FUNC "" @7-7
-                                  PARAM_LIST
-                                    PARAM
-                                      null
-                                      ZVAL "key#1"
-                                      null
-                                      null
-                                      null
-                                      null
-                                    PARAM
-                                      null
-                                      ZVAL "value#2"
-                                      null
-                                      null
-                                      null
-                                      null
-                                  null
-                                  ARRAY [3]
-                                    ARRAY_ELEM
-                                      CAST [6]
-                                        VAR
-                                          ZVAL "key#1"
-                                      null
-                                    ARRAY_ELEM
-                                      VAR
+                  SHARP_TYPE_ARGS
+                    NEW
+                      ZVAL "Sharp\\Map"
+                      ARG_LIST
+                        CALL
+                          ZVAL "array_merge"
+                          ARG_LIST
+                            ARRAY [3]
+                            UNPACK
+                              CALL
+                                ZVAL "array_map"
+                                ARG_LIST
+                                  ARROW_FUNC "" @7-7
+                                    PARAM_LIST
+                                      PARAM
+                                        null
+                                        ZVAL "key#1"
+                                        null
+                                        null
+                                        null
+                                        null
+                                      PARAM
+                                        null
                                         ZVAL "value#2"
-                                      null
-                                  null
-                                  null
-                                CALL
-                                  ZVAL "array_keys"
-                                  ARG_LIST
-                                    VAR
-                                      ZVAL "named"
-                                VAR
-                                  ZVAL "named"
+                                        null
+                                        null
+                                        null
+                                        null
+                                    null
+                                    ARRAY [3]
+                                      ARRAY_ELEM
+                                        CAST [6]
+                                          VAR
+                                            ZVAL "key#1"
+                                        null
+                                      ARRAY_ELEM
+                                        VAR
+                                          ZVAL "value#2"
+                                        null
+                                    null
+                                    null
+                                  CALL
+                                    ZVAL "array_keys"
+                                    ARG_LIST
+                                      VAR
+                                        ZVAL "named"
+                                  VAR
+                                    ZVAL "named"
+                    ZVAL "string, Lib.Calc?"
                   VAR
                     ZVAL "named"
               RETURN
@@ -21155,53 +21335,55 @@ fn a_loop_over_a_plain_php_array_keyed_by_string_takes_its_keys_back() {
                             ARG_LIST
                           ZVAL "Map<string, int>"
                           ZVAL "Lib\\Calc::prices()"
-                  NEW
-                    ZVAL "Sharp\\Map"
-                    ARG_LIST
-                      CALL
-                        ZVAL "array_merge"
-                        ARG_LIST
-                          ARRAY [3]
-                          UNPACK
-                            CALL
-                              ZVAL "array_map"
-                              ARG_LIST
-                                ARROW_FUNC "" @9-9
-                                  PARAM_LIST
-                                    PARAM
-                                      null
-                                      ZVAL "key#2"
-                                      null
-                                      null
-                                      null
-                                      null
-                                    PARAM
-                                      null
-                                      ZVAL "value#3"
-                                      null
-                                      null
-                                      null
-                                      null
-                                  null
-                                  ARRAY [3]
-                                    ARRAY_ELEM
-                                      CAST [6]
-                                        VAR
-                                          ZVAL "key#2"
-                                      null
-                                    ARRAY_ELEM
-                                      VAR
+                  SHARP_TYPE_ARGS
+                    NEW
+                      ZVAL "Sharp\\Map"
+                      ARG_LIST
+                        CALL
+                          ZVAL "array_merge"
+                          ARG_LIST
+                            ARRAY [3]
+                            UNPACK
+                              CALL
+                                ZVAL "array_map"
+                                ARG_LIST
+                                  ARROW_FUNC "" @9-9
+                                    PARAM_LIST
+                                      PARAM
+                                        null
+                                        ZVAL "key#2"
+                                        null
+                                        null
+                                        null
+                                        null
+                                      PARAM
+                                        null
                                         ZVAL "value#3"
-                                      null
-                                  null
-                                  null
-                                CALL
-                                  ZVAL "array_keys"
-                                  ARG_LIST
-                                    VAR
-                                      ZVAL "crossing#1"
-                                VAR
-                                  ZVAL "crossing#1"
+                                        null
+                                        null
+                                        null
+                                        null
+                                    null
+                                    ARRAY [3]
+                                      ARRAY_ELEM
+                                        CAST [6]
+                                          VAR
+                                            ZVAL "key#2"
+                                        null
+                                      ARRAY_ELEM
+                                        VAR
+                                          ZVAL "value#3"
+                                        null
+                                    null
+                                    null
+                                  CALL
+                                    ZVAL "array_keys"
+                                    ARG_LIST
+                                      VAR
+                                        ZVAL "crossing#1"
+                                  VAR
+                                    ZVAL "crossing#1"
+                    ZVAL "string, int"
                   VAR
                     ZVAL "crossing#1"
                 VAR
@@ -23404,7 +23586,7 @@ fn every_accessor_form_takes_attributes_and_an_event_parameter_targets_its_part(
     assert_eq!(tagged(&[1, 0, 0, 3]), attribute("tags"));
     assert_eq!(
         tagged(&[1, 2, 0]),
-        "ASSIGN\n  VAR\n    ZVAL \"tags\"\n  CONDITIONAL\n    CALL\n      ZVAL \"is_array\"\n      ARG_LIST\n        VAR\n          ZVAL \"tags\"\n    NEW\n      ZVAL \"Sharp\\\\Set\"\n      ARG_LIST\n        VAR\n          ZVAL \"tags\"\n    VAR\n      ZVAL \"tags\"\n"
+        "ASSIGN\n  VAR\n    ZVAL \"tags\"\n  CONDITIONAL\n    CALL\n      ZVAL \"is_array\"\n      ARG_LIST\n        VAR\n          ZVAL \"tags\"\n    SHARP_TYPE_ARGS\n      NEW\n        ZVAL \"Sharp\\\\Set\"\n        ARG_LIST\n          VAR\n            ZVAL \"tags\"\n      ZVAL \"string\"\n    VAR\n      ZVAL \"tags\"\n"
     );
     assert_eq!(tagged(&[1, 2, 1]), set_by_constructor("tags"));
 }
@@ -24307,7 +24489,7 @@ fn a_map_a_method_stores_in_a_plain_php_collection_goes_in_as_its_element_takes_
 
 /// ```php
 /// $this->stock = \is_array($crossing = \Lib\Prices::all())
-///     ? new \Sharp\Map(\array_merge([], ...\array_map(fn ($key, $value) => [(string) $key, $value], \array_keys($crossing), $crossing)))
+///     ? new \Sharp\Map<string, int>(\array_merge([], ...\array_map(fn ($key, $value) => [(string) $key, $value], \array_keys($crossing), $crossing)))
 ///     : $crossing;
 /// $this->names = \is_array($renumbered = \Lib\Calc::names()) ? \array_values($renumbered) : $renumbered;
 /// ```
@@ -24350,53 +24532,55 @@ fn plain_php_s_array_written_into_a_php_sharp_base_s_property_crosses_as_its_typ
                               ARG_LIST
                             ZVAL "Map<string, int>"
                             ZVAL "Lib\\Prices::all()"
-                    NEW
-                      ZVAL "Sharp\\Map"
-                      ARG_LIST
-                        CALL
-                          ZVAL "array_merge"
-                          ARG_LIST
-                            ARRAY [3]
-                            UNPACK
-                              CALL
-                                ZVAL "array_map"
-                                ARG_LIST
-                                  ARROW_FUNC "" @10-10
-                                    PARAM_LIST
-                                      PARAM
-                                        null
-                                        ZVAL "key#2"
-                                        null
-                                        null
-                                        null
-                                        null
-                                      PARAM
-                                        null
-                                        ZVAL "value#3"
-                                        null
-                                        null
-                                        null
-                                        null
-                                    null
-                                    ARRAY [3]
-                                      ARRAY_ELEM
-                                        CAST [6]
-                                          VAR
-                                            ZVAL "key#2"
-                                        null
-                                      ARRAY_ELEM
-                                        VAR
+                    SHARP_TYPE_ARGS
+                      NEW
+                        ZVAL "Sharp\\Map"
+                        ARG_LIST
+                          CALL
+                            ZVAL "array_merge"
+                            ARG_LIST
+                              ARRAY [3]
+                              UNPACK
+                                CALL
+                                  ZVAL "array_map"
+                                  ARG_LIST
+                                    ARROW_FUNC "" @10-10
+                                      PARAM_LIST
+                                        PARAM
+                                          null
+                                          ZVAL "key#2"
+                                          null
+                                          null
+                                          null
+                                          null
+                                        PARAM
+                                          null
                                           ZVAL "value#3"
-                                        null
-                                    null
-                                    null
-                                  CALL
-                                    ZVAL "array_keys"
-                                    ARG_LIST
-                                      VAR
-                                        ZVAL "crossing#1"
-                                  VAR
-                                    ZVAL "crossing#1"
+                                          null
+                                          null
+                                          null
+                                          null
+                                      null
+                                      ARRAY [3]
+                                        ARRAY_ELEM
+                                          CAST [6]
+                                            VAR
+                                              ZVAL "key#2"
+                                          null
+                                        ARRAY_ELEM
+                                          VAR
+                                            ZVAL "value#3"
+                                          null
+                                      null
+                                      null
+                                    CALL
+                                      ZVAL "array_keys"
+                                      ARG_LIST
+                                        VAR
+                                          ZVAL "crossing#1"
+                                    VAR
+                                      ZVAL "crossing#1"
+                      ZVAL "string, int"
                     VAR
                       ZVAL "crossing#1"
             "#},
@@ -24433,8 +24617,8 @@ fn plain_php_s_array_written_into_a_php_sharp_base_s_property_crosses_as_its_typ
 }
 
 /// ```php
-/// [$sorted = \Sharp\Internal\arrayOf($sorted), \Lib\Calc::sort($sorted), $sorted = \is_array($sorted) ? \Sharp\Map::from($sorted) : $sorted][1];
-/// [$filled = \Sharp\Internal\arrayOf($filled), \Lib\Calc::fill($filled), $filled = \is_array($filled) ? \Sharp\Map::from($filled) : $filled][1];
+/// [$sorted = \Sharp\Internal\arrayOf($sorted), \Lib\Calc::sort($sorted), $sorted = \is_array($sorted) ? \Sharp\Map::from($sorted, 'int, string') : $sorted][1];
+/// [$filled = \Sharp\Internal\arrayOf($filled), \Lib\Calc::fill($filled), $filled = \is_array($filled) ? \Sharp\Map::from($filled, 'int, string') : $filled][1];
 /// \Lib\Calc::bump($count);
 /// ```
 ///
@@ -24485,6 +24669,7 @@ fn a_typed_local_crosses_into_and_back_from_a_plain_php_reference_parameter() {
                             ARG_LIST
                               VAR
                                 ZVAL "sorted"
+                              ZVAL "int, string"
                           VAR
                             ZVAL "sorted"
                       null
@@ -24527,6 +24712,7 @@ fn a_typed_local_crosses_into_and_back_from_a_plain_php_reference_parameter() {
                             ARG_LIST
                               VAR
                                 ZVAL "filled"
+                              ZVAL "int, string"
                           VAR
                             ZVAL "filled"
                       null
@@ -24637,9 +24823,9 @@ fn nested(tree: &str, levels: usize) -> String {
 }
 
 /// ```php
-/// $levels = \is_array($levels) ? new \Sharp\Map(\array_merge([], ...\array_map(fn ($key#1, $value#2) => [\Lib\Level::from($key#1), $value#2], \array_keys($levels), $levels))) : $levels;
-/// $names = \is_array(${'crossing#1'} = \Lib\Calc::names()) ? \Sharp\Map::from(${'crossing#1'}) : ${'crossing#1'};
-/// return \is_array(${'crossing#1'} = \Lib\Calc::names()) ? \Sharp\Map::from(${'crossing#1'}) : ${'crossing#1'};
+/// $levels = \is_array($levels) ? new \Sharp\Map<Lib.Level, int>(\array_merge([], ...\array_map(fn ($key#1, $value#2) => [\Lib\Level::from($key#1), $value#2], \array_keys($levels), $levels))) : $levels;
+/// $names = \is_array(${'crossing#1'} = \Lib\Calc::names()) ? \Sharp\Map::from(${'crossing#1'}, 'int, string') : ${'crossing#1'};
+/// return \is_array(${'crossing#1'} = \Lib\Calc::names()) ? \Sharp\Map::from(${'crossing#1'}, 'int, string') : ${'crossing#1'};
 /// ```
 ///
 /// A value plain PHP gives enters PHP# with each `Map` it holds made the object, spec section 12: a parameter, a typed
@@ -24670,6 +24856,7 @@ fn a_value_plain_php_gives_enters_php_sharp_as_the_object() {
             ARG_LIST
               VAR
                 ZVAL "crossing#1"
+              ZVAL "int, string"
           VAR
             ZVAL "crossing#1"
     "#};
@@ -24687,56 +24874,58 @@ fn a_value_plain_php_gives_enters_php_sharp_as_the_object() {
                       ARG_LIST
                         VAR
                           ZVAL "levels"
-                    NEW
-                      ZVAL "Sharp\\Map"
-                      ARG_LIST
-                        CALL
-                          ZVAL "array_merge"
-                          ARG_LIST
-                            ARRAY [3]
-                            UNPACK
-                              CALL
-                                ZVAL "array_map"
-                                ARG_LIST
-                                  ARROW_FUNC "" @8-8
-                                    PARAM_LIST
-                                      PARAM
-                                        null
-                                        ZVAL "key#1"
-                                        null
-                                        null
-                                        null
-                                        null
-                                      PARAM
-                                        null
-                                        ZVAL "value#2"
-                                        null
-                                        null
-                                        null
-                                        null
-                                    null
-                                    ARRAY [3]
-                                      ARRAY_ELEM
-                                        STATIC_CALL
-                                          ZVAL "Lib\\Level"
-                                          ZVAL "from"
-                                          ARG_LIST
-                                            VAR
-                                              ZVAL "key#1"
-                                        null
-                                      ARRAY_ELEM
-                                        VAR
+                    SHARP_TYPE_ARGS
+                      NEW
+                        ZVAL "Sharp\\Map"
+                        ARG_LIST
+                          CALL
+                            ZVAL "array_merge"
+                            ARG_LIST
+                              ARRAY [3]
+                              UNPACK
+                                CALL
+                                  ZVAL "array_map"
+                                  ARG_LIST
+                                    ARROW_FUNC "" @8-8
+                                      PARAM_LIST
+                                        PARAM
+                                          null
+                                          ZVAL "key#1"
+                                          null
+                                          null
+                                          null
+                                          null
+                                        PARAM
+                                          null
                                           ZVAL "value#2"
-                                        null
-                                    null
-                                    null
-                                  CALL
-                                    ZVAL "array_keys"
-                                    ARG_LIST
-                                      VAR
-                                        ZVAL "levels"
-                                  VAR
-                                    ZVAL "levels"
+                                          null
+                                          null
+                                          null
+                                          null
+                                      null
+                                      ARRAY [3]
+                                        ARRAY_ELEM
+                                          STATIC_CALL
+                                            ZVAL "Lib\\Level"
+                                            ZVAL "from"
+                                            ARG_LIST
+                                              VAR
+                                                ZVAL "key#1"
+                                          null
+                                        ARRAY_ELEM
+                                          VAR
+                                            ZVAL "value#2"
+                                          null
+                                      null
+                                      null
+                                    CALL
+                                      ZVAL "array_keys"
+                                      ARG_LIST
+                                        VAR
+                                          ZVAL "levels"
+                                    VAR
+                                      ZVAL "levels"
+                      ZVAL "Lib.Level, int"
                     VAR
                       ZVAL "levels"
             "#}
@@ -25119,7 +25308,7 @@ fn is_and_as_of_a_tuple_a_class_value_or_object_are_the_engine_test_of_its_type(
 
 /// ```php
 /// $numbers = <is List<int>>($extra);
-/// $kept = \is_array($crossing#1 = <is Map<string, int>>($extra) ? $extra : null) ? new \Sharp\Map(…) : $crossing#1;
+/// $kept = \is_array($crossing#1 = <is Map<string, int>>($extra) ? $extra : null) ? new \Sharp\Map<string, int>(…) : $crossing#1;
 /// $tags = <is Set<string>>($extra);
 /// ```
 ///
@@ -25161,53 +25350,55 @@ fn is_and_as_of_a_collection_are_the_engine_test_of_its_type() {
                           VAR
                             ZVAL "extra"
                           ZVAL null
-                  NEW
-                    ZVAL "Sharp\\Map"
-                    ARG_LIST
-                      CALL
-                        ZVAL "array_merge"
-                        ARG_LIST
-                          ARRAY [3]
-                          UNPACK
-                            CALL
-                              ZVAL "array_map"
-                              ARG_LIST
-                                ARROW_FUNC "" @10-10
-                                  PARAM_LIST
-                                    PARAM
-                                      null
-                                      ZVAL "key#2"
-                                      null
-                                      null
-                                      null
-                                      null
-                                    PARAM
-                                      null
-                                      ZVAL "value#3"
-                                      null
-                                      null
-                                      null
-                                      null
-                                  null
-                                  ARRAY [3]
-                                    ARRAY_ELEM
-                                      CAST [6]
-                                        VAR
-                                          ZVAL "key#2"
-                                      null
-                                    ARRAY_ELEM
-                                      VAR
+                  SHARP_TYPE_ARGS
+                    NEW
+                      ZVAL "Sharp\\Map"
+                      ARG_LIST
+                        CALL
+                          ZVAL "array_merge"
+                          ARG_LIST
+                            ARRAY [3]
+                            UNPACK
+                              CALL
+                                ZVAL "array_map"
+                                ARG_LIST
+                                  ARROW_FUNC "" @10-10
+                                    PARAM_LIST
+                                      PARAM
+                                        null
+                                        ZVAL "key#2"
+                                        null
+                                        null
+                                        null
+                                        null
+                                      PARAM
+                                        null
                                         ZVAL "value#3"
-                                      null
-                                  null
-                                  null
-                                CALL
-                                  ZVAL "array_keys"
-                                  ARG_LIST
-                                    VAR
-                                      ZVAL "crossing#1"
-                                VAR
-                                  ZVAL "crossing#1"
+                                        null
+                                        null
+                                        null
+                                        null
+                                    null
+                                    ARRAY [3]
+                                      ARRAY_ELEM
+                                        CAST [6]
+                                          VAR
+                                            ZVAL "key#2"
+                                        null
+                                      ARRAY_ELEM
+                                        VAR
+                                          ZVAL "value#3"
+                                        null
+                                    null
+                                    null
+                                  CALL
+                                    ZVAL "array_keys"
+                                    ARG_LIST
+                                      VAR
+                                        ZVAL "crossing#1"
+                                  VAR
+                                    ZVAL "crossing#1"
+                    ZVAL "string, int"
                   VAR
                     ZVAL "crossing#1"
               ASSIGN
@@ -25247,53 +25438,55 @@ fn an_index_a_pattern_tests_coalesces_a_missing_key_to_null() {
                     ARG_LIST
                       VAR
                         ZVAL "counts"
-                  NEW
-                    ZVAL "Sharp\\Map"
-                    ARG_LIST
-                      CALL
-                        ZVAL "array_merge"
-                        ARG_LIST
-                          ARRAY [3]
-                          UNPACK
-                            CALL
-                              ZVAL "array_map"
-                              ARG_LIST
-                                ARROW_FUNC "" @7-7
-                                  PARAM_LIST
-                                    PARAM
-                                      null
-                                      ZVAL "key#1"
-                                      null
-                                      null
-                                      null
-                                      null
-                                    PARAM
-                                      null
-                                      ZVAL "value#2"
-                                      null
-                                      null
-                                      null
-                                      null
-                                  null
-                                  ARRAY [3]
-                                    ARRAY_ELEM
-                                      CAST [6]
-                                        VAR
-                                          ZVAL "key#1"
-                                      null
-                                    ARRAY_ELEM
-                                      VAR
+                  SHARP_TYPE_ARGS
+                    NEW
+                      ZVAL "Sharp\\Map"
+                      ARG_LIST
+                        CALL
+                          ZVAL "array_merge"
+                          ARG_LIST
+                            ARRAY [3]
+                            UNPACK
+                              CALL
+                                ZVAL "array_map"
+                                ARG_LIST
+                                  ARROW_FUNC "" @7-7
+                                    PARAM_LIST
+                                      PARAM
+                                        null
+                                        ZVAL "key#1"
+                                        null
+                                        null
+                                        null
+                                        null
+                                      PARAM
+                                        null
                                         ZVAL "value#2"
-                                      null
-                                  null
-                                  null
-                                CALL
-                                  ZVAL "array_keys"
-                                  ARG_LIST
-                                    VAR
-                                      ZVAL "counts"
-                                VAR
-                                  ZVAL "counts"
+                                        null
+                                        null
+                                        null
+                                        null
+                                    null
+                                    ARRAY [3]
+                                      ARRAY_ELEM
+                                        CAST [6]
+                                          VAR
+                                            ZVAL "key#1"
+                                        null
+                                      ARRAY_ELEM
+                                        VAR
+                                          ZVAL "value#2"
+                                        null
+                                    null
+                                    null
+                                  CALL
+                                    ZVAL "array_keys"
+                                    ARG_LIST
+                                      VAR
+                                        ZVAL "counts"
+                                  VAR
+                                    ZVAL "counts"
+                    ZVAL "string, int"
                   VAR
                     ZVAL "counts"
               IF
@@ -25466,6 +25659,7 @@ fn a_leave_after_null_coalesce_is_its_statement_inside_the_expression() {
                     ARG_LIST
                       VAR
                         ZVAL "values"
+                      ZVAL "int, int"
                   VAR
                     ZVAL "values"
               ASSIGN
@@ -28280,53 +28474,55 @@ fn equality_of_two_collections_compares_each_element_with_its_own_equality() {
                     ARG_LIST
                       VAR
                         ZVAL "a"
-                  NEW
-                    ZVAL "Sharp\\Map"
-                    ARG_LIST
-                      CALL
-                        ZVAL "array_merge"
-                        ARG_LIST
-                          ARRAY [3]
-                          UNPACK
-                            CALL
-                              ZVAL "array_map"
-                              ARG_LIST
-                                ARROW_FUNC "" @7-7
-                                  PARAM_LIST
-                                    PARAM
-                                      null
-                                      ZVAL "key#1"
-                                      null
-                                      null
-                                      null
-                                      null
-                                    PARAM
-                                      null
-                                      ZVAL "value#2"
-                                      null
-                                      null
-                                      null
-                                      null
-                                  null
-                                  ARRAY [3]
-                                    ARRAY_ELEM
-                                      CAST [6]
-                                        VAR
-                                          ZVAL "key#1"
-                                      null
-                                    ARRAY_ELEM
-                                      VAR
+                  SHARP_TYPE_ARGS
+                    NEW
+                      ZVAL "Sharp\\Map"
+                      ARG_LIST
+                        CALL
+                          ZVAL "array_merge"
+                          ARG_LIST
+                            ARRAY [3]
+                            UNPACK
+                              CALL
+                                ZVAL "array_map"
+                                ARG_LIST
+                                  ARROW_FUNC "" @7-7
+                                    PARAM_LIST
+                                      PARAM
+                                        null
+                                        ZVAL "key#1"
+                                        null
+                                        null
+                                        null
+                                        null
+                                      PARAM
+                                        null
                                         ZVAL "value#2"
-                                      null
-                                  null
-                                  null
-                                CALL
-                                  ZVAL "array_keys"
-                                  ARG_LIST
-                                    VAR
-                                      ZVAL "a"
-                                VAR
-                                  ZVAL "a"
+                                        null
+                                        null
+                                        null
+                                        null
+                                    null
+                                    ARRAY [3]
+                                      ARRAY_ELEM
+                                        CAST [6]
+                                          VAR
+                                            ZVAL "key#1"
+                                        null
+                                      ARRAY_ELEM
+                                        VAR
+                                          ZVAL "value#2"
+                                        null
+                                    null
+                                    null
+                                  CALL
+                                    ZVAL "array_keys"
+                                    ARG_LIST
+                                      VAR
+                                        ZVAL "a"
+                                  VAR
+                                    ZVAL "a"
+                    ZVAL "string, int"
                   VAR
                     ZVAL "a"
               ASSIGN
@@ -28338,53 +28534,55 @@ fn equality_of_two_collections_compares_each_element_with_its_own_equality() {
                     ARG_LIST
                       VAR
                         ZVAL "b"
-                  NEW
-                    ZVAL "Sharp\\Map"
-                    ARG_LIST
-                      CALL
-                        ZVAL "array_merge"
-                        ARG_LIST
-                          ARRAY [3]
-                          UNPACK
-                            CALL
-                              ZVAL "array_map"
-                              ARG_LIST
-                                ARROW_FUNC "" @7-7
-                                  PARAM_LIST
-                                    PARAM
-                                      null
-                                      ZVAL "key#1"
-                                      null
-                                      null
-                                      null
-                                      null
-                                    PARAM
-                                      null
-                                      ZVAL "value#2"
-                                      null
-                                      null
-                                      null
-                                      null
-                                  null
-                                  ARRAY [3]
-                                    ARRAY_ELEM
-                                      CAST [6]
-                                        VAR
-                                          ZVAL "key#1"
-                                      null
-                                    ARRAY_ELEM
-                                      VAR
+                  SHARP_TYPE_ARGS
+                    NEW
+                      ZVAL "Sharp\\Map"
+                      ARG_LIST
+                        CALL
+                          ZVAL "array_merge"
+                          ARG_LIST
+                            ARRAY [3]
+                            UNPACK
+                              CALL
+                                ZVAL "array_map"
+                                ARG_LIST
+                                  ARROW_FUNC "" @7-7
+                                    PARAM_LIST
+                                      PARAM
+                                        null
+                                        ZVAL "key#1"
+                                        null
+                                        null
+                                        null
+                                        null
+                                      PARAM
+                                        null
                                         ZVAL "value#2"
-                                      null
-                                  null
-                                  null
-                                CALL
-                                  ZVAL "array_keys"
-                                  ARG_LIST
-                                    VAR
-                                      ZVAL "b"
-                                VAR
-                                  ZVAL "b"
+                                        null
+                                        null
+                                        null
+                                        null
+                                    null
+                                    ARRAY [3]
+                                      ARRAY_ELEM
+                                        CAST [6]
+                                          VAR
+                                            ZVAL "key#1"
+                                        null
+                                      ARRAY_ELEM
+                                        VAR
+                                          ZVAL "value#2"
+                                        null
+                                    null
+                                    null
+                                  CALL
+                                    ZVAL "array_keys"
+                                    ARG_LIST
+                                      VAR
+                                        ZVAL "b"
+                                  VAR
+                                    ZVAL "b"
+                    ZVAL "string, int"
                   VAR
                     ZVAL "b"
               RETURN
@@ -29733,57 +29931,59 @@ fn parse_reads_each_field_as_its_type() {
                                 ARG_LIST
                                   VAR
                                     ZVAL "read#27"
-                              NEW
-                                ZVAL "Sharp\\Map"
-                                ARG_LIST
-                                  CALL
-                                    ZVAL "array_merge"
-                                    ARG_LIST
-                                      ARRAY [3]
-                                      UNPACK
-                                        CALL
-                                          ZVAL "array_map"
-                                          ARG_LIST
-                                            ARROW_FUNC "" @3-3
-                                              PARAM_LIST
-                                                PARAM
-                                                  null
-                                                  ZVAL "key#29"
-                                                  null
-                                                  null
-                                                  null
-                                                  null
-                                                PARAM
-                                                  null
-                                                  ZVAL "value#30"
-                                                  null
-                                                  null
-                                                  null
-                                                  null
-                                              null
-                                              ARRAY [3]
-                                                ARRAY_ELEM
-                                                  STATIC_CALL
-                                                    ZVAL "App\\Status"
-                                                    ZVAL "from"
-                                                    ARG_LIST
-                                                      CAST [6]
-                                                        VAR
-                                                          ZVAL "key#29"
-                                                  null
-                                                ARRAY_ELEM
-                                                  VAR
+                              SHARP_TYPE_ARGS
+                                NEW
+                                  ZVAL "Sharp\\Map"
+                                  ARG_LIST
+                                    CALL
+                                      ZVAL "array_merge"
+                                      ARG_LIST
+                                        ARRAY [3]
+                                        UNPACK
+                                          CALL
+                                            ZVAL "array_map"
+                                            ARG_LIST
+                                              ARROW_FUNC "" @3-3
+                                                PARAM_LIST
+                                                  PARAM
+                                                    null
+                                                    ZVAL "key#29"
+                                                    null
+                                                    null
+                                                    null
+                                                    null
+                                                  PARAM
+                                                    null
                                                     ZVAL "value#30"
-                                                  null
-                                              null
-                                              null
-                                            CALL
-                                              ZVAL "array_keys"
-                                              ARG_LIST
-                                                VAR
-                                                  ZVAL "read#27"
-                                            VAR
-                                              ZVAL "read#27"
+                                                    null
+                                                    null
+                                                    null
+                                                    null
+                                                null
+                                                ARRAY [3]
+                                                  ARRAY_ELEM
+                                                    STATIC_CALL
+                                                      ZVAL "App\\Status"
+                                                      ZVAL "from"
+                                                      ARG_LIST
+                                                        CAST [6]
+                                                          VAR
+                                                            ZVAL "key#29"
+                                                    null
+                                                  ARRAY_ELEM
+                                                    VAR
+                                                      ZVAL "value#30"
+                                                    null
+                                                null
+                                                null
+                                              CALL
+                                                ZVAL "array_keys"
+                                                ARG_LIST
+                                                  VAR
+                                                    ZVAL "read#27"
+                                              VAR
+                                                ZVAL "read#27"
+                                ZVAL "App.Status, int"
                               VAR
                                 ZVAL "read#27"
                     ASSIGN
@@ -30337,53 +30537,55 @@ fn parse_reads_each_field_as_its_type() {
                                 ARG_LIST
                                   VAR
                                     ZVAL "read#41"
-                              NEW
-                                ZVAL "Sharp\\Map"
-                                ARG_LIST
-                                  CALL
-                                    ZVAL "array_merge"
-                                    ARG_LIST
-                                      ARRAY [3]
-                                      UNPACK
-                                        CALL
-                                          ZVAL "array_map"
-                                          ARG_LIST
-                                            ARROW_FUNC "" @3-3
-                                              PARAM_LIST
-                                                PARAM
-                                                  null
-                                                  ZVAL "key#45"
-                                                  null
-                                                  null
-                                                  null
-                                                  null
-                                                PARAM
-                                                  null
-                                                  ZVAL "value#46"
-                                                  null
-                                                  null
-                                                  null
-                                                  null
-                                              null
-                                              ARRAY [3]
-                                                ARRAY_ELEM
-                                                  CAST [6]
-                                                    VAR
-                                                      ZVAL "key#45"
-                                                  null
-                                                ARRAY_ELEM
-                                                  VAR
+                              SHARP_TYPE_ARGS
+                                NEW
+                                  ZVAL "Sharp\\Map"
+                                  ARG_LIST
+                                    CALL
+                                      ZVAL "array_merge"
+                                      ARG_LIST
+                                        ARRAY [3]
+                                        UNPACK
+                                          CALL
+                                            ZVAL "array_map"
+                                            ARG_LIST
+                                              ARROW_FUNC "" @3-3
+                                                PARAM_LIST
+                                                  PARAM
+                                                    null
+                                                    ZVAL "key#45"
+                                                    null
+                                                    null
+                                                    null
+                                                    null
+                                                  PARAM
+                                                    null
                                                     ZVAL "value#46"
-                                                  null
-                                              null
-                                              null
-                                            CALL
-                                              ZVAL "array_keys"
-                                              ARG_LIST
-                                                VAR
-                                                  ZVAL "read#41"
-                                            VAR
-                                              ZVAL "read#41"
+                                                    null
+                                                    null
+                                                    null
+                                                    null
+                                                null
+                                                ARRAY [3]
+                                                  ARRAY_ELEM
+                                                    CAST [6]
+                                                      VAR
+                                                        ZVAL "key#45"
+                                                    null
+                                                  ARRAY_ELEM
+                                                    VAR
+                                                      ZVAL "value#46"
+                                                    null
+                                                null
+                                                null
+                                              CALL
+                                                ZVAL "array_keys"
+                                                ARG_LIST
+                                                  VAR
+                                                    ZVAL "read#41"
+                                              VAR
+                                                ZVAL "read#41"
+                                ZVAL "string, App.Address|App.Point"
                               VAR
                                 ZVAL "read#41"
                     ASSIGN
@@ -30491,11 +30693,13 @@ fn parse_reads_each_field_as_its_type() {
                                 ARG_LIST
                                   VAR
                                     ZVAL "read#45"
-                              NEW
-                                ZVAL "Sharp\\Set"
-                                ARG_LIST
-                                  VAR
-                                    ZVAL "read#45"
+                              SHARP_TYPE_ARGS
+                                NEW
+                                  ZVAL "Sharp\\Set"
+                                  ARG_LIST
+                                    VAR
+                                      ZVAL "read#45"
+                                ZVAL "App.Status"
                               VAR
                                 ZVAL "read#45"
                     ASSIGN
@@ -30591,11 +30795,13 @@ fn parse_reads_each_field_as_its_type() {
                                                 ARG_LIST
                                                   VAR
                                                     ZVAL "element#53"
-                                              NEW
-                                                ZVAL "Sharp\\Set"
-                                                ARG_LIST
-                                                  VAR
-                                                    ZVAL "element#53"
+                                              SHARP_TYPE_ARGS
+                                                NEW
+                                                  ZVAL "Sharp\\Set"
+                                                  ARG_LIST
+                                                    VAR
+                                                      ZVAL "element#53"
+                                                ZVAL "int"
                                               VAR
                                                 ZVAL "element#53"
                                             null

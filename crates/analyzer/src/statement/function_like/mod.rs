@@ -599,6 +599,7 @@ where
         }
     }
 
+    record_signature_types(&mut artifacts, function_like_metadata);
     add_parameter_types_to_context(
         context,
         block_context,
@@ -723,6 +724,7 @@ where
     parent_artifacts.resolved_method_calls.append(&mut artifacts.resolved_method_calls);
     parent_artifacts.call_targets.extend(std::mem::take(&mut artifacts.call_targets));
     parent_artifacts.tested_types.extend(std::mem::take(&mut artifacts.tested_types));
+    parent_artifacts.declared_types.extend(std::mem::take(&mut artifacts.declared_types));
     parent_artifacts.namespace_constants.extend(std::mem::take(&mut artifacts.namespace_constants));
     parent_artifacts.function_values.append(&mut artifacts.function_values);
     parent_artifacts.readonly_calls.append(&mut artifacts.readonly_calls);
@@ -801,6 +803,19 @@ fn assume<'ctx, A>(
             false,
             false,
         );
+    }
+}
+
+/// Records the type each parameter's hint and the result's hint of the PHP# `function_like_metadata` write, as
+/// [`AnalysisArtifacts::get_declared_type`] reads them.
+pub(crate) fn record_signature_types(artifacts: &mut AnalysisArtifacts, function_like_metadata: &FunctionLikeMetadata) {
+    if !function_like_metadata.flags.is_sharp() {
+        return;
+    }
+    let parameters =
+        function_like_metadata.parameters.iter().filter_map(|parameter| parameter.get_type_declaration_metadata());
+    for declared in parameters.chain(function_like_metadata.return_type_declaration_metadata.as_ref()) {
+        artifacts.record_declared_type(&declared.span, declared.type_union.clone());
     }
 }
 

@@ -275,8 +275,10 @@ fn sections_hash(bytes: &[u8]) -> [u8; 16] {
     xxh3_128(&bytes[size_of::<sharp_unit_header>()..]).to_be_bytes()
 }
 
-/// Reads the header of a `.sharpc` file, after load checks 1 to 3: the magic and the ABI match this bridge's, the
-/// file's length is the length its header gives, and the sections after the header hash to its `sections_hash`.
+/// Reads the header of a `.sharpc` file, after load checks 1 to 3.
+///
+/// The magic and the ABI match this bridge's, the file's length is the length its header gives, and the sections
+/// after the header hash to its `sections_hash`.
 ///
 /// # Errors
 ///

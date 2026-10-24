@@ -179,7 +179,9 @@ where
     A: Arena,
 {
     let literal_type = |artifacts: &mut AnalysisArtifacts, value_type: &TUnion| match value_type.types.as_ref() {
-        [TAtomic::Array(array)] if array.is_empty() => get_empty_literal_type(source, declared),
+        [TAtomic::Array(array)] if array.is_empty() => source
+            .and_then(|source| get_set_literal_type(context, artifacts, source, declared))
+            .or_else(|| get_empty_literal_type(source, declared)),
         _ => source.and_then(|source| get_set_literal_type(context, artifacts, source, declared)),
     };
 

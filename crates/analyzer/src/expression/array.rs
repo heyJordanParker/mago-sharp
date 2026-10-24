@@ -7,6 +7,9 @@ use std::sync::Arc;
 use foldhash::HashSet;
 
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
+use mago_codex::misc::GenericParent;
+use mago_codex::ttype::TType;
+use mago_codex::ttype::TypeRef;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::array::key::ArrayKey;
@@ -122,8 +125,10 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for LegacyArray<'arena> {
 /// `Map` literal there is refused by [`check_sharp_literal_kind`], and keeps the `Set` of its values, so its place adds
 /// no second issue, unless the place also declares a `Map`, which takes it as it is. A literal at a place whose
 /// elements are declared `Set`s holds `Set` literals, at any depth, as in `List<Set<int>> sets = [[1]]` and
-/// `Set<Set<int>> groups = [[1, 2]]`, so it gets the type of its elements once they are `Set`s. `None` for any other
-/// value or place. The literal inside any parentheses gets the type too, since the lowering reads it there.
+/// `Set<Set<int>> groups = [[1, 2]]`, so it gets the type of its elements once they are `Set`s. An empty literal is the
+/// collection its place declares, as [`get_placed_type`] gives it. `None` for any other value or place. The literal
+/// inside any parentheses gets the type too, since the lowering reads it there. A literal that holds elements keeps
+/// its own element types, and [`record_placed_type`] records the collection its place declares, at any depth.
 pub(crate) fn get_set_literal_type<A>(
     context: &Context<'_, '_, A>,
     artifacts: &mut AnalysisArtifacts,
@@ -145,25 +150,31 @@ where
     let declares_map = declared_type.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(TArray::Keyed(_))));
     let becomes_set = declares_set && !(declares_map && is_map_literal(array_literal) == Some(true));
     let literal_type = match get_literal_of_sets_type(context, artifacts, array_literal, declared_type, becomes_set) {
-        Some(literal_type) => literal_type,
+        Some(literal_type) => Some(literal_type),
+        None if array_literal.elements.is_empty() => get_placed_type(value, declared_type),
         None if becomes_set => {
             let array = artifacts.get_expression_type(value)?.get_single_array()?;
             let (_, element_type) = get_array_parameters(array, context.codebase);
 
-            TUnion::from_atomic(TAtomic::Array(TArray::Set(Arc::new(element_type))))
+            Some(TUnion::from_atomic(TAtomic::Array(TArray::Set(Arc::new(element_type)))))
         }
-        None => return None,
+        None => None,
     };
-    artifacts.set_expression_type(literal, literal_type.clone());
-    artifacts.set_expression_type(value, literal_type.clone());
+    if let Some(literal_type) = &literal_type {
+        artifacts.set_expression_type(literal, literal_type.clone());
+        artifacts.set_expression_type(value, literal_type.clone());
+    }
+    if !array_literal.elements.is_empty() {
+        record_placed_type(context, artifacts, array_literal, value, declared_type);
+    }
 
-    Some(literal_type)
+    literal_type
 }
 
 /// The type of the literal `array_literal`, written where `declared_type` declares its elements, once each element that
-/// is a literal of a declared `Set` has the `Set` type: the `Set` of the elements' types when the literal `becomes_set`,
-/// or else a `List` of them or a `Map` of its keys to them, a spread's elements included. A missing element, refused on
-/// its own, adds no type. `None` when no element became a `Set`.
+/// is a literal has the type its place gives it, as [`get_set_literal_type`] gives it: the `Set` of the elements' types
+/// when the literal `becomes_set`, or else a `List` of them or a `Map` of its keys to them, a spread's elements
+/// included. A missing element, refused on its own, adds no type. `None` when no element took a type from its place.
 fn get_literal_of_sets_type<A>(
     context: &Context<'_, '_, A>,
     artifacts: &mut AnalysisArtifacts,
@@ -190,7 +201,7 @@ where
             combine_union_types(&first, &other, context.codebase, context.settings.combiner_options())
         })?;
 
-    let mut became_set = false;
+    let mut placed_element = false;
     let mut element_types = Vec::with_capacity(array_literal.elements.len());
     for element in array_literal.elements.iter() {
         let element_value = match element {
@@ -203,10 +214,10 @@ where
             }
             ArrayElement::Missing(_) => continue,
         };
-        became_set |= get_set_literal_type(context, artifacts, element_value, &declared_element).is_some();
+        placed_element |= get_set_literal_type(context, artifacts, element_value, &declared_element).is_some();
         element_types.push(artifacts.get_expression_type(element_value)?.clone());
     }
-    if !became_set {
+    if !placed_element {
         return None;
     }
 
@@ -225,6 +236,46 @@ where
     };
 
     Some(TUnion::from_atomic(TAtomic::Array(collection)))
+}
+
+/// The collection the place declared `declared` gives a literal written there as `value`: spec section 12 has a
+/// literal take the type of where it lands, so the lowering makes its `Map` or `Set` with the place's type. It is the
+/// place's collection of the literal's kind, as [`get_empty_literal_type`] picks it. `None` where the collection names
+/// a method's type parameter, which a call's parameter names for the method it calls, whose type arguments the code
+/// that writes the literal can't spell.
+fn get_placed_type(value: &Expression<'_>, declared: &TUnion) -> Option<TUnion> {
+    let placed = get_empty_literal_type(Some(value), declared)?;
+    let names_method_parameter = placed.get_all_child_nodes().into_iter().any(|node| {
+        matches!(node, TypeRef::Atomic(TAtomic::GenericParameter(parameter))
+            if matches!(parameter.defining_entity, GenericParent::FunctionLike(_)))
+    });
+
+    (!names_method_parameter).then_some(placed)
+}
+
+/// Records the collection the place declared `declared` gives the literal `array_literal` that holds elements, written
+/// there as `value`, as [`get_placed_type`] gives it, once the literal's own type fits it, as the declared type of the
+/// literal, which the lowering makes its `Map` or `Set` with. The literal keeps its own type, so the place checks each
+/// element as it is, a lambda's effects and a `foreign` object included.
+fn record_placed_type<A>(
+    context: &Context<'_, '_, A>,
+    artifacts: &mut AnalysisArtifacts,
+    array_literal: &Array<'_>,
+    value: &Expression<'_>,
+    declared: &TUnion,
+) where
+    A: Arena,
+{
+    let Some(placed) = get_placed_type(value, declared) else {
+        return;
+    };
+    let Some(own) = artifacts.get_expression_type(value) else {
+        return;
+    };
+    let mut result = ComparisonResult::for_dialect(context.dialect);
+    if is_contained_by(context.codebase, own, &placed, false, false, false, &mut result) {
+        artifacts.record_declared_type(array_literal, placed);
+    }
 }
 
 /// The type an empty value written to a place declared `declared` has there: PHP types `[]` and `[:]` as one empty

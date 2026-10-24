@@ -560,7 +560,9 @@ where
         }
         None => report_undefined_types(context, &local_type, hint.span()),
     }
-    let local_type = (Rc::new(known_type_or_error(local_type)), hint.span());
+    let local_type = known_type_or_error(local_type);
+    artifacts.record_declared_type(hint, local_type.clone());
+    let local_type = (Rc::new(local_type), hint.span());
     block_context.local_types.insert(variable_id, local_type.clone());
 
     Some(local_type)

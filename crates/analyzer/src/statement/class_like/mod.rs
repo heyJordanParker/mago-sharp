@@ -1633,6 +1633,14 @@ where
                 };
 
                 for property_name in property_names {
+                    if context.dialect.is_sharp()
+                        && let Some(declared) = class_like_metadata
+                            .properties
+                            .get(&property_name)
+                            .and_then(|prop_meta| prop_meta.type_declaration_metadata.as_ref())
+                    {
+                        artifacts.record_declared_type(&declared.span, declared.type_union.clone());
+                    }
                     if let Some(prop_meta) = class_like_metadata.properties.get(&property_name)
                         && let Some(type_meta) = &prop_meta.type_metadata
                     {

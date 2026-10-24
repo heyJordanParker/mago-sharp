@@ -5,11 +5,13 @@ use mago_span::HasSpan;
 use mago_span::Span;
 
 use crate::cst::cst::access::PropertyAccess;
+use crate::cst::cst::array::Array;
 use crate::cst::cst::attribute::AttributeList;
 use crate::cst::cst::block::Block;
 use crate::cst::cst::class_like::member::ClassLikeMemberSelector;
 use crate::cst::cst::expression::Expression;
 use crate::cst::cst::function_like::parameter::FunctionLikeParameterList;
+use crate::cst::cst::identifier::Identifier;
 use crate::cst::cst::identifier::LocalIdentifier;
 use crate::cst::cst::keyword::Keyword;
 use crate::cst::cst::modifier::Modifier;
@@ -331,23 +333,32 @@ impl<'arena> Property<'arena> {
     /// Returns `true` when a PHP# instance property's initial value runs at the start of the constructor instead of
     /// being PHP's default: a value that is not a constant expression or that reads a static member, `Class.name`, as
     /// a method value `Item.doubled` does, any value of a property that runs as `readonly`, which takes no default, or
-    /// any value of a property with behaviors, whose `set` processes it (spec section 6.4). A static member's runs
-    /// once, when a request first uses its class's statics.
+    /// any value of a property with behaviors, whose `set` processes it (spec section 6.4). A collection literal whose
+    /// type, the property's, holds a `Map` or a `Set` whose type names one of its class's `type_parameters` runs there,
+    /// as `Map<string, T> index = [:]`, since only the object's type arguments spell the type the `Map` is made with
+    /// (spec section 12). A static member's runs once, when a request first uses its class's statics.
     #[must_use]
-    pub fn initial_value_runs_in_constructor(&self) -> bool {
+    pub fn initial_value_runs_in_constructor(&self, type_parameters: &[&[u8]]) -> bool {
         !self.modifiers().contains_static()
             && self.initial_value().is_some_and(|value| {
                 matches!(self, Property::Hooked(hooked) if hooked.hook_list.is_readonly() || hooked.behaviors.is_some())
                     || runs_as_code(value)
+                    || self.makes_table(value, type_parameters)
             })
     }
 
+    /// Whether the initial value `value` is a collection literal, or holds one, of a type that holds a `Map` or a `Set`
+    /// whose type names one of `type_parameters`, which only the type arguments the code runs with spell.
+    fn makes_table(&self, value: &Expression<'_>, type_parameters: &[&[u8]]) -> bool {
+        holds_collection_literal(value) && self.hint().is_some_and(|hint| holds_table(hint, type_parameters, false))
+    }
+
     /// Returns `true` when a PHP# instance property runs code at the start of the constructor: an initial value
-    /// [that runs there](Self::initial_value_runs_in_constructor), or behaviors, which the constructor creates before
-    /// any initial value (spec section 6.4).
+    /// [that runs there](Self::initial_value_runs_in_constructor), with its class's `type_parameters`, or behaviors,
+    /// which the constructor creates before any initial value (spec section 6.4).
     #[must_use]
-    pub fn runs_in_constructor(&self) -> bool {
-        self.initial_value_runs_in_constructor()
+    pub fn runs_in_constructor(&self, type_parameters: &[&[u8]]) -> bool {
+        self.initial_value_runs_in_constructor(type_parameters)
             || matches!(self, Property::Hooked(hooked) if hooked.behaviors.is_some())
     }
 
@@ -355,10 +366,13 @@ impl<'arena> Property<'arena> {
     /// statics, instead of being PHP's default: a value that is not a constant expression, or one that reads a static
     /// member of a class, `Class.name`, which PHP's constant expression can't read. PHP# names a property or method in
     /// camel case, and a constant or enum case with a capital (spec section 24), so `Class.count` reads a static
-    /// member and `Order.Ascending` an enum case.
+    /// member and `Order.Ascending` an enum case. A collection literal whose type holds a `Map` or a `Set` whose type
+    /// names one of its class's `type_parameters` runs then too, for each type argument (spec section 11), since only
+    /// the type arguments spell the type the `Map` is made with (spec section 12).
     #[must_use]
-    pub fn initial_value_runs_after_class(&self) -> bool {
-        self.modifiers().contains_static() && self.initial_value_runs_as_code()
+    pub fn initial_value_runs_after_class(&self, type_parameters: &[&[u8]]) -> bool {
+        self.modifiers().contains_static()
+            && self.initial_value().is_some_and(|value| runs_as_code(value) || self.makes_table(value, type_parameters))
     }
 
     /// Returns `true` when a PHP# member's initial value runs as code rather than as PHP's constant expression: it is
@@ -374,6 +388,46 @@ fn runs_as_code(value: &Expression<'_>) -> bool {
     walk_expression_mut(&mut read, value, &mut ());
 
     read.found || !value.is_constant(&PHPVersion::PHP85, false)
+}
+
+/// Whether `value` holds a collection literal, `[…]` or `[:]`, at any depth.
+fn holds_collection_literal(value: &Expression<'_>) -> bool {
+    let mut literal = CollectionLiteral { found: false };
+    walk_expression_mut(&mut literal, value, &mut ());
+
+    literal.found
+}
+
+/// Whether `hint` holds a `Map` or a `Set`, at any depth, whose type names one of `names`. `in_table` says whether
+/// `hint` sits inside one already.
+fn holds_table(hint: &Hint<'_>, names: &[&[u8]], in_table: bool) -> bool {
+    match hint {
+        Hint::Identifier(Identifier::Local(name)) => in_table && names.contains(&name.value),
+        Hint::Generic(generic) => {
+            let in_table = in_table || matches!(generic.name.value, b"Map" | b"Set");
+            generic.type_arguments.arguments.iter().any(|argument| holds_table(argument, names, in_table))
+        }
+        Hint::Nullable(nullable) => holds_table(nullable.hint, names, in_table),
+        Hint::Parenthesized(parenthesized) => holds_table(parenthesized.hint, names, in_table),
+        Hint::Readonly(readonly) => holds_table(readonly.hint, names, in_table),
+        Hint::Union(union) => holds_table(union.left, names, in_table) || holds_table(union.right, names, in_table),
+        Hint::Intersection(intersection) => {
+            holds_table(intersection.left, names, in_table) || holds_table(intersection.right, names, in_table)
+        }
+        Hint::Tuple(tuple) => tuple.elements.iter().any(|element| holds_table(&element.hint, names, in_table)),
+        _ => false,
+    }
+}
+
+/// Finds a collection literal in an initial value, for [`holds_collection_literal`].
+struct CollectionLiteral {
+    found: bool,
+}
+
+impl<'ast, 'arena> MutWalker<'ast, 'arena, ()> for CollectionLiteral {
+    fn walk_in_array(&mut self, _array: &'ast Array<'arena>, _context: &mut ()) {
+        self.found = true;
+    }
 }
 
 /// Finds a static member read, `Class.name` or `Counter<T>.name`, in an initial value, for

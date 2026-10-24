@@ -57,6 +57,7 @@ use mago_syntax::cst::Call;
 use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::FunctionCall;
+use mago_syntax::cst::Hint;
 use mago_syntax::cst::Inheritance;
 use mago_syntax::cst::NullSafeFunctionCall;
 use mago_syntax::cst::NullSafePropertyAccess;
@@ -531,6 +532,24 @@ impl<'analysis> Types<'analysis> {
         receiver_classes(self.artifacts.get_tested_type(name)?)
     }
 
+    /// The type arguments of the one `Map` or `Set` `r#type` holds, `string, int` for a `Map<string, int>`, written as
+    /// [`Self::type_arguments`] writes those of a `new`, which a table PHP# code makes as a value of `r#type` takes, so
+    /// the engine checks each write plain PHP makes into it. None when `r#type` holds no table or several, or an argument
+    /// PHP# can't write, as the elements of an empty literal before it lands.
+    pub(crate) fn table_type_arguments(&self, r#type: &TUnion) -> Option<String> {
+        let mut tables = r#type.types.iter().filter_map(|atomic| match atomic {
+            TAtomic::Array(table @ (TArray::Keyed(_) | TArray::Set(_))) => Some(table),
+            _ => None,
+        });
+        let (Some(table), None) = (tables.next(), tables.next()) else {
+            return None;
+        };
+        let (key, value) = self.array_parameters(table);
+        let arguments = if matches!(table, TArray::Set(_)) { vec![value] } else { vec![key, value] };
+
+        arguments.iter().all(is_written_in_sharp).then(|| self.argument_texts(&arguments))
+    }
+
     /// The type texts of `arguments`, joined by `, `, as a `SHARP_TYPE_ARGS` spells them.
     pub(crate) fn argument_texts(&self, arguments: &[TUnion]) -> String {
         arguments.iter().map(|argument| text(argument, self.codebase, Parameter::Index)).collect::<Vec<_>>().join(", ")
@@ -628,13 +647,23 @@ impl<'analysis> Types<'analysis> {
             .is_some_and(|metadata| self.scanned(class).checks_results_at_call(metadata))
     }
 
-    /// The declared result type of the method `class::method`, with a type parameter as itself, or none without one.
-    pub(crate) fn declared_result(&self, class: &[u8], method: &[u8]) -> Option<&'analysis TUnion> {
-        Some(&self.codebase.get_method(class, method)?.return_type_metadata.as_ref()?.type_union)
+    /// The type the declaration's type `hint` of this file writes, a parameter's, a result's, a property's or a typed
+    /// local's, as the checker resolved it, each class it names and each type parameter as itself included.
+    pub(crate) fn declared_type(&self, hint: &Hint) -> &'analysis TUnion {
+        self.artifacts
+            .get_declared_type(hint)
+            .unwrap_or_else(|| unreachable!("the analysis resolves the type of each declaration's hint, not `{hint}`"))
+    }
+
+    /// The type a `Map` or `Set` the collection literal `literal` makes takes, spec section 12: the collection the place
+    /// it lands in declares, as the analysis records it, or else the literal's own type.
+    pub(crate) fn literal_type(&self, literal: &Expression) -> &'analysis TUnion {
+        self.artifacts.get_declared_type(literal).unwrap_or_else(|| self.expression_type(literal))
     }
 
     /// The declared type of the property `variable`, `$`-prefixed, that the class `class` declares or inherits, with a
-    /// type parameter as itself.
+    /// type parameter as itself. A property of another file's class has no hint in this file, so
+    /// [`Self::declared_type`] has no type of it.
     pub(crate) fn declared_property_type(&self, class: &[u8], variable: &[u8]) -> Option<&'analysis TUnion> {
         Some(&self.codebase.get_declaring_property(class, variable)?.type_metadata.as_ref()?.type_union)
     }
@@ -1325,6 +1354,18 @@ impl<'analysis> Types<'analysis> {
         };
 
         Some(signature.get_parameters().first()?.get_type_signature().cloned().unwrap_or_else(get_mixed))
+    }
+
+    /// The result type of the function the method value `value` is, as the checker typed it. None for one it typed
+    /// without.
+    pub(crate) fn value_result_type(&self, value: &Expression) -> Option<&'analysis TUnion> {
+        let Some(TAtomic::Callable(TCallable::Signature(signature))) =
+            self.expression_type(value).types.iter().find(|atomic| atomic.is_callable())
+        else {
+            unreachable!("the analysis types a method value as its signature, not the value at {:?}", value.span());
+        };
+
+        signature.get_return_type()
     }
 
     /// The parameters of the function the method value `value` is, as the checker typed it, each named as the method

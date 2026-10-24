@@ -115,6 +115,11 @@ pub struct AnalysisArtifacts {
     /// or a class with type arguments, keyed by the span of the type it writes. Apart from `expression_types`, because the `instanceof`
     /// a test runs as spans that type too when nothing the code writes stands before it.
     pub(crate) tested_types: HashMap<(u32, u32), TUnion>,
+    /// The type each declaration's hint writes, a parameter's, a result's, a property's or a typed local's, as the
+    /// checker resolved it, each class and type parameter it names included, keyed by the span of the hint, and the
+    /// collection the place a collection literal that holds elements lands in declares for it, keyed by the span of the
+    /// literal. Read through [`Self::get_declared_type`].
+    pub(crate) declared_types: HashMap<(u32, u32), TUnion>,
     /// The tuple a list pattern of types alone, as `[int, string]`, narrows the value it tests to, keyed by the span of
     /// its `[`. The test there reads `List<Any?>` while the code runs, and the count and element tests after it check
     /// the rest of the tuple.
@@ -179,6 +184,7 @@ impl AnalysisArtifacts {
             listings: HashSet::default(),
             call_targets: HashMap::default(),
             tested_types: HashMap::default(),
+            declared_types: HashMap::default(),
             list_pattern_tuples: HashMap::default(),
             namespace_constants: HashMap::default(),
             widened_parameters: HashSet::default(),
@@ -388,6 +394,19 @@ impl AnalysisArtifacts {
     /// class with type arguments. `None` for a class without type arguments.
     pub fn get_tested_type(&self, hint: &impl HasSpan) -> Option<&TUnion> {
         self.tested_types.get(&get_expression_range(hint))
+    }
+
+    /// Records that the declaration's type `hint` writes `declared`, as the checker resolved it, or that the place a
+    /// collection literal `hint` lands in declares it `declared`.
+    pub(crate) fn record_declared_type(&mut self, hint: &impl HasSpan, declared: TUnion) {
+        self.declared_types.insert(get_expression_range(hint), declared);
+    }
+
+    /// The type the declaration's type `hint` writes, as the checker resolved it, each class and type parameter it
+    /// names included, or the collection the place a collection literal `hint` lands in declares for it. `None` for a
+    /// hint the analysis met in no declaration, and a literal no declared collection takes.
+    pub fn get_declared_type(&self, hint: &impl HasSpan) -> Option<&TUnion> {
+        self.declared_types.get(&get_expression_range(hint))
     }
 
     /// Records that the list pattern whose `[` is `left_bracket` narrows the value it tests to `tuple`, or to the type

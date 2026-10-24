@@ -1189,12 +1189,16 @@ where
     fn walk_out_class(&mut self, class: &'arena Class<'arena>, context: &mut Context<'ctx, 'arena, A>) {
         // The bridge gives a PHP# class without a constructor one for the initial values that run there and its
         // behaviors, so a subclass's `: super()` reaches it from any file.
+        let type_parameters: Vec<&[u8]> = class
+            .type_parameters
+            .iter()
+            .flat_map(|list| list.parameters.iter().map(|parameter| parameter.name.value))
+            .collect();
         if !self.has_constructor
             && context.program.dialect.is_sharp()
-            && class
-                .members
-                .iter()
-                .any(|member| matches!(member, ClassLikeMember::Property(property) if property.runs_in_constructor()))
+            && class.members.iter().any(|member| {
+                matches!(member, ClassLikeMember::Property(property) if property.runs_in_constructor(&type_parameters))
+            })
             && let Some(class_like_metadata) =
                 self.stack.last().and_then(|class| self.codebase.class_likes.get_mut(class))
         {
