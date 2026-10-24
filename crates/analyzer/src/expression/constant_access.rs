@@ -52,7 +52,16 @@ impl<'arena> Analyzable<'_, 'arena> for ConstantAccess<'arena> {
         A: Arena,
     {
         if let Some(variable_id) = get_bare_name_variable_id(&self.name, context.resolved_names) {
-            let resulting_type = read_variable(context, block_context, artifacts, variable_id.as_bytes(), self.span());
+            let mut resulting_type =
+                read_variable(context, block_context, artifacts, variable_id.as_bytes(), self.span());
+            // A local a lambda assigns may change whenever any code runs, so it is never narrowed, as Kotlin refuses a
+            // smart cast of "a local variable that is captured by a changing closure".
+            if let Some(Binding::Local(local)) = context.resolved_names.binding(&self.name)
+                && context.resolved_names.is_written_by_lambda(&local)
+                && let Some(declared_type) = block_context.declared_type(&variable_id)
+            {
+                resulting_type = declared_type.into();
+            }
             artifacts.set_rc_expression_type(self, resulting_type);
 
             return Ok(());

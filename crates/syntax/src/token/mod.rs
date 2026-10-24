@@ -576,6 +576,242 @@ impl TokenKind {
         )
     }
 
+    /// The text every token of this kind writes, as `;` or `return`, which a parse error quotes for an expected token.
+    /// `None` for a kind whose tokens each write their own text, as a name, a literal or a comment does.
+    #[must_use]
+    pub const fn written(&self) -> Option<&'static str> {
+        Some(match self {
+            TokenKind::Eval => "eval",
+            TokenKind::Die => "die",
+            TokenKind::Self_ => "self",
+            TokenKind::Parent => "parent",
+            TokenKind::Backtick => "`",
+            TokenKind::From => "from",
+            TokenKind::Print => "print",
+            TokenKind::Dollar => "$",
+            TokenKind::HaltCompiler => "__halt_compiler",
+            TokenKind::Readonly => "readonly",
+            TokenKind::Global => "global",
+            TokenKind::Abstract => "abstract",
+            TokenKind::Ampersand => "&",
+            TokenKind::AmpersandEqual => "&=",
+            TokenKind::AmpersandAmpersand => "&&",
+            TokenKind::AmpersandAmpersandEqual => "&&=",
+            TokenKind::Array => "array",
+            TokenKind::ArrayCast => "(array)",
+            TokenKind::MinusGreaterThan => "->",
+            TokenKind::QuestionMinusGreaterThan => "?->",
+            TokenKind::At => "@",
+            TokenKind::As => "as",
+            TokenKind::Asterisk => "*",
+            TokenKind::HashLeftBracket => "#[",
+            TokenKind::Bang => "!",
+            TokenKind::BangEqual => "!=",
+            TokenKind::LessThanGreaterThan => "<>",
+            TokenKind::BangEqualEqual => "!==",
+            TokenKind::LessThanEqualGreaterThan => "<=>",
+            TokenKind::BoolCast => "(bool)",
+            TokenKind::BooleanCast => "(boolean)",
+            TokenKind::And => "and",
+            TokenKind::Or => "or",
+            TokenKind::Break => "break",
+            TokenKind::Callable => "callable",
+            TokenKind::Caret => "^",
+            TokenKind::CaretEqual => "^=",
+            TokenKind::Case => "case",
+            TokenKind::Catch => "catch",
+            TokenKind::Class => "class",
+            TokenKind::ClassConstant => "__CLASS__",
+            TokenKind::TraitConstant => "__TRAIT__",
+            TokenKind::FunctionConstant => "__FUNCTION__",
+            TokenKind::MethodConstant => "__METHOD__",
+            TokenKind::LineConstant => "__LINE__",
+            TokenKind::FileConstant => "__FILE__",
+            TokenKind::Clone => "clone",
+            TokenKind::MinusEqual => "-=",
+            TokenKind::CloseTag => "?>",
+            TokenKind::QuestionQuestion => "??",
+            TokenKind::QuestionQuestionEqual => "??=",
+            TokenKind::AsteriskEqual => "*=",
+            TokenKind::Colon => ":",
+            TokenKind::Comma => ",",
+            TokenKind::Const => "const",
+            TokenKind::Continue => "continue",
+            TokenKind::Declare => "declare",
+            TokenKind::MinusMinus => "--",
+            TokenKind::Default => "default",
+            TokenKind::DirConstant => "__DIR__",
+            TokenKind::SlashEqual => "/=",
+            TokenKind::Do => "do",
+            TokenKind::DollarLeftBrace => "${",
+            TokenKind::Dot => ".",
+            TokenKind::DotEqual => ".=",
+            TokenKind::EqualGreaterThan => "=>",
+            TokenKind::DoubleCast => "(double)",
+            TokenKind::RealCast => "(real)",
+            TokenKind::FloatCast => "(float)",
+            TokenKind::ColonColon => "::",
+            TokenKind::EqualEqual => "==",
+            TokenKind::DoubleQuote => "\"",
+            TokenKind::Else => "else",
+            TokenKind::Echo => "echo",
+            TokenKind::DotDotDot => "...",
+            TokenKind::ElseIf => "elseif",
+            TokenKind::Empty => "empty",
+            TokenKind::EndDeclare => "enddeclare",
+            TokenKind::EndFor => "endfor",
+            TokenKind::EndForeach => "endforeach",
+            TokenKind::EndIf => "endif",
+            TokenKind::EndSwitch => "endswitch",
+            TokenKind::EndWhile => "endwhile",
+            TokenKind::Enum => "enum",
+            TokenKind::Equal => "=",
+            TokenKind::Extends => "extends",
+            TokenKind::False => "false",
+            TokenKind::Final => "final",
+            TokenKind::Finally => "finally",
+            TokenKind::Fn => "fn",
+            TokenKind::For => "for",
+            TokenKind::Foreach => "foreach",
+            TokenKind::Function => "function",
+            TokenKind::Goto => "goto",
+            TokenKind::GreaterThan => ">",
+            TokenKind::GreaterThanEqual => ">=",
+            TokenKind::If => "if",
+            TokenKind::Implements => "implements",
+            TokenKind::Include => "include",
+            TokenKind::IncludeOnce => "include_once",
+            TokenKind::PlusPlus => "++",
+            TokenKind::Instanceof => "instanceof",
+            TokenKind::Insteadof => "insteadof",
+            TokenKind::Exit => "exit",
+            TokenKind::Unset => "unset",
+            TokenKind::Isset => "isset",
+            TokenKind::List => "list",
+            TokenKind::IntCast => "(int)",
+            TokenKind::IntegerCast => "(integer)",
+            TokenKind::Interface => "interface",
+            TokenKind::LeftBrace => "{",
+            TokenKind::LeftBracket => "[",
+            TokenKind::LeftParenthesis => "(",
+            TokenKind::LeftShift => "<<",
+            TokenKind::LeftShiftEqual => "<<=",
+            TokenKind::RightShift => ">>",
+            TokenKind::RightShiftEqual => ">>=",
+            TokenKind::LessThan => "<",
+            TokenKind::LessThanEqual => "<=",
+            TokenKind::Match => "match",
+            TokenKind::Minus => "-",
+            TokenKind::Namespace => "namespace",
+            TokenKind::NamespaceSeparator => "\\",
+            TokenKind::NamespaceConstant => "__NAMESPACE__",
+            TokenKind::PropertyConstant => "__PROPERTY__",
+            TokenKind::New => "new",
+            TokenKind::Null => "null",
+            TokenKind::ObjectCast => "(object)",
+            TokenKind::UnsetCast => "(unset)",
+            TokenKind::OpenTag => "<?php",
+            TokenKind::EchoTag => "<?=",
+            TokenKind::ShortOpenTag => "<?",
+            TokenKind::Percent => "%",
+            TokenKind::PercentEqual => "%=",
+            TokenKind::Pipe => "|",
+            TokenKind::PipeEqual => "|=",
+            TokenKind::Plus => "+",
+            TokenKind::PlusEqual => "+=",
+            TokenKind::AsteriskAsterisk => "**",
+            TokenKind::AsteriskAsteriskEqual => "**=",
+            TokenKind::Private => "private",
+            TokenKind::PrivateSet => "private(set)",
+            TokenKind::Protected => "protected",
+            TokenKind::ProtectedSet => "protected(set)",
+            TokenKind::Public => "public",
+            TokenKind::PublicSet => "public(set)",
+            TokenKind::Question => "?",
+            TokenKind::Require => "require",
+            TokenKind::RequireOnce => "require_once",
+            TokenKind::Return => "return",
+            TokenKind::RightBrace => "}",
+            TokenKind::RightBracket => "]",
+            TokenKind::RightParenthesis => ")",
+            TokenKind::Semicolon => ";",
+            TokenKind::Slash => "/",
+            TokenKind::Static => "static",
+            TokenKind::StringCast => "(string)",
+            TokenKind::BinaryCast => "(binary)",
+            TokenKind::VoidCast => "(void)",
+            TokenKind::Switch => "switch",
+            TokenKind::Throw => "throw",
+            TokenKind::Trait => "trait",
+            TokenKind::EqualEqualEqual => "===",
+            TokenKind::True => "true",
+            TokenKind::Try => "try",
+            TokenKind::Use => "use",
+            TokenKind::Var => "var",
+            TokenKind::Yield => "yield",
+            TokenKind::While => "while",
+            TokenKind::Tilde => "~",
+            TokenKind::PipePipe => "||",
+            TokenKind::Xor => "xor",
+            TokenKind::PipeGreaterThan => "|>",
+            TokenKind::Whitespace
+            | TokenKind::DocumentStart(_)
+            | TokenKind::DocumentEnd
+            | TokenKind::SingleLineComment
+            | TokenKind::HashComment
+            | TokenKind::MultiLineComment
+            | TokenKind::DocBlockComment
+            | TokenKind::PartialLiteralString
+            | TokenKind::LiteralString
+            | TokenKind::LiteralFloat
+            | TokenKind::LiteralInteger
+            | TokenKind::FullyQualifiedIdentifier
+            | TokenKind::QualifiedIdentifier
+            | TokenKind::Identifier
+            | TokenKind::InlineText
+            | TokenKind::InlineShebang
+            | TokenKind::OffsetNumber
+            | TokenKind::OffsetString
+            | TokenKind::StringPart
+            | TokenKind::StringVariableName
+            | TokenKind::Variable => return None,
+        })
+    }
+
+    /// The text a `.sharp` file writes for a token of this kind: [`Self::written`], unless the token is PHP's alone,
+    /// as `?>`, `->`, `$`, a PHP cast or a keyword that is no PHP# keyword, which PHP# reads as a name.
+    #[must_use]
+    pub fn written_in_sharp(&self) -> Option<&'static str> {
+        let written = self.written()?;
+        let php_only = matches!(
+            self,
+            TokenKind::CloseTag
+                | TokenKind::OpenTag
+                | TokenKind::EchoTag
+                | TokenKind::ShortOpenTag
+                | TokenKind::Dollar
+                | TokenKind::DollarLeftBrace
+                | TokenKind::MinusGreaterThan
+                | TokenKind::QuestionMinusGreaterThan
+                | TokenKind::ColonColon
+                | TokenKind::HashLeftBracket
+                | TokenKind::At
+                | TokenKind::Backtick
+                | TokenKind::LessThanGreaterThan
+                | TokenKind::ArrayCast
+                | TokenKind::BooleanCast
+                | TokenKind::DoubleCast
+                | TokenKind::RealCast
+                | TokenKind::IntegerCast
+                | TokenKind::ObjectCast
+                | TokenKind::UnsetCast
+                | TokenKind::BinaryCast
+                | TokenKind::VoidCast
+        ) || (self.is_keyword() && !is_sharp_keyword(written.as_bytes()));
+
+        (!php_only).then_some(written)
+    }
+
     #[inline]
     #[must_use]
     pub const fn is_infix(&self) -> bool {

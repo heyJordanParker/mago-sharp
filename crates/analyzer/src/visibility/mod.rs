@@ -265,7 +265,7 @@ where
             visibility,
             access_span,
             member_span,
-            method_metadata.flags.is_user_defined().then_some(method_metadata.span),
+            (!method_metadata.flags.is_built_in()).then_some(method_metadata.span),
             help_text,
         );
     }
@@ -468,7 +468,7 @@ where
             property_metadata
                 .span
                 .or(property_metadata.name_span)
-                .filter(|_| declaring_class_metadata.flags.is_user_defined()),
+                .filter(|_| !declaring_class_metadata.flags.is_built_in()),
             help_text,
         );
     }
@@ -651,7 +651,7 @@ where
                 property_metadata
                     .span
                     .or(property_metadata.name_span)
-                    .filter(|_| declaring_class_metadata.flags.is_user_defined()),
+                    .filter(|_| !declaring_class_metadata.flags.is_built_in()),
                 help_text,
             );
         }
@@ -831,8 +831,8 @@ fn is_visible_via_required_extends(
     false
 }
 
-/// Reports an access the member's visibility refuses. `definition_span` is where the member is declared, when that is
-/// the project's own code: a declaration in a prelude or a stub is no file the developer reads or changes.
+/// Reports an access the member's visibility refuses. `definition_span` is where the member is declared, unless that is
+/// a built-in declaration: a prelude or a stub is no file the developer can open. A vendor package's file is one.
 fn report_visibility_issue<A>(
     context: &mut Context<'_, '_, A>,
     calling_class: Option<Word>,

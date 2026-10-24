@@ -796,8 +796,8 @@ pub fn are_definitely_not_identical(
         }
     }
 
-    if (lhs.is_null() && (!rhs.is_null() && !rhs.can_be_null()))
-        || (rhs.is_null() && (!lhs.is_null() && !lhs.can_be_null()))
+    if (lhs.is_null() && (!rhs.is_null() && rhs.is_never_null()))
+        || (rhs.is_null() && (!lhs.is_null() && lhs.is_never_null()))
     {
         return true;
     }

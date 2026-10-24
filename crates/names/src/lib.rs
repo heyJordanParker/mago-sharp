@@ -171,9 +171,11 @@ pub struct ResolvedNames<'arena> {
     #[cfg_attr(feature = "serde", serde(skip_serializing_if = "HashMap::is_empty"))]
     captures: HashMap<u32, Vec<(&'arena [u8], Local)>>,
 
-    /// Declaration start offset of every PHP# local that code writes after its declaration.
-    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "foldhash::HashSet::is_empty"))]
-    written_locals: foldhash::HashSet<u32>,
+    /// Declaration start offset of every PHP# local that code writes after its declaration -> the offset after which no
+    /// write runs: the end of its last write, or of the outermost loop that repeats the write and not the declaration.
+    /// A write in a lambda that captures the local may run at any time, so it gives `u32::MAX`.
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "HashMap::is_empty"))]
+    written_locals: HashMap<u32, u32>,
 
     /// The full name of each class-like of the file's namespace that wins over a default class-like the file names,
     /// whether the namespace holds it or not. Empty for PHP.
@@ -385,7 +387,21 @@ impl<'arena> ResolvedNames<'arena> {
     /// `--` on it or an index of it, or a call of one of the [`CHANGING_COLLECTION_METHODS`] on it.
     #[must_use]
     pub fn is_written(&self, local: &Local) -> bool {
-        self.written_locals.contains(&local.declaration.start.offset)
+        self.written_locals.contains_key(&local.declaration.start.offset)
+    }
+
+    /// Returns whether a lambda that captures the PHP# local writes it, so the write may run at any time, as Kotlin's
+    /// "local variable that is captured by a changing closure" is.
+    #[must_use]
+    pub fn is_written_by_lambda(&self, local: &Local) -> bool {
+        self.written_locals.get(&local.declaration.start.offset) == Some(&u32::MAX)
+    }
+
+    /// Returns whether a write of the PHP# local can run after the code at `offset`: a write after it, a write in a
+    /// loop that repeats both, or a write in a lambda, as TypeScript 5.4 decides whether a closure keeps a narrowing.
+    #[must_use]
+    pub fn is_written_after(&self, local: &Local, offset: u32) -> bool {
+        self.written_locals.get(&local.declaration.start.offset).is_some_and(|settled| *settled > offset)
     }
 
     /// Returns the full name of each class-like of the PHP# file's namespace that would win over a default class-like
@@ -406,8 +422,10 @@ impl<'arena> ResolvedNames<'arena> {
         }
     }
 
-    pub(crate) fn write(&mut self, local: Local) {
-        self.written_locals.insert(local.declaration.start.offset);
+    /// Records a write of `local` whose effect may run until `settled`.
+    pub(crate) fn write(&mut self, local: Local, settled: u32) {
+        let last = self.written_locals.entry(local.declaration.start.offset).or_default();
+        *last = (*last).max(settled);
     }
 
     pub(crate) fn add_namespace_class(&mut self, name: &'arena [u8]) {

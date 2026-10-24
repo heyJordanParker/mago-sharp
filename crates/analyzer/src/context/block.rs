@@ -92,10 +92,6 @@ pub struct BlockContext<'ctx> {
     /// type. Every value assigned to the local must have this type.
     pub local_types: WordMap<(Rc<TUnion>, Span)>,
 
-    /// Each local of the function a lambda written in it assigns. Any call may run the lambda, so a call ends the
-    /// local's narrowing. Every block of one function shares the set, so a lambda written in a branch counts after it.
-    pub lambda_written_locals: Rc<RefCell<WordSet>>,
-
     /// Bitflags for various context states (inside_conditional, inside_isset, etc.)
     pub flags: BlockContextFlags,
 
@@ -236,7 +232,6 @@ impl<'ctx> BlockContext<'ctx> {
             references_possibly_from_confusing_scope: WordSet::default(),
             by_reference_constraints: WordMap::default(),
             local_types: WordMap::default(),
-            lambda_written_locals: Rc::default(),
             flags: BlockContextFlags::new(),
             clauses: Vec::new(),
             reconciled_expression_clauses: Vec::new(),

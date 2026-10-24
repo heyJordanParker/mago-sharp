@@ -5290,15 +5290,17 @@ fn written_without_null(union: &UnionHint, context: &Context<'_, '_, '_>) -> Opt
     Some(rest.join("|"))
 }
 
-/// Reports `as` to `hint`, a nullable type or `void`, spec section 14.4: `as T` already gives `T?`. `without` is the
-/// type written without its `?` or `null`, which the help names.
+/// Reports `as` to `hint`, a nullable type or `void`, spec section 14.4: `as int` already gives null for a value of
+/// another type. `without` is the type written without its `?` or `null`, which the note and the help name, as a
+/// message names only types the code writes.
 fn report_nullable_as(hint: &Hint, without: Option<String>, context: &mut Context<'_, '_, '_>) {
     let issue = Issue::error("`as` converts to a type that is not nullable or `void`.")
-        .with_annotation(Annotation::primary(hint.span()).with_message("Written here."))
-        .with_note("`as T` already gives `T?`: the value as a `T`, or null when it is not one.");
+        .with_annotation(Annotation::primary(hint.span()).with_message("Written here."));
 
     context.report(match without {
-        Some(without) => issue.with_help(format!("Write `as {without}`.")),
+        Some(without) => issue
+            .with_note(format!("`as {without}` already gives null for a value of another type."))
+            .with_help(format!("Write `as {without}`.")),
         None => issue,
     });
 }

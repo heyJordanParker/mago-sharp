@@ -796,7 +796,7 @@ where
             continue;
         }
 
-        let Some(earlier) = handled_earlier(node, pattern, context) else {
+        let Some(earlier) = handled_earlier(node, pattern, context, block_context, artifacts) else {
             context.collector.report(never_matches(pattern));
             continue;
         };
@@ -1789,22 +1789,58 @@ fn arm_of(node: Node<'_, '_>, pattern: Span) -> Option<Span> {
     })
 }
 
-/// The pattern of an arm of `node`, a `match`, before the arm at `pattern`, that has no `when` condition and is written
-/// as `pattern` is, so it handles every value `pattern` matches.
-fn handled_earlier<A>(node: Node<'_, '_>, pattern: Span, context: &Context<'_, '_, A>) -> Option<Span>
+/// The pattern of an arm of `node`, a `match`, before the arm at `pattern`, that has no `when` condition and tests the
+/// one value `pattern` tests, so it handles every value `pattern` matches. `0x1` and a constant that holds `1` test the
+/// value `1` tests.
+fn handled_earlier<'ctx, A>(
+    node: Node<'_, '_>,
+    pattern: Span,
+    context: &Context<'ctx, '_, A>,
+    block_context: &BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+) -> Option<Span>
 where
     A: Arena,
 {
-    let written = quoted_source(context, pattern);
-
-    match_arms(node)
+    let tested = artifacts.get_expression_type(tested_value(node)).cloned().unwrap_or_else(get_mixed);
+    let arms: Vec<&Pattern<'_>> = match_arms(node)
         .iter()
         .filter_map(|arm| match arm {
-            PatternMatchArm::Pattern(arm) if arm.guard.is_none() => Some(arm.pattern.span()),
+            PatternMatchArm::Pattern(arm) if arm.guard.is_none() || arm.pattern.span() == pattern => Some(arm.pattern),
             _ => None,
         })
-        .take_while(|earlier| earlier.start.offset < pattern.start.offset)
-        .find(|earlier| quoted_source(context, *earlier) == written)
+        .collect();
+    let (position, _) = arms.iter().enumerate().find(|(_, arm)| arm.span() == pattern)?;
+    let value = tested_value_of(arms[position], &tested, context, block_context, artifacts)?;
+
+    arms[..position].iter().find_map(|earlier| {
+        (tested_value_of(earlier, &tested, context, block_context, artifacts).as_ref() == Some(&value))
+            .then(|| earlier.span())
+    })
+}
+
+/// The one value `pattern`, a pattern of a `match` over a value of `tested`, matches: a literal, a constant that holds
+/// one, `null`, `true`, `false` or a case of an enum. `None` for a pattern that matches more than one value.
+fn tested_value_of<'ctx, A>(
+    pattern: &Pattern<'_>,
+    tested: &TUnion,
+    context: &Context<'ctx, '_, A>,
+    block_context: &BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+) -> Option<TUnion>
+where
+    A: Arena,
+{
+    let value = match pattern {
+        Pattern::Parenthesized(parenthesized) => {
+            return tested_value_of(parenthesized.pattern, tested, context, block_context, artifacts);
+        }
+        Pattern::Value(expression) => held_type(pattern, tested, context, block_context, artifacts)
+            .or_else(|| artifacts.get_expression_type(expression).cloned())?,
+        _ => return None,
+    };
+
+    (value.is_single() && (value.get_single().is_literal() || value.is_single_enum_case())).then_some(value)
 }
 
 /// The error at a `match` arm's pattern that never runs, because the earlier arm at `earlier` handles its case.

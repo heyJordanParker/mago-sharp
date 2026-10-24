@@ -32,6 +32,7 @@ use crate::context::scope::var_has_root;
 use crate::error::AnalysisError;
 use crate::expression::assignment::PropertyWriteKind;
 use crate::expression::assignment::assign_to_expression;
+use crate::statement::get_general_type;
 use crate::statement::r#loop;
 use crate::statement::refuse_condition_that_never_finishes;
 use crate::utils::expression::get_block_expression_id;
@@ -150,6 +151,16 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Foreach<'arena> {
 
         if is_by_reference && let Expression::Variable(Variable::Direct(direct_variable)) = value_expression {
             loop_block_context.references_to_external_scope.insert(Word::from(direct_variable.name));
+        }
+
+        // A `for … of` loop variable without a written type takes its element's general type, as a `let` local takes
+        // its first value's.
+        if context.dialect.is_sharp()
+            && let Some(value_id) = value_expression_id
+            && !loop_block_context.local_types.contains_key(&value_id)
+        {
+            let general_type = get_general_type(&source_value_type, context.codebase);
+            loop_block_context.local_types.insert(value_id, (Rc::new(general_type), value_expression.span()));
         }
 
         let foreach_entry = if !is_by_reference

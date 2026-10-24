@@ -342,7 +342,7 @@ where
     #[must_use]
     fn unexpected_with(&self, found: Option<Token<'_>>, expected: Expected) -> ParseError {
         if let Some(token) = found {
-            ParseError::unexpected_token(expected, &token, self.file_id())
+            ParseError::unexpected_token(expected, &token, self.file_id(), self.lexer.is_sharp())
         } else {
             ParseError::UnexpectedEndOfFile(expected, self.file_id(), self.current_position())
         }

@@ -40,9 +40,9 @@ pub enum Expected {
 pub enum ParseError {
     SyntaxError(SyntaxError),
     UnexpectedEndOfFile(Expected, FileId, Position),
-    /// A token the parser did not expect, with the kinds it expected, the token's first line as the code writes it, and
-    /// its span.
-    UnexpectedToken(Expected, Box<str>, Span),
+    /// A token the parser did not expect, with the text of each token it expected that the file's language writes, the
+    /// token's first line as the code writes it, and its span.
+    UnexpectedToken(Box<[&'static str]>, Box<str>, Span),
     UnclosedLiteralString(LiteralStringKind, Span),
     RecursionLimitExceeded(Span),
     /// A PHP# parameter written without its type, such as `run(extra)`, at its name.
@@ -237,9 +237,17 @@ impl std::fmt::Display for ParseError {
             ParseError::SyntaxError(e) => {
                 return write!(f, "{e}");
             }
-            // A parse error quotes what the code writes, never the parser's names for the kinds of token it expected.
+            // A parse error quotes what the code writes and the tokens it expected, as rustc and TypeScript do, never
+            // the parser's names for the kinds of token.
             ParseError::UnexpectedEndOfFile(..) => "Unexpected end of file".to_string(),
-            ParseError::UnexpectedToken(_, written, _) => format!("Unexpected `{written}`"),
+            ParseError::UnexpectedToken(expected, written, _) => match expected.as_ref() {
+                [] => format!("Unexpected `{written}`"),
+                [only] => format!("Expected `{only}`, found `{written}`"),
+                [first @ .., last] => {
+                    let first: Vec<String> = first.iter().map(|token| format!("`{token}`")).collect();
+                    format!("Expected {} or `{last}`, found `{written}`", first.join(", "))
+                }
+            },
             ParseError::UnclosedLiteralString(kind, _) => match kind {
                 LiteralStringKind::SingleQuoted => "Unclosed single-quoted string".to_string(),
                 LiteralStringKind::DoubleQuoted => "Unclosed double-quoted string".to_string(),
@@ -329,12 +337,26 @@ impl std::fmt::Display for ParseError {
 
 impl ParseError {
     /// The error at `token` of the file `file_id`, which the parser did not expect where it expected `expected`. It
-    /// quotes the token's first line as the code writes it.
-    pub(crate) fn unexpected_token(expected: Expected, token: &Token<'_>, file_id: FileId) -> ParseError {
+    /// quotes the token's first line as the code writes it, and each expected token the file writes as its text: a
+    /// `.sharp` file, `sharp`, writes no token PHP# never writes, such as `?>`.
+    pub(crate) fn unexpected_token(expected: Expected, token: &Token<'_>, file_id: FileId, sharp: bool) -> ParseError {
+        let kinds = match &expected {
+            Expected::Exactly(kind) => std::slice::from_ref(kind),
+            Expected::OneOf(kinds) => kinds,
+        };
+        let mut texts: Vec<&'static str> = Vec::new();
+        for kind in kinds {
+            let text = if sharp { kind.written_in_sharp() } else { kind.written() };
+            if let Some(text) = text
+                && !texts.contains(&text)
+            {
+                texts.push(text);
+            }
+        }
         let written = String::from_utf8_lossy(token.value);
 
         ParseError::UnexpectedToken(
-            expected,
+            texts.into_boxed_slice(),
             written.lines().next().unwrap_or_default().into(),
             token.span_for(file_id),
         )
@@ -353,7 +375,7 @@ impl ParseError {
             match lexer.advance() {
                 Some(Ok(token)) if token.kind.is_trivia() => {}
                 Some(Ok(token)) => {
-                    return ParseError::unexpected_token(Expected::OneOf(&[]), &token, file_id);
+                    return ParseError::unexpected_token(Expected::OneOf(&[]), &token, file_id, true);
                 }
                 Some(Err(error)) => return ParseError::SyntaxError(error),
                 None => {
@@ -378,9 +400,8 @@ impl From<&SyntaxError> for Issue {
     fn from(error: &SyntaxError) -> Issue {
         let span = error.span();
 
-        Issue::error("Syntax error encountered during lexing")
-            .with_code(SYNTAX_ERROR_CODE)
-            .with_annotation(Annotation::primary(span).with_message(error.to_string()))
+        // The text as written is all a typo has to say, so it is the message.
+        Issue::error(error.to_string()).with_code(SYNTAX_ERROR_CODE).with_annotation(Annotation::primary(span))
     }
 }
 
@@ -436,10 +457,10 @@ impl From<&ParseError> for Issue {
                         ),
                     })
             }
-            // The text as written is all a typo has to say, so no note or help repeats that it is a parse error.
-            _ => Issue::error("Parse error encountered during parsing")
+            // The text as written is all a typo has to say, so it is the message, with no note or help.
+            _ => Issue::error(error.to_string())
                 .with_code(PARSE_ERROR_CODE)
-                .with_annotation(Annotation::primary(error.span()).with_message(error.to_string())),
+                .with_annotation(Annotation::primary(error.span())),
         }
     }
 }

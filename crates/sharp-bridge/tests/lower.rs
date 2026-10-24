@@ -813,7 +813,7 @@ fn every_line_is_the_line_the_zend_scanner_counts() {
     assert_eq!(lines, [("SHARP_AST_RETURN".to_owned(), 5, 0), ("SHARP_AST_METHOD".to_owned(), 3, 6)]);
 
     let refused = Lowered::new("class Report\r{\r    public void run() { echo 1; }\r}\r");
-    assert_eq!(refused.diagnostics(), ["3:25 compile error: Parse error encountered during parsing"]);
+    assert_eq!(refused.diagnostics(), ["3:25 compile error: Unexpected `echo`"]);
 }
 
 /// ```php

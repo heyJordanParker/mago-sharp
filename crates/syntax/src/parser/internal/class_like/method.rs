@@ -376,6 +376,9 @@ where
                 expression: self.parse_expression()?,
                 semicolon: self.stream.eat_span(T![";"])?,
             })
+        } else if self.dialect.is_sharp() && !self.stream.is_at(T!["{"])? {
+            let found = self.stream.lookahead(0)?;
+            return Err(self.stream.unexpected(found, T!["{", "=>"]));
         } else {
             MethodBody::Concrete(self.parse_block()?)
         })

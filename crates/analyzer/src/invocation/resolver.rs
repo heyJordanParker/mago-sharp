@@ -34,6 +34,7 @@ use mago_word::WordMap;
 use mago_word::empty_word;
 
 use crate::context::Context;
+use crate::expression::is_refused_type;
 use crate::invocation::Invocation;
 use crate::invocation::InvocationTarget;
 use crate::invocation::MethodInvocationKind;
@@ -666,7 +667,8 @@ where
         ),
     };
 
-    if !subject.is_never() {
+    // Nothing is certain about a refused value, so a test of it gives either branch.
+    if !subject.is_never() && !is_refused_type(&subject) {
         let mut comparison_result = ComparisonResult::new();
         let subject_is_contained = union_comparator::is_contained_by(
             context.codebase,

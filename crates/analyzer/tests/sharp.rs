@@ -1866,8 +1866,39 @@ fn a_read_of_an_exception_s_message_names_its_public_method() {
     assert!(elsewhere.is_empty(), "{elsewhere:#?}");
 }
 
-/// Spec section 22: an interface's header names only interfaces, so a plain PHP trait or a class there is refused, in
-/// PHP#'s words, with the fix that removes it.
+/// A protected member of a vendor package's class is refused with an annotation at its declaration, since the package's
+/// file is one the developer can open. Only a built-in declaration, in a prelude or a stub, has none.
+#[test]
+fn a_refused_member_of_a_vendor_class_points_at_its_declaration() {
+    let sharp = "namespace Demo;\n\nimport Lib.Secret;\n\npublic class Reader\n{\n    public static int code(Secret secret) => secret.code;\n\n    public static int hidden(Secret secret) => secret.hidden();\n}\n";
+    let secret = "<?php\n\nnamespace Lib;\n\nclass Secret\n{\n    protected int $code = 1;\n\n    protected function hidden(): int\n    {\n        return 1;\n    }\n}\n";
+    let issues =
+        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Reader.sharp", sharp), &[("vendor/Lib/Secret.php", secret)]);
+
+    let reader = issues.first().and_then(Issue::primary_span).expect("a refusal").file_id;
+    let declared: Vec<(&str, &str)> = issues
+        .iter()
+        .flat_map(|issue| &issue.annotations)
+        .filter(|annotation| annotation.span.file_id != reader)
+        .filter_map(|annotation| {
+            let range = annotation.span.start.offset as usize..annotation.span.end.offset as usize;
+            annotation.message.as_deref().zip(secret.get(range))
+        })
+        .collect();
+    assert_eq!(
+        declared,
+        [
+            ("Member is defined as `protected` here", "$code"),
+            (
+                "Member is defined as `protected` here",
+                "protected function hidden(): int\n    {\n        return 1;\n    }"
+            ),
+        ]
+    );
+}
+
+/// An interface extends only interfaces, as C#'s CS0527 and Java's `interface expected here` require, so a plain PHP
+/// trait or a class in an interface's header is refused, in PHP#'s words, with the fix that removes it.
 #[test]
 fn an_interface_header_that_names_a_trait_or_a_class_is_refused() {
     let sharp = "namespace Demo;\n\nimport Lib.Greets;\n\npublic interface Polite : Greets\n{\n}\n\npublic interface Named : Report\n{\n}\n\npublic class Report\n{\n}\n";
@@ -4030,10 +4061,10 @@ fn a_comparison_that_always_or_never_holds_speaks_of_its_bool() {
 }
 
 /// A `match` arm that never or always matches writes the `bool` of its condition as PHP# writes it. PHP keeps its own
-/// wording.
+/// wording. An arm an earlier arm already handles is an error of its own, with no warning beside it.
 #[test]
 fn a_match_arm_that_never_or_always_matches_speaks_of_its_bool() {
-    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static string twice(int x) => match (x) { 1 => \"one\", 0x1 => \"again\", default => \"other\" };\n    public static string always() => match (true) { true => \"yes\", default => \"no\" };\n}\n";
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static string twice(int x) => match (x) { 1 => \"one\", 1 => \"again\", default => \"other\" };\n    public static string never() => match (3) { 1 => \"one\", default => \"other\" };\n    public static string always() => match (true) { true => \"yes\", default => \"no\" };\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    public static function twice(int $x): string { return match ($x) { 1 => 'one', 1 => 'again', default => 'other' }; }\n    public static function always(): string { return match (true) { true => 'yes', default => 'no' }; }\n}\n";
     let arms = |analyzed| -> Vec<String> {
         worded(analyzed, &[])
@@ -4052,8 +4083,8 @@ fn a_match_arm_that_never_or_always_matches_speaks_of_its_bool() {
     assert_eq!(
         arms(("src/Demo/Report.sharp", sharp)),
         [
-            "5:66 unreachable-match-arm This match arm is unreachable. | This arm can never be reached | In this match expression | The condition is always `false` in this context.",
-            "6:53 match-arm-always-true This match arm is always `true`, making subsequent arms unreachable. | This arm covers all remaining cases for the subject | In this match expression | Any arms after this one can never be reached.",
+            "6:49 unreachable-match-arm This match arm is unreachable. | This arm can never be reached | In this match expression | The condition is always `false` in this context.",
+            "7:53 match-arm-always-true This match arm is always `true`, making subsequent arms unreachable. | This arm covers all remaining cases for the subject | In this match expression | Any arms after this one can never be reached.",
         ]
     );
 }
@@ -7065,17 +7096,21 @@ fn a_pattern_that_can_never_match_is_an_error_at_the_pattern() {
     );
 }
 
-/// An arm that repeats the pattern of an earlier arm without a `when` condition never runs, because the earlier arm
-/// handles its case. Its one error names the earlier arm's line, as C#'s error for a case already handled names it, and
-/// the arm reports nothing more.
+/// An arm whose value an earlier arm without a `when` condition tests never runs, because the earlier arm handles its
+/// case. The values are compared as the checker resolves them, so `0x1`, `(1)` and a constant that holds `1` repeat
+/// `1`, and an earlier arm with a `when` condition handles no case for certain. Its one error names the earlier arm's
+/// line, as C#'s error for a case already handled names it, and the arm reports nothing more.
 #[test]
 fn an_arm_whose_case_an_earlier_arm_handles_is_one_error_that_names_that_arm() {
-    let sharp = "namespace Demo;\n\nenum Status\n{\n    case Open;\n    case Closed;\n}\n\nclass Report\n{\n    public static int arms(Status status) => match (status) {\n        Status.Open => 1,\n        Status.Open => 5,\n        Status.Closed => 2,\n    };\n}\n";
+    let sharp = "namespace Demo;\n\nenum Status\n{\n    case Open;\n    case Closed;\n}\n\nclass Report\n{\n    public const int ONE = 1;\n\n    public static int arms(Status status) => match (status) {\n        Status.Open => 1,\n        Status.Open => 5,\n        Status.Closed => 2,\n    };\n\n    public static string hex(int count) => match (count) {\n        1 => \"one\",\n        0x1 => \"again\",\n        default => \"other\",\n    };\n\n    public static string named(int count) => match (count) {\n        1 => \"one\",\n        Report.ONE => \"again\",\n        default => \"other\",\n    };\n\n    public static string guarded(int count, bool strict) => match (count) {\n        1 when strict => \"strict one\",\n        1 => \"one\",\n        default => \"other\",\n    };\n\n    public static string grouped(int count) => match (count) {\n        1 => \"one\",\n        (1) => \"again\",\n        default => \"other\",\n    };\n}\n";
 
     assert_eq!(
         refusals(("src/Demo/Report.sharp", sharp), &[]),
         [
-            "13:9 impossible-type-comparison This arm never runs: the arm on line 12 already handles `Status.Open`. | Remove this arm, or change its pattern."
+            "15:9 impossible-type-comparison This arm never runs: the arm on line 14 already handles `Status.Open`. | Remove this arm, or change its pattern.",
+            "21:9 impossible-type-comparison This arm never runs: the arm on line 20 already handles `0x1`. | Remove this arm, or change its pattern.",
+            "27:9 impossible-type-comparison This arm never runs: the arm on line 26 already handles `Report.ONE`. | Remove this arm, or change its pattern.",
+            "39:9 impossible-type-comparison This arm never runs: the arm on line 38 already handles `(1)`. | Remove this arm, or change its pattern.",
         ]
     );
 }
@@ -7344,21 +7379,21 @@ fn an_expression_the_parser_refuses_reports_only_its_parse_error() {
     assert_eq!(
         reports(("src/Demo/Report.sharp", sharp)),
         [
-            "8:14 parse Parse error encountered during parsing",
-            "11:25 parse Parse error encountered during parsing",
-            "12:25 parse Parse error encountered during parsing",
-            "13:25 parse Parse error encountered during parsing",
-            "14:20 parse Parse error encountered during parsing",
-            "15:20 parse Parse error encountered during parsing",
-            "16:25 parse Parse error encountered during parsing",
+            "8:14 parse Unexpected `.=`",
+            "11:25 parse Unexpected `->`",
+            "12:25 parse Unexpected `::`",
+            "13:25 parse Unexpected `?->`",
+            "14:20 parse Unexpected `fn`",
+            "15:20 parse Unexpected `function`",
+            "16:25 parse Unexpected `=>`",
             "17:53 parse A `? :` in a `when` condition needs parentheses, as in `when (strict ? forced : ready) =>`.",
-            "18:26 parse Parse error encountered during parsing",
-            "20:40 parse Parse error encountered during parsing",
-            "24:29 parse Parse error encountered during parsing",
-            "32:51 parse Parse error encountered during parsing",
-            "32:61 parse Parse error encountered during parsing",
-            "36:26 parse Parse error encountered during parsing",
-            "42:26 parse Parse error encountered during parsing",
+            "18:26 parse Unexpected `->`",
+            "20:40 parse Unexpected `=>`",
+            "24:29 parse Unexpected `->`",
+            "32:51 parse Unexpected `=>`",
+            "32:61 parse Unexpected `=>`",
+            "36:26 parse Unexpected `->`",
+            "42:26 parse Unexpected `->`",
             "9:21 invalid-local-assignment-value Invalid assignment to `wrong`: it is declared as `int`.",
         ]
     );
@@ -7367,7 +7402,7 @@ fn an_expression_the_parser_refuses_reports_only_its_parse_error() {
     assert_eq!(
         reports(("src/Demo/run.php", unparsed)),
         [
-            "7:12 parse Parse error encountered during parsing",
+            "7:12 parse Unexpected `]`",
             "7:12 no-value Argument #1 passed to function `printf` has type `never`, meaning it cannot produce a value.",
         ]
     );
@@ -9156,7 +9191,7 @@ fn a_missing_class_is_one_error_that_names_it_as_php_sharp_does() {
         (
             "namespace App;\n\nclass Report\n{\n    use Missing;\n}\n",
             vec![
-                "5:5 parse Parse error encountered during parsing | Unexpected `use`".to_owned(),
+                "5:5 parse Unexpected `use`".to_owned(),
                 missing("5:9", "App.Missing"),
             ],
         ),
@@ -9187,10 +9222,11 @@ fn a_missing_class_is_one_error_that_names_it_as_php_sharp_does() {
 /// that does not exist, a property that does not exist, and an instance property read as a static one each have the
 /// type of a refused value, so returning, passing, comparing or testing it reports nothing more. A value of no type
 /// would report a second error that advises a return type the method already declares, and one of the type `never`
-/// would say it cannot produce a value.
+/// would say it cannot produce a value. The locals of a refused unpack hold refused values too, also where a lambda
+/// writes one.
 #[test]
 fn a_value_from_a_refused_read_or_call_starts_no_second_error() {
-    let sharp = "namespace App;\n\nclass Report\n{\n    public string draft(string html) => renderIt(html);\n\n    public int size(Report? report) => report.count();\n\n    public int bare() => DEFAULT_DPI;\n\n    public int gone(Report report) => report.missing;\n\n    public int read() => Report.take(Report.width);\n\n    public bool same(string html) => renderIt(html) == \"x\";\n\n    public bool text(string html) => renderIt(html) is string;\n\n    public int width { get; } = 0;\n\n    public int count() => 1;\n\n    public static int take(int value) => value;\n}\n";
+    let sharp = "namespace App;\n\nclass Report\n{\n    public string draft(string html) => renderIt(html);\n\n    public int size(Report? report) => report.count();\n\n    public int bare() => DEFAULT_DPI;\n\n    public int gone(Report report) => report.missing;\n\n    public int read() => Report.take(Report.width);\n\n    public bool same(string html) => renderIt(html) == \"x\";\n\n    public bool text(string html) => renderIt(html) is string;\n\n    public int unpacked(List<int> xs)\n    {\n        let [a, b] = xs;\n        Function<void()> reset = () => { a = 1; };\n        reset();\n        return a + b;\n    }\n\n    public int width { get; } = 0;\n\n    public int count() => 1;\n\n    public static int take(int value) => value;\n}\n";
 
     assert_eq!(
         issues(("src/App/Report.sharp", sharp), &[]),
@@ -9202,6 +9238,25 @@ fn a_value_from_a_refused_read_or_call_starts_no_second_error() {
             "13:45 invalid-static-property-access",
             "15:38 non-existent-function",
             "17:38 non-existent-function",
+            "21:22 invalid-destructuring-source",
+        ]
+    );
+}
+
+/// A refused value is never null, never not null and matches no pattern for certain, so `== null`, `!= null` and a
+/// `match` on it report nothing more. In a `.sharp` file `1.e5` reads `e5` of the int `1`, as C# and Kotlin read it,
+/// and the int has no such member: one error.
+#[test]
+fn a_null_check_or_a_match_on_a_refused_value_starts_no_second_error() {
+    let sharp = "namespace App;\n\nclass Report\n{\n    public bool unknown() => MISSING != null;\n\n    public bool absent() => MISSING == null;\n\n    public int matched(Report report) => match (report.missing) {\n        int count => count,\n        Report other => 1,\n        default => 0,\n    };\n\n    public float exponent() => 1.e5;\n}\n";
+
+    assert_eq!(
+        issues(("src/App/Report.sharp", sharp), &[]),
+        [
+            "5:30 non-existent-constant",
+            "7:29 non-existent-constant",
+            "9:56 non-existent-property",
+            "15:34 invalid-property-access",
         ]
     );
 }
@@ -9928,13 +9983,13 @@ fn an_index_write_replaces_a_list_element_and_an_append_fails_as_a_typo_does() {
             .map(|issue| format!("{} {}", located(sharp, issue), issue.message))
             .collect::<Vec<_>>(),
         [
-            "16:14 parse Parse error encountered during parsing",
-            "17:18 parse Parse error encountered during parsing",
-            "18:16 parse Parse error encountered during parsing",
-            "19:15 parse Parse error encountered during parsing",
-            "20:13 parse Parse error encountered during parsing",
-            "21:14 parse Parse error encountered during parsing",
-            "22:14 parse Parse error encountered during parsing",
+            "16:14 parse Unexpected `[`",
+            "17:18 parse Unexpected `[`",
+            "18:16 parse Unexpected `[`",
+            "19:15 parse Unexpected `[`",
+            "20:13 parse Unexpected `[`",
+            "21:14 parse Unexpected `[`",
+            "22:14 parse Unexpected `[`",
         ]
     );
 }
@@ -14793,18 +14848,47 @@ fn a_type_test_in_a_while_condition_narrows_the_variable_in_the_body() {
     assert_eq!(issues(("src/Demo/Report.sharp", sharp), &[("src/Demo/Source.php", source)]), Vec::<String>::new());
 }
 
-/// Spec section 21 ends a local's narrowing at an assignment, and a lambda captures the variable itself, spec section 3,
-/// as Kotlin's smart casts and TypeScript's narrowing treat a captured local that code reassigns. So a lambda reads a
-/// captured local that code writes at its written type, since it may run after the write, and a call ends the
-/// narrowing of a local a lambda writes, since the call may run that lambda. A local nothing writes keeps its
-/// narrowing in a lambda, and a local a lambda writes keeps it until the next call.
+/// A lambda captures the variable itself (spec section 3), so a local or parameter that a lambda assigns may change
+/// whenever any code runs: a call, a property read, an operator. As Kotlin refuses a smart cast of "a local variable
+/// that is captured by a changing closure", such a local is never narrowed, by an `if`, a `while` condition or an early
+/// return alike. A lambda keeps the narrowing of a local it
+/// reads when no write can run after the lambda is created, as TypeScript 5.4 decides: a write later in the code, in a
+/// loop that repeats the lambda, or in a lambda ends it. A local of the same name inside a lambda is another local.
 #[test]
-fn a_captured_local_that_code_writes_keeps_no_narrowing_across_the_lambda() {
-    let sharp = "namespace Demo;\n\npublic class Report\n{\n    public static int captured()\n    {\n        Report? s = new Report();\n        if (s != null) {\n            Function<int()> f = () => s.size();\n            s = null;\n            return f();\n        }\n        return 0;\n    }\n\n    public static int cleared()\n    {\n        Report? s = new Report();\n        Function<void()> clear = () => { s = null; };\n        if (s != null) { clear(); return s.size(); }\n        return 0;\n    }\n\n    public static int kept(Report? s)\n    {\n        if (s != null) {\n            Function<int()> f = () => s.size();\n            return f();\n        }\n        return 0;\n    }\n\n    public static int unchanged()\n    {\n        Report? s = new Report();\n        Function<void()> clear = () => { s = null; };\n        if (s != null) { return s.size(); }\n        clear();\n        return 0;\n    }\n\n    public int size() => 1;\n}\n";
+fn a_local_a_lambda_assigns_is_never_narrowed_and_a_lambda_keeps_a_narrowing_no_later_write_ends() {
+    let sharp = "namespace Demo;\n\npublic class Report\n{\n    public static int afterTheLambda()\n    {\n        Report? s = new Report();\n        if (s != null) {\n            Function<int()> f = () => s.size();\n            s = null;\n            return f();\n        }\n        return 0;\n    }\n\n    public static int cleared()\n    {\n        Report? s = new Report();\n        Function<void()> clear = () => { s = null; };\n        if (s != null) { clear(); return s.size(); }\n        return 0;\n    }\n\n    public static int viaGetter()\n    {\n        Report? s = new Report();\n        Holder h = new Holder(() => { s = null; });\n        if (s != null) {\n            const n = h.ran;\n            return s.size() + n;\n        }\n        return 0;\n    }\n\n    public static int viaOperator()\n    {\n        Report? s = new Report();\n        Holder h = new Holder(() => { s = null; });\n        if (s != null) {\n            const g = h + h;\n            return s.size();\n        }\n        return 0;\n    }\n\n    public static int nestedParameter(Report? s)\n    {\n        Function<int()> outer = () => {\n            if (s != null) {\n                Function<int()> inner = () => s.size();\n                s = null;\n                return inner();\n            }\n            return 0;\n        };\n        return outer();\n    }\n\n    public static int nestedWriter()\n    {\n        Report? s = new Report();\n        Function<void()> outer = () => {\n            Function<void()> inner = () => { s = null; };\n            inner();\n        };\n        if (s != null) {\n            outer();\n            return s.size();\n        }\n        return 0;\n    }\n\n    public static int loop()\n    {\n        Report? s = new Report();\n        Function<void()> f = () => { };\n        int total = 0;\n        if (s != null) {\n            for (int i = 0; i < 2; i++) {\n                f();\n                total += s.size();\n                f = () => { s = null; };\n            }\n        }\n        return total;\n    }\n\n    public static int arrow()\n    {\n        Report? s = new Report();\n        Function<Report?()> clear = () => s = null;\n        if (s != null) {\n            clear();\n            return s.size();\n        }\n        return 0;\n    }\n\n    public static int loopVariable(List<Report?> reports)\n    {\n        int total = 0;\n        for (let r of reports) {\n            Function<void()> clear = () => { r = null; };\n            if (r != null) {\n                clear();\n                total += r.size();\n            }\n        }\n        return total;\n    }\n\n    public static int neverCalled()\n    {\n        Report? s = new Report();\n        Function<void()> clear = () => { s = null; };\n        if (s != null) {\n            return s.size();\n        }\n        clear();\n        return 0;\n    }\n\n    public static int writtenBefore(bool flag)\n    {\n        Report? s = null;\n        if (flag) {\n            s = new Report();\n        }\n        if (s != null) {\n            Function<int()> f = () => s.size();\n            return f();\n        }\n        return 0;\n    }\n\n    public static int writtenInTheLoop(List<Report?> reports)\n    {\n        Report? s = null;\n        List<Function<int()>> later = [];\n        for (const r of reports) {\n            s = r;\n            if (s != null) {\n                later.add(() => s.size());\n            }\n        }\n        return later.count();\n    }\n\n    public static int kept(Report? s)\n    {\n        if (s != null) {\n            Function<int()> f = () => s.size();\n            return f();\n        }\n        return 0;\n    }\n\n    public static int pattern(Any? value)\n    {\n        if (value is Report r) {\n            Function<void()> other = () => { value = null; };\n            other();\n            return r.size();\n        }\n        return 0;\n    }\n\n    public static int sameName()\n    {\n        Function<void()> make = () => {\n            Report? t = new Report();\n            Function<void()> clear = () => { t = null; };\n            clear();\n        };\n        Report? t = new Report();\n        if (t != null) {\n            make();\n            return t.size();\n        }\n        return 0;\n    }\n\n    public static int stored()\n    {\n        Report? s = new Report();\n        Holder h = new Holder(() => { s = null; });\n        if (s != null) {\n            h.action();\n            return s.size();\n        }\n        return 0;\n    }\n\n    public static int whileCondition()\n    {\n        Report? s = new Report();\n        Function<void()> clear = () => { s = null; };\n        int total = 0;\n        while (s != null) {\n            clear();\n            total += s.size();\n        }\n        return total;\n    }\n\n    public static int earlyReturn()\n    {\n        Report? s = new Report();\n        Function<void()> clear = () => { s = null; };\n        if (s == null) {\n            return 0;\n        }\n        clear();\n        return s.size();\n    }\n\n    public int size() => 1;\n}\n";
+    let holder = "namespace Demo;\n\npublic class Holder\n{\n    public Holder(public Function<void()> action { get; }) { }\n\n    public int ran => this.fire();\n\n    public static Holder operator +(Holder a, Holder b)\n    {\n        a.action();\n        return new Holder(b.action);\n    }\n\n    private int fire()\n    {\n        this.action();\n        return 1;\n    }\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Report.sharp", sharp), &[("src/Demo/Holder.sharp", holder)]),
+        [
+            "9:39 possible-method-access-on-null",
+            "20:42 possible-method-access-on-null",
+            "30:20 possible-method-access-on-null",
+            "41:20 possible-method-access-on-null",
+            "50:47 possible-method-access-on-null",
+            "68:20 possible-method-access-on-null",
+            "81:26 possible-method-access-on-null",
+            "94:20 possible-method-access-on-null",
+            "106:26 possible-method-access-on-null",
+            "117:20 possible-method-access-on-null",
+            "143:33 possible-method-access-on-null",
+            "189:20 possible-method-access-on-null",
+            "201:22 possible-method-access-on-null",
+            "214:16 possible-method-access-on-null",
+        ]
+    );
+}
+
+/// A `catch` variable is a local of the type its clause names, so a lambda reads it at that type when code writes it
+/// after the lambda is created, and a test never narrows it when a lambda writes it, as any local.
+#[test]
+fn a_catch_variable_a_lambda_captures_follows_the_rules_of_any_local() {
+    let sharp = "namespace Demo;\n\npublic class Late : Exception\n{\n    public int delay() => 1;\n}\n\npublic class Report\n{\n    public static int writtenAfter()\n    {\n        try {\n            throw new Late();\n        } catch (Exception e) {\n            if (e is Late) {\n                Function<int()> f = () => e.delay();\n                e = new Exception(\"other\");\n                return f();\n            }\n            return 0;\n        }\n    }\n\n    public static int writtenInside()\n    {\n        try {\n            throw new Late();\n        } catch (Exception e) {\n            Function<void()> reset = () => { e = new Exception(\"other\"); };\n            if (e is Late) {\n                reset();\n                return e.delay();\n            }\n            return 0;\n        }\n    }\n}\n";
 
     assert_eq!(
         issues(("src/Demo/Report.sharp", sharp), &[]),
-        ["9:39 possible-method-access-on-null", "20:42 possible-method-access-on-null"]
+        ["16:45 non-existent-method", "32:26 non-existent-method"]
     );
 }
 

@@ -25,6 +25,7 @@ use mago_syntax::cst::ComputedProperty;
 use mago_syntax::cst::Conditional;
 use mago_syntax::cst::Constant;
 use mago_syntax::cst::ConstantAccess;
+use mago_syntax::cst::DoWhile;
 use mago_syntax::cst::Enum;
 use mago_syntax::cst::EnumCase;
 use mago_syntax::cst::Event;
@@ -142,6 +143,8 @@ pub struct NameWalker<'arena, 'classes> {
     pattern_kinds: std::vec::Vec<LocalKind>,
     /// The start offsets of the lambdas being walked, innermost last.
     lambdas: std::vec::Vec<u32>,
+    /// The loops being walked, innermost last, each a block of its own.
+    loops: std::vec::Vec<Span>,
     /// The accessor list being walked in PHP#, which declares `field`, its property's storage.
     accessors: Option<Span>,
     /// The name and declaration of each type parameter of each class, interface and method being walked in PHP#, one
@@ -207,6 +210,7 @@ impl<'arena, 'classes> NameWalker<'arena, 'classes> {
             class_members: std::vec::Vec::new(),
             pattern_kinds: std::vec::Vec::new(),
             lambdas: std::vec::Vec::new(),
+            loops: std::vec::Vec::new(),
             accessors: None,
             type_parameters: std::vec::Vec::new(),
             declared_classes,
@@ -257,9 +261,11 @@ impl<'arena, 'classes> NameWalker<'arena, 'classes> {
         }
     }
 
-    /// Records a write to `target` when it is a bare name of a local whose block is open, or an index of one, as in
-    /// `counts[key] = 1`, which changes the collection the local holds.
-    fn record_write(&mut self, target: &Expression<'arena>) {
+    /// Records the write at `write` to `target` when `target` is a bare name of a local whose block is open, or an index
+    /// of one, as in `counts[key] = 1`, which changes the collection the local holds. The write's effect lasts until the
+    /// end of the write, or of the outermost loop that repeats it and not the local's declaration, and forever when a
+    /// lambda that captures the local writes it.
+    fn record_write(&mut self, target: &Expression<'arena>, write: Span) {
         let mut target = target;
         while let Expression::ArrayAccess(access) = target {
             target = access.array;
@@ -269,17 +275,31 @@ impl<'arena, 'classes> NameWalker<'arena, 'classes> {
             && let Expression::ConstantAccess(target) = target
             && let Some(local) = self.locals.lookup(target.name.value())
         {
-            self.resolved_names.write(local);
+            let declared = local.declaration.start.offset;
+            let settled = if self.lambdas.iter().any(|&lambda| declared < lambda) {
+                u32::MAX
+            } else {
+                self.loops
+                    .iter()
+                    .find(|repeating| declared < repeating.start.offset)
+                    .map_or(write.end.offset, |repeating| repeating.end.offset)
+            };
+            self.resolved_names.write(local, settled);
         }
     }
 
-    /// Records a call of one of the [`CHANGING_COLLECTION_METHODS`] on `object` as a write to it. PHP finds a method
-    /// ignoring case, so the name is compared ignoring case.
-    fn record_changing_call(&mut self, object: &Expression<'arena>, method: &ClassLikeMemberSelector<'arena>) {
+    /// Records `call`, a call of one of the [`CHANGING_COLLECTION_METHODS`] on `object`, as a write to it. PHP finds a
+    /// method ignoring case, so the name is compared ignoring case.
+    fn record_changing_call(
+        &mut self,
+        object: &Expression<'arena>,
+        method: &ClassLikeMemberSelector<'arena>,
+        call: Span,
+    ) {
         if let ClassLikeMemberSelector::Identifier(method) = method
             && CHANGING_COLLECTION_METHODS.iter().any(|name| method.value.eq_ignore_ascii_case(name.as_bytes()))
         {
-            self.record_write(object);
+            self.record_write(object, call);
         }
     }
 
@@ -1052,7 +1072,7 @@ where
         assignment: &'ast Assignment<'arena>,
         _context: &mut NameResolutionContext<'arena, A>,
     ) {
-        self.record_write(assignment.lhs);
+        self.record_write(assignment.lhs, assignment.span());
     }
 
     fn walk_in_unary_prefix(
@@ -1061,7 +1081,7 @@ where
         _context: &mut NameResolutionContext<'arena, A>,
     ) {
         if unary_prefix.operator.is_increment_or_decrement() {
-            self.record_write(unary_prefix.operand);
+            self.record_write(unary_prefix.operand, unary_prefix.span());
         }
     }
 
@@ -1070,7 +1090,15 @@ where
         unary_postfix: &'ast UnaryPostfix<'arena>,
         _context: &mut NameResolutionContext<'arena, A>,
     ) {
-        self.record_write(unary_postfix.operand);
+        self.record_write(unary_postfix.operand, unary_postfix.span());
+    }
+
+    fn walk_in_do_while(&mut self, do_while: &'ast DoWhile<'arena>, _context: &mut NameResolutionContext<'arena, A>) {
+        self.loops.push(do_while.span());
+    }
+
+    fn walk_out_do_while(&mut self, _do_while: &'ast DoWhile<'arena>, _context: &mut NameResolutionContext<'arena, A>) {
+        self.loops.pop();
     }
 
     fn walk_in_block(&mut self, _block: &'ast Block<'arena>, _context: &mut NameResolutionContext<'arena, A>) {
@@ -1086,13 +1114,15 @@ where
     }
 
     /// A PHP# `for` is a block of its own, so the local it declares lives until the loop ends.
-    fn walk_in_for(&mut self, _for: &'ast For<'arena>, _context: &mut NameResolutionContext<'arena, A>) {
+    fn walk_in_for(&mut self, r#for: &'ast For<'arena>, _context: &mut NameResolutionContext<'arena, A>) {
+        self.loops.push(r#for.span());
         if self.sharp {
             self.locals.enter_block();
         }
     }
 
     fn walk_out_for(&mut self, _for: &'ast For<'arena>, _context: &mut NameResolutionContext<'arena, A>) {
+        self.loops.pop();
         if self.sharp {
             self.locals.exit_block();
         }
@@ -1113,7 +1143,9 @@ where
             self.declare(variable.name.value, variable.name.span, kind);
         }
 
+        self.loops.push(for_of.span());
         self.walk_statement(for_of.body, context);
+        self.loops.pop();
         self.locals.exit_block();
     }
 
@@ -1264,8 +1296,10 @@ where
             return walk_while_mut(self, r#while, context);
         };
 
+        self.loops.push(r#while.span());
         self.walk_expression(r#while.condition, context);
         self.walk_where(r#while.condition, true, context, |walker, context| walker.walk_statement(body, context));
+        self.loops.pop();
     }
 
     /// An arm is a block of its own. Its `when` condition and its body see its pattern's variables, and its body also
@@ -1349,7 +1383,7 @@ where
         _context: &mut NameResolutionContext<'arena, A>,
     ) {
         self.mark_member_object(method_call.object);
-        self.record_changing_call(method_call.object, &method_call.method);
+        self.record_changing_call(method_call.object, &method_call.method, method_call.span());
     }
 
     fn walk_in_method_partial_application(
@@ -1374,7 +1408,11 @@ where
         _context: &mut NameResolutionContext<'arena, A>,
     ) {
         self.mark_member_object(null_safe_method_call.object);
-        self.record_changing_call(null_safe_method_call.object, &null_safe_method_call.method);
+        self.record_changing_call(
+            null_safe_method_call.object,
+            &null_safe_method_call.method,
+            null_safe_method_call.span(),
+        );
     }
 
     fn walk_in_null_safe_property_access(

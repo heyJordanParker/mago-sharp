@@ -166,6 +166,12 @@ impl<'input> Lexer<'input> {
         Lexer { sharp: true, ..Self::scripting(input, settings) }
     }
 
+    /// Whether the lexer reads a PHP# file.
+    #[must_use]
+    pub(crate) const fn is_sharp(&self) -> bool {
+        self.sharp
+    }
+
     /// Check if the lexer has reached the end of the input.
     ///
     /// If this method returns `true`, the lexer will not produce any more tokens.

@@ -2843,14 +2843,14 @@ fn a_php_form_fails_with_the_text_it_writes_and_nothing_more() {
             format!("class Report\n{{\n    Any run(Any value)\n    {{\n        {body}\n    }}\n}}\n").into_boxed_str(),
         )
     };
-    for (code, written) in [
-        (method("foreach (value as item) { }"), "foreach"),
-        (method("return value->size;"), "->"),
-        ("class Report\n{\n    public function run() { }\n}\n", "function"),
-        ("class Report\n{\n    public ?string run() => null;\n}\n", "?"),
-        ("namespace App;\n\nuse App\\Foo;\n\nclass Report\n{\n}\n", "use"),
-        ("class Report\n{\n    public int[] run() => [];\n}\n", "["),
-        ("class Report\n{\n}\n?>\n", "?"),
+    for (code, written, message) in [
+        (method("foreach (value as item) { }"), "foreach", "Unexpected `foreach`"),
+        (method("return value->size;"), "->", "Unexpected `->`"),
+        ("class Report\n{\n    public function run() { }\n}\n", "function", "Unexpected `function`"),
+        ("class Report\n{\n    public ?string run() => null;\n}\n", "?", "Unexpected `?`"),
+        ("namespace App;\n\nuse App\\Foo;\n\nclass Report\n{\n}\n", "use", "Unexpected `use`"),
+        ("class Report\n{\n    public int[] run() => [];\n}\n", "[", "Unexpected `[`"),
+        ("class Report\n{\n}\n?>\n", "?", "Unexpected `?`"),
     ] {
         let arena = LocalArena::new();
         let program = parse(&arena, "src/Report.sharp", code);
@@ -2859,24 +2859,49 @@ fn a_php_form_fails_with_the_text_it_writes_and_nothing_more() {
         let annotation = issue.annotations.first().and_then(|annotation| annotation.message.as_deref());
         assert_eq!(
             (issue.message.as_str(), annotation, issue.notes.len(), issue.help.as_deref()),
-            ("Parse error encountered during parsing", Some(format!("Unexpected `{written}`").as_str()), 0, None),
+            (message, None, 0, None),
             "{code}"
         );
         assert_eq!(source(code, &program.errors[0]), written, "{code}");
     }
 }
 
-/// A second parse error where one already starts says nothing new, so PHP# reports one error per position, as
-/// TypeScript's parser does.
+/// A parse error that knows the tokens it expected writes them as the code would, as rustc does: "Expected `;`, found
+/// `return`". A `.sharp` file names no token PHP# never writes, such as PHP's `?>`, and with none left the error is
+/// "Unexpected `x`" alone. A plain PHP file names PHP's tokens, `?>` included.
 #[test]
-fn a_parse_error_is_reported_once_at_its_position() {
-    const CODE: &str = "class Report\n{\n    public int[] run() => [];\n}\n";
-    let arena = LocalArena::new();
-    let program = parse(&arena, "src/Report.sharp", CODE);
+fn a_parse_error_writes_the_tokens_it_expected() {
+    let sharp = "class Report\n{\n    int run()\n    {\n        let a = 1\n        return a;\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nfunction broken(): int\n{\n    $a = 1\n    return $a;\n}\n";
+    for (path, code, message) in [
+        ("src/Report.sharp", sharp, "Expected `;`, found `return`"),
+        ("src/plain.php", php, "Expected `;` or `?>`, found `return`"),
+    ] {
+        let arena = LocalArena::new();
+        let program = parse(&arena, path, code);
 
-    let errors: Vec<(String, &str)> =
-        program.errors.iter().map(|error| (error.to_string(), source(CODE, error))).collect();
-    assert_eq!(errors, [("Unexpected `[`".to_owned(), "["), ("Unexpected `]`".to_owned(), "]")]);
+        let errors: Vec<(String, &str)> =
+            program.errors.iter().map(|error| (Issue::from(error).message, source(code, error))).collect();
+        assert_eq!(errors, [(message.to_owned(), "return")], "{path}");
+    }
+}
+
+/// One typo is one parse error: the tokens the parser skips after it report nothing until a member or a statement
+/// parses again, and a second error where one already starts says nothing new, as TypeScript's parser recovers.
+#[test]
+fn one_typo_is_one_parse_error() {
+    for (code, error) in [
+        ("class Report\n{\n    public int[] run() => [];\n}\n", ("Unexpected `[`", "[")),
+        ("class G<> { }\n", ("Unexpected `<>`", "<>")),
+        ("class Torn\n{\n    public int run( => 1;\n}\n", ("Unexpected `=>`", "=>")),
+    ] {
+        let arena = LocalArena::new();
+        let program = parse(&arena, "src/Report.sharp", code);
+
+        let errors: Vec<(String, &str)> =
+            program.errors.iter().map(|found| (found.to_string(), source(code, found))).collect();
+        assert_eq!(errors, [(error.0.to_owned(), error.1)], "{code}");
+    }
 }
 
 /// Spec section 27: a `.sharp` file starts in code, so an opening tag is one error, and the file parses on.
@@ -3243,7 +3268,7 @@ fn a_php_closure_or_arrow_function_fails_as_a_typo_does() {
         let [error] = program.errors else {
             panic!("expected one error for `{lambda}`, got {:#?}", program.errors);
         };
-        assert_eq!(Issue::from(error).message, "Parse error encountered during parsing", "{lambda}");
+        assert_eq!(Issue::from(error).message, format!("Unexpected `{start}`"), "{lambda}");
         assert_eq!(source(code, error), start, "{lambda}");
     }
 }
@@ -6420,7 +6445,7 @@ fn an_operator_without_a_body_is_a_parse_error() {
     let program =
         parse(&arena, "src/Money.sharp", "class Money\n{\n    public static bool operator ==(Money a, Money b);\n}\n");
 
-    assert_eq!(program.errors.first().map(ToString::to_string).as_deref(), Some("Unexpected `;`"));
+    assert_eq!(program.errors.first().map(ToString::to_string).as_deref(), Some("Expected `{` or `=>`, found `;`"));
 }
 
 #[test]
