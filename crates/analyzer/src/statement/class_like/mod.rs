@@ -77,6 +77,7 @@ use mago_syntax::cst::Trait;
 use mago_syntax::token::is_sharp_keyword;
 use mago_word::Word;
 use mago_word::WordMap;
+use mago_word::WordSet;
 use mago_word::ascii_lowercase_word;
 use mago_word::word;
 
@@ -1277,6 +1278,13 @@ where
         context.collector.start_recording();
     }
 
+    // The base that starts a chain back to the class is the cycle's error alone, so no other check reads it.
+    if let Some(start) = report_inheritance_cycle(context, class_like_metadata, &extended_types, &implemented_types) {
+        let starts_cycle =
+            |name: &Identifier<'arena>| context.resolved_names.get(name).eq_ignore_ascii_case(start.as_bytes());
+        extended_types.retain(|name| !starts_cycle(name));
+        implemented_types.retain(|name| !starts_cycle(name));
+    }
     if class_like_metadata.flags.is_sharp() {
         check_sharp_reached_twice(context, class_like_metadata, inheritance_ast, &mut checked_signatures);
     }
@@ -1986,6 +1994,73 @@ fn report_cases_without_property<A>(
     }
 }
 
+/// The chain of types from `class_like` through the bases each header names back to `class_like`, as in `[A, B, A]`,
+/// when one of its bases inherits from it.
+fn inheritance_cycle<'ctx>(
+    codebase: &'ctx CodebaseMetadata,
+    class_like: &'ctx ClassLikeMetadata,
+) -> Option<Vec<&'ctx ClassLikeMetadata>> {
+    fn reaches<'ctx>(
+        codebase: &'ctx CodebaseMetadata,
+        start: Word,
+        chain: &mut Vec<&'ctx ClassLikeMetadata>,
+        seen: &mut WordSet,
+    ) -> bool {
+        let current = chain[chain.len() - 1];
+        let mut bases: Vec<Word> = current.direct_parent_interfaces.iter().copied().collect();
+        bases.sort_unstable();
+        for base in current.direct_parent_class.into_iter().chain(bases) {
+            let Some(base) = codebase.get_class_like(base.as_bytes()) else {
+                continue;
+            };
+            chain.push(base);
+            if base.name == start || (seen.insert(base.name) && reaches(codebase, start, chain, seen)) {
+                return true;
+            }
+            chain.pop();
+        }
+
+        false
+    }
+
+    let mut chain = vec![class_like];
+
+    reaches(codebase, class_like.name, &mut chain, &mut WordSet::default()).then_some(chain)
+}
+
+/// Reports `class_like` when it inherits from itself through the bases its header names, as C#'s CS0146 and Java
+/// refuse, at the header name that starts the chain, and returns that name. The populator links no type as its own
+/// base, so a class that names itself is still among its interfaces.
+fn report_inheritance_cycle<A>(
+    context: &mut Context<'_, '_, A>,
+    class_like: &ClassLikeMetadata,
+    extended_types: &[Identifier<'_>],
+    implemented_types: &[Identifier<'_>],
+) -> Option<Word>
+where
+    A: Arena,
+{
+    let chain = inheritance_cycle(context.codebase, class_like)?;
+    let start = chain[1].name;
+    let written = extended_types
+        .iter()
+        .chain(implemented_types)
+        .find(|name| context.resolved_names.get(*name).eq_ignore_ascii_case(start.as_bytes()))?;
+    let names: Vec<Word> =
+        chain.iter().map(|type_like| display_class_like_name(context, type_like.original_name)).collect();
+    let (own, base) = (names[0], names[1]);
+    let chain = names.iter().map(|name| format!("`{name}`")).collect::<Vec<_>>().join(" → ");
+
+    context.collector.report_with_code(
+        IssueCode::InvalidExtend,
+        Issue::error(format!("`{own}` inherits from itself: {chain}."))
+            .with_annotation(Annotation::primary(written.span()).with_message("Inherited here."))
+            .with_help(format!("Remove `{base}` from the header of `{own}`.")),
+    );
+
+    Some(start)
+}
+
 #[allow(clippy::unwrap_used)]
 fn check_class_like_extends<'ctx, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
@@ -2064,6 +2139,19 @@ fn check_class_like_extends<'ctx, 'arena, A>(
         }
 
         if class_like_metadata.kind.is_interface() {
+            if !extended_class_metadata.kind.is_interface() && context.dialect.is_sharp() {
+                context.collector.report_with_code(
+                    IssueCode::InvalidExtend,
+                    Issue::error(format!(
+                        "`{using_name}` is an interface, so its header names only interfaces, and `{extended_name}` is {extended_kind_prefix} {extended_kind_str}."
+                    ))
+                    .with_annotation(Annotation::primary(extended_type.span()).with_message("Named here."))
+                    .with_help(format!("Remove `{extended_name}` from the header of `{using_name}`.")),
+                );
+
+                continue;
+            }
+
             if !extended_class_metadata.kind.is_interface() {
                 context.collector.report_with_code(
                     IssueCode::InvalidExtend,

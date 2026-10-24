@@ -5189,8 +5189,8 @@ fn an_empty_literal_needs_a_type() {
     assert_eq!(
         issues(code),
         [
-            "7:21 An empty literal needs a type: write `List<T> names = []`.",
-            "8:23 An empty literal needs a type: write `const Map<TKey, TValue> sizes = [:]`.",
+            "7:21 An empty literal needs a type: write the type of its elements, as in `List<string> names = []`.",
+            "8:23 An empty literal needs a type: write the types of its keys and values, as in `const Map<string, int> sizes = [:]`.",
         ]
     );
 }
@@ -5201,7 +5201,27 @@ fn a_null_start_needs_a_type() {
         "        let value = null;\n        const other = null;\n        string? kept = null;\n        let either = extra > 1 ? null : 1;\n        return 1;\n",
     ));
 
-    assert_eq!(issues(code), ["7:21 A null start needs a type: write `T? value = null`."]);
+    assert_eq!(
+        issues(code),
+        ["7:21 A null start needs a type: write the type it holds, as in `string? value = null`."]
+    );
+}
+
+/// A local the method returns takes the method's return type, so the error for its empty literal or null start names
+/// that type, the one the code needs. A `return` in a lambda returns from the lambda, so it names none.
+#[test]
+fn a_local_without_a_type_that_the_method_returns_is_named_with_the_return_type() {
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public List<string> names()\n    {\n        let names = [];\n        return names;\n    }\n\n    public Map<string, int> sizes()\n    {\n        let sizes = [:];\n        return sizes;\n    }\n\n    public string? label()\n    {\n        let label = null;\n        return label;\n    }\n\n    public Function<List<int>()> later()\n    {\n        let seen = [];\n        return () => { return seen; };\n    }\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "7:21 An empty literal needs a type: write `List<string> names = []`.",
+            "13:21 An empty literal needs a type: write `Map<string, int> sizes = [:]`.",
+            "19:21 A null start needs a type: write `string? label = null`.",
+            "25:20 An empty literal needs a type: write the type of its elements, as in `List<string> seen = []`.",
+        ]
+    );
 }
 
 /// `List`, `Set` and `Class` take one type argument and `Map` two, wherever the type is written, and none is `void`,

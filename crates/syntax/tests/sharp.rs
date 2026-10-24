@@ -2866,6 +2866,19 @@ fn a_php_form_fails_with_the_text_it_writes_and_nothing_more() {
     }
 }
 
+/// A second parse error where one already starts says nothing new, so PHP# reports one error per position, as
+/// TypeScript's parser does.
+#[test]
+fn a_parse_error_is_reported_once_at_its_position() {
+    const CODE: &str = "class Report\n{\n    public int[] run() => [];\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Report.sharp", CODE);
+
+    let errors: Vec<(String, &str)> =
+        program.errors.iter().map(|error| (error.to_string(), source(CODE, error))).collect();
+    assert_eq!(errors, [("Unexpected `[`".to_owned(), "["), ("Unexpected `]`".to_owned(), "]")]);
+}
+
 /// Spec section 27: a `.sharp` file starts in code, so an opening tag is one error, and the file parses on.
 #[test]
 fn an_opening_tag_fails_as_a_typo_does() {

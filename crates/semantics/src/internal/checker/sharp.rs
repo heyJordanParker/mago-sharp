@@ -6146,24 +6146,77 @@ pub fn check_local_declaration(local_declaration: &LocalDeclaration, context: &m
         return;
     };
 
-    let (start, hint, value) = match local_declaration.value {
-        Expression::Array(literal) if literal.elements.is_empty() && literal.colon.is_some() => {
-            ("An empty literal", "Map<TKey, TValue>", "[:]")
-        }
-        Expression::Array(literal) if literal.elements.is_empty() => ("An empty literal", "List<T>", "[]"),
+    // Each start with the words for the type it needs, an example of that type, and the kind of declared type that
+    // gives it one.
+    let (start, value, needs, example, fits): (_, _, _, _, fn(&Hint<'_>) -> bool) = match local_declaration.value {
+        Expression::Array(literal) if literal.elements.is_empty() && literal.colon.is_some() => (
+            "An empty literal",
+            "[:]",
+            "the types of its keys and values",
+            "Map<string, int>",
+            |hint| matches!(hint, Hint::Generic(generic) if generic.name.value == b"Map"),
+        ),
+        Expression::Array(literal) if literal.elements.is_empty() => (
+            "An empty literal",
+            "[]",
+            "the type of its elements",
+            "List<string>",
+            |hint| matches!(hint, Hint::Generic(generic) if matches!(generic.name.value, b"List" | b"Set")),
+        ),
         // A `const` never takes another value, so `null` is all of its type.
-        Expression::Literal(Literal::Null(_)) if !local_declaration.is_const() => ("A null start", "T?", "null"),
+        Expression::Literal(Literal::Null(_)) if !local_declaration.is_const() => {
+            ("A null start", "null", "the type it holds", "string?", |hint| matches!(hint, Hint::Nullable(_)))
+        }
         _ => return,
     };
 
     let keyword = if local_declaration.is_const() { "const " } else { "" };
+    let returned = returned_type(context, local_declaration.span(), name.value, fits);
     let name = BytesDisplay(name.value);
+    let message = match returned {
+        Some(hint) => format!("{start} needs a type: write `{keyword}{} {name} = {value}`.", BytesDisplay(hint)),
+        None => format!("{start} needs a type: write {needs}, as in `{keyword}{example} {name} = {value}`."),
+    };
 
     context.report(
-        Issue::error(format!("{start} needs a type: write `{keyword}{hint} {name} = {value}`.")).with_annotation(
+        Issue::error(message).with_annotation(
             Annotation::primary(local_declaration.value.span()).with_message("Declared without a type."),
         ),
     );
+}
+
+/// The return type of the method whose body declares the local `name` at `declaration`, as written, when the method
+/// returns `name` and `fits` takes the type: the type the local needs. A local of a lambda, and a `return` in a
+/// lambda, belong to the lambda, which writes no return type, so they say nothing.
+fn returned_type<'ctx>(
+    context: &Context<'ctx, '_, '_>,
+    declaration: Span,
+    name: &[u8],
+    fits: fn(&Hint<'_>) -> bool,
+) -> Option<&'ctx [u8]> {
+    fn returns(node: Node<'_, '_>, name: &[u8]) -> bool {
+        match node {
+            Node::Closure(_) | Node::ArrowFunction(_) => false,
+            Node::Return(Return { value: Some(Expression::ConstantAccess(access)), .. }) => access.name.value() == name,
+            _ => node.children().into_iter().any(|child| returns(child, name)),
+        }
+    }
+
+    // The innermost method, function or lambda around the declaration, from the outermost node the walk is in.
+    let mut node = *context.ancestors.first()?;
+    let mut holder = None;
+    while let Some(inner) = node.children().into_iter().find(|child| child.span().contains(&declaration.start)) {
+        if matches!(inner, Node::Method(_) | Node::Function(_) | Node::Closure(_) | Node::ArrowFunction(_)) {
+            holder = Some(inner);
+        }
+        node = inner;
+    }
+    let Some(Node::Method(method)) = holder else {
+        return None;
+    };
+    let hint = &method.return_type_hint.as_ref()?.hint;
+
+    (fits(hint) && returns(Node::Method(method), name)).then(|| context.get_code_snippet(hint))
 }
 
 #[inline]

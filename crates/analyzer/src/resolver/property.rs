@@ -40,6 +40,7 @@ use mago_codex::ttype::template::bounds::get_most_specific_type_from_bounds;
 use mago_codex::ttype::template::inferred_type_replacer;
 use mago_codex::ttype::union::TUnion;
 use mago_codex::ttype::wrap_atomic;
+use mago_codex::visibility::Visibility;
 use mago_names::ResolvedNames;
 use mago_names::display_sharp_member;
 use mago_reporting::Annotation;
@@ -2587,6 +2588,18 @@ where
     inferred_type_replacer::replace(&value, &template_result, context.codebase)
 }
 
+/// The public method of `class` that gives its property `property`'s value, a `getMessage()` for `message`, as
+/// Kotlin reads Java's getters, written as the code calls it, as in `getMessage()`.
+pub(crate) fn public_getter(codebase: &CodebaseMetadata, class: &[u8], property: &[u8]) -> Option<String> {
+    let property = property.strip_prefix(b"$").unwrap_or(property);
+    let (first, rest) = property.split_first()?;
+    let getter = [b"get".as_slice(), &[first.to_ascii_uppercase()], rest].concat();
+    let method = codebase.get_declaring_method(class, &getter)?;
+
+    (method.parameters.is_empty() && codebase.get_method_visibility(class, &getter) == Some(Visibility::Public))
+        .then(|| format!("{}()", method.original_name))
+}
+
 fn report_non_existent_property<A>(
     context: &mut Context<'_, '_, A>,
     classname: Word,
@@ -2598,13 +2611,19 @@ fn report_non_existent_property<A>(
     A: Arena,
 {
     let class_kind_str = context.codebase.get_class_like(classname.as_bytes()).map_or("class", |m| m.kind.as_str());
+    let getter = public_getter(context.codebase, classname.as_bytes(), prop_name.as_bytes());
     let classname = display_class_like_name(context, classname);
 
-    // PHP# writes no sealed object type, so its message names the property of a class.
+    // PHP# writes no sealed object type, so its message names the property of a class, and its help the public method
+    // that gives the value, when the class has one.
     if context.dialect.is_sharp() {
         let property = display_sharp_member(classname, prop_name);
         let name = prop_name.as_str_lossy();
         let name = name.trim_start_matches('$');
+        let help = match getter {
+            Some(getter) => format!("Call `{getter}`, the public method that gives the value."),
+            None => "Define the property in the class or check for its existence before accessing it.".to_owned(),
+        };
 
         context.collector.report_with_code(
             IssueCode::NonExistentProperty,
@@ -2614,7 +2633,7 @@ fn report_non_existent_property<A>(
                     Annotation::secondary(object_span).with_message(format!("On instance of `{classname}`")),
                 )
                 .with_note(format!("The {class_kind_str} `{classname}` does not define the property `{name}`."))
-                .with_help("Define the property in the class or check for its existence before accessing it."),
+                .with_help(help),
         );
 
         return;

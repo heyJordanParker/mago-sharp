@@ -779,7 +779,10 @@ where
     }
 
     // Reading (g) of spec section 21: a pattern that can never match is an error, as C#'s CS8121 is. Its test is then
-    // `false`, unless an error at the pattern already says so.
+    // `false`, unless an error at the pattern already says so. An arm an earlier arm handles says which, as C#'s CS8120
+    // does. That arm's own reports from its PHP, that it is unreachable and compares a value it never equals, say the
+    // same again, so they are left out.
+    let mut handled_arms: Vec<Span> = Vec::new();
     for (pattern, test) in tests {
         let reported = issues.iter().any(|issue| {
             issue.level == Level::Error
@@ -793,8 +796,20 @@ where
             continue;
         }
 
-        context.collector.report(never_matches(pattern));
+        let Some(earlier) = handled_earlier(node, pattern, context) else {
+            context.collector.report(never_matches(pattern));
+            continue;
+        };
+        handled_arms.extend(arm_of(node, pattern));
+        context.collector.report(already_handled(pattern, earlier, context));
     }
+    let issues = issues.into_iter().filter(|issue| {
+        !(is_code(issue, IssueCode::UnreachableMatchArm) || is_code(issue, IssueCode::RedundantComparison))
+            || !issue
+                .annotations
+                .iter()
+                .any(|annotation| handled_arms.iter().any(|arm| arm.contains(&annotation.span.start)))
+    });
     context.collector.extend(issues);
     result?;
 
@@ -1755,6 +1770,58 @@ fn never_matches(pattern: Span) -> Issue {
         .with_annotation(Annotation::primary(pattern).with_message("Never matches."))
         .with_note("PHP# makes a pattern that can never match an error, as C# does (CS8121).")
         .with_help("Remove the pattern, or test a value that can match it.")
+}
+
+/// The arms of `node`, when it is a `match`.
+fn match_arms<'node, 'arena>(node: Node<'node, 'arena>) -> &'node [PatternMatchArm<'arena>] {
+    match node {
+        Node::Expression(Expression::PatternMatch(pattern_match))
+        | Node::Statement(Statement::PatternMatch(pattern_match)) => pattern_match.arms.as_slice(),
+        _ => &[],
+    }
+}
+
+/// The span of the arm of `node`, a `match`, whose pattern is at `pattern`.
+fn arm_of(node: Node<'_, '_>, pattern: Span) -> Option<Span> {
+    match_arms(node).iter().find_map(|arm| match arm {
+        PatternMatchArm::Pattern(arm) if arm.pattern.span() == pattern => Some(arm.span()),
+        _ => None,
+    })
+}
+
+/// The pattern of an arm of `node`, a `match`, before the arm at `pattern`, that has no `when` condition and is written
+/// as `pattern` is, so it handles every value `pattern` matches.
+fn handled_earlier<A>(node: Node<'_, '_>, pattern: Span, context: &Context<'_, '_, A>) -> Option<Span>
+where
+    A: Arena,
+{
+    let written = quoted_source(context, pattern);
+
+    match_arms(node)
+        .iter()
+        .filter_map(|arm| match arm {
+            PatternMatchArm::Pattern(arm) if arm.guard.is_none() => Some(arm.pattern.span()),
+            _ => None,
+        })
+        .take_while(|earlier| earlier.start.offset < pattern.start.offset)
+        .find(|earlier| quoted_source(context, *earlier) == written)
+}
+
+/// The error at a `match` arm's pattern that never runs, because the earlier arm at `earlier` handles its case.
+fn already_handled<A>(pattern: Span, earlier: Span, context: &Context<'_, '_, A>) -> Issue
+where
+    A: Arena,
+{
+    let line = context.source_file.line_number(earlier.start.offset) + 1;
+
+    Issue::error(format!(
+        "This arm never runs: the arm on line {line} already handles `{}`.",
+        quoted_source(context, pattern)
+    ))
+    .with_code(IssueCode::ImpossibleTypeComparison.as_str())
+    .with_annotation(Annotation::primary(pattern).with_message("Never runs."))
+    .with_annotation(Annotation::secondary(earlier).with_message("Handled here."))
+    .with_help("Remove this arm, or change its pattern.")
 }
 
 /// `issue`, in PHP#'s words when it is the PHP's report that a list pattern's element, one of `elements`, can never be

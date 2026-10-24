@@ -1843,6 +1843,68 @@ fn a_closed_method_and_a_header_with_two_classes_speak_sharp() {
     );
 }
 
+/// An exception's message is read through its public `getMessage()`, so a read of the protected `message`, or of the
+/// `message` `Throwable` has none of, names that method as the fix. The error points at the code that reads it, never
+/// into the engine's own declarations, and the read starts no second error.
+#[test]
+fn a_read_of_an_exception_s_message_names_its_public_method() {
+    let sharp = "namespace App;\n\nclass Report\n{\n    public string caught()\n    {\n        try {\n            return \"ok\";\n        } catch (RuntimeException e) {\n            return e.message;\n        }\n    }\n\n    public string thrown()\n    {\n        try {\n            return \"ok\";\n        } catch (Throwable e) {\n            return e.message;\n        }\n    }\n}\n";
+    let issues = analyze(&PLUGIN_REGISTRY, settings(), ("src/App/Report.sharp", sharp), &[]);
+    let file = issues.first().and_then(Issue::primary_span).expect("a refusal").file_id;
+
+    assert_eq!(
+        refusals(("src/App/Report.sharp", sharp), &[]),
+        [
+            "10:22 invalid-property-read Cannot read protected property `Exception.message`. | Call `getMessage()`, the public method that gives the value.",
+            "19:22 non-existent-property Property `Throwable.message` does not exist. | Call `getMessage()`, the public method that gives the value.",
+        ]
+    );
+    let elsewhere: Vec<&Issue> = issues
+        .iter()
+        .filter(|issue| issue.annotations.iter().any(|annotation| annotation.span.file_id != file))
+        .collect();
+    assert!(elsewhere.is_empty(), "{elsewhere:#?}");
+}
+
+/// Spec section 22: an interface's header names only interfaces, so a plain PHP trait or a class there is refused, in
+/// PHP#'s words, with the fix that removes it.
+#[test]
+fn an_interface_header_that_names_a_trait_or_a_class_is_refused() {
+    let sharp = "namespace Demo;\n\nimport Lib.Greets;\n\npublic interface Polite : Greets\n{\n}\n\npublic interface Named : Report\n{\n}\n\npublic class Report\n{\n}\n";
+    let library =
+        "<?php\n\nnamespace Lib;\n\ntrait Greets\n{\n    public function greet(): string { return 'hi'; }\n}\n";
+
+    assert_eq!(
+        refusals(("src/Demo/Polite.sharp", sharp), &[("src/Lib/Greets.php", library)]),
+        [
+            "5:27 invalid-extend `Polite` is an interface, so its header names only interfaces, and `Greets` is a trait. | Remove `Greets` from the header of `Polite`.",
+            "9:26 invalid-extend `Named` is an interface, so its header names only interfaces, and `Report` is a class. | Remove `Report` from the header of `Named`.",
+        ]
+    );
+}
+
+/// Spec section 22: a class or an interface that inherits from itself, through its own header or a chain of headers of
+/// any length, is an error at each header of the chain that names the chain, as C#'s CS0146 and Java refuse. A class
+/// that names itself gets the same error, not one that calls it no interface.
+#[test]
+fn a_type_that_inherits_from_itself_is_an_error_that_names_the_chain() {
+    let sharp = "namespace Demo;\n\npublic class A : B\n{\n}\n\npublic class B : A\n{\n}\n\npublic interface I : J\n{\n}\n\npublic interface J : I\n{\n}\n\npublic class C : E\n{\n}\n\npublic class E : F\n{\n}\n\npublic class F : C\n{\n}\n\npublic class D : D\n{\n}\n";
+
+    assert_eq!(
+        refusals(("src/Demo/A.sharp", sharp), &[]),
+        [
+            "3:18 invalid-extend `A` inherits from itself: `A` → `B` → `A`. | Remove `B` from the header of `A`.",
+            "7:18 invalid-extend `B` inherits from itself: `B` → `A` → `B`. | Remove `A` from the header of `B`.",
+            "11:22 invalid-extend `I` inherits from itself: `I` → `J` → `I`. | Remove `J` from the header of `I`.",
+            "15:22 invalid-extend `J` inherits from itself: `J` → `I` → `J`. | Remove `I` from the header of `J`.",
+            "19:18 invalid-extend `C` inherits from itself: `C` → `E` → `F` → `C`. | Remove `E` from the header of `C`.",
+            "23:18 invalid-extend `E` inherits from itself: `E` → `F` → `C` → `E`. | Remove `F` from the header of `E`.",
+            "27:18 invalid-extend `F` inherits from itself: `F` → `C` → `E` → `F`. | Remove `C` from the header of `F`.",
+            "31:18 invalid-extend `D` inherits from itself: `D` → `D`. | Remove `D` from the header of `D`.",
+        ]
+    );
+}
+
 /// Spec section 22 gives a class one method per name: when two places give the class a body for one method, two
 /// header traits, two interfaces' default bodies, or a default body beside the base class's method, the class writes
 /// the method itself. Until it does, the class is an error that names both places. A computed property two interfaces
@@ -3971,7 +4033,7 @@ fn a_comparison_that_always_or_never_holds_speaks_of_its_bool() {
 /// wording.
 #[test]
 fn a_match_arm_that_never_or_always_matches_speaks_of_its_bool() {
-    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static string twice(int x) => match (x) { 1 => \"one\", 1 => \"again\", default => \"other\" };\n    public static string always() => match (true) { true => \"yes\", default => \"no\" };\n}\n";
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static string twice(int x) => match (x) { 1 => \"one\", 0x1 => \"again\", default => \"other\" };\n    public static string always() => match (true) { true => \"yes\", default => \"no\" };\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    public static function twice(int $x): string { return match ($x) { 1 => 'one', 1 => 'again', default => 'other' }; }\n    public static function always(): string { return match (true) { true => 'yes', default => 'no' }; }\n}\n";
     let arms = |analyzed| -> Vec<String> {
         worded(analyzed, &[])
@@ -7000,6 +7062,21 @@ fn a_pattern_that_can_never_match_is_an_error_at_the_pattern() {
             .filter(|message| message.starts_with("Impossible type assertion"))
             .collect::<Vec<_>>(),
         ["Impossible type assertion: `$count` of type `int` can never be `string`."]
+    );
+}
+
+/// An arm that repeats the pattern of an earlier arm without a `when` condition never runs, because the earlier arm
+/// handles its case. Its one error names the earlier arm's line, as C#'s error for a case already handled names it, and
+/// the arm reports nothing more.
+#[test]
+fn an_arm_whose_case_an_earlier_arm_handles_is_one_error_that_names_that_arm() {
+    let sharp = "namespace Demo;\n\nenum Status\n{\n    case Open;\n    case Closed;\n}\n\nclass Report\n{\n    public static int arms(Status status) => match (status) {\n        Status.Open => 1,\n        Status.Open => 5,\n        Status.Closed => 2,\n    };\n}\n";
+
+    assert_eq!(
+        refusals(("src/Demo/Report.sharp", sharp), &[]),
+        [
+            "13:9 impossible-type-comparison This arm never runs: the arm on line 12 already handles `Status.Open`. | Remove this arm, or change its pattern."
+        ]
     );
 }
 
@@ -18632,6 +18709,26 @@ fn a_message_names_a_value_a_pattern_reads_as_sharp_reads_it() {
             "Impossible type assertion: `lines[0].quantity` of type `int` can never be `string`.",
             "Impossible type assertion: `lines[lines.count() - 1].quantity` of type `int` can never be `string`.",
             "Impossible type assertion: `this.lines()[0].quantity` of type `int` can never be `string`.",
+        ]
+    );
+}
+
+/// A value the code writes is named as written, its spacing kept, and a value a pattern reads is named as PHP# reads
+/// it. A form inside another numbers its hidden variables after the outer form's, so a message names its own value.
+#[test]
+fn a_message_names_a_written_value_as_written_and_each_form_its_own_value() {
+    let sharp = "namespace Demo;\n\nclass Line\n{\n    public int quantity { get; } = 0;\n\n    public bool spaced(List<Line> lines, List<int> counts, int count) => lines[ 0 ] .quantity is string || counts[ 0 ] is string || count-1 is string;\n\n    public bool nested() => (this.first() is int) is string;\n\n    public Any? first() => 1;\n}\n";
+
+    assert_eq!(
+        messages(("src/Demo/Line.sharp", sharp), &[])
+            .into_iter()
+            .filter(|message| message.starts_with("Impossible type assertion"))
+            .collect::<Vec<_>>(),
+        [
+            "Impossible type assertion: `lines[ 0 ] .quantity` of type `int` can never be `string`.",
+            "Impossible type assertion: `counts[ 0 ]` of type `int` can never be `string`.",
+            "Impossible type assertion: `count-1` of type `int` can never be `string`.",
+            "Impossible type assertion: `(this.first() is int)` of type `bool` can never be `string`.",
         ]
     );
 }

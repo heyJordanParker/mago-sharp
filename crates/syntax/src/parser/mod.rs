@@ -169,6 +169,13 @@ where
             }
         }
 
+        // A PHP# parse error where the one before it starts says nothing new, as TypeScript's parser reports one error
+        // per position.
+        if self.dialect.is_sharp() {
+            let mut last = None;
+            self.errors.retain(|error| last.replace(error.span().start) != Some(error.span().start));
+        }
+
         self.arena.alloc(Program {
             file_id,
             dialect: self.dialect,

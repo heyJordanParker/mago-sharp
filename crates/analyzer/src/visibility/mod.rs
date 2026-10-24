@@ -19,6 +19,7 @@ use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::resolver::property::DeclaredProperty;
 use crate::resolver::property::DeclaredPropertyKind;
+use crate::resolver::property::public_getter;
 use crate::resolver::property::resolve_declared_property;
 use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_member;
@@ -264,7 +265,7 @@ where
             visibility,
             access_span,
             member_span,
-            Some(method_metadata.span),
+            method_metadata.flags.is_user_defined().then_some(method_metadata.span),
             help_text,
         );
     }
@@ -427,13 +428,23 @@ where
     );
 
     if !is_visible {
-        // PHP names the property and its class apart, and PHP# names the property as it reads: `Order.total`.
+        // PHP names the property and its class apart, and PHP# names the property as it reads: `Order.total`. Its help
+        // names the public method that gives the value, when the class has one, since a class outside the project's
+        // code cannot be made `public`.
         let (issue_title, help_text) = if context.dialect.is_sharp() {
             let property = display_member(context, declaring_class_metadata.original_name, property_name);
-            (
-                format!("Cannot read {visibility} property `{property}`."),
-                format!("Make the property `{property}` readable (e.g., `public`), or add a public getter method."),
-            )
+            let help = match public_getter(
+                context.codebase,
+                declaring_class_metadata.name.as_bytes(),
+                property_name.as_bytes(),
+            ) {
+                Some(getter) => format!("Call `{getter}`, the public method that gives the value."),
+                None => {
+                    format!("Make the property `{property}` readable (e.g., `public`), or add a public getter method.")
+                }
+            };
+
+            (format!("Cannot read {visibility} property `{property}`."), help)
         } else {
             (
                 format!(
@@ -454,7 +465,10 @@ where
             visibility,
             access_span,
             member_span,
-            property_metadata.span.or(property_metadata.name_span),
+            property_metadata
+                .span
+                .or(property_metadata.name_span)
+                .filter(|_| declaring_class_metadata.flags.is_user_defined()),
             help_text,
         );
     }
@@ -634,7 +648,10 @@ where
                 visibility,
                 access_span,
                 member_span,
-                property_metadata.span.or(property_metadata.name_span),
+                property_metadata
+                    .span
+                    .or(property_metadata.name_span)
+                    .filter(|_| declaring_class_metadata.flags.is_user_defined()),
                 help_text,
             );
         }
@@ -814,6 +831,8 @@ fn is_visible_via_required_extends(
     false
 }
 
+/// Reports an access the member's visibility refuses. `definition_span` is where the member is declared, when that is
+/// the project's own code: a declaration in a prelude or a stub is no file the developer reads or changes.
 fn report_visibility_issue<A>(
     context: &mut Context<'_, '_, A>,
     calling_class: Option<Word>,
