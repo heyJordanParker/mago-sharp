@@ -59,7 +59,7 @@ pub struct sharp_node {
     pub line: u32,
     /// Closing line, for declarations.
     pub end_line: u32,
-    /// Index into `children[]`.
+    /// Index into `children[]`. Each child is a node written before this one, so the tree holds no cycle.
     pub first_child: u32,
     /// List kinds are variadic.
     pub child_count: u32,
