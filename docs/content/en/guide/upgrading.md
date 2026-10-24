@@ -10,6 +10,13 @@ nav_section = "Guide"
 
 > Composer installs are different. The Composer wrapper pins a binary that matches the Composer package version, so you upgrade Mago with `composer update` rather than `self-update`.
 
+## Verification
+
+`self-update` verifies the archive it downloads before it extracts anything from it, and refuses one that fails, leaving the installed binary as it was:
+
+- With the [GitHub CLI](https://cli.github.com/) on your `PATH`, it checks the archive's build attestation with `gh attestation verify`, which proves the release workflow built it.
+- Without it, it checks the archive's SHA-256 against the release's `mago-<version>-sha256sums.txt`, and warns that full provenance needs `gh`: a checksum from the release cannot tell a replaced release apart. A release that publishes no sums file, such as 0.5.0 and earlier, installs only with `gh`.
+
 ## Common flows
 
 Check for updates without installing:
