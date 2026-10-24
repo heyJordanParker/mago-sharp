@@ -1862,7 +1862,7 @@ fn get_never_null_operand_compared_with_null<'ast, 'arena, 'types>(
     }
 
     let is_never_null = |operand_type: &TUnion| {
-        !operand_type.can_be_null() && !operand_type.possibly_undefined() && !operand_type.is_never()
+        operand_type.is_never_null() && !operand_type.possibly_undefined() && !operand_type.is_never()
     };
 
     if rhs_type.is_null() && is_never_null(lhs_type) {

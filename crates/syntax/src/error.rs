@@ -12,6 +12,7 @@ use crate::cst::Operator;
 use crate::lexer::Lexer;
 use crate::parser::MAX_RECURSION_DEPTH;
 use crate::settings::LexerSettings;
+use crate::token::Token;
 use crate::token::TokenKind;
 
 const SYNTAX_ERROR_CODE: &str = "syntax";
@@ -34,22 +35,14 @@ pub enum Expected {
     OneOf(&'static [TokenKind]),
 }
 
-impl Expected {
-    #[must_use]
-    pub fn kinds(&self) -> &[TokenKind] {
-        match self {
-            Expected::Exactly(kind) => std::slice::from_ref(kind),
-            Expected::OneOf(kinds) => kinds,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub enum ParseError {
     SyntaxError(SyntaxError),
     UnexpectedEndOfFile(Expected, FileId, Position),
-    UnexpectedToken(Expected, TokenKind, Span),
+    /// A token the parser did not expect, with the text of each token it expected that the file's language writes, the
+    /// token's first line as the code writes it, and its span.
+    UnexpectedToken(Box<[&'static str]>, Box<str>, Span),
     UnclosedLiteralString(LiteralStringKind, Span),
     RecursionLimitExceeded(Span),
     /// A PHP# parameter written without its type, such as `run(extra)`, at its name.
@@ -120,6 +113,9 @@ pub enum ParseError {
     /// A PHP# lambda with attributes and a parameter without parentheses, as in `[Pure] n => n * 2`, from the first
     /// attribute list to the parameter. Spec section 1: a lambda with attributes puts its parameters in parentheses.
     UnparenthesizedAttributedLambdaInSharp(Span),
+    /// TypeScript's `in` written in a PHP# loop, as in `for (const line in lines)`, at the `in`. Spec section 17: the
+    /// loop over a collection takes `of`, which closes the TypeScript trap where `in` loops over keys.
+    InLoopInSharp(Span),
 }
 
 impl HasFileId for SyntaxError {
@@ -163,7 +159,8 @@ impl HasFileId for ParseError {
             | ParseError::StructHeaderTypeInSharp(span)
             | ParseError::NamedConstructorTypeParametersInSharp(_, _, span)
             | ParseError::MiscasedKeywordInSharp(_, span)
-            | ParseError::UnparenthesizedAttributedLambdaInSharp(span) => span.file_id,
+            | ParseError::UnparenthesizedAttributedLambdaInSharp(span)
+            | ParseError::InLoopInSharp(span) => span.file_id,
         }
     }
 }
@@ -211,23 +208,26 @@ impl HasSpan for ParseError {
             | ParseError::StructHeaderTypeInSharp(span)
             | ParseError::NamedConstructorTypeParametersInSharp(_, _, span)
             | ParseError::MiscasedKeywordInSharp(_, span)
-            | ParseError::UnparenthesizedAttributedLambdaInSharp(span) => *span,
+            | ParseError::UnparenthesizedAttributedLambdaInSharp(span)
+            | ParseError::InLoopInSharp(span) => *span,
         }
     }
 }
 
 impl std::fmt::Display for SyntaxError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let message = match self {
-            Self::UnexpectedToken(_, token, _) => &format!("Unexpected token `{}` (0x{:02X})", *token as char, token),
-            Self::UnrecognizedToken(_, token, _) => {
-                &format!("Unrecognised token `{}` (0x{:02X})", *token as char, token)
+        match self {
+            // The byte as the code writes it, or its value when it shows as nothing.
+            Self::UnexpectedToken(_, byte, _) | Self::UnrecognizedToken(_, byte, _) => {
+                if byte.is_ascii_graphic() {
+                    write!(f, "Unexpected `{}`", *byte as char)
+                } else {
+                    write!(f, "Unexpected byte 0x{byte:02X}")
+                }
             }
-            Self::UnexpectedEndOfFile(_, _) => "Unexpected end of file",
-            Self::RecursionLimitExceeded(_, _) => "Maximum recursion depth exceeded",
-        };
-
-        write!(f, "{message}")
+            Self::UnexpectedEndOfFile(_, _) => write!(f, "Unexpected end of file"),
+            Self::RecursionLimitExceeded(_, _) => write!(f, "Maximum recursion depth exceeded"),
+        }
     }
 }
 
@@ -237,30 +237,17 @@ impl std::fmt::Display for ParseError {
             ParseError::SyntaxError(e) => {
                 return write!(f, "{e}");
             }
-            ParseError::UnexpectedEndOfFile(expected, _, _) => {
-                let expected = expected.kinds().iter().map(ToString::to_string).collect::<Vec<_>>().join("`, `");
-
-                if expected.is_empty() {
-                    "Unexpected end of file".to_string()
-                } else if expected.len() == 1 {
-                    format!("Expected `{expected}` before end of file")
-                } else {
-                    format!("Expected one of `{expected}` before end of file")
+            // A parse error quotes what the code writes and the tokens it expected, as rustc and TypeScript do, never
+            // the parser's names for the kinds of token.
+            ParseError::UnexpectedEndOfFile(..) => "Unexpected end of file".to_string(),
+            ParseError::UnexpectedToken(expected, written, _) => match expected.as_ref() {
+                [] => format!("Unexpected `{written}`"),
+                [only] => format!("Expected `{only}`, found `{written}`"),
+                [first @ .., last] => {
+                    let first: Vec<String> = first.iter().map(|token| format!("`{token}`")).collect();
+                    format!("Expected {} or `{last}`, found `{written}`", first.join(", "))
                 }
-            }
-            ParseError::UnexpectedToken(expected, found, _) => {
-                let expected = expected.kinds().iter().map(ToString::to_string).collect::<Vec<_>>().join("`, `");
-
-                let found = found.to_string();
-
-                if expected.is_empty() {
-                    format!("Unexpected token `{found}`")
-                } else if expected.len() == 1 {
-                    format!("Expected `{expected}`, found `{found}`")
-                } else {
-                    format!("Expected one of `{expected}`, found `{found}`")
-                }
-            }
+            },
             ParseError::UnclosedLiteralString(kind, _) => match kind {
                 LiteralStringKind::SingleQuoted => "Unclosed single-quoted string".to_string(),
                 LiteralStringKind::DoubleQuoted => "Unclosed double-quoted string".to_string(),
@@ -339,6 +326,9 @@ impl std::fmt::Display for ParseError {
             ParseError::UnparenthesizedAttributedLambdaInSharp(_) => {
                 "A lambda with attributes puts its parameters in parentheses, as in `[Pure] (n) => n * 2`.".to_string()
             }
+            ParseError::InLoopInSharp(_) => {
+                "A loop over a collection takes `of`, as in `for (const line of lines)`.".to_string()
+            }
         };
 
         write!(f, "{message}")
@@ -346,6 +336,32 @@ impl std::fmt::Display for ParseError {
 }
 
 impl ParseError {
+    /// The error at `token` of the file `file_id`, which the parser did not expect where it expected `expected`. It
+    /// quotes the token's first line as the code writes it, and each expected token the file writes as its text: a
+    /// `.sharp` file, `sharp`, writes no token PHP# never writes, such as `?>`.
+    pub(crate) fn unexpected_token(expected: Expected, token: &Token<'_>, file_id: FileId, sharp: bool) -> ParseError {
+        let kinds = match &expected {
+            Expected::Exactly(kind) => std::slice::from_ref(kind),
+            Expected::OneOf(kinds) => kinds,
+        };
+        let mut texts: Vec<&'static str> = Vec::new();
+        for kind in kinds {
+            let text = if sharp { kind.written_in_sharp() } else { kind.written() };
+            if let Some(text) = text
+                && !texts.contains(&text)
+            {
+                texts.push(text);
+            }
+        }
+        let written = String::from_utf8_lossy(token.value);
+
+        ParseError::UnexpectedToken(
+            texts.into_boxed_slice(),
+            written.lines().next().unwrap_or_default().into(),
+            token.span_for(file_id),
+        )
+    }
+
     /// The error a typo gives at the first token from `offset` of a PHP# file's `code`, as `asdf` does in
     /// `public asdf#($@`: that token is unexpected. Every form outside the PHP# grammar fails with it, whichever
     /// language it comes from.
@@ -359,7 +375,7 @@ impl ParseError {
             match lexer.advance() {
                 Some(Ok(token)) if token.kind.is_trivia() => {}
                 Some(Ok(token)) => {
-                    return ParseError::UnexpectedToken(Expected::OneOf(&[]), token.kind, token.span_for(file_id));
+                    return ParseError::unexpected_token(Expected::OneOf(&[]), &token, file_id, true);
                 }
                 Some(Err(error)) => return ParseError::SyntaxError(error),
                 None => {
@@ -384,11 +400,8 @@ impl From<&SyntaxError> for Issue {
     fn from(error: &SyntaxError) -> Issue {
         let span = error.span();
 
-        Issue::error("Syntax error encountered during lexing")
-            .with_code(SYNTAX_ERROR_CODE)
-            .with_annotation(Annotation::primary(span).with_message(error.to_string()))
-            .with_note("This error indicates that the lexer encountered a syntax issue.")
-            .with_help("Check the syntax of your code.")
+        // The text as written is all a typo has to say, so it is the message.
+        Issue::error(error.to_string()).with_code(SYNTAX_ERROR_CODE).with_annotation(Annotation::primary(span))
     }
 }
 
@@ -423,7 +436,8 @@ impl From<&ParseError> for Issue {
             | ParseError::NestedTypeInSharp(..)
             | ParseError::StructHeaderTypeInSharp(..)
             | ParseError::MiscasedKeywordInSharp(..)
-            | ParseError::UnparenthesizedAttributedLambdaInSharp(..) => Issue::error(error.to_string())
+            | ParseError::UnparenthesizedAttributedLambdaInSharp(..)
+            | ParseError::InLoopInSharp(..) => Issue::error(error.to_string())
                 .with_code(PARSE_ERROR_CODE)
                 .with_annotation(Annotation::primary(error.span()).with_message("Written here.")),
             // A generic class's static method takes the class's type arguments, so its help declares none of its own.
@@ -443,11 +457,10 @@ impl From<&ParseError> for Issue {
                         ),
                     })
             }
-            _ => Issue::error("Parse error encountered during parsing")
+            // The text as written is all a typo has to say, so it is the message, with no note or help.
+            _ => Issue::error(error.to_string())
                 .with_code(PARSE_ERROR_CODE)
-                .with_annotation(Annotation::primary(error.span()).with_message(error.to_string()))
-                .with_note("This error indicates that the parser encountered a parse issue.")
-                .with_help("Check the syntax of your code."),
+                .with_annotation(Annotation::primary(error.span())),
         }
     }
 }

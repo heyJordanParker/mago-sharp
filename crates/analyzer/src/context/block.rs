@@ -269,6 +269,22 @@ impl<'ctx> BlockContext<'ctx> {
         self.scope.is_global()
     }
 
+    /// The type the local `variable_id` is declared with: its written type, or the general type of its first value
+    /// when it has none, or else the type of the parameter of that name.
+    pub fn declared_type(&self, variable_id: &Word) -> Option<TUnion> {
+        match self.local_types.get(variable_id) {
+            Some((local_type, _)) => Some(local_type.as_ref().clone()),
+            None => self
+                .scope
+                .get_function_like()?
+                .parameters
+                .iter()
+                .find(|parameter| parameter.get_name().0 == *variable_id)?
+                .get_type_metadata()
+                .map(|metadata| metadata.type_union.clone()),
+        }
+    }
+
     /// Runs `analyze` on a constant expression: a constant's value, a default or an attribute's arguments.
     pub fn in_constant_expression<R>(&mut self, analyze: impl FnOnce(&mut Self) -> R) -> R {
         let was_inside_constant_expression = self.flags.inside_constant_expression();

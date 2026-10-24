@@ -430,7 +430,7 @@ fn a_const_local_reassigned_returns_one_compile_error_and_no_nodes() {
 fn php_syntax_returns_a_parse_error_and_no_nodes() {
     let lowered = Lowered::new(&method("        return this->run(1);\n"));
 
-    assert_eq!(lowered.diagnostics(), ["9:20 parse error: Unexpected token `MinusGreaterThan`"]);
+    assert_eq!(lowered.diagnostics(), ["9:20 parse error: Unexpected `->`"]);
     assert_eq!(lowered.nodes().len(), 0);
 }
 
@@ -813,7 +813,7 @@ fn every_line_is_the_line_the_zend_scanner_counts() {
     assert_eq!(lines, [("SHARP_AST_RETURN".to_owned(), 5, 0), ("SHARP_AST_METHOD".to_owned(), 3, 6)]);
 
     let refused = Lowered::new("class Report\r{\r    public void run() { echo 1; }\r}\r");
-    assert_eq!(refused.diagnostics(), ["3:25 compile error: Parse error encountered during parsing"]);
+    assert_eq!(refused.diagnostics(), ["3:25 compile error: Unexpected `echo`"]);
 }
 
 /// ```php
@@ -27184,7 +27184,7 @@ fn a_fully_qualified_null_true_or_false_in_a_library_body_is_refused() {
             .expect_err("PHP# refuses a `\\` name in a library body");
 
         assert_eq!(refusal.len(), 1, "{refusal:?}");
-        assert!(refusal[0].contains("parse error: Unexpected token `FullyQualifiedIdentifier`"), "{refusal:?}");
+        assert!(refusal[0].contains(&format!("parse error: Unexpected `{value}`")), "{refusal:?}");
     }
 }
 

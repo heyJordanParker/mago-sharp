@@ -43,6 +43,9 @@ where
     ) -> Result<Sequence<'arena, ClassLikeMember<'arena>>, ParseError> {
         let members_name = name.map(|name| std::boxed::Box::<[u8]>::from(name.value));
         let mut members = self.new_vec();
+        // Whether the loop is skipping the tokens after an error, which report nothing until a member parses again.
+        // PHP# recovers so, and PHP keeps upstream's error per skipped token.
+        let mut recovering = false;
         loop {
             if matches!(self.stream.peek_kind(0)?, Some(T!["}"])) {
                 break;
@@ -52,16 +55,27 @@ where
             self.state.members_of = members_of;
             self.state.members_name.clone_from(&members_name);
             self.state.type_parameters_of.clone_from(&type_parameters_of);
+            let errors_before = self.errors.len();
             match self.parse_classlike_member() {
-                Ok(member) => members.push(member),
-                Err(err) => self.errors.push(err),
+                Ok(member) => {
+                    members.push(member);
+                    recovering = false;
+                }
+                Err(_) if recovering => self.errors.truncate(errors_before),
+                Err(err) => {
+                    self.errors.push(err);
+                    recovering = self.dialect.is_sharp();
+                }
             }
             if self.stream.current_position() == position_before {
                 if let Ok(Some(token)) = self.stream.lookahead(0) {
                     if token.kind == T!["}"] {
                         break;
                     }
-                    self.errors.push(self.stream.unexpected(Some(token), &[]));
+                    if !recovering {
+                        self.errors.push(self.stream.unexpected(Some(token), &[]));
+                        recovering = self.dialect.is_sharp();
+                    }
                     let _ = self.stream.consume();
                 } else {
                     break;

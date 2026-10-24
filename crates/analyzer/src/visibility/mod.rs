@@ -4,6 +4,7 @@ use mago_word::word;
 
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
+use mago_codex::metadata::flags::MetadataFlags;
 use mago_codex::metadata::module::ModuleKind;
 use mago_codex::metadata::module::ModuleMetadata;
 use mago_codex::metadata::property::PropertyMetadata;
@@ -19,6 +20,7 @@ use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::resolver::property::DeclaredProperty;
 use crate::resolver::property::DeclaredPropertyKind;
+use crate::resolver::property::public_getter;
 use crate::resolver::property::resolve_declared_property;
 use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_member;
@@ -264,7 +266,7 @@ where
             visibility,
             access_span,
             member_span,
-            Some(method_metadata.span),
+            is_in_a_file(method_metadata.flags).then_some(method_metadata.span),
             help_text,
         );
     }
@@ -427,13 +429,23 @@ where
     );
 
     if !is_visible {
-        // PHP names the property and its class apart, and PHP# names the property as it reads: `Order.total`.
+        // PHP names the property and its class apart, and PHP# names the property as it reads: `Order.total`. Its help
+        // names the public method that gives the value, when the class has one, since a class outside the project's
+        // code cannot be made `public`.
         let (issue_title, help_text) = if context.dialect.is_sharp() {
             let property = display_member(context, declaring_class_metadata.original_name, property_name);
-            (
-                format!("Cannot read {visibility} property `{property}`."),
-                format!("Make the property `{property}` readable (e.g., `public`), or add a public getter method."),
-            )
+            let help = match public_getter(
+                context.codebase,
+                declaring_class_metadata.name.as_bytes(),
+                property_name.as_bytes(),
+            ) {
+                Some(getter) => format!("Call `{getter}`, the public method that gives the value."),
+                None => {
+                    format!("Make the property `{property}` readable (e.g., `public`), or add a public getter method.")
+                }
+            };
+
+            (format!("Cannot read {visibility} property `{property}`."), help)
         } else {
             (
                 format!(
@@ -454,7 +466,10 @@ where
             visibility,
             access_span,
             member_span,
-            property_metadata.span.or(property_metadata.name_span),
+            property_metadata
+                .span
+                .or(property_metadata.name_span)
+                .filter(|_| is_in_a_file(declaring_class_metadata.flags)),
             help_text,
         );
     }
@@ -634,7 +649,10 @@ where
                 visibility,
                 access_span,
                 member_span,
-                property_metadata.span.or(property_metadata.name_span),
+                property_metadata
+                    .span
+                    .or(property_metadata.name_span)
+                    .filter(|_| is_in_a_file(declaring_class_metadata.flags)),
                 help_text,
             );
         }
@@ -814,6 +832,14 @@ fn is_visible_via_required_extends(
     false
 }
 
+/// Whether a declaration with `flags` is in a file the developer can open: the project's own or a vendor package's. A
+/// built-in declaration, in a prelude or a stub, and an external analyzer's in-memory source are not.
+const fn is_in_a_file(flags: MetadataFlags) -> bool {
+    !flags.is_built_in() && !flags.is_external()
+}
+
+/// Reports an access the member's visibility refuses. `definition_span` is where the member is declared, when that is
+/// [in a file](is_in_a_file) the developer can open.
 fn report_visibility_issue<A>(
     context: &mut Context<'_, '_, A>,
     calling_class: Option<Word>,

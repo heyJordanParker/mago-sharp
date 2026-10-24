@@ -20,6 +20,7 @@ use crate::artifacts::AnalysisArtifacts;
 use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
+use crate::expression::is_refused_type;
 use crate::resolver::class_name::report_non_existent_class_like;
 
 pub mod utils;
@@ -133,7 +134,8 @@ where
         return get_bool();
     };
 
-    if lhs_type.is_mixed() {
+    // Nothing is certain about a refused value, so a test of it is neither always true nor always false.
+    if lhs_type.is_mixed() || is_refused_type(lhs_type) {
         return get_bool();
     }
 

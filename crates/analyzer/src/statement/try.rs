@@ -304,7 +304,14 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Try<'arena> {
                 let exception_type = TUnion::new(exception_types.into());
 
                 let catch_var_name = php_variable_name(catch_variable.name);
-                catch_block_context.locals.insert(catch_var_name, Rc::new(exception_type));
+                let exception_type = Rc::new(exception_type);
+                // A PHP# `catch` variable is a local of the type its clause writes, as `Money? total = null;` is.
+                if context.dialect.is_sharp() {
+                    catch_block_context
+                        .local_types
+                        .insert(catch_var_name, (Rc::clone(&exception_type), catch_clause.hint.span()));
+                }
+                catch_block_context.locals.insert(catch_var_name, exception_type);
                 catch_block_context.remove_variable_from_conflicting_clauses(context, catch_var_name, None);
                 catch_block_context.variables_possibly_in_scope.insert(catch_var_name);
             }

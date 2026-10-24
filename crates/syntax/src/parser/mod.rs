@@ -127,6 +127,9 @@ where
     /// Parses and returns the program CST.
     fn parse(mut self, source_text: &'arena [u8], file_id: FileId) -> &'arena Program<'arena> {
         let mut statements = Vec::new_in(self.arena);
+        // Whether the loop is skipping the tokens after an error, which report nothing until a statement parses again.
+        // PHP# recovers so, as TypeScript's parser does, and PHP keeps upstream's error per skipped token.
+        let mut recovering = false;
 
         loop {
             let reached_eof = match self.stream.has_reached_eof() {
@@ -150,10 +153,13 @@ where
                     if self.accepts_nesting(&statement, 0, errors_before) {
                         statements.push(statement);
                     }
+                    recovering = false;
                 }
+                Err(_) if recovering => self.errors.truncate(errors_before),
                 Err(err) => {
                     self.errors.push(err);
                     self.accepts_nesting_errors(errors_before);
+                    recovering = self.dialect.is_sharp();
                 }
             }
 
@@ -164,9 +170,19 @@ where
             if position_after == position_before
                 && let Ok(Some(token)) = self.stream.lookahead(0)
             {
-                self.errors.push(self.stream.unexpected(Some(token), &[]));
+                if !recovering {
+                    self.errors.push(self.stream.unexpected(Some(token), &[]));
+                    recovering = self.dialect.is_sharp();
+                }
                 let _ = self.stream.consume();
             }
+        }
+
+        // A PHP# parse error where the one before it starts says nothing new, as TypeScript's parser reports one error
+        // per position.
+        if self.dialect.is_sharp() {
+            let mut last = None;
+            self.errors.retain(|error| last.replace(error.span().start) != Some(error.span().start));
         }
 
         self.arena.alloc(Program {

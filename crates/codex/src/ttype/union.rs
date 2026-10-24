@@ -864,6 +864,13 @@ impl TUnion {
         })
     }
 
+    /// Whether the value is certainly not null. A refused value's type is unknown, so it is neither null nor certainly
+    /// not null, and a null check of it starts no second error.
+    #[must_use]
+    pub fn is_never_null(&self) -> bool {
+        !self.can_be_null() && !self.types.iter().any(|t| matches!(t, TAtomic::Error))
+    }
+
     #[must_use]
     pub fn is_void(&self) -> bool {
         self.types.iter().all(|t| matches!(t, TAtomic::Void)) && !self.types.is_empty()
