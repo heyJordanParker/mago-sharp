@@ -11,15 +11,19 @@ use Throwable;
 use ZipArchive;
 
 use function array_map;
+use function basename;
 use function chmod;
 use function curl_error;
 use function curl_exec;
 use function curl_getinfo;
 use function curl_init;
 use function curl_setopt;
+use function dirname;
 use function escapeshellarg;
+use function explode;
 use function extension_loaded;
 use function fclose;
+use function file;
 use function file_exists;
 use function file_get_contents;
 use function file_put_contents;
@@ -28,6 +32,8 @@ use function fopen;
 use function fprintf;
 use function fwrite;
 use function getenv;
+use function hash_equals;
+use function hash_file;
 use function implode;
 use function ini_get;
 use function is_dir;
@@ -37,6 +43,7 @@ use function ltrim;
 use function mkdir;
 use function number_format;
 use function php_uname;
+use function preg_match;
 use function proc_close;
 use function proc_get_status;
 use function proc_open;
@@ -44,7 +51,10 @@ use function shell_exec;
 use function str_contains;
 use function stream_context_create;
 use function stream_get_contents;
+use function stream_get_meta_data;
+use function stripos;
 use function strtolower;
+use function substr;
 use function sys_get_temp_dir;
 use function trim;
 use function unlink;
@@ -56,7 +66,9 @@ use const CURLOPT_FOLLOWLOCATION;
 use const CURLOPT_HTTPHEADER;
 use const CURLOPT_NOPROGRESS;
 use const CURLOPT_PROGRESSFUNCTION;
+use const CURLOPT_UNRESTRICTED_AUTH;
 use const CURLOPT_USERAGENT;
+use const FILE_IGNORE_NEW_LINES;
 use const LOCK_EX;
 use const LOCK_UN;
 use const STDERR;
@@ -423,9 +435,13 @@ function download_with_curl(string $url, string $destination): void
     curl_setopt($ch, CURLOPT_NOPROGRESS, false);
     curl_setopt($ch, CURLOPT_USERAGENT, 'mago-composer/' . namespace\get_version());
 
+    // The release download redirects to objects.githubusercontent.com. curl 7.58.0 and later send a custom
+    // Authorization header only to the host the request starts at, unless CURLOPT_UNRESTRICTED_AUTH is set, so
+    // the token never reaches the redirect's host.
     $token = namespace\get_github_token();
     if ($token !== null) {
         curl_setopt($ch, CURLOPT_HTTPHEADER, ['Authorization: Bearer ' . $token]);
+        curl_setopt($ch, CURLOPT_UNRESTRICTED_AUTH, false);
     }
 
     curl_setopt($ch, CURLOPT_PROGRESSFUNCTION, function (mixed $_resource, int $dlSize, int $dlNow): int {
@@ -455,17 +471,50 @@ function download_with_curl(string $url, string $destination): void
 }
 
 /**
- * Download a file using `file_get_contents` (requires `allow_url_fopen`).
+ * Download a file using PHP's HTTP stream wrapper (requires `allow_url_fopen`).
  *
- * @throws RuntimeException If the download fails.
+ * The release download redirects to objects.githubusercontent.com, and the wrapper sends a context's headers to
+ * every host it follows. So this follows each redirect itself, and only the first request carries the GitHub
+ * token, as curl sends it.
+ *
+ * @throws RuntimeException If the download fails or redirects more than 20 times.
  *
  * @internal
  */
 function download_with_fopen(string $url, string $destination): void
 {
-    $headers = ['User-Agent: mago-composer/' . namespace\get_version()];
-
     $token = namespace\get_github_token();
+    for ($redirects = 0; $redirects <= 20; $redirects++) {
+        $stream = namespace\open_url($url, $redirects === 0 ? $token : null);
+        $location = namespace\redirect_location($stream);
+        if ($location === null) {
+            file_put_contents($destination, $stream);
+            fclose($stream);
+
+            return;
+        }
+
+        fclose($stream);
+        $url = $location;
+    }
+
+    throw new RuntimeException("Failed to download mago binary: it redirected more than 20 times.\nURL: {$url}");
+}
+
+/**
+ * Open a URL with PHP's HTTP stream wrapper, without following a redirect.
+ *
+ * @param null|non-empty-string $token The GitHub token to send, or null to send none.
+ *
+ * @throws RuntimeException If the request fails.
+ *
+ * @return resource
+ *
+ * @internal
+ */
+function open_url(string $url, ?string $token): mixed
+{
+    $headers = ['User-Agent: mago-composer/' . namespace\get_version()];
     if ($token !== null) {
         $headers[] = 'Authorization: Bearer ' . $token;
     }
@@ -474,30 +523,108 @@ function download_with_fopen(string $url, string $destination): void
         'http' => [
             'method' => 'GET',
             'header' => implode("\r\n", $headers),
-            'follow_location' => 1,
-            'max_redirects' => 20,
+            'follow_location' => 0,
         ],
     ]);
 
-    $contents = file_get_contents($url, false, $context);
-    if ($contents === false) {
+    $stream = fopen($url, 'rb', false, $context);
+    if ($stream === false) {
         throw new RuntimeException("Failed to download mago binary.\nURL: {$url}");
     }
 
-    file_put_contents($destination, $contents);
+    return $stream;
 }
 
 /**
- * Extract an archive to a destination directory.
+ * Read the URL a response redirects to.
  *
- * Supports `.zip` (via ZipArchive) and `.tar.gz` (via PharData).
+ * @param resource $stream A stream `open_url` opened.
  *
- * @throws RuntimeException If the archive cannot be opened or extracted.
+ * @throws RuntimeException If a redirect names no Location.
+ *
+ * @return null|string The Location of a 3xx response, or null for any other response.
  *
  * @internal
  */
-function extract_archive(string $archiveFile, string $destination, string $archiveExtension): void
+function redirect_location(mixed $stream): ?string
 {
+    /** @var list<string> $headers */
+    $headers = stream_get_meta_data($stream)['wrapper_data'] ?? [];
+    if (preg_match('{^HTTP/\S+ 3\d\d\b}', $headers[0] ?? '') !== 1) {
+        return null;
+    }
+
+    foreach ($headers as $header) {
+        if (stripos($header, 'Location:') === 0) {
+            return trim(substr($header, 9));
+        }
+    }
+
+    throw new RuntimeException("The download answered {$headers[0]} with no Location.");
+}
+
+/**
+ * Read the SHA-256 a heyjordanparker/mago-sharp release pins for one of its release's archives.
+ *
+ * release.yml writes `composer/sha256sums.txt`, in `sha256sum`'s format, into the package version it publishes, so
+ * the package version pins the exact binary. A hash read from the release itself would not catch a replaced asset.
+ *
+ * @param string $checksumFile Path to the package's `sha256sums.txt`.
+ * @param string $archiveName The archive's file name (e.g., "mago-1.10.0-x86_64-unknown-linux-gnu.tar.gz").
+ *
+ * @throws RuntimeException If the file does not exist or pins no SHA-256 for the archive.
+ *
+ * @return string The archive's SHA-256, in lowercase hex.
+ *
+ * @internal
+ */
+function get_archive_checksum(string $checksumFile, string $archiveName): string
+{
+    $lines = file_exists($checksumFile) ? file($checksumFile, FILE_IGNORE_NEW_LINES) : false;
+    if ($lines === false) {
+        throw new RuntimeException(
+            "{$checksumFile} does not exist, so no mago download can be verified. Only a heyjordanparker/mago-sharp "
+            . 'release ships it: require a release version.',
+        );
+    }
+
+    foreach ($lines as $line) {
+        [$checksum, $name] = explode('  ', $line, 2) + ['', ''];
+        if ($name === $archiveName) {
+            return $checksum;
+        }
+    }
+
+    throw new RuntimeException(
+        "{$checksumFile} pins no SHA-256 for {$archiveName}, so its download cannot be verified.",
+    );
+}
+
+/**
+ * Extract an archive to a destination directory, if its SHA-256 is the one the release pins.
+ *
+ * Supports `.zip` (via ZipArchive) and `.tar.gz` (via PharData). The archive is deleted either way.
+ *
+ * @param string $checksum The SHA-256 `get_archive_checksum` read for the archive.
+ *
+ * @throws RuntimeException If the archive's SHA-256 differs, or the archive cannot be opened or extracted.
+ *
+ * @internal
+ */
+function extract_archive(string $archiveFile, string $checksum, string $destination, string $archiveExtension): void
+{
+    $actual = (string) hash_file('sha256', $archiveFile);
+    if (!hash_equals($checksum, $actual)) {
+        unlink($archiveFile);
+
+        throw new RuntimeException(
+            'The downloaded '
+            . basename($archiveFile)
+            . " has SHA-256 {$actual}, and heyjordanparker/mago-sharp pins {$checksum} for it, so it is not the "
+            . 'archive the release built. It was deleted, and nothing was extracted.',
+        );
+    }
+
     if ($archiveExtension === '.zip') {
         $zip = new ZipArchive();
         if ($zip->open($archiveFile) !== true) {
@@ -522,15 +649,17 @@ function extract_archive(string $archiveFile, string $destination, string $archi
  * Ensure the mago binary is available, downloading it if necessary.
  *
  * Checks if the binary already exists at the expected path. If not, downloads
- * the appropriate release archive, extracts it, and sets executable permissions.
+ * the appropriate release archive, checks its SHA-256 against the one the package
+ * pins, extracts it, and sets executable permissions.
  *
  * @param string $version Package version.
  * @param string $triple Target triple (e.g., "x86_64-unknown-linux-gnu").
  * @param string $executableExtension Executable extension ("" or ".exe").
  * @param string $archiveExtension Archive extension (".zip" or ".tar.gz").
- * @param string $binDir Base directory for storing binaries.
+ * @param string $binDir Base directory for storing binaries, the package's `composer/bin`. The package's
+ *   `sha256sums.txt` is in its parent directory.
  *
- * @throws RuntimeException If the download, extraction, or binary verification fails.
+ * @throws RuntimeException If the download, checksum, extraction, or binary verification fails.
  *
  * @return string Path to the mago executable.
  *
@@ -546,6 +675,7 @@ function ensure_binary(
     $storageDir = "mago-{$version}-{$triple}";
     $releaseDir = "{$binDir}/{$version}";
     $executablePath = "{$releaseDir}/{$storageDir}/mago{$executableExtension}";
+    $checksumFile = dirname($binDir) . '/sha256sums.txt';
 
     if (file_exists($executablePath)) {
         return $executablePath;
@@ -566,12 +696,14 @@ function ensure_binary(
         $releaseDir,
         $storageDir,
         $executablePath,
+        $checksumFile,
     ): string {
         // Re-check after acquiring lock: another process may have completed the download. (double-checked locking)
         if (file_exists($executablePath)) {
             return $executablePath;
         }
 
+        $checksum = namespace\get_archive_checksum($checksumFile, "{$storageDir}{$archiveExtension}");
         $archiveFile = "{$releaseDir}/{$storageDir}{$archiveExtension}";
         $url = namespace\build_download_url($version, $storageDir, $archiveExtension);
 
@@ -579,7 +711,7 @@ function ensure_binary(
         namespace\download($url, $archiveFile);
         fprintf(STDERR, "Downloaded.\n");
 
-        namespace\extract_archive($archiveFile, $releaseDir, $archiveExtension);
+        namespace\extract_archive($archiveFile, $checksum, $releaseDir, $archiveExtension);
 
         if (!file_exists($executablePath)) {
             throw new RuntimeException("Expected binary not found after extraction at {$executablePath}");
