@@ -263,8 +263,8 @@ impl<'arena, 'classes> NameWalker<'arena, 'classes> {
 
     /// Records the write at `write` to `target` when `target` is a bare name of a local whose block is open, or an index
     /// of one, as in `counts[key] = 1`, which changes the collection the local holds. The write's effect lasts until the
-    /// end of the write, or of the outermost loop that repeats it and not the local's declaration, and forever when a
-    /// lambda that captures the local writes it.
+    /// end of the write, or of the outermost loop that repeats it and not the local's declaration. A write in a lambda
+    /// that captures the local, the innermost one created after the declaration, may run at any time.
     fn record_write(&mut self, target: &Expression<'arena>, write: Span) {
         let mut target = target;
         while let Expression::ArrayAccess(access) = target {
@@ -276,14 +276,16 @@ impl<'arena, 'classes> NameWalker<'arena, 'classes> {
             && let Some(local) = self.locals.lookup(target.name.value())
         {
             let declared = local.declaration.start.offset;
-            let settled = if self.lambdas.iter().any(|&lambda| declared < lambda) {
-                u32::MAX
-            } else {
-                self.loops
-                    .iter()
-                    .find(|repeating| declared < repeating.start.offset)
-                    .map_or(write.end.offset, |repeating| repeating.end.offset)
-            };
+            if let Some(&lambda) = self.lambdas.iter().rev().find(|&&lambda| declared < lambda) {
+                self.resolved_names.write_in_lambda(local, lambda);
+                return;
+            }
+
+            let settled = self
+                .loops
+                .iter()
+                .find(|repeating| declared < repeating.start.offset)
+                .map_or(write.end.offset, |repeating| repeating.end.offset);
             self.resolved_names.write(local, settled);
         }
     }

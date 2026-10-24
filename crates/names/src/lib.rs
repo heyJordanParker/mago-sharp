@@ -171,11 +171,16 @@ pub struct ResolvedNames<'arena> {
     #[cfg_attr(feature = "serde", serde(skip_serializing_if = "HashMap::is_empty"))]
     captures: HashMap<u32, Vec<(&'arena [u8], Local)>>,
 
-    /// Declaration start offset of every PHP# local that code writes after its declaration -> the offset after which no
-    /// write runs: the end of its last write, or of the outermost loop that repeats the write and not the declaration.
-    /// A write in a lambda that captures the local may run at any time, so it gives `u32::MAX`.
+    /// Declaration start offset of every PHP# local that code outside a lambda writes after its declaration -> the
+    /// offset after which no such write runs: the end of its last write, or of the outermost loop that repeats the
+    /// write and not the declaration.
     #[cfg_attr(feature = "serde", serde(skip_serializing_if = "HashMap::is_empty"))]
     written_locals: HashMap<u32, u32>,
+
+    /// Declaration start offset of every PHP# local that a lambda capturing it writes -> the start offset of the first
+    /// such lambda in the file. That write may run at any time.
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "HashMap::is_empty"))]
+    assigning_lambdas: HashMap<u32, u32>,
 
     /// The full name of each class-like of the file's namespace that wins over a default class-like the file names,
     /// whether the namespace holds it or not. Empty for PHP.
@@ -387,21 +392,24 @@ impl<'arena> ResolvedNames<'arena> {
     /// `--` on it or an index of it, or a call of one of the [`CHANGING_COLLECTION_METHODS`] on it.
     #[must_use]
     pub fn is_written(&self, local: &Local) -> bool {
-        self.written_locals.contains_key(&local.declaration.start.offset)
+        let declaration = local.declaration.start.offset;
+
+        self.written_locals.contains_key(&declaration) || self.assigning_lambdas.contains_key(&declaration)
     }
 
-    /// Returns whether a lambda that captures the PHP# local writes it, so the write may run at any time, as Kotlin's
-    /// "local variable that is captured by a changing closure" is.
+    /// Returns the start offset of a lambda that captures the PHP# local and writes it, so the write may run at any
+    /// time, as Kotlin's "local variable that is captured by a changing closure" is: the first such lambda in the file.
     #[must_use]
-    pub fn is_written_by_lambda(&self, local: &Local) -> bool {
-        self.written_locals.get(&local.declaration.start.offset) == Some(&u32::MAX)
+    pub fn lambda_that_assigns(&self, local: &Local) -> Option<u32> {
+        self.assigning_lambdas.get(&local.declaration.start.offset).copied()
     }
 
     /// Returns whether a write of the PHP# local can run after the code at `offset`: a write after it, a write in a
     /// loop that repeats both, or a write in a lambda, as TypeScript 5.4 decides whether a closure keeps a narrowing.
     #[must_use]
     pub fn is_written_after(&self, local: &Local, offset: u32) -> bool {
-        self.written_locals.get(&local.declaration.start.offset).is_some_and(|settled| *settled > offset)
+        self.lambda_that_assigns(local).is_some()
+            || self.written_locals.get(&local.declaration.start.offset).is_some_and(|settled| *settled > offset)
     }
 
     /// Returns the full name of each class-like of the PHP# file's namespace that would win over a default class-like
@@ -426,6 +434,11 @@ impl<'arena> ResolvedNames<'arena> {
     pub(crate) fn write(&mut self, local: Local, settled: u32) {
         let last = self.written_locals.entry(local.declaration.start.offset).or_default();
         *last = (*last).max(settled);
+    }
+
+    /// Records a write of `local` in the lambda that starts at `lambda`, which may run at any time.
+    pub(crate) fn write_in_lambda(&mut self, local: Local, lambda: u32) {
+        self.assigning_lambdas.entry(local.declaration.start.offset).or_insert(lambda);
     }
 
     pub(crate) fn add_namespace_class(&mut self, name: &'arena [u8]) {

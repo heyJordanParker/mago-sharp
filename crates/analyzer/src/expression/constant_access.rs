@@ -3,6 +3,7 @@ use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::metadata::constant::ConstantMetadata;
 use mago_codex::scanner::inference::get_literal_constant_type;
 use mago_codex::scanner::inference::get_platform_constant_type;
+use mago_codex::ttype::TType;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::expander;
 use mago_codex::ttype::expander::TypeExpansionOptions;
@@ -38,6 +39,8 @@ use crate::expression::variable::read_variable;
 use crate::resolver::class_name::report_keyword_in_another_case;
 use crate::resolver::property::resolve_function_value;
 use crate::utils::expression::get_bare_name_variable_id;
+use crate::utils::names::display_value_type;
+use crate::utils::names::display_variable_name;
 use crate::utils::names::namespace_member;
 use mago_bytes::BytesDisplay;
 
@@ -55,11 +58,17 @@ impl<'arena> Analyzable<'_, 'arena> for ConstantAccess<'arena> {
             let mut resulting_type =
                 read_variable(context, block_context, artifacts, variable_id.as_bytes(), self.span());
             // A local a lambda assigns may change whenever any code runs, so it is never narrowed, as Kotlin refuses a
-            // smart cast of "a local variable that is captured by a changing closure".
+            // smart cast of "a local variable that is captured by a changing closure". An error at a read that would
+            // have been narrowed says so.
             if let Some(Binding::Local(local)) = context.resolved_names.binding(&self.name)
-                && context.resolved_names.is_written_by_lambda(&local)
+                && let Some(lambda) = context.resolved_names.lambda_that_assigns(&local)
                 && let Some(declared_type) = block_context.declared_type(&variable_id)
             {
+                if resulting_type.get_id() != declared_type.get_id() {
+                    let explained =
+                        explain_unnarrowed_read(context, variable_id, lambda, &resulting_type, &declared_type);
+                    context.lambda_assigned_reads.insert(self.span(), explained);
+                }
                 resulting_type = declared_type.into();
             }
             artifacts.set_rc_expression_type(self, resulting_type);
@@ -156,6 +165,33 @@ impl<'arena> Analyzable<'_, 'arena> for ConstantAccess<'arena> {
 
         Ok(())
     }
+}
+
+/// The note and the help an error at a read of the local `variable_id` adds, when a test or an assignment narrowed it
+/// to `narrowed` but it reads at `declared` because the lambda that starts at `lambda` assigns it. As Kotlin's "smart
+/// cast is impossible" error, the note names the lambda's line, and the help binds the value to a name, as spec section
+/// 21 keeps a property's tested value.
+fn explain_unnarrowed_read<A>(
+    context: &Context<'_, '_, A>,
+    variable_id: Word,
+    lambda: u32,
+    narrowed: &TUnion,
+    declared: &TUnion,
+) -> (String, String)
+where
+    A: Arena,
+{
+    let name = display_variable_name(context, variable_id.as_bytes());
+    let line = context.source_file.line_number(lambda) + 1;
+    let narrowed = display_value_type(context, narrowed, declared);
+    let bound = if name == "t" { "tested" } else { "t" };
+
+    (
+        format!(
+            "`{name}` is not narrowed to `{narrowed}` here: the lambda on line {line} assigns it, so it may change before this read."
+        ),
+        format!("Bind the tested value to a name, as in `{name} is {narrowed} {bound}`, and read `{bound}`."),
+    )
 }
 
 /// Analyzes the PHP# read `read` of `namespace_name.member`, as `Pdf.DEFAULT_DPI` after `import Vendor.Pdf;`, as a read

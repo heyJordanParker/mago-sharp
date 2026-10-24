@@ -155,6 +155,10 @@ fn analyze_with_artifacts(
             if name.starts_with("vendor/") {
                 file.file_type = FileType::Vendored;
             }
+            // An external analyzer's in-memory source, which no file on disk holds.
+            if name.starts_with("external/") {
+                file.file_type = FileType::External;
+            }
 
             (*name, database.add(file))
         })
@@ -1867,7 +1871,8 @@ fn a_read_of_an_exception_s_message_names_its_public_method() {
 }
 
 /// A protected member of a vendor package's class is refused with an annotation at its declaration, since the package's
-/// file is one the developer can open. Only a built-in declaration, in a prelude or a stub, has none.
+/// file is one the developer can open. A built-in declaration, in a prelude or a stub, has none, and neither has an
+/// external analyzer's in-memory source.
 #[test]
 fn a_refused_member_of_a_vendor_class_points_at_its_declaration() {
     let sharp = "namespace Demo;\n\nimport Lib.Secret;\n\npublic class Reader\n{\n    public static int code(Secret secret) => secret.code;\n\n    public static int hidden(Secret secret) => secret.hidden();\n}\n";
@@ -1895,6 +1900,18 @@ fn a_refused_member_of_a_vendor_class_points_at_its_declaration() {
             ),
         ]
     );
+
+    // An external analyzer's in-memory source is no file either, so its declarations get no annotation.
+    let issues =
+        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Reader.sharp", sharp), &[("external/Lib/Secret.php", secret)]);
+    let refused: Vec<(&str, usize)> = issues
+        .iter()
+        .map(|issue| {
+            let elsewhere = issue.annotations.iter().filter(|annotation| annotation.span.file_id != reader).count();
+            (issue.code.as_deref().unwrap_or("none"), elsewhere)
+        })
+        .collect();
+    assert_eq!(refused, [("invalid-property-read", 0), ("invalid-method-access", 0)]);
 }
 
 /// An interface extends only interfaces, as C#'s CS0527 and Java's `interface expected here` require, so a plain PHP
@@ -14878,6 +14895,69 @@ fn a_local_a_lambda_assigns_is_never_narrowed_and_a_lambda_keeps_a_narrowing_no_
             "214:16 possible-method-access-on-null",
         ]
     );
+}
+
+/// An error at a read of a local that a test narrowed, but that a lambda assigns, says which lambda assigns it and
+/// binds the tested value to a name instead, as Kotlin's "smart cast is impossible" error names its reason and spec
+/// section 21 keeps a property's tested value. A read no test narrowed says nothing more.
+#[test]
+fn an_error_at_a_local_a_lambda_assigns_names_the_lambda_and_binds_the_tested_value() {
+    let sharp = "namespace Demo;\n\npublic class Report\n{\n    public static int tested(Report? s)\n    {\n        Function<void()> clear = () => { s = null; };\n        if (s != null) {\n            clear();\n            return s.size();\n        }\n        return 0;\n    }\n\n    public static int untested(Report? s)\n    {\n        Function<void()> clear = () => { s = null; };\n        clear();\n        return s.size();\n    }\n\n    public static int argument(string? s)\n    {\n        Function<void()> clear = () => { s = null; };\n        if (s != null) {\n            clear();\n            return Report.count(s);\n        }\n        return 0;\n    }\n\n    public static int count(string text) => 1;\n\n    public int size() => 1;\n}\n";
+
+    let explained: Vec<(String, Vec<String>, Option<String>)> =
+        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Report.sharp", sharp), &[])
+            .into_iter()
+            .map(|issue| (located(sharp, &issue), issue.notes, issue.help))
+            .collect();
+    assert_eq!(
+        explained,
+        [
+            (
+                "10:20 possible-method-access-on-null".to_owned(),
+                vec![
+                    "`s` is not narrowed to `Report` here: the lambda on line 7 assigns it, so it may change before this read."
+                        .to_owned()
+                ],
+                Some("Bind the tested value to a name, as in `s is Report t`, and read `t`.".to_owned()),
+            ),
+            (
+                "19:16 possible-method-access-on-null".to_owned(),
+                vec![],
+                Some("Use the nullsafe operator (`?.`) if `null` is an expected value.".to_owned()),
+            ),
+            (
+                "27:33 possibly-null-argument".to_owned(),
+                vec![
+                    "`s` is not narrowed to `string` here: the lambda on line 24 assigns it, so it may change before this read."
+                        .to_owned()
+                ],
+                Some("Bind the tested value to a name, as in `s is string t`, and read `t`.".to_owned()),
+            ),
+        ]
+    );
+}
+
+/// A call of a method whose return type is `never` passed as an argument gives no value, as a `throw` does, and the
+/// error says so in the words of the code, never naming the type `never` it did not write there.
+#[test]
+fn an_argument_that_never_gets_a_value_is_an_error_that_names_no_type() {
+    let sharp = "namespace Demo;\n\npublic class Report\n{\n    public static never fail() => throw new Exception(\"no\");\n\n    public static int take(int value) => value;\n\n    public static int called() => Report.take(Report.fail());\n\n    public static int thrown() => Report.take(throw new Exception(\"no\"));\n}\n";
+
+    let explained: Vec<(String, String, Vec<String>, Option<String>)> =
+        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Report.sharp", sharp), &[])
+            .into_iter()
+            .map(|issue| (located(sharp, &issue), issue.message, issue.notes, issue.help))
+            .collect();
+    let no_value = |at: &str| {
+        (
+            format!("{at} no-value"),
+            "Argument #1 passed to method `Report.take` gets no value: its expression always throws or exits, so the call never runs."
+                .to_owned(),
+            Vec::<String>::new(),
+            Some("Write the expression as a statement of its own, or pass a value.".to_owned()),
+        )
+    };
+    assert_eq!(explained, [no_value("9:47"), no_value("11:47")]);
 }
 
 /// A `catch` variable is a local of the type its clause names, so a lambda reads it at that type when code writes it

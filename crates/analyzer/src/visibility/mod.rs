@@ -4,6 +4,7 @@ use mago_word::word;
 
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
+use mago_codex::metadata::flags::MetadataFlags;
 use mago_codex::metadata::module::ModuleKind;
 use mago_codex::metadata::module::ModuleMetadata;
 use mago_codex::metadata::property::PropertyMetadata;
@@ -265,7 +266,7 @@ where
             visibility,
             access_span,
             member_span,
-            (!method_metadata.flags.is_built_in()).then_some(method_metadata.span),
+            is_in_a_file(method_metadata.flags).then_some(method_metadata.span),
             help_text,
         );
     }
@@ -468,7 +469,7 @@ where
             property_metadata
                 .span
                 .or(property_metadata.name_span)
-                .filter(|_| !declaring_class_metadata.flags.is_built_in()),
+                .filter(|_| is_in_a_file(declaring_class_metadata.flags)),
             help_text,
         );
     }
@@ -651,7 +652,7 @@ where
                 property_metadata
                     .span
                     .or(property_metadata.name_span)
-                    .filter(|_| !declaring_class_metadata.flags.is_built_in()),
+                    .filter(|_| is_in_a_file(declaring_class_metadata.flags)),
                 help_text,
             );
         }
@@ -831,8 +832,14 @@ fn is_visible_via_required_extends(
     false
 }
 
-/// Reports an access the member's visibility refuses. `definition_span` is where the member is declared, unless that is
-/// a built-in declaration: a prelude or a stub is no file the developer can open. A vendor package's file is one.
+/// Whether a declaration with `flags` is in a file the developer can open: the project's own or a vendor package's. A
+/// built-in declaration, in a prelude or a stub, and an external analyzer's in-memory source are not.
+const fn is_in_a_file(flags: MetadataFlags) -> bool {
+    !flags.is_built_in() && !flags.is_external()
+}
+
+/// Reports an access the member's visibility refuses. `definition_span` is where the member is declared, when that is
+/// [in a file](is_in_a_file) the developer can open.
 fn report_visibility_issue<A>(
     context: &mut Context<'_, '_, A>,
     calling_class: Option<Word>,

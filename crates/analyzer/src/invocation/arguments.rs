@@ -321,6 +321,20 @@ where
 
     if input_type.is_never() {
         let target_name_str = invocation_target.guess_name(context);
+        // PHP# code writes `never` only as a return type, so its error says what the code does: the argument's
+        // expression always throws or exits, and the call never runs.
+        if context.dialect.is_sharp() {
+            context.collector.report_with_code(
+                IssueCode::NoValue,
+                Issue::error(format!(
+                    "{argument_subject} passed to {target_kind_str} `{target_name_str}` gets no value: its expression always throws or exits, so the call never runs."
+                ))
+                .with_annotation(Annotation::primary(input_expression.span()).with_message("Never returns a value."))
+                .with_help("Write the expression as a statement of its own, or pass a value."),
+            );
+
+            return false;
+        }
         context.collector.report_with_code(
             IssueCode::NoValue,
             Issue::error(format!(
