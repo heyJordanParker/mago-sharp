@@ -17262,6 +17262,34 @@ fn a_generic_method_value_is_a_closure_that_calls_the_method_with_its_type_argum
     assert!(boxer.contains(r##"ZVAL "#0""##), "{boxer}");
 }
 
+/// A literal whose place names the type parameter of the method it runs in is made with the call's type argument, as
+/// `new \Sharp\Map<string, #0>()`: a local's, and a parameter's of a method it calls with that type argument.
+#[test]
+fn a_literal_in_a_generic_method_takes_the_methods_own_type_arguments() {
+    let lowered = Lowered::with(
+        "namespace App;\n\nclass Report\n{\n    public void build<TItem>(TItem item)\n    {\n        Map<string, TItem> made = [:];\n        Map<string, TItem> held = [\"k\": item];\n        this.take<TItem>([:]);\n    }\n\n    public void take<TValue>(Map<string, TValue> given) {}\n}\n",
+        &[],
+    );
+    let build = lowered.body_of("build");
+
+    assert_eq!(build.matches(r##"ZVAL "string, #0""##).count(), 3, "{build}");
+    assert_eq!(build.matches("SHARP_TYPE_ARGS\n").count(), 4, "{build}");
+}
+
+/// The value of a method that makes a `Map` passes the `Map`'s type arguments to the method as a call of it does, as
+/// `$items->entries('int, string')`.
+#[test]
+fn a_method_value_that_makes_a_map_passes_its_type_arguments() {
+    let lowered = Lowered::with(
+        "namespace App;\n\nclass Report\n{\n    public int run(List<string> items)\n    {\n        const made = items.entries;\n\n        return made().count();\n    }\n}\n",
+        &[],
+    );
+    let run = lowered.body_of("run");
+
+    assert_eq!(run.matches(r#"ZVAL "entries""#).count(), 1, "{run}");
+    assert_eq!(run.matches(r#"ZVAL "int, string""#).count(), 1, "{run}");
+}
+
 /// ```php
 /// return function (float $ratio, bool $loud, ?int $count, int|string $key, int|string|null $code,
 ///     \App\Report $report, \Closure $step, $tags, string $receiver#1, ...$arguments) use ($receiver) { … };

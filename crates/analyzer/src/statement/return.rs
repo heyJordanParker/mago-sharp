@@ -376,7 +376,13 @@ pub fn handle_return_value<'ctx, A>(
     }
 
     if let Some(return_value) = return_value
-        && let Some(set_type) = get_set_literal_type(context, artifacts, return_value, &expected_return_type)
+        && let Some(set_type) = get_set_literal_type(
+            context,
+            artifacts,
+            return_value,
+            &expected_return_type,
+            block_context.scope.get_function_like(),
+        )
     {
         inferred_return_type = Rc::new(set_type);
     }

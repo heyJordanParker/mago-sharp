@@ -183,7 +183,8 @@ where
             && let Some(value_type) = artifacts.get_expression_type(value).cloned()
             && !value_type.is_never()
         {
-            let value_type = get_set_literal_type(context, artifacts, value, &declared_type).unwrap_or(value_type);
+            let value_type =
+                get_set_literal_type(context, artifacts, value, &declared_type, None).unwrap_or(value_type);
 
             let mut comparison_result = ComparisonResult::for_dialect(context.dialect);
             if union_comparator::is_contained_by(

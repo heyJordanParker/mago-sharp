@@ -534,15 +534,15 @@ impl<'analysis> Types<'analysis> {
 
     /// The type arguments of the one `Map` or `Set` `r#type` holds, `string, int` for a `Map<string, int>`, written as
     /// [`Self::type_arguments`] writes those of a `new`, which a table PHP# code makes as a value of `r#type` takes, so
-    /// the engine checks each write plain PHP makes into it. None when `r#type` holds no table or several, or an argument
-    /// PHP# can't write, as the elements of an empty literal before it lands.
+    /// the engine checks each write plain PHP makes into it. None for an argument PHP# can't write, as the elements of an
+    /// empty literal before it lands.
     pub(crate) fn table_type_arguments(&self, r#type: &TUnion) -> Option<String> {
         let mut tables = r#type.types.iter().filter_map(|atomic| match atomic {
             TAtomic::Array(table @ (TArray::Keyed(_) | TArray::Set(_))) => Some(table),
             _ => None,
         });
         let (Some(table), None) = (tables.next(), tables.next()) else {
-            return None;
+            unreachable!("the lowering makes a table of a type that holds one, and the analysis refuses a type of two");
         };
         let (key, value) = self.array_parameters(table);
         let arguments = if matches!(table, TArray::Set(_)) { vec![value] } else { vec![key, value] };

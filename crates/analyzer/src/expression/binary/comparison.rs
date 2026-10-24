@@ -524,7 +524,7 @@ fn type_collection_literal<'arena, A>(
     } else if array.elements.is_empty() {
         get_empty_literal_type(Some(literal), &other_type)
     } else {
-        get_set_literal_type(context, artifacts, literal, &other_type)
+        get_set_literal_type(context, artifacts, literal, &other_type, block_context.scope.get_function_like())
     };
     if let Some(literal_type) = literal_type {
         artifacts.set_expression_type(array, literal_type.clone());

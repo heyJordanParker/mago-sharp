@@ -2099,7 +2099,8 @@ fn check_parameter_default_value<'ctx, 'arena, A>(
         return;
     }
 
-    let Some(default_type) = get_set_literal_type(context, artifacts, default_expression, declared_type)
+    // PHP evaluates a default as a constant expression, outside the frame that holds the method's type arguments.
+    let Some(default_type) = get_set_literal_type(context, artifacts, default_expression, declared_type, None)
         .or_else(|| artifacts.get_expression_type(default_expression).cloned())
     else {
         return;

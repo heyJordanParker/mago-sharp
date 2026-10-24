@@ -924,9 +924,13 @@ where
                     );
                     // Spec section 12: a literal takes its collection type from the parameter it lands in, so a list
                     // literal is a `Set` where the parameter declares one, at any depth.
-                    if let Some(literal_type) =
-                        get_set_literal_type(context, artifacts, argument_expression, &final_parameter_type)
-                    {
+                    if let Some(literal_type) = get_set_literal_type(
+                        context,
+                        artifacts,
+                        argument_expression,
+                        &final_parameter_type,
+                        block_context.scope.get_function_like(),
+                    ) {
                         argument_value_type = literal_type;
                     }
                 }
