@@ -392,8 +392,16 @@ where
         )?;
     }
 
+    // A PHP# call with a target the analysis refused, as an unknown function or a method called on `null`, has the type
+    // of a refused value, so nothing that reads its value reports the same mistake again.
+    let refused = context.dialect.is_sharp() && encountered_invalid_targets;
+
     let resulting_type = if let Some(resulting_type) = resulting_type {
         if encountered_invalid_targets {
+            if refused {
+                artifacts.set_expression_type(&call_span, TUnion::from_atomic(TAtomic::Error));
+            }
+
             return Ok(());
         } else if encountered_mixed_targets {
             get_mixed()
@@ -414,7 +422,9 @@ where
     } else {
         analyze_invocation_arguments_source(context, block_context, artifacts, &invocation_arguments)?;
 
-        if encountered_mixed_targets {
+        if refused {
+            TUnion::from_atomic(TAtomic::Error)
+        } else if encountered_mixed_targets {
             get_mixed()
         } else {
             return Ok(());

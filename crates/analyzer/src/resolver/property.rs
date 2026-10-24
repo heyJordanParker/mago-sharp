@@ -1313,10 +1313,17 @@ where
             return None;
         }
 
-        result.has_invalid_path = true;
+        // A PHP# object has only the properties its class declares, so no subclass defines a missing one, and the read
+        // is refused: what it gives reports nothing again.
+        if context.dialect.is_sharp() {
+            result.has_error_path = true;
+        } else {
+            result.has_invalid_path = true;
 
-        if !class_metadata.flags.is_final() || class_metadata.kind.is_interface() || class_metadata.kind.is_trait() {
-            result.has_possibly_defined_property = true;
+            if !class_metadata.flags.is_final() || class_metadata.kind.is_interface() || class_metadata.kind.is_trait()
+            {
+                result.has_possibly_defined_property = true;
+            }
         }
 
         report_non_existent_property(context, class_id, prop_name, selector.span(), object_expr.span(), false);

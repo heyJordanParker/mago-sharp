@@ -427,7 +427,12 @@ where
             return None;
         }
 
-        result.has_invalid_path = true;
+        // A refused PHP# read reports nothing again where its value goes.
+        if context.dialect.is_sharp() {
+            result.has_error_path = true;
+        } else {
+            result.has_invalid_path = true;
+        }
         report_non_existent_property(
             context,
             declaring_class_metadata.original_name,

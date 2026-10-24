@@ -322,7 +322,7 @@ where
             report_missing_function(context, &function, function_name.span());
         }
 
-        return Ok((vec![], false));
+        return Ok((vec![], true));
     } else if let Expression::Identifier(function_name) = expression {
         let name = word(context.resolved_names.get(function_name));
         let unqualified_name = word(function_name.value());

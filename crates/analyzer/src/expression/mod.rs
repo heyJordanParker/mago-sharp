@@ -679,6 +679,9 @@ where
     // The test states the type of the value it tests, so a read of a property whose type is unknown, spec section 14.3,
     // needs no warning there: the warning's own help asks for this test.
     let tested_read = tested_value(node).unparenthesized().span();
+    // A tested value whose expression is refused reported itself, so no test of it reports that it always or never
+    // holds.
+    let tested_refused = artifacts.get_expression_type(tested_value(node)).is_some_and(is_refused_type);
     let issues: Vec<Issue> = issues
         .into_iter()
         .filter(|issue| {
@@ -695,6 +698,7 @@ where
             // PHP's report on `match (true)` names `true`, so a PHP# `match` reports what it misses itself.
             !is_code(issue, IssueCode::MatchNotExhaustive)
                 && !reads_tested_value
+                && !(tested_refused && (always_true || is_code(issue, IssueCode::ImpossibleTypeComparison)))
                 && (!is_code(issue, IssueCode::RedundantLogicalOperation)
                     || span.is_none_or(|span| !field_tests.iter().any(|test| test.start == span.start)))
                 && (!always_true || called.is_none_or(|call| !is_shape(call)))
@@ -782,7 +786,10 @@ where
                 && is_code(issue, IssueCode::ImpossibleTypeComparison)
                 && issue.primary_span().is_some_and(|span| pattern.contains(&span.start))
         });
-        if reported || !artifacts.get_rc_expression_type(test).is_some_and(|test_type| test_type.is_false()) {
+        if tested_refused
+            || reported
+            || !artifacts.get_rc_expression_type(test).is_some_and(|test_type| test_type.is_false())
+        {
             continue;
         }
 

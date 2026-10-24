@@ -322,11 +322,7 @@ fn analyze_names_the_member_a_bare_call_meant_on_a_line_without_a_refusal() {
     let output = run(directory.path(), "analyze", &["--reporting-format", "emacs"]);
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    assert_eq!(
-        issues_in(&stdout, "src/Demo/Report.sharp"),
-        ["9:39 parse", "7:32 non-existent-function", "7:32 mixed-return-statement"],
-        "{stdout}"
-    );
+    assert_eq!(issues_in(&stdout, "src/Demo/Report.sharp"), ["9:39 parse", "7:32 non-existent-function"], "{stdout}");
     assert!(
         stdout.contains(
             "Write `Report.total()`: a static method reaches the members of its class through the class name."

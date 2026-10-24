@@ -10,6 +10,7 @@ use mago_codex::ttype::expander::expand_union;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_never;
 use mago_codex::ttype::get_null;
+use mago_codex::ttype::union::TUnion;
 use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::ClassLikeMemberSelector;
@@ -230,7 +231,14 @@ where
     }
 
     let refused_object = artifacts.get_expression_type(object).filter(|object_type| is_refused_type(object_type));
-    let mut resulting_type = refused_object.cloned().or(resulting_expression_type).unwrap_or_else(get_never);
+    // A PHP# read the resolution refused reported itself, so what it gives reports nothing again.
+    let mut resulting_type = refused_object.cloned().or(resulting_expression_type).unwrap_or_else(|| {
+        if context.dialect.is_sharp() && resolution_result.has_error_path {
+            TUnion::from_atomic(TAtomic::Error)
+        } else {
+            get_never()
+        }
+    });
     let object_has_nullsafe_null = artifacts.get_expression_type(object).is_some_and(|t| t.has_nullsafe_null());
     if resolution_result.all_properties_non_nullable
         && ((is_null_safe && resolution_result.encountered_null) || object_has_nullsafe_null)

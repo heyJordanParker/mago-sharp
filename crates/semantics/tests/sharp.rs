@@ -1334,11 +1334,7 @@ fn declare_of_another_setting_fails_as_a_typo_does() {
         let issues: Vec<(String, Option<String>)> =
             check_in_type_file(code).into_iter().map(|issue| (issue.message, issue.help)).collect();
 
-        assert_eq!(
-            issues,
-            [("Parse error encountered during parsing".to_owned(), Some("Check the syntax of your code.".to_owned()))],
-            "{code}"
-        );
+        assert_eq!(issues, [("Parse error encountered during parsing".to_owned(), None)], "{code}");
     }
 }
 
@@ -2944,6 +2940,25 @@ fn a_superglobal_with_or_without_dollar_fails_as_a_typo_does() {
             format!("16:27 {message}"),
         ]
     );
+}
+
+/// Decision 38: a superglobal fails as a typo does, so its error quotes the code as written, with no note or help and no
+/// message that recognizes the superglobal or names `Environment`. A `$` variable fails the same way.
+#[test]
+fn a_superglobal_and_a_dollar_variable_fail_with_the_text_they_write_and_nothing_more() {
+    let code = leak(method("        Store.keep($_SERVER[\"HTTP_HOST\"], _SERVER, $extra);\n        return extra;\n"));
+    let issues: Vec<(String, Option<String>, usize, Option<String>)> = check_in_type_file(code)
+        .into_iter()
+        .map(|issue| {
+            let annotation = issue.annotations.first().and_then(|annotation| annotation.message.clone());
+            (issue.message, annotation, issue.notes.len(), issue.help)
+        })
+        .collect();
+    let typo = |written: &str| {
+        ("Parse error encountered during parsing".to_owned(), Some(format!("Unexpected `{written}`")), 0, None)
+    };
+
+    assert_eq!(issues, [typo("$_SERVER"), typo("_SERVER"), typo("$extra")]);
 }
 
 /// A write to a superglobal's element fails as a read does, at the superglobal, not at the write target.
@@ -7064,7 +7079,7 @@ fn an_error_for_a_php_form_without_a_sharp_form_names_no_php_code() {
     assert_eq!(
         helps("src/Demo/Order.sharp", code),
         [
-            ("Parse error encountered during parsing".to_owned(), Some("Check the syntax of your code.".to_owned())),
+            ("Parse error encountered during parsing".to_owned(), None),
             ("`[` cannot follow a class name in a `new` expression.".to_owned(), None),
             (
                 "Write the lambda in parentheses to call it where it is written, as in `((int a) => a + 1)(2)`."

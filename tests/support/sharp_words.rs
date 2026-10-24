@@ -26,8 +26,10 @@ static BANNED: LazyLock<Vec<(&str, Regex)>> = LazyLock::new(|| {
     .collect()
 });
 
-/// The PHP form a refusal quotes because the developer wrote it, as in "PHP# has no `compact`".
-static REFUSED_FORM: LazyLock<Regex> = LazyLock::new(|| Regex::new("PHP# has no `[^`]*`").expect("a valid pattern"));
+/// The PHP form a refusal quotes because the developer wrote it, as in "PHP# has no `compact`" and the typo error
+/// "Unexpected `mixed`".
+static REFUSED_FORM: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new("PHP# has no `[^`]*`|Unexpected `[^`]*`").expect("a valid pattern"));
 
 /// The first text of `issue`, its message, help, notes or annotations, that names something only PHP has outside a
 /// refused form it quotes, with what it names: what it is and the words found.

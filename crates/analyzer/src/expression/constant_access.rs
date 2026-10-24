@@ -114,6 +114,8 @@ impl<'arena> Analyzable<'_, 'arena> for ConstantAccess<'arena> {
                             "Check `{written}` for typos. A bare name reads a constant of this file's namespace, declared in a `.php` file. A class constant is read through its class, as in `Limits.MAX`, and a plain PHP library's constant through its namespace, as in `Pdf.DEFAULT_DPI`."
                         )),
                 );
+                // A refused read is refused once, so nothing that uses it reports again.
+                artifacts.set_expression_type(self, TUnion::from_atomic(TAtomic::Error));
             } else {
                 let name = BytesDisplay(name_bytes);
                 context.collector.report_with_code(

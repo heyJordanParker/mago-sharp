@@ -92,6 +92,10 @@ pub struct BlockContext<'ctx> {
     /// type. Every value assigned to the local must have this type.
     pub local_types: WordMap<(Rc<TUnion>, Span)>,
 
+    /// Each local of the function a lambda written in it assigns. Any call may run the lambda, so a call ends the
+    /// local's narrowing. Every block of one function shares the set, so a lambda written in a branch counts after it.
+    pub lambda_written_locals: Rc<RefCell<WordSet>>,
+
     /// Bitflags for various context states (inside_conditional, inside_isset, etc.)
     pub flags: BlockContextFlags,
 
@@ -232,6 +236,7 @@ impl<'ctx> BlockContext<'ctx> {
             references_possibly_from_confusing_scope: WordSet::default(),
             by_reference_constraints: WordMap::default(),
             local_types: WordMap::default(),
+            lambda_written_locals: Rc::default(),
             flags: BlockContextFlags::new(),
             clauses: Vec::new(),
             reconciled_expression_clauses: Vec::new(),
@@ -267,6 +272,22 @@ impl<'ctx> BlockContext<'ctx> {
 
     pub fn is_global_scope(&self) -> bool {
         self.scope.is_global()
+    }
+
+    /// The type the local `variable_id` is declared with: its written type, or the general type of its first value
+    /// when it has none, or else the type of the parameter of that name.
+    pub fn declared_type(&self, variable_id: &Word) -> Option<TUnion> {
+        match self.local_types.get(variable_id) {
+            Some((local_type, _)) => Some(local_type.as_ref().clone()),
+            None => self
+                .scope
+                .get_function_like()?
+                .parameters
+                .iter()
+                .find(|parameter| parameter.get_name().0 == *variable_id)?
+                .get_type_metadata()
+                .map(|metadata| metadata.type_union.clone()),
+        }
     }
 
     /// Runs `analyze` on a constant expression: a constant's value, a default or an attribute's arguments.

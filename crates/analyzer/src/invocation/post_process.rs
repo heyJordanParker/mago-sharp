@@ -84,6 +84,7 @@ where
 {
     update_by_reference_argument_types(context, block_context, artifacts, invoication, template_result, parameters)?;
     clear_object_property_narrowings(context, block_context, invoication, this_variable);
+    clear_lambda_written_local_narrowings(block_context);
 
     let Some(identifier) = invoication.target.get_function_like_identifier() else {
         return Ok(());
@@ -467,6 +468,27 @@ fn record_by_reference_mutation_in_loop(artifacts: &mut AnalysisArtifacts, varia
         loop_scope.possibly_redefined_loop_parent_variables.insert(variable_id, Rc::clone(&new_type));
         loop_scope.by_reference_loop_mutations.insert(variable_id, new_type);
     }
+}
+
+/// Gives each local a lambda of the function assigns its declared type back after an invocation, and drops the clauses
+/// that name it. The invocation may run the lambda, and spec section 21 ends a local's narrowing at an assignment.
+fn clear_lambda_written_local_narrowings(block_context: &mut BlockContext<'_>) {
+    if block_context.lambda_written_locals.borrow().is_empty() {
+        return;
+    }
+
+    let written = block_context.lambda_written_locals.borrow().clone();
+    for variable in &written {
+        if block_context.locals.contains_key(variable)
+            && let Some(declared_type) = block_context.declared_type(variable)
+        {
+            block_context.locals.insert(*variable, Rc::new(declared_type));
+        }
+    }
+
+    let names_written = |clause: &Rc<Clause>| clause.possibilities.keys().any(|variable| written.contains(variable));
+    block_context.clauses.retain(|clause| clause.wedge || !names_written(clause));
+    block_context.reconciled_expression_clauses.retain(|clause| clause.wedge || !names_written(clause));
 }
 
 /// Clears narrowed property types after an invocation.

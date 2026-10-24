@@ -229,7 +229,9 @@ where
 
 /// Brings each local a PHP# lambda captures into the lambda's block, as a closure's `use` clause does. Spec section 3
 /// captures the variable itself, so a captured local that code writes is captured by reference, as the engine runs
-/// it, and [`merge_captured_references`] carries the lambda's writes back.
+/// it, and [`merge_captured_references`] carries the lambda's writes back. The lambda may run after any write, so it
+/// reads such a local at its declared type, never at the type a test narrowed it to, and assigns it only values of
+/// that type.
 pub fn capture_lambda_locals<A>(
     context: &Context<'_, '_, A>,
     lambda: Span,
@@ -244,6 +246,12 @@ pub fn capture_lambda_locals<A>(
 
         let mut variable_type = block_context.locals.get(&variable).cloned().unwrap_or_else(|| Rc::new(get_mixed()));
         if context.resolved_names.is_written(local) {
+            if let Some(declared_type) = block_context.declared_type(&variable) {
+                variable_type = Rc::new(declared_type);
+            }
+            if let Some(local_type) = block_context.local_types.get(&variable) {
+                lambda_block_context.local_types.insert(variable, local_type.clone());
+            }
             Rc::make_mut(&mut variable_type).set_by_reference(true);
             lambda_block_context.references_to_external_scope.insert(variable);
         }
@@ -486,7 +494,9 @@ pub fn is_member_read(expression: &Expression<'_>) -> bool {
 }
 
 /// Joins the type each variable a closure captured by reference has at the end of the closure into its type in the
-/// enclosing block, because the closure may have run.
+/// enclosing block, because the closure may have run, and records each one the closure or a lambda inside it assigns
+/// in the enclosing function's [lambda-written locals](BlockContext::lambda_written_locals), because any later call
+/// may run it again.
 pub fn merge_captured_references<A>(
     context: &Context<'_, '_, A>,
     block_context: &mut BlockContext<'_>,
@@ -494,7 +504,14 @@ pub fn merge_captured_references<A>(
 ) where
     A: Arena,
 {
+    let inner_lambda_written = closure_block_context.lambda_written_locals.borrow().clone();
     for referenced_variable in closure_block_context.references_to_external_scope {
+        if closure_block_context.possibly_assigned_variable_ids.contains(&referenced_variable)
+            || inner_lambda_written.contains(&referenced_variable)
+        {
+            block_context.lambda_written_locals.borrow_mut().insert(referenced_variable);
+        }
+
         let Some(inner_type) = closure_block_context.locals.remove(&referenced_variable) else {
             continue;
         };
