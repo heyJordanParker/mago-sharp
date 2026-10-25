@@ -23,7 +23,7 @@ where
     A: Arena,
 {
     /// Parses a PHP# loop written with its name, as `orders: for (const order of this.orders) { … }`, spec section 17.
-    pub(crate) fn parse_named_loop(&mut self) -> Result<Statement<'arena>, ParseError> {
+    pub(crate) fn parse_named_loop(&mut self) -> Result<Statement<'arena>, ParseError<'arena>> {
         let label = Some(self.parse_label()?);
 
         Ok(match self.stream.peek_kind(0)? {
@@ -38,14 +38,14 @@ where
         })
     }
 
-    pub(crate) fn parse_continue(&mut self) -> Result<Continue<'arena>, ParseError> {
+    pub(crate) fn parse_continue(&mut self) -> Result<Continue<'arena>, ParseError<'arena>> {
         let r#continue = self.expect_keyword(T!["continue"])?;
         let label = self.parse_loop_name()?;
 
         Ok(Continue { r#continue, label, level: self.parse_level(label)?, terminator: self.parse_terminator()? })
     }
 
-    pub(crate) fn parse_break(&mut self) -> Result<Break<'arena>, ParseError> {
+    pub(crate) fn parse_break(&mut self) -> Result<Break<'arena>, ParseError<'arena>> {
         let r#break = self.expect_keyword(T!["break"])?;
         let label = self.parse_loop_name()?;
 
@@ -54,7 +54,7 @@ where
 
     /// The name of the loop a PHP# `break` or `continue` leaves or continues, as `orders` in `break orders;`. PHP
     /// writes a level there instead, as in `break 2;`.
-    fn parse_loop_name(&mut self) -> Result<Option<LocalIdentifier<'arena>>, ParseError> {
+    fn parse_loop_name(&mut self) -> Result<Option<LocalIdentifier<'arena>>, ParseError<'arena>> {
         if !self.dialect.is_sharp()
             || !self.stream.peek_kind(0)?.is_some_and(|kind| kind.is_identifier_maybe_reserved())
         {
@@ -68,7 +68,7 @@ where
     fn parse_level(
         &mut self,
         label: Option<LocalIdentifier<'arena>>,
-    ) -> Result<Option<&'arena Expression<'arena>>, ParseError> {
+    ) -> Result<Option<&'arena Expression<'arena>>, ParseError<'arena>> {
         if label.is_some() || matches!(self.stream.peek_kind(0)?, Some(T![";" | "?>"])) {
             return Ok(None);
         }

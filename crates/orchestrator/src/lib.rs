@@ -368,7 +368,7 @@ impl<'cfg> Orchestrator<'cfg> {
     ///
     /// - `Ok(FileFormatStatus::Unchanged)` if the file is already properly formatted
     /// - `Ok(FileFormatStatus::Changed(String))` if the file was formatted, containing the new content
-    /// - `Ok(FileFormatStatus::FailedToParse(ParseError))` if the file couldn't be parsed
+    /// - `Ok(FileFormatStatus::FailedToParse(Issue))` if the file couldn't be parsed, with the issue that reports it
     /// - `Err(OrchestratorError)` if formatting failed for other reasons
     ///
     /// # Performance
@@ -402,7 +402,7 @@ impl<'cfg> Orchestrator<'cfg> {
     ///
     /// - `Ok(FileFormatStatus::Unchanged)` if the file is already properly formatted
     /// - `Ok(FileFormatStatus::Changed(String))` if the file was formatted, containing the new content
-    /// - `Ok(FileFormatStatus::FailedToParse(ParseError))` if the file couldn't be parsed
+    /// - `Ok(FileFormatStatus::FailedToParse(Issue))` if the file couldn't be parsed, with the issue that reports it
     /// - `Err(OrchestratorError)` if formatting failed for other reasons
     ///
     /// # Performance

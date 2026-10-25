@@ -17,7 +17,7 @@ impl<'arena, A> Parser<'_, 'arena, A>
 where
     A: Arena,
 {
-    pub(crate) fn parse_variable(&mut self) -> Result<Variable<'arena>, ParseError> {
+    pub(crate) fn parse_variable(&mut self) -> Result<Variable<'arena>, ParseError<'arena>> {
         let token = self.stream.lookahead(0)?.ok_or_else(|| self.stream.unexpected(None, &[]))?;
 
         Ok(match &token.kind {
@@ -28,7 +28,7 @@ where
         })
     }
 
-    pub(crate) fn parse_direct_variable(&mut self) -> Result<DirectVariable<'arena>, ParseError> {
+    pub(crate) fn parse_direct_variable(&mut self) -> Result<DirectVariable<'arena>, ParseError<'arena>> {
         let token = self.stream.eat(T!["$variable"])?;
 
         Ok(DirectVariable { span: token.span_for(self.stream.file_id()), name: token.value })
@@ -36,13 +36,13 @@ where
 
     /// Parses the bare name a PHP# field, catch clause or lambda declares, which has no `$`. A keyword parses as the
     /// name too: a member may take any word, and the checker names a keyword a local can't take.
-    pub(crate) fn parse_bare_variable(&mut self) -> Result<DirectVariable<'arena>, ParseError> {
+    pub(crate) fn parse_bare_variable(&mut self) -> Result<DirectVariable<'arena>, ParseError<'arena>> {
         let name = self.parse_local_identifier()?;
 
         Ok(DirectVariable { span: name.span, name: name.value })
     }
 
-    pub(crate) fn parse_indirect_variable(&mut self) -> Result<IndirectVariable<'arena>, ParseError> {
+    pub(crate) fn parse_indirect_variable(&mut self) -> Result<IndirectVariable<'arena>, ParseError<'arena>> {
         let dollar_left_brace = self.stream.eat_span(T!["${"])?;
 
         let expression = if matches!(self.stream.peek_kind(0)?, Some(T![StringVariableName])) {
@@ -73,7 +73,7 @@ where
         Ok(IndirectVariable { dollar_left_brace, expression, right_brace: self.stream.eat_span(T!["}"])? })
     }
 
-    pub(crate) fn parse_nested_variable(&mut self) -> Result<NestedVariable<'arena>, ParseError> {
+    pub(crate) fn parse_nested_variable(&mut self) -> Result<NestedVariable<'arena>, ParseError<'arena>> {
         Ok(NestedVariable {
             dollar: self.stream.eat_span(T!["$"])?,
             variable: self.arena.alloc(self.parse_variable()?),

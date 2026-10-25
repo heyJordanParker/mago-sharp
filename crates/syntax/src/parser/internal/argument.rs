@@ -18,17 +18,17 @@ impl<'arena, A> Parser<'_, 'arena, A>
 where
     A: Arena,
 {
-    pub(crate) fn parse_optional_argument_list(&mut self) -> Result<Option<ArgumentList<'arena>>, ParseError> {
+    pub(crate) fn parse_optional_argument_list(&mut self) -> Result<Option<ArgumentList<'arena>>, ParseError<'arena>> {
         if let Some(T!["("]) = self.stream.peek_kind(0)? { Ok(Some(self.parse_argument_list()?)) } else { Ok(None) }
     }
 
-    pub(crate) fn parse_argument_list(&mut self) -> Result<ArgumentList<'arena>, ParseError> {
+    pub(crate) fn parse_argument_list(&mut self) -> Result<ArgumentList<'arena>, ParseError<'arena>> {
         let result = self.parse_comma_separated_sequence(T!["("], T![")"], |p| p.parse_argument())?;
 
         Ok(ArgumentList { left_parenthesis: result.open, arguments: result.sequence, right_parenthesis: result.close })
     }
 
-    pub(crate) fn parse_argument(&mut self) -> Result<Argument<'arena>, ParseError> {
+    pub(crate) fn parse_argument(&mut self) -> Result<Argument<'arena>, ParseError<'arena>> {
         let current = self.stream.lookahead(0)?.ok_or_else(|| self.stream.unexpected(None, &[]))?;
         if current.kind.is_identifier_maybe_reserved() && matches!(self.stream.peek_kind(1)?, Some(T![":"])) {
             return Ok(Argument::Named(NamedArgument {
@@ -46,7 +46,7 @@ where
 
     /// Parses a named argument's name. In PHP# a name before `:` is never the object a method runs on, so `this:` names
     /// the parameter `@this`, as `class:` names the parameter `@class`, spec section 2.
-    fn parse_argument_name(&mut self) -> Result<LocalIdentifier<'arena>, ParseError> {
+    fn parse_argument_name(&mut self) -> Result<LocalIdentifier<'arena>, ParseError<'arena>> {
         let mut name = self.parse_local_identifier()?;
         if self.dialect.is_sharp() && name.value == b"this" {
             name.value = b"@this";
@@ -57,7 +57,7 @@ where
 
     pub(crate) fn parse_optional_partial_argument_list(
         &mut self,
-    ) -> Result<Option<PartialArgumentList<'arena>>, ParseError> {
+    ) -> Result<Option<PartialArgumentList<'arena>>, ParseError<'arena>> {
         if let Some(T!["("]) = self.stream.peek_kind(0)? {
             Ok(Some(self.parse_partial_argument_list()?))
         } else {
@@ -65,7 +65,7 @@ where
         }
     }
 
-    pub(crate) fn parse_partial_argument_list(&mut self) -> Result<PartialArgumentList<'arena>, ParseError> {
+    pub(crate) fn parse_partial_argument_list(&mut self) -> Result<PartialArgumentList<'arena>, ParseError<'arena>> {
         let result = self.parse_comma_separated_sequence(T!["("], T![")"], |p| p.parse_partial_argument())?;
 
         Ok(PartialArgumentList {
@@ -75,7 +75,7 @@ where
         })
     }
 
-    pub(crate) fn parse_partial_argument(&mut self) -> Result<PartialArgument<'arena>, ParseError> {
+    pub(crate) fn parse_partial_argument(&mut self) -> Result<PartialArgument<'arena>, ParseError<'arena>> {
         let current = self.stream.lookahead(0)?.ok_or_else(|| self.stream.unexpected(None, &[]))?;
 
         if current.kind == T!["?"] {

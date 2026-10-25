@@ -47,7 +47,7 @@ impl<'arena, A> Parser<'_, 'arena, A>
 where
     A: Arena,
 {
-    pub(crate) fn parse_string(&mut self) -> Result<CompositeString<'arena>, ParseError> {
+    pub(crate) fn parse_string(&mut self) -> Result<CompositeString<'arena>, ParseError<'arena>> {
         let token = self.stream.lookahead(0)?.ok_or_else(|| self.stream.unexpected(None, &[]))?;
 
         Ok(match token.kind {
@@ -69,7 +69,7 @@ where
         })
     }
 
-    pub(crate) fn parse_interpolated_string(&mut self) -> Result<InterpolatedString<'arena>, ParseError> {
+    pub(crate) fn parse_interpolated_string(&mut self) -> Result<InterpolatedString<'arena>, ParseError<'arena>> {
         let token = self.stream.consume()?;
         let token_span = token.span_for(self.stream.file_id());
         let has_prefix = token.value.starts_with(b"b") || token.value.starts_with(b"B");
@@ -92,7 +92,7 @@ where
         Ok(InterpolatedString { prefix, left_double_quote, parts: Sequence::new(parts), right_double_quote })
     }
 
-    pub(crate) fn parse_shell_execute_string(&mut self) -> Result<ShellExecuteString<'arena>, ParseError> {
+    pub(crate) fn parse_shell_execute_string(&mut self) -> Result<ShellExecuteString<'arena>, ParseError<'arena>> {
         let left_backtick = self.stream.eat_span(T!["`"])?;
         let mut parts = self.new_vec();
         while let Some(part) = self.parse_optional_string_part(T!["`"], LiteralPartDecoding::DoubleQuoted)? {
@@ -106,7 +106,7 @@ where
 
     /// Parses a PHP# template, `` `Order ${number}` ``, into the interpolated string PHP writes `"Order {$number}"`,
     /// with its backticks as the quotes.
-    fn parse_template(&mut self) -> Result<InterpolatedString<'arena>, ParseError> {
+    fn parse_template(&mut self) -> Result<InterpolatedString<'arena>, ParseError<'arena>> {
         let left_double_quote = self.stream.eat_span(T!["`"])?;
         let mut parts = self.new_vec();
         while let Some(part) = self.parse_optional_string_part(T!["`"], LiteralPartDecoding::Template)? {
@@ -118,7 +118,7 @@ where
         Ok(InterpolatedString { prefix: None, left_double_quote, parts: Sequence::new(parts), right_double_quote })
     }
 
-    pub(crate) fn parse_document_string(&mut self) -> Result<DocumentString<'arena>, ParseError> {
+    pub(crate) fn parse_document_string(&mut self) -> Result<DocumentString<'arena>, ParseError<'arena>> {
         let current = self.stream.consume()?;
         let has_prefix = current.value.starts_with(b"b") || current.value.starts_with(b"B");
         let current_span = current.span_for(self.stream.file_id());
@@ -195,7 +195,7 @@ where
         &mut self,
         closing_kind: TokenKind,
         decoding: LiteralPartDecoding,
-    ) -> Result<Option<StringPart<'arena>>, ParseError> {
+    ) -> Result<Option<StringPart<'arena>>, ParseError<'arena>> {
         let token = self.stream.lookahead(0)?.ok_or_else(|| self.stream.unexpected(None, &[]))?;
         Ok(match token.kind {
             T!["{"] => Some(StringPart::BracedExpression(self.parse_braced_expression_string_part()?)),
@@ -237,7 +237,7 @@ where
 
     pub(crate) fn parse_braced_expression_string_part(
         &mut self,
-    ) -> Result<BracedExpressionStringPart<'arena>, ParseError> {
+    ) -> Result<BracedExpressionStringPart<'arena>, ParseError<'arena>> {
         let left_brace = self.stream.eat_span(T!["{"])?;
         let expr = self.parse_expression()?;
 
@@ -262,7 +262,7 @@ where
 
     /// Parses `${expression}` in a PHP# template, which takes any expression, as a braced part whose left brace is
     /// the `${`.
-    fn parse_template_interpolation(&mut self) -> Result<BracedExpressionStringPart<'arena>, ParseError> {
+    fn parse_template_interpolation(&mut self) -> Result<BracedExpressionStringPart<'arena>, ParseError<'arena>> {
         let left_brace = self.stream.eat_span(T!["${"])?;
         let expression = self.parse_expression()?;
         let right_brace = self.stream.eat_span(T!["}"])?;
@@ -270,7 +270,7 @@ where
         Ok(BracedExpressionStringPart { left_brace, expression, right_brace })
     }
 
-    fn parse_string_part_expression(&mut self) -> Result<&'arena Expression<'arena>, ParseError> {
+    fn parse_string_part_expression(&mut self) -> Result<&'arena Expression<'arena>, ParseError<'arena>> {
         let previous_state = self.state.within_string_interpolation;
         self.state.within_string_interpolation = true;
         let expression = self.parse_expression();
@@ -279,7 +279,9 @@ where
         expression
     }
 
-    pub(crate) fn parse_interpolated_numeric_offset(&mut self) -> Result<&'arena Expression<'arena>, ParseError> {
+    pub(crate) fn parse_interpolated_numeric_offset(
+        &mut self,
+    ) -> Result<&'arena Expression<'arena>, ParseError<'arena>> {
         let minus = if matches!(self.stream.peek_kind(0)?, Some(T!["-"])) {
             Some(self.stream.eat_span(T!["-"])?)
         } else {
@@ -320,7 +322,9 @@ where
         })
     }
 
-    pub(crate) fn parse_interpolated_string_offset(&mut self) -> Result<&'arena Expression<'arena>, ParseError> {
+    pub(crate) fn parse_interpolated_string_offset(
+        &mut self,
+    ) -> Result<&'arena Expression<'arena>, ParseError<'arena>> {
         let label = self.stream.eat(T![OffsetString])?;
 
         Ok(self.string_key_offset(label.value, label.span_for(self.stream.file_id())))

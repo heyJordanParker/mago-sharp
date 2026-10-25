@@ -88,7 +88,11 @@ where
     /// # Errors
     ///
     /// Returns a [`ParseError`] if the input code contains syntax errors.
-    pub fn format_code(&self, name: Cow<'static, [u8]>, code: Cow<'static, [u8]>) -> Result<&'arena [u8], ParseError> {
+    pub fn format_code(
+        &self,
+        name: Cow<'static, [u8]>,
+        code: Cow<'static, [u8]>,
+    ) -> Result<&'arena [u8], ParseError<'arena>> {
         let file = File::ephemeral(name, code);
 
         self.format_file(&file)
@@ -103,10 +107,10 @@ where
     /// # Errors
     ///
     /// Returns the first [`ParseError`] if the file's content contains syntax errors.
-    pub fn format_file<'ctx>(&self, file: &'ctx File) -> Result<&'arena [u8], ParseError> {
+    pub fn format_file<'ctx>(&self, file: &'ctx File) -> Result<&'arena [u8], ParseError<'arena>> {
         let program = parse_file_with_settings(self.arena, file, self.parser_settings);
         if let Some(error) = program.errors.first() {
-            return Err(error.clone());
+            return Err(*error);
         }
 
         Ok(self.format(file, program))

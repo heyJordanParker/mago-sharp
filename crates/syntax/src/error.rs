@@ -12,13 +12,12 @@ use crate::cst::Operator;
 use crate::lexer::Lexer;
 use crate::parser::MAX_RECURSION_DEPTH;
 use crate::settings::LexerSettings;
-use crate::token::Token;
 use crate::token::TokenKind;
 
 const SYNTAX_ERROR_CODE: &str = "syntax";
 const PARSE_ERROR_CODE: &str = "parse";
 
-#[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub enum SyntaxError {
     UnexpectedToken(FileId, u8, Position),
@@ -35,14 +34,19 @@ pub enum Expected {
     OneOf(&'static [TokenKind]),
 }
 
-#[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
+/// An error in a parsed file.
+///
+/// A [`Program`](crate::cst::Program) holds its errors in its arena, which never runs `Drop`, so a parse error is
+/// `Copy`: the compiler refuses a field that owns heap memory, which would leak on every parse that reports it. Its
+/// text borrows the code it quotes and the arena.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
-pub enum ParseError {
+pub enum ParseError<'arena> {
     SyntaxError(SyntaxError),
     UnexpectedEndOfFile(Expected, FileId, Position),
     /// A token the parser did not expect, with the text of each token it expected that the file's language writes, the
-    /// token's first line as the code writes it, and its span.
-    UnexpectedToken(Box<[&'static str]>, Box<str>, Span),
+    /// token as the code writes it, and its span. A message quotes the token's first line.
+    UnexpectedToken(&'arena [&'static str], &'arena [u8], Span),
     UnclosedLiteralString(LiteralStringKind, Span),
     RecursionLimitExceeded(Span),
     /// A PHP# parameter written without its type, such as `run(extra)`, at its name.
@@ -66,14 +70,14 @@ pub enum ParseError {
     ConditionalInGuardInSharp(Span),
     /// A PHP# operator declared with a symbol that is no binary operator, such as `operator !`, with the symbol, at the
     /// symbol. Semantics refuses a binary operator a class cannot declare.
-    UndeclarableOperatorInSharp(Box<str>, Span),
+    UndeclarableOperatorInSharp(&'arena [u8], Span),
     /// A `uses` clause written after a PHP# function type's `>`, as in `Function<Charge(Cart)> uses Http charge`, at
     /// the clause. A function type lists its effects inside its brackets.
     UsesAfterFunctionTypeInSharp(Span),
     /// A PHP# method's function parameter named in its `uses`, as `f` in `apply(Function<int()> f) uses f`, with the
     /// name, at the name. Spec section 29: a method takes on the effects of each function it is given, with nothing
     /// written.
-    FunctionParameterInUsesInSharp(Box<str>, Span),
+    FunctionParameterInUsesInSharp(&'arena [u8], Span),
     /// A `uses` clause written on a PHP# `import`, as in `import Vendor.Pdf uses Files;`, at the clause. Spec section
     /// 23: a library's effect lives in its one `extern` declaration.
     UsesOnImportInSharp(Span),
@@ -98,14 +102,14 @@ pub enum ParseError {
     /// A type declared inside a PHP# class-like, as in `class Order { public event Paid(int id); }`, with the
     /// class-like as a message names it, `A class`, and the type's name, at the whole type. Every type, events and
     /// interfaces included, is declared in its own file.
-    NestedTypeInSharp(&'static str, Box<str>, Span),
+    NestedTypeInSharp(&'static str, &'arena [u8], Span),
     /// A type other than an interface name in a PHP# struct's header, as in `struct Username : string`, at the type.
     /// Spec section 10: a struct implements interfaces, and keys a `Map` by its whole value.
     StructHeaderTypeInSharp(Span),
     /// Type parameters written on a PHP# named constructor, as in `Plain.of<T>(T value)`, with its class's name and the
     /// names of the type parameters its class declares, at the type parameters. A named constructor takes its class's
     /// type arguments, as Dart's does, and declares none.
-    NamedConstructorTypeParametersInSharp(Box<str>, Option<Box<str>>, Span),
+    NamedConstructorTypeParametersInSharp(&'arena [u8], Option<&'arena str>, Span),
     /// A PHP# keyword written in another case, as in `Return 5;`, with the keyword as PHP# writes it, at the keyword.
     /// PHP#'s keywords are lowercase and case-sensitive, as C#'s are, except `Self`. The analyzer reports it too, where
     /// a name that spells a keyword names nothing, as `THIS` does.
@@ -129,7 +133,7 @@ impl HasFileId for SyntaxError {
     }
 }
 
-impl HasFileId for ParseError {
+impl HasFileId for ParseError<'_> {
     fn file_id(&self) -> FileId {
         match self {
             ParseError::SyntaxError(syntax_error) => syntax_error.file_id(),
@@ -178,7 +182,7 @@ impl HasSpan for SyntaxError {
     }
 }
 
-impl HasSpan for ParseError {
+impl HasSpan for ParseError<'_> {
     fn span(&self) -> Span {
         match &self {
             ParseError::SyntaxError(syntax_error) => syntax_error.span(),
@@ -231,7 +235,7 @@ impl std::fmt::Display for SyntaxError {
     }
 }
 
-impl std::fmt::Display for ParseError {
+impl std::fmt::Display for ParseError<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let message = match self {
             ParseError::SyntaxError(e) => {
@@ -240,14 +244,18 @@ impl std::fmt::Display for ParseError {
             // A parse error quotes what the code writes and the tokens it expected, as rustc and TypeScript do, never
             // the parser's names for the kinds of token.
             ParseError::UnexpectedEndOfFile(..) => "Unexpected end of file".to_string(),
-            ParseError::UnexpectedToken(expected, written, _) => match expected.as_ref() {
-                [] => format!("Unexpected `{written}`"),
-                [only] => format!("Expected `{only}`, found `{written}`"),
-                [first @ .., last] => {
-                    let first: Vec<String> = first.iter().map(|token| format!("`{token}`")).collect();
-                    format!("Expected {} or `{last}`, found `{written}`", first.join(", "))
+            ParseError::UnexpectedToken(expected, written, _) => {
+                let written = String::from_utf8_lossy(written);
+                let written = written.lines().next().unwrap_or_default();
+                match *expected {
+                    [] => format!("Unexpected `{written}`"),
+                    [only] => format!("Expected `{only}`, found `{written}`"),
+                    [first @ .., last] => {
+                        let first: Vec<String> = first.iter().map(|token| format!("`{token}`")).collect();
+                        format!("Expected {} or `{last}`, found `{written}`", first.join(", "))
+                    }
                 }
-            },
+            }
             ParseError::UnclosedLiteralString(kind, _) => match kind {
                 LiteralStringKind::SingleQuoted => "Unclosed single-quoted string".to_string(),
                 LiteralStringKind::DoubleQuoted => "Unclosed double-quoted string".to_string(),
@@ -276,15 +284,19 @@ impl std::fmt::Display for ParseError {
                 "A `? :` in a `when` condition needs parentheses, as in `when (strict ? forced : ready) =>`.".to_string()
             }
             ParseError::UndeclarableOperatorInSharp(symbol, _) => {
+                let symbol = String::from_utf8_lossy(symbol);
                 format!("`operator {symbol}` cannot be declared: only {} can.", Operator::DECLARABLE)
             }
             ParseError::UsesAfterFunctionTypeInSharp(_) => {
                 "A function type lists its effects inside its brackets, as in `Function<Charge(Cart) uses Http>`."
                     .to_string()
             }
-            ParseError::FunctionParameterInUsesInSharp(name, _) => format!(
-                "`{name}` is a function parameter, and a method takes on the effects of each function it is given, so `uses` names no parameter: delete it."
-            ),
+            ParseError::FunctionParameterInUsesInSharp(name, _) => {
+                let name = String::from_utf8_lossy(name);
+                format!(
+                    "`{name}` is a function parameter, and a method takes on the effects of each function it is given, so `uses` names no parameter: delete it."
+                )
+            }
             ParseError::UsesOnImportInSharp(_) => {
                 "An import never carries `uses`: declare the library's effect once, with `extern`.".to_string()
             }
@@ -310,6 +322,7 @@ impl std::fmt::Display for ParseError {
                     .to_string()
             }
             ParseError::NestedTypeInSharp(owner, name, _) => {
+                let name = String::from_utf8_lossy(name);
                 format!("{owner} can't declare a type inside it: declare `{name}` in its own file.")
             }
             ParseError::StructHeaderTypeInSharp(_) => {
@@ -335,38 +348,12 @@ impl std::fmt::Display for ParseError {
     }
 }
 
-impl ParseError {
-    /// The error at `token` of the file `file_id`, which the parser did not expect where it expected `expected`. It
-    /// quotes the token's first line as the code writes it, and each expected token the file writes as its text: a
-    /// `.sharp` file, `sharp`, writes no token PHP# never writes, such as `?>`.
-    pub(crate) fn unexpected_token(expected: Expected, token: &Token<'_>, file_id: FileId, sharp: bool) -> ParseError {
-        let kinds = match &expected {
-            Expected::Exactly(kind) => std::slice::from_ref(kind),
-            Expected::OneOf(kinds) => kinds,
-        };
-        let mut texts: Vec<&'static str> = Vec::new();
-        for kind in kinds {
-            let text = if sharp { kind.written_in_sharp() } else { kind.written() };
-            if let Some(text) = text
-                && !texts.contains(&text)
-            {
-                texts.push(text);
-            }
-        }
-        let written = String::from_utf8_lossy(token.value);
-
-        ParseError::UnexpectedToken(
-            texts.into_boxed_slice(),
-            written.lines().next().unwrap_or_default().into(),
-            token.span_for(file_id),
-        )
-    }
-
+impl<'code> ParseError<'code> {
     /// The error a typo gives at the first token from `offset` of a PHP# file's `code`, as `asdf` does in
     /// `public asdf#($@`: that token is unexpected. Every form outside the PHP# grammar fails with it, whichever
-    /// language it comes from.
+    /// language it comes from. It quotes the token from `code`.
     #[must_use]
-    pub fn unexpected_in_sharp(file_id: FileId, code: &[u8], offset: u32) -> ParseError {
+    pub fn unexpected_in_sharp(file_id: FileId, code: &'code [u8], offset: u32) -> ParseError<'code> {
         let start = Position::new(offset);
         let mut lexer =
             Lexer::sharp(Input::anchored_at(file_id, &code[offset as usize..], start), LexerSettings::default());
@@ -374,9 +361,7 @@ impl ParseError {
         loop {
             match lexer.advance() {
                 Some(Ok(token)) if token.kind.is_trivia() => {}
-                Some(Ok(token)) => {
-                    return ParseError::unexpected_token(Expected::OneOf(&[]), &token, file_id, true);
-                }
+                Some(Ok(token)) => return ParseError::UnexpectedToken(&[], token.value, token.span_for(file_id)),
                 Some(Err(error)) => return ParseError::SyntaxError(error),
                 None => {
                     return ParseError::UnexpectedEndOfFile(Expected::OneOf(&[]), file_id, lexer.current_position());
@@ -388,7 +373,7 @@ impl ParseError {
 
 impl std::error::Error for SyntaxError {}
 
-impl std::error::Error for ParseError {
+impl std::error::Error for ParseError<'_> {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             ParseError::SyntaxError(e) => Some(e),
@@ -405,14 +390,14 @@ impl From<&SyntaxError> for Issue {
     }
 }
 
-impl From<SyntaxError> for ParseError {
+impl From<SyntaxError> for ParseError<'_> {
     fn from(error: SyntaxError) -> Self {
         ParseError::SyntaxError(error)
     }
 }
 
-impl From<&ParseError> for Issue {
-    fn from(error: &ParseError) -> Self {
+impl From<&ParseError<'_>> for Issue {
+    fn from(error: &ParseError<'_>) -> Self {
         match error {
             ParseError::SyntaxError(syntax_error) => syntax_error.into(),
             // A PHP# parse error names the rule it breaks, so its message is the title.
@@ -442,6 +427,8 @@ impl From<&ParseError> for Issue {
                 .with_annotation(Annotation::primary(error.span()).with_message("Written here.")),
             // A generic class's static method takes the class's type arguments, so its help declares none of its own.
             ParseError::NamedConstructorTypeParametersInSharp(class, type_parameters, span) => {
+                let class = String::from_utf8_lossy(class);
+
                 Issue::error(error.to_string())
                     .with_code(PARSE_ERROR_CODE)
                     .with_annotation(Annotation::primary(*span).with_message("Written here."))
@@ -464,3 +451,17 @@ impl From<&ParseError> for Issue {
         }
     }
 }
+
+/// A program's arena never runs `Drop`, so a parse error that owned heap memory would leak it on every parse that
+/// reports the error. `ParseError` derives `Copy`, which makes the compiler refuse such a field, and every build fails
+/// here once the derive goes. No test caught the leak before: macOS has no LeakSanitizer, and the fuzz targets never ran
+/// in CI.
+const _: fn() = || {
+    fn assert_copy<T>()
+    where
+        T: Copy,
+    {
+    }
+
+    assert_copy::<ParseError<'static>>();
+};

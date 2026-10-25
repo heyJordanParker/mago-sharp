@@ -9,7 +9,7 @@ impl<'arena, A> Parser<'_, 'arena, A>
 where
     A: Arena,
 {
-    pub(crate) fn parse_global(&mut self) -> Result<Global<'arena>, ParseError> {
+    pub(crate) fn parse_global(&mut self) -> Result<Global<'arena>, ParseError<'arena>> {
         Ok(Global {
             global: self.expect_keyword(T!["global"])?,
             variables: {

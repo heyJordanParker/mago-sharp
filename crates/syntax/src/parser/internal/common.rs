@@ -19,7 +19,7 @@ where
     /// Expects and consumes a keyword token. Only the keyword can stand here, so a `.sharp` file's name that spells it
     /// in another case reads as it, as [`Self::read_miscased_keyword`] reads it.
     #[inline]
-    pub(crate) fn expect_keyword(&mut self, kind: TokenKind) -> Result<Keyword<'arena>, ParseError> {
+    pub(crate) fn expect_keyword(&mut self, kind: TokenKind) -> Result<Keyword<'arena>, ParseError<'arena>> {
         if let Some(token) = self.stream.lookahead(0)?
             && let Some(word) = self.miscased_keyword(token)
             && lookup_keyword(word.as_bytes()) == Some(kind)
@@ -33,7 +33,7 @@ where
     /// Expects and consumes a PHP keyword that PHP# does not have, such as `use`, and reports it in a PHP# file.
     ///
     /// The error stands, and the PHP construct still parses so the rest of the file does.
-    pub(crate) fn expect_php_keyword(&mut self, kind: TokenKind) -> Result<Keyword<'arena>, ParseError> {
+    pub(crate) fn expect_php_keyword(&mut self, kind: TokenKind) -> Result<Keyword<'arena>, ParseError<'arena>> {
         let keyword = self.expect_keyword(kind)?;
         if self.dialect.is_sharp() {
             self.report_unexpected_in_sharp(keyword.span);
@@ -53,20 +53,20 @@ where
     /// doesn't use as a plain name, spec section 2, so PHP's construct parses only where a member or a part of a PHP
     /// construct starts, and its own error names the PHP# form. A modifier written in another case reads as it there,
     /// as `Static` in `public Static int run()` does.
-    pub(crate) fn read_php_construct(&mut self) -> Result<(), ParseError> {
+    pub(crate) fn read_php_construct(&mut self) -> Result<(), ParseError<'arena>> {
         self.read_php_keyword(Head::Declaration)
     }
 
     /// Reads the name after a type's modifiers as [`Self::read_php_construct`] does, and also a type's keyword written
     /// in another case, as `Class` in `public Class Cart {`. Only a file declares a type, so in a class body that word
     /// is a member's type, as in `public Class kind { get; set; }`.
-    pub(crate) fn read_php_type_declaration(&mut self) -> Result<(), ParseError> {
+    pub(crate) fn read_php_type_declaration(&mut self) -> Result<(), ParseError<'arena>> {
         self.read_php_keyword(Head::TypeDeclaration)
     }
 
     /// Reads the name at the head of an expression as [`Self::read_php_construct`] does, and also a keyword written
     /// in another case, as `New` in `New Cart()`.
-    pub(crate) fn read_php_expression(&mut self) -> Result<(), ParseError> {
+    pub(crate) fn read_php_expression(&mut self) -> Result<(), ParseError<'arena>> {
         self.read_php_keyword(Head::Expression)
     }
 
@@ -74,7 +74,7 @@ where
     /// writes with a colon body or a braceless body, as in `foreach (items as item):`, and as `declare(…)`. The token
     /// after an `if` statement's body is a statement's head too, where `elseif` or `else` may follow, and so is the
     /// token after a `try` statement's block or a `catch` clause, where `catch` or `finally` may follow.
-    pub(crate) fn read_php_statement(&mut self) -> Result<(), ParseError> {
+    pub(crate) fn read_php_statement(&mut self) -> Result<(), ParseError<'arena>> {
         self.read_php_keyword(Head::Statement)
     }
 
@@ -88,7 +88,7 @@ where
     ///
     /// A PHP# keyword written in another case reads as the keyword where its construct follows and the name could not
     /// stand, as [`Self::miscased_construct_follows`] decides.
-    fn read_php_keyword(&mut self, head: Head) -> Result<(), ParseError> {
+    fn read_php_keyword(&mut self, head: Head) -> Result<(), ParseError<'arena>> {
         let n = usize::from(self.stream.is_at(T!["static"])?);
         let Some(token) = self.stream.lookahead(n)? else {
             return Ok(());
@@ -108,7 +108,7 @@ where
     /// its construct follows. A PHP# keyword reads with one error, as [`Self::miscased_construct_follows`] decides. A
     /// PHP keyword PHP# doesn't use reads as its construct with no other error, as `FUNCTION f() { }` does, so the
     /// construct's own error names the PHP# form.
-    fn read_keyword_in_another_case(&mut self, token: Token<'_>, head: Head) -> Result<(), ParseError> {
+    fn read_keyword_in_another_case(&mut self, token: Token<'_>, head: Head) -> Result<(), ParseError<'arena>> {
         if let Some(word) = self.miscased_keyword(token) {
             if self.miscased_construct_follows(word, head)? {
                 self.read_miscased_keyword(token, word);
@@ -126,7 +126,12 @@ where
     }
 
     /// Whether the construct `keyword` starts follows the name at `n`, as [`Self::read_php_keyword`] describes.
-    fn construct_follows(&mut self, keyword: TokenKind, n: usize, at_statement: bool) -> Result<bool, ParseError> {
+    fn construct_follows(
+        &mut self,
+        keyword: TokenKind,
+        n: usize,
+        at_statement: bool,
+    ) -> Result<bool, ParseError<'arena>> {
         let starts_lambda = matches!(keyword, T!["fn" | "function"]);
         let starts_body = at_statement && matches!(keyword, T!["foreach" | "switch" | "elseif"]);
 
@@ -160,7 +165,7 @@ where
     /// as in `public static Lazy operator +(…)`, and in an enum it is `case` followed by a name. After a type's
     /// modifiers, it is a type's keyword followed by its name, as `Class` in `public Class Cart {`. At a file's
     /// statement, it is a modifier followed by another or by a type's keyword, as `Public` in `Public class Cart {`.
-    fn miscased_construct_follows(&mut self, word: &'static str, head: Head) -> Result<bool, ParseError> {
+    fn miscased_construct_follows(&mut self, word: &'static str, head: Head) -> Result<bool, ParseError<'arena>> {
         let next = self.stream.lookahead(1)?;
         let next_kind = next.map(|next| next.kind);
         let after_name = match next_kind {
@@ -238,7 +243,7 @@ where
     /// Whether the head of the stream is PHP's keyword `kind` where a PHP construct expects it, as `endif` ends
     /// `if (…): … endif;`. A `.sharp` file lexes a PHP keyword that PHP# doesn't use as a name, which reads as the
     /// keyword from now on.
-    pub(crate) fn is_at_php_keyword(&mut self, kind: TokenKind) -> Result<bool, ParseError> {
+    pub(crate) fn is_at_php_keyword(&mut self, kind: TokenKind) -> Result<bool, ParseError<'arena>> {
         let Some(token) = self.stream.lookahead(0)? else {
             return Ok(false);
         };
@@ -263,20 +268,26 @@ where
 
     /// Optionally consumes a keyword token if present.
     #[inline]
-    pub(crate) fn maybe_expect_keyword(&mut self, kind: TokenKind) -> Result<Option<Keyword<'arena>>, ParseError> {
+    pub(crate) fn maybe_expect_keyword(
+        &mut self,
+        kind: TokenKind,
+    ) -> Result<Option<Keyword<'arena>>, ParseError<'arena>> {
         if self.stream.is_at(kind)? { Ok(Some(self.expect_keyword(kind)?)) } else { Ok(None) }
     }
 
     /// Consumes any token and returns it as a keyword.
     #[inline]
-    pub(crate) fn expect_any_keyword(&mut self) -> Result<Keyword<'arena>, ParseError> {
+    pub(crate) fn expect_any_keyword(&mut self) -> Result<Keyword<'arena>, ParseError<'arena>> {
         let token = self.stream.consume()?;
         Ok(Keyword { span: token.span_for(self.stream.file_id()), value: token.value })
     }
 
     /// Expects and consumes one of the given token kinds.
     #[inline]
-    pub(crate) fn expect_one_of_keyword(&mut self, kinds: &'static [TokenKind]) -> Result<Keyword<'arena>, ParseError> {
+    pub(crate) fn expect_one_of_keyword(
+        &mut self,
+        kinds: &'static [TokenKind],
+    ) -> Result<Keyword<'arena>, ParseError<'arena>> {
         let token = self.stream.consume()?;
         if kinds.contains(&token.kind) {
             Ok(Keyword { span: token.span_for(self.stream.file_id()), value: token.value })

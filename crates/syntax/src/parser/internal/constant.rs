@@ -15,7 +15,7 @@ where
     pub(crate) fn parse_constant_with_attributes(
         &mut self,
         attribute_lists: Sequence<'arena, AttributeList<'arena>>,
-    ) -> Result<Constant<'arena>, ParseError> {
+    ) -> Result<Constant<'arena>, ParseError<'arena>> {
         Ok(Constant {
             attribute_lists,
             r#const: self.expect_keyword(T!["const"])?,
@@ -42,7 +42,7 @@ where
         })
     }
 
-    pub(crate) fn parse_constant_item(&mut self) -> Result<ConstantItem<'arena>, ParseError> {
+    pub(crate) fn parse_constant_item(&mut self) -> Result<ConstantItem<'arena>, ParseError<'arena>> {
         Ok(ConstantItem {
             name: self.parse_local_identifier()?,
             equals: self.stream.eat_span(T!["="])?,

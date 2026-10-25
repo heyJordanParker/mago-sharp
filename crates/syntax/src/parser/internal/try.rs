@@ -11,7 +11,7 @@ impl<'arena, A> Parser<'_, 'arena, A>
 where
     A: Arena,
 {
-    pub(crate) fn parse_try(&mut self) -> Result<Try<'arena>, ParseError> {
+    pub(crate) fn parse_try(&mut self) -> Result<Try<'arena>, ParseError<'arena>> {
         Ok(Try {
             r#try: self.expect_keyword(T!["try"])?,
             block: self.parse_block()?,
@@ -27,7 +27,9 @@ where
         })
     }
 
-    pub(crate) fn parse_optional_try_catch_clause(&mut self) -> Result<Option<TryCatchClause<'arena>>, ParseError> {
+    pub(crate) fn parse_optional_try_catch_clause(
+        &mut self,
+    ) -> Result<Option<TryCatchClause<'arena>>, ParseError<'arena>> {
         self.read_php_statement()?;
         Ok(match self.stream.peek_kind(0)? {
             Some(T!["catch"]) => {
@@ -58,7 +60,9 @@ where
         })
     }
 
-    pub(crate) fn parse_optional_try_finally_clause(&mut self) -> Result<Option<TryFinallyClause<'arena>>, ParseError> {
+    pub(crate) fn parse_optional_try_finally_clause(
+        &mut self,
+    ) -> Result<Option<TryFinallyClause<'arena>>, ParseError<'arena>> {
         Ok(match self.stream.peek_kind(0)? {
             Some(T!["finally"]) => {
                 Some(TryFinallyClause { finally: self.expect_any_keyword()?, block: self.parse_block()? })
