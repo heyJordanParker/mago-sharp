@@ -34,7 +34,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/heyJordan
 
 ### 校验下载
 
-如果 [GitHub CLI](https://cli.github.com/) 在你的 PATH 上,安装脚本会在解压前根据 Mago 的 GitHub 构建证明(build attestation)校验归档。无需任何参数。如果 `gh` 缺失或版本太旧,脚本会打印提示并继续运行而不进行校验。
+如果 [GitHub CLI](https://cli.github.com/) 在你的 PATH 上,安装脚本会在解压前根据 Mago 的 GitHub 构建证明(build attestation)校验归档。无需任何参数。如果 `gh` 缺失或版本太旧,脚本会改为根据发布中 `mago-<version>-sha256sums.txt` 的 SHA-256 校验归档,并提示完整的来源校验需要 `gh`:与归档一同发布的校验和能发现损坏的下载,但发现不了被替换的发布。
 
 要让校验成为强制项,请传 `--always-verify`。如果 `gh` 不可用、版本太旧,或证明不匹配,安装脚本会在修改 PATH 之前中止。
 
@@ -82,7 +82,7 @@ sudo mv "mago-${VERSION}-${TARGET}/mago" /usr/local/bin/
 composer require --dev "heyjordanparker/mago-sharp:^0.5.0"
 ```
 
-Composer 包是一个轻量封装。第一次调用 `vendor/bin/mago` 会从 GitHub 发布下载对应的预构建二进制并缓存。后续调用复用缓存,不再发起任何网络请求。
+Composer 包是一个轻量封装。第一次调用 `vendor/bin/mago` 会从 GitHub 发布下载对应的预构建二进制并缓存。后续调用复用缓存,不再发起任何网络请求。每个包版本都带有其发布构建的每个归档的 SHA-256,封装会拒绝解压 SHA-256 不一致的下载,因此你要求的版本锁定了确切的二进制。
 
 如果 GitHub 的匿名速率限制阻止了首次下载(在共享 CI runner 上很常见),为该次调用设置 `GITHUB_TOKEN` 或 `GH_TOKEN` 即可。在 GitHub Actions 中 token 不会自动导出,需要显式传入:
 
@@ -100,7 +100,7 @@ shell 安装脚本会根据你传入的参数,在三种模式之间选择。
 
 | 模式 | 参数 | 行为 |
 | :--- | :--- | :--- |
-| `auto` | 无 | 如果 `gh` 可用就校验;否则跳过校验直接安装。 |
+| `auto` | 无 | 如果 `gh` 可用就校验证明;否则校验发布的 SHA-256 校验和。 |
 | `always` | `--always-verify` | 强制校验。`gh` 缺失、版本太旧或匹配失败都会中止安装。 |
 | `never` | `--no-verify` | 即便 `gh` 可用也跳过校验。 |
 

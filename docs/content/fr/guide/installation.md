@@ -34,7 +34,7 @@ La même syntaxe fonctionne avec `wget`.
 
 ### Vérifier le téléchargement
 
-Si la [GitHub CLI](https://cli.github.com/) est dans votre PATH, le script vérifie l'archive contre l'attestation de build GitHub de Mago avant de la décompresser. Aucun drapeau requis. Si `gh` est absent ou trop ancien, le script affiche un avis et continue sans vérification.
+Si la [GitHub CLI](https://cli.github.com/) est dans votre PATH, le script vérifie l'archive contre l'attestation de build GitHub de Mago avant de la décompresser. Aucun drapeau requis. Si `gh` est absent ou trop ancien, le script vérifie plutôt l'archive contre le SHA-256 du fichier `mago-<version>-sha256sums.txt` de la release, et indique que la provenance complète demande `gh` : une somme de contrôle publiée à côté de l'archive détecte un téléchargement corrompu, pas une release remplacée.
 
 Pour rendre la vérification obligatoire, passez `--always-verify`. Le script s'interrompt avant de toucher votre PATH si `gh` est indisponible, trop ancien ou si l'attestation ne correspond pas.
 
@@ -82,7 +82,7 @@ Pour les projets PHP :
 composer require --dev "heyjordanparker/mago-sharp:^0.5.0"
 ```
 
-Le paquet Composer est un fin wrapper. Le premier appel à `vendor/bin/mago` télécharge le binaire pré-construit correspondant depuis la release GitHub et le met en cache. Les appels suivants réutilisent le cache et ne font aucune requête réseau.
+Le paquet Composer est un fin wrapper. Le premier appel à `vendor/bin/mago` télécharge le binaire pré-construit correspondant depuis la release GitHub et le met en cache. Les appels suivants réutilisent le cache et ne font aucune requête réseau. Chaque version du paquet contient le SHA-256 de chaque archive construite par sa release, et le wrapper refuse de décompresser un téléchargement dont le SHA-256 diffère : la version que vous requérez épingle le binaire exact.
 
 Si la limite de taux anonyme de GitHub bloque le premier téléchargement (fréquent sur les runners CI partagés), définissez `GITHUB_TOKEN` ou `GH_TOKEN` pour cette invocation. Dans GitHub Actions, le jeton n'est pas exporté automatiquement, donc passez-le explicitement :
 
@@ -100,7 +100,7 @@ Le script shell choisit l'un de trois modes selon les drapeaux que vous passez.
 
 | Mode | Drapeau | Comportement |
 | :--- | :--- | :--- |
-| `auto` | aucun | Vérifie si `gh` est disponible ; sinon installe sans vérifier. |
+| `auto` | aucun | Vérifie l'attestation si `gh` est disponible ; sinon vérifie la somme de contrôle SHA-256 de la release. |
 | `always` | `--always-verify` | La vérification est obligatoire. Un `gh` manquant ou trop ancien, ou une correspondance échouée, interrompt l'installation. |
 | `never` | `--no-verify` | Saute la vérification même quand `gh` est disponible. |
 

@@ -9,5 +9,8 @@
         <testsuite name="Mago PHP SDK">
             <directory suffix="Test.php">tests/Sdk/Unit</directory>
         </testsuite>
+        <testsuite name="Mago Composer wrapper">
+            <directory suffix="Test.php">tests/Internal</directory>
+        </testsuite>
     </testsuites>
 </phpunit>
