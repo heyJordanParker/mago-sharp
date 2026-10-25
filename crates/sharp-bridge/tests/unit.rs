@@ -275,8 +275,7 @@ fn encoding_one_lowering_twice_gives_the_same_bytes_with_zero_padding() {
     assert_eq!(first, second);
 
     let decoded = Decoded::new(&first);
-    let after_header =
-        offset_of!(sharp_unit_header, library_version) + size_of::<sharp_str>()..size_of::<sharp_unit_header>();
+    let after_header = offset_of!(sharp_unit_header, sections_hash) + 16..size_of::<sharp_unit_header>();
     assert!(first[after_header].iter().all(|&byte| byte == 0), "the header ends in zero padding");
     let after_kind = offset_of!(sharp_node, kind) + size_of::<u16>()..offset_of!(sharp_node, attr);
     let after_value = offset_of!(sharp_node, value) + size_of::<u8>()..offset_of!(sharp_node, long_value);
@@ -303,7 +302,8 @@ fn header_reads_the_fields_of_a_current_file() {
 }
 
 #[test]
-fn header_refuses_a_short_file_a_wrong_magic_a_wrong_abi_a_wrong_length_and_a_library_version_past_its_texts() {
+fn header_refuses_a_short_file_a_wrong_magic_a_wrong_abi_a_wrong_length_changed_sections_and_a_library_version_past_its_texts()
+ {
     let bytes = encoded(SOURCE);
     let changed = |offset: usize| {
         let mut changed = bytes.clone();
@@ -321,6 +321,9 @@ fn header_refuses_a_short_file_a_wrong_magic_a_wrong_abi_a_wrong_length_and_a_li
     assert_eq!(header(&bytes[..bytes.len() - 1]), Err(FormatError::Length));
     assert_eq!(header(&changed(offset_of!(sharp_unit_header, node_count))), Err(FormatError::Length));
     assert_eq!(header(&changed(offset_of!(sharp_unit_header, texts_size))), Err(FormatError::Length));
+    assert_eq!(header(&changed(size_of::<sharp_unit_header>())), Err(FormatError::Sections));
+    assert_eq!(header(&changed(bytes.len() - 1)), Err(FormatError::Sections));
+    assert_eq!(header(&changed(offset_of!(sharp_unit_header, sections_hash) + 15)), Err(FormatError::Sections));
     assert_eq!(
         header(&changed(offset_of!(sharp_unit_header, library_version) + offset_of!(sharp_str, len) + 3)),
         Err(FormatError::Length)
@@ -468,16 +471,19 @@ fn a_compiled_file_is_current_until_one_of_its_inputs_changes() {
 }
 
 #[test]
-fn a_compiled_file_another_checker_build_wrote_or_that_is_no_compiled_file_is_stale() {
+fn a_compiled_file_another_checker_build_wrote_whose_sections_changed_or_that_is_no_compiled_file_is_stale() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
     write(root, "app/Report.sharp", SOURCE);
     let bytes = compiled_with_inputs(root, &["app/Report.sharp"]);
     let mut other_build = bytes.clone();
     other_build[offset_of!(sharp_unit_header, checker)] ^= 1;
+    let mut damaged = bytes.clone();
+    *damaged.last_mut().unwrap() ^= 1;
 
     assert!(!is_stale(root, &bytes).unwrap());
     assert!(is_stale(root, &other_build).unwrap());
+    assert!(is_stale(root, &damaged).unwrap());
     assert!(is_stale(root, b"not a compiled file").unwrap());
 }
 
@@ -594,6 +600,7 @@ fn the_c_header_lays_out_every_type_as_the_bridge_does() {
         ("offsetof(sharp_unit_header, texts_size)", offset_of!(sharp_unit_header, texts_size)),
         ("offsetof(sharp_unit_header, native_fingerprint)", offset_of!(sharp_unit_header, native_fingerprint)),
         ("offsetof(sharp_unit_header, library_version)", offset_of!(sharp_unit_header, library_version)),
+        ("offsetof(sharp_unit_header, sections_hash)", offset_of!(sharp_unit_header, sections_hash)),
         ("sizeof(sharp_input)", size_of::<sharp_input>()),
         ("offsetof(sharp_input, size)", offset_of!(sharp_input, size)),
         ("offsetof(sharp_input, mtime_ns)", offset_of!(sharp_input, mtime_ns)),

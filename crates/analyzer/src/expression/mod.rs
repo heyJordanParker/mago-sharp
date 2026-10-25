@@ -679,6 +679,9 @@ where
     // The test states the type of the value it tests, so a read of a property whose type is unknown, spec section 14.3,
     // needs no warning there: the warning's own help asks for this test.
     let tested_read = tested_value(node).unparenthesized().span();
+    // A tested value whose expression is refused reported itself, so no test of it reports that it always or never
+    // holds.
+    let tested_refused = artifacts.get_expression_type(tested_value(node)).is_some_and(is_refused_type);
     let issues: Vec<Issue> = issues
         .into_iter()
         .filter(|issue| {
@@ -695,6 +698,7 @@ where
             // PHP's report on `match (true)` names `true`, so a PHP# `match` reports what it misses itself.
             !is_code(issue, IssueCode::MatchNotExhaustive)
                 && !reads_tested_value
+                && !(tested_refused && (always_true || is_code(issue, IssueCode::ImpossibleTypeComparison)))
                 && (!is_code(issue, IssueCode::RedundantLogicalOperation)
                     || span.is_none_or(|span| !field_tests.iter().any(|test| test.start == span.start)))
                 && (!always_true || called.is_none_or(|call| !is_shape(call)))
@@ -775,19 +779,37 @@ where
     }
 
     // Reading (g) of spec section 21: a pattern that can never match is an error, as C#'s CS8121 is. Its test is then
-    // `false`, unless an error at the pattern already says so.
+    // `false`, unless an error at the pattern already says so. An arm an earlier arm handles says which, as C#'s CS8120
+    // does. That arm's own reports from its PHP, that it is unreachable and compares a value it never equals, say the
+    // same again, so they are left out.
+    let mut handled_arms: Vec<Span> = Vec::new();
     for (pattern, test) in tests {
         let reported = issues.iter().any(|issue| {
             issue.level == Level::Error
                 && is_code(issue, IssueCode::ImpossibleTypeComparison)
                 && issue.primary_span().is_some_and(|span| pattern.contains(&span.start))
         });
-        if reported || !artifacts.get_rc_expression_type(test).is_some_and(|test_type| test_type.is_false()) {
+        if tested_refused
+            || reported
+            || !artifacts.get_rc_expression_type(test).is_some_and(|test_type| test_type.is_false())
+        {
             continue;
         }
 
-        context.collector.report(never_matches(pattern));
+        let Some(earlier) = handled_earlier(node, pattern, context, block_context, artifacts) else {
+            context.collector.report(never_matches(pattern));
+            continue;
+        };
+        handled_arms.extend(arm_of(node, pattern));
+        context.collector.report(already_handled(pattern, earlier, context));
     }
+    let issues = issues.into_iter().filter(|issue| {
+        !(is_code(issue, IssueCode::UnreachableMatchArm) || is_code(issue, IssueCode::RedundantComparison))
+            || !issue
+                .annotations
+                .iter()
+                .any(|annotation| handled_arms.iter().any(|arm| arm.contains(&annotation.span.start)))
+    });
     context.collector.extend(issues);
     result?;
 
@@ -1748,6 +1770,94 @@ fn never_matches(pattern: Span) -> Issue {
         .with_annotation(Annotation::primary(pattern).with_message("Never matches."))
         .with_note("PHP# makes a pattern that can never match an error, as C# does (CS8121).")
         .with_help("Remove the pattern, or test a value that can match it.")
+}
+
+/// The arms of `node`, when it is a `match`.
+fn match_arms<'node, 'arena>(node: Node<'node, 'arena>) -> &'node [PatternMatchArm<'arena>] {
+    match node {
+        Node::Expression(Expression::PatternMatch(pattern_match))
+        | Node::Statement(Statement::PatternMatch(pattern_match)) => pattern_match.arms.as_slice(),
+        _ => &[],
+    }
+}
+
+/// The span of the arm of `node`, a `match`, whose pattern is at `pattern`.
+fn arm_of(node: Node<'_, '_>, pattern: Span) -> Option<Span> {
+    match_arms(node).iter().find_map(|arm| match arm {
+        PatternMatchArm::Pattern(arm) if arm.pattern.span() == pattern => Some(arm.span()),
+        _ => None,
+    })
+}
+
+/// The pattern of an arm of `node`, a `match`, before the arm at `pattern`, that has no `when` condition and tests the
+/// one value `pattern` tests, so it handles every value `pattern` matches. `0x1` and a constant that holds `1` test the
+/// value `1` tests.
+fn handled_earlier<'ctx, A>(
+    node: Node<'_, '_>,
+    pattern: Span,
+    context: &Context<'ctx, '_, A>,
+    block_context: &BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+) -> Option<Span>
+where
+    A: Arena,
+{
+    let tested = artifacts.get_expression_type(tested_value(node)).cloned().unwrap_or_else(get_mixed);
+    let arms: Vec<&Pattern<'_>> = match_arms(node)
+        .iter()
+        .filter_map(|arm| match arm {
+            PatternMatchArm::Pattern(arm) if arm.guard.is_none() || arm.pattern.span() == pattern => Some(arm.pattern),
+            _ => None,
+        })
+        .collect();
+    let (position, _) = arms.iter().enumerate().find(|(_, arm)| arm.span() == pattern)?;
+    let value = tested_value_of(arms[position], &tested, context, block_context, artifacts)?;
+
+    arms[..position].iter().find_map(|earlier| {
+        (tested_value_of(earlier, &tested, context, block_context, artifacts).as_ref() == Some(&value))
+            .then(|| earlier.span())
+    })
+}
+
+/// The one value `pattern`, a pattern of a `match` over a value of `tested`, matches: a literal, a constant that holds
+/// one, `null`, `true`, `false` or a case of an enum. `None` for a pattern that matches more than one value.
+fn tested_value_of<'ctx, A>(
+    pattern: &Pattern<'_>,
+    tested: &TUnion,
+    context: &Context<'ctx, '_, A>,
+    block_context: &BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+) -> Option<TUnion>
+where
+    A: Arena,
+{
+    let value = match pattern {
+        Pattern::Parenthesized(parenthesized) => {
+            return tested_value_of(parenthesized.pattern, tested, context, block_context, artifacts);
+        }
+        Pattern::Value(expression) => held_type(pattern, tested, context, block_context, artifacts)
+            .or_else(|| artifacts.get_expression_type(expression).cloned())?,
+        _ => return None,
+    };
+
+    (value.is_single() && (value.get_single().is_literal() || value.is_single_enum_case())).then_some(value)
+}
+
+/// The error at a `match` arm's pattern that never runs, because the earlier arm at `earlier` handles its case.
+fn already_handled<A>(pattern: Span, earlier: Span, context: &Context<'_, '_, A>) -> Issue
+where
+    A: Arena,
+{
+    let line = context.source_file.line_number(earlier.start.offset) + 1;
+
+    Issue::error(format!(
+        "This arm never runs: the arm on line {line} already handles `{}`.",
+        quoted_source(context, pattern)
+    ))
+    .with_code(IssueCode::ImpossibleTypeComparison.as_str())
+    .with_annotation(Annotation::primary(pattern).with_message("Never runs."))
+    .with_annotation(Annotation::secondary(earlier).with_message("Handled here."))
+    .with_help("Remove this arm, or change its pattern.")
 }
 
 /// `issue`, in PHP#'s words when it is the PHP's report that a list pattern's element, one of `elements`, can never be

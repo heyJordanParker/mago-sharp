@@ -1469,20 +1469,7 @@ where
 
     match object {
         Expression::ConstantAccess(access) => {
-            let variable_id = get_bare_name_variable_id(&access.name, context.resolved_names)?;
-
-            Some(match block_context.local_types.get(&variable_id) {
-                Some((local_type, _)) => local_type.as_ref().clone(),
-                None => block_context
-                    .scope
-                    .get_function_like()?
-                    .parameters
-                    .iter()
-                    .find(|parameter| parameter.get_name().0 == variable_id)?
-                    .get_type_metadata()?
-                    .type_union
-                    .clone(),
-            })
+            block_context.declared_type(&get_bare_name_variable_id(&access.name, context.resolved_names)?)
         }
         // Spec section 14.4: `object?.name` is the place `object.name` is, where `object` is not null.
         Expression::Access(

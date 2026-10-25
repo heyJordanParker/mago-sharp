@@ -7,6 +7,7 @@ use mago_algebra::clause::Clause;
 use mago_algebra::disjoin_clauses;
 use mago_codex::assertion::Assertion;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
+use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::ttype::TType;
 use mago_codex::ttype::add_union_type;
 use mago_codex::ttype::atomic::TAtomic;
@@ -166,6 +167,7 @@ pub(crate) enum PropertyWriteKind {
 /// collection the place declares: an empty literal, as [`get_empty_literal_type`] decides, or a list literal at a `Set`,
 /// as [`get_set_literal_type`] does. `source_type` is what `=` writes. `??=` writes `source` only when `target` is
 /// `null`, so it keeps what `target` held without `null` beside the retyped `source`. `None` when nothing is retyped.
+/// The write runs in `function_like`.
 pub(crate) fn get_written_literal_type<A>(
     context: &Context<'_, '_, A>,
     artifacts: &mut AnalysisArtifacts,
@@ -174,13 +176,19 @@ pub(crate) fn get_written_literal_type<A>(
     source_type: &TUnion,
     declared: &TUnion,
     coalesce: bool,
+    function_like: Option<&FunctionLikeMetadata>,
 ) -> Option<TUnion>
 where
     A: Arena,
 {
+    let set_literal_type = |artifacts: &mut AnalysisArtifacts| {
+        source.and_then(|source| get_set_literal_type(context, artifacts, source, declared, function_like))
+    };
     let literal_type = |artifacts: &mut AnalysisArtifacts, value_type: &TUnion| match value_type.types.as_ref() {
-        [TAtomic::Array(array)] if array.is_empty() => get_empty_literal_type(source, declared),
-        _ => source.and_then(|source| get_set_literal_type(context, artifacts, source, declared)),
+        [TAtomic::Array(array)] if array.is_empty() => {
+            set_literal_type(artifacts).or_else(|| get_empty_literal_type(source, declared))
+        }
+        _ => set_literal_type(artifacts),
     };
 
     if coalesce
@@ -386,6 +394,7 @@ where
                 &source_type,
                 &declared_type,
                 matches!(assignment_operator, Some(AssignmentOperator::Coalesce(_))),
+                block_context.scope.get_function_like(),
             )
         })
         .map_or(source_type, Rc::new);

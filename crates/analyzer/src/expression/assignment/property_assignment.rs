@@ -159,6 +159,7 @@ where
             assigned_value_type,
             declared_type,
             write_kind == PropertyWriteKind::Coalesce,
+            block_context.scope.get_function_like(),
         );
     }
     let assigned_value_type = literal_type.as_ref().unwrap_or(assigned_value_type);

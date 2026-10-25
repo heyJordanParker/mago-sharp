@@ -29,15 +29,27 @@ static BANNED: LazyLock<Vec<(&str, Regex)>> = LazyLock::new(|| {
 /// The PHP form a refusal quotes because the developer wrote it, as in "PHP# has no `compact`".
 static REFUSED_FORM: LazyLock<Regex> = LazyLock::new(|| Regex::new("PHP# has no `[^`]*`").expect("a valid pattern"));
 
+/// The token a parse error quotes because the developer wrote it, as in the typo error "Unexpected `mixed`" or
+/// "Expected `;`, found `mixed`".
+static WRITTEN_TOKEN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new("(?:Unexpected|found) `[^`]*`").expect("a valid pattern"));
+
 /// The first text of `issue`, its message, help, notes or annotations, that names something only PHP has outside a
-/// refused form it quotes, with what it names: what it is and the words found.
+/// refused form it quotes, with what it names: what it is and the words found. Only a parse error quotes a token as
+/// written.
 pub fn banned_word(issue: &Issue) -> Option<(&str, String)> {
+    let parse_error = issue.code.as_deref() == Some("parse");
     std::iter::once(issue.message.as_str())
         .chain(issue.help.as_deref())
         .chain(issue.notes.iter().map(String::as_str))
         .chain(issue.annotations.iter().filter_map(|annotation| annotation.message.as_deref()))
         .find_map(|text| {
             let own_words = REFUSED_FORM.replace_all(text, "");
+            let own_words = if parse_error {
+                WRITTEN_TOKEN.replace_all(&own_words, "").into_owned()
+            } else {
+                own_words.into_owned()
+            };
             BANNED.iter().find_map(|(name, pattern)| {
                 pattern.find(&own_words).map(|found| (text, format!("{name}: `{}`", found.as_str())))
             })

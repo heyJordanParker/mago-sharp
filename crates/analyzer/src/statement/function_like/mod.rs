@@ -229,7 +229,9 @@ where
 
 /// Brings each local a PHP# lambda captures into the lambda's block, as a closure's `use` clause does. Spec section 3
 /// captures the variable itself, so a captured local that code writes is captured by reference, as the engine runs
-/// it, and [`merge_captured_references`] carries the lambda's writes back.
+/// it, and [`merge_captured_references`] carries the lambda's writes back. The lambda runs later, so it keeps the type
+/// a test narrowed such a local to only when no write can run after the lambda is created, as TypeScript 5.4 decides,
+/// and otherwise reads it at its declared type. It assigns it only values of that type.
 pub fn capture_lambda_locals<A>(
     context: &Context<'_, '_, A>,
     lambda: Span,
@@ -244,6 +246,14 @@ pub fn capture_lambda_locals<A>(
 
         let mut variable_type = block_context.locals.get(&variable).cloned().unwrap_or_else(|| Rc::new(get_mixed()));
         if context.resolved_names.is_written(local) {
+            if let Some(declared_type) = block_context.declared_type(&variable) {
+                let declared_type = Rc::new(declared_type);
+                if context.resolved_names.is_written_after(local, lambda.start.offset) {
+                    variable_type = Rc::clone(&declared_type);
+                }
+                let span = block_context.local_types.get(&variable).map_or(local.declaration, |(_, span)| *span);
+                lambda_block_context.local_types.insert(variable, (declared_type, span));
+            }
             Rc::make_mut(&mut variable_type).set_by_reference(true);
             lambda_block_context.references_to_external_scope.insert(variable);
         }
@@ -599,6 +609,7 @@ where
         }
     }
 
+    record_signature_types(&mut artifacts, function_like_metadata);
     add_parameter_types_to_context(
         context,
         block_context,
@@ -723,6 +734,7 @@ where
     parent_artifacts.resolved_method_calls.append(&mut artifacts.resolved_method_calls);
     parent_artifacts.call_targets.extend(std::mem::take(&mut artifacts.call_targets));
     parent_artifacts.tested_types.extend(std::mem::take(&mut artifacts.tested_types));
+    parent_artifacts.declared_types.extend(std::mem::take(&mut artifacts.declared_types));
     parent_artifacts.namespace_constants.extend(std::mem::take(&mut artifacts.namespace_constants));
     parent_artifacts.function_values.append(&mut artifacts.function_values);
     parent_artifacts.readonly_calls.append(&mut artifacts.readonly_calls);
@@ -801,6 +813,19 @@ fn assume<'ctx, A>(
             false,
             false,
         );
+    }
+}
+
+/// Records the type each parameter's hint and the result's hint of the PHP# `function_like_metadata` write, as
+/// [`AnalysisArtifacts::get_declared_type`] reads them.
+pub(crate) fn record_signature_types(artifacts: &mut AnalysisArtifacts, function_like_metadata: &FunctionLikeMetadata) {
+    if !function_like_metadata.flags.is_sharp() {
+        return;
+    }
+    let parameters =
+        function_like_metadata.parameters.iter().filter_map(|parameter| parameter.get_type_declaration_metadata());
+    for declared in parameters.chain(function_like_metadata.return_type_declaration_metadata.as_ref()) {
+        artifacts.record_declared_type(&declared.span, declared.type_union.clone());
     }
 }
 
@@ -2084,7 +2109,8 @@ fn check_parameter_default_value<'ctx, 'arena, A>(
         return;
     }
 
-    let Some(default_type) = get_set_literal_type(context, artifacts, default_expression, declared_type)
+    // PHP evaluates a default as a constant expression, outside the frame that holds the method's type arguments.
+    let Some(default_type) = get_set_literal_type(context, artifacts, default_expression, declared_type, None)
         .or_else(|| artifacts.get_expression_type(default_expression).cloned())
     else {
         return;

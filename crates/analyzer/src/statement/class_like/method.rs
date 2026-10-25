@@ -55,6 +55,7 @@ use crate::statement::attributes::analyze_attributes;
 use crate::statement::function_like::FunctionLikeBody;
 use crate::statement::function_like::analyze_function_like;
 use crate::statement::function_like::check_unused_function_template_parameters;
+use crate::statement::function_like::record_signature_types;
 use crate::statement::function_like::rejected_nullable_parameter;
 use crate::statement::function_like::unused_parameter;
 use crate::statement::function_like::unused_parameter::utils::is_variable_used_in_expression;
@@ -371,6 +372,8 @@ where
 
     if context.dialect.is_sharp() && matches!(method.body, MethodBody::Abstract(_)) {
         check_declaration_uses(context, class_like_metadata, method_metadata, method.name_span);
+        // A method without a body runs no analysis of its own, which records the types its hints write.
+        record_signature_types(artifacts, method_metadata);
     }
 
     let body = match method.body {
@@ -603,6 +606,7 @@ pub(super) fn check_super_call<A>(
     });
     let class_name = display_class_like_name(context, class.original_name);
     let base_name = display_class_like_name(context, base);
+    let type_parameters: Vec<&[u8]> = class.template_types.keys().map(|name| name.as_bytes()).collect();
 
     match constructor {
         Some(constructor) if constructor.initializer.is_none() => {
@@ -613,9 +617,9 @@ pub(super) fn check_super_call<A>(
             );
         }
         None if !constructor_of_base.parameters.is_empty()
-            && members.iter().any(
-                |member| matches!(member, ClassLikeMember::Property(property) if property.runs_in_constructor()),
-            ) =>
+            && members.iter().any(|member| {
+                matches!(member, ClassLikeMember::Property(property) if property.runs_in_constructor(&type_parameters))
+            }) =>
         {
             let mut parameters = Vec::new();
             let mut arguments = Vec::new();

@@ -151,7 +151,8 @@ where
         })
     {
         check_sharp_literal_kind(context, Some(block_context), artifacts, value, &element);
-        set_literal_type = get_set_literal_type(context, artifacts, value, &element);
+        set_literal_type =
+            get_set_literal_type(context, artifacts, value, &element, block_context.scope.get_function_like());
 
         // Spec section 29: a function written into a collection is held to its element type, as one written to a
         // local or a field is to theirs.

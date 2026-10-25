@@ -66,6 +66,9 @@ pub struct sharp_unit_header {
     /// The version Composer installed that standard library at, which the engine's refusal names. Empty when Composer
     /// reports none.
     pub library_version: sharp_str,
+    /// The hash of every byte after the header: the inputs, the tree and the texts. The engine refuses a file whose
+    /// sections changed after it was written, as a damaged or partly written one.
+    pub sections_hash: [u8; 16],
 }
 
 /// A file whose edit makes the compiled file's source due for a check.
@@ -80,7 +83,7 @@ pub struct sharp_input {
 }
 
 const _: () = {
-    assert!(size_of::<sharp_unit_header>() == 128, "the header is 128 bytes");
+    assert!(size_of::<sharp_unit_header>() == 144, "the header is 144 bytes");
     assert!(offset_of!(sharp_unit_header, abi) == 8, "abi is at 8");
     assert!(offset_of!(sharp_unit_header, checker) == 24, "checker is at 24");
     assert!(offset_of!(sharp_unit_header, key) == 40, "key is at 40");
@@ -93,6 +96,7 @@ const _: () = {
     assert!(offset_of!(sharp_unit_header, texts_size) == 96, "texts_size is at 96");
     assert!(offset_of!(sharp_unit_header, native_fingerprint) == 100, "native_fingerprint is at 100");
     assert!(offset_of!(sharp_unit_header, library_version) == 116, "library_version is at 116");
+    assert!(offset_of!(sharp_unit_header, sections_hash) == 124, "sections_hash is at 124");
     assert!(size_of::<sharp_input>() == 40, "an input is 40 bytes");
     assert!(offset_of!(sharp_input, size) == 8, "an input's size is at 8");
     assert!(offset_of!(sharp_input, mtime_ns) == 16, "an input's mtime_ns is at 16");
@@ -150,7 +154,7 @@ pub struct Library {
     pub version: Vec<u8>,
 }
 
-/// The fields of a header that passed load checks 1 and 2.
+/// The fields of a header that passed load checks 1 to 3.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Header {
     pub abi: [u8; 16],
@@ -171,6 +175,8 @@ pub enum FormatError {
     Abi,
     /// The file's length differs from the length its header gives.
     Length,
+    /// The file's inputs, tree or texts differ from the ones its header's `sections_hash` names.
+    Sections,
 }
 
 /// The xxh3-128 of a source, as the header's `source_hash` stores it.
@@ -243,6 +249,7 @@ pub fn encode(unit: &Unit, source: &[u8], key: [u8; 16], inputs: &[Input], libra
         texts_size: size("texts", texts.len()),
         native_fingerprint: library.native_fingerprint,
         library_version,
+        sections_hash: [0; 16],
     };
 
     let mut bytes = Vec::with_capacity(length(&header) as usize);
@@ -257,12 +264,21 @@ pub fn encode(unit: &Unit, source: &[u8], key: [u8; 16], inputs: &[Input], libra
         bytes.extend_from_slice(&child.to_le_bytes());
     }
     bytes.extend_from_slice(&texts);
+    let sections_hash = sections_hash(&bytes);
+    put(&mut bytes, offset_of!(sharp_unit_header, sections_hash), &sections_hash);
 
     bytes
 }
 
-/// Reads the header of a `.sharpc` file, after load checks 1 and 2: the magic and the ABI match this bridge's, and the
-/// file's length is the length its header gives.
+/// The xxh3-128 of every byte of the compiled file `bytes` after its header, as the header's `sections_hash` stores it.
+fn sections_hash(bytes: &[u8]) -> [u8; 16] {
+    xxh3_128(&bytes[size_of::<sharp_unit_header>()..]).to_be_bytes()
+}
+
+/// Reads the header of a `.sharpc` file, after load checks 1 to 3.
+///
+/// The magic and the ABI match this bridge's, the file's length is the length its header gives, and the sections
+/// after the header hash to its `sections_hash`.
 ///
 /// # Errors
 ///
@@ -305,12 +321,16 @@ pub fn header(bytes: &[u8]) -> Result<Header, FormatError> {
             offset: word(offset_of!(sharp_unit_header, library_version) + offset_of!(sharp_str, offset)),
             len: word(offset_of!(sharp_unit_header, library_version) + offset_of!(sharp_str, len)),
         },
+        sections_hash: hash(offset_of!(sharp_unit_header, sections_hash)),
     };
     if header.abi != SHARP_UNIT_ABI {
         return Err(FormatError::Abi);
     }
     if bytes.len() as u64 != length(&header) {
         return Err(FormatError::Length);
+    }
+    if sections_hash(bytes) != header.sections_hash {
+        return Err(FormatError::Sections);
     }
 
     let texts = size_of::<sharp_unit_header>()
@@ -512,6 +532,7 @@ fn header_bytes(header: &sharp_unit_header) -> [u8; size_of::<sharp_unit_header>
     put(&mut bytes, offset_of!(sharp_unit_header, texts_size), &header.texts_size.to_le_bytes());
     put(&mut bytes, offset_of!(sharp_unit_header, native_fingerprint), &header.native_fingerprint);
     put_text(&mut bytes, offset_of!(sharp_unit_header, library_version), header.library_version);
+    put(&mut bytes, offset_of!(sharp_unit_header, sections_hash), &header.sections_hash);
 
     bytes
 }

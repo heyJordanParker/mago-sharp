@@ -179,10 +179,7 @@ fn an_event_takes_only_public_or_internal_and_its_parameters_are_its_properties(
 fn a_case_in_an_interface_is_no_php_sharp_construct() {
     let interface = "namespace App.Shop;\n\npublic interface Shape\n{\n    case Open;\n}\n";
 
-    assert_eq!(
-        issues(interface),
-        ["5:5 Interface `Shape` cannot contain enum cases.", "5:5 Parse error encountered during parsing"]
-    );
+    assert_eq!(issues(interface), ["5:5 Interface `Shape` cannot contain enum cases.", "5:5 Unexpected `case`"]);
 }
 
 /// Spec section 28: a law states a fact about the values of a class or an enum, and an interface has no values.
@@ -501,15 +498,8 @@ fn every_construct_outside_the_slice_is_an_error() {
     let class = "namespace App.Tenant;\n\nclass Report\n{\n    public int run(int extra)\n    {\n        const made = new Report;\n        const partial = this.run(...);\n        const text = <<<TEXT\ntotal\nTEXT;\n        return extra;\n    }\n}\n";
 
     assert_eq!(issues(interface), Vec::<String>::new());
-    assert_eq!(issues(r#trait), ["3:1 Parse error encountered during parsing"]);
-    assert_eq!(
-        issues(class),
-        [
-            "7:32 Parse error encountered during parsing",
-            "8:34 Parse error encountered during parsing",
-            "9:22 Parse error encountered during parsing",
-        ]
-    );
+    assert_eq!(issues(r#trait), ["3:1 Unexpected `trait`"]);
+    assert_eq!(issues(class), ["7:32 Unexpected `;`", "8:34 Unexpected `...`", "9:22 Unexpected `<<<TEXT`"]);
 }
 
 /// A PHP form PHP# never has fails as a typo does, with no message that names the form, never "not supported yet",
@@ -526,25 +516,25 @@ fn a_php_form_php_sharp_never_has_fails_as_a_typo_does() {
         [issues(body), issues(declarations), issues(members)],
         [
             vec![
-                "7:25 Parse error encountered during parsing",
-                "8:19 Parse error encountered during parsing",
-                "9:9 Parse error encountered during parsing",
-                "10:19 Parse error encountered during parsing",
-                "13:9 Parse error encountered during parsing",
-                "14:9 Parse error encountered during parsing",
-                "15:19 Parse error encountered during parsing",
-                "16:9 Parse error encountered during parsing",
-                "17:9 Parse error encountered during parsing",
+                "7:25 Unexpected `instanceof`",
+                "8:19 Unexpected `(unset)`",
+                "9:9 Unexpected `(void)`",
+                "10:19 Unexpected `<<<'TEXT'`",
+                "13:9 Unexpected `goto`",
+                "14:9 Unexpected `end`",
+                "15:19 Unexpected `clone`",
+                "16:9 Unexpected `include`",
+                "17:9 Unexpected `require`",
             ],
             vec![
                 "7:9 An `import` goes at the top of the file, after the namespace: move it out of the method.",
                 "8:9 A method can't declare a type inside it: declare `Inner` in its own file.",
             ],
             vec![
-                "5:12 Parse error encountered during parsing",
+                "5:12 Unexpected `private(set)`",
                 "6:13 Write `Calc` without parentheses: they go only around a union or an intersection before `?`, as in `(int|string)?`.",
                 "6:14 Type `Calc` cannot be parenthesized.",
-                "7:20 Parse error encountered during parsing",
+                "7:20 Unexpected `&`",
                 "8:20 An accessor takes no `final`: remove it.",
                 "9:30 `willSet` takes no access level: it runs inside `set`.",
             ],
@@ -570,7 +560,7 @@ fn a_member_that_breaks_a_rule_names_it_and_an_unknown_accessor_fails_as_a_typo_
                 "6:20 `get` takes no parameter list.",
                 "7:13 `Iterable` takes 1 type argument: the element.",
             ],
-            vec!["5:20 Parse error encountered during parsing", "5:16 A PHP# property needs a `get` accessor."],
+            vec!["5:20 Unexpected `fetch`", "5:16 A PHP# property needs a `get` accessor."],
             vec!["5:5 An interface method needs a return type in PHP#."],
         ]
     );
@@ -592,10 +582,10 @@ fn a_class_form_php_sharp_never_has_fails_as_a_typo_does_or_names_the_rule_it_br
             vec!["3:8 A class takes no `virtual`: remove it."],
             vec!["3:8 A class takes no `required`: remove it."],
             vec![
-                "5:12 Parse error encountered during parsing",
-                "9:9 Parse error encountered during parsing",
+                "5:12 Unexpected `public(set)`",
+                "9:9 Unexpected `static`",
                 "12:9 `[a, b]` can't be written to: unpack a tuple into new locals with `const [a, b] = …`.",
-                "14:10 Parse error encountered during parsing",
+                "14:10 Unexpected `,`",
             ],
             vec![],
         ]
@@ -613,11 +603,11 @@ fn a_pipe_and_an_open_argument_fail_as_a_typo_does() {
     assert_eq!(
         issues(code),
         [
-            "7:25 Parse error encountered during parsing",
-            "8:23 Parse error encountered during parsing",
-            "9:31 Parse error encountered during parsing",
-            "10:26 Parse error encountered during parsing",
-            "11:38 Parse error encountered during parsing",
+            "7:25 Unexpected `|>`",
+            "8:23 Unexpected `?`",
+            "9:31 Unexpected `?`",
+            "10:26 Unexpected `...`",
+            "11:38 Unexpected `?`",
         ]
     );
 }
@@ -636,11 +626,11 @@ fn a_php_version_error_and_a_goto_label_error_stay_out_of_a_sharp_file() {
     assert_eq!(
         issues(code),
         [
-            "7:25 Parse error encountered during parsing",
-            "8:23 Parse error encountered during parsing",
-            "9:19 Parse error encountered during parsing",
-            "10:9 Parse error encountered during parsing",
-            "11:9 Parse error encountered during parsing",
+            "7:25 Unexpected `|>`",
+            "8:23 Unexpected `?`",
+            "9:19 Unexpected `(unset)`",
+            "10:9 Unexpected `(void)`",
+            "11:9 Unexpected `goto`",
         ]
     );
     assert_eq!(
@@ -735,12 +725,7 @@ fn switch_and_or_and_xor_fail_as_a_typo_does() {
 
     assert_eq!(
         issues(code),
-        [
-            "7:9 Parse error encountered during parsing",
-            "11:15 Parse error encountered during parsing",
-            "12:15 Parse error encountered during parsing",
-            "13:15 Parse error encountered during parsing",
-        ]
+        ["7:9 Unexpected `switch`", "11:15 Unexpected `and`", "12:15 Unexpected `or`", "13:15 Unexpected `xor`",]
     );
 }
 
@@ -753,17 +738,10 @@ fn a_parent_type_and_a_self_type_are_errors_that_name_the_class() {
     let unlisted = "namespace App.Tenant;\n\nclass Report\n{\n    public parent copy() => null;\n}\n";
     let written = "namespace App.Tenant;\n\nimport Lib.Entity;\n\nclass Report : Entity\n{\n    public Entity copy(Report other)\n    {\n        return other;\n    }\n}\n";
 
-    assert_eq!(
-        issues(code),
-        ["7:12 Parse error encountered during parsing", "7:24 Parse error encountered during parsing"]
-    );
+    assert_eq!(issues(code), ["7:12 Unexpected `parent`", "7:24 Unexpected `self`"]);
     assert_eq!(
         [issues(listed), issues(unlisted), issues(written)],
-        [
-            vec!["8:12 Parse error encountered during parsing"],
-            vec!["5:12 Parse error encountered during parsing"],
-            vec![],
-        ]
+        [vec!["8:12 Unexpected `parent`"], vec!["5:12 Unexpected `parent`"], vec![]]
     );
 }
 
@@ -772,15 +750,13 @@ fn a_parent_type_and_a_self_type_are_errors_that_name_the_class() {
 #[test]
 fn a_final_enum_is_an_error_and_a_trait_fails_as_a_typo_does_at_its_keyword() {
     let code = "namespace App.Tenant;\n\nfinal enum Suit\n{\n}\n\npublic trait Tagged\n{\n}\n\ntrait Bare\n{\n}\n\n[Deprecated]\ntrait Old\n{\n}\n";
-    let r#trait = "Parse error encountered during parsing";
-
     assert_eq!(
         issues(code),
         [
-            "3:1 An enum takes no `final`: remove it.".to_owned(),
-            format!("7:8 {trait}"),
-            format!("11:1 {trait}"),
-            format!("16:1 {trait}"),
+            "3:1 An enum takes no `final`: remove it.",
+            "7:8 Unexpected `trait`",
+            "11:1 Unexpected `trait`",
+            "16:1 Unexpected `trait`",
         ]
     );
 }
@@ -806,7 +782,7 @@ fn a_template_is_in_the_slice_with_any_slice_expression_in_its_interpolations() 
 fn an_interpolation_outside_the_slice_is_an_error() {
     let code = leak(method("        const label = `made ${this.run(...)}`;\n        return extra;\n"));
 
-    assert_eq!(issues(code), ["7:40 Parse error encountered during parsing"]);
+    assert_eq!(issues(code), ["7:40 Unexpected `...`"]);
 }
 
 #[test]
@@ -918,7 +894,7 @@ fn a_colon_delimited_body_fails_as_a_typo_does() {
     ] {
         let code = leak(method(&format!("{body}        return extra;\n")));
 
-        assert_eq!(issues(code), [format!("{at} Parse error encountered during parsing")], "{body}");
+        assert_eq!(issues(code), [format!("{at} Unexpected `:`")], "{body}");
     }
 }
 
@@ -928,7 +904,7 @@ fn elseif_fails_as_a_typo_does() {
         "        if (extra > 1) {\n            return 1;\n        } elseif (extra > 2) {\n            return 2;\n        }\n        return extra;\n",
     ));
 
-    assert_eq!(issues(code), ["9:11 Parse error encountered during parsing"]);
+    assert_eq!(issues(code), ["9:11 Unexpected `elseif`"]);
 }
 
 #[test]
@@ -973,10 +949,7 @@ fn break_and_continue_with_a_level_fail_as_a_typo_does_at_the_level() {
         "        while (extra > 0) {\n            while (extra > 1) {\n                break 2;\n            }\n            continue 1;\n        }\n        return extra;\n",
     ));
 
-    assert_eq!(
-        issues(code),
-        ["9:23 Parse error encountered during parsing", "11:22 Parse error encountered during parsing"]
-    );
+    assert_eq!(issues(code), ["9:23 Unexpected `2`", "11:22 Unexpected `1`"]);
 }
 
 /// Jordan's ruling of 10-18 on loop names: a `for`, `for … of`, `while` or `do` loop takes an optional name, which
@@ -1033,7 +1006,7 @@ fn a_break_or_continue_names_a_loop_around_it_and_a_loop_name_is_used_once() {
 fn a_name_before_a_statement_that_is_no_loop_fails_as_a_typo_does() {
     let code = leak(method("        checked: if (extra > 0) { extra = 0; }\n        return extra;\n"));
 
-    assert_eq!(issues(code), ["7:9 Parse error encountered during parsing"]);
+    assert_eq!(issues(code), ["7:9 Unexpected `checked`"]);
 }
 
 /// A `break` or `continue` that names a loop outside a `finally` block leaves the block, even from a loop inside it.
@@ -1196,7 +1169,7 @@ fn writing_a_const_local_after_its_block_closes_reports_only_the_scope_error() {
 /// A function declared in a method is one PHP declares globally when the method runs, so it is the same error, once.
 #[test]
 fn a_top_level_function_is_an_error() {
-    let message = "Parse error encountered during parsing";
+    let message = "Unexpected `total`";
     for (code, at) in [
         ("namespace App.Tenant;\n\nfunction total(int extra) { return extra; }\n", "3:10"),
         ("namespace App.Tenant;\n\nFUNCTION total(int extra) { return extra; }\n", "3:10"),
@@ -1251,7 +1224,7 @@ fn a_statement_at_file_level_is_an_error() {
 /// file compiles without it.
 #[test]
 fn declare_strict_types_is_one_error_wherever_it_is_written() {
-    let message = "Parse error encountered during parsing";
+    let message = "Unexpected `declare`";
     let before = "declare(strict_types=1);\n\nnamespace App.Tenant;\n\nclass Report\n{\n}\n";
     let after = "namespace App.Tenant;\n\ndeclare(strict_types=1);\n\nclass Report\n{\n}\n";
     let inside = leak(method("        declare(strict_types=1);\n        return extra;\n"));
@@ -1301,7 +1274,7 @@ fn a_keyword_in_another_case_leaves_the_files_other_errors_reported() {
         .collect();
 
     assert_eq!(parse_errors, ["Write the keyword `return` in lowercase."]);
-    assert_eq!(semantic_issues, ["Write `true` in lowercase.", "Parse error encountered during parsing"]);
+    assert_eq!(semantic_issues, ["Write `true` in lowercase.", "Unexpected `$total`"]);
 }
 
 /// PHP reserves `X::class` for a class's name, so a constant named `class` in any case fails when PHP loads the file.
@@ -1334,11 +1307,7 @@ fn declare_of_another_setting_fails_as_a_typo_does() {
         let issues: Vec<(String, Option<String>)> =
             check_in_type_file(code).into_iter().map(|issue| (issue.message, issue.help)).collect();
 
-        assert_eq!(
-            issues,
-            [("Parse error encountered during parsing".to_owned(), Some("Check the syntax of your code.".to_owned()))],
-            "{code}"
-        );
+        assert_eq!(issues, [("Unexpected `declare`".to_owned(), None)], "{code}");
     }
 }
 
@@ -1346,17 +1315,14 @@ fn declare_of_another_setting_fails_as_a_typo_does() {
 fn dollar_variables_are_errors() {
     let code = leak(method("        $total = 1;\n        $$total;\n        return 1;\n"));
 
-    assert_eq!(
-        issues(code),
-        ["7:9 Parse error encountered during parsing", "8:9 Parse error encountered during parsing"]
-    );
+    assert_eq!(issues(code), ["7:9 Unexpected `$total`", "8:9 Unexpected `$`"]);
 }
 
 #[test]
 fn a_dollar_parameter_is_an_error() {
     let code = "class Report\n{\n    public int run(int $extra) { return 1; }\n}\n";
 
-    assert_eq!(issues(code), ["3:24 Parse error encountered during parsing"]);
+    assert_eq!(issues(code), ["3:24 Unexpected `$extra`"]);
 }
 
 #[test]
@@ -1374,10 +1340,7 @@ fn a_construct_outside_the_slice_is_an_error_in_a_catch_block_or_a_call_argument
         "        try {\n        } catch (Missing failure) {\n            extra = extra <> 1;\n        }\n        return count(this.run(...));\n",
     ));
 
-    assert_eq!(
-        issues(code),
-        ["9:27 Parse error encountered during parsing", "11:31 Parse error encountered during parsing"]
-    );
+    assert_eq!(issues(code), ["9:27 Unexpected `<>`", "11:31 Unexpected `...`"]);
 }
 
 /// Spec section 14.1: any expression that gives a function is called by writing its arguments after it, as `f?.(x)`
@@ -1407,10 +1370,7 @@ fn a_php_first_class_callable_names_the_method_value() {
         "        const doubled = Report.doubled(...);\n        const plus = this.plus(...);\n        return extra;\n",
     ));
 
-    assert_eq!(
-        issues(code),
-        ["7:40 Parse error encountered during parsing", "8:32 Parse error encountered during parsing"]
-    );
+    assert_eq!(issues(code), ["7:40 Unexpected `...`", "8:32 Unexpected `...`"]);
 }
 
 /// Spec section 14.1: one name covers every function type, so an import of PHP's `Closure` gets what an import of a name
@@ -1429,7 +1389,7 @@ fn global_fails_as_a_typo_does_and_compact_and_extract_are_calls() {
     let code =
         leak(method("        compact(\"extra\");\n        extract([]);\n        global $config;\n        return 1;\n"));
 
-    assert_eq!(issues(code), ["9:9 Parse error encountered during parsing"]);
+    assert_eq!(issues(code), ["9:9 Unexpected `global`"]);
 }
 
 /// Spec section 8 removes `echo` and `print`: output goes through the standard library's `Console`, so PHP's `echo`
@@ -1441,10 +1401,7 @@ fn echo_and_print_fail_as_a_typo_does_and_their_calls_are_unknown_names() {
     let print =
         leak(method("        const shown = print \"total\";\n        print(\"total\");\n        return extra;\n"));
 
-    assert_eq!(
-        [issues(echo), issues(print)],
-        [vec!["7:9 Parse error encountered during parsing"], vec!["7:23 Parse error encountered during parsing"]]
-    );
+    assert_eq!([issues(echo), issues(print)], [vec!["7:9 Unexpected `echo`"], vec!["7:23 Unexpected `print`"]]);
 }
 
 /// Spec section 2 makes `isset`, `empty`, `unset`, `array`, `list` and `die` plain names, so each written as PHP writes
@@ -1458,7 +1415,7 @@ fn isset_empty_unset_array_list_and_die_are_plain_names() {
     ));
     let local = leak(method("        const isset = (int value) => value > 0;\n        return isset(extra) ? 1 : 0;\n"));
 
-    assert_eq!(issues(code), ["11:9 Parse error encountered during parsing"]);
+    assert_eq!(issues(code), ["11:9 Unexpected `list`"]);
     assert_eq!(issues(local), Vec::<String>::new());
 }
 
@@ -1643,7 +1600,7 @@ fn an_interface_member_gives_a_default_body_checked_as_a_class_member_body() {
         issues(refused),
         [
             "8:16 Write `this.designColumn`: members of the same object are always written with `this.`.",
-            "10:29 Parse error encountered during parsing",
+            "10:29 Unexpected `$label`",
             "11:25 Write `this.designColumn`: members of the same object are always written with `this.`.",
             "12:5 An interface property takes no modifier but `override`: its default body runs on each read."
         ]
@@ -1922,7 +1879,7 @@ fn new_self_needs_a_required_constructor() {
 
     assert_eq!(issues(report), [format!("9:34 {needs}")]);
     assert_eq!(issues(total), [format!("5:34 {needs}")]);
-    assert_eq!(issues(entity), ["9:42 Parse error encountered during parsing"]);
+    assert_eq!(issues(entity), ["9:42 Unexpected `;`"]);
     assert_eq!(help(report), ["Declare the constructor of `Report` `required`, as in `public required Report(…)`."]);
     assert_eq!(help(total), ["Declare the constructor of `Total` `required`, as in `public required Total(…)`."]);
 }
@@ -1948,29 +1905,28 @@ fn self_names_the_class_and_self_where_it_goes() {
     let r#struct = "namespace App.Tenant;\n\nstruct Spot\n{\n    public self moved() => this;\n}\n";
     let class = "namespace App.Tenant;\n\nclass Report\n{\n    private static int count = 0;\n    private self other;\n\n    public required Report(self copy)\n    {\n    }\n\n    public static self make()\n    {\n        self.count = 1;\n        let made = self.make();\n        return new self(self.count);\n    }\n}\n";
     let interface = "namespace App.Tenant;\n\ninterface Copyable\n{\n    self copy();\n}\n";
-    let without_self = "Parse error encountered during parsing";
-    let with_self = "Parse error encountered during parsing";
+    let message = "Unexpected `self`";
 
-    assert_eq!(issues(r#struct), ["5:12 Parse error encountered during parsing"]);
+    assert_eq!(issues(r#struct), [format!("5:12 {message}")]);
     assert_eq!(
         issues(class),
         [
-            format!("6:13 {without_self}"),
-            format!("8:28 {without_self}"),
-            format!("12:19 {with_self}"),
-            format!("14:9 {without_self}"),
-            format!("15:20 {with_self}"),
-            format!("16:20 {with_self}"),
-            format!("16:25 {without_self}"),
+            format!("6:13 {message}"),
+            format!("8:28 {message}"),
+            format!("12:19 {message}"),
+            format!("14:9 {message}"),
+            format!("15:20 {message}"),
+            format!("16:20 {message}"),
+            format!("16:25 {message}"),
         ]
     );
-    assert_eq!(issues(interface), ["5:5 Parse error encountered during parsing"]);
+    assert_eq!(issues(interface), [format!("5:5 {message}")]);
 }
 
 #[test]
 fn static_is_written_self() {
     let code = "namespace App.Tenant;\n\nclass Report\n{\n    private static int count = 0;\n\n    public required Report(int|static copy)\n    {\n    }\n\n    public static int|static make()\n    {\n        let count = static.count;\n        let made = static.make();\n        return new static(static.count);\n    }\n}\n";
-    let message = "Parse error encountered during parsing";
+    let message = "Unexpected `static`";
 
     assert_eq!(
         issues(code),
@@ -2207,7 +2163,7 @@ fn internal_is_an_access_modifier() {
 
     // PHP# has no anonymous class, and `internal` among its modifiers is no other error.
     let anonymous = leak(method("        const other = new readonly internal class {};\n        return 1;\n"));
-    assert_eq!(issues(anonymous), ["7:23 Parse error encountered during parsing"]);
+    assert_eq!(issues(anonymous), ["7:23 Unexpected `new`"]);
 }
 
 /// An accessor's access modifier reaches strictly less than its property's, as in C#. `internal` reaches a namespace
@@ -2917,33 +2873,48 @@ fn a_superglobal_with_or_without_dollar_fails_as_a_typo_does() {
     let code = leak(method(
         "        Store.keep(GLOBALS[\"a\"], $GLOBALS);\n        Store.keep(_SERVER[\"a\"], $_SERVER);\n        Store.keep(_GET[\"a\"], $_GET);\n        Store.keep(_POST[\"a\"], $_POST);\n        Store.keep(_FILES[\"a\"], $_FILES);\n        Store.keep(_COOKIE[\"a\"], $_COOKIE);\n        Store.keep(_SESSION[\"a\"], $_SESSION);\n        Store.keep(_REQUEST[\"a\"], $_REQUEST);\n        Store.keep(_ENV[\"a\"], $_ENV);\n        Store.keep($argv, $argc);\n        return extra;\n",
     ));
-    let message = "Parse error encountered during parsing";
-
     assert_eq!(
         issues(code),
         [
-            format!("7:20 {message}"),
-            format!("7:34 {message}"),
-            format!("8:20 {message}"),
-            format!("8:34 {message}"),
-            format!("9:20 {message}"),
-            format!("9:31 {message}"),
-            format!("10:20 {message}"),
-            format!("10:32 {message}"),
-            format!("11:20 {message}"),
-            format!("11:33 {message}"),
-            format!("12:20 {message}"),
-            format!("12:34 {message}"),
-            format!("13:20 {message}"),
-            format!("13:35 {message}"),
-            format!("14:20 {message}"),
-            format!("14:35 {message}"),
-            format!("15:20 {message}"),
-            format!("15:31 {message}"),
-            format!("16:20 {message}"),
-            format!("16:27 {message}"),
+            "7:20 Unexpected `GLOBALS`",
+            "7:34 Unexpected `$GLOBALS`",
+            "8:20 Unexpected `_SERVER`",
+            "8:34 Unexpected `$_SERVER`",
+            "9:20 Unexpected `_GET`",
+            "9:31 Unexpected `$_GET`",
+            "10:20 Unexpected `_POST`",
+            "10:32 Unexpected `$_POST`",
+            "11:20 Unexpected `_FILES`",
+            "11:33 Unexpected `$_FILES`",
+            "12:20 Unexpected `_COOKIE`",
+            "12:34 Unexpected `$_COOKIE`",
+            "13:20 Unexpected `_SESSION`",
+            "13:35 Unexpected `$_SESSION`",
+            "14:20 Unexpected `_REQUEST`",
+            "14:35 Unexpected `$_REQUEST`",
+            "15:20 Unexpected `_ENV`",
+            "15:31 Unexpected `$_ENV`",
+            "16:20 Unexpected `$argv`",
+            "16:27 Unexpected `$argc`",
         ]
     );
+}
+
+/// Decision 38: a superglobal fails as a typo does, so its error quotes the code as written, with no note or help and no
+/// message that recognizes the superglobal or names `Environment`. A `$` variable fails the same way.
+#[test]
+fn a_superglobal_and_a_dollar_variable_fail_with_the_text_they_write_and_nothing_more() {
+    let code = leak(method("        Store.keep($_SERVER[\"HTTP_HOST\"], _SERVER, $extra);\n        return extra;\n"));
+    let issues: Vec<(String, Option<String>, usize, Option<String>)> = check_in_type_file(code)
+        .into_iter()
+        .map(|issue| {
+            let annotation = issue.annotations.first().and_then(|annotation| annotation.message.clone());
+            (issue.message, annotation, issue.notes.len(), issue.help)
+        })
+        .collect();
+    let typo = |written: &str| (format!("Unexpected `{written}`"), None, 0, None);
+
+    assert_eq!(issues, [typo("$_SERVER"), typo("_SERVER"), typo("$extra")]);
 }
 
 /// A write to a superglobal's element fails as a read does, at the superglobal, not at the write target.
@@ -2952,9 +2923,7 @@ fn a_write_to_a_superglobal_fails_as_a_typo_does() {
     let code = leak(method(
         "        _SESSION[\"user\"] = extra;\n        $_SESSION[\"user\"] = extra;\n        _GET[\"n\"]++;\n        return extra;\n",
     ));
-    let message = "Parse error encountered during parsing";
-
-    assert_eq!(issues(code), [format!("7:9 {message}"), format!("8:9 {message}"), format!("9:9 {message}")]);
+    assert_eq!(issues(code), ["7:9 Unexpected `_SESSION`", "8:9 Unexpected `$_SESSION`", "9:9 Unexpected `_GET`"]);
 }
 
 /// A constant expression that reads a superglobal, or a member of one or of a `__Something__` name, fails as a typo
@@ -2969,17 +2938,15 @@ fn a_superglobal_in_a_constant_expression_fails_as_a_typo_does() {
                 "string host = _SERVER[\"HTTP_HOST\"], string other = $_SERVER[\"HTTP_HOST\"], string server = _SERVER.HTTP_HOST, int line = __Foo__.bar",
             ),
     );
-    let message = "Parse error encountered during parsing";
-
     assert_eq!(
         issues(code),
         [
-            format!("5:26 {message}"),
-            format!("6:12 {message}"),
-            format!("7:34 {message}"),
-            format!("7:71 {message}"),
-            format!("7:110 {message}"),
-            format!("7:140 {message}"),
+            "5:26 Unexpected `__Foo__`",
+            "6:12 Unexpected `_SERVER`",
+            "7:34 Unexpected `_SERVER`",
+            "7:71 Unexpected `$_SERVER`",
+            "7:110 Unexpected `_SERVER`",
+            "7:140 Unexpected `__Foo__`",
         ]
     );
 }
@@ -2991,18 +2958,16 @@ fn a_superglobal_or_a_double_underscore_name_before_a_member_fails_as_a_typo_doe
     let code = leak(method(
         "        Store.keep(_SERVER.x);\n        Store.keep(GLOBALS.x);\n        _SERVER.read();\n        _SERVER.x = 1;\n        Store.keep(__Foo__.bar);\n        __Foo__.bar();\n        Store.keep(_SERVER?.x);\n        Store.keep(_Helper.x);\n        return extra;\n",
     ));
-    let message = "Parse error encountered during parsing";
-
     assert_eq!(
         issues(code),
         [
-            format!("7:20 {message}"),
-            format!("8:20 {message}"),
-            format!("9:9 {message}"),
-            format!("10:9 {message}"),
-            format!("11:20 {message}"),
-            format!("12:9 {message}"),
-            format!("13:20 {message}"),
+            "7:20 Unexpected `_SERVER`",
+            "8:20 Unexpected `GLOBALS`",
+            "9:9 Unexpected `_SERVER`",
+            "10:9 Unexpected `_SERVER`",
+            "11:20 Unexpected `__Foo__`",
+            "12:9 Unexpected `__Foo__`",
+            "13:20 Unexpected `_SERVER`",
         ]
     );
 }
@@ -3021,18 +2986,18 @@ fn a_magic_constant_or_another_double_underscore_name_fails_as_a_typo_does() {
     assert_eq!(
         issues(code),
         [
-            "5:32 Parse error encountered during parsing".to_owned(),
-            "7:20 Parse error encountered during parsing".to_owned(),
-            "8:20 Parse error encountered during parsing".to_owned(),
-            "9:20 Parse error encountered during parsing".to_owned(),
-            "10:20 Parse error encountered during parsing".to_owned(),
-            "11:20 Parse error encountered during parsing".to_owned(),
-            "12:20 Parse error encountered during parsing".to_owned(),
-            "13:20 Parse error encountered during parsing".to_owned(),
-            "14:20 Parse error encountered during parsing".to_owned(),
-            "15:20 Parse error encountered during parsing".to_owned(),
-            "16:20 Parse error encountered during parsing".to_owned(),
-            "17:20 Parse error encountered during parsing".to_owned(),
+            "5:32 Unexpected `__LINE__`",
+            "7:20 Unexpected `__DIR__`",
+            "8:20 Unexpected `__FILE__`",
+            "9:20 Unexpected `__LINE__`",
+            "10:20 Unexpected `__FUNCTION__`",
+            "11:20 Unexpected `__METHOD__`",
+            "12:20 Unexpected `__CLASS__`",
+            "13:20 Unexpected `__NAMESPACE__`",
+            "14:20 Unexpected `__TRAIT__`",
+            "15:20 Unexpected `__PROPERTY__`",
+            "16:20 Unexpected `__COMPILER_HALT_OFFSET__`",
+            "17:20 Unexpected `__dir__`",
         ]
     );
 }
@@ -3046,40 +3011,30 @@ fn a_declared_double_underscore_name_fails_as_a_typo_does() {
     let r#enum = "namespace App.Tenant;\n\nenum __Suit__\n{\n    case __Hearts__;\n}\n";
     let code = "namespace App.Tenant;\n\nclass Report\n{\n    private int __count__ = 0;\n    public int __views__ { get; set; }\n    public string __slug__ => \"a\";\n    public const int __MAX__ = 1;\n\n    public Report(private int __kept__)\n    {\n    }\n\n    public int __run__(int __extra__)\n    {\n        let __a__ = 1;\n        const __b__ = 2;\n        int __c__ = 3;\n        for (let __i__ = 0; __i__ < 1; __i__++) {\n        }\n        for (const __v__ of Store.values()) {\n        }\n        try {\n        } catch (Missing __e__) {\n        }\n        const f = (int __x__) => __x__;\n        return 1;\n    }\n\n    public int __get(string name) => 1;\n}\n";
 
-    assert_eq!(issues(class), ["3:7 Parse error encountered during parsing".to_owned()]);
+    assert_eq!(issues(class), ["3:7 Unexpected `__Shape__`"]);
     assert_eq!(
         issues(interface),
-        [
-            "3:11 Parse error encountered during parsing".to_owned(),
-            "5:9 Parse error encountered during parsing".to_owned(),
-            "5:22 Parse error encountered during parsing".to_owned(),
-        ]
+        ["3:11 Unexpected `__Named__`", "5:9 Unexpected `__area__`", "5:22 Unexpected `__side__`"]
     );
-    assert_eq!(
-        issues(r#enum),
-        [
-            "3:6 Parse error encountered during parsing".to_owned(),
-            "5:10 Parse error encountered during parsing".to_owned()
-        ]
-    );
+    assert_eq!(issues(r#enum), ["3:6 Unexpected `__Suit__`", "5:10 Unexpected `__Hearts__`"]);
     assert_eq!(
         issues(code),
         [
-            "5:17 Parse error encountered during parsing".to_owned(),
-            "6:16 Parse error encountered during parsing".to_owned(),
-            "7:19 Parse error encountered during parsing".to_owned(),
-            "8:22 Parse error encountered during parsing".to_owned(),
-            "10:31 Parse error encountered during parsing".to_owned(),
-            "14:16 Parse error encountered during parsing".to_owned(),
-            "14:28 Parse error encountered during parsing".to_owned(),
-            "16:13 Parse error encountered during parsing".to_owned(),
-            "17:15 Parse error encountered during parsing".to_owned(),
-            "18:13 Parse error encountered during parsing".to_owned(),
-            "19:18 Parse error encountered during parsing".to_owned(),
-            "21:20 Parse error encountered during parsing".to_owned(),
-            "24:26 Parse error encountered during parsing".to_owned(),
-            "26:24 Parse error encountered during parsing".to_owned(),
-            "30:16 Parse error encountered during parsing".to_owned(),
+            "5:17 Unexpected `__count__`",
+            "6:16 Unexpected `__views__`",
+            "7:19 Unexpected `__slug__`",
+            "8:22 Unexpected `__MAX__`",
+            "10:31 Unexpected `__kept__`",
+            "14:16 Unexpected `__run__`",
+            "14:28 Unexpected `__extra__`",
+            "16:13 Unexpected `__a__`",
+            "17:15 Unexpected `__b__`",
+            "18:13 Unexpected `__c__`",
+            "19:18 Unexpected `__i__`",
+            "21:20 Unexpected `__v__`",
+            "24:26 Unexpected `__e__`",
+            "26:24 Unexpected `__x__`",
+            "30:16 Unexpected `__get`",
         ]
     );
 }
@@ -3089,7 +3044,7 @@ fn a_declared_double_underscore_name_fails_as_a_typo_does() {
 fn a_double_underscore_class_with_a_constructor_reports_its_name_once() {
     let code = "namespace App.Tenant;\n\nclass __Shape__\n{\n    public __Shape__()\n    {\n    }\n}\n";
 
-    assert_eq!(issues(code), ["3:7 Parse error encountered during parsing".to_owned()]);
+    assert_eq!(issues(code), ["3:7 Unexpected `__Shape__`"]);
 }
 
 /// A refusal skips a node's children only when its span covers them, so a method refused at its name still has its
@@ -3102,8 +3057,8 @@ fn a_method_refused_at_its_name_has_its_body_checked() {
         issues(code),
         [
             "5:17 Only the constructor is named after its class: rename `forms`.",
-            "7:22 Parse error encountered during parsing",
-            "8:9 Parse error encountered during parsing",
+            "7:22 Unexpected `_SERVER`",
+            "8:9 Unexpected `echo`",
         ]
     );
 }
@@ -3115,29 +3070,23 @@ fn a_member_refused_at_part_of_its_declaration_has_the_rest_checked() {
     let r#enum = "namespace App.Tenant;\n\nenum Suit\n{\n    case Hearts;\n\n    public Suit()\n    {\n        echo \"a\";\n    }\n}\n";
     let code = "namespace App.Tenant;\n\nclass Report\n{\n    int count = __LINE__;\n    const int MAX = __LINE__;\n\n    public Report(public int id = __LINE__, &total = __LINE__)\n    {\n    }\n\n    int run()\n    {\n        Map<Any, callable> rows = [:];\n        echo \"b\";\n        return 1;\n    }\n}\n";
 
-    assert_eq!(
-        issues(interface),
-        ["5:10 Parse error encountered during parsing", "5:30 Parse error encountered during parsing"]
-    );
+    assert_eq!(issues(interface), ["5:10 Unexpected `__get`", "5:30 Unexpected `_SERVER`"]);
     assert_eq!(
         issues(r#enum),
-        [
-            "7:12 An enum has no constructor: its cases are its only values.",
-            "9:9 Parse error encountered during parsing",
-        ]
+        ["7:12 An enum has no constructor: its cases are its only values.", "9:9 Unexpected `echo`"]
     );
     assert_eq!(
         issues(code),
         [
-            "5:17 Parse error encountered during parsing".to_owned(),
-            "6:21 Parse error encountered during parsing".to_owned(),
-            "8:19 A constructor parameter declared `public` needs accessors: it is a property, as in `public int id { get; }`.".to_owned(),
-            "8:35 Parse error encountered during parsing".to_owned(),
-            "8:45 Parse error encountered during parsing".to_owned(),
-            "8:54 Parse error encountered during parsing".to_owned(),
-            "14:13 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`.".to_owned(),
-            "14:18 Parse error encountered during parsing".to_owned(),
-            "15:9 Parse error encountered during parsing".to_owned(),
+            "5:17 Unexpected `__LINE__`",
+            "6:21 Unexpected `__LINE__`",
+            "8:19 A constructor parameter declared `public` needs accessors: it is a property, as in `public int id { get; }`.",
+            "8:35 Unexpected `__LINE__`",
+            "8:45 Unexpected `&`",
+            "8:54 Unexpected `__LINE__`",
+            "14:13 A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`.",
+            "14:18 Unexpected `callable`",
+            "15:9 Unexpected `echo`",
         ]
     );
 }
@@ -3146,29 +3095,27 @@ fn a_member_refused_at_part_of_its_declaration_has_the_rest_checked() {
 #[test]
 fn an_expression_refused_at_part_of_it_has_the_rest_checked() {
     let code = "namespace App.Tenant;\n\nclass Report\n{\n    public void run()\n    {\n        const a = (array) _SERVER;\n        const b = _GET ?: __LINE__;\n        const c = self.make(__LINE__);\n        const d = new static(__LINE__);\n        const e = total(__LINE__);\n        const f = _SERVER[__LINE__];\n        PI = __LINE__;\n        _SERVER[\"x\"] = _GET;\n        const g = _GET ? 1 : 2 ? 3 : __LINE__;\n    }\n\n    public int total(int x) => x;\n}\n";
-    let request = "Parse error encountered during parsing";
-
     assert_eq!(
         issues(code),
         [
-            "7:19 Parse error encountered during parsing".to_owned(),
-            format!("7:27 {request}"),
-            "8:24 Parse error encountered during parsing".to_owned(),
-            format!("8:19 {request}"),
-            "8:27 Parse error encountered during parsing".to_owned(),
-            "9:19 Parse error encountered during parsing".to_owned(),
-            "9:29 Parse error encountered during parsing".to_owned(),
-            "10:23 Parse error encountered during parsing".to_owned(),
-            "10:30 Parse error encountered during parsing".to_owned(),
-            "11:25 Parse error encountered during parsing".to_owned(),
-            format!("12:19 {request}"),
-            "12:27 Parse error encountered during parsing".to_owned(),
-            "13:9 `PI` can't be written to.".to_owned(),
-            "13:14 Parse error encountered during parsing".to_owned(),
-            format!("14:9 {request}"),
-            format!("14:24 {request}"),
-            format!("15:19 {request}"),
-            "15:38 Parse error encountered during parsing".to_owned(),
+            "7:19 Unexpected `(array)`",
+            "7:27 Unexpected `_SERVER`",
+            "8:24 Unexpected `?`",
+            "8:19 Unexpected `_GET`",
+            "8:27 Unexpected `__LINE__`",
+            "9:19 Unexpected `self`",
+            "9:29 Unexpected `__LINE__`",
+            "10:23 Unexpected `static`",
+            "10:30 Unexpected `__LINE__`",
+            "11:25 Unexpected `__LINE__`",
+            "12:19 Unexpected `_SERVER`",
+            "12:27 Unexpected `__LINE__`",
+            "13:9 `PI` can't be written to.",
+            "13:14 Unexpected `__LINE__`",
+            "14:9 Unexpected `_SERVER`",
+            "14:24 Unexpected `_GET`",
+            "15:19 Unexpected `_GET`",
+            "15:38 Unexpected `__LINE__`",
         ]
     );
 }
@@ -3183,18 +3130,15 @@ fn a_function_or_namespace_refused_at_its_name_has_its_code_checked() {
     assert_eq!(
         issues(code),
         [
-            "3:10 Parse error encountered during parsing",
-            "5:5 Parse error encountered during parsing",
+            "3:10 Unexpected `helper`",
+            "5:5 Unexpected `echo`",
             "8:1 A file has one namespace: move the code after this one to a file in its own namespace's folder.",
-            "14:9 Parse error encountered during parsing",
+            "14:9 Unexpected `echo`",
         ]
     );
     assert_eq!(
         issues(braced),
-        [
-            "1:1 A namespace is written without braces, as in `namespace App.Tenant;`.",
-            "6:13 Parse error encountered during parsing",
-        ]
+        ["1:1 A namespace is written without braces, as in `namespace App.Tenant;`.", "6:13 Unexpected `echo`"]
     );
 }
 
@@ -3225,10 +3169,10 @@ fn a_map_key_is_refused_once() {
     assert_eq!(
         issues(code),
         [
-            "7:13 Parse error encountered during parsing".to_owned(),
-            "8:13 Parse error encountered during parsing".to_owned(),
+            "7:13 Unexpected `callable`".to_owned(),
+            "8:13 Unexpected `static`".to_owned(),
             format!("9:13 {key}"),
-            "10:13 Parse error encountered during parsing".to_owned(),
+            "10:13 Unexpected `callable`".to_owned(),
             format!("11:13 {key}"),
         ]
     );
@@ -3242,11 +3186,7 @@ fn a_public_parameter_outside_a_constructor_reports_only_the_php_error() {
 
     assert_eq!(
         issues(code),
-        [
-            format!("3:17 {promoted}"),
-            "3:10 Parse error encountered during parsing".to_owned(),
-            format!("9:21 {promoted}"),
-        ]
+        [format!("3:17 {promoted}"), "3:10 Unexpected `helper`".to_owned(), format!("9:21 {promoted}"),]
     );
 }
 
@@ -3297,14 +3237,14 @@ fn extends_fails_as_a_typo_does() {
     let code = "namespace App.Tenant;\n\nclass Report extends Base\n{\n}\n";
 
     assert_eq!(issues(base), Vec::<String>::new());
-    assert_eq!(issues(code), ["3:14 Parse error encountered during parsing"]);
+    assert_eq!(issues(code), ["3:14 Unexpected `extends`"]);
 }
 
 #[test]
 fn implements_fails_as_a_typo_does() {
     let code = "namespace App.Tenant;\n\nimport Lib.Shape;\n\nclass Report implements Shape\n{\n}\n";
 
-    assert_eq!(issues(code), ["5:14 Parse error encountered during parsing"]);
+    assert_eq!(issues(code), ["5:14 Unexpected `implements`"]);
 }
 
 #[test]
@@ -3363,9 +3303,9 @@ fn an_attribute_target_names_a_part_of_its_declaration_and_an_accessor_takes_att
         issues(code),
         [
             "3:2 `method:` names no part of a class, whose targets are `type:`.",
-            "6:6 Parse error encountered during parsing",
+            "6:6 Unexpected `return`",
             "9:6 `field:` names no part of a property without storage, whose targets are `property:`.",
-            "12:30 Parse error encountered during parsing",
+            "12:30 Unexpected `return`",
             "14:34 `willSet` runs inside the `set` accessor, so it has no place of its own for an attribute.",
             "16:23 `property:` names no part of a parameter, whose targets are `param:`.",
             "18:6 `module:` names no part of a method, whose targets are `method:`.",
@@ -3374,7 +3314,7 @@ fn an_attribute_target_names_a_part_of_its_declaration_and_an_accessor_takes_att
     // A declaration PHP# refuses has no part for a target to name.
     assert_eq!(
         issues("namespace App.Tenant;\n\n[method: Note]\nfunction helper() { }\n"),
-        ["4:10 Parse error encountered during parsing", "3:2 `method:` names no part of this declaration."]
+        ["4:10 Unexpected `helper`", "3:2 `method:` names no part of this declaration."]
     );
 }
 
@@ -3477,23 +3417,21 @@ fn a_method_name_starting_with_two_underscores_fails_as_a_typo_does() {
     let code = "namespace App.Tenant;\n\nclass Report\n{\n    public void __clone() { }\n    public int __get(string name) { return 1; }\n    public int __invoke() { return 1; }\n    public string __toString() { return \"report\"; }\n    public void __construct() { }\n    public int __sleep() { return 1; }\n    public int __total() { return 1; }\n    public int __1st() { return 1; }\n    public int __Report() { return 1; }\n}\n";
     let r#enum = "namespace App.Tenant;\n\nenum Suit\n{\n    case Hearts;\n\n    public int __get(string name) { return 1; }\n}\n";
     let written = "namespace App.Tenant;\n\nclass Report\n{\n    public Report()\n    {\n    }\n\n    public string toString() => \"report\";\n\n    public int total() => 1;\n\n    public Report copy() => this with { };\n}\n";
-    let message = "Parse error encountered during parsing";
-
     assert_eq!(
         issues(code),
         [
-            format!("5:17 {message}"),
-            format!("6:16 {message}"),
-            format!("7:16 {message}"),
-            format!("8:19 {message}"),
-            format!("9:17 {message}"),
-            format!("10:16 {message}"),
-            format!("11:16 {message}"),
-            format!("12:16 {message}"),
-            format!("13:16 {message}"),
+            "5:17 Unexpected `__clone`",
+            "6:16 Unexpected `__get`",
+            "7:16 Unexpected `__invoke`",
+            "8:19 Unexpected `__toString`",
+            "9:17 Unexpected `__construct`",
+            "10:16 Unexpected `__sleep`",
+            "11:16 Unexpected `__total`",
+            "12:16 Unexpected `__1st`",
+            "13:16 Unexpected `__Report`",
         ]
     );
-    assert_eq!(issues_in("src/Suit.sharp", r#enum), [format!("7:16 {message}")]);
+    assert_eq!(issues_in("src/Suit.sharp", r#enum), ["7:16 Unexpected `__get`"]);
     assert_eq!(issues(written), Vec::<String>::new());
 }
 
@@ -3945,10 +3883,7 @@ fn this_in_an_extension_member_is_an_error() {
 fn an_extension_member_body_is_checked_as_a_method_body() {
     let code = "namespace App.Shared;\n\npublic static class TextExtensions\n{\n    extension(string value)\n    {\n        public string orDash() => value ?: \"-\";\n        public string dashed => value ?: \"-\";\n    }\n}\n";
 
-    assert_eq!(
-        issues(code),
-        ["7:41 Parse error encountered during parsing", "8:39 Parse error encountered during parsing"]
-    );
+    assert_eq!(issues(code), ["7:41 Unexpected `?`", "8:39 Unexpected `?`"]);
 }
 
 /// A static class runs each extension member as a static method of its name, so two members, in its extensions or
@@ -4065,10 +4000,7 @@ fn an_extern_method_with_a_body_has_its_body_checked() {
 
     assert_eq!(
         issues(code),
-        [
-            "5:33 An `extern` method is `static`, in a static or `foreign` class, with no body.",
-            "7:9 Parse error encountered during parsing",
-        ]
+        ["5:33 An `extern` method is `static`, in a static or `foreign` class, with no body.", "7:9 Unexpected `echo`"]
     );
 }
 
@@ -4088,7 +4020,7 @@ fn the_error_control_operator_is_an_error_in_every_namespace() {
             "namespace {namespace};\n\npublic static class Text\n{{\n    public static string quiet(string title) => @(title.trim());\n}}\n"
         ));
 
-        assert_eq!(issues(code), ["5:49 Parse error encountered during parsing"], "{namespace}");
+        assert_eq!(issues(code), ["5:49 Unexpected `@`"], "{namespace}");
     }
 }
 
@@ -4243,9 +4175,7 @@ fn a_static_needs_an_initial_value_whatever_its_type() {
 fn a_nullable_field_of_a_type_outside_the_slice_is_an_error() {
     let code =
         "namespace App.Tenant;\n\nclass Report\n{\n    private iterable? items;\n    private (int|iterable)? key;\n}\n";
-    let iterable = "Parse error encountered during parsing";
-
-    assert_eq!(issues(code), [format!("5:13 {iterable}"), format!("6:18 {iterable}")]);
+    assert_eq!(issues(code), ["5:13 Unexpected `iterable`", "6:18 Unexpected `iterable`"]);
 }
 
 #[test]
@@ -4349,8 +4279,8 @@ fn a_class_constant_outside_the_slice_is_an_error() {
         [
             "6:5 A constant declares one name: declare each constant on its own line.",
             "7:5 A constant takes no `final`: remove it.",
-            "8:24 Parse error encountered during parsing",
-            "9:18 Parse error encountered during parsing",
+            "8:24 Unexpected `<>`",
+            "9:18 Unexpected `iterable`",
         ]
     );
 }
@@ -4394,7 +4324,7 @@ fn a_union_typed_class_constant_follows_the_union_rules() {
         issues(code),
         [
             "5:22 A type that holds null is written `int?`.",
-            "6:22 Parse error encountered during parsing",
+            "6:22 Unexpected `iterable`",
             "7:29 Duplicate type `int` is redundant.",
         ]
     );
@@ -4443,10 +4373,7 @@ fn a_computed_property_is_in_the_slice_with_any_access_modifier() {
 fn an_expression_body_is_checked_as_a_method_body() {
     let code = "namespace App.Tenant;\n\nclass Report\n{\n    private int count = 0;\n\n    public int total() => this.count ?: 1;\n    public int size => this.count ?: 1;\n}\n";
 
-    assert_eq!(
-        issues(code),
-        ["7:38 Parse error encountered during parsing", "8:35 Parse error encountered during parsing"]
-    );
+    assert_eq!(issues(code), ["7:38 Unexpected `?`", "8:35 Unexpected `?`"]);
 }
 
 /// Spec section 5: a member without an access modifier is `private`, a property, a computed property, a constant and a
@@ -4872,10 +4799,7 @@ fn operators_outside_the_slice_are_an_error() {
     let code =
         leak(method("        let a = extra;\n        a = @(extra);\n        a = extra <> 1;\n        return a;\n"));
 
-    assert_eq!(
-        issues(code),
-        ["8:13 Parse error encountered during parsing", "9:19 Parse error encountered during parsing"]
-    );
+    assert_eq!(issues(code), ["8:13 Unexpected `@`", "9:19 Unexpected `<>`"]);
 }
 
 /// `<=>` orders two values, as spec section 19 writes it for numbers, strings and instances whose class declares
@@ -4891,7 +4815,7 @@ fn spaceship_is_in_the_slice() {
 fn a_member_name_written_as_an_expression_is_an_error() {
     let code = leak(method("        return this.{\"run\"}(extra);\n"));
 
-    assert_eq!(issues(code), ["7:21 Parse error encountered during parsing"]);
+    assert_eq!(issues(code), ["7:21 Unexpected `{`"]);
 }
 
 /// Spec section 24: the built-in types are lowercase, every other type is capitalized, and a PHP# type written in
@@ -4905,15 +4829,15 @@ fn a_type_written_in_another_case_names_its_spelling_and_a_php_type_fails_as_a_t
         ("Bool", "PHP# writes the type `bool`."),
         ("String", "PHP# writes the type `string`."),
         ("INT", "PHP# writes the type `int`."),
-        ("object", "Parse error encountered during parsing"),
+        ("object", "Unexpected `object`"),
         ("OBJECT", "PHP# writes `Object`."),
         ("any", "PHP# writes `Any`."),
-        ("mixed", "Parse error encountered during parsing"),
+        ("mixed", "Unexpected `mixed`"),
         ("null", "A type holds null only with `?` after it: write the type, as in `int?`."),
-        ("true", "Parse error encountered during parsing"),
-        ("false", "Parse error encountered during parsing"),
-        ("array", "Parse error encountered during parsing"),
-        ("callable", "Parse error encountered during parsing"),
+        ("true", "Unexpected `true`"),
+        ("false", "Unexpected `false`"),
+        ("array", "Unexpected `array`"),
+        ("callable", "Unexpected `callable`"),
     ];
 
     for (written, message) in rows {
@@ -4938,7 +4862,7 @@ fn a_type_written_in_another_case_names_its_spelling_and_a_php_type_fails_as_a_t
     let union = leak(method("        return 1;\n").replace("int extra", "Int|string extra"));
     assert_eq!(issues(union), ["5:20 PHP# writes the type `int`."]);
     let keyword_union = leak(method("        return 1;\n").replace("int extra", "int|false extra"));
-    assert_eq!(issues(keyword_union), ["5:24 Parse error encountered during parsing"]);
+    assert_eq!(issues(keyword_union), ["5:24 Unexpected `false`"]);
     let written = leak(
         method("        return 1;\n").replace("int extra", "int a, float b, bool c, string d, Any e, Any? f, Object g"),
     );
@@ -4999,18 +4923,16 @@ fn a_type_written_in_another_case_names_its_spelling_and_a_php_type_fails_as_a_t
 #[test]
 fn types_outside_the_slice_are_an_error_and_an_intersection_holds_null_only_as_a_whole() {
     let code = "class Report\n{\n    public object run(iterable? a, int|iterable b, iterable c, callable d, (Lib&Other)|null e)\n    {\n        return 1;\n    }\n\n    public self make(Lib f, float g, bool h, string i)\n    {\n        return this;\n    }\n}\n";
-    let iterable = "Parse error encountered during parsing";
-
     assert_eq!(
         issues(code),
         [
-            "3:12 Parse error encountered during parsing".to_owned(),
-            format!("3:23 {iterable}"),
-            format!("3:40 {iterable}"),
-            format!("3:52 {iterable}"),
-            "3:64 Parse error encountered during parsing".to_owned(),
-            "3:88 A type that holds null is written `(Lib&Other)?`.".to_owned(),
-            "8:12 Parse error encountered during parsing".to_owned(),
+            "3:12 Unexpected `object`",
+            "3:23 Unexpected `iterable`",
+            "3:40 Unexpected `iterable`",
+            "3:52 Unexpected `iterable`",
+            "3:64 Unexpected `callable`",
+            "3:88 A type that holds null is written `(Lib&Other)?`.",
+            "8:12 Unexpected `self`",
         ]
     );
 }
@@ -5025,8 +4947,8 @@ fn a_typed_local_takes_the_types_of_the_slice_but_not_void() {
         issues(code),
         [
             "7:9 A local cannot be `void`: `void` is only a return type.",
-            "8:9 Parse error encountered during parsing",
-            "9:9 Parse error encountered during parsing",
+            "8:9 Unexpected `iterable`",
+            "9:9 Unexpected `mixed`",
             "11:9 Cannot assign to `kept`: it is declared with `const`.",
         ]
     );
@@ -5042,7 +4964,7 @@ fn a_typed_for_counter_takes_the_types_of_the_slice_but_not_void() {
         issues(code),
         [
             "7:14 A local cannot be `void`: `void` is only a return type.",
-            "9:14 Parse error encountered during parsing",
+            "9:14 Unexpected `iterable`",
             "11:40 Cannot assign to `kept`: it is declared with `const`.",
         ]
     );
@@ -5056,10 +4978,7 @@ fn a_typed_loop_variable_takes_the_types_of_the_slice_but_not_void() {
 
     assert_eq!(
         issues(code),
-        [
-            "11:20 A local cannot be `void`: `void` is only a return type.",
-            "13:20 Parse error encountered during parsing",
-        ]
+        ["11:20 A local cannot be `void`: `void` is only a return type.", "13:20 Unexpected `iterable`"]
     );
 }
 
@@ -5075,14 +4994,14 @@ fn a_nullable_void_reports_only_the_php_error() {
 fn a_method_parameter_by_reference_fails_as_a_typo_does() {
     let code = leak(method("        return 1;\n").replace("int extra", "&extra"));
 
-    assert_eq!(issues(code), ["5:20 Parse error encountered during parsing"]);
+    assert_eq!(issues(code), ["5:20 Unexpected `&`"]);
 }
 
 #[test]
 fn a_dollar_parameter_without_a_type_reports_only_the_dollar_error() {
     let code = leak(method("        return 1;\n").replace("int extra", "$extra"));
 
-    assert_eq!(issues(code), ["5:20 Parse error encountered during parsing"]);
+    assert_eq!(issues(code), ["5:20 Unexpected `$extra`"]);
 }
 
 #[test]
@@ -5143,7 +5062,7 @@ fn list_and_map_types_literals_and_indexes_are_in_the_slice() {
 fn a_type_argument_takes_a_question_mark_in_a_field() {
     let code = "class Report\n{\n    private Map<string, Any?> saved = [:];\n    public List<int?> sizes { get; private set; } = [];\n    private Map<string, List<Line?>> lines = [:];\n    private Map<string, mixed> old = [:];\n    private Map<string, Any?>? maybe = null;\n    private Map<string, Function<Any?(Any)>> handlers = [:];\n}\n";
 
-    assert_eq!(issues(code), ["6:25 Parse error encountered during parsing"]);
+    assert_eq!(issues(code), ["6:25 Unexpected `mixed`"]);
 }
 
 #[test]
@@ -5174,8 +5093,8 @@ fn an_empty_literal_needs_a_type() {
     assert_eq!(
         issues(code),
         [
-            "7:21 An empty literal needs a type: write `List<T> names = []`.",
-            "8:23 An empty literal needs a type: write `const Map<TKey, TValue> sizes = [:]`.",
+            "7:21 An empty literal needs a type: write the type of its elements, as in `List<string> names = []`.",
+            "8:23 An empty literal needs a type: write the types of its keys and values, as in `const Map<string, int> sizes = [:]`.",
         ]
     );
 }
@@ -5186,7 +5105,29 @@ fn a_null_start_needs_a_type() {
         "        let value = null;\n        const other = null;\n        string? kept = null;\n        let either = extra > 1 ? null : 1;\n        return 1;\n",
     ));
 
-    assert_eq!(issues(code), ["7:21 A null start needs a type: write `T? value = null`."]);
+    assert_eq!(
+        issues(code),
+        ["7:21 A null start needs a type: write the type it holds, as in `string? value = null`."]
+    );
+}
+
+/// A local the method returns takes the method's return type, so the error for its empty literal or null start names
+/// that type, the one the code needs. A `return` in a lambda returns from the lambda, and a local of a lambda belongs to
+/// the lambda, which writes no return type, so neither names one.
+#[test]
+fn a_local_without_a_type_that_the_method_returns_is_named_with_the_return_type() {
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public List<string> names()\n    {\n        let names = [];\n        return names;\n    }\n\n    public Map<string, int> sizes()\n    {\n        let sizes = [:];\n        return sizes;\n    }\n\n    public string? label()\n    {\n        let label = null;\n        return label;\n    }\n\n    public List<string> later()\n    {\n        let seen = [];\n        Function<List<string>()> read = () => { return seen; };\n        return read();\n    }\n\n    public int inLambda()\n    {\n        Function<int()> count = () => {\n            let found = [];\n            return found.count();\n        };\n        return count();\n    }\n}\n";
+
+    assert_eq!(
+        issues(code),
+        [
+            "7:21 An empty literal needs a type: write `List<string> names = []`.",
+            "13:21 An empty literal needs a type: write `Map<string, int> sizes = [:]`.",
+            "19:21 A null start needs a type: write `string? label = null`.",
+            "25:20 An empty literal needs a type: write the type of its elements, as in `List<string> seen = []`.",
+            "33:25 An empty literal needs a type: write the type of its elements, as in `List<string> found = []`.",
+        ]
+    );
 }
 
 /// `List`, `Set` and `Class` take one type argument and `Map` two, wherever the type is written, and none is `void`,
@@ -5306,7 +5247,7 @@ fn yield_as_a_value_or_without_a_value_is_an_error() {
         [
             "7:22 `yield` gives no value back: write it as a statement, as in `yield value;`.",
             "8:20 `yield` gives no value back: write it as a statement, as in `yield value;`.",
-            "9:9 Parse error encountered during parsing",
+            "9:9 Unexpected `yield`",
         ]
     );
 }
@@ -5315,10 +5256,7 @@ fn yield_as_a_value_or_without_a_value_is_an_error() {
 fn php_yield_from_and_a_yielded_key_are_errors_that_name_the_php_sharp_form() {
     let code = "namespace App.Tenant;\n\nclass Report\n{\n    public Iterable<Order> all(List<Order> pending, Order latest)\n    {\n        yield from pending;\n        yield 1 => latest;\n    }\n}\n";
 
-    assert_eq!(
-        issues(code),
-        ["7:9 Parse error encountered during parsing", "8:9 Parse error encountered during parsing"]
-    );
+    assert_eq!(issues(code), ["7:9 Unexpected `yield`", "8:9 Unexpected `yield`"]);
 }
 
 /// A method that yields produces only the values it yields, as C#'s CS1622 "Cannot return a value from an iterator"
@@ -5367,10 +5305,7 @@ fn a_literal_element_outside_the_slice_is_an_error() {
     let code =
         leak(method("        const reference = [&extra];\n        const missing = [, extra];\n        return 1;\n"));
 
-    assert_eq!(
-        issues(code),
-        ["7:28 Parse error encountered during parsing", "8:26 Parse error encountered during parsing"]
-    );
+    assert_eq!(issues(code), ["7:28 Unexpected `&`", "8:26 Unexpected `,`"]);
 }
 
 /// PHP's `x[] = v` is the analyzer's to refuse, by the collection it writes.
@@ -5445,7 +5380,7 @@ fn a_class_without_a_name_fails_as_a_typo_does() {
     ] {
         let code = leak(method(&format!("        const other = {class};\n        return 1;\n")));
 
-        assert_eq!(issues(code), ["7:23 Parse error encountered during parsing"], "{class}");
+        assert_eq!(issues(code), ["7:23 Unexpected `new`"], "{class}");
     }
 }
 
@@ -5457,7 +5392,7 @@ fn a_new_without_arguments_is_refused_unless_a_member_chain_reads_through_it() {
         "        const bare = new Report.of;\n        const chained = new App.Shop.Order();\n        const read = new App.Shop.total;\n        return 1;\n",
     ));
 
-    assert_eq!(issues(code), ["7:35 Parse error encountered during parsing"]);
+    assert_eq!(issues(code), ["7:35 Unexpected `;`"]);
 }
 
 /// `new (type)(…)` creates an object from a class value, with or without type arguments, spec section 25. It calls
@@ -5473,7 +5408,7 @@ fn new_through_a_class_value_calls_the_constructor_with_its_arguments() {
         issues(code),
         [
             "9:39 `new` through a class value calls the class's constructor, so it names no other one.",
-            "10:32 Parse error encountered during parsing",
+            "10:32 Unexpected `;`",
         ]
     );
 }
@@ -5501,10 +5436,7 @@ fn typeof_takes_one_type_in_a_method_body() {
                     .to_owned(),
             ],
         ),
-        (
-            "self",
-            vec!["7:27 Parse error encountered during parsing".to_owned()],
-        ),
+        ("self", vec!["7:27 Unexpected `self`".to_owned()]),
     ] {
         let code = leak(method(&format!("        Store.keep(typeof({type}));\n        return extra;\n")));
 
@@ -5545,7 +5477,7 @@ fn the_ternary_is_in_the_slice_with_a_nested_ternary_in_parentheses() {
 fn the_two_operand_ternary_is_not_part_of_php_sharp() {
     let code = leak(method("        return extra ?: 1;\n"));
 
-    assert_eq!(issues(code), ["7:22 Parse error encountered during parsing"]);
+    assert_eq!(issues(code), ["7:22 Unexpected `?`"]);
 }
 
 /// Spec section 21: `a ? b : c ? d : e` means `a ? b : (c ? d : e)`, so it needs no parentheses.
@@ -5571,14 +5503,7 @@ fn bool_array_and_object_casts_do_not_exist_in_php_sharp() {
         "        const a = (bool)extra;\n        const b = (array)extra;\n        const c = (object)extra;\n        return 1;\n",
     ));
 
-    assert_eq!(
-        issues(code),
-        [
-            "7:19 Parse error encountered during parsing",
-            "8:19 Parse error encountered during parsing",
-            "9:19 Parse error encountered during parsing",
-        ]
-    );
+    assert_eq!(issues(code), ["7:19 Unexpected `(bool)`", "8:19 Unexpected `(array)`", "9:19 Unexpected `(object)`"]);
 }
 
 /// Spec section 24 replaces `(array)` with a struct's `parse` for an object and `List.wrap` for a value, so `(array)`
@@ -5595,12 +5520,12 @@ fn an_array_cast_fails_as_a_typo_does() {
     assert_eq!(
         issues(code),
         [
-            "7:22 Parse error encountered during parsing".to_owned(),
-            "8:23 Parse error encountered during parsing".to_owned(),
-            "9:24 Parse error encountered during parsing".to_owned(),
-            "9:31 Parse error encountered during parsing".to_owned(),
-            "10:25 Parse error encountered during parsing".to_owned(),
-            "10:32 Parse error encountered during parsing".to_owned(),
+            "7:22 Unexpected `(array)`",
+            "8:23 Unexpected `(array)`",
+            "9:24 Unexpected `(array)`",
+            "9:31 Unexpected `_SERVER`",
+            "10:25 Unexpected `(array)`",
+            "10:32 Unexpected `__VERSION__`",
         ]
     );
 }
@@ -5609,7 +5534,7 @@ fn an_array_cast_fails_as_a_typo_does() {
 fn an_object_cast_fails_as_a_typo_does() {
     let code = leak(method("        const row = (object)extra;\n        return 1;\n"));
 
-    assert_eq!(issues(code), ["7:21 Parse error encountered during parsing"]);
+    assert_eq!(issues(code), ["7:21 Unexpected `(object)`"]);
 }
 
 #[test]
@@ -5621,11 +5546,11 @@ fn php_cast_aliases_do_not_exist_in_php_sharp() {
     assert_eq!(
         issues(code),
         [
-            "7:19 Parse error encountered during parsing",
-            "8:19 Parse error encountered during parsing",
-            "9:19 Parse error encountered during parsing",
-            "10:19 Parse error encountered during parsing",
-            "11:19 Parse error encountered during parsing",
+            "7:19 Unexpected `(integer)`",
+            "8:19 Unexpected `(double)`",
+            "9:19 Unexpected `(real)`",
+            "10:19 Unexpected `(boolean)`",
+            "11:19 Unexpected `(binary)`",
         ]
     );
 }
@@ -5643,12 +5568,7 @@ fn mixed_does_not_exist_in_php_sharp() {
 
     assert_eq!(
         issues(code),
-        [
-            "5:13 Parse error encountered during parsing",
-            "7:12 Parse error encountered during parsing",
-            "7:23 Parse error encountered during parsing",
-            "9:9 Parse error encountered during parsing",
-        ]
+        ["5:13 Unexpected `mixed`", "7:12 Unexpected `mixed`", "7:23 Unexpected `mixed`", "9:9 Unexpected `mixed`",]
     );
 }
 
@@ -5657,7 +5577,7 @@ fn an_interface_method_and_a_class_constant_take_any_and_never_mixed() {
     let interface =
         "namespace App.Tenant;\n\ninterface Source\n{\n    mixed read(mixed key);\n\n    Any? first(Any key);\n}\n";
     let class = "namespace App.Tenant;\n\nclass Report\n{\n    public const mixed NONE = 1;\n\n    public const Any SOME = 1;\n}\n";
-    let mixed = "Parse error encountered during parsing";
+    let mixed = "Unexpected `mixed`";
 
     assert_eq!(issues(interface), [format!("5:5 {mixed}"), format!("5:16 {mixed}")]);
     assert_eq!(issues(class), [format!("5:18 {mixed}")]);
@@ -5794,7 +5714,7 @@ fn implements_in_an_enum_and_a_final_enum_method_are_errors() {
     assert_eq!(
         issues(code),
         [
-            "5:22 Parse error encountered during parsing",
+            "5:22 Unexpected `implements`",
             "9:5 `final` marks only an override: a PHP# method is already closed unless it is `virtual`.",
         ]
     );
@@ -6073,7 +5993,7 @@ fn the_type_arguments_of_new_and_of_a_method_call_are_checked_as_types() {
         issues(code),
         [
             "10:40 A type argument cannot be `void`: `void` is only a return type.",
-            "11:33 Parse error encountered during parsing",
+            "11:33 Unexpected `mixed`",
             "12:32 A type argument cannot be `void`: `void` is only a return type.",
         ]
     );
@@ -6165,7 +6085,7 @@ fn a_static_member_of_a_generic_class_returns_self() {
     let pair =
         "namespace App.Tenant;\n\npublic class Pair<TFirst, TSecond>\n{\n    public static Self? none() => null;\n}\n";
 
-    assert_eq!(issues(code), ["11:19 Parse error encountered during parsing"]);
+    assert_eq!(issues(code), ["11:19 Unexpected `self`"]);
     assert_eq!(issues(pair), Vec::<String>::new());
 }
 
@@ -6476,7 +6396,7 @@ fn a_properties_pattern_without_a_type_takes_no_name() {
         issues(code),
         [
             "7:45 A pattern creates a variable only through a typed declaration: write the type, as in `Response { status: 200 } r`.",
-            "9:9 Parse error encountered during parsing",
+            "9:9 Unexpected `$leftover`",
         ]
     );
 }
@@ -6588,6 +6508,21 @@ fn a_nullable_type_pattern_or_as_to_a_nullable_type_is_an_error() {
             "Write `as Map<string, float>`.",
             "Test for null with `x == null`, or join both with `or`, as in `x is int or null`.",
             "Write `as int|string`.",
+        ]
+    );
+    // A note names the type the code writes, never a placeholder such as `T`.
+    let notes: Vec<_> = check_in_type_file(code)
+        .into_iter()
+        .filter(|issue| issue.message.starts_with("`as`"))
+        .map(|issue| issue.notes)
+        .collect();
+    assert_eq!(
+        notes,
+        [
+            vec!["`as int` already gives null for a value of another type.".to_owned()],
+            vec!["`as Map<string, float>` already gives null for a value of another type.".to_owned()],
+            vec![],
+            vec!["`as int|string` already gives null for a value of another type.".to_owned()],
         ]
     );
 }
@@ -6823,15 +6758,15 @@ fn a_lambda_parameter_by_reference_fails_as_a_typo_does() {
     assert_eq!(
         issues(code),
         [
-            "7:26 Parse error encountered during parsing",
+            "7:26 Unexpected `&`",
             "8:25 An `int` never changes, so `readonly` changes nothing: write `int`.",
-            "9:28 Parse error encountered during parsing",
+            "9:28 Unexpected `&`",
         ]
     );
     // A method's typed parameter, which reads as the intersection `int & value` until the parameter ends.
     let typed = leak(method("        return 1;\n").replace("int extra", "int &extra"));
 
-    assert_eq!(issues(typed), ["5:24 Parse error encountered during parsing"]);
+    assert_eq!(issues(typed), ["5:24 Unexpected `&`"]);
 }
 
 /// A lambda's parameter is a method's, so it takes a union, a nullable union and a variadic last parameter, and a
@@ -7064,7 +6999,7 @@ fn an_error_for_a_php_form_without_a_sharp_form_names_no_php_code() {
     assert_eq!(
         helps("src/Demo/Order.sharp", code),
         [
-            ("Parse error encountered during parsing".to_owned(), Some("Check the syntax of your code.".to_owned())),
+            ("Unexpected `new`".to_owned(), None),
             ("`[` cannot follow a class name in a `new` expression.".to_owned(), None),
             (
                 "Write the lambda in parentheses to call it where it is written, as in `((int a) => a + 1)(2)`."
@@ -7175,7 +7110,7 @@ fn an_operator_body_is_a_method_body() {
         "    public static Money operator +(Money a, Money b)\n    {\n        echo \"adding\";\n        return a;\n    }\n",
     );
 
-    assert_eq!(issues_in("src/Money.sharp", code), ["7:9 Parse error encountered during parsing"]);
+    assert_eq!(issues_in("src/Money.sharp", code), ["7:9 Unexpected `echo`"]);
 }
 
 /// Spec section 19: an enum declares an operator as a class does, also after an import, and an interface writes it

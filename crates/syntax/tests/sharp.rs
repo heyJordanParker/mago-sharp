@@ -980,7 +980,7 @@ fn internal_with_a_namespace_fails_as_a_typo_does_at_its_parentheses() {
     let program = parse(&arena, "src/Helper.sharp", code);
 
     let messages: Vec<String> = program.errors.iter().map(ToString::to_string).collect();
-    assert_eq!(messages, ["Unexpected token `LeftParenthesis`", "Unexpected token `LeftParenthesis`"]);
+    assert_eq!(messages, ["Unexpected `(`", "Unexpected `(`"]);
     let reaches: Vec<&str> = program.errors.iter().map(|error| source(code, error)).collect();
     assert_eq!(reaches, ["(", "("]);
     assert_eq!(class_members(program).len(), 2);
@@ -1427,6 +1427,24 @@ fn a_class_and_an_interface_declare_type_parameters_with_variance_and_bounds() {
     let bound = parameters[1].bound.as_ref().expect("a bound");
     assert!(matches!(bound.hint, Hint::Intersection(_)), "{:#?}", bound.hint);
     assert_eq!(source(CODE, bound), ": DatabaseEntity & Shareable");
+}
+
+/// An empty type parameter list, `<>`, is one typo at the `<>`, and the class, the interface or the method parses on
+/// with no type parameters.
+#[test]
+fn an_empty_type_parameter_list_is_one_error_and_its_declaration_parses_on() {
+    const CODE: &str = "public class G<>\n{\n    public void run<>() { }\n}\n\npublic interface H<>\n{\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/G.sharp", CODE);
+
+    let errors: Vec<(String, &str)> =
+        program.errors.iter().map(|error| (error.to_string(), source(CODE, error))).collect();
+    assert_eq!(errors, vec![("Unexpected `<>`".to_owned(), "<>"); 3]);
+    let [Statement::Class(class), Statement::Interface(interface)] = program.statements.as_slice() else {
+        panic!("expected a class and an interface, got {:#?}", program.statements);
+    };
+    assert!(class.type_parameters.is_none() && interface.type_parameters.is_none());
+    assert_eq!(class.members.len(), 1, "{:#?}", class.members);
 }
 
 /// The shape of `hint`: each union and intersection in parentheses, and the parentheses written in the code as `[…]`.
@@ -2769,30 +2787,32 @@ fn a_dollar_catch_variable_fails_as_a_typo_does() {
     assert_eq!(spans, ["$failure"]);
 }
 
+/// Spec section 17: `for (x in y)` is PHP#'s own loop with TypeScript's word, so it is an error that names `of`, at the
+/// `in`, and the loop still parses.
 #[test]
-fn for_in_fails_as_a_typo_does() {
+fn for_in_is_an_error_that_names_of() {
+    const CODE: &str =
+        "class Report\n{\n    void run()\n    {\n        for (const line in lines) {\n        }\n    }\n}\n";
     let arena = LocalArena::new();
-    let program = parse(
-        &arena,
-        "src/Report.sharp",
-        "class Report\n{\n    void run()\n    {\n        for (const line in lines) {\n        }\n    }\n}\n",
-    );
+    let program = parse(&arena, "src/Report.sharp", CODE);
 
-    let messages: Vec<String> = program.errors.iter().map(ToString::to_string).collect();
-    assert_eq!(messages, ["Unexpected token `Identifier`"]);
+    let errors: Vec<(String, &str)> =
+        program.errors.iter().map(|error| (error.to_string(), source(CODE, error))).collect();
+    assert_eq!(errors, [("A loop over a collection takes `of`, as in `for (const line of lines)`.".to_owned(), "in")]);
+    assert!(matches!(method_body(program).first(), Some(Statement::ForOf(_))), "{:#?}", method_body(program));
 }
 
-/// TypeScript's `for (x in y)` declares no loop variable, and it fails as a typo does, at the `in`, while the
-/// statements after it still parse.
+/// TypeScript's `for (x in y)` declares no loop variable, and it is the same error that names `of`, at the `in`, while
+/// the statements after it still parse.
 #[test]
-fn for_in_without_const_fails_as_a_typo_does_and_the_statements_after_it_parse() {
+fn for_in_without_const_names_of_and_the_statements_after_it_parse() {
     const CODE: &str = "class Report\n{\n    void run()\n    {\n        for (line in lines) {\n            const kept = 1;\n        }\n        const after = 2;\n    }\n}\n";
     let arena = LocalArena::new();
     let program = parse(&arena, "src/Report.sharp", CODE);
 
     let errors: Vec<(String, &str)> =
         program.errors.iter().map(|error| (error.to_string(), source(CODE, error))).collect();
-    assert_eq!(errors, [("Unexpected token `Identifier`".to_owned(), "in")]);
+    assert_eq!(errors, [("A loop over a collection takes `of`, as in `for (const line of lines)`.".to_owned(), "in")]);
     assert_eq!(method_body(program).len(), 2, "{:#?}", method_body(program));
 }
 
@@ -2808,7 +2828,79 @@ fn foreach_fails_as_a_typo_does() {
 
         let errors: Vec<(String, &str)> =
             program.errors.iter().map(|error| (error.to_string(), source(code, error))).collect();
-        assert_eq!(errors, [("Unexpected token `Identifier`".to_owned(), "foreach")], "{body}");
+        assert_eq!(errors, [("Unexpected `foreach`".to_owned(), "foreach")], "{body}");
+    }
+}
+
+/// Jordan's ruling of 10-18, decisions 34, 38 and 83: a form PHP# never writes fails as a typo does. Its error quotes the
+/// code as written, as in "Unexpected `->`", and never names a kind of token the parser reads, PHP's closing tag among
+/// them, nor recognizes the PHP form or names its replacement. It has no note or help, which would say only that it
+/// is a parse error. The semantic checks refuse a `$` variable and a superglobal the same way.
+#[test]
+fn a_php_form_fails_with_the_text_it_writes_and_nothing_more() {
+    let method = |body: &str| -> &'static str {
+        Box::leak(
+            format!("class Report\n{{\n    Any run(Any value)\n    {{\n        {body}\n    }}\n}}\n").into_boxed_str(),
+        )
+    };
+    for (code, written, message) in [
+        (method("foreach (value as item) { }"), "foreach", "Unexpected `foreach`"),
+        (method("return value->size;"), "->", "Unexpected `->`"),
+        ("class Report\n{\n    public function run() { }\n}\n", "function", "Unexpected `function`"),
+        ("class Report\n{\n    public ?string run() => null;\n}\n", "?", "Unexpected `?`"),
+        ("namespace App;\n\nuse App\\Foo;\n\nclass Report\n{\n}\n", "use", "Unexpected `use`"),
+        ("class Report\n{\n    public int[] run() => [];\n}\n", "[", "Unexpected `[`"),
+        ("class Report\n{\n}\n?>\n", "?", "Unexpected `?`"),
+    ] {
+        let arena = LocalArena::new();
+        let program = parse(&arena, "src/Report.sharp", code);
+
+        let issue = Issue::from(program.errors.first().unwrap_or_else(|| panic!("an error for {code}")));
+        let annotation = issue.annotations.first().and_then(|annotation| annotation.message.as_deref());
+        assert_eq!(
+            (issue.message.as_str(), annotation, issue.notes.len(), issue.help.as_deref()),
+            (message, None, 0, None),
+            "{code}"
+        );
+        assert_eq!(source(code, &program.errors[0]), written, "{code}");
+    }
+}
+
+/// A parse error that knows the tokens it expected writes them as the code would, as rustc does: "Expected `;`, found
+/// `return`". A `.sharp` file names no token PHP# never writes, such as PHP's `?>`, and with none left the error is
+/// "Unexpected `x`" alone. A plain PHP file names PHP's tokens, `?>` included.
+#[test]
+fn a_parse_error_writes_the_tokens_it_expected() {
+    let sharp = "class Report\n{\n    int run()\n    {\n        let a = 1\n        return a;\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nfunction broken(): int\n{\n    $a = 1\n    return $a;\n}\n";
+    for (path, code, message) in [
+        ("src/Report.sharp", sharp, "Expected `;`, found `return`"),
+        ("src/plain.php", php, "Expected `;` or `?>`, found `return`"),
+    ] {
+        let arena = LocalArena::new();
+        let program = parse(&arena, path, code);
+
+        let errors: Vec<(String, &str)> =
+            program.errors.iter().map(|error| (Issue::from(error).message, source(code, error))).collect();
+        assert_eq!(errors, [(message.to_owned(), "return")], "{path}");
+    }
+}
+
+/// One typo is one parse error: the tokens the parser skips after it report nothing until a member or a statement
+/// parses again, and a second error where one already starts says nothing new, as TypeScript's parser recovers.
+#[test]
+fn one_typo_is_one_parse_error() {
+    for (code, error) in [
+        ("class Report\n{\n    public int[] run() => [];\n}\n", ("Unexpected `[`", "[")),
+        ("class G<> { }\n", ("Unexpected `<>`", "<>")),
+        ("class Torn\n{\n    public int run( => 1;\n}\n", ("Unexpected `=>`", "=>")),
+    ] {
+        let arena = LocalArena::new();
+        let program = parse(&arena, "src/Report.sharp", code);
+
+        let errors: Vec<(String, &str)> =
+            program.errors.iter().map(|found| (found.to_string(), source(code, found))).collect();
+        assert_eq!(errors, [(error.0.to_owned(), error.1)], "{code}");
     }
 }
 
@@ -2821,7 +2913,7 @@ fn an_opening_tag_fails_as_a_typo_does() {
 
     let errors: Vec<(String, &str)> =
         program.errors.iter().map(|error| (error.to_string(), source(CODE, error))).collect();
-    assert_eq!(errors, [("Unexpected token `OpenTag`".to_owned(), "<?php")]);
+    assert_eq!(errors, [("Unexpected `<?php`".to_owned(), "<?php")]);
     assert!(matches!(program.statements.get(1), Some(Statement::Namespace(_))), "{:#?}", program.statements);
 }
 
@@ -2871,7 +2963,7 @@ fn a_partial_type_fails_as_a_typo_does() {
 
         let errors: Vec<(String, &str)> =
             program.errors.iter().map(|error| (error.to_string(), source(code, error))).collect();
-        assert_eq!(errors, [("Unexpected token `Identifier`".to_owned(), "partial")], "{code}");
+        assert_eq!(errors, [("Unexpected `partial`".to_owned(), "partial")], "{code}");
     }
 
     // Everywhere else `partial` is a name.
@@ -2937,6 +3029,47 @@ fn dot_reads_as_member_access_whatever_the_name_before_it() {
     };
     assert_eq!(bare_name(assignment.lhs), b"total");
     assert!(matches!(assignment.rhs, Expression::Binary(Binary { operator: BinaryOperator::Subtraction(_), .. })));
+}
+
+/// Spec section 24: an `int` has members, so `7.mod(2)` calls `mod` on the int 7, as C# and Kotlin read it, and a
+/// `.` with a digit after it still writes a float. Plain PHP reads `12.e5` as a float, as PHP does.
+#[test]
+fn a_dot_and_a_name_after_an_int_literal_read_as_member_access() {
+    const CODE: &str =
+        "class Report\n{\n    void run()\n    {\n        7.mod(2);\n        1.5.round(1);\n        12.e5;\n    }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Report.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let [modulo, round, read] = method_body(program) else {
+        panic!("expected three statements, got {:#?}", method_body(program));
+    };
+
+    let Expression::Call(Call::Method(modulo)) = expression(modulo) else {
+        panic!("expected `7.mod(2)` to be a method call, got {modulo:#?}");
+    };
+    assert!(matches!(modulo.object, Expression::Literal(Literal::Integer(_))), "{modulo:#?}");
+    assert_eq!(source(CODE, &modulo.method), "mod");
+
+    let Expression::Call(Call::Method(round)) = expression(round) else {
+        panic!("expected `1.5.round(1)` to be a method call, got {round:#?}");
+    };
+    assert!(matches!(round.object, Expression::Literal(Literal::Float(_))), "{round:#?}");
+
+    let Expression::Access(Access::Property(read)) = expression(read) else {
+        panic!("expected `12.e5` to read a member, got {read:#?}");
+    };
+    assert!(matches!(read.object, Expression::Literal(Literal::Integer(_))), "{read:#?}");
+
+    let php = parse(&arena, "src/Report.php", "<?php 12.e5;");
+    assert!(
+        matches!(
+            php.statements.get(1),
+            Some(Statement::Expression(ExpressionStatement { expression: Expression::Literal(Literal::Float(_)), .. }))
+        ),
+        "{:#?}",
+        php.statements
+    );
 }
 
 #[test]
@@ -3135,7 +3268,7 @@ fn a_php_closure_or_arrow_function_fails_as_a_typo_does() {
         let [error] = program.errors else {
             panic!("expected one error for `{lambda}`, got {:#?}", program.errors);
         };
-        assert_eq!(Issue::from(error).message, "Parse error encountered during parsing", "{lambda}");
+        assert_eq!(Issue::from(error).message, format!("Unexpected `{start}`"), "{lambda}");
         assert_eq!(source(code, error), start, "{lambda}");
     }
 }
@@ -3194,7 +3327,7 @@ fn a_php_operator_is_reported_once_where_it_is_consumed() {
     );
 
     let messages: Vec<String> = program.errors.iter().map(ToString::to_string).collect();
-    assert_eq!(messages, ["Unexpected token `DotEqual`"]);
+    assert_eq!(messages, ["Unexpected `.=`"]);
 }
 
 /// `use` fails as a typo does in every form, once, at the `use`: PHP# imports with `import`, and lists a trait in the
@@ -3421,10 +3554,8 @@ fn a_keyword_written_in_another_case_is_one_error_wherever_the_keyword_stands() 
 
         parse(&arena, "src/Report.sharp", code).errors.iter().map(ToString::to_string).collect()
     };
-    assert_eq!(
-        messages(method("        Foreach (value as item) { }\n        return 1;\n")),
-        messages(method("        foreach (value as item) { }\n        return 1;\n")),
-    );
+    assert_eq!(messages(method("        Foreach (value as item) { }\n        return 1;\n")), ["Unexpected `Foreach`"]);
+    assert_eq!(messages(method("        foreach (value as item) { }\n        return 1;\n")), ["Unexpected `foreach`"]);
 
     for (code, word, names) in [
         (method("        Return refund = new Return();\n        return refund;\n"), "Return", 2),
@@ -3459,7 +3590,7 @@ fn a_php_closure_reports_its_function_and_its_use_clause() {
     );
 
     let messages: Vec<String> = program.errors.iter().map(ToString::to_string).collect();
-    assert_eq!(messages, ["Unexpected token `Identifier`", "Unexpected token `Identifier`"]);
+    assert_eq!(messages, ["Unexpected `function`", "Unexpected `use`"]);
 }
 
 /// PHP# writes a full name only in an `import` line, so a `\` name anywhere else fails as a typo does, once, at the name.
@@ -3489,7 +3620,7 @@ fn a_method_written_with_function_is_a_parse_error() {
         parse(&arena, "src/Report.sharp", "class Report\n{\n    public function run(): int { return 1; }\n}\n");
 
     let messages: Vec<String> = program.errors.iter().map(ToString::to_string).collect();
-    assert_eq!(messages.first().map(String::as_str), Some("Unexpected token `Identifier`"));
+    assert_eq!(messages.first().map(String::as_str), Some("Unexpected `function`"));
 }
 
 fn returned_template<'arena>(program: &'arena Program<'arena>) -> &'arena InterpolatedString<'arena> {
@@ -3806,7 +3937,7 @@ fn php_attribute_syntax_fails_as_a_typo_does() {
     let program = parse(&arena, "src/Report.sharp", CODE);
 
     let messages: Vec<String> = program.errors.iter().map(ToString::to_string).collect();
-    assert_eq!(messages, ["Unexpected token `HashLeftBracket`"; 3]);
+    assert_eq!(messages, ["Unexpected `#[`"; 3]);
     let spans: Vec<&str> = program.errors.iter().map(|error| source(CODE, error)).collect();
     assert_eq!(spans, ["#["; 3]);
     assert_eq!(attribute_lists(CODE, Node::Program(program)), ["#[Marker]"; 3]);
@@ -3823,7 +3954,7 @@ fn an_accessor_takes_attributes_and_a_type_parameter_takes_none() {
 
     let messages: Vec<(String, &str)> =
         program.errors.iter().map(|error| (error.to_string(), source(CODE, error))).collect();
-    assert_eq!(messages, [("Unexpected token `LeftBracket`".to_owned(), "[")]);
+    assert_eq!(messages, [("Unexpected `[`".to_owned(), "[")]);
     let Some(ClassLikeMember::Property(Property::Hooked(count))) = class_members(program).first() else {
         panic!("expected a property, got {:#?}", class_members(program));
     };
@@ -3888,7 +4019,7 @@ fn an_attribute_target_opens_its_brackets() {
     let program = parse(&arena, "src/Report.sharp", LATE);
     let messages: Vec<(String, &str)> =
         program.errors.iter().map(|error| (error.to_string(), source(LATE, error))).collect();
-    assert_eq!(messages, [("Unexpected token `Identifier`".to_owned(), "method")]);
+    assert_eq!(messages, [("Unexpected `method`".to_owned(), "method")]);
 }
 
 /// `typeof` takes any type, spec section 25: a class by its short name, a class value of a generic class with its type
@@ -5266,9 +5397,9 @@ fn a_capitalized_type_in_parentheses_is_a_class_name_and_not_a_cast() {
 #[test]
 fn a_class_cast_fails_as_a_typo_does() {
     for (code, messages) in [
-        ("const admin = (Admin) user;", &["Unexpected token `LeftParenthesis`"][..]),
-        ("const admin = (Admin) this.user;", &["Unexpected token `LeftParenthesis`"]),
-        ("const admin = (Admin) users.first();", &["Unexpected token `LeftParenthesis`"]),
+        ("const admin = (Admin) user;", &["Unexpected `(`"][..]),
+        ("const admin = (Admin) this.user;", &["Unexpected `(`"]),
+        ("const admin = (Admin) users.first();", &["Unexpected `(`"]),
         ("const plan = (Plan) is Plan;", &[]),
     ] {
         let source = format!("class Report\n{{\n    void run()\n    {{\n        {code}\n    }}\n}}\n");
@@ -6147,7 +6278,7 @@ fn a_lambda_after_an_operator_needs_parentheses_as_in_csharp() {
                 "A lambda after an operator needs parentheses, as in `handler ?? (item => item.ready)`.".to_owned(),
                 "item =>"
             ),
-            ("Unexpected token `MinusGreaterThan`".to_owned(), "->"),
+            ("Unexpected `->`".to_owned(), "->"),
         ]
     );
 }
@@ -6170,7 +6301,7 @@ fn a_conditional_at_the_top_of_a_guard_needs_parentheses_as_in_csharp() {
                     .to_owned(),
                 "strict ? forced : ready"
             ),
-            ("Unexpected token `MinusGreaterThan`".to_owned(), "->"),
+            ("Unexpected `->`".to_owned(), "->"),
         ]
     );
 }
@@ -6314,10 +6445,7 @@ fn an_operator_without_a_body_is_a_parse_error() {
     let program =
         parse(&arena, "src/Money.sharp", "class Money\n{\n    public static bool operator ==(Money a, Money b);\n}\n");
 
-    assert_eq!(
-        program.errors.first().map(ToString::to_string).as_deref(),
-        Some("Expected one of `LeftBrace`, found `Semicolon`")
-    );
+    assert_eq!(program.errors.first().map(ToString::to_string).as_deref(), Some("Expected `{` or `=>`, found `;`"));
 }
 
 #[test]

@@ -166,6 +166,12 @@ impl<'input> Lexer<'input> {
         Lexer { sharp: true, ..Self::scripting(input, settings) }
     }
 
+    /// Whether the lexer reads a PHP# file.
+    #[must_use]
+    pub(crate) const fn is_sharp(&self) -> bool {
+        self.sharp
+    }
+
     /// Check if the lexer has reached the end of the input.
     ///
     /// If this method returns `true`, the lexer will not produce any more tokens.
@@ -703,7 +709,11 @@ impl<'input> Lexer<'input> {
                             }
                         }
 
-                        let is_float = matches!(self.input.peek(length, 3), float_separator!());
+                        // Spec section 24: a PHP# `int` has members, so a `.` and a name after its digits read as a
+                        // member access, as `7.mod(2)` does in C# and Kotlin.
+                        let is_member_access =
+                            self.sharp && matches!(self.input.peek(length, 2), [b'.', start_of_identifier!()]);
+                        let is_float = !is_member_access && matches!(self.input.peek(length, 3), float_separator!());
 
                         if !is_float {
                             if kind == NumberKind::OctalOrFloat

@@ -118,7 +118,14 @@ where
         }
     }
 
-    let resulting_type = Rc::new(resulting_expression_type.unwrap_or_else(get_never));
+    // A PHP# read the resolution refused reported itself, so what it gives reports nothing again.
+    let resulting_type = Rc::new(resulting_expression_type.unwrap_or_else(|| {
+        if context.dialect.is_sharp() && resolution_result.has_error_path {
+            TUnion::from_atomic(TAtomic::Error)
+        } else {
+            get_never()
+        }
+    }));
     if let Some(property_access_id) = property_access_id {
         block_context.locals.insert(property_access_id, Rc::clone(&resulting_type));
     }

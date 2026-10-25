@@ -155,6 +155,10 @@ fn analyze_with_artifacts(
             if name.starts_with("vendor/") {
                 file.file_type = FileType::Vendored;
             }
+            // An external analyzer's in-memory source, which no file on disk holds.
+            if name.starts_with("external/") {
+                file.file_type = FileType::External;
+            }
 
             (*name, database.add(file))
         })
@@ -526,7 +530,12 @@ fn a_class_in_the_same_namespace_takes_static_calls_as_in_php() {
     let php_issues = issues(("src/Demo/Report.php", php), &[]);
 
     assert_eq!(sharp_issues[0], "15:29 invalid-argument");
-    assert_eq!(codes(&sharp_issues), codes(&php_issues));
+    // PHP reads the missing method's value as `mixed` and reports its uses again, and PHP# reports the method once.
+    assert_eq!(codes(&sharp_issues), ["invalid-argument", "non-existent-method"]);
+    assert_eq!(
+        codes(&php_issues),
+        ["invalid-argument", "non-existent-method", "mixed-operand", "mixed-return-statement"]
+    );
 }
 
 #[test]
@@ -537,8 +546,9 @@ fn a_local_reads_a_missing_property_as_in_php() {
     let sharp_issues = issues(("src/Demo/Report.sharp", sharp), &[("src/Lib/Calc.php", CALC)]);
     let php_issues = issues(("src/Demo/Report.php", php), &[("src/Lib/Calc.php", CALC)]);
 
-    assert!(!sharp_issues.is_empty(), "expected the missing property to be reported");
-    assert_eq!(codes(&sharp_issues), codes(&php_issues));
+    // PHP reads the missing property as `null` and reports the return again, and PHP# reports the property once.
+    assert_eq!(codes(&sharp_issues), ["non-existent-property"]);
+    assert_eq!(codes(&php_issues), ["non-existent-property", "invalid-return-statement"]);
 }
 
 /// Spec section 23: a bare name reads the code's own constant, of the file's namespace, and a plain PHP library's
@@ -552,13 +562,13 @@ fn a_bare_constant_is_the_code_s_own_and_a_missing_one_is_refused_as_in_php() {
     let sharp_issues = issues(("src/Demo/Report.sharp", sharp), &[]);
     let php_issues = issues(("src/Demo/Report.php", php), &[]);
 
-    assert_eq!(sharp_issues[0], "7:23 non-existent-constant");
-    assert_eq!(codes(&sharp_issues), codes(&php_issues));
+    // PHP reads the missing constant as `mixed` and reports its uses again, and PHP# reports the constant once.
+    assert_eq!(codes(&sharp_issues), ["non-existent-constant"]);
+    assert_eq!(codes(&php_issues), ["non-existent-constant", "mixed-operand", "mixed-return-statement"]);
     assert_eq!(
-        refusals(("src/Demo/Report.sharp", sharp), &[])[..2],
+        refusals(("src/Demo/Report.sharp", sharp), &[]),
         [
             "7:23 non-existent-constant Undefined constant: `MISSING`. | Check `MISSING` for typos. A bare name reads a constant of this file's namespace, declared in a `.php` file. A class constant is read through its class, as in `Limits.MAX`, and a plain PHP library's constant through its namespace, as in `Pdf.DEFAULT_DPI`.",
-            "7:23 mixed-operand Right operand in binary operation has type `Any?`. | Check the right operand with `is` or `match` first, as in `if (value is int n)`, and use `n`.",
         ]
     );
     assert_eq!(
@@ -646,9 +656,9 @@ fn a_static_method_named_through_its_class_without_a_call_is_a_closure_of_its_si
         ["invalid-argument", "non-existent-property", "null-operand", "mixed-return-statement"],
         "{php_issues:?}"
     );
+    // PHP reads the missing property as `null` and reports its uses again, and PHP# reports the read once.
     let sharp_issues = issues(("src/Demo/Report.sharp", sharp), &others);
-    assert_eq!(codes(&sharp_issues), codes(&php_issues), "{sharp_issues:?}");
-    assert_eq!(&sharp_issues[..2], ["11:48 invalid-argument", "11:60 non-existent-property"]);
+    assert_eq!(sharp_issues, ["11:48 invalid-argument", "11:60 non-existent-property"]);
 }
 
 /// Spec section 5: a member without an access modifier is `private`, so a property, a computed property, a constant
@@ -663,17 +673,7 @@ fn a_member_without_an_access_modifier_is_private() {
 
     assert_eq!(from_bare, issues(("src/Demo/Report.sharp", report), &[("src/Demo/Order.sharp", private)]));
     // The analyzer checks no constant's access, `private const` included, and the engine refuses line 10 as it runs.
-    assert_eq!(
-        from_bare,
-        [
-            "7:21 invalid-method-access",
-            "7:21 no-value",
-            "8:27 invalid-property-read",
-            "8:21 no-value",
-            "9:27 invalid-property-read",
-            "9:21 no-value",
-        ]
-    );
+    assert_eq!(from_bare, ["7:21 invalid-method-access", "8:27 invalid-property-read", "9:27 invalid-property-read"]);
 }
 
 /// A method read as a value obeys the method's visibility, as `$order->secret(...)` does in PHP.
@@ -888,7 +888,6 @@ fn a_null_safe_receiver_is_not_null_in_the_rest_of_its_chain() {
         ),
         [
             "52:65 possible-method-access-on-null",
-            "52:65 mixed-argument",
             "55:46 non-documented-method",
             "70:61 redundant-nullsafe-operator",
             "70:57 redundant-null-coalesce",
@@ -898,18 +897,12 @@ fn a_null_safe_receiver_is_not_null_in_the_rest_of_its_chain() {
             "77:14 redundant-nullsafe-operator",
             "78:16 redundant-nullsafe-operator",
             "84:16 possible-method-access-on-null",
-            "84:16 mixed-return-statement",
             "90:16 possible-method-access-on-null",
-            "90:16 mixed-return-statement",
             "96:16 possible-method-access-on-null",
-            "96:16 mixed-return-statement",
             "102:16 possible-method-access-on-null",
-            "102:16 mixed-return-statement",
             "108:16 possible-method-access-on-null",
-            "108:16 mixed-return-statement",
             "114:16 possible-method-access-on-null",
             "114:21 ambiguous-object-method-access",
-            "114:16 mixed-return-statement",
             "120:16 possibly-null-property-access",
             "120:16 nullable-return-statement",
             "120:16 invalid-return-statement",
@@ -1502,16 +1495,21 @@ fn a_class_member_read_is_checked_as_its_constant_enum_case_or_static_property_i
     let sharp_issues = issues(("src/Demo/Members.sharp", sharp), &[("src/Lib/Registry.php", registry)]);
     let php_issues = issues(("src/Demo/Members.php", php), &[("src/Lib/Registry.php", registry)]);
 
-    assert_eq!(codes(&sharp_issues), codes(&php_issues), "{sharp_issues:?} {php_issues:?}");
+    // PHP reads the missing property as `null` and the hidden one as `never`, and reports each return again. PHP#
+    // reports each read once.
+    assert_eq!(
+        codes(&php_issues),
+        [
+            "invalid-return-statement",
+            "non-existent-property",
+            "invalid-return-statement",
+            "invalid-property-read",
+            "never-return"
+        ]
+    );
     assert_eq!(
         sharp_issues,
-        [
-            "20:16 invalid-return-statement",
-            "25:25 non-existent-property",
-            "25:16 invalid-return-statement",
-            "30:25 invalid-property-read",
-            "30:16 never-return",
-        ]
+        ["20:16 invalid-return-statement", "25:25 non-existent-property", "30:25 invalid-property-read"]
     );
 }
 
@@ -1670,7 +1668,7 @@ fn a_default_body_sees_only_its_interface_and_a_plain_php_class_gets_it_through_
     let sharp = "namespace App;\n\npublic interface HasDesign\n{\n    string designColumn { get; }\n    string designKey() => `design:${this.designColumn}`;\n    string designId() => `design:${this.id}`;\n}\n\npublic class Page : HasDesign\n{\n    public int id => 7;\n    public string designColumn => \"design\";\n    public string shown() => this.designKey();\n}\n";
     let php = "<?php\n\nnamespace Legacy;\n\nuse App\\HasDesign;\n\nclass LegacyPage implements HasDesign\n{\n    use HasDesign\\Defaults;\n\n    public string $designColumn = 'design';\n}\n\nclass Bare implements HasDesign\n{\n    public string $designColumn = 'design';\n}\n";
 
-    assert_eq!(issues(("src/App/HasDesign.sharp", sharp), &[]), ["7:41 non-existent-property", "7:34 invalid-operand"]);
+    assert_eq!(issues(("src/App/HasDesign.sharp", sharp), &[]), ["7:41 non-existent-property"]);
     assert_eq!(
         worded(("src/Legacy/LegacyPage.php", php), &[("src/App/HasDesign.sharp", sharp)]),
         [
@@ -1845,6 +1843,112 @@ fn a_closed_method_and_a_header_with_two_classes_speak_sharp() {
             "`Base.save` is not `virtual`, so no subclass replaces it.",
             "`Base.save` is not `virtual`, so no subclass replaces it.",
             "`Twice` names two base classes, `Base` and `Other`.",
+        ]
+    );
+}
+
+/// An exception's message is read through its public `getMessage()`, so a read of the protected `message`, or of the
+/// `message` `Throwable` has none of, names that method as the fix. The error points at the code that reads it, never
+/// into the engine's own declarations, and the read starts no second error.
+#[test]
+fn a_read_of_an_exception_s_message_names_its_public_method() {
+    let sharp = "namespace App;\n\nclass Report\n{\n    public string caught()\n    {\n        try {\n            return \"ok\";\n        } catch (RuntimeException e) {\n            return e.message;\n        }\n    }\n\n    public string thrown()\n    {\n        try {\n            return \"ok\";\n        } catch (Throwable e) {\n            return e.message;\n        }\n    }\n}\n";
+    let issues = analyze(&PLUGIN_REGISTRY, settings(), ("src/App/Report.sharp", sharp), &[]);
+    let file = issues.first().and_then(Issue::primary_span).expect("a refusal").file_id;
+
+    assert_eq!(
+        refusals(("src/App/Report.sharp", sharp), &[]),
+        [
+            "10:22 invalid-property-read Cannot read protected property `Exception.message`. | Call `getMessage()`, the public method that gives the value.",
+            "19:22 non-existent-property Property `Throwable.message` does not exist. | Call `getMessage()`, the public method that gives the value.",
+        ]
+    );
+    let elsewhere: Vec<&Issue> = issues
+        .iter()
+        .filter(|issue| issue.annotations.iter().any(|annotation| annotation.span.file_id != file))
+        .collect();
+    assert!(elsewhere.is_empty(), "{elsewhere:#?}");
+}
+
+/// A protected member of a vendor package's class is refused with an annotation at its declaration, since the package's
+/// file is one the developer can open. A built-in declaration, in a prelude or a stub, has none, and neither has an
+/// external analyzer's in-memory source.
+#[test]
+fn a_refused_member_of_a_vendor_class_points_at_its_declaration() {
+    let sharp = "namespace Demo;\n\nimport Lib.Secret;\n\npublic class Reader\n{\n    public static int code(Secret secret) => secret.code;\n\n    public static int hidden(Secret secret) => secret.hidden();\n}\n";
+    let secret = "<?php\n\nnamespace Lib;\n\nclass Secret\n{\n    protected int $code = 1;\n\n    protected function hidden(): int\n    {\n        return 1;\n    }\n}\n";
+    let issues =
+        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Reader.sharp", sharp), &[("vendor/Lib/Secret.php", secret)]);
+
+    let reader = issues.first().and_then(Issue::primary_span).expect("a refusal").file_id;
+    let declared: Vec<(&str, &str)> = issues
+        .iter()
+        .flat_map(|issue| &issue.annotations)
+        .filter(|annotation| annotation.span.file_id != reader)
+        .filter_map(|annotation| {
+            let range = annotation.span.start.offset as usize..annotation.span.end.offset as usize;
+            annotation.message.as_deref().zip(secret.get(range))
+        })
+        .collect();
+    assert_eq!(
+        declared,
+        [
+            ("Member is defined as `protected` here", "$code"),
+            (
+                "Member is defined as `protected` here",
+                "protected function hidden(): int\n    {\n        return 1;\n    }"
+            ),
+        ]
+    );
+
+    // An external analyzer's in-memory source is no file either, so its declarations get no annotation.
+    let issues =
+        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Reader.sharp", sharp), &[("external/Lib/Secret.php", secret)]);
+    let refused: Vec<(&str, usize)> = issues
+        .iter()
+        .map(|issue| {
+            let elsewhere = issue.annotations.iter().filter(|annotation| annotation.span.file_id != reader).count();
+            (issue.code.as_deref().unwrap_or("none"), elsewhere)
+        })
+        .collect();
+    assert_eq!(refused, [("invalid-property-read", 0), ("invalid-method-access", 0)]);
+}
+
+/// An interface extends only interfaces, as C#'s CS0527 and Java's `interface expected here` require, so a plain PHP
+/// trait or a class in an interface's header is refused, in PHP#'s words, with the fix that removes it.
+#[test]
+fn an_interface_header_that_names_a_trait_or_a_class_is_refused() {
+    let sharp = "namespace Demo;\n\nimport Lib.Greets;\n\npublic interface Polite : Greets\n{\n}\n\npublic interface Named : Report\n{\n}\n\npublic class Report\n{\n}\n";
+    let library =
+        "<?php\n\nnamespace Lib;\n\ntrait Greets\n{\n    public function greet(): string { return 'hi'; }\n}\n";
+
+    assert_eq!(
+        refusals(("src/Demo/Polite.sharp", sharp), &[("src/Lib/Greets.php", library)]),
+        [
+            "5:27 invalid-extend `Polite` is an interface, so its header names only interfaces, and `Greets` is a trait. | Remove `Greets` from the header of `Polite`.",
+            "9:26 invalid-extend `Named` is an interface, so its header names only interfaces, and `Report` is a class. | Remove `Report` from the header of `Named`.",
+        ]
+    );
+}
+
+/// Spec section 22: a class or an interface that inherits from itself, through its own header or a chain of headers of
+/// any length, is an error at each header of the chain that names the chain, as C#'s CS0146 and Java refuse. A class
+/// that names itself gets the same error, not one that calls it no interface.
+#[test]
+fn a_type_that_inherits_from_itself_is_an_error_that_names_the_chain() {
+    let sharp = "namespace Demo;\n\npublic class A : B\n{\n}\n\npublic class B : A\n{\n}\n\npublic interface I : J\n{\n}\n\npublic interface J : I\n{\n}\n\npublic class C : E\n{\n}\n\npublic class E : F\n{\n}\n\npublic class F : C\n{\n}\n\npublic class D : D\n{\n}\n";
+
+    assert_eq!(
+        refusals(("src/Demo/A.sharp", sharp), &[]),
+        [
+            "3:18 invalid-extend `A` inherits from itself: `A` → `B` → `A`. | Remove `B` from the header of `A`.",
+            "7:18 invalid-extend `B` inherits from itself: `B` → `A` → `B`. | Remove `A` from the header of `B`.",
+            "11:22 invalid-extend `I` inherits from itself: `I` → `J` → `I`. | Remove `J` from the header of `I`.",
+            "15:22 invalid-extend `J` inherits from itself: `J` → `I` → `J`. | Remove `I` from the header of `J`.",
+            "19:18 invalid-extend `C` inherits from itself: `C` → `E` → `F` → `C`. | Remove `E` from the header of `C`.",
+            "23:18 invalid-extend `E` inherits from itself: `E` → `F` → `C` → `E`. | Remove `F` from the header of `E`.",
+            "27:18 invalid-extend `F` inherits from itself: `F` → `C` → `E` → `F`. | Remove `C` from the header of `F`.",
+            "31:18 invalid-extend `D` inherits from itself: `D` → `D`. | Remove `D` from the header of `D`.",
         ]
     );
 }
@@ -2811,8 +2915,9 @@ fn super_in_a_class_without_a_base_class_is_an_error_as_in_php() {
     let sharp_issues = issues(("src/Demo/Tag.sharp", sharp), &[]);
     let php_issues = issues(("src/Demo/Tag.php", php), &[]);
 
+    // PHP reads the refused call's value as `mixed` and reports its return again, and PHP# reports the call once.
     assert_eq!(codes(&php_issues), ["invalid-parent-type", "mixed-return-statement"], "{php_issues:?}");
-    assert_eq!(codes(&sharp_issues), codes(&php_issues), "{sharp_issues:?}");
+    assert_eq!(codes(&sharp_issues), ["invalid-parent-type"], "{sharp_issues:?}");
 
     let invalid = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Tag.sharp", sharp), &[]).remove(0);
     assert_eq!(invalid.level, Level::Error);
@@ -2841,8 +2946,9 @@ fn a_member_read_through_a_class_value_is_checked_as_the_static_member_in_php() 
         artifacts.expression_types.get(&(start, start + text.len() as u32)).map(|r#type| r#type.get_id().to_string())
     };
 
-    assert_eq!(sharp_issues, codes(&php_issues), "{php_issues:?}");
-    assert_eq!(sharp_issues, ["non-existent-property", "invalid-return-statement", "non-existent-method"]);
+    // PHP reads the missing property as `null` and reports the return again, and PHP# reports the read once.
+    assert_eq!(codes(&php_issues), ["non-existent-property", "invalid-return-statement", "non-existent-method"]);
+    assert_eq!(sharp_issues, ["non-existent-property", "non-existent-method"]);
     assert_eq!(type_at("type.MAX").as_deref(), Some("int(3)"));
     assert_eq!(type_at("type.count").as_deref(), Some("int"));
     assert_eq!(type_at("type.tag()").as_deref(), Some("string"));
@@ -3480,20 +3586,10 @@ fn a_bare_call_of_a_method_that_no_function_shares_names_the_member_to_write() {
         messages(analyzed, &[]),
         [
             "Write `Calc.total()`: a static method reaches the members of its class through the class name.",
-            "Could not infer a precise return type for method `Calc.run`. Saw type `Any?`.",
             "Write `this.size()`: members of the same object are always written with `this.`.",
-            "Could not infer a precise return type for method `Calc.measure`. Saw type `Any?`.",
         ]
     );
-    assert_eq!(
-        issues(analyzed, &[]),
-        [
-            "7:32 non-existent-function",
-            "7:32 mixed-return-statement",
-            "11:29 non-existent-function",
-            "11:29 mixed-return-statement",
-        ]
-    );
+    assert_eq!(issues(analyzed, &[]), ["7:32 non-existent-function", "11:29 non-existent-function"]);
 
     let php = "<?php\n\nnamespace Demo;\n\nclass Calc\n{\n    public static function total(): int { return 1; }\n\n    public static function run(): int { return total(); }\n\n    public function size(): int { return 1; }\n\n    public function measure(): int { return Size(); }\n}\n";
     assert_eq!(
@@ -3982,10 +4078,10 @@ fn a_comparison_that_always_or_never_holds_speaks_of_its_bool() {
 }
 
 /// A `match` arm that never or always matches writes the `bool` of its condition as PHP# writes it. PHP keeps its own
-/// wording.
+/// wording. An arm an earlier arm already handles is an error of its own, with no warning beside it.
 #[test]
 fn a_match_arm_that_never_or_always_matches_speaks_of_its_bool() {
-    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static string twice(int x) => match (x) { 1 => \"one\", 1 => \"again\", default => \"other\" };\n    public static string always() => match (true) { true => \"yes\", default => \"no\" };\n}\n";
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static string twice(int x) => match (x) { 1 => \"one\", 1 => \"again\", default => \"other\" };\n    public static string never() => match (3) { 1 => \"one\", default => \"other\" };\n    public static string always() => match (true) { true => \"yes\", default => \"no\" };\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    public static function twice(int $x): string { return match ($x) { 1 => 'one', 1 => 'again', default => 'other' }; }\n    public static function always(): string { return match (true) { true => 'yes', default => 'no' }; }\n}\n";
     let arms = |analyzed| -> Vec<String> {
         worded(analyzed, &[])
@@ -4004,8 +4100,8 @@ fn a_match_arm_that_never_or_always_matches_speaks_of_its_bool() {
     assert_eq!(
         arms(("src/Demo/Report.sharp", sharp)),
         [
-            "5:66 unreachable-match-arm This match arm is unreachable. | This arm can never be reached | In this match expression | The condition is always `false` in this context.",
-            "6:53 match-arm-always-true This match arm is always `true`, making subsequent arms unreachable. | This arm covers all remaining cases for the subject | In this match expression | Any arms after this one can never be reached.",
+            "6:49 unreachable-match-arm This match arm is unreachable. | This arm can never be reached | In this match expression | The condition is always `false` in this context.",
+            "7:53 match-arm-always-true This match arm is always `true`, making subsequent arms unreachable. | This arm covers all remaining cases for the subject | In this match expression | Any arms after this one can never be reached.",
         ]
     );
 }
@@ -5644,7 +5740,6 @@ fn a_method_value_of_a_collection_an_extension_or_a_plain_php_function_has_its_f
             "33:43 invalid-local-assignment-value",
             "35:26 possibly-null-property-access",
             "36:29 non-existent-method",
-            "36:15 impossible-assignment",
             "37:15 invalid-property-write",
             "38:30 invalid-property-access",
         ]
@@ -5653,7 +5748,7 @@ fn a_method_value_of_a_collection_an_extension_or_a_plain_php_function_has_its_f
     assert_eq!(messages[4], "Invalid argument type for argument #1 of `slugged`: expected `string`, but found `int`.");
     assert_eq!(messages[8], "`string` is outside `T`'s bound `Order`, so `List<string>` has no `total`.");
     assert_eq!(
-        messages[10],
+        messages[9],
         "`slug` is a method an extension adds: it is called or read as a function value, never written."
     );
 }
@@ -7018,6 +7113,25 @@ fn a_pattern_that_can_never_match_is_an_error_at_the_pattern() {
     );
 }
 
+/// An arm whose value an earlier arm without a `when` condition tests never runs, because the earlier arm handles its
+/// case. The values are compared as the checker resolves them, so `0x1`, `(1)` and a constant that holds `1` repeat
+/// `1`, and an earlier arm with a `when` condition handles no case for certain. Its one error names the earlier arm's
+/// line, as C#'s error for a case already handled names it, and the arm reports nothing more.
+#[test]
+fn an_arm_whose_case_an_earlier_arm_handles_is_one_error_that_names_that_arm() {
+    let sharp = "namespace Demo;\n\nenum Status\n{\n    case Open;\n    case Closed;\n}\n\nclass Report\n{\n    public const int ONE = 1;\n\n    public static int arms(Status status) => match (status) {\n        Status.Open => 1,\n        Status.Open => 5,\n        Status.Closed => 2,\n    };\n\n    public static string hex(int count) => match (count) {\n        1 => \"one\",\n        0x1 => \"again\",\n        default => \"other\",\n    };\n\n    public static string named(int count) => match (count) {\n        1 => \"one\",\n        Report.ONE => \"again\",\n        default => \"other\",\n    };\n\n    public static string guarded(int count, bool strict) => match (count) {\n        1 when strict => \"strict one\",\n        1 => \"one\",\n        default => \"other\",\n    };\n\n    public static string grouped(int count) => match (count) {\n        1 => \"one\",\n        (1) => \"again\",\n        default => \"other\",\n    };\n}\n";
+
+    assert_eq!(
+        refusals(("src/Demo/Report.sharp", sharp), &[]),
+        [
+            "15:9 impossible-type-comparison This arm never runs: the arm on line 14 already handles `Status.Open`. | Remove this arm, or change its pattern.",
+            "21:9 impossible-type-comparison This arm never runs: the arm on line 20 already handles `0x1`. | Remove this arm, or change its pattern.",
+            "27:9 impossible-type-comparison This arm never runs: the arm on line 26 already handles `Report.ONE`. | Remove this arm, or change its pattern.",
+            "39:9 impossible-type-comparison This arm never runs: the arm on line 38 already handles `(1)`. | Remove this arm, or change its pattern.",
+        ]
+    );
+}
+
 /// `is` and `match` check an `Any?`, so the value they narrow is used as its checked type, spec section 24.
 #[test]
 fn is_and_match_check_an_any_before_its_use() {
@@ -7282,21 +7396,21 @@ fn an_expression_the_parser_refuses_reports_only_its_parse_error() {
     assert_eq!(
         reports(("src/Demo/Report.sharp", sharp)),
         [
-            "8:14 parse Parse error encountered during parsing",
-            "11:25 parse Parse error encountered during parsing",
-            "12:25 parse Parse error encountered during parsing",
-            "13:25 parse Parse error encountered during parsing",
-            "14:20 parse Parse error encountered during parsing",
-            "15:20 parse Parse error encountered during parsing",
-            "16:25 parse Parse error encountered during parsing",
+            "8:14 parse Unexpected `.=`",
+            "11:25 parse Unexpected `->`",
+            "12:25 parse Unexpected `::`",
+            "13:25 parse Unexpected `?->`",
+            "14:20 parse Unexpected `fn`",
+            "15:20 parse Unexpected `function`",
+            "16:25 parse Unexpected `=>`",
             "17:53 parse A `? :` in a `when` condition needs parentheses, as in `when (strict ? forced : ready) =>`.",
-            "18:26 parse Parse error encountered during parsing",
-            "20:40 parse Parse error encountered during parsing",
-            "24:29 parse Parse error encountered during parsing",
-            "32:51 parse Parse error encountered during parsing",
-            "32:61 parse Parse error encountered during parsing",
-            "36:26 parse Parse error encountered during parsing",
-            "42:26 parse Parse error encountered during parsing",
+            "18:26 parse Unexpected `->`",
+            "20:40 parse Unexpected `=>`",
+            "24:29 parse Unexpected `->`",
+            "32:51 parse Unexpected `=>`",
+            "32:61 parse Unexpected `=>`",
+            "36:26 parse Unexpected `->`",
+            "42:26 parse Unexpected `->`",
             "9:21 invalid-local-assignment-value Invalid assignment to `wrong`: it is declared as `int`.",
         ]
     );
@@ -7305,7 +7419,7 @@ fn an_expression_the_parser_refuses_reports_only_its_parse_error() {
     assert_eq!(
         reports(("src/Demo/run.php", unparsed)),
         [
-            "7:12 parse Parse error encountered during parsing",
+            "7:12 parse Unexpected `]`",
             "7:12 no-value Argument #1 passed to function `printf` has type `never`, meaning it cannot produce a value.",
         ]
     );
@@ -7829,7 +7943,6 @@ fn an_imported_extension_is_a_member_of_its_receiver() {
             "9:39 invalid-return-statement: Invalid return type for method `Catalog.count`: expected `int`, but found `string`.",
             "10:53 invalid-argument: Invalid argument type for argument #1 of `string.slug`: expected `string`, but found `int`.",
             "11:45 non-existent-method: `isBlank` is a computed property of `string`, not a method: read it without `(…)`.",
-            "11:39 mixed-return-statement: Could not infer a precise return type for method `Catalog.none`. Saw type `Any?`.",
             "12:41 invalid-return-statement: Invalid return type for method `Catalog.bare`: expected `string`, but found `Function<string(string)>`.",
             "15:15 invalid-property-write: `isBlank` is a computed property an extension adds: it is read, never written.",
             "17:40 too-few-arguments: Too few arguments provided for method `string.slug`.",
@@ -8615,8 +8728,9 @@ fn self_calls_a_static_method_as_static_does_in_php() {
     let sharp_issues = issues(("src/Demo/Counter.sharp", sharp), &[]);
     let php_issues = issues(("src/Demo/Counter.php", php), &[]);
 
-    assert_eq!(sharp_issues, ["9:41 non-existent-method", "9:36 mixed-return-statement", "15:9 unused-statement"]);
-    assert_eq!(codes(&sharp_issues), codes(&php_issues), "{php_issues:?}");
+    assert_eq!(sharp_issues, ["9:41 non-existent-method", "15:9 unused-statement"]);
+    // PHP reads the missing method's value as `mixed` and reports its return again, and PHP# reports the method once.
+    assert_eq!(codes(&php_issues), ["non-existent-method", "mixed-return-statement", "unused-statement"]);
 }
 
 /// An override of a method whose parameter is variadic declares it variadic too, spec section 7, as PHP refuses
@@ -9094,7 +9208,7 @@ fn a_missing_class_is_one_error_that_names_it_as_php_sharp_does() {
         (
             "namespace App;\n\nclass Report\n{\n    use Missing;\n}\n",
             vec![
-                "5:5 parse Parse error encountered during parsing | Unexpected token `Identifier` | This error indicates that the parser encountered a parse issue. | Check the syntax of your code.".to_owned(),
+                "5:5 parse Unexpected `use`".to_owned(),
                 missing("5:9", "App.Missing"),
             ],
         ),
@@ -9118,6 +9232,50 @@ fn a_missing_class_is_one_error_that_names_it_as_php_sharp_does() {
     ] {
         assert_eq!(worded(("src/App/Report.sharp", code), &others), expected, "{code}");
     }
+}
+
+/// A value whose type comes from an error already reported starts no second error, as C# reports one error for one
+/// unknown name. A call of a function that does not exist or of a method on a value that can be `null`, a constant
+/// that does not exist, a property that does not exist, and an instance property read as a static one each have the
+/// type of a refused value, so returning, passing, comparing or testing it reports nothing more. A value of no type
+/// would report a second error that advises a return type the method already declares, and one of the type `never`
+/// would say it cannot produce a value. The locals of a refused unpack hold refused values too, also where a lambda
+/// writes one.
+#[test]
+fn a_value_from_a_refused_read_or_call_starts_no_second_error() {
+    let sharp = "namespace App;\n\nclass Report\n{\n    public string draft(string html) => renderIt(html);\n\n    public int size(Report? report) => report.count();\n\n    public int bare() => DEFAULT_DPI;\n\n    public int gone(Report report) => report.missing;\n\n    public int read() => Report.take(Report.width);\n\n    public bool same(string html) => renderIt(html) == \"x\";\n\n    public bool text(string html) => renderIt(html) is string;\n\n    public int unpacked(List<int> xs)\n    {\n        let [a, b] = xs;\n        Function<void()> reset = () => { a = 1; };\n        reset();\n        return a + b;\n    }\n\n    public int width { get; } = 0;\n\n    public int count() => 1;\n\n    public static int take(int value) => value;\n}\n";
+
+    assert_eq!(
+        issues(("src/App/Report.sharp", sharp), &[]),
+        [
+            "5:41 non-existent-function",
+            "7:40 possible-method-access-on-null",
+            "9:26 non-existent-constant",
+            "11:46 non-existent-property",
+            "13:45 invalid-static-property-access",
+            "15:38 non-existent-function",
+            "17:38 non-existent-function",
+            "21:22 invalid-destructuring-source",
+        ]
+    );
+}
+
+/// A refused value is never null, never not null and matches no pattern for certain, so `== null`, `!= null` and a
+/// `match` on it report nothing more. In a `.sharp` file `1.e5` reads `e5` of the int `1`, as C# and Kotlin read it,
+/// and the int has no such member: one error.
+#[test]
+fn a_null_check_or_a_match_on_a_refused_value_starts_no_second_error() {
+    let sharp = "namespace App;\n\nclass Report\n{\n    public bool unknown() => MISSING != null;\n\n    public bool absent() => MISSING == null;\n\n    public int matched(Report report) => match (report.missing) {\n        int count => count,\n        Report other => 1,\n        default => 0,\n    };\n\n    public float exponent() => 1.e5;\n}\n";
+
+    assert_eq!(
+        issues(("src/App/Report.sharp", sharp), &[]),
+        [
+            "5:30 non-existent-constant",
+            "7:29 non-existent-constant",
+            "9:56 non-existent-property",
+            "15:34 invalid-property-access",
+        ]
+    );
 }
 
 /// Spec section 23: the last part of an import is a class, or the namespace of a plain PHP library's functions and
@@ -9842,13 +10000,13 @@ fn an_index_write_replaces_a_list_element_and_an_append_fails_as_a_typo_does() {
             .map(|issue| format!("{} {}", located(sharp, issue), issue.message))
             .collect::<Vec<_>>(),
         [
-            "16:14 parse Parse error encountered during parsing",
-            "17:18 parse Parse error encountered during parsing",
-            "18:16 parse Parse error encountered during parsing",
-            "19:15 parse Parse error encountered during parsing",
-            "20:13 parse Parse error encountered during parsing",
-            "21:14 parse Parse error encountered during parsing",
-            "22:14 parse Parse error encountered during parsing",
+            "16:14 parse Unexpected `[`",
+            "17:18 parse Unexpected `[`",
+            "18:16 parse Unexpected `[`",
+            "19:15 parse Unexpected `[`",
+            "20:13 parse Unexpected `[`",
+            "21:14 parse Unexpected `[`",
+            "22:14 parse Unexpected `[`",
         ]
     );
 }
@@ -10743,17 +10901,12 @@ fn a_method_without_an_access_modifier_is_private_as_its_php_twin() {
 
     let sharp_issues = issues(("src/App/Shop/Order.sharp", sharp_reader), &[("src/App/Shop/Stock.sharp", sharp)]);
     let php_issues = issues(("src/App/Shop/Order.php", php_reader), &[("src/App/Shop/Stock.php", php)]);
+    assert_eq!(sharp_issues, ["5:43 invalid-method-access", "5:64 invalid-method-access"]);
+    // PHP reads each refused call's value as `mixed` and reports its uses again, and PHP# reports each call once.
     assert_eq!(
-        sharp_issues,
-        [
-            "5:43 invalid-method-access",
-            "5:64 invalid-method-access",
-            "5:37 mixed-operand",
-            "5:58 mixed-operand",
-            "5:37 mixed-return-statement",
-        ]
+        codes(&php_issues),
+        ["invalid-method-access", "invalid-method-access", "mixed-operand", "mixed-operand", "mixed-return-statement"]
     );
-    assert_eq!(codes(&sharp_issues), codes(&php_issues), "{php_issues:?}");
 
     assert_eq!(
         issues(("src/App/Shop/Label.sharp", named_user), &[("src/App/Shop/Named.sharp", named)]),
@@ -10799,8 +10952,9 @@ fn a_field_without_an_access_modifier_is_private_as_its_php_twin() {
     );
     let php_issues =
         issues(("src/App/Shop/Receipt.php", php_reader), &[("src/App/Shop/Checkout.php", php), SHOP, offers, sums]);
-    assert_eq!(sharp_issues, ["7:70 invalid-property-read", "7:61 no-value"]);
-    assert_eq!(codes(&sharp_issues), codes(&php_issues));
+    // PHP reads the hidden property as `never` and reports its use again, and PHP# reports the read once.
+    assert_eq!(sharp_issues, ["7:70 invalid-property-read"]);
+    assert_eq!(codes(&php_issues), ["invalid-property-read", "no-value"]);
     let refused = refusals(
         ("src/App/Shop/Receipt.sharp", sharp_reader),
         &[("src/App/Shop/Checkout.sharp", sharp), SHOP, offers, sums],
@@ -13163,7 +13317,7 @@ fn the_engines_set_class_is_not_a_class_sharp_code_calls() {
     let sharp = "namespace Demo;\n\nimport Lib.Words;\nimport Sharp.Set;\n\nclass Tags\n{\n    public int count(List<string> tags)\n    {\n        const made = Set.from(tags);\n        return Words.length(made);\n    }\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nfinal class Tags\n{\n    /** @param list<string> $tags */\n    public function count(array $tags): int\n    {\n        $made = \\Sharp\\Set::from($tags);\n        return \\Lib\\Words::length($made);\n    }\n}\n";
 
-    assert_eq!(issues(("src/Demo/Tags.sharp", sharp), &[WORDS]), ["10:26 non-existent-method", "11:29 mixed-argument"]);
+    assert_eq!(issues(("src/Demo/Tags.sharp", sharp), &[WORDS]), ["10:26 non-existent-method"]);
     assert_eq!(
         issues(("src/Demo/Tags.php", php), &[WORDS]),
         ["10:29 non-existent-method", "10:9 mixed-assignment", "11:35 mixed-argument"]
@@ -13648,9 +13802,7 @@ fn a_static_member_of_a_type_parameter_is_its_bounds() {
         messages(("src/Demo/Builder.sharp", sharp), &[]),
         [
             "Method `Maker.unknown` does not exist.",
-            "Could not infer a precise return type for method `Builder.missing`. Saw type `Any?`.",
             "`TAny` can stand for a type that is not a class.",
-            "Could not infer a precise return type for method `Builder.open`. Saw type `Any?`.",
             "`TAny` can stand for a type that is not a class.",
             "Invalid return type for method `Builder.maker`: expected `int`, but found `Function<int()>`.",
         ]
@@ -13751,9 +13903,7 @@ fn self_reads_and_writes_members_of_the_class_the_code_is_called_on() {
         [
             "Invalid return type for method `Store.wrong`: expected `int`, but found `string`.",
             "`Store.NOPE` does not exist.",
-            "Invalid return type for method `Store.missing`: expected `string`, but found `null`.",
             "`Store.NOPE` does not exist.",
-            "Invalid return type for method `Store.named`: expected `string`, but found `null`.",
         ]
     );
 }
@@ -14715,6 +14865,113 @@ fn a_type_test_in_a_while_condition_narrows_the_variable_in_the_body() {
     assert_eq!(issues(("src/Demo/Report.sharp", sharp), &[("src/Demo/Source.php", source)]), Vec::<String>::new());
 }
 
+/// A lambda captures the variable itself (spec section 3), so a local or parameter that a lambda assigns may change
+/// whenever any code runs: a call, a property read, an operator. As Kotlin refuses a smart cast of "a local variable
+/// that is captured by a changing closure", such a local is never narrowed, by an `if`, a `while` condition or an early
+/// return alike. A lambda keeps the narrowing of a local it
+/// reads when no write can run after the lambda is created, as TypeScript 5.4 decides: a write later in the code, in a
+/// loop that repeats the lambda, or in a lambda ends it. A local of the same name inside a lambda is another local.
+#[test]
+fn a_local_a_lambda_assigns_is_never_narrowed_and_a_lambda_keeps_a_narrowing_no_later_write_ends() {
+    let sharp = "namespace Demo;\n\npublic class Report\n{\n    public static int afterTheLambda()\n    {\n        Report? s = new Report();\n        if (s != null) {\n            Function<int()> f = () => s.size();\n            s = null;\n            return f();\n        }\n        return 0;\n    }\n\n    public static int cleared()\n    {\n        Report? s = new Report();\n        Function<void()> clear = () => { s = null; };\n        if (s != null) { clear(); return s.size(); }\n        return 0;\n    }\n\n    public static int viaGetter()\n    {\n        Report? s = new Report();\n        Holder h = new Holder(() => { s = null; });\n        if (s != null) {\n            const n = h.ran;\n            return s.size() + n;\n        }\n        return 0;\n    }\n\n    public static int viaOperator()\n    {\n        Report? s = new Report();\n        Holder h = new Holder(() => { s = null; });\n        if (s != null) {\n            const g = h + h;\n            return s.size();\n        }\n        return 0;\n    }\n\n    public static int nestedParameter(Report? s)\n    {\n        Function<int()> outer = () => {\n            if (s != null) {\n                Function<int()> inner = () => s.size();\n                s = null;\n                return inner();\n            }\n            return 0;\n        };\n        return outer();\n    }\n\n    public static int nestedWriter()\n    {\n        Report? s = new Report();\n        Function<void()> outer = () => {\n            Function<void()> inner = () => { s = null; };\n            inner();\n        };\n        if (s != null) {\n            outer();\n            return s.size();\n        }\n        return 0;\n    }\n\n    public static int loop()\n    {\n        Report? s = new Report();\n        Function<void()> f = () => { };\n        int total = 0;\n        if (s != null) {\n            for (int i = 0; i < 2; i++) {\n                f();\n                total += s.size();\n                f = () => { s = null; };\n            }\n        }\n        return total;\n    }\n\n    public static int arrow()\n    {\n        Report? s = new Report();\n        Function<Report?()> clear = () => s = null;\n        if (s != null) {\n            clear();\n            return s.size();\n        }\n        return 0;\n    }\n\n    public static int loopVariable(List<Report?> reports)\n    {\n        int total = 0;\n        for (let r of reports) {\n            Function<void()> clear = () => { r = null; };\n            if (r != null) {\n                clear();\n                total += r.size();\n            }\n        }\n        return total;\n    }\n\n    public static int neverCalled()\n    {\n        Report? s = new Report();\n        Function<void()> clear = () => { s = null; };\n        if (s != null) {\n            return s.size();\n        }\n        clear();\n        return 0;\n    }\n\n    public static int writtenBefore(bool flag)\n    {\n        Report? s = null;\n        if (flag) {\n            s = new Report();\n        }\n        if (s != null) {\n            Function<int()> f = () => s.size();\n            return f();\n        }\n        return 0;\n    }\n\n    public static int writtenInTheLoop(List<Report?> reports)\n    {\n        Report? s = null;\n        List<Function<int()>> later = [];\n        for (const r of reports) {\n            s = r;\n            if (s != null) {\n                later.add(() => s.size());\n            }\n        }\n        return later.count();\n    }\n\n    public static int kept(Report? s)\n    {\n        if (s != null) {\n            Function<int()> f = () => s.size();\n            return f();\n        }\n        return 0;\n    }\n\n    public static int pattern(Any? value)\n    {\n        if (value is Report r) {\n            Function<void()> other = () => { value = null; };\n            other();\n            return r.size();\n        }\n        return 0;\n    }\n\n    public static int sameName()\n    {\n        Function<void()> make = () => {\n            Report? t = new Report();\n            Function<void()> clear = () => { t = null; };\n            clear();\n        };\n        Report? t = new Report();\n        if (t != null) {\n            make();\n            return t.size();\n        }\n        return 0;\n    }\n\n    public static int stored()\n    {\n        Report? s = new Report();\n        Holder h = new Holder(() => { s = null; });\n        if (s != null) {\n            h.action();\n            return s.size();\n        }\n        return 0;\n    }\n\n    public static int whileCondition()\n    {\n        Report? s = new Report();\n        Function<void()> clear = () => { s = null; };\n        int total = 0;\n        while (s != null) {\n            clear();\n            total += s.size();\n        }\n        return total;\n    }\n\n    public static int earlyReturn()\n    {\n        Report? s = new Report();\n        Function<void()> clear = () => { s = null; };\n        if (s == null) {\n            return 0;\n        }\n        clear();\n        return s.size();\n    }\n\n    public int size() => 1;\n}\n";
+    let holder = "namespace Demo;\n\npublic class Holder\n{\n    public Holder(public Function<void()> action { get; }) { }\n\n    public int ran => this.fire();\n\n    public static Holder operator +(Holder a, Holder b)\n    {\n        a.action();\n        return new Holder(b.action);\n    }\n\n    private int fire()\n    {\n        this.action();\n        return 1;\n    }\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Report.sharp", sharp), &[("src/Demo/Holder.sharp", holder)]),
+        [
+            "9:39 possible-method-access-on-null",
+            "20:42 possible-method-access-on-null",
+            "30:20 possible-method-access-on-null",
+            "41:20 possible-method-access-on-null",
+            "50:47 possible-method-access-on-null",
+            "68:20 possible-method-access-on-null",
+            "81:26 possible-method-access-on-null",
+            "94:20 possible-method-access-on-null",
+            "106:26 possible-method-access-on-null",
+            "117:20 possible-method-access-on-null",
+            "143:33 possible-method-access-on-null",
+            "189:20 possible-method-access-on-null",
+            "201:22 possible-method-access-on-null",
+            "214:16 possible-method-access-on-null",
+        ]
+    );
+}
+
+/// An error at a read of a local that a test narrowed, but that a lambda assigns, says which lambda assigns it and
+/// binds the tested value to a name instead, as Kotlin's "smart cast is impossible" error names its reason and spec
+/// section 21 keeps a property's tested value. A read no test narrowed says nothing more.
+#[test]
+fn an_error_at_a_local_a_lambda_assigns_names_the_lambda_and_binds_the_tested_value() {
+    let sharp = "namespace Demo;\n\npublic class Report\n{\n    public static int tested(Report? s)\n    {\n        Function<void()> clear = () => { s = null; };\n        if (s != null) {\n            clear();\n            return s.size();\n        }\n        return 0;\n    }\n\n    public static int untested(Report? s)\n    {\n        Function<void()> clear = () => { s = null; };\n        clear();\n        return s.size();\n    }\n\n    public static int argument(string? s)\n    {\n        Function<void()> clear = () => { s = null; };\n        if (s != null) {\n            clear();\n            return Report.count(s);\n        }\n        return 0;\n    }\n\n    public static int count(string text) => 1;\n\n    public int size() => 1;\n}\n";
+
+    let explained: Vec<(String, Vec<String>, Option<String>)> =
+        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Report.sharp", sharp), &[])
+            .into_iter()
+            .map(|issue| (located(sharp, &issue), issue.notes, issue.help))
+            .collect();
+    assert_eq!(
+        explained,
+        [
+            (
+                "10:20 possible-method-access-on-null".to_owned(),
+                vec![
+                    "`s` is not narrowed to `Report` here: the lambda on line 7 assigns it, so it may change before this read."
+                        .to_owned()
+                ],
+                Some("Bind the tested value to a name, as in `s is Report t`, and read `t`.".to_owned()),
+            ),
+            (
+                "19:16 possible-method-access-on-null".to_owned(),
+                vec![],
+                Some("Use the nullsafe operator (`?.`) if `null` is an expected value.".to_owned()),
+            ),
+            (
+                "27:33 possibly-null-argument".to_owned(),
+                vec![
+                    "`s` is not narrowed to `string` here: the lambda on line 24 assigns it, so it may change before this read."
+                        .to_owned()
+                ],
+                Some("Bind the tested value to a name, as in `s is string t`, and read `t`.".to_owned()),
+            ),
+        ]
+    );
+}
+
+/// A call of a method whose return type is `never` passed as an argument gives no value, as a `throw` does, and the
+/// error says so in the words of the code, never naming the type `never` it did not write there.
+#[test]
+fn an_argument_that_never_gets_a_value_is_an_error_that_names_no_type() {
+    let sharp = "namespace Demo;\n\npublic class Report\n{\n    public static never fail() => throw new Exception(\"no\");\n\n    public static int take(int value) => value;\n\n    public static int called() => Report.take(Report.fail());\n\n    public static int thrown() => Report.take(throw new Exception(\"no\"));\n}\n";
+
+    let explained: Vec<(String, String, Vec<String>, Option<String>)> =
+        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Report.sharp", sharp), &[])
+            .into_iter()
+            .map(|issue| (located(sharp, &issue), issue.message, issue.notes, issue.help))
+            .collect();
+    let no_value = |at: &str| {
+        (
+            format!("{at} no-value"),
+            "Argument #1 passed to method `Report.take` gets no value: its expression always throws or exits, so the call never runs."
+                .to_owned(),
+            Vec::<String>::new(),
+            Some("Write the expression as a statement of its own, or pass a value.".to_owned()),
+        )
+    };
+    assert_eq!(explained, [no_value("9:47"), no_value("11:47")]);
+}
+
+/// A `catch` variable is a local of the type its clause names, so a lambda reads it at that type when code writes it
+/// after the lambda is created, and a test never narrows it when a lambda writes it, as any local.
+#[test]
+fn a_catch_variable_a_lambda_captures_follows_the_rules_of_any_local() {
+    let sharp = "namespace Demo;\n\npublic class Late : Exception\n{\n    public int delay() => 1;\n}\n\npublic class Report\n{\n    public static int writtenAfter()\n    {\n        try {\n            throw new Late();\n        } catch (Exception e) {\n            if (e is Late) {\n                Function<int()> f = () => e.delay();\n                e = new Exception(\"other\");\n                return f();\n            }\n            return 0;\n        }\n    }\n\n    public static int writtenInside()\n    {\n        try {\n            throw new Late();\n        } catch (Exception e) {\n            Function<void()> reset = () => { e = new Exception(\"other\"); };\n            if (e is Late) {\n                reset();\n                return e.delay();\n            }\n            return 0;\n        }\n    }\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Report.sharp", sharp), &[]),
+        ["16:45 non-existent-method", "32:26 non-existent-method"]
+    );
+}
+
 /// `is`, `as` and a `match` arm of `Any` or of a union test the type written while the code runs, so the value they
 /// narrow has that type: a value tested `is int|string` is no `int`.
 #[test]
@@ -15532,7 +15789,6 @@ fn a_member_access_on_a_type_parameter_names_it() {
             "7:14 mixed-method-access Attempting to access a method on a non-object type (`TItem`). | Cannot call method here | This expression has type `TItem`",
             "10:42 mixed-property-access Attempting to access a property on a non-object type (`TItem`). | Cannot access property here | This expression has type `TItem`",
             "14:9 non-existent-function Function `unknown` does not exist. | Undefined function `unknown` called here | This often means the function is misspelled, or not defined or autoloaded. | Check the spelling of `unknown`.",
-            "14:19 mixed-method-access Attempting to access a method on a non-object type (`Any?`). | Cannot call method here | This expression has type `Any?`",
         ]
     );
 }
@@ -17746,9 +18002,7 @@ fn a_constant_and_an_enum_case_are_named_as_sharp_writes_them() {
             "5:19 invalid-enum-case-value Invalid case value for `Status.Active`. Expected `string`, but got `int`. | This value has the type `int` | Enum `Status` is defined here with a `string` backing type | Ensure the case value is a literal string or a constant expression that resolves to a string.",
             "10:30 invalid-constant-value Value for constant `Order.LIMIT` is not assignable to its declared type. | This value has type `string` | Constant is declared with type `int` | A class constant's value must be assignable to its declared type. | Change the value to match the declared type, or update the declared type to accept the value.",
             "12:44 non-existent-property `Status.Missing` does not exist. | This names no constant, case or static property | The enum `Status` has no constant, case or static property named `Missing`",
-            "12:37 invalid-return-statement Invalid return type for method `Order.first`: expected `Status`, but found `null`. | This has type `null` | The type `null` returned here is not compatible with the declared return type `Status`. | Change the return value to match `Status`, or update the method's return type declaration.",
             "14:40 non-existent-property `Order.NOPE` does not exist. | This names no constant, case or static property | The class `Order` has no constant, case or static property named `NOPE`",
-            "14:34 invalid-return-statement Invalid return type for method `Order.limit`: expected `int`, but found `null`. | This has type `null` | The type `null` returned here is not compatible with the declared return type `int`. | Change the return value to match `int`, or update the method's return type declaration.",
         ]
     );
 }
@@ -17802,18 +18056,14 @@ fn an_undefined_method_and_property_are_named_as_sharp_writes_them() {
         messages(("src/Demo/Report.sharp", sharp), &[]),
         [
             "Method `Order.missing` does not exist.",
-            "Could not infer a precise return type for method `Report.run`. Saw type `Any?`.",
             "Property `Order.gone` does not exist.",
-            "Could not infer a precise return type for method `Report.read`. Saw type `Any?`.",
             "Method `Order.nothing` does not exist.",
-            "Could not infer a precise return type for method `Report.call`. Saw type `Any?`.",
         ]
     );
     assert_eq!(
-        worded(("src/Demo/Report.sharp", sharp), &[])[..3],
+        worded(("src/Demo/Report.sharp", sharp), &[])[..2],
         [
             "10:49 non-existent-method Method `Order.missing` does not exist. | This method selection is invalid | This expression has type `Order` | Ensure the method `Order.missing` is defined.",
-            "10:43 mixed-return-statement Could not infer a precise return type for method `Report.run`. Saw type `Any?`. | Type inferred as `Any?` here. | The analysis could not determine a specific type for the value returned here, resulting in `Any?`. This can happen with complex code paths or unannotated data. | Add specific type hints to variables, parameters, or properties involved in calculating the return value. Consider adding a specific return type declaration to the method signature to catch potential mismatches earlier.",
             "12:50 non-existent-property Property `Order.gone` does not exist. | Property not found here | On instance of `Order` | The class `Order` does not define the property `gone`. | Define the property in the class or check for its existence before accessing it.",
         ]
     );
@@ -18311,7 +18561,6 @@ fn a_possibly_null_member_access_names_and_writes_the_null_safe_operator_of_the_
         [
             "7:42 possibly-null-property-access Attempting to access a property on a possibly `null` value. | This expression can be `null` here | If this expression is `null` at runtime, PHP will raise a warning and the property access will result in `null`. | Use the nullsafe operator (`?.`) to safely access the property, or add a check to ensure the value is not `null` (e.g., `if (obj != null)`).",
             "9:43 possible-method-access-on-null Attempting to call a method on `null`. | This expression can be `null` | Use the nullsafe operator (`?.`) if `null` is an expected value.",
-            "9:43 mixed-return-statement Could not infer a precise return type for method `Report.count`. Saw type `Any?`. | Type inferred as `Any?` here. | The analysis could not determine a specific type for the value returned here, resulting in `Any?`. This can happen with complex code paths or unannotated data. | Add specific type hints to variables, parameters, or properties involved in calculating the return value. Consider adding a specific return type declaration to the method signature to catch potential mismatches earlier.",
         ]
     );
     assert_eq!(fixes(("src/Demo/Report.sharp", sharp)), ["?."]);
@@ -18624,6 +18873,26 @@ fn a_message_names_a_value_a_pattern_reads_as_sharp_reads_it() {
             "Impossible type assertion: `lines[0].quantity` of type `int` can never be `string`.",
             "Impossible type assertion: `lines[lines.count() - 1].quantity` of type `int` can never be `string`.",
             "Impossible type assertion: `this.lines()[0].quantity` of type `int` can never be `string`.",
+        ]
+    );
+}
+
+/// A value the code writes is named as written, its spacing kept, and a value a pattern reads is named as PHP# reads
+/// it. A form inside another numbers its hidden variables after the outer form's, so a message names its own value.
+#[test]
+fn a_message_names_a_written_value_as_written_and_each_form_its_own_value() {
+    let sharp = "namespace Demo;\n\nclass Line\n{\n    public int quantity { get; } = 0;\n\n    public bool spaced(List<Line> lines, List<int> counts, int count) => lines[ 0 ] .quantity is string || counts[ 0 ] is string || count-1 is string;\n\n    public bool nested() => (this.first() is int) is string;\n\n    public Any? first() => 1;\n}\n";
+
+    assert_eq!(
+        messages(("src/Demo/Line.sharp", sharp), &[])
+            .into_iter()
+            .filter(|message| message.starts_with("Impossible type assertion"))
+            .collect::<Vec<_>>(),
+        [
+            "Impossible type assertion: `lines[ 0 ] .quantity` of type `int` can never be `string`.",
+            "Impossible type assertion: `counts[ 0 ]` of type `int` can never be `string`.",
+            "Impossible type assertion: `count-1` of type `int` can never be `string`.",
+            "Impossible type assertion: `(this.first() is int)` of type `bool` can never be `string`.",
         ]
     );
 }
@@ -18998,10 +19267,7 @@ const AUDITED_ORDER: (&str, &str) =
 fn equality_of_instances_narrows_nothing() {
     let sharp = "namespace App;\n\npublic class Audit\n{\n    public int items(Money money, Order order)\n    {\n        if (money == order) {\n            return money.items();\n        }\n        return 0;\n    }\n}\n";
 
-    assert_eq!(
-        issues(("src/App/Audit.sharp", sharp), &[MONEY_OPERATORS, AUDITED_ORDER]),
-        ["8:26 non-existent-method", "8:20 mixed-return-statement"]
-    );
+    assert_eq!(issues(("src/App/Audit.sharp", sharp), &[MONEY_OPERATORS, AUDITED_ORDER]), ["8:26 non-existent-method"]);
 }
 
 /// The lowered `op_Equality` takes nullable parameters, so a plain PHP caller passes `null` and gets the lifted answer.
@@ -21857,7 +22123,7 @@ fn environment_require_is_called_on_an_environment_object() {
         "namespace App.Ops;\n\nimport Sharp.System.Environment;\n\npublic class Deploy\n{\n    public Deploy(private Environment environment) { }\n\n    public string key() => this.environment.require(\"APP_KEY\");\n\n    public string staticKey() => Environment.require(\"APP_KEY\");\n}\n",
     );
 
-    assert_eq!(issues(deploy, &[]), ["11:46 invalid-static-method-access", "11:34 mixed-return-statement"]);
+    assert_eq!(issues(deploy, &[]), ["11:46 invalid-static-method-access"]);
 }
 
 /// Spec section 29: code has a `foreign` class's effect by holding one of its objects, so a getter that calls or reads
@@ -22742,7 +23008,7 @@ fn a_call_of_a_law_outside_a_law_body_is_a_non_existent_method_that_names_the_la
         "namespace App.Shared;\n\npublic class Money\n{\n    public Money(public int amount { get; }) { }\n\n    public static bool check(Money a) => sameAmount(a);\n\n    law sameAmount(Money a) => a.amount == a.amount;\n}\n",
     );
 
-    assert_eq!(codes(&issues(ledger, &[LAWFUL_MONEY])), ["non-existent-method", "mixed-return-statement"]);
+    assert_eq!(codes(&issues(ledger, &[LAWFUL_MONEY])), ["non-existent-method"]);
     assert_eq!(
         messages(ledger, &[LAWFUL_MONEY])[0],
         "`Money.addKeepsCurrency` is a law, and only a law's body calls a law, as a statement of its own."
@@ -22848,13 +23114,7 @@ fn a_law_that_calls_itself_on_a_value_no_smaller_is_refused() {
     );
     assert_eq!(
         issues(law_body("        if (x < unknown) { return; }\n        Count.f(unknown, items);"), &[]),
-        [
-            "8:9 law-recursion",
-            "7:17 non-existent-constant",
-            "7:17 mixed-operand",
-            "8:17 non-existent-constant",
-            "8:17 mixed-argument"
-        ]
+        ["8:9 law-recursion", "7:17 non-existent-constant", "8:17 non-existent-constant"]
     );
 
     // A call passes its smaller value in the parameter's own place, though an argument before it passes one too.

@@ -101,7 +101,7 @@ where
         // class's type arguments, as Dart's does, so one written with type parameters parses whole and is left out.
         if let Hint::Identifier(Identifier::Local(class)) = hint
             && self.stream.is_at(T!["."])?
-            && matches!(self.stream.peek_kind(2)?, Some(T!["(" | "<"]))
+            && matches!(self.stream.peek_kind(2)?, Some(T!["(" | "<" | "<>"]))
         {
             let dot = self.stream.eat_span(T!["."])?;
             let name = self.parse_local_identifier()?;
@@ -175,7 +175,8 @@ where
 
             return Ok(ClassLikeMember::Property(self.parse_untyped_property(attributes, modifiers, name)?));
         }
-        if !matches!(self.stream.peek_kind(1)?, Some(T!["(" | "<"])) {
+        // `<>` is an empty type parameter list, which the lexer reads as one token.
+        if !matches!(self.stream.peek_kind(1)?, Some(T!["(" | "<" | "<>"])) {
             return Ok(ClassLikeMember::Property(self.parse_property_with_hint(
                 attributes,
                 modifiers,
@@ -375,6 +376,9 @@ where
                 expression: self.parse_expression()?,
                 semicolon: self.stream.eat_span(T![";"])?,
             })
+        } else if self.dialect.is_sharp() && !self.stream.is_at(T!["{"])? {
+            let found = self.stream.lookahead(0)?;
+            return Err(self.stream.unexpected(found, T!["{", "=>"]));
         } else {
             MethodBody::Concrete(self.parse_block()?)
         })

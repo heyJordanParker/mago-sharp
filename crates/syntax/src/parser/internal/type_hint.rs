@@ -526,11 +526,23 @@ where
     }
 
     /// Parses the PHP# type parameters after the name of a class, an interface or a method, as in
-    /// `<out TItem : DatabaseEntity & Shareable, TKey>`.
+    /// `<out TItem : DatabaseEntity & Shareable, TKey>`. An empty list, `<>`, which the lexer reads as one token, is
+    /// one typo, and the declaration parses on with no type parameters.
     pub(crate) fn parse_optional_type_parameter_list(
         &mut self,
     ) -> Result<Option<TypeParameterList<'arena>>, ParseError> {
-        if !self.dialect.is_sharp() || !self.stream.is_at(T!["<"])? {
+        if !self.dialect.is_sharp() {
+            return Ok(None);
+        }
+
+        if self.stream.is_at(T!["<>"])? {
+            let empty = self.stream.consume()?;
+            self.errors.push(self.stream.unexpected(Some(empty), &[]));
+
+            return Ok(None);
+        }
+
+        if !self.stream.is_at(T!["<"])? {
             return Ok(None);
         }
 

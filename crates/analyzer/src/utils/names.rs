@@ -480,9 +480,8 @@ where
         {
             format!("{}.count()", display_tested_value(context, list.value))
         }
-        Expression::Literal(Literal::Integer(integer)) if integer.span.length() == 0 => {
-            String::from_utf8_lossy(integer.raw).into_owned()
-        }
+        // A literal the pattern's PHP builds spans nothing, and a written one's raw text is its source.
+        Expression::Literal(Literal::Integer(integer)) => String::from_utf8_lossy(integer.raw).into_owned(),
         _ => {
             debug_assert!(value.span().length() > 0, "a tested value the source writes spans its text");
 

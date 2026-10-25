@@ -110,7 +110,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for ClassLikeConstantItem<'arena> {
 
                 // Spec section 12: a list literal where a `Set` is declared becomes one.
                 let value_type =
-                    &get_set_literal_type(context, artifacts, self.value, &declared_type).unwrap_or(value_type);
+                    &get_set_literal_type(context, artifacts, self.value, &declared_type, None).unwrap_or(value_type);
                 let mut comparison_result = ComparisonResult::for_dialect(context.dialect);
                 if !union_comparator::is_contained_by(
                     context.codebase,

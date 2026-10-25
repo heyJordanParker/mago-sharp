@@ -173,7 +173,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Instantiation<'arena> {
                     )
                     .with_help("Get a class value with `typeof`, as in `typeof(Order)`.");
 
-                    (issue, get_never())
+                    (issue, TUnion::from_atomic(TAtomic::Error))
                 }
             };
             context.collector.report_with_code(IssueCode::InvalidClassStringExpression, issue);
@@ -459,7 +459,7 @@ where
     if classname.is_invalid() {
         argument_list.analyze(context, block_context, artifacts)?;
 
-        return Ok(get_never());
+        return Ok(refused_instantiation(context));
     }
 
     let Some(fq_classname) = classname.fqcn else {
@@ -500,7 +500,7 @@ where
 
         argument_list.analyze(context, block_context, artifacts)?;
 
-        return Ok(get_never());
+        return Ok(refused_instantiation(context));
     };
 
     let classname_str = display_class_like_name(context, metadata.original_name);
@@ -522,7 +522,7 @@ where
 
         argument_list.analyze(context, block_context, artifacts)?;
 
-        return Ok(get_never());
+        return Ok(refused_instantiation(context));
     } else if metadata.kind.is_trait() && !classname.is_static() && !classname.is_self() {
         context.collector.report_with_code(
             IssueCode::TraitInstantiation,
@@ -538,7 +538,7 @@ where
 
         argument_list.analyze(context, block_context, artifacts)?;
 
-        return Ok(get_never());
+        return Ok(refused_instantiation(context));
     } else if metadata.kind.is_enum() {
         let case = display_code_member(context, metadata.original_name, "CASE_NAME");
         let cases = display_code_member(context, metadata.original_name, "cases()");
@@ -558,7 +558,7 @@ where
 
         argument_list.analyze(context, block_context, artifacts)?;
 
-        return Ok(get_never());
+        return Ok(refused_instantiation(context));
     } else if metadata.flags.is_static() {
         let name = display_class_like_name(context, metadata.original_name);
         context.collector.report_with_code(
@@ -571,7 +571,7 @@ where
 
         argument_list.analyze(context, block_context, artifacts)?;
 
-        return Ok(get_never());
+        return Ok(refused_instantiation(context));
     } else if metadata.flags.is_module() {
         let name = display_class_like_name(context, metadata.original_name);
         context.collector.report_with_code(
@@ -582,7 +582,7 @@ where
 
         argument_list.analyze(context, block_context, artifacts)?;
 
-        return Ok(get_never());
+        return Ok(refused_instantiation(context));
     }
     // class kind is a regular class; no kind-specific instantiation diagnostic to emit
 
@@ -698,7 +698,7 @@ where
 
                 argument_list.analyze(context, block_context, artifacts)?;
 
-                return Ok(get_never());
+                return Ok(refused_instantiation(context));
             }
 
             (constructor_id, MethodInvocationKind::Static)
@@ -999,7 +999,7 @@ where
     }
 
     if is_impossible {
-        return Ok(get_never());
+        return Ok(refused_instantiation(context));
     }
 
     // A refused `new Box(…)` reports nothing again where its object goes.
@@ -1034,6 +1034,15 @@ where
         };
 
     Ok(wrap_atomic(result_atomic))
+}
+
+/// The type of a `new` the analysis refused and reported: in a `.sharp` file the refused type, so nothing that uses the
+/// object reports the same mistake again, and in a PHP file `never`, which creates no object.
+fn refused_instantiation<A>(context: &Context<'_, '_, A>) -> TUnion
+where
+    A: Arena,
+{
+    if context.dialect.is_sharp() { TUnion::from_atomic(TAtomic::Error) } else { get_never() }
 }
 
 /// Reports `class`, a generic class of PHP# or of plain PHP's `@template`, written at `span` in a PHP# file without the
