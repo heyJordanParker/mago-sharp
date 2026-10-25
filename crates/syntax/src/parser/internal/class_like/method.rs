@@ -117,12 +117,9 @@ where
                 body: self.parse_method_body()?,
             };
             if let Some(type_parameters) = type_parameters {
-                let class_type_parameters =
-                    self.state.type_parameters_of.as_deref().map(|names| &*self.arena.alloc_str(names));
-
                 return Err(ParseError::NamedConstructorTypeParametersInSharp(
                     class.value,
-                    class_type_parameters,
+                    self.state.type_parameters_of,
                     type_parameters.span(),
                 ));
             }

@@ -32,7 +32,7 @@ pub mod stream;
 pub(crate) const MAX_RECURSION_DEPTH: u16 = 512;
 
 #[derive(Debug, Default)]
-pub struct State {
+pub struct State<'arena> {
     pub within_string_interpolation: bool,
     /// Whether the parser is inside a `{ … }` block of statements, where a PHP# statement never starts with an
     /// attribute list.
@@ -46,10 +46,10 @@ pub struct State {
     pub members_of: &'static str,
     /// The name of the class-like whose members the parser reads, which its constructor writes, or `None` for an
     /// anonymous class, a module and an extension.
-    pub members_name: Option<std::boxed::Box<[u8]>>,
+    pub members_name: Option<&'arena [u8]>,
     /// The type parameter names of the class whose members the parser reads, as `T` or `TKey, TValue`, or `None` when
     /// it declares none.
-    pub type_parameters_of: Option<std::boxed::Box<str>>,
+    pub type_parameters_of: Option<&'arena str>,
 }
 
 /// The main parser for PHP source code.
@@ -66,7 +66,7 @@ where
     pub(crate) dialect: Dialect,
     /// The source text, which a form outside the PHP# grammar is read from to fail as a typo does.
     pub(crate) source: &'input [u8],
-    pub(crate) state: State,
+    pub(crate) state: State<'arena>,
     pub(crate) stream: TokenStream<'input, 'arena, A>,
     pub(crate) errors: Vec<'arena, ParseError<'arena>, A>,
 }

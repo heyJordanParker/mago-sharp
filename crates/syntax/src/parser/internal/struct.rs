@@ -10,7 +10,6 @@ use crate::cst::cst::Struct;
 use crate::cst::sequence::Sequence;
 use crate::error::ParseError;
 use crate::parser::Parser;
-use crate::parser::internal::class_like::type_parameter_names;
 
 impl<'arena, A> Parser<'_, 'arena, A>
 where
@@ -41,7 +40,7 @@ where
         let r#struct = self.expect_any_keyword()?;
         let name = self.parse_local_identifier()?;
         let type_parameters = self.parse_optional_type_parameter_list()?;
-        let type_parameter_names = type_parameter_names(type_parameters.as_ref());
+        let type_parameter_names = self.type_parameter_names(type_parameters.as_ref());
 
         Ok(Struct {
             attribute_lists: attributes,

@@ -39,9 +39,9 @@ where
         &mut self,
         members_of: &'static str,
         name: Option<&LocalIdentifier<'arena>>,
-        type_parameters_of: Option<std::boxed::Box<str>>,
+        type_parameters_of: Option<&'arena str>,
     ) -> Result<Sequence<'arena, ClassLikeMember<'arena>>, ParseError<'arena>> {
-        let members_name = name.map(|name| std::boxed::Box::<[u8]>::from(name.value));
+        let members_name = name.map(|name| name.value);
         let mut members = self.new_vec();
         // Whether the loop is skipping the tokens after an error, which report nothing until a member parses again.
         // PHP# recovers so, and PHP keeps upstream's error per skipped token.
@@ -53,8 +53,8 @@ where
 
             let position_before = self.stream.current_position();
             self.state.members_of = members_of;
-            self.state.members_name.clone_from(&members_name);
-            self.state.type_parameters_of.clone_from(&type_parameters_of);
+            self.state.members_name = members_name;
+            self.state.type_parameters_of = type_parameters_of;
             let errors_before = self.errors.len();
             match self.parse_classlike_member() {
                 Ok(member) => {
@@ -152,7 +152,7 @@ where
         let interface = self.expect_keyword(T!["interface"])?;
         let name = self.parse_local_identifier()?;
         let type_parameters = self.parse_optional_type_parameter_list()?;
-        let type_parameter_names = type_parameter_names(type_parameters.as_ref());
+        let type_parameter_names = self.type_parameter_names(type_parameters.as_ref());
 
         Ok(Interface {
             attribute_lists: attributes,
@@ -186,7 +186,7 @@ where
         let class = self.expect_keyword(T!["class"])?;
         let name = self.parse_local_identifier()?;
         let type_parameters = self.parse_optional_type_parameter_list()?;
-        let type_parameter_names = type_parameter_names(type_parameters.as_ref());
+        let type_parameter_names = self.type_parameter_names(type_parameters.as_ref());
 
         Ok(Class {
             attribute_lists: attributes,
@@ -259,7 +259,7 @@ where
         let r#enum = self.expect_keyword(T!["enum"])?;
         let name = self.parse_local_identifier()?;
         let type_parameters = self.parse_optional_type_parameter_list()?;
-        let type_parameter_names = type_parameter_names(type_parameters.as_ref());
+        let type_parameter_names = self.type_parameter_names(type_parameters.as_ref());
         let (backing_type_hint, inheritance) = self.parse_enum_header()?;
 
         Ok(Enum {
@@ -307,13 +307,14 @@ where
 
         Ok((backing_type_hint, Some(self.parse_inheritance_from(comma, first)?)))
     }
-}
 
-/// The names of the type parameters `list` declares, as `T` or `TKey, TValue`, or `None` when it declares none.
-pub(crate) fn type_parameter_names(list: Option<&TypeParameterList<'_>>) -> Option<std::boxed::Box<str>> {
-    list.map(|list| {
-        let names = list.parameters.iter().map(|parameter| String::from_utf8_lossy(parameter.name.value));
+    /// The names of the type parameters `list` declares, as `T` or `TKey, TValue`, in the arena, or `None` when it
+    /// declares none.
+    pub(crate) fn type_parameter_names(&self, list: Option<&TypeParameterList<'_>>) -> Option<&'arena str> {
+        list.map(|list| {
+            let names = list.parameters.iter().map(|parameter| String::from_utf8_lossy(parameter.name.value));
 
-        names.collect::<std::vec::Vec<_>>().join(", ").into_boxed_str()
-    })
+            &*self.arena.alloc_str(&names.collect::<std::vec::Vec<_>>().join(", "))
+        })
+    }
 }

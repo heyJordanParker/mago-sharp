@@ -341,7 +341,7 @@ where
     /// The error at `found`, which the parser did not expect where it expected `expected`, or at the end of the file
     /// when `found` is `None`. It quotes the token as the code writes it, and each expected token the file writes as
     /// its text, in the arena: a `.sharp` file writes no token PHP# never writes, such as `?>`.
-    #[inline]
+    #[inline(never)]
     #[must_use]
     fn unexpected_with(&self, found: Option<Token<'arena>>, expected: Expected) -> ParseError<'arena> {
         let Some(token) = found else {
@@ -353,7 +353,7 @@ where
             Expected::OneOf(kinds) => kinds,
         };
         let sharp = self.lexer.is_sharp();
-        let mut texts = Vec::new_in(self.arena);
+        let mut texts = Vec::with_capacity_in(kinds.len(), self.arena);
         for kind in kinds {
             let text = if sharp { kind.written_in_sharp() } else { kind.written() };
             if let Some(text) = text

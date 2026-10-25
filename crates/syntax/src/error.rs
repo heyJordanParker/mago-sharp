@@ -452,22 +452,16 @@ impl From<&ParseError<'_>> for Issue {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::ParseError;
-
-    /// A program's arena never runs `Drop`, so a parse error that owned heap memory would leak it on every parse that
-    /// reports the error. `ParseError` derives `Copy`, which makes the compiler refuse such a field, and this test stops
-    /// compiling once the derive goes. No test caught the leak before: macOS has no LeakSanitizer, and the fuzz targets
-    /// never ran in CI.
-    #[test]
-    fn a_parse_error_is_copy_so_it_owns_no_heap_memory() {
-        fn assert_copy<T>()
-        where
-            T: Copy,
-        {
-        }
-
-        assert_copy::<ParseError<'static>>();
+/// A program's arena never runs `Drop`, so a parse error that owned heap memory would leak it on every parse that
+/// reports the error. `ParseError` derives `Copy`, which makes the compiler refuse such a field, and every build fails
+/// here once the derive goes. No test caught the leak before: macOS has no LeakSanitizer, and the fuzz targets never ran
+/// in CI.
+const _: fn() = || {
+    fn assert_copy<T>()
+    where
+        T: Copy,
+    {
     }
-}
+
+    assert_copy::<ParseError<'static>>();
+};

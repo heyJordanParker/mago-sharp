@@ -285,7 +285,7 @@ where
         let Some((name, after)) = self.peek_after_tuple_hint()? else {
             return Ok(false);
         };
-        if after.kind == T!["("] && self.state.members_name.as_deref() == Some(name.value) {
+        if after.kind == T!["("] && self.state.members_name == Some(name.value) {
             return Ok(false);
         }
 
