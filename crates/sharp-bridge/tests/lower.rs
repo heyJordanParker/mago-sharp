@@ -17276,6 +17276,20 @@ fn a_literal_in_a_generic_method_takes_the_methods_own_type_arguments() {
     assert_eq!(build.matches("SHARP_TYPE_ARGS\n").count(), 4, "{build}");
 }
 
+/// A literal in a lambda written in a generic method takes the method's type arguments, as a C# closure sees them: the
+/// lambda captures the method's hidden local of them, and makes its empty `Map` with `string, #0`.
+#[test]
+fn a_literal_in_a_lambda_takes_its_methods_type_arguments() {
+    let lowered = Lowered::with(
+        "namespace App;\n\nclass Report\n{\n    public static Map<string, T> keyed<T>()\n    {\n        Function<Map<string, T>()> make = () => [:];\n        return make();\n    }\n}\n",
+        &[],
+    );
+    let keyed = lowered.body_of("keyed");
+
+    assert_eq!(keyed.matches(r#"ZVAL "\0<sharp>\0types""#).count(), 1, "{keyed}");
+    assert_eq!(keyed.matches(r##"ZVAL "string, #0""##).count(), 1, "{keyed}");
+}
+
 /// The value of a method that makes a `Map` passes the `Map`'s type arguments to the method as a call of it does, as
 /// `$items->entries('int, string')`.
 #[test]
