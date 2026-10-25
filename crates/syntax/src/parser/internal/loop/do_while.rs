@@ -8,7 +8,7 @@ impl<'arena, A> Parser<'_, 'arena, A>
 where
     A: Arena,
 {
-    pub(crate) fn parse_do_while(&mut self) -> Result<DoWhile<'arena>, ParseError> {
+    pub(crate) fn parse_do_while(&mut self) -> Result<DoWhile<'arena>, ParseError<'arena>> {
         Ok(DoWhile {
             label: None,
             r#do: self.expect_keyword(T!["do"])?,

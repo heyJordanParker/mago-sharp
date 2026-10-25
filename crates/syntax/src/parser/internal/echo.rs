@@ -12,7 +12,7 @@ where
 {
     /// Parses a PHP echo tag. A `.sharp` file has none, spec section 27, so there the tag is an error, and the file
     /// parses on.
-    pub(crate) fn parse_echo_tag(&mut self) -> Result<EchoTag<'arena>, ParseError> {
+    pub(crate) fn parse_echo_tag(&mut self) -> Result<EchoTag<'arena>, ParseError<'arena>> {
         let tag = self.stream.eat_span(T!["<?="])?;
         if self.dialect.is_sharp() {
             self.report_unexpected_in_sharp(tag);
@@ -44,7 +44,7 @@ where
         })
     }
 
-    pub(crate) fn parse_echo(&mut self) -> Result<Echo<'arena>, ParseError> {
+    pub(crate) fn parse_echo(&mut self) -> Result<Echo<'arena>, ParseError<'arena>> {
         Ok(Echo {
             echo: self.expect_keyword(T!["echo"])?,
             values: {

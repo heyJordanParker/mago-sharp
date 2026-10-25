@@ -10,7 +10,7 @@ where
 {
     pub(crate) fn parse_optional_function_like_return_type_hint(
         &mut self,
-    ) -> Result<Option<FunctionLikeReturnTypeHint<'arena>>, ParseError> {
+    ) -> Result<Option<FunctionLikeReturnTypeHint<'arena>>, ParseError<'arena>> {
         Ok(match self.stream.peek_kind(0)? {
             Some(T![":"]) => Some(self.parse_function_like_return_type_hint()?),
             _ => None,
@@ -19,7 +19,7 @@ where
 
     pub(crate) fn parse_function_like_return_type_hint(
         &mut self,
-    ) -> Result<FunctionLikeReturnTypeHint<'arena>, ParseError> {
+    ) -> Result<FunctionLikeReturnTypeHint<'arena>, ParseError<'arena>> {
         Ok(FunctionLikeReturnTypeHint { colon: Some(self.stream.eat_span(T![":"])?), hint: self.parse_type_hint()? })
     }
 }

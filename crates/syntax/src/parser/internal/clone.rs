@@ -31,7 +31,7 @@ where
     /// next token is not a comma and the argument is a simple positional one, it assumes
     /// the legacy `clone (expr)` structure. Otherwise, it parses the expression as a
     /// standard function call.
-    pub(crate) fn parse_ambiguous_clone_expression(&mut self) -> Result<Expression<'arena>, ParseError> {
+    pub(crate) fn parse_ambiguous_clone_expression(&mut self) -> Result<Expression<'arena>, ParseError<'arena>> {
         let clone = self.expect_keyword(T!["clone"])?;
         let next = self.stream.lookahead(0)?.ok_or_else(|| self.stream.unexpected(None, &[]))?;
         if next.kind != TokenKind::LeftParenthesis {

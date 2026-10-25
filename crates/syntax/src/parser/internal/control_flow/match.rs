@@ -13,7 +13,7 @@ impl<'arena, A> Parser<'_, 'arena, A>
 where
     A: Arena,
 {
-    pub(crate) fn parse_match(&mut self) -> Result<Match<'arena>, ParseError> {
+    pub(crate) fn parse_match(&mut self) -> Result<Match<'arena>, ParseError<'arena>> {
         let r#match = self.expect_keyword(T!["match"])?;
         let left_parenthesis = self.stream.eat_span(T!["("])?;
         let expression = self.arena.alloc(self.parse_expression()?);
@@ -31,7 +31,7 @@ where
         })
     }
 
-    fn parse_match_arm(&mut self) -> Result<MatchArm<'arena>, ParseError> {
+    fn parse_match_arm(&mut self) -> Result<MatchArm<'arena>, ParseError<'arena>> {
         let token = self.stream.lookahead(0)?.ok_or_else(|| self.stream.unexpected(None, &[]))?;
         Ok(match token.kind {
             T!["default"] => MatchArm::Default(self.parse_match_default_arm()?),
@@ -39,7 +39,7 @@ where
         })
     }
 
-    fn parse_match_expression_arm(&mut self) -> Result<MatchExpressionArm<'arena>, ParseError> {
+    fn parse_match_expression_arm(&mut self) -> Result<MatchExpressionArm<'arena>, ParseError<'arena>> {
         Ok(MatchExpressionArm {
             conditions: {
                 let mut conditions = self.new_vec();
@@ -68,7 +68,7 @@ where
         })
     }
 
-    fn parse_match_default_arm(&mut self) -> Result<MatchDefaultArm<'arena>, ParseError> {
+    fn parse_match_default_arm(&mut self) -> Result<MatchDefaultArm<'arena>, ParseError<'arena>> {
         Ok(MatchDefaultArm {
             default: self.expect_keyword(T!["default"])?,
             comma: if self.stream.is_at(TokenKind::Comma)? {

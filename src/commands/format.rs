@@ -192,10 +192,10 @@ impl FormatCommand {
 
         let result = service.run()?;
 
-        for (file_id, parse_error) in result.parse_errors() {
+        for (file_id, issue) in result.parse_errors() {
             let file = database.get_ref(file_id)?;
 
-            tracing::error!("Failed to parse file '{}': {parse_error}", mago_bytes::BytesDisplay(&file.name));
+            tracing::error!("Failed to parse file '{}': {}", mago_bytes::BytesDisplay(&file.name), issue.message);
         }
 
         let changed_files_count = result.changed_files_count();
@@ -336,8 +336,8 @@ impl FormatCommand {
                     update_staged_file(workspace, &path, new_content)?;
                     changed_files_count += 1;
                 }
-                FileFormatStatus::FailedToParse(parse_error) => {
-                    tracing::error!("Failed to parse staged file '{}': {}", path.display(), parse_error);
+                FileFormatStatus::FailedToParse(issue) => {
+                    tracing::error!("Failed to parse staged file '{}': {}", path.display(), issue.message);
                 }
             };
         }
@@ -379,8 +379,8 @@ fn emit_stdin_result(status: FileFormatStatus, file: &File) -> ExitCode {
             let _ = std::io::stdout().write_all(&new_content);
             ExitCode::SUCCESS
         }
-        FileFormatStatus::FailedToParse(parse_error) => {
-            tracing::error!("Failed to parse {}: {parse_error}", mago_bytes::BytesDisplay(&file.name));
+        FileFormatStatus::FailedToParse(issue) => {
+            tracing::error!("Failed to parse {}: {}", mago_bytes::BytesDisplay(&file.name), issue.message);
             ExitCode::from(EXIT_CODE_ERROR)
         }
     }

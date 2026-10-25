@@ -33,7 +33,7 @@ impl<'arena, A> Parser<'_, 'arena, A>
 where
     A: Arena,
 {
-    pub(crate) fn is_at_type_hint(&mut self) -> Result<bool, ParseError> {
+    pub(crate) fn is_at_type_hint(&mut self) -> Result<bool, ParseError<'arena>> {
         if self.is_at_generic_hint()? || self.is_at_function_hint()? || self.is_at_readonly_hint()? {
             return Ok(true);
         }
@@ -67,21 +67,21 @@ where
         if self.dialect.is_sharp() { written == name } else { written.eq_ignore_ascii_case(name) }
     }
 
-    pub(crate) fn parse_optional_type_hint(&mut self) -> Result<Option<Hint<'arena>>, ParseError> {
+    pub(crate) fn parse_optional_type_hint(&mut self) -> Result<Option<Hint<'arena>>, ParseError<'arena>> {
         if self.is_at_type_hint()? { Ok(Some(self.parse_type_hint()?)) } else { Ok(None) }
     }
 
     /// A union or intersection nests its right side, so a long one recurses once for each of its types.
-    pub(crate) fn parse_type_hint(&mut self) -> Result<Hint<'arena>, ParseError> {
+    pub(crate) fn parse_type_hint(&mut self) -> Result<Hint<'arena>, ParseError<'arena>> {
         ensure_sufficient_stack(|| self.parse_type_hint_inner(false))
     }
 
     /// Parses the type of a pattern or of `as`, which can end an expression, so a `?` after it can start a `? :`.
-    pub(crate) fn parse_type_hint_in_expression(&mut self) -> Result<Hint<'arena>, ParseError> {
+    pub(crate) fn parse_type_hint_in_expression(&mut self) -> Result<Hint<'arena>, ParseError<'arena>> {
         ensure_sufficient_stack(|| self.parse_type_hint_inner(true))
     }
 
-    fn parse_type_hint_inner(&mut self, in_expression: bool) -> Result<Hint<'arena>, ParseError> {
+    fn parse_type_hint_inner(&mut self, in_expression: bool) -> Result<Hint<'arena>, ParseError<'arena>> {
         let token = self.stream.lookahead(0)?.ok_or_else(|| self.stream.unexpected(None, &[]))?;
 
         let hint = match &token.kind {
@@ -231,7 +231,7 @@ where
     /// by the end of a pattern, or by a name and then the end of a pattern, as in `value is string? text)`. Otherwise a
     /// `?` followed by anything that starts an expression starts a `? :`, as in `value is string ? text : ""`. A PHP#
     /// pattern also ends at `=>`, `when`, `and` and `or`.
-    fn is_at_conditional(&mut self) -> Result<bool, ParseError> {
+    fn is_at_conditional(&mut self) -> Result<bool, ParseError<'arena>> {
         let ends_pattern = |token: Option<Token<'_>>| {
             token.is_none_or(|token| {
                 matches!(token.kind, T![")" | "]" | "}" | "{" | "," | ";" | "=>"])
@@ -249,7 +249,7 @@ where
     /// Whether a PHP# readonly type starts here, spec section 13: `readonly` followed by a type, as in
     /// `readonly Order order`. Before `class`, `struct`, another modifier or anything else, `readonly` is a modifier,
     /// which the checker refuses on a class and a field with the message that names `{ get; }`.
-    pub(crate) fn is_at_readonly_hint(&mut self) -> Result<bool, ParseError> {
+    pub(crate) fn is_at_readonly_hint(&mut self) -> Result<bool, ParseError<'arena>> {
         if !self.dialect.is_sharp() || self.stream.peek_kind(0)? != Some(T!["readonly"]) {
             return Ok(false);
         }
@@ -281,7 +281,7 @@ where
     /// `(`, `,`, `)`, `=`, `;` or `{`, as in `[Money, int] totals()` or `[Money, int] pair = …`. After an attribute list,
     /// a type and a name follow, as in `[Searchable] string name`, or the class's own name and `(`, as in
     /// `[Deprecated] Report(…)`, its constructor. After a list an operator or `.` follows.
-    pub(crate) fn is_at_tuple_hint(&self) -> Result<bool, ParseError> {
+    pub(crate) fn is_at_tuple_hint(&self) -> Result<bool, ParseError<'arena>> {
         let Some((name, after)) = self.peek_after_tuple_hint()? else {
             return Ok(false);
         };
@@ -295,7 +295,7 @@ where
     /// Whether a PHP# loop variable with a tuple type starts here, as in `[string, int] entry of stock`: the name after
     /// the type is followed by `of`, or TypeScript's `in`, which `parse_of_keyword` reports. In `[key, count] of stock`
     /// no name follows the brackets, so they unpack each element.
-    pub(crate) fn is_at_tuple_loop_variable(&self) -> Result<bool, ParseError> {
+    pub(crate) fn is_at_tuple_loop_variable(&self) -> Result<bool, ParseError<'arena>> {
         Ok(self
             .peek_after_tuple_hint()?
             .is_some_and(|(_, after)| after.kind == T![Identifier] && matches!(after.value, b"of" | b"in")))
@@ -303,7 +303,7 @@ where
 
     /// The number of names joined by `.` that start here, and the token after them, as `2` and `(` for `Money.of(`, or
     /// `None` at the end of the file. A `.` that no name follows is the token after them.
-    pub(crate) fn peek_dotted_name(&self) -> Result<(usize, Option<Token<'_>>), ParseError> {
+    pub(crate) fn peek_dotted_name(&self) -> Result<(usize, Option<Token<'_>>), ParseError<'arena>> {
         let mut tokens = self.stream.peek_tokens().skip(1);
         let mut parts = 1;
         loop {
@@ -319,7 +319,7 @@ where
 
     /// The name after the PHP# tuple type that may start here, and the token after that name: the type, as
     /// [`Self::peek_after_tuple_type`] reads it, is followed by a name.
-    fn peek_after_tuple_hint(&self) -> Result<Option<(Token<'_>, Token<'_>)>, ParseError> {
+    fn peek_after_tuple_hint(&self) -> Result<Option<(Token<'_>, Token<'_>)>, ParseError<'arena>> {
         let Some(TupleTypeEnd { after: name, mut tokens, .. }) = self.peek_after_tuple_type()? else {
             return Ok(None);
         };
@@ -333,7 +333,7 @@ where
     /// Whether a PHP# type pattern that starts with a tuple type starts here: the type, as
     /// [`Self::peek_after_tuple_type`] reads it, is a union, as in `[int, string]|int`, or a name follows it, as in
     /// `[int, string] pair`. Any other `[` starts a list pattern.
-    pub(crate) fn is_at_tuple_type_pattern(&self) -> Result<bool, ParseError> {
+    pub(crate) fn is_at_tuple_type_pattern(&self) -> Result<bool, ParseError<'arena>> {
         let Some(TupleTypeEnd { after, union, mut tokens }) = self.peek_after_tuple_type()? else {
             return Ok(false);
         };
@@ -353,7 +353,8 @@ where
     /// it, then each `|` of a union and the type after it, whose brackets and angle brackets it skips whole.
     fn peek_after_tuple_type(
         &self,
-    ) -> Result<Option<TupleTypeEnd<'_, impl Iterator<Item = Result<Token<'_>, SyntaxError>>>>, ParseError> {
+    ) -> Result<Option<TupleTypeEnd<'_, impl Iterator<Item = Result<Token<'_>, SyntaxError>>>>, ParseError<'arena>>
+    {
         if !self.dialect.is_sharp() {
             return Ok(None);
         }
@@ -418,7 +419,7 @@ where
 
     /// Parses a PHP# tuple type, spec section 30: element types in brackets, each followed by its optional name, as in
     /// `[Money total, int count]`.
-    fn parse_tuple_hint(&mut self) -> Result<TupleHint<'arena>, ParseError> {
+    fn parse_tuple_hint(&mut self) -> Result<TupleHint<'arena>, ParseError<'arena>> {
         let left_bracket = self.stream.eat_span(T!["["])?;
         let mut elements = Vec::new_in(self.arena);
         let mut commas = Vec::new_in(self.arena);
@@ -445,7 +446,7 @@ where
     }
 
     /// Whether a PHP# type with type arguments starts here: a name, such as `List` or `Class`, followed by `<`.
-    pub(crate) fn is_at_generic_hint(&mut self) -> Result<bool, ParseError> {
+    pub(crate) fn is_at_generic_hint(&mut self) -> Result<bool, ParseError<'arena>> {
         Ok(self.dialect.is_sharp()
             && self.stream.peek_kind(0)? == Some(T![Identifier])
             && self.stream.peek_kind(1)? == Some(T!["<"]))
@@ -453,7 +454,7 @@ where
 
     /// Parses a PHP# type with type arguments, as in `Map<string, List<Line>>`, and the case of a generic enum it may
     /// name after them, as in `Result<Order, PaymentError>.Ok`.
-    fn parse_generic_hint(&mut self) -> Result<GenericHint<'arena>, ParseError> {
+    fn parse_generic_hint(&mut self) -> Result<GenericHint<'arena>, ParseError<'arena>> {
         let name = self.parse_local_identifier()?;
         let type_arguments = self.parse_type_argument_list()?;
         // The `.` follows this list's own `>`, which a `>>` that closes an outer list too does not end with.
@@ -473,7 +474,7 @@ where
     }
 
     /// Parses PHP# type arguments, as a type, a `new` and a call write them: `<string, List<Line>>`.
-    pub(crate) fn parse_type_argument_list(&mut self) -> Result<TypeArgumentList<'arena>, ParseError> {
+    pub(crate) fn parse_type_argument_list(&mut self) -> Result<TypeArgumentList<'arena>, ParseError<'arena>> {
         let (less_than, arguments, greater_than) = self.parse_angle_bracket_list(Self::parse_type_hint)?;
 
         Ok(TypeArgumentList { less_than, arguments, greater_than })
@@ -483,8 +484,8 @@ where
     /// and its `>`.
     fn parse_angle_bracket_list<Item>(
         &mut self,
-        parse_item: impl Fn(&mut Self) -> Result<Item, ParseError>,
-    ) -> Result<(Span, TokenSeparatedSequence<'arena, Item>, Span), ParseError> {
+        parse_item: impl Fn(&mut Self) -> Result<Item, ParseError<'arena>>,
+    ) -> Result<(Span, TokenSeparatedSequence<'arena, Item>, Span), ParseError<'arena>> {
         let less_than = self.stream.eat_span(T!["<"])?;
         let mut items = Vec::new_in(self.arena);
         let mut commas = Vec::new_in(self.arena);
@@ -501,7 +502,9 @@ where
     }
 
     /// Parses the PHP# type arguments after the class of `new`, as in `new PaginatedList<Order>(rows)`.
-    pub(crate) fn parse_optional_type_argument_list(&mut self) -> Result<Option<TypeArgumentList<'arena>>, ParseError> {
+    pub(crate) fn parse_optional_type_argument_list(
+        &mut self,
+    ) -> Result<Option<TypeArgumentList<'arena>>, ParseError<'arena>> {
         if self.dialect.is_sharp() && self.stream.is_at(T!["<"])? {
             Ok(Some(self.parse_type_argument_list()?))
         } else {
@@ -514,7 +517,7 @@ where
     /// `>`, so `this.count < limit` stays a comparison.
     pub(crate) fn parse_optional_call_type_argument_list(
         &mut self,
-    ) -> Result<Option<TypeArgumentList<'arena>>, ParseError> {
+    ) -> Result<Option<TypeArgumentList<'arena>>, ParseError<'arena>> {
         if self.dialect.is_sharp()
             && self.stream.is_at(T!["<"])?
             && self.stream.peek_kind_after_type_arguments(0)? == Some(T!["("])
@@ -530,7 +533,7 @@ where
     /// one typo, and the declaration parses on with no type parameters.
     pub(crate) fn parse_optional_type_parameter_list(
         &mut self,
-    ) -> Result<Option<TypeParameterList<'arena>>, ParseError> {
+    ) -> Result<Option<TypeParameterList<'arena>>, ParseError<'arena>> {
         if !self.dialect.is_sharp() {
             return Ok(None);
         }
@@ -553,7 +556,7 @@ where
 
     /// Parses one PHP# type parameter. `in` and `out` are names the lexer reads as identifiers, so one is the variance
     /// only when another name follows it, as `of` is read in a `for … of` loop.
-    fn parse_type_parameter(&mut self) -> Result<TypeParameter<'arena>, ParseError> {
+    fn parse_type_parameter(&mut self) -> Result<TypeParameter<'arena>, ParseError<'arena>> {
         // C# writes an attribute on a type parameter, as in `<[Marker] T>`, which is no PHP# syntax, spec section 1.
         let attribute_lists = self.parse_typeless_attribute_list_sequence()?;
         if let Some(first) = attribute_lists.first() {
@@ -585,7 +588,7 @@ where
     }
 
     /// Whether a PHP# function type starts here: `Function` followed by `<`.
-    pub(crate) fn is_at_function_hint(&mut self) -> Result<bool, ParseError> {
+    pub(crate) fn is_at_function_hint(&mut self) -> Result<bool, ParseError<'arena>> {
         Ok(self.dialect.is_sharp()
             && self
                 .stream
@@ -595,7 +598,7 @@ where
     }
 
     /// Parses a PHP# function type, as in `Function<Money?(Line, string)>` or `Function<Charge(Cart) uses Http>`.
-    fn parse_function_hint(&mut self) -> Result<FunctionHint<'arena>, ParseError> {
+    fn parse_function_hint(&mut self) -> Result<FunctionHint<'arena>, ParseError<'arena>> {
         let function = self.expect_any_keyword()?;
         let less_than = self.stream.eat_span(T!["<"])?;
         let return_type = self.parse_type_hint()?;
@@ -650,7 +653,7 @@ where
     }
 
     /// Consumes the `>` that closes a type argument list. A `>>` closes this list and the enclosing one.
-    fn parse_closing_angle(&mut self) -> Result<Span, ParseError> {
+    fn parse_closing_angle(&mut self) -> Result<Span, ParseError<'arena>> {
         if let Some(span) = self.state.closing_angle.take() {
             return Ok(span);
         }
@@ -665,14 +668,14 @@ where
         self.stream.eat_span(T![">"])
     }
 
-    pub(crate) fn parse_nullable_type_hint(&mut self) -> Result<NullableHint<'arena>, ParseError> {
+    pub(crate) fn parse_nullable_type_hint(&mut self) -> Result<NullableHint<'arena>, ParseError<'arena>> {
         let question_mark = self.stream.eat_span(T!["?"])?;
         let hint = self.parse_type_hint()?;
 
         Ok(NullableHint { question_mark, hint: self.arena.alloc(hint) })
     }
 
-    pub(crate) fn parse_parenthesized_type_hint(&mut self) -> Result<ParenthesizedHint<'arena>, ParseError> {
+    pub(crate) fn parse_parenthesized_type_hint(&mut self) -> Result<ParenthesizedHint<'arena>, ParseError<'arena>> {
         let left_parenthesis = self.stream.eat_span(T!["("])?;
         let hint = self.parse_type_hint()?;
         let right_parenthesis = self.stream.eat_span(T![")"])?;
@@ -695,7 +698,7 @@ fn skip_to_close<'token>(
     tokens: &mut impl Iterator<Item = Result<Token<'token>, SyntaxError>>,
     open: TokenKind,
     close: TokenKind,
-) -> Result<Option<Token<'token>>, ParseError> {
+) -> Result<Option<Token<'token>>, SyntaxError> {
     let mut depth = 1usize;
     for token in tokens {
         let token = token?;

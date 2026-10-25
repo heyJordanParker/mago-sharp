@@ -13,7 +13,7 @@ where
     pub(crate) fn parse_function_with_attributes(
         &mut self,
         attributes: Sequence<'arena, AttributeList<'arena>>,
-    ) -> Result<Function<'arena>, ParseError> {
+    ) -> Result<Function<'arena>, ParseError<'arena>> {
         Ok(Function {
             attribute_lists: attributes,
             function: self.expect_keyword(T!["function"])?,

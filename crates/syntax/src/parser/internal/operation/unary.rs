@@ -12,7 +12,7 @@ impl<'arena, A> Parser<'_, 'arena, A>
 where
     A: Arena,
 {
-    pub(crate) fn parse_unary_prefix_operation(&mut self) -> Result<UnaryPrefix<'arena>, ParseError> {
+    pub(crate) fn parse_unary_prefix_operation(&mut self) -> Result<UnaryPrefix<'arena>, ParseError<'arena>> {
         let token = self.stream.consume()?;
 
         let operator = match token.kind {

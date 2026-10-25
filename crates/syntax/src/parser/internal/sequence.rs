@@ -35,10 +35,10 @@ where
         open_kind: TokenKind,
         close_kind: TokenKind,
         parse_element: F,
-    ) -> Result<TokenSeparatedSequenceResult<'arena, T>, ParseError>
+    ) -> Result<TokenSeparatedSequenceResult<'arena, T>, ParseError<'arena>>
     where
         T: HasSpan,
-        F: FnMut(&mut Self) -> Result<T, ParseError>,
+        F: FnMut(&mut Self) -> Result<T, ParseError<'arena>>,
     {
         self.parse_token_separated_sequence(open_kind, close_kind, T![","], parse_element)
     }
@@ -56,10 +56,10 @@ where
         close_kind: TokenKind,
         separator_kind: TokenKind,
         mut parse_element: F,
-    ) -> Result<TokenSeparatedSequenceResult<'arena, T>, ParseError>
+    ) -> Result<TokenSeparatedSequenceResult<'arena, T>, ParseError<'arena>>
     where
         T: HasSpan,
-        F: FnMut(&mut Self) -> Result<T, ParseError>,
+        F: FnMut(&mut Self) -> Result<T, ParseError<'arena>>,
     {
         let open = self.stream.eat_span(open_kind)?;
 

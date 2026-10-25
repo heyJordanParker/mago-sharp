@@ -8,7 +8,7 @@ use mago_database::file::FileId;
 use mago_formatter::Formatter;
 use mago_formatter::settings::FormatSettings;
 use mago_php_version::PHPVersion;
-use mago_syntax::error::ParseError;
+use mago_reporting::Issue;
 use mago_syntax::settings::ParserSettings;
 
 use crate::error::OrchestratorError;
@@ -20,7 +20,9 @@ use crate::service::refuse_sharp_file;
 pub enum FileFormatStatus {
     Unchanged,
     Changed(Vec<u8>),
-    FailedToParse(ParseError),
+    /// The issue that reports the file's first parse error. The error itself lives in the formatter's arena, which is
+    /// gone once the status is returned.
+    FailedToParse(Issue),
 }
 
 #[derive(Debug)]
@@ -79,7 +81,7 @@ impl FormatService {
                     Ok(FileFormatStatus::Changed(formatted_content.to_vec()))
                 }
             }
-            Err(parse_error) => Ok(FileFormatStatus::FailedToParse(parse_error)),
+            Err(parse_error) => Ok(FileFormatStatus::FailedToParse(Issue::from(&parse_error))),
         }
     }
 
@@ -116,7 +118,7 @@ impl FormatService {
                         FileFormatStatus::Changed(formatted_content.to_vec())
                     }
                 }
-                Err(parse_error) => FileFormatStatus::FailedToParse(parse_error),
+                Err(parse_error) => FileFormatStatus::FailedToParse(Issue::from(&parse_error)),
             };
 
             Ok((file.id, status))
@@ -171,7 +173,7 @@ impl FormatService {
                         FileFormatStatus::Changed(formatted_content.to_vec())
                     }
                 }
-                Err(parse_error) => FileFormatStatus::FailedToParse(parse_error),
+                Err(parse_error) => FileFormatStatus::FailedToParse(Issue::from(&parse_error)),
             };
 
             Ok((file.id, status))
@@ -211,9 +213,9 @@ impl FormatResult {
         self.changed_files.values().any(|status| matches!(status, FileFormatStatus::Changed(_)))
     }
 
-    pub fn parse_errors(&self) -> impl Iterator<Item = (&FileId, &ParseError)> {
+    pub fn parse_errors(&self) -> impl Iterator<Item = (&FileId, &Issue)> {
         self.changed_files.iter().filter_map(|(file_id, status)| {
-            if let FileFormatStatus::FailedToParse(error) = status { Some((file_id, error)) } else { None }
+            if let FileFormatStatus::FailedToParse(issue) = status { Some((file_id, issue)) } else { None }
         })
     }
 

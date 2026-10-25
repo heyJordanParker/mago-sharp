@@ -19,7 +19,7 @@ where
     /// Whether a PHP# struct starts here: `struct`, a name, and `:`, `{` or the `<` of type parameters. The name may
     /// be a reserved word, as a class's may, and the checks refuse it there. Everywhere else `struct` is a name, such
     /// as a local `struct`.
-    pub(crate) fn is_at_struct(&mut self) -> Result<bool, ParseError> {
+    pub(crate) fn is_at_struct(&mut self) -> Result<bool, ParseError<'arena>> {
         let starts_with_struct =
             self.stream.lookahead(0)?.is_some_and(|token| token.kind == T![Identifier] && token.value == b"struct");
         let names_a_struct =
@@ -37,7 +37,7 @@ where
         &mut self,
         attributes: Sequence<'arena, AttributeList<'arena>>,
         modifiers: Sequence<'arena, Modifier<'arena>>,
-    ) -> Result<Struct<'arena>, ParseError> {
+    ) -> Result<Struct<'arena>, ParseError<'arena>> {
         let r#struct = self.expect_any_keyword()?;
         let name = self.parse_local_identifier()?;
         let type_parameters = self.parse_optional_type_parameter_list()?;
@@ -58,7 +58,7 @@ where
 
     /// A struct's header, `: Interface, Other`, each a class name with or without type arguments. A type that names no
     /// interface, such as `string`, is refused where it stands, and the interfaces after it still parse.
-    fn parse_struct_header(&mut self) -> Result<Option<Inheritance<'arena>>, ParseError> {
+    fn parse_struct_header(&mut self) -> Result<Option<Inheritance<'arena>>, ParseError<'arena>> {
         if !self.stream.is_at(T![":"])? {
             return Ok(None);
         }

@@ -33,7 +33,7 @@ where
         &mut self,
         attributes: Sequence<'arena, AttributeList<'arena>>,
         modifiers: Sequence<'arena, Modifier<'arena>>,
-    ) -> Result<Method<'arena>, ParseError> {
+    ) -> Result<Method<'arena>, ParseError<'arena>> {
         Ok(Method {
             attribute_lists: attributes,
             modifiers,
@@ -67,7 +67,7 @@ where
         &mut self,
         attributes: Sequence<'arena, AttributeList<'arena>>,
         modifiers: Sequence<'arena, Modifier<'arena>>,
-    ) -> Result<ClassLikeMember<'arena>, ParseError> {
+    ) -> Result<ClassLikeMember<'arena>, ParseError<'arena>> {
         if attributes.is_empty() && modifiers.is_empty() && self.is_at_extension()? {
             return self.parse_extension().map(ClassLikeMember::Extension);
         }
@@ -117,11 +117,12 @@ where
                 body: self.parse_method_body()?,
             };
             if let Some(type_parameters) = type_parameters {
-                let class_name = String::from_utf8_lossy(class.value).into_owned().into_boxed_str();
+                let class_type_parameters =
+                    self.state.type_parameters_of.as_deref().map(|names| &*self.arena.alloc_str(names));
 
                 return Err(ParseError::NamedConstructorTypeParametersInSharp(
-                    class_name,
-                    self.state.type_parameters_of.clone(),
+                    class.value,
+                    class_type_parameters,
                     type_parameters.span(),
                 ));
             }
@@ -203,10 +204,7 @@ where
                         Some(Hint::Function(_) | Hint::Nullable(NullableHint { hint: Hint::Function(_), .. }))
                     )
             }) {
-                self.errors.push(ParseError::FunctionParameterInUsesInSharp(
-                    String::from_utf8_lossy(name.value).into(),
-                    name.span,
-                ));
+                self.errors.push(ParseError::FunctionParameterInUsesInSharp(name.value, name.span));
             }
         }
         let last = self.parse_optional_readonly_marker()?;
@@ -239,7 +237,7 @@ where
 
     /// Parses a PHP# method's `readonly` when one is here, spec section 13: its last clause, after the parameters, `on`
     /// and `uses`.
-    fn parse_optional_readonly_marker(&mut self) -> Result<Option<Keyword<'arena>>, ParseError> {
+    fn parse_optional_readonly_marker(&mut self) -> Result<Option<Keyword<'arena>>, ParseError<'arena>> {
         if !self.dialect.is_sharp() || !self.stream.is_at(T!["readonly"])? {
             return Ok(None);
         }
@@ -257,7 +255,7 @@ where
     /// Parses an `on` clause when one starts here: `on`, which stays a name everywhere else, and the events it lists,
     /// each a name, which the analyzer refuses as a full name when it is dotted, or a generic event's name and its type
     /// arguments, as in `Saved<Order>`.
-    fn parse_optional_on(&mut self) -> Result<Option<On<'arena>>, ParseError> {
+    fn parse_optional_on(&mut self) -> Result<Option<On<'arena>>, ParseError<'arena>> {
         if !self.stream.lookahead(0)?.is_some_and(|token| token.kind == T![Identifier] && token.value == b"on") {
             return Ok(None);
         }
@@ -290,7 +288,7 @@ where
         &mut self,
         attributes: Sequence<'arena, AttributeList<'arena>>,
         modifiers: Sequence<'arena, Modifier<'arena>>,
-    ) -> Result<ParseError, ParseError> {
+    ) -> Result<ParseError<'arena>, ParseError<'arena>> {
         // The nested type's own members overwrite which class-like the parser reads.
         let owner = self.state.members_of;
         let (name, span) = match self.stream.peek_kind(0)? {
@@ -320,13 +318,15 @@ where
             }
         };
 
-        Ok(ParseError::NestedTypeInSharp(owner, String::from_utf8_lossy(name.value).into(), span))
+        Ok(ParseError::NestedTypeInSharp(owner, name.value, span))
     }
 
     /// Parses a PHP# constructor's `: super(…)` or `: this(…)`, spec section 9.1. Anything else after `:`, such as
     /// `: base(row)`, `: super` without arguments or `: ?Type`, is one error up to the body, so the constructor and the
     /// class parse on.
-    fn parse_optional_constructor_initializer(&mut self) -> Result<Option<ConstructorInitializer<'arena>>, ParseError> {
+    fn parse_optional_constructor_initializer(
+        &mut self,
+    ) -> Result<Option<ConstructorInitializer<'arena>>, ParseError<'arena>> {
         if !self.dialect.is_sharp() || !self.stream.is_at(T![":"])? {
             return Ok(None);
         }
@@ -359,7 +359,7 @@ where
     }
 
     /// Parses a method's body. A PHP# method may also have an expression body, `=> expr;`, as spec section 7 writes it.
-    fn parse_method_body(&mut self) -> Result<MethodBody<'arena>, ParseError> {
+    fn parse_method_body(&mut self) -> Result<MethodBody<'arena>, ParseError<'arena>> {
         if matches!(self.stream.peek_kind(0)?, Some(T![";" | "?>"])) {
             return Ok(MethodBody::Abstract(MethodAbstractBody { terminator: self.parse_terminator()? }));
         }
@@ -369,7 +369,7 @@ where
 
     /// Parses a body that holds code: a block, or in PHP# an expression body, `=> expr;`. An operator's body is
     /// always one, as spec section 19 writes it.
-    fn parse_method_body_with_code(&mut self) -> Result<MethodBody<'arena>, ParseError> {
+    fn parse_method_body_with_code(&mut self) -> Result<MethodBody<'arena>, ParseError<'arena>> {
         Ok(if self.dialect.is_sharp() && self.stream.is_at(T!["=>"])? {
             MethodBody::Expression(MethodExpressionBody {
                 arrow: self.stream.eat_span(T!["=>"])?,
@@ -386,7 +386,7 @@ where
 
     /// Whether `operator` starts the member after its return type, as in `public static bool operator ==(…)`. A name
     /// followed by what follows a member's name, such as `(`, `;` or `=`, is a method or a field named `operator`.
-    fn is_at_operator_keyword(&mut self) -> Result<bool, ParseError> {
+    fn is_at_operator_keyword(&mut self) -> Result<bool, ParseError<'arena>> {
         Ok(self.stream.lookahead(0)?.is_some_and(|token| token.kind == T![Identifier] && token.value == b"operator")
             && !matches!(self.stream.peek_kind(1)?, None | Some(T!["(" | ";" | "=" | "," | "{" | "=>"])))
     }
@@ -394,7 +394,7 @@ where
     /// Parses the operator's symbol after `operator`, which is one of the binary operators. Semantics decides which of
     /// them a class declares. Any other token, such as `!`, is an error that names the operators a class declares: the
     /// operator parses whole and is left out of the class, which parses on.
-    fn parse_operator_symbol(&mut self) -> Result<BinaryOperator<'arena>, ParseError> {
+    fn parse_operator_symbol(&mut self) -> Result<BinaryOperator<'arena>, ParseError<'arena>> {
         let token = self.stream.lookahead(0)?.ok_or_else(|| self.stream.unexpected(None, &[]))?;
         let symbol: fn(Span) -> BinaryOperator<'arena> = match token.kind {
             T!["+"] => BinaryOperator::Addition,
@@ -427,7 +427,7 @@ where
                 self.parse_function_like_parameter_list()?;
                 self.parse_method_body_with_code()?;
 
-                return Err(ParseError::UndeclarableOperatorInSharp(String::from_utf8_lossy(token.value).into(), span));
+                return Err(ParseError::UndeclarableOperatorInSharp(token.value, span));
             }
         };
 

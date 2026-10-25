@@ -15,7 +15,7 @@ impl<'arena, A> Parser<'_, 'arena, A>
 where
     A: Arena,
 {
-    pub(crate) fn parse_identifier(&mut self) -> Result<Identifier<'arena>, ParseError> {
+    pub(crate) fn parse_identifier(&mut self) -> Result<Identifier<'arena>, ParseError<'arena>> {
         let identifier = self.parse_php_identifier()?;
 
         // PHP# writes a full name only in an `import` line. The error stands, and the name still parses so the rest
@@ -29,7 +29,7 @@ where
 
     /// Parses a local, qualified or fully qualified name as PHP writes it. A `use` line, an import or a trait use,
     /// reads its names with this, because PHP# reports the whole line once, at its `use` keyword.
-    pub(crate) fn parse_php_identifier(&mut self) -> Result<Identifier<'arena>, ParseError> {
+    pub(crate) fn parse_php_identifier(&mut self) -> Result<Identifier<'arena>, ParseError<'arena>> {
         let token = self.stream.lookahead(0)?.ok_or_else(|| self.stream.unexpected(None, &[]))?;
 
         Ok(match &token.kind {
@@ -42,7 +42,7 @@ where
     /// Parses a PHP# name for a `namespace` or `import` line, such as `App.Tenant.Store`.
     ///
     /// A `.` joins two parts only when it touches both of them, so the name's value is its source text.
-    pub(crate) fn parse_dotted_identifier(&mut self) -> Result<Identifier<'arena>, ParseError> {
+    pub(crate) fn parse_dotted_identifier(&mut self) -> Result<Identifier<'arena>, ParseError<'arena>> {
         let first = self.parse_local_identifier()?;
         let mut value = std::vec::Vec::from(first.value);
         let mut span = first.span;
@@ -70,7 +70,7 @@ where
     /// Parses a name, a keyword included. A name written with `@`, spec section 2, spans the `@`, and its value is the
     /// word after it, so `@event` is the name `event`. `@this` keeps its `@`, because a bare `this` is the object the
     /// method runs on, so the name `@this` differs from it wherever a name is read.
-    pub(crate) fn parse_local_identifier(&mut self) -> Result<LocalIdentifier<'arena>, ParseError> {
+    pub(crate) fn parse_local_identifier(&mut self) -> Result<LocalIdentifier<'arena>, ParseError<'arena>> {
         let token = self.stream.consume()?;
 
         if !token.kind.is_identifier_maybe_reserved() {
@@ -85,13 +85,15 @@ where
         Ok(LocalIdentifier { span: token.span_for(self.stream.file_id()), value })
     }
 
-    pub(crate) fn parse_qualified_identifier(&mut self) -> Result<QualifiedIdentifier<'arena>, ParseError> {
+    pub(crate) fn parse_qualified_identifier(&mut self) -> Result<QualifiedIdentifier<'arena>, ParseError<'arena>> {
         let token = self.stream.eat(T![QualifiedIdentifier])?;
 
         Ok(QualifiedIdentifier { span: token.span_for(self.stream.file_id()), value: token.value })
     }
 
-    pub(crate) fn parse_fully_qualified_identifier(&mut self) -> Result<FullyQualifiedIdentifier<'arena>, ParseError> {
+    pub(crate) fn parse_fully_qualified_identifier(
+        &mut self,
+    ) -> Result<FullyQualifiedIdentifier<'arena>, ParseError<'arena>> {
         let token = self.stream.eat(T![FullyQualifiedIdentifier])?;
 
         Ok(FullyQualifiedIdentifier { span: token.span_for(self.stream.file_id()), value: token.value })

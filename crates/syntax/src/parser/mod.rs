@@ -68,7 +68,7 @@ where
     pub(crate) source: &'input [u8],
     pub(crate) state: State,
     pub(crate) stream: TokenStream<'input, 'arena, A>,
-    pub(crate) errors: Vec<'arena, ParseError, A>,
+    pub(crate) errors: Vec<'arena, ParseError<'arena>, A>,
 }
 
 impl<'input, 'arena, A> Parser<'input, 'arena, A>
@@ -196,7 +196,7 @@ where
     }
 
     /// The error for a statement or expression that recursed past [`MAX_RECURSION_DEPTH`] while parsing.
-    pub(crate) fn recursion_limit_exceeded(&self, span: Span) -> ParseError {
+    pub(crate) fn recursion_limit_exceeded(&self, span: Span) -> ParseError<'arena> {
         match self.dialect {
             Dialect::Php => ParseError::RecursionLimitExceeded(span),
             Dialect::Sharp => ParseError::NestingTooDeepInSharp(span),

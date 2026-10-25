@@ -9,7 +9,7 @@ impl<'arena, A> Parser<'_, 'arena, A>
 where
     A: Arena,
 {
-    pub(crate) fn parse_block(&mut self) -> Result<Block<'arena>, ParseError> {
+    pub(crate) fn parse_block(&mut self) -> Result<Block<'arena>, ParseError<'arena>> {
         let within_block = std::mem::replace(&mut self.state.within_block, true);
         let block = self.parse_block_statements();
         self.state.within_block = within_block;
@@ -17,7 +17,7 @@ where
         block
     }
 
-    fn parse_block_statements(&mut self) -> Result<Block<'arena>, ParseError> {
+    fn parse_block_statements(&mut self) -> Result<Block<'arena>, ParseError<'arena>> {
         let left_brace = self.stream.eat_span(T!["{"])?;
         let mut statements = self.new_vec();
         // Whether the loop is skipping the tokens after an error, which report nothing until a statement parses again.

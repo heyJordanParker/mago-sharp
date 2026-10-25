@@ -28,7 +28,7 @@ where
     /// Parses a PHP# module, spec section 32: `module`, the module it overrides after `:`, and its members in braces.
     /// A member is an `imports` line, a service binding or a law, spec section 28. It reads any other member, a
     /// statement or a class member, drops it, and reports it once at its span.
-    pub(crate) fn parse_module(&mut self) -> Result<Module<'arena>, ParseError> {
+    pub(crate) fn parse_module(&mut self) -> Result<Module<'arena>, ParseError<'arena>> {
         let module = self.expect_any_keyword()?;
         let parent = if self.stream.is_at(T![":"])? {
             Some(ModuleParent { colon: self.stream.consume_span()?, name: self.parse_dotted_identifier()? })
@@ -81,7 +81,7 @@ where
     }
 
     /// Whether an `imports` line starts here: `imports`, which stays a name everywhere else, followed by a name.
-    fn is_at_imports(&mut self) -> Result<bool, ParseError> {
+    fn is_at_imports(&mut self) -> Result<bool, ParseError<'arena>> {
         let starts_with_imports =
             self.stream.lookahead(0)?.is_some_and(|token| token.kind == T![Identifier] && token.value == b"imports");
 
@@ -90,7 +90,7 @@ where
 
     /// Parses an `imports` line, spec section 32: `imports`, the full name of each namespace it lists, separated by
     /// commas, and `;`.
-    fn parse_imports(&mut self) -> Result<Imports<'arena>, ParseError> {
+    fn parse_imports(&mut self) -> Result<Imports<'arena>, ParseError<'arena>> {
         let imports = self.expect_any_keyword()?;
         let mut namespaces = self.new_vec();
         let mut commas = self.new_vec();
@@ -113,7 +113,7 @@ where
 
     /// Whether a service binding starts here: `singleton`, `scoped` or `transient`, which stay names everywhere else,
     /// followed by the service's type.
-    fn is_at_binding(&mut self) -> Result<bool, ParseError> {
+    fn is_at_binding(&mut self) -> Result<bool, ParseError<'arena>> {
         let starts_with_lifetime = self.stream.lookahead(0)?.is_some_and(|token| {
             token.kind == T![Identifier] && matches!(token.value, b"singleton" | b"scoped" | b"transient")
         });
@@ -123,7 +123,7 @@ where
 
     /// Parses a service binding, spec section 32: its lifetime, the service's type, the services it needs as
     /// parameters, `for` and the one class it serves, `=`, its value and `;`.
-    fn parse_binding(&mut self) -> Result<Binding<'arena>, ParseError> {
+    fn parse_binding(&mut self) -> Result<Binding<'arena>, ParseError<'arena>> {
         let lifetime = self.expect_any_keyword()?;
         let service = self.parse_type_hint()?;
         let parameter_list =
@@ -145,7 +145,7 @@ where
     fn parse_binding_value(
         &mut self,
         parameter_list: Option<&FunctionLikeParameterList<'arena>>,
-    ) -> Result<BindingValue<'arena>, ParseError> {
+    ) -> Result<BindingValue<'arena>, ParseError<'arena>> {
         let expression = self.parse_expression()?;
         let class = |expression: &Expression<'arena>| match expression {
             Expression::ConstantAccess(ConstantAccess { name: Identifier::Local(name) })

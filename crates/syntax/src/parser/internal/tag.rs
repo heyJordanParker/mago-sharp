@@ -15,7 +15,7 @@ where
 {
     /// Parses a PHP opening tag. A `.sharp` file has none, spec section 27, so there the tag is an error, and the file
     /// parses on.
-    pub(crate) fn parse_opening_tag(&mut self) -> Result<OpeningTag<'arena>, ParseError> {
+    pub(crate) fn parse_opening_tag(&mut self) -> Result<OpeningTag<'arena>, ParseError<'arena>> {
         let token = self.stream.consume()?;
         let span = token.span_for(self.stream.file_id());
         if self.dialect.is_sharp() {
@@ -31,7 +31,7 @@ where
 
     /// Parses a PHP closing tag. A `.sharp` file lexes `?>` as `?` and `>`, which close a nullable type argument, as in
     /// `List<int?>`. No statement starts with `?`, so there the two are a closing tag, an error, and the file parses on.
-    pub(crate) fn parse_closing_tag(&mut self) -> Result<ClosingTag, ParseError> {
+    pub(crate) fn parse_closing_tag(&mut self) -> Result<ClosingTag, ParseError<'arena>> {
         let span = if self.dialect.is_sharp() {
             let span = self.stream.eat_span(T!["?"])?.join(self.stream.eat_span(T![">"])?);
             self.report_unexpected_in_sharp(span);

@@ -15,7 +15,7 @@ where
 {
     pub(crate) fn parse_attribute_list_sequence(
         &mut self,
-    ) -> Result<Sequence<'arena, AttributeList<'arena>>, ParseError> {
+    ) -> Result<Sequence<'arena, AttributeList<'arena>>, ParseError<'arena>> {
         self.parse_attribute_lists(true)
     }
 
@@ -23,14 +23,14 @@ where
     /// in `{ [Pure] get; }`.
     pub(crate) fn parse_typeless_attribute_list_sequence(
         &mut self,
-    ) -> Result<Sequence<'arena, AttributeList<'arena>>, ParseError> {
+    ) -> Result<Sequence<'arena, AttributeList<'arena>>, ParseError<'arena>> {
         self.parse_attribute_lists(false)
     }
 
     fn parse_attribute_lists(
         &mut self,
         types_may_start: bool,
-    ) -> Result<Sequence<'arena, AttributeList<'arena>>, ParseError> {
+    ) -> Result<Sequence<'arena, AttributeList<'arena>>, ParseError<'arena>> {
         let mut inner = self.new_vec();
         while let Some(open) = self.attribute_list_open(types_may_start)? {
             inner.push(self.parse_attribute_list(open)?);
@@ -47,7 +47,7 @@ where
 
     /// The token that opens the next attribute list: `#[`, or in PHP# a `[` that opens no tuple type where
     /// `types_may_start`.
-    fn attribute_list_open(&mut self, types_may_start: bool) -> Result<Option<TokenKind>, ParseError> {
+    fn attribute_list_open(&mut self, types_may_start: bool) -> Result<Option<TokenKind>, ParseError<'arena>> {
         Ok(match self.stream.peek_kind(0)? {
             Some(T!["#["]) => Some(T!["#["]),
             Some(T!["["]) if self.dialect.is_sharp() && !(types_may_start && self.is_at_tuple_hint()?) => Some(T!["["]),
@@ -58,7 +58,7 @@ where
     /// PHP# writes an attribute list in square brackets, as in `[Searchable]`, which may open with a target, as in
     /// `[param: Trimmed]`, spec section 1. A target written after the first attribute, as in `[Cached, param: Trimmed]`,
     /// and PHP's `#[` are no PHP# syntax, so each fails as a typo does, and the list still parses.
-    fn parse_attribute_list(&mut self, open: TokenKind) -> Result<AttributeList<'arena>, ParseError> {
+    fn parse_attribute_list(&mut self, open: TokenKind) -> Result<AttributeList<'arena>, ParseError<'arena>> {
         let mut target = None;
         let mut first = true;
         let result = self.parse_comma_separated_sequence(open, T!["]"], |parser| {
@@ -85,7 +85,7 @@ where
     }
 
     /// A PHP# attribute target, as `return:` in `[return: NotNull]`: a name and a colon before an attribute.
-    fn parse_optional_attribute_target(&mut self) -> Result<Option<AttributeTarget<'arena>>, ParseError> {
+    fn parse_optional_attribute_target(&mut self) -> Result<Option<AttributeTarget<'arena>>, ParseError<'arena>> {
         if !self.dialect.is_sharp()
             || !self.stream.peek_kind(0)?.is_some_and(|kind| kind.is_identifier_maybe_reserved())
             || self.stream.peek_kind(1)? != Some(T![":"])
@@ -96,7 +96,7 @@ where
         Ok(Some(AttributeTarget { name: self.parse_local_identifier()?, colon: self.stream.eat_span(T![":"])? }))
     }
 
-    fn parse_attribute(&mut self) -> Result<Attribute<'arena>, ParseError> {
+    fn parse_attribute(&mut self) -> Result<Attribute<'arena>, ParseError<'arena>> {
         // A dotted name is a full name, which the analyzer refuses with the import to add, spec section 23.
         let name = if self.dialect.is_sharp() && self.stream.peek_kind(1)? == Some(T!["."]) {
             self.parse_dotted_identifier()?

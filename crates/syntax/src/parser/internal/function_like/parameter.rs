@@ -16,7 +16,7 @@ where
 {
     pub(crate) fn parse_optional_function_like_parameter_list(
         &mut self,
-    ) -> Result<Option<FunctionLikeParameterList<'arena>>, ParseError> {
+    ) -> Result<Option<FunctionLikeParameterList<'arena>>, ParseError<'arena>> {
         Ok(match self.stream.peek_kind(0)? {
             Some(T!["("]) => Some(self.parse_function_like_parameter_list()?),
             _ => None,
@@ -25,7 +25,7 @@ where
 
     pub(crate) fn parse_function_like_parameter_list(
         &mut self,
-    ) -> Result<FunctionLikeParameterList<'arena>, ParseError> {
+    ) -> Result<FunctionLikeParameterList<'arena>, ParseError<'arena>> {
         let result = self.parse_comma_separated_sequence(T!["("], T![")"], Self::parse_function_like_parameter)?;
 
         Ok(FunctionLikeParameterList {
@@ -36,7 +36,9 @@ where
     }
 
     /// Parses a PHP# lambda's parameters, which may leave out their types: `(a, b)` or `(Order order)`.
-    pub(crate) fn parse_lambda_parameter_list(&mut self) -> Result<FunctionLikeParameterList<'arena>, ParseError> {
+    pub(crate) fn parse_lambda_parameter_list(
+        &mut self,
+    ) -> Result<FunctionLikeParameterList<'arena>, ParseError<'arena>> {
         let result = self.parse_comma_separated_sequence(T!["("], T![")"], |parser| parser.parse_parameter(false))?;
 
         Ok(FunctionLikeParameterList {
@@ -46,12 +48,14 @@ where
         })
     }
 
-    pub(crate) fn parse_function_like_parameter(&mut self) -> Result<FunctionLikeParameter<'arena>, ParseError> {
+    pub(crate) fn parse_function_like_parameter(
+        &mut self,
+    ) -> Result<FunctionLikeParameter<'arena>, ParseError<'arena>> {
         self.parse_parameter(true)
     }
 
     /// Parses a parameter. A PHP# method's parameter must have a type, and a lambda's may leave it out.
-    fn parse_parameter(&mut self, typed: bool) -> Result<FunctionLikeParameter<'arena>, ParseError> {
+    fn parse_parameter(&mut self, typed: bool) -> Result<FunctionLikeParameter<'arena>, ParseError<'arena>> {
         let attribute_lists = self.parse_attribute_list_sequence()?;
         let modifiers = self.parse_modifier_sequence()?;
         let mut hint = self.parse_optional_type_hint()?;
@@ -148,7 +152,7 @@ where
 
     fn parse_optional_function_like_parameter_default_value(
         &mut self,
-    ) -> Result<Option<FunctionLikeParameterDefaultValue<'arena>>, ParseError> {
+    ) -> Result<Option<FunctionLikeParameterDefaultValue<'arena>>, ParseError<'arena>> {
         Ok(if self.stream.is_at(T!["="])? {
             let equals = self.stream.eat_span(T!["="])?;
             Some(FunctionLikeParameterDefaultValue { equals, value: self.parse_expression()? })
