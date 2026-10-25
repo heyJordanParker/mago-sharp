@@ -8,6 +8,7 @@ use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::array::keyed::TKeyedArray;
 use mago_codex::ttype::combiner::CombinerOptions;
 use mago_codex::ttype::get_array_parameters;
+use mago_codex::ttype::get_int;
 use mago_codex::ttype::get_list;
 use mago_codex::ttype::get_map_entry;
 use mago_codex::ttype::get_mixed;
@@ -28,8 +29,10 @@ use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
 use crate::expression::binary::comparison::check_sorted_by_key;
 use crate::invocation::Invocation;
+use crate::invocation::InvocationArgumentsSource;
 use crate::invocation::InvocationTarget;
 use crate::invocation::resolver::resolve_invocation_type;
+use crate::resolver::extension::is_collection_member;
 use crate::statement::class_like::r#struct::report_class_held_by_key;
 use crate::statement::function_like::collection_key_error;
 use crate::statement::function_like::known_type_or_error;
@@ -55,9 +58,13 @@ where
 
     if context.dialect.is_sharp()
         && (is_method(&invocation.target, b"Sharp\\Internal\\SetMethods", b"filter")
-            || is_method(&invocation.target, b"Sharp\\Internal\\ListMethods", b"toSet"))
+            || is_function(&invocation.target, b"Sharp\\Internal\\toSet"))
     {
         return Ok(fetch_set_return_type(context, invocation, template_result, parameters));
+    }
+
+    if context.dialect.is_sharp() && is_function(&invocation.target, b"Sharp\\Internal\\entries") {
+        return Ok(fetch_indexed_return_type(context, invocation, template_result, parameters));
     }
 
     if context.dialect.is_sharp() && is_method(&invocation.target, b"Sharp\\Internal\\MapMethods", b"toList") {
@@ -65,13 +72,17 @@ where
     }
 
     // `sortedBy` orders by the key its function returns, and `groupBy` and `associateBy` key the `Map` they return by it.
+    // An extension member's call passes its receiver first, and its last type argument is the key's.
+    let selector_index =
+        usize::from(matches!(invocation.arguments_source, InvocationArgumentsSource::ExtensionReceiver(..)));
     if context.dialect.is_sharp()
-        && let Some(argument) = invocation.arguments_source.get_argument(0).filter(|argument| !argument.is_unpacked())
+        && let Some(argument) =
+            invocation.arguments_source.get_argument(selector_index).filter(|argument| !argument.is_unpacked())
         && let Some(selector) = argument.value()
-        && let Some([key_type]) = artifacts
+        && let Some(key_type) = artifacts
             .inferred_type_arguments
             .get(&(invocation.span.start.offset, invocation.span.end.offset))
-            .map(Vec::as_slice)
+            .and_then(|type_arguments| type_arguments.last())
     {
         // A key is checked only where a function fills the key parameter. Otherwise the argument check refused the
         // call, and the key it left is no key the code wrote.
@@ -187,9 +198,9 @@ where
     Some(get_list(element_type))
 }
 
-/// Gives a PHP# `Set<T>`'s `filter` and a `List<T>`'s `toSet` their type `Set<T>`. A docblock writes no `Set`, so
-/// `Sharp\Internal\SetMethods::filter` and `Sharp\Internal\ListMethods::toSet` declare an array of the elements, and
-/// the call holds them as a `Set`.
+/// Gives a PHP# `Set<T>`'s `filter` and the engine's `Sharp\Internal\toSet`, which a `List<T>`'s `toSet` calls, their
+/// type `Set<T>`. A docblock writes no `Set`, so `Sharp\Internal\SetMethods::filter` and `Sharp\Internal\toSet` declare
+/// an array of the elements, and the call holds them as a `Set`.
 fn fetch_set_return_type<A>(
     context: &Context<'_, '_, A>,
     invocation: &Invocation<'_, '_, '_>,
@@ -204,6 +215,25 @@ where
         declared.get_single_array().map_or_else(get_mixed, |array| get_array_parameters(array, context.codebase).1);
 
     TUnion::from_atomic(TAtomic::Array(TArray::Set(Arc::new(element_type))))
+}
+
+/// Gives the engine's `Sharp\Internal\entries`, which a `List<T>`'s `entries` calls, its type `Map<int, T>`. A plain PHP
+/// function's `array<int, T>` reads as a `List`, so the call holds the elements under their indexes as a `Map`.
+fn fetch_indexed_return_type<A>(
+    context: &Context<'_, '_, A>,
+    invocation: &Invocation<'_, '_, '_>,
+    template_result: &TemplateResult,
+    parameters: &WordMap<TUnion>,
+) -> TUnion
+where
+    A: Arena,
+{
+    let declared = fetch_declared_invocation_return_type(context, invocation, template_result, parameters);
+    let element_type =
+        declared.get_single_array().map_or_else(get_mixed, |array| get_array_parameters(array, context.codebase).1);
+    let map = TKeyedArray::new_with_parameters(Arc::new(get_int()), Arc::new(element_type));
+
+    TUnion::from_atomic(TAtomic::Array(TArray::Keyed(map)))
 }
 
 /// Gives a PHP# `Map<K, V>`'s `toList` its type `List<[K, V]>`, spec section 12, as Kotlin's gives pairs. A docblock
@@ -225,18 +255,36 @@ where
     get_list(get_map_entry(key_type, value_type))
 }
 
-/// Whether `target` is a PHP# `List`'s or `Map`'s `groupBy` or `associateBy`, which key a `Map` by what their function
-/// returns. A `.sharp` call checks that key by spec sections 10 and 12's rule, where a backed enum or a struct keys a
-/// `Map` too, so it infers their `G` without the `array-key` bound a `.php` call checks it by.
+/// Whether `target` is a PHP# `List`'s or `Map`'s `groupBy` or `associateBy`, or the engine function a `List`'s runs,
+/// which key a `Map` by what their function returns. A `.sharp` call checks that key by spec sections 10 and 12's rule,
+/// where a backed enum or a struct keys a `Map` too, so it infers their `G` without the `array-key` bound a `.php` call
+/// checks it by.
 pub(crate) fn keys_a_map_by_its_function(target: &InvocationTarget<'_>) -> bool {
-    is_collection_method(target, b"groupBy") || is_collection_method(target, b"associateBy")
+    is_collection_method(target, b"groupBy")
+        || is_collection_method(target, b"associateBy")
+        || is_function(target, b"Sharp\\Internal\\groupBy")
+        || is_function(target, b"Sharp\\Internal\\associateBy")
 }
 
-/// Whether `target` is the method `method` of a PHP# `List`, `Map` or `Set`.
+/// Whether `target` is the function `function`, by its full name.
+fn is_function(target: &InvocationTarget<'_>, function: &[u8]) -> bool {
+    matches!(
+        target.get_function_like_identifier(),
+        Some(FunctionLikeIdentifier::Function(called)) if called.as_bytes().eq_ignore_ascii_case(function)
+    )
+}
+
+/// Whether `target` is the method `method` of a PHP# `List`, `Map` or `Set`: the standard library's member, spec section
+/// 12, or a method of the prelude's `Sharp\Internal\MapMethods` or `Sharp\Internal\SetMethods`.
 fn is_collection_method(target: &InvocationTarget<'_>, method: &[u8]) -> bool {
-    [b"Sharp\\Internal\\ListMethods".as_slice(), b"Sharp\\Internal\\MapMethods", b"Sharp\\Internal\\SetMethods"]
+    [b"Sharp\\Internal\\MapMethods".as_slice(), b"Sharp\\Internal\\SetMethods"]
         .into_iter()
         .any(|class| is_method(target, class, method))
+        || matches!(
+            (target.get_function_like_identifier(), target.get_function_like_metadata()),
+            (Some(FunctionLikeIdentifier::Method(class, called)), Some(metadata))
+                if called.as_bytes().eq_ignore_ascii_case(method) && is_collection_member(*class, metadata)
+        )
 }
 
 /// Whether `target` is the method `method` of the class `class`.

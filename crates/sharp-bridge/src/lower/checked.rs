@@ -27,6 +27,10 @@ use super::types::Types;
 /// #         pub fn get(&self, _: &[u8]) -> Option<&InlineForm> { None }
 /// #     }
 /// #     pub fn key(_: &[u8], _: &[u8]) -> Vec<u8> { Vec::new() }
+/// #     pub const TAKES_RESULT_TYPE: &[u8] = b"";
+/// #     pub const TAKES_KEY_ORDER: &[u8] = b"";
+/// #     pub const RESULT_TYPE_SLOT: &[u8] = b"";
+/// #     pub const KEY_ORDER_SLOT: &[u8] = b"";
 /// # }
 /// # mod types {
 /// #     include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lower/types.rs"));
@@ -66,6 +70,10 @@ use super::types::Types;
 /// #         pub fn get(&self, _: &[u8]) -> Option<&InlineForm> { None }
 /// #     }
 /// #     pub fn key(_: &[u8], _: &[u8]) -> Vec<u8> { Vec::new() }
+/// #     pub const TAKES_RESULT_TYPE: &[u8] = b"";
+/// #     pub const TAKES_KEY_ORDER: &[u8] = b"";
+/// #     pub const RESULT_TYPE_SLOT: &[u8] = b"";
+/// #     pub const KEY_ORDER_SLOT: &[u8] = b"";
 /// # }
 /// # mod types {
 /// #     include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lower/types.rs"));

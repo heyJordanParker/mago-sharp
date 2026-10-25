@@ -44,20 +44,21 @@ where
     /// to their resolved fully qualified names.
     #[must_use]
     pub fn resolve<'ast>(&self, program: &'ast Program<'arena>) -> ResolvedNames<'arena> {
-        self.resolve_in(program, &NamespaceClasses::default())
+        self.resolve_in(program, &NamespaceClasses::default(), &ChangingMembers::default())
     }
 
     /// Resolves names within `program` as [`resolve`](Self::resolve) does, where a bare PHP# name of a class-like
     /// `Sharp` imports by default names the class-like of `namespace_classes` in the file's namespace instead, spec
-    /// section 23.
+    /// section 23, and a call of one of the `changing_members` on a local writes it.
     #[must_use]
     pub fn resolve_in<'ast>(
         &self,
         program: &'ast Program<'arena>,
         namespace_classes: &NamespaceClasses,
+        changing_members: &ChangingMembers,
     ) -> ResolvedNames<'arena> {
         let mut context = NameResolutionContext::new(self.arena);
-        let mut walker = NameWalker::new(program, namespace_classes);
+        let mut walker = NameWalker::new(program, namespace_classes, changing_members);
 
         walker.walk_program(program, &mut context);
 
@@ -93,5 +94,28 @@ impl NamespaceClasses {
     #[must_use]
     pub fn contains(&self, name: &[u8]) -> bool {
         self.0.contains(&trim_start_byte(name, b'\\').to_ascii_lowercase())
+    }
+}
+
+/// The names of the members of a project that change the value they are called on.
+///
+/// They are the standard library's members that take their receiver by `ref`, spec section 26, as a `List`'s `add`,
+/// which the project's scan finds. The binder counts a call of one on a local as a write to the local.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ChangingMembers(HashSet<std::vec::Vec<u8>>);
+
+impl ChangingMembers {
+    /// The members named `names`. PHP compares method names ignoring case, and so does [`contains`](Self::contains).
+    pub fn new<N>(names: impl IntoIterator<Item = N>) -> Self
+    where
+        N: AsRef<[u8]>,
+    {
+        Self(names.into_iter().map(|name| name.as_ref().to_ascii_lowercase()).collect())
+    }
+
+    /// Whether `name` is one of these members.
+    #[must_use]
+    pub fn contains(&self, name: &[u8]) -> bool {
+        self.0.contains(&name.to_ascii_lowercase())
     }
 }

@@ -114,6 +114,7 @@ where
                     Some(b"lazy") => Modifier::Lazy(self.expect_any_keyword()?),
                     Some(b"internal") => Modifier::Internal(self.expect_any_keyword()?),
                     Some(b"foreign") => Modifier::Foreign(self.expect_any_keyword()?),
+                    Some(b"ref") => Modifier::Ref(self.expect_any_keyword()?),
                     _ => return Ok(None),
                 }
             }

@@ -264,12 +264,25 @@ final class Listening
 namespace Sharp\Internal;
 
 /**
- * Marks a method of `ListMethods` that the bridge lowers to PHP on the array, from the list's type, instead of a call.
- * A `List` is a PHP array, which has no methods, so the checker refuses a marked method on a value that can also be an
- * object, whose own method would not run.
+ * Marks the parameter of a standard library collection member that the member compares with the collection's elements
+ * by `==`, as `List.contains`'s, so the checker refuses a value whose `==` against an element is no comparison.
  */
-#[\Attribute(\Attribute::TARGET_METHOD)]
-final class Inlined {}
+#[\Attribute(\Attribute::TARGET_PARAMETER)]
+final class ComparedByEquality {}
+
+/**
+ * Marks the parameter of an engine function that makes a `Map` or a `Set`, which takes the type arguments of the
+ * collection the call gives, as `entries`'s, so the bridge passes them from the type the checker gave the call.
+ */
+#[\Attribute(\Attribute::TARGET_PARAMETER)]
+final class TakesResultType {}
+
+/**
+ * Marks the parameter of an engine function that orders by the keys a function gives, as `sortedBy`'s, which takes the
+ * `operator <=>` the checker chose for the key type, so the bridge passes it from the call.
+ */
+#[\Attribute(\Attribute::TARGET_PARAMETER)]
+final class TakesKeyOrder {}
 
 /**
  * Marks the parameter of a standard library method that writes its argument as JSON text, as `Json.encode`'s, so the
@@ -333,238 +346,6 @@ abstract class Parsed
 final class LeanFunction
 {
     public function __construct(public string $function) {}
-}
-
-/**
- * The methods a PHP# `List<T>` has. The analyzer checks a call on a list against them, and the engine runs them on
- * `Sharp\Collection`, except the methods marked `Inlined`, which the bridge lowers from the list's type. A method
- * without `@mutation-free` changes the list.
- *
- * @template T
- */
-final class ListMethods
-{
-    /**
-     * Appends `$value` after the last element.
-     *
-     * @param T $value
-     */
-    public function add(mixed $value): void {}
-
-    /**
-     * @return T|null the element at `$index`, or null when `$index` is not an index of the list.
-     *
-     * @mutation-free
-     */
-    #[Inlined]
-    public function getOrNull(int $index): mixed {}
-
-    /**
-     * The analyzer types the result `Set<T>`, which a docblock cannot write.
-     *
-     * @return list<T> the set of the elements, each once, in the order they first appear.
-     *
-     * @mutation-free
-     */
-    #[Inlined]
-    public function toSet(): array {}
-
-    /**
-     * @return array<int, T> each index with its element, for `for (const [i, x] of list.entries())`.
-     *
-     * @mutation-free
-     */
-    public function entries(): array {}
-
-    /**
-     * @return int how many elements the list holds.
-     *
-     * @mutation-free
-     */
-    #[Inlined]
-    public function count(): int {}
-
-    /**
-     * @param T $value
-     *
-     * @return bool whether an element equals `$value` by `==`.
-     *
-     * @mutation-free
-     */
-    #[Inlined]
-    public function contains(mixed $value): bool {}
-
-    /**
-     * @param T $value
-     *
-     * @return int|null the index of the first element that equals `$value` by `==`, or null when none does.
-     *
-     * @mutation-free
-     */
-    #[Inlined]
-    public function indexOf(mixed $value): ?int {}
-
-    /**
-     * @return T the last element.
-     *
-     * @throws \OutOfRangeException when the list is empty.
-     *
-     * @mutation-free
-     */
-    #[Inlined]
-    public function last(): mixed {}
-
-    /**
-     * Puts `$value` at `$index`, after the elements before it, and renumbers the ones after it.
-     *
-     * @param T $value
-     *
-     * @throws \OutOfRangeException when `$index` is below 0 or above the number of elements.
-     */
-    public function insert(int $index, mixed $value): void {}
-
-    /**
-     * Removes the first element that equals `$value` by `==`, and renumbers the elements after it.
-     *
-     * @param T $value
-     *
-     * @return bool whether an element equalled `$value`.
-     */
-    #[Inlined]
-    public function remove(mixed $value): bool {}
-
-    /**
-     * Removes every element.
-     */
-    #[Inlined]
-    public function clear(): void {}
-
-    /**
-     * @param \Closure(T): bool $predicate
-     *
-     * @return list<T> the elements `$predicate` keeps, in order.
-     *
-     * @mutation-free
-     */
-    public function filter(\Closure $predicate): array {}
-
-    /**
-     * @template R
-     *
-     * @param \Closure(T): R $transform
-     *
-     * @return list<R> what `$transform` gives for each element, in order.
-     *
-     * @mutation-free
-     */
-    public function map(\Closure $transform): array {}
-
-    /**
-     * @template R
-     *
-     * @param \Closure(T): iterable<R> $transform
-     *
-     * @return list<R> the elements of what `$transform` gives for each element, in order.
-     *
-     * @mutation-free
-     */
-    public function flatMap(\Closure $transform): array {}
-
-    /**
-     * @return list<T> the elements, in order.
-     *
-     * @mutation-free
-     */
-    #[Inlined]
-    public function toList(): array {}
-
-    /**
-     * @template R of int|float
-     *
-     * @param \Closure(T): R $selector
-     *
-     * @return R the sum of what `$selector` gives for each element, 0 for an empty list.
-     *
-     * @mutation-free
-     */
-    public function sumOf(\Closure $selector): int|float {}
-
-    /**
-     * @return T the largest element.
-     *
-     * @throws \OutOfRangeException when the list is empty.
-     *
-     * @where T is int
-     *
-     * @mutation-free
-     */
-    #[Inlined]
-    public function max(): mixed {}
-
-    /**
-     * @return T the smallest element.
-     *
-     * @throws \OutOfRangeException when the list is empty.
-     *
-     * @where T is int
-     *
-     * @mutation-free
-     */
-    #[Inlined]
-    public function min(): mixed {}
-
-    /**
-     * @param \Closure(T): bool $predicate
-     *
-     * @return T the first element `$predicate` keeps.
-     *
-     * @throws \OutOfRangeException when `$predicate` keeps no element.
-     *
-     * @mutation-free
-     */
-    public function first(\Closure $predicate): mixed {}
-
-    /**
-     * @param \Closure(T): bool $predicate
-     *
-     * @return bool whether `$predicate` keeps any element.
-     *
-     * @mutation-free
-     */
-    public function any(\Closure $predicate): bool {}
-
-    /**
-     * @template G of array-key
-     *
-     * @param \Closure(T): G $key
-     *
-     * @return array<G, list<T>> the elements under the key `$key` gives each, in order.
-     *
-     * @mutation-free
-     */
-    public function groupBy(\Closure $key): array {}
-
-    /**
-     * @template G of array-key
-     *
-     * @param \Closure(T): G $key
-     *
-     * @return array<G, T> each element under the key `$key` gives it, the last one where two share a key.
-     *
-     * @mutation-free
-     */
-    public function associateBy(\Closure $key): array {}
-
-    /**
-     * @template R
-     *
-     * @param \Closure(T): R $selector
-     *
-     * @return list<T> the elements in ascending order of what `$selector` gives, equal ones in their order.
-     *
-     * @mutation-free
-     */
-    public function sortedBy(\Closure $selector): array {}
 }
 
 /**
@@ -912,3 +693,256 @@ function listenersFor(object $event): array {}
  * @return T
  */
 function runScoped(\Closure $body): mixed {}
+
+/*
+ * The engine functions the standard library's `List` members run, each with the list first. A
+ * function that changes the list takes it by reference, from the place a `ref` receiver passes, and only the standard
+ * library reaches `Sharp.Internal`.
+ */
+
+/**
+ * Appends `$value` after the last element.
+ *
+ * @template T
+ *
+ * @param list<T> $list
+ * @param T $value
+ */
+function add(array &$list, mixed $value): void {}
+
+/**
+ * Puts `$value` at `$index`, after the elements before it, and renumbers the ones after it.
+ *
+ * @template T
+ *
+ * @param list<T> $list
+ * @param T $value
+ *
+ * @throws \OutOfRangeException when `$index` is below 0 or above the number of elements.
+ */
+function insert(array &$list, int $index, mixed $value): void {}
+
+/**
+ * Replaces the element at `$index` with `$value`, as `list[i] = v` does.
+ *
+ * @template T
+ *
+ * @param list<T> $list
+ * @param T $value
+ *
+ * @return T the value.
+ *
+ * @throws \OutOfRangeException when `$index` is not an index of the list.
+ */
+function set(array &$list, int $index, mixed $value): mixed {}
+
+/**
+ * Removes the first element that equals `$value` by `==`, and renumbers the elements after it.
+ *
+ * @template T
+ *
+ * @param list<T> $list
+ * @param T $value
+ *
+ * @return bool whether an element equalled `$value`.
+ */
+function remove(array &$list, mixed $value): bool {}
+
+/**
+ * Removes the element at `$index`, and renumbers the elements after it.
+ *
+ * @template T
+ *
+ * @param list<T> $list
+ *
+ * @return T the removed element.
+ *
+ * @throws \OutOfRangeException when the list is empty, or `$index` is not an index of it.
+ */
+function removeAt(array &$list, int $index): mixed {}
+
+/**
+ * Removes the last element.
+ *
+ * @template T
+ *
+ * @param list<T> $list
+ *
+ * @return T the removed element.
+ *
+ * @throws \OutOfRangeException when the list is empty.
+ */
+function removeLast(array &$list): mixed {}
+
+/**
+ * Removes every element.
+ *
+ * @param list<mixed> $list
+ */
+function clear(array &$list): void {}
+
+/**
+ * @template T
+ *
+ * @param list<T> $list
+ *
+ * @return T|null the element at `$index`, or null when `$index` is not an index of the list.
+ *
+ * @pure
+ */
+function get(array $list, int $index): mixed {}
+
+/**
+ * @template T
+ *
+ * @param list<T> $list
+ * @param T $value
+ *
+ * @return bool whether an element equals `$value` by `==`.
+ */
+function contains(array $list, mixed $value): bool {}
+
+/**
+ * @template T
+ *
+ * @param list<T> $list
+ * @param T $value
+ *
+ * @return int|null the index of the first element that equals `$value` by `==`, or null when none does.
+ */
+function indexOf(array $list, mixed $value): ?int {}
+
+/**
+ * @template T
+ *
+ * @param list<T> $list
+ *
+ * @return non-empty-list<T> the list.
+ *
+ * @throws \OutOfRangeException when the list is empty.
+ *
+ * @pure
+ */
+function nonEmpty(array $list): array {}
+
+/**
+ * @template T
+ *
+ * @param list<T> $list
+ *
+ * @return array<int, T> each index with its element.
+ *
+ * @pure
+ */
+function entries(array $list, #[TakesResultType] ?string $type = null): array {}
+
+/**
+ * The analyzer types the result `Set<T>`, which a docblock cannot write.
+ *
+ * @template T
+ *
+ * @param list<T> $list
+ *
+ * @return list<T> the set of the elements, each once, in the order they first appear.
+ *
+ * @pure
+ */
+function toSet(array $list, #[TakesResultType] ?string $type = null): array {}
+
+/**
+ * @template T
+ *
+ * @param list<T> $list
+ * @param \Closure(T): bool $predicate
+ *
+ * @return list<T> the elements `$predicate` keeps, in order.
+ */
+function filter(array $list, \Closure $predicate): array {}
+
+/**
+ * @template T
+ * @template R
+ *
+ * @param list<T> $list
+ * @param \Closure(T): R $transform
+ *
+ * @return list<R> what `$transform` gives for each element, in order.
+ */
+function map(array $list, \Closure $transform): array {}
+
+/**
+ * @template T
+ * @template R
+ *
+ * @param list<T> $list
+ * @param \Closure(T): iterable<R> $transform
+ *
+ * @return list<R> the elements of what `$transform` gives for each element, in order.
+ */
+function flatMap(array $list, \Closure $transform): array {}
+
+/**
+ * @template T
+ * @template R of int|float
+ *
+ * @param list<T> $list
+ * @param \Closure(T): R $selector
+ *
+ * @return R the sum of what `$selector` gives for each element, 0 for an empty list.
+ */
+function sumOf(array $list, \Closure $selector): int|float {}
+
+/**
+ * @template T
+ *
+ * @param list<T> $list
+ * @param \Closure(T): bool $predicate
+ *
+ * @return T the first element `$predicate` keeps.
+ *
+ * @throws \OutOfRangeException when `$predicate` keeps no element.
+ */
+function first(array $list, \Closure $predicate): mixed {}
+
+/**
+ * @template T
+ *
+ * @param list<T> $list
+ * @param \Closure(T): bool $predicate
+ *
+ * @return bool whether `$predicate` keeps any element.
+ */
+function any(array $list, \Closure $predicate): bool {}
+
+/**
+ * @template T
+ * @template G of array-key
+ *
+ * @param list<T> $list
+ * @param \Closure(T): G $key
+ *
+ * @return array<G, list<T>> the elements under the key `$key` gives each, in order.
+ */
+function groupBy(array $list, \Closure $key, #[TakesResultType] ?string $type = null): array {}
+
+/**
+ * @template T
+ * @template G of array-key
+ *
+ * @param list<T> $list
+ * @param \Closure(T): G $key
+ *
+ * @return array<G, T> each element under the key `$key` gives it, the last one where two share a key.
+ */
+function associateBy(array $list, \Closure $key, #[TakesResultType] ?string $type = null): array {}
+
+/**
+ * @template T
+ * @template R
+ *
+ * @param list<T> $list
+ * @param \Closure(T): R $selector
+ *
+ * @return list<T> the elements in ascending order of what `$selector` gives, equal ones in their order.
+ */
+function sortedBy(array $list, \Closure $selector, #[TakesKeyOrder] ?\Closure $comparison = null): array {}

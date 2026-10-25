@@ -949,8 +949,22 @@ where
         let class_name = codebase.get_class_like(class.as_bytes()).map_or(class, |metadata| metadata.original_name);
         let cause = (class_name, metadata.original_name);
         let receiver_roots = receiver.map(|receiver| self.roots(receiver)).unwrap_or_default();
-        let roots = self.argument_roots(arguments, &metadata.parameters);
-        self.passed_functions(arguments, &metadata.parameters, &receiver_roots, &roots);
+        // An extension's member takes its receiver as its first parameter, as its method value does, and the call's
+        // arguments fill the parameters after it.
+        let (receiver_roots, roots) = match metadata.parameters.split_first() {
+            Some((_, parameters)) if metadata.flags.is_extension_method() => {
+                let roots = self.argument_roots(arguments, parameters);
+                self.passed_functions(arguments, parameters, &receiver_roots, &roots);
+
+                (Roots::new(), std::iter::once(receiver_roots).chain(roots).collect())
+            }
+            _ => {
+                let roots = self.argument_roots(arguments, &metadata.parameters);
+                self.passed_functions(arguments, &metadata.parameters, &receiver_roots, &roots);
+
+                (receiver_roots, roots)
+            }
+        };
         if let Some(effect) = foreign_class(codebase, class) {
             self.summary.effects.push((Effect::Foreign(effect), span, cause));
 

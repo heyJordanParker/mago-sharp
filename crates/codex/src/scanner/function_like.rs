@@ -285,24 +285,20 @@ where
 
 /// Spec section 29: whether `parameter` is a function a standard library collection method runs only inside its call,
 /// as `List.map` runs its lambda, so the call takes on that function's effects, as a PHP# method's function parameter
-/// whose type states no effects does. The prelude declares the collection methods on `Sharp\Internal\ListMethods`,
-/// `MapMethods`, `SetMethods` and `IterableMethods`, each taking its function as a `\Closure`.
+/// whose type states no effects does. The prelude declares the methods of a `Map`, a `Set` and an `Iterable` on
+/// `Sharp\Internal\MapMethods`, `SetMethods` and `IterableMethods`, each taking its function as a `\Closure`. A `List`'s
+/// members are the standard library's PHP# methods.
 fn runs_inside_collection_method(class: &ClassLikeMetadata, parameter: &FunctionLikeParameterMetadata) -> bool {
     is_collection_class(class)
         && parameter.type_metadata.as_ref().is_some_and(|declared| declared.type_union.has_callable())
 }
 
-/// Whether `class` is one of the prelude's `Sharp\Internal\ListMethods`, `MapMethods`, `SetMethods` and
-/// `IterableMethods`, which declare the methods of PHP#'s collections.
+/// Whether `class` is one of the prelude's `Sharp\Internal\MapMethods`, `SetMethods` and `IterableMethods`, which
+/// declare the methods of PHP#'s `Map`, `Set` and `Iterable`.
 fn is_collection_class(class: &ClassLikeMetadata) -> bool {
-    [
-        "Sharp\\Internal\\ListMethods",
-        "Sharp\\Internal\\MapMethods",
-        "Sharp\\Internal\\SetMethods",
-        "Sharp\\Internal\\IterableMethods",
-    ]
-    .iter()
-    .any(|collection| collection.as_bytes().eq_ignore_ascii_case(class.name.as_bytes()))
+    ["Sharp\\Internal\\MapMethods", "Sharp\\Internal\\SetMethods", "Sharp\\Internal\\IterableMethods"]
+        .iter()
+        .any(|collection| collection.as_bytes().eq_ignore_ascii_case(class.name.as_bytes()))
 }
 
 /// Spec section 12: makes each `iterable<T>` a collection method takes, or its function gives, as `flatMap`'s does, the

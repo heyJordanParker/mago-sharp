@@ -24,6 +24,7 @@ use mago_codex::ttype::expander;
 use mago_codex::ttype::expander::StaticClassType;
 use mago_codex::ttype::expander::TypeExpansionOptions;
 use mago_codex::ttype::get_array_parameters;
+use mago_codex::ttype::get_list;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_never;
 use mago_codex::ttype::get_specialized_template_type;
@@ -54,6 +55,7 @@ use crate::context::block::BlockContext;
 use crate::effects::Body;
 use crate::effects::ReadonlyCall;
 use crate::error::AnalysisError;
+use crate::expression::call::method_call::report_collection_method_on_object;
 use crate::expression::constant_access::field_storage;
 use crate::expression::instantiation::bare_generic_class;
 use crate::resolver::class_name::class_value_classes;
@@ -62,6 +64,8 @@ use crate::resolver::class_name::report_non_existent_class_like;
 use crate::resolver::class_name::report_unknown_sharp_class;
 use crate::resolver::extension::Extension;
 use crate::resolver::extension::extension_methods;
+use crate::resolver::extension::is_collection_member;
+use crate::resolver::extension::is_list_member;
 use crate::resolver::extension::resolve_extension;
 use crate::resolver::property::DeclaredPropertyKind;
 use crate::resolver::property::get_localized_property_type;
@@ -197,6 +201,9 @@ pub struct MethodResolutionResult {
     pub called_properties: Vec<CalledProperty>,
     /// The static method of the extension a PHP# call runs, spec section 26, which leaves the other targets empty.
     pub extension: Option<MethodIdentifier>,
+    /// The standard library's member of a `List` a PHP# call runs when the receiver's value is one of its `List` parts,
+    /// the second, beside the other targets, which the receiver's other collections run, spec section 12.
+    pub list_member: Option<(MethodIdentifier, TUnion)>,
     /// True when the receiver is a PHP# class value and the method is no member of `Class`, so the call is a static
     /// call on the classes the value holds, spec section 25, which leaves the other targets empty.
     pub class_value: bool,
@@ -243,10 +250,16 @@ where
 
     let resolved_selectors = resolve_member_selector(context, block_context, artifacts, selector, false)?;
 
+    // A `List`'s members are the kind's own, which the receiver's `List` parts reach below, where an empty `Map` takes
+    // its own methods.
     if context.dialect.is_sharp()
         && let ClassLikeMemberSelector::Identifier(name) = selector
         && let Some(object_type) = artifacts.get_expression_type(object).cloned()
         && let Some(extension) = resolve_extension(context, &object_type, name, MetadataFlags::EXTENSION_METHOD)
+        && !matches!(extension, Extension::Member(method)
+        if context.codebase.get_method_by_id(&method).is_some_and(|metadata| {
+            is_list_member(method.get_class_name(), metadata)
+        }))
     {
         match extension {
             Extension::Member(method) => result.extension = Some(method),
@@ -286,6 +299,7 @@ where
     }
 
     let mut missing: HashSet<(Word, Word)> = HashSet::default();
+    let mut list_parts = Vec::new();
     if let Some(object_type) = artifacts.get_expression_type(object) {
         let receivers = get_receiver_atomics(context, block_context, artifacts, object, object_type);
         let mut object_atomics = receivers.iter().map(|atomic| (atomic, atomic)).collect::<Vec<_>>();
@@ -321,16 +335,20 @@ where
                     // An empty value with no declared type, an empty literal the semantic checks refuse or an emptied
                     // plain PHP array property, is neither a List nor a Map. Only `count` gives the same on each, 0,
                     // and a `List`'s is PHP's `\count`, which counts a `Map` and a `Set` too.
-                    collection_methods = if !array.is_empty() {
-                        get_collection_methods(array, context.codebase)
-                    } else if method_names.iter().all(|name| name.as_bytes() == b"count") {
-                        TObject::Named(TNamedObject::new_with_type_parameters(
-                            word("Sharp\\Internal\\ListMethods"),
-                            Some(vec![get_never()]),
-                        ))
-                    } else {
+                    if array.is_empty() {
+                        if method_names.iter().all(|name| name.as_bytes() == b"count") {
+                            list_parts.extend(get_list(get_never()).types.iter().cloned());
+                        }
                         continue;
-                    };
+                    }
+                    // A `List`'s members are the standard library's, which the receiver's `List` parts reach below.
+                    match get_collection_methods(array, context.codebase) {
+                        Some(methods) if !array.is_empty() => collection_methods = methods,
+                        _ => {
+                            list_parts.push(object_atomic.clone());
+                            continue;
+                        }
+                    }
                     &collection_methods
                 }
                 TAtomic::Iterable(iterable) if context.dialect.is_sharp() => {
@@ -566,6 +584,36 @@ where
         result.encountered_mixed = true;
         let mixed = TAtomic::Mixed(TMixed::new());
         report_call_on_non_object(context, &mixed, &mixed, object.span(), selector.span());
+    }
+
+    // The receiver's `List` parts reach the standard library's members of a `List`, which are the `List`'s own, spec
+    // section 12, beside the members the receiver's other collections have, as `held.contains("tea")` on a
+    // `List<string>|Set<string>` runs the member of the kind the value holds.
+    // A value that may also be an object runs a different method of that name on each, so the call is refused.
+    if !list_parts.is_empty() && report_collection_method_on_object(context, artifacts, object, selector) {
+        result.has_invalid_target = true;
+    } else if !list_parts.is_empty()
+        && let ClassLikeMemberSelector::Identifier(name) = selector
+    {
+        let list = TUnion::from_vec(list_parts);
+        match resolve_extension(context, &list, name, MetadataFlags::EXTENSION_METHOD) {
+            Some(Extension::Member(method))
+                if context
+                    .codebase
+                    .get_method_by_id(&method)
+                    .is_some_and(|metadata| is_collection_member(method.get_class_name(), metadata)) =>
+            {
+                result.list_member = Some((method, list));
+            }
+            // A refusal the resolution reported stands alone.
+            resolved => {
+                if !matches!(resolved, Some(Extension::Refused)) {
+                    report_non_existent_list_member(context, &list, object.span(), selector.span(), word(name.value));
+                    result.lacks_sharp_method = true;
+                }
+                result.has_invalid_target = true;
+            }
+        }
     }
 
     for method_id in asserted_descendant_method_references {
@@ -1322,26 +1370,6 @@ where
         let required_constraint_str = display_type(context, &constraint.type_union);
         let actual_template_type_str = display_type(context, &actual_template_type);
 
-        // PHP# writes no `@where`: only a collection method of the prelude has one, as a `List<int>`'s `max()`. The call
-        // keeps the type its elements give it, so it is refused once.
-        if context.dialect.is_sharp()
-            && let Some(collection) = display_sharp_collection(context, object_type)
-            && let ClassLikeMemberSelector::Identifier(method) = selector
-        {
-            let method = String::from_utf8_lossy(method.value);
-            context.collector.report_with_code(
-                IssueCode::WhereConstraintViolation,
-                Issue::error(format!(
-                    "`{method}` needs elements of type `{required_constraint_str}`, and this is a `{collection}`."
-                ))
-                .with_annotation(Annotation::primary(selector.span()).with_message("A method of these elements only."))
-                .with_annotation(Annotation::secondary(object_span).with_message(format!("This is a `{collection}`.")))
-                .with_help(format!("Call it on a collection whose elements are `{required_constraint_str}`.")),
-            );
-
-            return true;
-        }
-
         context.collector.report_with_code(
             IssueCode::WhereConstraintViolation,
             Issue::error(format!(
@@ -1607,7 +1635,7 @@ where
         .iter()
         .filter(|atomic| !atomic.is_null())
         .map(|atomic| match atomic {
-            TAtomic::Array(array) if !array.is_empty() => Some(get_collection_methods(array, context.codebase)),
+            TAtomic::Array(array) if !array.is_empty() => get_collection_methods(array, context.codebase),
             TAtomic::Iterable(iterable) => Some(get_iterable_methods(iterable)),
             _ => None,
         })
@@ -1615,25 +1643,23 @@ where
         .filter(|collections| !collections.is_empty())
 }
 
-/// The class whose methods a PHP# collection has, as spec section 12 writes them: a `List<T>` is called as
-/// `Sharp\Internal\ListMethods<T>`, a `Map<K, V>` as `Sharp\Internal\MapMethods<K, V>` and a `Set<T>` as
-/// `Sharp\Internal\SetMethods<T>`, so each method is typed by the elements. A PHP# element type is never narrower than
-/// `int` or `string`, so a literal the analyzer knows widens to it.
-fn get_collection_methods(array: &TArray, codebase: &CodebaseMetadata) -> TObject {
+/// The class whose methods a PHP# `Map` or `Set` has, as spec section 12 writes them: a `Map<K, V>` is called as
+/// `Sharp\Internal\MapMethods<K, V>` and a `Set<T>` as `Sharp\Internal\SetMethods<T>`, so each method is typed by the
+/// elements. A PHP# element type is never narrower than `int` or `string`, so a literal the analyzer knows widens to it.
+/// None for a `List`, whose members are the standard library's `ListMembers`, spec section 26.
+fn get_collection_methods(array: &TArray, codebase: &CodebaseMetadata) -> Option<TObject> {
     let (mut key, mut value) = get_array_parameters(array, codebase);
     key.widen_scalars();
     value.widen_scalars();
-    TObject::Named(match array {
-        TArray::List(_) => {
-            TNamedObject::new_with_type_parameters(word("Sharp\\Internal\\ListMethods"), Some(vec![value]))
-        }
+    Some(TObject::Named(match array {
+        TArray::List(_) => return None,
         TArray::Keyed(_) => {
             TNamedObject::new_with_type_parameters(word("Sharp\\Internal\\MapMethods"), Some(vec![key, value]))
         }
         TArray::Set(_) => {
             TNamedObject::new_with_type_parameters(word("Sharp\\Internal\\SetMethods"), Some(vec![value]))
         }
-    })
+    }))
 }
 
 /// The class whose lazy operations a PHP# `Iterable<T>` has, spec section 12: it is called as
@@ -1679,6 +1705,55 @@ fn scalar_name(atomic: &TAtomic) -> Option<&'static str> {
         TAtomic::Scalar(TScalar::Bool(_)) => "bool",
         _ => return None,
     })
+}
+
+/// Reports a member the `List` parts `list` of a receiver lack, naming the members a `List` has, which the standard
+/// library's `ListMembers` declares, as a `Map`'s error names its methods.
+fn report_non_existent_list_member<A>(
+    context: &mut Context<'_, '_, A>,
+    list: &TUnion,
+    obj_span: Span,
+    selector_span: Span,
+    method_name: Word,
+) where
+    A: Arena,
+{
+    let collection = display_type(context, list);
+    // A member of a `List` of narrower elements, as a `List<int>`'s `max()`, names the elements it needs.
+    let codebase = context.codebase;
+    let needed = codebase.extensions.get(&ascii_lowercase_word(method_name.as_bytes())).and_then(|members| {
+        members.iter().find_map(|(_, member)| {
+            let metadata = codebase.get_method_by_id(member)?;
+            let array = metadata.parameters.first()?.get_type_metadata()?.type_union.get_single_array()?;
+
+            is_list_member(member.get_class_name(), metadata)
+                .then(|| get_array_parameters(array, codebase).1)
+                .filter(|elements| !elements.has_template_types())
+        })
+    });
+    if let Some(needed) = needed {
+        let needed = display_type(context, &needed);
+        context.collector.report_with_code(
+            IssueCode::WhereConstraintViolation,
+            Issue::error(format!("`{method_name}` needs elements of type `{needed}`, and this is a `{collection}`."))
+                .with_annotation(Annotation::primary(selector_span).with_message("A method of these elements only."))
+                .with_annotation(Annotation::secondary(obj_span).with_message(format!("This is a `{collection}`.")))
+                .with_help(format!("Call it on a collection whose elements are `{needed}`.")),
+        );
+
+        return;
+    }
+    let methods = extension_methods(context, list);
+
+    context.collector.report_with_code(
+        IssueCode::NonExistentMethod,
+        Issue::error(format!("Method `{method_name}` does not exist on `{collection}`."))
+            .with_annotation(Annotation::primary(selector_span).with_message("This method selection is invalid"))
+            .with_annotation(
+                Annotation::secondary(obj_span).with_message(format!("This expression has type `{collection}`")),
+            )
+            .with_help(format!("A `{collection}` has the methods {}.", methods.join(", "))),
+    );
 }
 
 /// Reports a method a PHP# `string`, `int`, `float` or `bool`, named `scalar`, does not have, naming the extension
@@ -1820,9 +1895,9 @@ pub(crate) fn report_non_existent_method<A>(
     context.collector.report_with_code(IssueCode::NonExistentMethod, issue);
 }
 
-/// Reports a method a PHP# `List`, `Map`, `Set` or `Iterable` does not have, naming the collection type the code wrote
-/// and the methods `classname`, its `Sharp\Internal\ListMethods`, `Sharp\Internal\MapMethods`,
-/// `Sharp\Internal\SetMethods` or `Sharp\Internal\IterableMethods`, gives it.
+/// Reports a method a PHP# `Map`, `Set` or `Iterable` does not have, naming the collection type the code wrote and the
+/// methods `classname`, its `Sharp\Internal\MapMethods`, `Sharp\Internal\SetMethods` or
+/// `Sharp\Internal\IterableMethods`, gives it.
 fn report_non_existent_collection_method<A>(
     context: &mut Context<'_, '_, A>,
     obj_span: Span,

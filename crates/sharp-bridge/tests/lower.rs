@@ -18,7 +18,6 @@ use indoc::indoc;
 
 use mago_database::file::File;
 use mago_database::file::FileType;
-use mago_names::INLINED;
 use mago_sharp_bridge::InlineForms;
 use mago_sharp_bridge::Unit;
 use mago_sharp_bridge::inline_forms;
@@ -4392,13 +4391,12 @@ fn a_named_constructor_of_a_generic_class_takes_the_class_type_arguments_as_its_
 /// ```php
 /// public static function track($item, /* type args: bounds "Any?", checks "#0" */): bool {
 ///     \Sharp\Internal\statics(\App\Counter::class, /* the text of "#0" */)['count']++;
-///     (${'receiver#1'} = &\Sharp\Internal\statics(\App\Counter::class, /* the text of "#0" */)['items'])->add($item);
+///     \Sharp\Internal\add(\Sharp\Internal\statics(\App\Counter::class, /* the text of "#0" */)['items'], $item);
 ///     return /* $item is #0 */;
 /// }
 /// \App\Counter::track($order, /* type args "App.Order" */);
 /// \App\Orders::track($order, /* type args "App.Order" */);
-/// (${'receiver#1'} = &\Sharp\Internal\statics(\App\Counter::class, /* the text of "App.Order" */)['items'])
-///     ->add($order);
+/// \Sharp\Internal\add(\Sharp\Internal\statics(\App\Counter::class, /* the text of "App.Order" */)['items'], $order);
 /// \Sharp\Internal\statics(\App\Counter::class, /* the text of "App.Order" */)['count'] = 5;
 /// ```
 ///
@@ -4407,7 +4405,7 @@ fn a_named_constructor_of_a_generic_class_takes_the_class_type_arguments_as_its_
 /// passes `App.Order` after the arguments, as `Orders.track(order)` does from the header `Orders : Counter<Order>`. Each
 /// type argument keeps its own statics, whose entry `\Sharp\Internal\statics` returns by reference for the text of the
 /// type arguments, so `Orders.count` is the entry `Counter<Order>.count` is, also where a write before it makes its
-/// type known. A method call binds the field to a reference first, so `items.add(item)` changes the list where it lives.
+/// type known. `items.add(item)` passes the entry by reference, so it changes the list where it lives.
 #[test]
 fn a_static_method_of_a_generic_class_takes_the_class_type_arguments_as_its_own() {
     let files = lowered_each(
@@ -4459,10 +4457,9 @@ fn a_static_method_of_a_generic_class_takes_the_class_type_arguments_as_its_own(
                       SHARP_TYPE_OF [1]
                         ZVAL "#0"
                   ZVAL "count"
-              METHOD_CALL
-                ASSIGN_REF
-                  VAR
-                    ZVAL "receiver#1"
+              CALL
+                ZVAL "Sharp\\Internal\\add"
+                ARG_LIST
                   DIM
                     CALL
                       ZVAL "Sharp\\Internal\\statics"
@@ -4472,8 +4469,6 @@ fn a_static_method_of_a_generic_class_takes_the_class_type_arguments_as_its_own(
                         SHARP_TYPE_OF [1]
                           ZVAL "#0"
                     ZVAL "items"
-                ZVAL "add"
-                ARG_LIST
                   VAR
                     ZVAL "item"
               RETURN
@@ -4505,10 +4500,9 @@ fn a_static_method_of_a_generic_class_takes_the_class_type_arguments_as_its_own(
                   SHARP_TYPE_ARGS
                     null
                     ZVAL "App.Order"
-              METHOD_CALL
-                ASSIGN_REF
-                  VAR
-                    ZVAL "receiver#1"
+              CALL
+                ZVAL "Sharp\\Internal\\add"
+                ARG_LIST
                   DIM
                     CALL
                       ZVAL "Sharp\\Internal\\statics"
@@ -4518,8 +4512,6 @@ fn a_static_method_of_a_generic_class_takes_the_class_type_arguments_as_its_own(
                         SHARP_TYPE_OF [1]
                           ZVAL "App.Order"
                     ZVAL "items"
-                ZVAL "add"
-                ARG_LIST
                   VAR
                     ZVAL "order"
               ASSIGN
@@ -5053,13 +5045,12 @@ fn new_through_a_class_value_creates_the_class_with_the_type_arguments_it_carrie
 /// ```php
 /// $type = /* the class value of "App.Counter<App.Order>" */;
 /// \Sharp\Internal\statics(\App\Counter::class, /* the text of "App.Order" */)['count'] = 5;
-/// (${'receiver#1'} = &\Sharp\Internal\statics(\App\Counter::class, /* the text of "App.Order" */)['items'])
-///     ->add($order);
+/// \Sharp\Internal\add(\Sharp\Internal\statics(\App\Counter::class, /* the text of "App.Order" */)['items'], $order);
 /// ```
 ///
 /// Spec section 25: a write through a class value writes the static field of the class it holds, as
-/// `Counter<Order>.count = 5` does, so the field is the entry of the type arguments the value carries. A method call
-/// binds the field to a reference first, so `type.items.add(order)` changes the list where it lives.
+/// `Counter<Order>.count = 5` does, so the field is the entry of the type arguments the value carries.
+/// `type.items.add(order)` passes the entry by reference, so it changes the list where it lives.
 #[test]
 fn a_write_through_a_class_value_writes_the_static_field_of_the_type_arguments_it_carries() {
     let lowered = Lowered::with(
@@ -5093,10 +5084,9 @@ fn a_write_through_a_class_value_writes_the_static_field_of_the_type_arguments_i
                         ZVAL "App.Order"
                   ZVAL "count"
                 ZVAL 5
-              METHOD_CALL
-                ASSIGN_REF
-                  VAR
-                    ZVAL "receiver#1"
+              CALL
+                ZVAL "Sharp\\Internal\\add"
+                ARG_LIST
                   DIM
                     CALL
                       ZVAL "Sharp\\Internal\\statics"
@@ -5106,8 +5096,6 @@ fn a_write_through_a_class_value_writes_the_static_field_of_the_type_arguments_i
                         SHARP_TYPE_OF [1]
                           ZVAL "App.Order"
                     ZVAL "items"
-                ZVAL "add"
-                ARG_LIST
                   VAR
                     ZVAL "order"
         "##}
@@ -5909,7 +5897,7 @@ fn a_map_method_runs_on_the_map_and_takes_a_named_argument_by_position() {
 }
 
 /// ```php
-/// $standings->add($status);
+/// \Sharp\Internal\add($standings, $status);
 /// ```
 ///
 /// `List.add` declares its parameter as the `List`'s element type, not a key type, so a case goes in as the case.
@@ -5923,11 +5911,11 @@ fn a_backed_enum_value_goes_into_list_add_as_its_case() {
         ),
         indoc! {r#"
             STMT_LIST
-              METHOD_CALL
-                VAR
-                  ZVAL "standings"
-                ZVAL "add"
+              CALL
+                ZVAL "Sharp\\Internal\\add"
                 ARG_LIST
+                  VAR
+                    ZVAL "standings"
                   VAR
                     ZVAL "status"
         "#}
@@ -6868,49 +6856,15 @@ fn a_list_counts_with_php_count_and_a_map_with_its_method() {
     );
 }
 
-/// Each method the prelude marks `Inlined`, each one of `List`, a PHP array, lowers to PHP on the array, never to a call
-/// of the method itself.
-#[test]
-fn every_inlined_collection_method_lowers_to_php_on_the_array() {
-    let inlined: Vec<(String, String)> = common::PRELUDE
-        .metadata
-        .function_likes
-        .iter()
-        .filter(|(_, metadata)| metadata.has_attribute(INLINED.as_bytes()))
-        .map(|((class, _), metadata)| {
-            (String::from_utf8_lossy(class.as_bytes()).into_owned(), metadata.original_name.to_string())
-        })
-        .collect();
-    assert_eq!(inlined.len(), 11, "{inlined:?}");
-    for (class, method) in &inlined {
-        assert!(class.eq_ignore_ascii_case("Sharp\\Internal\\ListMethods"), "{class}.{method}");
-        let collection = "List";
-        let argument = match method.as_str() {
-            "remove" | "contains" | "indexOf" | "getOrNull" => "1",
-            _ => "",
-        };
-        let body = Lowered::new(&format!(
-            "namespace App.Tenant;\n\nclass Report\n{{\n    public void run({collection}<int> values)\n    {{\n        values.{method}({argument});\n    }}\n}}\n"
-        ))
-        .body();
-        let root = body
-            .lines()
-            .rfind(|line| line.starts_with("  ") && !line.starts_with("   "))
-            .expect("the call lowers to a statement")
-            .trim();
-
-        assert_ne!(root, "METHOD_CALL", "{collection}.{method}:\n{body}");
-    }
-}
-
 /// ```php
-/// $found = $sizes[$extra] ?? null;
-/// $unique = new \Sharp\Set<int>($sizes);
+/// $found = \Sharp\Internal\get($sizes, $extra);
+/// $unique = \Sharp\Internal\toSet($sizes, 'int');
 /// $copy = $sizes;
 /// ```
 ///
-/// Spec section 12: `getOrNull(i)` is the safe read, which gives null past either end, `toSet()` is the `Set` a
-/// literal of the elements makes, each element once, and `toList()` is the list itself, which PHP copies on a write.
+/// Spec section 12: `getOrNull(i)` is the safe read, which gives null past either end, `toSet()` is the `Set` of the
+/// elements, each once, with the type argument the call gives, and `toList()` is the list itself, which PHP copies on
+/// a write.
 #[test]
 fn get_or_null_to_set_and_to_list_lower_to_php_on_the_array() {
     assert_eq!(
@@ -6924,23 +6878,22 @@ fn get_or_null_to_set_and_to_list_lower_to_php_on_the_array() {
               ASSIGN
                 VAR
                   ZVAL "found"
-                COALESCE
-                  DIM
+                CALL
+                  ZVAL "Sharp\\Internal\\get"
+                  ARG_LIST
                     VAR
                       ZVAL "sizes"
                     VAR
                       ZVAL "extra"
-                  ZVAL null
               ASSIGN
                 VAR
                   ZVAL "unique"
-                SHARP_TYPE_ARGS
-                  NEW
-                    ZVAL "Sharp\\Set"
-                    ARG_LIST
-                      VAR
-                        ZVAL "sizes"
-                  ZVAL "int"
+                CALL
+                  ZVAL "Sharp\\Internal\\toSet"
+                  ARG_LIST
+                    VAR
+                      ZVAL "sizes"
+                    ZVAL "int"
               ASSIGN
                 VAR
                   ZVAL "copy"
@@ -6951,19 +6904,17 @@ fn get_or_null_to_set_and_to_list_lower_to_php_on_the_array() {
 }
 
 /// ```php
-/// $held = \in_array($tag, $tags, true);
-/// $at = ((${'index#1'} = \array_search('vip', $tags, true)) === false) ? null : ${'index#1'};
-/// $next = ((${'index#1'} = \array_search($tag, $tags, true)) === false) ? null : ${'index#1'};
-/// $found = (($maybe === null) ? null : \in_array($tag, $maybe, true)) ?? false;
-/// return $held && $at !== $next && $found && \in_array($ratio, $ratios, true);
+/// $held = \Sharp\Internal\contains($tags, $tag);
+/// $at = \Sharp\Internal\indexOf($tags, 'vip');
+/// $next = \Sharp\Internal\indexOf($tags, $tag);
+/// $found = (($maybe === null) ? null : \Sharp\Internal\contains($maybe, $tag)) ?? false;
+/// return $held && $at !== $next && $found && \Sharp\Internal\contains($ratios, $ratio);
 /// ```
 ///
-/// Spec section 12's `contains` and `indexOf` compare by section 19's `==`, which is `===` on a string and on two floats,
-/// so where neither the receiver nor the value runs code they are PHP's strict `in_array` and `array_search`. `indexOf`
-/// gives null where `array_search` gives false, and its hidden `$index#N` holds the index, since index 0 is falsy. The
-/// next search takes the same hidden variable. A null-safe search tests its receiver first.
+/// Spec section 12's `contains` and `indexOf` are the engine functions of their names, which compare each element by
+/// section 19's `==`. `indexOf` gives null where no element is equal. A null-safe search tests its receiver first.
 #[test]
-fn a_list_search_is_a_strict_php_search_where_equality_is_identity() {
+fn a_list_search_is_the_engine_function_of_its_name() {
     assert_eq!(
         body_in(
             "bool run(List<string> tags, string tag, List<float> ratios, float ratio, List<string>? maybe)",
@@ -6976,52 +6927,31 @@ fn a_list_search_is_a_strict_php_search_where_equality_is_identity() {
                 VAR
                   ZVAL "held"
                 CALL
-                  ZVAL "in_array"
+                  ZVAL "Sharp\\Internal\\contains"
                   ARG_LIST
                     VAR
-                      ZVAL "tag"
-                    VAR
                       ZVAL "tags"
-                    ZVAL true
+                    VAR
+                      ZVAL "tag"
               ASSIGN
                 VAR
                   ZVAL "at"
-                CONDITIONAL [1]
-                  BINARY_OP [16]
-                    ASSIGN
-                      VAR
-                        ZVAL "index#1"
-                      CALL
-                        ZVAL "array_search"
-                        ARG_LIST
-                          ZVAL "vip"
-                          VAR
-                            ZVAL "tags"
-                          ZVAL true
-                    ZVAL false
-                  ZVAL null
-                  VAR
-                    ZVAL "index#1"
+                CALL
+                  ZVAL "Sharp\\Internal\\indexOf"
+                  ARG_LIST
+                    VAR
+                      ZVAL "tags"
+                    ZVAL "vip"
               ASSIGN
                 VAR
                   ZVAL "next"
-                CONDITIONAL [1]
-                  BINARY_OP [16]
-                    ASSIGN
-                      VAR
-                        ZVAL "index#1"
-                      CALL
-                        ZVAL "array_search"
-                        ARG_LIST
-                          VAR
-                            ZVAL "tag"
-                          VAR
-                            ZVAL "tags"
-                          ZVAL true
-                    ZVAL false
-                  ZVAL null
-                  VAR
-                    ZVAL "index#1"
+                CALL
+                  ZVAL "Sharp\\Internal\\indexOf"
+                  ARG_LIST
+                    VAR
+                      ZVAL "tags"
+                    VAR
+                      ZVAL "tag"
               ASSIGN
                 VAR
                   ZVAL "found"
@@ -7033,13 +6963,12 @@ fn a_list_search_is_a_strict_php_search_where_equality_is_identity() {
                       ZVAL null
                     ZVAL null
                     CALL
-                      ZVAL "in_array"
+                      ZVAL "Sharp\\Internal\\contains"
                       ARG_LIST
                         VAR
-                          ZVAL "tag"
-                        VAR
                           ZVAL "maybe"
-                        ZVAL true
+                        VAR
+                          ZVAL "tag"
                   ZVAL false
               RETURN
                 AND
@@ -7055,350 +6984,29 @@ fn a_list_search_is_a_strict_php_search_where_equality_is_identity() {
                     VAR
                       ZVAL "found"
                   CALL
-                    ZVAL "in_array"
+                    ZVAL "Sharp\\Internal\\contains"
                     ARG_LIST
-                      VAR
-                        ZVAL "ratio"
                       VAR
                         ZVAL "ratios"
-                      ZVAL true
-        "#}
-    );
-}
-
-/// ```php
-/// return \array_find_key($prices, (fn (${'value#1'}) => fn (${'element#2'}) => \App\Money::op_Equality(${'element#2'}, ${'value#1'}))($price)) !== null
-///     && \array_find_key($amounts, (fn (${'value#1'}) => fn (${'element#2'}) =>
-///         ((${'operand#3'} = ${'element#2'}) === null) === ((${'operand#4'} = ${'value#1'}) === null)
-///         && (${'operand#3'} === null || (float) ${'operand#3'} === (float) ${'operand#4'}))(1)) === 0
-///     && \array_find_key($rows, (fn (${'value#1'}) => fn (${'element#2'}) => ${'element#2'} == ${'value#1'})($row)) !== null;
-/// ```
-///
-/// Where section 19's `==` is not `===`, a search runs the `==` the bridge lowers for each element: the `op_Equality`
-/// the element's class declares, an int compared with a float as two floats, where a null element equals only null,
-/// or PHP's `==` on two `Map`s. The outer function takes the value once, as an argument, after the receiver, and the
-/// inner one compares an element with it. `contains` is whether `\array_find_key` found a key.
-#[test]
-fn a_list_search_runs_the_equality_of_its_element_type_for_each_element() {
-    assert_eq!(
-        ledger_body(
-            "bool run(List<Money> prices, Money price, List<(int|float)?> amounts, List<Map<string, int>> rows, Map<string, int> row)",
-            "        return prices.contains(price) && amounts.indexOf(1) == 0 && rows.contains(row);\n"
-        ),
-        indoc! {r#"
-            STMT_LIST
-              ASSIGN
-                VAR
-                  ZVAL "rows"
-                CONDITIONAL
-                  CALL
-                    ZVAL "is_array"
-                    ARG_LIST
                       VAR
-                        ZVAL "rows"
-                  CALL
-                    ZVAL "array_map"
-                    ARG_LIST
-                      ARROW_FUNC "" @14-14
-                        PARAM_LIST
-                          PARAM
-                            null
-                            ZVAL "element#1"
-                            null
-                            null
-                            null
-                            null
-                        null
-                        CONDITIONAL
-                          CALL
-                            ZVAL "is_array"
-                            ARG_LIST
-                              VAR
-                                ZVAL "element#1"
-                          SHARP_TYPE_ARGS
-                            NEW
-                              ZVAL "Sharp\\Map"
-                              ARG_LIST
-                                CALL
-                                  ZVAL "array_merge"
-                                  ARG_LIST
-                                    ARRAY [3]
-                                    UNPACK
-                                      CALL
-                                        ZVAL "array_map"
-                                        ARG_LIST
-                                          ARROW_FUNC "" @14-14
-                                            PARAM_LIST
-                                              PARAM
-                                                null
-                                                ZVAL "key#2"
-                                                null
-                                                null
-                                                null
-                                                null
-                                              PARAM
-                                                null
-                                                ZVAL "value#3"
-                                                null
-                                                null
-                                                null
-                                                null
-                                            null
-                                            ARRAY [3]
-                                              ARRAY_ELEM
-                                                CAST [6]
-                                                  VAR
-                                                    ZVAL "key#2"
-                                                null
-                                              ARRAY_ELEM
-                                                VAR
-                                                  ZVAL "value#3"
-                                                null
-                                            null
-                                            null
-                                          CALL
-                                            ZVAL "array_keys"
-                                            ARG_LIST
-                                              VAR
-                                                ZVAL "element#1"
-                                          VAR
-                                            ZVAL "element#1"
-                            ZVAL "string, int"
-                          VAR
-                            ZVAL "element#1"
-                        null
-                        null
-                      VAR
-                        ZVAL "rows"
-                  VAR
-                    ZVAL "rows"
-              ASSIGN
-                VAR
-                  ZVAL "row"
-                CONDITIONAL
-                  CALL
-                    ZVAL "is_array"
-                    ARG_LIST
-                      VAR
-                        ZVAL "row"
-                  SHARP_TYPE_ARGS
-                    NEW
-                      ZVAL "Sharp\\Map"
-                      ARG_LIST
-                        CALL
-                          ZVAL "array_merge"
-                          ARG_LIST
-                            ARRAY [3]
-                            UNPACK
-                              CALL
-                                ZVAL "array_map"
-                                ARG_LIST
-                                  ARROW_FUNC "" @14-14
-                                    PARAM_LIST
-                                      PARAM
-                                        null
-                                        ZVAL "key#1"
-                                        null
-                                        null
-                                        null
-                                        null
-                                      PARAM
-                                        null
-                                        ZVAL "value#2"
-                                        null
-                                        null
-                                        null
-                                        null
-                                    null
-                                    ARRAY [3]
-                                      ARRAY_ELEM
-                                        CAST [6]
-                                          VAR
-                                            ZVAL "key#1"
-                                        null
-                                      ARRAY_ELEM
-                                        VAR
-                                          ZVAL "value#2"
-                                        null
-                                    null
-                                    null
-                                  CALL
-                                    ZVAL "array_keys"
-                                    ARG_LIST
-                                      VAR
-                                        ZVAL "row"
-                                  VAR
-                                    ZVAL "row"
-                    ZVAL "string, int"
-                  VAR
-                    ZVAL "row"
-              RETURN
-                AND
-                  AND
-                    BINARY_OP [17]
-                      CALL
-                        ZVAL "array_find_key"
-                        ARG_LIST
-                          VAR
-                            ZVAL "prices"
-                          CALL
-                            ARROW_FUNC "" @16-16
-                              PARAM_LIST
-                                PARAM
-                                  null
-                                  ZVAL "value#1"
-                                  null
-                                  null
-                                  null
-                                  null
-                              null
-                              ARROW_FUNC "" @16-16
-                                PARAM_LIST
-                                  PARAM
-                                    null
-                                    ZVAL "element#2"
-                                    null
-                                    null
-                                    null
-                                    null
-                                null
-                                STATIC_CALL
-                                  ZVAL "App\\Money"
-                                  ZVAL "op_Equality"
-                                  ARG_LIST
-                                    VAR
-                                      ZVAL "element#2"
-                                    VAR
-                                      ZVAL "value#1"
-                                null
-                                null
-                              null
-                              null
-                            ARG_LIST
-                              VAR
-                                ZVAL "price"
-                      ZVAL null
-                    BINARY_OP [16]
-                      CALL
-                        ZVAL "array_find_key"
-                        ARG_LIST
-                          VAR
-                            ZVAL "amounts"
-                          CALL
-                            ARROW_FUNC "" @16-16
-                              PARAM_LIST
-                                PARAM
-                                  null
-                                  ZVAL "value#1"
-                                  null
-                                  null
-                                  null
-                                  null
-                              null
-                              ARROW_FUNC "" @16-16
-                                PARAM_LIST
-                                  PARAM
-                                    null
-                                    ZVAL "element#2"
-                                    null
-                                    null
-                                    null
-                                    null
-                                null
-                                AND
-                                  BINARY_OP [16]
-                                    BINARY_OP [16]
-                                      ASSIGN
-                                        VAR
-                                          ZVAL "operand#3"
-                                        VAR
-                                          ZVAL "element#2"
-                                      ZVAL null
-                                    BINARY_OP [16]
-                                      ASSIGN
-                                        VAR
-                                          ZVAL "operand#4"
-                                        VAR
-                                          ZVAL "value#1"
-                                      ZVAL null
-                                  OR
-                                    BINARY_OP [16]
-                                      VAR
-                                        ZVAL "operand#3"
-                                      ZVAL null
-                                    BINARY_OP [16]
-                                      CAST [5]
-                                        VAR
-                                          ZVAL "operand#3"
-                                      CAST [5]
-                                        VAR
-                                          ZVAL "operand#4"
-                                null
-                                null
-                              null
-                              null
-                            ARG_LIST
-                              ZVAL 1
-                      ZVAL 0
-                  BINARY_OP [17]
-                    CALL
-                      ZVAL "array_find_key"
-                      ARG_LIST
-                        VAR
-                          ZVAL "rows"
-                        CALL
-                          ARROW_FUNC "" @16-16
-                            PARAM_LIST
-                              PARAM
-                                null
-                                ZVAL "value#1"
-                                null
-                                null
-                                null
-                                null
-                            null
-                            ARROW_FUNC "" @16-16
-                              PARAM_LIST
-                                PARAM
-                                  null
-                                  ZVAL "element#2"
-                                  null
-                                  null
-                                  null
-                                  null
-                              null
-                              BINARY_OP [18]
-                                VAR
-                                  ZVAL "element#2"
-                                VAR
-                                  ZVAL "value#1"
-                              null
-                              null
-                            null
-                            null
-                          ARG_LIST
-                            VAR
-                              ZVAL "row"
-                    ZVAL null
+                        ZVAL "ratio"
         "#}
     );
 }
 
 /// ```php
 /// $x = 1;
-/// return \array_find_key($this->bump($xs), (fn (${'value#1'}) => fn (${'element#2'}) => ${'element#2'} === ${'value#1'})($this->n)) !== null
-///     && \array_find_key(\App\Tenant\Report::pick($xs, $x = 2), (fn (${'value#1'}) => fn (${'element#2'}) => ${'element#2'} === ${'value#1'})($x)) === 0
-///     && ((${'index#2'} = \array_find_key((${'receiver#1'} = $this->bumped())->items, (fn (${'value#3'}) => fn (${'element#4'}) =>
-///         ${'element#4'} === ${'value#3'})($this->n))) !== null) && ${'receiver#1'}->items->removeAt(${'index#2'}) === null;
+/// return \Sharp\Internal\contains($this->bump($xs), $this->n)
+///     && \Sharp\Internal\indexOf(\App\Tenant\Report::pick($xs, $x = 2), $x) === 0
+///     && [${'receiver#1'} = $this->bumped(), \Sharp\Internal\remove(${'receiver#1'}->items, $this->n)][1];
 ///
 /// return $this->bumped()->counts->has($this->n) && $this->bumped()->counts->remove($this->n);
 /// ```
 ///
-/// PHP's `in_array` and `array_search` read their value before their array, so a search whose receiver or value runs
-/// code takes the form that runs the receiver first, as the call runs it: `this.bump(xs)` changes `this.n` before
-/// `contains` reads it, `Report.pick(xs, x = 2)` assigns `x` before `indexOf` reads it, and `this.bumped()` changes
-/// `this.n` before a `List`'s `remove` reads it. A `Map`'s `has` and `remove` are method calls on the `Map`, which PHP
-/// runs receiver first.
+/// A search runs its receiver before its value, as the call runs it: the engine function takes the list first, so
+/// `this.bump(xs)` changes `this.n` before `contains` reads it, `Report.pick(xs, x = 2)` assigns `x` before `indexOf`
+/// reads it, and `this.bumped()`, held once for the place `remove` changes, changes `this.n` before `remove` reads it.
+/// A `Map`'s `has` and `remove` are method calls on the `Map`, which PHP runs receiver first.
 
 #[test]
 fn a_search_runs_its_receiver_before_its_value() {
@@ -7416,56 +7024,23 @@ fn a_search_runs_its_receiver_before_its_value() {
               RETURN
                 AND
                   AND
-                    BINARY_OP [17]
-                      CALL
-                        ZVAL "array_find_key"
-                        ARG_LIST
-                          METHOD_CALL
+                    CALL
+                      ZVAL "Sharp\\Internal\\contains"
+                      ARG_LIST
+                        METHOD_CALL
+                          VAR
+                            ZVAL "this"
+                          ZVAL "bump"
+                          ARG_LIST
                             VAR
-                              ZVAL "this"
-                            ZVAL "bump"
-                            ARG_LIST
-                              VAR
-                                ZVAL "xs"
-                          CALL
-                            ARROW_FUNC "" @26-26
-                              PARAM_LIST
-                                PARAM
-                                  null
-                                  ZVAL "value#1"
-                                  null
-                                  null
-                                  null
-                                  null
-                              null
-                              ARROW_FUNC "" @26-26
-                                PARAM_LIST
-                                  PARAM
-                                    null
-                                    ZVAL "element#2"
-                                    null
-                                    null
-                                    null
-                                    null
-                                null
-                                BINARY_OP [16]
-                                  VAR
-                                    ZVAL "element#2"
-                                  VAR
-                                    ZVAL "value#1"
-                                null
-                                null
-                              null
-                              null
-                            ARG_LIST
-                              PROP
-                                VAR
-                                  ZVAL "this"
-                                ZVAL "n"
-                      ZVAL null
+                              ZVAL "xs"
+                        PROP
+                          VAR
+                            ZVAL "this"
+                          ZVAL "n"
                     BINARY_OP [16]
                       CALL
-                        ZVAL "array_find_key"
+                        ZVAL "Sharp\\Internal\\indexOf"
                         ARG_LIST
                           STATIC_CALL
                             ZVAL "App\\Tenant\\Report"
@@ -7477,105 +7052,35 @@ fn a_search_runs_its_receiver_before_its_value() {
                                 VAR
                                   ZVAL "x"
                                 ZVAL 2
-                          CALL
-                            ARROW_FUNC "" @26-26
-                              PARAM_LIST
-                                PARAM
-                                  null
-                                  ZVAL "value#1"
-                                  null
-                                  null
-                                  null
-                                  null
-                              null
-                              ARROW_FUNC "" @26-26
-                                PARAM_LIST
-                                  PARAM
-                                    null
-                                    ZVAL "element#2"
-                                    null
-                                    null
-                                    null
-                                    null
-                                null
-                                BINARY_OP [16]
-                                  VAR
-                                    ZVAL "element#2"
-                                  VAR
-                                    ZVAL "value#1"
-                                null
-                                null
-                              null
-                              null
-                            ARG_LIST
-                              VAR
-                                ZVAL "x"
+                          VAR
+                            ZVAL "x"
                       ZVAL 0
-                  AND
-                    BINARY_OP [17]
-                      ASSIGN
-                        VAR
-                          ZVAL "index#2"
-                        CALL
-                          ZVAL "array_find_key"
-                          ARG_LIST
-                            PROP
-                              ASSIGN
-                                VAR
-                                  ZVAL "receiver#1"
-                                METHOD_CALL
-                                  VAR
-                                    ZVAL "this"
-                                  ZVAL "bumped"
-                                  ARG_LIST
-                              ZVAL "items"
-                            CALL
-                              ARROW_FUNC "" @26-26
-                                PARAM_LIST
-                                  PARAM
-                                    null
-                                    ZVAL "value#3"
-                                    null
-                                    null
-                                    null
-                                    null
-                                null
-                                ARROW_FUNC "" @26-26
-                                  PARAM_LIST
-                                    PARAM
-                                      null
-                                      ZVAL "element#4"
-                                      null
-                                      null
-                                      null
-                                      null
-                                  null
-                                  BINARY_OP [16]
-                                    VAR
-                                      ZVAL "element#4"
-                                    VAR
-                                      ZVAL "value#3"
-                                  null
-                                  null
-                                null
-                                null
-                              ARG_LIST
-                                PROP
-                                  VAR
-                                    ZVAL "this"
-                                  ZVAL "n"
-                      ZVAL null
-                    BINARY_OP [16]
-                      METHOD_CALL
-                        PROP
+                  DIM
+                    ARRAY [3]
+                      ARRAY_ELEM
+                        ASSIGN
                           VAR
                             ZVAL "receiver#1"
-                          ZVAL "items"
-                        ZVAL "removeAt"
-                        ARG_LIST
-                          VAR
-                            ZVAL "index#2"
-                      ZVAL null
+                          METHOD_CALL
+                            VAR
+                              ZVAL "this"
+                            ZVAL "bumped"
+                            ARG_LIST
+                        null
+                      ARRAY_ELEM
+                        CALL
+                          ZVAL "Sharp\\Internal\\remove"
+                          ARG_LIST
+                            PROP
+                              VAR
+                                ZVAL "receiver#1"
+                              ZVAL "items"
+                            PROP
+                              VAR
+                                ZVAL "this"
+                              ZVAL "n"
+                        null
+                    ZVAL 1
         "#}
     );
     assert_eq!(
@@ -7620,13 +7125,13 @@ fn a_search_runs_its_receiver_before_its_value() {
 }
 
 /// ```php
-/// $last = ($sizes === []) ? throw new \OutOfRangeException('The list is empty.') : \array_last($sizes);
-/// return ((${'receiver#1'} = $this->make()) === []) ? throw new \OutOfRangeException('The list is empty.') : \array_last(${'receiver#1'});
+/// $last = @\array_last(\Sharp\Internal\nonEmpty($sizes));
+/// return $last + @\array_last(\Sharp\Internal\nonEmpty($this->make()));
 /// ```
 ///
-/// `last()` is the last element, and throws `OutOfRangeException` on an empty list, as Kotlin's `last()` throws. It
-/// tests the list for `[]` rather than `\array_last` for null, which a `List<int?>` may hold last, so it reads the
-/// receiver twice, a receiver that runs code through a hidden `$receiver#N`.
+/// `last()` is the last element, and throws `OutOfRangeException` on an empty list, as Kotlin's `last()` throws.
+/// `Sharp\Internal\nonEmpty` throws on an empty list rather than `\array_last` giving null, which a `List<int?>` may
+/// hold last, and the receiver runs once. Its result is no generic call's to check: the list's elements are checked.
 #[test]
 fn last_is_the_last_element_and_throws_on_an_empty_list() {
     assert_eq!(
@@ -7639,46 +7144,31 @@ fn last_is_the_last_element_and_throws_on_an_empty_list() {
               ASSIGN
                 VAR
                   ZVAL "last"
-                CONDITIONAL [1]
-                  BINARY_OP [16]
-                    VAR
-                      ZVAL "sizes"
-                    ARRAY [3]
-                  THROW
-                    NEW
-                      ZVAL "OutOfRangeException"
-                      ARG_LIST
-                        ZVAL "The list is empty."
+                SILENCE
                   CALL
                     ZVAL "array_last"
                     ARG_LIST
-                      VAR
-                        ZVAL "sizes"
+                      CALL
+                        ZVAL "Sharp\\Internal\\nonEmpty"
+                        ARG_LIST
+                          VAR
+                            ZVAL "sizes"
               RETURN
                 BINARY_OP [1]
                   VAR
                     ZVAL "last"
-                  CONDITIONAL [1]
-                    BINARY_OP [16]
-                      ASSIGN
-                        VAR
-                          ZVAL "receiver#1"
-                        METHOD_CALL
-                          VAR
-                            ZVAL "this"
-                          ZVAL "make"
-                          ARG_LIST
-                      ARRAY [3]
-                    THROW
-                      NEW
-                        ZVAL "OutOfRangeException"
-                        ARG_LIST
-                          ZVAL "The list is empty."
+                  SILENCE
                     CALL
                       ZVAL "array_last"
                       ARG_LIST
-                        VAR
-                          ZVAL "receiver#1"
+                        CALL
+                          ZVAL "Sharp\\Internal\\nonEmpty"
+                          ARG_LIST
+                            METHOD_CALL
+                              VAR
+                                ZVAL "this"
+                              ZVAL "make"
+                              ARG_LIST
         "#}
     );
 }
@@ -7686,12 +7176,12 @@ fn last_is_the_last_element_and_throws_on_an_empty_list() {
 /// ```php
 /// $stock = \is_array($stock) ? new \Sharp\Set<string>($stock) : $stock;
 /// $held = $listed ? $names : $stock;
-/// return (\is_array($held) ? \in_array('tea', $held, true) : $held->contains('tea')) && \count($held) > 0;
+/// return (\is_array($held) ? \Sharp\ListMembers::contains($held, 'tea') : $held->contains('tea'))
+///     && (\is_array($held) ? \Sharp\ListMembers::count($held) : $held->count()) > 0;
 /// ```
 ///
-/// A method a `List` shares with a `Map` or a `Set` runs on a value that may be either: the `List`'s PHP on the array
-/// when the value is one, and the collection's own method otherwise. `count` needs no test, as PHP's `\count` counts
-/// a `Map` and a `Set` too.
+/// A method a `List` shares with a `Map` or a `Set` runs on a value that may be either, spec section 12: the `List`'s
+/// member when the value is an array, and the collection's own method otherwise.
 #[test]
 fn a_shared_list_method_on_a_value_that_may_be_another_collection_tests_for_the_list() {
     assert_eq!(
@@ -7737,13 +7227,13 @@ fn a_shared_list_method_on_a_value_that_may_be_another_collection_tests_for_the_
                       ARG_LIST
                         VAR
                           ZVAL "held"
-                    CALL
-                      ZVAL "in_array"
+                    STATIC_CALL
+                      ZVAL "Sharp\\ListMembers"
+                      ZVAL "contains"
                       ARG_LIST
-                        ZVAL "tea"
                         VAR
                           ZVAL "held"
-                        ZVAL true
+                        ZVAL "tea"
                     METHOD_CALL
                       VAR
                         ZVAL "held"
@@ -7751,23 +7241,100 @@ fn a_shared_list_method_on_a_value_that_may_be_another_collection_tests_for_the_
                       ARG_LIST
                         ZVAL "tea"
                   GREATER
-                    CALL
-                      ZVAL "count"
-                      ARG_LIST
+                    CONDITIONAL [1]
+                      CALL
+                        ZVAL "is_array"
+                        ARG_LIST
+                          VAR
+                            ZVAL "held"
+                      STATIC_CALL
+                        ZVAL "Sharp\\ListMembers"
+                        ZVAL "count"
+                        ARG_LIST
+                          VAR
+                            ZVAL "held"
+                      METHOD_CALL
                         VAR
                           ZVAL "held"
+                        ZVAL "count"
+                        ARG_LIST
                     ZVAL 0
         "#}
     );
+    // A receiver that runs something runs once, before an argument that runs something:
+    // `[$receiver#1 = $this->listed() ? $this->names : $this->stock, [$argument#2 = $this->wanted(), …][1]][1]`.
+    let run = Lowered::new(
+        "namespace App.Tenant;\n\nclass Report\n{\n    private List<string> names = [];\n\n    private Set<string> stock = [];\n\n    public bool listed() => true;\n\n    public string wanted() => \"tea\";\n\n    public bool run() => (this.listed() ? this.names : this.stock).contains(this.wanted());\n}\n",
+    )
+    .body_of("run");
+    let (receiver, argument) = (run.find(r##"ZVAL "receiver#1""##), run.find(r##"ZVAL "argument#2""##));
+    assert!(receiver.is_some() && receiver < argument, "{run}");
+    assert_eq!(run.matches(r#"ZVAL "listed""#).count(), 1, "{run}");
+    // A change passes the place, the local, to both, and a named argument goes by its name to both.
+    let body = Lowered::new(
+        "namespace App.Tenant;\n\nclass Report\n{\n    public bool run(bool listed, List<string> names, Set<string> stock)\n    {\n        let held = listed ? names : stock;\n        held.add(\"tea\");\n        return held.contains(value: \"tea\");\n    }\n}\n",
+    )
+    .body();
+    let changes = &body[body.find("  CONDITIONAL [1]").expect("the change")..];
+    assert_eq!(
+        format!("STMT_LIST\n{changes}"),
+        indoc! {r#"
+            STMT_LIST
+              CONDITIONAL [1]
+                CALL
+                  ZVAL "is_array"
+                  ARG_LIST
+                    VAR
+                      ZVAL "held"
+                STATIC_CALL
+                  ZVAL "Sharp\\ListMembers"
+                  ZVAL "add"
+                  ARG_LIST
+                    VAR
+                      ZVAL "held"
+                    ZVAL "tea"
+                METHOD_CALL
+                  VAR
+                    ZVAL "held"
+                  ZVAL "add"
+                  ARG_LIST
+                    ZVAL "tea"
+              RETURN
+                CONDITIONAL [1]
+                  CALL
+                    ZVAL "is_array"
+                    ARG_LIST
+                      VAR
+                        ZVAL "held"
+                  STATIC_CALL
+                    ZVAL "Sharp\\ListMembers"
+                    ZVAL "contains"
+                    ARG_LIST
+                      VAR
+                        ZVAL "held"
+                      NAMED_ARG
+                        ZVAL "value"
+                        ZVAL "tea"
+                  METHOD_CALL
+                    VAR
+                      ZVAL "held"
+                    ZVAL "contains"
+                    ARG_LIST
+                      NAMED_ARG
+                        ZVAL "value"
+                        ZVAL "tea"
+        "#}
+    );
+    assert_eq!(run.matches(r#"ZVAL "wanted""#).count(), 1, "{run}");
 }
 
 /// ```php
-/// return (($sizes === []) ? throw new \OutOfRangeException('The list is empty.') : \max($sizes))
-///     + (((${'receiver#1'} = $this->make()) === []) ? throw new \OutOfRangeException('The list is empty.') : \max(${'receiver#1'}));
+/// return @\max(\Sharp\Internal\nonEmpty($sizes)) + @\max(\Sharp\Internal\nonEmpty($this->make()));
 /// ```
 ///
 /// A `List<int>`'s `max()` and `min()` are its largest and smallest element, PHP's `\max` and `\min` on the array,
-/// and throw `OutOfRangeException` on an empty list, as `last()` does, where PHP's throw a `ValueError`.
+/// and throw `OutOfRangeException` on an empty list, as `last()` does, where PHP's throw a `ValueError`:
+/// `Sharp\Internal\nonEmpty` gives the list it takes, and throws on an empty one. The receiver runs once.
 #[test]
 fn max_and_min_are_the_largest_and_smallest_element_and_throw_on_an_empty_list() {
     for method in ["max", "min"] {
@@ -7781,42 +7348,27 @@ fn max_and_min_are_the_largest_and_smallest_element_and_throw_on_an_empty_list()
                     STMT_LIST
                       RETURN
                         BINARY_OP [1]
-                          CONDITIONAL [1]
-                            BINARY_OP [16]
-                              VAR
-                                ZVAL "sizes"
-                              ARRAY [3]
-                            THROW
-                              NEW
-                                ZVAL "OutOfRangeException"
-                                ARG_LIST
-                                  ZVAL "The list is empty."
+                          SILENCE
                             CALL
                               ZVAL "{method}"
                               ARG_LIST
-                                VAR
-                                  ZVAL "sizes"
-                          CONDITIONAL [1]
-                            BINARY_OP [16]
-                              ASSIGN
-                                VAR
-                                  ZVAL "receiver#1"
-                                METHOD_CALL
-                                  VAR
-                                    ZVAL "this"
-                                  ZVAL "make"
+                                CALL
+                                  ZVAL "Sharp\\Internal\\nonEmpty"
                                   ARG_LIST
-                              ARRAY [3]
-                            THROW
-                              NEW
-                                ZVAL "OutOfRangeException"
-                                ARG_LIST
-                                  ZVAL "The list is empty."
+                                    VAR
+                                      ZVAL "sizes"
+                          SILENCE
                             CALL
                               ZVAL "{method}"
                               ARG_LIST
-                                VAR
-                                  ZVAL "receiver#1"
+                                CALL
+                                  ZVAL "Sharp\\Internal\\nonEmpty"
+                                  ARG_LIST
+                                    METHOD_CALL
+                                      VAR
+                                        ZVAL "this"
+                                      ZVAL "make"
+                                      ARG_LIST
                 "#},
                 method = method
             ),
@@ -7826,16 +7378,15 @@ fn max_and_min_are_the_largest_and_smallest_element_and_throw_on_an_empty_list()
 }
 
 /// ```php
-/// $tags->insert(0, 'a');
-/// $removed = ((${'index#1'} = \array_search('a', $tags, true)) !== false) && $tags->removeAt(${'index#1'}) === null;
-/// $tags = [];
-/// return $removed && ((${'index#1'} = \array_find_key($prices, (fn (${'value#2'}) => fn (${'element#3'}) =>
-///     \App\Money::op_Equality(${'element#3'}, ${'value#2'}))($price))) !== null) && $prices->removeAt(${'index#1'}) === null;
+/// \Sharp\Internal\insert($tags, 0, 'a');
+/// $removed = \Sharp\Internal\remove($tags, 'a');
+/// \Sharp\Internal\clear($tags);
+/// return $removed && \Sharp\Internal\remove($prices, $price);
 /// ```
 ///
-/// Spec section 12's changes to a `List` write it back where it lives. `insert` is the `Sharp\Collection` method of
-/// its name. `remove(value)` finds the index of the first element `==` the value, as `indexOf` does, and gives true
-/// when `Sharp\Collection::removeAt` removed it, which renumbers the list. `clear` assigns `[]`.
+/// Spec section 12's changes to a `List` write it back where it lives: each is the engine function of its name, which
+/// takes the list by reference. `remove(value)` removes the first element `==` the value, by spec section 19's `==`
+/// of the element type, as `Money`'s `operator ==`, renumbers the list and gives whether it removed one.
 #[test]
 fn list_insert_remove_and_clear_change_the_list_where_it_lives() {
     assert_eq!(
@@ -7845,102 +7396,38 @@ fn list_insert_remove_and_clear_change_the_list_where_it_lives() {
         ),
         indoc! {r#"
             STMT_LIST
-              METHOD_CALL
-                VAR
-                  ZVAL "tags"
-                ZVAL "insert"
+              CALL
+                ZVAL "Sharp\\Internal\\insert"
                 ARG_LIST
+                  VAR
+                    ZVAL "tags"
                   ZVAL 0
                   ZVAL "a"
               ASSIGN
                 VAR
                   ZVAL "removed"
-                AND
-                  BINARY_OP [17]
-                    ASSIGN
-                      VAR
-                        ZVAL "index#1"
-                      CALL
-                        ZVAL "array_search"
-                        ARG_LIST
-                          ZVAL "a"
-                          VAR
-                            ZVAL "tags"
-                          ZVAL true
-                    ZVAL false
-                  BINARY_OP [16]
-                    METHOD_CALL
-                      VAR
-                        ZVAL "tags"
-                      ZVAL "removeAt"
-                      ARG_LIST
-                        VAR
-                          ZVAL "index#1"
-                    ZVAL null
-              ASSIGN
-                VAR
-                  ZVAL "tags"
-                ARRAY [3]
+                CALL
+                  ZVAL "Sharp\\Internal\\remove"
+                  ARG_LIST
+                    VAR
+                      ZVAL "tags"
+                    ZVAL "a"
+              CALL
+                ZVAL "Sharp\\Internal\\clear"
+                ARG_LIST
+                  VAR
+                    ZVAL "tags"
               RETURN
                 AND
                   VAR
                     ZVAL "removed"
-                  AND
-                    BINARY_OP [17]
-                      ASSIGN
-                        VAR
-                          ZVAL "index#1"
-                        CALL
-                          ZVAL "array_find_key"
-                          ARG_LIST
-                            VAR
-                              ZVAL "prices"
-                            CALL
-                              ARROW_FUNC "" @19-19
-                                PARAM_LIST
-                                  PARAM
-                                    null
-                                    ZVAL "value#2"
-                                    null
-                                    null
-                                    null
-                                    null
-                                null
-                                ARROW_FUNC "" @19-19
-                                  PARAM_LIST
-                                    PARAM
-                                      null
-                                      ZVAL "element#3"
-                                      null
-                                      null
-                                      null
-                                      null
-                                  null
-                                  STATIC_CALL
-                                    ZVAL "App\\Money"
-                                    ZVAL "op_Equality"
-                                    ARG_LIST
-                                      VAR
-                                        ZVAL "element#3"
-                                      VAR
-                                        ZVAL "value#2"
-                                  null
-                                  null
-                                null
-                                null
-                              ARG_LIST
-                                VAR
-                                  ZVAL "price"
-                      ZVAL null
-                    BINARY_OP [16]
-                      METHOD_CALL
-                        VAR
-                          ZVAL "prices"
-                        ZVAL "removeAt"
-                        ARG_LIST
-                          VAR
-                            ZVAL "index#1"
-                      ZVAL null
+                  CALL
+                    ZVAL "Sharp\\Internal\\remove"
+                    ARG_LIST
+                      VAR
+                        ZVAL "prices"
+                      VAR
+                        ZVAL "price"
         "#}
     );
 }
@@ -7949,20 +7436,21 @@ fn list_insert_remove_and_clear_change_the_list_where_it_lives() {
 /// $sets = \is_array($sets) ? \array_map(fn ($element#1) => \is_array($element#1) ? new \Sharp\Set($element#1) : $element#1, $sets) : $sets;
 /// $maps = …;
 /// $stock = …;
-/// $grid[0]->clear();
+/// (\array_key_exists(0, $grid) ? \Sharp\Internal\clear($grid[0]) : throw new \OutOfRangeException('Undefined array key ' . 0));
 /// $sets[0]->add(4);
 /// $maps[0]->put('c', 3);
 /// $maps[0]['d'] ?? $maps[0]->put('d', 4);
-/// ((${'index#2'} = \array_find_key($grid[${'index#1'} = $this->next()], …)) !== null)
-///     && $grid[${'index#1'}]->removeAt(${'index#2'}) === null;
-/// return (($stock['a'] ?? null) === null) ? null : \count($stock['a']);
+/// [${'index#1'} = $this->next(), (\array_key_exists(${'index#1'}, $grid) ? \Sharp\Internal\remove($grid[${'index#1'}], 2)
+///     : throw new \OutOfRangeException('Undefined array key ' . ${'index#1'}))][1];
+/// return ((${'nullsafe#1'} = $stock['a'] ?? null) === null) ? null : \count(${'nullsafe#1'});
 /// ```
 ///
-/// Spec section 12 makes a `List` index a place, which only the engine's collection of the element reaches, so a
-/// change through it is a `Sharp\Collection` method on the index: `clear`, a `Set`'s `add`, and `put` for a write
-/// into a `Map` element, whose `??=` puts only for a missing key. An index that runs something is held in a hidden
-/// variable, so it runs once. A null-safe method that runs as PHP reads a missing `Map` key as null. Each parameter
-/// first makes each `Set` and `Map` plain PHP gave as an array the object, and renumbers each `List` a `Map` holds.
+/// Spec section 12 makes a `List` index a place. A `List` member that changes an element takes the element by
+/// reference where it exists, since PHP's write to a missing one would add it. A `Set`'s `add` and `put` for a write
+/// into a `Map` element are the collection's methods on the index, whose `??=` puts only for a missing key. An index
+/// that runs something is held in a hidden variable, so it runs once. A null-safe call reads a missing `Map` key as
+/// null. Each parameter first makes each `Set` and `Map` plain PHP gave as an array the object, and renumbers each
+/// `List` a `Map` holds.
 #[test]
 fn a_change_through_a_list_index_runs_a_collection_method_on_the_index() {
     assert_eq!(
@@ -8189,13 +7677,27 @@ fn a_change_through_a_list_index_runs_a_collection_method_on_the_index() {
                     ZVAL "string, List<int>"
                   VAR
                     ZVAL "stock"
-              METHOD_CALL
-                DIM
-                  VAR
-                    ZVAL "grid"
-                  ZVAL 0
-                ZVAL "clear"
-                ARG_LIST
+              CONDITIONAL [1]
+                CALL
+                  ZVAL "array_key_exists"
+                  ARG_LIST
+                    ZVAL 0
+                    VAR
+                      ZVAL "grid"
+                CALL
+                  ZVAL "Sharp\\Internal\\clear"
+                  ARG_LIST
+                    DIM
+                      VAR
+                        ZVAL "grid"
+                      ZVAL 0
+                THROW
+                  NEW
+                    ZVAL "OutOfRangeException"
+                    ARG_LIST
+                      BINARY_OP [8]
+                        ZVAL "Undefined array key "
+                        ZVAL 0
               METHOD_CALL
                 DIM
                   VAR
@@ -8229,105 +7731,83 @@ fn a_change_through_a_list_index_runs_a_collection_method_on_the_index() {
                   ARG_LIST
                     ZVAL "d"
                     ZVAL 4
-              AND
-                BINARY_OP [17]
-                  ASSIGN
-                    VAR
-                      ZVAL "index#2"
-                    CALL
-                      ZVAL "array_find_key"
-                      ARG_LIST
-                        DIM
-                          VAR
-                            ZVAL "grid"
-                          ASSIGN
-                            VAR
-                              ZVAL "index#1"
-                            METHOD_CALL
-                              VAR
-                                ZVAL "this"
-                              ZVAL "next"
-                              ARG_LIST
-                        CALL
-                          ARROW_FUNC "" @13-13
-                            PARAM_LIST
-                              PARAM
-                                null
-                                ZVAL "value#3"
-                                null
-                                null
-                                null
-                                null
-                            null
-                            ARROW_FUNC "" @13-13
-                              PARAM_LIST
-                                PARAM
-                                  null
-                                  ZVAL "element#4"
-                                  null
-                                  null
-                                  null
-                                  null
-                              null
-                              BINARY_OP [16]
-                                VAR
-                                  ZVAL "element#4"
-                                VAR
-                                  ZVAL "value#3"
-                              null
-                              null
-                            null
-                            null
-                          ARG_LIST
-                            ZVAL 2
-                  ZVAL null
-                BINARY_OP [16]
-                  METHOD_CALL
-                    DIM
-                      VAR
-                        ZVAL "grid"
+              DIM
+                ARRAY [3]
+                  ARRAY_ELEM
+                    ASSIGN
                       VAR
                         ZVAL "index#1"
-                    ZVAL "removeAt"
-                    ARG_LIST
-                      VAR
-                        ZVAL "index#2"
-                  ZVAL null
+                      METHOD_CALL
+                        VAR
+                          ZVAL "this"
+                        ZVAL "next"
+                        ARG_LIST
+                    null
+                  ARRAY_ELEM
+                    CONDITIONAL [1]
+                      CALL
+                        ZVAL "array_key_exists"
+                        ARG_LIST
+                          VAR
+                            ZVAL "index#1"
+                          VAR
+                            ZVAL "grid"
+                      CALL
+                        ZVAL "Sharp\\Internal\\remove"
+                        ARG_LIST
+                          DIM
+                            VAR
+                              ZVAL "grid"
+                            VAR
+                              ZVAL "index#1"
+                          ZVAL 2
+                      THROW
+                        NEW
+                          ZVAL "OutOfRangeException"
+                          ARG_LIST
+                            BINARY_OP [8]
+                              ZVAL "Undefined array key "
+                              VAR
+                                ZVAL "index#1"
+                    null
+                ZVAL 1
               RETURN
                 CONDITIONAL [1]
                   BINARY_OP [16]
-                    COALESCE
-                      DIM
-                        VAR
-                          ZVAL "stock"
-                        ZVAL "a"
-                      ZVAL null
+                    ASSIGN
+                      VAR
+                        ZVAL "nullsafe#1"
+                      COALESCE
+                        DIM
+                          VAR
+                            ZVAL "stock"
+                          ZVAL "a"
+                        ZVAL null
                     ZVAL null
                   ZVAL null
                   CALL
                     ZVAL "count"
                     ARG_LIST
-                      DIM
-                        VAR
-                          ZVAL "stock"
-                        ZVAL "a"
+                      VAR
+                        ZVAL "nullsafe#1"
         "#}
     );
 }
 
 /// ```php
-/// $rows[0]?->add(5);
-/// $maybe[1]?->insert(0, 6);
-/// $this->held[0]?->add(7);
-/// $maybe[0]?->entries('int, int');
-/// ($maybe[2] === null) ? null : $maybe[2]->clear();
-/// return ($maybe[3] === null) ? null : \in_array(4, $maybe[3], true);
+/// (\array_key_exists(0, $rows) ? (($rows[0] === null) ? null : \Sharp\Internal\add($rows[0], 5)) : throw …);
+/// (\array_key_exists(1, $maybe) ? (($maybe[1] === null) ? null : \Sharp\Internal\insert($maybe[1], 0, 6)) : throw …);
+/// [${'receiver#1'} = $this->held, ${'kept#2'} = ${'receiver#1'}, (\array_key_exists(0, ${'receiver#1'}) ? … : throw …),
+///     ${'receiver#1'} === ${'kept#2'} || ($this->held = ${'receiver#1'})][2];
+/// ((${'nullsafe#1'} = $maybe[0]) === null) ? null : \Sharp\Internal\entries(${'nullsafe#1'}, 'int, int');
+/// (\array_key_exists(2, $maybe) ? (($maybe[2] === null) ? null : \Sharp\Internal\clear($maybe[2])) : throw …);
+/// return ((${'nullsafe#1'} = $maybe[3]) === null) ? null : \Sharp\Internal\contains(${'nullsafe#1'}, 4);
 /// ```
 ///
 /// Spec section 12 makes a `List` index a place, so a change after `?.` on one runs on the index itself, as a change
-/// without `?.` does, and reaches the element the list stores, here a local's, a parameter's and a hooked property's.
-/// The index is a bare read on every path, which throws on a missing index, so `?.` skips only a null element: a
-/// change, a method that changes nothing, and the test an inlined method runs first.
+/// without `?.` does, and reaches the element the list stores, here a local's, a parameter's and a hooked property's,
+/// which PHP gives no reference to, so the change runs on its value and its `set` stores it back once it changed. A
+/// missing index throws, so `?.` skips only a null element. A read after `?.` tests the element it holds first.
 #[test]
 fn a_null_safe_change_through_a_list_index_runs_on_the_index() {
     assert_eq!(
@@ -8338,74 +7818,254 @@ fn a_null_safe_change_through_a_list_index_runs_on_the_index() {
         ),
         indoc! {r#"
             STMT_LIST
-              NULLSAFE_METHOD_CALL
-                DIM
-                  VAR
-                    ZVAL "rows"
-                  ZVAL 0
-                ZVAL "add"
-                ARG_LIST
-                  ZVAL 5
-              NULLSAFE_METHOD_CALL
-                DIM
-                  VAR
-                    ZVAL "maybe"
-                  ZVAL 1
-                ZVAL "insert"
-                ARG_LIST
-                  ZVAL 0
-                  ZVAL 6
-              NULLSAFE_METHOD_CALL
-                DIM
-                  PROP
-                    VAR
-                      ZVAL "this"
-                    ZVAL "held"
-                  ZVAL 0
-                ZVAL "add"
-                ARG_LIST
-                  ZVAL 7
-              NULLSAFE_METHOD_CALL
-                DIM
-                  VAR
-                    ZVAL "maybe"
-                  ZVAL 0
-                ZVAL "entries"
-                ARG_LIST
-                  ZVAL "int, int"
               CONDITIONAL [1]
-                BINARY_OP [16]
-                  DIM
-                    VAR
-                      ZVAL "maybe"
-                    ZVAL 2
-                  ZVAL null
-                ZVAL null
-                METHOD_CALL
-                  DIM
-                    VAR
-                      ZVAL "maybe"
-                    ZVAL 2
-                  ZVAL "clear"
+                CALL
+                  ZVAL "array_key_exists"
                   ARG_LIST
-              RETURN
+                    ZVAL 0
+                    VAR
+                      ZVAL "rows"
+                CONDITIONAL [1]
+                  BINARY_OP [16]
+                    DIM
+                      VAR
+                        ZVAL "rows"
+                      ZVAL 0
+                    ZVAL null
+                  ZVAL null
+                  CALL
+                    ZVAL "Sharp\\Internal\\add"
+                    ARG_LIST
+                      DIM
+                        VAR
+                          ZVAL "rows"
+                        ZVAL 0
+                      ZVAL 5
+                THROW
+                  NEW
+                    ZVAL "OutOfRangeException"
+                    ARG_LIST
+                      BINARY_OP [8]
+                        ZVAL "Undefined array key "
+                        ZVAL 0
+              CONDITIONAL [1]
+                CALL
+                  ZVAL "array_key_exists"
+                  ARG_LIST
+                    ZVAL 1
+                    VAR
+                      ZVAL "maybe"
                 CONDITIONAL [1]
                   BINARY_OP [16]
                     DIM
                       VAR
                         ZVAL "maybe"
-                      ZVAL 3
+                      ZVAL 1
                     ZVAL null
                   ZVAL null
                   CALL
-                    ZVAL "in_array"
+                    ZVAL "Sharp\\Internal\\insert"
                     ARG_LIST
-                      ZVAL 4
+                      DIM
+                        VAR
+                          ZVAL "maybe"
+                        ZVAL 1
+                      ZVAL 0
+                      ZVAL 6
+                THROW
+                  NEW
+                    ZVAL "OutOfRangeException"
+                    ARG_LIST
+                      BINARY_OP [8]
+                        ZVAL "Undefined array key "
+                        ZVAL 1
+              DIM
+                ARRAY [3]
+                  ARRAY_ELEM
+                    ASSIGN
+                      VAR
+                        ZVAL "receiver#1"
+                      PROP
+                        VAR
+                          ZVAL "this"
+                        ZVAL "held"
+                    null
+                  ARRAY_ELEM
+                    ASSIGN
+                      VAR
+                        ZVAL "kept#2"
+                      VAR
+                        ZVAL "receiver#1"
+                    null
+                  ARRAY_ELEM
+                    CONDITIONAL [1]
+                      CALL
+                        ZVAL "array_key_exists"
+                        ARG_LIST
+                          ZVAL 0
+                          VAR
+                            ZVAL "receiver#1"
+                      CONDITIONAL [1]
+                        BINARY_OP [16]
+                          DIM
+                            VAR
+                              ZVAL "receiver#1"
+                            ZVAL 0
+                          ZVAL null
+                        ZVAL null
+                        CALL
+                          ZVAL "Sharp\\Internal\\add"
+                          ARG_LIST
+                            DIM
+                              VAR
+                                ZVAL "receiver#1"
+                              ZVAL 0
+                            ZVAL 7
+                      THROW
+                        NEW
+                          ZVAL "OutOfRangeException"
+                          ARG_LIST
+                            BINARY_OP [8]
+                              ZVAL "Undefined array key "
+                              ZVAL 0
+                    null
+                  ARRAY_ELEM
+                    OR
+                      BINARY_OP [16]
+                        VAR
+                          ZVAL "receiver#1"
+                        VAR
+                          ZVAL "kept#2"
+                      ASSIGN
+                        PROP
+                          VAR
+                            ZVAL "this"
+                          ZVAL "held"
+                        VAR
+                          ZVAL "receiver#1"
+                    null
+                ZVAL 2
+              CONDITIONAL [1]
+                BINARY_OP [16]
+                  ASSIGN
+                    VAR
+                      ZVAL "nullsafe#1"
+                    DIM
+                      VAR
+                        ZVAL "maybe"
+                      ZVAL 0
+                  ZVAL null
+                ZVAL null
+                CALL
+                  ZVAL "Sharp\\Internal\\entries"
+                  ARG_LIST
+                    VAR
+                      ZVAL "nullsafe#1"
+                    ZVAL "int, int"
+              CONDITIONAL [1]
+                CALL
+                  ZVAL "array_key_exists"
+                  ARG_LIST
+                    ZVAL 2
+                    VAR
+                      ZVAL "maybe"
+                CONDITIONAL [1]
+                  BINARY_OP [16]
+                    DIM
+                      VAR
+                        ZVAL "maybe"
+                      ZVAL 2
+                    ZVAL null
+                  ZVAL null
+                  CALL
+                    ZVAL "Sharp\\Internal\\clear"
+                    ARG_LIST
+                      DIM
+                        VAR
+                          ZVAL "maybe"
+                        ZVAL 2
+                THROW
+                  NEW
+                    ZVAL "OutOfRangeException"
+                    ARG_LIST
+                      BINARY_OP [8]
+                        ZVAL "Undefined array key "
+                        ZVAL 2
+              RETURN
+                CONDITIONAL [1]
+                  BINARY_OP [16]
+                    ASSIGN
+                      VAR
+                        ZVAL "nullsafe#1"
                       DIM
                         VAR
                           ZVAL "maybe"
                         ZVAL 3
-                      ZVAL true
+                    ZVAL null
+                  ZVAL null
+                  CALL
+                    ZVAL "Sharp\\Internal\\contains"
+                    ARG_LIST
+                      VAR
+                        ZVAL "nullsafe#1"
+                      ZVAL 4
+        "#}
+    );
+}
+
+/// ```php
+/// ((${'nullsafe#1'} = $other) === null) ? null : \Sharp\Internal\add(${'nullsafe#1'}->grid, [1]);
+/// return ($rows === null) ? null : \count(\Sharp\Internal\removeLast($rows));
+/// ```
+///
+/// A change after `?.` reaches the place below it as a change without `?.` does: `other?.grid.add([1])` adds to the
+/// property of the object `other` holds, and `rows?.removeLast().count()` counts what `removeLast` removed. Each
+/// skips the rest of its chain where the value before `?.` is null, one test around the whole chain.
+#[test]
+fn a_change_after_a_null_safe_link_reaches_the_place_below_it() {
+    let lowered = Lowered::new(
+        "namespace App.Tenant;\n\nclass Report\n{\n    private List<List<int>> grid = [];\n\n    public int? run(Report? other, List<List<int>>? rows)\n    {\n        other?.grid.add([1]);\n        return rows?.removeLast().count();\n    }\n}\n",
+    );
+
+    assert_eq!(
+        lowered.body_of("run"),
+        indoc! {r#"
+            STMT_LIST
+              CONDITIONAL [1]
+                BINARY_OP [16]
+                  ASSIGN
+                    VAR
+                      ZVAL "nullsafe#1"
+                    VAR
+                      ZVAL "other"
+                  ZVAL null
+                ZVAL null
+                CALL
+                  ZVAL "Sharp\\Internal\\add"
+                  ARG_LIST
+                    PROP
+                      VAR
+                        ZVAL "nullsafe#1"
+                      ZVAL "grid"
+                    ARRAY [3]
+                      ARRAY_ELEM
+                        ZVAL 1
+                        null
+              RETURN
+                CONDITIONAL [1]
+                  BINARY_OP [16]
+                    VAR
+                      ZVAL "rows"
+                    ZVAL null
+                  ZVAL null
+                  CALL
+                    ZVAL "count"
+                    ARG_LIST
+                      CALL
+                        ZVAL "Sharp\\Internal\\removeLast"
+                        ARG_LIST
+                          VAR
+                            ZVAL "rows"
         "#}
     );
 }
@@ -8484,13 +8144,14 @@ fn a_write_into_a_map_a_hooked_property_holds_puts_it_through_the_property() {
 }
 
 /// ```php
-/// $sizes->set(0, $extra);
-/// $grid[$extra]->set(1, 2);
+/// \Sharp\Internal\set($sizes, 0, $extra);
+/// (\array_key_exists($extra, $grid) ? \Sharp\Internal\set($grid[$extra], 1, 2)
+///     : throw new \OutOfRangeException('Undefined array key ' . $extra));
 /// ```
 ///
 /// Spec section 12: `x[i] = v` on a `List` replaces the element at `i`, and throws `OutOfRangeException` past the end,
-/// where PHP's write would append or leave a gap. So it is the engine's `set` on the list, a local or an element of
-/// another `List`.
+/// where PHP's write would append or leave a gap. So it is the engine's `set`, which takes the list's place by
+/// reference: a local, or an element of another `List` that exists, since PHP's write to a missing one would add it.
 #[test]
 fn a_list_index_write_replaces_the_element_through_set() {
     assert_eq!(
@@ -8501,33 +8162,49 @@ fn a_list_index_write_replaces_the_element_through_set() {
         ),
         indoc! {r#"
             STMT_LIST
-              METHOD_CALL
-                VAR
-                  ZVAL "sizes"
-                ZVAL "set"
+              CALL
+                ZVAL "Sharp\\Internal\\set"
                 ARG_LIST
+                  VAR
+                    ZVAL "sizes"
                   ZVAL 0
                   VAR
                     ZVAL "extra"
-              METHOD_CALL
-                DIM
-                  VAR
-                    ZVAL "grid"
-                  VAR
-                    ZVAL "extra"
-                ZVAL "set"
-                ARG_LIST
-                  ZVAL 1
-                  ZVAL 2
+              CONDITIONAL [1]
+                CALL
+                  ZVAL "array_key_exists"
+                  ARG_LIST
+                    VAR
+                      ZVAL "extra"
+                    VAR
+                      ZVAL "grid"
+                CALL
+                  ZVAL "Sharp\\Internal\\set"
+                  ARG_LIST
+                    DIM
+                      VAR
+                        ZVAL "grid"
+                      VAR
+                        ZVAL "extra"
+                    ZVAL 1
+                    ZVAL 2
+                THROW
+                  NEW
+                    ZVAL "OutOfRangeException"
+                    ARG_LIST
+                      BINARY_OP [8]
+                        ZVAL "Undefined array key "
+                        VAR
+                          ZVAL "extra"
         "#}
     );
 }
 
 /// ```php
-/// $sizes->set(${'index#1'} = $this->at(), $sizes[${'index#1'}] + $extra);
-/// $sizes->set(0, $sizes[0] + 1);
-/// $names->set(0, $names[0] . "s");
-/// return ($sizes->set(1, (${'old#1'} = $sizes[1]) - 1)) ? ${'old#1'} : ${'old#1'};
+/// \Sharp\Internal\set($sizes, ${'index#1'} = $this->at(), $sizes[${'index#1'}] + $extra);
+/// \Sharp\Internal\set($sizes, 0, $sizes[0] + 1);
+/// \Sharp\Internal\set($names, 0, $names[0] . "s");
+/// return \Sharp\Internal\set($sizes, 1, (${'old#1'} = $sizes[1]) - 1) ? ${'old#1'} : ${'old#1'};
 /// ```
 ///
 /// `list[i] op= v`, `++list[i]` and `--list[i]` write what the operator gives on the element, through `set`, which
@@ -8544,11 +8221,11 @@ fn a_compound_write_or_a_step_on_a_list_index_sets_what_the_operator_gives() {
         ),
         indoc! {r#"
             STMT_LIST
-              METHOD_CALL
-                VAR
-                  ZVAL "sizes"
-                ZVAL "set"
+              CALL
+                ZVAL "Sharp\\Internal\\set"
                 ARG_LIST
+                  VAR
+                    ZVAL "sizes"
                   ASSIGN
                     VAR
                       ZVAL "index#1"
@@ -8565,11 +8242,11 @@ fn a_compound_write_or_a_step_on_a_list_index_sets_what_the_operator_gives() {
                         ZVAL "index#1"
                     VAR
                       ZVAL "extra"
-              METHOD_CALL
-                VAR
-                  ZVAL "sizes"
-                ZVAL "set"
+              CALL
+                ZVAL "Sharp\\Internal\\set"
                 ARG_LIST
+                  VAR
+                    ZVAL "sizes"
                   ZVAL 0
                   BINARY_OP [1]
                     DIM
@@ -8577,11 +8254,11 @@ fn a_compound_write_or_a_step_on_a_list_index_sets_what_the_operator_gives() {
                         ZVAL "sizes"
                       ZVAL 0
                     ZVAL 1
-              METHOD_CALL
-                VAR
-                  ZVAL "names"
-                ZVAL "set"
+              CALL
+                ZVAL "Sharp\\Internal\\set"
                 ARG_LIST
+                  VAR
+                    ZVAL "names"
                   ZVAL 0
                   BINARY_OP [8]
                     DIM
@@ -8591,11 +8268,11 @@ fn a_compound_write_or_a_step_on_a_list_index_sets_what_the_operator_gives() {
                     ZVAL "s"
               RETURN
                 CONDITIONAL [1]
-                  METHOD_CALL
-                    VAR
-                      ZVAL "sizes"
-                    ZVAL "set"
+                  CALL
+                    ZVAL "Sharp\\Internal\\set"
                     ARG_LIST
+                      VAR
+                        ZVAL "sizes"
                       ZVAL 1
                       BINARY_OP [2]
                         ASSIGN
@@ -8615,13 +8292,16 @@ fn a_compound_write_or_a_step_on_a_list_index_sets_what_the_operator_gives() {
 }
 
 /// ```php
-/// $this->held->set(0, $extra);
-/// (${'receiver#1'} = $this->me())->held->set(0, ${'receiver#1'}->held[0] * 2);
+/// [${'receiver#1'} = $this->held, ${'kept#2'} = ${'receiver#1'}, \Sharp\Internal\set(${'receiver#1'}, 0, $extra),
+///     ${'receiver#1'} === ${'kept#2'} || ($this->held = ${'receiver#1'})][2];
+/// [${'receiver#1'} = $this->me(), ${'receiver#2'} = ${'receiver#1'}->held, ${'kept#3'} = ${'receiver#2'},
+///     \Sharp\Internal\set(${'receiver#2'}, 0, ${'receiver#2'}[0] * 2),
+///     ${'receiver#2'} === ${'kept#3'} || (${'receiver#1'}->held = ${'receiver#2'})][3];
 /// ```
 ///
-/// PHP gives no reference to a hooked property, so a write into the `List` one holds reaches it, and its `set` hook,
-/// only through the engine's collection of the property, as a write into a `Map` there does. An object that runs
-/// something runs once, in a hidden variable.
+/// PHP gives no reference to a hooked property, so a write into the `List` one holds changes the value its `get`
+/// gives, held in a hidden variable, and its `set` hook stores it back once it changed. An object that runs something
+/// runs once, in a hidden variable too.
 #[test]
 fn a_write_into_a_list_a_hooked_property_holds_sets_it_through_the_property() {
     assert_eq!(
@@ -8632,38 +8312,108 @@ fn a_write_into_a_list_a_hooked_property_holds_sets_it_through_the_property() {
         ),
         indoc! {r#"
             STMT_LIST
-              METHOD_CALL
-                PROP
-                  VAR
-                    ZVAL "this"
-                  ZVAL "held"
-                ZVAL "set"
-                ARG_LIST
-                  ZVAL 0
-                  VAR
-                    ZVAL "extra"
-              METHOD_CALL
-                PROP
-                  ASSIGN
-                    VAR
-                      ZVAL "receiver#1"
-                    METHOD_CALL
+              DIM
+                ARRAY [3]
+                  ARRAY_ELEM
+                    ASSIGN
                       VAR
-                        ZVAL "this"
-                      ZVAL "me"
+                        ZVAL "receiver#1"
+                      PROP
+                        VAR
+                          ZVAL "this"
+                        ZVAL "held"
+                    null
+                  ARRAY_ELEM
+                    ASSIGN
+                      VAR
+                        ZVAL "kept#2"
+                      VAR
+                        ZVAL "receiver#1"
+                    null
+                  ARRAY_ELEM
+                    CALL
+                      ZVAL "Sharp\\Internal\\set"
                       ARG_LIST
-                  ZVAL "held"
-                ZVAL "set"
-                ARG_LIST
-                  ZVAL 0
-                  BINARY_OP [3]
-                    DIM
+                        VAR
+                          ZVAL "receiver#1"
+                        ZVAL 0
+                        VAR
+                          ZVAL "extra"
+                    null
+                  ARRAY_ELEM
+                    OR
+                      BINARY_OP [16]
+                        VAR
+                          ZVAL "receiver#1"
+                        VAR
+                          ZVAL "kept#2"
+                      ASSIGN
+                        PROP
+                          VAR
+                            ZVAL "this"
+                          ZVAL "held"
+                        VAR
+                          ZVAL "receiver#1"
+                    null
+                ZVAL 2
+              DIM
+                ARRAY [3]
+                  ARRAY_ELEM
+                    ASSIGN
+                      VAR
+                        ZVAL "receiver#1"
+                      METHOD_CALL
+                        VAR
+                          ZVAL "this"
+                        ZVAL "me"
+                        ARG_LIST
+                    null
+                  ARRAY_ELEM
+                    ASSIGN
+                      VAR
+                        ZVAL "receiver#2"
                       PROP
                         VAR
                           ZVAL "receiver#1"
                         ZVAL "held"
-                      ZVAL 0
-                    ZVAL 2
+                    null
+                  ARRAY_ELEM
+                    ASSIGN
+                      VAR
+                        ZVAL "kept#3"
+                      VAR
+                        ZVAL "receiver#2"
+                    null
+                  ARRAY_ELEM
+                    CALL
+                      ZVAL "Sharp\\Internal\\set"
+                      ARG_LIST
+                        VAR
+                          ZVAL "receiver#2"
+                        ZVAL 0
+                        BINARY_OP [3]
+                          DIM
+                            VAR
+                              ZVAL "receiver#2"
+                            ZVAL 0
+                          ZVAL 2
+                    null
+                  ARRAY_ELEM
+                    OR
+                      BINARY_OP [16]
+                        VAR
+                          ZVAL "receiver#2"
+                        VAR
+                          ZVAL "kept#3"
+                      ASSIGN
+                        PROP
+                          VAR
+                            ZVAL "receiver#1"
+                          ZVAL "held"
+                        VAR
+                          ZVAL "receiver#2"
+                    null
+                ZVAL 3
         "#}
     );
 }
@@ -9939,11 +9689,11 @@ fn a_variadic_or_operator_set_parameter_becomes_a_set_before_the_body_runs() {
 }
 
 /// ```php
-/// public array $tags = [] { set { $this->tags = []; $this->tags->add("x"); } }
+/// public array $tags = [] { set { $this->tags = []; \Sharp\Internal\add($this->tags, "x"); } }
 /// ```
 ///
 /// `field = []` leaves the property a `List<string>`, so the checker checks `field.add` as `List.add`, and the add
-/// lowers as that call.
+/// lowers as that call, which a hook passes its own backing store by reference.
 #[test]
 fn an_emptied_list_field_takes_add_as_the_list_method() {
     let lowered = Lowered::new(
@@ -9973,13 +9723,13 @@ fn an_emptied_list_field_takes_add_as_the_list_method() {
                               ZVAL "this"
                             ZVAL "tags"
                           ARRAY [3]
-                        METHOD_CALL
-                          PROP
-                            VAR
-                              ZVAL "this"
-                            ZVAL "tags"
-                          ZVAL "add"
+                        CALL
+                          ZVAL "Sharp\\Internal\\add"
                           ARG_LIST
+                            PROP
+                              VAR
+                                ZVAL "this"
+                              ZVAL "tags"
                             ZVAL "x"
                       null
                       null
@@ -9991,7 +9741,7 @@ fn an_emptied_list_field_takes_add_as_the_list_method() {
 /// ```php
 /// $standings = [$status];
 /// $standings = [];
-/// $standings->add($status);
+/// \Sharp\Internal\add($standings, $status);
 /// ```
 ///
 /// `standings = []` leaves the local a `List<Calc>`, whose `add` takes an element, so a case goes in as the case.
@@ -10017,11 +9767,11 @@ fn a_backed_enum_value_goes_into_an_emptied_list_add_as_its_case() {
                 VAR
                   ZVAL "standings"
                 ARRAY [3]
-              METHOD_CALL
-                VAR
-                  ZVAL "standings"
-                ZVAL "add"
+              CALL
+                ZVAL "Sharp\\Internal\\add"
                 ARG_LIST
+                  VAR
+                    ZVAL "standings"
                   VAR
                     ZVAL "status"
         "#}
@@ -12433,10 +12183,10 @@ fn new_and_a_static_member_of_a_type_parameter_read_its_class_while_the_code_run
     );
 }
 
-/// A list runs its methods in the engine's built-in `Sharp\Collection`, so a call of a generic one such as `map` carries
-/// no type arguments, as a call of any built-in method does.
+/// A list's generic member such as `map` runs as the engine function it inlines to, which takes no type arguments, as a
+/// call of any built-in function does.
 #[test]
-fn a_generic_method_call_on_a_list_carries_no_type_arguments() {
+fn a_generic_member_call_on_a_list_carries_no_type_arguments() {
     let lowered = Lowered::with(
         indoc! {"
         namespace App;
@@ -12451,7 +12201,9 @@ fn a_generic_method_call_on_a_list_carries_no_type_arguments() {
 
     // A call with type arguments is a `SHARP_TYPE_ARGS` around the call. The lambda's own holds its function type.
     assert!(
-        lowered.body_of("labels").starts_with("STMT_LIST\n  RETURN\n    METHOD_CALL\n"),
+        lowered
+            .body_of("labels")
+            .starts_with("STMT_LIST\n  RETURN\n    CALL\n      ZVAL \"Sharp\\\\Internal\\\\map\"\n"),
         "{}",
         lowered.body_of("labels")
     );
@@ -17276,8 +17028,9 @@ fn a_literal_in_a_generic_method_takes_the_methods_own_type_arguments() {
     assert_eq!(build.matches("SHARP_TYPE_ARGS\n").count(), 4, "{build}");
 }
 
-/// The value of a method that makes a `Map` passes the `Map`'s type arguments to the method as a call of it does, as
-/// `$items->entries('int, string')`.
+/// The value of a `List` member that makes a `Map` passes the member its type arguments, as
+/// `\Sharp\ListMembers::entries($receiver, /* type args "string" */)`, and the member's own call of the engine function
+/// passes the `Map`'s, `int, #0`, which the engine reads from them.
 #[test]
 fn a_method_value_that_makes_a_map_passes_its_type_arguments() {
     let lowered = Lowered::with(
@@ -17287,7 +17040,14 @@ fn a_method_value_that_makes_a_map_passes_its_type_arguments() {
     let run = lowered.body_of("run");
 
     assert_eq!(run.matches(r#"ZVAL "entries""#).count(), 1, "{run}");
-    assert_eq!(run.matches(r#"ZVAL "int, string""#).count(), 1, "{run}");
+    assert!(
+        run.contains("SHARP_TYPE_ARGS\n                        null\n                        ZVAL \"string\"\n"),
+        "{run}"
+    );
+
+    let (path, code) = common::effect_classes::LIST_MEMBERS;
+    let entries = Lowered::named(path, code).body_of("entries");
+    assert!(entries.contains(r##"ZVAL "int, #0""##), "{entries}");
 }
 
 /// ```php
@@ -17534,18 +17294,40 @@ fn a_method_value_of_a_method_that_is_not_generic_is_a_first_class_callable() {
 
 /// ```php
 /// return (function ($receiver) {
-///     return function (int $value) use ($receiver) { return \in_array($value, $receiver, true); };
+///     return function (int $value) use ($receiver) { return \Sharp\ListMembers::contains($receiver, $value, /* type args "int" */); };
 /// })($ids);
 /// return (function ($receiver) {
 ///     return function (string $key) use ($receiver) { return $receiver->has($key); };
 /// })($this->prices);
-/// return (function ($receiver) { return function () use ($receiver) { return \count($receiver); }; })($ids);
+/// return (function ($receiver) {
+///     return function () use ($receiver) { return \Sharp\ListMembers::count($receiver, /* type args "int" */); };
+/// })($ids);
 /// ```
 ///
 /// Spec section 14.3: a collection method's value is a closure over the collection, read once where the value is read,
-/// so it holds the collection as it was then, as PHP copies an array into a parameter. A method the lowering writes as
-/// PHP on the array runs that PHP on it, and any other runs on `Sharp\Collection`, as its call does. Either way the
-/// closure takes the method's parameters by name, with the types the collection's type gives them.
+/// so it holds the collection as it was then, as PHP copies an array into a parameter. A `List`'s member runs as the
+/// static method of `Sharp\ListMembers`, as any extension method's value does, and a `Map`'s method runs on the `Map`.
+/// Either way the closure takes the method's parameters by name, with the types the collection's type gives them.
+/// A `List`'s member value that goes into a plain PHP `\Closure` parameter takes the element type its receiver gives
+/// it, as a value that goes into a function type does, so plain PHP reads `int $value`, and the call passes `int`.
+#[test]
+fn a_list_member_value_a_plain_php_closure_parameter_takes_keeps_its_parameter_types() {
+    let lowered = child_body(
+        "string run(List<int> ids)",
+        "        return this.describe(ids.contains);\n",
+        "<?php namespace App\\Tenant; class Base { public function describe(\\Closure $callback): string { return ''; } }",
+    );
+
+    assert!(
+        lowered.contains("PARAM\n                      ZVAL [1] \"int\"\n                      ZVAL \"value\""),
+        "{lowered}"
+    );
+    assert!(
+        lowered.contains("SHARP_TYPE_ARGS\n                            null\n                            ZVAL \"int\""),
+        "{lowered}"
+    );
+}
+
 #[test]
 fn a_collection_method_value_is_a_closure_over_the_collection() {
     let lowered = Lowered::new(
@@ -17583,14 +17365,17 @@ fn a_collection_method_value_is_a_closure_over_the_collection() {
                             ZVAL "receiver"
                           STMT_LIST
                             RETURN
-                              CALL
-                                ZVAL "in_array"
+                              STATIC_CALL
+                                ZVAL "Sharp\\ListMembers"
+                                ZVAL "contains"
                                 ARG_LIST
                                   VAR
-                                    ZVAL "value"
-                                  VAR
                                     ZVAL "receiver"
-                                  ZVAL true
+                                  VAR
+                                    ZVAL "value"
+                                  SHARP_TYPE_ARGS
+                                    null
+                                    ZVAL "int"
                           null
                           null
                     null
@@ -17673,11 +17458,15 @@ fn a_collection_method_value_is_a_closure_over_the_collection() {
                             ZVAL "receiver"
                           STMT_LIST
                             RETURN
-                              CALL
+                              STATIC_CALL
+                                ZVAL "Sharp\\ListMembers"
                                 ZVAL "count"
                                 ARG_LIST
                                   VAR
                                     ZVAL "receiver"
+                                  SHARP_TYPE_ARGS
+                                    null
+                                    ZVAL "int"
                           null
                           null
                     null
@@ -17689,7 +17478,7 @@ fn a_collection_method_value_is_a_closure_over_the_collection() {
     );
     // Each read of the same value is that value, the second one too.
     let twice = lowered.body_of("twice");
-    assert_eq!(twice.matches(r#"ZVAL "in_array""#).count(), 2, "{twice}");
+    assert_eq!(twice.matches(r#"ZVAL "contains""#).count(), 2, "{twice}");
     // Through `?.`, a null collection gives null, and any other gives the value.
     assert_eq!(
         lowered.body_of("maybe"),
@@ -17728,14 +17517,17 @@ fn a_collection_method_value_is_a_closure_over_the_collection() {
                               ZVAL "receiver"
                             STMT_LIST
                               RETURN
-                                CALL
-                                  ZVAL "in_array"
+                                STATIC_CALL
+                                  ZVAL "Sharp\\ListMembers"
+                                  ZVAL "contains"
                                   ARG_LIST
                                     VAR
-                                      ZVAL "value"
-                                    VAR
                                       ZVAL "receiver"
-                                    ZVAL true
+                                    VAR
+                                      ZVAL "value"
+                                    SHARP_TYPE_ARGS
+                                      null
+                                      ZVAL "int"
                             null
                             null
                       null
@@ -19371,6 +19163,8 @@ fn equality_of_strings_ints_and_enums_is_identity() {
 /// ```php
 /// $b = \Sharp\Internal\equals($either, $tags); $b = !\Sharp\Internal\equals($either, 1);
 /// return \Sharp\Internal\equals($tuple, 1);
+///
+/// return \Sharp\Internal\contains($rows, $either);
 /// ```
 ///
 /// Spec section 19: a value that may be a collection or another type compares by what it holds, which only the running
@@ -19417,7 +19211,7 @@ fn equality_of_a_union_that_holds_a_collection_compares_by_what_it_holds() {
                     ZVAL 1
         "#}
     );
-    // A search compares each element as `==` does, never with `\in_array`'s `===`.
+    // A search is the engine's, which compares each element as `==` does, never with `\in_array`'s `===`.
     let search = body_in(
         "bool run(List<Set<int>|int> rows, Set<int>|int either)",
         "        return rows.contains(either);\n",
@@ -19428,48 +19222,13 @@ fn equality_of_a_union_that_holds_a_collection_compares_by_what_it_holds() {
         indoc! {r#"
             STMT_LIST
               RETURN
-                BINARY_OP [17]
-                  CALL
-                    ZVAL "array_find_key"
-                    ARG_LIST
-                      VAR
-                        ZVAL "rows"
-                      CALL
-                        ARROW_FUNC "" @9-9
-                          PARAM_LIST
-                            PARAM
-                              null
-                              ZVAL "value#1"
-                              null
-                              null
-                              null
-                              null
-                          null
-                          ARROW_FUNC "" @9-9
-                            PARAM_LIST
-                              PARAM
-                                null
-                                ZVAL "element#2"
-                                null
-                                null
-                                null
-                                null
-                            null
-                            CALL
-                              ZVAL "Sharp\\Internal\\equals"
-                              ARG_LIST
-                                VAR
-                                  ZVAL "element#2"
-                                VAR
-                                  ZVAL "value#1"
-                            null
-                            null
-                          null
-                          null
-                        ARG_LIST
-                          VAR
-                            ZVAL "either"
-                  ZVAL null
+                CALL
+                  ZVAL "Sharp\\Internal\\contains"
+                  ARG_LIST
+                    VAR
+                      ZVAL "rows"
+                    VAR
+                      ZVAL "either"
         "#}
     );
 }
@@ -19601,7 +19360,7 @@ fn a_call_of_a_function_value_checks_a_float_result() {
 }
 
 /// ```php
-/// $read = $source->read(); return $numbers->map($f);
+/// $read = $source->read(); return \Sharp\Internal\map($numbers, $f);
 /// ```
 ///
 /// Spec section 24: a plain PHP class may implement a PHP# interface, and the engine runs the function value a
@@ -19863,12 +19622,12 @@ fn a_null_safe_call_and_a_map_of_floats_check_their_results() {
 
 /// ```php
 /// $b = \Sharp\Internal\equals($kind, $other); $b = !\Sharp\Internal\equals($kind, $other);
-/// $found = array_find_key($kinds, (fn ($value#1) => fn ($element#2) => \Sharp\Internal\equals($element#2, $value#1))($kind)) !== null;
+/// return \Sharp\Internal\contains($kinds, $kind);
 /// ```
 ///
 /// Spec section 25: `==` compares two class values by their whole type, type arguments included, as C# compares two
 /// `Type`s, so `typeof(Box<Order>) == typeof(Box<Invoice>)` is false though both name `App\Box`. The engine's
-/// `\Sharp\Internal\equals` compares them, `!=` is its `!`, and a search of class values runs it for each element.
+/// `\Sharp\Internal\equals` compares them, `!=` is its `!`, and the engine's search compares each element as `==` does.
 #[test]
 fn equality_of_class_values_compares_their_whole_types() {
     assert_eq!(
@@ -19901,48 +19660,13 @@ fn equality_of_class_values_compares_their_whole_types() {
                       VAR
                         ZVAL "other"
               RETURN
-                BINARY_OP [17]
-                  CALL
-                    ZVAL "array_find_key"
-                    ARG_LIST
-                      VAR
-                        ZVAL "kinds"
-                      CALL
-                        ARROW_FUNC "" @11-11
-                          PARAM_LIST
-                            PARAM
-                              null
-                              ZVAL "value#1"
-                              null
-                              null
-                              null
-                              null
-                          null
-                          ARROW_FUNC "" @11-11
-                            PARAM_LIST
-                              PARAM
-                                null
-                                ZVAL "element#2"
-                                null
-                                null
-                                null
-                                null
-                            null
-                            CALL
-                              ZVAL "Sharp\\Internal\\equals"
-                              ARG_LIST
-                                VAR
-                                  ZVAL "element#2"
-                                VAR
-                                  ZVAL "value#1"
-                            null
-                            null
-                          null
-                          null
-                        ARG_LIST
-                          VAR
-                            ZVAL "kind"
-                  ZVAL null
+                CALL
+                  ZVAL "Sharp\\Internal\\contains"
+                  ARG_LIST
+                    VAR
+                      ZVAL "kinds"
+                    VAR
+                      ZVAL "kind"
         "#}
     );
 }
@@ -22437,8 +22161,8 @@ fn a_plain_php_int_keyed_array_is_renumbered_where_it_arrives() {
 
 /// ```php
 /// [$users->names = \is_array($renumbered#1 = $users->names) ? \array_values($renumbered#1) : $renumbered#1,
-///     $users->names->add('cy')][1];
-/// [$receiver#1 = \App\Tenant\Users::make(), $receiver#1->names = …, $receiver#1->names->add('x')][2];
+///     \Sharp\Internal\add($users->names, 'cy')][1];
+/// [$receiver#1 = \App\Tenant\Users::make(), $receiver#1->names = …, \Sharp\Internal\add($receiver#1->names, 'x')][2];
 /// $users->names = ['p', 'q'];
 /// ```
 ///
@@ -22486,13 +22210,13 @@ fn a_write_through_a_plain_php_property_read_as_a_list_changes_it_renumbered() {
                           ZVAL "renumbered#1"
                     null
                   ARRAY_ELEM
-                    METHOD_CALL
-                      PROP
-                        VAR
-                          ZVAL "users"
-                        ZVAL "names"
-                      ZVAL "add"
+                    CALL
+                      ZVAL "Sharp\\Internal\\add"
                       ARG_LIST
+                        PROP
+                          VAR
+                            ZVAL "users"
+                          ZVAL "names"
                         ZVAL "cy"
                     null
                 ZVAL 1
@@ -22540,7 +22264,7 @@ fn a_write_through_a_plain_php_property_read_as_a_list_changes_it_renumbered() {
     );
     assert!(
         lowered("        string? first = users.names.getOrNull(0);\n        return 1;\n")
-            .contains("COALESCE\n      DIM\n        CONDITIONAL\n")
+            .contains("CALL\n      ZVAL \"Sharp\\\\Internal\\\\get\"\n      ARG_LIST\n        CONDITIONAL\n")
     );
 }
 
@@ -24458,13 +24182,13 @@ fn a_map_written_into_a_plain_php_parent_s_or_set_s_storage_goes_in_as_its_type_
 }
 
 /// ```php
-/// $context->rows->add(\Sharp\Internal\arrayOf($stock));
-/// $context->rows->add(\Sharp\Internal\arrayOf($stock));
-/// $context->rows->insert(index: 0, value: \Sharp\Internal\arrayOf($stock));
+/// \Sharp\Internal\add($context->rows, \Sharp\Internal\arrayOf($stock));
+/// \Sharp\ListMembers::add($context->rows, value: \Sharp\Internal\arrayOf($stock), /* type args "Any?" */);
+/// \Sharp\ListMembers::insert($context->rows, index: 0, value: \Sharp\Internal\arrayOf($stock), /* type args "Any?" */);
 /// ```
 ///
-/// A `Map` a collection method stores in a collection plain PHP declares goes in as an element of it takes it, spec
-/// section 12, whether the argument is positional or named.
+/// A `Map` a `List` member stores in a list plain PHP declares goes in as an element of it takes it, spec section 12,
+/// whether the argument is positional, in the member's inline form, or named, in the call of its static method.
 #[test]
 fn a_map_a_method_stores_in_a_plain_php_collection_goes_in_as_its_element_takes_it() {
     let context = (
@@ -24472,34 +24196,52 @@ fn a_map_a_method_stores_in_a_plain_php_collection_goes_in_as_its_element_takes_
         "<?php namespace Lib; class Context { /** @var list<mixed> */ public array $rows = []; }",
     );
     let code = "namespace App.Tenant;\n\nimport Lib.Context;\n\nclass Report\n{\n    public void run(Context context)\n    {\n        Map<string, int> stock = this.stock();\n        context.rows.add(stock);\n        context.rows.add(value: stock);\n        context.rows.insert(index: 0, value: stock);\n    }\n\n    private Map<string, int> stock() => [:];\n}\n";
-    let added = indoc! {r#"
-        METHOD_CALL
-          PROP
-            VAR
-              ZVAL "context"
-            ZVAL "rows"
-          ZVAL "add"
-          ARG_LIST
-            CALL
-              ZVAL "Sharp\\Internal\\arrayOf"
-              ARG_LIST
-                VAR
-                  ZVAL "stock"
-    "#};
-
     assert_eq!(
         statements_at(code, &[context], 1..4),
         [
-            added,
-            added,
             indoc! {r#"
-                METHOD_CALL
-                  PROP
-                    VAR
-                      ZVAL "context"
-                    ZVAL "rows"
+                CALL
+                  ZVAL "Sharp\\Internal\\add"
+                  ARG_LIST
+                    PROP
+                      VAR
+                        ZVAL "context"
+                      ZVAL "rows"
+                    CALL
+                      ZVAL "Sharp\\Internal\\arrayOf"
+                      ARG_LIST
+                        VAR
+                          ZVAL "stock"
+            "#},
+            indoc! {r#"
+                STATIC_CALL
+                  ZVAL "Sharp\\ListMembers"
+                  ZVAL "add"
+                  ARG_LIST
+                    PROP
+                      VAR
+                        ZVAL "context"
+                      ZVAL "rows"
+                    NAMED_ARG
+                      ZVAL "value"
+                      CALL
+                        ZVAL "Sharp\\Internal\\arrayOf"
+                        ARG_LIST
+                          VAR
+                            ZVAL "stock"
+                    SHARP_TYPE_ARGS
+                      null
+                      ZVAL "Any?"
+            "#},
+            indoc! {r#"
+                STATIC_CALL
+                  ZVAL "Sharp\\ListMembers"
                   ZVAL "insert"
                   ARG_LIST
+                    PROP
+                      VAR
+                        ZVAL "context"
+                      ZVAL "rows"
                     NAMED_ARG
                       ZVAL "index"
                       ZVAL 0
@@ -24510,6 +24252,9 @@ fn a_map_a_method_stores_in_a_plain_php_collection_goes_in_as_its_element_takes_
                         ARG_LIST
                           VAR
                             ZVAL "stock"
+                    SHARP_TYPE_ARGS
+                      null
+                      ZVAL "Any?"
             "#},
         ]
     );
@@ -27068,6 +26813,42 @@ fn a_method_whose_body_is_one_call_reading_each_slot_once_gives_an_inline_form()
     assert_eq!(form_names(TEXT), ["sharp\\text::capitalized", "sharp\\text::padded", "sharp\\text::wrapped"]);
 }
 
+/// ```php
+/// return \implode(', ', \Sharp\Internal\map($numbers, fn ($n) => $n * 2));
+/// return \implode(', ', \Sharp\ListMembers::map($numbers, transform: fn ($n) => $n * 2));
+/// ```
+///
+/// A `List`'s member whose type argument only a PHP docblock writes, as `implode`'s parameter gives `map`'s result,
+/// runs its form, which takes none, and its static method without them, as a plain PHP caller calls it.
+#[test]
+fn a_list_member_with_a_type_argument_php_sharp_cannot_write_passes_none() {
+    let lowered = |call: &str| {
+        let code = format!(
+            "namespace Sharp;\n\npublic static class Joined\n{{\n    public static string run(List<int> numbers) => global.implode(\", \", {call});\n}}\n"
+        );
+
+        Lowered::named("vendor/heyjordanparker/php-sharp-composer/library/Sharp/Joined.sharp", &code).body_of("run")
+    };
+
+    let inlined = lowered("numbers.map(n => n * 2)");
+    assert!(inlined.contains("ZVAL \"Sharp\\\\Internal\\\\map\"\n"), "{inlined}");
+    let named = lowered("numbers.map(transform: n => n * 2)");
+    assert!(named.contains("ZVAL \"Sharp\\\\ListMembers\"\n"), "{named}");
+    assert_eq!(named.matches("SHARP_TYPE_ARGS").count(), 1, "{named}");
+}
+
+/// A `void` method whose body is one call gives an inline form, as `ListMembers.add` does, and a constructor with an
+/// expression body gives none: it declares no return type, and a call runs it through `new`.
+#[test]
+fn a_void_method_gives_an_inline_form_and_a_constructor_none() {
+    let code = "namespace Sharp;\n\npublic class Counter\n{\n    private string name;\n\n    public Counter(string name) => this.name = name;\n\n    public static void log(string text) => global.error_log(text);\n}\n";
+
+    assert_eq!(
+        form_names(("vendor/heyjordanparker/php-sharp-composer/library/Sharp/Counter.sharp", code)),
+        ["sharp\\counter::log"]
+    );
+}
+
 /// `Position.current()` in a standard library method is the position in the library's file, inside that method. Copied
 /// into a caller, it would give the caller's file with the library's line, so a method that runs it gives no form.
 #[test]
@@ -27843,7 +27624,7 @@ fn ordering_instances_compares_op_comparison_with_zero() {
 /// return \App\Priced\Defaults::{'op_Comparison@App\Priced'}($a, $b) < 0;
 /// return \App\Priced\Defaults::{'op_Comparison@App\Priced'}($a, $b) < 0;
 /// return \App\Size::op_Comparison(\App\Size::Small, \App\Size::Large) < 0;
-/// return $books->sortedBy(…, \App\Priced\Defaults::{'op_Comparison@App\Priced'}(...));
+/// return \Sharp\Internal\sortedBy($books, …, \App\Priced\Defaults::{'op_Comparison@App\Priced'}(...));
 /// ```
 ///
 /// Spec sections 19 and 22: an interface's constant is `[1]` `ZEND_ACC_PUBLIC`, and its operator is one `[17]` public
@@ -27883,7 +27664,7 @@ fn an_interface_operator_runs_from_its_trait_as_the_types_of_the_operands_choose
             member("Uses", &[0, 2]),
             member("Uses", &[1, 2]),
             member("Uses", &[2, 2]),
-            member("Uses", &[3, 2, 0, 0, 2, 1]),
+            member("Uses", &[3, 2, 0, 0, 1, 2]),
         ]
         .concat(),
         indoc! {r#"

@@ -7,8 +7,14 @@ use mago_codex::identifier::method::MethodIdentifier;
 use mago_codex::ttype::TType;
 use mago_codex::ttype::add_optional_union_type;
 use mago_codex::ttype::atomic::TAtomic;
+use mago_codex::ttype::atomic::object::TObject;
+use mago_codex::ttype::atomic::object::named::TNamedObject;
+use mago_codex::ttype::comparator::ComparisonResult;
+use mago_codex::ttype::comparator::union_comparator;
 use mago_codex::ttype::expander::StaticClassType;
+use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::get_mixed;
+use mago_codex::ttype::get_never;
 use mago_codex::ttype::get_null;
 use mago_codex::ttype::get_void;
 use mago_codex::ttype::template::TemplateResult;
@@ -17,6 +23,7 @@ use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_span::HasSpan;
 use mago_span::Span;
+use mago_syntax::cst::Argument;
 use mago_syntax::cst::ArgumentList;
 use mago_syntax::cst::Call;
 use mago_syntax::cst::ClassLikeMemberSelector;
@@ -38,6 +45,7 @@ use crate::context::scope::control_action::ControlAction;
 use crate::error::AnalysisError;
 use crate::expression::access::report_full_name;
 use crate::expression::access::report_member_of_mixed_kinds;
+use crate::expression::binary::comparison::check_element_equality;
 use crate::invocation::Invocation;
 use crate::invocation::InvocationArgumentsSource;
 use crate::invocation::InvocationTarget;
@@ -50,6 +58,8 @@ use crate::invocation::template_result::seed_extension_type_arguments;
 use crate::plugin::hook::NamedCall;
 use crate::plugin::hook::StaticCall;
 use crate::reconciler::assertion_reconciler;
+use crate::utils::names::collection_member_kind;
+use crate::utils::names::collection_type_parameters;
 use crate::utils::names::display_function_like_identifier;
 use crate::utils::quoted_source;
 
@@ -492,6 +502,16 @@ where
     }
     let class_like_metadata =
         context.codebase.get_class_like(class.as_bytes()).expect("an extension's class is a class-like");
+    // A collection's member is the collection's own, spec section 12, so its class carries the receiver's element
+    // types, which an issue names it with, as `List<int>.getOrNull`.
+    let class_type =
+        match artifacts.get_expression_type(receiver).filter(|_| collection_member_kind(class, metadata).is_some()) {
+            Some(receiver_type) => StaticClassType::Object(TObject::Named(TNamedObject::new_with_type_parameters(
+                class,
+                Some(collection_type_parameters(&receiver_type.to_non_nullable(), context.codebase)),
+            ))),
+            None => StaticClassType::Name(class),
+        };
     let target = InvocationTarget::FunctionLike {
         identifier: FunctionLikeIdentifier::Method(class, extension.get_method_name()),
         metadata,
@@ -501,7 +521,7 @@ where
             invocation_kind: MethodInvocationKind::Extension,
             declaring_method_id: Some(extension),
             class_like_metadata,
-            class_type: StaticClassType::Name(class),
+            class_type,
             declaring_object_type: None,
         }),
         span,
@@ -522,8 +542,66 @@ where
         false,
         skips_null,
         receiver_has_nullsafe_null,
-    )
+    )?;
+
+    let Some(arguments) = arguments.filter(|_| context.dialect.is_sharp()) else {
+        return Ok(());
+    };
+    // The arguments a member that changes its receiver stores have their types once the invocation is analyzed.
+    if method_call::changes_receiver(context, &extension) {
+        method_call::check_stored_in_static(context, artifacts, receiver, arguments);
+    }
+    // A collection member compares the value of a parameter marked `ComparedByEquality` with each element as `==` does,
+    // spec section 12, once the value's type is known. A value that is no element is refused by its argument check.
+    for (parameter, argument) in metadata.parameters.iter().skip(1).zip(&arguments.arguments) {
+        if parameter
+            .attributes
+            .iter()
+            .any(|attribute| attribute.name.as_bytes().eq_ignore_ascii_case(COMPARED_BY_EQUALITY))
+            && let Argument::Positional(_) = argument
+            && let Some(value_type) = artifacts.get_expression_type(argument.value())
+            && let Some(receiver_type) = artifacts.get_expression_type(receiver)
+            && receiver_type.types.iter().all(|atomic| matches!(atomic, TAtomic::Array(_) | TAtomic::Null))
+        {
+            let element_type = receiver_type
+                .types
+                .iter()
+                .filter_map(|atomic| match atomic {
+                    TAtomic::Array(array) => Some(get_array_parameters(array, context.codebase).1),
+                    _ => None,
+                })
+                .fold(None, |element_type, other| {
+                    Some(add_optional_union_type(other, element_type.as_ref(), context.codebase))
+                })
+                .unwrap_or_else(get_never);
+            if union_comparator::is_contained_by(
+                context.codebase,
+                value_type,
+                &element_type,
+                false,
+                false,
+                false,
+                &mut ComparisonResult::new(),
+            ) {
+                let method = metadata.original_name;
+                check_element_equality(
+                    context,
+                    &method.as_str_lossy(),
+                    receiver,
+                    argument.value(),
+                    &element_type,
+                    value_type,
+                    is_null_safe,
+                );
+            }
+        }
+    }
+
+    Ok(())
 }
+
+/// The prelude attribute that marks a collection member's parameter compared with the elements by `==`.
+const COMPARED_BY_EQUALITY: &[u8] = b"Sharp\\Internal\\ComparedByEquality";
 
 /// Applies active method call assertions to narrow the return type.
 ///

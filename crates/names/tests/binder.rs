@@ -11,6 +11,7 @@ use mago_names::binding::BindingError;
 use mago_names::binding::Local;
 use mago_names::binding::LocalKind;
 use mago_names::binding::php_variable_name;
+use mago_names::resolver::ChangingMembers;
 use mago_names::resolver::NameResolver;
 use mago_names::resolver::NamespaceClasses;
 use mago_span::Position;
@@ -844,7 +845,7 @@ fn a_class_like_of_the_files_namespace_wins_over_a_default_one() {
     let file = File::ephemeral(Cow::Borrowed(FILE_NAME), Cow::Borrowed(CODE.as_bytes()));
     let arena = LocalArena::new();
     let program = parse_file(&arena, &file);
-    let names = NameResolver::new(&arena).resolve_in(program, &namespace_classes);
+    let names = NameResolver::new(&arena).resolve_in(program, &namespace_classes, &ChangingMembers::default());
 
     for (needle, nth, class) in [
         ("Random?", 0, "App\\Random"),
@@ -925,7 +926,11 @@ fn error_always_names_the_standard_interface_and_result_is_a_default_class() {
     ] {
         let file = File::ephemeral(Cow::Borrowed(FILE_NAME), Cow::Borrowed(code.as_bytes()));
         let arena = LocalArena::new();
-        let names = NameResolver::new(&arena).resolve_in(parse_file(&arena, &file), &namespace_classes);
+        let names = NameResolver::new(&arena).resolve_in(
+            parse_file(&arena, &file),
+            &namespace_classes,
+            &ChangingMembers::default(),
+        );
 
         assert_eq!(String::from_utf8_lossy(resolved(&names, code, "Error e", 0)), error, "{code}");
         assert_eq!(String::from_utf8_lossy(resolved(&names, code, "Error>", 0)), error, "{code}");
@@ -1052,11 +1057,15 @@ fn a_lambda_binds_its_parameters_and_records_the_outer_locals_it_captures() {
     assert_eq!(names.captures(&span(CODE, "() => extra", 0)), extra);
 }
 
+/// A call of a member that changes its receiver, as the scan finds `add`, writes the local, ignoring case.
 #[test]
 fn a_local_written_after_its_declaration_is_recorded_as_written() {
     const CODE: &str = "class Report\n{\n    public int total(int extra)\n    {\n        let count = 0;\n        let other = 0;\n        let kept = 1;\n        let sizes = [:];\n        let lines = [];\n        let read = [];\n        count += 1;\n        other++;\n        extra = 2;\n        sizes[\"a\"][\"b\"] = 1;\n        lines.ADD(1);\n        read.get(0);\n        return count + other + kept + extra;\n    }\n}\n";
     let arena = LocalArena::new();
-    let names = bind(&arena, CODE);
+    let file = File::ephemeral(Cow::Borrowed(FILE_NAME), Cow::Borrowed(CODE.as_bytes()));
+    let program = parse_file(&arena, &file);
+    let names =
+        NameResolver::new(&arena).resolve_in(program, &NamespaceClasses::default(), &ChangingMembers::new(["add"]));
 
     assert!(names.is_written(&declared(CODE, "lines", 0, LocalKind::Let)));
     assert!(!names.is_written(&declared(CODE, "read", 0, LocalKind::Let)));
