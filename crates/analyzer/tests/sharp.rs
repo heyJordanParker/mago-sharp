@@ -4071,8 +4071,8 @@ fn a_comparison_that_always_or_never_holds_speaks_of_its_bool() {
         [
             "7:53 redundant-comparison Redundant `!=` comparison: left-hand side is never equal to (always `false` for !=) right-hand side. | Left operand is `1` | Right operand is `1` | The `!=` operator will always return `false` in this case. | Consider simplifying or removing this comparison as it always evaluates to `false`.",
             "8:54 redundant-comparison Redundant `!=` comparison: left-hand side is always not equal to (always `true` for !=) right-hand side. | Left operand is `1` | Right operand is `2` | The `!=` operator will always return `true` in this case. | Consider simplifying or removing this comparison as it always evaluates to `true`.",
-            "9:40 invalid-operand `<` orders numbers, strings, and classes and enums that declare `operator <=>`, and `bool` is none of them. | This is `bool`. | This is `int`. | A `bool` and a collection have no order, and an enum's cases have one only where it declares `operator <=>`. | Order a number or a string taken from the value instead.",
-            "10:40 invalid-operand `<=>` orders numbers, strings, and classes and enums that declare `operator <=>`, and `bool` is none of them. | This is `bool`. | This is `int`. | A `bool` and a collection have no order, and an enum's cases have one only where it declares `operator <=>`. | Order a number or a string taken from the value instead.",
+            "9:40 invalid-operand `<` orders numbers, strings, and classes, structs and enums that declare `operator <=>`, and `bool` is none of them. | This is `bool`. | This is `int`. | A `bool` and a collection have no order, and an enum's cases have one only where it declares `operator <=>`. | Order a number or a string taken from the value instead.",
+            "10:40 invalid-operand `<=>` orders numbers, strings, and classes, structs and enums that declare `operator <=>`, and `bool` is none of them. | This is `bool`. | This is `int`. | A `bool` and a collection have no order, and an enum's cases have one only where it declares `operator <=>`. | Order a number or a string taken from the value instead.",
         ]
     );
 }
@@ -5093,8 +5093,8 @@ fn ordering_a_bool_is_refused() {
     assert_eq!(
         worded(("src/Demo/Report.sharp", sharp), &[store]),
         [
-            "7:31 invalid-operand `<` orders numbers, strings, and classes and enums that declare `operator <=>`, and `bool` is none of them. | This is `bool`. | This is `int`. | A `bool` and a collection have no order, and an enum's cases have one only where it declares `operator <=>`. | Order a number or a string taken from the value instead.",
-            "9:31 invalid-operand `<` orders numbers, strings, and classes and enums that declare `operator <=>`, and `bool` is none of them. | This is `bool|int`. | This is `int`. | A `bool` and a collection have no order, and an enum's cases have one only where it declares `operator <=>`. | Order a number or a string taken from the value instead.",
+            "7:31 invalid-operand `<` orders numbers, strings, and classes, structs and enums that declare `operator <=>`, and `bool` is none of them. | This is `bool`. | This is `int`. | A `bool` and a collection have no order, and an enum's cases have one only where it declares `operator <=>`. | Order a number or a string taken from the value instead.",
+            "9:31 invalid-operand `<` orders numbers, strings, and classes, structs and enums that declare `operator <=>`, and `bool` is none of them. | This is `bool|int`. | This is `int`. | A `bool` and a collection have no order, and an enum's cases have one only where it declares `operator <=>`. | Order a number or a string taken from the value instead.",
         ]
     );
 }
@@ -5108,8 +5108,8 @@ fn ordering_an_enum_case_is_refused() {
     assert_eq!(
         worded(("src/Demo/Report.sharp", sharp), &[status]),
         [
-            "7:31 invalid-operand `<` orders numbers, strings, and classes and enums that declare `operator <=>`, and `Status` is none of them. | This is `Status`. | This is `Status`. | A `bool` and a collection have no order, and an enum's cases have one only where it declares `operator <=>`. | Declare `public static int operator <=>(Status a, Status b)` in `Status`: an enum orders its cases once it declares `operator <=>`.",
-            "9:55 invalid-operand `<=>` orders numbers, strings, and classes and enums that declare `operator <=>`, and `Status` is none of them. | This is `Status`. | This is `Status`. | A `bool` and a collection have no order, and an enum's cases have one only where it declares `operator <=>`. | Declare `public static int operator <=>(Status a, Status b)` in `Status`: an enum orders its cases once it declares `operator <=>`.",
+            "7:31 invalid-operand `<` orders numbers, strings, and classes, structs and enums that declare `operator <=>`, and `Status` is none of them. | This is `Status`. | This is `Status`. | A `bool` and a collection have no order, and an enum's cases have one only where it declares `operator <=>`. | Declare `public static int operator <=>(Status a, Status b)` in `Status`: an enum orders its cases once it declares `operator <=>`.",
+            "9:55 invalid-operand `<=>` orders numbers, strings, and classes, structs and enums that declare `operator <=>`, and `Status` is none of them. | This is `Status`. | This is `Status`. | A `bool` and a collection have no order, and an enum's cases have one only where it declares `operator <=>`. | Declare `public static int operator <=>(Status a, Status b)` in `Status`: an enum orders its cases once it declares `operator <=>`.",
         ]
     );
 }
@@ -5122,7 +5122,26 @@ fn ordering_a_collection_is_refused() {
     assert_eq!(
         worded(("src/Demo/Report.sharp", sharp), &[]),
         [
-            "5:63 invalid-operand `<` orders numbers, strings, and classes and enums that declare `operator <=>`, and `List<int>` is none of them. | This is `List<int>`. | This is `List<int>`. | A `bool` and a collection have no order, and an enum's cases have one only where it declares `operator <=>`. | Order a number or a string taken from the value instead.",
+            "5:63 invalid-operand `<` orders numbers, strings, and classes, structs and enums that declare `operator <=>`, and `List<int>` is none of them. | This is `List<int>`. | This is `List<int>`. | A `bool` and a collection have no order, and an enum's cases have one only where it declares `operator <=>`. | Order a number or a string taken from the value instead.",
+        ]
+    );
+}
+
+/// A struct has an order only where it declares `operator <=>`, as a class does, so `<` and `sortedBy` refuse one that
+/// declares none, and each refusal names structs among what orders.
+#[test]
+fn ordering_a_struct_is_refused() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static bool a(Spot left, Spot right) => left < right;\n\n    public static List<Spot> b(List<Spot> spots) => spots.sortedBy(s => s);\n}\n";
+    let spot = (
+        "src/Demo/Spot.sharp",
+        "namespace Demo;\n\npublic struct Spot\n{\n    public Spot(public int x { get; }) { }\n}\n",
+    );
+
+    assert_eq!(
+        worded(("src/Demo/Report.sharp", sharp), &[spot]),
+        [
+            "5:52 invalid-operand `<` cannot compare `Spot` with `Spot`: `Spot` declares no `operator <=>`. | This is `Spot`. | This is `Spot`. | `<` orders numbers, strings, and classes, structs and enums that declare `operator <=>`. | Compare values the instances hold, such as their properties.",
+            "7:68 invalid-argument `sortedBy` orders numbers, strings, and classes, structs and enums that declare `operator <=>`, and `Spot` is none of them. | This returns `Spot`. | A class instance or a struct has an order only where its type declares `operator <=>`. | Order a number or a string taken from the value instead.",
         ]
     );
 }
@@ -5145,7 +5164,7 @@ fn ordering_an_any_keeps_its_report_unless_the_other_side_has_no_order() {
         [
             "5:40 mixed-operand Left operand of `<` is `Any`, which has no order. | Check the value with `is` or `match` first, as in `if (value is int n)`, and compare `n`.",
             "7:41 mixed-operand Left operand of `<=` is `Any?`, which has no order. | Check the value with `is` or `match` first, as in `if (value is int n)`, and compare `n`.",
-            "9:40 invalid-operand `<` orders numbers, strings, and classes and enums that declare `operator <=>`, and `bool` is none of them. | Order a number or a string taken from the value instead.",
+            "9:40 invalid-operand `<` orders numbers, strings, and classes, structs and enums that declare `operator <=>`, and `bool` is none of them. | Order a number or a string taken from the value instead.",
         ]
     );
 
@@ -5172,10 +5191,10 @@ fn sorted_by_a_key_with_no_order_is_refused() {
     assert_eq!(
         worded(("src/Demo/Report.sharp", sharp), &others),
         [
-            "7:71 invalid-argument `sortedBy` orders numbers, strings, and classes and enums that declare `operator <=>`, and `Status` is none of them. | This returns `Status`. | A `bool` and a collection have no order, and an enum's cases have one only where it declares `operator <=>`. | Declare `public static int operator <=>(Status a, Status b)` in `Status`: an enum orders its cases once it declares `operator <=>`.",
-            "9:61 invalid-argument `sortedBy` orders numbers, strings, and classes and enums that declare `operator <=>`, and `bool` is none of them. | This returns `bool`. | A `bool` and a collection have no order, and an enum's cases have one only where it declares `operator <=>`. | Order a number or a string taken from the value instead.",
-            "11:57 invalid-argument `sortedBy` orders numbers, strings, and classes and enums that declare `operator <=>`, and `List<string>` is none of them. | This returns `List<string>`. | A `bool` and a collection have no order, and an enum's cases have one only where it declares `operator <=>`. | Order a number or a string taken from the value instead.",
-            "13:63 invalid-argument `sortedBy` orders numbers, strings, and classes and enums that declare `operator <=>`, and `Cart` is none of them. | This returns `Cart`. | A class instance has an order only where its class declares `operator <=>`. | Order a number or a string taken from the value instead.",
+            "7:71 invalid-argument `sortedBy` orders numbers, strings, and classes, structs and enums that declare `operator <=>`, and `Status` is none of them. | This returns `Status`. | A `bool` and a collection have no order, and an enum's cases have one only where it declares `operator <=>`. | Declare `public static int operator <=>(Status a, Status b)` in `Status`: an enum orders its cases once it declares `operator <=>`.",
+            "9:61 invalid-argument `sortedBy` orders numbers, strings, and classes, structs and enums that declare `operator <=>`, and `bool` is none of them. | This returns `bool`. | A `bool` and a collection have no order, and an enum's cases have one only where it declares `operator <=>`. | Order a number or a string taken from the value instead.",
+            "11:57 invalid-argument `sortedBy` orders numbers, strings, and classes, structs and enums that declare `operator <=>`, and `List<string>` is none of them. | This returns `List<string>`. | A `bool` and a collection have no order, and an enum's cases have one only where it declares `operator <=>`. | Order a number or a string taken from the value instead.",
+            "13:63 invalid-argument `sortedBy` orders numbers, strings, and classes, structs and enums that declare `operator <=>`, and `Cart` is none of them. | This returns `Cart`. | A class instance or a struct has an order only where its type declares `operator <=>`. | Order a number or a string taken from the value instead.",
         ]
     );
 }
@@ -5185,7 +5204,7 @@ fn sorted_by_a_key_with_no_order_is_refused() {
 #[test]
 fn sorted_by_on_a_map_a_set_and_a_chain_refuses_a_key_with_no_order() {
     let sharp = "namespace Demo;\n\nimport Lib.Status;\n\nclass Report\n{\n    public List<Status> a(Map<string, Status> owners) => owners.sortedBy(s => s);\n\n    public List<Status> b(Set<Status> statuses) => statuses.sortedBy(s => s);\n\n    public List<Status> c(List<Status> statuses) => statuses.filter(s => s != Status.Closed).sortedBy(s => s);\n}\n";
-    let refused = "invalid-argument `sortedBy` orders numbers, strings, and classes and enums that declare `operator <=>`, and `Status` is none of them. | This returns `Status`. | A `bool` and a collection have no order, and an enum's cases have one only where it declares `operator <=>`. | Declare `public static int operator <=>(Status a, Status b)` in `Status`: an enum orders its cases once it declares `operator <=>`.";
+    let refused = "invalid-argument `sortedBy` orders numbers, strings, and classes, structs and enums that declare `operator <=>`, and `Status` is none of them. | This returns `Status`. | A `bool` and a collection have no order, and an enum's cases have one only where it declares `operator <=>`. | Declare `public static int operator <=>(Status a, Status b)` in `Status`: an enum orders its cases once it declares `operator <=>`.";
 
     assert_eq!(
         worded(("src/Demo/Report.sharp", sharp), &[("src/Lib/Status.php", STATUS)]),
@@ -6586,7 +6605,7 @@ fn a_data_case_compares_by_value() {
             "32:59 invalid-operand `===` cannot compare `PaymentResult` with `PaymentResult`: it tests whether two class instances are the same object.",
             "33:51 invalid-operand `==` cannot compare `PaymentResult` with `int`.",
             "34:60 invalid-operand `==` cannot compare `PaymentResult` with `CheckoutState`.",
-            "35:61 invalid-operand `<` orders numbers, strings, and classes and enums that declare `operator <=>`, and `PaymentResult` is none of them.",
+            "35:61 invalid-operand `<` orders numbers, strings, and classes, structs and enums that declare `operator <=>`, and `PaymentResult` is none of them.",
             "36:40 invalid-operand `Step` can't be compared: `action` is a function.",
             "37:47 invalid-operand `Booking` can't compare by value: `plan` is a `Plan`, which declares no `operator ==`.",
         ]
@@ -12082,10 +12101,71 @@ fn a_struct_compares_by_value() {
             "97:47 invalid-operand `Moving` can't be compared: `onMove` is a function.",
             "99:43 invalid-operand `<` cannot compare `Spot` with `Spot`: `Spot` declares no `operator <=>`.",
             "101:41 invalid-operand `<=>` cannot compare `Spot` with `Spot`: `Spot` declares no `operator <=>`.",
-            "103:66 invalid-argument `sortedBy` orders numbers, strings, and classes and enums that declare `operator <=>`, and `Spot` is none of them.",
+            "103:66 invalid-argument `sortedBy` orders numbers, strings, and classes, structs and enums that declare `operator <=>`, and `Spot` is none of them.",
             "105:45 invalid-operand `==` cannot compare `Moved` with `Moved`: `Moved` declares no `operator ==`.",
         ]
     );
+}
+
+/// Spec section 19: a struct with a field that has no `==` has no `==` either, and a plain PHP object has none. A field
+/// counts as a property does, so `==`, `!=` and a search refuse a struct whose field is a `DateTimeZone`, and a struct
+/// that holds one, as they refuse a project's struct whose field is a plain PHP class of its own.
+#[test]
+fn a_struct_with_a_field_that_has_no_equality_has_none() {
+    let zones = "namespace Sharp.Time;\n\npublic class Zones\n{\n    public bool same(Zone a, Zone b) => a == b;\n\n    public bool moved(Zone a, Zone b) => a != b;\n\n    public bool held(List<Zone> zones, Zone zone) => zones.contains(zone);\n\n    public bool met(Meeting a, Meeting b) => a == b;\n}\n";
+    let zone = (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Time/Zone.sharp",
+        "namespace Sharp.Time;\n\nimport DateTimeZone;\n\npublic struct Zone\n{\n    private DateTimeZone rules;\n\n    public Zone(public string name { get; })\n    {\n        this.rules = new DateTimeZone(name);\n    }\n}\n",
+    );
+    let meeting = (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Time/Meeting.sharp",
+        "namespace Sharp.Time;\n\npublic struct Meeting\n{\n    public Meeting(public int at { get; }, public Zone zone { get; }) { }\n}\n",
+    );
+    let analyzed = ("vendor/heyjordanparker/php-sharp-composer/library/Sharp/Time/Zones.sharp", zones);
+
+    assert_eq!(
+        written(zones, &analyze(&PLUGIN_REGISTRY, settings(), analyzed, &[zone, meeting])),
+        [
+            "5:41 invalid-operand `Zone` can't compare by value: `rules` is a `DateTimeZone`, which declares no `operator ==`.",
+            "7:42 invalid-operand `Zone` can't compare by value: `rules` is a `DateTimeZone`, which declares no `operator ==`.",
+            "9:69 invalid-argument `contains` compares elements with `==`, and `Zone` can't compare by value: `rules` is a `DateTimeZone`, which declares no `operator ==`.",
+            "11:46 invalid-operand `Meeting` can't compare by value: `zone` is a `Zone`, which can't compare by value.",
+        ]
+    );
+
+    let tickets = "namespace App;\n\npublic class Tickets\n{\n    public bool same(Ticket a, Ticket b) => a == b;\n}\n";
+    let ticket = (
+        "src/App/Ticket.sharp",
+        "namespace App;\n\nimport Lib.Words;\n\npublic struct Ticket\n{\n    private Words words;\n\n    public Ticket(public string code { get; })\n    {\n        this.words = new Words();\n    }\n}\n",
+    );
+
+    assert_eq!(
+        written(tickets, &analyze(&PLUGIN_REGISTRY, settings(), ("src/App/Tickets.sharp", tickets), &[ticket, WORDS])),
+        [
+            "5:45 invalid-operand `Ticket` can't compare by value: `words` is a `Words`, which declares no `operator ==`."
+        ]
+    );
+}
+
+/// Spec section 19: a struct whose every field has `==` compares by value with no code, through a field of a nested
+/// struct and of an enum as through a property, so `==`, `!=`, a search, a `Map` key and an `Any?` compare it.
+#[test]
+fn a_struct_whose_fields_all_have_equality_compares_by_value() {
+    let compare = "namespace Demo;\n\npublic class Compare\n{\n    public bool same(Seat a, Seat b) => a == b;\n\n    public bool moved(Seat a, Seat b) => a != b;\n\n    public bool held(List<Seat> seats, Seat seat) => seats.contains(seat);\n\n    public int keyed(Map<Seat, int> counts) => counts.count();\n\n    public bool loose(Any? a, Seat b) => a == b;\n}\n";
+    let seat = (
+        "src/Demo/Seat.sharp",
+        "namespace Demo;\n\npublic struct Seat\n{\n    private int row;\n\n    private Spot spot;\n\n    private Size size;\n\n    public Seat(public string label { get; }, int row, Spot spot, Size size)\n    {\n        this.row = row;\n        this.spot = spot;\n        this.size = size;\n    }\n}\n",
+    );
+    let spot = (
+        "src/Demo/Spot.sharp",
+        "namespace Demo;\n\npublic struct Spot\n{\n    private int x;\n\n    public Spot(int x)\n    {\n        this.x = x;\n    }\n}\n",
+    );
+    let size = (
+        "src/Demo/Size.sharp",
+        "namespace Demo;\n\npublic enum Size : string\n{\n    case Big = \"big\";\n\n    case Small = \"small\";\n}\n",
+    );
+
+    assert_eq!(issues(("src/Demo/Compare.sharp", compare), &[seat, spot, size]), Vec::<String>::new());
 }
 
 /// Spec section 10: a struct can be generic, and each of its type arguments decides what its property of that type
@@ -18344,7 +18424,7 @@ fn a_comparison_message_names_its_operand_type_as_sharp_writes_it() {
     assert_eq!(
         worded(("src/Demo/Order.sharp", sharp), &[]),
         [
-            "5:40 invalid-operand `<` cannot compare `Order?` with `int`: `Order` declares no `operator <=>`. | This is `Order?`. | This is `int`. | `<` on a class instance exists only where its class declares `operator <=>`. | Compare values the instances hold, such as their properties.",
+            "5:40 invalid-operand `<` cannot compare `Order?` with `int`: `Order` declares no `operator <=>`. | This is `Order?`. | This is `int`. | `<` orders numbers, strings, and classes, structs and enums that declare `operator <=>`. | Compare values the instances hold, such as their properties.",
         ]
     );
 }

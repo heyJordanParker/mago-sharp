@@ -790,8 +790,8 @@ impl Comparand {
         matches!(self, Comparand::Instance | Comparand::Struct(_))
     }
 
-    /// Whether a value of this comparand has no order: only numbers, strings and classes that declare `operator <=>`
-    /// have one, so `<`, `<=`, `>`, `>=` and `<=>` refuse a `bool`, an enum case and a collection.
+    /// Whether a value of this comparand has no order: only [`ORDERED_TYPES`] have one, so `<`, `<=`, `>`, `>=` and
+    /// `<=>` refuse a `bool`, an enum case and a collection.
     const fn is_unordered(self) -> bool {
         matches!(self, Comparand::Bool | Comparand::Enum(_) | Comparand::Collection)
     }
@@ -1367,9 +1367,7 @@ pub(crate) fn report_sharp_refusal<A>(
                     .with_help(format!("Use `{identity}` to test whether both sides are the same object."))
             } else {
                 Issue::error(format!("{pair}: `{class}` declares no `operator <=>`."))
-                    .with_note(format!(
-                        "`{op}` on a class instance exists only where its class declares `operator <=>`."
-                    ))
+                    .with_note(format!("`{op}` orders {ORDERED_TYPES}."))
                     .with_help("Compare values the instances hold, such as their properties.")
             };
 
@@ -1663,6 +1661,9 @@ fn struct_property_refusal<'codebase>(
     let enum_type_arguments =
         data_enum(codebase, class).and_then(|_| enum_type_arguments(class.name, [type_of], codebase));
     visiting.push(class.name);
+    // The span only marks each property's `==` as written in the source, which `refusal` checks. A field has no span of
+    // its own, so each one is marked at its struct or case.
+    let equality = BinaryOperator::Equal(class.span);
 
     let refused = properties.into_iter().find_map(|property| {
         let declared = &property.type_metadata.as_ref().or(property.type_declaration_metadata.as_ref())?.type_union;
@@ -1674,7 +1675,6 @@ fn struct_property_refusal<'codebase>(
         if comparands(&r#type, codebase).contains(&Comparand::Any) {
             return Some((property, r#type, None));
         }
-        let equality = BinaryOperator::Equal(property.span?);
 
         refusal(&equality, &r#type, &r#type, codebase, visiting).map(|refusal| (property, r#type, Some(refusal)))
     });
@@ -1770,9 +1770,12 @@ fn different_types_issue(comparison: &str, help: &str) -> Issue {
         .with_help(help)
 }
 
+/// What PHP# orders, spec section 19, as an ordering's refusal names it.
+const ORDERED_TYPES: &str = "numbers, strings, and classes, structs and enums that declare `operator <=>`";
+
 /// The issue that refuses ordering a value whose part `part` has no order by `orderer`, an operator or `sortedBy`, as
 /// `refusal` gives the reason: a `bool`, a case of an enum that declares no `operator <=>`, `unordered_enum` when it
-/// is one, or a collection, or an instance of a class that declares none.
+/// is one, or a collection, or an instance of a class or a struct that declares none.
 fn unordered_issue(
     orderer: impl std::fmt::Display,
     part: &str,
@@ -1780,7 +1783,7 @@ fn unordered_issue(
     unordered_enum: Option<&str>,
 ) -> Issue {
     let note = if matches!(refusal, Refusal::Instance) {
-        "A class instance has an order only where its class declares `operator <=>`."
+        "A class instance or a struct has an order only where its type declares `operator <=>`."
     } else {
         "A `bool` and a collection have no order, and an enum's cases have one only where it declares `operator <=>`."
     };
@@ -1792,11 +1795,9 @@ fn unordered_issue(
         None => "Order a number or a string taken from the value instead.".to_owned(),
     };
 
-    Issue::error(format!(
-        "`{orderer}` orders numbers, strings, and classes and enums that declare `operator <=>`, and `{part}` is none of them."
-    ))
-    .with_note(note)
-    .with_help(help)
+    Issue::error(format!("`{orderer}` orders {ORDERED_TYPES}, and `{part}` is none of them."))
+        .with_note(note)
+        .with_help(help)
 }
 
 /// The enum a case of `lhs_type` or `rhs_type` belongs to when its cases have no order, as `Status`, for the help

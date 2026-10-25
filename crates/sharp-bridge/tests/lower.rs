@@ -32163,6 +32163,131 @@ fn a_struct_is_a_final_class_whose_op_equality_compares_each_property() {
 }
 
 /// ```php
+/// public static function op_Equality(mixed $a, mixed $b): bool
+/// {
+///     if ($a instanceof \App\Seat && $b instanceof \App\Seat) {
+///         return $a->row === $b->row && \App\Spot::op_Equality($a->spot, $b->spot) && $a->kind === $b->kind;
+///     }
+///     return $a === $b;
+/// }
+/// ```
+///
+/// Spec section 19: a field is part of a struct's value as a property is, so the struct's `op_Equality` compares each
+/// field by the field's own `==`: a nested struct through its `op_Equality`, and an `int` and an enum case by `===`. A
+/// field whose type has no `==`, as a class that declares no `operator ==`, gives the struct none, so `==` on it is
+/// refused before lowering and never runs as `===`.
+#[test]
+fn a_struct_s_op_equality_compares_each_field_by_its_own_equality() {
+    let seat = "namespace App;\n\npublic struct Seat\n{\n    private int row;\n\n    private Spot spot;\n\n    private Size kind;\n\n    public Seat(int row, Spot spot, Size kind)\n    {\n        this.row = row;\n        this.spot = spot;\n        this.kind = kind;\n    }\n\n    public bool run(Seat other) => this == other;\n}\n";
+    let library = [
+        (
+            "src/App/Spot.sharp",
+            "namespace App;\n\npublic struct Spot\n{\n    private int x;\n\n    public Spot(int x)\n    {\n        this.x = x;\n    }\n}\n",
+        ),
+        ("src/App/Size.sharp", "namespace App;\n\npublic enum Size : string\n{\n    case Big = \"big\";\n}\n"),
+        ("src/App/Plan.sharp", "namespace App;\n\npublic class Plan\n{\n}\n"),
+    ];
+    let lowered = Lowered::with(seat, &library);
+
+    assert_eq!(
+        lowered.declared("op_Equality"),
+        indoc! {r#"
+            METHOD [17] "op_Equality" @3-3
+              PARAM_LIST
+                PARAM
+                  ZVAL [1] "mixed"
+                  ZVAL "a"
+                  null
+                  null
+                  null
+                  null
+                PARAM
+                  ZVAL [1] "mixed"
+                  ZVAL "b"
+                  null
+                  null
+                  null
+                  null
+              null
+              STMT_LIST
+                IF
+                  IF_ELEM
+                    AND
+                      INSTANCEOF
+                        VAR
+                          ZVAL "a"
+                        ZVAL "App\\Seat"
+                      INSTANCEOF
+                        VAR
+                          ZVAL "b"
+                        ZVAL "App\\Seat"
+                    STMT_LIST
+                      RETURN
+                        AND
+                          AND
+                            BINARY_OP [16]
+                              PROP
+                                VAR
+                                  ZVAL "a"
+                                ZVAL "row"
+                              PROP
+                                VAR
+                                  ZVAL "b"
+                                ZVAL "row"
+                            STATIC_CALL
+                              ZVAL "App\\Spot"
+                              ZVAL "op_Equality"
+                              ARG_LIST
+                                PROP
+                                  VAR
+                                    ZVAL "a"
+                                  ZVAL "spot"
+                                PROP
+                                  VAR
+                                    ZVAL "b"
+                                  ZVAL "spot"
+                          BINARY_OP [16]
+                            PROP
+                              VAR
+                                ZVAL "a"
+                              ZVAL "kind"
+                            PROP
+                              VAR
+                                ZVAL "b"
+                              ZVAL "kind"
+                RETURN
+                  BINARY_OP [16]
+                    VAR
+                      ZVAL "a"
+                    VAR
+                      ZVAL "b"
+              ZVAL [1] "bool"
+              null
+        "#}
+    );
+    assert_eq!(
+        lowered.body(),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                STATIC_CALL
+                  ZVAL "App\\Seat"
+                  ZVAL "op_Equality"
+                  ARG_LIST
+                    VAR
+                      ZVAL "this"
+                    VAR
+                      ZVAL "other"
+        "#}
+    );
+
+    assert_eq!(
+        Lowered::with(&seat.replace("Size", "Plan"), &library).diagnostics(),
+        ["18:36 compile error: `Seat` can't compare by value: `kind` is a `Plan`, which declares no `operator ==`."]
+    );
+}
+
+/// ```php
 /// return $rush->total(2) + \App\Text\Extensions::total($order, 2);
 /// ```
 ///
