@@ -40,7 +40,11 @@ impl SyntaxError {
     }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
+/// An error in a parsed template.
+///
+/// A [`Template`](crate::cst::Template) holds its errors in its arena, which never runs `Drop`, so a parse error is
+/// `Copy`: the compiler refuses a field that owns heap memory, which would leak on every parse that reports it.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub enum ParseError<'arena> {
     SyntaxError(SyntaxError),

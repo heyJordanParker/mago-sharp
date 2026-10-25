@@ -17,7 +17,7 @@ where
     pub(crate) fn parse_enum_case_with_attributes(
         &mut self,
         attributes: Sequence<'arena, AttributeList<'arena>>,
-    ) -> Result<EnumCase<'arena>, ParseError> {
+    ) -> Result<EnumCase<'arena>, ParseError<'arena>> {
         Ok(EnumCase {
             attribute_lists: attributes,
             case: self.expect_keyword(T!["case"])?,
@@ -26,7 +26,7 @@ where
         })
     }
 
-    fn parse_enum_case_item(&mut self) -> Result<EnumCaseItem<'arena>, ParseError> {
+    fn parse_enum_case_item(&mut self) -> Result<EnumCaseItem<'arena>, ParseError<'arena>> {
         let name = self.parse_local_identifier()?;
         if self.dialect.is_sharp() && self.stream.is_at(T!["("])? {
             let parameter_list = self.parse_function_like_parameter_list()?;

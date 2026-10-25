@@ -8,7 +8,7 @@ impl<'arena, A> Parser<'_, 'arena, A>
 where
     A: Arena,
 {
-    pub(crate) fn parse_throw(&mut self) -> Result<Throw<'arena>, ParseError> {
+    pub(crate) fn parse_throw(&mut self) -> Result<Throw<'arena>, ParseError<'arena>> {
         Ok(Throw { throw: self.expect_keyword(T!["throw"])?, exception: self.arena.alloc(self.parse_expression()?) })
     }
 }

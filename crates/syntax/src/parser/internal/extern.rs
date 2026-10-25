@@ -13,7 +13,7 @@ where
 {
     /// Parses a PHP# `extern` declaration: `extern`, `event` when the class is an event, its target, a bare name or
     /// `Class.member`, then an optional `uses` clause.
-    pub(crate) fn parse_extern(&mut self) -> Result<Extern<'arena>, ParseError> {
+    pub(crate) fn parse_extern(&mut self) -> Result<Extern<'arena>, ParseError<'arena>> {
         let r#extern = self.expect_any_keyword()?;
         let event = if self.stream.lookahead(0)?.is_some_and(|token| token.value == b"event")
             && self.stream.peek_kind(1)? == Some(T![Identifier])
@@ -35,7 +35,7 @@ where
     }
 
     /// Parses a `uses` clause when one starts here: `uses`, which stays a name everywhere else, and its effects.
-    pub(crate) fn parse_optional_uses(&mut self) -> Result<Option<Uses<'arena>>, ParseError> {
+    pub(crate) fn parse_optional_uses(&mut self) -> Result<Option<Uses<'arena>>, ParseError<'arena>> {
         if !self.stream.lookahead(0)?.is_some_and(|token| token.kind == T![Identifier] && token.value == b"uses") {
             return Ok(None);
         }

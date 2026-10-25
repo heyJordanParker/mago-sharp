@@ -64,7 +64,7 @@ impl<'arena, A> Parser<'_, 'arena, A>
 where
     A: Arena,
 {
-    pub(crate) fn parse_expression(&mut self) -> Result<&'arena Expression<'arena>, ParseError> {
+    pub(crate) fn parse_expression(&mut self) -> Result<&'arena Expression<'arena>, ParseError<'arena>> {
         self.parse_expression_with_precedence(Precedence::Lowest)
     }
 
@@ -72,7 +72,9 @@ where
     /// a by-reference value is legal (array element value, yield value, `list(&$x)` destructuring).
     /// `&` outside such positions must remain a syntax error, so callers in those positions
     /// should use this helper instead of `parse_expression`.
-    pub(crate) fn parse_possibly_referenced_expression(&mut self) -> Result<&'arena Expression<'arena>, ParseError> {
+    pub(crate) fn parse_possibly_referenced_expression(
+        &mut self,
+    ) -> Result<&'arena Expression<'arena>, ParseError<'arena>> {
         if matches!(self.stream.peek_kind(0)?, Some(T!["&"])) {
             let ampersand_span = self.stream.eat_span(T!["&"])?;
             let referenced_expr = self.parse_expression_with_precedence(Precedence::Reference)?;
@@ -130,7 +132,7 @@ where
     pub(crate) fn parse_expression_with_precedence(
         &mut self,
         precedence: Precedence,
-    ) -> Result<&'arena Expression<'arena>, ParseError> {
+    ) -> Result<&'arena Expression<'arena>, ParseError<'arena>> {
         self.state.recursion_depth += 1;
         if self.state.recursion_depth > MAX_RECURSION_DEPTH {
             self.state.recursion_depth -= 1;
@@ -151,7 +153,7 @@ where
     fn parse_expression_with_precedence_inner(
         &mut self,
         precedence: Precedence,
-    ) -> Result<&'arena Expression<'arena>, ParseError> {
+    ) -> Result<&'arena Expression<'arena>, ParseError<'arena>> {
         let left = self.parse_lhs_expression(precedence)?;
 
         self.parse_expression_continuation(left, precedence)
@@ -161,7 +163,7 @@ where
         &mut self,
         mut left: &'arena Expression<'arena>,
         precedence: Precedence,
-    ) -> Result<&'arena Expression<'arena>, ParseError> {
+    ) -> Result<&'arena Expression<'arena>, ParseError<'arena>> {
         while let Some(next) = self.stream.lookahead(0)? {
             let kind = self.operator_kind(next)?;
 
@@ -273,7 +275,10 @@ where
     }
 
     #[inline]
-    fn parse_lhs_expression(&mut self, precedence: Precedence) -> Result<&'arena Expression<'arena>, ParseError> {
+    fn parse_lhs_expression(
+        &mut self,
+        precedence: Precedence,
+    ) -> Result<&'arena Expression<'arena>, ParseError<'arena>> {
         self.read_php_expression()?;
         let token = self.stream.lookahead(0)?.ok_or_else(|| self.stream.unexpected(None, &[]))?;
         let next = self.stream.peek_kind(1)?;
@@ -456,7 +461,7 @@ where
         }))
     }
 
-    fn parse_arrow_function_or_closure(&mut self) -> Result<&'arena Expression<'arena>, ParseError> {
+    fn parse_arrow_function_or_closure(&mut self) -> Result<&'arena Expression<'arena>, ParseError<'arena>> {
         let attributes = self.parse_attribute_list_sequence()?;
 
         let next = self.stream.lookahead(0)?.ok_or_else(|| self.stream.unexpected(None, &[]))?;
@@ -478,7 +483,7 @@ where
     /// operator after an operand, where no name can follow.
     /// `(expression)`, or in PHP# a class name in parentheses before a value, as in `(Admin) user`. PHP# has no class
     /// casts, spec section 24, so that fails as a typo does at its `(`, and the value stands for the cast.
-    fn parse_parenthesized(&mut self) -> Result<Expression<'arena>, ParseError> {
+    fn parse_parenthesized(&mut self) -> Result<Expression<'arena>, ParseError<'arena>> {
         let parenthesized = Parenthesized {
             left_parenthesis: self.stream.eat_span(T!["("])?,
             expression: self.parse_expression_with_precedence(Precedence::Lowest)?,
@@ -506,7 +511,7 @@ where
         Ok(value.clone())
     }
 
-    fn operator_kind(&mut self, token: Token<'_>) -> Result<TokenKind, ParseError> {
+    fn operator_kind(&mut self, token: Token<'_>) -> Result<TokenKind, ParseError<'arena>> {
         Ok(match (self.dialect, token.kind) {
             (Dialect::Sharp, T!["."]) => T!["->"],
             (Dialect::Sharp, T!["?"])
@@ -529,7 +534,7 @@ where
     /// stands as an error expression, so no stage after the parser checks it.
     ///
     /// PHP#'s `?.` is two tokens, consumed together.
-    fn consume_operator_span(&mut self) -> Result<(Span, bool), ParseError> {
+    fn consume_operator_span(&mut self) -> Result<(Span, bool), ParseError<'arena>> {
         let token = self.stream.consume()?;
         let span = token.span_for(self.stream.file_id());
         if self.dialect.is_sharp() && token.kind == T!["?"] {
@@ -549,7 +554,7 @@ where
         lhs: &'arena Expression<'arena>,
         operator: TokenKind,
         precedence: Precedence,
-    ) -> Result<&'arena Expression<'arena>, ParseError> {
+    ) -> Result<&'arena Expression<'arena>, ParseError<'arena>> {
         let mut refused = false;
         let expression = self.arena.alloc(match operator {
             T!["("] => {
@@ -754,7 +759,7 @@ where
     /// Parses the `return`, `continue` or `break` the right side of `??` runs in a `.sharp` file, spec section 14.4.
     /// It is its statement without the `;`, so `return` takes a value only when an expression follows it, and the
     /// statement's terminator is the empty span where it ends.
-    fn parse_leave(&mut self) -> Result<Leave<'arena>, ParseError> {
+    fn parse_leave(&mut self) -> Result<Leave<'arena>, ParseError<'arena>> {
         let ends_value =
             |kind: Option<TokenKind>| matches!(kind, None | Some(T![";" | "?>" | ")" | "]" | "}" | "," | ":" | "=>"]));
         let end = |span: Span| Terminator::Missing(Span::new(span.file_id, span.end, span.end));
@@ -783,7 +788,7 @@ where
     fn parse_infix_expression(
         &mut self,
         lhs: &'arena Expression<'arena>,
-    ) -> Result<&'arena Expression<'arena>, ParseError> {
+    ) -> Result<&'arena Expression<'arena>, ParseError<'arena>> {
         let operator = self.stream.lookahead(0)?.ok_or_else(|| self.stream.unexpected(None, &[]))?;
 
         Ok(self.arena.alloc(match operator.kind {

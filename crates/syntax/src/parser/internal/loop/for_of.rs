@@ -18,7 +18,7 @@ where
 {
     /// Whether the `for` header after `(` declares its variables with `let` or `const`, as a PHP# `for … of` loop and
     /// a PHP# counter both do.
-    pub(crate) fn is_at_loop_variable_keyword(&mut self) -> Result<bool, ParseError> {
+    pub(crate) fn is_at_loop_variable_keyword(&mut self) -> Result<bool, ParseError<'arena>> {
         if !self.dialect.is_sharp() {
             return Ok(false);
         }
@@ -33,7 +33,7 @@ where
     }
 
     /// Whether the `for` header after `(` is TypeScript's `for (x in y)`, which declares no loop variable.
-    pub(crate) fn is_at_for_in_without_keyword(&mut self) -> Result<bool, ParseError> {
+    pub(crate) fn is_at_for_in_without_keyword(&mut self) -> Result<bool, ParseError<'arena>> {
         if !self.dialect.is_sharp() || self.stream.peek_kind(0)?.is_none_or(|kind| kind != T![Identifier]) {
             return Ok(false);
         }
@@ -43,7 +43,7 @@ where
 
     /// Reports TypeScript's `for (x in y)` at its `in`, as `parse_of_keyword` reports `in`. The loop declares no
     /// variable, so it parses to its body alone, and the statements after it still parse.
-    pub(crate) fn parse_for_in_without_keyword(&mut self) -> Result<Statement<'arena>, ParseError> {
+    pub(crate) fn parse_for_in_without_keyword(&mut self) -> Result<Statement<'arena>, ParseError<'arena>> {
         self.stream.consume()?;
         let r#in = self.stream.consume()?;
         self.errors.push(ParseError::InLoopInSharp(r#in.span_for(self.stream.file_id())));
@@ -54,7 +54,7 @@ where
     }
 
     /// Whether `of`, or TypeScript's `in`, comes next.
-    pub(crate) fn is_at_of_keyword(&mut self) -> Result<bool, ParseError> {
+    pub(crate) fn is_at_of_keyword(&mut self) -> Result<bool, ParseError<'arena>> {
         Ok(self
             .stream
             .lookahead(0)?
@@ -68,7 +68,7 @@ where
         left_parenthesis: Span,
         keyword: Keyword<'arena>,
         target: ForOfTarget<'arena>,
-    ) -> Result<ForOf<'arena>, ParseError> {
+    ) -> Result<ForOf<'arena>, ParseError<'arena>> {
         Ok(ForOf {
             label: None,
             r#for,
@@ -85,7 +85,7 @@ where
     pub(crate) fn parse_for_of_unpack_target(
         &mut self,
         is_const: bool,
-    ) -> Result<ForOfUnpackTarget<'arena>, ParseError> {
+    ) -> Result<ForOfUnpackTarget<'arena>, ParseError<'arena>> {
         Ok(ForOfUnpackTarget {
             left_bracket: self.stream.eat_span(T!["["])?,
             first: self.parse_for_of_variable(is_const)?,
@@ -100,7 +100,10 @@ where
     ///
     /// A written type can be longer than the parser looks ahead, as `Map<string, List<int>>` is, so the header reads
     /// the variable first and only then decides between `for … of` and a counter by the `of` or `=` after it.
-    pub(crate) fn parse_for_of_variable(&mut self, is_const: bool) -> Result<ForOfVariable<'arena>, ParseError> {
+    pub(crate) fn parse_for_of_variable(
+        &mut self,
+        is_const: bool,
+    ) -> Result<ForOfVariable<'arena>, ParseError<'arena>> {
         let name_follows = match self.stream.lookahead(1)? {
             Some(token) => {
                 matches!(token.kind, T![","] | T!["]"] | T!["="])
@@ -114,7 +117,7 @@ where
     }
 
     /// Consumes `of`. TypeScript's `in` is an error that names `of`, spec section 17, and the loop still parses.
-    fn parse_of_keyword(&mut self) -> Result<Keyword<'arena>, ParseError> {
+    fn parse_of_keyword(&mut self) -> Result<Keyword<'arena>, ParseError<'arena>> {
         let token = self.stream.consume()?;
         let keyword = Keyword { span: token.span_for(self.stream.file_id()), value: token.value };
         if token.kind != T![Identifier] || !matches!(token.value, b"of" | b"in") {

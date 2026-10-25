@@ -15,7 +15,7 @@ impl<'arena, A> Parser<'_, 'arena, A>
 where
     A: Arena,
 {
-    pub(crate) fn parse_foreach(&mut self) -> Result<Foreach<'arena>, ParseError> {
+    pub(crate) fn parse_foreach(&mut self) -> Result<Foreach<'arena>, ParseError<'arena>> {
         Ok(Foreach {
             label: None,
             foreach: self.expect_php_keyword(T!["foreach"])?,
@@ -33,7 +33,7 @@ where
         })
     }
 
-    fn parse_foreach_target(&mut self) -> Result<ForeachTarget<'arena>, ParseError> {
+    fn parse_foreach_target(&mut self) -> Result<ForeachTarget<'arena>, ParseError<'arena>> {
         let key_or_value = self.parse_possibly_referenced_expression()?;
 
         Ok(match self.stream.peek_kind(0)? {
@@ -46,14 +46,14 @@ where
         })
     }
 
-    fn parse_foreach_body(&mut self) -> Result<ForeachBody<'arena>, ParseError> {
+    fn parse_foreach_body(&mut self) -> Result<ForeachBody<'arena>, ParseError<'arena>> {
         Ok(match self.stream.peek_kind(0)? {
             Some(T![":"]) => ForeachBody::ColonDelimited(self.parse_foreach_colon_delimited_body()?),
             _ => ForeachBody::Statement(self.arena.alloc(self.parse_statement()?)),
         })
     }
 
-    fn parse_foreach_colon_delimited_body(&mut self) -> Result<ForeachColonDelimitedBody<'arena>, ParseError> {
+    fn parse_foreach_colon_delimited_body(&mut self) -> Result<ForeachColonDelimitedBody<'arena>, ParseError<'arena>> {
         Ok(ForeachColonDelimitedBody {
             colon: self.stream.eat_span(T![":"])?,
             statements: {

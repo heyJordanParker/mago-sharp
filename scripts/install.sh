@@ -10,7 +10,9 @@ SIGNER_WORKFLOW=".github/workflows/release.yml"
 INSTALL_DIR=""
 VERSION=""
 VERIFY_MODE="auto"
-DO_VERIFY=0
+# How the downloaded archive is verified: "attestation" (gh attestation verify), "checksum" (the release's SHA-256
+# checksums), or "" for --no-verify.
+VERIFY_WITH=""
 
 function separator() {
     echo
@@ -85,32 +87,34 @@ case "$VERIFY_MODE" in
       fail "Aborting: refusing to install without attestation verification."
     fi
 
-    DO_VERIFY=1
+    VERIFY_WITH="attestation"
     green "Attestation verification: ON (--always-verify). Using: $(command -v gh)"
     ;;
 
   never)
     separator
-    yellow "Attestation verification: OFF (--no-verify)."
-    yellow "The downloaded archive will be installed without checking its build attestation."
+    yellow "Verification: OFF (--no-verify)."
+    yellow "The downloaded archive will be installed without checking its build attestation or its checksum."
     ;;
 
   auto)
+    separator
     if gh_supports_attestation; then
-      DO_VERIFY=1
-      separator
+      VERIFY_WITH="attestation"
       green "Attestation verification: ON (auto). Using: $(command -v gh)"
     else
-      separator
-      yellow "Attestation verification: OFF."
+      VERIFY_WITH="checksum"
+      green "Checksum verification: ON. The archive must match the SHA-256 the release publishes."
       if command -v gh > /dev/null; then
-        yellow "Found 'gh' but it does not support 'gh attestation' (version too old)."
-        yellow "Upgrade the GitHub CLI (https://cli.github.com/) to enable verification,"
-        yellow "or pass --always-verify to make this a hard requirement."
+        yellow "Found 'gh' but it does not support 'gh attestation' (version too old), so the archive's build"
+        yellow "attestation is not verified. A checksum from the release cannot tell a replaced release apart:"
+        yellow "full provenance needs the attestation. Upgrade the GitHub CLI (https://cli.github.com/) to verify it,"
+        yellow "or pass --always-verify to make it a hard requirement."
       else
-        yellow "GitHub CLI ('gh') was not found on PATH. Install it from"
-        yellow "https://cli.github.com/ to enable verification, or pass"
-        yellow "--always-verify to make this a hard requirement."
+        yellow "GitHub CLI ('gh') was not found on PATH, so the archive's build attestation is not verified."
+        yellow "A checksum from the release cannot tell a replaced release apart: full provenance needs the"
+        yellow "attestation. Install the GitHub CLI from https://cli.github.com/ to verify it, or pass"
+        yellow "--always-verify to make it a hard requirement."
       fi
     fi
     ;;
@@ -325,32 +329,70 @@ green "Download complete!"
 
 separator
 
-if [ "$DO_VERIFY" -eq 1 ]; then
-  green "Verifying attestation for ${file_name}.tar.gz..."
-  green "  Repository:      ${REPO}"
-  green "  Signer workflow: ${SIGNER_WORKFLOW}"
-  if ! gh attestation verify "${destination}.tar.gz" \
-       --repo "$REPO" \
-       --signer-workflow "${REPO}/${SIGNER_WORKFLOW}"; then
-    quarantine="${PWD}/${file_name}.unverified.tar.gz"
-    cp "${destination}.tar.gz" "$quarantine" || quarantine=""
+# Keeps the unverified archive for inspection, names why it was refused, and exits.
+function refuse() {
+  quarantine="${PWD}/${file_name}.unverified.tar.gz"
+  cp "${destination}.tar.gz" "$quarantine" || quarantine=""
 
-    red "ATTESTATION VERIFICATION FAILED for ${file_name}.tar.gz."
-    red "The downloaded archive could not be matched to a build attestation"
-    red "signed by ${REPO}/${SIGNER_WORKFLOW}."
-    red "Refusing to install."
-    if [ -n "$quarantine" ]; then
-      red "The archive has been preserved at:"
-      red "  ${quarantine}"
-      red "Inspect it manually; do not run anything from it."
-    fi
-    fail "Aborting installation."
+  red "$1"
+  red "Refusing to install."
+  if [ -n "$quarantine" ]; then
+    red "The archive has been preserved at:"
+    red "  ${quarantine}"
+    red "Inspect it manually; do not run anything from it."
   fi
+  fail "Aborting installation."
+}
 
-  green "Attestation verified."
+case "$VERIFY_WITH" in
+  attestation)
+    green "Verifying attestation for ${file_name}.tar.gz..."
+    green "  Repository:      ${REPO}"
+    green "  Signer workflow: ${SIGNER_WORKFLOW}"
+    if ! gh attestation verify "${destination}.tar.gz" \
+         --repo "$REPO" \
+         --signer-workflow "${REPO}/${SIGNER_WORKFLOW}"; then
+      refuse "ATTESTATION VERIFICATION FAILED for ${file_name}.tar.gz. The downloaded archive could not be matched to a build attestation signed by ${REPO}/${SIGNER_WORKFLOW}."
+    fi
 
-  separator
-fi
+    green "Attestation verified."
+
+    separator
+    ;;
+
+  checksum)
+    if command -v sha256sum > /dev/null; then
+      sha256=(sha256sum)
+    elif command -v shasum > /dev/null; then
+      sha256=(shasum -a 256)
+    else
+      fail "Neither 'sha256sum' nor 'shasum' is installed, so the download cannot be verified. Install one, install the GitHub CLI, or pass --no-verify."
+    fi
+
+    sums_name="${BIN_NAME}-${version}-sha256sums.txt"
+    sums_url="https://github.com/${REPO}/releases/download/v${version}/${sums_name}"
+    green "Verifying ${file_name}.tar.gz against ${sums_name}..."
+    if command -v curl > /dev/null; then
+      curl -fsSL "$sums_url" -o "${TMP_DIR}/${sums_name}" || fail "Release v${version} publishes no ${sums_name}, so the archive cannot be verified without the GitHub CLI. Install it from https://cli.github.com/, or pass --no-verify."
+    else
+      wget -q "$sums_url" -O "${TMP_DIR}/${sums_name}" || fail "Release v${version} publishes no ${sums_name}, so the archive cannot be verified without the GitHub CLI. Install it from https://cli.github.com/, or pass --no-verify."
+    fi
+
+    expected=$(awk -v name="${file_name}.tar.gz" '$2 == name { print $1 }' "${TMP_DIR}/${sums_name}")
+    if [ -z "$expected" ]; then
+      fail "${sums_name} holds no SHA-256 for ${file_name}.tar.gz, so the archive cannot be verified."
+    fi
+
+    actual=$("${sha256[@]}" "${destination}.tar.gz" | cut -d ' ' -f 1)
+    if [ "$actual" != "$expected" ]; then
+      refuse "CHECKSUM VERIFICATION FAILED for ${file_name}.tar.gz. Its SHA-256 is ${actual}, and ${sums_name} names ${expected}."
+    fi
+
+    green "Checksum verified: ${actual}"
+
+    separator
+    ;;
+esac
 
 green "Extracting ${file_name}.tar.gz..."
 if ! tar -xzf "${destination}.tar.gz" -C "$TMP_DIR"; then

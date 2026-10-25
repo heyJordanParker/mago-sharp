@@ -13,7 +13,7 @@ impl<'arena, A> Parser<'_, 'arena, A>
 where
     A: Arena,
 {
-    pub(crate) fn parse_declare(&mut self) -> Result<Declare<'arena>, ParseError> {
+    pub(crate) fn parse_declare(&mut self) -> Result<Declare<'arena>, ParseError<'arena>> {
         Ok(Declare {
             declare: self.expect_keyword(T!["declare"])?,
             left_parenthesis: self.stream.eat_span(T!["("])?,
@@ -41,7 +41,7 @@ where
         })
     }
 
-    pub(crate) fn parse_declare_item(&mut self) -> Result<DeclareItem<'arena>, ParseError> {
+    pub(crate) fn parse_declare_item(&mut self) -> Result<DeclareItem<'arena>, ParseError<'arena>> {
         Ok(DeclareItem {
             name: self.parse_local_identifier()?,
             equal: self.stream.eat_span(T!["="])?,
@@ -49,7 +49,7 @@ where
         })
     }
 
-    pub(crate) fn parse_declare_body(&mut self) -> Result<DeclareBody<'arena>, ParseError> {
+    pub(crate) fn parse_declare_body(&mut self) -> Result<DeclareBody<'arena>, ParseError<'arena>> {
         let next = self.stream.lookahead(0)?;
 
         Ok(match next.map(|t| t.kind) {
@@ -60,7 +60,7 @@ where
 
     pub(crate) fn parse_declare_colon_delimited_body(
         &mut self,
-    ) -> Result<DeclareColonDelimitedBody<'arena>, ParseError> {
+    ) -> Result<DeclareColonDelimitedBody<'arena>, ParseError<'arena>> {
         Ok(DeclareColonDelimitedBody {
             colon: self.stream.eat_span(T![":"])?,
             statements: {

@@ -18,7 +18,7 @@ where
     A: Arena,
 {
     /// Parses a `for` loop, or a PHP# `for … of` loop when its header declares a loop variable followed by `of`.
-    pub(crate) fn parse_for(&mut self) -> Result<Statement<'arena>, ParseError> {
+    pub(crate) fn parse_for(&mut self) -> Result<Statement<'arena>, ParseError<'arena>> {
         let r#for = self.expect_keyword(T!["for"])?;
         let left_parenthesis = self.stream.eat_span(T!["("])?;
         if self.is_at_for_in_without_keyword()? {
@@ -129,14 +129,14 @@ where
         }))
     }
 
-    fn parse_for_body(&mut self) -> Result<ForBody<'arena>, ParseError> {
+    fn parse_for_body(&mut self) -> Result<ForBody<'arena>, ParseError<'arena>> {
         Ok(match self.stream.peek_kind(0)? {
             Some(T![":"]) => ForBody::ColonDelimited(self.parse_for_colon_delimited_body()?),
             _ => ForBody::Statement(self.arena.alloc(self.parse_statement()?)),
         })
     }
 
-    fn parse_for_colon_delimited_body(&mut self) -> Result<ForColonDelimitedBody<'arena>, ParseError> {
+    fn parse_for_colon_delimited_body(&mut self) -> Result<ForColonDelimitedBody<'arena>, ParseError<'arena>> {
         Ok(ForColonDelimitedBody {
             colon: self.stream.eat_span(T![":"])?,
             statements: {

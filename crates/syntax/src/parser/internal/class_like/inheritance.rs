@@ -13,7 +13,7 @@ impl<'arena, A> Parser<'_, 'arena, A>
 where
     A: Arena,
 {
-    pub(crate) fn parse_optional_implements(&mut self) -> Result<Option<Implements<'arena>>, ParseError> {
+    pub(crate) fn parse_optional_implements(&mut self) -> Result<Option<Implements<'arena>>, ParseError<'arena>> {
         if !self.is_at_php_keyword(T!["implements"])? {
             return Ok(None);
         }
@@ -41,7 +41,7 @@ where
 
     /// PHP#'s `: Base, Interface` header, as spec section 22 writes it. Each entry is a type, as in C#'s base list, so
     /// `: PaginatedList<Order>` names a generic base class.
-    pub(crate) fn parse_optional_inheritance(&mut self) -> Result<Option<Inheritance<'arena>>, ParseError> {
+    pub(crate) fn parse_optional_inheritance(&mut self) -> Result<Option<Inheritance<'arena>>, ParseError<'arena>> {
         if !self.dialect.is_sharp() || !matches!(self.stream.peek_kind(0)?, Some(T![":"])) {
             return Ok(None);
         }
@@ -57,7 +57,7 @@ where
         &mut self,
         colon: Span,
         first: Hint<'arena>,
-    ) -> Result<Inheritance<'arena>, ParseError> {
+    ) -> Result<Inheritance<'arena>, ParseError<'arena>> {
         let mut types = self.new_vec();
         let mut commas = self.new_vec();
         types.push(first);
@@ -69,7 +69,7 @@ where
         Ok(Inheritance { colon, types: TokenSeparatedSequence::new(types, commas) })
     }
 
-    pub(crate) fn parse_optional_extends(&mut self) -> Result<Option<Extends<'arena>>, ParseError> {
+    pub(crate) fn parse_optional_extends(&mut self) -> Result<Option<Extends<'arena>>, ParseError<'arena>> {
         if !self.is_at_php_keyword(T!["extends"])? {
             return Ok(None);
         }

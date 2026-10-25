@@ -16,7 +16,7 @@ where
     /// Whether a PHP# event starts here: `event`, a name and `(`, or the `<` of type parameters. The name may be a
     /// reserved word, as a class's may, and the checks refuse it there. Everywhere else `event` is a name, such as a
     /// local `event`, a call `event(x)` or an operand `event is (Paid)`.
-    pub(crate) fn is_at_event(&mut self) -> Result<bool, ParseError> {
+    pub(crate) fn is_at_event(&mut self) -> Result<bool, ParseError<'arena>> {
         let starts_with_event =
             self.stream.lookahead(0)?.is_some_and(|token| token.kind == T![Identifier] && token.value == b"event");
         let names_an_event = self.stream.lookahead(1)?.is_some_and(|token| {
@@ -35,7 +35,7 @@ where
         &mut self,
         attributes: Sequence<'arena, AttributeList<'arena>>,
         modifiers: Sequence<'arena, Modifier<'arena>>,
-    ) -> Result<Event<'arena>, ParseError> {
+    ) -> Result<Event<'arena>, ParseError<'arena>> {
         let event = self.expect_any_keyword()?;
         let name = self.parse_local_identifier()?;
         let type_parameters = self.parse_optional_type_parameter_list()?;

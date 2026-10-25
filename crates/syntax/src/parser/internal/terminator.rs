@@ -12,7 +12,7 @@ impl<'arena, A> Parser<'_, 'arena, A>
 where
     A: Arena,
 {
-    pub(crate) fn parse_optional_terminator(&mut self) -> Result<Option<Terminator<'arena>>, ParseError> {
+    pub(crate) fn parse_optional_terminator(&mut self) -> Result<Option<Terminator<'arena>>, ParseError<'arena>> {
         let next = self.stream.lookahead(0)?;
         Ok(match next.map(|t| t.kind) {
             Some(T![";" | "?>"]) => Some(self.parse_terminator()?),
@@ -20,7 +20,7 @@ where
         })
     }
 
-    pub(crate) fn parse_terminator(&mut self) -> Result<Terminator<'arena>, ParseError> {
+    pub(crate) fn parse_terminator(&mut self) -> Result<Terminator<'arena>, ParseError<'arena>> {
         if self.stream.is_at(TokenKind::Semicolon)? {
             let token = self.stream.consume()?;
 

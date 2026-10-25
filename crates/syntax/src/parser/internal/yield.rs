@@ -16,7 +16,7 @@ impl<'arena, A> Parser<'_, 'arena, A>
 where
     A: Arena,
 {
-    pub(crate) fn parse_yield(&mut self) -> Result<Yield<'arena>, ParseError> {
+    pub(crate) fn parse_yield(&mut self) -> Result<Yield<'arena>, ParseError<'arena>> {
         let r#yield = self.expect_keyword(T!["yield"])?;
         let Some(next) = self.stream.lookahead(0)? else {
             return Ok(Yield::Value(YieldValue { r#yield, value: None }));

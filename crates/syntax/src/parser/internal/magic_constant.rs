@@ -8,7 +8,7 @@ impl<'arena, A> Parser<'_, 'arena, A>
 where
     A: Arena,
 {
-    pub(crate) fn parse_magic_constant(&mut self) -> Result<MagicConstant<'arena>, ParseError> {
+    pub(crate) fn parse_magic_constant(&mut self) -> Result<MagicConstant<'arena>, ParseError<'arena>> {
         let token = self.stream.lookahead(0)?.ok_or_else(|| self.stream.unexpected(None, &[]))?;
 
         Ok(match token.kind {

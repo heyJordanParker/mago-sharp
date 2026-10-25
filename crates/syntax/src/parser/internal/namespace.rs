@@ -11,7 +11,7 @@ impl<'arena, A> Parser<'_, 'arena, A>
 where
     A: Arena,
 {
-    pub(crate) fn parse_namespace(&mut self) -> Result<Namespace<'arena>, ParseError> {
+    pub(crate) fn parse_namespace(&mut self) -> Result<Namespace<'arena>, ParseError<'arena>> {
         let namespace = self.expect_keyword(T!["namespace"])?;
         let name = match self.stream.peek_kind(0)? {
             Some(T![";" | "?>" | "{"]) => None,
@@ -23,14 +23,16 @@ where
         Ok(Namespace { namespace, name, body })
     }
 
-    pub(crate) fn parse_namespace_body(&mut self) -> Result<NamespaceBody<'arena>, ParseError> {
+    pub(crate) fn parse_namespace_body(&mut self) -> Result<NamespaceBody<'arena>, ParseError<'arena>> {
         match self.stream.peek_kind(0)? {
             Some(T!["{"]) => Ok(NamespaceBody::BraceDelimited(self.parse_block()?)),
             _ => Ok(NamespaceBody::Implicit(self.parse_namespace_implicit_body()?)),
         }
     }
 
-    pub(crate) fn parse_namespace_implicit_body(&mut self) -> Result<NamespaceImplicitBody<'arena>, ParseError> {
+    pub(crate) fn parse_namespace_implicit_body(
+        &mut self,
+    ) -> Result<NamespaceImplicitBody<'arena>, ParseError<'arena>> {
         let terminator = self.parse_terminator()?;
         let mut statements = self.new_vec();
         loop {

@@ -8212,7 +8212,7 @@ fn a_method_a_string_or_a_number_lacks_is_an_error_that_lists_the_methods_it_has
             ]
         ),
         [
-            "5:46 non-existent-method Method `shuffled` does not exist on `string`. | A `string` has the methods `capitalized`, `characters`, `codePoints`, `contains`, `decapitalized`, `endsWith`, `indexOf`, `lastIndexOf`, `length`, `lines`, `lowercase`, `padEnd`, `padStart`, `parseCsv`, `removePrefix`, `removeSuffix`, `repeat`, `replace`, `slug`, `split`, `startsWith`, `substring`, `trimEnd`, `trimStart`, `trim`, `uppercase`.",
+            "5:46 non-existent-method Method `shuffled` does not exist on `string`. | A `string` has the methods `capitalized`, `characters`, `codePoints`, `compareTo`, `contains`, `decapitalized`, `endsWith`, `indexOf`, `lastIndexOf`, `length`, `lines`, `lowercase`, `padEnd`, `padStart`, `parseCsv`, `removePrefix`, `removeSuffix`, `repeat`, `replace`, `slug`, `split`, `startsWith`, `substring`, `trimEnd`, `trimStart`, `trim`, `uppercase`.",
             "6:36 non-existent-method Method `missing` does not exist on `int`. | An `int` has the methods `abs`, `ceil`, `clamp`, `floorDiv`, `floor`, `format`, `isFinite`, `mod`, `round`, `toByteString`, `toHex`.",
             "7:40 non-existent-method Method `missing` does not exist on `float`. | A `float` has the methods `abs`, `ceil`, `clamp`, `floor`, `format`, `isFinite`, `round`.",
             "8:44 non-existent-method Method `negate` does not exist on `bool`. | A `bool` has no methods.",
