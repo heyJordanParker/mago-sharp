@@ -1079,10 +1079,9 @@ fn refusal(
             .iter()
             .any(|side| side.types.iter().any(|atomic| matches!(atomic, TAtomic::Callable(_))));
 
-    // A comparison no source writes, as the `==` a value pattern runs as, has no operator token to refuse, but for a
-    // function, which a value pattern compares as `is == f` does.
+    // A comparison no source writes, as the `===` a list pattern's count runs as, has no operator token to refuse.
     if operator.span().length() == 0 {
-        return (compares_function && matches!(operator, BinaryOperator::Equal(_))).then_some(Refusal::Instance);
+        return None;
     }
 
     match operator {
@@ -1406,11 +1405,14 @@ pub(crate) fn report_sharp_refusal<A>(
             different_types_issue(&pair, "Convert one side so both sides have the same type."),
         ),
     };
+    // A pattern's read of its subject has no text of its own, so its refusal is at the operator: the one the pattern
+    // writes, or the `==` a value pattern runs as, which spans the value.
+    let at = if binary.lhs.span().length() == 0 { binary.operator.span() } else { binary.lhs.span() };
 
     context.collector.report_with_code(
         code,
         issue
-            .with_annotation(Annotation::primary(binary.lhs.span()).with_message(format!("This is `{lhs_name}`.")))
+            .with_annotation(Annotation::primary(at).with_message(format!("This is `{lhs_name}`.")))
             .with_annotation(Annotation::secondary(binary.rhs.span()).with_message(format!("This is `{rhs_name}`."))),
     );
 }
@@ -1637,8 +1639,9 @@ pub(crate) fn check_element_equality<A>(
 /// `type_of` gives the struct, so `Pair<int, string>` compares and `Pair<Order, int>` does not when `Order` declares no
 /// `operator ==`, and a field of a generic enum's case as the type argument `type_of` gives the enum, spec section 31,
 /// with the property's type as those type arguments give it. `visiting` holds the structs and enums being checked, so
-/// one that holds itself, as in `Node? next`, compares by the rest.
-fn struct_property_refusal<'codebase>(
+/// one that holds itself, as in `Node? next`, compares by the rest. It alone decides whether a struct or a case has
+/// `==`, for `==`, a search, a `Map` key and a `Set` element.
+pub(crate) fn struct_property_refusal<'codebase>(
     name: Word,
     type_of: &TUnion,
     codebase: &'codebase CodebaseMetadata,
@@ -1661,8 +1664,8 @@ fn struct_property_refusal<'codebase>(
     let enum_type_arguments =
         data_enum(codebase, class).and_then(|_| enum_type_arguments(class.name, [type_of], codebase));
     visiting.push(class.name);
-    // The span only marks each property's `==` as written in the source, which `refusal` checks. A field has no span of
-    // its own, so each one is marked at its struct or case.
+    // The span only marks each property's `==` as written in the source, which `refusal` checks. A field has its name's
+    // span but no span of its own, so each one is marked at its struct or case.
     let equality = BinaryOperator::Equal(class.span);
 
     let refused = properties.into_iter().find_map(|property| {
@@ -1727,13 +1730,37 @@ where
     } else {
         ("case", "An enum case compares by value, field by field, with each field's own `==`.")
     };
-    let property_name = property.name.0.as_bytes();
-    let property_name = BytesDisplay(property_name.strip_prefix(b"$").unwrap_or(property_name));
-    if property_type.types.iter().any(|atomic| matches!(atomic, TAtomic::Callable(_))) {
-        return Issue::error(
-            format!("`{struct}` can't be compared: `{property_name}` is a function.", struct = r#struct),
-        )
-        .with_note(format!("A function value has no equality, so a {value} that holds one has none."));
+    let why = property_reason(context, property, &property_type, reason);
+    if is_function(&property_type) {
+        return Issue::error(format!("`{struct}` can't be compared: {why}.", struct = r#struct))
+            .with_note(format!("A function value has no equality, so a {value} that holds one has none."));
+    }
+
+    let issue = Issue::error(format!("`{struct}` can't compare by value: {why}.", struct = r#struct)).with_note(note);
+
+    match reason {
+        Some(Refusal::Collection) => {
+            issue.with_note(format!("{}.", collection_reason(context, &property_type.to_non_nullable())))
+        }
+        _ => issue,
+    }
+}
+
+/// Why `==` cannot compare `property`, of `property_type`, as [`struct_property_refusal`] gives `reason`: "`plan` is a
+/// `Plan`, which declares no `operator ==`", or "`onMove` is a function", which has no equality.
+pub(crate) fn property_reason<A>(
+    context: &Context<'_, '_, A>,
+    property: &PropertyMetadata,
+    property_type: &TUnion,
+    reason: Option<Refusal>,
+) -> String
+where
+    A: Arena,
+{
+    let name = property.name.0.as_bytes();
+    let name = BytesDisplay(name.strip_prefix(b"$").unwrap_or(name));
+    if is_function(property_type) {
+        return format!("`{name}` is a function");
     }
     let r#type = display_operand(context, &property_type.to_non_nullable());
     let article = article(&r#type);
@@ -1748,19 +1775,12 @@ where
         }
     };
 
-    let issue = Issue::error(format!(
-        "`{struct}` can't compare by value: `{property_name}` is {article} `{type}`, {why}.",
-        struct = r#struct,
-        type = r#type
-    ))
-    .with_note(note);
+    format!("`{name}` is {article} `{type}`, {why}", type = r#type)
+}
 
-    match reason {
-        Some(Refusal::Collection) => {
-            issue.with_note(format!("{}.", collection_reason(context, &property_type.to_non_nullable())))
-        }
-        _ => issue,
-    }
+/// Whether a value of `r#type` may be a function.
+fn is_function(r#type: &TUnion) -> bool {
+    r#type.types.iter().any(|atomic| matches!(atomic, TAtomic::Callable(_)))
 }
 
 /// The issue that refuses `comparison`, of values of two types that never match, with `help` naming what to convert.

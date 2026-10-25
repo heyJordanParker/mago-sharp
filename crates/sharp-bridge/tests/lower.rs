@@ -25564,59 +25564,68 @@ fn an_index_a_pattern_tests_coalesces_a_missing_key_to_null() {
 }
 
 /// ```php
-/// $a = $extra === 200;
-/// $b = \is_int($extra) && $extra >= 1 && $extra < 10 || !($extra === -1);
+/// $a = \is_int($extra) && $extra === 200;
+/// $b = \is_int($extra) && ($extra >= 1 && $extra < 10 || !($extra === -1));
 /// $c = \is_object($extra) && (${'match#1'} = $extra->count) > 0 && \is_string($label = $extra->name);
 /// ```
 ///
 /// A value is compared with `===`, a comparison keeps its operator, and `and`, `or` and `not` are `&&`, `||` and
-/// `!`. A properties pattern tests that the value is an object, then reads each property once. A comparison orders a
-/// `Calc`, which declares no `operator <=>`, only once `int` has ruled it out.
+/// `!`. A properties pattern tests that the value is an object, then reads each property once. A value pattern
+/// compares a `Calc`, which declares no `operator ==`, and a comparison orders one, which declares no `operator <=>`,
+/// only once `int` has ruled it out: a value pattern's `==` is the code's own, so `extra is 200` is refused as
+/// `extra == 200` is.
 #[test]
 fn values_comparisons_and_properties_are_the_php_comparisons_they_name() {
+    let calc = (
+        "src/Lib/Calc.php",
+        "<?php namespace Lib; final class Calc { public int $count = 0; public ?string $name = null; }",
+    );
     assert_eq!(
         body_in(
             "Calc|int run(Calc|int extra)",
-            "        const a = extra is 200;\n        const b = extra is int and >= 1 and < 10 or (not -1);\n        const c = extra is { count: > 0, name: string label };\n        return extra;\n",
-            &[(
-                "src/Lib/Calc.php",
-                "<?php namespace Lib; final class Calc { public int $count = 0; public ?string $name = null; }",
-            )]
+            "        const a = extra is int and 200;\n        const b = extra is int and (>= 1 and < 10 or (not -1));\n        const c = extra is { count: > 0, name: string label };\n        return extra;\n",
+            &[calc]
         ),
         indoc! {r#"
             STMT_LIST
               ASSIGN
                 VAR
                   ZVAL "a"
-                BINARY_OP [16]
-                  VAR
-                    ZVAL "extra"
-                  ZVAL 200
+                AND
+                  CALL
+                    ZVAL "is_int"
+                    ARG_LIST
+                      VAR
+                        ZVAL "extra"
+                  BINARY_OP [16]
+                    VAR
+                      ZVAL "extra"
+                    ZVAL 200
               ASSIGN
                 VAR
                   ZVAL "b"
-                OR
-                  AND
+                AND
+                  CALL
+                    ZVAL "is_int"
+                    ARG_LIST
+                      VAR
+                        ZVAL "extra"
+                  OR
                     AND
-                      CALL
-                        ZVAL "is_int"
-                        ARG_LIST
-                          VAR
-                            ZVAL "extra"
                       GREATER_EQUAL
                         VAR
                           ZVAL "extra"
                         ZVAL 1
-                    BINARY_OP [20]
-                      VAR
-                        ZVAL "extra"
-                      ZVAL 10
-                  UNARY_OP [14]
-                    BINARY_OP [16]
-                      VAR
-                        ZVAL "extra"
-                      UNARY_MINUS
-                        ZVAL 1
+                      BINARY_OP [20]
+                        VAR
+                          ZVAL "extra"
+                        ZVAL 10
+                    UNARY_OP [14]
+                      BINARY_OP [16]
+                        VAR
+                          ZVAL "extra"
+                        UNARY_MINUS
+                          ZVAL 1
               ASSIGN
                 VAR
                   ZVAL "c"
@@ -25650,6 +25659,11 @@ fn values_comparisons_and_properties_are_the_php_comparisons_they_name() {
                 VAR
                   ZVAL "extra"
         "#}
+    );
+    assert_eq!(
+        Lowered::with(&method_with("bool run(Calc|int extra)", "        return extra is 200;\n"), &[calc])
+            .diagnostics(),
+        ["9:16 compile error: `==` cannot compare `int|Calc` with `int`: `Calc` declares no `operator ==`."]
     );
 }
 
@@ -32166,19 +32180,21 @@ fn a_struct_is_a_final_class_whose_op_equality_compares_each_property() {
 /// public static function op_Equality(mixed $a, mixed $b): bool
 /// {
 ///     if ($a instanceof \App\Seat && $b instanceof \App\Seat) {
-///         return $a->row === $b->row && \App\Spot::op_Equality($a->spot, $b->spot) && $a->kind === $b->kind;
+///         return $a->label === $b->label && $a->row === $b->row && \App\Spot::op_Equality($a->spot, $b->spot)
+///             && $a->kind === $b->kind;
 ///     }
 ///     return $a === $b;
 /// }
 /// ```
 ///
 /// Spec section 19: a field is part of a struct's value as a property is, so the struct's `op_Equality` compares each
-/// field by the field's own `==`: a nested struct through its `op_Equality`, and an `int` and an enum case by `===`. A
+/// field by the field's own `==`, in the order the struct declares them, a main constructor's property before the
+/// fields after it: a nested struct through its `op_Equality`, and a `string`, an `int` and an enum case by `===`. A
 /// field whose type has no `==`, as a class that declares no `operator ==`, gives the struct none, so `==` on it is
 /// refused before lowering and never runs as `===`.
 #[test]
 fn a_struct_s_op_equality_compares_each_field_by_its_own_equality() {
-    let seat = "namespace App;\n\npublic struct Seat\n{\n    private int row;\n\n    private Spot spot;\n\n    private Size kind;\n\n    public Seat(int row, Spot spot, Size kind)\n    {\n        this.row = row;\n        this.spot = spot;\n        this.kind = kind;\n    }\n\n    public bool run(Seat other) => this == other;\n}\n";
+    let seat = "namespace App;\n\npublic struct Seat\n{\n    public Seat(public string label { get; }, int row, Spot spot, Size kind)\n    {\n        this.row = row;\n        this.spot = spot;\n        this.kind = kind;\n    }\n\n    private int row;\n\n    private Spot spot;\n\n    private Size kind;\n\n    public bool run(Seat other) => this == other;\n}\n";
     let library = [
         (
             "src/App/Spot.sharp",
@@ -32225,15 +32241,25 @@ fn a_struct_s_op_equality_compares_each_field_by_its_own_equality() {
                       RETURN
                         AND
                           AND
-                            BINARY_OP [16]
-                              PROP
-                                VAR
-                                  ZVAL "a"
-                                ZVAL "row"
-                              PROP
-                                VAR
-                                  ZVAL "b"
-                                ZVAL "row"
+                            AND
+                              BINARY_OP [16]
+                                PROP
+                                  VAR
+                                    ZVAL "a"
+                                  ZVAL "label"
+                                PROP
+                                  VAR
+                                    ZVAL "b"
+                                  ZVAL "label"
+                              BINARY_OP [16]
+                                PROP
+                                  VAR
+                                    ZVAL "a"
+                                  ZVAL "row"
+                                PROP
+                                  VAR
+                                    ZVAL "b"
+                                  ZVAL "row"
                             STATIC_CALL
                               ZVAL "App\\Spot"
                               ZVAL "op_Equality"
