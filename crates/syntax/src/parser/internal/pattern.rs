@@ -38,7 +38,7 @@ where
 {
     /// Whether the next token is PHP#'s `is` or `as` after a value, which bind as tightly as `<`, as in C#. A name
     /// after a value can only be one of them, so `IS` or `As` reads as it with one error, spec section 2.
-    pub(crate) fn is_at_is_or_as(&mut self) -> Result<bool, ParseError> {
+    pub(crate) fn is_at_is_or_as(&mut self) -> Result<bool, ParseError<'arena>> {
         let Some(token) = self.stream.lookahead(0)?.filter(|_| self.dialect.is_sharp()) else {
             return Ok(false);
         };
@@ -55,7 +55,7 @@ where
     pub(crate) fn parse_is_or_as(
         &mut self,
         value: &'arena Expression<'arena>,
-    ) -> Result<&'arena Expression<'arena>, ParseError> {
+    ) -> Result<&'arena Expression<'arena>, ParseError<'arena>> {
         let keyword = self.expect_any_keyword()?;
 
         Ok(self.arena.alloc(if keyword.value == b"as" {
@@ -66,7 +66,7 @@ where
     }
 
     /// Parses a pattern: patterns joined by `or`, each of them patterns joined by `and`, as in C#.
-    pub(crate) fn parse_pattern(&mut self) -> Result<&'arena Pattern<'arena>, ParseError> {
+    pub(crate) fn parse_pattern(&mut self) -> Result<&'arena Pattern<'arena>, ParseError<'arena>> {
         let mut left = self.parse_and_pattern()?;
         while self.stream.lookahead(0)?.is_some_and(|token| token.kind == T![Identifier] && token.value == b"or") {
             let operator = self.expect_any_keyword()?;
@@ -77,7 +77,7 @@ where
         Ok(left)
     }
 
-    fn parse_and_pattern(&mut self) -> Result<&'arena Pattern<'arena>, ParseError> {
+    fn parse_and_pattern(&mut self) -> Result<&'arena Pattern<'arena>, ParseError<'arena>> {
         let mut left = self.parse_not_pattern()?;
         while self.stream.lookahead(0)?.is_some_and(|token| token.kind == T![Identifier] && token.value == b"and") {
             let operator = self.expect_any_keyword()?;
@@ -88,7 +88,7 @@ where
         Ok(left)
     }
 
-    fn parse_not_pattern(&mut self) -> Result<&'arena Pattern<'arena>, ParseError> {
+    fn parse_not_pattern(&mut self) -> Result<&'arena Pattern<'arena>, ParseError<'arena>> {
         ensure_sufficient_stack(|| {
             if self.stream.lookahead(0)?.is_some_and(|token| token.kind == T![Identifier] && token.value == b"not") {
                 let not = self.expect_any_keyword()?;
@@ -101,7 +101,7 @@ where
         })
     }
 
-    fn parse_primary_pattern(&mut self) -> Result<&'arena Pattern<'arena>, ParseError> {
+    fn parse_primary_pattern(&mut self) -> Result<&'arena Pattern<'arena>, ParseError<'arena>> {
         let token = self.stream.lookahead(0)?.ok_or_else(|| self.stream.unexpected(None, &[]))?;
         let pattern = match token.kind {
             T!["("] => Pattern::Parenthesized(ParenthesizedPattern {
@@ -169,7 +169,7 @@ where
     /// Parses `[pattern, …]`, the elements a matched list's must match, where a rest, `...List<T> rest` or a bare
     /// `...`, stands for the elements the others leave, at its place among them. The semantic check refuses a second
     /// rest.
-    fn parse_list_pattern(&mut self) -> Result<ListPattern<'arena>, ParseError> {
+    fn parse_list_pattern(&mut self) -> Result<ListPattern<'arena>, ParseError<'arena>> {
         let elements = self.parse_comma_separated_sequence(T!["["], T!["]"], |parser| {
             if !parser.stream.is_at(T!["..."])? {
                 return Ok(ListPatternElement::Pattern(parser.parse_pattern()?));
@@ -191,7 +191,7 @@ where
     }
 
     /// Parses `{ name: pattern, … }`, the properties a matched object's must match.
-    fn parse_properties_pattern(&mut self) -> Result<PropertiesPattern<'arena>, ParseError> {
+    fn parse_properties_pattern(&mut self) -> Result<PropertiesPattern<'arena>, ParseError<'arena>> {
         let properties = self.parse_comma_separated_sequence(T!["{"], T!["}"], |parser| {
             Ok(PropertyPattern {
                 name: parser.parse_local_identifier()?,
@@ -211,7 +211,7 @@ where
     /// The name a type pattern declares, as in `int count`. `when`, which starts an arm's condition, and `and` and
     /// `or`, which join patterns, are no names, and neither is `is` where it starts another test. A keyword parses as
     /// the name, so the checker names a keyword a local can't take.
-    fn parse_pattern_variable(&mut self) -> Result<Option<LocalIdentifier<'arena>>, ParseError> {
+    fn parse_pattern_variable(&mut self) -> Result<Option<LocalIdentifier<'arena>>, ParseError<'arena>> {
         let Some(token) = self.stream.lookahead(0)? else {
             return Ok(None);
         };
@@ -227,7 +227,7 @@ where
     /// Whether `Case.Name` is followed by its fields in parentheses, its properties or a name, as a case of an enum with
     /// data is matched. A name of three parts or more is a type too, as `App.Shop.Order`, since no constant has one:
     /// the analyzer refuses it as a full name, spec section 23.
-    fn is_at_dotted_type_pattern(&self) -> Result<bool, ParseError> {
+    fn is_at_dotted_type_pattern(&self) -> Result<bool, ParseError<'arena>> {
         let (parts, after) = self.peek_dotted_name()?;
 
         Ok(parts > 2
@@ -240,7 +240,7 @@ where
 
     /// Parses an enum case pattern, spec section 21: the case's type, `Case.Name`, then its fields in parentheses by
     /// their position, its properties and its name, as in `PaymentResult.Paid(string transactionId)`.
-    fn parse_case_pattern(&mut self) -> Result<TypePattern<'arena>, ParseError> {
+    fn parse_case_pattern(&mut self) -> Result<TypePattern<'arena>, ParseError<'arena>> {
         let hint = Hint::Identifier(self.parse_dotted_identifier()?);
         let fields = if self.stream.is_at(T!["("])? {
             let fields = self.parse_comma_separated_sequence(T!["("], T![")"], |parser| parser.parse_pattern())?;
@@ -262,7 +262,7 @@ where
     /// Parses a PHP# `match`. Its arms are written `pattern => value`, `pattern when condition => value` and
     /// `default => value`, and an arm's value may be a block. A `when` condition holds operators that bind as tightly
     /// as `??` or tighter, as in C#, so the arm's `=>` ends it, and a `? :` or a lambda in it needs parentheses.
-    pub(crate) fn parse_pattern_match(&mut self) -> Result<PatternMatch<'arena>, ParseError> {
+    pub(crate) fn parse_pattern_match(&mut self) -> Result<PatternMatch<'arena>, ParseError<'arena>> {
         let r#match = self.expect_keyword(T!["match"])?;
         let left_parenthesis = self.stream.eat_span(T!["("])?;
         let expression = self.parse_expression()?;
@@ -280,7 +280,7 @@ where
         })
     }
 
-    fn parse_pattern_match_arm(&mut self) -> Result<PatternMatchArm<'arena>, ParseError> {
+    fn parse_pattern_match_arm(&mut self) -> Result<PatternMatchArm<'arena>, ParseError<'arena>> {
         if self.stream.lookahead(0)?.is_some_and(|token| token.kind == T![Identifier] && token.value == b"default") {
             return Ok(PatternMatchArm::Default(PatternMatchDefaultArm {
                 default: self.expect_any_keyword()?,
@@ -315,7 +315,7 @@ where
     pub(crate) fn parse_conditional_in_guard(
         &mut self,
         condition: &'arena Expression<'arena>,
-    ) -> Result<&'arena Expression<'arena>, ParseError> {
+    ) -> Result<&'arena Expression<'arena>, ParseError<'arena>> {
         if !self.stream.is_at(T!["?"])? {
             return Ok(condition);
         }
@@ -332,7 +332,7 @@ where
         Ok(self.arena.alloc(Expression::Error(conditional.span())))
     }
 
-    fn parse_pattern_match_arm_body(&mut self) -> Result<PatternMatchArmBody<'arena>, ParseError> {
+    fn parse_pattern_match_arm_body(&mut self) -> Result<PatternMatchArmBody<'arena>, ParseError<'arena>> {
         Ok(if self.stream.is_at(T!["{"])? {
             PatternMatchArmBody::Block(self.parse_block()?)
         } else {

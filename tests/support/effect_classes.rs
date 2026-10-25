@@ -17,7 +17,7 @@ macro_rules! library_file {
 /// The members of a `List`, which every collection call of a project reaches.
 pub const LIST_MEMBERS: (&str, &str) = library_file!("Sharp/ListMembers.sharp");
 
-pub const EFFECT_CLASSES: [(&str, &str); 27] = [
+pub const EFFECT_CLASSES: [(&str, &str); 28] = [
     LIST_MEMBERS,
     library_file!("Sharp/System/Environment.sharp"),
     library_file!("Sharp/Time/Clock.sharp"),
@@ -35,6 +35,7 @@ pub const EFFECT_CLASSES: [(&str, &str); 27] = [
     library_file!("Sharp/Time/DateTime.sharp"),
     library_file!("Sharp/Time/Date.sharp"),
     library_file!("Sharp/Time/TimeZone.sharp"),
+    library_file!("Sharp/Time/DateTimeInterfaceMembers.sharp"),
     library_file!("Sharp/Time/Weekday.sharp"),
     library_file!("Sharp/Time/Month.sharp"),
     library_file!("Sharp/Int.sharp"),

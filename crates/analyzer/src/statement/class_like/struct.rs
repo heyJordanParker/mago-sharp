@@ -24,8 +24,9 @@ use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
+use crate::expression::binary::comparison::property_reason;
+use crate::expression::binary::comparison::struct_property_refusal;
 use crate::expression::binary::utils::DeclaredOperator;
-use crate::expression::binary::utils::chosen_operator;
 use crate::expression::binary::utils::get_operator_method;
 use crate::expression::binary::utils::report_tied_operator;
 use crate::expression::is_refused_type;
@@ -33,7 +34,6 @@ use crate::statement::attributes::analyze_class_like_attributes;
 use crate::statement::class_like::analyze_class_like;
 use crate::statement::class_like::override_attribute;
 use crate::statement::class_like::report_duplicate_definition;
-use crate::utils::names::article;
 use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_sharp_type;
 use crate::utils::template::class_type_arguments;
@@ -315,12 +315,12 @@ pub(crate) fn data_cases<'codebase>(
         .collect()
 }
 
-/// Reports each struct or enum case in `key_type` that holds a class instance without `==` and `hash()` at any depth,
+/// Reports each struct or enum case in `key_type` that has no `==`, as [`struct_property_refusal`] decides it for `==`,
 /// spec sections 10 and 20: a `Map` finds such a key, and a `Set` such an element, by a hash of its fields and their
-/// `==`, and a class instance has neither unless its class declares `operator ==`. A struct that declares
-/// `operator ==` is held through it and its `hash()`, so it holds what it likes. A class key without `==` is
-/// `map_key_error`'s to report, and one whose two values two interfaces' `operator ==` tie on, spec section 19, is
-/// reported here, as `==` on two of them is. Precedent: Rust's `HashMap` needs `Hash` on every field, and Swift's
+/// `==`, and a class instance has neither unless its class declares `operator ==`, which the checker requires `hash()`
+/// beside. A struct that declares `operator ==` is held through it and its `hash()`, so it holds what it likes. A class
+/// key without `==` is `map_key_error`'s to report, and one whose two values two interfaces' `operator ==` tie on, spec
+/// section 19, is reported here, as `==` on two of them is. Precedent: Rust's `HashMap` needs `Hash` on every field, and Swift's
 /// `Dictionary` needs `Hashable`. `in_set` names a `Set` element. Returns whether it reported one.
 pub(crate) fn report_class_held_by_key<A>(
     context: &mut Context<'_, '_, A>,
@@ -343,38 +343,23 @@ where
     let structs = key_type.types.iter().filter_map(|atomic| match atomic {
         TAtomic::Object(TObject::Named(object)) if !declares_equality(codebase, object.name) => codebase
             .get_class_like(object.name.as_bytes())
-            .filter(|class_like| value_properties(codebase, class_like).is_some()),
+            .filter(|class_like| value_properties(codebase, class_like).is_some())
+            .map(|class_like| (class_like, TUnion::from_atomic(atomic.clone()))),
         _ => None,
     });
-    for r#struct in structs {
-        let Some((property, held, is_direct)) = held_class(codebase, r#struct, &mut vec![r#struct.name]) else {
+    for (r#struct, value) in structs {
+        let Some((property, property_type, reason)) =
+            struct_property_refusal(r#struct.name, &value, codebase, &mut Vec::new())
+        else {
             continue;
         };
 
         let class = display_class_like_name(context, r#struct.original_name);
-        let held_name = display_sharp_type(context, &TUnion::from_atomic(held.clone()));
-        let article = article(&held_name);
-        let what = match &held {
-            TAtomic::Object(TObject::Named(named)) => {
-                match context.codebase.get_class_like(named.name.as_bytes()).map(|class_like| class_like.kind) {
-                    Some(kind) if kind.is_interface() => format!("{article} `{held_name}`, an interface"),
-                    _ => format!("{article} `{held_name}`, a class"),
-                }
-            }
-            TAtomic::Callable(_) => format!("a `{held_name}`, a function"),
-            _ => format!("`{held_name}`, which can be a class instance"),
-        };
-        let verb = if is_direct { "is" } else { "holds" };
+        let why = property_reason(context, property, &property_type, reason);
         let message = if in_set {
-            format!(
-                "`{class}` can't be in a `Set`: `{}` {verb} {what}, and a `Set` holds only values.",
-                BytesDisplay(property.as_bytes().strip_prefix(b"$").unwrap_or(property.as_bytes()))
-            )
+            format!("`{class}` can't be in a `Set`: {why}.")
         } else {
-            format!(
-                "`{class}` can't key a `Map`: `{}` {verb} {what}, and a key holds only values.",
-                BytesDisplay(property.as_bytes().strip_prefix(b"$").unwrap_or(property.as_bytes()))
-            )
+            format!("`{class}` can't key a `Map`: {why}.")
         };
 
         context.collector.report_with_code(
@@ -394,60 +379,6 @@ where
     }
 
     reported
-}
-
-/// The first property of `value`, a struct, an enum case or an enum with a case that carries data, in declaration
-/// order, whose type holds a class instance at any depth, with the part that holds it and whether it is the property's
-/// own type: a class, an interface, a function or `Any`, also inside a collection, a struct or a case, which `visiting`
-/// holds while it is read. A plain enum case is a value.
-fn held_class(
-    codebase: &CodebaseMetadata,
-    value: &ClassLikeMetadata,
-    visiting: &mut Vec<Word>,
-) -> Option<(Word, TAtomic, bool)> {
-    value_properties(codebase, value)?.into_iter().find_map(|property| {
-        let r#type = &property.type_metadata.as_ref()?.type_union;
-        let held = class_part(codebase, r#type, visiting)?;
-        let is_direct = r#type.types.contains(&held);
-
-        Some((property.name.0, held, is_direct))
-    })
-}
-
-/// The part of `r#type` that can be a class instance without `==` and `hash()`, or none when every value of it has
-/// them. A struct that declares `operator ==` has them whatever it holds, and so does a class whose two values `==`
-/// chooses an `operator ==` for, spec section 19, which the checker requires `hash()` beside. A class that two
-/// interfaces' operators tie on has none. A struct or an enum case has them when its fields do.
-fn class_part(codebase: &CodebaseMetadata, r#type: &TUnion, visiting: &mut Vec<Word>) -> Option<TAtomic> {
-    r#type.types.iter().find_map(|atomic| match atomic {
-        TAtomic::Object(TObject::Named(object)) => {
-            // A type that names no class is reported where it is written.
-            let class_like = codebase.get_class_like(object.name.as_bytes())?;
-            if value_properties(codebase, class_like).is_none() {
-                let value = TUnion::from_atomic(atomic.clone());
-                let has_equality = chosen_operator(codebase, b"op_Equality", &[&value, &value]).is_some();
-
-                return (!has_equality).then(|| atomic.clone());
-            }
-            if visiting.contains(&class_like.name) || declares_equality(codebase, class_like.name) {
-                return None;
-            }
-
-            visiting.push(class_like.name);
-            let found = held_class(codebase, class_like, visiting).map(|(_, held, _)| held);
-            visiting.pop();
-
-            found
-        }
-        TAtomic::Object(TObject::Enum(_)) => None,
-        TAtomic::Object(_) | TAtomic::Callable(_) | TAtomic::Mixed(_) => Some(atomic.clone()),
-        TAtomic::Array(array) => {
-            let (key, value) = get_array_parameters(array, codebase);
-
-            class_part(codebase, &key, visiting).or_else(|| class_part(codebase, &value, visiting))
-        }
-        _ => None,
-    })
 }
 
 /// The part of `r#type` `parse` can't read from a value, with why: an enum with no backing value, a function, a class

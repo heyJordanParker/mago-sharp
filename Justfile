@@ -86,6 +86,13 @@ fuzz-php-parser:
         ../../analyzer/tests/cases \
         ../../formatter/tests/cases
 
+# Fuzz the PHP# parser. Seeds are drawn from the semantics and tests PHP# fixtures.
+fuzz-sharp-parser:
+    cd crates/syntax/fuzz && cargo +nightly fuzz run sharp_parser \
+        corpus/sharp_parser \
+        ../../semantics/tests/fixtures \
+        ../../../tests/fixtures/sharp
+
 # Fuzz the Twig lexer.
 fuzz-twig-lexer:
     cd crates/twig-syntax/fuzz && cargo +nightly fuzz run lexer corpus/lexer seeds/lexer

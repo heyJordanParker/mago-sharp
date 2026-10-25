@@ -629,11 +629,11 @@ impl IssueProcessor {
                     match format_status {
                         FileFormatStatus::Unchanged => ephemeral_file.contents.into_owned(),
                         FileFormatStatus::Changed(new_content) => new_content,
-                        FileFormatStatus::FailedToParse(parse_error) => {
+                        FileFormatStatus::FailedToParse(issue) => {
                             tracing::warn!(
                                 "Failed to format file `{}` after applying fixes: {}",
                                 mago_bytes::BytesDisplay(&ephemeral_file.name),
-                                parse_error
+                                issue.message
                             );
 
                             ephemeral_file.contents.into_owned()

@@ -17,7 +17,7 @@ where
         &mut self,
         attributes: Sequence<'arena, AttributeList<'arena>>,
         modifiers: Sequence<'arena, Modifier<'arena>>,
-    ) -> Result<ClassLikeConstant<'arena>, ParseError> {
+    ) -> Result<ClassLikeConstant<'arena>, ParseError<'arena>> {
         Ok(ClassLikeConstant {
             attribute_lists: attributes,
             modifiers,
@@ -54,7 +54,7 @@ where
         })
     }
 
-    fn parse_class_like_constant_item(&mut self) -> Result<ClassLikeConstantItem<'arena>, ParseError> {
+    fn parse_class_like_constant_item(&mut self) -> Result<ClassLikeConstantItem<'arena>, ParseError<'arena>> {
         Ok(ClassLikeConstantItem {
             name: self.parse_local_identifier()?,
             equals: self.stream.eat_span(T!["="])?,

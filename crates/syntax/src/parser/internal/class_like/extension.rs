@@ -13,7 +13,7 @@ where
     /// Whether a PHP# class member starts an extension block: `extension` and `(`, or `<` for its type parameters.
     /// Everywhere else `extension` is a name, such as a return type after a modifier, a member's type before its name,
     /// or a call `extension(x)`. A lowercase name is a value, spec section 24, so `extension<` is never a generic type.
-    pub(crate) fn is_at_extension(&mut self) -> Result<bool, ParseError> {
+    pub(crate) fn is_at_extension(&mut self) -> Result<bool, ParseError<'arena>> {
         let starts_with_extension =
             self.stream.lookahead(0)?.is_some_and(|token| token.kind == T![Identifier] && token.value == b"extension");
 
@@ -22,7 +22,7 @@ where
 
     /// Parses a PHP# extension block, spec section 26: `extension`, its type parameters, its receiver as a parameter
     /// list, and the members it adds in braces.
-    pub(crate) fn parse_extension(&mut self) -> Result<Extension<'arena>, ParseError> {
+    pub(crate) fn parse_extension(&mut self) -> Result<Extension<'arena>, ParseError<'arena>> {
         let extension = self.expect_any_keyword()?;
         let type_parameters = self.parse_optional_type_parameter_list()?.map(|list| &*self.arena.alloc(list));
         let parameter_list = self.parse_function_like_parameter_list()?;

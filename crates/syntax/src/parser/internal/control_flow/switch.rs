@@ -19,7 +19,7 @@ impl<'arena, A> Parser<'_, 'arena, A>
 where
     A: Arena,
 {
-    pub(crate) fn parse_switch(&mut self) -> Result<Switch<'arena>, ParseError> {
+    pub(crate) fn parse_switch(&mut self) -> Result<Switch<'arena>, ParseError<'arena>> {
         Ok(Switch {
             switch: self.expect_keyword(T!["switch"])?,
             left_parenthesis: self.stream.eat_span(T!["("])?,
@@ -29,7 +29,7 @@ where
         })
     }
 
-    fn parse_switch_body(&mut self) -> Result<SwitchBody<'arena>, ParseError> {
+    fn parse_switch_body(&mut self) -> Result<SwitchBody<'arena>, ParseError<'arena>> {
         let token = self.stream.lookahead(0)?.ok_or_else(|| self.stream.unexpected(None, &[]))?;
 
         Ok(match token.kind {
@@ -41,7 +41,7 @@ where
         })
     }
 
-    fn parse_switch_brace_delimited_body(&mut self) -> Result<SwitchBraceDelimitedBody<'arena>, ParseError> {
+    fn parse_switch_brace_delimited_body(&mut self) -> Result<SwitchBraceDelimitedBody<'arena>, ParseError<'arena>> {
         let left_brace = self.stream.eat_span(T!["{"])?;
         let optional_terminator = self.parse_optional_terminator()?;
         let cases = self.parse_switch_cases()?;
@@ -50,7 +50,7 @@ where
         Ok(SwitchBraceDelimitedBody { left_brace, optional_terminator, cases, right_brace })
     }
 
-    fn parse_switch_colon_delimited_body(&mut self) -> Result<SwitchColonDelimitedBody<'arena>, ParseError> {
+    fn parse_switch_colon_delimited_body(&mut self) -> Result<SwitchColonDelimitedBody<'arena>, ParseError<'arena>> {
         Ok(SwitchColonDelimitedBody {
             colon: self.stream.eat_span(T![":"])?,
             optional_terminator: self.parse_optional_terminator()?,
@@ -60,7 +60,7 @@ where
         })
     }
 
-    fn parse_switch_cases(&mut self) -> Result<Sequence<'arena, SwitchCase<'arena>>, ParseError> {
+    fn parse_switch_cases(&mut self) -> Result<Sequence<'arena, SwitchCase<'arena>>, ParseError<'arena>> {
         let mut cases = self.new_vec();
         loop {
             if self.stream.is_at(T!["}"])? || self.is_at_php_keyword(T!["endswitch"])? {
@@ -73,7 +73,7 @@ where
         Ok(Sequence::new(cases))
     }
 
-    fn parse_switch_case(&mut self) -> Result<SwitchCase<'arena>, ParseError> {
+    fn parse_switch_case(&mut self) -> Result<SwitchCase<'arena>, ParseError<'arena>> {
         Ok(if self.is_at_php_keyword(T!["default"])? {
             SwitchCase::Default(self.parse_switch_default_case()?)
         } else {
@@ -81,7 +81,7 @@ where
         })
     }
 
-    fn parse_switch_expression_case(&mut self) -> Result<SwitchExpressionCase<'arena>, ParseError> {
+    fn parse_switch_expression_case(&mut self) -> Result<SwitchExpressionCase<'arena>, ParseError<'arena>> {
         Ok(SwitchExpressionCase {
             case: self.expect_keyword(T!["case"])?,
             expression: self.arena.alloc(self.parse_expression()?),
@@ -90,7 +90,7 @@ where
         })
     }
 
-    fn parse_switch_default_case(&mut self) -> Result<SwitchDefaultCase<'arena>, ParseError> {
+    fn parse_switch_default_case(&mut self) -> Result<SwitchDefaultCase<'arena>, ParseError<'arena>> {
         Ok(SwitchDefaultCase {
             default: self.expect_keyword(T!["default"])?,
             separator: self.parse_switch_case_separator()?,
@@ -98,7 +98,7 @@ where
         })
     }
 
-    fn parse_switch_statements(&mut self) -> Result<Sequence<'arena, Statement<'arena>>, ParseError> {
+    fn parse_switch_statements(&mut self) -> Result<Sequence<'arena, Statement<'arena>>, ParseError<'arena>> {
         let mut statements = self.new_vec();
         loop {
             if matches!(self.stream.peek_kind(0)?, None | Some(T!["case" | "}"]))
@@ -122,7 +122,7 @@ where
         Ok(Sequence::new(statements))
     }
 
-    fn parse_switch_case_separator(&mut self) -> Result<SwitchCaseSeparator, ParseError> {
+    fn parse_switch_case_separator(&mut self) -> Result<SwitchCaseSeparator, ParseError<'arena>> {
         let token = self.stream.consume()?;
         let span = token.span_for(self.stream.file_id());
 

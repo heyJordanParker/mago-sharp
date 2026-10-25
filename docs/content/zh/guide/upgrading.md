@@ -10,6 +10,13 @@ nav_section = "指南"
 
 > Composer 安装方式不同。Composer 包装会锁定一份与 Composer 包版本匹配的二进制,所以你应使用 `composer update` 而非 `self-update` 来升级 Mago。
 
+## 校验
+
+`self-update` 会在解压任何内容之前校验下载的归档,校验失败时拒绝安装,已安装的二进制保持不变:
+
+- 如果 `PATH` 中有 [GitHub CLI](https://cli.github.com/),它会用 `gh attestation verify` 校验归档的构建证明,证明该归档由发布工作流构建。
+- 如果没有,它会用该发行版的 `mago-<version>-sha256sums.txt` 校验归档的 SHA-256,并提示完整的来源证明需要 `gh`:来自发行版本身的校验和无法识别被替换的发行版。未发布校验和文件的发行版(例如 0.5.0 及更早版本)只能在有 `gh` 时安装。
+
 ## 常见流程
 
 只检查更新而不安装:

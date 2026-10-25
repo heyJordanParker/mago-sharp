@@ -15,7 +15,7 @@ impl<'arena, A> Parser<'_, 'arena, A>
 where
     A: Arena,
 {
-    pub(crate) fn parse_instantiation(&mut self) -> Result<Instantiation<'arena>, ParseError> {
+    pub(crate) fn parse_instantiation(&mut self) -> Result<Instantiation<'arena>, ParseError<'arena>> {
         let new = self.expect_keyword(T!["new"])?;
         let class = self.arena.alloc(self.parse_expression_with_precedence(Precedence::New)?);
         let type_arguments = self.parse_optional_type_argument_list()?;
@@ -45,7 +45,7 @@ where
     /// opens one only where a name and `:`, `,` or `}` follow it, or `}` closes it at once, so PHP's `{` never does.
     pub(crate) fn parse_optional_object_initializer(
         &mut self,
-    ) -> Result<Option<ObjectInitializer<'arena>>, ParseError> {
+    ) -> Result<Option<ObjectInitializer<'arena>>, ParseError<'arena>> {
         let opens = self.dialect.is_sharp()
             && self.stream.is_at(T!["{"])?
             && match self.stream.peek_kind(1)? {
@@ -61,7 +61,7 @@ where
 
     /// Parses `{ name: value, … }`, the values `new` and `with` set by name, spec section 16. The shorthand `name`
     /// reads the local `name`.
-    pub(crate) fn parse_object_initializer(&mut self) -> Result<ObjectInitializer<'arena>, ParseError> {
+    pub(crate) fn parse_object_initializer(&mut self) -> Result<ObjectInitializer<'arena>, ParseError<'arena>> {
         let result = self.parse_comma_separated_sequence(T!["{"], T!["}"], |parser| {
             let name = parser.parse_local_identifier()?;
             if parser.stream.is_at(T![":"])? {

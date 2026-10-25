@@ -1,9 +1,15 @@
+use std::fmt::Write as _;
 use std::fs;
 use std::io::BufRead;
 use std::io::Write;
+use std::path::Path;
+use std::process::Command;
 use std::process::ExitCode;
+use std::process::Stdio;
 
 use clap::Parser;
+use sha2::Digest;
+use sha2::Sha256;
 use tempfile::TempDir;
 use tracing::debug;
 use tracing::info;
@@ -19,6 +25,9 @@ use crate::updater::version::is_version_compatible;
 use crate::updater::version::is_version_newer;
 use crate::version_check::VersionCheck;
 use crate::version_check::VersionPin;
+
+/// The workflow that builds and attests every release archive, as install.sh names it.
+const SIGNER_WORKFLOW: &str = ".github/workflows/release.yml";
 
 #[derive(Parser, Debug)]
 #[command(
@@ -167,6 +176,8 @@ fn perform_update(release: &Release, target_asset: &ReleaseAsset) -> Result<(), 
 
     debug!("Downloaded archive to: {:?}", tmp_archive_path);
 
+    verify_archive(release, target_asset, &tmp_archive_path)?;
+
     let binary_path = format!("{BIN}-{}-{TARGET}/{BIN}{}", release.version, std::env::consts::EXE_SUFFIX);
 
     info!("Extracting archive...");
@@ -179,6 +190,91 @@ fn perform_update(release: &Release, target_asset: &ReleaseAsset) -> Result<(), 
     self_replace::self_replace(&new_executable)?;
 
     Ok(())
+}
+
+/// Verifies the downloaded archive before anything is extracted from it, as install.sh does: against its build
+/// attestation when the GitHub CLI can check one, else against the SHA-256 the release's sums file names for it.
+fn verify_archive(release: &Release, archive: &ReleaseAsset, archive_path: &Path) -> Result<(), UpdateError> {
+    let repository = format!("{REPO_OWNER}/{REPO_NAME}");
+    let signer = format!("{repository}/{SIGNER_WORKFLOW}");
+
+    if gh_verifies_attestations() {
+        info!("Verifying the build attestation of `{}`, signed by {signer}...", archive.name);
+        let verified = Command::new("gh")
+            .args(["attestation", "verify"])
+            .arg(archive_path)
+            .args(["--repo", &repository, "--signer-workflow", &signer])
+            .status()?
+            .success();
+        if !verified {
+            return Err(UpdateError::Update(format!(
+                "`{}` could not be matched to a build attestation signed by {signer}, so nothing was extracted or installed.",
+                archive.name
+            )));
+        }
+
+        info!("Attestation verified.");
+        return Ok(());
+    }
+
+    warn!(
+        "The GitHub CLI (`gh`) with `gh attestation` was not found, so the build attestation of `{}` is not verified. A checksum from the release cannot tell a replaced release apart: full provenance needs the attestation. Install the GitHub CLI from https://cli.github.com/ to verify it.",
+        archive.name
+    );
+
+    let sums_name = format!("{BIN}-{}-sha256sums.txt", release.version);
+    let sums_asset = release.assets.iter().find(|asset| asset.name == sums_name).ok_or_else(|| {
+        UpdateError::Update(format!(
+            "Release `{}` publishes no `{sums_name}`, so `{}` cannot be verified without the GitHub CLI. Install it from https://cli.github.com/ and run `mago self-update` again.",
+            release.version, archive.name
+        ))
+    })?;
+
+    let mut sums = Vec::new();
+    github::download_asset(sums_asset, &mut sums)?;
+    let actual = verify_checksum(&fs::read(archive_path)?, &archive.name, &String::from_utf8_lossy(&sums), &sums_name)?;
+
+    info!("Checksum verified: {actual}");
+    Ok(())
+}
+
+/// Returns `true` when a `gh` on the `PATH` has the `gh attestation` subcommand.
+fn gh_verifies_attestations() -> bool {
+    Command::new("gh")
+        .args(["attestation", "--help"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+/// Checks `archive` against the SHA-256 that `sums`, a `sha256sum` listing, names for `archive_name`, and returns it.
+fn verify_checksum(archive: &[u8], archive_name: &str, sums: &str, sums_name: &str) -> Result<String, UpdateError> {
+    let expected = sums
+        .lines()
+        .find_map(|line| {
+            let mut fields = line.split_whitespace();
+            let hash = fields.next()?;
+            (fields.next()? == archive_name).then_some(hash)
+        })
+        .ok_or_else(|| {
+            UpdateError::Update(format!(
+                "`{sums_name}` holds no SHA-256 for `{archive_name}`, so it cannot be verified."
+            ))
+        })?;
+
+    let actual = Sha256::digest(archive).iter().fold(String::new(), |mut digest, byte| {
+        let _ = write!(digest, "{byte:02x}");
+        digest
+    });
+
+    if actual != expected {
+        return Err(UpdateError::Update(format!(
+            "`{archive_name}` has SHA-256 {actual}, and `{sums_name}` names {expected}, so it is not the archive the release built. Nothing was extracted or installed."
+        )));
+    }
+
+    Ok(actual)
 }
 
 fn confirm_prompt(msg: &str) -> Result<(), UpdateError> {
@@ -331,5 +427,46 @@ mod tests {
 
         assert_eq!(newest("0").version, "0.2.0");
         assert_eq!(newest("0.1").version, "0.1.0");
+    }
+
+    const ARCHIVE_NAME: &str = "mago-0.6.0-x86_64-unknown-linux-gnu.tar.gz";
+    const SUMS_NAME: &str = "mago-0.6.0-sha256sums.txt";
+    // The SHA-256 of `b"the archive the release built"`.
+    const ARCHIVE_SHA256: &str = "316cf7459b683a544be9e8e39cb89a1746847d567e56378035c7b39428bc5bb1";
+
+    fn sums() -> String {
+        format!(
+            "{ARCHIVE_SHA256}  {ARCHIVE_NAME}\n0000000000000000000000000000000000000000000000000000000000000000  mago-0.6.0-wasm.tar.gz\n"
+        )
+    }
+
+    #[test]
+    fn an_archive_whose_sha256_the_sums_file_names_is_verified() {
+        let verified = verify_checksum(b"the archive the release built", ARCHIVE_NAME, &sums(), SUMS_NAME);
+
+        assert_eq!(verified.map_err(|error| error.to_string()), Ok(ARCHIVE_SHA256.to_owned()));
+    }
+
+    #[test]
+    fn a_tampered_archive_is_refused_with_its_sha256_and_the_one_the_sums_file_names() {
+        let refused = verify_checksum(b"a tampered archive", ARCHIVE_NAME, &sums(), SUMS_NAME);
+
+        assert_eq!(
+            refused.map_err(|error| error.to_string()),
+            Err(format!(
+                "`{ARCHIVE_NAME}` has SHA-256 9ae45a0d01f8cca551834081def762178aa77340819390181702cd913bc98ac8, and `{SUMS_NAME}` names {ARCHIVE_SHA256}, so it is not the archive the release built. Nothing was extracted or installed."
+            ))
+        );
+    }
+
+    #[test]
+    fn an_archive_the_sums_file_does_not_name_is_refused() {
+        let refused =
+            verify_checksum(b"the archive the release built", "mago-0.6.0-riscv64.tar.gz", &sums(), SUMS_NAME);
+
+        assert_eq!(
+            refused.map_err(|error| error.to_string()),
+            Err(format!("`{SUMS_NAME}` holds no SHA-256 for `mago-0.6.0-riscv64.tar.gz`, so it cannot be verified."))
+        );
     }
 }

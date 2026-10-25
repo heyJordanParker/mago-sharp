@@ -24,7 +24,7 @@ impl<'arena, A> Parser<'_, 'arena, A>
 where
     A: Arena,
 {
-    pub(crate) fn parse_construct(&mut self) -> Result<Expression<'arena>, ParseError> {
+    pub(crate) fn parse_construct(&mut self) -> Result<Expression<'arena>, ParseError<'arena>> {
         let token = self.stream.lookahead(0)?.ok_or_else(|| self.stream.unexpected(None, &[]))?;
 
         Ok(Expression::Construct(match token.kind {

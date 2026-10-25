@@ -39,9 +39,9 @@ where
         &mut self,
         members_of: &'static str,
         name: Option<&LocalIdentifier<'arena>>,
-        type_parameters_of: Option<std::boxed::Box<str>>,
-    ) -> Result<Sequence<'arena, ClassLikeMember<'arena>>, ParseError> {
-        let members_name = name.map(|name| std::boxed::Box::<[u8]>::from(name.value));
+        type_parameters_of: Option<&'arena str>,
+    ) -> Result<Sequence<'arena, ClassLikeMember<'arena>>, ParseError<'arena>> {
+        let members_name = name.map(|name| name.value);
         let mut members = self.new_vec();
         // Whether the loop is skipping the tokens after an error, which report nothing until a member parses again.
         // PHP# recovers so, and PHP keeps upstream's error per skipped token.
@@ -53,8 +53,8 @@ where
 
             let position_before = self.stream.current_position();
             self.state.members_of = members_of;
-            self.state.members_name.clone_from(&members_name);
-            self.state.type_parameters_of.clone_from(&type_parameters_of);
+            self.state.members_name = members_name;
+            self.state.type_parameters_of = type_parameters_of;
             let errors_before = self.errors.len();
             match self.parse_classlike_member() {
                 Ok(member) => {
@@ -89,7 +89,7 @@ where
     pub(crate) fn parse_interface_with_attributes(
         &mut self,
         attributes: Sequence<'arena, AttributeList<'arena>>,
-    ) -> Result<Interface<'arena>, ParseError> {
+    ) -> Result<Interface<'arena>, ParseError<'arena>> {
         self.parse_interface_with_attributes_and_modifiers(attributes, Sequence::empty())
     }
 
@@ -98,7 +98,7 @@ where
     pub(crate) fn parse_modified_class_like_with_attributes(
         &mut self,
         attributes: Sequence<'arena, AttributeList<'arena>>,
-    ) -> Result<Statement<'arena>, ParseError> {
+    ) -> Result<Statement<'arena>, ParseError<'arena>> {
         let modifiers = self.parse_modifier_sequence()?;
         self.read_php_type_declaration()?;
         if self.is_at_event()? {
@@ -133,7 +133,7 @@ where
 
     /// Whether an interface starts here: `interface`, or in PHP# `sealed interface`, spec section 20.1. Everywhere else
     /// `sealed` is a name, and `sealed` before anything but `interface` stays a parse error.
-    pub(crate) fn is_at_interface(&mut self) -> Result<bool, ParseError> {
+    pub(crate) fn is_at_interface(&mut self) -> Result<bool, ParseError<'arena>> {
         let is_sealed =
             self.stream.lookahead(0)?.is_some_and(|token| token.kind == T![Identifier] && token.value == b"sealed");
 
@@ -147,12 +147,12 @@ where
         &mut self,
         attributes: Sequence<'arena, AttributeList<'arena>>,
         modifiers: Sequence<'arena, Modifier<'arena>>,
-    ) -> Result<Interface<'arena>, ParseError> {
+    ) -> Result<Interface<'arena>, ParseError<'arena>> {
         let sealed = if self.stream.is_at(T!["interface"])? { None } else { Some(self.expect_any_keyword()?) };
         let interface = self.expect_keyword(T!["interface"])?;
         let name = self.parse_local_identifier()?;
         let type_parameters = self.parse_optional_type_parameter_list()?;
-        let type_parameter_names = type_parameter_names(type_parameters.as_ref());
+        let type_parameter_names = self.type_parameter_names(type_parameters.as_ref());
 
         Ok(Interface {
             attribute_lists: attributes,
@@ -172,7 +172,7 @@ where
     pub(crate) fn parse_class_with_attributes(
         &mut self,
         attributes: Sequence<'arena, AttributeList<'arena>>,
-    ) -> Result<Class<'arena>, ParseError> {
+    ) -> Result<Class<'arena>, ParseError<'arena>> {
         let modifiers = self.parse_modifier_sequence()?;
 
         self.parse_class_with_attributes_and_modifiers(attributes, modifiers)
@@ -182,11 +182,11 @@ where
         &mut self,
         attributes: Sequence<'arena, AttributeList<'arena>>,
         modifiers: Sequence<'arena, Modifier<'arena>>,
-    ) -> Result<Class<'arena>, ParseError> {
+    ) -> Result<Class<'arena>, ParseError<'arena>> {
         let class = self.expect_keyword(T!["class"])?;
         let name = self.parse_local_identifier()?;
         let type_parameters = self.parse_optional_type_parameter_list()?;
-        let type_parameter_names = type_parameter_names(type_parameters.as_ref());
+        let type_parameter_names = self.type_parameter_names(type_parameters.as_ref());
 
         Ok(Class {
             attribute_lists: attributes,
@@ -203,7 +203,7 @@ where
         })
     }
 
-    pub(crate) fn parse_anonymous_class(&mut self) -> Result<AnonymousClass<'arena>, ParseError> {
+    pub(crate) fn parse_anonymous_class(&mut self) -> Result<AnonymousClass<'arena>, ParseError<'arena>> {
         Ok(AnonymousClass {
             new: self.expect_keyword(T!["new"])?,
             attribute_lists: self.parse_attribute_list_sequence()?,
@@ -221,7 +221,7 @@ where
     pub(crate) fn parse_trait_with_attributes(
         &mut self,
         attributes: Sequence<'arena, AttributeList<'arena>>,
-    ) -> Result<Trait<'arena>, ParseError> {
+    ) -> Result<Trait<'arena>, ParseError<'arena>> {
         self.parse_trait_with_attributes_and_modifiers(attributes, Sequence::empty())
     }
 
@@ -229,7 +229,7 @@ where
         &mut self,
         attributes: Sequence<'arena, AttributeList<'arena>>,
         modifiers: Sequence<'arena, Modifier<'arena>>,
-    ) -> Result<Trait<'arena>, ParseError> {
+    ) -> Result<Trait<'arena>, ParseError<'arena>> {
         let r#trait = self.expect_keyword(T!["trait"])?;
         let name = self.parse_local_identifier()?;
 
@@ -247,7 +247,7 @@ where
     pub(crate) fn parse_enum_with_attributes(
         &mut self,
         attributes: Sequence<'arena, AttributeList<'arena>>,
-    ) -> Result<Enum<'arena>, ParseError> {
+    ) -> Result<Enum<'arena>, ParseError<'arena>> {
         self.parse_enum_with_attributes_and_modifiers(attributes, Sequence::empty())
     }
 
@@ -255,11 +255,11 @@ where
         &mut self,
         attributes: Sequence<'arena, AttributeList<'arena>>,
         modifiers: Sequence<'arena, Modifier<'arena>>,
-    ) -> Result<Enum<'arena>, ParseError> {
+    ) -> Result<Enum<'arena>, ParseError<'arena>> {
         let r#enum = self.expect_keyword(T!["enum"])?;
         let name = self.parse_local_identifier()?;
         let type_parameters = self.parse_optional_type_parameter_list()?;
-        let type_parameter_names = type_parameter_names(type_parameters.as_ref());
+        let type_parameter_names = self.type_parameter_names(type_parameters.as_ref());
         let (backing_type_hint, inheritance) = self.parse_enum_header()?;
 
         Ok(Enum {
@@ -282,7 +282,7 @@ where
     /// the backing type, which `check_enum` holds to `int` or `string`.
     fn parse_enum_header(
         &mut self,
-    ) -> Result<(Option<EnumBackingTypeHint<'arena>>, Option<Inheritance<'arena>>), ParseError> {
+    ) -> Result<(Option<EnumBackingTypeHint<'arena>>, Option<Inheritance<'arena>>), ParseError<'arena>> {
         if !matches!(self.stream.peek_kind(0)?, Some(T![":"])) {
             return Ok((None, None));
         }
@@ -307,13 +307,14 @@ where
 
         Ok((backing_type_hint, Some(self.parse_inheritance_from(comma, first)?)))
     }
-}
 
-/// The names of the type parameters `list` declares, as `T` or `TKey, TValue`, or `None` when it declares none.
-pub(crate) fn type_parameter_names(list: Option<&TypeParameterList<'_>>) -> Option<std::boxed::Box<str>> {
-    list.map(|list| {
-        let names = list.parameters.iter().map(|parameter| String::from_utf8_lossy(parameter.name.value));
+    /// The names of the type parameters `list` declares, as `T` or `TKey, TValue`, in the arena, or `None` when it
+    /// declares none.
+    pub(crate) fn type_parameter_names(&self, list: Option<&TypeParameterList<'_>>) -> Option<&'arena str> {
+        list.map(|list| {
+            let names = list.parameters.iter().map(|parameter| String::from_utf8_lossy(parameter.name.value));
 
-        names.collect::<std::vec::Vec<_>>().join(", ").into_boxed_str()
-    })
+            &*self.arena.alloc_str(&names.collect::<std::vec::Vec<_>>().join(", "))
+        })
+    }
 }

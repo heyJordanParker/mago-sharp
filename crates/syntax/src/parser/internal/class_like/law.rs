@@ -14,7 +14,7 @@ where
 {
     /// Whether a PHP# class member starts a law: `law`, a name and `(`. Everywhere else `law` is a name, such as a
     /// return type after a modifier or a call `law(x)`.
-    pub(crate) fn is_at_law(&mut self) -> Result<bool, ParseError> {
+    pub(crate) fn is_at_law(&mut self) -> Result<bool, ParseError<'arena>> {
         let starts_with_law =
             self.stream.lookahead(0)?.is_some_and(|token| token.kind == T![Identifier] && token.value == b"law");
         let named = self.stream.lookahead(1)?.is_some_and(|token| token.kind.is_identifier_maybe_reserved());
@@ -25,7 +25,7 @@ where
     /// Parses a PHP# law, spec section 28: `law`, its name, its parameters, an optional `when` condition, `=>` and its
     /// claim, then `;` or the body that proves it. The `when` condition reads as a `match` arm's does, so the `=>`
     /// after it ends it.
-    pub(crate) fn parse_law(&mut self) -> Result<Law<'arena>, ParseError> {
+    pub(crate) fn parse_law(&mut self) -> Result<Law<'arena>, ParseError<'arena>> {
         let law = self.expect_any_keyword()?;
         let name = self.parse_local_identifier()?;
         let parameter_list = self.parse_function_like_parameter_list()?;

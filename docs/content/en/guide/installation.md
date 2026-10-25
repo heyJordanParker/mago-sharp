@@ -34,7 +34,7 @@ The same syntax works with `wget`.
 
 ### Verify the download
 
-If the [GitHub CLI](https://cli.github.com/) is on your PATH, the installer verifies the archive against Mago's GitHub build attestation before unpacking it. No flag required. If `gh` is missing or too old, the script prints a notice and continues without verification.
+If the [GitHub CLI](https://cli.github.com/) is on your PATH, the installer verifies the archive against Mago's GitHub build attestation before unpacking it. No flag required. If `gh` is missing or too old, the installer checks the archive against the SHA-256 in the release's `mago-<version>-sha256sums.txt` instead, and says that full provenance needs `gh`: a checksum published beside the archive catches a corrupted download, not a replaced release.
 
 To make verification mandatory, pass `--always-verify`. The installer aborts before touching your PATH if `gh` is unavailable, too old, or the attestation does not match.
 
@@ -82,7 +82,7 @@ For PHP projects:
 composer require --dev "heyjordanparker/mago-sharp:^0.5.0"
 ```
 
-The Composer package is a thin wrapper. The first call to `vendor/bin/mago` downloads the matching pre-built binary from the GitHub release and caches it. Subsequent calls reuse the cache and make no network requests.
+The Composer package is a thin wrapper. The first call to `vendor/bin/mago` downloads the matching pre-built binary from the GitHub release and caches it. Subsequent calls reuse the cache and make no network requests. Each package version ships the SHA-256 of every archive its release built, and the wrapper refuses to unpack a download whose SHA-256 differs, so the version you require pins the exact binary.
 
 If GitHub's anonymous rate limit blocks the first download (common on shared CI runners) set `GITHUB_TOKEN` or `GH_TOKEN` for that one invocation. In GitHub Actions the token is not exported automatically, so pass it explicitly:
 
@@ -111,7 +111,7 @@ The shell installer chooses one of three modes based on the flags you pass.
 
 | Mode | Flag | Behaviour |
 | :--- | :--- | :--- |
-| `auto` | none | Verifies if `gh` is available; otherwise installs without verifying. |
+| `auto` | none | Verifies the attestation if `gh` is available; otherwise verifies the release's SHA-256 checksum. |
 | `always` | `--always-verify` | Verification is mandatory. Missing or too-old `gh`, or a failed match, aborts the install. |
 | `never` | `--no-verify` | Skips the check even when `gh` is available. |
 

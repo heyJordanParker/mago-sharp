@@ -162,7 +162,8 @@ impl ClassLikeMetadata {
             .values()
             .filter(|property| !property.flags.is_static() && !property.flags.is_virtual_property())
             .collect();
-        properties.sort_by_key(|property| property.span.map(|span| span.start.offset));
+        // A field has its name's span but no span of its own.
+        properties.sort_by_key(|property| property.name_span.map(|span| span.start.offset));
 
         properties
     }

@@ -34,7 +34,7 @@ where
         &mut self,
         attributes: Sequence<'arena, AttributeList<'arena>>,
         modifiers: Sequence<'arena, Modifier<'arena>>,
-    ) -> Result<Property<'arena>, ParseError> {
+    ) -> Result<Property<'arena>, ParseError<'arena>> {
         let var = if self.stream.is_at(T!["var"])? { Some(self.expect_php_keyword(T!["var"])?) } else { None };
         let hint = self.parse_optional_type_hint()?;
 
@@ -48,7 +48,7 @@ where
         modifiers: Sequence<'arena, Modifier<'arena>>,
         var: Option<Keyword<'arena>>,
         hint: Option<Hint<'arena>>,
-    ) -> Result<Property<'arena>, ParseError> {
+    ) -> Result<Property<'arena>, ParseError<'arena>> {
         // A computed property, `public string slug => expr;` in spec section 6.1.
         if self.dialect.is_sharp() && self.stream.peek_kind(1)? == Some(T!["=>"]) {
             return Ok(Property::Computed(ComputedProperty {
@@ -105,7 +105,7 @@ where
         attributes: Sequence<'arena, AttributeList<'arena>>,
         modifiers: Sequence<'arena, Modifier<'arena>>,
         name: LocalIdentifier<'arena>,
-    ) -> Result<Property<'arena>, ParseError> {
+    ) -> Result<Property<'arena>, ParseError<'arena>> {
         let variable = DirectVariable { span: name.span, name: name.value };
         let item = if self.stream.is_at(T!["="])? {
             PropertyItem::Concrete(PropertyConcreteItem {
@@ -133,7 +133,7 @@ where
         attributes: Sequence<'arena, AttributeList<'arena>>,
         modifiers: Sequence<'arena, Modifier<'arena>>,
         name: LocalIdentifier<'arena>,
-    ) -> Result<Property<'arena>, ParseError> {
+    ) -> Result<Property<'arena>, ParseError<'arena>> {
         let item = PropertyItem::Abstract(PropertyAbstractItem {
             variable: DirectVariable { span: name.span, name: name.value },
         });
@@ -149,7 +149,7 @@ where
         var: Option<Keyword<'arena>>,
         hint: Option<Hint<'arena>>,
         item: PropertyItem<'arena>,
-    ) -> Result<Property<'arena>, ParseError> {
+    ) -> Result<Property<'arena>, ParseError<'arena>> {
         let hook_list = self.parse_property_hook_list()?;
         let behaviors = self.parse_optional_behavior_list()?;
         let initial_value = if self.dialect.is_sharp() && self.stream.is_at(T!["="])? {
@@ -174,18 +174,18 @@ where
         }))
     }
 
-    fn parse_property_item(&mut self) -> Result<PropertyItem<'arena>, ParseError> {
+    fn parse_property_item(&mut self) -> Result<PropertyItem<'arena>, ParseError<'arena>> {
         Ok(match self.stream.peek_kind(1)? {
             Some(T!["="]) => PropertyItem::Concrete(self.parse_property_concrete_item()?),
             _ => PropertyItem::Abstract(self.parse_property_abstract_item()?),
         })
     }
 
-    fn parse_property_abstract_item(&mut self) -> Result<PropertyAbstractItem<'arena>, ParseError> {
+    fn parse_property_abstract_item(&mut self) -> Result<PropertyAbstractItem<'arena>, ParseError<'arena>> {
         Ok(PropertyAbstractItem { variable: self.parse_property_variable()? })
     }
 
-    fn parse_property_concrete_item(&mut self) -> Result<PropertyConcreteItem<'arena>, ParseError> {
+    fn parse_property_concrete_item(&mut self) -> Result<PropertyConcreteItem<'arena>, ParseError<'arena>> {
         Ok(PropertyConcreteItem {
             variable: self.parse_property_variable()?,
             equals: self.stream.eat_span(T!["="])?,
@@ -194,7 +194,7 @@ where
     }
 
     /// Parses the name a property declares. A PHP# field names it bare, and a `$` variable there is PHP syntax.
-    fn parse_property_variable(&mut self) -> Result<DirectVariable<'arena>, ParseError> {
+    fn parse_property_variable(&mut self) -> Result<DirectVariable<'arena>, ParseError<'arena>> {
         if !self.dialect.is_sharp() {
             return self.parse_direct_variable();
         }
@@ -211,14 +211,14 @@ where
     }
 
     /// Whether a PHP# `via` clause starts here, spec section 6.4.
-    fn is_at_via(&mut self) -> Result<bool, ParseError> {
+    fn is_at_via(&mut self) -> Result<bool, ParseError<'arena>> {
         Ok(self.dialect.is_sharp()
             && self.stream.lookahead(0)?.is_some_and(|token| token.kind == T![Identifier] && token.value == b"via"))
     }
 
     /// Parses a PHP# property's behaviors after its accessors, spec section 6.4: `via` and types separated by
     /// commas, ending with `;` unless an initial value follows.
-    fn parse_optional_behavior_list(&mut self) -> Result<Option<PropertyBehaviorList<'arena>>, ParseError> {
+    fn parse_optional_behavior_list(&mut self) -> Result<Option<PropertyBehaviorList<'arena>>, ParseError<'arena>> {
         if !self.is_at_via()? {
             return Ok(None);
         }
@@ -241,7 +241,7 @@ where
     /// the `=` of the parameter's default, as [`Self::is_at_parameter_behavior`] says, since no parameter is a type alone.
     pub(crate) fn parse_optional_parameter_behavior_list(
         &mut self,
-    ) -> Result<Option<PropertyBehaviorList<'arena>>, ParseError> {
+    ) -> Result<Option<PropertyBehaviorList<'arena>>, ParseError<'arena>> {
         if !self.is_at_via()? {
             return Ok(None);
         }
@@ -264,7 +264,7 @@ where
 
     /// Whether the token after the `,` the stream is at starts another behavior of a parameter: a class name, with type
     /// arguments when it is generic, followed by `,`, `)` or `=`. The next parameter writes a name after its type.
-    fn is_at_parameter_behavior(&mut self) -> Result<bool, ParseError> {
+    fn is_at_parameter_behavior(&mut self) -> Result<bool, ParseError<'arena>> {
         if self.stream.peek_kind(1)? != Some(T![Identifier]) {
             return Ok(false);
         }
@@ -276,14 +276,16 @@ where
         Ok(matches!(after, Some(T![","] | T![")"] | T!["="])))
     }
 
-    pub(crate) fn parse_optional_property_hook_list(&mut self) -> Result<Option<PropertyHookList<'arena>>, ParseError> {
+    pub(crate) fn parse_optional_property_hook_list(
+        &mut self,
+    ) -> Result<Option<PropertyHookList<'arena>>, ParseError<'arena>> {
         Ok(match self.stream.peek_kind(0)? {
             Some(T!["{"]) => Some(self.parse_property_hook_list()?),
             _ => None,
         })
     }
 
-    fn parse_property_hook_list(&mut self) -> Result<PropertyHookList<'arena>, ParseError> {
+    fn parse_property_hook_list(&mut self) -> Result<PropertyHookList<'arena>, ParseError<'arena>> {
         Ok(PropertyHookList {
             left_brace: self.stream.eat_span(T!["{"])?,
             hooks: {
@@ -303,7 +305,7 @@ where
         })
     }
 
-    fn parse_property_hook(&mut self) -> Result<PropertyHook<'arena>, ParseError> {
+    fn parse_property_hook(&mut self) -> Result<PropertyHook<'arena>, ParseError<'arena>> {
         Ok(PropertyHook {
             attribute_lists: self.parse_typeless_attribute_list_sequence()?,
             ampersand: if self.stream.is_at(T!["&"])? { Some(self.stream.eat_span(T!["&"])?) } else { None },
@@ -314,7 +316,7 @@ where
         })
     }
 
-    fn parse_property_hook_body(&mut self) -> Result<PropertyHookBody<'arena>, ParseError> {
+    fn parse_property_hook_body(&mut self) -> Result<PropertyHookBody<'arena>, ParseError<'arena>> {
         let next = self.stream.lookahead(0)?.ok_or_else(|| self.stream.unexpected(None, &[]))?;
 
         Ok(match next.kind {
@@ -324,11 +326,11 @@ where
         })
     }
 
-    fn parse_property_hook_abstract_body(&mut self) -> Result<PropertyHookAbstractBody, ParseError> {
+    fn parse_property_hook_abstract_body(&mut self) -> Result<PropertyHookAbstractBody, ParseError<'arena>> {
         Ok(PropertyHookAbstractBody { semicolon: self.stream.eat_span(T![";"])? })
     }
 
-    fn parse_property_hook_concrete_body(&mut self) -> Result<PropertyHookConcreteBody<'arena>, ParseError> {
+    fn parse_property_hook_concrete_body(&mut self) -> Result<PropertyHookConcreteBody<'arena>, ParseError<'arena>> {
         let next = self.stream.lookahead(0)?.ok_or_else(|| self.stream.unexpected(None, &[]))?;
 
         Ok(match next.kind {
@@ -340,7 +342,7 @@ where
 
     fn parse_property_hook_concrete_expression_body(
         &mut self,
-    ) -> Result<PropertyHookConcreteExpressionBody<'arena>, ParseError> {
+    ) -> Result<PropertyHookConcreteExpressionBody<'arena>, ParseError<'arena>> {
         Ok(PropertyHookConcreteExpressionBody {
             arrow: self.stream.eat_span(T!["=>"])?,
             expression: self.parse_expression()?,

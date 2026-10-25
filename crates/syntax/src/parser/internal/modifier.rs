@@ -26,7 +26,7 @@ where
     /// Whether C#'s `partial` starts here, before a type's keyword or its other modifiers, as in `partial class Order`
     /// or `partial static class Texts`. PHP# has no partial types, so there it fails as a typo does, and everywhere
     /// else `partial` is a name.
-    pub(crate) fn is_at_partial(&mut self) -> Result<bool, ParseError> {
+    pub(crate) fn is_at_partial(&mut self) -> Result<bool, ParseError<'arena>> {
         if !self.dialect.is_sharp()
             || !self.stream.lookahead(0)?.is_some_and(|token| token.kind == T![Identifier] && token.value == b"partial")
         {
@@ -43,12 +43,12 @@ where
     }
 
     /// Whether the token `offset` ahead is spec section 5's `internal`.
-    fn is_internal_token_at(&mut self, offset: usize) -> Result<bool, ParseError> {
+    fn is_internal_token_at(&mut self, offset: usize) -> Result<bool, ParseError<'arena>> {
         Ok(self.stream.lookahead(offset)?.is_some_and(|token| self.is_internal(token)))
     }
 
     /// Consumes a `(` and every token up to its matching `)`, and returns their span.
-    fn skip_parenthesized(&mut self) -> Result<Span, ParseError> {
+    fn skip_parenthesized(&mut self) -> Result<Span, ParseError<'arena>> {
         let start = self.stream.eat_span(T!["("])?;
         let mut depth: usize = 1;
         loop {
@@ -62,7 +62,7 @@ where
         }
     }
 
-    pub(crate) fn parse_modifier_sequence(&mut self) -> Result<Sequence<'arena, Modifier<'arena>>, ParseError> {
+    pub(crate) fn parse_modifier_sequence(&mut self) -> Result<Sequence<'arena, Modifier<'arena>>, ParseError<'arena>> {
         let mut modifiers = self.new_vec();
         while let Some(modifier) = self.parse_optional_modifier()? {
             modifiers.push(modifier);
@@ -71,7 +71,7 @@ where
         Ok(Sequence::new(modifiers))
     }
 
-    pub(crate) fn parse_optional_modifier(&mut self) -> Result<Option<Modifier<'arena>>, ParseError> {
+    pub(crate) fn parse_optional_modifier(&mut self) -> Result<Option<Modifier<'arena>>, ParseError<'arena>> {
         self.read_php_construct()?;
         Ok(Some(match self.stream.peek_kind(0)? {
             Some(T!["public"]) => Modifier::Public(self.expect_any_keyword()?),

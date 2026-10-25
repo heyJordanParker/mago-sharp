@@ -35,6 +35,13 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "sharp_parser"
+path = "fuzz_targets/sharp_parser.rs"
+test = false
+doc = false
+bench = false
+
 [profile.release]
 debug = 1
 opt-level = 3

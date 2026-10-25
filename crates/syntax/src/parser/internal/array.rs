@@ -23,7 +23,7 @@ impl<'arena, A> Parser<'_, 'arena, A>
 where
     A: Arena,
 {
-    pub(crate) fn parse_array(&mut self) -> Result<Array<'arena>, ParseError> {
+    pub(crate) fn parse_array(&mut self) -> Result<Array<'arena>, ParseError<'arena>> {
         if self.dialect.is_sharp() && self.stream.peek_kind(1)? == Some(T![":"]) {
             return Ok(Array {
                 left_bracket: self.stream.eat_span(T!["["])?,
@@ -38,14 +38,14 @@ where
         Ok(Array { left_bracket: result.open, elements: result.sequence, colon: None, right_bracket: result.close })
     }
 
-    pub(crate) fn parse_list(&mut self) -> Result<List<'arena>, ParseError> {
+    pub(crate) fn parse_list(&mut self) -> Result<List<'arena>, ParseError<'arena>> {
         let list = self.expect_keyword(T!["list"])?;
         let result = self.parse_comma_separated_sequence(T!["("], T![")"], |p| p.parse_array_element())?;
 
         Ok(List { list, left_parenthesis: result.open, elements: result.sequence, right_parenthesis: result.close })
     }
 
-    pub(crate) fn parse_legacy_array(&mut self) -> Result<LegacyArray<'arena>, ParseError> {
+    pub(crate) fn parse_legacy_array(&mut self) -> Result<LegacyArray<'arena>, ParseError<'arena>> {
         let array = self.expect_keyword(T!["array"])?;
         let result = self.parse_comma_separated_sequence(T!["("], T![")"], |p| p.parse_array_element())?;
 
@@ -57,7 +57,7 @@ where
         })
     }
 
-    pub(crate) fn parse_array_element(&mut self) -> Result<ArrayElement<'arena>, ParseError> {
+    pub(crate) fn parse_array_element(&mut self) -> Result<ArrayElement<'arena>, ParseError<'arena>> {
         Ok(match self.stream.peek_kind(0)? {
             Some(T!["..."]) => {
                 let ellipsis = self.stream.consume_span()?;

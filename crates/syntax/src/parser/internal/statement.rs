@@ -16,7 +16,7 @@ impl<'arena, A> Parser<'_, 'arena, A>
 where
     A: Arena,
 {
-    pub(crate) fn parse_statement(&mut self) -> Result<Statement<'arena>, ParseError> {
+    pub(crate) fn parse_statement(&mut self) -> Result<Statement<'arena>, ParseError<'arena>> {
         self.state.recursion_depth += 1;
         if self.state.recursion_depth > MAX_RECURSION_DEPTH {
             self.state.recursion_depth -= 1;
@@ -35,7 +35,7 @@ where
         result
     }
 
-    fn parse_statement_inner(&mut self) -> Result<Statement<'arena>, ParseError> {
+    fn parse_statement_inner(&mut self) -> Result<Statement<'arena>, ParseError<'arena>> {
         self.read_php_statement()?;
         let token = self.stream.lookahead(0)?.ok_or_else(|| self.stream.unexpected(None, &[]))?;
         // Each path returns its parser's `Result` as it is, never unwrapped with `?` and wrapped again: an unoptimized
@@ -209,7 +209,7 @@ where
     fn parse_closure_or_function(
         &mut self,
         attributes: Sequence<'arena, AttributeList<'arena>>,
-    ) -> Result<Statement<'arena>, ParseError> {
+    ) -> Result<Statement<'arena>, ParseError<'arena>> {
         Ok(match (self.stream.peek_kind(1)?, self.stream.lookahead(2)?.map(|t| t.kind)) {
             // if the next token is `(` or `&` followed by `(`, then we know this is a closure
             (Some(T!["("]), _) | (Some(T!["&"]), Some(T!["("])) => Statement::Expression(ExpressionStatement {

@@ -17,11 +17,11 @@ impl<'arena, A> Parser<'_, 'arena, A>
 where
     A: Arena,
 {
-    pub(crate) fn parse_classlike_member(&mut self) -> Result<ClassLikeMember<'arena>, ParseError> {
+    pub(crate) fn parse_classlike_member(&mut self) -> Result<ClassLikeMember<'arena>, ParseError<'arena>> {
         ensure_sufficient_stack(|| self.parse_classlike_member_inner())
     }
 
-    fn parse_classlike_member_inner(&mut self) -> Result<ClassLikeMember<'arena>, ParseError> {
+    fn parse_classlike_member_inner(&mut self) -> Result<ClassLikeMember<'arena>, ParseError<'arena>> {
         self.read_php_construct()?;
         let token = self.stream.lookahead(0)?.ok_or_else(|| self.stream.unexpected(None, &[]))?;
         Ok(match token.kind {
@@ -56,7 +56,7 @@ where
     fn parse_classlike_member_with_attributes(
         &mut self,
         attributes: Sequence<'arena, AttributeList<'arena>>,
-    ) -> Result<ClassLikeMember<'arena>, ParseError> {
+    ) -> Result<ClassLikeMember<'arena>, ParseError<'arena>> {
         self.read_php_construct()?;
         let token = self.stream.lookahead(0)?.ok_or_else(|| self.stream.unexpected(None, &[]))?;
         Ok(match token.kind {
@@ -85,7 +85,7 @@ where
         &mut self,
         attributes: Sequence<'arena, AttributeList<'arena>>,
         modifiers: Sequence<'arena, Modifier<'arena>>,
-    ) -> Result<ClassLikeMember<'arena>, ParseError> {
+    ) -> Result<ClassLikeMember<'arena>, ParseError<'arena>> {
         self.read_php_construct()?;
         let token = self.stream.lookahead(0)?.ok_or_else(|| self.stream.unexpected(None, &[]))?;
         Ok(match token.kind {
@@ -102,7 +102,9 @@ where
         })
     }
 
-    pub(crate) fn parse_classlike_member_selector(&mut self) -> Result<ClassLikeMemberSelector<'arena>, ParseError> {
+    pub(crate) fn parse_classlike_member_selector(
+        &mut self,
+    ) -> Result<ClassLikeMemberSelector<'arena>, ParseError<'arena>> {
         let Some(token) = self.stream.lookahead(0)? else {
             let pos = self.stream.current_position();
             let span = Span::new(self.stream.file_id(), pos, pos);
