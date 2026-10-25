@@ -11,7 +11,7 @@ impl<'arena, A> Parser<'_, 'arena, A>
 where
     A: Arena,
 {
-    pub(crate) fn parse_while(&mut self) -> Result<While<'arena>, ParseError> {
+    pub(crate) fn parse_while(&mut self) -> Result<While<'arena>, ParseError<'arena>> {
         Ok(While {
             label: None,
             r#while: self.expect_keyword(T!["while"])?,
@@ -22,14 +22,14 @@ where
         })
     }
 
-    fn parse_while_body(&mut self) -> Result<WhileBody<'arena>, ParseError> {
+    fn parse_while_body(&mut self) -> Result<WhileBody<'arena>, ParseError<'arena>> {
         Ok(match self.stream.peek_kind(0)? {
             Some(T![":"]) => WhileBody::ColonDelimited(self.parse_while_colon_delimited_body()?),
             _ => WhileBody::Statement(self.arena.alloc(self.parse_statement()?)),
         })
     }
 
-    fn parse_while_colon_delimited_body(&mut self) -> Result<WhileColonDelimitedBody<'arena>, ParseError> {
+    fn parse_while_colon_delimited_body(&mut self) -> Result<WhileColonDelimitedBody<'arena>, ParseError<'arena>> {
         Ok(WhileColonDelimitedBody {
             colon: self.stream.eat_span(T![":"])?,
             statements: {

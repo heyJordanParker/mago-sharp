@@ -32,7 +32,7 @@ pub struct Program<'arena> {
     pub source_text: &'arena [u8],
     pub trivia: Sequence<'arena, Trivia<'arena>>,
     pub statements: Sequence<'arena, Statement<'arena>>,
-    pub errors: &'arena [ParseError],
+    pub errors: &'arena [ParseError<'arena>],
 }
 
 impl Program<'_> {

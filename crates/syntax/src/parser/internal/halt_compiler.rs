@@ -8,7 +8,7 @@ impl<'arena, A> Parser<'_, 'arena, A>
 where
     A: Arena,
 {
-    pub(crate) fn parse_halt_compiler(&mut self) -> Result<HaltCompiler<'arena>, ParseError> {
+    pub(crate) fn parse_halt_compiler(&mut self) -> Result<HaltCompiler<'arena>, ParseError<'arena>> {
         Ok(HaltCompiler {
             halt_compiler: self.expect_one_of_keyword(&[T!["__halt_compiler"]])?,
             left_parenthesis: self.stream.eat_span(T!["("])?,

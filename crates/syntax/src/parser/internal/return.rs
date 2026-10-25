@@ -8,7 +8,7 @@ impl<'arena, A> Parser<'_, 'arena, A>
 where
     A: Arena,
 {
-    pub(crate) fn parse_return(&mut self) -> Result<Return<'arena>, ParseError> {
+    pub(crate) fn parse_return(&mut self) -> Result<Return<'arena>, ParseError<'arena>> {
         Ok(Return {
             r#return: self.expect_keyword(T!["return"])?,
             value: if matches!(self.stream.peek_kind(0)?, Some(T![";" | "?>"])) {

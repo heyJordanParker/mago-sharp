@@ -21,7 +21,7 @@ impl<'arena, A> Parser<'_, 'arena, A>
 where
     A: Arena,
 {
-    pub(crate) fn parse_use(&mut self) -> Result<Use<'arena>, ParseError> {
+    pub(crate) fn parse_use(&mut self) -> Result<Use<'arena>, ParseError<'arena>> {
         Ok(Use {
             r#use: self.expect_php_keyword(T!["use"])?,
             items: self.parse_use_items()?,
@@ -31,7 +31,7 @@ where
 
     /// Parses a PHP# `import`, which brings one class into scope by its dotted name, under the name after `as` when it
     /// has one, as PHP's `use` does.
-    pub(crate) fn parse_import(&mut self) -> Result<Use<'arena>, ParseError> {
+    pub(crate) fn parse_import(&mut self) -> Result<Use<'arena>, ParseError<'arena>> {
         let import = self.expect_any_keyword()?;
         let start = self.stream.lookahead(0)?.ok_or_else(|| self.stream.unexpected(None, &[]))?.start;
         let item = UseItem { name: self.parse_dotted_identifier()?, alias: self.parse_optional_use_item_alias()? };
@@ -52,7 +52,7 @@ where
         })
     }
 
-    pub(crate) fn parse_use_items(&mut self) -> Result<UseItems<'arena>, ParseError> {
+    pub(crate) fn parse_use_items(&mut self) -> Result<UseItems<'arena>, ParseError<'arena>> {
         self.read_php_construct()?;
         let next = self.stream.peek_kind(0)?;
 
@@ -68,7 +68,7 @@ where
         })
     }
 
-    pub(crate) fn parse_use_item_sequence(&mut self) -> Result<UseItemSequence<'arena>, ParseError> {
+    pub(crate) fn parse_use_item_sequence(&mut self) -> Result<UseItemSequence<'arena>, ParseError<'arena>> {
         let start = self.stream.lookahead(0)?.ok_or_else(|| self.stream.unexpected(None, &[]))?.start;
 
         let mut items = self.new_vec();
@@ -86,7 +86,7 @@ where
         Ok(UseItemSequence { file_id: self.stream.file_id(), start, items: TokenSeparatedSequence::new(items, commas) })
     }
 
-    pub(crate) fn parse_typed_use_item_sequence(&mut self) -> Result<TypedUseItemSequence<'arena>, ParseError> {
+    pub(crate) fn parse_typed_use_item_sequence(&mut self) -> Result<TypedUseItemSequence<'arena>, ParseError<'arena>> {
         let r#type = self.parse_use_type()?;
         let mut items = self.new_vec();
         let mut commas = self.new_vec();
@@ -103,7 +103,7 @@ where
         Ok(TypedUseItemSequence { r#type, items: TokenSeparatedSequence::new(items, commas) })
     }
 
-    pub(crate) fn parse_typed_use_item_list(&mut self) -> Result<TypedUseItemList<'arena>, ParseError> {
+    pub(crate) fn parse_typed_use_item_list(&mut self) -> Result<TypedUseItemList<'arena>, ParseError<'arena>> {
         let r#type = self.parse_use_type()?;
         let namespace = self.parse_php_identifier()?;
         let namespace_separator = self.stream.eat_span(T!["\\"])?;
@@ -135,7 +135,7 @@ where
         })
     }
 
-    pub(crate) fn parse_mixed_use_item_list(&mut self) -> Result<MixedUseItemList<'arena>, ParseError> {
+    pub(crate) fn parse_mixed_use_item_list(&mut self) -> Result<MixedUseItemList<'arena>, ParseError<'arena>> {
         let namespace = self.parse_php_identifier()?;
         let namespace_separator = self.stream.eat_span(T!["\\"])?;
         let left_brace = self.stream.eat_span(T!["{"])?;
@@ -165,11 +165,11 @@ where
         })
     }
 
-    pub(crate) fn parse_maybe_typed_use_item(&mut self) -> Result<MaybeTypedUseItem<'arena>, ParseError> {
+    pub(crate) fn parse_maybe_typed_use_item(&mut self) -> Result<MaybeTypedUseItem<'arena>, ParseError<'arena>> {
         Ok(MaybeTypedUseItem { r#type: self.parse_optional_use_type()?, item: self.parse_use_item()? })
     }
 
-    pub(crate) fn parse_optional_use_type(&mut self) -> Result<Option<UseType<'arena>>, ParseError> {
+    pub(crate) fn parse_optional_use_type(&mut self) -> Result<Option<UseType<'arena>>, ParseError<'arena>> {
         self.read_php_construct()?;
         Ok(match self.stream.peek_kind(0)? {
             Some(T!["function"]) => Some(UseType::Function(self.expect_any_keyword()?)),
@@ -178,7 +178,7 @@ where
         })
     }
 
-    pub(crate) fn parse_use_type(&mut self) -> Result<UseType<'arena>, ParseError> {
+    pub(crate) fn parse_use_type(&mut self) -> Result<UseType<'arena>, ParseError<'arena>> {
         let next = self.stream.lookahead(0)?.ok_or_else(|| self.stream.unexpected(None, &[]))?;
 
         Ok(match next.kind {
@@ -188,18 +188,18 @@ where
         })
     }
 
-    pub(crate) fn parse_use_item(&mut self) -> Result<UseItem<'arena>, ParseError> {
+    pub(crate) fn parse_use_item(&mut self) -> Result<UseItem<'arena>, ParseError<'arena>> {
         Ok(UseItem { name: self.parse_php_identifier()?, alias: self.parse_optional_use_item_alias()? })
     }
 
-    pub(crate) fn parse_optional_use_item_alias(&mut self) -> Result<Option<UseItemAlias<'arena>>, ParseError> {
+    pub(crate) fn parse_optional_use_item_alias(&mut self) -> Result<Option<UseItemAlias<'arena>>, ParseError<'arena>> {
         Ok(match self.stream.peek_kind(0)? {
             Some(T!["as"]) => Some(self.parse_use_item_alias()?),
             _ => None,
         })
     }
 
-    pub(crate) fn parse_use_item_alias(&mut self) -> Result<UseItemAlias<'arena>, ParseError> {
+    pub(crate) fn parse_use_item_alias(&mut self) -> Result<UseItemAlias<'arena>, ParseError<'arena>> {
         let r#as = self.expect_keyword(T!["as"])?;
         let id = self.parse_local_identifier()?;
 

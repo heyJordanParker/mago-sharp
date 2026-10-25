@@ -16,7 +16,7 @@ impl<'arena, A> Parser<'_, 'arena, A>
 where
     A: Arena,
 {
-    pub(crate) fn parse_if(&mut self) -> Result<If<'arena>, ParseError> {
+    pub(crate) fn parse_if(&mut self) -> Result<If<'arena>, ParseError<'arena>> {
         Ok(If {
             r#if: self.expect_keyword(T!["if"])?,
             left_parenthesis: self.stream.eat_span(T!["("])?,
@@ -26,14 +26,14 @@ where
         })
     }
 
-    fn parse_if_body(&mut self) -> Result<IfBody<'arena>, ParseError> {
+    fn parse_if_body(&mut self) -> Result<IfBody<'arena>, ParseError<'arena>> {
         Ok(match self.stream.peek_kind(0)? {
             Some(T![":"]) => IfBody::ColonDelimited(self.parse_if_colon_delimited_body()?),
             _ => IfBody::Statement(self.parse_if_statement_body()?),
         })
     }
 
-    fn parse_if_statement_body(&mut self) -> Result<IfStatementBody<'arena>, ParseError> {
+    fn parse_if_statement_body(&mut self) -> Result<IfStatementBody<'arena>, ParseError<'arena>> {
         Ok(IfStatementBody {
             statement: self.arena.alloc(self.parse_statement()?),
             else_if_clauses: {
@@ -50,7 +50,7 @@ where
 
     fn parse_optional_if_statement_body_else_if_clause(
         &mut self,
-    ) -> Result<Option<IfStatementBodyElseIfClause<'arena>>, ParseError> {
+    ) -> Result<Option<IfStatementBodyElseIfClause<'arena>>, ParseError<'arena>> {
         self.read_php_statement()?;
         Ok(match self.stream.peek_kind(0)? {
             Some(T!["elseif"]) => Some(self.parse_if_statement_body_else_if_clause()?),
@@ -58,7 +58,9 @@ where
         })
     }
 
-    fn parse_if_statement_body_else_if_clause(&mut self) -> Result<IfStatementBodyElseIfClause<'arena>, ParseError> {
+    fn parse_if_statement_body_else_if_clause(
+        &mut self,
+    ) -> Result<IfStatementBodyElseIfClause<'arena>, ParseError<'arena>> {
         Ok(IfStatementBodyElseIfClause {
             elseif: self.expect_keyword(T!["elseif"])?,
             left_parenthesis: self.stream.eat_span(T!["("])?,
@@ -70,21 +72,21 @@ where
 
     fn parse_optional_if_statement_body_else_clause(
         &mut self,
-    ) -> Result<Option<IfStatementBodyElseClause<'arena>>, ParseError> {
+    ) -> Result<Option<IfStatementBodyElseClause<'arena>>, ParseError<'arena>> {
         Ok(match self.stream.peek_kind(0)? {
             Some(T!["else"]) => Some(self.parse_if_statement_body_else_clause()?),
             _ => None,
         })
     }
 
-    fn parse_if_statement_body_else_clause(&mut self) -> Result<IfStatementBodyElseClause<'arena>, ParseError> {
+    fn parse_if_statement_body_else_clause(&mut self) -> Result<IfStatementBodyElseClause<'arena>, ParseError<'arena>> {
         Ok(IfStatementBodyElseClause {
             r#else: self.expect_keyword(T!["else"])?,
             statement: self.arena.alloc(self.parse_statement()?),
         })
     }
 
-    fn parse_if_colon_delimited_body(&mut self) -> Result<IfColonDelimitedBody<'arena>, ParseError> {
+    fn parse_if_colon_delimited_body(&mut self) -> Result<IfColonDelimitedBody<'arena>, ParseError<'arena>> {
         Ok(IfColonDelimitedBody {
             colon: self.stream.eat_span(T![":"])?,
             statements: {
@@ -123,7 +125,7 @@ where
 
     /// Whether the statements of a colon-delimited `if` or `elseif` end here, at `elseif`, `else`, `endif` or the end
     /// of the file.
-    fn is_at_end_of_if_colon_body(&mut self) -> Result<bool, ParseError> {
+    fn is_at_end_of_if_colon_body(&mut self) -> Result<bool, ParseError<'arena>> {
         Ok(matches!(self.stream.peek_kind(0)?, None | Some(T!["else"]))
             || self.is_at_php_keyword(T!["elseif"])?
             || self.is_at_php_keyword(T!["endif"])?)
@@ -131,7 +133,7 @@ where
 
     fn parse_optional_if_colon_delimited_body_else_if_clause(
         &mut self,
-    ) -> Result<Option<IfColonDelimitedBodyElseIfClause<'arena>>, ParseError> {
+    ) -> Result<Option<IfColonDelimitedBodyElseIfClause<'arena>>, ParseError<'arena>> {
         Ok(match self.stream.peek_kind(0)? {
             Some(T!["elseif"]) => Some(self.parse_if_colon_delimited_body_else_if_clause()?),
             _ => None,
@@ -140,7 +142,7 @@ where
 
     fn parse_if_colon_delimited_body_else_if_clause(
         &mut self,
-    ) -> Result<IfColonDelimitedBodyElseIfClause<'arena>, ParseError> {
+    ) -> Result<IfColonDelimitedBodyElseIfClause<'arena>, ParseError<'arena>> {
         Ok(IfColonDelimitedBodyElseIfClause {
             r#elseif: self.expect_keyword(T!["elseif"])?,
             left_parenthesis: self.stream.eat_span(T!["("])?,
@@ -172,7 +174,7 @@ where
 
     fn parse_optional_if_colon_delimited_body_else_clause(
         &mut self,
-    ) -> Result<Option<IfColonDelimitedBodyElseClause<'arena>>, ParseError> {
+    ) -> Result<Option<IfColonDelimitedBodyElseClause<'arena>>, ParseError<'arena>> {
         Ok(match self.stream.peek_kind(0)? {
             Some(T!["else"]) => Some(self.parse_if_colon_delimited_body_else_clause()?),
             _ => None,
@@ -181,7 +183,7 @@ where
 
     fn parse_if_colon_delimited_body_else_clause(
         &mut self,
-    ) -> Result<IfColonDelimitedBodyElseClause<'arena>, ParseError> {
+    ) -> Result<IfColonDelimitedBodyElseClause<'arena>, ParseError<'arena>> {
         Ok(IfColonDelimitedBodyElseClause {
             r#else: self.expect_keyword(T!["else"])?,
             colon: self.stream.eat_span(T![":"])?,

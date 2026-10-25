@@ -20,7 +20,7 @@ impl<'arena, A> Parser<'_, 'arena, A>
 where
     A: Arena,
 {
-    pub(crate) fn parse_literal(&mut self) -> Result<Literal<'arena>, ParseError> {
+    pub(crate) fn parse_literal(&mut self) -> Result<Literal<'arena>, ParseError<'arena>> {
         let token = self.stream.consume()?;
 
         Ok(match &token.kind {

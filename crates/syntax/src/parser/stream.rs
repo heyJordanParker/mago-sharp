@@ -77,7 +77,7 @@ where
     ///
     /// Returns a [`ParseError`] if EOF is reached or a lexer error occurs.
     #[inline]
-    pub fn consume(&mut self) -> Result<Token<'input>, ParseError> {
+    pub fn consume(&mut self) -> Result<Token<'input>, ParseError<'arena>> {
         match self.advance() {
             Some(Ok(token)) => Ok(token),
             Some(Err(error)) => Err(error.into()),
@@ -93,7 +93,7 @@ where
     ///
     /// Returns a [`ParseError`] if the next token's kind does not match `kind`, or if EOF is reached.
     #[inline]
-    pub fn eat(&mut self, kind: TokenKind) -> Result<Token<'input>, ParseError> {
+    pub fn eat(&mut self, kind: TokenKind) -> Result<Token<'input>, ParseError<'arena>> {
         // Fast path: head already buffered. Avoids the Result<Option<...>>
         // round trip from `peek_kind` plus a follow-up `lookahead` on the
         // happy path.
@@ -128,7 +128,7 @@ where
     ///
     /// Returns a [`ParseError`] if EOF is reached or a lexer error occurs.
     #[inline]
-    pub fn consume_span(&mut self) -> Result<Span, ParseError> {
+    pub fn consume_span(&mut self) -> Result<Span, ParseError<'arena>> {
         let file_id = self.file_id();
         self.consume().map(|t| t.span_for(file_id))
     }
@@ -141,7 +141,7 @@ where
     ///
     /// Returns a [`ParseError`] if the next token's kind does not match `kind`, or if EOF is reached.
     #[inline]
-    pub fn eat_span(&mut self, kind: TokenKind) -> Result<Span, ParseError> {
+    pub fn eat_span(&mut self, kind: TokenKind) -> Result<Span, ParseError<'arena>> {
         let file_id = self.file_id();
         self.eat(kind).map(|t| t.span_for(file_id))
     }
@@ -178,7 +178,7 @@ where
     ///
     /// Returns a [`ParseError`] if the lexer fails to produce the next token.
     #[inline]
-    pub fn is_at(&mut self, kind: TokenKind) -> Result<bool, ParseError> {
+    pub fn is_at(&mut self, kind: TokenKind) -> Result<bool, ParseError<'arena>> {
         if let Some(token) = self.buffer.get(0) {
             return Ok(token.kind == kind);
         }
@@ -194,7 +194,7 @@ where
     ///
     /// Returns a [`ParseError`] if the lexer fails to produce a token while filling the lookahead buffer.
     #[inline]
-    pub fn lookahead(&mut self, n: usize) -> Result<Option<Token<'input>>, ParseError> {
+    pub fn lookahead(&mut self, n: usize) -> Result<Option<Token<'input>>, ParseError<'arena>> {
         if n < self.buffer.len() {
             return Ok(self.buffer.get(n));
         }
@@ -233,7 +233,7 @@ where
     ///
     /// Returns a [`ParseError`] if the lexer fails to produce a token while filling the lookahead buffer.
     #[inline]
-    pub fn peek_kind(&mut self, n: usize) -> Result<Option<TokenKind>, ParseError> {
+    pub fn peek_kind(&mut self, n: usize) -> Result<Option<TokenKind>, ParseError<'arena>> {
         if n < self.buffer.len() {
             return Ok(self.buffer.get(n).map(|t| t.kind));
         }
@@ -251,7 +251,7 @@ where
     /// # Errors
     ///
     /// Returns a [`ParseError`] if the lexer fails to produce a token.
-    pub fn peek_after_parentheses(&mut self) -> Result<Option<Token<'input>>, ParseError> {
+    pub fn peek_after_parentheses(&mut self) -> Result<Option<Token<'input>>, ParseError<'arena>> {
         let mut tokens = self.peek_tokens();
         let mut depth = 0usize;
         while let Some(token) = tokens.next() {
@@ -276,7 +276,7 @@ where
     /// # Errors
     ///
     /// Returns a [`ParseError`] if the lexer fails to produce a token.
-    pub fn peek_kind_after_type_arguments(&mut self, from: usize) -> Result<Option<TokenKind>, ParseError> {
+    pub fn peek_kind_after_type_arguments(&mut self, from: usize) -> Result<Option<TokenKind>, ParseError<'arena>> {
         let mut tokens = self.peek_tokens().skip(from);
         let mut depth = 0usize;
         while let Some(token) = tokens.next() {
@@ -327,25 +327,43 @@ where
     /// Creates a `ParseError` for an unexpected token or EOF, given one or more expected kinds.
     #[inline]
     #[must_use]
-    pub fn unexpected(&self, found: Option<Token<'_>>, expected: &'static [TokenKind]) -> ParseError {
+    pub fn unexpected(&self, found: Option<Token<'arena>>, expected: &'static [TokenKind]) -> ParseError<'arena> {
         self.unexpected_with(found, Expected::OneOf(expected))
     }
 
     /// Creates a `ParseError` for an unexpected token or EOF when a single, runtime-known kind was expected.
     #[inline]
     #[must_use]
-    pub fn unexpected_kind(&self, found: Option<Token<'_>>, expected: TokenKind) -> ParseError {
+    pub fn unexpected_kind(&self, found: Option<Token<'arena>>, expected: TokenKind) -> ParseError<'arena> {
         self.unexpected_with(found, Expected::Exactly(expected))
     }
 
-    #[inline]
+    /// The error at `found`, which the parser did not expect where it expected `expected`, or at the end of the file
+    /// when `found` is `None`. It quotes the token as the code writes it, and each expected token the file writes as
+    /// its text, in the arena: a `.sharp` file writes no token PHP# never writes, such as `?>`.
+    #[inline(never)]
     #[must_use]
-    fn unexpected_with(&self, found: Option<Token<'_>>, expected: Expected) -> ParseError {
-        if let Some(token) = found {
-            ParseError::unexpected_token(expected, &token, self.file_id(), self.lexer.is_sharp())
-        } else {
-            ParseError::UnexpectedEndOfFile(expected, self.file_id(), self.current_position())
+    fn unexpected_with(&self, found: Option<Token<'arena>>, expected: Expected) -> ParseError<'arena> {
+        let Some(token) = found else {
+            return ParseError::UnexpectedEndOfFile(expected, self.file_id(), self.current_position());
+        };
+
+        let kinds = match &expected {
+            Expected::Exactly(kind) => std::slice::from_ref(kind),
+            Expected::OneOf(kinds) => kinds,
+        };
+        let sharp = self.lexer.is_sharp();
+        let mut texts = Vec::with_capacity_in(kinds.len(), self.arena);
+        for kind in kinds {
+            let text = if sharp { kind.written_in_sharp() } else { kind.written() };
+            if let Some(text) = text
+                && !texts.contains(&text)
+            {
+                texts.push(text);
+            }
         }
+
+        ParseError::UnexpectedToken(texts.leak(), token.value, token.span_for(self.file_id()))
     }
 
     /// Consumes the comments collected by the lexer and returns them.

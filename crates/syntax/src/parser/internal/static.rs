@@ -12,7 +12,7 @@ impl<'arena, A> Parser<'_, 'arena, A>
 where
     A: Arena,
 {
-    pub(crate) fn parse_static(&mut self) -> Result<Static<'arena>, ParseError> {
+    pub(crate) fn parse_static(&mut self) -> Result<Static<'arena>, ParseError<'arena>> {
         let r#static = self.expect_keyword(T!["static"])?;
         let items = {
             let mut items = self.new_vec();
@@ -39,7 +39,7 @@ where
         Ok(Static { r#static, items, terminator })
     }
 
-    pub(crate) fn parse_static_item(&mut self) -> Result<StaticItem<'arena>, ParseError> {
+    pub(crate) fn parse_static_item(&mut self) -> Result<StaticItem<'arena>, ParseError<'arena>> {
         let var = self.parse_direct_variable()?;
 
         Ok(match self.stream.peek_kind(0)? {

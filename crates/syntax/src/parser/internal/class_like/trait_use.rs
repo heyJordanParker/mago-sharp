@@ -20,7 +20,7 @@ where
 {
     /// Parses PHP's `use` of traits in a class body. A PHP# class lists a trait in its header, spec section 22, so the
     /// `use` is an error that names the traits to list there.
-    pub(crate) fn parse_trait_use(&mut self) -> Result<TraitUse<'arena>, ParseError> {
+    pub(crate) fn parse_trait_use(&mut self) -> Result<TraitUse<'arena>, ParseError<'arena>> {
         let r#use = self.expect_keyword(T!["use"])?;
         let trait_names = {
             let mut traits = self.new_vec();
@@ -53,7 +53,7 @@ where
         Ok(TraitUse { r#use, trait_names, specification: self.parse_trait_use_specification()? })
     }
 
-    fn parse_trait_use_specification(&mut self) -> Result<TraitUseSpecification<'arena>, ParseError> {
+    fn parse_trait_use_specification(&mut self) -> Result<TraitUseSpecification<'arena>, ParseError<'arena>> {
         let next = self.stream.lookahead(0)?.ok_or_else(|| self.stream.unexpected(None, &[]))?;
         Ok(match next.kind {
             T![";" | "?>"] => TraitUseSpecification::Abstract(TraitUseAbstractSpecification(self.parse_terminator()?)),
@@ -75,7 +75,7 @@ where
         })
     }
 
-    fn parse_trait_use_adaptation(&mut self) -> Result<TraitUseAdaptation<'arena>, ParseError> {
+    fn parse_trait_use_adaptation(&mut self) -> Result<TraitUseAdaptation<'arena>, ParseError<'arena>> {
         Ok(match self.parse_trait_use_method_reference()? {
             TraitUseMethodReference::Absolute(reference) => {
                 let next = self.stream.lookahead(0)?.ok_or_else(|| self.stream.unexpected(None, &[]))?;
@@ -135,7 +135,7 @@ where
         })
     }
 
-    fn parse_trait_use_method_reference(&mut self) -> Result<TraitUseMethodReference<'arena>, ParseError> {
+    fn parse_trait_use_method_reference(&mut self) -> Result<TraitUseMethodReference<'arena>, ParseError<'arena>> {
         Ok(match self.stream.peek_kind(1)? {
             Some(T!["::"]) => TraitUseMethodReference::Absolute(self.parse_trait_use_absolute_method_reference()?),
             _ => TraitUseMethodReference::Identifier(self.parse_local_identifier()?),
@@ -144,7 +144,7 @@ where
 
     fn parse_trait_use_absolute_method_reference(
         &mut self,
-    ) -> Result<TraitUseAbsoluteMethodReference<'arena>, ParseError> {
+    ) -> Result<TraitUseAbsoluteMethodReference<'arena>, ParseError<'arena>> {
         Ok(TraitUseAbsoluteMethodReference {
             trait_name: self.parse_php_identifier()?,
             double_colon: self.stream.eat_span(T!["::"])?,

@@ -17,7 +17,7 @@ where
 {
     /// Whether a PHP# local declaration starts here: `const`, `let` followed by a name, or a type, as
     /// `is_at_typed_local` reads it.
-    pub(crate) fn is_at_local_declaration(&mut self) -> Result<bool, ParseError> {
+    pub(crate) fn is_at_local_declaration(&mut self) -> Result<bool, ParseError<'arena>> {
         if !self.dialect.is_sharp() {
             return Ok(false);
         }
@@ -42,7 +42,7 @@ where
     /// Parses a PHP# local: `let` or `const`, then its type when it is written, its name, `=` and its value. A local
     /// with its type written has no `let`, as in `Money? total = null;`. `let` or `const` before brackets of names
     /// unpacks a tuple, spec section 30, as in `const [total, count] = summary;`.
-    pub(crate) fn parse_local_declaration(&mut self) -> Result<LocalDeclaration<'arena>, ParseError> {
+    pub(crate) fn parse_local_declaration(&mut self) -> Result<LocalDeclaration<'arena>, ParseError<'arena>> {
         let keyword = match self.stream.lookahead(0)? {
             Some(token) if token.kind == T!["const"] || token.value == b"let" => Some(self.expect_any_keyword()?),
             _ => None,
@@ -60,7 +60,7 @@ where
     }
 
     /// Parses the names a PHP# local declaration unpacks a tuple into, as in `[total, count]`.
-    fn parse_local_unpack(&mut self) -> Result<LocalUnpack<'arena>, ParseError> {
+    fn parse_local_unpack(&mut self) -> Result<LocalUnpack<'arena>, ParseError<'arena>> {
         let result = self.parse_comma_separated_sequence(T!["["], T!["]"], Self::parse_local_identifier)?;
 
         Ok(LocalUnpack { left_bracket: result.open, names: result.sequence, right_bracket: result.close })
@@ -72,7 +72,7 @@ where
         keyword: Option<Keyword<'arena>>,
         hint: Option<&'arena Hint<'arena>>,
         target: LocalTarget<'arena>,
-    ) -> Result<LocalDeclaration<'arena>, ParseError> {
+    ) -> Result<LocalDeclaration<'arena>, ParseError<'arena>> {
         Ok(LocalDeclaration {
             keyword,
             hint,
@@ -93,7 +93,7 @@ where
     /// A capitalized name followed by `<` starts a type with type arguments, as in `List<Line> lines = [];`, because
     /// spec section 24 capitalizes every type but the built-in ones, unless a `.` follows the `>`, as in
     /// `Counter<Order>.count++;`, which reads a static member. Its arguments can be longer than the parser looks ahead.
-    fn is_at_typed_local(&mut self) -> Result<bool, ParseError> {
+    fn is_at_typed_local(&mut self) -> Result<bool, ParseError<'arena>> {
         // Spec section 13: no statement starts with `readonly` and a type but a readonly local, `readonly Order o = …;`.
         if self.is_at_readonly_hint()? {
             return Ok(true);
@@ -155,7 +155,7 @@ where
     /// Returns `true` when names joined by `.`, an optional `?` written right after them, a local's name and `=`
     /// follow: a case type, as in `PaymentResult.Paid paid = …;`, or a full name the analyzer refuses, spec section 23.
     /// It reads past the token buffer, because the name can be longer than the buffer holds.
-    fn is_at_dotted_typed_local(&self) -> Result<bool, ParseError> {
+    fn is_at_dotted_typed_local(&self) -> Result<bool, ParseError<'arena>> {
         let mut tokens = self.stream.peek_tokens();
         let Some(mut last) = tokens.next().transpose()? else {
             return Ok(false);
@@ -185,7 +185,7 @@ where
     /// `=`. A type holds names, `|`, `&`, a `?` written right after the token before it, and anything inside `<…>` or
     /// `(…)`, so the first other token ends it. It reads past the token buffer, because a type can be longer than the
     /// buffer holds.
-    fn is_at_union_typed_local(&self) -> Result<bool, ParseError> {
+    fn is_at_union_typed_local(&self) -> Result<bool, ParseError<'arena>> {
         let ends_type = |token: &Token<'_>| {
             token.kind.is_identifier_maybe_reserved() || matches!(token.kind, T![">" | ">>" | ")" | "?"])
         };

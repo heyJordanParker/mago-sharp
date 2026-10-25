@@ -18,7 +18,7 @@ where
     pub(crate) fn parse_closure_with_attributes(
         &mut self,
         attributes: Sequence<'arena, AttributeList<'arena>>,
-    ) -> Result<&'arena Expression<'arena>, ParseError> {
+    ) -> Result<&'arena Expression<'arena>, ParseError<'arena>> {
         let closure = Closure {
             attribute_lists: attributes,
             r#static: self.maybe_expect_keyword(T!["static"])?,
@@ -38,7 +38,7 @@ where
         }))
     }
 
-    fn parse_optional_closure_use_clause(&mut self) -> Result<Option<ClosureUseClause<'arena>>, ParseError> {
+    fn parse_optional_closure_use_clause(&mut self) -> Result<Option<ClosureUseClause<'arena>>, ParseError<'arena>> {
         self.read_php_construct()?;
         Ok(match self.stream.peek_kind(0)? {
             Some(T!["use"]) => Some(self.parse_closure_use_clause()?),
@@ -46,7 +46,7 @@ where
         })
     }
 
-    fn parse_closure_use_clause(&mut self) -> Result<ClosureUseClause<'arena>, ParseError> {
+    fn parse_closure_use_clause(&mut self) -> Result<ClosureUseClause<'arena>, ParseError<'arena>> {
         let r#use = self.expect_php_keyword(T!["use"])?;
         let result =
             self.parse_comma_separated_sequence(T!["("], T![")"], |p| p.parse_closure_use_clause_variable())?;
@@ -59,7 +59,7 @@ where
         })
     }
 
-    fn parse_closure_use_clause_variable(&mut self) -> Result<ClosureUseClauseVariable<'arena>, ParseError> {
+    fn parse_closure_use_clause_variable(&mut self) -> Result<ClosureUseClauseVariable<'arena>, ParseError<'arena>> {
         Ok(ClosureUseClauseVariable {
             ampersand: if self.stream.is_at(T!["&"])? { Some(self.stream.eat_span(T!["&"])?) } else { None },
             variable: self.parse_direct_variable()?,

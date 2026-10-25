@@ -139,7 +139,7 @@ impl<'program> CheckedProgram<'program> {
 #[derive(Debug)]
 pub enum Refusal<'program> {
     /// The parser's errors.
-    Parse(&'program [ParseError]),
+    Parse(&'program [ParseError<'program>]),
     /// The error-level issues the checks reported.
     Compile(Vec<Issue>),
 }

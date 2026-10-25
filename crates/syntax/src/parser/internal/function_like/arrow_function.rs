@@ -22,7 +22,7 @@ where
     pub(crate) fn parse_arrow_function_with_attributes(
         &mut self,
         attributes: Sequence<'arena, AttributeList<'arena>>,
-    ) -> Result<&'arena Expression<'arena>, ParseError> {
+    ) -> Result<&'arena Expression<'arena>, ParseError<'arena>> {
         let arrow_function = ArrowFunction {
             attribute_lists: attributes,
             r#static: self.maybe_expect_keyword(T!["static"])?,
@@ -45,7 +45,7 @@ where
     /// loosely as assignment, as in C#, so it starts only where a whole value, an assignment's value or a branch of
     /// `? :` goes. After any other operator, `=>` belongs to what holds the expression, such as a `match` arm. A keyword
     /// other than a literal reads as the bare name too, which the checker refuses with a message that names it.
-    pub(crate) fn is_at_lambda(&mut self, precedence: Precedence) -> Result<bool, ParseError> {
+    pub(crate) fn is_at_lambda(&mut self, precedence: Precedence) -> Result<bool, ParseError<'arena>> {
         if precedence > Precedence::ElvisOrConditional {
             return Ok(false);
         }
@@ -62,7 +62,7 @@ where
     /// Whether the `[…]` groups that start here are a lambda's attributes: the last is followed by a parenthesized list
     /// and `=>`, as C# writes `[Pure] (int n) => n * 2`, or by a name and `=>`, which `parse_lambda` reports. A list
     /// literal is never followed by either.
-    fn is_at_attributed_lambda(&self) -> Result<bool, ParseError> {
+    fn is_at_attributed_lambda(&self) -> Result<bool, ParseError<'arena>> {
         let mut tokens = self.stream.peek_tokens();
         loop {
             let (open, close) = match tokens.next().transpose()?.map(|token| token.kind) {
@@ -96,7 +96,7 @@ where
         &mut self,
         expression: &'arena Expression<'arena>,
         precedence: Precedence,
-    ) -> Result<Option<&'arena Expression<'arena>>, ParseError> {
+    ) -> Result<Option<&'arena Expression<'arena>>, ParseError<'arena>> {
         if precedence != Precedence::Lowest || !self.dialect.is_sharp() || !self.stream.is_at(T!["=>"])? {
             return Ok(None);
         }
@@ -115,7 +115,7 @@ where
     /// Parses a PHP# lambda: an [`ArrowFunction`] without `fn` when its body is an expression, and a [`Closure`]
     /// without `function` or `use` when its body is a block, each with the attributes before it. A lone parameter has
     /// no parentheses, so its list's parentheses are empty spans at its start and end.
-    pub(crate) fn parse_lambda(&mut self) -> Result<&'arena Expression<'arena>, ParseError> {
+    pub(crate) fn parse_lambda(&mut self) -> Result<&'arena Expression<'arena>, ParseError<'arena>> {
         let attribute_lists = self.parse_attribute_list_sequence()?;
         let parameter_list = if self.stream.is_at(T!["("])? {
             self.parse_lambda_parameter_list()?

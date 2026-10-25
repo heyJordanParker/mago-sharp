@@ -9,7 +9,7 @@ impl<'arena, A> Parser<'_, 'arena, A>
 where
     A: Arena,
 {
-    pub(crate) fn parse_goto(&mut self) -> Result<Goto<'arena>, ParseError> {
+    pub(crate) fn parse_goto(&mut self) -> Result<Goto<'arena>, ParseError<'arena>> {
         Ok(Goto {
             goto: self.expect_keyword(T!["goto"])?,
             label: self.parse_local_identifier()?,
@@ -17,7 +17,7 @@ where
         })
     }
 
-    pub(crate) fn parse_label(&mut self) -> Result<Label<'arena>, ParseError> {
+    pub(crate) fn parse_label(&mut self) -> Result<Label<'arena>, ParseError<'arena>> {
         Ok(Label { name: self.parse_local_identifier()?, colon: self.stream.eat_span(T![":"])? })
     }
 }

@@ -9,7 +9,7 @@ impl<'arena, A> Parser<'_, 'arena, A>
 where
     A: Arena,
 {
-    pub(crate) fn parse_inline(&mut self) -> Result<Inline<'arena>, ParseError> {
+    pub(crate) fn parse_inline(&mut self) -> Result<Inline<'arena>, ParseError<'arena>> {
         let token = self.expect_one_of_keyword(T![InlineText, InlineShebang])?;
 
         Ok(Inline {
