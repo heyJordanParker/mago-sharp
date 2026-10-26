@@ -16659,16 +16659,18 @@ fn a_class_value_with_type_arguments_does_not_satisfy_equatable() {
         "src/Demo/Box.sharp",
         "namespace Demo;\n\npublic class Box<TItem>\n{\n}\n\npublic class Order : DatabaseEntity\n{\n}\n\npublic class Invoice : DatabaseEntity\n{\n}\n",
     );
-    let sharp = "namespace Demo;\n\npublic class Checks\n{\n    public static int keyed() => Generic.keys([typeof(Box<Order>), typeof(Box<Invoice>)]);\n\n    public static bool same() => Generic.same(typeof(Box<Order>), typeof(Box<Invoice>));\n\n    public static bool compared(Class<Box<Order>> a, Class<Box<Order>> b) => a == b;\n\n    public static bool plain(Class<Order> a, Class<Order> b) => Generic.same(a, b);\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Checks\n{\n    public static int keyed() => Generic.keys([typeof(Box<Order>), typeof(Box<Invoice>)]);\n\n    public static bool same() => Generic.same(typeof(Box<Order>), typeof(Box<Invoice>));\n\n    public static bool compared(Class<Box<Order>> a, Class<Box<Order>> b) => a == b;\n\n    public static bool plain(Class<Order> a, Class<Order> b) => Generic.same(a, b);\n\n    public static bool held<TItem>(Class<TItem> a, Class<TItem> b) => Generic.same(a, b);\n}\n";
     let refusal = "template-constraint-violation `Class<Box<Invoice>>|Class<Box<Order>>` does not satisfy the bound `Equatable` of type parameter `T`: a class value with type arguments can't key a `Map`.";
 
-    // A class value without type arguments keys no `Map` either, spec section 12, so it is outside the bound too.
+    // A class value without type arguments keys no `Map` either, spec section 12, so it is outside the bound too, and
+    // so is the class value of a type parameter.
     assert_eq!(
         equatable_written(sharp, &[boxes]),
         [
             format!("5:34 {refusal}"),
             format!("7:34 {refusal}"),
             "11:65 template-constraint-violation `Class<Order>` does not satisfy the bound `Equatable` of type parameter `T`: `Class<Order>` can't key a `Map`.".to_owned(),
+            "13:71 template-constraint-violation `Class<TItem>` does not satisfy the bound `Equatable` of type parameter `T`: `Class<TItem>` can't key a `Map`.".to_owned(),
         ]
     );
 }
