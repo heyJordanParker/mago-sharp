@@ -147,24 +147,26 @@ fn analyze_with_artifacts(
     analyzed: (&'static str, &'static str),
     others: &[(&'static str, &'static str)],
 ) -> (Vec<Issue>, AnalysisArtifacts) {
-    let (issues, artifacts, _) = analyze_with_references(registry, settings, analyzed, others);
+    let (issues, artifacts, _) = analyze_with_references(registry, settings, analyzed, others, &EFFECT_CLASSES);
 
     (issues, artifacts)
 }
 
-/// Analyzes `analyzed` together with `others` under `settings` and the plugins of `registry`, and returns its issues,
-/// the analysis artifacts and the symbol references the analysis recorded, with the prelude's.
+/// Analyzes `analyzed` together with `others` and the standard library files `library` under `settings` and the
+/// plugins of `registry`, and returns its issues, the analysis artifacts and the symbol references the analysis
+/// recorded, with the prelude's.
 fn analyze_with_references(
     registry: &PluginRegistry,
     settings: Settings,
     analyzed: (&'static str, &'static str),
     others: &[(&'static str, &'static str)],
+    library: &[(&'static str, &'static str)],
 ) -> (Vec<Issue>, AnalysisArtifacts, SymbolReferences) {
     let Prelude { mut database, mut metadata, mut symbol_references } = PRELUDE.clone();
 
     let file_ids: Vec<_> = std::iter::once(&analyzed)
         .chain(others)
-        .chain(&EFFECT_CLASSES)
+        .chain(library)
         .map(|(name, code)| {
             let mut file = File::ephemeral(Cow::Borrowed(name.as_bytes()), Cow::Borrowed(code.as_bytes()));
             file.is_standard_library = name.starts_with(STANDARD_LIBRARY);
@@ -450,6 +452,7 @@ fn a_bare_name_of_an_alias_of_the_files_namespace_is_a_reference_to_the_alias() 
         settings(),
         ("src/Demo/Report.sharp", sharp),
         &[("src/Lib/Rate.php", rate), ("src/Lib/aliases.php", aliases)],
+        &EFFECT_CLASSES,
     );
 
     assert!(issues.is_empty(), "{issues:#?}");
@@ -10145,6 +10148,34 @@ fn an_index_write_replaces_a_list_element_and_an_append_fails_as_a_typo_does() {
             "21:14 parse Unexpected `[`",
             "22:14 parse Unexpected `[`",
         ]
+    );
+}
+
+/// `list[i] = v` runs the standard library's `set` of a `List`, so a project without the library is refused each write
+/// of a `List` index, as it is refused every other member of a `List`.
+#[test]
+fn a_list_index_write_without_the_standard_library_is_refused() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static void reset(List<int> sizes)\n    {\n        sizes[0] = 1;\n        sizes[1] += 2;\n        ++sizes[2];\n    }\n}\n";
+    let (issues, _, _) =
+        analyze_with_references(&PLUGIN_REGISTRY, settings(), ("src/Demo/Report.sharp", sharp), &[], &[]);
+
+    assert_eq!(
+        issues.iter().map(|issue| format!("{} {}", located(sharp, issue), issue.message)).collect::<Vec<_>>(),
+        [
+            "7:9 non-existent-method Method `set`, which `list[i] = v` runs, does not exist on `List<int>`.",
+            "8:9 non-existent-method Method `set`, which `list[i] = v` runs, does not exist on `List<int>`.",
+            "9:11 non-existent-method Method `set`, which `list[i] = v` runs, does not exist on `List<int>`.",
+        ]
+    );
+    assert_eq!(
+        issues[0].primary_annotation().and_then(|annotation| annotation.message.as_deref()),
+        Some("This index write runs `set`.")
+    );
+    assert_eq!(
+        issues[0].help.as_deref(),
+        Some(
+            "Install the standard library, heyjordanparker/php-sharp-composer, which declares the members of a `List`."
+        )
     );
 }
 

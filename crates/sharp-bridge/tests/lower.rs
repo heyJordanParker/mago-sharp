@@ -8335,6 +8335,48 @@ fn a_list_index_write_whose_value_is_read_gives_the_value_it_stores() {
 }
 
 /// ```php
+/// \Sharp\ListMembers::set($sizes, $this->at(), $extra);
+/// ```
+///
+/// An index write lowers its index and its value before it runs `set`, so it copies only a form that reads its slots
+/// in order before it calls anything. A `set` whose form calls first is a call of the library's member.
+#[test]
+fn a_list_index_write_calls_a_set_whose_form_calls_before_it_reads_every_slot() {
+    let (path, members) = common::effect_classes::LIST_MEMBERS;
+    let calls_first =
+        members.replace("Internal.set(list, index, value)", "Internal.set(list, global.intval(index), value)");
+    let forms: InlineForms = common::checked(path, &calls_first, &[], inline_forms)
+        .expect("the library file is checked")
+        .into_iter()
+        .collect();
+    let code = method_with(
+        "void run(List<int> sizes, int extra)",
+        "        sizes[this.at()] = extra;\n    }\n\n    private int at()\n    {\n        return 0;\n",
+    );
+    let lowered = Lowered(common::checked_inlining(&common::sharp_files::type_file(&code), &code, &[], &forms, lower));
+
+    assert_eq!(
+        lowered.body(),
+        indoc! {r#"
+            STMT_LIST
+              STATIC_CALL
+                ZVAL "Sharp\\ListMembers"
+                ZVAL "set"
+                ARG_LIST
+                  VAR
+                    ZVAL "sizes"
+                  METHOD_CALL
+                    VAR
+                      ZVAL "this"
+                    ZVAL "at"
+                    ARG_LIST
+                  VAR
+                    ZVAL "extra"
+        "#}
+    );
+}
+
+/// ```php
 /// [${'receiver#1'} = $this->held, ${'kept#2'} = ${'receiver#1'}, \Sharp\Internal\set(${'receiver#1'}, 0, $extra),
 ///     ${'receiver#1'} === ${'kept#2'} || ($this->held = ${'receiver#1'})][2];
 /// [${'receiver#1'} = $this->me(), ${'receiver#2'} = ${'receiver#1'}->held, ${'kept#3'} = ${'receiver#2'},
@@ -27723,13 +27765,15 @@ fn ordering_instances_compares_op_comparison_with_zero() {
 /// return \App\Priced\Defaults::{'op_Comparison@App\Priced'}($a, $b) < 0;
 /// return \App\Size::op_Comparison(\App\Size::Small, \App\Size::Large) < 0;
 /// return \Sharp\Internal\sortedBy($books, …, \App\Priced\Defaults::{'op_Comparison@App\Priced'}(...));
+/// return $books->sortedBy(…, \App\Priced\Defaults::{'op_Comparison@App\Priced'}(...));
 /// ```
 ///
 /// Spec sections 19 and 22: an interface's constant is `[1]` `ZEND_ACC_PUBLIC`, and its operator is one `[17]` public
 /// static method of its trait of default bodies, named after its interface. The operator is chosen from the static
 /// types of both operands, so two values of the interface and two `Book`s, which declares none, call it on the trait
 /// itself, and no class or operand order changes which one runs. An enum that declares one runs it as a class does.
-/// `sortedBy` passes the engine the operator `<` on two of its keys runs, as a first-class callable.
+/// `sortedBy`, the `List` member and the `Map` method alike, passes the engine the operator `<` on two of its keys
+/// runs, as a first-class callable.
 #[test]
 fn an_interface_operator_runs_from_its_trait_as_the_types_of_the_operands_choose_it() {
     let files = lowered_each(
@@ -27748,7 +27792,7 @@ fn an_interface_operator_runs_from_its_trait_as_the_types_of_the_operands_choose
             ),
             (
                 "src/App/Uses.sharp",
-                "namespace App;\n\npublic static class Uses\n{\n    public static bool priced(Priced a, Priced b) => a < b;\n\n    public static bool books(Book a, Book b) => a < b;\n\n    public static bool sizes() => Size.Small < Size.Large;\n\n    public static List<Book> sorted(List<Book> books) => books.sortedBy(book => book);\n}\n",
+                "namespace App;\n\npublic static class Uses\n{\n    public static bool priced(Priced a, Priced b) => a < b;\n\n    public static bool books(Book a, Book b) => a < b;\n\n    public static bool sizes() => Size.Small < Size.Large;\n\n    public static List<Book> sorted(List<Book> books) => books.sortedBy(book => book);\n\n    public static List<Book> shelved(Map<string, Book> books) => books.sortedBy(book => book);\n}\n",
             ),
         ],
         &[],
@@ -27763,6 +27807,7 @@ fn an_interface_operator_runs_from_its_trait_as_the_types_of_the_operands_choose
             member("Uses", &[1, 2]),
             member("Uses", &[2, 2]),
             member("Uses", &[3, 2, 0, 0, 1, 2]),
+            member("Uses", &[4, 2, 1, 0, 2, 1]),
         ]
         .concat(),
         indoc! {r#"
@@ -27843,6 +27888,10 @@ fn an_interface_operator_runs_from_its_trait_as_the_types_of_the_operands_choose
                         ZVAL "App\\Size"
                         ZVAL "Large"
                   ZVAL 0
+            STATIC_CALL
+              ZVAL "App\\Priced\\Defaults"
+              ZVAL "op_Comparison@App\\Priced"
+              CALLABLE_CONVERT
             STATIC_CALL
               ZVAL "App\\Priced\\Defaults"
               ZVAL "op_Comparison@App\\Priced"
