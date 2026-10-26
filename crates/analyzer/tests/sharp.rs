@@ -34,6 +34,7 @@ use mago_analyzer::settings::Settings;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::populator::populate_codebase;
+use mago_codex::reference::SymbolReferences;
 use mago_codex::scanner::scan_program;
 use mago_codex::ttype::TType;
 use mago_codex::ttype::get_int;
@@ -61,6 +62,7 @@ use mago_syntax::cst::Expression;
 use mago_syntax::parser::parse_file;
 use mago_word::WordSet;
 use mago_word::ascii_lowercase_word;
+use mago_word::empty_word;
 use mago_word::word;
 
 #[path = "../../../tests/support/sharp_words.rs"]
@@ -145,6 +147,19 @@ fn analyze_with_artifacts(
     analyzed: (&'static str, &'static str),
     others: &[(&'static str, &'static str)],
 ) -> (Vec<Issue>, AnalysisArtifacts) {
+    let (issues, artifacts, _) = analyze_with_references(registry, settings, analyzed, others);
+
+    (issues, artifacts)
+}
+
+/// Analyzes `analyzed` together with `others` under `settings` and the plugins of `registry`, and returns its issues,
+/// the analysis artifacts and the symbol references the analysis recorded, with the prelude's.
+fn analyze_with_references(
+    registry: &PluginRegistry,
+    settings: Settings,
+    analyzed: (&'static str, &'static str),
+    others: &[(&'static str, &'static str)],
+) -> (Vec<Issue>, AnalysisArtifacts, SymbolReferences) {
     let Prelude { mut database, mut metadata, mut symbol_references } = PRELUDE.clone();
 
     let file_ids: Vec<_> = std::iter::once(&analyzed)
@@ -214,7 +229,7 @@ fn analyze_with_artifacts(
     let issues: Vec<Issue> = program.errors.iter().map(Issue::from).chain(result.issues).collect();
     assert_speaks_sharp(file_ids.iter().map(|(name, _)| *name), &issues);
 
-    (issues, artifacts)
+    (issues, artifacts, result.symbol_references)
 }
 
 /// The too-wide warnings of a project of `files`, as `mago analyze` gives them once it has analyzed every file: each
@@ -420,6 +435,27 @@ fn the_analyzer_reads_the_dialect_from_the_program_not_the_file_name() {
         .expect("analysis succeeds");
 
     assert!(result.issues.iter().any(|issue| issue.code.as_deref() == Some("invalid-operand")), "{:#?}", result.issues);
+}
+
+/// A bare PHP# name of a class alias of the file's own namespace reads the alias, as an import of it would: the
+/// codebase resolves the alias to its target, so the call through it references only the target.
+#[test]
+fn a_bare_name_of_an_alias_of_the_files_namespace_is_a_reference_to_the_alias() {
+    let sharp = "namespace Demo;\n\npublic class Report\n{\n    public int percent()\n    {\n        return Pace.percent();\n    }\n}\n";
+    let rate = "<?php\n\nnamespace Lib;\n\nfinal class Rate\n{\n    public static function percent(): int\n    {\n        return 5;\n    }\n}\n";
+    let aliases = "<?php\n\nclass_alias(\\Lib\\Rate::class, 'Demo\\\\Pace');\n";
+
+    let (issues, _, references) = analyze_with_references(
+        &PLUGIN_REGISTRY,
+        settings(),
+        ("src/Demo/Report.sharp", sharp),
+        &[("src/Lib/Rate.php", rate), ("src/Lib/aliases.php", aliases)],
+    );
+
+    assert!(issues.is_empty(), "{issues:#?}");
+    let referencing = references.get_references_to_symbol((ascii_lowercase_word(b"Demo\\Pace"), empty_word()));
+    let report = ascii_lowercase_word(b"Demo\\Report");
+    assert_eq!(referencing, HashSet::from_iter([&(report, empty_word()), &(report, word(b"percent"))]));
 }
 
 /// The binder records a call of a changing collection method as a write to its local, so a lambda captures that

@@ -13,6 +13,7 @@ use RuntimeException;
 
 use function count;
 use function Mago\Internal\get_version;
+use function strlen;
 
 /**
  * Decodes the syntax snapshot shared by external linter and analyzer messages.
@@ -38,7 +39,16 @@ final class SourceFileCodec
         $targetCount = $reader->readU32();
         $targetIds = $reader->readU32List($targetCount);
         $nodeCount = $reader->readU32();
-        $nodeRecords = $reader->readRaw($nodeCount * NodeStore::RECORD_SIZE);
+        $nodeBytes = $nodeCount * NodeStore::RECORD_SIZE;
+        $nodeRecords = $reader->readRaw($nodeBytes);
+        $read = strlen($nodeRecords);
+        // `NodeStore` reads each node's kind byte by byte, and a byte past the end of the records reads as 0 with only
+        // a warning.
+        if ($read !== $nodeBytes) {
+            throw new ProtocolException(
+                "The source snapshot holds {$read} bytes of node records, where its {$nodeCount} nodes take {$nodeBytes}.",
+            );
+        }
         $nodes = new NodeStore($kinds, $nodeRecords, $nodeCount);
         $nameCount = $reader->readU32();
         $nameStarts = $reader->readRaw($nameCount * ResolvedNameStore::START_SIZE);
