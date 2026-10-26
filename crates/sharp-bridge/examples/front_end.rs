@@ -26,6 +26,7 @@ use mago_codex::populator::populate_codebase;
 use mago_codex::scanner::scan_program;
 use mago_database::file::File;
 use mago_names::resolver::NameResolver;
+use mago_php_version::PHPVersion;
 use mago_prelude::Prelude;
 use mago_semantics::SemanticsChecker;
 use mago_sharp_bridge::InlineForms;
@@ -56,7 +57,7 @@ fn main() {
             continue;
         }
 
-        let issues = SemanticsChecker::new(mago_analyzer::ENGINE_PHP_VERSION).check(&file, program, &names);
+        let issues = SemanticsChecker::new(PHPVersion::ENGINE).check(&file, program, &names);
         if !sharp {
             let messages = issues.iter().map(|issue| &issue.message).collect::<Vec<_>>();
             assert!(messages.is_empty(), "{path} checks without issues: {messages:?}");

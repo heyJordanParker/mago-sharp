@@ -59,10 +59,6 @@ pub use crate::resolver::extension::is_collection_member;
 /// finds.
 pub use crate::resolver::extension::list_member;
 
-/// The PHP version of the PHP# engine, which the bridge lowers for and the analyzer checks the standard library
-/// against, whatever version a project's own code targets.
-pub const ENGINE_PHP_VERSION: mago_php_version::PHPVersion = mago_php_version::PHPVersion::PHP85;
-
 mod analyzable;
 mod assertion;
 mod common;

@@ -108,6 +108,10 @@ impl PHPVersion {
     /// Use with caution, primarily for internal or forward-looking features.
     pub const NEXT: PHPVersion = PHPVersion::PHP86;
 
+    /// The PHP version of the PHP# engine, which PHP# code lowers to and is checked as, and which the analyzer checks
+    /// the standard library against, whatever version a project's own code targets.
+    pub const ENGINE: PHPVersion = PHPVersion::PHP85;
+
     /// Creates a new `PHPVersion` from the provided `major`, `minor`, and `patch` values.
     ///
     /// The internal representation packs these three components into a single `u32`

@@ -57,9 +57,9 @@ impl SemanticsChecker {
         program: &'ast Program<'arena>,
         names: &'ast ResolvedNames<'arena>,
     ) -> IssueCollection {
-        // A PHP version gates PHP's syntax, never PHP#'s, so a `.sharp` file is checked as the PHP 8.5 that PHP# lowers
-        // to, whatever version the project names, and gets none of the version checks.
-        let version = if program.dialect.is_sharp() { PHPVersion::PHP85 } else { self.version };
+        // A PHP version gates PHP's syntax, never PHP#'s, so a `.sharp` file is checked as the engine's PHP that PHP#
+        // lowers to, whatever version the project names, and gets none of the version checks.
+        let version = if program.dialect.is_sharp() { PHPVersion::ENGINE } else { self.version };
         let mut context = Context::new(version, program, names, file);
 
         CheckingWalker.walk_program(program, &mut context);

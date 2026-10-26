@@ -46,6 +46,7 @@ use mago_names::STANDARD_ROOT_CLASSES;
 use mago_names::resolver::ChangingMembers;
 use mago_names::resolver::NameResolver;
 use mago_names::resolver::NamespaceClasses;
+use mago_php_version::PHPVersion;
 use mago_prelude::Prelude;
 use mago_reporting::Annotation;
 use mago_reporting::AnnotationKind;
@@ -9172,7 +9173,7 @@ fn compile_errors(analyzed: (&'static str, &'static str), others: &[(&'static st
     let file = File::ephemeral(Cow::Borrowed(analyzed.0.as_bytes()), Cow::Borrowed(analyzed.1.as_bytes()));
     let program = parse_file(&arena, &file);
     let names = NameResolver::new(&arena).resolve(program);
-    let semantic_issues = SemanticsChecker::new(mago_analyzer::ENGINE_PHP_VERSION).check(&file, program, &names);
+    let semantic_issues = SemanticsChecker::new(PHPVersion::ENGINE).check(&file, program, &names);
 
     semantic_issues
         .into_iter()

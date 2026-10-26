@@ -7837,7 +7837,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// nothing when lowered again is lowered at each read. Any other is held in the hidden variable `name#N`, which
     /// its first read assigns.
     fn reread<'value, 'ast>(&mut self, value: &'value Expression<'ast>, name: &str) -> Reread<'value, 'ast> {
-        if self.is_pure(value) || value.is_constant(&mago_analyzer::ENGINE_PHP_VERSION, false) {
+        if self.is_pure(value) || value.is_constant(&mago_php_version::PHPVersion::ENGINE, false) {
             return Reread::once(value);
         }
 
