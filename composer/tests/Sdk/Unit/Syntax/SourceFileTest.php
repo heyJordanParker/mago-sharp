@@ -7,8 +7,10 @@ namespace Mago\Tests\Sdk\Unit\Syntax;
 use Mago\Sdk\Exception\ProtocolException;
 use Mago\Sdk\Internal\Analyzer\Protocol as AnalyzerProtocol;
 use Mago\Sdk\Internal\Linter\Protocol as LinterProtocol;
+use Mago\Sdk\Internal\Protocol\PayloadReader;
 use Mago\Sdk\Internal\Syntax\NodeStore;
 use Mago\Sdk\Internal\Syntax\ResolvedNameStore;
+use Mago\Sdk\Internal\Syntax\SourceFileCodec;
 use Mago\Sdk\Internal\Syntax\TriviaStore;
 use Mago\Sdk\PHPVersion;
 use Mago\Sdk\Syntax\Binding;
@@ -73,16 +75,33 @@ final class SourceFileTest extends TestCase
         $kinds[299] = NodeKind::FunctionCall;
         $nodeRecords = pack('nNNNNN', 0, 0, 10, $noNode, 1, $noNode) . pack('nNNNNN', 299, 1, 4, 0, $noNode, $noNode);
 
-        $scanned = new NodeStore($kinds, $nodeRecords, 2);
-        $call = $scanned->getAll(NodeKind::FunctionCall)[0];
+        $indexed = new NodeStore($kinds, $nodeRecords, 2);
+        $call = $indexed->getAll(NodeKind::FunctionCall)[0];
         self::assertSame(NodeKind::FunctionCall, $call->kind);
         self::assertSame(1, $call->span->start);
         self::assertSame(4, $call->span->end);
         self::assertSame(0, $call->parentId);
-        self::assertSame([$call], $scanned->getChildren($scanned->get(0)));
+        self::assertSame([$call], $indexed->getChildren($indexed->get(0)));
 
         $looked = new NodeStore($kinds, $nodeRecords, 2);
         self::assertSame(NodeKind::FunctionCall, $looked->getMany([1])[0]->kind);
+    }
+
+    public function testASnapshotWhoseNodeRecordsEndEarlyIsRefused(): void
+    {
+        $noNode = 4_294_967_295;
+        $payload = pack('NN', 0, 2) . pack('nNNNNN', 0, 0, 10, $noNode, $noNode, $noNode);
+
+        $this->expectException(ProtocolException::class);
+        $this->expectExceptionMessage('The source snapshot holds 22 bytes of node records, where its 2 nodes take 44.');
+
+        SourceFileCodec::read(
+            new PayloadReader($payload),
+            PHPVersion::fromParts(8, 4),
+            [NodeKind::Program],
+            'a.php',
+            '',
+        );
     }
 
     public function testTheNodesOfAKindAreTheScannedNodesOfThatKindInOrder(): void

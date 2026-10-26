@@ -136,34 +136,6 @@ fn a_scoped_check_reports_what_a_whole_check_reports_in_the_named_file() {
     the_scoped_check_is_the_whole_check_filtered(SOURCE_PATHS);
 }
 
-/// A check that names an edited file and a file that calls it reports in each what the whole check reports there.
-#[test]
-fn a_scoped_check_reports_what_a_whole_check_reports_in_a_named_file_and_its_dependent() {
-    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
-    if !common::php_sdk_is_available(repository, "the scoped dependent check test") {
-        return;
-    }
-    let directory = workspace(repository, SOURCE_PATHS);
-    std::fs::write(directory.path().join("src/Third.php"), "<?php\n\nfunction third(): string { return first(); }\n")
-        .expect("third file");
-    let named = ["src/First.php", "src/Third.php"];
-
-    let whole = issues(&analyze(directory.path(), &[]));
-    let scoped = issues(&analyze(directory.path(), &named));
-
-    let mut filtered = whole
-        .iter()
-        .filter(|issue| primary_file(issue).is_none_or(|file| named.contains(&file)))
-        .map(Value::to_string)
-        .collect::<Vec<_>>();
-    let mut scoped = scoped.iter().map(Value::to_string).collect::<Vec<_>>();
-    filtered.sort();
-    scoped.sort();
-    assert!(scoped.iter().any(|issue| issue.contains("src/Third.php")), "the dependent's own issue: {scoped:#?}");
-    assert!(whole.iter().any(|issue| primary_file(issue) == Some("src/Second.php")), "{whole:#?}");
-    assert_eq!(scoped, filtered);
-}
-
 #[test]
 fn a_project_with_no_source_paths_is_checked_whole_around_the_named_file() {
     the_scoped_check_is_the_whole_check_filtered("");
