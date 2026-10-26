@@ -17290,6 +17290,33 @@ fn a_literal_in_a_lambda_takes_its_methods_type_arguments() {
     assert_eq!(keyed.matches(r##"ZVAL "string, #0""##).count(), 1, "{keyed}");
 }
 
+/// Every other form of such a lambda makes its literal with the method's type arguments too: one that returns another
+/// lambda, whose inner lambda captures the types from the outer one, one with a block body, and a literal with an
+/// entry. A PHP# lambda declares no result, section 14.2, so its literal always takes the function type that takes it.
+#[test]
+fn a_literal_in_each_form_of_lambda_takes_its_methods_type_arguments() {
+    for (form, body, captures) in [
+        (
+            "a nested lambda",
+            "Function<Function<Map<string, T>()>()> make = () => () => [:];\n        return make()();",
+            2,
+        ),
+        ("a block body", "Function<Map<string, T>()> make = () => { return [:]; };\n        return make();", 1),
+        ("an entry", "Function<Map<string, T>()> make = () => [\"k\": item];\n        return make();", 1),
+    ] {
+        let lowered = Lowered::with(
+            &format!(
+                "namespace App;\n\nclass Report\n{{\n    public static Map<string, T> keyed<T>(T item)\n    {{\n        {body}\n    }}\n}}\n"
+            ),
+            &[],
+        );
+        let keyed = lowered.body_of("keyed");
+
+        assert_eq!(keyed.matches(r#"ZVAL "\0<sharp>\0types""#).count(), captures, "{form}: {keyed}");
+        assert_eq!(keyed.matches(r##"ZVAL "string, #0""##).count(), 1, "{form}: {keyed}");
+    }
+}
+
 /// The value of a method that makes a `Map` passes the `Map`'s type arguments to the method as a call of it does, as
 /// `$items->entries('int, string')`.
 #[test]
