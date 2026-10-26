@@ -2482,6 +2482,19 @@ fn any_is_a_reserved_class_name() {
     assert_eq!(issues(code), ["3:7 Cannot use `Any` as a class name: it is reserved."]);
 }
 
+/// Spec section 11: `Equatable` is the built-in bound of the types with `==`, so a class can't take its name, and it is
+/// a bound alone and never a value's type: a parameter, a type argument, a property and a local typed `Equatable` are
+/// each an error. A bound joins it to others with `&`.
+#[test]
+fn equatable_is_a_reserved_name_and_only_a_bound() {
+    let reserved = "namespace App.Tenant;\n\nclass Equatable\n{\n}\n";
+    let typed = "namespace App;\n\npublic class Shapes\n{\n    public List<Equatable> kept { get; set; } = [];\n\n    public static bool joined<T : Shareable & Equatable>(T a, T b) => a == b;\n\n    public static void alone(Equatable value)\n    {\n        List<Equatable> values = [value];\n    }\n}\n";
+    let refusal = "`Equatable` is a bound, as in `<T : Equatable>`, and never a value's type.";
+
+    assert_eq!(issues(reserved), ["3:7 Cannot use `Equatable` as a class name: it is reserved."]);
+    assert_eq!(issues(typed), [format!("5:17 {refusal}"), format!("9:30 {refusal}"), format!("11:14 {refusal}")]);
+}
+
 /// The standard library declares `Sharp.Int`, `Sharp.Float` and `Sharp.Bool`, spec section 24. The engine compiles
 /// the library knowing only the file, so it lets any `.sharp` file whose namespace is exactly `Sharp` declare them.
 #[test]
@@ -5908,14 +5921,14 @@ fn a_bound_that_is_not_object_a_class_an_interface_a_generic_class_type_or_a_typ
                 15 => "15:24 `Object` is a bound alone, as in `<TValue : Object>`: it joins no other bound with `&`."
                     .to_owned(),
                 line => format!(
-                    "{line}:24 A bound is `Object`, a class, an interface or a type parameter, as in `<TItem : DatabaseEntity>`."
+                    "{line}:24 A bound is `Object`, `Equatable`, a class, an interface or a type parameter, as in `<TItem : DatabaseEntity>`."
                 ),
             })
             .collect::<Vec<_>>()
     );
     assert!(check_in_type_file(code).iter().filter(|issue| issue.message.starts_with("A bound")).all(|issue| issue
         .notes
-        == ["A PHP# type parameter is an optional `in` or `out`, a name that starts with `T`, and an optional bound of `Object`, of another type parameter, or of classes and interfaces joined with `&`, as in `<out TItem : DatabaseEntity & Shareable>`."]));
+        == ["A PHP# type parameter is an optional `in` or `out`, a name that starts with `T`, and an optional bound of `Object`, of another type parameter, or of classes, interfaces and `Equatable` joined with `&`, as in `<out TItem : DatabaseEntity & Shareable>`."]));
 }
 
 /// A type parameter's bound never leads back to it, directly or through the bounds of the others in its list, as C#

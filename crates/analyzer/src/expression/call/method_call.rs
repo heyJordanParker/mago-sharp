@@ -409,6 +409,8 @@ where
         && method_resolution.resolved_methods.iter().any(|method| {
             let name = method.method_identifier.get_method_name();
 
+            // PR #208 marks these parameters `#[ComparedByEquality]` in the standard library. The pull request that
+            // merges after the other keys this check, and the `Equatable` bound it applies, on that mark.
             sharp_collection_name(&TObject::new_named(method.classname)) == Some("List")
                 && ["contains", "indexOf", "remove"]
                     .iter()

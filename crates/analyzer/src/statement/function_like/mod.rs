@@ -43,6 +43,7 @@ use mago_codex::ttype::expander;
 use mago_codex::ttype::expander::StaticClassType;
 use mago_codex::ttype::expander::TypeExpansionOptions;
 use mago_codex::ttype::expander::get_signature_of_function_like_metadata;
+use mago_codex::ttype::flags::UnionFlags;
 use mago_codex::ttype::get_arraykey;
 use mago_codex::ttype::get_keyed_array;
 use mago_codex::ttype::get_list;
@@ -88,6 +89,7 @@ use crate::context::block::ReferenceConstraintSource;
 use crate::error::AnalysisError;
 use crate::expression::array::check_sharp_literal_kind;
 use crate::expression::array::get_set_literal_type;
+use crate::expression::binary::comparison::missing_equality;
 use crate::expression::instantiation::report_missing_type_arguments;
 use crate::formula::get_formula;
 use crate::reconciler::reconcile_keyed_types;
@@ -2410,6 +2412,31 @@ where
         template_result.add_lower_bound(*template_name, template.defining_entity, argument.clone());
     }
     for (argument, (template_name, template)) in arguments.iter().zip(templates.iter()) {
+        // Spec section 11: a type argument of `Equatable` has `==`, as `==` on two of its values decides.
+        if is_sharp
+            && template.constraint.flags.contains(UnionFlags::EQUATABLE)
+            && let Some(reason) = missing_equality(context, argument, span)
+        {
+            let argument_id = display_type(context, argument);
+            let constraint_id = display_type(context, &template.constraint);
+            context.collector.report_with_code(
+                IssueCode::TemplateConstraintViolation,
+                Issue::error(format!(
+                    "Type argument `{argument_id}` does not satisfy `{generic_owner}`'s `{template_name}`: {reason}."
+                ))
+                .with_annotation(
+                    Annotation::primary(span)
+                        .with_message(format!("`{argument_id}` is supplied for `{template_name}` here...")),
+                )
+                .with_annotation(
+                    Annotation::secondary(owner_span)
+                        .with_message(format!("...but `{template_name}` is bounded by `{constraint_id}`.")),
+                )
+                .with_help("Supply a type that has `==`."),
+            );
+
+            continue;
+        }
         let names_a_template = template.constraint.has_template_types();
         // An explicit `mixed` argument is the written form of "any argument", which Mago accepts for every bound in
         // PHP. A written PHP# `Any` or `Any?` is a type like any other, so its bound checks it.

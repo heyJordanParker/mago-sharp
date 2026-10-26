@@ -32,6 +32,7 @@ use crate::ttype::atomic::scalar::string::TStringLiteral;
 use crate::ttype::comparator::ComparisonResult;
 use crate::ttype::comparator::union_comparator;
 use crate::ttype::expander::TypeExpansionOptions;
+use crate::ttype::flags::UnionFlags;
 use crate::ttype::resolution::TypeResolutionContext;
 use crate::ttype::shared::ARRAYKEY_ATOMIC;
 use crate::ttype::shared::BOOL_ATOMIC;
@@ -1461,7 +1462,8 @@ pub fn get_backing_key_type<'key>(
 ///
 /// Spec section 12 keys a `Map` by anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`
 /// and an enum case, which section 19 gives `==` with no code, a struct, a `List`, `Set` or `Map` of them, and a class
-/// that declares or inherits `operator ==`, which the checker requires `hash()` beside. An intersection keys one when any of its members does,
+/// that declares or inherits `operator ==`, which the checker requires `hash()` beside, and a type parameter bounded by
+/// `Equatable` or by one of them. An intersection keys one when any of its members does,
 /// since each of its values is a value of every member. A class value keys none: it compares by its whole type, type
 /// arguments included, and runs as its plain class name, which `Class<Box<Order>>` and `Class<Box<Invoice>>` share.
 #[must_use]
@@ -1493,7 +1495,10 @@ pub fn is_key_type(key_type: &TUnion, codebase: &CodebaseMetadata) -> bool {
         TAtomic::Object(_) => {
             std::iter::once(atomic).chain(atomic.get_intersection_types().unwrap_or_default()).any(is_key_object)
         }
-        TAtomic::GenericParameter(parameter) => is_key_type(&parameter.constraint, codebase),
+        // Spec section 11: each value of a type parameter bounded by `Equatable` has `==`, and `hash()` beside it.
+        TAtomic::GenericParameter(parameter) => {
+            parameter.constraint.flags.contains(UnionFlags::EQUATABLE) || is_key_type(&parameter.constraint, codebase)
+        }
         // Section 19 compares two collections by their elements, and the engine hashes a collection by them, so a
         // collection of key types keys a `Map` too.
         TAtomic::Array(TArray::Set(element_type)) => is_key_type(element_type, codebase),

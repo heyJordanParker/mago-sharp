@@ -76,6 +76,12 @@ pub const PARSED: &str = "Sharp\\Internal\\Parsed";
 /// attribute's argument names, folded over the call's arguments, as `Math.max` is Lean's `max`.
 pub const LEAN_FUNCTION: &str = "Sharp\\Internal\\LeanFunction";
 
+/// The built-in bound of every type that has `==`, spec section 11, as a `.sharp` file writes it.
+///
+/// It is a bound alone and names no class-like, so the checker reserves it and the scanner reads it as no type the
+/// running code checks.
+pub const EQUATABLE: &str = "Equatable";
+
 /// The class-likes that a bare name in a `.sharp` file names by default, spec section 23, and that a class-like of the
 /// file's namespace can win over: every class-like the standard library or the prelude declares directly in `Sharp`,
 /// then the [standard root classes](STANDARD_ROOT_CLASSES), but the [fixed one](fixed_default_class).

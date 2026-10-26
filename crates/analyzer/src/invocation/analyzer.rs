@@ -30,6 +30,7 @@ use mago_codex::ttype::combiner::CombinerOptions;
 use mago_codex::ttype::expander;
 use mago_codex::ttype::expander::StaticClassType;
 use mago_codex::ttype::expander::TypeExpansionOptions;
+use mago_codex::ttype::flags::UnionFlags;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_php_passed_type;
 use mago_codex::ttype::intersect_union_types;
@@ -58,6 +59,7 @@ use crate::error::AnalysisError;
 use crate::expression::ancestor_type_arguments;
 use crate::expression::array::check_sharp_literal_kind;
 use crate::expression::array::get_set_literal_type;
+use crate::expression::binary::comparison::missing_equality;
 use crate::expression::is_refused_type;
 use crate::invocation::Invocation;
 use crate::invocation::InvocationArgument;
@@ -1268,6 +1270,14 @@ where
                 &type_arguments,
                 &violated_templates,
             );
+            report_type_arguments_without_equality(
+                context,
+                invocation,
+                template_types,
+                &type_arguments,
+                bound_before_arguments.as_ref(),
+                &violated_templates,
+            );
         }
 
         artifacts.record_type_arguments(invocation.span, type_arguments.into_iter(), context.codebase);
@@ -1815,6 +1825,52 @@ fn report_unfixed_type_arguments<A>(
             )
             .with_help(help),
     );
+}
+
+/// Spec section 11: a type argument of a type parameter bounded by `Equatable` has `==`, so a call whose arguments or
+/// declared type fix one without it is refused, as Go refuses a type argument of `comparable` without `==`. A type
+/// argument the call or its receiver writes, in `written`, is refused where it is written, and one of
+/// `violated_templates` by the issue that names its bound.
+fn report_type_arguments_without_equality<A>(
+    context: &mut Context<'_, '_, A>,
+    invocation: &Invocation<'_, '_, '_>,
+    template_types: &TemplateTypes,
+    type_arguments: &[Option<TUnion>],
+    written: Option<&TemplateResult>,
+    violated_templates: &WordSet,
+) where
+    A: Arena,
+{
+    for ((name, template), type_argument) in template_types.iter().zip(type_arguments) {
+        let Some(type_argument) = type_argument else {
+            continue;
+        };
+        if !template.constraint.flags.contains(UnionFlags::EQUATABLE)
+            || violated_templates.contains(name)
+            || written.is_some_and(|written| written.has_lower_bound(*name, &template.defining_entity))
+        {
+            continue;
+        }
+        let Some(reason) = missing_equality(context, type_argument, invocation.span) else {
+            continue;
+        };
+
+        let argument = display_type(context, type_argument);
+        let bound = display_type(context, &template.constraint);
+        let method_name = invocation.target.guess_name(context);
+        context.collector.report_with_code(
+            IssueCode::TemplateConstraintViolation,
+            Issue::error(format!(
+                "`{argument}` does not satisfy the bound `{bound}` of type parameter `{name}`: {reason}."
+            ))
+            .with_annotation(
+                Annotation::primary(invocation.span)
+                    .with_message(format!("`{method_name}` is called here, which fixes `{name}` as `{argument}`.")),
+            )
+            .with_note(format!("Type parameter `{name}` is bounded by `{bound}`, which holds each type that has `==`."))
+            .with_help("Pass values of a type that has `==`."),
+        );
+    }
 }
 
 /// The engine carries a PHP# call's type arguments as their PHP# text, so one a plain PHP value fixes as a type only a
