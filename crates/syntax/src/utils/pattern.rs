@@ -517,10 +517,12 @@ where
                     self.alloc(Expression::Identifier(Identifier::Local(*case))),
                 )
             }
+            // The `==` is the code's own, spec section 19, so it spans the value, and the checker checks it as it
+            // checks a written `==`.
             Pattern::Value(value) => {
                 let read = self.read(subject, follows);
 
-                self.binary(read, BinaryOperator::Equal(start_of(value.span())), value)
+                self.binary(read, BinaryOperator::Equal(value.span()), value)
             }
             Pattern::Comparison(comparison) => {
                 let read = self.read(subject, pattern.span());

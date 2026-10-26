@@ -432,6 +432,31 @@ fn write_library(root: &Path) {
     }
 }
 
+#[test]
+fn every_library_file_an_effect_class_imports_is_an_effect_class_too() {
+    // A test project holds only the files on `EFFECT_CLASSES`, so an import of a library file left off the list is
+    // refused there. An import that names no file under `sharp/composer/library/`, such as an attribute the binder
+    // declares, needs nothing.
+    let library = Path::new(env!("CARGO_MANIFEST_DIR")).join("../composer/library");
+    let listed: Vec<&str> = EFFECT_CLASSES
+        .iter()
+        .map(|(path, _)| path.strip_prefix("vendor/heyjordanparker/php-sharp-composer/library/").unwrap())
+        .collect();
+    let missing: Vec<String> = EFFECT_CLASSES
+        .iter()
+        .flat_map(|(path, source)| {
+            source
+                .lines()
+                .filter_map(|line| line.strip_prefix("import Sharp.")?.strip_suffix(';'))
+                .map(move |name| (path, format!("Sharp/{}.sharp", name.replace('.', "/"))))
+        })
+        .filter(|(_, imported)| library.join(imported).is_file() && !listed.contains(&imported.as_str()))
+        .map(|(path, imported)| format!("{path} imports {imported}"))
+        .collect();
+
+    assert!(missing.is_empty(), "Add each imported file to EFFECT_CLASSES: {missing:#?}");
+}
+
 /// A project whose `vendor/` holds the standard library's package, beside the project's `src/App/Page.sharp`.
 fn library_workspace(page: &str) -> tempfile::TempDir {
     let directory = tempfile::tempdir().unwrap();
@@ -530,7 +555,7 @@ fn compile_treats_the_repository_of_the_standard_library_as_the_library() {
     let printed = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
 
     assert_eq!(output.status.code(), Some(1), "{printed}");
-    assert!(printed.contains("Compiled 30 PHP# files into .sharp/. 1 PHP# file was refused"), "{printed}");
+    assert!(printed.contains("Compiled 31 PHP# files into .sharp/. 1 PHP# file was refused"), "{printed}");
     assert!(root.join(".sharp/library/Sharp/Text/StringMembers.sharpc").is_file(), "{printed}");
     assert!(root.join(".sharp/library/Sharp/System/Environment.sharpc").is_file(), "{printed}");
     let title = std::fs::read(root.join(".sharp/example/App/Title.sharpc")).unwrap();
