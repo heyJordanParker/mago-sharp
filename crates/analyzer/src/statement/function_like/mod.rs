@@ -15,6 +15,7 @@ use mago_word::word;
 
 use mago_codex::context::ScopeContext;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
+use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::metadata::class_like::TemplateTypes;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
@@ -35,6 +36,7 @@ use mago_codex::ttype::atomic::object::named::TNamedObject;
 use mago_codex::ttype::atomic::reference::TReference;
 use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeString;
+use mago_codex::ttype::bound_is_equatable;
 use mago_codex::ttype::combiner::CombinerOptions;
 use mago_codex::ttype::comparator::ComparisonResult;
 use mago_codex::ttype::comparator::atomic_comparator;
@@ -43,7 +45,6 @@ use mago_codex::ttype::expander;
 use mago_codex::ttype::expander::StaticClassType;
 use mago_codex::ttype::expander::TypeExpansionOptions;
 use mago_codex::ttype::expander::get_signature_of_function_like_metadata;
-use mago_codex::ttype::flags::UnionFlags;
 use mago_codex::ttype::get_arraykey;
 use mago_codex::ttype::get_keyed_array;
 use mago_codex::ttype::get_list;
@@ -90,6 +91,8 @@ use crate::error::AnalysisError;
 use crate::expression::array::check_sharp_literal_kind;
 use crate::expression::array::get_set_literal_type;
 use crate::expression::binary::comparison::missing_equality;
+use crate::expression::binary::comparison::unbounded_parameter_reason;
+use crate::expression::binary::comparison::unequatable_parameter;
 use crate::expression::instantiation::report_missing_type_arguments;
 use crate::formula::get_formula;
 use crate::reconciler::reconcile_keyed_types;
@@ -2414,7 +2417,7 @@ where
     for (argument, (template_name, template)) in arguments.iter().zip(templates.iter()) {
         // Spec section 11: a type argument of `Equatable` has `==`, as `==` on two of its values decides.
         if is_sharp
-            && template.constraint.flags.contains(UnionFlags::EQUATABLE)
+            && bound_is_equatable(&template.constraint)
             && let Some(reason) = missing_equality(context, argument, span)
         {
             let argument_id = display_type(context, argument);
@@ -2564,25 +2567,40 @@ where
         }
 
         let key_id = display_sharp_type(context, key_type);
-        let error = collection_key_error(key_id.as_str(), in_set, span);
+        let error = collection_key_error(context.codebase, key_type, key_id.as_str(), in_set, span);
         context.collector.report_with_code(IssueCode::TemplateConstraintViolation, error);
     }
 }
 
-/// The error for a PHP# `Map` keyed by, or a `Set` of, a type written `key_id` that has no `==` and `hash()`, at
-/// `span`. A `Map` or `Set` type, a literal and a `groupBy` key state the rule of spec section 12 in these words.
-pub(crate) fn collection_key_error(key_id: &str, in_set: bool, span: Span) -> Issue {
+/// The error for a PHP# `Map` keyed by, or a `Set` of, `key_type`, written `key_id`, that has no `==` and `hash()`, at
+/// `span`. A `Map` or `Set` type, a literal and a `groupBy` key state the rule of spec section 12 in these words, and
+/// name the fix of spec section 11 for a type parameter with no `Equatable` bound, as a search does.
+pub(crate) fn collection_key_error(
+    codebase: &CodebaseMetadata,
+    key_type: &TUnion,
+    key_id: &str,
+    in_set: bool,
+    span: Span,
+) -> Issue {
     let (rule, held, fix) = if in_set {
         ("A `Set`'s element", format!("`{key_id}` is this `Set`'s element."), "Fill the `Set` with")
     } else {
         ("A `Map`'s key", format!("`{key_id}` keys this `Map`."), "Key the `Map` by")
     };
+    let rule = format!(
+        "{rule} is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`"
+    );
+    if let Some(parameter) = unequatable_parameter(key_type, codebase) {
+        return Issue::error(format!(
+            "{rule}, and `{parameter}` is {}.",
+            unbounded_parameter_reason(&parameter.to_string())
+        ))
+        .with_annotation(Annotation::primary(span).with_message(held));
+    }
 
-    Issue::error(format!(
-        "{rule} is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`, and `{key_id}` is none of them."
-    ))
-    .with_annotation(Annotation::primary(span).with_message(held))
-    .with_help(format!(
-        "{fix} an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `public static bool operator ==` with `public int hash()`."
-    ))
+    Issue::error(format!("{rule}, and `{key_id}` is none of them."))
+        .with_annotation(Annotation::primary(span).with_message(held))
+        .with_help(format!(
+            "{fix} an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `public static bool operator ==` with `public int hash()`."
+        ))
 }

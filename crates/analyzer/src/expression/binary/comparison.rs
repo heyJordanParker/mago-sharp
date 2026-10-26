@@ -9,13 +9,15 @@ use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::scalar::TScalar;
-use mago_codex::ttype::flags::UnionFlags;
+use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeString;
+use mago_codex::ttype::bound_is_equatable;
 use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::get_bool;
 use mago_codex::ttype::get_false;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_named_object;
 use mago_codex::ttype::get_true;
+use mago_codex::ttype::is_key_type;
 use mago_codex::ttype::template::inferred_type_replacer;
 use mago_codex::ttype::union::TUnion;
 use mago_names::binding::php_operator_name;
@@ -699,10 +701,7 @@ fn check_comparison_operand<A>(
     {
         let issue = if context.dialect.is_sharp() {
             let (reason, note) = if operator.is_equality() {
-                (
-                    "compares by value only with a string, a number, a `bool`, an enum case, a struct or a collection",
-                    "An `Any` may hold any value, so `==` cannot compare it strictly until it is checked.",
-                )
+                (ANY_EQUALITY, "An `Any` may hold any value, so `==` cannot compare it strictly until it is checked.")
             } else {
                 (
                     "has no order",
@@ -1057,10 +1056,10 @@ pub(crate) enum Refusal {
 /// The type parameter a value of `union` may be whose bound gives it no `==`, spec section 11: one bound by neither
 /// `Equatable` nor a type with `==`, which leaves its values `Any?`. A bound of a class that declares no `operator ==`
 /// keeps the refusal of an instance of that class.
-fn unequatable_parameter(union: &TUnion, codebase: &CodebaseMetadata) -> Option<Word> {
+pub(crate) fn unequatable_parameter(union: &TUnion, codebase: &CodebaseMetadata) -> Option<Word> {
     union.types.iter().find_map(|atomic| match atomic {
         TAtomic::GenericParameter(parameter)
-            if !parameter.constraint.flags.contains(UnionFlags::EQUATABLE)
+            if !bound_is_equatable(&parameter.constraint)
                 && comparands(&parameter.constraint, codebase).contains(&Comparand::Any) =>
         {
             Some(parameter.parameter_name)
@@ -1069,12 +1068,12 @@ fn unequatable_parameter(union: &TUnion, codebase: &CodebaseMetadata) -> Option<
     })
 }
 
-/// Whether every value of `union` but `null` is a value of a type parameter bounded by `Equatable`, which has `==`
-/// whatever its type argument, spec section 11.
+/// Whether every value of `union` but `null` is a value of a type parameter whose bound gives it `==` whatever its
+/// type argument, spec section 11.
 fn is_equatable_parameter(union: &TUnion) -> bool {
-    union.types.iter().filter(|atomic| !atomic.is_null()).all(|atomic| {
-        matches!(atomic, TAtomic::GenericParameter(parameter) if parameter.constraint.flags.contains(UnionFlags::EQUATABLE))
-    })
+    union.types.iter().filter(|atomic| !atomic.is_null()).all(
+        |atomic| matches!(atomic, TAtomic::GenericParameter(parameter) if bound_is_equatable(&parameter.constraint)),
+    )
 }
 
 /// Whether spec section 19 compares a value of `lhs_type` with one of `rhs_type` as two floats: both are numbers, `null`
@@ -1101,6 +1100,11 @@ pub(crate) fn sharp_refusal(
     rhs_type: &TUnion,
     codebase: &CodebaseMetadata,
 ) -> Option<Refusal> {
+    // A comparison no source writes, as the `===` a list pattern's count runs as, has no operator token to refuse.
+    if operator.span().length() == 0 {
+        return None;
+    }
+
     refusal(operator, lhs_type, rhs_type, codebase, &mut Vec::new())
 }
 
@@ -1121,11 +1125,6 @@ fn refusal(
         && [lhs_type, rhs_type]
             .iter()
             .any(|side| side.types.iter().any(|atomic| matches!(atomic, TAtomic::Callable(_))));
-
-    // A comparison no source writes, as the `===` a list pattern's count runs as, has no operator token to refuse.
-    if operator.span().length() == 0 {
-        return None;
-    }
 
     match operator {
         BinaryOperator::Identical(_) | BinaryOperator::NotIdentical(_) => {
@@ -1768,25 +1767,60 @@ fn equality_refusal(
     refusal(equality, r#type, r#type, codebase, visiting).map(Some)
 }
 
-/// Why `r#type`, a type argument a call or a type gives a type parameter bounded by `Equatable`, has no `==`, spec
-/// section 11, as [`equality_refusal`] decides, or `None` when it has: "`Cart` declares no `operator ==`". `span` marks
-/// where the type argument is written.
+/// Why `r#type`, a type argument a call, a value or a type gives a type parameter bounded by `Equatable`, does not
+/// satisfy it, spec section 11, or `None` when it does: "`Cart` declares no `operator ==`". A type argument of
+/// `Equatable` has `==`, as [`equality_refusal`] decides, and keys a `Map` and fills a `Set`, as [`is_key_type`]
+/// decides, so a class value, which has `==` but keys no `Map`, does not satisfy it. `span` marks where the type
+/// argument is written or fixed.
 pub(crate) fn missing_equality<A>(context: &Context<'_, '_, A>, r#type: &TUnion, span: Span) -> Option<String>
 where
     A: Arena,
 {
+    let codebase = context.codebase;
     let equality = BinaryOperator::Equal(span);
     let r#type = r#type.to_non_nullable();
-    let reason = equality_refusal(&equality, &r#type, context.codebase, &mut Vec::new())?;
     let name = display_operand(context, &r#type);
+    let Some(reason) = equality_refusal(&equality, &r#type, codebase, &mut Vec::new()) else {
+        return (!is_key_type(&r#type, codebase)).then(|| key_reason(context, &r#type));
+    };
 
     Some(match reason {
-        None => format!(
-            "`{name}` compares by value only with a string, a number, a `bool`, an enum case, a struct or a collection"
-        ),
-        Some(Refusal::TypeParameter) => format!("`{name}` is a type parameter with no `Equatable` bound"),
+        None => format!("`{name}` {ANY_EQUALITY}"),
+        Some(Refusal::TypeParameter) => {
+            let parameter =
+                unequatable_parameter(&r#type, codebase).map_or_else(|| name.clone(), |name| name.to_string());
+
+            format!("`{parameter}` is {}", unbounded_parameter_reason(&parameter))
+        }
+        Some(Refusal::Instance) if is_function(&r#type) => "a function has no `==`".to_owned(),
+        Some(Refusal::DifferentTypes) if r#type.types.len() > 1 => {
+            format!("the values of `{name}` may be of two different types, which never match")
+        }
         refused => refusal_reason(context, &equality, &r#type, &r#type, refused),
     })
+}
+
+/// Why a value of `r#type`, which has `==`, keys no `Map`, spec sections 11 and 12, as "a class value with type
+/// arguments can't key a `Map`": a class value runs as its plain class name, which `Class<Box<Order>>` and
+/// `Class<Box<Invoice>>` share.
+fn key_reason<A>(context: &Context<'_, '_, A>, r#type: &TUnion) -> String
+where
+    A: Arena,
+{
+    let has_type_arguments = r#type.types.iter().any(|atomic| match atomic {
+        TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::OfType { constraint, .. })) => {
+            constraint.types.iter().any(|atomic| {
+                matches!(atomic, TAtomic::Object(TObject::Named(named)) if named.type_parameters.as_ref().is_some_and(|arguments| !arguments.is_empty()))
+            })
+        }
+        _ => false,
+    });
+
+    if has_type_arguments {
+        "a class value with type arguments can't key a `Map`".to_owned()
+    } else {
+        format!("`{}` can't key a `Map`", display_operand(context, r#type))
+    }
 }
 
 /// The type arguments a value of one of `unions` gives the generic enum `name`, as a `Result<int, PaymentError>.Ok`
@@ -1872,14 +1906,20 @@ where
         Some(Refusal::Collection) => "which `==` does not compare",
         Some(Refusal::CollectionElement) => "whose elements `==` cannot compare",
         Some(Refusal::StructProperty) => "which can't compare by value",
-        Some(Refusal::TypeParameter) => "a type parameter with no `Equatable` bound",
-        Some(_) => "which `==` cannot compare with another of its type",
-        None => {
-            "which compares by value only with a string, a number, a `bool`, an enum case, a struct or a collection"
+        Some(Refusal::TypeParameter) => {
+            return format!("`{name}` is {article} `{type}`, {}", unbounded_parameter_reason(&r#type), type = r#type);
         }
+        Some(_) => "which `==` cannot compare with another of its type",
+        None => return format!("`{name}` is {article} `{type}`, which {ANY_EQUALITY}", type = r#type),
     };
 
     format!("`{name}` is {article} `{type}`, {why}", type = r#type)
+}
+
+/// Why a value of the type parameter `name` has no `==`, with the fix, spec section 11: "a type parameter with no
+/// `Equatable` bound: bound it with `Equatable`, as in `<T : Equatable>`".
+pub(crate) fn unbounded_parameter_reason(name: &str) -> String {
+    format!("a type parameter with no `Equatable` bound: bound it with `Equatable`, as in `<{name} : Equatable>`")
 }
 
 /// Whether a value of `r#type` may be a function.
@@ -1893,6 +1933,10 @@ fn different_types_issue(comparison: &str, help: &str) -> Issue {
         .with_note("PHP# compares values strictly, so values of two different types never match.")
         .with_help(help)
 }
+
+/// What `==` compares an `Any` with, spec section 19, as a refusal of `==` on one names it.
+const ANY_EQUALITY: &str =
+    "compares by value only with a string, a number, a `bool`, an enum case, a struct or a collection";
 
 /// What PHP# orders, spec section 19, as an ordering's refusal names it.
 const ORDERED_TYPES: &str = "numbers, strings, and classes, structs and enums that declare `operator <=>`";

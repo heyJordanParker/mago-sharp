@@ -26,11 +26,11 @@ use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeString;
 use mago_codex::ttype::atomic::scalar::string::TString;
 use mago_codex::ttype::atomic::scalar::string::TStringLiteral;
+use mago_codex::ttype::bound_is_equatable;
 use mago_codex::ttype::combiner::CombinerOptions;
 use mago_codex::ttype::expander;
 use mago_codex::ttype::expander::StaticClassType;
 use mago_codex::ttype::expander::TypeExpansionOptions;
-use mago_codex::ttype::flags::UnionFlags;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_php_passed_type;
 use mago_codex::ttype::intersect_union_types;
@@ -1270,9 +1270,11 @@ where
                 &type_arguments,
                 &violated_templates,
             );
+            let method_name = invocation.target.guess_name(context);
             report_type_arguments_without_equality(
                 context,
-                invocation,
+                invocation.span,
+                &method_name,
                 template_types,
                 &type_arguments,
                 bound_before_arguments.as_ref(),
@@ -1827,13 +1829,15 @@ fn report_unfixed_type_arguments<A>(
     );
 }
 
-/// Spec section 11: a type argument of a type parameter bounded by `Equatable` has `==`, so a call whose arguments or
-/// declared type fix one without it is refused, as Go refuses a type argument of `comparable` without `==`. A type
-/// argument the call or its receiver writes, in `written`, is refused where it is written, and one of
-/// `violated_templates` by the issue that names its bound.
-fn report_type_arguments_without_equality<A>(
+/// Spec section 11: a type argument of a type parameter bounded by `Equatable` has `==`, so a call, or a method's
+/// value, at `span` of the method `method_name`, whose arguments, declared type or function type fix one without it
+/// is refused, as Go refuses a type argument of `comparable` without `==`. Each place that fixes a type argument it
+/// does not write checks it here. A type argument the call or its receiver writes, in `written`, is refused where it
+/// is written, and one of `violated_templates` by the issue that names its bound.
+pub(crate) fn report_type_arguments_without_equality<A>(
     context: &mut Context<'_, '_, A>,
-    invocation: &Invocation<'_, '_, '_>,
+    span: Span,
+    method_name: &str,
     template_types: &TemplateTypes,
     type_arguments: &[Option<TUnion>],
     written: Option<&TemplateResult>,
@@ -1845,27 +1849,25 @@ fn report_type_arguments_without_equality<A>(
         let Some(type_argument) = type_argument else {
             continue;
         };
-        if !template.constraint.flags.contains(UnionFlags::EQUATABLE)
+        if !bound_is_equatable(&template.constraint)
             || violated_templates.contains(name)
             || written.is_some_and(|written| written.has_lower_bound(*name, &template.defining_entity))
         {
             continue;
         }
-        let Some(reason) = missing_equality(context, type_argument, invocation.span) else {
+        let Some(reason) = missing_equality(context, type_argument, span) else {
             continue;
         };
 
         let argument = display_type(context, type_argument);
         let bound = display_type(context, &template.constraint);
-        let method_name = invocation.target.guess_name(context);
         context.collector.report_with_code(
             IssueCode::TemplateConstraintViolation,
             Issue::error(format!(
                 "`{argument}` does not satisfy the bound `{bound}` of type parameter `{name}`: {reason}."
             ))
             .with_annotation(
-                Annotation::primary(invocation.span)
-                    .with_message(format!("`{method_name}` is called here, which fixes `{name}` as `{argument}`.")),
+                Annotation::primary(span).with_message(format!("`{method_name}` fixes `{name}` as `{argument}` here.")),
             )
             .with_note(format!("Type parameter `{name}` is bounded by `{bound}`, which holds each type that has `==`."))
             .with_help("Pass values of a type that has `==`."),

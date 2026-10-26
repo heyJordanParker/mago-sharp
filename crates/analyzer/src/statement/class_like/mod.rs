@@ -26,6 +26,7 @@ use mago_codex::ttype::atomic::callable::TCallableSignature;
 use mago_codex::ttype::atomic::generic::TGenericParameter;
 use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeString;
+use mago_codex::ttype::bound_is_equatable;
 use mago_codex::ttype::combine_union_types;
 use mago_codex::ttype::combiner::CombinerOptions;
 use mago_codex::ttype::comparator::ComparisonResult;
@@ -88,6 +89,7 @@ use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::effects::check::check_foreign_statics;
 use crate::error::AnalysisError;
+use crate::expression::binary::comparison::missing_equality;
 use crate::plugin::context::HookContext;
 use crate::resolver::class_name::report_missing_class;
 use crate::resolver::extension::class_member;
@@ -2876,6 +2878,28 @@ fn check_template_parameters<'ctx, A>(
                         );
                     }
                 }
+            }
+
+            // Spec section 11: a header's type argument of `Equatable` has `==`, as a written one anywhere else does.
+            if let Some(parent) = &sharp_parent
+                && bound_is_equatable(&parent_template.constraint)
+                && let Some(reason) = missing_equality(context, &extended_type, primary_annotation_span)
+            {
+                context.collector.report_with_code(
+                    IssueCode::TemplateConstraintViolation,
+                    Issue::error(format!(
+                        "Type argument `{extended_type_str}` does not satisfy `{parent}`'s `{template_name}`: {reason}."
+                    ))
+                    .with_annotation(
+                        Annotation::primary(primary_annotation_span)
+                            .with_message(format!("`{extended_type_str}` is supplied for `{template_name}` here...")),
+                    )
+                    .with_annotation(Annotation::secondary(parent_definition_span).with_message(format!(
+                        "...but `{template_name}` is bounded by `{}`.",
+                        display_type(context, &parent_template.constraint)
+                    )))
+                    .with_help("Supply a type that has `==`."),
+                );
             }
 
             if template_type.is_mixed() {

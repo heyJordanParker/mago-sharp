@@ -1497,7 +1497,7 @@ pub fn is_key_type(key_type: &TUnion, codebase: &CodebaseMetadata) -> bool {
         }
         // Spec section 11: each value of a type parameter bounded by `Equatable` has `==`, and `hash()` beside it.
         TAtomic::GenericParameter(parameter) => {
-            parameter.constraint.flags.contains(UnionFlags::EQUATABLE) || is_key_type(&parameter.constraint, codebase)
+            bound_is_equatable(&parameter.constraint) || is_key_type(&parameter.constraint, codebase)
         }
         // Section 19 compares two collections by their elements, and the engine hashes a collection by them, so a
         // collection of key types keys a `Map` too.
@@ -1509,6 +1509,19 @@ pub fn is_key_type(key_type: &TUnion, codebase: &CodebaseMetadata) -> bool {
         }
         _ => false,
     })
+}
+
+/// Whether `bound`, a type parameter's bound, gives each of its values `==` whatever its type argument.
+///
+/// Spec section 11: `Equatable` does, as in `<T : Equatable>` or `<T : Shareable & Equatable>`, and so does a type
+/// parameter it bounds, as `T` bounds `TSub` in `<T : Equatable, TSub : T>`. It alone reads the `Equatable` mark of a
+/// bound, for `==`, a `Map` key, a `Set` element and a type argument.
+#[must_use]
+pub fn bound_is_equatable(bound: &TUnion) -> bool {
+    bound.flags.contains(UnionFlags::EQUATABLE)
+        || bound.types.iter().any(|atomic| {
+            matches!(atomic, TAtomic::GenericParameter(parameter) if bound_is_equatable(&parameter.constraint))
+        })
 }
 
 /// The object a PHP# `Map<K, V>` or `Set<T>` runs as, `Sharp\Map<K, V>` or `Sharp\Set<T>`, each key as itself, or
