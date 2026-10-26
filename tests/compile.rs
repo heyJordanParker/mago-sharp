@@ -2944,8 +2944,9 @@ fn compile_refuses_an_unproven_law_whatever_pragma_ignore_entry_or_baseline_entr
     }
 }
 
-/// Compiles `source` as `app/Shared/Shape.sharp` and checks that the compile refuses it with the unmodeled-construct
-/// error `message`, before any Lean process starts.
+/// Compiles `source` as `app/Shared/Shape.sharp`, in a project that installs the standard library and so the members of
+/// a `List`, and checks that the compile refuses it with the unmodeled-construct error `message`, before any Lean
+/// process starts.
 fn assert_unmodeled(source: &str, message: &str) {
     assert_unmodeled_beside(source, &[], message);
 }
@@ -2954,7 +2955,7 @@ fn assert_unmodeled(source: &str, message: &str) {
 fn assert_unmodeled_beside(source: &str, others: &[(&str, &str)], message: &str) {
     let files: Vec<(&str, &str)> =
         [("app/Shared/Shape.sharp", source)].into_iter().chain(others.iter().copied()).collect();
-    let directory = lawful_project(&files);
+    let directory = library_project(&files);
     let root = directory.path();
 
     let output = compile_without_lean(root);
@@ -3042,7 +3043,8 @@ fn compile_proves_a_law_over_map_filter_and_count() {
     );
 }
 
-/// Compiles `source` as `app/Shared/<class>.sharp` and checks that the compile proves every law it states with the proof
+/// Compiles `source` as `app/Shared/<class>.sharp`, in a project that installs the standard library and so the members
+/// of a `List`, and checks that the compile proves every law it states with the proof
 /// it creates, and that the class with `twin` added, a false law over the same code, is refused as `law-unproven`.
 fn assert_proven(class: &str, source: &str, twin: &str) {
     let name = format!("app/Shared/{class}.sharp");
@@ -3052,7 +3054,7 @@ fn assert_proven(class: &str, source: &str, twin: &str) {
     };
 
     for (source, proven) in [(source, true), (with_twin.as_str(), false)] {
-        let directory = lawful_project(&[(&name, source)]);
+        let directory = library_project(&[(&name, source)]);
         let root = directory.path();
 
         let output = compile(root);
