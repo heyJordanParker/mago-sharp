@@ -878,6 +878,13 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
                 }
                 .then_some(Place::TypeParameter);
             }
+            // The standard library's `sumOf` gives a number, `int|float`, a bound only it writes.
+            if is_standard_library_namespace(context.program)
+                && matches!(&bound.hint, Hint::Union(union)
+                    if matches!((union.left, union.right), (Hint::Integer(_), Hint::Float(_))))
+            {
+                return None;
+            }
 
             let message = if matches!(bound.hint, Hint::Union(_)) {
                 "A bound can't be a union: join several bounds with `&`."
@@ -1608,6 +1615,14 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             Node::IntersectionHint(_),
             FieldOrProperty | ClassConstant | Method | Signature | Parameter | Body | Place::Pattern,
         ) => Some(place),
+        // Spec section 26: an extension's receiver takes `ref`, which `check_extension` keeps to the standard library.
+        // Every other parameter takes none, as `broken_rule` says.
+        (Node::Modifier(Modifier::Ref(keyword)), Parameter)
+            if enclosing_extension(context.program, keyword.span)
+                .is_some_and(|extension| extension.parameter_list.span().contains(&keyword.span.start)) =>
+        {
+            Some(Parameter)
+        }
         // Spec section 9: every call passes a parameter without a default, a constructor's or a method's, so `required`
         // adds nothing. It declares no member either, so it is this one error.
         (Node::Modifier(modifier @ Modifier::Required(_)), Parameter) => {
@@ -3094,18 +3109,19 @@ fn is_class_value_type(hint: &Hint) -> bool {
     }
 }
 
-/// Checks an extension block of a static class, spec section 26: one receiver, a parameter with no modifier, default
-/// or `...`, and members that are methods or computed properties of the receiver, each with only an access modifier,
-/// naming the receiver and never `this`. A static class has no constructor, in an extension either. A class value's
-/// members are `Class`'s own and the statics of the class it holds, spec section 25, so only the standard library
-/// extends `Class`.
+/// Checks an extension block of a static class, spec section 26: one receiver, a parameter with no modifier but `ref`,
+/// default or `...`, and members that are methods or computed properties of the receiver, each with only an access
+/// modifier, naming the receiver and never `this`. A static class has no constructor, in an extension either. A class
+/// value's members are `Class`'s own and the statics of the class it holds, spec section 25, so only the standard
+/// library extends `Class`. A member that changes a collection in place takes it by `ref`, and code outside the
+/// standard library returns the changed copy instead, spec section 12, so only the standard library writes `ref`.
 fn check_extension(extension: &Extension, context: &mut Context<'_, '_, '_>) {
     let receivers = &extension.parameter_list.parameters;
     let refused_receiver = match receivers.as_slice() {
-        [receiver] => {
-            (!receiver.modifiers.is_empty() || receiver.default_value.is_some() || receiver.ellipsis.is_some())
-                .then(|| receiver.span())
-        }
+        [receiver] => (!matches!(receiver.modifiers.as_slice(), [] | [Modifier::Ref(_)])
+            || receiver.default_value.is_some()
+            || receiver.ellipsis.is_some())
+        .then(|| receiver.span()),
         _ => Some(extension.parameter_list.span()),
     };
     if let Some(span) = refused_receiver {
@@ -3129,6 +3145,17 @@ fn check_extension(extension: &Extension, context: &mut Context<'_, '_, '_>) {
             )
             .with_annotation(Annotation::primary(hint.span()).with_message("Receiver written here."))
             .with_help("Write a static method that takes the class value, as in `public static string describe<T>(Class<T> type)`."),
+        );
+    }
+    if let [receiver] = receivers.as_slice()
+        && let [by_ref @ Modifier::Ref(_)] = receiver.modifiers.as_slice()
+        && !is_standard_library_namespace(context.program)
+    {
+        context.report(
+            Issue::error(
+                "Only the standard library declares a method that changes the collection it is called on: return the changed copy instead, as in `lines = Cart.withShipping(lines, shipping);`.",
+            )
+            .with_annotation(Annotation::primary(by_ref.span()).with_message("Written here.")),
         );
     }
 

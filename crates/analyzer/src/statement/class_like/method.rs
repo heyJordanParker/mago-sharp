@@ -50,6 +50,7 @@ use crate::expression::call::static_method_call::analyze_static_method_call;
 use crate::expression::composite_string::TextMethodFault;
 use crate::expression::composite_string::text_method_fault;
 use crate::plugin::hook::StaticCall;
+use crate::resolver::extension::collection_member_hiding;
 use crate::statement::attributes::AttributeTarget;
 use crate::statement::attributes::analyze_attributes;
 use crate::statement::function_like::FunctionLikeBody;
@@ -268,10 +269,18 @@ where
     };
     // The member runs on a part of the receiver that declares none, so only a receiver whose every part that is not
     // `null` declares it hides the member for good.
+    // A `List`'s members are the standard library's, which hide another of their name as a real member does.
+    let library = class.name.as_bytes().get(..6).is_some_and(|root| root.eq_ignore_ascii_case(b"sharp\\"));
     let mut parts = Vec::new();
     for part in receiver.type_union.to_non_nullable().types.iter() {
         let part = TUnion::from_atomic(part.clone());
-        let Some(&class) = context.codebase.get_classes_hidden_by_extension(&part, member.name).first() else {
+        let hidden = context
+            .codebase
+            .get_classes_hidden_by_extension(&part, member.name)
+            .first()
+            .copied()
+            .or_else(|| (!library).then(|| collection_member_hiding(context, &part, member.name)).flatten());
+        let Some(class) = hidden else {
             return;
         };
         parts.push((format!("`{}`", display_type(context, &part)), class));

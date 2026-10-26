@@ -26,7 +26,8 @@ pub fn check_availability<A>(
 ) where
     A: Arena,
 {
-    let version = context.settings.version;
+    // The standard library runs only on the PHP# engine, whatever version the project's own code targets.
+    let version = if context.source_file.is_standard_library { PHPVersion::ENGINE } else { context.settings.version };
     if version_constraint.allows_version(version) {
         return;
     }

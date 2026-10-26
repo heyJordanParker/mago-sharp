@@ -57,7 +57,7 @@ fn main() {
             continue;
         }
 
-        let issues = SemanticsChecker::new(PHPVersion::PHP85).check(&file, program, &names);
+        let issues = SemanticsChecker::new(PHPVersion::ENGINE).check(&file, program, &names);
         if !sharp {
             let messages = issues.iter().map(|issue| &issue.message).collect::<Vec<_>>();
             assert!(messages.is_empty(), "{path} checks without issues: {messages:?}");

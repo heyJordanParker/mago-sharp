@@ -32,20 +32,6 @@ pub use sharp_classes::EMIT_EFFECT;
 pub use sharp_classes::PROPERTY_BEHAVIOR;
 pub use sharp_classes::STANDARD_ROOT_CLASSES;
 
-/// The methods of a PHP# `List`, `Map` or `Set` that change it.
-///
-/// Spec section 12 runs them on the collection a local holds, so a call of one on a local writes the local, as
-/// [`ResolvedNames::is_written`] reports. The binder knows no types, so a call of a method of these names on an object
-/// writes its local too, which captures it by reference, as harmless.
-pub const CHANGING_COLLECTION_METHODS: [&str; 4] = ["add", "insert", "remove", "clear"];
-
-/// The attribute the prelude marks each method of a PHP# `List` with that the bridge lowers from the checker's types.
-///
-/// Each marked method lowers to PHP functions or operators on the array. A `List` is a PHP array, which has no
-/// methods, so the checker refuses one on a value that can also be an object, whose own method would not run. A `Map`
-/// and a `Set` are engine objects, whose every method runs on `Sharp\Collection`.
-pub const INLINED: &str = "Sharp\\Internal\\Inlined";
-
 /// The mark of a parameter whose argument a method writes as JSON text.
 ///
 /// The standard library marks `Json.encode`'s, so the checker refuses a `Map` key JSON can't write. The checker reads
@@ -389,7 +375,9 @@ impl<'arena> ResolvedNames<'arena> {
     }
 
     /// Returns whether code writes the PHP# local after its declaration: with `=`, a compound assignment, `++` or
-    /// `--` on it or an index of it, or a call of one of the [`CHANGING_COLLECTION_METHODS`] on it.
+    /// `--` on it or an index of it, or a call of one of the project's
+    /// [`ChangingMembers`](crate::resolver::ChangingMembers) on it, as `add`. The binder knows no types, so a call of a
+    /// method of one of those names on an object writes its local too, which captures it by reference, as harmless.
     #[must_use]
     pub fn is_written(&self, local: &Local) -> bool {
         let declaration = local.declaration.start.offset;

@@ -170,6 +170,7 @@ fn calculate_modifier_signature(modifiers: &Sequence<'_, Modifier<'_>>) -> u32 {
             Modifier::Lazy(_) => 1 << 14,
             Modifier::Internal(_) => 1 << 15,
             Modifier::Foreign(_) => 1 << 16,
+            Modifier::Ref(_) => 1 << 17,
         };
     }
     sig

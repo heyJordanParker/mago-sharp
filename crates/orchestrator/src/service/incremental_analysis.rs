@@ -54,6 +54,7 @@ use mago_database::file::File;
 use mago_database::file::FileId;
 use mago_database::file::FileType;
 use mago_names::ResolvedNames;
+use mago_names::resolver::ChangingMembers;
 use mago_names::resolver::NameResolver;
 use mago_names::resolver::NamespaceClasses;
 use mago_php_version::PHPVersion;
@@ -167,6 +168,8 @@ pub struct IncrementalAnalysisService {
     /// The class-likes of the codebase that win over a default class-like in their namespace, which every file resolves
     /// its names against.
     namespace_classes: NamespaceClasses,
+    /// The members of the codebase that change the value they are called on, which every file's binder counts as writes.
+    changing_members: ChangingMembers,
     use_progress_bars: bool,
     scan_only: bool,
     node_analysis_files: Option<HashSet<FileId>>,
@@ -198,6 +201,7 @@ impl std::fmt::Debug for IncrementalAnalysisService {
             .field("codebase_scan_plan", &self.codebase_scan_plan.is_some())
             .field("codebase_scan_files", &self.codebase_scan_files.len())
             .field("namespace_classes", &self.namespace_classes)
+            .field("changing_members", &self.changing_members)
             .field("use_progress_bars", &self.use_progress_bars)
             .field("scan_only", &self.scan_only)
             .field("node_analysis_files", &self.node_analysis_files.as_ref().map(HashSet::len))
@@ -247,6 +251,7 @@ impl IncrementalAnalysisService {
             codebase_scan_plan: None,
             codebase_scan_files: HashMap::default(),
             namespace_classes: NamespaceClasses::default(),
+            changing_members: ChangingMembers::default(),
             use_progress_bars: false,
             scan_only: false,
             node_analysis_files: None,
@@ -288,6 +293,7 @@ impl IncrementalAnalysisService {
         self.codebase_scan_plan = None;
         self.codebase_scan_files.clear();
         self.namespace_classes = NamespaceClasses::default();
+        self.changing_members = ChangingMembers::default();
     }
 
     /// Updates the database for a new analysis run.
@@ -542,6 +548,10 @@ impl IncrementalAnalysisService {
         self.namespace_classes = NamespaceClasses::new(per_file_results.iter().flat_map(|(_, _, metadata, _, _)| {
             metadata.class_likes.values().map(|class_like| class_like.original_name)
         }));
+        // An extension changes only as a whole analysis runs again, so the members that change their receiver stay.
+        self.changing_members = ChangingMembers::new(
+            per_file_results.iter().flat_map(|(_, _, metadata, _, _)| receiver_changing_members(metadata)),
+        );
         let namespace_classes = &self.namespace_classes;
         per_file_results
             .par_iter_mut()
@@ -1522,7 +1532,8 @@ impl IncrementalAnalysisService {
 
         let arena = LocalArena::new();
         let program = parse_file_with_settings(&arena, &file, self.parser_settings);
-        let resolved_names = NameResolver::new(&arena).resolve_in(program, &self.namespace_classes);
+        let resolved_names =
+            NameResolver::new(&arena).resolve_in(program, &self.namespace_classes, &self.changing_members);
 
         let mut issues = IssueCollection::new();
         if program.has_errors() {
@@ -1571,7 +1582,8 @@ impl IncrementalAnalysisService {
 
         let arena = LocalArena::new();
         let program = parse_file_with_settings(&arena, &file, self.parser_settings);
-        let resolved_names = NameResolver::new(&arena).resolve_in(program, &self.namespace_classes);
+        let resolved_names =
+            NameResolver::new(&arena).resolve_in(program, &self.namespace_classes, &self.changing_members);
 
         let mut issues = IssueCollection::new();
         if program.has_errors() {
@@ -1699,6 +1711,7 @@ impl IncrementalAnalysisService {
             settings,
             self.parser_settings,
             &self.namespace_classes,
+            &self.changing_members,
             external_session.as_deref(),
         )?;
         #[cfg(not(target_arch = "wasm32"))]
@@ -1740,6 +1753,7 @@ impl IncrementalAnalysisService {
         let settings = settings.clone();
         let parser_settings = self.parser_settings;
         let namespace_classes = &self.namespace_classes;
+        let changing_members = &self.changing_members;
         let analyzing_bar = (self.use_progress_bars && !host_files.is_empty())
             .then(|| create_progress_bar(host_files.len(), "🔬 Analyzing", ProgressBarTheme::Green));
         #[cfg(not(target_arch = "wasm32"))]
@@ -1758,7 +1772,7 @@ impl IncrementalAnalysisService {
                 let mut analysis_result = AnalysisResult::new(SymbolReferences::new());
 
                 let program = parse_file_with_settings(arena, &source_file, parser_settings);
-                let resolved_names = NameResolver::new(arena).resolve_in(program, namespace_classes);
+                let resolved_names = NameResolver::new(arena).resolve_in(program, namespace_classes, changing_members);
 
                 let semantics_checker = SemanticsChecker::new(settings.version);
                 let mut analyzer =
@@ -2114,7 +2128,8 @@ fn scan_file(
         );
     }
 
-    let resolved_names = NameResolver::new(arena).resolve_in(program, namespace_classes);
+    // A scan reads no write of a local, so it needs no changing members.
+    let resolved_names = NameResolver::new(arena).resolve_in(program, namespace_classes, &ChangingMembers::default());
     let mut metadata = scan_program(arena, file, program, &resolved_names, php_version);
     metadata.set_file_signature(file.id, signature_builder::build_file_signature(program, &resolved_names));
     if file.file_type.is_patch() {
@@ -2123,6 +2138,19 @@ fn scan_file(
     let codebase_scan = plan.map(|plan| plan.capture(file, &metadata)).transpose()?.flatten();
 
     Ok((metadata, codebase_scan, resolved_names.namespace_classes().map(mago_word::word).collect()))
+}
+
+/// The names of the extension members `metadata` declares that take their receiver by `ref`, spec section 26, and so
+/// change it, as a `List`'s `add`.
+pub(crate) fn receiver_changing_members(metadata: &CodebaseMetadata) -> impl Iterator<Item = Word> + '_ {
+    metadata
+        .function_likes
+        .values()
+        .filter(|member| {
+            member.flags.is_extension_method()
+                && member.parameters.first().is_some_and(|receiver| receiver.flags.is_by_reference())
+        })
+        .map(|member| member.original_name)
 }
 
 /// The `extern` declarations in `file_id`, in the codebase's order. A body's summary records the effects of the

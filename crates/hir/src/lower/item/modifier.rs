@@ -40,6 +40,7 @@ where
                 cst::Modifier::Lazy(_) => ModifierKind::Lazy,
                 cst::Modifier::Internal(_) => ModifierKind::Internal,
                 cst::Modifier::Foreign(_) => ModifierKind::Foreign,
+                cst::Modifier::Ref(_) => ModifierKind::Ref,
             },
         }
     }

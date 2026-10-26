@@ -8,14 +8,20 @@
 
 use std::collections::HashMap;
 
+use mago_codex::ttype::union::TUnion;
 use mago_names::binding::Binding;
+use mago_names::binding::php_operator_name;
+use mago_span::Span;
 use mago_syntax::cst::Access;
 use mago_syntax::cst::Argument;
 use mago_syntax::cst::ArgumentList;
+use mago_syntax::cst::Binary;
+use mago_syntax::cst::BinaryOperator;
 use mago_syntax::cst::Call;
 use mago_syntax::cst::ClassLikeMember;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::FunctionLikeParameter;
+use mago_syntax::cst::Hint;
 use mago_syntax::cst::Method;
 use mago_syntax::cst::MethodBody;
 use mago_syntax::cst::MethodCall;
@@ -24,6 +30,8 @@ use mago_syntax::cst::Node;
 use mago_syntax::cst::Property;
 use mago_syntax::cst::Return;
 use mago_syntax::cst::Statement;
+use mago_syntax::cst::UnaryPrefix;
+use mago_syntax::cst::UnaryPrefixOperator;
 
 use super::Lines;
 use super::Lowering;
@@ -32,11 +40,27 @@ use super::types::Declaration;
 use super::types::DeclarationKind;
 use super::types::receiver_classes;
 use crate::lower::checked::CheckedProgram;
+use crate::sharp_kind::SHARP_AST_CALLABLE_CONVERT;
 use crate::sharp_kind::SHARP_AST_VAR;
 use crate::sharp_node;
+use crate::sharp_value;
 use crate::store_text;
 use crate::unit::Read;
 use crate::unit::form_fingerprint;
+
+/// The prelude's mark of an engine function's parameter that takes the type arguments of the `Map` or the `Set` the
+/// inlined call gives.
+pub(crate) const TAKES_RESULT_TYPE: &[u8] = b"Sharp\\Internal\\TakesResultType";
+
+/// The prelude's mark of an engine function's parameter that takes the `operator <=>` the checker chose for the keys the
+/// inlined call orders by.
+pub(crate) const TAKES_KEY_ORDER: &[u8] = b"Sharp\\Internal\\TakesKeyOrder";
+
+/// The name of a form's slot for what a [`TAKES_RESULT_TYPE`] parameter takes, which no PHP# name can be.
+pub(crate) const RESULT_TYPE_SLOT: &[u8] = b"result#type";
+
+/// The name of a form's slot for what a [`TAKES_KEY_ORDER`] parameter takes, which no PHP# name can be.
+pub(crate) const KEY_ORDER_SLOT: &[u8] = b"key#order";
 
 /// A standard library method's body, lowered, with a slot where it reads its receiver or a parameter.
 #[derive(Debug, Clone)]
@@ -51,6 +75,18 @@ pub struct InlineForm {
     /// Whether the form reads every slot in declaration order, the receiver first, before its first call, so the
     /// values run in the order the call runs them.
     in_order: bool,
+    /// The node the type arguments of the collection the inlined call gives replace, [`RESULT_TYPE_SLOT`].
+    result_type: Option<u32>,
+    /// The node the `operator <=>` of the keys the inlined call orders by replaces, [`KEY_ORDER_SLOT`].
+    key_order: Option<u32>,
+}
+
+/// The value an inline form's slot takes.
+pub(super) enum InlineReceiver<'value, 'ast> {
+    /// A value the form reads where its slot is.
+    Expression(&'value Expression<'ast>),
+    /// A place already lowered, which reading runs nothing, as the place a `ref` receiver passes.
+    Place(u32),
 }
 
 impl InlineForm {
@@ -144,6 +180,7 @@ pub fn inline_forms(checked: &CheckedProgram<'_>) -> Vec<(Vec<u8>, InlineForm)> 
                                     property.variable.name,
                                     &[receiver],
                                     Body::Expression(property.body.expression),
+                                    true,
                                 ),
                             ),
                             _ => unreachable!("semantics refuses the extension member `{member}`"),
@@ -178,15 +215,17 @@ impl Lowering<'_, '_> {
     /// The form of `class`'s method `method`, when the inlining rule takes it. A method an extension adds takes its
     /// `receiver` first.
     ///
-    /// The body is one expression, or, for an `extern` method, the call of its native function.
+    /// The body is one expression, or, for an `extern` method, the call of its native function. A `void` method's
+    /// expression body is a call, whose value no caller reads. A constructor, which declares no return type, has none.
     fn method_form(
         self,
         class: &[u8],
         method: &Method,
         receiver: Option<&FunctionLikeParameter>,
     ) -> Option<InlineForm> {
+        let is_void = method.return_type_hint.as_ref().is_some_and(|hint| matches!(hint.hint, Hint::Void(_)));
         let body = match &method.body {
-            MethodBody::Expression(body) if method.returns_value() => Body::Expression(body.expression),
+            MethodBody::Expression(body) if method.returns_value() || is_void => Body::Expression(body.expression),
             MethodBody::Concrete(block) => {
                 let mut statements = block.statements.iter();
                 match (statements.next(), statements.next()) {
@@ -205,23 +244,29 @@ impl Lowering<'_, '_> {
         let parameters: Vec<&FunctionLikeParameter> =
             receiver.into_iter().chain(&method.parameter_list.parameters).collect();
 
-        self.form(class, method.name.value, &parameters, body)
+        self.form(class, method.name.value, &parameters, body, receiver.is_some())
     }
 
-    /// The form of `class`'s member `name`, which takes `parameters` and runs `body`, lowered into this empty lowering,
-    /// when the inlining rule takes it: the body's steps are ones the rule takes.
+    /// The form of `class`'s member `name`, which takes `parameters`, the receiver first for an `extension` member, and
+    /// runs `body`, lowered into this empty lowering, when the inlining rule takes it: the body's steps are ones the
+    /// rule takes.
     fn form(
         mut self,
         class: &[u8],
         name: &[u8],
         parameters: &[&FunctionLikeParameter],
         body: Body,
+        extension: bool,
     ) -> Option<InlineForm> {
         // A form runs without the method's statements before its body, which make each `Map` and `Set` a parameter
-        // holds the object.
-        if parameters.iter().any(|parameter| parameter.is_variadic() || self.crossing_type(parameter).is_some()) {
+        // holds the object. An extension's receiver needs none: a PHP# caller's is the object already, and the call
+        // crosses one plain PHP gives, as a method call's receiver.
+        if parameters.iter().enumerate().any(|(index, parameter)| {
+            parameter.is_variadic() || (self.crossing_type(parameter).is_some() && !(extension && index == 0))
+        }) {
             return None;
         }
+        self.forming = true;
 
         let receiver = match self.types.member_declaration(class, name).kind {
             DeclarationKind::Method { overridable: false } => true,
@@ -262,21 +307,37 @@ impl Lowering<'_, '_> {
             Body::Native(method) => (self.native_call(method, class), true),
         };
         let mut slots = vec![NULL; names.len()];
+        let (mut result_type, mut key_order) = (None, None);
         for (index, node) in self.nodes.iter().enumerate() {
             if node.kind == SHARP_AST_VAR {
                 let name = self.nodes[self.children[node.first_child as usize] as usize].text;
                 let name = &self.texts[name.offset as usize..(name.offset + name.len) as usize];
-                // A body whose lowering holds a value in a variable of its own, as a plain PHP `List` renumbered
-                // where it arrives does, runs as a call, since a form reads only its slots.
-                let slot = names.iter().position(|slot| *slot == name)?;
-                slots[slot] = index as u32;
+                match name {
+                    RESULT_TYPE_SLOT => result_type = Some(index as u32),
+                    KEY_ORDER_SLOT => key_order = Some(index as u32),
+                    // A body whose lowering holds a value in a variable of its own, as a plain PHP `List` renumbered
+                    // where it arrives does, runs as a call, since a form reads only its slots.
+                    _ => {
+                        let slot = names.iter().position(|slot| *slot == name)?;
+                        slots[slot] = index as u32;
+                    }
+                }
             }
         }
         for node in &mut self.nodes {
             node.line = 0;
         }
 
-        Some(InlineForm { nodes: self.nodes, children: self.children, texts: self.texts, root, slots, in_order })
+        Some(InlineForm {
+            nodes: self.nodes,
+            children: self.children,
+            texts: self.texts,
+            root,
+            slots,
+            in_order,
+            result_type,
+            key_order,
+        })
     }
 
     /// Appends what `expression` runs to `steps`, and whether the inlining rule takes all of it: a literal, a read of
@@ -303,6 +364,15 @@ impl Lowering<'_, '_> {
                 self.argument_steps(&call.argument_list, names, steps) && self.call_step(steps)
             }
             Expression::Call(Call::Method(call)) => self.method_call_steps(expression, call, names, steps),
+            // `!`, `==` and `!=` run what their operands run, as `isEmpty()`'s `global.count(items) == 0` does.
+            Expression::UnaryPrefix(UnaryPrefix { operator: UnaryPrefixOperator::Not(_), operand }) => {
+                self.steps(operand, names, steps)
+            }
+            Expression::Binary(Binary {
+                lhs,
+                operator: BinaryOperator::Equal(_) | BinaryOperator::NotEqual(_),
+                rhs,
+            }) => self.steps(lhs, names, steps) && self.steps(rhs, names, steps),
             _ => false,
         }
     }
@@ -367,20 +437,31 @@ impl Lowering<'_, '_> {
         };
         let declaration = self.types.call_target(expression);
 
-        self.inlined(&declaration, receiver, Some(&call.argument_list), self.line(call))
+        self.inlined(
+            expression,
+            &declaration,
+            receiver.map(InlineReceiver::Expression),
+            Some(&call.argument_list),
+            None,
+        )
     }
 
-    /// The call of `declaration` on `receiver`, its first slot, with `arguments`, as the method's inline form on
-    /// `line`, under the rule [`Self::inlined_call`] states.
+    /// The call `call` of `declaration` on `receiver`, its first slot, with `arguments`, as the method's inline form on
+    /// the call's line, under the rule [`Self::inlined_call`] states. A form that calls an engine function whose
+    /// parameter takes what the call gives, [`TAKES_RESULT_TYPE`] or [`TAKES_KEY_ORDER`], gets it from `call`. Each
+    /// argument goes in as an element of the type `element` does, where the receiver is a collection plain PHP declares.
     pub(super) fn inlined(
         &mut self,
+        call: &Expression,
         declaration: &Declaration,
-        receiver: Option<&Expression>,
+        receiver: Option<InlineReceiver>,
         arguments: Option<&ArgumentList>,
-        line: u32,
+        element: Option<&TUnion>,
     ) -> Option<u32> {
         let form = self.types.inline_form(declaration)?;
-        let mut values: Vec<&Expression> = receiver.into_iter().collect();
+        let line = self.line(call);
+        let receivers = usize::from(receiver.is_some());
+        let mut values: Vec<InlineReceiver> = receiver.into_iter().collect();
         for argument in arguments.into_iter().flat_map(|list| list.arguments.iter()) {
             let Argument::Positional(argument) = argument else {
                 return None;
@@ -389,19 +470,76 @@ impl Lowering<'_, '_> {
                 return None;
             }
 
-            values.push(argument.value);
+            values.push(InlineReceiver::Expression(argument.value));
         }
-        if values.len() != form.slots.len() || !(form.in_order || values.iter().all(|value| self.is_pure(value))) {
+        // A place is lowered already, and reading it runs nothing.
+        let runs_code =
+            |value: &InlineReceiver| matches!(value, InlineReceiver::Expression(value) if !self.is_pure(value));
+        if values.len() != form.slots.len() || (!form.in_order && values.iter().any(runs_code)) {
             return None;
         }
 
-        let values: Vec<u32> = values.into_iter().map(|value| self.expression(value)).collect();
+        let mut values: Vec<u32> = values
+            .into_iter()
+            .enumerate()
+            .map(|(position, value)| match value {
+                InlineReceiver::Expression(value) if position >= receivers => self.member_argument(value, element),
+                InlineReceiver::Expression(value) => self.expression(value),
+                InlineReceiver::Place(place) => place,
+            })
+            .collect();
+        let result_type = form.result_type.map(|_| self.result_type_argument(call, line));
+        let key_order = form.key_order.map(|_| self.key_order_argument(call, line));
+        values.extend(result_type.into_iter().chain(key_order));
+
+        Some(self.copied(declaration, form, &values, line))
+    }
+
+    /// The member `declaration` an operation runs, as `list[i] = v` runs a `List`'s `set`, with `values` lowered
+    /// already in its slots, in order, as the member's inline form on `line`. None when the member has no form, or one
+    /// that reads its slots out of order or takes what a call gives.
+    pub(super) fn inlined_operation(&mut self, declaration: &Declaration, values: &[u32], line: u32) -> Option<u32> {
+        let form = self.types.inline_form(declaration)?;
+        if values.len() != form.slots.len() || !form.in_order || form.result_type.is_some() || form.key_order.is_some()
+        {
+            return None;
+        }
+
+        Some(self.copied(declaration, form, values, line))
+    }
+
+    /// `form`, the inline form of `declaration`, with `values` in its slots on `line`, which the unit names among the
+    /// forms it inlines.
+    fn copied(&mut self, declaration: &Declaration, form: &InlineForm, values: &[u32], line: u32) -> u32 {
         self.inlined.push(Read {
             name: key(declaration.class.as_bytes(), declaration.name.as_bytes()),
             fingerprint: form.fingerprint(),
         });
 
-        Some(self.copy(form, form.root, &values, line))
+        self.copy(form, form.root, values, line)
+    }
+
+    /// The type arguments of the `Map` or the `Set` `call` gives, as the engine function's [`TAKES_RESULT_TYPE`]
+    /// parameter takes them.
+    pub(super) fn result_type_argument(&mut self, call: &Expression, line: u32) -> u32 {
+        let Some(text) = self.table_type_arguments(self.types.expression_type(call)) else {
+            unreachable!("the checker refuses a type argument PHP# can't write, as `never` of `map(x => throw …)`");
+        };
+
+        self.type_text(line, &text)
+    }
+
+    /// The `operator <=>` the checker chose for the keys `call` orders by, spec section 19, as the engine function's
+    /// [`TAKES_KEY_ORDER`] parameter takes it: its first-class callable, or null for keys of a type that declares none.
+    pub(super) fn key_order_argument(&mut self, call: &Expression, line: u32) -> u32 {
+        match self.types.sorting_operator(call).zip(php_operator_name(&BinaryOperator::Spaceship(Span::zero()), 2)) {
+            Some((owner, name)) => {
+                let callable = self.node(SHARP_AST_CALLABLE_CONVERT, 0, line, &[]);
+
+                self.operator_method(line, owner, name, callable)
+            }
+            None => self.zval(line, sharp_value::SHARP_NULL, |_| {}),
+        }
     }
 
     /// Whether reading `expression` runs nothing: a literal, a name, a plain PHP constant read through its namespace, a
@@ -422,13 +560,21 @@ impl Lowering<'_, '_> {
         }
     }
 
-    /// `form`'s node `node` and its children, on `line`, with each slot replaced by its value in `values`.
+    /// `form`'s node `node` and its children, on `line`, with each slot replaced by its value in `values`, followed by
+    /// the value of its result type's slot and then of its key order's, as the form has them.
     fn copy(&mut self, form: &InlineForm, node: u32, values: &[u32], line: u32) -> u32 {
         if node == NULL {
             return NULL;
         }
         if let Some(slot) = form.slots.iter().position(|&slot| slot == node) {
             return values[slot];
+        }
+        let result_type = form.slots.len();
+        if form.result_type == Some(node) {
+            return values[result_type];
+        }
+        if form.key_order == Some(node) {
+            return values[result_type + usize::from(form.result_type.is_some())];
         }
 
         let source = form.nodes[node as usize];

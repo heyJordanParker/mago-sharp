@@ -2535,6 +2535,13 @@ where
         if key_type.types.iter().any(|atomic| matches!(atomic, TAtomic::Reference(TReference::Symbol { .. }))) {
             continue;
         }
+        // The standard library's generic members of a `List` key a `Map` or fill a `Set` with a type parameter, which
+        // each call checks with the type argument it fixes, as `lines.toSet()` on a `List<Line>`.
+        if context.source_file.is_standard_library
+            && key_type.types.iter().all(|atomic| matches!(atomic, TAtomic::GenericParameter(_)))
+        {
+            continue;
+        }
 
         let key_id = display_sharp_type(context, key_type);
         let error = collection_key_error(key_id.as_str(), in_set, span);

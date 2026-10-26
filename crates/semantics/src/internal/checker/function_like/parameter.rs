@@ -58,7 +58,8 @@ pub fn check_parameter_list(
                 | Modifier::Extern(_)
                 | Modifier::Lazy(_)
                 | Modifier::Internal(_)
-                | Modifier::Foreign(_) => {}
+                | Modifier::Foreign(_)
+                | Modifier::Ref(_) => {}
                 Modifier::Static(keyword) | Modifier::Final(keyword) | Modifier::Abstract(keyword) => {
                     let kw = BytesDisplay(keyword.value);
                     context.report(

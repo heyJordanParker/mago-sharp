@@ -18,6 +18,7 @@ use mago_analyzer::settings::Settings;
 use mago_codex::populator::populate_codebase;
 use mago_codex::scanner::scan_program;
 use mago_database::file::File;
+use mago_names::resolver::ChangingMembers;
 use mago_names::resolver::NameResolver;
 use mago_names::resolver::NamespaceClasses;
 use mago_php_version::PHPVersion;
@@ -44,7 +45,7 @@ pub mod sharp_files;
 mod sharp_words;
 
 #[path = "../../../../tests/support/effect_classes.rs"]
-mod effect_classes;
+pub mod effect_classes;
 
 /// `Lib\Model`, a plain PHP parent whose accessors read and write an attribute by name, as Eloquent's do.
 pub const MODEL: (&str, &str) = (
@@ -99,26 +100,41 @@ const STANDARD_LIBRARY: &str = "vendor/heyjordanparker/php-sharp-composer/";
 pub static PRELUDE: LazyLock<Prelude> = LazyLock::new(Prelude::build);
 static PLUGIN_REGISTRY: LazyLock<PluginRegistry> = LazyLock::new(PluginRegistry::with_library_providers);
 
+/// The inline forms of the members of a `List`, which every project's lowering inlines, as `mago compile` does.
+static LIST_MEMBER_FORMS: LazyLock<InlineForms> = LazyLock::new(|| forms_of(&[effect_classes::LIST_MEMBERS]));
+
 /// Parses `code` as the PHP# file at `path`, runs the semantic checks, scans it with the prelude, the standard
 /// library's effect classes and the `library` files, each a path and its code, analyzes it and passes the result to
-/// `check`. Returns what `then` returns for the
-/// checked program, or the refusal as `line:column parse error: message` or `line:column compile error: message` lines.
+/// `check`, inlining the members of a `List`. Returns what `then` returns for the checked program, or the refusal as
+/// `line:column parse error: message` or `line:column compile error: message` lines.
 pub fn checked<R>(
     path: &str,
     code: &str,
     library: &[(&str, &str)],
     then: impl FnOnce(&CheckedProgram<'_>) -> R,
 ) -> Result<R, Vec<String>> {
-    checked_inlining(path, code, library, &InlineForms::default(), then)
+    checked_inlining(path, code, library, &LIST_MEMBER_FORMS, then)
 }
 
 /// The inline forms of the standard library files in `library`, each checked alone first, as the orchestrator lowers
-/// the library before the files that call it.
+/// the library before the files that call it, and with the members of a `List`.
 pub fn library_forms(library: &[(&str, &str)]) -> InlineForms {
+    let with_list_members: Vec<(&str, &str)> = library
+        .iter()
+        .copied()
+        .chain(std::iter::once(effect_classes::LIST_MEMBERS).filter(|members| !library.contains(members)))
+        .collect();
+
+    forms_of(&with_list_members)
+}
+
+/// The inline forms of the standard library files in `library`, each checked alone first.
+fn forms_of(library: &[(&str, &str)]) -> InlineForms {
     library
         .iter()
         .flat_map(|(path, code)| {
-            checked(path, code, &[], inline_forms).unwrap_or_else(|refusal| panic!("{path} is checked: {refusal:?}"))
+            checked_inlining(path, code, &[], &InlineForms::default(), inline_forms)
+                .unwrap_or_else(|refusal| panic!("{path} is checked: {refusal:?}"))
         })
         .collect()
 }
@@ -148,9 +164,11 @@ pub fn checked_file<R>(
     let Prelude { mut metadata, mut symbol_references, .. } = PRELUDE.clone();
     let settings = Settings::default();
     let arena = LocalArena::new();
+    // A standard library file checked as `file` is not its own library.
     let library: Vec<File> = library
         .iter()
         .chain(&effect_classes::EFFECT_CLASSES)
+        .filter(|(path, _)| path.as_bytes() != &*file.name)
         .map(|(path, code)| {
             let mut library_file =
                 File::ephemeral(Cow::Owned(path.as_bytes().to_vec()), Cow::Owned(code.as_bytes().to_vec()));
@@ -177,22 +195,35 @@ pub fn checked_file<R>(
     let program = parse_file_with_dialect(&arena, file, Dialect::Sharp, ParserSettings::default());
 
     // A class-like's name never depends on how names resolve, so a first scan finds each class-like that wins over a
-    // default class-like in its namespace, as `mago compile` finds them across the project's files.
-    let namespace_classes =
-        NamespaceClasses::new(library.iter().chain([&(file, program)]).flat_map(|(file, program)| {
+    // default class-like in its namespace, and each member that changes its receiver, as `mago compile` finds them
+    // across the project's files.
+    let scanned: Vec<_> = library
+        .iter()
+        .chain([&(file, program)])
+        .map(|(file, program)| {
             let names = NameResolver::new(&arena).resolve(program);
             scan_program(&arena, file, program, &names, settings.version)
-                .class_likes
-                .into_values()
-                .map(|class_like| class_like.original_name)
-        }));
+        })
+        .collect();
+    let namespace_classes = NamespaceClasses::new(
+        scanned.iter().flat_map(|scan| scan.class_likes.values().map(|class_like| class_like.original_name)),
+    );
+    let changing_members = ChangingMembers::new(scanned.iter().flat_map(|scan| {
+        scan.function_likes
+            .values()
+            .filter(|member| {
+                member.flags.is_extension_method()
+                    && member.parameters.first().is_some_and(|receiver| receiver.flags.is_by_reference())
+            })
+            .map(|member| member.original_name)
+    }));
     for (library_file, library_program) in &library {
-        let names = NameResolver::new(&arena).resolve_in(library_program, &namespace_classes);
+        let names = NameResolver::new(&arena).resolve_in(library_program, &namespace_classes, &changing_members);
         metadata.extend(scan_program(&arena, library_file, library_program, &names, settings.version));
     }
 
-    let names = NameResolver::new(&arena).resolve_in(program, &namespace_classes);
-    let semantic_issues = SemanticsChecker::new(PHPVersion::PHP85).check(file, program, &names);
+    let names = NameResolver::new(&arena).resolve_in(program, &namespace_classes, &changing_members);
+    let semantic_issues = SemanticsChecker::new(PHPVersion::ENGINE).check(file, program, &names);
 
     metadata.extend(scan_program(&arena, file, program, &names, settings.version));
     populate_codebase(&mut metadata, &mut symbol_references, WordSet::default(), HashSet::default());

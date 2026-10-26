@@ -1,7 +1,7 @@
-//! The standard library's effect classes, spec section 29, the types their members take and return, and the library
-//! classes their code calls, each as the path a project reads it from in `vendor/` and its code from
-//! `sharp/composer/library/`. Every project holds them, so the tests that check `.sharp` files include this module and
-//! add the files to every project they build.
+//! The standard library's effect classes, spec section 29, the types their members take and return, the library
+//! classes their code calls, and the members of a `List`, spec section 12, each as the path a project reads it from in
+//! `vendor/` and its code from `sharp/composer/library/`. Every project holds them, so the tests that check `.sharp`
+//! files include this module and add the files to every project they build.
 
 /// A file of the standard library at `path` under `sharp/composer/library/`, named as a project reads it from
 /// `vendor/`.
@@ -14,7 +14,11 @@ macro_rules! library_file {
     };
 }
 
-pub const EFFECT_CLASSES: [(&str, &str); 27] = [
+/// The members of a `List`, which every collection call of a project reaches.
+pub const LIST_MEMBERS: (&str, &str) = library_file!("Sharp/ListMembers.sharp");
+
+pub const EFFECT_CLASSES: [(&str, &str); 28] = [
+    LIST_MEMBERS,
     library_file!("Sharp/System/Environment.sharp"),
     library_file!("Sharp/Time/Clock.sharp"),
     library_file!("Sharp/Random.sharp"),

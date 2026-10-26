@@ -555,7 +555,7 @@ fn compile_treats_the_repository_of_the_standard_library_as_the_library() {
     let printed = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
 
     assert_eq!(output.status.code(), Some(1), "{printed}");
-    assert!(printed.contains("Compiled 31 PHP# files into .sharp/. 1 PHP# file was refused"), "{printed}");
+    assert!(printed.contains("Compiled 32 PHP# files into .sharp/. 1 PHP# file was refused"), "{printed}");
     assert!(root.join(".sharp/library/Sharp/Text/StringMembers.sharpc").is_file(), "{printed}");
     assert!(root.join(".sharp/library/Sharp/System/Environment.sharpc").is_file(), "{printed}");
     let title = std::fs::read(root.join(".sharp/example/App/Title.sharpc")).unwrap();
@@ -716,6 +716,48 @@ fn analyze_finds_no_issues_in_the_repository_of_the_standard_library() {
 
     assert!(output.status.success(), "{stdout}{stderr}");
     assert!(stderr.contains("No issues found."), "{stdout}{stderr}");
+}
+
+/// The standard library runs only on the PHP# engine, so it is checked against the engine's PHP 8.5 in a repository
+/// that targets PHP 8.4: `List.last` calls PHP 8.5's `array_last`. Another package's plain PHP in the repository is
+/// still checked against the version it targets, so its call of `array_last` is refused.
+#[test]
+fn only_the_standard_library_is_checked_against_the_engine_s_php_version() {
+    let directory = tempfile::tempdir().unwrap();
+    write(directory.path(), "mago.toml", "php-version = \"8.4\"\n\n[source]\npaths = [\"library\", \"example\"]\n");
+    write_library(directory.path());
+    write(directory.path(), "example/composer.json", "{\n    \"name\": \"acme/example\"\n}\n");
+    write(
+        directory.path(),
+        "example/last.php",
+        "<?php\n\nfunction last_of(array $items): mixed\n{\n    return array_last($items);\n}\n",
+    );
+
+    let output = run(directory.path(), "analyze", &["--reporting-format", "emacs"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let unavailable: Vec<&str> = stdout.lines().filter(|line| line.contains("unavailable-function")).collect();
+
+    assert_eq!(unavailable.len(), 1, "{stdout}");
+    assert!(unavailable[0].starts_with("example/last.php:5:12:"), "{stdout}");
+}
+
+/// `list[i] = v` runs the standard library's `set` of a `List`, so a project without the library is refused it, as it
+/// is refused every other member of a `List`, and nothing is left for the lowering to run.
+#[test]
+fn a_list_index_write_without_the_standard_library_is_refused() {
+    let directory = workspace(
+        "namespace Demo;\n\nclass Report\n{\n    public static void reset(List<int> sizes)\n    {\n        sizes[0] = 1;\n        sizes[1] += 2;\n        ++sizes[2];\n    }\n}\n",
+    );
+
+    let output = run(directory.path(), "analyze", &["--reporting-format", "emacs"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let refused: Vec<&str> = stdout.lines().filter(|line| line.contains("non-existent-method")).collect();
+
+    assert_eq!(refused.len(), 3, "{stdout}");
+    for (line, refusal) in refused.iter().enumerate() {
+        assert!(refusal.starts_with(&format!("src/Demo/Report.sharp:{}:", 7 + line)), "{stdout}");
+        assert!(refusal.contains("`set`"), "{stdout}");
+    }
 }
 
 /// `mago analyze` reports nothing in vendored files, so another package's `extern` method under `Sharp` gets no
@@ -1531,12 +1573,13 @@ fn compile_refuses_a_file_whose_law_calls_plain_php_with_an_effect() {
 }
 
 /// A `set` that empties its `List` with `field = []` and adds to it again, as php-sharp's `Accessors.sharp` does,
-/// compiles: the add is the `List` method the checker checked.
+/// compiles: the add is the `List` member the checker checked, from the standard library the project installs.
 #[test]
 fn compile_writes_a_list_property_whose_set_empties_and_refills_it() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
-    write(root, "mago.toml", "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\n");
+    write(root, "mago.toml", "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n");
+    write_library(&root.join("vendor/heyjordanparker/php-sharp-composer"));
     write(
         root,
         "app/Store/Product.sharp",

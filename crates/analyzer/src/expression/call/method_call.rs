@@ -11,20 +11,16 @@ use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::ttype::add_optional_union_type;
 use mago_codex::ttype::atomic::TAtomic;
-use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::object::TObject;
-use mago_codex::ttype::comparator::ComparisonResult;
-use mago_codex::ttype::comparator::union_comparator;
 use mago_codex::ttype::expander::StaticClassType;
-use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_never;
 use mago_codex::ttype::template::TemplateResult;
 use mago_codex::ttype::union::TUnion;
-use mago_names::INLINED;
 use mago_names::binding::Binding;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
+use mago_reporting::IssueCollection;
 use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::Access;
@@ -53,7 +49,6 @@ use crate::expression::array_access::check_change_through_index;
 use crate::expression::assignment::PropertyWriteKind;
 use crate::expression::assignment::property_assignment;
 use crate::expression::assignment::static_property_assignment;
-use crate::expression::binary::comparison::check_element_equality;
 use crate::expression::call::analyze_extension_access;
 use crate::expression::call::analyze_invocation_targets;
 use crate::expression::call::function_call::resolve_callable_targets;
@@ -396,24 +391,81 @@ where
         );
     }
 
-    let refused_on_object = context.dialect.is_sharp()
-        && method_resolution.resolved_methods.iter().any(|method| {
-            context
-                .codebase
-                .get_method(method.classname.as_bytes(), method.method_identifier.get_method_name().as_bytes())
-                .is_some_and(|metadata| metadata.has_attribute(INLINED.as_bytes()))
-        })
-        && report_collection_method_on_object(context, artifacts, object, selector);
-    let searches_list = context.dialect.is_sharp()
-        && !refused_on_object
-        && method_resolution.resolved_methods.iter().any(|method| {
-            let name = method.method_identifier.get_method_name();
+    // The receiver's `List` parts run the standard library's member of a `List`, analyzed on those parts, and its other
+    // collections run their own methods below, spec section 12, as `held.contains("tea")` on a `List<string>|Set<string>`
+    // runs the member of the kind the value holds.
+    let mut list_copy = None;
+    let list_result = match method_resolution.list_member.take() {
+        // A receiver that is only a `List`, or null, runs the member alone, as any extension's.
+        Some((member, list))
+            if method_resolution.resolved_methods.is_empty()
+                && method_resolution.unresolved_methods.is_empty()
+                && method_resolution.called_properties.is_empty()
+                && method_resolution.undocumented_methods.is_empty() =>
+        {
+            let copy = if changes_receiver(context, &member) {
+                check_changed_collection(context, block_context, artifacts, object)
+            } else {
+                Ok(None)
+            };
+            report_receiver_issues(context, receiver_issues, &copy);
+            copy?;
+            // `?.` skips the null the receiver may hold, as on any extension's receiver, and a null an earlier `?.` of
+            // the chain gives makes the call's value null too.
+            let list = match artifacts.get_expression_type(object) {
+                Some(written) if written.is_nullable() => {
+                    let mut list = list.as_nullable();
+                    list.set_nullsafe_null(written.has_nullsafe_null());
+                    list
+                }
+                _ => list,
+            };
 
-            sharp_collection_name(&TObject::new_named(method.classname)) == Some("List")
-                && ["contains", "indexOf", "remove"]
-                    .iter()
-                    .any(|search| search.as_bytes().eq_ignore_ascii_case(name.as_bytes()))
-        });
+            return analyze_rest_of_chain(
+                context,
+                block_context,
+                artifacts,
+                object,
+                is_null_safe,
+                |context, block_context, artifacts| {
+                    with_receiver_type(artifacts, object, list, |artifacts| {
+                        analyze_extension_access(
+                            context,
+                            block_context,
+                            artifacts,
+                            member,
+                            object,
+                            type_arguments,
+                            Some(argument_list),
+                            is_null_safe,
+                            span,
+                        )
+                    })
+                },
+            );
+        }
+        Some((member, list)) => {
+            if changes_receiver(context, &member) {
+                list_copy = Some(check_changed_collection(context, block_context, artifacts, object));
+            }
+            with_receiver_type(artifacts, object, list, |artifacts| {
+                analyze_extension_access(
+                    context,
+                    block_context,
+                    artifacts,
+                    member,
+                    object,
+                    type_arguments,
+                    Some(argument_list),
+                    is_null_safe,
+                    span,
+                )
+            })?;
+
+            artifacts.get_rc_expression_type(&span).cloned()
+        }
+        None => None,
+    };
 
     let undocumented_template_result =
         (!method_resolution.undocumented_methods.is_empty()).then(|| method_resolution.template_result.clone());
@@ -464,20 +516,15 @@ where
         });
     }
 
-    let copy = if context.dialect.is_sharp()
-        && changes_collection
-        && !method_resolution.has_invalid_target
-        && !refused_on_object
-    {
+    // The receiver's `List` parts checked its place already, as a place for every part of it.
+    let copy = if let Some(list_copy) = list_copy {
+        list_copy
+    } else if context.dialect.is_sharp() && changes_collection && !method_resolution.has_invalid_target {
         check_changed_collection(context, block_context, artifacts, object)
     } else {
         Ok(None)
     };
-    let copy_span = copy.as_ref().ok().copied().flatten();
-    context.collector.extend(receiver_issues.into_iter().filter(|issue| {
-        issue.code.as_deref() != Some(IssueCode::PossiblyUndefinedArrayIndex.as_str())
-            || copy_span.is_none_or(|copy| issue.primary_span() != Some(copy))
-    }));
+    report_receiver_issues(context, receiver_issues, &copy);
     copy?;
 
     if !method_resolution.unresolved_methods.is_empty() {
@@ -569,37 +616,6 @@ where
         check_stored_in_static(context, artifacts, object, argument_list);
     }
 
-    // A search compares each element with the value as `==` does, so it runs once the value's type is known. A value
-    // that is no element is refused by its argument check. On a value that may also be a `Map` or a `Set`, only the
-    // `List`'s elements are searched.
-    if searches_list
-        && let ClassLikeMemberSelector::Identifier(method) = selector
-        && let Some(value) = argument_list.arguments.first().map(Argument::value)
-        && let Some(value_type) = artifacts.get_expression_type(value)
-        && let Some(element_type) = artifacts.get_expression_type(object).and_then(|list_type| {
-            list_type.types.iter().fold(None, |element_type, atomic| match atomic {
-                TAtomic::Array(list @ TArray::List(_)) => Some(add_optional_union_type(
-                    get_array_parameters(list, context.codebase).1,
-                    element_type.as_ref(),
-                    context.codebase,
-                )),
-                _ => element_type,
-            })
-        })
-        && union_comparator::is_contained_by(
-            context.codebase,
-            value_type,
-            &element_type,
-            false,
-            false,
-            false,
-            &mut ComparisonResult::new(),
-        )
-    {
-        let method = String::from_utf8_lossy(method.value);
-        check_element_equality(context, &method, object, value, &element_type, value_type, is_null_safe);
-    }
-
     if !method_resolution.undocumented_methods.is_empty() {
         analyze_rest_of_chain(
             context,
@@ -638,15 +654,20 @@ where
             artifacts.set_expression_type(&span, TUnion::from_atomic(TAtomic::Error));
         }
     }
+    if let Some(list_result) = list_result {
+        let result =
+            add_optional_union_type((*list_result).clone(), artifacts.get_expression_type(&span), context.codebase);
+        artifacts.set_expression_type(&span, result);
+    }
 
     Ok(())
 }
 
-/// Reports a collection method marked [`INLINED`] called on `object` when its value can also be an object, as
-/// `List<int>|Box`, as a method call on a value that is no object is reported. The bridge lowers such a call to PHP
-/// on the array, so an object the value holds would never reach its own method of that name. Returns whether it
-/// reported the call.
-fn report_collection_method_on_object<A>(
+/// Reports a member of a `List` called on `object` when its value can also be an object, as `List<int>|Box`, as a
+/// method call on a value that is no object is reported. The bridge lowers such a call to the standard library's
+/// function on the array, so an object the value holds would never reach its own method of that name. Returns whether
+/// it reported the call.
+pub(crate) fn report_collection_method_on_object<A>(
     context: &mut Context<'_, '_, A>,
     artifacts: &AnalysisArtifacts,
     object: &Expression<'_>,
@@ -684,9 +705,55 @@ where
     true
 }
 
+/// Runs `analyze` with the receiver `object` typed `receiver_type`, as an extension member's call takes it, and types
+/// `object` as before afterwards.
+fn with_receiver_type<T>(
+    artifacts: &mut AnalysisArtifacts,
+    object: &Expression<'_>,
+    receiver_type: TUnion,
+    analyze: impl FnOnce(&mut AnalysisArtifacts) -> T,
+) -> T {
+    let Some(written_type) = artifacts.get_rc_expression_type(object).cloned() else {
+        unreachable!("the call's receiver is analyzed before its member, so it has its type");
+    };
+    artifacts.set_expression_type(object, receiver_type);
+    let analyzed = analyze(artifacts);
+    artifacts.set_rc_expression_type(object, written_type);
+
+    analyzed
+}
+
+/// Reports the issues the receiver's analysis found, but the read of the `Map` index at `copy`, which the change through
+/// it was refused at once, as a change to a copy, spec section 12.
+fn report_receiver_issues<A>(
+    context: &mut Context<'_, '_, A>,
+    receiver_issues: IssueCollection,
+    copy: &Result<Option<Span>, AnalysisError>,
+) where
+    A: Arena,
+{
+    let copy_span = copy.as_ref().ok().copied().flatten();
+    context.collector.extend(receiver_issues.into_iter().filter(|issue| {
+        issue.code.as_deref() != Some(IssueCode::PossiblyUndefinedArrayIndex.as_str())
+            || copy_span.is_none_or(|copy| issue.primary_span() != Some(copy))
+    }));
+}
+
+/// Whether the extension member `member` takes its receiver by `ref`, spec section 26, and so changes it.
+pub(super) fn changes_receiver<A>(context: &Context<'_, '_, A>, member: &MethodIdentifier) -> bool
+where
+    A: Arena,
+{
+    context
+        .codebase
+        .get_method_by_id(member)
+        .and_then(|metadata| metadata.parameters.first())
+        .is_some_and(|receiver| receiver.flags.is_by_reference())
+}
+
 /// A method that changes a static collection, as `Cache.all.add(this.store)`, stores its arguments in the static, which
 /// holds no `foreign` object, spec section 29.
-fn check_stored_in_static<A>(
+pub(super) fn check_stored_in_static<A>(
     context: &mut Context<'_, '_, A>,
     artifacts: &AnalysisArtifacts,
     collection: &Expression<'_>,

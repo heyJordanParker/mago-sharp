@@ -9,6 +9,7 @@ use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::flags::MetadataFlags;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::ttype::atomic::TAtomic;
+use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::comparator::ComparisonResult;
 use mago_codex::ttype::comparator::union_comparator;
@@ -25,6 +26,7 @@ use mago_word::ascii_lowercase_word;
 
 use crate::code::IssueCode;
 use crate::context::Context;
+use crate::expression::is_refused_type;
 use crate::invocation::TemplateInferenceViolation;
 use crate::invocation::infer_unfixed_templates;
 use crate::resolver::class_name::class_value_classes;
@@ -82,8 +84,9 @@ where
     A: Arena,
 {
     let receiver = &receiver.to_non_nullable();
-    // A receiver that is always `null` has no value left, and `never` fits every receiver.
-    if receiver.is_never() {
+    // A receiver that is always `null` has no value left, and `never` fits every receiver, as a refused value does,
+    // whose refusal stands alone.
+    if receiver.is_never() || is_refused_type(receiver) {
         return None;
     }
 
@@ -101,6 +104,15 @@ where
         .filter_map(|(_, method)| Some((*method, codebase.get_method_by_id(method)?)))
         .filter(|(_, metadata)| (!is_class_value || is_class_member(metadata)) && fits(context, receiver, metadata))
         .collect();
+    // A `List`'s member is the kind's own, which wins over any other extension, as a real member does.
+    let fitting = if fitting.iter().any(|(method, metadata)| is_collection_member(method.get_class_name(), metadata)) {
+        fitting
+            .into_iter()
+            .filter(|(method, metadata)| is_collection_member(method.get_class_name(), metadata))
+            .collect()
+    } else {
+        fitting
+    };
     let (own, others): (Vec<_>, Vec<_>) =
         fitting.iter().partition(|(method, _)| is_imported_or_in_namespace(context, method.get_class_name()));
     let (default, elsewhere): (Vec<_>, Vec<_>) = others
@@ -425,16 +437,68 @@ where
     A: Arena,
 {
     imports_by_default(&context.scope, class)
-        || class.as_bytes().get(..6).is_some_and(|root| root.eq_ignore_ascii_case(b"sharp\\"))
-            && metadata.parameters.first().and_then(|receiver| receiver.get_type_metadata()).is_some_and(|receiver| {
-                receiver.type_union.types.iter().all(|atomic| {
-                    matches!(
-                        atomic,
-                        TAtomic::Scalar(TScalar::String(_) | TScalar::Integer(_) | TScalar::Float(_))
-                            | TAtomic::Array(_)
-                    )
-                })
-            })
+        || is_standard_library_member_on(class, metadata, |atomic| {
+            matches!(
+                atomic,
+                TAtomic::Scalar(TScalar::String(_) | TScalar::Integer(_) | TScalar::Float(_)) | TAtomic::Array(_)
+            )
+        })
+}
+
+/// Whether `metadata` of the static class `class` is a member of a PHP# collection, spec section 12.
+///
+/// It is an extension method of the standard library's, under `Sharp\`, on a `List`, a `Map` or a `Set`, which the
+/// semantic checks let take its receiver by `ref`. It is that collection's own member, so a union of collections
+/// reaches it on its parts of that kind.
+#[must_use]
+pub fn is_collection_member(class: Word, metadata: &FunctionLikeMetadata) -> bool {
+    metadata.flags.is_extension_method()
+        && is_standard_library_member_on(class, metadata, |atomic| matches!(atomic, TAtomic::Array(_)))
+}
+
+/// Whether the extension member `metadata` of the static class `class` is the standard library's member of a `List`,
+/// as [`is_collection_member`] says of a collection's.
+pub(crate) fn is_list_member(class: Word, metadata: &FunctionLikeMetadata) -> bool {
+    is_standard_library_member_on(class, metadata, |atomic| matches!(atomic, TAtomic::Array(TArray::List(_))))
+}
+
+/// The standard library's member `name` of a `List`, which an operation on a List runs, as Kotlin runs an operator
+/// member: `list[i] = v` runs `set`. None when the library declares none.
+#[must_use]
+pub fn list_member<'codebase>(
+    codebase: &'codebase CodebaseMetadata,
+    name: &[u8],
+) -> Option<&'codebase MethodIdentifier> {
+    codebase.extensions.get(&ascii_lowercase_word(name))?.iter().map(|(_, method)| method).find(|method| {
+        codebase.get_method_by_id(method).is_some_and(|metadata| is_list_member(method.get_class_name(), metadata))
+    })
+}
+
+/// The class of the member `name` the standard library gives a collection of type `receiver`, which hides an
+/// extension member of that name on it, as a real member does. None when it gives none.
+pub(crate) fn collection_member_hiding<A>(context: &Context<'_, '_, A>, receiver: &TUnion, name: &[u8]) -> Option<Word>
+where
+    A: Arena,
+{
+    let codebase = context.codebase;
+
+    codebase.extensions.get(&ascii_lowercase_word(name))?.iter().find_map(|(_, method)| {
+        let metadata = codebase.get_method_by_id(method)?;
+
+        (is_collection_member(method.get_class_name(), metadata) && fits(context, receiver, metadata))
+            .then(|| method.get_class_name())
+    })
+}
+
+/// Whether the extension member `metadata` of the static class `class` is the standard library's, under `Sharp\`, on a
+/// receiver whose every part `kind` takes.
+fn is_standard_library_member_on(class: Word, metadata: &FunctionLikeMetadata, kind: fn(&TAtomic) -> bool) -> bool {
+    class.as_bytes().get(..6).is_some_and(|root| root.eq_ignore_ascii_case(b"sharp\\"))
+        && metadata
+            .parameters
+            .first()
+            .and_then(|receiver| receiver.get_type_metadata())
+            .is_some_and(|receiver| receiver.type_union.types.iter().all(kind))
 }
 
 /// Whether the extension member `metadata` is a member of `Class`, spec section 25: its receiver is a class value, as

@@ -21,6 +21,7 @@ use mago_database::DatabaseReader;
 use mago_database::ReadDatabase;
 use mago_database::file::FileId;
 use mago_database::file::FileType;
+use mago_names::resolver::ChangingMembers;
 use mago_names::resolver::NameResolver;
 use mago_names::resolver::NamespaceClasses;
 use mago_reporting::Issue;
@@ -32,6 +33,7 @@ use mago_word::WordSet;
 
 use crate::error::OrchestratorError;
 use crate::service::body_return::resolve_body_returns;
+use crate::service::incremental_analysis::receiver_changing_members;
 use crate::service::issue_reconciliation::DeferredIssueReconciler;
 use crate::service::issue_reconciliation::drop_follow_on_issues;
 
@@ -135,6 +137,10 @@ impl AnalysisService {
 
         populate_codebase(&mut self.codebase, &mut self.symbol_references, WordSet::default(), HashSet::default());
 
+        // The binder counts a call of a member that changes its receiver as a write, which the populated codebase names.
+        let changing_members = ChangingMembers::new(receiver_changing_members(&self.codebase));
+        let resolved_names =
+            NameResolver::new(&arena).resolve_in(program, &NamespaceClasses::default(), &changing_members);
         let host_files = self.database.files().filter(|file| file.file_type == FileType::Host).collect::<Vec<_>>();
         resolve_body_returns(
             &mut self.codebase,
@@ -143,6 +149,7 @@ impl AnalysisService {
             &self.settings,
             self.parser_settings,
             &NamespaceClasses::default(),
+            &changing_members,
             external_session.as_ref(),
         )?;
 

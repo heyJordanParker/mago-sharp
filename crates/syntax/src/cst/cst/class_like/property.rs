@@ -387,7 +387,7 @@ fn runs_as_code(value: &Expression<'_>) -> bool {
     let mut read = ClassMemberRead { found: false };
     walk_expression_mut(&mut read, value, &mut ());
 
-    read.found || !value.is_constant(&PHPVersion::PHP85, false)
+    read.found || !value.is_constant(&PHPVersion::ENGINE, false)
 }
 
 /// Whether `value` holds a collection literal, `[…]` or `[:]`, at any depth.
