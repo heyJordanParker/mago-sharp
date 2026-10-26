@@ -55,6 +55,13 @@ pub use crate::context::assertion::CodebasePatternNames;
 pub use crate::expression::binary::utils::chosen_operator;
 /// The engine's bridge lowers a collection's members as the analyzer resolves them, so both know them by this rule.
 pub use crate::resolver::extension::is_collection_member;
+/// The engine's bridge lowers an operation on a `List`, as `list[i] = v`, through the standard library's member this
+/// finds.
+pub use crate::resolver::extension::list_member;
+
+/// The PHP version of the PHP# engine, which the bridge lowers for and the analyzer checks the standard library
+/// against, whatever version a project's own code targets.
+pub const ENGINE_PHP_VERSION: mago_php_version::PHPVersion = mago_php_version::PHPVersion::PHP85;
 
 mod analyzable;
 mod assertion;

@@ -491,12 +491,32 @@ impl Lowering<'_, '_> {
         let result_type = form.result_type.map(|_| self.result_type_argument(call, line));
         let key_order = form.key_order.map(|_| self.key_order_argument(call, line));
         values.extend(result_type.into_iter().chain(key_order));
+
+        Some(self.copied(declaration, form, &values, line))
+    }
+
+    /// The member `declaration` an operation runs, as `list[i] = v` runs a `List`'s `set`, with `values` lowered
+    /// already in its slots, in order, as the member's inline form on `line`. None when the member has no form, or one
+    /// that reads its slots out of order or takes what a call gives.
+    pub(super) fn inlined_operation(&mut self, declaration: &Declaration, values: &[u32], line: u32) -> Option<u32> {
+        let form = self.types.inline_form(declaration)?;
+        if values.len() != form.slots.len() || !form.in_order || form.result_type.is_some() || form.key_order.is_some()
+        {
+            return None;
+        }
+
+        Some(self.copied(declaration, form, values, line))
+    }
+
+    /// `form`, the inline form of `declaration`, with `values` in its slots on `line`, which the unit names among the
+    /// forms it inlines.
+    fn copied(&mut self, declaration: &Declaration, form: &InlineForm, values: &[u32], line: u32) -> u32 {
         self.inlined.push(Read {
             name: key(declaration.class.as_bytes(), declaration.name.as_bytes()),
             fingerprint: form.fingerprint(),
         });
 
-        Some(self.copy(form, form.root, &values, line))
+        self.copy(form, form.root, values, line)
     }
 
     /// The type arguments of the `Map` or the `Set` `call` gives, as the engine function's [`TAKES_RESULT_TYPE`]

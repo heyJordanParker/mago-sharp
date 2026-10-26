@@ -741,6 +741,25 @@ fn only_the_standard_library_is_checked_against_the_engine_s_php_version() {
     assert!(unavailable[0].starts_with("example/last.php:5:12:"), "{stdout}");
 }
 
+/// `list[i] = v` runs the standard library's `set` of a `List`, so a project without the library is refused it, as it
+/// is refused every other member of a `List`, and nothing is left for the lowering to run.
+#[test]
+fn a_list_index_write_without_the_standard_library_is_refused() {
+    let directory = workspace(
+        "namespace Demo;\n\nclass Report\n{\n    public static void reset(List<int> sizes)\n    {\n        sizes[0] = 1;\n        sizes[1] += 2;\n        ++sizes[2];\n    }\n}\n",
+    );
+
+    let output = run(directory.path(), "analyze", &["--reporting-format", "emacs"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let refused: Vec<&str> = stdout.lines().filter(|line| line.contains("non-existent-method")).collect();
+
+    assert_eq!(refused.len(), 3, "{stdout}");
+    for (line, refusal) in refused.iter().enumerate() {
+        assert!(refusal.starts_with(&format!("src/Demo/Report.sharp:{}:", 7 + line)), "{stdout}");
+        assert!(refusal.contains("`set`"), "{stdout}");
+    }
+}
+
 /// `mago analyze` reports nothing in vendored files, so another package's `extern` method under `Sharp` gets no
 /// report. The engine registers no native function for it, so a call of it fails when it runs.
 #[test]

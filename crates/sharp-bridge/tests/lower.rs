@@ -8150,8 +8150,9 @@ fn a_write_into_a_map_a_hooked_property_holds_puts_it_through_the_property() {
 /// ```
 ///
 /// Spec section 12: `x[i] = v` on a `List` replaces the element at `i`, and throws `OutOfRangeException` past the end,
-/// where PHP's write would append or leave a gap. So it is the engine's `set`, which takes the list's place by
-/// reference: a local, or an element of another `List` that exists, since PHP's write to a missing one would add it.
+/// where PHP's write would append or leave a gap. So it is the standard library's `set` member, whose inline form
+/// calls the engine's `set`, which takes the list's place by reference: a local, or an element of another `List` that
+/// exists, since PHP's write to a missing one would add it.
 #[test]
 fn a_list_index_write_replaces_the_element_through_set() {
     assert_eq!(
@@ -8200,17 +8201,33 @@ fn a_list_index_write_replaces_the_element_through_set() {
     );
 }
 
+/// The index write runs the standard library's `set` member, as every member of a `List` runs its library member, so
+/// the unit names that member's form among the forms it inlines, and a change to the form reaches the write.
+#[test]
+fn a_list_index_write_runs_the_standard_library_s_set_member() {
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public void run(List<int> sizes)\n    {\n        sizes[0] = 1;\n    }\n}\n";
+    let lowered = Lowered::new(code);
+    let inlined: Vec<String> = lowered
+        .unit()
+        .expect("the source lowers")
+        .inlined()
+        .iter()
+        .map(|read| String::from_utf8_lossy(&read.name).into_owned())
+        .collect();
+
+    assert_eq!(inlined, ["sharp\\listmembers::set"]);
+}
+
 /// ```php
 /// \Sharp\Internal\set($sizes, ${'index#1'} = $this->at(), $sizes[${'index#1'}] + $extra);
 /// \Sharp\Internal\set($sizes, 0, $sizes[0] + 1);
 /// \Sharp\Internal\set($names, 0, $names[0] . "s");
-/// return \Sharp\Internal\set($sizes, 1, (${'old#1'} = $sizes[1]) - 1) ? ${'old#1'} : ${'old#1'};
+/// return \Sharp\Internal\set($sizes, 1, $sizes[1] - 1);
 /// ```
 ///
-/// `list[i] op= v`, `++list[i]` and `--list[i]` write what the operator gives on the element, through `set`, which
-/// gives the value it stores, and `+=` on a `List<string>` element joins the strings, spec section 24. An index that
-/// runs something runs once, in a hidden variable. `list[i]++` and `list[i]--` give the element before the write,
-/// which a hidden variable holds, as PHP has no expression that runs one and gives another.
+/// `list[i] op= v`, `++list[i]` and `--list[i]` write what the operator gives on the element, through `set`, and `+=`
+/// on a `List<string>` element joins the strings, spec section 24. An index that runs something runs once, in a hidden
+/// variable. `list[i]++` and `list[i]--` give the element before the write, which `set` gives, as Kotlin's does.
 #[test]
 fn a_compound_write_or_a_step_on_a_list_index_sets_what_the_operator_gives() {
     assert_eq!(
@@ -8267,26 +8284,52 @@ fn a_compound_write_or_a_step_on_a_list_index_sets_what_the_operator_gives() {
                       ZVAL 0
                     ZVAL "s"
               RETURN
+                CALL
+                  ZVAL "Sharp\\Internal\\set"
+                  ARG_LIST
+                    VAR
+                      ZVAL "sizes"
+                    ZVAL 1
+                    BINARY_OP [2]
+                      DIM
+                        VAR
+                          ZVAL "sizes"
+                        ZVAL 1
+                      ZVAL 1
+        "#}
+    );
+}
+
+/// ```php
+/// return \Sharp\Internal\set($sizes, 0, ${'stored#1'} = $extra) ? ${'stored#1'} : ${'stored#1'};
+/// ```
+///
+/// `set` gives the element it replaced, as Kotlin's does, so a write whose value code reads gives the value it stores
+/// from a hidden variable, as PHP has no expression that runs one and gives another. A write that is a statement of its
+/// own gives nothing anyone reads, so it is the call alone.
+#[test]
+fn a_list_index_write_whose_value_is_read_gives_the_value_it_stores() {
+    assert_eq!(
+        body_in("int run(List<int> sizes, int extra)", "        return sizes[0] = extra;\n", &[]),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
                 CONDITIONAL [1]
                   CALL
                     ZVAL "Sharp\\Internal\\set"
                     ARG_LIST
                       VAR
                         ZVAL "sizes"
-                      ZVAL 1
-                      BINARY_OP [2]
-                        ASSIGN
-                          VAR
-                            ZVAL "old#1"
-                          DIM
-                            VAR
-                              ZVAL "sizes"
-                            ZVAL 1
-                        ZVAL 1
+                      ZVAL 0
+                      ASSIGN
+                        VAR
+                          ZVAL "stored#1"
+                        VAR
+                          ZVAL "extra"
                   VAR
-                    ZVAL "old#1"
+                    ZVAL "stored#1"
                   VAR
-                    ZVAL "old#1"
+                    ZVAL "stored#1"
         "#}
     );
 }

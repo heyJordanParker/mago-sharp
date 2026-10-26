@@ -21,7 +21,6 @@ mago-build-id = { workspace = true }
 mago-codex = { workspace = true }
 mago-database = { workspace = true }
 mago-names = { workspace = true }
-mago-php-version = { workspace = true }
 mago-reporting = { workspace = true }
 mago-span = { workspace = true }
 mago-syntax = { workspace = true }

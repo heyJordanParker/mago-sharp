@@ -26,9 +26,9 @@ pub fn check_availability<A>(
 ) where
     A: Arena,
 {
-    // The standard library runs only on the PHP# engine, PHP 8.5, as the bridge lowers for it, whatever version the
-    // project's own code targets.
-    let version = if context.source_file.is_standard_library { PHPVersion::PHP85 } else { context.settings.version };
+    // The standard library runs only on the PHP# engine, whatever version the project's own code targets.
+    let version =
+        if context.source_file.is_standard_library { crate::ENGINE_PHP_VERSION } else { context.settings.version };
     if version_constraint.allows_version(version) {
         return;
     }

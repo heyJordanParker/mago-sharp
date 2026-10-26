@@ -46,7 +46,6 @@ use mago_names::STANDARD_ROOT_CLASSES;
 use mago_names::resolver::ChangingMembers;
 use mago_names::resolver::NameResolver;
 use mago_names::resolver::NamespaceClasses;
-use mago_php_version::PHPVersion;
 use mago_prelude::Prelude;
 use mago_reporting::Annotation;
 use mago_reporting::AnnotationKind;
@@ -447,7 +446,7 @@ fn the_binder_knows_every_changing_collection_method() {
     changing_members.sort_unstable();
     assert_eq!(
         changing_members,
-        ["add", "clear", "insert", "remove", "removeAt", "removeFirst", "removeLast"],
+        ["add", "clear", "insert", "remove", "removeAt", "removeFirst", "removeLast", "set"],
         "the members of a `List` that take it by `ref`"
     );
 
@@ -9173,7 +9172,7 @@ fn compile_errors(analyzed: (&'static str, &'static str), others: &[(&'static st
     let file = File::ephemeral(Cow::Borrowed(analyzed.0.as_bytes()), Cow::Borrowed(analyzed.1.as_bytes()));
     let program = parse_file(&arena, &file);
     let names = NameResolver::new(&arena).resolve(program);
-    let semantic_issues = SemanticsChecker::new(PHPVersion::PHP85).check(&file, program, &names);
+    let semantic_issues = SemanticsChecker::new(mago_analyzer::ENGINE_PHP_VERSION).check(&file, program, &names);
 
     semantic_issues
         .into_iter()
@@ -11551,7 +11550,8 @@ fn an_emptied_php_array_property_keeps_the_map_rules() {
 /// type, null when no element is there, `remove` gives `bool`, `keys()` gives a `List` of the key type, a backed enum
 /// included, `values()` a `List` of the value type, `toSet()` a `Set` of the element type, `flatMap` a `List` of the
 /// elements of the `Iterable` its function gives, `toList()` a `List` of the element type, a `Set`'s and a `List`'s
-/// alike, and a `Map`'s `filter` gives the `Map` it keeps. A `List` has no `get` or `set`: its index reads and writes it.
+/// alike, and a `Map`'s `filter` gives the `Map` it keeps. A `List` has no `get`: its index reads it. Its `set` is what
+/// its index write runs, as Kotlin's is.
 #[test]
 fn collection_methods_take_and_give_the_types_of_their_elements() {
     let sharp = "namespace Demo;\n\nclass Order\n{\n    public List<Line> lines { get; private set; } = [];\n    private Map<string, int> counts = [:];\n\n    public int total(Line line, List<Line> extra)\n    {\n        this.lines.add(line);\n        extra.add(line);\n        extra[0] = line;\n        this.counts.remove(\"a\");\n        let sum = (this.counts.get(\"b\") ?? 0) + (extra.getOrNull(0)?.cents ?? 0);\n        for (const [index, item] of extra.entries()) {\n            sum += index + item.cents;\n        }\n        return sum;\n    }\n\n    public void wrong(List<Line> extra, Map<string, int> counts)\n    {\n        extra.add(1);\n        extra.set(0, new Line(1));\n        counts.add(1);\n        extra.delete(0);\n        Line? got = extra.get(0);\n    }\n\n    public int read(List<int> sizes)\n    {\n        bool held = sizes.contains(2);\n        int? at = sizes.indexOf(2);\n        int last = sizes.last();\n        int index = sizes.indexOf(2);\n        bool text = sizes.contains(\"a\");\n        int other = sizes.last(1);\n        int? maybe = sizes.getOrNull(5);\n        bool notMaybe = sizes.getOrNull(5);\n        Set<int> unique = sizes.toSet();\n        List<int> notSet = sizes.toSet();\n        return (held ? 1 : 0) + (at ?? 0) + last + index + (text ? 1 : 0) + other + (maybe ?? 0) + (notMaybe ? 1 : 0) + unique.count() + notSet.count();\n    }\n\n    public int change(List<int> sizes)\n    {\n        sizes.insert(0, 1);\n        bool gone = sizes.remove(2);\n        sizes.clear();\n        sizes.insert(\"a\", 1);\n        sizes.insert(0, \"a\");\n        int removed = sizes.remove(1);\n        return removed + (gone ? 1 : 0);\n    }\n\n    public int keyed(Map<string, int> counts, Map<Status, int> tally)\n    {\n        bool had = counts.has(\"a\");\n        List<string> names = counts.keys();\n        List<Status> statuses = tally.keys();\n        Map<string, int> kept = counts.filter(c => c > 0);\n        bool gone = counts.remove(\"a\");\n        int flag = counts.has(\"a\");\n        List<int> numbered = counts.keys();\n        List<string> backing = tally.keys();\n        List<int> renumbered = counts.filter(c => c > 0);\n        int removed = counts.remove(\"a\");\n        List<int> values = counts.values();\n        List<string> notValues = counts.values();\n        return (had || gone ? 1 : 0) + names.count() + statuses.count() + kept.count() + flag + numbered.count() + backing.count() + renumbered.count() + removed + values.count() + notValues.count();\n    }\n\n    public int flat(List<List<int>> rows, Set<string> tags, Map<string, int> counts)\n    {\n        List<int> cells = rows.flatMap(r => r);\n        List<string> listed = tags.toList();\n        List<int> values = counts.values().toList();\n        List<int> copy = cells.toList();\n        List<string> notCells = rows.flatMap(r => r);\n        List<int> notIterable = rows.flatMap(r => r.count());\n        Set<int> notList = cells.toList();\n        return cells.count() + listed.count() + values.count() + copy.count() + notCells.count() + notIterable.count() + notList.count();\n    }\n}\n\nenum Status : string\n{\n    case Open = \"open\";\n}\n\nclass Line\n{\n    public Line(public int cents { get; })\n    {\n    }\n}\n";
@@ -11560,7 +11560,6 @@ fn collection_methods_take_and_give_the_types_of_their_elements() {
         issues(("src/Demo/Order.sharp", sharp), &[]),
         [
             "23:19 invalid-argument",
-            "24:15 non-existent-method",
             "25:16 non-existent-method",
             "26:15 non-existent-method",
             "27:27 non-existent-method",
@@ -12561,6 +12560,20 @@ fn a_php_caller_of_group_by_keys_the_array_by_an_array_key() {
             "15:41 template-constraint-violation",
             "15:41 invalid-argument"
         ]
+    );
+}
+
+/// A function with a parameter marked `#[TakesResultType]` makes the collection its declared array says, whatever its
+/// name: a list is a `Set` of its elements, and any other array a `Map` of its keys and values, even `array<int, T>`,
+/// which reads as a `List` elsewhere. A `Map` keyed by a type parameter takes keys `array-key` does not bound.
+#[test]
+fn a_function_that_takes_its_result_type_makes_the_collection_its_array_says() {
+    let sharp = "namespace Demo;\n\nimport Lib.Made;\nimport Lib.Status;\n\nclass Tally\n{\n    public int made(List<string> names)\n    {\n        Set<string> unique = Made.unique(names);\n        Map<int, string> indexed = Made.indexed(names);\n        Map<Status, List<string>> grouped = Made.grouped(names, name => Status.Active);\n        return unique.count() + indexed.count() + grouped.count();\n    }\n}\n";
+    let made = "<?php\n\nnamespace Lib;\n\nuse Sharp\\Internal\\TakesResultType;\n\nfinal class Made\n{\n    /**\n     * @template T\n     * @param list<T> $list\n     * @return list<T>\n     */\n    public static function unique(array $list, #[TakesResultType] ?string $type = null): array { return $list; }\n\n    /**\n     * @template T\n     * @param list<T> $list\n     * @return array<int, T>\n     */\n    public static function indexed(array $list, #[TakesResultType] ?string $type = null): array { return $list; }\n\n    /**\n     * @template T\n     * @template G of array-key\n     * @param list<T> $list\n     * @param \\Closure(T): G $key\n     * @return array<G, list<T>>\n     */\n    public static function grouped(array $list, \\Closure $key, #[TakesResultType] ?string $type = null): array { return []; }\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Tally.sharp", sharp), &[("src/Lib/Made.php", made), ("src/Lib/Status.php", STATUS)]),
+        Vec::<String>::new()
     );
 }
 

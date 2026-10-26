@@ -730,7 +730,7 @@ function insert(array &$list, int $index, mixed $value): void {}
  * @param list<T> $list
  * @param T $value
  *
- * @return T the value.
+ * @return T the element it replaced, as Kotlin's `MutableList.set` gives it.
  *
  * @throws \OutOfRangeException when `$index` is not an index of the list.
  */

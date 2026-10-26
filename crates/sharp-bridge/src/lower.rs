@@ -34,7 +34,6 @@ use mago_names::binding::php_local_name;
 use mago_names::binding::php_method_name;
 use mago_names::binding::php_operator_name;
 use mago_names::scope::php_name;
-use mago_php_version::PHPVersion;
 use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::Access;
@@ -551,6 +550,8 @@ struct Lowering<'lowering, 'arena> {
     renumbered_places: Vec<Span>,
     /// The null-safe links whose chain's conditional already tests the receiver, so each is its plain form.
     tested_links: Vec<Span>,
+    /// The expression of the expression statement being lowered, whose value nothing reads.
+    discarded: Option<Span>,
     /// The declaration offsets of the locals a lambda captures by reference: those code writes.
     by_reference: HashSet<u32>,
     /// The PHP loops that hold the code being lowered, innermost last, inside the innermost method or lambda: each PHP#
@@ -611,6 +612,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             held_receivers: Vec::new(),
             renumbered_places: Vec::new(),
             tested_links: Vec::new(),
+            discarded: None,
             by_reference: HashSet::default(),
             loops: Vec::new(),
             captures_type_arguments: false,
@@ -4767,7 +4769,13 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     fn statement(&mut self, statement: &Statement) -> u32 {
         ensure_sufficient_stack(|| match statement {
             Statement::Block(block) => self.block(block),
-            Statement::Expression(statement) => self.expression(statement.expression),
+            Statement::Expression(statement) => {
+                let discarded = self.discarded.replace(statement.expression.unparenthesized().span());
+                let lowered = self.expression(statement.expression);
+                self.discarded = discarded;
+
+                lowered
+            }
             Statement::Return(r#return) => self.r#return(r#return),
             // `emit e;` is `\Sharp\Internal\emit($e);`, which runs every listener of the event before it returns.
             Statement::Emit(emit) => {
@@ -5492,7 +5500,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     let decrement = matches!(unary.operator, UnaryPrefixOperator::PreDecrement(_));
 
                     return self.renumbered_first(access.array, |this| {
-                        this.list_write(line, access, ListWrite::Step { decrement, postfix: false })
+                        this.list_write(line, unary.span(), access, ListWrite::Step { decrement, postfix: false })
                     });
                 }
                 if let UnaryPrefixOperator::PreIncrement(_) | UnaryPrefixOperator::PreDecrement(_) = unary.operator
@@ -5523,7 +5531,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     let decrement = matches!(unary.operator, UnaryPostfixOperator::PostDecrement(_));
 
                     return self.renumbered_first(access.array, |this| {
-                        this.list_write(line, access, ListWrite::Step { decrement, postfix: true })
+                        this.list_write(line, unary.span(), access, ListWrite::Step { decrement, postfix: true })
                     });
                 }
                 if let Some((access, name)) = self.static_accessor(unary.operand) {
@@ -5571,7 +5579,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     && self.is_list(access.array)
                 {
                     return self.renumbered_first(access.array, |this| {
-                        this.list_write(line, access, ListWrite::Assignment(assignment))
+                        this.list_write(line, assignment.span(), access, ListWrite::Assignment(assignment))
                     });
                 }
                 // An element plain PHP declares holds a PHP array, which PHP's own write changes where it lives, once
@@ -6507,16 +6515,19 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
     /// A write to the element of a `List` at an index, which spec section 12 makes replace the element and throw
     /// `OutOfRangeException` past the end, where PHP's write would append or leave a gap. Every form runs the standard
-    /// library's `Sharp\Internal\set` on the list's place, as [`Self::with_place`] passes it, which gives the value it
-    /// stores: `list[i] = v` is `\Sharp\Internal\set($list, $i, $v)`, and `list[i] op= v` and `++list[i]` are
+    /// library's `set` member of a `List` on the list's place, as [`Self::with_place`] passes it, which gives the
+    /// element it replaced. Its inline form calls the engine's `set`: `list[i] = v` is
+    /// `\Sharp\Internal\set($list, $i, $v)`, and `list[i] op= v` and `++list[i]` are
     /// `\Sharp\Internal\set($list, $i, $list[$i] op v)`, whose index runs once, in a hidden variable when it runs
-    /// something. `list[i]++` is `\Sharp\Internal\set($list, $i, ($old#N = $list[$i]) + 1) ? $old#N : $old#N`, which
-    /// gives the element before the write, as PHP has no expression that runs one and gives another. The checker refuses
-    /// `??=`, which reads the index quietly.
-    fn list_write(&mut self, line: u32, access: &ArrayAccess, write: ListWrite) -> u32 {
+    /// something. `list[i]++` gives what `set` gives. Any other write gives the value it stores, so where code reads it,
+    /// the value is held in a hidden variable, `\Sharp\Internal\set($list, $i, $stored#N = $v) ? $stored#N : $stored#N`,
+    /// as PHP has no expression that runs one and gives another. The checker refuses `??=`, which reads the index
+    /// quietly.
+    fn list_write(&mut self, line: u32, span: Span, access: &ArrayAccess, write: ListWrite) -> u32 {
         let reads = !matches!(write, ListWrite::Assignment(Assignment { operator: AssignmentOperator::Assign(_), .. }));
         let mut index = if reads { self.reread(access.index, "index") } else { Reread::once(access.index) };
-        let mut old = None;
+        let gives_stored = self.discarded != Some(span) && !matches!(write, ListWrite::Step { postfix: true, .. });
+        let mut stored = None;
         let set = self.with_place(access.array, false, |this, place| {
             let written = this.read(&mut index);
             let mut element = |lowering: &mut Self| {
@@ -6526,7 +6537,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 lowering.node(SHARP_AST_DIM, 0, line, &[list, index])
             };
             // The variables stay taken until the value is lowered, as in a compound assignment.
-            let value = match write {
+            let mut value = match write {
                 ListWrite::Assignment(assignment @ Assignment { operator: AssignmentOperator::Assign(_), .. }) => {
                     let declared = this.types.plain_place_type(assignment.lhs);
 
@@ -6539,31 +6550,33 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
                     this.compound_value(line, assignment, element, value)
                 }
-                ListWrite::Step { decrement, postfix } => {
-                    let mut element = element(this);
-                    if postfix {
-                        let name = this.hidden("old");
-                        let variable = this.variable(access.span(), &name);
-                        element = this.node(SHARP_AST_ASSIGN, 0, line, &[variable, element]);
-                        old = Some(name);
-                    }
+                ListWrite::Step { decrement, .. } => {
+                    let element = element(this);
                     let one = this.zval(line, sharp_value::SHARP_LONG, |node| node.long_value = 1);
                     let operation = if decrement { ZEND_SUB } else { ZEND_ADD };
 
                     this.node(SHARP_AST_BINARY_OP, operation, line, &[element, one])
                 }
             };
-            if old.is_some() {
+            if gives_stored {
+                let name = this.hidden("stored");
+                let variable = this.variable(access.span(), &name);
+                value = this.node(SHARP_AST_ASSIGN, 0, line, &[variable, value]);
                 this.temporaries -= 1;
+                stored = Some(name);
             }
 
-            this.global_call(line, b"Sharp\\Internal\\set", &[place, written, value])
+            let set = this.types.list_operation(b"set");
+            let values = [place, written, value];
+
+            this.inlined_operation(&set, &values, line)
+                .unwrap_or_else(|| this.operator_call(line, set.class, set.name.as_bytes(), &values))
         });
         self.release(index);
-        let Some(old) = old else {
+        let Some(stored) = stored else {
             return set;
         };
-        let [given, otherwise] = [(); 2].map(|()| self.variable(access.span(), &old));
+        let [given, otherwise] = [(); 2].map(|()| self.variable(access.span(), &stored));
 
         self.node(SHARP_AST_CONDITIONAL, ZEND_PARENTHESIZED_CONDITIONAL, line, &[set, given, otherwise])
     }
@@ -7824,7 +7837,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// nothing when lowered again is lowered at each read. Any other is held in the hidden variable `name#N`, which
     /// its first read assigns.
     fn reread<'value, 'ast>(&mut self, value: &'value Expression<'ast>, name: &str) -> Reread<'value, 'ast> {
-        if self.is_pure(value) || value.is_constant(&PHPVersion::PHP85, false) {
+        if self.is_pure(value) || value.is_constant(&mago_analyzer::ENGINE_PHP_VERSION, false) {
             return Reread::once(value);
         }
 
@@ -8611,14 +8624,16 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 Argument::Named(named) => self.named(named, lowered),
             });
         }
-        if let Some(owner) = self.types.sorting_operator(call)
+        let method = self.types.collection_method(call).map(|(_, method)| method);
+        if method.as_deref() == Some(b"sortedby")
+            && let Some(owner) = self.types.sorting_operator(call)
             && let Some(name) = php_operator_name(&BinaryOperator::Spaceship(Span::zero()), 2)
         {
             let line = self.line(list);
             let callable = self.node(SHARP_AST_CALLABLE_CONVERT, 0, line, &[]);
             arguments.push(self.operator_method(line, owner, name, callable));
         }
-        if let Some((_, method)) = self.types.collection_method(call)
+        if let Some(method) = method
             && matches!(method.as_slice(), b"entries" | b"groupby" | b"associateby")
             && let Some(text) = self.table_type_arguments(self.types.expression_type(call))
         {

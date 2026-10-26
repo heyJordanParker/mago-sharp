@@ -462,6 +462,18 @@ pub(crate) fn is_list_member(class: Word, metadata: &FunctionLikeMetadata) -> bo
     is_standard_library_member_on(class, metadata, |atomic| matches!(atomic, TAtomic::Array(TArray::List(_))))
 }
 
+/// The standard library's member `name` of a `List`, which an operation on a List runs, as Kotlin runs an operator
+/// member: `list[i] = v` runs `set`. None when the library declares none.
+#[must_use]
+pub fn list_member<'codebase>(
+    codebase: &'codebase CodebaseMetadata,
+    name: &[u8],
+) -> Option<&'codebase MethodIdentifier> {
+    codebase.extensions.get(&ascii_lowercase_word(name))?.iter().map(|(_, method)| method).find(|method| {
+        codebase.get_method_by_id(method).is_some_and(|metadata| is_list_member(method.get_class_name(), metadata))
+    })
+}
+
 /// The class of the member `name` the standard library gives a collection of type `receiver`, which hides an
 /// extension member of that name on it, as a real member does. None when it gives none.
 pub(crate) fn collection_member_hiding<A>(context: &Context<'_, '_, A>, receiver: &TUnion, name: &[u8]) -> Option<Word>

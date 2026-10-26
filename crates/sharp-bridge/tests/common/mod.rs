@@ -21,7 +21,6 @@ use mago_database::file::File;
 use mago_names::resolver::ChangingMembers;
 use mago_names::resolver::NameResolver;
 use mago_names::resolver::NamespaceClasses;
-use mago_php_version::PHPVersion;
 use mago_prelude::Prelude;
 use mago_reporting::Issue;
 use mago_semantics::SemanticsChecker;
@@ -223,7 +222,7 @@ pub fn checked_file<R>(
     }
 
     let names = NameResolver::new(&arena).resolve_in(program, &namespace_classes, &changing_members);
-    let semantic_issues = SemanticsChecker::new(PHPVersion::PHP85).check(file, program, &names);
+    let semantic_issues = SemanticsChecker::new(mago_analyzer::ENGINE_PHP_VERSION).check(file, program, &names);
 
     metadata.extend(scan_program(&arena, file, program, &names, settings.version));
     populate_codebase(&mut metadata, &mut symbol_references, WordSet::default(), HashSet::default());

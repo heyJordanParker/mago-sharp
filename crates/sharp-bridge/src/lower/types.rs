@@ -6,6 +6,7 @@ use mago_analyzer::artifacts::CallTarget;
 use mago_analyzer::chosen_operator;
 use mago_analyzer::effects::Effects;
 use mago_analyzer::is_collection_member;
+use mago_analyzer::list_member;
 use mago_codex::defaults_trait_name;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::identifier::method::MethodIdentifier;
@@ -1348,6 +1349,25 @@ impl<'analysis> Types<'analysis> {
         })
     }
 
+    /// The standard library's member `name` of a `List`, which an operation on a List runs, as `list[i] = v` runs `set`.
+    pub(crate) fn list_operation(&self, name: &[u8]) -> Declaration {
+        let Some((class, member)) = list_member(self.codebase, name)
+            .and_then(|method| Some((method.get_class_name(), self.codebase.get_method_by_id(method)?)))
+        else {
+            unreachable!(
+                "the analyzer refuses an operation of a `List` without the standard library's `{}`",
+                String::from_utf8_lossy(name)
+            )
+        };
+
+        Declaration {
+            kind: DeclarationKind::StaticMethod,
+            class: self.class_declaration(class.as_bytes()).name,
+            name: member.original_name,
+            public: true,
+        }
+    }
+
     /// The member of a `List` the method call `call` runs on a value that may also be a `Map` or a `Set`, spec section
     /// 12: the analysis checked it against the standard library's member and the other collections' method of that
     /// name. None for a call on one kind, or on anything else.
@@ -2105,26 +2125,15 @@ impl<'analysis> Types<'analysis> {
             && self.compares_identically(&lhs_element, &rhs_element)
     }
 
-    /// The class-like whose `operator <=>` the PHP# `sortedBy` call `call` orders two keys by, as `<` on two values of
-    /// the key type its function returns chooses it, spec section 19, so a `List<Priced>` sorts by `Priced`'s whatever
-    /// classes it holds. None for any other call, and for keys of a type that declares none, such as strings.
+    /// The class-like whose `operator <=>` the call `call`, which sorts, orders two keys by, as `<` on two values of
+    /// the key type its last type argument names chooses it, spec section 19, so a `List<Priced>` sorts by `Priced`'s
+    /// whatever classes it holds. A call sorts when it runs `sortedBy` or a form whose engine function takes
+    /// [`TAKES_KEY_ORDER`]. None for keys of a type that declares none, such as strings.
     pub(crate) fn sorting_operator(&self, call: &Expression) -> Option<Word> {
-        // A `List`'s `sortedBy` is the standard library's member, whose receiver's element type comes first.
-        let sorts = self.collection_method(call).is_some_and(|(_, method)| method == b"sortedby")
-            || self.extension(call).is_some_and(|extension| {
-                extension.name.as_bytes().eq_ignore_ascii_case(b"sortedBy")
-                    && self
-                        .codebase
-                        .get_method(extension.class.as_bytes(), b"sortedby")
-                        .is_some_and(|member| is_collection_member(extension.class, member))
-            });
-        if !sorts {
-            return None;
-        }
         let span = call.span();
         let Some(key) = self.artifacts.inferred_type_arguments.get(&(span.start.offset, span.end.offset))?.last()
         else {
-            unreachable!("sortedBy takes the type of its keys as its last type argument");
+            unreachable!("a call that sorts takes the type of its keys as its last type argument");
         };
         let key = key.to_non_nullable();
 

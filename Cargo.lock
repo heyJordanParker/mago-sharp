@@ -1912,7 +1912,6 @@ dependencies = [
  "mago-codex",
  "mago-database",
  "mago-names",
- "mago-php-version",
  "mago-prelude",
  "mago-reporting",
  "mago-semantics",
