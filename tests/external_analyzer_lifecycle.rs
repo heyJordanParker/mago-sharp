@@ -336,7 +336,9 @@ fn external_analyzer_lifecycle_is_exact_across_workers_and_incremental_runs() {
 
     let without_late_reference_audit = read_audit(&audit_log);
     let late_reference_removal_audit = &without_late_reference_audit[second_audit.len()..];
-    assert_eq!(late_reference_removal_audit.iter().filter(|entry| entry.1 == "after-file").count(), PLUGINS.len());
+    // Only `src/file5.php`'s hook reads `ENABLE_LATE_FRAMEWORK_ACTION`, but a hook may answer any file from what it
+    // kept, so every file counts the read as its own and runs again when the constant leaves.
+    assert_eq!(late_reference_removal_audit.iter().filter(|entry| entry.1 == "after-file").count(), FILE_COUNT * 2);
 
     service.update_database(second_updated_database.read_only());
     let restored_late_reference = service
@@ -346,7 +348,7 @@ fn external_analyzer_lifecycle_is_exact_across_workers_and_incremental_runs() {
 
     let restored_late_reference_audit = read_audit(&audit_log);
     let late_reference_restoration_audit = &restored_late_reference_audit[without_late_reference_audit.len()..];
-    assert_eq!(late_reference_restoration_audit.iter().filter(|entry| entry.1 == "after-file").count(), PLUGINS.len());
+    assert_eq!(late_reference_restoration_audit.iter().filter(|entry| entry.1 == "after-file").count(), FILE_COUNT * 2);
 
     let (without_framework_reference, _) = make_database(Some(6), false, true, &initialization_sources);
     service.update_database(without_framework_reference.read_only());

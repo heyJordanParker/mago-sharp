@@ -10,11 +10,13 @@ use foldhash::HashSet;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::symbol::SymbolIdentifier;
 use mago_extension::PayloadReader;
+use mago_extension::PayloadWriter;
 use mago_word::Word;
 use mago_word::ascii_lowercase_word;
 use mago_word::empty_word;
 use mago_word::word;
 
+use crate::external::ExternalAnalysisSession;
 use crate::external::ExternalAnalyzerError;
 use crate::external::error::protocol;
 use crate::external::metadata;
@@ -47,8 +49,8 @@ pub enum Listing {
     Descendants(Word),
     /// Whether this namespace exists.
     Namespace(Word),
-    /// A method search across classes, which depends on every class-like's signature.
-    Methods,
+    /// The methods a search across classes finds, with the fields it projects, by the search as the worker wrote it.
+    Methods(Word),
 }
 
 impl FileReads {
@@ -103,7 +105,7 @@ impl FileReads {
                 self.listings.insert(Listing::Namespace(word(name)));
             }
             (metadata::FIND_METHODS, 0) => {
-                self.listings.insert(Listing::Methods);
+                self.listings.insert(Listing::Methods(metadata::method_search(name)?));
             }
             _ => {
                 return Err(protocol(format!(
@@ -118,10 +120,11 @@ impl FileReads {
 }
 
 impl Listing {
-    /// Answers this listing against `codebase` as a hash. Two codebases answer it alike exactly
-    /// when no name joined or left the set it lists.
+    /// Answers this listing against `codebase` as a hash, a method search with each method it finds as the worker reads
+    /// it from `session`'s files. Two codebases answer it alike exactly when no name joined or left the set it lists,
+    /// and no method a search finds changed what the search projects of it.
     #[must_use]
-    pub fn answer(&self, codebase: &CodebaseMetadata) -> u64 {
+    pub fn answer(&self, codebase: &CodebaseMetadata, session: &ExternalAnalysisSession) -> u64 {
         let mut hasher = DefaultHasher::new();
         match self {
             Self::ClassLikes(filter) => hash_names(&mut hasher, metadata::class_like_names(codebase, *filter)),
@@ -132,25 +135,13 @@ impl Listing {
             }
             Self::Descendants(name) => hash_names(&mut hasher, codebase.get_class_descendants(name.as_bytes())),
             Self::Namespace(name) => codebase.namespace_exists(name.as_bytes()).hash(&mut hasher),
-            Self::Methods => {
-                let mut signatures = codebase
-                    .file_signatures
-                    .values()
-                    .flat_map(|signature| &signature.ast_nodes)
-                    .filter(|node| !node.is_function)
-                    .map(|node| {
-                        let members = node
-                            .children
-                            .iter()
-                            .map(|member| (member.name.as_bytes(), member.signature_hash))
-                            .collect::<Vec<_>>();
-                        (node.name.as_bytes(), node.signature_hash, members)
-                    })
-                    .collect::<Vec<_>>();
-                signatures.sort_unstable();
-                for signature in signatures {
-                    signature.hash(&mut hasher);
-                }
+            Self::Methods(search) => {
+                let mut found = PayloadWriter::new();
+                // A search that fails, as one that finds more methods than an answer holds, answers apart from each
+                // result one gives.
+                let failed = metadata::write_found_methods(search.as_bytes(), &mut found, codebase, session).is_err();
+                failed.hash(&mut hasher);
+                found.finish().hash(&mut hasher);
             }
         }
 

@@ -214,147 +214,217 @@ pub(super) fn handle_query(
     }
 }
 
-#[allow(clippy::too_many_lines)]
 fn find_methods(
     reader: &mut PayloadReader<'_>,
     writer: &mut PayloadWriter,
     codebase: &CodebaseMetadata,
     session: &ExternalAnalysisSession,
 ) -> Result<(), ExternalAnalyzerError> {
-    let started = tracing::enabled!(tracing::Level::TRACE).then(std::time::Instant::now);
-    let class_filter = reader.read_u8("method search class filter")?;
-    let class = match class_filter {
-        METHOD_SEARCH_ANY_CLASS => None,
-        METHOD_SEARCH_EXACT_CLASS | METHOD_SEARCH_DESCENDANTS => {
-            let class = reader.read_bytes("method search class")?;
-            if class.is_empty() {
-                return Err(protocol("method search class cannot be empty"));
-            }
+    MethodSearch::read(reader)?.write_methods(writer, codebase, session)
+}
 
-            Some(ascii_lowercase_word(class))
-        }
-        unknown => return Err(protocol(format!("unknown method search class filter {unknown}"))),
-    };
+/// A method search as a worker writes it: the classes it searches, the name it matches, whether it skips inherited and
+/// trait-provided methods, the attributes a method carries one of, and the metadata fields it projects.
+struct MethodSearch {
+    class_filter: u8,
+    class: Option<Word>,
+    pattern: Word,
+    prefix: bool,
+    declared_only: bool,
+    attributes: Vec<Word>,
+    fields: u32,
+}
 
-    let pattern = reader.read_bytes("method search name pattern")?;
-    if pattern.is_empty() {
-        return Err(protocol("method search name pattern cannot be empty"));
+/// The method search a worker wrote as `search`, interned, as a codebase read names it.
+///
+/// # Errors
+///
+/// Returns a protocol error when `search` is not one whole method search.
+pub(super) fn method_search(search: &[u8]) -> Result<Word, ExternalAnalyzerError> {
+    MethodSearch::read_whole(search)?;
+
+    Ok(word(search))
+}
+
+/// Writes what the method search a worker wrote as `search` finds in `codebase`, as the worker reads it: the fields it
+/// projects, then each method it finds with them.
+///
+/// # Errors
+///
+/// Returns a protocol error when `search` is not one whole method search, or when the search finds more methods than
+/// one answer holds.
+pub(super) fn write_found_methods(
+    search: &[u8],
+    writer: &mut PayloadWriter,
+    codebase: &CodebaseMetadata,
+    session: &ExternalAnalysisSession,
+) -> Result<(), ExternalAnalyzerError> {
+    MethodSearch::read_whole(search)?.write_methods(writer, codebase, session)
+}
+
+impl MethodSearch {
+    fn read_whole(search: &[u8]) -> Result<Self, ExternalAnalyzerError> {
+        let mut reader = PayloadReader::new(search);
+        let search = Self::read(&mut reader)?;
+        reader.finish()?;
+
+        Ok(search)
     }
-    let prefix = pattern.ends_with(b"*");
-    let pattern = if prefix { &pattern[..pattern.len() - 1] } else { pattern };
-    if pattern.contains(&b'*') {
-        return Err(protocol("method search wildcards are only allowed at the end"));
-    }
-    let pattern = ascii_lowercase_word(pattern);
-    let declared_only = reader.read_bool("method search declared-only filter")?;
 
-    let attribute_count = reader.read_count("method search attribute filters", MAXIMUM_QUERIES)?;
-    let mut attributes = Vec::with_capacity(attribute_count);
-    for _ in 0..attribute_count {
-        let attribute = reader.read_bytes("method search attribute")?;
-        if attribute.is_empty() {
-            return Err(protocol("method search attribute cannot be empty"));
-        }
-        attributes.push(ascii_lowercase_word(attribute));
-    }
+    fn read(reader: &mut PayloadReader<'_>) -> Result<Self, ExternalAnalyzerError> {
+        let class_filter = reader.read_u8("method search class filter")?;
+        let class = match class_filter {
+            METHOD_SEARCH_ANY_CLASS => None,
+            METHOD_SEARCH_EXACT_CLASS | METHOD_SEARCH_DESCENDANTS => {
+                let class = reader.read_bytes("method search class")?;
+                if class.is_empty() {
+                    return Err(protocol("method search class cannot be empty"));
+                }
 
-    let fields = reader.read_u32("method projection fields")?;
-    if fields & !METHOD_FIELDS_ALL != 0 {
-        return Err(protocol(format!("method projection contains unknown fields {fields:#x}")));
-    }
-    writer.write_u32(fields);
-
-    let mut scanned_classes = 0usize;
-    let mut scanned_methods = 0usize;
-    let mut matches = Vec::new();
-    let mut collect = |class_like: &ClassLikeMetadata| {
-        scanned_classes += 1;
-        for (method_name, declaring) in &class_like.declaring_method_ids {
-            scanned_methods += 1;
-            let matches_name =
-                if prefix { method_name.as_bytes().starts_with(pattern.as_bytes()) } else { *method_name == pattern };
-            if !matches_name || (declared_only && declaring.get_class_name() != class_like.name) {
-                continue;
+                Some(ascii_lowercase_word(class))
             }
+            unknown => return Err(protocol(format!("unknown method search class filter {unknown}"))),
+        };
 
-            let Some(metadata) = codebase.get_method_by_id(declaring) else {
-                continue;
-            };
-            if !attributes.is_empty()
-                && !metadata.attributes.iter().any(|attribute| {
-                    attributes
-                        .iter()
-                        .any(|requested| attribute.name.as_bytes().eq_ignore_ascii_case(requested.as_bytes()))
-                })
-            {
-                continue;
-            }
-
-            matches.push((class_like.name, *method_name, *declaring));
+        let pattern = reader.read_bytes("method search name pattern")?;
+        if pattern.is_empty() {
+            return Err(protocol("method search name pattern cannot be empty"));
         }
-    };
-
-    match (class_filter, class) {
-        (METHOD_SEARCH_EXACT_CLASS, Some(class)) => {
-            if let Some(class_like) = codebase.get_class_like(class.as_bytes()) {
-                collect(class_like);
-            }
+        let prefix = pattern.ends_with(b"*");
+        let pattern = if prefix { &pattern[..pattern.len() - 1] } else { pattern };
+        if pattern.contains(&b'*') {
+            return Err(protocol("method search wildcards are only allowed at the end"));
         }
-        (METHOD_SEARCH_DESCENDANTS, Some(class)) => {
-            for class_like in codebase.class_likes.values() {
-                if class_like.name != class && codebase.is_instance_of(class_like.name.as_bytes(), class.as_bytes()) {
+        let pattern = ascii_lowercase_word(pattern);
+        let declared_only = reader.read_bool("method search declared-only filter")?;
+
+        let attribute_count = reader.read_count("method search attribute filters", MAXIMUM_QUERIES)?;
+        let mut attributes = Vec::with_capacity(attribute_count);
+        for _ in 0..attribute_count {
+            let attribute = reader.read_bytes("method search attribute")?;
+            if attribute.is_empty() {
+                return Err(protocol("method search attribute cannot be empty"));
+            }
+            attributes.push(ascii_lowercase_word(attribute));
+        }
+
+        let fields = reader.read_u32("method projection fields")?;
+        if fields & !METHOD_FIELDS_ALL != 0 {
+            return Err(protocol(format!("method projection contains unknown fields {fields:#x}")));
+        }
+
+        Ok(Self { class_filter, class, pattern, prefix, declared_only, attributes, fields })
+    }
+
+    /// Writes the fields this search projects, then each method it finds in `codebase` with them, ordered by the class
+    /// it appears in and its name.
+    fn write_methods(
+        &self,
+        writer: &mut PayloadWriter,
+        codebase: &CodebaseMetadata,
+        session: &ExternalAnalysisSession,
+    ) -> Result<(), ExternalAnalyzerError> {
+        let started = tracing::enabled!(tracing::Level::TRACE).then(std::time::Instant::now);
+        let Self { class_filter, class, pattern, prefix, declared_only, fields, .. } = *self;
+        let attributes = &self.attributes;
+        writer.write_u32(fields);
+
+        let mut scanned_classes = 0usize;
+        let mut scanned_methods = 0usize;
+        let mut matches = Vec::new();
+        let mut collect = |class_like: &ClassLikeMetadata| {
+            scanned_classes += 1;
+            for (method_name, declaring) in &class_like.declaring_method_ids {
+                scanned_methods += 1;
+                let matches_name = if prefix {
+                    method_name.as_bytes().starts_with(pattern.as_bytes())
+                } else {
+                    *method_name == pattern
+                };
+                if !matches_name || (declared_only && declaring.get_class_name() != class_like.name) {
+                    continue;
+                }
+
+                let Some(metadata) = codebase.get_method_by_id(declaring) else {
+                    continue;
+                };
+                if !attributes.is_empty()
+                    && !metadata.attributes.iter().any(|attribute| {
+                        attributes
+                            .iter()
+                            .any(|requested| attribute.name.as_bytes().eq_ignore_ascii_case(requested.as_bytes()))
+                    })
+                {
+                    continue;
+                }
+
+                matches.push((class_like.name, *method_name, *declaring));
+            }
+        };
+
+        match (class_filter, class) {
+            (METHOD_SEARCH_EXACT_CLASS, Some(class)) => {
+                if let Some(class_like) = codebase.get_class_like(class.as_bytes()) {
                     collect(class_like);
                 }
             }
-        }
-        (METHOD_SEARCH_ANY_CLASS, None) => {
-            for class_like in codebase.class_likes.values() {
-                collect(class_like);
+            (METHOD_SEARCH_DESCENDANTS, Some(class)) => {
+                for class_like in codebase.class_likes.values() {
+                    if class_like.name != class && codebase.is_instance_of(class_like.name.as_bytes(), class.as_bytes())
+                    {
+                        collect(class_like);
+                    }
+                }
             }
+            (METHOD_SEARCH_ANY_CLASS, None) => {
+                for class_like in codebase.class_likes.values() {
+                    collect(class_like);
+                }
+            }
+            _ => unreachable!(),
         }
-        _ => unreachable!(),
-    }
 
-    if matches.len() > MAXIMUM_METHOD_PROJECTIONS {
-        return Err(protocol(format!(
-            "method search returned {} results, exceeding the limit of {MAXIMUM_METHOD_PROJECTIONS}",
-            matches.len()
-        )));
-    }
-    matches.sort_unstable_by(|(left_class, left_method, _), (right_class, right_method, _)| {
-        left_class
-            .as_bytes()
-            .cmp(right_class.as_bytes())
-            .then_with(|| left_method.as_bytes().cmp(right_method.as_bytes()))
-    });
+        if matches.len() > MAXIMUM_METHOD_PROJECTIONS {
+            return Err(protocol(format!(
+                "method search returned {} results, exceeding the limit of {MAXIMUM_METHOD_PROJECTIONS}",
+                matches.len()
+            )));
+        }
+        matches.sort_unstable_by(|(left_class, left_method, _), (right_class, right_method, _)| {
+            left_class
+                .as_bytes()
+                .cmp(right_class.as_bytes())
+                .then_with(|| left_method.as_bytes().cmp(right_method.as_bytes()))
+        });
 
-    writer.write_u32(matches.len() as u32);
-    for (class_name, method_name, declaring) in &matches {
-        let class_like = codebase
-            .class_likes
-            .get(class_name)
-            .ok_or_else(|| protocol("method projection references a missing class-like"))?;
-        let metadata = codebase
-            .get_method_by_id(declaring)
-            .ok_or_else(|| protocol("method projection references missing method metadata"))?;
-        write_method_projection(writer, class_like, *method_name, metadata, fields, codebase, session)?;
-    }
+        writer.write_u32(matches.len() as u32);
+        for (class_name, method_name, declaring) in &matches {
+            let class_like = codebase
+                .class_likes
+                .get(class_name)
+                .ok_or_else(|| protocol("method projection references a missing class-like"))?;
+            let metadata = codebase
+                .get_method_by_id(declaring)
+                .ok_or_else(|| protocol("method projection references missing method metadata"))?;
+            write_method_projection(writer, class_like, *method_name, metadata, fields, codebase, session)?;
+        }
 
-    if let Some(started) = started {
-        tracing::trace!(
-            class_filter,
-            fields,
-            declared_only,
-            attribute_filters = attributes.len(),
-            scanned_classes,
-            scanned_methods,
-            matched_methods = matches.len(),
-            elapsed_us = started.elapsed().as_micros(),
-            "completed projected method metadata query"
-        );
-    }
+        if let Some(started) = started {
+            tracing::trace!(
+                class_filter,
+                fields,
+                declared_only,
+                attribute_filters = attributes.len(),
+                scanned_classes,
+                scanned_methods,
+                matched_methods = matches.len(),
+                elapsed_us = started.elapsed().as_micros(),
+                "completed projected method metadata query"
+            );
+        }
 
-    Ok(())
+        Ok(())
+    }
 }
 
 fn write_method_projection(
@@ -1643,5 +1713,78 @@ mod tests {
         let error = protocol::handle_nested_request(&writer.finish(), &codebase, &session, |_| None)
             .expect_err("unknown method projection fields must fail");
         assert!(error.to_string().contains("unknown fields"));
+    }
+
+    /// `Order` has an `#[Owner]` method, and `Invoice` has one without it.
+    const OWNED: (&str, &str) = (
+        "src/Models.php",
+        "<?php\n\n#[Attribute]\nfinal class Owner {}\n\nfinal class Order\n{\n    #[Owner]\n    public function account(): int { return 1; }\n}\n\nfinal class Invoice\n{\n    public function account(): int { return 1; }\n}\n",
+    );
+
+    /// [`OWNED`] with a method `Invoice::total` that carries no attribute.
+    const OWNED_AND_TOTALLED: (&str, &str) = (
+        "src/Models.php",
+        "<?php\n\n#[Attribute]\nfinal class Owner {}\n\nfinal class Order\n{\n    #[Owner]\n    public function account(): int { return 1; }\n}\n\nfinal class Invoice\n{\n    public function total(): int { return 2; }\n\n    public function account(): int { return 1; }\n}\n",
+    );
+
+    /// [`OWNED`] with `Invoice::account` an `#[Owner]` method too.
+    const BOTH_OWNED: (&str, &str) = (
+        "src/Models.php",
+        "<?php\n\n#[Attribute]\nfinal class Owner {}\n\nfinal class Order\n{\n    #[Owner]\n    public function account(): int { return 1; }\n}\n\nfinal class Invoice\n{\n    #[Owner]\n    public function account(): int { return 1; }\n}\n",
+    );
+
+    /// The search for every method with an `#[Owner]` attribute, projecting their names, as a worker writes it.
+    fn owner_search() -> Vec<u8> {
+        let mut writer = PayloadWriter::new();
+        writer.write_u8(METHOD_SEARCH_ANY_CLASS);
+        writer.write_bytes(b"*").expect("the pattern should fit in a frame");
+        writer.write_bool(false);
+        writer.write_u32(1);
+        writer.write_bytes(b"owner").expect("the attribute should fit in a frame");
+        writer.write_u32(METHOD_FIELDS_NAMES);
+        writer.finish()
+    }
+
+    /// The listing a worker's read of [`owner_search`] records, answered against `files`.
+    fn owner_listing_answer(files: (&'static str, &'static str)) -> u64 {
+        let search = owner_search();
+        let mut read = PayloadWriter::new();
+        read.write_u32(1);
+        read.write_u8(FIND_METHODS);
+        read.write_u8(0);
+        read.write_bytes(&search).expect("the search should fit in a frame");
+        let reads = crate::external::FileReads::decode(&mut PayloadReader::new(&read.finish()))
+            .expect("a whole method search is a read");
+        assert_eq!(reads.listings.len(), 1, "the read is one listing: {reads:?}");
+        let listing = *reads.listings.iter().next().expect("the read is one listing");
+
+        analyzed(&[files], |analysis| {
+            listing.answer(analysis.codebase, &ExternalAnalysisSession::from_files(analysis.files.iter().cloned()))
+        })
+    }
+
+    /// A method search is answered by what it finds, so an edit that leaves the methods it finds as they were leaves
+    /// its answer as it was, and a method that joins them changes it.
+    #[test]
+    fn a_method_search_answers_alike_until_the_methods_it_finds_change() {
+        let owned = owner_listing_answer(OWNED);
+
+        assert_eq!(owner_listing_answer(OWNED_AND_TOTALLED), owned, "a method with no `#[Owner]` leaves it");
+        assert_ne!(owner_listing_answer(BOTH_OWNED), owned, "a method that gains `#[Owner]` joins it");
+    }
+
+    /// A read names the whole search it records, so one the protocol can't run is refused where it arrives.
+    #[test]
+    fn a_read_of_a_method_search_that_is_not_one_whole_search_is_refused() {
+        for search in [Vec::new(), [owner_search(), vec![0]].concat()] {
+            let mut read = PayloadWriter::new();
+            read.write_u32(1);
+            read.write_u8(FIND_METHODS);
+            read.write_u8(0);
+            read.write_bytes(&search).expect("the search should fit in a frame");
+
+            crate::external::FileReads::decode(&mut PayloadReader::new(&read.finish()))
+                .expect_err("a read must name one whole method search");
+        }
     }
 }

@@ -812,6 +812,81 @@ fn compile_hides_the_host_errors_an_ignore_entry_or_the_baseline_hides_from_anal
     }
 }
 
+/// An extension host whose node hook fails in any file but a PHP# file, so a compile that runs it anywhere else fails.
+const SHARP_ONLY_HOST: &str = r#"<?php
+
+declare(strict_types=1);
+
+use Mago\Sdk\Analyzer\NodeAnalysisContext;
+use Mago\Sdk\Analyzer\NodeAnalysisHook;
+use Mago\Sdk\Analyzer\Plugin;
+use Mago\Sdk\Analyzer\PluginDefinition;
+use Mago\Sdk\Analyzer\PluginRegistry;
+use Mago\Sdk\Extension;
+use Mago\Sdk\Syntax\NodeKind;
+use Mago\Sdk\Worker;
+
+require $argv[1];
+
+final class SharpOnlyRule implements Plugin, NodeAnalysisHook
+{
+    public function getDefinition(): PluginDefinition
+    {
+        return new PluginDefinition('acme', 'Acme rules', 'Inspects the classes of PHP# files.');
+    }
+
+    public function register(PluginRegistry $registry): void
+    {
+        $registry->registerNodeAnalysisHook($this);
+    }
+
+    public function getRequirements(): array
+    {
+        return [];
+    }
+
+    public function getTargets(): array
+    {
+        return [NodeKind::Class_];
+    }
+
+    public function analyze(NodeAnalysisContext $context): void
+    {
+        if (!str_ends_with($context->analysis->file, '.sharp')) {
+            throw new RuntimeException("The node hook ran in {$context->analysis->file}.");
+        }
+    }
+}
+
+(new Worker(new Extension('acme', 'Acme', '0.0.0', analyzerPlugins: [new SharpOnlyRule()])))->run();
+"#;
+
+/// `mago compile` lowers only PHP# files and refuses one only for the errors reported in it, and a node hook reports
+/// in the file it inspects, so the compile runs its hosts' node hooks in its PHP# files alone: here the classes of
+/// `app/Order.sharp` and the package's `Money.sharp`, and never `app/Legacy.php`'s.
+#[test]
+fn compile_runs_the_node_hooks_only_in_the_php_sharp_files_it_lowers() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if !common::php_sdk_is_available(repository, "the scoped node hooks compile test") {
+        return;
+    }
+    let directory = project(ORDER, MONEY);
+    let root = directory.path();
+    write(root, "tools/host.php", SHARP_ONLY_HOST);
+    write(
+        root,
+        "mago.toml",
+        &format!(
+            "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.acme]\nworkers = 1\ncommand = [\"php\", \"tools/host.php\", {:?}]\n",
+            repository.join("vendor/autoload.php").display().to_string()
+        ),
+    );
+
+    compile_succeeds(root);
+    assert!(compiled(root, "app/Order.sharp").exists());
+    assert!(compiled(root, MONEY_PATH).exists());
+}
+
 /// The typing host of [`a_typing_host_loads_a_class_only_its_typing_makes_correct_on_a_fresh_tree`]: it gives
 /// `App\Helpers\untyped()` the return type `string`, and its hook throws unless the hosts' compile holds
 /// `app/Greeting.sharp`, as a host whose loading of a project class fails rethrows.

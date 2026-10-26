@@ -147,11 +147,11 @@ Within one callback, batching remains important even when data might be cached: 
 
 ## Reads and incremental analysis
 
-Mago records what a file's providers, issue filters, after-file hooks, and targeted hooks read through `codebase` and `types`, cached answers included, and analyzes the file again when that changes:
+Mago records what providers, issue filters, after-file hooks, and targeted hooks read through `codebase` and `types`, cached answers included. A hook may keep what it read for one file on its own object and answer later files from it, so Mago counts every read of the analysis as read by every file, and analyzes the files again when one changes:
 
 - a class-like, function, or constant they read changes its signature, appears, or disappears; a read of a class-like member counts as a read of the class-like, so any signature change to the class-like or its ancestors counts;
 - a class-like named anywhere in a type they compared through `types` changes its signature, appears, or disappears, including one named in a generic argument, a union, an intersection, a `class-string`, or an object shape;
 - a list of names they read, such as `getClassNames()`, `getClassDescendants()`, or `namespaceExists()`, gains or loses a name;
-- any class-like changes its signature, after a `findMethods()` search that did not name one class.
+- a `findMethods()` search that did not name one class finds other methods, or other fields of a method it projects.
 
 An edit to a method body changes none of these, so it does not run another file's providers or hooks again. The files whose edit can change a read also count among the inputs of a compiled PHP# file.

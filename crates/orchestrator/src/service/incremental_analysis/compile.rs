@@ -13,6 +13,7 @@ use mago_analyzer::code::IssueCode;
 use mago_analyzer::effects::EffectSummary;
 use mago_analyzer::effects::Effects;
 use mago_analyzer::external::ExternalAnalysisSession;
+use mago_analyzer::external::FileReads;
 use mago_analyzer::external::Listing;
 use mago_codex::metadata::module::BindingMetadata;
 use mago_codex::metadata::module::ModuleKind;
@@ -196,8 +197,9 @@ impl IncrementalAnalysisService {
     ///
     /// An accepted file's inputs are its own source, `composer.lock`, and each file outside `vendor/` whose edit makes
     /// the warm path re-analyze it: each file whose signature edit reaches it through the cascade or reaches a symbol
-    /// its extension hooks or providers read, every file when they listed names, each file that declares a class alias
-    /// its code reaches, and along a chain of aliases each file that declares the next alias and the class at its end,
+    /// any file's extension hooks or providers read, every file when they listed names, each file that declares a
+    /// class alias its code reaches, and along a chain of aliases each file that declares the next alias and the class
+    /// at its end,
     /// each file that declares a patch, and each file that declares a method whose return it reads
     /// from that method's body or a body its calls reach, whose effects its functions' types list, along every chain of
     /// such returns and calls, with that file's own inputs.
@@ -481,12 +483,35 @@ impl IncrementalAnalysisService {
     /// files whose bodies it read: those that declare those methods, and those whose bodies its calls reach, which
     /// `effects` solved its functions' effects from.
     fn reads(&self, effects: &Effects) -> HashMap<FileId, (Reads, HashSet<FileId>)> {
+        // A declaration several files hold, as two polyfill files each declare one function, is read as the one the
+        // codebase keeps, else as the one in the first file by id, so every compile fingerprints the same one.
+        let kept = |name: Word, is_function: bool| {
+            let name = name.as_bytes();
+            let span = if is_function {
+                self.codebase.get_function(name).map(|function| function.span)
+            } else {
+                self.codebase
+                    .get_class_like(name)
+                    .map(|class| class.span)
+                    .or_else(|| self.codebase.get_constant(name).map(|constant| constant.span))
+            };
+
+            span.map(|span| span.file_id)
+        };
+        let mut signatures: Vec<_> = self.codebase.file_signatures.iter().collect();
+        signatures.sort_unstable_by_key(|(file_id, _)| **file_id);
         let mut declarations: HashMap<SymbolIdentifier, (FileId, u64)> = HashMap::default();
-        for (file_id, signature) in &self.codebase.file_signatures {
+        for (file_id, signature) in signatures {
             for node in &signature.ast_nodes {
-                declarations.insert((node.name, empty_word()), (*file_id, node.signature_hash));
+                let replaces = kept(node.name, node.is_function) == Some(*file_id);
+                let mut declare = |symbol: SymbolIdentifier, hash: u64| {
+                    if replaces || !declarations.contains_key(&symbol) {
+                        declarations.insert(symbol, (*file_id, hash));
+                    }
+                };
+                declare((node.name, empty_word()), node.signature_hash);
                 for child in &node.children {
-                    declarations.insert((node.name, child.name), (*file_id, child.signature_hash));
+                    declare((node.name, child.name), child.signature_hash);
                 }
             }
         }
@@ -550,19 +575,31 @@ impl IncrementalAnalysisService {
             file_reads.signatures.push(Read { name, fingerprint: hash });
         });
 
-        for (file_id, state) in self.file_states.iter().filter(|(_, state)| !state.reads.is_empty()) {
-            let (file_reads, _) = reads.entry(*file_id).or_default();
-            for symbol in state.reads.symbols.iter().flat_map(|&(name, _)| self.with_ancestors(name)) {
-                if let Some((target, target_file, hash)) = declared((symbol, empty_word()))
-                    && target_file != *file_id
-                {
-                    file_reads.signatures.push(Read { name: target.0.as_bytes().to_vec(), fingerprint: hash });
-                }
-            }
-            for listing in &state.reads.listings {
-                file_reads
-                    .listed
-                    .push(Read { name: listing_name(listing), fingerprint: listing.answer(&self.codebase) });
+        // Each PHP# file read what every file's hooks and providers read, as `extension_reads` says, but a declaration
+        // of its own.
+        let extension_reads = super::extension_reads(&self.file_states);
+        let session = ExternalAnalysisSession::from_files(self.database.files());
+        let symbols: Vec<(SymbolIdentifier, FileId, u64)> = extension_reads
+            .symbols
+            .iter()
+            .flat_map(|&(name, _)| self.with_ancestors(name))
+            .filter_map(|symbol| declared((symbol, empty_word())))
+            .collect();
+        let listed: Vec<Read> = extension_reads
+            .listings
+            .iter()
+            .map(|listing| Read { name: listing_name(listing), fingerprint: listing.answer(&self.codebase, &session) })
+            .collect();
+        if !symbols.is_empty() || !listed.is_empty() {
+            for file in self.database.files().filter(|file| Dialect::of(file).is_sharp()) {
+                let (file_reads, _) = reads.entry(file.id).or_default();
+                file_reads.signatures.extend(
+                    symbols
+                        .iter()
+                        .filter(|(_, target_file, _)| *target_file != file.id)
+                        .map(|(target, _, hash)| Read { name: target.0.as_bytes().to_vec(), fingerprint: *hash }),
+                );
+                file_reads.listed.extend(listed.iter().cloned());
             }
         }
         for (file_id, callee_files) in effects.callee_files(&self.codebase) {
@@ -708,7 +745,8 @@ impl IncrementalAnalysisService {
     }
 }
 
-/// The name `listing` enters a key under: what it lists, and the class-like or namespace it lists for.
+/// The name `listing` enters a key under: what it lists, and the class-like or namespace it lists for or the method
+/// search it lists by.
 fn listing_name(listing: &Listing) -> Vec<u8> {
     match listing {
         Listing::ClassLikes(kind) => format!("class-likes of kind {kind}").into_bytes(),
@@ -717,7 +755,7 @@ fn listing_name(listing: &Listing) -> Vec<u8> {
         Listing::DirectDescendants(class) => [b"direct descendants of ", class.as_bytes()].concat(),
         Listing::Descendants(class) => [b"descendants of ", class.as_bytes()].concat(),
         Listing::Namespace(namespace) => [b"namespace ", namespace.as_bytes()].concat(),
-        Listing::Methods => b"methods".to_vec(),
+        Listing::Methods(search) => [b"methods ", search.as_bytes()].concat(),
     }
 }
 
@@ -767,12 +805,15 @@ struct Dependencies<'service> {
     referencing_members: HashMap<Word, Vec<SymbolIdentifier>>,
     /// The source files that declare each declaration.
     declared_in: HashMap<SymbolIdentifier, Vec<FileId>>,
+    /// What every file read through the extension hooks and providers, as `extension_reads` gives it.
+    extension_reads: FileReads,
 }
 
 impl<'service> Dependencies<'service> {
     fn new(service: &'service IncrementalAnalysisService) -> Self {
         let mut dependencies = Self {
             service,
+            extension_reads: super::extension_reads(&service.file_states),
             signature: HashMap::default(),
             references: HashMap::default(),
             files: HashMap::default(),
@@ -833,11 +874,10 @@ impl<'service> Dependencies<'service> {
 
     /// The source files other than `file_id` whose signature edit makes the warm path re-analyze `file_id`.
     fn reached_by(&self, file_id: FileId) -> HashSet<FileId> {
-        let reads = self.service.file_states.get(&file_id).map(|state| &state.reads);
         let signature = self.service.codebase.get_file_signature(&file_id);
-        let Some(signature) = signature.filter(|_| reads.is_none_or(|reads| reads.listings.is_empty())) else {
-            // The warm path re-analyzes a file with no signature after every signature edit, and a file whose hooks or
-            // providers listed names after any edit that adds or removes one.
+        let Some(signature) = signature.filter(|_| self.extension_reads.listings.is_empty()) else {
+            // The warm path re-analyzes a file with no signature after every signature edit, and every file once a
+            // hook or provider listed names, after any edit that adds or removes one.
             return self
                 .service
                 .codebase
@@ -865,7 +905,7 @@ impl<'service> Dependencies<'service> {
                 self.changes(*member, &mut changes, &mut visited);
             }
         }
-        for read in reads.into_iter().flat_map(|reads| &reads.symbols) {
+        for read in &self.extension_reads.symbols {
             self.signature_changes(*read, &mut changes, &mut visited);
         }
 
@@ -1482,6 +1522,39 @@ mod tests {
         assert_ne!(compiled_key(title), compiled_key(accepted(&after, "app/Title.sharp")));
     }
 
+    /// A function several polyfill files declare, each its own way, is read as the declaration the codebase keeps,
+    /// never as the one its map of files happens to list last. So every compile of one tree gives the PHP# file that
+    /// calls it one key, whichever order the process walks the files in.
+    #[test]
+    fn a_function_several_files_declare_is_read_in_its_caller_key_as_the_declaration_the_codebase_keeps() {
+        let text = TEXT.replace("ucfirst", "shout");
+        let polyfills: Vec<(String, String)> = ["string", "?string", "int|string", "float|string", "bool|string"]
+            .iter()
+            .enumerate()
+            .map(|(index, parameter)| {
+                (
+                    format!("vendor/acme/polyfill/bootstrap{index}.php"),
+                    format!("<?php\n\nif (!\\function_exists('shout')) {{\n    function shout({parameter} $text): string\n    {{\n        return (string) $text;\n    }}\n}}\n"),
+                )
+            })
+            .collect();
+        let key = |polyfills: &[(String, String)]| {
+            let mut files: Vec<(&str, &str)> =
+                polyfills.iter().map(|(name, code)| (name.as_str(), code.as_str())).collect();
+            files.push((TEXT_PATH, text.as_str()));
+            let mut service = analyzed(&project(&files));
+            let kept = service.codebase.get_function(b"shout").expect("the codebase keeps one `shout`").span.file_id;
+
+            (kept, compiled_key(accepted(&compile(&mut service, empty_stamp), TEXT_PATH)))
+        };
+
+        let (kept, every) = key(&polyfills);
+        let kept = polyfills.iter().find(|(name, _)| FileId::new(name.as_bytes()) == kept).expect("a polyfill is kept");
+        let (_, alone) = key(std::slice::from_ref(kept));
+
+        assert_eq!(every, alone, "the caller reads `shout` as {}", kept.0);
+    }
+
     /// Spec section 21: a lambda's function type lists the effects of each body it calls, in any file, so the file
     /// of each body a call reaches is an input, along every chain of calls. An edit two calls away that gives or takes
     /// an effect changes the lambda's type text and its key on a warm compile, as on a clean one. An edit that keeps
@@ -1722,7 +1795,8 @@ mod tests {
             service.codebase.safe_symbols.clear();
             service.codebase.safe_symbol_members.clear();
             let unchanged: Vec<FileId> = files.iter().copied().filter(|file_id| *file_id != edited.id).collect();
-            let reads = super::super::symbols_read_by(&service.file_states, &service.database, &unchanged);
+            let extension_reads = super::super::extension_reads(&service.file_states);
+            let reads = super::super::symbols_read_by(&extension_reads.symbols, &service.database, &unchanged);
             let invalid_files = service
                 .codebase
                 .mark_safe_symbols(&diff, &service.native_symbol_references, reads)

@@ -1208,11 +1208,12 @@ impl IncrementalAnalysisService {
             return Ok(analysis_result);
         }
 
-        let listings_before: HashMap<Listing, u64> = unchanged_file_ids
+        let extension_reads = extension_reads(&self.file_states);
+        let session = ExternalAnalysisSession::from_files(self.database.files());
+        let listings_before: Vec<(Listing, u64)> = extension_reads
+            .listings
             .iter()
-            .filter_map(|file_id| self.file_states.get(file_id))
-            .flat_map(|state| state.reads.listings.iter().copied())
-            .map(|listing| (listing, listing.answer(&self.codebase)))
+            .map(|listing| (*listing, listing.answer(&self.codebase, &session)))
             .collect();
         // The analyzer refuses a class-like whose full name is also a namespace (spec section 23), on either side, so a
         // file is analyzed again when a class-like it declares names the namespace of a class-like scanned again, or
@@ -1265,7 +1266,7 @@ impl IncrementalAnalysisService {
         merged_codebase.safe_symbols.clear();
         merged_codebase.safe_symbol_members.clear();
 
-        let reads = symbols_read_by(&self.file_states, &self.database, &unchanged_file_ids);
+        let reads = symbols_read_by(&extension_reads.symbols, &self.database, &unchanged_file_ids);
         let Some(mut invalid_files) = merged_codebase.mark_safe_symbols(&diff, &self.native_symbol_references, reads)
         else {
             tracing::warn!("Invalidation cascade too expensive (>5000 steps), falling back to full analysis");
@@ -1302,14 +1303,11 @@ impl IncrementalAnalysisService {
             safe_symbol_members,
             dirty_symbols,
         );
-        let changed_listings: HashSet<Listing> = listings_before
-            .into_iter()
-            .filter(|(listing, answer)| listing.answer(&merged_codebase) != *answer)
-            .map(|(listing, _)| listing)
-            .collect();
+        let listing_changed =
+            listings_before.iter().any(|(listing, answer)| listing.answer(&merged_codebase, &session) != *answer);
         for file_id in &unchanged_file_ids {
             if self.file_states.get(file_id).is_some_and(|state| {
-                state.reads.listings.iter().any(|listing| changed_listings.contains(listing))
+                listing_changed
                     || state.entry_keys.class_like_names.iter().any(|name| {
                         scanned_namespaces.contains(name)
                             || namespaces_of(name).iter().any(|namespace| scanned_class_likes.contains(namespace))
@@ -2126,19 +2124,36 @@ fn extensions_in(codebase: &CodebaseMetadata, file_id: FileId) -> Vec<(Word, Met
     extensions
 }
 
-/// The symbols the extension hooks and providers of each of `files` read, by file name, for the invalidation cascade.
-fn symbols_read_by<'state>(
-    file_states: &'state HashMap<FileId, FileState>,
+/// What the extension hooks and providers read from the codebase in the last analysis of each file, with the sets each
+/// file's own analysis read whole, taken as read by every file. A hook or provider may keep what it read for one file
+/// on its own object, as a rule keeps the methods a search found or a class's ancestors, and answer any later file of
+/// its worker from it with no read of its own. Which files a worker takes first changes from run to run, so only the
+/// reads of every file together name what each file read.
+fn extension_reads(file_states: &HashMap<FileId, FileState>) -> FileReads {
+    let mut reads = FileReads::default();
+    for state in file_states.values() {
+        reads.symbols.extend(state.reads.symbols.iter().copied());
+        reads.listings.extend(state.reads.listings.iter().copied());
+    }
+
+    reads
+}
+
+/// The symbols each of `files` read through the extension hooks and providers, `read`, by file name, for the
+/// invalidation cascade.
+fn symbols_read_by<'read>(
+    read: &'read HashSet<SymbolIdentifier>,
     database: &ReadDatabase,
     files: &[FileId],
-) -> Vec<(Word, &'state HashSet<SymbolIdentifier>)> {
+) -> Vec<(Word, &'read HashSet<SymbolIdentifier>)> {
+    if read.is_empty() {
+        return Vec::new();
+    }
+
     files
         .iter()
-        .filter_map(|file_id| {
-            let state = file_states.get(file_id).filter(|state| !state.reads.symbols.is_empty())?;
-            let file = database.get(file_id).ok()?;
-            Some((mago_word::word(file.name.as_ref()), &state.reads.symbols))
-        })
+        .filter_map(|file_id| database.get(file_id).ok())
+        .map(|file| (mago_word::word(file.name.as_ref()), read))
         .collect()
 }
 

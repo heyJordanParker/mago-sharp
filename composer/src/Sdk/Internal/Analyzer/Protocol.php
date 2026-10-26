@@ -1729,9 +1729,14 @@ final class Protocol
         return [$reader, $reader->readCount(65_536)];
     }
 
-    /** @param list<string> $withAnyAttribute */
-    public static function writeCodebaseFindMethodsRequest(
-        int $generation,
+    /**
+     * A method search as Mago reads it, both in the request that runs it and in the read that records it: the classes
+     * it searches, the name pattern, whether it skips inherited methods, the attributes a method carries one of, and
+     * the fields it projects.
+     *
+     * @param list<string> $withAnyAttribute
+     */
+    public static function writeMethodSearch(
         ?string $class,
         ?string $descendantsOf,
         string $name,
@@ -1739,9 +1744,7 @@ final class Protocol
         int $fields,
         bool $declaredOnly,
     ): string {
-        $writer = self::createMessage(self::CODEBASE_QUERY_REQUEST);
-        $writer->writeU64($generation);
-        $writer->writeU8(self::FIND_METHODS);
+        $writer = new PayloadWriter();
         $writer->writeU8(match (true) {
             $class !== null => self::METHOD_SEARCH_EXACT_CLASS,
             $descendantsOf !== null => self::METHOD_SEARCH_DESCENDANTS,
@@ -1758,6 +1761,16 @@ final class Protocol
             $writer->writeBytes($attribute);
         }
         $writer->writeU32($fields);
+
+        return $writer->finish();
+    }
+
+    public static function writeCodebaseFindMethodsRequest(int $generation, string $search): string
+    {
+        $writer = self::createMessage(self::CODEBASE_QUERY_REQUEST);
+        $writer->writeU64($generation);
+        $writer->writeU8(self::FIND_METHODS);
+        $writer->writeRaw($search);
 
         return $writer->finish();
     }

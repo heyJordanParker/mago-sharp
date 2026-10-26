@@ -11,10 +11,12 @@ use mago_analyzer::external::ExternalAnalyzerHandle;
 use mago_analyzer::plugin::PluginRegistry;
 use mago_analyzer::settings::Settings as AnalyzerSettings;
 use mago_database::Database;
+use mago_database::DatabaseConfiguration;
 use mago_database::DatabaseReader;
 use mago_database::file::File;
 use mago_database::file::FileId;
 use mago_database::file::FileType;
+use mago_database::membership::WorkspaceMatcher;
 use mago_extension::WorkerCommand;
 use mago_extension::WorkerPool;
 use mago_extension::WorkerPoolOptions;
@@ -266,6 +268,120 @@ fn a_hook_that_listed_classes_sees_a_new_class_on_the_next_run_and_does_not_run_
     assert_eq!(reads(&removed, "listing"), ["Run 3: classes Box."]);
 }
 
+/// The messages reported under `code`, sorted, since files analyzed together report in any order.
+fn reported(issues: &IssueCollection, code: &str) -> Vec<String> {
+    let mut messages: Vec<String> =
+        issues.iter().filter(|issue| issue.code.as_deref() == Some(code)).map(|issue| issue.message.clone()).collect();
+    messages.sort();
+    messages
+}
+
+/// The messages the owners hook reports.
+fn owners(issues: &IssueCollection) -> Vec<String> {
+    reported(issues, "server-owners/owners")
+}
+
+/// The messages the parents hook reports.
+fn parents(issues: &IssueCollection) -> Vec<String> {
+    reported(issues, "server-parents/parents")
+}
+
+/// The attribute the owners hook lists the methods of.
+const OWNER: &str = "<?php\n#[Attribute]\nfinal class Owner {}\n";
+
+/// `Order` has an `#[Owner]` method, and `Invoice` has `invoice` before its `account`.
+fn models(invoice: &str) -> String {
+    format!(
+        "<?php\nfinal class Order\n{{\n    #[Owner]\n    public function account(): int {{ return 1; }}\n}}\nfinal class Invoice\n{{\n{invoice}    public function account(): int {{ return 1; }}\n}}\n"
+    )
+}
+
+/// The hook reads the listing in whichever of the two marked files the worker analyzes first, and answers the other
+/// from the listing it kept. Each file is analyzed again when the listing changes, and neither when an edit leaves it
+/// as it was.
+#[test]
+fn every_file_a_kept_listing_answered_runs_again_when_the_listing_changes_and_none_when_it_stays() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if !common::php_sdk_is_available(repository, "the kept listing reads test") {
+        return;
+    }
+
+    let mut server = server(
+        repository,
+        database(&[
+            ("src/owner.php", OWNER),
+            ("src/models.php", &models("")),
+            ("src/orders.php", "<?php\n// owners: Order\nfinal class OrderReport {}\n"),
+            ("src/invoices.php", "<?php\n// owners: Invoice\nfinal class InvoiceReport {}\n"),
+        ]),
+    );
+    let first = server.analyze().expect("initial analysis").issues;
+    assert_eq!(
+        owners(&first),
+        ["Run 1 of `src/invoices.php`: `Invoice` is not owned.", "Run 1 of `src/orders.php`: `Order` is owned."]
+    );
+
+    let models_file = FileId::new(b"src/models.php");
+    let total = "    public function total(): int { return 2; }\n";
+    server.database_mut().update(models_file, Cow::Owned(models(total).into_bytes()));
+    let same = server.analyze_incremental(&[models_file]).expect("analysis after a method the listing omits").issues;
+    assert_eq!(owners(&same), owners(&first), "a method with no `#[Owner]` leaves the listing as it was");
+
+    server.database_mut().update(models_file, Cow::Owned(models("    #[Owner]\n").into_bytes()));
+    let owned = server.analyze_incremental(&[models_file]).expect("analysis after a method joins the listing").issues;
+    assert_eq!(
+        owners(&owned),
+        ["Run 2 of `src/invoices.php`: `Invoice` is owned.", "Run 2 of `src/orders.php`: `Order` is owned."]
+    );
+}
+
+/// `Order`, extending `parent`, with `total` returning `returned`.
+fn order_of(parent: &str, returned: &str) -> String {
+    format!(
+        "<?php\nclass Base {{}}\nclass Other {{}}\nfinal class Order extends {parent}\n{{\n    public function total(): int {{ return {returned}; }}\n}}\n"
+    )
+}
+
+/// The hook reads `Order`'s parents in whichever of the two marked files the worker analyzes first, and answers the
+/// other from the parents it kept. Each file is analyzed again when `Order`'s parent changes, and neither after an edit
+/// of `Order`'s body.
+#[test]
+fn every_file_a_kept_class_answered_runs_again_when_the_class_changes_parent_and_none_after_a_body_edit() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if !common::php_sdk_is_available(repository, "the kept class reads test") {
+        return;
+    }
+
+    let mut server = server(
+        repository,
+        database(&[
+            ("src/order.php", &order_of("Base", "1")),
+            ("src/billing.php", "<?php\n// extends: Order Base\nfinal class Billing {}\n"),
+            ("src/shipping.php", "<?php\n// extends: Order Base\nfinal class Shipping {}\n"),
+        ]),
+    );
+    let first = server.analyze().expect("initial analysis").issues;
+    assert_eq!(
+        parents(&first),
+        ["Run 1 of `src/billing.php`: `Order` extends `Base`.", "Run 1 of `src/shipping.php`: `Order` extends `Base`."]
+    );
+
+    let order_file = FileId::new(b"src/order.php");
+    server.database_mut().update(order_file, Cow::Owned(order_of("Base", "2").into_bytes()));
+    let edited = server.analyze_incremental(&[order_file]).expect("analysis after a body edit").issues;
+    assert_eq!(parents(&edited), parents(&first), "a body edit runs neither again");
+
+    server.database_mut().update(order_file, Cow::Owned(order_of("Other", "2").into_bytes()));
+    let moved = server.analyze_incremental(&[order_file]).expect("analysis after a parent change").issues;
+    assert_eq!(
+        parents(&moved),
+        [
+            "Run 2 of `src/billing.php`: `Order` does not extend `Base`.",
+            "Run 2 of `src/shipping.php`: `Order` does not extend `Base`."
+        ]
+    );
+}
+
 /// The messages the reading hook reports under `comparison`, sorted, since files analyzed together report in any order.
 fn comparisons(issues: &IssueCollection) -> Vec<String> {
     let mut messages = reads(issues, "comparison");
@@ -511,4 +627,65 @@ fn changing_the_parent_of_a_model_a_provider_compared_changes_the_sharp_file_inp
 
     assert_ne!(before["app/Models/Order.php"], after["app/Models/Order.php"]);
     assert_ne!(header(&before_bytes).expect("a header").key, header(&after_bytes).expect("a header").key);
+}
+
+/// A PHP# file whose class declaration the owners hook answers from the listing it kept.
+const REPORT: &str = "namespace App;\n\npublic class Report\n{\n    // owners: Invoice\n}\n";
+
+/// The inputs and the compiled bytes of `app/Report.sharp`, and the owners hook's reports, from a server whose node
+/// hooks run in the files `scope` names, or in every file.
+fn compiled_report(repository: &Path, scope: Option<&[u8]>) -> (Vec<String>, Vec<u8>, Vec<String>) {
+    let files = [
+        ("app/owner.php", OWNER.to_owned()),
+        ("app/models.php", models("")),
+        ("app/orders.php", "<?php\n// owners: Order\nfinal class OrderReport {}\n".to_owned()),
+        ("app/Report.sharp", REPORT.to_owned()),
+    ];
+    let mut database = Database::new(common::database_configuration("/server-proof", vec![Cow::Borrowed(b"app")]));
+    for (name, contents) in files {
+        database.add(File::new(
+            Cow::Borrowed(name.as_bytes()),
+            FileType::Host,
+            Some(Path::new("/server-proof").join(name)),
+            Cow::Owned(contents.into_bytes()),
+        ));
+    }
+    let mut server = server(repository, database);
+    if let Some(scope) = scope {
+        let matcher = WorkspaceMatcher::from_configuration(&DatabaseConfiguration::new(
+            Path::new("/server-proof"),
+            vec![scope],
+            vec![],
+            vec![],
+            vec![b"sharp"],
+        ))
+        .expect("the scope compiles");
+        server = server.scoped_to(matcher);
+    }
+    let reports = owners(&server.analyze().expect("the analysis runs").issues);
+    let (inputs, bytes) = compiled(&mut server);
+
+    (inputs.into_keys().collect(), bytes, reports)
+}
+
+/// Whichever file the worker analyzes first reads the listing the hook keeps, and that changes with the files the hooks
+/// run in. A compile whose hooks run only in its PHP# file writes the bytes of one whose hooks run in every file, the
+/// inputs the listing gives `app/Report.sharp` included.
+#[test]
+fn a_compile_whose_hooks_run_in_its_php_sharp_file_alone_writes_the_bytes_of_one_whose_hooks_run_everywhere() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if !common::php_sdk_is_available(repository, "the scoped hooks compile test") {
+        return;
+    }
+
+    let (everywhere_inputs, everywhere, everywhere_reports) = compiled_report(repository, None);
+    let (scoped_inputs, scoped, scoped_reports) = compiled_report(repository, Some(b"app/Report.sharp"));
+
+    assert_eq!(
+        everywhere_reports,
+        ["Run 1 of `app/Report.sharp`: `Invoice` is not owned.", "Run 1 of `app/orders.php`: `Order` is owned."]
+    );
+    assert_eq!(scoped_reports, ["Run 1 of `app/Report.sharp`: `Invoice` is not owned."]);
+    assert_eq!(scoped_inputs, everywhere_inputs);
+    assert!(scoped == everywhere, "the two compiles list the same inputs and write other bytes");
 }

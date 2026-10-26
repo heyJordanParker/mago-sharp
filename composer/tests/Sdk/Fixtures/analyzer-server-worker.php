@@ -12,6 +12,7 @@ use Mago\Sdk\Analyzer\BeforeAnalysisContext;
 use Mago\Sdk\Analyzer\BeforeAnalysisHook;
 use Mago\Sdk\Analyzer\FileAnalysis;
 use Mago\Sdk\Analyzer\Metadata\MemberIdentifier;
+use Mago\Sdk\Analyzer\Metadata\MethodFields;
 use Mago\Sdk\Analyzer\MethodReturnTypeProvider;
 use Mago\Sdk\Analyzer\MethodTarget;
 use Mago\Sdk\Analyzer\NodeAnalysisContext;
@@ -31,6 +32,7 @@ use Mago\Sdk\Syntax\NodeKind;
 use Mago\Sdk\Worker;
 use RuntimeException;
 
+use function array_key_exists;
 use function dirname;
 use function explode;
 use function implode;
@@ -39,6 +41,7 @@ use function str_contains;
 use function strcspn;
 use function strlen;
 use function strpos;
+use function strtolower;
 use function substr;
 use function usort;
 
@@ -279,9 +282,161 @@ final class ServerModelPlugin implements Plugin, MethodReturnTypeProvider
     }
 }
 
+/**
+ * A node hook that keeps the classes with an `#[Owner]` method in a field, as an app's rule keeps a listing it read for
+ * one file and answers every later file of the analysis from it. In a file marked `owners: Class` it reports at each
+ * class declaration whether `Class` has such a method. Each report counts the hook's runs in its file in this worker,
+ * so a test sees whether Mago ran it again.
+ *
+ * @mago-expect lint:single-class-per-file
+ */
+final class ServerOwnersPlugin implements Plugin, BeforeAnalysisHook, NodeAnalysisHook
+{
+    /** @var array<string, true>|null */
+    private ?array $owned = null;
+
+    /** @var array<string, int> */
+    private array $runs = [];
+
+    public function getDefinition(): PluginDefinition
+    {
+        return new PluginDefinition('server-owners', 'Server owners', 'A node hook that keeps a listing in a field.');
+    }
+
+    public function register(PluginRegistry $registry): void
+    {
+        $registry->registerBeforeAnalysisHook($this);
+        $registry->registerNodeAnalysisHook($this);
+    }
+
+    public function getTargets(): array
+    {
+        return [NodeKind::Class_];
+    }
+
+    public function getRequirements(): array
+    {
+        return [];
+    }
+
+    public function beforeAnalysis(BeforeAnalysisContext $context): void
+    {
+        $this->owned = null;
+    }
+
+    public function analyze(NodeAnalysisContext $context): void
+    {
+        $contents = $context->analysis->getSourceFile()->contents;
+        $marker = strpos($contents, 'owners: ');
+        if ($marker === false) {
+            return;
+        }
+
+        if ($this->owned === null) {
+            $this->owned = [];
+            foreach ($context->codebase->findMethods(
+                withAnyAttribute: ['Owner'],
+                fields: MethodFields::NAMES,
+            ) as $method) {
+                $this->owned[strtolower($method->method->class)] = true;
+            }
+        }
+
+        $start = $marker + strlen('owners: ');
+        $class = substr($contents, $start, strcspn($contents, " \t\n\v\f\r", $start));
+        $file = $context->analysis->file;
+        $runs = ($this->runs[$file] ?? 0) + 1;
+        $this->runs[$file] = $runs;
+        $owned = array_key_exists(strtolower($class), $this->owned) ? 'is' : 'is not';
+        $context->report(
+            Level::Warning,
+            'owners',
+            Issue::new("Run {$runs} of `{$file}`: `{$class}` {$owned} owned.", $context->node->span),
+        );
+    }
+}
+
+/**
+ * A node hook that keeps each class's parents it read in a field, as an app's rule keeps a class it read for one file
+ * and answers every later file of the analysis from it. In a file marked `extends: Class Parent` it reports at each
+ * class declaration whether `Class` extends `Parent`. Each report counts the hook's runs in its file in this worker, so
+ * a test sees whether Mago ran it again.
+ *
+ * @mago-expect lint:single-class-per-file
+ */
+final class ServerParentsPlugin implements Plugin, BeforeAnalysisHook, NodeAnalysisHook
+{
+    /** @var array<string, array<string, true>> */
+    private array $parents = [];
+
+    /** @var array<string, int> */
+    private array $runs = [];
+
+    public function getDefinition(): PluginDefinition
+    {
+        return new PluginDefinition('server-parents', 'Server parents', 'A node hook that keeps a class in a field.');
+    }
+
+    public function register(PluginRegistry $registry): void
+    {
+        $registry->registerBeforeAnalysisHook($this);
+        $registry->registerNodeAnalysisHook($this);
+    }
+
+    public function getTargets(): array
+    {
+        return [NodeKind::Class_];
+    }
+
+    public function getRequirements(): array
+    {
+        return [];
+    }
+
+    public function beforeAnalysis(BeforeAnalysisContext $context): void
+    {
+        $this->parents = [];
+    }
+
+    public function analyze(NodeAnalysisContext $context): void
+    {
+        $contents = $context->analysis->getSourceFile()->contents;
+        $marker = strpos($contents, 'extends: ');
+        if ($marker === false) {
+            return;
+        }
+
+        $start = $marker + strlen('extends: ');
+        [$class, $parent] = explode(' ', substr($contents, $start, strcspn($contents, "\t\n\v\f\r", $start)), 2);
+        $key = strtolower($class);
+        if (!array_key_exists($key, $this->parents)) {
+            $this->parents[$key] = [];
+            foreach ($context->codebase->getClassLike($class)->parentClasses ?? [] as $read) {
+                $this->parents[$key][strtolower($read)] = true;
+            }
+        }
+
+        $file = $context->analysis->file;
+        $runs = ($this->runs[$file] ?? 0) + 1;
+        $this->runs[$file] = $runs;
+        $extends = array_key_exists(strtolower($parent), $this->parents[$key]) ? 'extends' : 'does not extend';
+        $context->report(
+            Level::Warning,
+            'parents',
+            Issue::new("Run {$runs} of `{$file}`: `{$class}` {$extends} `{$parent}`.", $context->node->span),
+        );
+    }
+}
+
 (new Worker(new Extension(
     identifier: 'mago/server-proof',
     name: 'Mago analysis server proof',
     version: '1.0.0',
-    analyzerPlugins: [new ServerProofPlugin(), new ServerReadsPlugin(), new ServerModelPlugin()],
+    analyzerPlugins: [
+        new ServerProofPlugin(),
+        new ServerReadsPlugin(),
+        new ServerModelPlugin(),
+        new ServerOwnersPlugin(),
+        new ServerParentsPlugin(),
+    ],
 )))->run();

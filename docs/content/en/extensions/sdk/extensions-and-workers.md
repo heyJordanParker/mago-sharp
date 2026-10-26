@@ -102,6 +102,8 @@ This state is:
 
 A worker runs one request at a time, in the order Mago sends them. A hook that waits on a codebase query keeps its turn, so no other hook in that process starts until it returns. A rule can fill a cache on its own object around a query, and every later file reads the full result. Mago gets parallelism by running several workers.
 
+Mago counts what any hook or provider reads from the codebase, such as a class from `Codebase::getClassLike()` or the methods `Codebase::findMethods()` finds across classes, as read by every file, as [reads and incremental analysis](/extensions/analyzer/codebase-metadata/#reads-and-incremental-analysis) says. So a rule may keep what it read on its own object and answer later files from it: every file is analyzed again when what was read changes, as a class's signature or a search's result, and none is when it stays the same.
+
 Use generation-aware SDK data for analysis caches. Use a `WorkerReducer` when process-local application metrics must be combined at shutdown.
 
 ## PHP version
