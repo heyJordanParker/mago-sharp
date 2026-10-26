@@ -147,11 +147,13 @@ Within one callback, batching remains important even when data might be cached: 
 
 ## Reads and incremental analysis
 
-Mago records what providers, issue filters, after-file hooks, and targeted hooks read through `codebase` and `types`, cached answers included. A hook may keep what it read for one file on its own object and answer later files from it, so Mago counts every read of the analysis as read by every file, and analyzes the files again when one changes:
+Mago records what providers, issue filters, before-analysis hooks, after-file hooks, and targeted hooks read through `codebase` and `types`, cached answers included. A hook may keep what it read before the analysis or for one file on its own object and answer later files from it, so Mago counts every read of the analysis as read by every file, and analyzes the files again when one changes:
 
 - a class-like, function, or constant they read changes its signature, appears, or disappears; a read of a class-like member counts as a read of the class-like, so any signature change to the class-like or its ancestors counts;
 - a class-like named anywhere in a type they compared through `types` changes its signature, appears, or disappears, including one named in a generic argument, a union, an intersection, a `class-string`, or an object shape;
 - a list of names they read, such as `getClassNames()`, `getClassDescendants()`, or `namespaceExists()`, gains or loses a name;
 - a `findMethods()` search that did not name one class finds other methods, or other fields of a method it projects.
 
-An edit to a method body changes none of these, so it does not run another file's providers or hooks again. The files whose edit can change a read also count among the inputs of a compiled PHP# file.
+An edit to a method body changes none of these, so it does not run another file's providers or hooks again.
+
+Every read enters the key of each compiled PHP# file, so `mago compile` writes it again when a read changes. A provider's read can change the code a PHP# file compiles to, so the files whose edit can change it also count among the file's inputs, and the engine refuses the compiled file after their edit until the next compile. A hook's or an issue filter's read decides only which issues Mago reports, so it names no input.

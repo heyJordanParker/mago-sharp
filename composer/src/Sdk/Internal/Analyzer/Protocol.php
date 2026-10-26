@@ -914,7 +914,8 @@ final class Protocol
     /**
      * @param list<int|ReportedIssue|string|null> $reportedIssues
      * @param list<int|string|MemberIdentifier|ReferenceOrigin|ReferenceKind|null> $contributedReferences
-     * @param list<array{string, list<array{int, int, string}>}> $recordedReads each file's codebase reads
+     * @param list<array{string|null, list<array{int, int, string}>}> $recordedReads each file's codebase reads, or
+     *   the before-analysis hooks', which name no file
      *
      * @mago-expect lint:halstead
      */
@@ -1003,7 +1004,10 @@ final class Protocol
 
         $writer->writeCount($recordedReads);
         foreach ($recordedReads as [$file, $reads]) {
-            $writer->writeBytes($file);
+            if ($requestKind !== self::BEFORE_ANALYSIS_REQUEST) {
+                $writer->writeBytes($file ?? throw new ProtocolException('A file analysis read names no file.'));
+            }
+
             self::writeCodebaseReads($writer, $reads);
         }
 

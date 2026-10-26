@@ -1248,7 +1248,12 @@ final class Worker
                 $host->progress($requestId, $analysis->file);
             }
 
-            $reads = $analysis instanceof FileAnalysis ? new CodebaseReads() : null;
+            // A file's hooks read for it, and the before-analysis hooks for every file, since a rule may keep what it
+            // read there and answer each file from it.
+            $reads =
+                $analysis instanceof FileAnalysis || $kind === AnalyzerProtocol::BEFORE_ANALYSIS_REQUEST
+                    ? new CodebaseReads()
+                    : null;
             $fileCodebase = $reads === null
                 ? $codebase
                 : new Codebase($host, $requestId, $cancellation, $this->metadataCache, $reads);
@@ -1266,8 +1271,8 @@ final class Worker
                     $context = match ($kind) {
                         AnalyzerProtocol::BEFORE_ANALYSIS_REQUEST => new BeforeAnalysisContext(
                             $this->phpVersion,
-                            $codebase,
-                            $types,
+                            $fileCodebase,
+                            $fileTypes,
                             $cancellation,
                         ),
                         AnalyzerProtocol::AFTER_FILE_ANALYSIS_REQUEST => new AfterFileAnalysisContext(
@@ -1349,8 +1354,8 @@ final class Worker
             }
 
             $taken = $reads?->take() ?? [];
-            if ($analysis instanceof FileAnalysis && $taken !== []) {
-                $recordedReads[] = [$analysis->file, $taken];
+            if ($taken !== []) {
+                $recordedReads[] = [$analysis instanceof FileAnalysis ? $analysis->file : null, $taken];
             }
         }
 

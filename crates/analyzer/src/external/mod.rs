@@ -48,6 +48,7 @@ pub use error::ExternalAnalyzerError;
 pub use lifecycle::AFTER_FILE_ANALYSIS_BATCH_SIZE;
 pub use lifecycle::FileAnalysisSnapshot;
 use protocol::Registration;
+pub use reads::ExtensionReads;
 pub use reads::FileReads;
 pub use reads::Listing;
 
@@ -126,7 +127,7 @@ pub(crate) struct ForwardedCall {
 pub struct ExternalAnalysisSession {
     generation: u64,
     sources: foldhash::HashMap<FileId, Arc<File>>,
-    reads: Mutex<foldhash::HashMap<FileId, FileReads>>,
+    reads: Mutex<ExtensionReads>,
 }
 
 impl ExternalAnalysisSession {
@@ -138,28 +139,44 @@ impl ExternalAnalysisSession {
         Self { generation, sources, reads: Mutex::default() }
     }
 
-    /// Takes what each file's hooks and providers read from the codebase in this run.
+    /// Takes what the hooks, issue filters and providers read from the codebase in this run.
     #[must_use]
-    pub fn take_reads(&self) -> foldhash::HashMap<FileId, FileReads> {
+    pub fn take_reads(&self) -> ExtensionReads {
         std::mem::take(&mut self.reads.lock().unwrap_or_else(std::sync::PoisonError::into_inner))
     }
 
-    fn record_reads(&self, file_id: FileId, reads: FileReads) {
+    fn record(&self, record: impl FnOnce(&mut ExtensionReads)) {
+        record(&mut self.reads.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
+    }
+
+    /// Records reads that decide only the issues reported in `file_id`, as its after-file and targeted hooks' do.
+    fn record_issue_reads(&self, file_id: FileId, reads: FileReads) {
         if !reads.is_empty() {
-            self.reads
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .entry(file_id)
-                .or_default()
-                .extend(reads);
+            self.record(|run| run.issues.entry(file_id).or_default().extend(reads));
         }
     }
 
-    /// Records the codebase reads a provider or issue filter made while Mago analyzed `file_id`, which lead its
-    /// `response`, and returns the response without them.
+    /// Records what the before-analysis hooks read.
+    fn record_before_analysis_reads(&self, reads: FileReads) {
+        self.record(|run| run.before_analysis.extend(reads));
+    }
+
+    /// Records the codebase reads a provider made while Mago analyzed `file_id`, which lead its `response`, and returns
+    /// the response without them.
     fn record_response_reads(&self, file_id: FileId, response: &[u8]) -> Result<Vec<u8>, ExternalAnalyzerError> {
         let (reads, response) = protocol::take_codebase_reads(response)?;
-        self.record_reads(file_id, reads);
+        if !reads.is_empty() {
+            self.record(|run| run.code.entry(file_id).or_default().extend(reads));
+        }
+
+        Ok(response)
+    }
+
+    /// Records the codebase reads an issue filter made for `file_id`'s issues, which lead its `response`, and returns
+    /// the response without them.
+    fn record_issue_filter_reads(&self, file_id: FileId, response: &[u8]) -> Result<Vec<u8>, ExternalAnalyzerError> {
+        let (reads, response) = protocol::take_codebase_reads(response)?;
+        self.record_issue_reads(file_id, reads);
 
         Ok(response)
     }
@@ -1809,7 +1826,7 @@ where
 
             let decode_start = self.trace_enabled.then(Instant::now);
             let removed = session
-                .record_response_reads(file.id, &response)
+                .record_issue_filter_reads(file.id, &response)
                 .and_then(|response| protocol::decode_issue_filter_response(&response, issue_count))
                 .inspect_err(|_| self.record_issue_filter_error())?;
             let removed = removed.into_iter().map(|index| candidate_indices[index]).collect::<Vec<_>>();

@@ -1453,24 +1453,33 @@ pub(super) fn decode_lifecycle_response(
         }
     }
 
+    // The before-analysis hooks read for no one file, so their reads name none.
     let read_file_count = reader.read_count("files with codebase reads", AFTER_FILE_ANALYSIS_BATCH_SIZE)?;
-    if read_file_count != 0 && !matches!(request_kind, AFTER_FILE_ANALYSIS_REQUEST | AFTER_FILE_ANALYSIS_BATCH_REQUEST)
-    {
-        return Err(protocol("only after-file hooks record codebase reads"));
+    if read_file_count != 0 && request_kind == AFTER_ANALYSIS_REQUEST {
+        return Err(protocol("after-analysis hooks may not record codebase reads"));
     }
 
     let mut reads = Vec::with_capacity(read_file_count);
     for _ in 0..read_file_count {
-        let name = reader.read_bytes("codebase read file")?;
-        let (file_id, _) = session
-            .source(name)
-            .ok_or_else(|| protocol(format!("codebase reads name unknown file `{}`", String::from_utf8_lossy(name))))?;
+        let file_id = if request_kind == BEFORE_ANALYSIS_REQUEST {
+            None
+        } else {
+            let name = reader.read_bytes("codebase read file")?;
+            let (file_id, _) = session.source(name).ok_or_else(|| {
+                protocol(format!("codebase reads name unknown file `{}`", String::from_utf8_lossy(name)))
+            })?;
+
+            Some(file_id)
+        };
         reads.push((file_id, FileReads::decode(&mut reader)?));
     }
 
     reader.finish()?;
     for (file_id, file_reads) in reads {
-        session.record_reads(file_id, file_reads);
+        match file_id {
+            Some(file_id) => session.record_issue_reads(file_id, file_reads),
+            None => session.record_before_analysis_reads(file_reads),
+        }
     }
 
     Ok(LifecycleEffects { issues, references, references_by_file })

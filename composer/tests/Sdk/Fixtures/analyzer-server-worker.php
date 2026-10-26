@@ -428,6 +428,76 @@ final class ServerParentsPlugin implements Plugin, BeforeAnalysisHook, NodeAnaly
     }
 }
 
+/**
+ * A rule that reads `Shipment`'s parents before the analysis and keeps them in a field, as an app's rule fills a cache
+ * before any file. In a file marked `prepared: Parent` it reports at each class declaration whether `Shipment` extends
+ * `Parent`. Each report counts the hook's runs in its file in this worker, so a test sees whether Mago ran it again.
+ *
+ * @mago-expect lint:single-class-per-file
+ */
+final class ServerPreparedPlugin implements Plugin, BeforeAnalysisHook, NodeAnalysisHook
+{
+    /** @var array<string, true> */
+    private array $parents = [];
+
+    /** @var array<string, int> */
+    private array $runs = [];
+
+    public function getDefinition(): PluginDefinition
+    {
+        return new PluginDefinition(
+            'server-prepared',
+            'Server prepared',
+            'A node hook that answers from what it read before the analysis.',
+        );
+    }
+
+    public function register(PluginRegistry $registry): void
+    {
+        $registry->registerBeforeAnalysisHook($this);
+        $registry->registerNodeAnalysisHook($this);
+    }
+
+    public function getTargets(): array
+    {
+        return [NodeKind::Class_];
+    }
+
+    public function getRequirements(): array
+    {
+        return [];
+    }
+
+    public function beforeAnalysis(BeforeAnalysisContext $context): void
+    {
+        $this->parents = [];
+        foreach ($context->codebase->getClassLike('Shipment')->parentClasses ?? [] as $parent) {
+            $this->parents[strtolower($parent)] = true;
+        }
+    }
+
+    public function analyze(NodeAnalysisContext $context): void
+    {
+        $contents = $context->analysis->getSourceFile()->contents;
+        $marker = strpos($contents, 'prepared: ');
+        if ($marker === false) {
+            return;
+        }
+
+        $start = $marker + strlen('prepared: ');
+        $parent = substr($contents, $start, strcspn($contents, " \t\n\v\f\r", $start));
+        $file = $context->analysis->file;
+        $runs = ($this->runs[$file] ?? 0) + 1;
+        $this->runs[$file] = $runs;
+        $extends = array_key_exists(strtolower($parent), $this->parents) ? 'extends' : 'does not extend';
+        $context->report(
+            Level::Warning,
+            'prepared',
+            Issue::new("Run {$runs} of `{$file}`: `Shipment` {$extends} `{$parent}`.", $context->node->span),
+        );
+    }
+}
+
 (new Worker(new Extension(
     identifier: 'mago/server-proof',
     name: 'Mago analysis server proof',
@@ -438,5 +508,6 @@ final class ServerParentsPlugin implements Plugin, BeforeAnalysisHook, NodeAnaly
         new ServerModelPlugin(),
         new ServerOwnersPlugin(),
         new ServerParentsPlugin(),
+        new ServerPreparedPlugin(),
     ],
 )))->run();

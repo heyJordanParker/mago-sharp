@@ -196,13 +196,13 @@ impl IncrementalAnalysisService {
     /// `File::is_standard_library` marks, lower first, and the others inline their forms.
     ///
     /// An accepted file's inputs are its own source, `composer.lock`, and each file outside `vendor/` whose edit makes
-    /// the warm path re-analyze it: each file whose signature edit reaches it through the cascade or reaches a symbol
-    /// any file's extension hooks or providers read, every file when they listed names, each file that declares a
-    /// class alias its code reaches, and along a chain of aliases each file that declares the next alias and the class
-    /// at its end,
-    /// each file that declares a patch, and each file that declares a method whose return it reads
-    /// from that method's body or a body its calls reach, whose effects its functions' types list, along every chain of
-    /// such returns and calls, with that file's own inputs.
+    /// the warm path re-analyze it and can change its code: each file whose signature edit reaches it through the
+    /// cascade or reaches a symbol any file's providers read, every file when its own analysis or a provider listed
+    /// names, each file that declares a class alias its code reaches, and along a chain of aliases each file that
+    /// declares the next alias and the class at its end, each file that declares a patch, and each file that declares
+    /// a method whose return it reads from that method's body or a body its calls reach, whose effects its functions'
+    /// types list, along every chain of such returns and calls, with that file's own inputs. What a hook or an issue
+    /// filter read decides only which issues the analysis reports, never the code, so it enters the key and no input.
     ///
     /// A file that states a law also lists every source its laws reach. A file that declares a module or a listener
     /// also lists the module files its check resolves services through, each folder's `Module.sharp` whether or not a
@@ -575,21 +575,25 @@ impl IncrementalAnalysisService {
             file_reads.signatures.push(Read { name, fingerprint: hash });
         });
 
-        // Each PHP# file read what every file's hooks and providers read, as `extension_reads` says, but a declaration
-        // of its own.
-        let extension_reads = super::extension_reads(&self.file_states);
         let session = ExternalAnalysisSession::from_files(self.database.files());
+        let answered = |listing: &Listing| Read {
+            name: listing_name(listing),
+            fingerprint: listing.answer(&self.codebase, &session),
+        };
+        // A file's own analysis reads a set whole for itself alone.
+        for (file_id, state) in self.file_states.iter().filter(|(_, state)| !state.reads.listings.is_empty()) {
+            reads.entry(*file_id).or_default().0.listed.extend(state.reads.listings.iter().map(answered));
+        }
+        // Each PHP# file read what every file's hooks, issue filters and providers read, as `extension_reads` says, but
+        // a declaration of its own.
+        let extension_reads = super::extension_reads(&self.file_states, &self.before_analysis_reads);
         let symbols: Vec<(SymbolIdentifier, FileId, u64)> = extension_reads
             .symbols
             .iter()
             .flat_map(|&(name, _)| self.with_ancestors(name))
             .filter_map(|symbol| declared((symbol, empty_word())))
             .collect();
-        let listed: Vec<Read> = extension_reads
-            .listings
-            .iter()
-            .map(|listing| Read { name: listing_name(listing), fingerprint: listing.answer(&self.codebase, &session) })
-            .collect();
+        let listed: Vec<Read> = extension_reads.listings.iter().map(answered).collect();
         if !symbols.is_empty() || !listed.is_empty() {
             for file in self.database.files().filter(|file| Dialect::of(file).is_sharp()) {
                 let (file_reads, _) = reads.entry(file.id).or_default();
@@ -805,15 +809,16 @@ struct Dependencies<'service> {
     referencing_members: HashMap<Word, Vec<SymbolIdentifier>>,
     /// The source files that declare each declaration.
     declared_in: HashMap<SymbolIdentifier, Vec<FileId>>,
-    /// What every file read through the extension hooks and providers, as `extension_reads` gives it.
-    extension_reads: FileReads,
+    /// What every file read through the providers, as `code_reads` gives it. A hook's or an issue filter's read decides
+    /// only which issues are reported, never the lowered code, so it names no input.
+    code_reads: FileReads,
 }
 
 impl<'service> Dependencies<'service> {
     fn new(service: &'service IncrementalAnalysisService) -> Self {
         let mut dependencies = Self {
             service,
-            extension_reads: super::extension_reads(&service.file_states),
+            code_reads: super::code_reads(&service.file_states),
             signature: HashMap::default(),
             references: HashMap::default(),
             files: HashMap::default(),
@@ -872,12 +877,13 @@ impl<'service> Dependencies<'service> {
         self.references.entry(from).or_default().push(to);
     }
 
-    /// The source files other than `file_id` whose signature edit makes the warm path re-analyze `file_id`.
+    /// The source files other than `file_id` whose signature edit can change `file_id`'s analyzed code.
     fn reached_by(&self, file_id: FileId) -> HashSet<FileId> {
+        let listed = self.service.file_states.get(&file_id).is_some_and(|state| !state.reads.listings.is_empty());
         let signature = self.service.codebase.get_file_signature(&file_id);
-        let Some(signature) = signature.filter(|_| self.extension_reads.listings.is_empty()) else {
-            // The warm path re-analyzes a file with no signature after every signature edit, and every file once a
-            // hook or provider listed names, after any edit that adds or removes one.
+        let Some(signature) = signature.filter(|_| !listed && self.code_reads.listings.is_empty()) else {
+            // The warm path re-analyzes a file with no signature after every signature edit, a file whose analysis
+            // listed names after any edit that adds or removes one, and every file once a provider listed names.
             return self
                 .service
                 .codebase
@@ -905,7 +911,7 @@ impl<'service> Dependencies<'service> {
                 self.changes(*member, &mut changes, &mut visited);
             }
         }
-        for read in &self.extension_reads.symbols {
+        for read in &self.code_reads.symbols {
             self.signature_changes(*read, &mut changes, &mut visited);
         }
 
@@ -1795,7 +1801,7 @@ mod tests {
             service.codebase.safe_symbols.clear();
             service.codebase.safe_symbol_members.clear();
             let unchanged: Vec<FileId> = files.iter().copied().filter(|file_id| *file_id != edited.id).collect();
-            let extension_reads = super::super::extension_reads(&service.file_states);
+            let extension_reads = super::super::extension_reads(&service.file_states, &service.before_analysis_reads);
             let reads = super::super::symbols_read_by(&extension_reads.symbols, &service.database, &unchanged);
             let invalid_files = service
                 .codebase

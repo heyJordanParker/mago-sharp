@@ -286,6 +286,57 @@ fn parents(issues: &IssueCollection) -> Vec<String> {
     reported(issues, "server-parents/parents")
 }
 
+/// `Shipment`, extending `parent`, with `total` returning `returned`.
+fn shipment(parent: &str, returned: &str) -> String {
+    format!(
+        "<?php\nclass Base {{}}\nclass Other {{}}\nfinal class Shipment extends {parent}\n{{\n    public function total(): int {{ return {returned}; }}\n}}\n"
+    )
+}
+
+/// The prepared hook reads `Shipment`'s parents before the analysis and answers both marked files from them, reading
+/// nothing for either. Each file is analyzed again when `Shipment`'s parent changes, and neither after an edit of its
+/// body.
+#[test]
+fn every_file_a_before_analysis_read_answered_runs_again_when_the_class_changes_parent_and_none_after_a_body_edit() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if !common::php_sdk_is_available(repository, "the before-analysis reads test") {
+        return;
+    }
+
+    let mut server = server(
+        repository,
+        database(&[
+            ("src/shipment.php", &shipment("Base", "1")),
+            ("src/billing.php", "<?php\n// prepared: Base\nfinal class Billing {}\n"),
+            ("src/shipping.php", "<?php\n// prepared: Base\nfinal class Shipping {}\n"),
+        ]),
+    );
+    let prepared = |issues: &IssueCollection| reported(issues, "server-prepared/prepared");
+    let first = server.analyze().expect("initial analysis").issues;
+    assert_eq!(
+        prepared(&first),
+        [
+            "Run 1 of `src/billing.php`: `Shipment` extends `Base`.",
+            "Run 1 of `src/shipping.php`: `Shipment` extends `Base`."
+        ]
+    );
+
+    let shipment_file = FileId::new(b"src/shipment.php");
+    server.database_mut().update(shipment_file, Cow::Owned(shipment("Base", "2").into_bytes()));
+    let edited = server.analyze_incremental(&[shipment_file]).expect("analysis after a body edit").issues;
+    assert_eq!(prepared(&edited), prepared(&first), "a body edit runs neither again");
+
+    server.database_mut().update(shipment_file, Cow::Owned(shipment("Other", "2").into_bytes()));
+    let moved = server.analyze_incremental(&[shipment_file]).expect("analysis after a parent change").issues;
+    assert_eq!(
+        prepared(&moved),
+        [
+            "Run 2 of `src/billing.php`: `Shipment` does not extend `Base`.",
+            "Run 2 of `src/shipping.php`: `Shipment` does not extend `Base`."
+        ]
+    );
+}
+
 /// The attribute the owners hook lists the methods of.
 const OWNER: &str = "<?php\n#[Attribute]\nfinal class Owner {}\n";
 
@@ -632,12 +683,12 @@ fn changing_the_parent_of_a_model_a_provider_compared_changes_the_sharp_file_inp
 /// A PHP# file whose class declaration the owners hook answers from the listing it kept.
 const REPORT: &str = "namespace App;\n\npublic class Report\n{\n    // owners: Invoice\n}\n";
 
-/// The inputs and the compiled bytes of `app/Report.sharp`, and the owners hook's reports, from a server whose node
-/// hooks run in the files `scope` names, or in every file.
-fn compiled_report(repository: &Path, scope: Option<&[u8]>) -> (Vec<String>, Vec<u8>, Vec<String>) {
+/// The inputs and the key of `app/Report.sharp`, and the owners hook's reports, from a server whose node hooks run in
+/// `app/Report.sharp` alone, as `mago compile` runs them in its PHP# files, with `invoice` before `Invoice::account`.
+fn compiled_report(repository: &Path, invoice: &str) -> (Vec<String>, [u8; 16], Vec<String>) {
     let files = [
         ("app/owner.php", OWNER.to_owned()),
-        ("app/models.php", models("")),
+        ("app/models.php", models(invoice)),
         ("app/orders.php", "<?php\n// owners: Order\nfinal class OrderReport {}\n".to_owned()),
         ("app/Report.sharp", REPORT.to_owned()),
     ];
@@ -650,42 +701,44 @@ fn compiled_report(repository: &Path, scope: Option<&[u8]>) -> (Vec<String>, Vec
             Cow::Owned(contents.into_bytes()),
         ));
     }
-    let mut server = server(repository, database);
-    if let Some(scope) = scope {
-        let matcher = WorkspaceMatcher::from_configuration(&DatabaseConfiguration::new(
-            Path::new("/server-proof"),
-            vec![scope],
-            vec![],
-            vec![],
-            vec![b"sharp"],
-        ))
-        .expect("the scope compiles");
-        server = server.scoped_to(matcher);
-    }
+    let scope = WorkspaceMatcher::from_configuration(&DatabaseConfiguration::new(
+        Path::new("/server-proof"),
+        vec![b"app/Report.sharp"],
+        vec![],
+        vec![],
+        vec![b"sharp"],
+    ))
+    .expect("the scope compiles");
+    let mut server = server(repository, database).scoped_to(scope);
     let reports = owners(&server.analyze().expect("the analysis runs").issues);
     let (inputs, bytes) = compiled(&mut server);
 
-    (inputs.into_keys().collect(), bytes, reports)
+    (inputs.into_keys().collect(), header(&bytes).expect("a header").key, reports)
 }
 
-/// Whichever file the worker analyzes first reads the listing the hook keeps, and that changes with the files the hooks
-/// run in. A compile whose hooks run only in its PHP# file writes the bytes of one whose hooks run in every file, the
-/// inputs the listing gives `app/Report.sharp` included.
+/// The owners hook answers `app/Report.sharp` from the listing it reads, which decides only the issue it reports. So
+/// the listing enters the PHP# file's key, which changes when a method joins the listing and stays when an edit leaves
+/// the listing as it was, and none of the files it lists from is an input: their edits never make the file stale.
 #[test]
-fn a_compile_whose_hooks_run_in_its_php_sharp_file_alone_writes_the_bytes_of_one_whose_hooks_run_everywhere() {
+fn a_compile_keys_the_listing_its_hooks_read_and_lists_none_of_its_files_among_the_inputs() {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
-    if !common::php_sdk_is_available(repository, "the scoped hooks compile test") {
+    if !common::php_sdk_is_available(repository, "the hook reads compile test") {
         return;
     }
 
-    let (everywhere_inputs, everywhere, everywhere_reports) = compiled_report(repository, None);
-    let (scoped_inputs, scoped, scoped_reports) = compiled_report(repository, Some(b"app/Report.sharp"));
+    let (inputs, key, reports) = compiled_report(repository, "");
+    let (same_inputs, same_key, _) = compiled_report(repository, "    public function total(): int { return 2; }\n");
+    let (owned_inputs, owned_key, owned_reports) = compiled_report(repository, "    #[Owner]\n");
 
     assert_eq!(
-        everywhere_reports,
-        ["Run 1 of `app/Report.sharp`: `Invoice` is not owned.", "Run 1 of `app/orders.php`: `Order` is owned."]
+        reports,
+        ["Run 1 of `app/Report.sharp`: `Invoice` is not owned."],
+        "the hook runs in the PHP# file alone"
     );
-    assert_eq!(scoped_reports, ["Run 1 of `app/Report.sharp`: `Invoice` is not owned."]);
-    assert_eq!(scoped_inputs, everywhere_inputs);
-    assert!(scoped == everywhere, "the two compiles list the same inputs and write other bytes");
+    assert_eq!(owned_reports, ["Run 1 of `app/Report.sharp`: `Invoice` is owned."]);
+    assert_eq!(inputs, ["Module.sharp", "app/Module.sharp", "app/Report.sharp", "composer.lock"]);
+    assert_eq!(same_inputs, inputs);
+    assert_eq!(owned_inputs, inputs);
+    assert_eq!(same_key, key, "an edit that leaves the listing as it was keeps the key");
+    assert_ne!(owned_key, key, "a method that joins the listing gives a new key");
 }

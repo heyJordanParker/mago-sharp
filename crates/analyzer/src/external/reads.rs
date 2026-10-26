@@ -5,10 +5,12 @@ use std::hash::DefaultHasher;
 use std::hash::Hash;
 use std::hash::Hasher;
 
+use foldhash::HashMap;
 use foldhash::HashSet;
 
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::symbol::SymbolIdentifier;
+use mago_database::file::FileId;
 use mago_extension::PayloadReader;
 use mago_extension::PayloadWriter;
 use mago_word::Word;
@@ -24,6 +26,18 @@ use crate::external::metadata;
 /// The most reads one list holds: a file's hooks and providers can read each symbol of a large
 /// codebase once.
 const MAXIMUM_READS: usize = 1_000_000;
+
+/// What the extension hooks, issue filters and providers read from the codebase in one run.
+#[derive(Debug, Default)]
+pub struct ExtensionReads {
+    /// The reads that decide only the issues reported in each file: what its after-file and targeted hooks read, and
+    /// what its issue filters read.
+    pub issues: HashMap<FileId, FileReads>,
+    /// The reads that can change each file's analyzed code: what the providers read while Mago analyzed it.
+    pub code: HashMap<FileId, FileReads>,
+    /// What the before-analysis hooks read, for no one file.
+    pub before_analysis: FileReads,
+}
 
 /// What one file's extension hooks and providers read from the codebase.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
