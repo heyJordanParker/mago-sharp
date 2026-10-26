@@ -9,6 +9,7 @@ use Mago\Sdk\Span;
 use Mago\Sdk\Syntax\Node;
 use Mago\Sdk\Syntax\NodeKind;
 
+use function ord;
 use function unpack;
 
 /**
@@ -27,6 +28,14 @@ final class NodeStore
      * @var array<int<0, max>, Node>
      */
     private array $nodes = [];
+
+    /**
+     * The identifier of every node, in table order, by its kind's name: built on the first lookup of a kind, since a
+     * file's hooks look up many kinds, and a scan of the table per kind reads each node's kind again.
+     *
+     * @var null|array<string, list<non-negative-int>>
+     */
+    private ?array $idsByKind = null;
 
     /**
      * @param list<NodeKind> $kinds
@@ -48,7 +57,7 @@ final class NodeStore
     }
 
     /**
-     * @param array<int, int<0, 4294967295>> $ids
+     * @param array<int, non-negative-int> $ids
      *
      * @return list<Node>
      */
@@ -83,16 +92,25 @@ final class NodeStore
      */
     public function getAll(?NodeKind $kind = null): array
     {
-        $nodes = [];
-        for ($id = 0, $offset = 0; $id < $this->nodeCount; ++$id, $offset += self::RECORD_SIZE) {
-            if ($kind !== null && $this->readKind($offset) !== $kind) {
-                continue;
+        if ($kind === null) {
+            $nodes = [];
+            for ($id = 0; $id < $this->nodeCount; ++$id) {
+                $nodes[] = $this->nodes[$id] ??= $this->materialize($id);
             }
 
-            $nodes[] = $this->nodes[$id] ??= $this->materialize($id);
+            return $nodes;
         }
 
-        return $nodes;
+        if ($this->idsByKind === null) {
+            $idsByKind = [];
+            for ($id = 0, $offset = 0; $id < $this->nodeCount; ++$id, $offset += self::RECORD_SIZE) {
+                $idsByKind[$this->readKind($offset)->value][] = $id;
+            }
+
+            $this->idsByKind = $idsByKind;
+        }
+
+        return $this->getMany($this->idsByKind[$kind->value] ?? []);
     }
 
     /**
@@ -131,11 +149,12 @@ final class NodeStore
         return new Node($id, $kind, new Span($start, $end), $parent === self::NO_NODE ? null : $parent);
     }
 
+    /**
+     * The kind at the start of the record at `$offset`, a big-endian u16, read byte by byte: `ord` takes half the time
+     * `unpack('n')` takes, and the kind index reads the kind of every node of the file.
+     */
     private function readKind(int $offset): NodeKind
     {
-        /** @var array{1: int<0, 65535>} $decoded */
-        $decoded = unpack('n', $this->records, $offset);
-
-        return $this->kinds[$decoded[1]];
+        return $this->kinds[(ord($this->records[$offset]) << 8) | ord($this->records[$offset + 1])];
     }
 }

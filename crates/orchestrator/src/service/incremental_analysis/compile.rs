@@ -197,9 +197,9 @@ impl IncrementalAnalysisService {
     /// An accepted file's inputs are its own source, `composer.lock`, and each file outside `vendor/` whose edit makes
     /// the warm path re-analyze it: each file whose signature edit reaches it through the cascade or reaches a symbol
     /// its extension hooks or providers read, every file when they listed names, each file that declares a class alias
-    /// or a patch, and each file that declares a method whose return it reads from that method's body or a body its
-    /// calls reach, whose effects its functions' types list, along every chain of such returns and calls, with that
-    /// file's own inputs.
+    /// its code reaches, each file that declares a patch, and each file that declares a method whose return it reads
+    /// from that method's body or a body its calls reach, whose effects its functions' types list, along every chain of
+    /// such returns and calls, with that file's own inputs.
     ///
     /// A file that states a law also lists every source its laws reach. A file that declares a module or a listener
     /// also lists the module files its check resolves services through, each folder's `Module.sharp` whether or not a
@@ -296,12 +296,8 @@ impl IncrementalAnalysisService {
             .map_err(|error| OrchestratorError::General(format!("The laws could not be checked: {error}.")))?;
 
         let mut reads = self.reads(&effects);
-        let read_by_every_file: HashSet<FileId> = self
-            .codebase
-            .class_like_alias_declarations()
-            .map(|(_, _, span)| span.file_id)
-            .chain(self.database.files().filter(|file| file.file_type.is_patch()).map(|file| file.id))
-            .collect();
+        let read_by_every_file: HashSet<FileId> =
+            self.database.files().filter(|file| file.file_type.is_patch()).map(|file| file.id).collect();
 
         let inputs_start = std::time::Instant::now();
         let dependencies = Dependencies::new(self);
@@ -814,6 +810,15 @@ impl<'service> Dependencies<'service> {
             }
         }
 
+        // A class alias declares its name, so the file that declares it is an input of each file whose code reaches
+        // the alias, and of no other.
+        for (alias, _, span) in service.codebase.class_like_alias_declarations() {
+            if service.database.get(&span.file_id).is_ok_and(|file| is_source(&file)) {
+                let alias = ascii_lowercase_word(alias.as_bytes());
+                dependencies.declared_in.entry((alias, empty_word())).or_default().push(span.file_id);
+            }
+        }
+
         dependencies
     }
 
@@ -1247,18 +1252,26 @@ mod tests {
         );
     }
 
+    /// A PHP# file that reads `Lib\Rate` through its alias `Lib\Pace`.
+    const PACED: &str = "namespace App;\n\nimport Lib.Pace;\n\npublic class Paced\n{\n    public int percent()\n    {\n        return Pace.percent();\n    }\n}\n";
+
     #[test]
-    fn a_file_that_declares_a_class_alias_is_an_input_of_every_file() {
+    fn a_file_that_declares_a_class_alias_is_an_input_of_each_file_that_reads_the_alias() {
         let mut files = shop(MONEY, RATE);
         files.push(("lib/aliases.php", "<?php\n\nclass_alias(\\Lib\\Rate::class, 'Lib\\\\Pace');\n".to_string()));
+        files.push(("app/Paced.sharp", PACED.to_string()));
         let database = shop_project(&files);
         let mut service = analyzed(&database);
 
         let compiled = compile(&mut service, empty_stamp);
 
         assert_eq!(
+            input_paths(accepted(&compiled, "app/Paced.sharp")),
+            ["Module.sharp", "app/Module.sharp", "app/Paced.sharp", "composer.lock", "lib/Rate.php", "lib/aliases.php"]
+        );
+        assert_eq!(
             input_paths(accepted(&compiled, "app/Unrelated.sharp")),
-            ["Module.sharp", "app/Module.sharp", "app/Unrelated.sharp", "composer.lock", "lib/aliases.php"]
+            ["Module.sharp", "app/Module.sharp", "app/Unrelated.sharp", "composer.lock"]
         );
     }
 

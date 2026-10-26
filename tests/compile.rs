@@ -1342,6 +1342,40 @@ fn every_compiled_file_is_current_after_the_php_files_are_written() {
     }
 }
 
+/// A compiled file goes stale when a file it reads changes, and stays current when a file it never reads changes:
+/// here a file of an included folder outside `vendor/` that declares a class alias, as WordPress's bundled libraries
+/// declare theirs.
+#[test]
+fn a_compiled_file_goes_stale_only_when_a_file_it_reads_changes() {
+    let directory = project(ORDER, MONEY);
+    let root = directory.path();
+    write(
+        root,
+        "mago.toml",
+        "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\", \"public/wp\"]\n",
+    );
+    write(
+        root,
+        "public/wp/Rate.php",
+        "<?php\n\nnamespace Lib;\n\nfinal class Rate\n{\n    public static function percent(): int\n    {\n        return 5;\n    }\n}\n\nclass_alias(Rate::class, 'Lib\\\\Pace');\n",
+    );
+    write(
+        root,
+        "app/Paced.sharp",
+        "namespace App;\n\nimport Lib.Pace;\n\npublic class Paced\n{\n    public int percent()\n    {\n        return Pace.percent();\n    }\n}\n",
+    );
+    compile_succeeds(root);
+    let root = std::fs::canonicalize(root).unwrap();
+    let stale = |name: &str| is_stale(&root, &std::fs::read(compiled(&root, name)).unwrap()).unwrap();
+    assert!(!stale("app/Order.sharp") && !stale("app/Paced.sharp"));
+
+    let rate = std::fs::read_to_string(root.join("public/wp/Rate.php")).unwrap();
+    write(&root, "public/wp/Rate.php", &format!("{rate}\n// An edit.\n"));
+
+    assert!(stale("app/Paced.sharp"), "app/Paced.sharp reads the alias");
+    assert!(!stale("app/Order.sharp"), "app/Order.sharp reads nothing of public/wp/Rate.php");
+}
+
 /// Runs git in `folder`, and fails the test when git fails.
 fn git(folder: &Path, arguments: &[&str]) -> String {
     let output = Command::new("git")

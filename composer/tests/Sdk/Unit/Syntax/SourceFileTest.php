@@ -12,6 +12,7 @@ use Mago\Sdk\Internal\Syntax\ResolvedNameStore;
 use Mago\Sdk\Internal\Syntax\TriviaStore;
 use Mago\Sdk\PHPVersion;
 use Mago\Sdk\Syntax\Binding;
+use Mago\Sdk\Syntax\Node;
 use Mago\Sdk\Syntax\NodeKind;
 use Mago\Sdk\Syntax\SourceFile;
 use Mago\Sdk\Syntax\TriviaKind;
@@ -19,6 +20,9 @@ use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
 use function array_fill;
+use function array_filter;
+use function array_map;
+use function array_values;
 use function pack;
 use function strlen;
 
@@ -79,6 +83,39 @@ final class SourceFileTest extends TestCase
 
         $looked = new NodeStore($kinds, $nodeRecords, 2);
         self::assertSame(NodeKind::FunctionCall, $looked->getMany([1])[0]->kind);
+    }
+
+    public function testTheNodesOfAKindAreTheScannedNodesOfThatKindInOrder(): void
+    {
+        $noNode = 4_294_967_295;
+        $kinds = array_fill(0, 300, NodeKind::Program);
+        $kinds[1] = NodeKind::FunctionCall;
+        $kinds[2] = NodeKind::LiteralString;
+        $kinds[299] = NodeKind::FunctionCall;
+        $written = [0, 1, 2, 299, 2, 1, 0, 299, 1];
+        $nodeRecords = '';
+        foreach ($written as $id => $kind) {
+            $nodeRecords .= pack('nNNNNN', $kind, $id, $id + 1, $id === 0 ? $noNode : 0, $noNode, $noNode);
+        }
+
+        $scanned = (new NodeStore($kinds, $nodeRecords, 9))->getAll();
+        $indexed = new NodeStore($kinds, $nodeRecords, 9);
+        foreach ([NodeKind::Program, NodeKind::FunctionCall, NodeKind::LiteralString, NodeKind::MethodCall] as $kind) {
+            $ofKind = array_values(array_filter($scanned, static fn(Node $node): bool => $node->kind === $kind));
+
+            self::assertEquals($ofKind, $indexed->getAll($kind), $kind->value);
+        }
+        self::assertSame(
+            [1, 3, 5, 7, 8],
+            array_map(static fn(Node $node): int => $node->id, $indexed->getAll(NodeKind::FunctionCall)),
+        );
+        self::assertSame(
+            $indexed->getAll(NodeKind::FunctionCall),
+            array_values(array_filter(
+                $indexed->getAll(),
+                static fn(Node $node): bool => $node->kind === NodeKind::FunctionCall,
+            )),
+        );
     }
 
     /**
