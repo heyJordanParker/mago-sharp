@@ -375,12 +375,15 @@ pub fn handle_return_value<'ctx, A>(
         }
     }
 
+    // A lambda that declares no result returns its literal to the function type that takes the lambda, as a declared
+    // return type takes it. analyze_function_like sets lambda_result for that lambda alone.
+    let lambda_result = artifacts.lambda_result.clone();
     if let Some(return_value) = return_value
         && let Some(set_type) = get_set_literal_type(
             context,
             artifacts,
             return_value,
-            &expected_return_type,
+            lambda_result.as_ref().unwrap_or(&expected_return_type),
             block_context.scope.get_function_like(),
         )
     {

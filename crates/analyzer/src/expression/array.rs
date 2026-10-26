@@ -16,6 +16,7 @@ use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::array::key::ArrayKey;
 use mago_codex::ttype::atomic::array::keyed::TKeyedArray;
 use mago_codex::ttype::atomic::array::list::TList;
+use mago_codex::ttype::atomic::generic::TGenericParameter;
 use mago_codex::ttype::atomic::mixed::TMixed;
 use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::scalar::TScalar;
@@ -248,20 +249,27 @@ where
 /// literal take the type of where it lands, so the lowering makes its `Map` or `Set` with the place's type. It is the
 /// place's collection of the literal's kind, as [`get_empty_literal_type`] picks it. A type parameter of
 /// `function_like`, the method the literal runs in, has the type argument its call gives it, which the engine reads
-/// from the method's frame. `None` where the collection names a type parameter of any other function, as a call's
-/// parameter names one of the method it calls, whose type arguments the code that writes the literal can't spell.
+/// from the method's frame. So does one of the method a lambda `function_like` is written in, as a C# closure sees
+/// its method's type arguments: the lambda's frame captures the method's. `None` where the collection names a type
+/// parameter of any other function, as a call's parameter names one of the method it calls, whose type arguments the
+/// code that writes the literal can't spell.
 fn get_placed_type(
     value: &Expression<'_>,
     declared: &TUnion,
     function_like: Option<&FunctionLikeMetadata>,
 ) -> Option<TUnion> {
     let placed = get_empty_literal_type(Some(value), declared)?;
+    let sees = |parameter: &TGenericParameter| {
+        function_like
+            .and_then(|function_like| function_like.type_resolution_context.as_ref())
+            .and_then(|visible| visible.get_template_definition(parameter.parameter_name))
+            .is_some_and(|templates| {
+                templates.iter().any(|template| template.defining_entity == parameter.defining_entity)
+            })
+    };
     let names_other_function_parameter = placed.get_all_child_nodes().into_iter().any(|node| {
         matches!(node, TypeRef::Atomic(TAtomic::GenericParameter(parameter))
-            if matches!(parameter.defining_entity, GenericParent::FunctionLike(_))
-                && function_like
-                    .and_then(|function_like| function_like.template_types.get(&parameter.parameter_name))
-                    .is_none_or(|template| template.defining_entity != parameter.defining_entity))
+            if matches!(parameter.defining_entity, GenericParent::FunctionLike(_)) && !sees(parameter))
     });
 
     (!names_other_function_parameter).then_some(placed)
