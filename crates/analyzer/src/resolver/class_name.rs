@@ -232,15 +232,25 @@ impl ResolvedClassname {
 }
 
 /// Resolves a class written by name: a PHP name, or a bare PHP# name the binder bound to a class.
+///
+/// A bare PHP# name of a class alias in the file's own namespace reads the alias, as an import of it does, since the
+/// codebase resolves the alias to its target and every other reference names the target alone.
 fn resolve_named_class<A>(
     context: &mut Context<'_, '_, A>,
     block_context: &BlockContext<'_>,
+    artifacts: &mut AnalysisArtifacts,
     name_node: &Identifier<'_>,
 ) -> ResolvedClassname
 where
     A: Arena,
 {
     let fqcn = word(context.resolved_names.get(name_node));
+    if context.dialect.is_sharp() {
+        let alias = ascii_lowercase_word(fqcn.as_bytes());
+        if context.codebase.class_like_aliases.contains_key(&alias) {
+            artifacts.symbol_references.add_reference_to_symbol(&block_context.scope, alias, false);
+        }
+    }
 
     crate::utils::casing::check_class_like_casing(context, fqcn, name_node.span());
     crate::utils::experimental::check_experimental_class_like(context, block_context, fqcn, name_node.span());
@@ -534,7 +544,7 @@ where
             possible_types.extend(resolve_type_parameter(context, block_context, artifacts, &constant_access.name));
         }
         Expression::Identifier(name_node) => {
-            possible_types.push(resolve_named_class(context, block_context, name_node));
+            possible_types.push(resolve_named_class(context, block_context, artifacts, name_node));
         }
         // `Counter<Order>` names the class `Counter`, and its analysis checks the type arguments. One its analysis
         // refused names no class.
@@ -557,7 +567,7 @@ where
         Expression::ConstantAccess(constant_access)
             if context.resolved_names.binding(&constant_access.name) == Some(Binding::Class) =>
         {
-            possible_types.push(resolve_named_class(context, block_context, &constant_access.name));
+            possible_types.push(resolve_named_class(context, block_context, artifacts, &constant_access.name));
         }
         Expression::Self_(self_keyword) if !context.dialect.is_sharp() => {
             if let Some(self_class) = block_context.scope.get_class_like() {
