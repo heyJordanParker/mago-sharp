@@ -32,7 +32,6 @@ use mago_syntax::cst::Trivia;
 use mago_syntax::dialect::Dialect;
 
 use crate::analysis_result::AnalysisResult;
-use crate::artifacts::AnalysisArtifacts;
 use crate::code::IssueCode;
 use crate::context::assertion::AssertionContext;
 use crate::context::block::BlockContext;
@@ -290,15 +289,9 @@ where
         (result, issues)
     }
 
-    pub fn finish(self, artifacts: AnalysisArtifacts, analysis_result: &mut AnalysisResult) {
-        analysis_result.issues.extend(self.collector.finish());
-        analysis_result.symbol_references.extend(artifacts.symbol_references);
-    }
-
-    /// Drain the collector into the analysis result and return any
-    /// unreported issues. Used by [`crate::Analyzer::analyze_with_artifacts`]
-    /// when the caller needs to retain ownership of [`AnalysisArtifacts`]
-    /// after analysis completes.
+    /// Drain the collector into the analysis result. Used by
+    /// [`crate::Analyzer::analyze_with_artifacts`], which keeps the
+    /// [`crate::artifacts::AnalysisArtifacts`] for its caller after analysis completes.
     pub fn finish_collector(self, analysis_result: &mut AnalysisResult, defer_pragmas: bool) {
         let (issues, pragmas) = if defer_pragmas { self.collector.defer() } else { (self.collector.finish(), None) };
         analysis_result.issues.extend(explain_lambda_assigned_reads(issues, &self.lambda_assigned_reads));
