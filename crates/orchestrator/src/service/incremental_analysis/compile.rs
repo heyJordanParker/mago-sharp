@@ -14,6 +14,7 @@ use mago_analyzer::effects::EffectSummary;
 use mago_analyzer::effects::Effects;
 use mago_analyzer::external::ExternalAnalysisSession;
 use mago_analyzer::external::Listing;
+use mago_analyzer::is_collection_member;
 use mago_codex::metadata::module::BindingMetadata;
 use mago_codex::metadata::module::ModuleKind;
 use mago_codex::metadata::module::ModuleMetadata;
@@ -670,18 +671,21 @@ impl IncrementalAnalysisService {
                     errors.get(&file.id).map(|issues| issues.iter().cloned().collect()).unwrap_or_default();
                 let arena = LocalArena::new();
                 let program = parse_file_with_settings(&arena, file, self.parser_settings);
-                let names = NameResolver::new(&arena).resolve_in(program, &self.namespace_classes);
+                let names =
+                    NameResolver::new(&arena).resolve_in(program, &self.namespace_classes, &self.changing_members);
                 let namespace_classes = names.namespace_classes().map(mago_word::word).collect();
                 let mut result = AnalysisResult::new(SymbolReferences::new());
                 let artifacts =
                     self.file_analyzer(&arena, file, &names, session).analyze_with_artifacts(program, &mut result)?;
                 // This analysis of the one file records exactly what its code reaches, unlike the references the warm
-                // path keeps from a method it analyzed before.
+                // path keeps from a method it analyzed before. A collection's member is the collection's own, which no
+                // extension of the namespace replaces.
                 let mut reaches_extension = false;
                 result.symbol_references.for_each_reference(|_, (class, member), _| {
                     reaches_extension |= !member.is_empty()
                         && self.codebase.get_method(class.as_bytes(), member.as_bytes()).is_some_and(|method| {
-                            method.flags.is_extension_method() || method.flags.is_extension_property()
+                            (method.flags.is_extension_method() || method.flags.is_extension_property())
+                                && !is_collection_member(class, method)
                         });
                 });
 
@@ -2825,15 +2829,22 @@ mod tests {
     /// Spec section 26 applies an extension of the file's namespace with no import, so a file whose code reaches an
     /// extension, the standard library's included, lists its folder's listing and each `.sharp` file in its folder as
     /// inputs, and nothing below it or in another language. A file that reaches no extension lists neither, and a
-    /// package file leaves them to `composer.lock`.
+    /// package file leaves them to `composer.lock`. A collection's member, the standard library's, is the collection's
+    /// own, which no extension of the namespace replaces, so a file that reaches only those lists neither.
     #[test]
     fn a_file_whose_code_reaches_an_extension_lists_the_sharp_files_of_its_folder_as_inputs() {
         let words = "namespace Sharp.Text;\n\npublic static class Words\n{\n    extension(string text)\n    {\n        public string shout() => text;\n    }\n}\n";
         let report =
             "namespace App;\n\npublic class Report\n{\n    public string text(string name) => name.shout();\n}\n";
         let plain = "namespace App;\n\npublic class Plain\n{\n    public string text(string name) => name;\n}\n";
+        let listed = "namespace App;\n\npublic class Listed\n{\n    public int size(List<int> ids)\n    {\n        ids.add(1);\n        return ids.count();\n    }\n}\n";
         let packaged = "vendor/acme/shapes/src/Report.sharp";
         let database = project(&[
+            (
+                "vendor/heyjordanparker/php-sharp-composer/library/Sharp/ListMembers.sharp",
+                include_str!("../../../../../../composer/library/Sharp/ListMembers.sharp"),
+            ),
+            ("app/App/Listed.sharp", listed),
             ("vendor/heyjordanparker/php-sharp-composer/library/Sharp/Text/Words.sharp", words),
             ("app/App/Report.sharp", report),
             ("app/App/Plain.sharp", plain),
@@ -2849,6 +2860,7 @@ mod tests {
             [
                 "Module.sharp",
                 "app/App/*.sharp",
+                "app/App/Listed.sharp",
                 "app/App/Module.sharp",
                 "app/App/Plain.sharp",
                 "app/App/Report.sharp",
@@ -2859,6 +2871,10 @@ mod tests {
         assert_eq!(
             input_paths(accepted(&compiled, "app/App/Plain.sharp")),
             ["Module.sharp", "app/App/Module.sharp", "app/App/Plain.sharp", "app/Module.sharp", "composer.lock"]
+        );
+        assert_eq!(
+            input_paths(accepted(&compiled, "app/App/Listed.sharp")),
+            ["Module.sharp", "app/App/Listed.sharp", "app/App/Module.sharp", "app/Module.sharp", "composer.lock"]
         );
         assert_eq!(input_paths(accepted(&compiled, packaged)), ["composer.lock", packaged]);
     }

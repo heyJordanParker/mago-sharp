@@ -42,6 +42,9 @@ pub enum Modifier<'arena> {
     Internal(Keyword<'arena>),
     /// PHP#'s `foreign`, which marks a class whose objects carry an effect, spec section 29.
     Foreign(Keyword<'arena>),
+    /// PHP#'s `ref`, which marks an extension's receiver that its members change in place, as C# 14's does, spec
+    /// section 26.
+    Ref(Keyword<'arena>),
 }
 
 impl<'arena> Modifier<'arena> {
@@ -65,6 +68,7 @@ impl<'arena> Modifier<'arena> {
             Modifier::Lazy(k) => k,
             Modifier::Internal(k) => k,
             Modifier::Foreign(k) => k,
+            Modifier::Ref(k) => k,
         }
     }
 
@@ -174,7 +178,8 @@ impl HasSpan for Modifier<'_> {
             | Modifier::Extern(value)
             | Modifier::Lazy(value)
             | Modifier::Internal(value)
-            | Modifier::Foreign(value) => value.span(),
+            | Modifier::Foreign(value)
+            | Modifier::Ref(value) => value.span(),
         }
     }
 }

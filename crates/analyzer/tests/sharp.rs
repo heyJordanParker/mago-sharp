@@ -43,8 +43,8 @@ use mago_database::DatabaseReader;
 use mago_database::file::File;
 use mago_database::file::FileId;
 use mago_database::file::FileType;
-use mago_names::CHANGING_COLLECTION_METHODS;
 use mago_names::STANDARD_ROOT_CLASSES;
+use mago_names::resolver::ChangingMembers;
 use mago_names::resolver::NameResolver;
 use mago_names::resolver::NamespaceClasses;
 use mago_php_version::PHPVersion;
@@ -72,6 +72,7 @@ mod sharp_words;
 mod effect_classes;
 
 use effect_classes::EFFECT_CLASSES;
+use effect_classes::LIST_MEMBERS;
 
 static PRELUDE: LazyLock<Prelude> = LazyLock::new(Prelude::build);
 static PLUGIN_REGISTRY: LazyLock<PluginRegistry> = LazyLock::new(PluginRegistry::with_library_providers);
@@ -146,24 +147,26 @@ fn analyze_with_artifacts(
     analyzed: (&'static str, &'static str),
     others: &[(&'static str, &'static str)],
 ) -> (Vec<Issue>, AnalysisArtifacts) {
-    let (issues, artifacts, _) = analyze_with_references(registry, settings, analyzed, others);
+    let (issues, artifacts, _) = analyze_with_references(registry, settings, analyzed, others, &EFFECT_CLASSES);
 
     (issues, artifacts)
 }
 
-/// Analyzes `analyzed` together with `others` under `settings` and the plugins of `registry`, and returns its issues,
-/// the analysis artifacts and the symbol references the analysis recorded, with the prelude's.
+/// Analyzes `analyzed` together with `others` and the standard library files `library` under `settings` and the
+/// plugins of `registry`, and returns its issues, the analysis artifacts and the symbol references the analysis
+/// recorded, with the prelude's.
 fn analyze_with_references(
     registry: &PluginRegistry,
     settings: Settings,
     analyzed: (&'static str, &'static str),
     others: &[(&'static str, &'static str)],
+    library: &[(&'static str, &'static str)],
 ) -> (Vec<Issue>, AnalysisArtifacts, SymbolReferences) {
     let Prelude { mut database, mut metadata, mut symbol_references } = PRELUDE.clone();
 
     let file_ids: Vec<_> = std::iter::once(&analyzed)
         .chain(others)
-        .chain(&EFFECT_CLASSES)
+        .chain(library)
         .map(|(name, code)| {
             let mut file = File::ephemeral(Cow::Borrowed(name.as_bytes()), Cow::Borrowed(code.as_bytes()));
             file.is_standard_library = name.starts_with(STANDARD_LIBRARY);
@@ -189,17 +192,29 @@ fn analyze_with_references(
     }
 
     // A class-like's name never depends on how names resolve, so a first scan finds each class-like that wins over a
-    // default class-like in its namespace, as `mago analyze` finds them.
-    let namespace_classes = NamespaceClasses::new(parsed.iter().flat_map(|(file, program)| {
-        let names = NameResolver::new(&arena).resolve(program);
-        scan_program(&arena, file, program, &names, settings.version)
-            .class_likes
-            .into_values()
-            .map(|class_like| class_like.original_name)
+    // default class-like in its namespace, and each member that changes its receiver, as `mago analyze` finds them.
+    let scanned: Vec<_> = parsed
+        .iter()
+        .map(|(file, program)| {
+            let names = NameResolver::new(&arena).resolve(program);
+            scan_program(&arena, file, program, &names, settings.version)
+        })
+        .collect();
+    let namespace_classes = NamespaceClasses::new(
+        scanned.iter().flat_map(|scan| scan.class_likes.values().map(|class_like| class_like.original_name)),
+    );
+    let changing_members = ChangingMembers::new(scanned.iter().flat_map(|scan| {
+        scan.function_likes
+            .values()
+            .filter(|member| {
+                member.flags.is_extension_method()
+                    && member.parameters.first().is_some_and(|receiver| receiver.flags.is_by_reference())
+            })
+            .map(|member| member.original_name)
     }));
     let mut programs = Vec::new();
     for (file, program) in parsed {
-        let names = NameResolver::new(&arena).resolve_in(program, &namespace_classes);
+        let names = NameResolver::new(&arena).resolve_in(program, &namespace_classes, &changing_members);
         metadata.extend(scan_program(&arena, file, program, &names, settings.version));
         programs.push((file, program, names));
     }
@@ -437,6 +452,7 @@ fn a_bare_name_of_an_alias_of_the_files_namespace_is_a_reference_to_the_alias() 
         settings(),
         ("src/Demo/Report.sharp", sharp),
         &[("src/Lib/Rate.php", rate), ("src/Lib/aliases.php", aliases)],
+        &EFFECT_CLASSES,
     );
 
     assert!(issues.is_empty(), "{issues:#?}");
@@ -446,11 +462,35 @@ fn a_bare_name_of_an_alias_of_the_files_namespace_is_a_reference_to_the_alias() 
 }
 
 /// The binder records a call of a changing collection method as a write to its local, so a lambda captures that
-/// local by reference. It knows the methods only by name, so its list must name every collection method without
+/// local by reference. It knows the methods only by name, the names of the members the scan finds that take their
+/// receiver by `ref`, the standard library's of a `List`, which must name every `Map` and `Set` method without
 /// `@mutation-free`, which changes the collection.
 #[test]
 fn the_binder_knows_every_changing_collection_method() {
-    for class in ["Sharp\\Internal\\ListMethods", "Sharp\\Internal\\MapMethods", "Sharp\\Internal\\SetMethods"] {
+    let (name, code) = LIST_MEMBERS;
+    let mut file = File::ephemeral(Cow::Borrowed(name.as_bytes()), Cow::Borrowed(code.as_bytes()));
+    file.is_standard_library = true;
+    let arena = LocalArena::new();
+    let program = parse_file(&arena, &file);
+    let names = NameResolver::new(&arena).resolve(program);
+    let scanned = scan_program(&arena, &file, program, &names, settings().version);
+    let mut changing_members: Vec<&str> = scanned
+        .function_likes
+        .values()
+        .filter(|member| {
+            member.flags.is_extension_method()
+                && member.parameters.first().is_some_and(|receiver| receiver.flags.is_by_reference())
+        })
+        .map(|member| member.original_name.as_str().expect("an ASCII name"))
+        .collect();
+    changing_members.sort_unstable();
+    assert_eq!(
+        changing_members,
+        ["add", "clear", "insert", "remove", "removeAt", "removeFirst", "removeLast", "set"],
+        "the members of a `List` that take it by `ref`"
+    );
+
+    for class in ["Sharp\\Internal\\MapMethods", "Sharp\\Internal\\SetMethods"] {
         let metadata =
             PRELUDE.metadata.get_class_like(class.as_bytes()).expect("the collection stub is in the prelude");
         let mut changing: Vec<&str> = metadata
@@ -469,9 +509,8 @@ fn the_binder_knows_every_changing_collection_method() {
         changing.sort_unstable();
         assert!(!changing.is_empty(), "{class} has no changing method, so the stub was not read");
 
-        let known: Vec<&str> =
-            changing.iter().copied().filter(|method| CHANGING_COLLECTION_METHODS.contains(method)).collect();
-        assert_eq!(known, changing, "{class} changes the collection in a method CHANGING_COLLECTION_METHODS lacks");
+        let known: Vec<&str> = changing.iter().copied().filter(|method| changing_members.contains(method)).collect();
+        assert_eq!(known, changing, "{class} changes the collection in a method no `ref` member of a `List` names");
     }
 }
 
@@ -5294,7 +5333,7 @@ fn sorted_by_a_key_of_two_types_that_never_match_is_refused_as_less_than_refuses
 #[test]
 fn sorted_by_an_any_key_reports_what_less_than_reports_on_two_any_values() {
     let sharp = "namespace Demo;\n\nclass Report\n{\n    public bool a(Any left, Any right) => left < right;\n\n    public bool b(Any? left, Any? right) => left < right;\n\n    public List<Any> c(List<Any> values) => values.sortedBy(v => v);\n\n    public List<Any?> d(List<Any?> values) => values.sortedBy(v => v);\n}\n";
-    let php = "<?php\n\nnamespace Demo;\n\nuse Sharp\\Internal\\ListMethods;\n\nfinal class Report\n{\n    public function a(mixed $left, mixed $right): bool\n    {\n        return $left < $right;\n    }\n\n    /**\n     * @param ListMethods<mixed> $values\n     *\n     * @return list<mixed>\n     */\n    public function c(ListMethods $values): array\n    {\n        return $values->sortedBy(fn (mixed $v): mixed => $v);\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nuse Sharp\\Internal\\MapMethods;\n\nfinal class Report\n{\n    public function a(mixed $left, mixed $right): bool\n    {\n        return $left < $right;\n    }\n\n    /**\n     * @param MapMethods<string, mixed> $values\n     *\n     * @return list<mixed>\n     */\n    public function c(MapMethods $values): array\n    {\n        return $values->sortedBy(fn (mixed $v): mixed => $v);\n    }\n}\n";
     let mixed = |at: &str, side: &str| {
         format!(
             "{at} mixed-operand {side} operand in `<` comparison has `mixed` type. | This has type `mixed` | The result of comparing `mixed` types with `<` is unpredictable and can hide bugs. | Ensure this operand has a known, comparable type before using this comparison operator."
@@ -5756,6 +5795,44 @@ fn collection_methods_that_take_a_lambda_type_its_parameter_and_their_result() {
     let sharp = "namespace Demo;\n\nimport Lib.Words;\n\nclass Report\n{\n    public int run(List<int> numbers, Map<string, int> prices)\n    {\n        List<int> evens = numbers.filter(n => n % 2 == 0);\n        List<string> labels = numbers.map(n => `#${n}`);\n        int total = evens.sumOf(n => n * 2);\n        List<string> sorted = labels.sortedBy(s => Words.length(s));\n        Map<int, List<int>> groups = numbers.groupBy(n => n % 3);\n        Map<string, string> byLabel = labels.associateBy(s => s);\n        Map<string, int> cheap = prices.filter(p => p < 100);\n        List<float> halves = prices.map(p => p / 2.0);\n        int first = numbers.first(n => n > 2);\n        bool expensive = prices.any(p => p > 1000);\n        return total + first + sorted.count() + groups.count() + byLabel.count() + cheap.count() + halves.count() + (expensive ? 1 : 0);\n    }\n}\n";
 
     assert_eq!(issues(("src/Demo/Report.sharp", sharp), &[WORDS]), Vec::<String>::new());
+}
+
+/// On a value that may be a `List` or a `Set`, the `List`'s part reaches an extension of `List`s only, and a computed
+/// property called as a method is refused once, by the error that names the property, beside the `Set`'s missing
+/// method.
+#[test]
+fn a_computed_property_a_lists_part_has_called_as_a_method_is_refused_once() {
+    let lists = "namespace Demo;\n\npublic static class Lists\n{\n    extension<T>(List<T> items)\n    {\n        public bool isBlank => items.count() == 0;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public Any? run(bool listed, List<int> ids, Set<int> seen)\n    {\n        let held = listed ? ids : seen;\n        return held.isBlank();\n    }\n}\n";
+
+    assert_eq!(
+        messages(("src/Demo/Report.sharp", sharp), &[("src/Demo/Lists.sharp", lists)]),
+        [
+            "Method `isBlank` does not exist on `Set<int>`.",
+            "`isBlank` is a computed property of `List<int>`, not a method: read it without `(…)`.",
+        ]
+    );
+}
+
+/// A `List`'s member runs as the engine function its form calls, which takes no type arguments, so the type a plain PHP
+/// function's parameter gives its result, `scalar|Stringable|null` of `implode`'s, which PHP# can't write, fixes them.
+#[test]
+fn a_list_member_whose_result_goes_into_a_plain_php_parameter_takes_its_type() {
+    let sharp = "namespace Sharp;\n\npublic static class Joined\n{\n    public static string run(List<int> numbers) => global.implode(\", \", numbers.map(n => n * 2));\n}\n";
+
+    assert_eq!(
+        issues(("vendor/heyjordanparker/php-sharp-composer/library/Sharp/Joined.sharp", sharp), &[]),
+        Vec::<String>::new()
+    );
+}
+
+/// A `List`'s `sumOf` adds numbers: the standard library bounds its result by `int|float`, so a lambda that returns a
+/// `string` is refused.
+#[test]
+fn sum_of_a_list_takes_a_function_that_returns_a_number() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public float run(List<string> names)\n    {\n        return names.sumOf(name => 1.5) + names.sumOf(name => name);\n    }\n}\n";
+
+    assert_eq!(codes(&issues(("src/Demo/Report.sharp", sharp), &[])), ["template-constraint-violation"]);
 }
 
 /// A method value passed to a collection method types what it returns, as a lambda does.
@@ -8382,8 +8459,8 @@ fn an_extension_block_infers_its_type_parameters_from_the_receiver() {
     let orders = "namespace App;\n\npublic class Order\n{\n}\n";
     let rush = "namespace App;\n\npublic class RushOrder : Order\n{\n}\n";
     let pair = "namespace App;\n\npublic class Pair<TLeft, TRight>\n{\n}\n";
-    let lists = "namespace App.Lists;\n\nimport App.Order;\nimport App.Pair;\n\npublic static class ListExtensions\n{\n    extension<T>(List<T> items)\n    {\n        public List<T> twice() => items;\n        public List<TOut> converted<TOut>(Function<TOut(T)> convert) => [];\n        public List<TOut> blank<TOut>() => [];\n        public bool isEmpty => items.count() == 0;\n    }\n\n    extension<TValue>(Map<string, List<TValue>> groups)\n    {\n        public TValue? firstOf(string key) => null;\n    }\n\n    extension<TLeft, TRight>(Pair<TLeft, TRight> pair)\n    {\n        public Pair<TRight, TLeft> swapped() => new Pair<TRight, TLeft>();\n    }\n\n    extension<T : Order>(List<T> orders)\n    {\n        public T? newest() => null;\n        public int saved => orders.count();\n    }\n}\n";
-    let sharp = "namespace Demo;\n\nimport App.Lists.ListExtensions;\nimport App.Order;\nimport App.Pair;\nimport App.RushOrder;\n\npublic class Report\n{\n    public List<int> twice(List<string> names) => names.twice();\n    public List<int> converted(List<Order> orders) => orders.converted<string>(order => \"order\");\n    public bool empty(List<Order> orders) => orders.isEmpty;\n    public int firstOf(Map<string, List<Order>> groups) => groups.firstOf(\"a\");\n    public int swapped(Pair<int, Order> pair) => pair.swapped();\n    public int newest(List<RushOrder> orders) => orders.newest();\n    public Any? numbers(List<int> numbers) => numbers.newest();\n    public List<int> blank(List<Order> orders) => orders.blank<string>();\n    public Any? many(List<Order> orders) => orders.blank<string, int>();\n    public Any? saved(List<string> names) => names.saved;\n    public Any? either(Pair<int, Order>|Pair<string, Order> pair) => pair.swapped();\n}\n";
+    let lists = "namespace App.Lists;\n\nimport App.Order;\nimport App.Pair;\n\npublic static class ListExtensions\n{\n    extension<T>(List<T> items)\n    {\n        public List<T> twice() => items;\n        public List<TOut> converted<TOut>(Function<TOut(T)> convert) => [];\n        public List<TOut> blank<TOut>() => [];\n        public bool isBlank => items.count() == 0;\n    }\n\n    extension<TValue>(Map<string, List<TValue>> groups)\n    {\n        public TValue? firstOf(string key) => null;\n    }\n\n    extension<TLeft, TRight>(Pair<TLeft, TRight> pair)\n    {\n        public Pair<TRight, TLeft> swapped() => new Pair<TRight, TLeft>();\n    }\n\n    extension<T : Order>(List<T> orders)\n    {\n        public T? newest() => null;\n        public int saved => orders.count();\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport App.Lists.ListExtensions;\nimport App.Order;\nimport App.Pair;\nimport App.RushOrder;\n\npublic class Report\n{\n    public List<int> twice(List<string> names) => names.twice();\n    public List<int> converted(List<Order> orders) => orders.converted<string>(order => \"order\");\n    public bool empty(List<Order> orders) => orders.isBlank;\n    public int firstOf(Map<string, List<Order>> groups) => groups.firstOf(\"a\");\n    public int swapped(Pair<int, Order> pair) => pair.swapped();\n    public int newest(List<RushOrder> orders) => orders.newest();\n    public Any? numbers(List<int> numbers) => numbers.newest();\n    public List<int> blank(List<Order> orders) => orders.blank<string>();\n    public Any? many(List<Order> orders) => orders.blank<string, int>();\n    public Any? saved(List<string> names) => names.saved;\n    public Any? either(Pair<int, Order>|Pair<string, Order> pair) => pair.swapped();\n}\n";
     let others = [
         ("src/App/Order.sharp", orders),
         ("src/App/RushOrder.sharp", rush),
@@ -9135,7 +9212,7 @@ fn compile_errors(analyzed: (&'static str, &'static str), others: &[(&'static st
     let file = File::ephemeral(Cow::Borrowed(analyzed.0.as_bytes()), Cow::Borrowed(analyzed.1.as_bytes()));
     let program = parse_file(&arena, &file);
     let names = NameResolver::new(&arena).resolve(program);
-    let semantic_issues = SemanticsChecker::new(PHPVersion::PHP85).check(&file, program, &names);
+    let semantic_issues = SemanticsChecker::new(PHPVersion::ENGINE).check(&file, program, &names);
 
     semantic_issues
         .into_iter()
@@ -9287,7 +9364,7 @@ fn a_missing_class_is_one_error_that_names_it_as_php_sharp_does() {
             vec![missing("5:21", "App.Fresh")],
         ),
         // Only the standard library imports `Sharp.Internal`, spec section 15, so no import is the advice for one of
-        // its classes, as for the prelude's `ListMethods`.
+        // its classes, as for the prelude's `MapMethods`.
         (
             "namespace App;\n\nclass Report\n{\n    public void run(Hidden hidden)\n    {\n    }\n}\n",
             vec![missing("5:21", "App.Hidden")],
@@ -10071,6 +10148,34 @@ fn an_index_write_replaces_a_list_element_and_an_append_fails_as_a_typo_does() {
             "21:14 parse Unexpected `[`",
             "22:14 parse Unexpected `[`",
         ]
+    );
+}
+
+/// `list[i] = v` runs the standard library's `set` of a `List`, so a project without the library is refused each write
+/// of a `List` index, as it is refused every other member of a `List`.
+#[test]
+fn a_list_index_write_without_the_standard_library_is_refused() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static void reset(List<int> sizes)\n    {\n        sizes[0] = 1;\n        sizes[1] += 2;\n        ++sizes[2];\n    }\n}\n";
+    let (issues, _, _) =
+        analyze_with_references(&PLUGIN_REGISTRY, settings(), ("src/Demo/Report.sharp", sharp), &[], &[]);
+
+    assert_eq!(
+        issues.iter().map(|issue| format!("{} {}", located(sharp, issue), issue.message)).collect::<Vec<_>>(),
+        [
+            "7:9 non-existent-method Method `set`, which `list[i] = v` runs, does not exist on `List<int>`.",
+            "8:9 non-existent-method Method `set`, which `list[i] = v` runs, does not exist on `List<int>`.",
+            "9:11 non-existent-method Method `set`, which `list[i] = v` runs, does not exist on `List<int>`.",
+        ]
+    );
+    assert_eq!(
+        issues[0].primary_annotation().and_then(|annotation| annotation.message.as_deref()),
+        Some("This index write runs `set`.")
+    );
+    assert_eq!(
+        issues[0].help.as_deref(),
+        Some(
+            "Install the standard library, heyjordanparker/php-sharp-composer, which declares the members of a `List`."
+        )
     );
 }
 
@@ -11513,7 +11618,8 @@ fn an_emptied_php_array_property_keeps_the_map_rules() {
 /// type, null when no element is there, `remove` gives `bool`, `keys()` gives a `List` of the key type, a backed enum
 /// included, `values()` a `List` of the value type, `toSet()` a `Set` of the element type, `flatMap` a `List` of the
 /// elements of the `Iterable` its function gives, `toList()` a `List` of the element type, a `Set`'s and a `List`'s
-/// alike, and a `Map`'s `filter` gives the `Map` it keeps. A `List` has no `get` or `set`: its index reads and writes it.
+/// alike, and a `Map`'s `filter` gives the `Map` it keeps. A `List` has no `get`: its index reads it. Its `set` is what
+/// its index write runs, as Kotlin's is.
 #[test]
 fn collection_methods_take_and_give_the_types_of_their_elements() {
     let sharp = "namespace Demo;\n\nclass Order\n{\n    public List<Line> lines { get; private set; } = [];\n    private Map<string, int> counts = [:];\n\n    public int total(Line line, List<Line> extra)\n    {\n        this.lines.add(line);\n        extra.add(line);\n        extra[0] = line;\n        this.counts.remove(\"a\");\n        let sum = (this.counts.get(\"b\") ?? 0) + (extra.getOrNull(0)?.cents ?? 0);\n        for (const [index, item] of extra.entries()) {\n            sum += index + item.cents;\n        }\n        return sum;\n    }\n\n    public void wrong(List<Line> extra, Map<string, int> counts)\n    {\n        extra.add(1);\n        extra.set(0, new Line(1));\n        counts.add(1);\n        extra.delete(0);\n        Line? got = extra.get(0);\n    }\n\n    public int read(List<int> sizes)\n    {\n        bool held = sizes.contains(2);\n        int? at = sizes.indexOf(2);\n        int last = sizes.last();\n        int index = sizes.indexOf(2);\n        bool text = sizes.contains(\"a\");\n        int other = sizes.last(1);\n        int? maybe = sizes.getOrNull(5);\n        bool notMaybe = sizes.getOrNull(5);\n        Set<int> unique = sizes.toSet();\n        List<int> notSet = sizes.toSet();\n        return (held ? 1 : 0) + (at ?? 0) + last + index + (text ? 1 : 0) + other + (maybe ?? 0) + (notMaybe ? 1 : 0) + unique.count() + notSet.count();\n    }\n\n    public int change(List<int> sizes)\n    {\n        sizes.insert(0, 1);\n        bool gone = sizes.remove(2);\n        sizes.clear();\n        sizes.insert(\"a\", 1);\n        sizes.insert(0, \"a\");\n        int removed = sizes.remove(1);\n        return removed + (gone ? 1 : 0);\n    }\n\n    public int keyed(Map<string, int> counts, Map<Status, int> tally)\n    {\n        bool had = counts.has(\"a\");\n        List<string> names = counts.keys();\n        List<Status> statuses = tally.keys();\n        Map<string, int> kept = counts.filter(c => c > 0);\n        bool gone = counts.remove(\"a\");\n        int flag = counts.has(\"a\");\n        List<int> numbered = counts.keys();\n        List<string> backing = tally.keys();\n        List<int> renumbered = counts.filter(c => c > 0);\n        int removed = counts.remove(\"a\");\n        List<int> values = counts.values();\n        List<string> notValues = counts.values();\n        return (had || gone ? 1 : 0) + names.count() + statuses.count() + kept.count() + flag + numbered.count() + backing.count() + renumbered.count() + removed + values.count() + notValues.count();\n    }\n\n    public int flat(List<List<int>> rows, Set<string> tags, Map<string, int> counts)\n    {\n        List<int> cells = rows.flatMap(r => r);\n        List<string> listed = tags.toList();\n        List<int> values = counts.values().toList();\n        List<int> copy = cells.toList();\n        List<string> notCells = rows.flatMap(r => r);\n        List<int> notIterable = rows.flatMap(r => r.count());\n        Set<int> notList = cells.toList();\n        return cells.count() + listed.count() + values.count() + copy.count() + notCells.count() + notIterable.count() + notList.count();\n    }\n}\n\nenum Status : string\n{\n    case Open = \"open\";\n}\n\nclass Line\n{\n    public Line(public int cents { get; })\n    {\n    }\n}\n";
@@ -11522,7 +11628,6 @@ fn collection_methods_take_and_give_the_types_of_their_elements() {
         issues(("src/Demo/Order.sharp", sharp), &[]),
         [
             "23:19 invalid-argument",
-            "24:15 non-existent-method",
             "25:16 non-existent-method",
             "26:15 non-existent-method",
             "27:27 non-existent-method",
@@ -11579,8 +11684,8 @@ fn a_search_needs_equality_on_the_element_type() {
             "21:63 possibly-invalid-argument Possible argument type mismatch for argument #1 of `Money.op_Equality`: expected `Money`, but possibly received `Line|Money`. | Ensure the argument always has the expected type using checks or assertions.",
             "22:36 invalid-argument `contains` compares elements with `==`, and an unchecked `Any?` element can't tell the same object as `price` from an equal value. | Test for the same object with `loose.any(element => element === price)`.",
             "23:40 invalid-argument `indexOf` compares elements with `==`, and the `operator ==` of `Money` does not take `int|Money` and `Money`. | Make the `operator ==` of `Money` take `int|Money` and `Money`.",
-            "24:37 invalid-argument `remove` compares elements with `==`, and the `operator ==` of `Money` does not take `Ticket|Money` and `Money`. | Make the `operator ==` of `Money` take `Ticket|Money` and `Money`.",
-            "25:41 invalid-argument `contains` compares elements with `==`, and the `operator ==` of `Coin` does not take `Line|Coin` and `Coin`. | Make the `operator ==` of `Coin` take `Line|Coin` and `Coin`.",
+            "24:37 invalid-argument `remove` compares elements with `==`, and the `operator ==` of `Money` does not take `Money|Ticket` and `Money`. | Make the `operator ==` of `Money` take `Money|Ticket` and `Money`.",
+            "25:41 invalid-argument `contains` compares elements with `==`, and the `operator ==` of `Coin` does not take `Coin|Line` and `Coin`. | Make the `operator ==` of `Coin` take `Coin|Line` and `Coin`.",
             "27:40 invalid-argument `contains` compares elements with `==`, and `Order` can't compare by value: `line` is a `Line`, which declares no `operator ==`. | ",
             "28:41 invalid-argument `contains` compares elements with `==`, and `Line` declares no `operator ==`. | ",
             "29:39 invalid-argument `contains` compares elements with `==`, which cannot compare `int|Spot` with `Spot`. | Search a list of one struct type.",
@@ -11594,10 +11699,10 @@ fn a_search_needs_equality_on_the_element_type() {
 #[test]
 fn every_collection_counts_its_elements() {
     let sharp = "namespace Demo;\n\nclass Shelf\n{\n    public int total(List<int> sizes, Map<string, int> counts)\n    {\n        return sizes.count() + counts.count();\n    }\n\n    public void wrong(List<int> sizes)\n    {\n        if (sizes.count()) { }\n        sizes.count(1);\n    }\n}\n";
-    let php = "<?php\n\nnamespace Demo;\n\nuse Sharp\\Internal\\ListMethods;\nuse Sharp\\Internal\\MapMethods;\n\nfinal class Shelf\n{\n    /**\n     * @param ListMethods<int> $sizes\n     * @param MapMethods<string, int> $counts\n     */\n    public function total(ListMethods $sizes, MapMethods $counts): int\n    {\n        return $sizes->count() + $counts->count();\n    }\n\n    /**\n     * @param ListMethods<int> $sizes\n     */\n    public function wrong(ListMethods $sizes): void\n    {\n        $sizes->count(1);\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nuse Sharp\\Internal\\MapMethods;\n\nfinal class Shelf\n{\n    /**\n     * @param MapMethods<string, int> $counts\n     */\n    public function total(MapMethods $counts): int\n    {\n        return $counts->count();\n    }\n\n    /**\n     * @param MapMethods<string, int> $counts\n     */\n    public function wrong(MapMethods $counts): void\n    {\n        $counts->count(1);\n    }\n}\n";
 
     assert_eq!(issues(("src/Demo/Shelf.sharp", sharp), &[]), ["12:13 invalid-operand", "13:21 too-many-arguments"]);
-    assert_eq!(issues(("src/Demo/Shelf.php", php), &[]), ["24:23 too-many-arguments"]);
+    assert_eq!(issues(("src/Demo/Shelf.php", php), &[]), ["22:24 too-many-arguments"]);
 }
 
 /// A method a `List` shares with a `Map` or a `Set` runs on a value that may be either: `remove`, `contains`, `clear`
@@ -11609,22 +11714,22 @@ fn a_method_a_list_shares_with_another_collection_runs_on_a_value_that_may_be_ei
     assert_eq!(refusals(("src/Demo/Shelf.sharp", sharp), &[]), Vec::<String>::new());
 }
 
-/// A `List` method the bridge lowers to PHP on the array, such as `count` or `contains`, is refused on a value that can
-/// also be an object, whose own method the PHP would skip, as a method on a value that is no object is. Any other
-/// collection method, and every `Set` and `Map` method, is a method call the engine sends to the object or the
-/// collection the value holds when it runs. A `.php` file has no PHP# collection.
+/// A `List` member, such as `count`, `contains` or `any`, is a call of the standard library's function on the array, so
+/// it is refused on a value that can also be an object, whose own method the call would skip, as a method on a value
+/// that is no object is. Every `Set` and `Map` method is a method call the engine sends to the object or the collection
+/// the value holds when it runs. A `.php` file has no PHP# collection.
 #[test]
 fn a_collection_method_on_a_value_that_can_also_be_an_object_is_refused() {
     let sharp = "namespace Demo;\n\nclass Box\n{\n    public int count() => 1;\n\n    public bool contains(int value) => true;\n\n    public bool any(Function<bool(int)> predicate) => true;\n}\n\nclass Shelf\n{\n    public int run(List<int>|Box items, Set<int>|Box tags)\n    {\n        if (tags.contains(1) || items.contains(1)) {\n            return items.any(i => i > 0) ? 1 : 0;\n        }\n        return items.count();\n    }\n}\n";
-    let php = "<?php\n\nnamespace Demo;\n\nuse Sharp\\Internal\\ListMethods;\n\nfinal class Shelf\n{\n    /**\n     * @param ListMethods<int>|list<int> $sizes\n     */\n    public function run(ListMethods|array $sizes): int\n    {\n        return $sizes->count();\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nfinal class Shelf\n{\n    /**\n     * @param \\ArrayObject<int, int>|list<int> $sizes\n     */\n    public function run(\\ArrayObject|array $sizes): int\n    {\n        return $sizes->count();\n    }\n}\n";
     let issues = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Shelf.sharp", sharp), &[]);
 
     assert_eq!(
         issues.iter().map(|issue| located(sharp, issue)).collect::<Vec<_>>(),
-        ["16:39 invalid-method-access", "19:22 invalid-method-access"]
+        ["16:39 invalid-method-access", "17:26 invalid-method-access", "19:22 invalid-method-access"]
     );
     assert_eq!(
-        issues[1].message,
+        issues[2].message,
         "`List<int>|Box` may be a collection or an object, and `count` runs a different method on each."
     );
     assert!(
@@ -11634,8 +11739,9 @@ fn a_collection_method_on_a_value_that_can_also_be_an_object_is_refused() {
     );
 }
 
-/// The analyzer checks a collection method against `Sharp\Internal\ListMethods` or `Sharp\Internal\MapMethods`, and
-/// every message names the PHP# type the code wrote instead, as in "`add` doesn't exist on `Map<string, int>`".
+/// The analyzer checks a `List` member against the standard library's `Sharp.ListMembers` and a collection method
+/// against `Sharp\Internal\MapMethods`, and every message names the PHP# type the code wrote instead, as in "`add`
+/// doesn't exist on `Map<string, int>`".
 #[test]
 fn a_collection_method_message_names_the_sharp_type() {
     let sharp = "namespace Demo;\n\nclass Order\n{\n    public void wrong(List<Line> lines, List<int> sizes, Map<string, int> counts)\n    {\n        lines.add(1);\n        sizes.getOrNull(\"a\");\n        counts.add(1);\n        sizes.delete(0);\n        counts.get(1.5);\n        sizes.getOrNull();\n        sizes.getOrNull(0, 1);\n        counts.has(1);\n        counts.remove(1);\n    }\n}\n\nclass Line\n{\n}\n";
@@ -11807,7 +11913,7 @@ fn a_changing_collection_method_writes_back_through_a_null_safe_property() {
 /// docblock calls its changing methods on a variable as on any other object.
 #[test]
 fn a_changing_collection_method_called_from_php_needs_no_place() {
-    let php = "<?php\n\nnamespace Demo;\n\nuse Sharp\\Internal\\ListMethods;\nuse Sharp\\Internal\\MapMethods;\nuse Sharp\\Internal\\SetMethods;\n\nfinal class Shop\n{\n    /**\n     * @param ListMethods<int> $lines\n     * @param MapMethods<string, int> $counts\n     * @param SetMethods<int> $ids\n     */\n    public function change(ListMethods $lines, MapMethods $counts, SetMethods $ids): bool\n    {\n        $lines->add(1);\n        $counts->remove('a');\n\n        return $ids->add(1);\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nuse Sharp\\Internal\\MapMethods;\nuse Sharp\\Internal\\SetMethods;\n\nfinal class Shop\n{\n    /**\n     * @param MapMethods<string, int> $counts\n     * @param SetMethods<int> $ids\n     */\n    public function change(MapMethods $counts, SetMethods $ids): bool\n    {\n        $counts->remove('a');\n\n        return $ids->add(1);\n    }\n}\n";
 
     assert_eq!(issues(("src/Demo/Shop.php", php), &[]), Vec::<String>::new());
 }
@@ -12512,7 +12618,7 @@ fn a_group_key_is_checked_only_where_a_function_fills_the_key_parameter() {
 /// `array-key` bound there, as on master: a class or a backed enum key is refused at the call.
 #[test]
 fn a_php_caller_of_group_by_keys_the_array_by_an_array_key() {
-    let php = "<?php\n\nnamespace Demo;\n\nuse Lib\\Line;\nuse Lib\\Status;\nuse Sharp\\Internal\\ListMethods;\n\nfinal class Tally\n{\n    /** @param ListMethods<Line> $lines */\n    public function group(ListMethods $lines): int\n    {\n        $byLine = $lines->groupBy(fn (Line $line) => $line);\n        $byStatus = $lines->associateBy(fn (Line $line) => Status::Active);\n        $byName = $lines->groupBy(fn (Line $line) => 'all');\n\n        return count($byLine) + count($byStatus) + count($byName);\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nuse Lib\\Line;\nuse Lib\\Status;\nuse Sharp\\Internal\\MapMethods;\n\nfinal class Tally\n{\n    /** @param MapMethods<string, Line> $lines */\n    public function group(MapMethods $lines): int\n    {\n        $byLine = $lines->groupBy(fn (Line $line) => $line);\n        $byStatus = $lines->associateBy(fn (Line $line) => Status::Active);\n        $byName = $lines->groupBy(fn (Line $line) => 'all');\n\n        return count($byLine) + count($byStatus) + count($byName);\n    }\n}\n";
 
     assert_eq!(
         issues(("src/Demo/Tally.php", php), &[("src/Lib/Status.php", STATUS)]),
@@ -12522,6 +12628,20 @@ fn a_php_caller_of_group_by_keys_the_array_by_an_array_key() {
             "15:41 template-constraint-violation",
             "15:41 invalid-argument"
         ]
+    );
+}
+
+/// A function with a parameter marked `#[TakesResultType]` makes the collection its declared array says, whatever its
+/// name: a list is a `Set` of its elements, and any other array a `Map` of its keys and values, even `array<int, T>`,
+/// which reads as a `List` elsewhere. A `Map` keyed by a type parameter takes keys `array-key` does not bound.
+#[test]
+fn a_function_that_takes_its_result_type_makes_the_collection_its_array_says() {
+    let sharp = "namespace Demo;\n\nimport Lib.Made;\nimport Lib.Status;\n\nclass Tally\n{\n    public int made(List<string> names)\n    {\n        Set<string> unique = Made.unique(names);\n        Map<int, string> indexed = Made.indexed(names);\n        Map<Status, List<string>> grouped = Made.grouped(names, name => Status.Active);\n        return unique.count() + indexed.count() + grouped.count();\n    }\n}\n";
+    let made = "<?php\n\nnamespace Lib;\n\nuse Sharp\\Internal\\TakesResultType;\n\nfinal class Made\n{\n    /**\n     * @template T\n     * @param list<T> $list\n     * @return list<T>\n     */\n    public static function unique(array $list, #[TakesResultType] ?string $type = null): array { return $list; }\n\n    /**\n     * @template T\n     * @param list<T> $list\n     * @return array<int, T>\n     */\n    public static function indexed(array $list, #[TakesResultType] ?string $type = null): array { return $list; }\n\n    /**\n     * @template T\n     * @template G of array-key\n     * @param list<T> $list\n     * @param \\Closure(T): G $key\n     * @return array<G, list<T>>\n     */\n    public static function grouped(array $list, \\Closure $key, #[TakesResultType] ?string $type = null): array { return []; }\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Tally.sharp", sharp), &[("src/Lib/Made.php", made), ("src/Lib/Status.php", STATUS)]),
+        Vec::<String>::new()
     );
 }
 
@@ -13090,8 +13210,8 @@ fn a_list_literal_is_passed_where_a_set_is_expected_and_a_list_or_a_map_is_not()
 }
 
 /// Spec section 12: a list literal argument is the `Set` its parameter declares, wherever the call goes: a PHP# method,
-/// each element of a variadic one, a lambda a local holds, `Sharp\Internal\ListMethods.add` of a `List<Set<string>>`,
-/// whose `Set` comes from its template, and a call through a `Function` value. A `List` variable is refused everywhere.
+/// each element of a variadic one, a lambda a local holds, the standard library's `add` of a `List<Set<string>>`, whose
+/// `Set` comes from its type parameter, and a call through a `Function` value. A `List` variable is refused everywhere.
 /// A plain PHP caller still passes a list to a PHP# method, which makes it a `Set` before its body runs.
 #[test]
 fn a_list_literal_argument_is_the_set_its_parameter_declares_and_a_list_variable_is_refused() {
@@ -16613,6 +16733,28 @@ fn a_search_a_map_key_and_a_set_element_of_a_type_parameter_need_equatable() {
         ]
     );
     assert_eq!(issues(("src/Demo/Searches.sharp", bounded), &[]), Vec::<String>::new());
+}
+
+/// Spec section 12: a collection member compares the value of a parameter marked `ComparedByEquality` with each element
+/// by `==`, so a library-style extension that marks one needs `==` on the element type, as `contains` does: an unbounded
+/// type parameter needs `Equatable`, and a class needs `operator ==`.
+#[test]
+fn a_member_compared_by_equality_needs_equatable_on_a_type_parameter() {
+    let shelf = (
+        "src/Lib/ShelfMembers.sharp",
+        "namespace Lib;\n\nimport Sharp.Internal.ComparedByEquality;\n\npublic static class ShelfMembers\n{\n    extension<T>(List<T> items)\n    {\n        public bool shelves([ComparedByEquality] T value) => global.in_array(value, items, true);\n    }\n}\n",
+    );
+    let sharp = "namespace Demo;\n\nimport Lib.ShelfMembers;\n\npublic class Checks<T>\n{\n    public bool unbounded(List<T> items, T item) => items.shelves(item);\n\n    public bool carts(List<Cart> carts, Cart cart) => carts.shelves(cart);\n\n    public bool points(List<Point> points, Point point) => points.shelves(point);\n}\n";
+    let bounded = "namespace Demo;\n\nimport Lib.ShelfMembers;\n\npublic class Checks<T : Equatable>\n{\n    public bool bounded(List<T> items, T item) => items.shelves(item);\n}\n";
+
+    assert_eq!(
+        equatable_written(sharp, &[shelf]),
+        [
+            "7:67 invalid-argument `shelves` compares elements with `==`, and `T` has no `==`: bound it with `Equatable`, as in `<T : Equatable>`.",
+            "9:69 invalid-argument `shelves` compares elements with `==`, and `Cart` declares no `operator ==`.",
+        ]
+    );
+    assert_eq!(equatable_written(bounded, &[shelf]), Vec::<String>::new());
 }
 
 /// Spec section 11: `Equatable` is a bound and never a value's type, so `List<Equatable>` and an `Equatable` parameter

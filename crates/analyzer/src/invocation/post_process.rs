@@ -327,7 +327,11 @@ where
     let constraint_type = invocation.target.is_method_call();
 
     for (parameter_offset, parameter_ref) in invocation.target.iter_parameters().enumerate() {
-        if !parameter_ref.is_by_reference() {
+        // An extension's `ref` receiver is a place its call checked and wrote back as a changed collection.
+        if !parameter_ref.is_by_reference()
+            || (parameter_offset == 0
+                && matches!(invocation.arguments_source, InvocationArgumentsSource::ExtensionReceiver(..)))
+        {
             continue;
         }
 

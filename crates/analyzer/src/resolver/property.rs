@@ -10,6 +10,7 @@ use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::metadata::flags::MetadataFlags;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
+use mago_codex::metadata::parameter::FunctionLikeParameterMetadata;
 use mago_codex::metadata::property::PropertyMetadata;
 use mago_codex::metadata::ttype::TypeMetadata;
 use mago_codex::misc::GenericParent;
@@ -77,6 +78,7 @@ use crate::resolver::class_name::class_value_classes;
 use crate::resolver::class_name::holds_no_class;
 use crate::resolver::class_name::report_non_existent_class_like;
 use crate::resolver::extension::Extension;
+use crate::resolver::extension::is_collection_member;
 use crate::resolver::extension::resolve_extension;
 use crate::resolver::method::check_call_through_readonly;
 use crate::resolver::method::get_receiver_collections;
@@ -180,9 +182,18 @@ where
         check_redundant_nullsafe(context, operator_span, object_expression, &object_type, false);
     }
 
+    // A tuple's members are its named elements, spec section 30, so it has no value of a `List`'s member.
+    let holds_tuple = object_type
+        .types
+        .iter()
+        .any(|atomic| matches!(atomic, TAtomic::Array(TArray::List(list)) if list.tuple_elements().is_some()));
     if context.dialect.is_sharp()
         && let ClassLikeMemberSelector::Identifier(name) = property_selector
         && let Some(extension) = resolve_extension(context, &object_type, name, MetadataFlags::EXTENSION_PROPERTY)
+        && !matches!(extension, Extension::Value(method) if holds_tuple
+        && context.codebase.get_method_by_id(&method).is_some_and(|metadata| {
+            is_collection_member(method.get_class_name(), metadata)
+        }))
     {
         match extension {
             Extension::Member(_) if for_assignment => {
@@ -210,8 +221,16 @@ where
             }
             Extension::Value(method) => {
                 let read = object_expression.span().join(name.span());
-                let property_type =
-                    resolve_extension_value(context, artifacts, method, &object_type.to_non_nullable(), read);
+                // A member that takes its receiver by `ref` changes it where it lives, which a function value cannot.
+                let changing = context.codebase.get_method_by_id(&method).and_then(|metadata| {
+                    let (receiver, parameters) = metadata.parameters.split_first()?;
+
+                    receiver.flags.is_by_reference().then_some(parameters)
+                });
+                let property_type = match changing {
+                    Some(parameters) => report_changing_method_value(context, read, parameters),
+                    None => resolve_extension_value(context, artifacts, method, &object_type.to_non_nullable(), read),
+                };
                 artifacts.record_call_target(
                     read,
                     CallTarget::FunctionLike {
@@ -2323,6 +2342,36 @@ where
     Some(fix_type_arguments(context, artifacts, value, method_metadata, &method_name, read_span, template_result))
 }
 
+/// Refuses the value read at `read_span` of a method that changes its collection, which takes `parameters` after the
+/// collection, since a function value holds a copy of the collection, and gives the refused type.
+fn report_changing_method_value<A>(
+    context: &mut Context<'_, '_, A>,
+    read_span: Span,
+    parameters: &[FunctionLikeParameterMetadata],
+) -> TUnion
+where
+    A: Arena,
+{
+    let written = quoted_source(context, read_span);
+    let parameters: Vec<String> =
+        parameters.iter().map(|parameter| parameter.name.0.as_str_lossy().trim_start_matches('$').to_owned()).collect();
+    let lambda_parameters = if let [parameter] = parameters.as_slice() {
+        parameter.clone()
+    } else {
+        format!("({})", parameters.join(", "))
+    };
+    context.collector.report_with_code(
+        IssueCode::InvalidPropertyAccess,
+        Issue::error(format!(
+            "`{written}` changes the collection, and a function value holds a copy of it: write a lambda that calls it, as in `{lambda_parameters} => {written}({})`.",
+            parameters.join(", ")
+        ))
+        .with_annotation(Annotation::primary(read_span).with_message("Read as a value here.")),
+    );
+
+    TUnion::from_atomic(TAtomic::Error)
+}
+
 /// Spec section 14.3: the value a read without `(…)` gives of the method `name` of a `List`, `Map`, `Set` or
 /// `Iterable`, on each of `collections`, the classes [`get_receiver_collections`] finds for the receiver `object`,
 /// typed as [`resolve_method_value`] types a method's value. None when one of them has no such method. The value holds
@@ -2355,27 +2404,7 @@ where
     let read_span = object.span().join(name.span());
 
     if let Some((_, changing)) = methods.iter().find(|(_, metadata)| !metadata.flags.is_mutation_free()) {
-        let written = quoted_source(context, read_span);
-        let parameters: Vec<String> = changing
-            .parameters
-            .iter()
-            .map(|parameter| parameter.name.0.as_str_lossy().trim_start_matches('$').to_owned())
-            .collect();
-        let lambda_parameters = if let [parameter] = parameters.as_slice() {
-            parameter.clone()
-        } else {
-            format!("({})", parameters.join(", "))
-        };
-        context.collector.report_with_code(
-            IssueCode::InvalidPropertyAccess,
-            Issue::error(format!(
-                "`{written}` changes the collection, and a function value holds a copy of it: write a lambda that calls it, as in `{lambda_parameters} => {written}({})`.",
-                parameters.join(", ")
-            ))
-            .with_annotation(Annotation::primary(read_span).with_message("Read as a value here.")),
-        );
-
-        return Some(TUnion::from_atomic(TAtomic::Error));
+        return Some(report_changing_method_value(context, read_span, &changing.parameters));
     }
 
     let mut value: Option<TUnion> = None;
@@ -2525,6 +2554,9 @@ where
 {
     let templates = &method.template_types;
     let mut violated_templates = WordSet::default();
+    // A type argument `template_result` already holds, an extension block's that its receiver fixed, stays as it is, as
+    // C# infers it from the receiver before the function type, so a `\Closure` parameter leaves it.
+    let fixed = template_result.lower_bounds.clone();
     if let Some(function_type) =
         artifacts.get_expected_type(&span).map(|expected| closure_parameter_types(context, expected))
         && let TAtomic::Callable(TCallable::Signature(signature)) = value.get_single()
@@ -2545,6 +2577,7 @@ where
             }
         }
     }
+    template_result.lower_bounds.extend(fixed);
     if !method.flags.is_sharp() {
         return inferred_type_replacer::replace(&value, &template_result, context.codebase);
     }

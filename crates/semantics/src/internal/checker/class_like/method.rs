@@ -204,7 +204,8 @@ pub fn check_method<'ast, 'arena>(
             | Modifier::Required(_)
             | Modifier::Lazy(_)
             | Modifier::Internal(_)
-            | Modifier::Foreign(_) => {}
+            | Modifier::Foreign(_)
+            | Modifier::Ref(_) => {}
             Modifier::Extern(_) => is_extern = true,
         }
     }

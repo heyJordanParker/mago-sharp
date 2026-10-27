@@ -53,6 +53,7 @@ use crate::expression::array_access::check_change_through_index;
 use crate::expression::assignment::PropertyWriteKind;
 use crate::expression::assignment::property_assignment;
 use crate::expression::assignment::static_property_assignment;
+use crate::resolver::extension::list_member;
 use crate::resolver::method::get_declared_collection;
 use crate::resolver::method::get_declared_type;
 use crate::resolver::method::with_declared_kinds;
@@ -179,6 +180,23 @@ where
         &mut root_array_type,
         &mut current_type,
     )?;
+
+    // Spec section 12: `list[i] = v` runs the standard library's `set` of a `List`, so a project without the library
+    // has it no more than any other member of a `List`.
+    if context.dialect.is_sharp()
+        && let ArrayTarget::Access(access) = array_target
+        && let Some(written) = artifacts.get_expression_type(access.array)
+        && written.types.iter().all(|atomic| matches!(atomic, TAtomic::Array(TArray::List(_))))
+        && list_member(context.codebase, b"set").is_none()
+    {
+        let list = display_sharp_type(context, written);
+        context.collector.report_with_code(
+            IssueCode::NonExistentMethod,
+            Issue::error(format!("Method `set`, which `list[i] = v` runs, does not exist on `{list}`."))
+                .with_annotation(Annotation::primary(access.span()).with_message("This index write runs `set`."))
+                .with_help("Install the standard library, heyjordanparker/php-sharp-composer, which declares the members of a `List`."),
+        );
+    }
 
     let root_is_string = root_array_type.has_string();
 

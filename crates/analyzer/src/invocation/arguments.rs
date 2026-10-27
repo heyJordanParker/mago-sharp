@@ -54,6 +54,7 @@ use crate::utils::expression::is_referenceable;
 use crate::utils::get_type_diff;
 use crate::utils::int_refused_for_float;
 use crate::utils::names::and_list;
+use crate::utils::names::collection_member_kind;
 use crate::utils::names::display_atomic;
 use crate::utils::names::display_function_holder;
 use crate::utils::names::display_nullable_type;
@@ -282,7 +283,10 @@ where
     else {
         return Cow::Borrowed(parameter_type);
     };
-    if metadata.template_types.is_empty() || sharp_collection_name(&TObject::new_named(*class)).is_none() {
+    if metadata.template_types.is_empty()
+        || (sharp_collection_name(&TObject::new_named(*class)).is_none()
+            && collection_member_kind(*class, metadata).is_none())
+    {
         return Cow::Borrowed(parameter_type);
     }
 

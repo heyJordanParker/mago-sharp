@@ -63,7 +63,8 @@ where
         flags |= MetadataFlags::VARIADIC;
     }
 
-    if parameter.ampersand.is_some() {
+    // An extension's `ref` receiver runs as the static method's by-reference first parameter, spec section 26.
+    if parameter.ampersand.is_some() || parameter.is_by_ref_receiver() {
         flags |= MetadataFlags::BY_REFERENCE;
     }
 

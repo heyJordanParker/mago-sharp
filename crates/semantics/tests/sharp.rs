@@ -3839,6 +3839,38 @@ fn only_the_standard_library_extends_class() {
     }
 }
 
+/// A member that changes the collection it is called on takes its receiver by `ref`, as C# 14 allows, spec section 26.
+/// Only the standard library, under `Sharp`, declares one: other code returns the changed copy, spec section 12.
+#[test]
+fn only_the_standard_library_takes_a_receiver_by_ref() {
+    let refusal = "Only the standard library declares a method that changes the collection it is called on: return the changed copy instead, as in `lines = Cart.withShipping(lines, shipping);`.";
+    for (namespace, receiver, expected) in [
+        ("App.Shared", "extension<T>(ref List<T> list)", vec![format!("5:18 {refusal}")]),
+        ("Sharp", "extension<T>(ref List<T> list)", vec![]),
+        ("Sharp.Data", "extension<T>(ref List<T> list)", vec![]),
+        (
+            "Sharp",
+            "extension<T>(ref public List<T> list)",
+            vec![
+                "5:18 An extension's receiver is one parameter, with no modifier, default or `...`, as in `extension(string value)`."
+                    .to_string(),
+            ],
+        ),
+    ] {
+        let code = format!(
+            "namespace {namespace};\n\npublic static class Lists\n{{\n    {receiver}\n    {{\n        public void clear() {{}}\n    }}\n}}\n"
+        );
+
+        assert_eq!(issues(code.leak()), expected, "`{namespace}`: `{receiver}`");
+    }
+
+    let member = "namespace Sharp;\n\npublic static class Lists\n{\n    extension<T>(List<T> items)\n    {\n        public void put(ref List<T> other) {}\n    }\n\n    public static void clear(ref List<int> list) {}\n}\n";
+    assert_eq!(
+        issues(member),
+        ["7:25 A parameter takes no `ref`: remove it.", "10:30 A parameter takes no `ref`: remove it."]
+    );
+}
+
 /// An extension adds methods and computed properties to its receiver's type. A value of that type has no storage of
 /// the extension's, and the static class holds its constants, operators, laws and constructors.
 #[test]
@@ -5929,6 +5961,21 @@ fn a_bound_that_is_not_object_a_class_an_interface_a_generic_class_type_or_a_typ
     assert!(check_in_type_file(code).iter().filter(|issue| issue.message.starts_with("A bound")).all(|issue| issue
         .notes
         == ["A PHP# type parameter is an optional `in` or `out`, a name that starts with `T`, and an optional bound of `Object`, of another type parameter, or of classes, interfaces and `Equatable` joined with `&`, as in `<out TItem : DatabaseEntity & Shareable>`."]));
+}
+
+/// The standard library's `sumOf` gives a number, so only its namespace writes the bound `int|float`.
+#[test]
+fn only_the_standard_library_bounds_a_type_parameter_by_a_number() {
+    for (namespace, expected) in [
+        ("App.Shared", vec!["5:31 A bound can't be a union: join several bounds with `&`.".to_owned()]),
+        ("Sharp", vec![]),
+    ] {
+        let code = format!(
+            "namespace {namespace};\n\npublic static class Sums\n{{\n    public static T total<T : int|float>(T value) => value;\n}}\n"
+        );
+
+        assert_eq!(issues(code.leak()), expected, "`{namespace}`");
+    }
 }
 
 /// A type parameter's bound never leads back to it, directly or through the bounds of the others in its list, as C#

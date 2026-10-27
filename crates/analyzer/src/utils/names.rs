@@ -13,6 +13,7 @@ use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::metadata::module::ModuleMetadata;
 use mago_codex::ttype::SharpType;
 use mago_codex::ttype::TType;
+use mago_codex::ttype::add_optional_union_type;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::callable::TCallable;
@@ -22,6 +23,7 @@ use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeString;
 use mago_codex::ttype::flags::UnionFlags;
 use mago_codex::ttype::get_array_parameters;
+use mago_codex::ttype::get_never;
 use mago_codex::ttype::get_sharp_type;
 use mago_codex::ttype::union::TUnion;
 use mago_names::EQUATABLE;
@@ -55,6 +57,7 @@ use mago_word::ascii_lowercase_word;
 use mago_word::word;
 
 use crate::context::Context;
+use crate::resolver::extension::is_collection_member;
 use crate::utils::quoted_source;
 use crate::visibility::display_namespace;
 use crate::visibility::list_refusing;
@@ -1046,15 +1049,13 @@ pub(crate) fn sharp_code_class_name(
     sharp_import_alias(codebase, imported_names, scope, name).unwrap_or_else(|| short_name(name))
 }
 
-/// Returns `List`, `Map`, `Set` or `Iterable` when `object` is `Sharp\Internal\ListMethods`,
-/// `Sharp\Internal\MapMethods`, `Sharp\Internal\SetMethods` or `Sharp\Internal\IterableMethods`.
+/// Returns `Map`, `Set` or `Iterable` when `object` is `Sharp\Internal\MapMethods`, `Sharp\Internal\SetMethods` or
+/// `Sharp\Internal\IterableMethods`.
 #[must_use]
 pub(crate) fn sharp_collection_name(object: &TObject) -> Option<&'static str> {
     let name = object.get_name()?;
 
-    if name.as_bytes().eq_ignore_ascii_case(b"Sharp\\Internal\\ListMethods") {
-        Some("List")
-    } else if name.as_bytes().eq_ignore_ascii_case(b"Sharp\\Internal\\MapMethods") {
+    if name.as_bytes().eq_ignore_ascii_case(b"Sharp\\Internal\\MapMethods") {
         Some("Map")
     } else if name.as_bytes().eq_ignore_ascii_case(b"Sharp\\Internal\\SetMethods") {
         Some("Set")
@@ -1063,6 +1064,64 @@ pub(crate) fn sharp_collection_name(object: &TObject) -> Option<&'static str> {
     } else {
         None
     }
+}
+
+/// Returns `List`, `Map` or `Set` when `metadata`, a member of the static class `class`, is the standard library's member
+/// of that collection, spec section 12, as `ListMembers.add` is a `List`'s, so a message writes it `List.add`.
+#[must_use]
+pub(crate) fn collection_member_kind(class: Word, metadata: &FunctionLikeMetadata) -> Option<&'static str> {
+    if !is_collection_member(class, metadata) {
+        return None;
+    }
+
+    match metadata.parameters.first()?.get_type_metadata()?.type_union.types.first()? {
+        TAtomic::Array(TArray::List(_)) => Some("List"),
+        TAtomic::Array(TArray::Keyed(_)) => Some("Map"),
+        TAtomic::Array(TArray::Set(_)) => Some("Set"),
+        _ => unreachable!("a collection member's receiver is a collection"),
+    }
+}
+
+/// The type arguments of the collection `receiver` holds, as an issue names them: a `List`'s and a `Set`'s element type,
+/// and a `Map`'s key and value types. A PHP# element type is never narrower than `int` or `string`, so a literal the
+/// analyzer knows widens to it.
+#[must_use]
+pub(crate) fn collection_type_parameters(receiver: &TUnion, codebase: &CodebaseMetadata) -> Vec<TUnion> {
+    let (mut keys, mut values): (Option<TUnion>, Option<TUnion>) = (None, None);
+    let mut is_map = false;
+    let arrays =
+        receiver.types.iter().filter_map(|atomic| if let TAtomic::Array(array) = atomic { Some(array) } else { None });
+    for array in arrays {
+        is_map |= matches!(array, TArray::Keyed(_));
+        let (key, value) = get_array_parameters(array, codebase);
+        keys = Some(add_optional_union_type(key, keys.as_ref(), codebase));
+        values = Some(add_optional_union_type(value, values.as_ref(), codebase));
+    }
+    let widened = |union: Option<TUnion>| {
+        let mut union = union.unwrap_or_else(get_never);
+        union.widen_scalars();
+        union
+    };
+
+    if is_map { vec![widened(keys), widened(values)] } else { vec![widened(values)] }
+}
+
+/// The name an issue gives the member `metadata` of a PHP# collection, a call of which runs on a receiver whose
+/// element types `class_type` carries, as `List<int>.getOrNull`, spec section 12. None for any other member.
+#[must_use]
+pub(crate) fn display_collection_member<A>(
+    context: &Context<'_, '_, A>,
+    class: Word,
+    metadata: &FunctionLikeMetadata,
+    type_parameters: &[TUnion],
+) -> Option<String>
+where
+    A: Arena,
+{
+    let kind = collection_member_kind(class, metadata)?;
+    let parameters: Vec<String> = type_parameters.iter().map(|parameter| display_type(context, parameter)).collect();
+
+    Some(format!("{kind}<{}>.{}", parameters.join(", "), metadata.original_name))
 }
 
 /// A class under `Sharp\` that the prelude declares as a plain PHP stub.

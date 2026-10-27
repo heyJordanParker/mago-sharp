@@ -68,6 +68,7 @@ use crate::effects::holding_declaration;
 use crate::effects::is_effect;
 use crate::effects::summary::parameter_index;
 use crate::statement::function_like::FunctionLikeBody;
+use crate::utils::names::collection_member_kind;
 use crate::utils::names::display_function_like_identifier;
 use crate::utils::names::display_member;
 use crate::utils::names::display_sharp_parameter_type;
@@ -1061,7 +1062,9 @@ where
             CallTarget::FunctionLike { callee: callee @ FunctionLikeIdentifier::Method(class, method), .. } => {
                 let metadata = codebase.get_method(class.as_bytes(), method.as_bytes());
                 // A collection's method is written on its PHP# type, as `List.add`.
-                let callee = sharp_collection_name(&TObject::new_named(*class)).map_or_else(
+                let collection = sharp_collection_name(&TObject::new_named(*class))
+                    .or_else(|| metadata.and_then(|metadata| collection_member_kind(*class, metadata)));
+                let callee = collection.map_or_else(
                     || display_function_like_identifier(self.context, callee),
                     |collection| {
                         display_sharp_member(collection, metadata.map_or(*method, |method| method.original_name))
@@ -1084,8 +1087,15 @@ where
             }
             CallTarget::FunctionLike { callee: FunctionLikeIdentifier::Closure(_), .. } => return Some((None, None)),
         };
-        let parameter = metadata
-            .and_then(|metadata| metadata.parameters.get(parameter_index(argument, position, &metadata.parameters)));
+        // An extension's member takes its receiver as its first parameter, so the call's arguments fill those after it.
+        let parameter = metadata.and_then(|metadata| {
+            let parameters = match metadata.parameters.split_first() {
+                Some((_, parameters)) if metadata.flags.is_extension_method() => parameters,
+                _ => metadata.parameters.as_slice(),
+            };
+
+            parameters.get(parameter_index(argument, position, parameters))
+        });
         let stated =
             parameter.and_then(|parameter| parameter.type_metadata.as_ref()).map(|declared| &declared.type_union);
         let keeps_inside = parameter.is_some_and(|parameter| parameter.flags.takes_on_effects())

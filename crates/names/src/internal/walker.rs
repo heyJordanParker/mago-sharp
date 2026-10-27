@@ -104,7 +104,6 @@ use mago_syntax::walker::walk_conditional_mut;
 use mago_syntax::walker::walk_if_mut;
 use mago_syntax::walker::walk_while_mut;
 
-use crate::CHANGING_COLLECTION_METHODS;
 use crate::ResolvedNames;
 use crate::binding::Binding;
 use crate::binding::BindingError;
@@ -115,6 +114,7 @@ use crate::fixed_default_class;
 use crate::internal::context::NameResolutionContext;
 use crate::internal::locals::LocalScopes;
 use crate::kind::NameKind;
+use crate::resolver::ChangingMembers;
 use crate::resolver::NamespaceClasses;
 use crate::scope::concat_with_sep;
 use crate::scope::php_name;
@@ -154,6 +154,8 @@ pub struct NameWalker<'arena, 'classes> {
     declared_classes: foldhash::HashSet<IgnoringCase<'arena>>,
     /// The class-likes of the project that win over a default class-like in their namespace.
     namespace_classes: &'classes NamespaceClasses,
+    /// The members of the project that change the value they are called on.
+    changing_members: &'classes ChangingMembers,
     /// The extension block being walked in PHP#, whose receiver each of its members declares as a parameter.
     extension: Option<ExtensionReceiver<'arena>>,
 }
@@ -198,7 +200,11 @@ impl Hash for IgnoringCase<'_> {
 }
 
 impl<'arena, 'classes> NameWalker<'arena, 'classes> {
-    pub fn new(program: &Program<'arena>, namespace_classes: &'classes NamespaceClasses) -> Self {
+    pub fn new(
+        program: &Program<'arena>,
+        namespace_classes: &'classes NamespaceClasses,
+        changing_members: &'classes ChangingMembers,
+    ) -> Self {
         let sharp = program.dialect.is_sharp();
         let declared_classes = if sharp { declared_class_names(program) } else { foldhash::HashSet::default() };
 
@@ -215,6 +221,7 @@ impl<'arena, 'classes> NameWalker<'arena, 'classes> {
             type_parameters: std::vec::Vec::new(),
             declared_classes,
             namespace_classes,
+            changing_members,
             extension: None,
         }
     }
@@ -290,8 +297,8 @@ impl<'arena, 'classes> NameWalker<'arena, 'classes> {
         }
     }
 
-    /// Records `call`, a call of one of the [`CHANGING_COLLECTION_METHODS`] on `object`, as a write to it. PHP finds a
-    /// method ignoring case, so the name is compared ignoring case.
+    /// Records `call`, a call of one of the [`ChangingMembers`] on `object`, as a write to it. PHP finds a method ignoring
+    /// case, so the name is compared ignoring case.
     fn record_changing_call(
         &mut self,
         object: &Expression<'arena>,
@@ -299,7 +306,7 @@ impl<'arena, 'classes> NameWalker<'arena, 'classes> {
         call: Span,
     ) {
         if let ClassLikeMemberSelector::Identifier(method) = method
-            && CHANGING_COLLECTION_METHODS.iter().any(|name| method.value.eq_ignore_ascii_case(name.as_bytes()))
+            && self.changing_members.contains(method.value)
         {
             self.record_write(object, call);
         }

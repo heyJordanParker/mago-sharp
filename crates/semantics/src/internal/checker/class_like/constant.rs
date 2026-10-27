@@ -106,7 +106,8 @@ pub fn check_class_like_constant<'ast, 'arena>(
             | Modifier::Extern(_)
             | Modifier::Lazy(_)
             | Modifier::Internal(_)
-            | Modifier::Foreign(_) => {}
+            | Modifier::Foreign(_)
+            | Modifier::Ref(_) => {}
         }
     }
 

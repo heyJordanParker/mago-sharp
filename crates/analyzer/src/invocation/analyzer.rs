@@ -32,6 +32,7 @@ use mago_codex::ttype::expander;
 use mago_codex::ttype::expander::StaticClassType;
 use mago_codex::ttype::expander::TypeExpansionOptions;
 use mago_codex::ttype::get_mixed;
+use mago_codex::ttype::get_never;
 use mago_codex::ttype::get_php_passed_type;
 use mago_codex::ttype::intersect_union_types;
 use mago_codex::ttype::is_written_in_sharp;
@@ -39,6 +40,9 @@ use mago_codex::ttype::template::TemplateResult;
 use mago_codex::ttype::template::bounds::get_most_specific_type_from_bounds;
 use mago_codex::ttype::template::inferred_type_replacer;
 use mago_codex::ttype::union::TUnion;
+use mago_names::binding::php_variable_name;
+
+use crate::resolver::extension::is_collection_member;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_span::HasSpan;
@@ -148,7 +152,12 @@ fn own_type_parameter_type<'parameter>(
     invocation: &Invocation<'_, '_, '_>,
     parameter: &InvocationTargetParameter<'parameter>,
 ) -> Option<&'parameter TUnion> {
+    // A `List`'s member takes its elements as the type argument the `List` gives them, readonly ones too, as a class's
+    // method takes its class's.
     invocation.target.get_function_like_metadata().filter(|function| function.flags.is_sharp())?;
+    if calls_collection_member(invocation) {
+        return None;
+    }
 
     parameter.get_type().filter(|declared| {
         declared.get_all_child_nodes().iter().any(|node| {
@@ -156,6 +165,14 @@ fn own_type_parameter_type<'parameter>(
                 if matches!(generic.defining_entity, GenericParent::FunctionLike(_)))
         })
     })
+}
+
+/// Whether `invocation` calls a member of a PHP# collection, the standard library's, spec section 12.
+fn calls_collection_member(invocation: &Invocation<'_, '_, '_>) -> bool {
+    matches!(
+        (invocation.target.get_function_like_identifier(), invocation.target.get_function_like_metadata()),
+        (Some(FunctionLikeIdentifier::Method(class, _)), Some(metadata)) if is_collection_member(*class, metadata)
+    )
 }
 
 /// Reports `argument`, a value of `argument_type` that would lose its readonly where `parameter` takes `parameter_type`,
@@ -344,6 +361,55 @@ where
         }
     }
 
+    // The type arguments the call and its receiver's written type give, which are checked where they are written, before
+    // an extension's receiver fixes its own from the receiver's value.
+    let written_type_arguments = context.dialect.is_sharp().then(|| template_result.clone());
+
+    let mut empty_receiver = false;
+    // An extension's receiver binds the type parameters its type gives as an object binds its class's, so
+    // `sizes.add("x")` on a `List<int>` is refused.
+    if context.dialect.is_sharp()
+        && let InvocationArgumentsSource::ExtensionReceiver(receiver, _) = invocation.arguments_source
+        && let Some(receiver_type) = artifacts.get_expression_type(receiver).map(TUnion::to_non_nullable)
+        && let Some(receiver_parameter_type) =
+            invocation.target.iter_parameters().next().and_then(|parameter| parameter.get_type().cloned())
+    {
+        let mut bound = template_result.clone();
+        infer_parameter_templates_from_argument(
+            context,
+            &receiver_parameter_type,
+            &receiver_type,
+            &mut bound,
+            0,
+            receiver.span(),
+            false,
+        );
+        for (name, parents) in bound.lower_bounds {
+            if template_result.lower_bounds.get(&name).is_some_and(|parents| !parents.is_empty()) {
+                continue;
+            }
+            for (parent, bounds) in parents {
+                for bound in bounds {
+                    template_result.add_lower_bound(name, parent, bound.bound_type);
+                }
+            }
+        }
+        // An empty receiver, as `[].count()`, fixes its element type as `never`, and the semantic checks refuse the
+        // empty literal without a type alone.
+        for atomic in receiver_parameter_type.get_template_types() {
+            if let TAtomic::GenericParameter(parameter) = atomic
+                && template_result
+                    .lower_bounds
+                    .get(&parameter.parameter_name)
+                    .and_then(|parents| parents.get(&parameter.defining_entity))
+                    .is_none_or(Vec::is_empty)
+            {
+                template_result.add_lower_bound(parameter.parameter_name, parameter.defining_entity, get_never());
+                empty_receiver = true;
+            }
+        }
+    }
+
     // In PHP# the type arguments of the receiver and those the call writes bind their templates before any argument,
     // so an argument infers only the others, as `map`'s `R` from `paid.map(this.format)`, and a wrong argument is the
     // invalid-argument issue alone.
@@ -352,6 +418,7 @@ where
     let arg_count = invocation.arguments_source.argument_count();
     let mut analyzed_argument_types = HashMap::default();
     let mut violated_templates = WordSet::default();
+    let mut refused_function_templates = WordSet::default();
 
     // A PHP# extension's receiver was analyzed as the object of its access, so it is the first argument as it is, less
     // the `null` that `?.` skips.
@@ -504,6 +571,16 @@ where
                     argument_type.1,
                     false,
                 ));
+                // A PHP# function type's type parameters are fixed by a function only, so a value that is none, which
+                // its own issue refuses, leaves them to that issue, as `groupBy(5)` does.
+                if context.dialect.is_sharp()
+                    && parameter_type.types.iter().all(TAtomic::is_callable)
+                    && !argument_type.0.types.iter().any(TAtomic::is_callable)
+                {
+                    refused_function_templates.extend(
+                        parameter_type.get_template_types().into_iter().filter_map(TAtomic::get_generic_parameter_name),
+                    );
+                }
             }
         }
     }
@@ -1268,7 +1345,7 @@ where
                 metadata,
                 template_types,
                 &type_arguments,
-                &violated_templates,
+                &violated_templates.union(&refused_function_templates).copied().collect(),
             );
             let method_name = invocation.target.guess_name(context);
             report_type_arguments_without_equality(
@@ -1277,13 +1354,17 @@ where
                 &method_name,
                 template_types,
                 &type_arguments,
-                bound_before_arguments.as_ref(),
+                written_type_arguments.as_ref(),
                 &violated_templates,
             );
         }
 
         artifacts.record_type_arguments(invocation.span, type_arguments.into_iter(), context.codebase);
+        // A collection's member runs as the engine function its form calls, which takes no type arguments, as a
+        // built-in method's call takes none, so a type argument only a PHP docblock writes stays its own.
         if sharp_metadata.is_some()
+            && !empty_receiver
+            && !calls_collection_member(invocation)
             && let Some(recorded) =
                 artifacts.inferred_type_arguments.get(&(invocation.span.start.offset, invocation.span.end.offset))
         {
@@ -1784,7 +1865,14 @@ fn report_unfixed_type_arguments<A>(
         .filter(|((name, _), type_argument)| type_argument.is_none() && !violated_templates.contains(name))
         .map(|(template, _)| template)
         .collect();
-    if unfixed.is_empty() {
+    // A named argument no parameter takes is refused on its own, as `groupBy(selector: …)` is, and fixes nothing.
+    let names_no_parameter = invocation.arguments_source.iter_arguments().any(|argument| {
+        argument.get_parameter_name().is_some_and(|name| {
+            let name = php_variable_name(name);
+            metadata.parameters.iter().all(|parameter| parameter.get_name().0 != name)
+        })
+    });
+    if unfixed.is_empty() || names_no_parameter {
         return;
     }
 
@@ -2103,7 +2191,10 @@ where
         _ => invocation_target_parameter.get_type(),
     };
     let parameter_type = parameter_type.cloned().unwrap_or_else(get_mixed);
-    let parameter_type = if context.dialect.is_sharp() && keys_a_map_by_its_function(invocation_target) {
+    let parameter_type = if context.dialect.is_sharp()
+        && keys_a_map_by_its_function(invocation_target)
+        && parameter_type.is_callable()
+    {
         without_method_template_bounds(&parameter_type)
     } else if invocation_target.get_function_like_metadata().is_some_and(|method| method.flags.is_sharp()) {
         // A plain PHP caller passes a `Map` or a `Set` as the object it runs as, or as a PHP array PHP# turns into one.

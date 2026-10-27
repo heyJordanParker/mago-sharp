@@ -52,15 +52,25 @@ impl FunctionLikeParameter<'_> {
     ///
     /// A promoted property is a property that is declared in a constructor parameter list.
     ///
-    /// A parameter is considered a promoted property if it has a hook or a modifier other than PHP#'s `lazy` and
-    /// `required`, which declare no member, and which semantics refuses on every parameter.
+    /// A parameter is considered a promoted property if it has a hook or a modifier other than PHP#'s `lazy`,
+    /// `required` and `ref`, which declare no member: semantics refuses the first two on every parameter, and takes
+    /// `ref` only on a standard library extension's receiver.
     ///
     /// [RFC: Constructor Property Promotion](https://wiki.php.net/rfc/constructor_promotion)
     /// [RFC: Property Hooks](https://wiki.php.net/rfc/property-hooks)
     #[must_use]
     pub fn is_promoted_property(&self) -> bool {
-        self.modifiers.iter().any(|modifier| !matches!(modifier, Modifier::Lazy(_) | Modifier::Required(_)))
+        self.modifiers
+            .iter()
+            .any(|modifier| !matches!(modifier, Modifier::Lazy(_) | Modifier::Required(_) | Modifier::Ref(_)))
             || self.hooks.is_some()
+    }
+
+    /// Whether the parameter is an extension's receiver taken by PHP#'s `ref`, which the members change in place,
+    /// spec section 26.
+    #[must_use]
+    pub fn is_by_ref_receiver(&self) -> bool {
+        self.modifiers.iter().any(|modifier| matches!(modifier, Modifier::Ref(_)))
     }
 
     #[inline]

@@ -310,7 +310,8 @@ pub fn check_property(
             | Modifier::Extern(_)
             | Modifier::Lazy(_)
             | Modifier::Internal(_)
-            | Modifier::Foreign(_) => {}
+            | Modifier::Foreign(_)
+            | Modifier::Ref(_) => {}
         }
     }
 

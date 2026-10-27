@@ -62,6 +62,8 @@ pub enum ModifierKind {
     Foreign,
     /// PHP#'s `sealed`, before an interface whose implementers are the classes of its namespace.
     Sealed,
+    /// PHP#'s `ref`, before an extension's receiver.
+    Ref,
 }
 
 impl CopyInto for Visibility {

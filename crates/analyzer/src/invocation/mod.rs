@@ -10,6 +10,7 @@ use mago_codex::metadata::parameter::FunctionLikeParameterMetadata;
 use mago_codex::misc::VariableIdentifier;
 use mago_codex::ttype::atomic::callable::TCallableSignature;
 use mago_codex::ttype::atomic::callable::parameter::TCallableParameter;
+use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::object::named::TNamedObject;
 use mago_codex::ttype::expander::StaticClassType;
 use mago_codex::ttype::union::TUnion;
@@ -235,10 +236,22 @@ impl<'ctx> InvocationTarget<'ctx> {
 
         if let InvocationTarget::FunctionLike {
             metadata,
-            method_context: Some(MethodTargetContext { invocation_kind: MethodInvocationKind::Extension, .. }),
+            method_context:
+                Some(MethodTargetContext { invocation_kind: MethodInvocationKind::Extension, class_type, .. }),
             ..
         } = self
         {
+            if let StaticClassType::Object(TObject::Named(class)) = class_type
+                && let Some(name) = crate::utils::names::display_collection_member(
+                    context,
+                    class.name,
+                    metadata,
+                    class.type_parameters.as_deref().unwrap_or_default(),
+                )
+            {
+                return name;
+            }
+
             return crate::utils::names::display_extension_member(context, metadata);
         }
 
