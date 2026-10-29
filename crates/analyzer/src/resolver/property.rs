@@ -70,6 +70,7 @@ use crate::expression::is_refused_type;
 use crate::expression::with::CREATED_OBJECT_PREFIX;
 use crate::expression::with::is_set_by_with;
 use crate::external::PropertyAccessKind;
+use crate::invocation::analyzer::report_type_arguments_without_equality;
 use crate::invocation::infer_parameter_templates_from_argument;
 use crate::invocation::infer_unfixed_templates;
 use crate::invocation::rename_trait_objects;
@@ -2610,6 +2611,15 @@ where
         return value;
     }
 
+    report_type_arguments_without_equality(
+        context,
+        span,
+        method_name,
+        templates,
+        &type_arguments,
+        None,
+        &violated_templates,
+    );
     artifacts.record_type_arguments(span, type_arguments.into_iter(), context.codebase);
 
     inferred_type_replacer::replace(&value, &template_result, context.codebase)

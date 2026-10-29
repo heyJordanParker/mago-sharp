@@ -12827,7 +12827,13 @@ fn a_map_keyed_by_a_type_parameter_without_a_backed_enum_in_its_bound_is_an_erro
             "A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`, and `{key}` is none of them."
         )
     };
-    assert_eq!(messages(("src/Demo/Tally.sharp", unbounded), &others), [refusal("TKey")]);
+    // Spec section 11: a type parameter whose bound leaves its values `Any?` gets the bound that gives it `==`.
+    assert_eq!(
+        messages(("src/Demo/Tally.sharp", unbounded), &others),
+        [
+            "A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`, and `TKey` is a type parameter with no `Equatable` bound: bound it with `Equatable`, as in `<TKey : Equatable>`."
+        ]
+    );
     assert_eq!(messages(("src/Demo/Tally.sharp", interfaces), &others), [refusal("TKey")]);
     assert_eq!(messages(("src/Demo/Tally.sharp", written), &others), [refusal("HasLabel & Other")]);
 }
@@ -16192,12 +16198,12 @@ fn a_null_guard_on_an_unbounded_type_parameter_rejects_no_nullable_parameter() {
 }
 
 /// A null check on a type parameter names the type parameter: `item == null`, `item ?? other` and `item?.total` on a
-/// `TItem : Order` that is never null. `number == item` on a `TItem` that may be null is lifted equality, so it adds no
-/// issue. The `int?` that `total` declares and never fills with null is named as PHP# writes it too. The PHP twin keeps
+/// `TItem : Order` that is never null. `number == item` on a `TItem : Equatable` that may be null is lifted equality,
+/// so it adds no issue. The `int?` that `total` declares and never fills with null is named as PHP# writes it too. The PHP twin keeps
 /// Mago's text.
 #[test]
 fn a_null_check_on_a_type_parameter_names_it() {
-    let sharp = "namespace Demo;\n\npublic class Order\n{\n    public int total = 0;\n}\n\npublic class Box<TItem : Order>\n{\n    public bool empty(TItem item) => item == null;\n\n    public Order pick(TItem item, Order other) => item ?? other;\n\n    public int? total(TItem item) => item?.total;\n}\n\npublic class Holder<TItem>\n{\n    public bool same(int number, TItem item) => number == item;\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Order\n{\n    public int total = 0;\n}\n\npublic class Box<TItem : Order>\n{\n    public bool empty(TItem item) => item == null;\n\n    public Order pick(TItem item, Order other) => item ?? other;\n\n    public int? total(TItem item) => item?.total;\n}\n\npublic class Holder<TItem : Equatable>\n{\n    public bool same(int number, TItem item) => number == item;\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nclass Order\n{\n    public int $total = 0;\n}\n\n/** @template TItem of Order */\nclass Box\n{\n    /** @param TItem $item */\n    public function empty(Order $item): bool\n    {\n        return $item == null;\n    }\n\n    /** @param TItem $item */\n    public function pick(Order $item, Order $other): Order\n    {\n        return $item ?? $other;\n    }\n\n    /** @param TItem $item */\n    public function total(Order $item): ?int\n    {\n        return $item?->total;\n    }\n}\n\n/** @template TItem */\nclass Holder\n{\n    /** @param TItem $item */\n    public function same(int $number, mixed $item): bool\n    {\n        return $number == $item;\n    }\n}\n";
 
     assert_eq!(
@@ -16595,6 +16601,295 @@ fn an_object_bound_takes_any_object_and_nothing_else() {
             "13:20 template-constraint-violation Type argument `int` does not satisfy `Report.keep<TValue>`'s `TValue`. | `int` is supplied for `TValue` here... | ...but `TValue` is bounded by `Object`. | Supply a type contained by `Object`.",
             "18:60 template-constraint-violation Type argument `int` does not satisfy `Class.attributes<TAttribute>`'s `TAttribute`. | `int` is supplied for `TAttribute` here... | ...but `TAttribute` is bounded by `Object`. | Supply a type contained by `Object`.",
         ]
+    );
+}
+
+/// The class files the `Equatable` tests share: a `DatabaseEntity` that declares `operator ==`, a `Cart` that declares
+/// none, a `Point` struct, which compares by value, and a `Shareable` interface.
+const EQUATABLE_CLASSES: [(&str, &str); 4] = [
+    (
+        "src/Demo/DatabaseEntity.sharp",
+        "namespace Demo;\n\npublic abstract class DatabaseEntity : Shareable\n{\n    public int id { get; set; } = 1;\n\n    public static bool operator ==(DatabaseEntity a, DatabaseEntity b) => a.id == b.id;\n\n    public int hash() => this.id;\n}\n",
+    ),
+    ("src/Demo/Cart.sharp", "namespace Demo;\n\npublic class Cart\n{\n}\n"),
+    (
+        "src/Demo/Point.sharp",
+        "namespace Demo;\n\npublic struct Point\n{\n    public Point(public int x { get; }) { }\n}\n",
+    ),
+    ("src/Demo/Shareable.sharp", "namespace Demo;\n\npublic interface Shareable\n{\n}\n"),
+];
+
+/// The generic class the `Equatable` tests call, whose `same` compares two values of its type parameter.
+const EQUATABLE_GENERIC: (&str, &str) = (
+    "src/Demo/Generic.sharp",
+    "namespace Demo;\n\npublic class Generic\n{\n    public static bool same<T : Equatable>(T a, T b) => a == b;\n\n    public static int keys<T : Equatable>(List<T> items)\n    {\n        Map<T, int> counts = [:];\n        for (const item of items) {\n            counts[item] = (counts[item] ?? 0) + 1;\n        }\n        return counts.count();\n    }\n}\n",
+);
+
+/// The issues of `sharp`, a `.sharp` file at `src/Demo/Checks.sharp`, beside the `Equatable` tests' shared classes, its
+/// `Generic` and `others`, as `line:column code message`.
+fn equatable_written(sharp: &'static str, others: &[(&'static str, &'static str)]) -> Vec<String> {
+    let others = [EQUATABLE_CLASSES.as_slice(), &[EQUATABLE_GENERIC], others].concat();
+
+    written(sharp, &analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Checks.sharp", sharp), &others))
+}
+
+/// Spec section 11: a type parameter has `==` only through its bound, so `==`, `!=` and a value pattern on an unbounded
+/// one are each the error that names `Equatable`, as Go's `comparable` and F#'s `equality` refuse them. `Equatable` or
+/// a class bound that declares `operator ==` gives it `==`, and `== null` is a null test any value takes.
+#[test]
+fn equality_on_a_type_parameter_needs_a_bound_that_has_it() {
+    let sharp = "namespace Demo;\n\npublic class Compare\n{\n    public static bool same<T : Equatable>(T a, T b) => a == b;\n\n    public static bool sameEntity<T : DatabaseEntity>(T a, T b) => a == b;\n\n    public static bool equal<T>(T a, T b) => a == b;\n\n    public static bool differ<T>(T a, T b) => a != b;\n\n    public static bool absent<T>(T a) => a == null;\n\n    public static bool matched<T>(T a) => a is == 5;\n\n    public static bool matchedBound<T : Equatable>(T a) => a is == 5;\n}\n";
+    let refusal = "`T` has no `==`: bound it with `Equatable`, as in `<T : Equatable>`.";
+
+    assert_eq!(
+        written(sharp, &analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Compare.sharp", sharp), &EQUATABLE_CLASSES)),
+        [
+            format!("9:46 invalid-operand {refusal}"),
+            format!("11:47 invalid-operand {refusal}"),
+            format!("15:43 invalid-operand {refusal}"),
+        ]
+    );
+}
+
+/// Spec section 11: every type with `==` satisfies `Equatable` with no declaration, as Go's `comparable` does: a
+/// number, a struct and a collection of them. A type argument without `==`, a class that declares no `operator ==`, a
+/// function or an unbounded type parameter, is outside the bound, whether the call infers it or writes it, and the
+/// error says why, as `==` on two of its values would.
+#[test]
+fn a_type_argument_of_equatable_has_equality() {
+    let sharp = "namespace Demo;\n\npublic class Calls\n{\n    public static List<bool> run(Point point, Point samePoint, Cart cartA, Cart cartB, Function<void() uses none> onSave) => [\n        Generic.same(1, 2),\n        Generic.same(point, samePoint),\n        Generic.same([1], [1]),\n        Generic.same(cartA, cartB),\n        Generic.same(onSave, onSave),\n        Generic.same<Cart>(cartA, cartB),\n    ];\n\n    public static bool through<TValue : Equatable>(TValue a, TValue b) => Generic.same(a, b);\n\n    public static bool unbounded<TValue>(TValue a, TValue b) => Generic.same(a, b);\n}\n";
+    let others = [EQUATABLE_CLASSES.as_slice(), &[EQUATABLE_GENERIC]].concat();
+
+    assert_eq!(
+        written(sharp, &analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Calls.sharp", sharp), &others)),
+        [
+            "9:9 template-constraint-violation `Cart` does not satisfy the bound `Equatable` of type parameter `T`: `Cart` declares no `operator ==`.",
+            "10:9 template-constraint-violation `Function<void()>` does not satisfy the bound `Equatable` of type parameter `T`: a function has no `==`.",
+            "11:21 template-constraint-violation Type argument `Cart` does not satisfy `Generic.same<T>`'s `T`: `Cart` declares no `operator ==`.",
+            "16:65 template-constraint-violation `TValue` does not satisfy the bound `Equatable` of type parameter `T`: `TValue` is a type parameter with no `Equatable` bound: bound it with `Equatable`, as in `<TValue : Equatable>`.",
+        ]
+    );
+}
+
+/// Spec section 12: `contains` on a `List`, a `Map`'s key and a `Set`'s element need `==` on their type, so on a type
+/// parameter they need the bound `==` on it needs, and `Equatable` gives each of them.
+#[test]
+fn a_search_a_map_key_and_a_set_element_of_a_type_parameter_need_equatable() {
+    let unbounded = "namespace Demo;\n\npublic class Searches<T>\n{\n    public bool has(List<T> items, T item) => items.contains(item);\n\n    public int keyed(Map<T, int> counts) => counts.count();\n\n    public int held(Set<T> items) => items.count();\n}\n";
+    let bounded = "namespace Demo;\n\npublic class Searches<T : Equatable>\n{\n    public bool has(List<T> items, T item) => items.contains(item);\n\n    public int keyed(Map<T, int> counts) => counts.count();\n\n    public int held(Set<T> items) => items.count();\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Searches.sharp", unbounded), &[]),
+        ["5:62 invalid-argument", "7:22 template-constraint-violation", "9:21 template-constraint-violation"]
+    );
+    let rule = "is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`, and `T` is a type parameter with no `Equatable` bound: bound it with `Equatable`, as in `<T : Equatable>`.";
+    assert_eq!(
+        messages(("src/Demo/Searches.sharp", unbounded), &[]),
+        [
+            "`contains` compares elements with `==`, and `T` has no `==`: bound it with `Equatable`, as in `<T : Equatable>`.".to_owned(),
+            format!("A `Map`'s key {rule}"),
+            format!("A `Set`'s element {rule}"),
+        ]
+    );
+    assert_eq!(issues(("src/Demo/Searches.sharp", bounded), &[]), Vec::<String>::new());
+}
+
+/// Spec section 12: a collection member compares the value of a parameter marked `ComparedByEquality` with each element
+/// by `==`, so a library-style extension that marks one needs `==` on the element type, as `contains` does: an unbounded
+/// type parameter needs `Equatable`, and a class needs `operator ==`.
+#[test]
+fn a_member_compared_by_equality_needs_equatable_on_a_type_parameter() {
+    let shelf = (
+        "src/Lib/ShelfMembers.sharp",
+        "namespace Lib;\n\nimport Sharp.Internal.ComparedByEquality;\n\npublic static class ShelfMembers\n{\n    extension<T>(List<T> items)\n    {\n        public bool shelves([ComparedByEquality] T value) => global.in_array(value, items, true);\n    }\n}\n",
+    );
+    let sharp = "namespace Demo;\n\nimport Lib.ShelfMembers;\n\npublic class Checks<T>\n{\n    public bool unbounded(List<T> items, T item) => items.shelves(item);\n\n    public bool carts(List<Cart> carts, Cart cart) => carts.shelves(cart);\n\n    public bool points(List<Point> points, Point point) => points.shelves(point);\n}\n";
+    let bounded = "namespace Demo;\n\nimport Lib.ShelfMembers;\n\npublic class Checks<T : Equatable>\n{\n    public bool bounded(List<T> items, T item) => items.shelves(item);\n}\n";
+
+    assert_eq!(
+        equatable_written(sharp, &[shelf]),
+        [
+            "7:67 invalid-argument `shelves` compares elements with `==`, and `T` has no `==`: bound it with `Equatable`, as in `<T : Equatable>`.",
+            "9:69 invalid-argument `shelves` compares elements with `==`, and `Cart` declares no `operator ==`.",
+        ]
+    );
+    assert_eq!(equatable_written(bounded, &[shelf]), Vec::<String>::new());
+}
+
+/// Spec section 11: `Equatable` is a bound and never a value's type, so `List<Equatable>` and an `Equatable` parameter
+/// are each an error, and it joins another bound with `&`, which then has `==` too.
+#[test]
+fn equatable_is_a_bound_and_joins_others() {
+    let sharp = "namespace Demo;\n\npublic class Shapes\n{\n    public static bool joined<T : Shareable & Equatable>(T a, T b) => a == b;\n\n    public static bool entities(DatabaseEntity a, DatabaseEntity b) => Shapes.joined(a, b);\n\n    public static int counted(List<Equatable> values) => values.count();\n\n    public static Any? alone(Equatable value) => value;\n}\n";
+    let refusal = "`Equatable` is a bound, as in `<T : Equatable>`, and never a value's type.";
+
+    assert_eq!(compile_errors(("src/Demo/Shapes.sharp", sharp), &EQUATABLE_CLASSES), [refusal, refusal]);
+}
+
+/// An extension block whose type parameter `Equatable` bounds, and a generic class bounded by it, for the tests of a
+/// type argument written or fixed by a receiver.
+const EQUATABLE_HOLDERS: [(&str, &str); 2] = [
+    (
+        "src/Demo/CartLists.sharp",
+        "namespace Demo;\n\npublic static class CartLists\n{\n    extension<TItem : Equatable>(List<TItem> items)\n    {\n        public bool holds(TItem wanted) => items.contains(wanted);\n    }\n}\n",
+    ),
+    ("src/Demo/Holder.sharp", "namespace Demo;\n\npublic class Holder<T : Equatable>\n{\n}\n"),
+];
+
+/// Spec section 11: a method value takes its type arguments from the function type it goes into, as a call takes
+/// them from its arguments, so a method value of `Generic.same` that fixes `Cart` is refused, as `Generic.same(cartA,
+/// cartB)` is, and so is an extension value whose receiver fixes it. One that fixes `Point` compiles.
+#[test]
+fn a_method_value_of_equatable_fixes_a_type_argument_with_equality() {
+    let sharp = "namespace Demo;\n\nimport Demo.CartLists;\n\npublic class Checks\n{\n    public static bool carts(Cart cartA, Cart cartB)\n    {\n        Function<bool(Cart, Cart)> compare = Generic.same;\n        return compare(cartA, cartB);\n    }\n\n    public static bool points(Point a, Point b)\n    {\n        Function<bool(Point, Point)> compare = Generic.same;\n        return compare(a, b);\n    }\n\n    public static bool held(List<Cart> carts, Cart cart)\n    {\n        Function<bool(Cart)> holds = carts.holds;\n        return holds(cart);\n    }\n}\n";
+
+    assert_eq!(
+        equatable_written(sharp, &EQUATABLE_HOLDERS),
+        [
+            "9:46 template-constraint-violation `Cart` does not satisfy the bound `Equatable` of type parameter `T`: `Cart` declares no `operator ==`.",
+            "21:38 template-constraint-violation `Cart` does not satisfy the bound `Equatable` of type parameter `TItem`: `Cart` declares no `operator ==`.",
+        ]
+    );
+}
+
+/// Spec section 11: a class value with type arguments keys no `Map`, since `Class<Box<Order>>` and
+/// `Class<Box<Invoice>>` share the plain class name, so it does not satisfy `Equatable`, whose values key a `Map`.
+#[test]
+fn a_class_value_with_type_arguments_does_not_satisfy_equatable() {
+    let boxes = (
+        "src/Demo/Box.sharp",
+        "namespace Demo;\n\npublic class Box<TItem>\n{\n}\n\npublic class Order : DatabaseEntity\n{\n}\n\npublic class Invoice : DatabaseEntity\n{\n}\n",
+    );
+    let sharp = "namespace Demo;\n\npublic class Checks\n{\n    public static int keyed() => Generic.keys([typeof(Box<Order>), typeof(Box<Invoice>)]);\n\n    public static bool same() => Generic.same(typeof(Box<Order>), typeof(Box<Invoice>));\n\n    public static bool compared(Class<Box<Order>> a, Class<Box<Order>> b) => a == b;\n\n    public static bool plain(Class<Order> a, Class<Order> b) => Generic.same(a, b);\n\n    public static bool held<TItem>(Class<TItem> a, Class<TItem> b) => Generic.same(a, b);\n}\n";
+    let refusal = "template-constraint-violation `Class<Box<Invoice>>|Class<Box<Order>>` does not satisfy the bound `Equatable` of type parameter `T`: a class value with type arguments can't key a `Map`.";
+
+    // A class value without type arguments keys no `Map` either, spec section 12, so it is outside the bound too, and
+    // so is the class value of a type parameter.
+    assert_eq!(
+        equatable_written(sharp, &[boxes]),
+        [
+            format!("5:34 {refusal}"),
+            format!("7:34 {refusal}"),
+            "11:65 template-constraint-violation `Class<Order>` does not satisfy the bound `Equatable` of type parameter `T`: `Class<Order>` can't key a `Map`.".to_owned(),
+            "13:71 template-constraint-violation `Class<TItem>` does not satisfy the bound `Equatable` of type parameter `T`: `Class<TItem>` can't key a `Map`.".to_owned(),
+        ]
+    );
+}
+
+/// Spec section 11: a bound that is a type parameter bounded by `Equatable` gives `==` too, as `TSub : T` goes where
+/// `T` goes, so `==`, a `Map` key and a type argument of `Equatable` each take a `TSub`.
+#[test]
+fn a_type_parameter_bounded_by_an_equatable_type_parameter_has_equality() {
+    let sharp = "namespace Demo;\n\npublic class Checks<T : Equatable, TSub : T>\n{\n    public bool same(TSub a, TSub b) => a == b;\n\n    public int keyed(Map<TSub, int> counts) => counts.count();\n\n    public bool passed(TSub a, TSub b) => Generic.same(a, b);\n}\n";
+
+    assert_eq!(equatable_written(sharp, &[]), Vec::<String>::new());
+}
+
+/// Spec section 11: a `match` arm, `indexOf`, `remove`, a nullable value, two lists, a struct field and a lambda each
+/// compare a value of a type parameter with `==`, so each needs the bound on an unbounded one, and compiles under
+/// `Equatable`. A class bound without `operator ==` is refused for its class.
+#[test]
+fn every_equality_on_a_type_parameter_needs_its_bound() {
+    let pair = (
+        "src/Demo/Pair.sharp",
+        "namespace Demo;\n\npublic struct Pair<TValue>\n{\n    public Pair(public TValue value { get; }) { }\n}\n",
+    );
+    let unbounded = "namespace Demo;\n\npublic class Checks<T>\n{\n    public string arm(T a) => match (a) {\n        5 => \"five\",\n        default => \"other\",\n    };\n\n    public int? found(List<T> items, T item) => items.indexOf(item);\n\n    public void dropped(List<T> items, T item) { items.remove(item); }\n\n    public bool maybe(T? a, T? b) => a == b;\n\n    public bool lists(List<T> a, List<T> b) => a == b;\n\n    public bool pairs(Pair<T> a, Pair<T> b) => a == b;\n\n    public bool any(List<T> items, T item) => items.any((T x) => x == item);\n}\n";
+    let bounded = "namespace Demo;\n\npublic class Checks<T : Equatable>\n{\n    public string arm(T a) => match (a) {\n        5 => \"five\",\n        default => \"other\",\n    };\n\n    public int? found(List<T> items, T item) => items.indexOf(item);\n\n    public void dropped(List<T> items, T item) { items.remove(item); }\n\n    public bool maybe(T? a, T? b) => a == b;\n\n    public bool lists(List<T> a, List<T> b) => a == b;\n\n    public bool pairs(Pair<T> a, Pair<T> b) => a == b;\n\n    public bool any(List<T> items, T item) => items.any((T x) => x == item);\n}\n";
+    let shared =
+        "namespace Demo;\n\npublic class Checks<T : Shareable>\n{\n    public bool same(T a, T b) => a == b;\n}\n";
+    let fix = "bound it with `Equatable`, as in `<T : Equatable>`";
+
+    assert_eq!(
+        equatable_written(unbounded, &[pair]),
+        [
+            format!("6:9 invalid-operand `T` has no `==`: {fix}."),
+            format!("10:63 invalid-argument `indexOf` compares elements with `==`, and `T` has no `==`: {fix}."),
+            format!("12:63 invalid-argument `remove` compares elements with `==`, and `T` has no `==`: {fix}."),
+            format!("14:38 invalid-operand `T` has no `==`: {fix}."),
+            format!(
+                "16:48 invalid-operand `==` compares `List<T>` with `List<T>` element by element, and `T` has no `==`: {fix}."
+            ),
+            format!(
+                "18:48 invalid-operand `Pair` can't compare by value: `value` is a `T`, a type parameter with no `Equatable` bound: {fix}."
+            ),
+            format!("20:66 invalid-operand `T` has no `==`: {fix}."),
+        ]
+    );
+    assert_eq!(equatable_written(bounded, &[pair]), Vec::<String>::new());
+    assert_eq!(
+        equatable_written(shared, &[]),
+        ["5:35 invalid-operand `==` cannot compare `T` with `T`: `T` declares no `operator ==`."]
+    );
+}
+
+/// Spec section 11: a type argument of `Equatable` has `==` wherever it is written or fixed: after `new`, by an
+/// extension call's receiver, in a header that implements an interface or extends a class, beside a class in a joined
+/// bound, and as a union, whose values may be of two types. An `Any` has no `==` of its own, and `int?` has one, as an
+/// enum does when its cases' fields all have one.
+#[test]
+fn a_type_argument_of_equatable_has_equality_wherever_it_is_given() {
+    let keyed = (
+        "src/Demo/Keyed.sharp",
+        "namespace Demo;\n\npublic interface Keyed<TKey : Equatable>\n{\n    TKey key();\n}\n",
+    );
+    let shapes = (
+        "src/Demo/Shapes.sharp",
+        "namespace Demo;\n\npublic class Plain : Shareable\n{\n}\n\npublic enum Counted\n{\n    case Kept(int count);\n    case Lost;\n}\n\npublic enum Carted\n{\n    case Held(Cart cart);\n    case Empty;\n}\n\npublic class Shapes\n{\n    public static bool joined<T : Shareable & Equatable>(T a, T b) => a == b;\n}\n",
+    );
+    let coded = "namespace Demo;\n\npublic class Coded : Keyed<Cart>\n{\n    public Cart key() => new Cart();\n}\n\npublic class Held : Holder<Cart>\n{\n}\n\npublic class Kept : Holder<int>\n{\n}\n";
+    let sharp = "namespace Demo;\n\nimport Demo.CartLists;\n\npublic class Checks\n{\n    public static Any made() => new Holder<Cart>();\n\n    public static Any kept() => new Holder<int>();\n\n    public static bool held(List<Cart> carts, Cart cart) => carts.holds(cart);\n\n    public static bool mixed(DatabaseEntity|Point a, DatabaseEntity|Point b) => Generic.same(a, b);\n\n    public static bool plain(Plain a, Plain b) => Shapes.joined(a, b);\n\n    public static bool unchecked(Any a, Any b) => Generic.same(a, b);\n\n    public static bool maybe(int? a, int? b) => Generic.same(a, b);\n\n    public static bool counted(Counted a, Counted b) => Generic.same(a, b);\n\n    public static bool carted(Carted a, Carted b) => Generic.same(a, b);\n}\n";
+    let others = [EQUATABLE_HOLDERS.as_slice(), &[keyed, shapes]].concat();
+
+    assert_eq!(
+        equatable_written(sharp, &others),
+        [
+            "7:43 template-constraint-violation Type argument `Cart` does not satisfy `Holder`'s `T`: `Cart` declares no `operator ==`.",
+            "11:61 template-constraint-violation `Cart` does not satisfy the bound `Equatable` of type parameter `TItem`: `Cart` declares no `operator ==`.",
+            "13:81 template-constraint-violation `DatabaseEntity|Point` does not satisfy the bound `Equatable` of type parameter `T`: the values of `DatabaseEntity|Point` may be of two different types, which never match.",
+            "15:51 template-constraint-violation `Plain` does not satisfy the bound `Shareable & Equatable` of type parameter `T`: `Plain` declares no `operator ==`.",
+            "17:51 template-constraint-violation `Any` does not satisfy the bound `Equatable` of type parameter `T`: `Any` compares by value only with a string, a number, a `bool`, an enum case, a struct or a collection.",
+            "23:54 template-constraint-violation `Carted` does not satisfy the bound `Equatable` of type parameter `T`: `Carted` can't compare by value: `cart` is a `Cart`, which declares no `operator ==`.",
+        ]
+    );
+    assert_eq!(
+        written(
+            coded,
+            &analyze(
+                &PLUGIN_REGISTRY,
+                settings(),
+                ("src/Demo/Coded.sharp", coded),
+                &[EQUATABLE_CLASSES.as_slice(), &EQUATABLE_HOLDERS, &[keyed]].concat()
+            )
+        ),
+        [
+            "3:22 template-constraint-violation Type argument `Cart` does not satisfy `Keyed`'s `TKey`: `Cart` declares no `operator ==`.",
+            "8:21 template-constraint-violation Type argument `Cart` does not satisfy `Holder`'s `T`: `Cart` declares no `operator ==`.",
+        ]
+    );
+}
+
+/// Spec section 11: `Equatable` is never a value's type, as a return type, nullable or in `typeof`, and it joins no
+/// `Object`, which is a bound alone.
+#[test]
+fn equatable_is_no_return_type_and_joins_no_object() {
+    let sharp = "namespace Demo;\n\npublic class Shapes\n{\n    public static Equatable made() => 1;\n\n    public static Any? maybe(Equatable? value) => value;\n\n    public static Any named() => typeof(Equatable);\n\n    public static bool objects<T : Object & Equatable>(T a, T b) => a == b;\n}\n";
+    let refusal = "`Equatable` is a bound, as in `<T : Equatable>`, and never a value's type.";
+
+    assert_eq!(
+        compile_errors(("src/Demo/Shapes.sharp", sharp), &EQUATABLE_CLASSES),
+        [
+            refusal,
+            refusal,
+            refusal,
+            "`Object` is a bound alone, as in `<TValue : Object>`: it joins no other bound with `&`.",
+            "Cannot find type `Demo.Equatable`.",
+        ]
+    );
+    // The class value reads `Equatable` as a class name, which no file declares.
+    assert_eq!(
+        written(sharp, &analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Shapes.sharp", sharp), &EQUATABLE_CLASSES)),
+        ["9:41 non-existent-class-like Cannot find type `Demo.Equatable`."]
     );
 }
 

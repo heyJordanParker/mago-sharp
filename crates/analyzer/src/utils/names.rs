@@ -21,10 +21,12 @@ use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::reference::TReference;
 use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeString;
+use mago_codex::ttype::flags::UnionFlags;
 use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::get_never;
 use mago_codex::ttype::get_sharp_type;
 use mago_codex::ttype::union::TUnion;
+use mago_names::EQUATABLE;
 use mago_names::ResolvedNames;
 use mago_names::STANDARD_ROOT_CLASSES;
 use mago_names::binding::sharp_operator_symbol;
@@ -658,7 +660,8 @@ where
 /// `(int|string)?`, `Any?`, a class as [`sharp_class_like_name`] names it, a type parameter by its name, an
 /// intersection as `A & B`, a function type as
 /// `Function<void(int)>` or `Function<Charge(Cart) uses Http>` with each effect named as a class is, `Class<Order>`,
-/// `Object`, `Iterable<int>`, and a literal as `1` or `"text"`. A refinement that
+/// `Object`, a bound that holds `Equatable` as `Equatable` or `Shareable & Equatable`, `Iterable<int>`, and a literal as
+/// `1` or `"text"`. A refinement that
 /// PHP# cannot write is the type that holds it, such as `int` for a `positive-int` and `int|string` for an
 /// `array-key`, and is named once, as `Any` is for a PHP docblock's `non-empty-mixed`. `numeric`, `scalar` and `never`
 /// have no PHP# name and keep Mago's.
@@ -709,6 +712,18 @@ fn display_sharp_union<A>(context: &Context<'_, '_, A>, union: &TUnion, paramete
 where
     A: Arena,
 {
+    // Spec section 11: a bound that holds `Equatable` writes it, alone or joined to the bound's other types.
+    if union.flags.contains(UnionFlags::EQUATABLE) {
+        let mut joined = union.clone();
+        joined.flags.set(UnionFlags::EQUATABLE, false);
+
+        return if joined.is_mixed() {
+            EQUATABLE.to_owned()
+        } else {
+            format!("{} & {EQUATABLE}", display_sharp_union(context, &joined, parameter))
+        };
+    }
+
     if let Some(TAtomic::Mixed(mixed)) = union.types.iter().find(|atomic| atomic.is_mixed()) {
         return if mixed.is_truthy() || mixed.is_non_null() { "Any" } else { "Any?" }.to_owned();
     }

@@ -8,6 +8,7 @@ use mago_casing::to_camel_case;
 use mago_casing::to_class_case;
 use mago_casing::to_constant_case;
 use mago_database::file::FolderNamespace;
+use mago_names::EQUATABLE;
 use mago_names::ResolvedNames;
 use mago_names::binding::Binding;
 use mago_names::binding::BindingError;
@@ -207,9 +208,9 @@ const OBJECT: &[u8] = b"Object";
 ///   `<out TItem : DatabaseEntity & Shareable, TKey>`. A name is `T`, or `T` and an uppercase ASCII letter, as in
 ///   `TItem`, and any other name is an error, as C# names them. A list that declares a name twice is an error. `in` and
 ///   `out` on a method's type parameter are errors, because only a class or an interface declares variance, spec
-///   section 11.1. A bound is `Object`, a class or an interface, a generic class type, as in `Comparable<TItem>`,
-///   several classes and interfaces joined with `&`, or another type parameter alone, as in `<TSub : T>`, and any
-///   other bound is an error. A type parameter is in scope in its class's or interface's
+///   section 11.1. A bound is `Object`, `Equatable`, a class or an interface, a generic class type, as in
+///   `Comparable<TItem>`, several of them but `Object` joined with `&`, or another type parameter alone, as in
+///   `<TSub : T>`, and any other bound is an error. A type parameter is in scope in its class's or interface's
 ///   whole declaration, its header included, and in its method's signature and body, as the binder decides. A
 ///   constant uses none of its class's type parameters, because every `Box<…>` shares it. A static field, property or
 ///   method uses them, because each type argument has its own, as `Box<int>.count` reaches it. The analyzer checks
@@ -891,7 +892,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             } else if joins_type_parameter(&bound.hint, context) {
                 "A type parameter is a bound alone, as in `<TSub : T>`: it joins no other bound with `&`."
             } else {
-                "A bound is `Object`, a class, an interface or a type parameter, as in `<TItem : DatabaseEntity>`."
+                "A bound is `Object`, `Equatable`, a class, an interface or a type parameter, as in `<TItem : DatabaseEntity>`."
             };
             context.report(
                 Issue::error(message)
@@ -4816,8 +4817,8 @@ fn is_slice_type(hint: &Hint) -> bool {
 /// The error for a type PHP# writes another way, spec section 24: the built-in types are lowercase, every other type is
 /// capitalized, as `Any` and `Object`, a lone `null` is written with `?` after a type, and PHP's `mixed`, `object`,
 /// `array`, `callable`, `iterable`, `parent`, `true` and `false` are no PHP# syntax. `never` is a type only as a
-/// method's return type, spec section 7, at `place` [`Place::Method`] or [`Place::Signature`]. `None` for a type
-/// written as PHP# writes it.
+/// method's return type, spec section 7, at `place` [`Place::Method`] or [`Place::Signature`]. `Equatable` is a type
+/// only as a bound, spec section 11, which is no `place` this reads. `None` for a type written as PHP# writes it.
 fn type_written_another_way(hint: &Hint, place: Place, context: &Context<'_, '_, '_>) -> Option<Issue> {
     let written = match hint {
         Hint::Identifier(Identifier::Local(name)) => name.value,
@@ -4855,6 +4856,10 @@ fn type_written_another_way(hint: &Hint, place: Place, context: &Context<'_, '_,
         b"null" => "A type holds null only with `?` after it: write the type, as in `int?`.".to_owned(),
         b"never" => "PHP# has no `never` type outside a return type.".to_owned(),
         b"iterable" => "`Iterable` takes 1 type argument: the element.".to_owned(),
+        // Spec section 11: `Equatable` holds every type with `==`, so a value of it could be any of them.
+        _ if written == EQUATABLE.as_bytes() => {
+            "`Equatable` is a bound, as in `<T : Equatable>`, and never a value's type.".to_owned()
+        }
         _ => return None,
     };
 
@@ -6065,7 +6070,7 @@ fn supported(place: Place) -> &'static str {
             "A PHP# header names each base class and interface by its short name, as in `: DatabaseEntity, Linkable`, and a generic one with its type arguments, as in `: PaginatedList<Order>`."
         }
         Place::TypeParameter => {
-            "A PHP# type parameter is an optional `in` or `out`, a name that starts with `T`, and an optional bound of `Object`, of another type parameter, or of classes and interfaces joined with `&`, as in `<out TItem : DatabaseEntity & Shareable>`."
+            "A PHP# type parameter is an optional `in` or `out`, a name that starts with `T`, and an optional bound of `Object`, of another type parameter, or of classes, interfaces and `Equatable` joined with `&`, as in `<out TItem : DatabaseEntity & Shareable>`."
         }
         Place::Event => unreachable!("`enter` places every part of an event, and its parameters are parameters"),
         Place::Struct => unreachable!("the walk enters every part of a struct"),
@@ -6949,9 +6954,9 @@ fn check_case_fields_named_like_members(r#enum: &Enum, context: &mut Context<'_,
     }
 }
 
-/// PHP# reserves PHP's type names and `Any`, its name for `mixed`.
+/// PHP# reserves PHP's type names, `Any`, its name for `mixed`, and `Equatable`, its built-in bound, spec section 11.
 fn is_reserved_class_name(name: &[u8]) -> bool {
-    RESERVED_CLASS_NAMES.iter().chain(&[ANY]).any(|reserved| reserved.eq_ignore_ascii_case(name))
+    RESERVED_CLASS_NAMES.iter().chain(&[ANY, EQUATABLE.as_bytes()]).any(|reserved| reserved.eq_ignore_ascii_case(name))
 }
 
 /// Whether a PHP name is one of the standard library's classes that carry a reserved name, spec section 24, written

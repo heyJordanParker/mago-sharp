@@ -26,6 +26,7 @@ use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeString;
 use mago_codex::ttype::atomic::scalar::string::TString;
 use mago_codex::ttype::atomic::scalar::string::TStringLiteral;
+use mago_codex::ttype::bound_is_equatable;
 use mago_codex::ttype::combiner::CombinerOptions;
 use mago_codex::ttype::expander;
 use mago_codex::ttype::expander::StaticClassType;
@@ -62,6 +63,7 @@ use crate::error::AnalysisError;
 use crate::expression::ancestor_type_arguments;
 use crate::expression::array::check_sharp_literal_kind;
 use crate::expression::array::get_set_literal_type;
+use crate::expression::binary::comparison::missing_equality;
 use crate::expression::is_refused_type;
 use crate::invocation::Invocation;
 use crate::invocation::InvocationArgument;
@@ -360,6 +362,10 @@ where
             }
         }
     }
+
+    // The type arguments the call and its receiver's written type give, which are checked where they are written, before
+    // an extension's receiver fixes its own from the receiver's value.
+    let written_type_arguments = context.dialect.is_sharp().then(|| template_result.clone());
 
     let mut empty_receiver = false;
     // An extension's receiver binds the type parameters its type gives as an object binds its class's, so
@@ -1346,6 +1352,16 @@ where
                 &type_arguments,
                 &violated_templates.union(&refused_function_templates).copied().collect(),
             );
+            let method_name = invocation.target.guess_name(context);
+            report_type_arguments_without_equality(
+                context,
+                invocation.span,
+                &method_name,
+                template_types,
+                &type_arguments,
+                written_type_arguments.as_ref(),
+                &violated_templates,
+            );
         }
 
         artifacts.record_type_arguments(invocation.span, type_arguments.into_iter(), context.codebase);
@@ -1904,6 +1920,52 @@ fn report_unfixed_type_arguments<A>(
             )
             .with_help(help),
     );
+}
+
+/// Spec section 11: a type argument of a type parameter bounded by `Equatable` has `==`, so a call, or a method's
+/// value, at `span` of the method `method_name`, whose arguments, declared type or function type fix one without it
+/// is refused, as Go refuses a type argument of `comparable` without `==`. Each place that fixes a type argument it
+/// does not write checks it here. A type argument the call or its receiver writes, in `written`, is refused where it
+/// is written, and one of `violated_templates` by the issue that names its bound.
+pub(crate) fn report_type_arguments_without_equality<A>(
+    context: &mut Context<'_, '_, A>,
+    span: Span,
+    method_name: &str,
+    template_types: &TemplateTypes,
+    type_arguments: &[Option<TUnion>],
+    written: Option<&TemplateResult>,
+    violated_templates: &WordSet,
+) where
+    A: Arena,
+{
+    for ((name, template), type_argument) in template_types.iter().zip(type_arguments) {
+        let Some(type_argument) = type_argument else {
+            continue;
+        };
+        if !bound_is_equatable(&template.constraint)
+            || violated_templates.contains(name)
+            || written.is_some_and(|written| written.has_lower_bound(*name, &template.defining_entity))
+        {
+            continue;
+        }
+        let Some(reason) = missing_equality(context, type_argument, span) else {
+            continue;
+        };
+
+        let argument = display_type(context, type_argument);
+        let bound = display_type(context, &template.constraint);
+        context.collector.report_with_code(
+            IssueCode::TemplateConstraintViolation,
+            Issue::error(format!(
+                "`{argument}` does not satisfy the bound `{bound}` of type parameter `{name}`: {reason}."
+            ))
+            .with_annotation(
+                Annotation::primary(span).with_message(format!("`{method_name}` fixes `{name}` as `{argument}` here.")),
+            )
+            .with_note(format!("Type parameter `{name}` is bounded by `{bound}`, which holds each type that has `==`."))
+            .with_help("Pass values of a type that has `==`."),
+        );
+    }
 }
 
 /// The engine carries a PHP# call's type arguments as their PHP# text, so one a plain PHP value fixes as a type only a

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use mago_allocator::Arena;
+use mago_names::EQUATABLE;
 use mago_names::ResolvedNames;
 use mago_names::kind::NameKind;
 use mago_names::scope::NamespaceScope;
@@ -35,6 +36,7 @@ use crate::ttype::atomic::scalar::class_like_string::TClassLikeString;
 use crate::ttype::atomic::scalar::class_like_string::TClassLikeStringKind;
 use crate::ttype::builder;
 use crate::ttype::error::TypeError;
+use crate::ttype::flags::UnionFlags;
 use crate::ttype::get_bool;
 use crate::ttype::get_false;
 use crate::ttype::get_float;
@@ -238,46 +240,20 @@ fn union_from_hint(
         Hint::Intersection(intersection) => {
             let left = convert(intersection.left);
             let right = convert(intersection.right);
+            // Spec section 11: `Equatable` joins a bound as the `==` its values have, and adds no type of its own.
+            let is_equatable = |side: &TUnion| side.flags.contains(UnionFlags::EQUATABLE);
+            if is_equatable(&left) || is_equatable(&right) {
+                let mut joined = match (left.is_mixed(), right.is_mixed()) {
+                    (true, _) => right,
+                    (_, true) => left,
+                    _ => union_from_intersection(left, right),
+                };
+                joined.flags.insert(UnionFlags::EQUATABLE);
 
-            let left_types = left.types;
-            let right_types = right.types;
-            let mut intersection_types = vec![];
-            // A type that can't be intersected, as `int` in `int & string`, is the semantics checker's error in PHP#.
-            for left_type in left_types.into_owned() {
-                if !left_type.can_be_intersected() {
-                    continue;
-                }
-
-                for right_type in right_types.as_ref() {
-                    if !right_type.can_be_intersected() {
-                        continue;
-                    }
-
-                    let mut intersection = left_type.clone();
-                    if let Some(nested_intersections) = right_type.get_intersection_types() {
-                        let mut right_base = right_type.clone();
-                        if let Some(intersections) = right_base.get_intersection_types_mut() {
-                            intersections.clear();
-                        }
-
-                        intersection.add_intersection_type(right_base);
-                        for nested in nested_intersections {
-                            intersection.add_intersection_type(nested.clone());
-                        }
-                    } else {
-                        intersection.add_intersection_type(right_type.clone());
-                    }
-
-                    intersection_types.push(intersection);
-                }
+                return joined;
             }
 
-            // With nothing left to join, the type is refused, as a union bound is, so it adds no issue of its own.
-            if intersection_types.is_empty() {
-                wrap_atomic(TAtomic::Error)
-            } else {
-                TUnion::from_vec(intersection_types)
-            }
+            union_from_intersection(left, right)
         }
         Hint::Iterable(_) => get_mixed_iterable(),
         // A generic class type is the docblock's `C<A, B>`, and `Class<T>` is its `class-string<T>`, spec section 25.
@@ -363,8 +339,47 @@ fn union_from_hint(
     }
 }
 
+/// The type `left & right` writes: each type of `left` joined with each type of `right`.
+fn union_from_intersection(left: TUnion, right: TUnion) -> TUnion {
+    let right_types = right.types;
+    let mut intersection_types = vec![];
+    // A type that can't be intersected, as `int` in `int & string`, is the semantics checker's error in PHP#.
+    for left_type in left.types.into_owned() {
+        if !left_type.can_be_intersected() {
+            continue;
+        }
+
+        for right_type in right_types.as_ref() {
+            if !right_type.can_be_intersected() {
+                continue;
+            }
+
+            let mut intersection = left_type.clone();
+            if let Some(nested_intersections) = right_type.get_intersection_types() {
+                let mut right_base = right_type.clone();
+                if let Some(intersections) = right_base.get_intersection_types_mut() {
+                    intersections.clear();
+                }
+
+                intersection.add_intersection_type(right_base);
+                for nested in nested_intersections {
+                    intersection.add_intersection_type(nested.clone());
+                }
+            } else {
+                intersection.add_intersection_type(right_type.clone());
+            }
+
+            intersection_types.push(intersection);
+        }
+    }
+
+    // With nothing left to join, the type is refused, as a union bound is, so it adds no issue of its own.
+    if intersection_types.is_empty() { wrap_atomic(TAtomic::Error) } else { TUnion::from_vec(intersection_types) }
+}
+
 /// The type a name in a hint writes. A PHP# type parameter is the template of the same name in `type_context`, as a
-/// docblock's `@template` name is. PHP's `Closure` is its function type, and a `dialect` PHP# file, whose function
+/// docblock's `@template` name is. PHP#'s `Equatable` is `Any?` marked [`UnionFlags::EQUATABLE`], the bound alone, and
+/// the checker refuses it anywhere else. PHP's `Closure` is its function type, and a `dialect` PHP# file, whose function
 /// types all go by one name, spec section 14.1, reads it as the class it names, which is no PHP# type.
 #[inline]
 fn get_union_from_identifier_hint(
@@ -379,6 +394,14 @@ fn get_union_from_identifier_hint(
         && let Some(definitions) = type_context.get_template_definition(word(name))
     {
         return wrap_atomic(builder::get_template_atomic(definitions, word(name)));
+    }
+
+    // Spec section 11: `Equatable` bounds a type parameter by the `==` its values have, and adds no type of its own.
+    if dialect.is_sharp() && matches!(identifier, Identifier::Local(local) if local.value == EQUATABLE.as_bytes()) {
+        let mut equatable = get_mixed();
+        equatable.flags.insert(UnionFlags::EQUATABLE);
+
+        return equatable;
     }
 
     if name.eq_ignore_ascii_case(b"Generator") {
