@@ -158,6 +158,18 @@ final class InvocationTest extends TestCase
     }
 
     /**
+     * Mago of protocol 1.11 reads no before-analysis reads and no whole method search, so the worker refuses its first
+     * request.
+     */
+    public function testDescribeRequestOfTheProtocolBeforeWholeMethodSearchesIsRejected(): void
+    {
+        $this->expectException(ProtocolException::class);
+        $this->expectExceptionMessage('Unsupported analyzer protocol version 1.11.');
+
+        Protocol::readRequest(pack('N3', 0x4D41_4E41, (1 << 16) | 11, Protocol::DESCRIBE_REQUEST << 16));
+    }
+
+    /**
      * @return iterable<string, array{string, int}>
      */
     public static function unhandledResponses(): iterable

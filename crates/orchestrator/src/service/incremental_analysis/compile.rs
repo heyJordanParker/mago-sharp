@@ -198,12 +198,13 @@ impl IncrementalAnalysisService {
     ///
     /// An accepted file's inputs are its own source, `composer.lock`, and each file outside `vendor/` whose edit makes
     /// the warm path re-analyze it and can change its code: each file whose signature edit reaches it through the
-    /// cascade or reaches a symbol any file's providers read, every file when its own analysis or a provider listed
-    /// names, each file that declares a class alias its code reaches, and along a chain of aliases each file that
-    /// declares the next alias and the class at its end, each file that declares a patch, and each file that declares
-    /// a method whose return it reads from that method's body or a body its calls reach, whose effects its functions'
-    /// types list, along every chain of such returns and calls, with that file's own inputs. What a hook or an issue
-    /// filter read decides only which issues the analysis reports, never the code, so it enters the key and no input.
+    /// cascade or reaches a symbol a plugin that registers a provider read, every file when its own analysis or such a
+    /// plugin listed names, each file that declares a class alias its code reaches, and along a chain of aliases each
+    /// file that declares the next alias and the class at its end, each file that declares a patch, and each file that
+    /// declares a method whose return it reads from that method's body or a body its calls reach, whose effects its
+    /// functions' types list, along every chain of such returns and calls, with that file's own inputs. What a plugin
+    /// with no provider read decides only which issues the analysis reports, never the code, so it enters the key and
+    /// no input.
     ///
     /// A file that states a law also lists every source its laws reach. A file that declares a module or a listener
     /// also lists the module files its check resolves services through, each folder's `Module.sharp` whether or not a
@@ -280,6 +281,21 @@ impl IncrementalAnalysisService {
             .flat_map(|(_, forms, _)| forms.iter().cloned())
             .collect();
         let lowered_rest = self.lower_all(&rest, &forms, (&errors, &unrefused), &reach, &effects, session.as_ref())?;
+        // Lowering analyzes each PHP# file again against the codebase its last analysis saw, so it sends the provider
+        // requests that analysis sent, and every read their answers rest on is one the analysis already holds.
+        debug_assert!(
+            session.as_ref().is_none_or(|session| {
+                let lowering = session.take_reads();
+                let held = super::code_reads(&self.file_states, &self.before_analysis_reads);
+                let held_issues = super::extension_reads(&self.file_states, &self.before_analysis_reads);
+                lowering
+                    .files
+                    .values()
+                    .chain([&lowering.before_analysis])
+                    .all(|reads| held.includes(&reads.code) && held_issues.includes(&reads.issues))
+            }),
+            "lowering read the codebase where the analysis it follows did not"
+        );
         let mut translations = Vec::new();
         let mut lowered: HashMap<FileId, Result<LoweredUnit, IssueCollection>> = library
             .iter()
@@ -813,8 +829,8 @@ struct Dependencies<'service> {
     referencing_members: HashMap<Word, Vec<SymbolIdentifier>>,
     /// The source files that declare each declaration.
     declared_in: HashMap<SymbolIdentifier, Vec<FileId>>,
-    /// What every file read through the providers, as `code_reads` gives it. A hook's or an issue filter's read decides
-    /// only which issues are reported, never the lowered code, so it names no input.
+    /// What the plugins that register a provider read, in any callback, as `code_reads` gives it. A read of a plugin
+    /// with no provider decides only which issues are reported, never the lowered code, so it names no input.
     code_reads: FileReads,
 }
 
@@ -822,7 +838,7 @@ impl<'service> Dependencies<'service> {
     fn new(service: &'service IncrementalAnalysisService) -> Self {
         let mut dependencies = Self {
             service,
-            code_reads: super::code_reads(&service.file_states),
+            code_reads: super::code_reads(&service.file_states, &service.before_analysis_reads),
             signature: HashMap::default(),
             references: HashMap::default(),
             files: HashMap::default(),
@@ -1806,11 +1822,13 @@ mod tests {
             service.codebase.safe_symbol_members.clear();
             let unchanged: Vec<FileId> = files.iter().copied().filter(|file_id| *file_id != edited.id).collect();
             let extension_reads = super::super::extension_reads(&service.file_states, &service.before_analysis_reads);
-            let reads = super::super::symbols_read_by(&extension_reads.symbols, &service.database, &unchanged);
-            let invalid_files = service
+            let (mut invalid_files, extension_symbol_changed) = service
                 .codebase
-                .mark_safe_symbols(&diff, &service.native_symbol_references, reads)
+                .mark_safe_symbols(&diff, &service.native_symbol_references, &extension_reads.symbols)
                 .expect("each fixture's cascade ends within the warm path's limit");
+            if extension_symbol_changed {
+                invalid_files.extend(unchanged.iter().map(|file_id| mago_word::word(name(file_id).as_bytes())));
+            }
 
             let skipped = service.files_to_skip(&service.codebase, &unchanged, &invalid_files);
             for reached in unchanged.iter().filter(|file_id| !skipped.contains(*file_id)) {

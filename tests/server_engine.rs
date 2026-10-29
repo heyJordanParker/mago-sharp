@@ -386,6 +386,90 @@ fn every_file_a_kept_listing_answered_runs_again_when_the_listing_changes_and_no
     );
 }
 
+/// The owners hook's answers, each as `` `file`: `Class` is owned. ``, without the run that gave it.
+fn owner_answers(issues: &IssueCollection) -> Vec<String> {
+    owners(issues).into_iter().map(|message| message.split_once(" of ").expect("a run").1.to_owned()).collect()
+}
+
+/// The owners files, `Order` and `Invoice` each with an `#[Owner]` method when marked so.
+fn owned_models(order: bool, invoice: bool) -> String {
+    let owner = |owned: bool| if owned { "    #[Owner]\n" } else { "" };
+    format!(
+        "<?php\nfinal class Order\n{{\n{}    public function account(): int {{ return 1; }}\n}}\nfinal class Invoice\n{{\n{}    public function account(): int {{ return 1; }}\n}}\n",
+        owner(order),
+        owner(invoice),
+    )
+}
+
+/// The owners hook reads the listing in one marked file and answers the other from it, so only the reading file's
+/// state holds the read. `lose` makes that file stop reading it. A later change to the listing then reaches the other
+/// file, which reports what a cold run reports.
+fn a_kept_listing_reaches_the_other_file_after_its_reader(lose: fn(&mut Server, FileId)) {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if !common::php_sdk_is_available(repository, "the lost listing reads test") {
+        return;
+    }
+
+    let marked = [
+        ("src/orders.php", "<?php\n// owners: Order\nfinal class OrderReport {}\n", "Order"),
+        ("src/invoices.php", "<?php\n// owners: Invoice\nfinal class InvoiceReport {}\n", "Invoice"),
+    ];
+    let mut warm = server(
+        repository,
+        database(&[
+            ("src/owner.php", OWNER),
+            ("src/models.php", &owned_models(true, false)),
+            (marked[0].0, marked[0].1),
+            (marked[1].0, marked[1].1),
+        ]),
+    );
+    let first = warm.analyze().expect("initial analysis").issues;
+    let [read] = reported(&first, "server-owners/owners-read").try_into().expect("one file read the owners");
+    let reader = read.split('`').nth(1).expect("the reading file").to_owned();
+    let (other, other_contents, other_class) =
+        marked.into_iter().find(|(name, _, _)| *name != reader).expect("the file answered from the kept listing");
+
+    let reader_file = FileId::new(reader.as_bytes());
+    lose(&mut warm, reader_file);
+    warm.analyze_incremental(&[reader_file]).expect("analysis after the reader stops reading");
+
+    let models_file = FileId::new(b"src/models.php");
+    let flipped = if other_class == "Order" { owned_models(false, false) } else { owned_models(true, true) };
+    warm.database_mut().update(models_file, Cow::Owned(flipped.clone().into_bytes()));
+    let changed = warm.analyze_incremental(&[models_file]).expect("analysis after the listing changes").issues;
+
+    let cold = server(
+        repository,
+        database(&[("src/owner.php", OWNER), ("src/models.php", &flipped), (other, other_contents)]),
+    )
+    .analyze()
+    .expect("cold analysis")
+    .issues;
+    let owned = if other_class == "Order" { "is not" } else { "is" };
+    assert_eq!(owner_answers(&cold), [format!("`{other}`: `{other_class}` {owned} owned.")]);
+    assert_eq!(owner_answers(&changed), owner_answers(&cold), "{reader} read the listing first");
+}
+
+#[test]
+fn a_kept_listing_reaches_the_other_file_after_its_reader_stops_reading_it() {
+    a_kept_listing_reaches_the_other_file_after_its_reader(|server, reader| {
+        let contents = server.database().get(&reader).expect("the reading file").contents.clone();
+        let unmarked = String::from_utf8_lossy(&contents)
+            .lines()
+            .filter(|line| !line.contains("owners: "))
+            .collect::<Vec<_>>()
+            .join("\n");
+        server.database_mut().update(reader, Cow::Owned(unmarked.into_bytes()));
+    });
+}
+
+#[test]
+fn a_kept_listing_reaches_the_other_file_after_its_reader_is_deleted() {
+    a_kept_listing_reaches_the_other_file_after_its_reader(|server, reader| {
+        server.database_mut().delete(reader);
+    });
+}
+
 /// `Order`, extending `parent`, with `total` returning `returned`.
 fn order_of(parent: &str, returned: &str) -> String {
     format!(
@@ -677,6 +761,58 @@ fn changing_the_parent_of_a_model_a_provider_compared_changes_the_sharp_file_inp
     let (after, after_bytes) = compiled(&mut server);
 
     assert_ne!(before["app/Models/Order.php"], after["app/Models/Order.php"]);
+    assert_ne!(header(&before_bytes).expect("a header").key, header(&after_bytes).expect("a header").key);
+}
+
+/// `Line`, with an `#[Relation]` method for each of `relations`.
+fn lines(relations: &[&str]) -> String {
+    let methods: String = relations
+        .iter()
+        .map(|relation| format!("    #[\\Relation]\n    public function {relation}(): int {{ return 1; }}\n"))
+        .collect();
+    format!("<?php\n\nnamespace App\\Models;\n\nfinal class Line\n{{\n{methods}}}\n")
+}
+
+/// A PHP# file whose `int` return holds only while the relations plugin's provider answers `Order::$items` with `int`.
+const ORDERS: &str = "namespace App;\n\nimport App.Models.Order;\n\npublic class Orders\n{\n    public int count(Order order)\n    {\n        return order.items;\n    }\n}\n";
+
+/// The relations plugin searches the methods before the analysis, and its provider answers `Order::$items` from what
+/// the search found, reading nothing itself. The search can change the PHP# file's code, so the file declaring a
+/// relation is among its inputs, and a relation that joins gives the file a new key.
+#[test]
+fn a_sharp_file_whose_type_a_provider_answered_from_its_plugins_before_analysis_read_lists_what_it_read_among_its_inputs()
+ {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if !common::php_sdk_is_available(repository, "the provider plugin reads compile test") {
+        return;
+    }
+
+    let mut server = server(
+        repository,
+        database(&[
+            ("app/Models/Relation.php", "<?php\n\n#[Attribute]\nfinal class Relation {}\n"),
+            ("app/Models/Line.php", &lines(&["order"])),
+            (
+                "app/Models/Order.php",
+                "<?php\n\nnamespace App\\Models;\n\nfinal class Order\n{\n    public function __get(string $name): mixed\n    {\n        return 1;\n    }\n}\n",
+            ),
+            ("app/Orders.sharp", ORDERS),
+        ]),
+    );
+    server.analyze().expect("initial analysis");
+    let (before, before_bytes) = compiled(&mut server);
+    assert!(
+        before.contains_key("app/Models/Line.php"),
+        "the file of the relation the plugin read: {:?}",
+        before.keys()
+    );
+
+    let line_file = FileId::new(b"app/Models/Line.php");
+    server.database_mut().update(line_file, Cow::Owned(lines(&["order", "product"]).into_bytes()));
+    server.analyze_incremental(&[line_file]).expect("analysis after a relation joins");
+    let (after, after_bytes) = compiled(&mut server);
+
+    assert_ne!(before["app/Models/Line.php"], after["app/Models/Line.php"]);
     assert_ne!(header(&before_bytes).expect("a header").key, header(&after_bytes).expect("a header").key);
 }
 

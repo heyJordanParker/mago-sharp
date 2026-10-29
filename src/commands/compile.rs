@@ -28,6 +28,7 @@ use mago_allocator::LocalArena;
 use mago_database::Database;
 use mago_database::DatabaseConfiguration;
 use mago_database::DatabaseReader;
+use mago_database::GlobSettings;
 use mago_database::error::DatabaseError;
 use mago_database::file::COMPANION_START;
 use mago_database::file::File;
@@ -277,12 +278,9 @@ fn project_database(
 /// The PHP# files of `database`, which the compile lowers, as the scope of its analysis. The compile refuses a PHP#
 /// file for the errors reported in it, and a node-analysis hook reports only in the file it inspects, so the hooks run
 /// only in these files, as they run only in the named files of `mago analyze <paths>`. A scope that names no path is
-/// the whole workspace, so a project with no PHP# file is scoped to every `.sharp` file, of which it has none.
-fn lowered_files(
-    orchestrator: &Orchestrator<'_>,
-    workspace: &Path,
-    database: &impl DatabaseReader,
-) -> Result<WorkspaceMatcher, Error> {
+/// the whole workspace, so a project with no PHP# file is scoped to every `.sharp` file, of which it has none. The glob
+/// settings shape only excludes, and the scope has none, so it takes the default ones.
+fn lowered_files(workspace: &Path, database: &impl DatabaseReader) -> Result<WorkspaceMatcher, Error> {
     let paths: Vec<Cow<'_, [u8]>> = database
         .files()
         .filter(|file| file.file_type == FileType::Host && Dialect::of(file).is_sharp())
@@ -296,7 +294,7 @@ fn lowered_files(
         patches: Vec::new(),
         excludes: Vec::new(),
         extensions: vec![Cow::Borrowed(b"sharp".as_slice())],
-        glob: orchestrator.config.glob,
+        glob: GlobSettings::default(),
     })?)
 }
 
@@ -399,7 +397,7 @@ fn compile(configuration: &Configuration, color_choice: ColorChoice) -> Result<C
             return Ok(ExitCode::FAILURE.into());
         }
     };
-    let lowered = lowered_files(&orchestrator, workspace, &database)?;
+    let lowered = lowered_files(workspace, &database)?;
     let mut server =
         Server::new(database.into_static(), decode_prelude, server_settings(&orchestrator)).scoped_to(lowered);
     server.analyze()?;

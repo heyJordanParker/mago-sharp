@@ -220,19 +220,29 @@ fn find_methods(
     codebase: &CodebaseMetadata,
     session: &ExternalAnalysisSession,
 ) -> Result<(), ExternalAnalyzerError> {
-    MethodSearch::read(reader)?.write_methods(writer, codebase, session)
+    write_methods(&read_method_search(reader)?, writer, codebase, session)
 }
 
 /// A method search as a worker writes it: the classes it searches, the name it matches, whether it skips inherited and
 /// trait-provided methods, the attributes a method carries one of, and the metadata fields it projects.
 struct MethodSearch {
-    class_filter: u8,
-    class: Option<Word>,
+    class_filter: ClassFilter,
     pattern: Word,
     prefix: bool,
     declared_only: bool,
     attributes: Vec<Word>,
     fields: u32,
+}
+
+/// The classes a method search searches, by their lowercase name.
+#[derive(Clone, Copy)]
+enum ClassFilter {
+    /// Every class.
+    Any,
+    /// The class of this name.
+    Exact(Word),
+    /// The classes below the class of this name, without it.
+    Descendants(Word),
 }
 
 /// The method search a worker wrote as `search`, interned, as a codebase read names it.
@@ -241,7 +251,7 @@ struct MethodSearch {
 ///
 /// Returns a protocol error when `search` is not one whole method search.
 pub(super) fn method_search(search: &[u8]) -> Result<Word, ExternalAnalyzerError> {
-    MethodSearch::read_whole(search)?;
+    read_whole_method_search(search)?;
 
     Ok(word(search))
 }
@@ -259,172 +269,161 @@ pub(super) fn write_found_methods(
     codebase: &CodebaseMetadata,
     session: &ExternalAnalysisSession,
 ) -> Result<(), ExternalAnalyzerError> {
-    MethodSearch::read_whole(search)?.write_methods(writer, codebase, session)
+    write_methods(&read_whole_method_search(search)?, writer, codebase, session)
 }
 
-impl MethodSearch {
-    fn read_whole(search: &[u8]) -> Result<Self, ExternalAnalyzerError> {
-        let mut reader = PayloadReader::new(search);
-        let search = Self::read(&mut reader)?;
-        reader.finish()?;
+fn read_whole_method_search(search: &[u8]) -> Result<MethodSearch, ExternalAnalyzerError> {
+    let mut reader = PayloadReader::new(search);
+    let search = read_method_search(&mut reader)?;
+    reader.finish()?;
 
-        Ok(search)
+    Ok(search)
+}
+
+fn read_method_search(reader: &mut PayloadReader<'_>) -> Result<MethodSearch, ExternalAnalyzerError> {
+    let class_filter = match reader.read_u8("method search class filter")? {
+        METHOD_SEARCH_ANY_CLASS => ClassFilter::Any,
+        filter @ (METHOD_SEARCH_EXACT_CLASS | METHOD_SEARCH_DESCENDANTS) => {
+            let class = reader.read_bytes("method search class")?;
+            if class.is_empty() {
+                return Err(protocol("method search class cannot be empty"));
+            }
+
+            let class = ascii_lowercase_word(class);
+            if filter == METHOD_SEARCH_EXACT_CLASS {
+                ClassFilter::Exact(class)
+            } else {
+                ClassFilter::Descendants(class)
+            }
+        }
+        unknown => return Err(protocol(format!("unknown method search class filter {unknown}"))),
+    };
+
+    let pattern = reader.read_bytes("method search name pattern")?;
+    if pattern.is_empty() {
+        return Err(protocol("method search name pattern cannot be empty"));
+    }
+    let prefix = pattern.ends_with(b"*");
+    let pattern = if prefix { &pattern[..pattern.len() - 1] } else { pattern };
+    if pattern.contains(&b'*') {
+        return Err(protocol("method search wildcards are only allowed at the end"));
+    }
+    let pattern = ascii_lowercase_word(pattern);
+    let declared_only = reader.read_bool("method search declared-only filter")?;
+
+    let attribute_count = reader.read_count("method search attribute filters", MAXIMUM_QUERIES)?;
+    let mut attributes = Vec::with_capacity(attribute_count);
+    for _ in 0..attribute_count {
+        let attribute = reader.read_bytes("method search attribute")?;
+        if attribute.is_empty() {
+            return Err(protocol("method search attribute cannot be empty"));
+        }
+        attributes.push(ascii_lowercase_word(attribute));
     }
 
-    fn read(reader: &mut PayloadReader<'_>) -> Result<Self, ExternalAnalyzerError> {
-        let class_filter = reader.read_u8("method search class filter")?;
-        let class = match class_filter {
-            METHOD_SEARCH_ANY_CLASS => None,
-            METHOD_SEARCH_EXACT_CLASS | METHOD_SEARCH_DESCENDANTS => {
-                let class = reader.read_bytes("method search class")?;
-                if class.is_empty() {
-                    return Err(protocol("method search class cannot be empty"));
-                }
-
-                Some(ascii_lowercase_word(class))
-            }
-            unknown => return Err(protocol(format!("unknown method search class filter {unknown}"))),
-        };
-
-        let pattern = reader.read_bytes("method search name pattern")?;
-        if pattern.is_empty() {
-            return Err(protocol("method search name pattern cannot be empty"));
-        }
-        let prefix = pattern.ends_with(b"*");
-        let pattern = if prefix { &pattern[..pattern.len() - 1] } else { pattern };
-        if pattern.contains(&b'*') {
-            return Err(protocol("method search wildcards are only allowed at the end"));
-        }
-        let pattern = ascii_lowercase_word(pattern);
-        let declared_only = reader.read_bool("method search declared-only filter")?;
-
-        let attribute_count = reader.read_count("method search attribute filters", MAXIMUM_QUERIES)?;
-        let mut attributes = Vec::with_capacity(attribute_count);
-        for _ in 0..attribute_count {
-            let attribute = reader.read_bytes("method search attribute")?;
-            if attribute.is_empty() {
-                return Err(protocol("method search attribute cannot be empty"));
-            }
-            attributes.push(ascii_lowercase_word(attribute));
-        }
-
-        let fields = reader.read_u32("method projection fields")?;
-        if fields & !METHOD_FIELDS_ALL != 0 {
-            return Err(protocol(format!("method projection contains unknown fields {fields:#x}")));
-        }
-
-        Ok(Self { class_filter, class, pattern, prefix, declared_only, attributes, fields })
+    let fields = reader.read_u32("method projection fields")?;
+    if fields & !METHOD_FIELDS_ALL != 0 {
+        return Err(protocol(format!("method projection contains unknown fields {fields:#x}")));
     }
 
-    /// Writes the fields this search projects, then each method it finds in `codebase` with them, ordered by the class
-    /// it appears in and its name.
-    fn write_methods(
-        &self,
-        writer: &mut PayloadWriter,
-        codebase: &CodebaseMetadata,
-        session: &ExternalAnalysisSession,
-    ) -> Result<(), ExternalAnalyzerError> {
-        let started = tracing::enabled!(tracing::Level::TRACE).then(std::time::Instant::now);
-        let Self { class_filter, class, pattern, prefix, declared_only, fields, .. } = *self;
-        let attributes = &self.attributes;
-        writer.write_u32(fields);
+    Ok(MethodSearch { class_filter, pattern, prefix, declared_only, attributes, fields })
+}
 
-        let mut scanned_classes = 0usize;
-        let mut scanned_methods = 0usize;
-        let mut matches = Vec::new();
-        let mut collect = |class_like: &ClassLikeMetadata| {
-            scanned_classes += 1;
-            for (method_name, declaring) in &class_like.declaring_method_ids {
-                scanned_methods += 1;
-                let matches_name = if prefix {
-                    method_name.as_bytes().starts_with(pattern.as_bytes())
-                } else {
-                    *method_name == pattern
-                };
-                if !matches_name || (declared_only && declaring.get_class_name() != class_like.name) {
-                    continue;
-                }
+/// Writes the fields `search` projects, then each method it finds in `codebase` with them, ordered by the class it
+/// appears in and its name.
+fn write_methods<'codebase>(
+    search: &MethodSearch,
+    writer: &mut PayloadWriter,
+    codebase: &'codebase CodebaseMetadata,
+    session: &ExternalAnalysisSession,
+) -> Result<(), ExternalAnalyzerError> {
+    let started = tracing::enabled!(tracing::Level::TRACE).then(std::time::Instant::now);
+    let MethodSearch { class_filter, pattern, prefix, declared_only, fields, .. } = *search;
+    let attributes = &search.attributes;
+    writer.write_u32(fields);
 
-                let Some(metadata) = codebase.get_method_by_id(declaring) else {
-                    continue;
-                };
-                if !attributes.is_empty()
-                    && !metadata.attributes.iter().any(|attribute| {
-                        attributes
-                            .iter()
-                            .any(|requested| attribute.name.as_bytes().eq_ignore_ascii_case(requested.as_bytes()))
-                    })
-                {
-                    continue;
-                }
-
-                matches.push((class_like.name, *method_name, *declaring));
+    let mut scanned_classes = 0usize;
+    let mut scanned_methods = 0usize;
+    let mut matches = Vec::new();
+    let mut collect = |class_like: &'codebase ClassLikeMetadata| {
+        scanned_classes += 1;
+        for (method_name, declaring) in &class_like.declaring_method_ids {
+            scanned_methods += 1;
+            let matches_name =
+                if prefix { method_name.as_bytes().starts_with(pattern.as_bytes()) } else { *method_name == pattern };
+            if !matches_name || (declared_only && declaring.get_class_name() != class_like.name) {
+                continue;
             }
-        };
 
-        match (class_filter, class) {
-            (METHOD_SEARCH_EXACT_CLASS, Some(class)) => {
-                if let Some(class_like) = codebase.get_class_like(class.as_bytes()) {
+            let Some(metadata) = codebase.get_method_by_id(declaring) else {
+                continue;
+            };
+            if !attributes.is_empty()
+                && !metadata.attributes.iter().any(|attribute| {
+                    attributes
+                        .iter()
+                        .any(|requested| attribute.name.as_bytes().eq_ignore_ascii_case(requested.as_bytes()))
+                })
+            {
+                continue;
+            }
+
+            matches.push((class_like.name, *method_name, (class_like, metadata)));
+        }
+    };
+
+    match class_filter {
+        ClassFilter::Exact(class) => {
+            if let Some(class_like) = codebase.get_class_like(class.as_bytes()) {
+                collect(class_like);
+            }
+        }
+        ClassFilter::Descendants(class) => {
+            for class_like in codebase.class_likes.values() {
+                if class_like.name != class && codebase.is_instance_of(class_like.name.as_bytes(), class.as_bytes()) {
                     collect(class_like);
                 }
             }
-            (METHOD_SEARCH_DESCENDANTS, Some(class)) => {
-                for class_like in codebase.class_likes.values() {
-                    if class_like.name != class && codebase.is_instance_of(class_like.name.as_bytes(), class.as_bytes())
-                    {
-                        collect(class_like);
-                    }
-                }
+        }
+        ClassFilter::Any => {
+            for class_like in codebase.class_likes.values() {
+                collect(class_like);
             }
-            (METHOD_SEARCH_ANY_CLASS, None) => {
-                for class_like in codebase.class_likes.values() {
-                    collect(class_like);
-                }
-            }
-            _ => unreachable!(),
         }
-
-        if matches.len() > MAXIMUM_METHOD_PROJECTIONS {
-            return Err(protocol(format!(
-                "method search returned {} results, exceeding the limit of {MAXIMUM_METHOD_PROJECTIONS}",
-                matches.len()
-            )));
-        }
-        matches.sort_unstable_by(|(left_class, left_method, _), (right_class, right_method, _)| {
-            left_class
-                .as_bytes()
-                .cmp(right_class.as_bytes())
-                .then_with(|| left_method.as_bytes().cmp(right_method.as_bytes()))
-        });
-
-        writer.write_u32(matches.len() as u32);
-        for (class_name, method_name, declaring) in &matches {
-            let class_like = codebase
-                .class_likes
-                .get(class_name)
-                .ok_or_else(|| protocol("method projection references a missing class-like"))?;
-            let metadata = codebase
-                .get_method_by_id(declaring)
-                .ok_or_else(|| protocol("method projection references missing method metadata"))?;
-            write_method_projection(writer, class_like, *method_name, metadata, fields, codebase, session)?;
-        }
-
-        if let Some(started) = started {
-            tracing::trace!(
-                class_filter,
-                fields,
-                declared_only,
-                attribute_filters = attributes.len(),
-                scanned_classes,
-                scanned_methods,
-                matched_methods = matches.len(),
-                elapsed_us = started.elapsed().as_micros(),
-                "completed projected method metadata query"
-            );
-        }
-
-        Ok(())
     }
+
+    if matches.len() > MAXIMUM_METHOD_PROJECTIONS {
+        return Err(protocol(format!(
+            "method search returned {} results, exceeding the limit of {MAXIMUM_METHOD_PROJECTIONS}",
+            matches.len()
+        )));
+    }
+    matches.sort_unstable_by(|(left_class, left_method, _), (right_class, right_method, _)| {
+        left_class
+            .as_bytes()
+            .cmp(right_class.as_bytes())
+            .then_with(|| left_method.as_bytes().cmp(right_method.as_bytes()))
+    });
+
+    writer.write_u32(matches.len() as u32);
+    for (_, method_name, (class_like, metadata)) in &matches {
+        write_method_projection(writer, class_like, *method_name, metadata, fields, codebase, session)?;
+    }
+
+    if let Some(started) = started {
+        tracing::trace!(
+            fields,
+            declared_only,
+            attribute_filters = attributes.len(),
+            scanned_classes,
+            scanned_methods,
+            matched_methods = matches.len(),
+            elapsed_us = started.elapsed().as_micros(),
+            "completed projected method metadata query"
+        );
+    }
+
+    Ok(())
 }
 
 fn write_method_projection(
@@ -1771,6 +1770,41 @@ mod tests {
 
         assert_eq!(owner_listing_answer(OWNED_AND_TOTALLED), owned, "a method with no `#[Owner]` leaves it");
         assert_ne!(owner_listing_answer(BOTH_OWNED), owned, "a method that gains `#[Owner]` joins it");
+    }
+
+    /// `Child` extends `Base`, and `Other` stands apart, each with methods.
+    const FAMILY: (&str, &str) = (
+        "src/Family.php",
+        "<?php\n\nclass Base\n{\n    public function run(): void {}\n}\n\nfinal class Child extends Base\n{\n    public function stop(): void {}\n}\n\nfinal class Other\n{\n    public function run(): void {}\n}\n",
+    );
+
+    /// A search of a class's descendants finds the methods each descendant shows, its inherited ones too, and none of
+    /// the class's own or of a class outside it.
+    #[test]
+    fn a_search_of_the_descendants_of_a_class_finds_the_methods_below_it() {
+        analyzed(&[FAMILY], |analysis| {
+            let session = ExternalAnalysisSession::from_files(analysis.files.iter().cloned());
+            let mut writer = protocol::message_writer(CODEBASE_QUERY_REQUEST);
+            writer.write_u64(session.generation());
+            writer.write_u8(FIND_METHODS);
+            writer.write_u8(METHOD_SEARCH_DESCENDANTS);
+            writer.write_bytes(b"Base").expect("the class should fit in a frame");
+            writer.write_bytes(b"*").expect("the pattern should fit in a frame");
+            writer.write_bool(false);
+            writer.write_u32(0);
+            writer.write_u32(METHOD_FIELDS_NAMES);
+
+            let (_, answer) = protocol::handle_nested_request(&writer.finish(), analysis.codebase, &session, |_| None)
+                .expect("the search should succeed");
+            let mut reader = protocol::message_reader(&answer, CODEBASE_QUERY_RESPONSE).expect("a response");
+            reader.read_u64("generation").expect("the generation");
+            reader.read_u8("operation").expect("the operation");
+            reader.read_u32("projection fields").expect("the projected fields");
+
+            assert_eq!(reader.read_u32("result count").expect("the count"), 2, "`Child::run` and `Child::stop`");
+            assert!(names(&answer, b"Child"), "the methods appear in `Child`");
+            assert!(!names(&answer, b"Other"), "`Other` is no descendant of `Base`");
+        });
     }
 
     /// A read names the whole search it records, so one the protocol can't run is refused where it arrives.

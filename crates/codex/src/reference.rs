@@ -739,24 +739,24 @@ impl SymbolReferences {
     ///
     /// * `codebase`: The codebase whose class hierarchy the cascade follows.
     /// * `codebase_diff`: Information about added, deleted, or modified symbols/signatures.
-    /// * `reads`: The symbols each file's extension hooks and providers read, by logical file name.
+    /// * `read`: The symbols the extension callbacks read, which every file counts as its own.
     ///
     /// # Returns
     ///
-    /// `Some((invalid_signatures, partially_invalid, invalid_files))` on success, where `invalid_signatures` contains
-    /// all symbol/member pairs whose signature is invalid (including propagated ones), and `partially_invalid`
-    /// contains symbols with at least one invalid member, and classes whose direct parent, interface or trait
-    /// changed. `invalid_files` contains logical file names whose top-level code references, or whose `reads` name,
-    /// a symbol with an invalid signature.
+    /// `Some((invalid_signatures, partially_invalid, invalid_files, read_invalid))` on success, where
+    /// `invalid_signatures` contains all symbol/member pairs whose signature is invalid (including propagated ones),
+    /// and `partially_invalid` contains symbols with at least one invalid member, and classes whose direct parent,
+    /// interface or trait changed. `invalid_files` contains logical file names whose top-level code references a
+    /// symbol with an invalid signature, and `read_invalid` whether `read` names one.
     /// Returns `None` if the propagation exceeds an expense limit (currently 5000 steps).
     #[inline]
     #[must_use]
-    pub fn get_invalid_symbols<'reads>(
+    pub fn get_invalid_symbols(
         &self,
         codebase: &CodebaseMetadata,
         codebase_diff: &CodebaseDiff,
-        reads: impl IntoIterator<Item = (Word, &'reads HashSet<SymbolIdentifier>)>,
-    ) -> Option<(HashSet<SymbolIdentifier>, WordSet, WordSet)> {
+        read: &HashSet<SymbolIdentifier>,
+    ) -> Option<(HashSet<SymbolIdentifier>, WordSet, WordSet, bool)> {
         let mut invalid_signatures = HashSet::default();
         let mut partially_invalid_symbols = WordSet::default();
 
@@ -849,15 +849,11 @@ impl SymbolReferences {
                 invalid_files.insert(file);
             }
         }
-        for (file, read) in reads {
-            if read.iter().any(|symbol| invalid_signatures.contains(symbol)) {
-                invalid_files.insert(file);
-            }
-        }
+        let read_invalid = read.iter().any(|symbol| invalid_signatures.contains(symbol));
 
         let mut all_invalid_symbols = invalid_signatures;
         all_invalid_symbols.extend(invalid_bodies);
-        Some((all_invalid_symbols, partially_invalid_symbols, invalid_files))
+        Some((all_invalid_symbols, partially_invalid_symbols, invalid_files, read_invalid))
     }
 
     /// Extracts references originating from safe (skipped) symbols and merges them into this instance.
@@ -1260,9 +1256,9 @@ mod tests {
         changed.insert((class_a, empty_word()));
         diff = diff.with_changed(changed);
 
-        let result = refs.get_invalid_symbols(&CodebaseMetadata::default(), &diff, []);
+        let result = refs.get_invalid_symbols(&CodebaseMetadata::default(), &diff, &HashSet::default());
         assert!(result.is_some());
-        let (invalid, partially_invalid, invalid_files) = result.unwrap();
+        let (invalid, partially_invalid, invalid_files, _) = result.unwrap();
 
         assert!(invalid.contains(&(class_a, empty_word())));
         assert!(invalid.contains(&(class_b, method_foo)));
@@ -1282,19 +1278,17 @@ mod tests {
         changed.insert((changed_class, empty_word()));
         diff = diff.with_changed(changed);
 
-        let (_, _, invalid_files) = references
-            .get_invalid_symbols(&CodebaseMetadata::default(), &diff, [])
+        let (_, _, invalid_files, _) = references
+            .get_invalid_symbols(&CodebaseMetadata::default(), &diff, &HashSet::default())
             .expect("invalidation should complete");
         assert_eq!(invalid_files.len(), 1);
         assert!(invalid_files.contains(&file));
     }
 
     #[test]
-    fn test_get_invalid_symbols_reaches_a_file_that_read_a_class_whose_member_changed() {
+    fn test_get_invalid_symbols_tells_a_read_of_a_class_whose_member_changed() {
         let parent = word("parent");
         let child = word("child");
-        let reader = word("src/reader.php");
-        let unrelated = word("src/unrelated.php");
         let mut references = SymbolReferences::new();
         references.add_symbol_reference_to_symbol(child, parent, true);
 
@@ -1303,11 +1297,13 @@ mod tests {
         changed.insert((parent, word("run")));
         diff = diff.with_changed(changed);
 
-        let read_child = HashSet::from_iter([(child, empty_word())]);
-        let read_other = HashSet::from_iter([(word("other"), empty_word())]);
-        let (_, _, invalid_files) = references
-            .get_invalid_symbols(&CodebaseMetadata::default(), &diff, [(reader, &read_child), (unrelated, &read_other)])
-            .expect("invalidation should complete");
-        assert_eq!(invalid_files.into_iter().collect::<Vec<_>>(), [reader]);
+        let read_invalid = |read: HashSet<SymbolIdentifier>| {
+            references
+                .get_invalid_symbols(&CodebaseMetadata::default(), &diff, &read)
+                .expect("invalidation should complete")
+                .3
+        };
+        assert!(read_invalid(HashSet::from_iter([(child, empty_word())])));
+        assert!(!read_invalid(HashSet::from_iter([(word("other"), empty_word())])));
     }
 }

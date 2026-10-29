@@ -111,10 +111,10 @@ use crate::external::ClassLikeAnalysisHookRegistration;
 use crate::external::CodebaseScanHookRegistration;
 use crate::external::EffectivePropertyType;
 use crate::external::EntryPoint;
+use crate::external::ExtensionReads;
 use crate::external::ExternalAnalysisSession;
 use crate::external::ExternalExtension;
 use crate::external::ExternalPlugin;
-use crate::external::FileReads;
 use crate::external::ForwardedCall;
 use crate::external::FunctionProvider;
 use crate::external::FunctionTarget;
@@ -138,7 +138,7 @@ use crate::invocation::MethodTargetContext;
 
 pub const ANALYZER_PROTOCOL_MAGIC: [u8; 4] = *b"MANA";
 pub const ANALYZER_PROTOCOL_MAJOR: u16 = 1;
-pub const ANALYZER_PROTOCOL_MINOR: u16 = 11;
+pub const ANALYZER_PROTOCOL_MINOR: u16 = 12;
 
 const HEADER_LENGTH: usize = 12;
 const INITIAL_MESSAGE_CAPACITY: usize = 256;
@@ -3323,11 +3323,11 @@ pub(super) fn message_reader(payload: &[u8], expected_kind: u16) -> Result<Paylo
 
 /// Splits the codebase reads a provider or issue filter made, which the SDK places right after the header, from the
 /// response they came with.
-pub(super) fn take_codebase_reads(response: &[u8]) -> Result<(FileReads, Vec<u8>), ExternalAnalyzerError> {
+pub(super) fn take_codebase_reads(response: &[u8]) -> Result<(ExtensionReads, Vec<u8>), ExternalAnalyzerError> {
     let header =
         response.get(..HEADER_LENGTH).ok_or_else(|| protocol("analyzer response is shorter than its header"))?;
     let mut reader = PayloadReader::new(&response[HEADER_LENGTH..]);
-    let reads = FileReads::decode(&mut reader)?;
+    let reads = ExtensionReads::decode(&mut reader)?;
 
     Ok((reads, [header, &response[response.len() - reader.remaining()..]].concat()))
 }
@@ -3842,6 +3842,20 @@ pub(super) mod testing {
 
         let result = decode_initialization_response(&writer.finish(), &[0]);
         assert!(matches!(result, Err(ExternalAnalyzerError::Protocol(message)) if message.contains("more than once")));
+    }
+
+    /// A worker of protocol 1.11 records no before-analysis reads and writes no whole method search, so Mago refuses
+    /// its responses instead of reading them as 1.12.
+    #[test]
+    fn a_response_of_the_protocol_before_whole_method_searches_is_refused() {
+        let mut response = message_writer(INITIALIZE_RESPONSE).finish();
+        response[6..8].copy_from_slice(&11u16.to_be_bytes());
+
+        let refusal = message_kind(&response);
+        assert!(
+            matches!(&refusal, Err(ExternalAnalyzerError::Protocol(message)) if message == "unsupported analyzer protocol version 1.11"),
+            "{refusal:?}"
+        );
     }
 
     #[test]
@@ -4359,7 +4373,7 @@ pub(super) mod testing {
     }
 
     /// The response that declines `request`, a property type or call forwarding request, after the codebase reads
-    /// the worker made for it: none.
+    /// the worker made for it: no issue read and no code read.
     pub fn declined_response(request: &[u8]) -> Vec<u8> {
         let kind = match message_kind(request).unwrap() {
             PROPERTY_TYPE_REQUEST => PROPERTY_TYPE_RESPONSE,
@@ -4367,6 +4381,7 @@ pub(super) mod testing {
             kind => unreachable!("no test declines a request of kind {kind}"),
         };
         let mut writer = message_writer(kind);
+        writer.write_u32(0);
         writer.write_u32(0);
         writer.write_bool(false);
         writer.finish()

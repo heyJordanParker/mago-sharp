@@ -49,9 +49,9 @@ use crate::utils::names::member_namespace;
 use crate::utils::names::namespace_function_name;
 use crate::utils::names::namespace_member;
 
+use super::ExtensionReads;
 use super::ExternalAnalysisSession;
 use super::ExternalPlugin;
-use super::FileReads;
 use super::NODE_REQUIREMENT_ARGUMENT_TYPES;
 use super::NODE_REQUIREMENT_RECEIVER_TYPE;
 use super::NODE_REQUIREMENT_TARGET_EXPRESSION_TYPES;
@@ -1471,15 +1471,12 @@ pub(super) fn decode_lifecycle_response(
 
             Some(file_id)
         };
-        reads.push((file_id, FileReads::decode(&mut reader)?));
+        reads.push((file_id, ExtensionReads::decode(&mut reader)?));
     }
 
     reader.finish()?;
     for (file_id, file_reads) in reads {
-        match file_id {
-            Some(file_id) => session.record_issue_reads(file_id, file_reads),
-            None => session.record_before_analysis_reads(file_reads),
-        }
+        session.record_reads(file_id, file_reads);
     }
 
     Ok(LifecycleEffects { issues, references, references_by_file })
@@ -1862,8 +1859,11 @@ fn read_level(reader: &mut PayloadReader<'_>) -> Result<Level, ExternalAnalyzerE
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
+    use std::borrow::Cow;
     use std::rc::Rc;
     use std::sync::Arc;
+
+    use foldhash::HashSet;
 
     use mago_codex::metadata::CodebaseMetadata;
     use mago_codex::metadata::class_like::ClassLikeMetadata;
@@ -1872,14 +1872,22 @@ mod tests {
     use mago_codex::ttype::atomic::TAtomic;
     use mago_codex::ttype::atomic::array::TArray;
     use mago_codex::ttype::union::TUnion;
+    use mago_database::file::File;
+    use mago_database::file::FileType;
     use mago_extension::PayloadWriter;
     use mago_span::Span;
     use mago_syntax::cst::NodeKind;
     use mago_word::empty_word;
     use mago_word::word;
 
+    use super::AFTER_ANALYSIS_REQUEST;
+    use super::AFTER_ANALYSIS_RESPONSE;
+    use super::AFTER_FILE_ANALYSIS_REQUEST;
+    use super::AFTER_FILE_ANALYSIS_RESPONSE;
     use super::ANALYSIS_QUERY_REQUEST;
     use super::AnalysisStore;
+    use super::BEFORE_ANALYSIS_REQUEST;
+    use super::BEFORE_ANALYSIS_RESPONSE;
     use super::FileAnalysisSnapshot;
     use super::GET_ALL_EXPRESSION_TYPES;
     use super::GET_EXPRESSION_TYPES;
@@ -1889,15 +1897,20 @@ mod tests {
     use super::analyzed_names;
     use super::build_node_analysis_plan;
     use super::class_like_matches_hook;
+    use super::decode_lifecycle_response;
     use super::encode_after_file_analysis_request;
     use super::handle_analysis_query;
     use super::write_reference_origin;
     use super::write_symbol_identifier;
     use crate::artifacts::AnalysisArtifacts;
     use crate::external::ClassLikeAnalysisHookRegistration;
+    use crate::external::ExtensionReads;
     use crate::external::ExternalAnalysisSession;
+    use crate::external::FileReads;
     use crate::external::NODE_REQUIREMENTS_ALL;
     use crate::external::NodeAnalysisRequirements;
+    use crate::external::SessionReads;
+    use crate::external::metadata::GET_CLASS_LIKES;
     use crate::external::protocol;
     use crate::external::protocol::testing::Analysis;
     use crate::external::protocol::testing::SHELF;
@@ -2126,5 +2139,83 @@ mod tests {
         let mut writer = PayloadWriter::new();
         assert!(write_symbol_identifier(&mut writer, (empty_word(), empty_word())).is_err());
         assert!(write_reference_origin(&mut writer, ReferenceOrigin::File(empty_word())).is_err());
+    }
+
+    /// A lifecycle response of `kind` with no issue and no reference, and a read entry for each of `files`: the file
+    /// it names, if any, then an issue read of the class `Issue` and a code read of the class `Code`.
+    fn response_with_reads(kind: u16, files: &[Option<&[u8]>]) -> Vec<u8> {
+        let mut writer = protocol::message_writer(kind);
+        writer.write_u32(0);
+        writer.write_u32(0);
+        writer.write_u32(files.len() as u32);
+        for file in files {
+            if let Some(file) = file {
+                writer.write_bytes(file).expect("the name should fit in a frame");
+            }
+            for class in [b"Issue".as_slice(), b"Code"] {
+                writer.write_u32(1);
+                writer.write_u8(GET_CLASS_LIKES);
+                writer.write_u8(0);
+                writer.write_bytes(class).expect("the class should fit in a frame");
+            }
+        }
+
+        writer.finish()
+    }
+
+    /// Decodes `response` to a request of `kind` against a session of `src/a.php`, and returns the session's reads, or
+    /// the protocol error the response gives.
+    fn decoded_reads(kind: u16, response: &[u8]) -> Result<SessionReads, String> {
+        let file = File::new(Cow::Borrowed(b"src/a.php"), FileType::Host, None, Cow::Borrowed(b"<?php\n"));
+        let session = ExternalAnalysisSession::from_files([Arc::new(file)]);
+        match decode_lifecycle_response(response, kind, &[], &[], &session, None, &CodebaseMetadata::new()) {
+            Ok(_) => Ok(session.take_reads()),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    /// The before-analysis hooks read for no one file, and a file's hooks for that file, each read as the worker
+    /// sorted it by its plugin.
+    #[test]
+    fn a_lifecycle_response_records_each_read_for_the_file_it_names_or_the_before_analysis_hooks() {
+        let class = |name: &[u8]| FileReads {
+            symbols: HashSet::from_iter([(word(name), empty_word())]),
+            listings: HashSet::default(),
+        };
+        let sorted = ExtensionReads { issues: class(b"issue"), code: class(b"code") };
+
+        let before = decoded_reads(BEFORE_ANALYSIS_REQUEST, &response_with_reads(BEFORE_ANALYSIS_RESPONSE, &[None]))
+            .expect("before-analysis hooks may read");
+        let after_file = decoded_reads(
+            AFTER_FILE_ANALYSIS_REQUEST,
+            &response_with_reads(AFTER_FILE_ANALYSIS_RESPONSE, &[Some(b"src/a.php")]),
+        )
+        .expect("after-file hooks may read");
+
+        assert_eq!(before.before_analysis, sorted);
+        assert!(before.files.is_empty());
+        assert_eq!(after_file.files.into_values().collect::<Vec<_>>(), [sorted]);
+        assert!(after_file.before_analysis.is_empty());
+    }
+
+    /// An after-analysis hook reads for no analysis that could run again, and a read of a file the session does not
+    /// hold names nothing Mago analyzed, so either is refused.
+    #[test]
+    fn a_lifecycle_response_with_a_read_no_analysis_can_take_is_refused() {
+        let after_analysis =
+            decoded_reads(AFTER_ANALYSIS_REQUEST, &response_with_reads(AFTER_ANALYSIS_RESPONSE, &[None]));
+        let unknown = decoded_reads(
+            AFTER_FILE_ANALYSIS_REQUEST,
+            &response_with_reads(AFTER_FILE_ANALYSIS_RESPONSE, &[Some(b"src/b.php")]),
+        );
+
+        assert_eq!(
+            after_analysis.err().as_deref(),
+            Some("external analyzer protocol error: after-analysis hooks may not record codebase reads")
+        );
+        assert_eq!(
+            unknown.err().as_deref(),
+            Some("external analyzer protocol error: codebase reads name unknown file `src/b.php`")
+        );
     }
 }

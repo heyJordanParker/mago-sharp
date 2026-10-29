@@ -20,6 +20,10 @@ use Mago\Sdk\Analyzer\NodeAnalysisHook;
 use Mago\Sdk\Analyzer\Plugin;
 use Mago\Sdk\Analyzer\PluginDefinition;
 use Mago\Sdk\Analyzer\PluginRegistry;
+use Mago\Sdk\Analyzer\PropertyTarget;
+use Mago\Sdk\Analyzer\PropertyType;
+use Mago\Sdk\Analyzer\PropertyTypeProvider;
+use Mago\Sdk\Analyzer\PropertyTypeProviderContext;
 use Mago\Sdk\Analyzer\ReferenceOrigin;
 use Mago\Sdk\Analyzer\ReturnTypeProviderContext;
 use Mago\Sdk\Analyzer\Type;
@@ -285,8 +289,8 @@ final class ServerModelPlugin implements Plugin, MethodReturnTypeProvider
 /**
  * A node hook that keeps the classes with an `#[Owner]` method in a field, as an app's rule keeps a listing it read for
  * one file and answers every later file of the analysis from it. In a file marked `owners: Class` it reports at each
- * class declaration whether `Class` has such a method. Each report counts the hook's runs in its file in this worker,
- * so a test sees whether Mago ran it again.
+ * class declaration whether `Class` has such a method, and in the file it read the listing for that it read it there.
+ * Each report counts the hook's runs in its file in this worker, so a test sees whether Mago ran it again.
  *
  * @mago-expect lint:single-class-per-file
  */
@@ -332,6 +336,7 @@ final class ServerOwnersPlugin implements Plugin, BeforeAnalysisHook, NodeAnalys
             return;
         }
 
+        $file = $context->analysis->file;
         if ($this->owned === null) {
             $this->owned = [];
             foreach ($context->codebase->findMethods(
@@ -340,11 +345,16 @@ final class ServerOwnersPlugin implements Plugin, BeforeAnalysisHook, NodeAnalys
             ) as $method) {
                 $this->owned[strtolower($method->method->class)] = true;
             }
+
+            $context->report(
+                Level::Warning,
+                'owners-read',
+                Issue::new("`{$file}` read the owners.", $context->node->span),
+            );
         }
 
         $start = $marker + strlen('owners: ');
         $class = substr($contents, $start, strcspn($contents, " \t\n\v\f\r", $start));
-        $file = $context->analysis->file;
         $runs = ($this->runs[$file] ?? 0) + 1;
         $this->runs[$file] = $runs;
         $owned = array_key_exists(strtolower($class), $this->owned) ? 'is' : 'is not';
@@ -498,6 +508,59 @@ final class ServerPreparedPlugin implements Plugin, BeforeAnalysisHook, NodeAnal
     }
 }
 
+/**
+ * A rule that lists the methods with a `#[Relation]` attribute before the analysis, in a project that declares
+ * `App\Models\Line`, and keeps them in a field, and a property type provider of the same plugin that answers
+ * `App\Models\Order::$items` from that field alone, reading nothing itself: `int` while any class has a relation.
+ *
+ * @mago-expect lint:single-class-per-file
+ */
+final class ServerRelationsPlugin implements Plugin, BeforeAnalysisHook, PropertyTypeProvider
+{
+    /** @var array<string, true> */
+    private array $relations = [];
+
+    public function getDefinition(): PluginDefinition
+    {
+        return new PluginDefinition(
+            'server-relations',
+            'Server relations',
+            'A property type provider that answers from what its plugin read before the analysis.',
+        );
+    }
+
+    public function register(PluginRegistry $registry): void
+    {
+        $registry->registerBeforeAnalysisHook($this);
+        $registry->registerPropertyTypeProvider($this);
+    }
+
+    public function getTargets(): array
+    {
+        return [PropertyTarget::exact('App\\Models\\Order', 'items')];
+    }
+
+    public function beforeAnalysis(BeforeAnalysisContext $context): void
+    {
+        $this->relations = [];
+        if ($context->codebase->getClassLike('App\\Models\\Line') === null) {
+            return;
+        }
+
+        foreach ($context->codebase->findMethods(
+            withAnyAttribute: ['Relation'],
+            fields: MethodFields::NAMES,
+        ) as $found) {
+            $this->relations[strtolower("{$found->method->class}::{$found->method->member}")] = true;
+        }
+    }
+
+    public function getPropertyType(PropertyTypeProviderContext $context): ?PropertyType
+    {
+        return $this->relations === [] ? null : new PropertyType(readType: Type::int());
+    }
+}
+
 (new Worker(new Extension(
     identifier: 'mago/server-proof',
     name: 'Mago analysis server proof',
@@ -509,5 +572,6 @@ final class ServerPreparedPlugin implements Plugin, BeforeAnalysisHook, NodeAnal
         new ServerOwnersPlugin(),
         new ServerParentsPlugin(),
         new ServerPreparedPlugin(),
+        new ServerRelationsPlugin(),
     ],
 )))->run();

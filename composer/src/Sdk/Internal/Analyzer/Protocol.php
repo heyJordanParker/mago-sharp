@@ -150,7 +150,7 @@ final class Protocol
     private const TYPE_COMPARISON_BATCH_REQUEST = 16;
     private const MAGIC_U32 = 0x4D41_4E41;
     private const MAJOR = 1;
-    private const MINOR = 11;
+    private const MINOR = 12;
     public const VERSION_U32 = (self::MAJOR << 16) | self::MINOR;
     private const DESCRIBE_RESPONSE = 0x8001;
     private const RETURN_TYPE_RESPONSE = 0x8002;
@@ -914,8 +914,9 @@ final class Protocol
     /**
      * @param list<int|ReportedIssue|string|null> $reportedIssues
      * @param list<int|string|MemberIdentifier|ReferenceOrigin|ReferenceKind|null> $contributedReferences
-     * @param list<array{string|null, list<array{int, int, string}>}> $recordedReads each file's codebase reads, or
-     *   the before-analysis hooks', which name no file
+     * @param list<array{string|null, list<array{int, int, string}>, list<array{int, int, string}>}> $recordedReads
+     *   each file's codebase reads, or the before-analysis hooks', which name no file: the reads of plugins with no
+     *   provider, then those of plugins with one
      *
      * @mago-expect lint:halstead
      */
@@ -1003,12 +1004,12 @@ final class Protocol
         }
 
         $writer->writeCount($recordedReads);
-        foreach ($recordedReads as [$file, $reads]) {
+        foreach ($recordedReads as [$file, $issueReads, $codeReads]) {
             if ($requestKind !== self::BEFORE_ANALYSIS_REQUEST) {
                 $writer->writeBytes($file ?? throw new ProtocolException('A file analysis read names no file.'));
             }
 
-            self::writeCodebaseReads($writer, $reads);
+            self::writeCodebaseReads($writer, $issueReads, $codeReads);
         }
 
         return $writer->finish();
@@ -1018,24 +1019,33 @@ final class Protocol
      * Places the codebase reads a provider or issue filter made right after `$response`'s header,
      * so Mago reads them in one place whatever kind the response is.
      *
-     * @param list<array{int, int, string}> $reads
+     * @param list<array{int, int, string}> $issueReads
+     * @param list<array{int, int, string}> $codeReads
      */
-    public static function withCodebaseReads(string $response, array $reads): string
+    public static function withCodebaseReads(string $response, array $issueReads, array $codeReads): string
     {
         $writer = new PayloadWriter(substr($response, 0, 12));
-        self::writeCodebaseReads($writer, $reads);
+        self::writeCodebaseReads($writer, $issueReads, $codeReads);
 
         return $writer->finish() . substr($response, 12);
     }
 
-    /** @param list<array{int, int, string}> $reads */
-    private static function writeCodebaseReads(PayloadWriter $writer, array $reads): void
+    /**
+     * Writes the reads of plugins with no provider, which decide only the issues reported, then those of plugins with
+     * one, which can change the analyzed code.
+     *
+     * @param list<array{int, int, string}> $issueReads
+     * @param list<array{int, int, string}> $codeReads
+     */
+    private static function writeCodebaseReads(PayloadWriter $writer, array $issueReads, array $codeReads): void
     {
-        $writer->writeCount($reads);
-        foreach ($reads as [$operation, $argument, $name]) {
-            $writer->writeU8($operation);
-            $writer->writeU8($argument);
-            $writer->writeBytes($name);
+        foreach ([$issueReads, $codeReads] as $reads) {
+            $writer->writeCount($reads);
+            foreach ($reads as [$operation, $argument, $name]) {
+                $writer->writeU8($operation);
+                $writer->writeU8($argument);
+                $writer->writeBytes($name);
+            }
         }
     }
 
