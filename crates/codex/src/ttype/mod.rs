@@ -1642,6 +1642,19 @@ pub fn keys_hold_in_array(r#type: &TUnion, codebase: &CodebaseMetadata) -> bool 
     })
 }
 
+/// Whether a parameter of type `parameter_type` of a function PHP builds in takes a PHP# `Map` or `Set` as the object it
+/// is, spec section 12: one that also takes a class or an interface a `Map` and a `Set` both are, as `count`'s
+/// `Countable|array` takes a `Countable`, which PHP counts as it counts the array. The collection passes there as itself
+/// and crosses into no PHP array. Plain PHP code's own parameters take the array, as they do today.
+#[must_use]
+pub fn takes_the_table_itself(parameter_type: &TUnion, codebase: &CodebaseMetadata) -> bool {
+    parameter_type.types.iter().any(|atomic| {
+        matches!(atomic, TAtomic::Object(TObject::Named(named))
+            if codebase.is_instance_of(b"Sharp\\Map", named.name.as_bytes())
+                && codebase.is_instance_of(b"Sharp\\Set", named.name.as_bytes()))
+    })
+}
+
 /// The one collection `r#type` holds where a value of it holds a `Map` or a `Set`, at any depth.
 ///
 /// It is the PHP array plain PHP passes for the value, which the bridge turns back into the collection. Where the value

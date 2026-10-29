@@ -44,7 +44,6 @@ use crate::symbol::SymbolIdentifier;
 use crate::symbol::SymbolKind;
 use crate::symbol::Symbols;
 use crate::ttype::atomic::TAtomic;
-use crate::ttype::atomic::array::TArray;
 use crate::ttype::atomic::object::TObject;
 use crate::ttype::union::TUnion;
 use crate::visibility::Visibility;
@@ -1061,9 +1060,8 @@ impl CodebaseMetadata {
     /// The classes that declare a real member a PHP# extension member called `name` would hide on a value of type
     /// `receiver`, spec section 26, sorted: the member of that name that a class the value can be declares or
     /// inherits, a method or property, or one a docblock declares with `@method` or `@property`. `__call` and `__get`
-    /// declare none. A `Map`, `Set` or `Iterable` has the methods of `Sharp\Internal\MapMethods`,
-    /// `Sharp\Internal\SetMethods` or `Sharp\Internal\IterableMethods`, and a `List` has only the standard library's
-    /// extension members, spec section 12. A type parameter
+    /// declare none. An `Iterable` has the methods of `Sharp\Internal\IterableMethods`, and a `List`, `Map` or `Set` has
+    /// only the standard library's extension members, spec section 12. A type parameter
     /// shows its bound, so it has the members its bound's classes have. A class below the type competes with no
     /// extension, which is chosen from the type the code shows.
     #[must_use]
@@ -1085,8 +1083,6 @@ impl CodebaseMetadata {
             .flat_map(shown)
             .filter_map(|atomic| match atomic {
                 TAtomic::Object(object) => object.get_name(),
-                TAtomic::Array(TArray::Keyed(_)) => Some(word("Sharp\\Internal\\MapMethods")),
-                TAtomic::Array(TArray::Set(_)) => Some(word("Sharp\\Internal\\SetMethods")),
                 TAtomic::Iterable(_) => Some(word("Sharp\\Internal\\IterableMethods")),
                 _ => None,
             })

@@ -513,9 +513,9 @@ where
     context.codebase.get_function(name.as_bytes()).map_or(name, |m| m.original_name)
 }
 
-/// Returns the PHP# collection type, as in `Map<string, int>`, that `object` stands for when it is one of the classes
-/// [`sharp_collection_name`] names. The analyzer checks a method call on a `List`, `Map`, `Set` or `Iterable` against
-/// those classes, and a message names the type the code wrote instead.
+/// Returns the PHP# collection type, as in `Iterable<int>`, that `object` stands for when it is the class
+/// [`sharp_collection_name`] names. The analyzer checks a method call on an `Iterable` against that class, and a message
+/// names the type the code wrote instead.
 #[must_use]
 pub(crate) fn display_sharp_collection<A>(context: &Context<'_, '_, A>, object: &TObject) -> Option<String>
 where
@@ -1034,21 +1034,10 @@ pub(crate) fn sharp_code_class_name(
     sharp_import_alias(codebase, imported_names, scope, name).unwrap_or_else(|| short_name(name))
 }
 
-/// Returns `Map`, `Set` or `Iterable` when `object` is `Sharp\Internal\MapMethods`, `Sharp\Internal\SetMethods` or
-/// `Sharp\Internal\IterableMethods`.
+/// Returns `Iterable` when `object` is `Sharp\Internal\IterableMethods`.
 #[must_use]
 pub(crate) fn sharp_collection_name(object: &TObject) -> Option<&'static str> {
-    let name = object.get_name()?;
-
-    if name.as_bytes().eq_ignore_ascii_case(b"Sharp\\Internal\\MapMethods") {
-        Some("Map")
-    } else if name.as_bytes().eq_ignore_ascii_case(b"Sharp\\Internal\\SetMethods") {
-        Some("Set")
-    } else if name.as_bytes().eq_ignore_ascii_case(b"Sharp\\Internal\\IterableMethods") {
-        Some("Iterable")
-    } else {
-        None
-    }
+    object.get_name()?.as_bytes().eq_ignore_ascii_case(b"Sharp\\Internal\\IterableMethods").then_some("Iterable")
 }
 
 /// Returns `List`, `Map` or `Set` when `metadata`, a member of the static class `class`, is the standard library's member

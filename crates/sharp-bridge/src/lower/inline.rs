@@ -484,7 +484,7 @@ impl Lowering<'_, '_> {
             .enumerate()
             .map(|(position, value)| match value {
                 InlineReceiver::Expression(value) if position >= receivers => self.member_argument(value, element),
-                InlineReceiver::Expression(value) => self.expression(value),
+                InlineReceiver::Expression(value) => self.read_receiver(value),
                 InlineReceiver::Place(place) => place,
             })
             .collect();

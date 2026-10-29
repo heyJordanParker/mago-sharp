@@ -55,7 +55,6 @@ use crate::context::block::BlockContext;
 use crate::effects::Body;
 use crate::effects::ReadonlyCall;
 use crate::error::AnalysisError;
-use crate::expression::call::method_call::report_collection_method_on_object;
 use crate::expression::constant_access::field_storage;
 use crate::expression::instantiation::bare_generic_class;
 use crate::resolver::class_name::class_value_classes;
@@ -65,7 +64,6 @@ use crate::resolver::class_name::report_unknown_sharp_class;
 use crate::resolver::extension::Extension;
 use crate::resolver::extension::extension_methods;
 use crate::resolver::extension::is_collection_member;
-use crate::resolver::extension::is_list_member;
 use crate::resolver::extension::resolve_extension;
 use crate::resolver::property::DeclaredPropertyKind;
 use crate::resolver::property::get_localized_property_type;
@@ -201,9 +199,9 @@ pub struct MethodResolutionResult {
     pub called_properties: Vec<CalledProperty>,
     /// The static method of the extension a PHP# call runs, spec section 26, which leaves the other targets empty.
     pub extension: Option<MethodIdentifier>,
-    /// The standard library's member of a `List` a PHP# call runs when the receiver's value is one of its `List` parts,
-    /// the second, beside the other targets, which the receiver's other collections run, spec section 12.
-    pub list_member: Option<(MethodIdentifier, TUnion)>,
+    /// The standard library's member a PHP# call runs for each kind of collection the receiver may be, spec section 12,
+    /// with the receiver's parts of that kind, beside the other targets, which the receiver's objects run.
+    pub collection_members: Vec<(MethodIdentifier, TUnion)>,
     /// True when the receiver is a PHP# class value and the method is no member of `Class`, so the call is a static
     /// call on the classes the value holds, spec section 25, which leaves the other targets empty.
     pub class_value: bool,
@@ -250,15 +248,14 @@ where
 
     let resolved_selectors = resolve_member_selector(context, block_context, artifacts, selector, false)?;
 
-    // A `List`'s members are the kind's own, which the receiver's `List` parts reach below, where an empty `Map` takes
-    // its own methods.
+    // A collection's members are the kind's own, which the receiver's collection parts reach below, each kind its own.
     if context.dialect.is_sharp()
         && let ClassLikeMemberSelector::Identifier(name) = selector
         && let Some(object_type) = artifacts.get_expression_type(object).cloned()
         && let Some(extension) = resolve_extension(context, &object_type, name, MetadataFlags::EXTENSION_METHOD)
         && !matches!(extension, Extension::Member(method)
         if context.codebase.get_method_by_id(&method).is_some_and(|metadata| {
-            is_list_member(method.get_class_name(), metadata)
+            is_collection_member(method.get_class_name(), metadata)
         }))
     {
         match extension {
@@ -299,7 +296,7 @@ where
     }
 
     let mut missing: HashSet<(Word, Word)> = HashSet::default();
-    let mut list_parts = Vec::new();
+    let mut collection_parts = Vec::new();
     if let Some(object_type) = artifacts.get_expression_type(object) {
         let receivers = get_receiver_atomics(context, block_context, artifacts, object, object_type);
         let mut object_atomics = receivers.iter().map(|atomic| (atomic, atomic)).collect::<Vec<_>>();
@@ -337,19 +334,14 @@ where
                     // and a `List`'s is PHP's `\count`, which counts a `Map` and a `Set` too.
                     if array.is_empty() {
                         if method_names.iter().all(|name| name.as_bytes() == b"count") {
-                            list_parts.extend(get_list(get_never()).types.iter().cloned());
+                            collection_parts.extend(get_list(get_never()).types.iter().cloned());
                         }
                         continue;
                     }
-                    // A `List`'s members are the standard library's, which the receiver's `List` parts reach below.
-                    match get_collection_methods(array, context.codebase) {
-                        Some(methods) if !array.is_empty() => collection_methods = methods,
-                        _ => {
-                            list_parts.push(object_atomic.clone());
-                            continue;
-                        }
-                    }
-                    &collection_methods
+                    // A collection's members are the standard library's, which the receiver's collection parts reach
+                    // below.
+                    collection_parts.push(object_atomic.clone());
+                    continue;
                 }
                 TAtomic::Iterable(iterable) if context.dialect.is_sharp() => {
                     collection_methods = get_iterable_methods(iterable);
@@ -586,32 +578,34 @@ where
         report_call_on_non_object(context, &mixed, &mixed, object.span(), selector.span());
     }
 
-    // The receiver's `List` parts reach the standard library's members of a `List`, which are the `List`'s own, spec
-    // section 12, beside the members the receiver's other collections have, as `held.contains("tea")` on a
-    // `List<string>|Set<string>` runs the member of the kind the value holds.
-    // A value that may also be an object runs a different method of that name on each, so the call is refused.
-    if !list_parts.is_empty() && report_collection_method_on_object(context, artifacts, object, selector) {
-        result.has_invalid_target = true;
-    } else if !list_parts.is_empty()
-        && let ClassLikeMemberSelector::Identifier(name) = selector
-    {
-        let list = TUnion::from_vec(list_parts);
-        match resolve_extension(context, &list, name, MetadataFlags::EXTENSION_METHOD) {
-            Some(Extension::Member(method))
-                if context
-                    .codebase
-                    .get_method_by_id(&method)
-                    .is_some_and(|metadata| is_collection_member(method.get_class_name(), metadata)) =>
-            {
-                result.list_member = Some((method, list));
-            }
-            // A refusal the resolution reported stands alone.
-            resolved => {
-                if !matches!(resolved, Some(Extension::Refused)) {
-                    report_non_existent_list_member(context, &list, object.span(), selector.span(), word(name.value));
-                    result.lacks_sharp_method = true;
+    // Each kind of collection among the receiver's parts reaches the standard library's members of that kind, which are
+    // its own, spec section 12, beside the methods its objects have, as `held.contains("tea")` on a
+    // `List<string>|Set<string>|Box` runs the member or the method of the kind the value holds.
+    if let ClassLikeMemberSelector::Identifier(name) = selector {
+        for kind in collection_kinds(collection_parts) {
+            match resolve_extension(context, &kind, name, MetadataFlags::EXTENSION_METHOD) {
+                Some(Extension::Member(method))
+                    if context
+                        .codebase
+                        .get_method_by_id(&method)
+                        .is_some_and(|metadata| is_collection_member(method.get_class_name(), metadata)) =>
+                {
+                    result.collection_members.push((method, kind));
                 }
-                result.has_invalid_target = true;
+                // A refusal the resolution reported stands alone.
+                resolved => {
+                    if !matches!(resolved, Some(Extension::Refused)) {
+                        report_non_existent_collection_member(
+                            context,
+                            &kind,
+                            object.span(),
+                            selector.span(),
+                            word(name.value),
+                        );
+                        result.lacks_sharp_method = true;
+                    }
+                    result.has_invalid_target = true;
+                }
             }
         }
     }
@@ -1612,9 +1606,9 @@ where
         .collect()
 }
 
-/// The classes whose methods the PHP# value `object` has, spec section 12, one for each collection its methods
-/// resolve on, as [`get_receiver_atomics`] finds them. None unless every type of it but `null` is a `List`, `Map`, `Set`
-/// or `Iterable`. A tuple's members are its named elements, spec section 30, so a tuple has none.
+/// The classes whose methods the PHP# value `object` has, spec section 12, one for each `Iterable` its methods resolve
+/// on, as [`get_receiver_atomics`] finds them. None unless every type of it but `null` is an `Iterable`. A `List`'s,
+/// `Map`'s and `Set`'s members are the standard library's, and a tuple's are its named elements, spec section 30.
 pub(crate) fn get_receiver_collections<'arena, A>(
     context: &Context<'_, 'arena, A>,
     block_context: &BlockContext<'_>,
@@ -1625,17 +1619,11 @@ where
     A: Arena,
 {
     let object_type = artifacts.get_expression_type(object)?;
-    let is_tuple =
-        |atomic: &TAtomic| matches!(atomic, TAtomic::Array(TArray::List(list)) if list.tuple_elements().is_some());
-    if object_type.types.iter().any(is_tuple) {
-        return None;
-    }
 
     get_receiver_atomics(context, block_context, artifacts, object, object_type)
         .iter()
         .filter(|atomic| !atomic.is_null())
         .map(|atomic| match atomic {
-            TAtomic::Array(array) if !array.is_empty() => get_collection_methods(array, context.codebase),
             TAtomic::Iterable(iterable) => Some(get_iterable_methods(iterable)),
             _ => None,
         })
@@ -1643,23 +1631,20 @@ where
         .filter(|collections| !collections.is_empty())
 }
 
-/// The class whose methods a PHP# `Map` or `Set` has, as spec section 12 writes them: a `Map<K, V>` is called as
-/// `Sharp\Internal\MapMethods<K, V>` and a `Set<T>` as `Sharp\Internal\SetMethods<T>`, so each method is typed by the
-/// elements. A PHP# element type is never narrower than `int` or `string`, so a literal the analyzer knows widens to it.
-/// None for a `List`, whose members are the standard library's `ListMembers`, spec section 26.
-fn get_collection_methods(array: &TArray, codebase: &CodebaseMetadata) -> Option<TObject> {
-    let (mut key, mut value) = get_array_parameters(array, codebase);
-    key.widen_scalars();
-    value.widen_scalars();
-    Some(TObject::Named(match array {
-        TArray::List(_) => return None,
-        TArray::Keyed(_) => {
-            TNamedObject::new_with_type_parameters(word("Sharp\\Internal\\MapMethods"), Some(vec![key, value]))
-        }
-        TArray::Set(_) => {
-            TNamedObject::new_with_type_parameters(word("Sharp\\Internal\\SetMethods"), Some(vec![value]))
-        }
-    }))
+/// The receiver's collection `parts`, one union for each kind among them, `List`, `Map` and `Set` in that order, which
+/// reaches that kind's members.
+fn collection_kinds(parts: Vec<TAtomic>) -> Vec<TUnion> {
+    let kind = |atomic: &TAtomic| match atomic {
+        TAtomic::Array(TArray::Keyed(_)) => 1,
+        TAtomic::Array(TArray::Set(_)) => 2,
+        _ => 0,
+    };
+    let mut kinds: [Vec<TAtomic>; 3] = Default::default();
+    for part in parts {
+        kinds[kind(&part)].push(part);
+    }
+
+    kinds.into_iter().filter(|parts| !parts.is_empty()).map(TUnion::from_vec).collect()
 }
 
 /// The class whose lazy operations a PHP# `Iterable<T>` has, spec section 12: it is called as
@@ -1707,28 +1692,33 @@ fn scalar_name(atomic: &TAtomic) -> Option<&'static str> {
     })
 }
 
-/// Reports a member the `List` parts `list` of a receiver lack, naming the members a `List` has, which the standard
-/// library's `ListMembers` declares, as a `Map`'s error names its methods.
-fn report_non_existent_list_member<A>(
+/// Reports a member the parts `kind` of a receiver, of one kind of collection, lack, naming the members that kind has,
+/// which the standard library declares.
+fn report_non_existent_collection_member<A>(
     context: &mut Context<'_, '_, A>,
-    list: &TUnion,
+    kind: &TUnion,
     obj_span: Span,
     selector_span: Span,
     method_name: Word,
 ) where
     A: Arena,
 {
-    let collection = display_type(context, list);
-    // A member of a `List` of narrower elements, as a `List<int>`'s `max()`, names the elements it needs.
+    let collection = display_type(context, kind);
+    // A member of the kind's collections of narrower elements, as a `List<int>`'s `max()`, names the elements it needs.
     let codebase = context.codebase;
+    let receiver_kind = kind.types.iter().find_map(|atomic| match atomic {
+        TAtomic::Array(array) => Some(std::mem::discriminant(array)),
+        _ => None,
+    });
     let needed = codebase.extensions.get(&ascii_lowercase_word(method_name.as_bytes())).and_then(|members| {
         members.iter().find_map(|(_, member)| {
             let metadata = codebase.get_method_by_id(member)?;
             let array = metadata.parameters.first()?.get_type_metadata()?.type_union.get_single_array()?;
 
-            is_list_member(member.get_class_name(), metadata)
-                .then(|| get_array_parameters(array, codebase).1)
-                .filter(|elements| !elements.has_template_types())
+            (is_collection_member(member.get_class_name(), metadata)
+                && receiver_kind == Some(std::mem::discriminant(array)))
+            .then(|| get_array_parameters(array, codebase).1)
+            .filter(|elements| !elements.has_template_types())
         })
     });
     if let Some(needed) = needed {
@@ -1743,7 +1733,7 @@ fn report_non_existent_list_member<A>(
 
         return;
     }
-    let methods = extension_methods(context, list);
+    let methods = extension_methods(context, kind);
 
     context.collector.report_with_code(
         IssueCode::NonExistentMethod,
@@ -1895,9 +1885,8 @@ pub(crate) fn report_non_existent_method<A>(
     context.collector.report_with_code(IssueCode::NonExistentMethod, issue);
 }
 
-/// Reports a method a PHP# `Map`, `Set` or `Iterable` does not have, naming the collection type the code wrote and the
-/// methods `classname`, its `Sharp\Internal\MapMethods`, `Sharp\Internal\SetMethods` or
-/// `Sharp\Internal\IterableMethods`, gives it.
+/// Reports a method a PHP# `Iterable` does not have, naming the collection type the code wrote and the methods
+/// `classname`, its `Sharp\Internal\IterableMethods`, gives it.
 fn report_non_existent_collection_method<A>(
     context: &mut Context<'_, '_, A>,
     obj_span: Span,
@@ -1920,7 +1909,6 @@ fn report_non_existent_collection_method<A>(
         })
         .unwrap_or_default();
     methods.sort();
-    let article = if collection.starts_with("Iterable") { "An" } else { "A" };
 
     context.collector.report_with_code(
         IssueCode::NonExistentMethod,
@@ -1929,7 +1917,7 @@ fn report_non_existent_collection_method<A>(
             .with_annotation(
                 Annotation::secondary(obj_span).with_message(format!("This expression has type `{collection}`")),
             )
-            .with_help(format!("{article} `{collection}` has the methods {}.", methods.join(", "))),
+            .with_help(format!("An `{collection}` has the methods {}.", methods.join(", "))),
     );
 }
 

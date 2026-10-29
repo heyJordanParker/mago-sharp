@@ -100,12 +100,17 @@ const STANDARD_LIBRARY: &str = "vendor/heyjordanparker/php-sharp-composer/";
 pub static PRELUDE: LazyLock<Prelude> = LazyLock::new(Prelude::build);
 static PLUGIN_REGISTRY: LazyLock<PluginRegistry> = LazyLock::new(PluginRegistry::with_library_providers);
 
-/// The inline forms of the members of a `List`, which every project's lowering inlines, as `mago compile` does.
-static LIST_MEMBER_FORMS: LazyLock<InlineForms> = LazyLock::new(|| forms_of(&[effect_classes::LIST_MEMBERS]));
+/// The members of a `List`, a `Map` and a `Set`, whose inline forms every project's lowering inlines, as `mago compile`
+/// does.
+const COLLECTION_MEMBERS: [(&str, &str); 3] =
+    [effect_classes::LIST_MEMBERS, effect_classes::MAP_MEMBERS, effect_classes::SET_MEMBERS];
+
+/// The inline forms of [`COLLECTION_MEMBERS`].
+static COLLECTION_MEMBER_FORMS: LazyLock<InlineForms> = LazyLock::new(|| forms_of(&COLLECTION_MEMBERS));
 
 /// Parses `code` as the PHP# file at `path`, runs the semantic checks, scans it with the prelude, the standard
 /// library's effect classes and the `library` files, each a path and its code, analyzes it and passes the result to
-/// `check`, inlining the members of a `List`. Returns what `then` returns for the checked program, or the refusal as
+/// `check`, inlining the members of a collection. Returns what `then` returns for the checked program, or the refusal as
 /// `line:column parse error: message` or `line:column compile error: message` lines.
 pub fn checked<R>(
     path: &str,
@@ -113,19 +118,19 @@ pub fn checked<R>(
     library: &[(&str, &str)],
     then: impl FnOnce(&CheckedProgram<'_>) -> R,
 ) -> Result<R, Vec<String>> {
-    checked_inlining(path, code, library, &LIST_MEMBER_FORMS, then)
+    checked_inlining(path, code, library, &COLLECTION_MEMBER_FORMS, then)
 }
 
 /// The inline forms of the standard library files in `library`, each checked alone first, as the orchestrator lowers
-/// the library before the files that call it, and with the members of a `List`.
+/// the library before the files that call it, and with the members of a collection.
 pub fn library_forms(library: &[(&str, &str)]) -> InlineForms {
-    let with_list_members: Vec<(&str, &str)> = library
+    let with_collection_members: Vec<(&str, &str)> = library
         .iter()
         .copied()
-        .chain(std::iter::once(effect_classes::LIST_MEMBERS).filter(|members| !library.contains(members)))
+        .chain(COLLECTION_MEMBERS.into_iter().filter(|members| !library.contains(members)))
         .collect();
 
-    forms_of(&with_list_members)
+    forms_of(&with_collection_members)
 }
 
 /// The inline forms of the standard library files in `library`, each checked alone first.

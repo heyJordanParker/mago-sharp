@@ -9,7 +9,6 @@ use mago_codex::ttype::atomic::array::keyed::TKeyedArray;
 use mago_codex::ttype::combiner::CombinerOptions;
 use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::get_list;
-use mago_codex::ttype::get_map_entry;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_php_received_type;
 use mago_codex::ttype::get_sharp_received_type;
@@ -56,14 +55,8 @@ where
     }
 
     let made = made_collection(&invocation.target).filter(|_| context.dialect.is_sharp());
-    if matches!(made, Some(TArray::List(_)))
-        || (context.dialect.is_sharp() && is_method(&invocation.target, b"Sharp\\Internal\\SetMethods", b"filter"))
-    {
+    if matches!(made, Some(TArray::List(_))) {
         return Ok(fetch_set_return_type(context, invocation, template_result, parameters));
-    }
-
-    if context.dialect.is_sharp() && is_method(&invocation.target, b"Sharp\\Internal\\MapMethods", b"toList") {
-        return Ok(fetch_entries_return_type(context, invocation, template_result, parameters));
     }
 
     // `sortedBy` orders by the key its function returns, and `groupBy` and `associateBy` key the `Map` they return by it.
@@ -197,9 +190,9 @@ where
     Some(get_list(element_type))
 }
 
-/// Gives a PHP# `Set<T>`'s `filter` and an engine function that makes a `Set`, as [`made_collection`] says, as the
-/// `Sharp\Internal\toSet` a `List<T>`'s `toSet` calls, their type `Set<T>`. A docblock writes no `Set`, so they declare
-/// a list of the elements, and the call holds them as a `Set`.
+/// Gives an engine function that makes a `Set`, as [`made_collection`] says, as the `Sharp\Internal\toSet` a `List<T>`'s
+/// `toSet` calls and the `Sharp\Internal\filterElements` a `Set<T>`'s `filter` calls, the type `Set<T>`. A docblock
+/// writes no `Set`, so they declare a list of the elements, and the call holds them as a `Set`.
 fn fetch_set_return_type<A>(
     context: &Context<'_, '_, A>,
     invocation: &Invocation<'_, '_, '_>,
@@ -252,25 +245,6 @@ fn made_collection<'target>(target: &InvocationTarget<'target>) -> Option<&'targ
 /// The prelude attribute that marks the parameter of an engine function that makes a `Map` or a `Set`.
 const TAKES_RESULT_TYPE: &[u8] = b"Sharp\\Internal\\TakesResultType";
 
-/// Gives a PHP# `Map<K, V>`'s `toList` its type `List<[K, V]>`, spec section 12, as Kotlin's gives pairs. A docblock
-/// writes no tuple, so `Sharp\Internal\MapMethods::toList` declares the map, and the call holds each entry as a tuple.
-fn fetch_entries_return_type<A>(
-    context: &Context<'_, '_, A>,
-    invocation: &Invocation<'_, '_, '_>,
-    template_result: &TemplateResult,
-    parameters: &WordMap<TUnion>,
-) -> TUnion
-where
-    A: Arena,
-{
-    let declared = fetch_declared_invocation_return_type(context, invocation, template_result, parameters);
-    let (key_type, value_type) = declared
-        .get_single_array()
-        .map_or_else(|| (get_mixed(), get_mixed()), |array| get_array_parameters(array, context.codebase));
-
-    get_list(get_map_entry(key_type, value_type))
-}
-
 /// Whether `target` is a PHP# `List`'s or `Map`'s `groupBy` or `associateBy`, or an engine function that makes a `Map`
 /// keyed by one of its type parameters, as the `Sharp\Internal\groupBy` a `List`'s runs, which key a `Map` by what their
 /// function returns. A `.sharp` call checks that key by spec sections 10 and 12's rule, where a backed enum or a struct
@@ -283,16 +257,13 @@ pub(crate) fn keys_a_map_by_its_function(target: &InvocationTarget<'_>) -> bool 
 }
 
 /// Whether `target` is the method `method` of a PHP# `List`, `Map` or `Set`: the standard library's member, spec section
-/// 12, or a method of the prelude's `Sharp\Internal\MapMethods` or `Sharp\Internal\SetMethods`.
+/// 12.
 fn is_collection_method(target: &InvocationTarget<'_>, method: &[u8]) -> bool {
-    [b"Sharp\\Internal\\MapMethods".as_slice(), b"Sharp\\Internal\\SetMethods"]
-        .into_iter()
-        .any(|class| is_method(target, class, method))
-        || matches!(
-            (target.get_function_like_identifier(), target.get_function_like_metadata()),
-            (Some(FunctionLikeIdentifier::Method(class, called)), Some(metadata))
-                if called.as_bytes().eq_ignore_ascii_case(method) && is_collection_member(*class, metadata)
-        )
+    matches!(
+        (target.get_function_like_identifier(), target.get_function_like_metadata()),
+        (Some(FunctionLikeIdentifier::Method(class, called)), Some(metadata))
+            if called.as_bytes().eq_ignore_ascii_case(method) && is_collection_member(*class, metadata)
+    )
 }
 
 /// Whether `target` is the method `method` of the class `class`.

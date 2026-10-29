@@ -94,14 +94,16 @@ use crate::utils::report_dropped_readonly;
 
 /// Whether `target`'s parameter types are ones PHP# wrote, which PHP# literal rules judge: the parameter of a PHP#
 /// method or lambda, whatever class the call goes through, of a function value whose signature PHP# wrote, or of a
-/// `Sharp\` collection method, which PHP# declares as a plain PHP stub only to carry its templates. Any other target is
-/// plain PHP, whose `array` parameter a `Map` crosses into.
+/// `Sharp\` method or engine function, which PHP# declares as a plain PHP stub only to carry its templates and which
+/// takes a `Map` or a `Set` as the object it is. Any other target is plain PHP, whose `array` parameter a `Map` crosses
+/// into.
 fn takes_php_sharp_types(target: &InvocationTarget<'_>) -> bool {
     matches!(target, InvocationTarget::Callable { signature, .. } if signature.effects.is_some())
         || target.get_function_like_metadata().is_some_and(|function| function.flags.is_sharp())
         || matches!(
             target.get_function_like_identifier(),
-            Some(FunctionLikeIdentifier::Method(class, _)) if is_prelude_stub(*class)
+            Some(FunctionLikeIdentifier::Method(name, _) | FunctionLikeIdentifier::Function(name))
+                if is_prelude_stub(*name)
         )
 }
 
@@ -985,9 +987,12 @@ where
 
             if !check_is_deferred_to_partial_invocation && !is_reported_by_its_bound {
                 // Only a type PHP# wrote is judged by PHP# literal rules. A plain PHP method's or closure's parameter
-                // takes either literal, whatever its docblock says.
+                // takes either literal, whatever its docblock says. An extension's receiver chose the member by its
+                // kind already, each part of it the member of its own kind.
+                let is_receiver = parameter_offset == 0
+                    && matches!(invocation.arguments_source, InvocationArgumentsSource::ExtensionReceiver(..));
                 let takes_sharp_types = takes_php_sharp_types(&invocation.target);
-                if takes_sharp_types {
+                if takes_sharp_types && !is_receiver {
                     check_sharp_literal_kind(
                         context,
                         Some(block_context),

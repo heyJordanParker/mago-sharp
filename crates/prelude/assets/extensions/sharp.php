@@ -349,276 +349,6 @@ final class LeanFunction
 }
 
 /**
- * The methods a PHP# `Map<K, V>` has. The analyzer checks a call on a map against them, and the engine runs each on
- * `Sharp\Collection`, over the `Sharp\Map` object. A method without `@mutation-free` changes the map.
- *
- * @template K of array-key
- * @template V
- */
-final class MapMethods
-{
-    /**
-     * Removes the entry of `$key`, if the map has one.
-     *
-     * @param K $key
-     *
-     * @return bool whether the map had an entry for `$key`.
-     */
-    public function remove(int|string $key): bool {}
-
-    /**
-     * @param K $key
-     *
-     * @return V|null the value of `$key`, or null when the map has no entry for it.
-     *
-     * @mutation-free
-     */
-    public function get(int|string $key): mixed {}
-
-    /**
-     * @param K $key
-     *
-     * @return bool whether the map has an entry for `$key`, which may hold null.
-     *
-     * @mutation-free
-     */
-    public function has(int|string $key): bool {}
-
-    /**
-     * @return list<K> the keys, in order.
-     *
-     * @mutation-free
-     */
-    public function keys(): array {}
-
-    /**
-     * @return list<V> the values, in the order of their keys.
-     *
-     * @mutation-free
-     */
-    public function values(): array {}
-
-    /**
-     * The analyzer types the result `List<[K, V]>`, which a docblock cannot write.
-     *
-     * @return array<K, V> the entries, each the tuple `[key, value]`, in order.
-     *
-     * @mutation-free
-     */
-    public function toList(): array {}
-
-    /**
-     * @return int how many entries the map holds.
-     *
-     * @mutation-free
-     */
-    public function count(): int {}
-
-    /**
-     * @param \Closure(V): bool $predicate
-     *
-     * @return array<K, V> the entries whose values `$predicate` keeps, with their keys.
-     *
-     * @mutation-free
-     */
-    public function filter(\Closure $predicate): array {}
-
-    /**
-     * @template R
-     *
-     * @param \Closure(V): R $transform
-     *
-     * @return list<R> what `$transform` gives for each value, in order.
-     *
-     * @mutation-free
-     */
-    public function map(\Closure $transform): array {}
-
-    /**
-     * @template R of int|float
-     *
-     * @param \Closure(V): R $selector
-     *
-     * @return R the sum of what `$selector` gives for each value, 0 for an empty map.
-     *
-     * @mutation-free
-     */
-    public function sumOf(\Closure $selector): int|float {}
-
-    /**
-     * @param \Closure(V): bool $predicate
-     *
-     * @return V the first value `$predicate` keeps.
-     *
-     * @throws \OutOfRangeException when `$predicate` keeps no value.
-     *
-     * @mutation-free
-     */
-    public function first(\Closure $predicate): mixed {}
-
-    /**
-     * @param \Closure(V): bool $predicate
-     *
-     * @return bool whether `$predicate` keeps any value.
-     *
-     * @mutation-free
-     */
-    public function any(\Closure $predicate): bool {}
-
-    /**
-     * @template G of array-key
-     *
-     * @param \Closure(V): G $key
-     *
-     * @return array<G, list<V>> the values under the key `$key` gives each, in order.
-     *
-     * @mutation-free
-     */
-    public function groupBy(\Closure $key): array {}
-
-    /**
-     * @template G of array-key
-     *
-     * @param \Closure(V): G $key
-     *
-     * @return array<G, V> each value under the key `$key` gives it, the last one where two share a key.
-     *
-     * @mutation-free
-     */
-    public function associateBy(\Closure $key): array {}
-
-    /**
-     * @template R
-     *
-     * @param \Closure(V): R $selector
-     *
-     * @return list<V> the values in ascending order of what `$selector` gives, equal ones in their order.
-     *
-     * @mutation-free
-     */
-    public function sortedBy(\Closure $selector): array {}
-}
-
-/**
- * The methods a PHP# `Set<T>` has. The analyzer checks a call on a set against them, and the engine runs each on
- * `Sharp\Collection`, over the `Sharp\Set` object. A method without `@mutation-free` changes the set.
- *
- * @template T
- */
-final class SetMethods
-{
-    /**
-     * Adds `$value`, if the set does not hold it.
-     *
-     * @param T $value
-     *
-     * @return bool whether the set did not hold `$value`.
-     */
-    public function add(mixed $value): bool {}
-
-    /**
-     * Removes `$value`, if the set holds it.
-     *
-     * @param T $value
-     *
-     * @return bool whether the set held `$value`.
-     */
-    public function remove(mixed $value): bool {}
-
-    /**
-     * Removes every element.
-     */
-    public function clear(): void {}
-
-    /**
-     * @param T $value
-     *
-     * @return bool whether the set holds `$value`.
-     *
-     * @mutation-free
-     */
-    public function contains(mixed $value): bool {}
-
-    /**
-     * @return int how many elements the set holds.
-     *
-     * @mutation-free
-     */
-    public function count(): int {}
-
-    /**
-     * @return list<T> the elements, in the order they were added.
-     *
-     * @mutation-free
-     */
-    public function toList(): array {}
-
-    /**
-     * The analyzer gives a call the type `Set<T>`, which a docblock cannot write.
-     *
-     * @param \Closure(T): bool $predicate
-     *
-     * @return array<array-key, T> the set of the elements `$predicate` keeps, in order.
-     *
-     * @mutation-free
-     */
-    public function filter(\Closure $predicate): array {}
-
-    /**
-     * @template R
-     *
-     * @param \Closure(T): R $transform
-     *
-     * @return list<R> what `$transform` gives for each element, in order.
-     *
-     * @mutation-free
-     */
-    public function map(\Closure $transform): array {}
-
-    /**
-     * @template R of int|float
-     *
-     * @param \Closure(T): R $selector
-     *
-     * @return R the sum of what `$selector` gives for each element, 0 for an empty set.
-     *
-     * @mutation-free
-     */
-    public function sumOf(\Closure $selector): int|float {}
-
-    /**
-     * @param \Closure(T): bool $predicate
-     *
-     * @return T the first element `$predicate` keeps.
-     *
-     * @throws \OutOfRangeException when `$predicate` keeps no element.
-     *
-     * @mutation-free
-     */
-    public function first(\Closure $predicate): mixed {}
-
-    /**
-     * @param \Closure(T): bool $predicate
-     *
-     * @return bool whether `$predicate` keeps any element.
-     *
-     * @mutation-free
-     */
-    public function any(\Closure $predicate): bool {}
-
-    /**
-     * @template R
-     *
-     * @param \Closure(T): R $selector
-     *
-     * @return list<T> the elements in ascending order of what `$selector` gives, equal ones in their order.
-     *
-     * @mutation-free
-     */
-    public function sortedBy(\Closure $selector): array {}
-}
-
-/**
  * The lazy operations of a PHP# `Iterable<T>`. The analyzer checks a call on an iterable against them, and the engine
  * runs them on `Sharp\Sequence`. `filter`, `map` and `take` read nothing until `toList()` or a loop reads the result.
  *
@@ -695,9 +425,11 @@ function listenersFor(object $event): array {}
 function runScoped(\Closure $body): mixed {}
 
 /*
- * The engine functions the standard library's `List` members run, each with the list first. A
- * function that changes the list takes it by reference, from the place a `ref` receiver passes, and only the standard
- * library reaches `Sharp.Internal`.
+ * The engine functions the standard library's `List`, `Map` and `Set` members run, each with the collection first. A
+ * function that changes the collection takes it by reference, from the place a `ref` receiver passes, and only the
+ * standard library reaches `Sharp.Internal`. A function that takes `$collection` takes any of the three, a `Map`'s
+ * values and a `Set`'s elements as its elements, and one that takes `$table` takes a `Map` or a `Set`, whose elements
+ * are its table's keys.
  */
 
 /**
@@ -777,20 +509,25 @@ function removeLast(array &$list): mixed {}
 /**
  * Removes every element.
  *
- * @param list<mixed> $list
+ * @template C of array
+ *
+ * @param C $collection
+ * @param-out C $collection
  */
-function clear(array &$list): void {}
+function clear(array|\Sharp\Map|\Sharp\Set &$collection): void {}
 
 /**
+ * @template K
  * @template T
  *
- * @param list<T> $list
+ * @param iterable<K, T> $collection
+ * @param K $key
  *
- * @return T|null the element at `$index`, or null when `$index` is not an index of the list.
+ * @return T|null the element at `$key`, a `List`'s index or a `Map`'s key, or null when the collection has none.
  *
  * @pure
  */
-function get(array $list, int $index): mixed {}
+function get(array|\Sharp\Map $collection, mixed $key): mixed {}
 
 /**
  * @template T
@@ -860,15 +597,16 @@ function toSet(array $list, #[TakesResultType] ?string $type = null): array {}
 function filter(array $list, \Closure $predicate): array {}
 
 /**
+ * @template K
  * @template T
  * @template R
  *
- * @param list<T> $list
+ * @param iterable<K, T> $collection
  * @param \Closure(T): R $transform
  *
  * @return list<R> what `$transform` gives for each element, in order.
  */
-function map(array $list, \Closure $transform): array {}
+function map(array|\Sharp\Map|\Sharp\Set $collection, \Closure $transform): array {}
 
 /**
  * @template T
@@ -882,67 +620,162 @@ function map(array $list, \Closure $transform): array {}
 function flatMap(array $list, \Closure $transform): array {}
 
 /**
+ * @template K
  * @template T
  * @template R of int|float
  *
- * @param list<T> $list
+ * @param iterable<K, T> $collection
  * @param \Closure(T): R $selector
  *
- * @return R the sum of what `$selector` gives for each element, 0 for an empty list.
+ * @return R the sum of what `$selector` gives for each element, 0 for an empty collection.
  */
-function sumOf(array $list, \Closure $selector): int|float {}
+function sumOf(array|\Sharp\Map|\Sharp\Set $collection, \Closure $selector): int|float {}
 
 /**
+ * @template K
  * @template T
  *
- * @param list<T> $list
+ * @param iterable<K, T> $collection
  * @param \Closure(T): bool $predicate
  *
  * @return T the first element `$predicate` keeps.
  *
  * @throws \OutOfRangeException when `$predicate` keeps no element.
  */
-function first(array $list, \Closure $predicate): mixed {}
+function first(array|\Sharp\Map|\Sharp\Set $collection, \Closure $predicate): mixed {}
 
 /**
+ * @template K
  * @template T
  *
- * @param list<T> $list
+ * @param iterable<K, T> $collection
  * @param \Closure(T): bool $predicate
  *
  * @return bool whether `$predicate` keeps any element.
  */
-function any(array $list, \Closure $predicate): bool {}
+function any(array|\Sharp\Map|\Sharp\Set $collection, \Closure $predicate): bool {}
 
 /**
+ * @template K
  * @template T
  * @template G of array-key
  *
- * @param list<T> $list
+ * @param iterable<K, T> $collection
  * @param \Closure(T): G $key
  *
  * @return array<G, list<T>> the elements under the key `$key` gives each, in order.
  */
-function groupBy(array $list, \Closure $key, #[TakesResultType] ?string $type = null): array {}
+function groupBy(array|\Sharp\Map|\Sharp\Set $collection, \Closure $key, #[TakesResultType] ?string $type = null): array {}
 
 /**
+ * @template K
  * @template T
  * @template G of array-key
  *
- * @param list<T> $list
+ * @param iterable<K, T> $collection
  * @param \Closure(T): G $key
  *
  * @return array<G, T> each element under the key `$key` gives it, the last one where two share a key.
  */
-function associateBy(array $list, \Closure $key, #[TakesResultType] ?string $type = null): array {}
+function associateBy(array|\Sharp\Map|\Sharp\Set $collection, \Closure $key, #[TakesResultType] ?string $type = null): array {}
 
 /**
+ * @template K
  * @template T
  * @template R
  *
- * @param list<T> $list
+ * @param iterable<K, T> $collection
  * @param \Closure(T): R $selector
  *
  * @return list<T> the elements in ascending order of what `$selector` gives, equal ones in their order.
  */
-function sortedBy(array $list, \Closure $selector, #[TakesKeyOrder] ?\Closure $comparison = null): array {}
+function sortedBy(array|\Sharp\Map|\Sharp\Set $collection, \Closure $selector, #[TakesKeyOrder] ?\Closure $comparison = null): array {}
+
+/**
+ * @template K
+ * @template V
+ *
+ * @param iterable<K, V> $table
+ * @param K $key
+ *
+ * @return bool whether the table has an entry for `$key`, which may hold null.
+ */
+function containsKey(\Sharp\Map|\Sharp\Set $table, mixed $key): bool {}
+
+/**
+ * Removes the entry of `$key`, if the table has one.
+ *
+ * @template C of iterable
+ *
+ * @param C $table
+ * @param-out C $table
+ *
+ * @return bool whether the table had an entry for `$key`.
+ */
+function removeKey(\Sharp\Map|\Sharp\Set &$table, mixed $key): bool {}
+
+/**
+ * Adds `$key`, if the table does not hold it.
+ *
+ * @template C of iterable
+ *
+ * @param C $table
+ * @param-out C $table
+ *
+ * @return bool whether the table did not hold `$key`.
+ */
+function addKey(\Sharp\Set &$table, mixed $key): bool {}
+
+/**
+ * @template K
+ * @template V
+ *
+ * @param iterable<K, V> $table
+ *
+ * @return list<K> the keys, in order, which are a `Set`'s elements.
+ */
+function keys(\Sharp\Map|\Sharp\Set $table): array {}
+
+/**
+ * @template K
+ * @template V
+ *
+ * @param iterable<K, V> $map
+ *
+ * @return list<V> the values, in the order of their keys.
+ */
+function values(\Sharp\Map $map): array {}
+
+/**
+ * @template K
+ * @template V
+ *
+ * @param iterable<K, V> $map
+ *
+ * @return list<list{K, V}> the entries, each the tuple `[key, value]`, in order.
+ */
+function pairs(\Sharp\Map $map): array {}
+
+/**
+ * @template K
+ * @template V
+ *
+ * @param iterable<K, V> $map
+ * @param \Closure(V): bool $predicate
+ *
+ * @return array<K, V> the entries whose values `$predicate` keeps, with their keys.
+ */
+function filterEntries(\Sharp\Map $map, \Closure $predicate): \Sharp\Map {}
+
+/**
+ * The analyzer types the result `Set<T>`, which a docblock cannot write.
+ *
+ * @template K
+ * @template T
+ *
+ * @param iterable<K, T> $set
+ * @param \Closure(T): bool $predicate
+ *
+ * @return list<T> the set of the elements `$predicate` keeps, in order.
+ */
+function filterElements(\Sharp\Set $set, \Closure $predicate, #[TakesResultType] ?string $type = null): \Sharp\Set {}

@@ -4,7 +4,7 @@
 
 /// The class-likes declared directly in `Sharp`: each public one of the standard library, and each one of the
 /// prelude, which the engine declares. Sorted.
-pub(crate) const SHARP_CLASSES: [&str; 24] = [
+pub(crate) const SHARP_CLASSES: [&str; 26] = [
     "Sharp\\Behavior",
     "Sharp\\Bool",
     "Sharp\\Class",
@@ -23,12 +23,14 @@ pub(crate) const SHARP_CLASSES: [&str; 24] = [
     "Sharp\\ListMembers",
     "Sharp\\Listening",
     "Sharp\\Map",
+    "Sharp\\MapMembers",
     "Sharp\\Math",
     "Sharp\\Position",
     "Sharp\\Random",
     "Sharp\\Result",
     "Sharp\\Scope",
     "Sharp\\Set",
+    "Sharp\\SetMembers",
 ];
 
 /// The PHP root classes a bare name in a `.sharp` file names by default, spec section 23.

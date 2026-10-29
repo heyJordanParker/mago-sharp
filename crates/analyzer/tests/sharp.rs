@@ -73,6 +73,8 @@ mod effect_classes;
 
 use effect_classes::EFFECT_CLASSES;
 use effect_classes::LIST_MEMBERS;
+use effect_classes::MAP_MEMBERS;
+use effect_classes::SET_MEMBERS;
 
 static PRELUDE: LazyLock<Prelude> = LazyLock::new(Prelude::build);
 static PLUGIN_REGISTRY: LazyLock<PluginRegistry> = LazyLock::new(PluginRegistry::with_library_providers);
@@ -463,55 +465,50 @@ fn a_bare_name_of_an_alias_of_the_files_namespace_is_a_reference_to_the_alias() 
 
 /// The binder records a call of a changing collection method as a write to its local, so a lambda captures that
 /// local by reference. It knows the methods only by name, the names of the members the scan finds that take their
-/// receiver by `ref`, the standard library's of a `List`, which must name every `Map` and `Set` method without
-/// `@mutation-free`, which changes the collection.
+/// receiver by `ref`: the standard library's of a `List`, a `Map` and a `Set`.
 #[test]
 fn the_binder_knows_every_changing_collection_method() {
-    let (name, code) = LIST_MEMBERS;
-    let mut file = File::ephemeral(Cow::Borrowed(name.as_bytes()), Cow::Borrowed(code.as_bytes()));
-    file.is_standard_library = true;
     let arena = LocalArena::new();
-    let program = parse_file(&arena, &file);
-    let names = NameResolver::new(&arena).resolve(program);
-    let scanned = scan_program(&arena, &file, program, &names, settings().version);
-    let mut changing_members: Vec<&str> = scanned
-        .function_likes
-        .values()
-        .filter(|member| {
-            member.flags.is_extension_method()
-                && member.parameters.first().is_some_and(|receiver| receiver.flags.is_by_reference())
+    let mut changing_members: Vec<String> = [LIST_MEMBERS, MAP_MEMBERS, SET_MEMBERS]
+        .into_iter()
+        .flat_map(|(name, code)| {
+            let mut file = File::ephemeral(Cow::Borrowed(name.as_bytes()), Cow::Borrowed(code.as_bytes()));
+            file.is_standard_library = true;
+            let program = parse_file(&arena, &file);
+            let names = NameResolver::new(&arena).resolve(program);
+            let scanned = scan_program(&arena, &file, program, &names, settings().version);
+
+            scanned
+                .function_likes
+                .values()
+                .filter(|member| {
+                    member.flags.is_extension_method()
+                        && member.parameters.first().is_some_and(|receiver| receiver.flags.is_by_reference())
+                })
+                .map(|member| format!("{}.{}", name.rsplit('/').next().unwrap_or(name), member.original_name))
+                .collect::<Vec<_>>()
         })
-        .map(|member| member.original_name.as_str().expect("an ASCII name"))
         .collect();
     changing_members.sort_unstable();
+
     assert_eq!(
         changing_members,
-        ["add", "clear", "insert", "remove", "removeAt", "removeFirst", "removeLast", "set"],
-        "the members of a `List` that take it by `ref`"
+        [
+            "ListMembers.sharp.add",
+            "ListMembers.sharp.clear",
+            "ListMembers.sharp.insert",
+            "ListMembers.sharp.remove",
+            "ListMembers.sharp.removeAt",
+            "ListMembers.sharp.removeFirst",
+            "ListMembers.sharp.removeLast",
+            "ListMembers.sharp.set",
+            "MapMembers.sharp.remove",
+            "SetMembers.sharp.add",
+            "SetMembers.sharp.clear",
+            "SetMembers.sharp.remove",
+        ],
+        "the members of a collection that take it by `ref`"
     );
-
-    for class in ["Sharp\\Internal\\MapMethods", "Sharp\\Internal\\SetMethods"] {
-        let metadata =
-            PRELUDE.metadata.get_class_like(class.as_bytes()).expect("the collection stub is in the prelude");
-        let mut changing: Vec<&str> = metadata
-            .methods
-            .iter()
-            .filter(|method| {
-                !PRELUDE
-                    .metadata
-                    .get_method(class.as_bytes(), method.as_bytes())
-                    .expect("a method")
-                    .flags
-                    .is_mutation_free()
-            })
-            .map(|method| std::str::from_utf8(method.as_bytes()).expect("an ASCII name"))
-            .collect();
-        changing.sort_unstable();
-        assert!(!changing.is_empty(), "{class} has no changing method, so the stub was not read");
-
-        let known: Vec<&str> = changing.iter().copied().filter(|method| changing_members.contains(method)).collect();
-        assert_eq!(known, changing, "{class} changes the collection in a method no `ref` member of a `List` names");
-    }
 }
 
 /// The issue codes alone, in order.
@@ -5328,12 +5325,12 @@ fn sorted_by_a_key_of_two_types_that_never_match_is_refused_as_less_than_refuses
 }
 
 /// `<` on two `Any` or two `Any?` values reports each side, as an `Any` must be checked with `is` first, so a `sortedBy`
-/// key of `Any` or `Any?` gets the same report, a `null` key aside. Each names `Any` as PHP# writes it. A `.php` call of
-/// the same method keeps PHP's report.
+/// key of `Any` or `Any?` gets the same report, a `null` key aside. Each names `Any` as PHP# writes it. The same
+/// comparison in a `.php` file keeps PHP's report.
 #[test]
 fn sorted_by_an_any_key_reports_what_less_than_reports_on_two_any_values() {
     let sharp = "namespace Demo;\n\nclass Report\n{\n    public bool a(Any left, Any right) => left < right;\n\n    public bool b(Any? left, Any? right) => left < right;\n\n    public List<Any> c(List<Any> values) => values.sortedBy(v => v);\n\n    public List<Any?> d(List<Any?> values) => values.sortedBy(v => v);\n}\n";
-    let php = "<?php\n\nnamespace Demo;\n\nuse Sharp\\Internal\\MapMethods;\n\nfinal class Report\n{\n    public function a(mixed $left, mixed $right): bool\n    {\n        return $left < $right;\n    }\n\n    /**\n     * @param MapMethods<string, mixed> $values\n     *\n     * @return list<mixed>\n     */\n    public function c(MapMethods $values): array\n    {\n        return $values->sortedBy(fn (mixed $v): mixed => $v);\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nfinal class Report\n{\n    public function a(mixed $left, mixed $right): bool\n    {\n        return $left < $right;\n    }\n}\n";
     let mixed = |at: &str, side: &str| {
         format!(
             "{at} mixed-operand {side} operand in `<` comparison has `mixed` type. | This has type `mixed` | The result of comparing `mixed` types with `<` is unpredictable and can hide bugs. | Ensure this operand has a known, comparable type before using this comparison operator."
@@ -5345,7 +5342,7 @@ fn sorted_by_an_any_key_reports_what_less_than_reports_on_two_any_values() {
         )
     };
 
-    assert_eq!(worded(("src/Demo/Report.php", php), &[]), [mixed("11:16", "Left"), mixed("11:24", "Right")]);
+    assert_eq!(worded(("src/Demo/Report.php", php), &[]), [mixed("9:16", "Left"), mixed("9:24", "Right")]);
     assert_eq!(
         worded(("src/Demo/Report.sharp", sharp), &[]),
         [
@@ -5808,8 +5805,8 @@ fn a_computed_property_a_lists_part_has_called_as_a_method_is_refused_once() {
     assert_eq!(
         messages(("src/Demo/Report.sharp", sharp), &[("src/Demo/Lists.sharp", lists)]),
         [
-            "Method `isBlank` does not exist on `Set<int>`.",
             "`isBlank` is a computed property of `List<int>`, not a method: read it without `(…)`.",
+            "Method `isBlank` does not exist on `Set<int>`.",
         ]
     );
 }
@@ -9364,7 +9361,7 @@ fn a_missing_class_is_one_error_that_names_it_as_php_sharp_does() {
             vec![missing("5:21", "App.Fresh")],
         ),
         // Only the standard library imports `Sharp.Internal`, spec section 15, so no import is the advice for one of
-        // its classes, as for the prelude's `MapMethods`.
+        // its classes, as for the prelude's `IterableMethods`.
         (
             "namespace App;\n\nclass Report\n{\n    public void run(Hidden hidden)\n    {\n    }\n}\n",
             vec![missing("5:21", "App.Hidden")],
@@ -10677,8 +10674,8 @@ fn a_collection_property_read_through_a_union_with_a_scalar_is_the_declared_coll
             "12:16 invalid-property-access Attempting to access a property on a non-object type (`int`). | Cannot access property here | This expression has type `int`",
             "12:9 possible-method-access-on-null Attempting to call a method on `null`. | This expression can be `null` | Use the nullsafe operator (`?.`) if `null` is an expected value.",
             "12:26 invalid-argument Invalid argument type for argument #1 of `Set<string>.add`: expected `string`, but found `int`. | This has type `int` | Arguments to this method are incorrect | The provided type `int` is not compatible with the expected type `string`. | Change the argument value to match `string`, or update the parameter's type declaration.",
-            "13:22 non-existent-method Method `get` does not exist on `Set<string>`. | This method selection is invalid | This expression has type `Set<string>` | A `Set<string>` has the methods `add`, `any`, `clear`, `contains`, `count`, `filter`, `first`, `map`, `remove`, `sortedBy`, `sumOf`, `toList`.",
             "13:9 possible-method-access-on-null Attempting to call a method on `null`. | This expression can be `null` | Use the nullsafe operator (`?.`) if `null` is an expected value.",
+            "13:22 non-existent-method Method `get` does not exist on `Set<string>`. | This method selection is invalid | This expression has type `Set<string>` | A `Set<string>` has the methods `add`, `any`, `clear`, `contains`, `count`, `filter`, `first`, `isEmpty`, `isNotEmpty`, `map`, `remove`, `sortedBy`, `sumOf`, `toList`.",
         ]
     );
 }
@@ -11699,10 +11696,17 @@ fn a_search_needs_equality_on_the_element_type() {
 #[test]
 fn every_collection_counts_its_elements() {
     let sharp = "namespace Demo;\n\nclass Shelf\n{\n    public int total(List<int> sizes, Map<string, int> counts)\n    {\n        return sizes.count() + counts.count();\n    }\n\n    public void wrong(List<int> sizes)\n    {\n        if (sizes.count()) { }\n        sizes.count(1);\n    }\n}\n";
-    let php = "<?php\n\nnamespace Demo;\n\nuse Sharp\\Internal\\MapMethods;\n\nfinal class Shelf\n{\n    /**\n     * @param MapMethods<string, int> $counts\n     */\n    public function total(MapMethods $counts): int\n    {\n        return $counts->count();\n    }\n\n    /**\n     * @param MapMethods<string, int> $counts\n     */\n    public function wrong(MapMethods $counts): void\n    {\n        $counts->count(1);\n    }\n}\n";
 
     assert_eq!(issues(("src/Demo/Shelf.sharp", sharp), &[]), ["12:13 invalid-operand", "13:21 too-many-arguments"]);
-    assert_eq!(issues(("src/Demo/Shelf.php", php), &[]), ["22:24 too-many-arguments"]);
+}
+
+/// A `Map` and a `Set` say whether they hold anything with `isEmpty()` and `isNotEmpty()`, as a `List` does, spec
+/// section 12. Each gives a `bool` and takes no argument.
+#[test]
+fn a_map_and_a_set_say_whether_they_are_empty() {
+    let sharp = "namespace Demo;\n\nclass Shelf\n{\n    public bool run(Map<string, int> counts, Set<string> tags)\n    {\n        return counts.isEmpty() || counts.isNotEmpty() || tags.isEmpty() || tags.isNotEmpty();\n    }\n\n    public void wrong(Set<string> tags)\n    {\n        tags.isEmpty(1);\n    }\n}\n";
+
+    assert_eq!(issues(("src/Demo/Shelf.sharp", sharp), &[]), ["12:22 too-many-arguments"]);
 }
 
 /// A method a `List` shares with a `Map` or a `Set` runs on a value that may be either: `remove`, `contains`, `clear`
@@ -11714,34 +11718,24 @@ fn a_method_a_list_shares_with_another_collection_runs_on_a_value_that_may_be_ei
     assert_eq!(refusals(("src/Demo/Shelf.sharp", sharp), &[]), Vec::<String>::new());
 }
 
-/// A `List` member, such as `count`, `contains` or `any`, is a call of the standard library's function on the array, so
-/// it is refused on a value that can also be an object, whose own method the call would skip, as a method on a value
-/// that is no object is. Every `Set` and `Map` method is a method call the engine sends to the object or the collection
-/// the value holds when it runs. A `.php` file has no PHP# collection.
+/// A collection's member on a value that may also be an object runs the member or the object's own method by what the
+/// value holds, spec section 12, as on a union of collections. An object without a method of that name is named by the
+/// error a method it lacks gets.
 #[test]
-fn a_collection_method_on_a_value_that_can_also_be_an_object_is_refused() {
-    let sharp = "namespace Demo;\n\nclass Box\n{\n    public int count() => 1;\n\n    public bool contains(int value) => true;\n\n    public bool any(Function<bool(int)> predicate) => true;\n}\n\nclass Shelf\n{\n    public int run(List<int>|Box items, Set<int>|Box tags)\n    {\n        if (tags.contains(1) || items.contains(1)) {\n            return items.any(i => i > 0) ? 1 : 0;\n        }\n        return items.count();\n    }\n}\n";
-    let php = "<?php\n\nnamespace Demo;\n\nfinal class Shelf\n{\n    /**\n     * @param \\ArrayObject<int, int>|list<int> $sizes\n     */\n    public function run(\\ArrayObject|array $sizes): int\n    {\n        return $sizes->count();\n    }\n}\n";
-    let issues = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Shelf.sharp", sharp), &[]);
+fn a_collection_member_on_a_value_that_may_be_an_object_runs_the_objects_method_on_it() {
+    let sharp = "namespace Demo;\n\nclass Box\n{\n    public int count() => 1;\n\n    public bool contains(int value) => true;\n\n    public bool any(Function<bool(int)> predicate) => true;\n}\n\nclass Shelf\n{\n    public int run(List<int>|Box items, Set<int>|Box tags)\n    {\n        if (tags.contains(1) || items.contains(1)) {\n            return items.any(i => i > 0) ? 1 : 0;\n        }\n        return items.count() + (tags.isEmpty() ? 0 : 1);\n    }\n}\n";
 
     assert_eq!(
-        issues.iter().map(|issue| located(sharp, issue)).collect::<Vec<_>>(),
-        ["16:39 invalid-method-access", "17:26 invalid-method-access", "19:22 invalid-method-access"]
-    );
-    assert_eq!(
-        issues[2].message,
-        "`List<int>|Box` may be a collection or an object, and `count` runs a different method on each."
-    );
-    assert!(
-        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Shelf.php", php), &[])
-            .iter()
-            .all(|issue| !issue.message.contains("may be a collection or an object"))
+        refusals(("src/Demo/Shelf.sharp", sharp), &[]),
+        [
+            "19:38 non-existent-method Method `Box.isempty` does not exist. | Ensure the method `Box.isempty` is defined."
+        ]
     );
 }
 
-/// The analyzer checks a `List` member against the standard library's `Sharp.ListMembers` and a collection method
-/// against `Sharp\Internal\MapMethods`, and every message names the PHP# type the code wrote instead, as in "`add`
-/// doesn't exist on `Map<string, int>`".
+/// The analyzer checks a `List` member against the standard library's `Sharp.ListMembers` and a `Map` member against
+/// its `Sharp.MapMembers`, and every message names the PHP# type the code wrote instead, as in "`add` doesn't exist on
+/// `Map<string, int>`".
 #[test]
 fn a_collection_method_message_names_the_sharp_type() {
     let sharp = "namespace Demo;\n\nclass Order\n{\n    public void wrong(List<Line> lines, List<int> sizes, Map<string, int> counts)\n    {\n        lines.add(1);\n        sizes.getOrNull(\"a\");\n        counts.add(1);\n        sizes.delete(0);\n        counts.get(1.5);\n        sizes.getOrNull();\n        sizes.getOrNull(0, 1);\n        counts.has(1);\n        counts.remove(1);\n    }\n}\n\nclass Line\n{\n}\n";
@@ -11764,7 +11758,7 @@ fn a_collection_method_message_names_the_sharp_type() {
     );
     for issue in &issues {
         let text = format!("{issue:?}");
-        assert!(!text.contains("ListMethods") && !text.contains("MapMethods"), "{text}");
+        assert!(!text.contains("ListMembers") && !text.contains("MapMembers"), "{text}");
     }
 }
 
@@ -11790,15 +11784,17 @@ fn a_list_of_a_nullable_type_takes_null_and_refuses_another_type() {
 }
 
 /// A `List<int>` has `max()` and `min()`, its largest and smallest element, typed `int`. A list of any other element
-/// type has neither, and the refusal names the elements they need.
+/// type has neither, and the refusal names the elements they need. A `Map` of `int` values has neither either, since
+/// they are a `List`'s members, so its refusal names the members a `Map` has.
 #[test]
 fn a_list_of_int_has_its_largest_and_smallest_element() {
-    let sharp = "namespace Demo;\n\nclass Sizes\n{\n    public int largest(List<int> sizes) => sizes.max();\n    public int smallest(List<int> sizes) => sizes.min();\n    public string first(List<string> names) => names.max();\n}\n";
+    let sharp = "namespace Demo;\n\nclass Sizes\n{\n    public int largest(List<int> sizes) => sizes.max();\n    public int smallest(List<int> sizes) => sizes.min();\n    public string first(List<string> names) => names.max();\n    public int most(Map<string, int> counts) => counts.max();\n}\n";
 
     assert_eq!(
         refusals(("src/Demo/Sizes.sharp", sharp), &[]),
         [
-            "7:54 where-constraint-violation `max` needs elements of type `int`, and this is a `List<string>`. | Call it on a collection whose elements are `int`."
+            "7:54 where-constraint-violation `max` needs elements of type `int`, and this is a `List<string>`. | Call it on a collection whose elements are `int`.",
+            "8:56 non-existent-method Method `max` does not exist on `Map<string, int>`. | A `Map<string, int>` has the methods `any`, `associateBy`, `count`, `filter`, `first`, `get`, `groupBy`, `has`, `isEmpty`, `isNotEmpty`, `keys`, `map`, `remove`, `sortedBy`, `sumOf`, `toList`, `values`.",
         ]
     );
 }
@@ -11909,15 +11905,6 @@ fn a_changing_collection_method_writes_back_through_a_null_safe_property() {
     );
 }
 
-/// Writing a changed collection back is a PHP# rule. A `.php` file that names a collection's methods class in a
-/// docblock calls its changing methods on a variable as on any other object.
-#[test]
-fn a_changing_collection_method_called_from_php_needs_no_place() {
-    let php = "<?php\n\nnamespace Demo;\n\nuse Sharp\\Internal\\MapMethods;\nuse Sharp\\Internal\\SetMethods;\n\nfinal class Shop\n{\n    /**\n     * @param MapMethods<string, int> $counts\n     * @param SetMethods<int> $ids\n     */\n    public function change(MapMethods $counts, SetMethods $ids): bool\n    {\n        $counts->remove('a');\n\n        return $ids->add(1);\n    }\n}\n";
-
-    assert_eq!(issues(("src/Demo/Shop.php", php), &[]), Vec::<String>::new());
-}
-
 /// A changing method writes a `Set` back through its property's `set`, so a `Set` property without one refuses the
 /// change, as a `List` property does.
 #[test]
@@ -11930,8 +11917,8 @@ fn a_set_property_without_a_set_refuses_a_changing_method() {
 /// A changing method called on a value that may be one of several collections is refused once, by the first rule it
 /// breaks. `add` on a `Map|Set` is refused by the `Map`, which lacks it, and not again for writing to no place. A
 /// conditional is no place, so a changing method on it is refused whatever it may hold: `List|Set`, `Set|Box` and
-/// `Map|Box`. A `Map` and a `Set` are objects whose methods run on whichever collection the value holds, so `add` on a
-/// `List|Set` local and `filter` on a `List|Map` or a `List|Set` run.
+/// `Map|Box`. Each kind of collection the value may hold runs its own member, so `add` on a `List|Set` local and `filter`
+/// on a `List|Map` or a `List|Set` run.
 #[test]
 fn a_changing_method_of_a_union_of_collections_is_refused_once() {
     let sharp = "namespace Demo;\n\nclass Box\n{\n    public bool add(int value) => true;\n    public bool remove(string key) => true;\n}\n\nclass Shop\n{\n    public int run(bool ready, List<int> lines, Set<int> ids, Map<string, int> counts, Box box)\n    {\n        (ready ? lines : ids).add(1);\n        (ready ? counts : ids).add(1);\n        (ready ? ids : box).add(1);\n        let tags = ready ? lines : ids;\n        tags.add(3);\n        (ready ? lines : counts).filter(n => n > 0);\n        (ready ? counts : box).remove(\"a\");\n        return tags.filter(tag => tag > 0).count();\n    }\n}\n";
@@ -12024,15 +12011,13 @@ fn a_map_keyed_by_a_backed_enum_takes_exactly_the_enum_as_a_key() {
     );
 }
 
-/// `Sharp\Internal\MapMethods` declares the key of `get`, `has` and `remove` as `K`, which a `Map<Status, int>` fills
-/// with `Status`, so each takes the case. A `.php` call on `MapMethods<string, int>` takes its `K` the same way.
+/// The standard library's `MapMembers` declares the key of `get`, `has` and `remove` as `K`, which a `Map<Status, int>`
+/// fills with `Status`, so each takes the case.
 #[test]
-fn map_get_has_and_remove_take_a_backed_enum_key_in_sharp_and_in_php() {
+fn map_get_has_and_remove_take_a_backed_enum_key() {
     let sharp = "namespace Demo;\n\nimport Lib.Status;\n\nclass Tally\n{\n    public int? lookup(Map<Status, int> counts, Status status)\n    {\n        counts.remove(status);\n        return counts.has(status) ? counts.get(status) : null;\n    }\n}\n";
-    let php = "<?php\n\nnamespace Demo;\n\nuse Sharp\\Internal\\MapMethods;\n\nfinal class Tally\n{\n    /** @param MapMethods<string, int> $counts */\n    public function lookup(MapMethods $counts, string $name): ?int\n    {\n        return $counts->get($name);\n    }\n}\n";
 
     assert_eq!(issues(("src/Demo/Tally.sharp", sharp), &[("src/Lib/Status.php", STATUS)]), Vec::<String>::new());
-    assert_eq!(issues(("src/Demo/Tally.php", php), &[("src/Lib/Status.php", STATUS)]), Vec::<String>::new());
 }
 
 /// Spec section 12 passes a `Map` to a plain PHP parameter whose declared type names `array` as a PHP array, whose
@@ -12614,23 +12599,6 @@ fn a_group_key_is_checked_only_where_a_function_fills_the_key_parameter() {
     );
 }
 
-/// A `.php` caller of a PHP# collection's `groupBy` or `associateBy` keys a PHP array, so their `G` keeps its
-/// `array-key` bound there, as on master: a class or a backed enum key is refused at the call.
-#[test]
-fn a_php_caller_of_group_by_keys_the_array_by_an_array_key() {
-    let php = "<?php\n\nnamespace Demo;\n\nuse Lib\\Line;\nuse Lib\\Status;\nuse Sharp\\Internal\\MapMethods;\n\nfinal class Tally\n{\n    /** @param MapMethods<string, Line> $lines */\n    public function group(MapMethods $lines): int\n    {\n        $byLine = $lines->groupBy(fn (Line $line) => $line);\n        $byStatus = $lines->associateBy(fn (Line $line) => Status::Active);\n        $byName = $lines->groupBy(fn (Line $line) => 'all');\n\n        return count($byLine) + count($byStatus) + count($byName);\n    }\n}\n";
-
-    assert_eq!(
-        issues(("src/Demo/Tally.php", php), &[("src/Lib/Status.php", STATUS)]),
-        [
-            "14:35 template-constraint-violation",
-            "14:35 invalid-argument",
-            "15:41 template-constraint-violation",
-            "15:41 invalid-argument"
-        ]
-    );
-}
-
 /// A function with a parameter marked `#[TakesResultType]` makes the collection its declared array says, whatever its
 /// name: a list is a `Set` of its elements, and any other array a `Map` of its keys and values, even `array<int, T>`,
 /// which reads as a `List` elsewhere. A `Map` keyed by a type parameter takes keys `array-key` does not bound.
@@ -12893,8 +12861,8 @@ fn a_set_element_takes_what_a_map_key_takes() {
     );
 }
 
-/// A `Set` has the methods of `Sharp\Internal\SetMethods`, each typed by its elements: `add`, `remove` and `clear`
-/// change it, `filter` gives a `Set`, and `map` and `sortedBy` give a `List`.
+/// A `Set` has the standard library's members of `Sharp.SetMembers`, each typed by its elements: `add`, `remove` and
+/// `clear` change it, `filter` gives a `Set`, and `map` and `sortedBy` give a `List`.
 #[test]
 fn set_methods_take_and_give_the_types_of_their_elements() {
     let sharp = "namespace Demo;\n\nimport Lib.Status;\nimport Lib.Words;\n\nclass Tags\n{\n    public int run(Set<string> tags, Set<Status> statuses)\n    {\n        bool added = tags.add(\"vip\");\n        bool removed = tags.remove(\"new\");\n        bool held = tags.contains(\"vip\") && statuses.contains(Status.Active);\n        List<string> listed = tags.toList();\n        Set<string> kept = tags.filter(tag => tag != \"x\");\n        List<int> sizes = tags.map(tag => Words.length(tag));\n        bool lengthy = tags.any(tag => Words.length(tag) > 3);\n        string first = tags.first(tag => tag != \"\");\n        List<Status> sorted = statuses.sortedBy(status => status.value);\n        statuses.add(Status.Closed);\n        statuses.remove(Status.Active);\n        tags.clear();\n        return tags.count() + tags.sumOf(tag => Words.length(tag)) + listed.count() + kept.count() + sizes.count() + sorted.count() + (added && removed && held && lengthy ? 1 : 0) + Words.length(first);\n    }\n\n    public void wrong(Set<string> tags, Set<Status> statuses)\n    {\n        tags.add(1);\n        statuses.add(\"active\");\n        List<int> kept = tags.filter(tag => tag != \"x\");\n        Set<int> sizes = tags.map(tag => Words.length(tag));\n        tags.get(0);\n    }\n}\n";
@@ -12911,13 +12879,11 @@ fn set_methods_take_and_give_the_types_of_their_elements() {
     );
 }
 
-/// A message about a `Set` method names the `Set` type the code wrote, never `Sharp\Internal\SetMethods`, and a
-/// parameter's `Set` type reads as PHP# writes it. A `.php` call on `SetMethods<string>` names the receiver as
-/// `Set<string>` too, as one on `MapMethods` names a `Map`, and the argument by its PHP type.
+/// A message about a `Set` member names the `Set` type the code wrote, never the standard library's `SetMembers`, and a
+/// parameter's `Set` type reads as PHP# writes it.
 #[test]
 fn a_set_message_names_the_sharp_type() {
     let sharp = "namespace Demo;\n\nimport Lib.Status;\n\nclass Tally\n{\n    public void wrong(Set<string> tags, Set<Status> statuses, Map<string, int> counts)\n    {\n        tags.add(1);\n        statuses.contains(\"active\");\n        tags.get(0);\n        this.mark(counts);\n    }\n\n    public void mark(Set<Status> statuses)\n    {\n    }\n}\n";
-    let php = "<?php\n\nnamespace Demo;\n\nuse Sharp\\Internal\\SetMethods;\n\nfinal class Tally\n{\n    /** @param SetMethods<string> $tags */\n    public function wrong(SetMethods $tags): void\n    {\n        $tags->add(1);\n        $tags->get(0);\n    }\n}\n";
 
     let issues =
         analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Tally.sharp", sharp), &[("src/Lib/Status.php", STATUS)]);
@@ -12933,15 +12899,8 @@ fn a_set_message_names_the_sharp_type() {
     );
     for issue in &issues {
         let text = format!("{issue:?}");
-        assert!(!text.contains("SetMethods"), "{text}");
+        assert!(!text.contains("SetMembers"), "{text}");
     }
-    assert_eq!(
-        messages(("src/Demo/Tally.php", php), &[]),
-        [
-            "Invalid argument type for argument #1 of `Set<string>.add`: expected `string`, but found `int(1)`.",
-            "Method `get` does not exist on `Set<string>`.",
-        ]
-    );
 }
 
 /// A `Set` has no index: its elements are tested with `contains` and added with `add`, so an index read or write is an

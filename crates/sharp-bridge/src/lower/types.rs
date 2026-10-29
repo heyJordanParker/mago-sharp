@@ -39,9 +39,11 @@ use mago_codex::ttype::comparator::ComparisonResult;
 use mago_codex::ttype::comparator::union_comparator;
 use mago_codex::ttype::comparator::union_comparator::can_expression_types_be_identical;
 use mago_codex::ttype::get_array_parameters;
+use mago_codex::ttype::get_collection_object;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_sharp_type;
 use mago_codex::ttype::is_written_in_sharp;
+use mago_codex::ttype::takes_the_table_itself;
 use mago_codex::ttype::template::variance::Variance;
 use mago_codex::ttype::union::TUnion;
 use mago_database::file::File;
@@ -74,11 +76,6 @@ use super::inline::RESULT_TYPE_SLOT;
 use super::inline::TAKES_KEY_ORDER;
 use super::inline::TAKES_RESULT_TYPE;
 use super::inline::key;
-
-/// Each collection PHP# has a class of methods for, with that class, which the analyzer checks a call on it against. A
-/// `List`'s members are the standard library's extensions.
-const COLLECTION_METHODS: [(&str, &[u8]); 2] =
-    [("Map", b"Sharp\\Internal\\MapMethods"), ("Set", b"Sharp\\Internal\\SetMethods")];
 
 /// The checker's types for one file. The lowering reads a type only through these queries, so `--assert-types` can
 /// turn each answer it used into a runtime guard.
@@ -459,8 +456,8 @@ impl<'analysis> Types<'analysis> {
 
     /// The type arguments the generic method call at `span` gives the method, as [`Self::type_arguments`] writes those
     /// of a `new`. None when the method declares no type parameter, or a built-in class declares it, whose method never
-    /// reads them, as the prelude's `Sharp\Internal\MapMethods` and `Sharp\Internal\SetMethods` declare a map's and a
-    /// set's. A method of any project class, PHP# or plain PHP, may run a PHP# method that overrides or implements it,
+    /// reads them, as the prelude's `Sharp\Internal\IterableMethods` declares an `Iterable`'s. A method of any project
+    /// class, PHP# or plain PHP, may run a PHP# method that overrides or implements it,
     /// so a call through a plain PHP `@template` interface or parent carries them, and a plain PHP method ignores them.
     /// The class that declares the method decides, so `super.m()` carries them through a plain PHP parent that inherits
     /// a PHP# `m`.
@@ -1368,32 +1365,39 @@ impl<'analysis> Types<'analysis> {
         }
     }
 
-    /// The member of a `List` the method call `call` runs on a value that may also be a `Map` or a `Set`, spec section
-    /// 12: the analysis checked it against the standard library's member and the other collections' method of that
-    /// name. None for a call on one kind, or on anything else.
-    pub(crate) fn list_member_among_collections(&self, call: &Expression) -> Option<Declaration> {
-        let (mut member, mut others) = (None, false);
+    /// The members the method call `call` runs on a value that may hold more than one kind of collection, or a
+    /// collection or an object, spec section 12, as the analysis resolved them: each kind's standard library member,
+    /// with the class of the object that kind runs as, `None` for a `List`, which runs as a PHP array, and whether an
+    /// object the value may hold runs its own method of that name. None for a call that runs one member, or no
+    /// collection's.
+    pub(crate) fn members_by_kind(&self, call: &Expression) -> Option<(Vec<(Option<Word>, Declaration)>, bool)> {
+        let (mut members, mut object) = (Vec::new(), false);
         for callee in self.artifacts.get_callees(call) {
             let CallTarget::FunctionLike { callee: FunctionLikeIdentifier::Method(class, method), .. } = callee else {
                 return None;
             };
-            if COLLECTION_METHODS.iter().any(|(_, methods)| class.as_bytes().eq_ignore_ascii_case(methods)) {
-                others = true;
-            } else {
-                let metadata = self.codebase.get_method(class.as_bytes(), method.as_bytes())?;
-                if !metadata.flags.is_extension_method() {
-                    return None;
-                }
-                member = Some(Declaration {
+            let metadata = self.codebase.get_method(class.as_bytes(), method.as_bytes())?;
+            if !metadata.flags.is_extension_method() {
+                object = true;
+                continue;
+            }
+            let receiver = metadata.parameters.first()?.get_type_metadata()?.type_union.get_single_array()?;
+            let runs_as = match get_collection_object(receiver, self.codebase) {
+                Some(TAtomic::Object(object)) => object.get_name(),
+                _ => None,
+            };
+            members.push((
+                runs_as,
+                Declaration {
                     kind: DeclarationKind::StaticMethod,
                     class: self.class_declaration(class.as_bytes()).name,
                     name: metadata.original_name,
                     public: true,
-                });
-            }
+                },
+            ));
         }
 
-        member.filter(|_| others)
+        (!members.is_empty() && members.len() + usize::from(object) > 1).then_some((members, object))
     }
 
     /// The slot an inline form leaves for each parameter of the engine function `function`, which `written` calls, that
@@ -1450,18 +1454,6 @@ impl<'analysis> Types<'analysis> {
                     if self.codebase.get_method(class.as_bytes(), method.as_bytes())
                         .is_some_and(|metadata| metadata.flags.is_extension_method())
             )
-    }
-
-    /// The result type of the function the method value `value` is, as the checker typed it. None for one it typed
-    /// without.
-    pub(crate) fn value_result_type(&self, value: &Expression) -> Option<&'analysis TUnion> {
-        let Some(TAtomic::Callable(TCallable::Signature(signature))) =
-            self.expression_type(value).types.iter().find(|atomic| atomic.is_callable())
-        else {
-            unreachable!("the analysis types a method value as its signature, not the value at {:?}", value.span());
-        };
-
-        signature.get_return_type()
     }
 
     /// The parameters of the function the method value `value` is, as the checker typed it, each named as the method
@@ -1685,35 +1677,6 @@ impl<'analysis> Types<'analysis> {
         }
 
         element_type.unwrap_or_else(|| unreachable!("the checker types the value as a collection"))
-    }
-
-    /// The collection, `Map` or `Set`, and the name in lowercase of the collection method the analyzer checked the
-    /// method call `call` against, null-safe or not, or that the read `call` gives the value of, spec section 14.3: a
-    /// method of `Sharp\Internal\MapMethods` or `Sharp\Internal\SetMethods`. None for a call of any other method.
-    pub(crate) fn collection_method(&self, call: &Expression) -> Option<(&'static str, Vec<u8>)> {
-        let mut callees = self.artifacts.get_callees(call);
-        let (Some(CallTarget::FunctionLike { callee: FunctionLikeIdentifier::Method(class, method), .. }), None) =
-            (callees.next(), callees.next())
-        else {
-            return None;
-        };
-        let collection = COLLECTION_METHODS
-            .into_iter()
-            .find_map(|(collection, methods)| class.as_bytes().eq_ignore_ascii_case(methods).then_some(collection))?;
-
-        Some((collection, method.as_bytes().to_ascii_lowercase()))
-    }
-
-    /// Whether the method call `call`, null-safe or not, runs a `Map` method that leaves its receiver as it is, which
-    /// `Sharp\Internal\MapMethods` declares mutation-free.
-    pub(crate) fn reads_map(&self, call: &Expression) -> bool {
-        let Some(("Map", method)) = self.collection_method(call) else {
-            return false;
-        };
-
-        self.codebase
-            .get_method(b"Sharp\\Internal\\MapMethods", &method)
-            .is_some_and(|metadata| metadata.flags.is_mutation_free())
     }
 
     /// Whether the method call `call`, null-safe or not, runs a lazy operation of a PHP# `Iterable<T>`, spec section 12,
@@ -2321,7 +2284,9 @@ fn plain_parameters<'function>(
     let sharp =
         function.flags.is_sharp() || owner.get(..6).is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"sharp\\"));
 
-    (!sharp).then(|| function.parameters.iter().map(PlainParameter::Declared).collect())
+    let parameter = if function.flags.is_built_in() { PlainParameter::BuiltIn } else { PlainParameter::Declared };
+
+    (!sharp).then(|| function.parameters.iter().map(parameter).collect())
 }
 
 /// The whole type of a PHP# method or lambda, which `is` tests a closure of it by.
@@ -2346,10 +2311,11 @@ pub(crate) fn takes_array(declared: &TUnion) -> bool {
 }
 
 /// A parameter of plain PHP code a call runs, which a `Map` or a `Set` crosses into: a declared function's, method's or
-/// constructor's, or one of the signature of a plain PHP closure a local holds.
+/// constructor's, one of a function PHP builds in, or one of the signature of a plain PHP closure a local holds.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum PlainParameter<'analysis> {
     Declared(&'analysis FunctionLikeParameterMetadata),
+    BuiltIn(&'analysis FunctionLikeParameterMetadata),
     Callable(&'analysis TCallableParameter),
 }
 
@@ -2357,7 +2323,7 @@ impl<'analysis> PlainParameter<'analysis> {
     /// The name a named argument gives the parameter, without its `$`.
     pub(crate) fn name(self) -> Option<&'analysis [u8]> {
         let name = match self {
-            Self::Declared(parameter) => parameter.get_name(),
+            Self::Declared(parameter) | Self::BuiltIn(parameter) => parameter.get_name(),
             Self::Callable(parameter) => parameter.get_name()?,
         };
 
@@ -2367,26 +2333,32 @@ impl<'analysis> PlainParameter<'analysis> {
     /// The type the parameter declares.
     pub(crate) fn declared_type(self) -> Option<&'analysis TUnion> {
         match self {
-            Self::Declared(parameter) => parameter.get_type_metadata().map(|declared| &declared.type_union),
+            Self::Declared(parameter) | Self::BuiltIn(parameter) => {
+                parameter.get_type_metadata().map(|declared| &declared.type_union)
+            }
             Self::Callable(parameter) => parameter.get_type_signature(),
         }
     }
 
     /// Whether the parameter takes a PHP array, as [`takes_array`] says of the type it declares, or it declares none.
-    pub(crate) fn takes_array(self) -> bool {
-        self.declared_type().is_none_or(takes_array)
+    /// A built-in function's parameter that takes a `Map` and a `Set` as the object they are takes the object, as the
+    /// codex's [`takes_the_table_itself`] says.
+    pub(crate) fn takes_array(self, codebase: &CodebaseMetadata) -> bool {
+        self.declared_type().is_none_or(|declared| {
+            takes_array(declared) && !(matches!(self, Self::BuiltIn(_)) && takes_the_table_itself(declared, codebase))
+        })
     }
 
     pub(crate) fn is_variadic(self) -> bool {
         match self {
-            Self::Declared(parameter) => parameter.flags.is_variadic(),
+            Self::Declared(parameter) | Self::BuiltIn(parameter) => parameter.flags.is_variadic(),
             Self::Callable(parameter) => parameter.is_variadic(),
         }
     }
 
     pub(crate) fn is_by_reference(self) -> bool {
         match self {
-            Self::Declared(parameter) => parameter.flags.is_by_reference(),
+            Self::Declared(parameter) | Self::BuiltIn(parameter) => parameter.flags.is_by_reference(),
             Self::Callable(parameter) => parameter.is_by_reference(),
         }
     }

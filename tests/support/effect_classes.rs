@@ -17,8 +17,16 @@ macro_rules! library_file {
 /// The members of a `List`, which every collection call of a project reaches.
 pub const LIST_MEMBERS: (&str, &str) = library_file!("Sharp/ListMembers.sharp");
 
-pub const EFFECT_CLASSES: [(&str, &str); 28] = [
+/// The members of a `Map`, as `LIST_MEMBERS` are a `List`'s.
+pub const MAP_MEMBERS: (&str, &str) = library_file!("Sharp/MapMembers.sharp");
+
+/// The members of a `Set`, as `LIST_MEMBERS` are a `List`'s.
+pub const SET_MEMBERS: (&str, &str) = library_file!("Sharp/SetMembers.sharp");
+
+pub const EFFECT_CLASSES: [(&str, &str); 30] = [
     LIST_MEMBERS,
+    MAP_MEMBERS,
+    SET_MEMBERS,
     library_file!("Sharp/System/Environment.sharp"),
     library_file!("Sharp/Time/Clock.sharp"),
     library_file!("Sharp/Random.sharp"),

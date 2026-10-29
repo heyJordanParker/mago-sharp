@@ -2371,12 +2371,10 @@ where
     TUnion::from_atomic(TAtomic::Error)
 }
 
-/// Spec section 14.3: the value a read without `(…)` gives of the method `name` of a `List`, `Map`, `Set` or
-/// `Iterable`, on each of `collections`, the classes [`get_receiver_collections`] finds for the receiver `object`,
-/// typed as [`resolve_method_value`] types a method's value. None when one of them has no such method. The value holds
-/// the collection as it was when it was read, spec section 12, so a method that changes the collection would change
-/// only that copy, and it is refused, as Swift refuses the value of a `mutating` method, with the lambda that changes
-/// the collection itself. The read records the method it reads for the lowering.
+/// Spec section 14.3: the value a read without `(…)` gives of the method `name` of an `Iterable`, on each of
+/// `collections`, the classes [`get_receiver_collections`] finds for the receiver `object`,
+/// typed as [`resolve_method_value`] types a method's value. None when one of them has no such method. Every lazy
+/// operation leaves its receiver as it is. The read records the method it reads for the lowering.
 #[allow(clippy::too_many_arguments)]
 fn resolve_collection_method_value<A>(
     context: &mut Context<'_, '_, A>,
@@ -2401,10 +2399,6 @@ where
         })
         .collect::<Option<Vec<_>>>()?;
     let read_span = object.span().join(name.span());
-
-    if let Some((_, changing)) = methods.iter().find(|(_, metadata)| !metadata.flags.is_mutation_free()) {
-        return Some(report_changing_method_value(context, read_span, &changing.parameters));
-    }
 
     let mut value: Option<TUnion> = None;
     for (collection, (class, _)) in collections.iter().zip(&methods) {

@@ -104,11 +104,20 @@ where
         .filter_map(|(_, method)| Some((*method, codebase.get_method_by_id(method)?)))
         .filter(|(_, metadata)| (!is_class_value || is_class_member(metadata)) && fits(context, receiver, metadata))
         .collect();
-    // A `List`'s member is the kind's own, which wins over any other extension, as a real member does.
+    // A collection's member is the kind's own, which wins over any other extension, as a real member does. An empty
+    // array fits every kind, and is a `List`, the most specific, as an empty literal is.
     let fitting = if fitting.iter().any(|(method, metadata)| is_collection_member(method.get_class_name(), metadata)) {
+        let empty = receiver.types.iter().all(|atomic| matches!(atomic, TAtomic::Array(array) if array.is_empty()));
+
         fitting
             .into_iter()
-            .filter(|(method, metadata)| is_collection_member(method.get_class_name(), metadata))
+            .filter(|(method, metadata)| {
+                if empty {
+                    is_list_member(method.get_class_name(), metadata)
+                } else {
+                    is_collection_member(method.get_class_name(), metadata)
+                }
+            })
             .collect()
     } else {
         fitting
@@ -288,15 +297,30 @@ where
         Cow::Owned(inferred_type_replacer::replace(&parameter.type_union, &template_result, context.codebase))
     };
 
-    union_comparator::is_contained_by(
-        context.codebase,
-        receiver,
-        &parameter,
-        false,
-        false,
-        false,
-        &mut ComparisonResult::new(),
-    )
+    // A `List`, a `Map` and a `Set` are each their own kind, spec section 12, where plain PHP takes a list as an array of
+    // any key, so an extension of one kind fits no other, and a type parameter is the kind of its bound. An empty array is
+    // no kind yet.
+    fn kinds(atomic: &TAtomic) -> Vec<std::mem::Discriminant<TArray>> {
+        match atomic {
+            TAtomic::Array(array) if !array.is_empty() => vec![std::mem::discriminant(array)],
+            TAtomic::GenericParameter(parameter) => parameter.constraint.types.iter().flat_map(kinds).collect(),
+            _ => vec![],
+        }
+    }
+    let parameter_kinds: Vec<_> = parameter.types.iter().flat_map(kinds).collect();
+    let same_kind =
+        parameter_kinds.is_empty() || receiver.types.iter().flat_map(kinds).all(|kind| parameter_kinds.contains(&kind));
+
+    (same_kind
+        && union_comparator::is_contained_by(
+            context.codebase,
+            receiver,
+            &parameter,
+            false,
+            false,
+            false,
+            &mut ComparisonResult::new(),
+        ))
     .then_some(())
     .ok_or(None)
 }

@@ -7,6 +7,7 @@ use mago_codex::identifier::method::MethodIdentifier;
 use mago_codex::ttype::TType;
 use mago_codex::ttype::add_optional_union_type;
 use mago_codex::ttype::atomic::TAtomic;
+use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::object::named::TNamedObject;
 use mago_codex::ttype::comparator::ComparisonResult;
@@ -551,8 +552,9 @@ where
     if method_call::changes_receiver(context, &extension) {
         method_call::check_stored_in_static(context, artifacts, receiver, arguments);
     }
-    // A collection member compares the value of a parameter marked `ComparedByEquality` with each element as `==` does,
-    // spec section 12, once the value's type is known. A value that is no element is refused by its argument check.
+    // A `List`'s member compares the value of a parameter marked `ComparedByEquality` with each element as `==` does,
+    // spec section 12, once the value's type is known. A value that is no element is refused by its argument check. A
+    // `Map` and a `Set` find a key by its `==` and `hash()`, which their key type has.
     for (parameter, argument) in metadata.parameters.iter().skip(1).zip(&arguments.arguments) {
         if parameter
             .attributes
@@ -561,7 +563,10 @@ where
             && let Argument::Positional(_) = argument
             && let Some(value_type) = artifacts.get_expression_type(argument.value())
             && let Some(receiver_type) = artifacts.get_expression_type(receiver)
-            && receiver_type.types.iter().all(|atomic| matches!(atomic, TAtomic::Array(_) | TAtomic::Null))
+            && receiver_type
+                .types
+                .iter()
+                .all(|atomic| matches!(atomic, TAtomic::Array(TArray::List(_)) | TAtomic::Null))
         {
             let element_type = receiver_type
                 .types
