@@ -32678,12 +32678,13 @@ fn an_enum_computed_property_is_a_virtual_property() {
     );
 }
 
-/// Spec sections 19 and 31: a value of a type parameter compares by its type argument's `==`, which only the running
-/// code knows, through `\Sharp\Internal\equals`, so a `Result<int, ChargeError>`'s `==` compares its errors by value.
+/// Spec sections 11, 19 and 31: a value of a type parameter bounded by `Equatable` compares by its type argument's
+/// `==`, which only the running code knows, through `\Sharp\Internal\equals`, so a `Result<int, ChargeError>`'s `==`
+/// compares its errors by value.
 #[test]
 fn a_type_parameter_compares_by_its_type_arguments_equality() {
     let lowered = Lowered::new(
-        "namespace App;\n\npublic class Report\n{\n    public static bool run<T>(T a, T b) => a == b;\n}\n",
+        "namespace App;\n\npublic class Report\n{\n    public static bool run<T : Equatable>(T a, T b) => a == b;\n}\n",
     );
 
     assert_eq!(

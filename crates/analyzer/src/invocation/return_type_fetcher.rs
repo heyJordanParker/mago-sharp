@@ -92,7 +92,7 @@ where
                 report_class_held_by_key(context, key_type, false, selector.span())
             } else {
                 let key_name = display_sharp_type(context, key_type);
-                let error = collection_key_error(key_name.as_str(), false, selector.span());
+                let error = collection_key_error(context.codebase, key_type, key_name.as_str(), false, selector.span());
                 context.collector.report_with_code(IssueCode::TemplateConstraintViolation, error);
 
                 true

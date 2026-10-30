@@ -1366,7 +1366,8 @@ impl PartialEq for TUnion {
             .union(UnionFlags::IGNORE_NULLABLE_ISSUES)
             .union(UnionFlags::IGNORE_FALSABLE_ISSUES)
             .union(UnionFlags::FROM_TEMPLATE_DEFAULT)
-            .union(UnionFlags::FROM_UNSPECIFIED_TEMPLATE);
+            .union(UnionFlags::FROM_UNSPECIFIED_TEMPLATE)
+            .union(UnionFlags::EQUATABLE);
 
         if self.flags.intersection(SEMANTIC_FLAGS) != other.flags.intersection(SEMANTIC_FLAGS) {
             return false;

@@ -2638,6 +2638,7 @@ mod tests {
     use mago_codex::ttype::atomic::scalar::TScalar;
     use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeString;
     use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeStringKind;
+    use mago_codex::ttype::flags::UnionFlags;
     use mago_codex::ttype::get_bool;
     use mago_codex::ttype::get_float;
     use mago_codex::ttype::get_int;
@@ -2807,6 +2808,19 @@ mod tests {
         let bound = class("App\\Comparable", vec![wrap_atomic(TAtomic::GenericParameter(parameter))]);
 
         assert_eq!(super::text(&bound, &CodebaseMetadata::default(), Parameter::Bound), "App.Comparable<App.Order>");
+    }
+
+    /// `Equatable` adds no type the running code checks, spec section 11: a bound of it alone is `Any?`, as no bound
+    /// is, and one that joins it to a class is the class, as `T : Object` is PHP's `object`.
+    #[test]
+    fn an_equatable_bound_writes_the_bound_without_it() {
+        let equatable = |mut bound: TUnion| {
+            bound.flags.insert(UnionFlags::EQUATABLE);
+            super::text(&bound, &CodebaseMetadata::default(), Parameter::Bound)
+        };
+
+        assert_eq!(equatable(get_mixed()), "Any?");
+        assert_eq!(equatable(class("App\\Shareable", vec![])), "App.Shareable");
     }
 
     /// A receiver's intersection names its classes, and a part that is no class, as a PHP `@template` it is joined

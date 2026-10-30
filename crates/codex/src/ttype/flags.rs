@@ -29,6 +29,9 @@ impl UnionFlags {
     pub const NULLSAFE_NULL: UnionFlags = UnionFlags(1 << 9);
     /// Indicates this union fills an omitted template argument that has no declared default.
     pub const FROM_UNSPECIFIED_TEMPLATE: UnionFlags = UnionFlags(1 << 10);
+    /// Indicates a PHP# type parameter's bound holds `Equatable`, spec section 11: each of its values has `==`. The
+    /// union holds the bound's other types, or `Any?` for `Equatable` alone, since it adds no type of its own.
+    pub const EQUATABLE: UnionFlags = UnionFlags(1 << 11);
 }
 
 impl UnionFlags {

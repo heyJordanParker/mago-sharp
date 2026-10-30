@@ -421,6 +421,8 @@ where
                             } else {
                                 let item_key_type_id = display_value_type(context, item_key_type, &get_arraykey());
                                 let error = collection_key_error(
+                                    context.codebase,
+                                    item_key_type,
                                     item_key_type_id.as_str(),
                                     false,
                                     key_value_array_element.key.span(),
