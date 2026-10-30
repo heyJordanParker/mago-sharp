@@ -48,12 +48,12 @@ use crate::error::AnalysisError;
 use crate::invocation::InvocationTarget;
 use crate::invocation::InvocationTargetParameter;
 use crate::invocation::analyzer::adjust_offset_for_variadic;
+use crate::resolver::extension::is_collection_member;
 use crate::statement::function_like::rejected_nullable_parameter::writes_null;
 use crate::utils::expression::is_referenceable;
 use crate::utils::get_type_diff;
 use crate::utils::int_refused_for_float;
 use crate::utils::names::and_list;
-use crate::utils::names::collection_member_kind;
 use crate::utils::names::display_atomic;
 use crate::utils::names::display_function_holder;
 use crate::utils::names::display_nullable_type;
@@ -281,7 +281,7 @@ where
     else {
         return Cow::Borrowed(parameter_type);
     };
-    if metadata.template_types.is_empty() || collection_member_kind(*class, metadata).is_none() {
+    if metadata.template_types.is_empty() || !is_collection_member(*class, metadata) {
         return Cow::Borrowed(parameter_type);
     }
 

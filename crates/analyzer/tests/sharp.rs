@@ -5308,6 +5308,22 @@ fn a_member_compared_by_order_refuses_a_key_with_no_order() {
     );
 }
 
+/// The key a member compared by order orders by is the type the marked argument's function returns, whatever type
+/// parameters the member declares after it.
+#[test]
+fn a_member_compared_by_order_orders_by_what_the_marked_function_returns() {
+    let shelf = (
+        "src/Lib/ShelfMembers.sharp",
+        "namespace Lib;\n\nimport Sharp.Internal.ComparedByOrder;\n\npublic static class ShelfMembers\n{\n    extension<T>(List<T> items)\n    {\n        public List<T> rankedWith<TKey, TExtra>([ComparedByOrder] Function<TKey(T)> selector, TExtra extra) => items.sortedBy(selector);\n    }\n}\n",
+    );
+    let sharp = "namespace Demo;\n\nimport Lib.ShelfMembers;\nimport Lib.Status;\n\nclass Report\n{\n    public List<Status> a(List<Status> statuses) => statuses.rankedWith(s => s, 1);\n\n    public List<int> b(List<int> numbers) => numbers.rankedWith(n => -n, true);\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Report.sharp", sharp), &[shelf, ("src/Lib/Status.php", STATUS)]),
+        ["8:73 invalid-argument"]
+    );
+}
+
 /// A loop body is analyzed more than once, and a `sortedBy` in it is refused once.
 #[test]
 fn sorted_by_in_a_loop_is_refused_once() {
@@ -13267,6 +13283,21 @@ fn an_iterable_is_anything_a_loop_reads() {
     assert_eq!(
         issues(("src/Demo/Report.sharp", sharp), &[("src/Demo/Query.php", query)]),
         ["14:93 possibly-invalid-argument"]
+    );
+}
+
+/// Spec section 26: a user's extension of `Iterable<T>` reaches a `List`, a `Set` and a plain PHP `iterable` too, as a
+/// value of each is an `Iterable<T>`. Only the standard library's `Iterable` members are a kind of their own, which a
+/// collection's own members hide.
+#[test]
+fn a_user_s_extension_of_an_iterable_reaches_a_list_a_set_and_a_plain_php_iterable() {
+    let rows = "namespace Demo;\n\npublic static class Rows\n{\n    extension<T>(Iterable<T> items)\n    {\n        public int lazyFrom(int start) => start;\n    }\n}\n";
+    let query = "<?php\n\nnamespace Demo;\n\nfinal class Query\n{\n    /** @return iterable<int> */\n    public static function cursor(): iterable\n    {\n        yield 1;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public int run(List<int> list, Set<int> set, Iterable<int> items) => list.lazyFrom(1) + set.lazyFrom(3) + Query.cursor().lazyFrom(4) + items.lazyFrom(5);\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Report.sharp", sharp), &[("src/Demo/Rows.sharp", rows), ("src/Demo/Query.php", query)]),
+        Vec::<String>::new()
     );
 }
 

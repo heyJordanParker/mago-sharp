@@ -66,8 +66,8 @@ use crate::effects::events;
 use crate::effects::holding_declaration;
 use crate::effects::is_effect;
 use crate::effects::summary::parameter_index;
+use crate::resolver::extension::collection_member_kind;
 use crate::statement::function_like::FunctionLikeBody;
-use crate::utils::names::collection_member_kind;
 use crate::utils::names::display_function_like_identifier;
 use crate::utils::names::display_member;
 use crate::utils::names::display_sharp_parameter_type;
@@ -1064,7 +1064,7 @@ where
                 let callee = collection.map_or_else(
                     || display_function_like_identifier(self.context, callee),
                     |collection| {
-                        display_sharp_member(collection, metadata.map_or(*method, |method| method.original_name))
+                        display_sharp_member(collection.name(), metadata.map_or(*method, |method| method.original_name))
                     },
                 );
 

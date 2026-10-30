@@ -53,6 +53,7 @@ use crate::expression::array_access::check_change_through_index;
 use crate::expression::assignment::PropertyWriteKind;
 use crate::expression::assignment::property_assignment;
 use crate::expression::assignment::static_property_assignment;
+use crate::resolver::extension::CollectionKind;
 use crate::resolver::extension::collection_member;
 use crate::resolver::method::get_declared_collection;
 use crate::resolver::method::get_declared_type;
@@ -186,7 +187,7 @@ where
     if context.dialect.is_sharp()
         && let ArrayTarget::Access(access) = array_target
         && let Some(written) = artifacts.get_expression_type(access.array)
-        && let Some((kind, write, name)) = indexed_collection(written)
+        && let Some((kind, write)) = indexed_collection(written)
         && collection_member(context.codebase, b"set", kind).is_none()
     {
         let collection = display_sharp_type(context, written);
@@ -195,7 +196,8 @@ where
             Issue::error(format!("Method `set`, which `{write}` runs, does not exist on `{collection}`."))
                 .with_annotation(Annotation::primary(access.span()).with_message("This index write runs `set`."))
                 .with_help(format!(
-                    "Install the standard library, heyjordanparker/php-sharp-composer, which declares the members of a `{name}`."
+                    "Install the standard library, heyjordanparker/php-sharp-composer, which declares the members of a `{}`.",
+                    kind.name()
                 )),
         );
     }
@@ -1187,20 +1189,15 @@ where
     context.collector.report(Issue::from(&error));
 }
 
-/// A collection whose index write runs the standard library's `set`: the receiver parts the member takes, the write as
-/// code writes it, and the collection's name.
-type IndexedCollection = (fn(&TAtomic) -> bool, &'static str, &'static str);
+/// The kind every part of `written` is when it is a `List` or a `Map`, whose index write runs the standard library's
+/// `set`, and the write as code writes it.
+fn indexed_collection(written: &TUnion) -> Option<(CollectionKind, &'static str)> {
+    let kind = CollectionKind::of(written.types.first()?)?;
+    let write = match kind {
+        CollectionKind::List => "list[i] = v",
+        CollectionKind::Map => "map[key] = value",
+        CollectionKind::Set | CollectionKind::Iterable => return None,
+    };
 
-/// The collection every part of `written` is when it is a `List` or a `Map`.
-fn indexed_collection(written: &TUnion) -> Option<IndexedCollection> {
-    let is_list: fn(&TAtomic) -> bool = |atomic| matches!(atomic, TAtomic::Array(TArray::List(_)));
-    let is_map: fn(&TAtomic) -> bool = |atomic| matches!(atomic, TAtomic::Array(TArray::Keyed(_)));
-
-    if written.types.iter().all(is_list) {
-        Some((is_list, "list[i] = v", "List"))
-    } else if written.types.iter().all(is_map) {
-        Some((is_map, "map[key] = value", "Map"))
-    } else {
-        None
-    }
+    written.types.iter().all(|atomic| CollectionKind::of(atomic) == Some(kind)).then_some((kind, write))
 }

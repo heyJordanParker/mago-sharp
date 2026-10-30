@@ -57,7 +57,7 @@ use mago_word::ascii_lowercase_word;
 use mago_word::word;
 
 use crate::context::Context;
-use crate::resolver::extension::is_collection_member;
+use crate::resolver::extension::collection_member_kind;
 use crate::utils::quoted_source;
 use crate::visibility::display_namespace;
 use crate::visibility::list_refusing;
@@ -1034,24 +1034,6 @@ pub(crate) fn sharp_code_class_name(
     sharp_import_alias(codebase, imported_names, scope, name).unwrap_or_else(|| short_name(name))
 }
 
-/// Returns `List`, `Map`, `Set` or `Iterable` when `metadata`, a member of the static class `class`, is the standard
-/// library's member of that collection, spec section 12, as `ListMembers.add` is a `List`'s, so a message writes it
-/// `List.add`.
-#[must_use]
-pub(crate) fn collection_member_kind(class: Word, metadata: &FunctionLikeMetadata) -> Option<&'static str> {
-    if !is_collection_member(class, metadata) {
-        return None;
-    }
-
-    match metadata.parameters.first()?.get_type_metadata()?.type_union.types.first()? {
-        TAtomic::Array(TArray::List(_)) => Some("List"),
-        TAtomic::Array(TArray::Keyed(_)) => Some("Map"),
-        TAtomic::Array(TArray::Set(_)) => Some("Set"),
-        TAtomic::Iterable(_) => Some("Iterable"),
-        _ => unreachable!("a collection member's receiver is a collection"),
-    }
-}
-
 /// The type arguments of the collection `receiver` holds, as an issue names them: a `List`'s, a `Set`'s and an
 /// `Iterable`'s element type, and a `Map`'s key and value types. A PHP# element type is never narrower than `int` or
 /// `string`, so a literal the analyzer knows widens to it.
@@ -1092,7 +1074,7 @@ pub(crate) fn display_collection_member<A>(
 where
     A: Arena,
 {
-    let kind = collection_member_kind(class, metadata)?;
+    let kind = collection_member_kind(class, metadata)?.name();
     let parameters: Vec<String> = type_parameters.iter().map(|parameter| display_type(context, parameter)).collect();
 
     Some(format!("{kind}<{}>.{}", parameters.join(", "), metadata.original_name))

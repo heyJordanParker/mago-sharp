@@ -60,7 +60,9 @@ use crate::resolver::class_name::class_value_classes;
 use crate::resolver::class_name::holds_no_class;
 use crate::resolver::class_name::report_non_existent_class_like;
 use crate::resolver::class_name::report_unknown_sharp_class;
+use crate::resolver::extension::CollectionKind;
 use crate::resolver::extension::Extension;
+use crate::resolver::extension::collection_member_kind;
 use crate::resolver::extension::extension_methods;
 use crate::resolver::extension::is_collection_member;
 use crate::resolver::extension::resolve_extension;
@@ -564,22 +566,22 @@ where
     // its own, spec section 12, beside the methods its objects have, as `held.contains("tea")` on a
     // `List<string>|Set<string>|Box` runs the member or the method of the kind the value holds.
     if let ClassLikeMemberSelector::Identifier(name) = selector {
-        for kind in collection_kinds(collection_parts) {
-            match resolve_extension(context, &kind, name, MetadataFlags::EXTENSION_METHOD) {
+        for (kind, parts) in collection_kinds(collection_parts) {
+            match resolve_extension(context, &parts, name, MetadataFlags::EXTENSION_METHOD) {
                 Some(Extension::Member(method))
                     if context
                         .codebase
                         .get_method_by_id(&method)
                         .is_some_and(|metadata| is_collection_member(method.get_class_name(), metadata)) =>
                 {
-                    result.collection_members.push((method, kind));
+                    result.collection_members.push((method, parts));
                 }
                 // A refusal the resolution reported stands alone.
                 resolved => {
                     if !matches!(resolved, Some(Extension::Refused)) {
                         report_non_existent_collection_member(
                             context,
-                            &kind,
+                            (kind, &parts),
                             object.span(),
                             selector.span(),
                             word(name.value),
@@ -1588,21 +1590,22 @@ where
         .collect()
 }
 
-/// The receiver's collection `parts`, one union for each kind among them, `List`, `Map`, `Set` and `Iterable` in that
-/// order, which reaches that kind's members.
-fn collection_kinds(parts: Vec<TAtomic>) -> Vec<TUnion> {
-    let kind = |atomic: &TAtomic| match atomic {
-        TAtomic::Array(TArray::Keyed(_)) => 1,
-        TAtomic::Array(TArray::Set(_)) => 2,
-        TAtomic::Iterable(_) => 3,
-        _ => 0,
-    };
-    let mut kinds: [Vec<TAtomic>; 4] = Default::default();
-    for part in parts {
-        kinds[kind(&part)].push(part);
-    }
+/// The receiver's collection `parts`, one union for each kind among them, in [`CollectionKind`]'s order, which reaches
+/// that kind's members.
+fn collection_kinds(mut parts: Vec<TAtomic>) -> Vec<(CollectionKind, TUnion)> {
+    let kind = |atomic: &TAtomic| {
+        let Some(kind) = CollectionKind::of(atomic) else {
+            unreachable!("a receiver's collection parts are each a collection");
+        };
 
-    kinds.into_iter().filter(|parts| !parts.is_empty()).map(TUnion::from_vec).collect()
+        kind
+    };
+    parts.sort_by_key(kind);
+
+    parts
+        .chunk_by(|part, next| kind(part) == kind(next))
+        .map(|parts| (kind(&parts[0]), TUnion::from_vec(parts.to_vec())))
+        .collect()
 }
 
 /// Reports a method called with `->`, or `.` in PHP#, on `object`, whose type `object_type` holds `null`, unless the
@@ -1641,31 +1644,26 @@ fn scalar_name(atomic: &TAtomic) -> Option<&'static str> {
     })
 }
 
-/// Reports a member the parts `kind` of a receiver, of one kind of collection, lack, naming the members that kind has,
+/// Reports a member the `parts` of a receiver, of one `kind` of collection, lack, naming the members that kind has,
 /// which the standard library declares.
 fn report_non_existent_collection_member<A>(
     context: &mut Context<'_, '_, A>,
-    kind: &TUnion,
+    (kind, parts): (CollectionKind, &TUnion),
     obj_span: Span,
     selector_span: Span,
     method_name: Word,
 ) where
     A: Arena,
 {
-    let collection = display_type(context, kind);
+    let collection = display_type(context, parts);
     // A member of the kind's collections of narrower elements, as a `List<int>`'s `max()`, names the elements it needs.
     let codebase = context.codebase;
-    let of_kind = |array: &TArray| {
-        kind.types.iter().any(
-            |atomic| matches!(atomic, TAtomic::Array(own) if std::mem::discriminant(own) == std::mem::discriminant(array)),
-        )
-    };
     let needed = codebase.extensions.get(&ascii_lowercase_word(method_name.as_bytes())).and_then(|members| {
         members.iter().find_map(|(_, member)| {
             let metadata = codebase.get_method_by_id(member)?;
             let array = metadata.parameters.first()?.get_type_metadata()?.type_union.get_single_array()?;
 
-            (is_collection_member(member.get_class_name(), metadata) && of_kind(array))
+            (collection_member_kind(member.get_class_name(), metadata) == Some(kind))
                 .then(|| get_array_parameters(array, codebase).1)
                 .filter(|elements| !elements.has_template_types())
         })
@@ -1682,8 +1680,8 @@ fn report_non_existent_collection_member<A>(
 
         return;
     }
-    let methods = extension_methods(context, kind);
-    let article = if collection.starts_with('I') { "An" } else { "A" };
+    let methods = extension_methods(context, parts);
+    let article = kind.article();
 
     context.collector.report_with_code(
         IssueCode::NonExistentMethod,

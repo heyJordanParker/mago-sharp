@@ -12,14 +12,17 @@ use mago_analyzer::artifacts::MemberCall;
 use mago_codex::ttype::union::TUnion;
 use mago_names::binding::Binding;
 use mago_names::binding::php_operator_name;
+use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::Access;
 use mago_syntax::cst::Argument;
 use mago_syntax::cst::ArgumentList;
+use mago_syntax::cst::ArrayElement;
 use mago_syntax::cst::Binary;
 use mago_syntax::cst::BinaryOperator;
 use mago_syntax::cst::Call;
 use mago_syntax::cst::ClassLikeMember;
+use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::FunctionLikeParameter;
 use mago_syntax::cst::Hint;
@@ -549,9 +552,13 @@ impl Lowering<'_, '_> {
         }
     }
 
-    /// Whether reading `expression` runs nothing: a literal, a name, a plain PHP constant read through its namespace, a
-    /// lambda, `typeof(X)` or `nameof(X.y)`.
+    /// Whether reading `expression` runs nothing: a literal, a collection literal of such values, a name, a plain PHP
+    /// constant read through its namespace, a class's constant or enum case, a lambda, `typeof(X)` or `nameof(X.y)`, or
+    /// a value a hidden variable holds already, which reads the variable.
     pub(super) fn is_pure(&self, expression: &Expression) -> bool {
+        if self.held_receivers.iter().any(|(span, _)| *span == expression.span()) {
+            return true;
+        }
         match expression {
             Expression::Parenthesized(parenthesized) => self.is_pure(parenthesized.expression),
             Expression::Literal(_)
@@ -562,7 +569,21 @@ impl Lowering<'_, '_> {
             Expression::ConstantAccess(name) => {
                 matches!(self.names.binding(&name.name), Some(Binding::Local(_) | Binding::This | Binding::Constant))
             }
-            Expression::Access(Access::Property(_)) => self.types.namespace_constant(expression).is_some(),
+            // A collection literal of values that run nothing runs nothing. A spread reads a sequence, which may run.
+            Expression::Array(array) => array.elements.iter().all(|element| match element {
+                ArrayElement::KeyValue(element) => self.is_pure(element.key) && self.is_pure(element.value),
+                ArrayElement::Value(element) => self.is_pure(element.value),
+                ArrayElement::Variadic(_) => false,
+                ArrayElement::Missing(_) => true,
+            }),
+            Expression::Access(Access::Property(access)) => {
+                self.types.namespace_constant(expression).is_some()
+                    || matches!(&access.property, ClassLikeMemberSelector::Identifier(name)
+                    if self.static_classes(access).is_some_and(|classes| classes.iter().all(|class| matches!(
+                        self.types.member_declaration(class, name.value).kind,
+                        DeclarationKind::Constant | DeclarationKind::EnumCase
+                    ))))
+            }
             _ => false,
         }
     }

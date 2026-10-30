@@ -1,11 +1,13 @@
 use std::sync::Arc;
 
 use mago_analyzer::CodebasePatternNames;
+use mago_analyzer::CollectionKind;
 use mago_analyzer::artifacts::AnalysisArtifacts;
 use mago_analyzer::artifacts::CallTarget;
 use mago_analyzer::artifacts::MemberCall;
 use mago_analyzer::chosen_operator;
 use mago_analyzer::collection_member;
+use mago_analyzer::collection_member_kind;
 use mago_analyzer::effects::Effects;
 use mago_analyzer::is_collection_member;
 use mago_codex::defaults_trait_name;
@@ -106,15 +108,17 @@ pub struct Declaration {
 /// The members a method call runs on a value that may hold more than one kind of collection, or a collection or an
 /// object, spec section 12, as [`Types::members_by_kind`] gives them.
 pub(crate) struct MembersByKind<'analysis> {
-    /// Each kind's standard library member, in the order the analysis resolved them, a `List`'s first.
+    /// Each kind's standard library member, in [`CollectionKind`]'s order, as the analysis resolved them.
     pub(crate) members: Vec<KindMember<'analysis>>,
-    /// Whether an object the value may hold runs its own method of that name.
-    pub(crate) object: bool,
+    /// The classes whose method of that name an object the value may hold runs, its own, none when it holds no object.
+    pub(crate) objects: Vec<Word>,
 }
 
 /// One kind's standard library member of a [`MembersByKind`].
 pub(crate) struct KindMember<'analysis> {
-    /// The class of the object the kind runs as, `None` for a `List`, which runs as a PHP array.
+    pub(crate) kind: CollectionKind,
+    /// The class of the object a `Map` or a `Set` runs as, which tells it apart. None for a `List`, which runs as a PHP
+    /// array, and for an `Iterable`.
     pub(crate) runs_as: Option<Word>,
     pub(crate) declaration: Declaration,
     /// The type arguments and the type the member's call has.
@@ -1390,9 +1394,9 @@ impl<'analysis> Types<'analysis> {
         })
     }
 
-    /// The standard library's member `name` of the collection whose receiver parts `kind` takes, a `List` or a `Map`,
-    /// which an operation on it runs, as `list[i] = v` and `map[key] = value` run `set`.
-    pub(crate) fn collection_operation(&self, name: &[u8], kind: fn(&TAtomic) -> bool) -> Declaration {
+    /// The standard library's member `name` of the collection `kind`, a `List` or a `Map`, which an operation on it runs,
+    /// as `list[i] = v` and `map[key] = value` run `set`.
+    pub(crate) fn collection_operation(&self, name: &[u8], kind: CollectionKind) -> Declaration {
         let Some((class, member)) = collection_member(self.codebase, name, kind)
             .and_then(|method| Some((method.get_class_name(), self.codebase.get_method_by_id(method)?)))
         else {
@@ -1414,7 +1418,7 @@ impl<'analysis> Types<'analysis> {
     /// collection or an object, spec section 12, as the analysis resolved them. None for a call that runs one member, or
     /// no collection's.
     pub(crate) fn members_by_kind(&self, call: &Expression) -> Option<MembersByKind<'_>> {
-        let (mut members, mut object) = (Vec::new(), false);
+        let (mut members, mut objects) = (Vec::new(), Vec::new());
         for callee in self.artifacts.get_callees(call) {
             let CallTarget::FunctionLike { callee: callee @ FunctionLikeIdentifier::Method(class, method), .. } =
                 callee
@@ -1423,18 +1427,24 @@ impl<'analysis> Types<'analysis> {
             };
             let metadata = self.codebase.get_method(class.as_bytes(), method.as_bytes())?;
             if !metadata.flags.is_extension_method() {
-                object = true;
+                let class = self.class_declaration(class.as_bytes()).name;
+                if !objects.contains(&class) {
+                    objects.push(class);
+                }
                 continue;
             }
-            let receiver = metadata.parameters.first()?.get_type_metadata()?.type_union.get_single_array()?;
-            let runs_as = match get_collection_object(receiver, self.codebase) {
-                Some(TAtomic::Object(object)) => object.get_name(),
-                _ => None,
-            };
+            let kind = collection_member_kind(*class, metadata)?;
+            let receiver = &metadata.parameters.first()?.get_type_metadata()?.type_union;
+            let runs_as =
+                match receiver.get_single_array().and_then(|array| get_collection_object(array, self.codebase)) {
+                    Some(TAtomic::Object(object)) => object.get_name(),
+                    _ => None,
+                };
             let Some(member_call) = self.artifacts.get_member_call(call, callee) else {
                 unreachable!("the analysis records each member of a call that runs several");
             };
             members.push(KindMember {
+                kind,
                 runs_as,
                 declaration: Declaration {
                     kind: DeclarationKind::StaticMethod,
@@ -1446,7 +1456,8 @@ impl<'analysis> Types<'analysis> {
             });
         }
 
-        (!members.is_empty() && members.len() + usize::from(object) > 1).then_some(MembersByKind { members, object })
+        (!members.is_empty() && members.len() + usize::from(!objects.is_empty()) > 1)
+            .then_some(MembersByKind { members, objects })
     }
 
     /// The slot an inline form leaves for each parameter of the engine function `function`, which `written` calls, that
