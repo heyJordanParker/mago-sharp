@@ -6,6 +6,7 @@ use mago_codex::ttype::add_union_type;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::array::keyed::TKeyedArray;
+use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::combiner::CombinerOptions;
 use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::get_list;
@@ -231,29 +232,50 @@ where
 }
 
 /// The array an engine function declares it returns when it makes a `Map` or a `Set`, which a parameter it marks
-/// `#[TakesResultType]` says, as the bridge passes that parameter the type arguments of what the call gives: a list
-/// for a `Set` of its elements, and any other array for a `Map` of its keys and values. None for any other function.
+/// `#[TakesResultType]` says, as the bridge passes that parameter the type arguments of what the call gives, or its
+/// declared return of `\Sharp\Set`, a `Set` of the type of the one it reads, which no docblock can write: a list for a
+/// `Set` of its elements, and any other array for a `Map` of its keys and values. None for any other function.
 fn made_collection<'target>(target: &InvocationTarget<'target>) -> Option<&'target TArray> {
     let metadata = target.get_function_like_metadata()?;
     let marked = metadata.parameters.iter().any(|parameter| {
         parameter.attributes.iter().any(|attribute| attribute.name.as_bytes().eq_ignore_ascii_case(TAKES_RESULT_TYPE))
     });
+    let makes_set = metadata.return_type_declaration_metadata.as_ref().is_some_and(|declared| {
+        declared.type_union.types.iter().any(|atomic| {
+            matches!(atomic, TAtomic::Object(TObject::Named(named)) if named.name.as_bytes().eq_ignore_ascii_case(b"Sharp\\Set"))
+        })
+    });
 
-    marked.then(|| metadata.return_type_metadata.as_ref()?.type_union.get_single_array()).flatten()
+    (marked || makes_set).then(|| metadata.return_type_metadata.as_ref()?.type_union.get_single_array()).flatten()
 }
 
 /// The prelude attribute that marks the parameter of an engine function that makes a `Map` or a `Set`.
 const TAKES_RESULT_TYPE: &[u8] = b"Sharp\\Internal\\TakesResultType";
 
-/// Whether `target` is a PHP# `List`'s or `Map`'s `groupBy` or `associateBy`, or an engine function that makes a `Map`
-/// keyed by one of its type parameters, as the `Sharp\Internal\groupBy` a `List`'s runs, which key a `Map` by what their
-/// function returns. A `.sharp` call checks that key by spec sections 10 and 12's rule, where a backed enum or a struct
-/// keys a `Map` too, so it infers their `G` without the `array-key` bound a `.php` call checks it by.
+/// Whether `target` keys the `Map` it returns by what its function returns: a PHP# collection's member, or an engine
+/// function that makes a `Map`, as [`made_collection`] says, whose `Map` is keyed by a type parameter the collection it
+/// takes first doesn't hold, as a `List`'s `groupBy<TKey>` and the `Sharp\Internal\groupBy` it runs are. A `.sharp`
+/// call checks that key by spec sections 10 and 12's rule, where a backed enum or a struct keys a `Map` too, so it
+/// infers their `G` without the `array-key` bound a `.php` call checks it by.
 pub(crate) fn keys_a_map_by_its_function(target: &InvocationTarget<'_>) -> bool {
-    is_collection_method(target, b"groupBy")
-        || is_collection_method(target, b"associateBy")
-        || matches!(made_collection(target), Some(TArray::Keyed(map))
-            if map.parameters.as_ref().is_some_and(|(key, _)| key.types.iter().all(|atomic| matches!(atomic, TAtomic::GenericParameter(_)))))
+    let Some(metadata) = target.get_function_like_metadata() else {
+        return false;
+    };
+    let is_member = matches!(target.get_function_like_identifier(),
+        Some(FunctionLikeIdentifier::Method(class, _)) if is_collection_member(*class, metadata));
+    let returned = metadata.return_type_metadata.as_ref().and_then(|returned| returned.type_union.get_single_array());
+    let Some(TArray::Keyed(TKeyedArray { parameters: Some((key, _)), .. })) = returned else {
+        return false;
+    };
+    let taken = metadata
+        .parameters
+        .first()
+        .and_then(|collection| collection.get_type_metadata())
+        .map(|collection| collection.type_union.get_template_types())
+        .unwrap_or_default();
+
+    (is_member || made_collection(target).is_some())
+        && key.types.iter().all(|atomic| matches!(atomic, TAtomic::GenericParameter(_)) && !taken.contains(&atomic))
 }
 
 /// Whether `target` is the method `method` of a PHP# `List`, `Map` or `Set`: the standard library's member, spec section

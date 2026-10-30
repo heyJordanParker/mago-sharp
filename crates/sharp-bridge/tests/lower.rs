@@ -6641,16 +6641,16 @@ fn set_methods_run_on_the_set() {
 /// ```php
 /// $tags = \is_array($tags) ? new \Sharp\Set<string>($tags) : $tags;
 /// $prices = …;
-/// $count = \count($tags);
-/// $kept = \Sharp\Internal\filterElements($tags, $keep, 'string');
+/// $count = \Sharp\Internal\size($tags);
+/// $kept = \Sharp\Internal\filterElements($tags, $keep);
 /// $priced = \Sharp\Internal\filterEntries($prices, $positive);
 /// \Sharp\Internal\any($tags, $keep);
 /// return \Sharp\Internal\keys($tags);
 /// ```
 ///
-/// A `Set`'s and a `Map`'s members inline to the call their standard library body makes, spec section 12: PHP's
-/// `count`, the engine function a `List` shares, or the one of a table. A `Set`'s `filter` passes the type arguments
-/// of the `Set` it makes, and its `toList()` is its table's keys.
+/// A `Set`'s and a `Map`'s members inline to the call their standard library body makes, spec section 12: the engine
+/// function a `List` shares, or the one of a table. A `Set`'s `filter` and a `Map`'s keep the type arguments of the
+/// one they filter, and a `Set`'s `toList()` is its table's keys.
 #[test]
 fn set_and_map_methods_are_the_collection_methods_of_their_names() {
     assert_eq!(
@@ -6743,7 +6743,7 @@ fn set_and_map_methods_are_the_collection_methods_of_their_names() {
                 VAR
                   ZVAL "count"
                 CALL
-                  ZVAL "count"
+                  ZVAL "Sharp\\Internal\\size"
                   ARG_LIST
                     VAR
                       ZVAL "tags"
@@ -6757,7 +6757,6 @@ fn set_and_map_methods_are_the_collection_methods_of_their_names() {
                       ZVAL "tags"
                     VAR
                       ZVAL "keep"
-                    ZVAL "string"
               ASSIGN
                 VAR
                   ZVAL "priced"
@@ -6786,56 +6785,13 @@ fn set_and_map_methods_are_the_collection_methods_of_their_names() {
 }
 
 /// ```php
-/// return \Lib\Calc::size(\Sharp\Internal\arrayOf($counts)) + \count($counts);
+/// return \count($this->lines) + \Sharp\Internal\size($counts);
 /// ```
 ///
-/// Spec section 12: plain PHP code's parameter of `array|\Countable` receives a `Map` as the PHP array it sees today,
-/// and only PHP's built-in `count`, which a `Map`'s `count()` runs and which counts a `Countable` as it counts the
-/// array, takes the `\Sharp\Map` itself.
+/// A `List`'s `count()` is PHP's `count` on the array, and a `Map`'s is the engine's `size` of its table, since PHP's
+/// built-ins take a `Map` as the PHP array it crosses into.
 #[test]
-fn only_a_built_in_function_takes_a_map_as_the_countable_it_is() {
-    let body = body_in(
-        "int run(Map<string, int> counts)",
-        "        return Calc.size(counts) + counts.count();\n",
-        &[(
-            "src/Lib/Calc.php",
-            "<?php namespace Lib; final class Calc { public static function size(array|\\Countable $items): int { return \\count($items); } }",
-        )],
-    );
-    let returned = &body[body.find("  RETURN").expect("the return")..];
-
-    assert_eq!(
-        format!("STMT_LIST\n{returned}"),
-        indoc! {r#"
-            STMT_LIST
-              RETURN
-                BINARY_OP [1]
-                  STATIC_CALL
-                    ZVAL "Lib\\Calc"
-                    ZVAL "size"
-                    ARG_LIST
-                      CALL
-                        ZVAL "Sharp\\Internal\\arrayOf"
-                        ARG_LIST
-                          VAR
-                            ZVAL "counts"
-                  CALL
-                    ZVAL "count"
-                    ARG_LIST
-                      VAR
-                        ZVAL "counts"
-        "#}
-    );
-}
-
-/// ```php
-/// return \count($this->lines) + \count($counts);
-/// ```
-///
-/// A `List`'s `count()` is PHP's `count` on the array, and a `Map`'s is PHP's `count` on the `\Sharp\Map`, which
-/// `\count` takes as the `Countable` it is, never as a PHP array.
-#[test]
-fn a_list_and_a_map_count_with_php_count() {
+fn a_list_counts_with_php_count_and_a_map_with_its_size() {
     let lowered = Lowered::new(
         "namespace App.Tenant;\n\nclass Report\n{\n    public List<int> lines { get; private set; } = [];\n\n    public int run(Map<string, int> counts)\n    {\n        return this.lines.count() + counts.count();\n    }\n}\n",
     );
@@ -6914,7 +6870,7 @@ fn a_list_and_a_map_count_with_php_count() {
                           ZVAL "this"
                         ZVAL "lines"
                   CALL
-                    ZVAL "count"
+                    ZVAL "Sharp\\Internal\\size"
                     ARG_LIST
                       VAR
                         ZVAL "counts"
@@ -7254,12 +7210,12 @@ fn last_is_the_last_element_and_throws_on_an_empty_list() {
 /// ```php
 /// $stock = \is_array($stock) ? new \Sharp\Set<string>($stock) : $stock;
 /// $held = $listed ? $names : $stock;
-/// return (\is_array($held) ? \Sharp\ListMembers::contains($held, 'tea') : \Sharp\SetMembers::contains($held, 'tea'))
-///     && (\is_array($held) ? \Sharp\ListMembers::count($held) : \Sharp\SetMembers::count($held)) > 0;
+/// return (\is_array($held) ? \Sharp\Internal\contains($held, 'tea') : \Sharp\Internal\containsKey($held, 'tea'))
+///     && (\is_array($held) ? \count($held) : \Sharp\Internal\size($held)) > 0;
 /// ```
 ///
 /// A member a `List` shares with a `Map` or a `Set` runs on a value that may be either, spec section 12: the `List`'s
-/// member when the value is an array, and the other collection's member otherwise.
+/// member when the value is an array, and the other collection's member otherwise, each as its own call runs it.
 #[test]
 fn a_shared_list_method_on_a_value_that_may_be_another_collection_tests_for_the_list() {
     assert_eq!(
@@ -7305,16 +7261,14 @@ fn a_shared_list_method_on_a_value_that_may_be_another_collection_tests_for_the_
                       ARG_LIST
                         VAR
                           ZVAL "held"
-                    STATIC_CALL
-                      ZVAL "Sharp\\ListMembers"
-                      ZVAL "contains"
+                    CALL
+                      ZVAL "Sharp\\Internal\\contains"
                       ARG_LIST
                         VAR
                           ZVAL "held"
                         ZVAL "tea"
-                    STATIC_CALL
-                      ZVAL "Sharp\\SetMembers"
-                      ZVAL "contains"
+                    CALL
+                      ZVAL "Sharp\\Internal\\containsKey"
                       ARG_LIST
                         VAR
                           ZVAL "held"
@@ -7326,15 +7280,13 @@ fn a_shared_list_method_on_a_value_that_may_be_another_collection_tests_for_the_
                         ARG_LIST
                           VAR
                             ZVAL "held"
-                      STATIC_CALL
-                        ZVAL "Sharp\\ListMembers"
+                      CALL
                         ZVAL "count"
                         ARG_LIST
                           VAR
                             ZVAL "held"
-                      STATIC_CALL
-                        ZVAL "Sharp\\SetMembers"
-                        ZVAL "count"
+                      CALL
+                        ZVAL "Sharp\\Internal\\size"
                         ARG_LIST
                           VAR
                             ZVAL "held"
@@ -7350,7 +7302,8 @@ fn a_shared_list_method_on_a_value_that_may_be_another_collection_tests_for_the_
     let (receiver, argument) = (run.find(r##"ZVAL "receiver#1""##), run.find(r##"ZVAL "argument#2""##));
     assert!(receiver.is_some() && receiver < argument, "{run}");
     assert_eq!(run.matches(r#"ZVAL "listed""#).count(), 1, "{run}");
-    // A change passes the place, the local, to both, and a named argument goes by its name to both.
+    // A change passes the place, the local, to both, and a named argument goes by its name to both, which then run as
+    // static calls with the type arguments of their own kind.
     let body = Lowered::new(
         "namespace App.Tenant;\n\nclass Report\n{\n    public bool run(bool listed, List<string> names, Set<string> stock)\n    {\n        let held = listed ? names : stock;\n        held.add(\"tea\");\n        return held.contains(value: \"tea\");\n    }\n}\n",
     )
@@ -7366,16 +7319,14 @@ fn a_shared_list_method_on_a_value_that_may_be_another_collection_tests_for_the_
                   ARG_LIST
                     VAR
                       ZVAL "held"
-                STATIC_CALL
-                  ZVAL "Sharp\\ListMembers"
-                  ZVAL "add"
+                CALL
+                  ZVAL "Sharp\\Internal\\add"
                   ARG_LIST
                     VAR
                       ZVAL "held"
                     ZVAL "tea"
-                STATIC_CALL
-                  ZVAL "Sharp\\SetMembers"
-                  ZVAL "add"
+                CALL
+                  ZVAL "Sharp\\Internal\\addKey"
                   ARG_LIST
                     VAR
                       ZVAL "held"
@@ -7396,6 +7347,9 @@ fn a_shared_list_method_on_a_value_that_may_be_another_collection_tests_for_the_
                       NAMED_ARG
                         ZVAL "value"
                         ZVAL "tea"
+                      SHARP_TYPE_ARGS
+                        null
+                        ZVAL "string"
                   STATIC_CALL
                     ZVAL "Sharp\\SetMembers"
                     ZVAL "contains"
@@ -7405,6 +7359,9 @@ fn a_shared_list_method_on_a_value_that_may_be_another_collection_tests_for_the_
                       NAMED_ARG
                         ZVAL "value"
                         ZVAL "tea"
+                      SHARP_TYPE_ARGS
+                        null
+                        ZVAL "string"
         "#}
     );
     assert_eq!(run.matches(r#"ZVAL "wanted""#).count(), 1, "{run}");
@@ -7443,9 +7400,9 @@ fn an_empty_map_local_runs_the_maps_remove() {
 }
 
 /// ```php
-/// return \is_array($held) ? \Sharp\ListMembers::count($held)
-///     : ($held instanceof \Sharp\Map ? \Sharp\MapMembers::count($held)
-///         : ($held instanceof \Sharp\Set ? \Sharp\SetMembers::count($held) : $held->count()));
+/// return \is_array($held) ? \count($held)
+///     : ($held instanceof \Sharp\Map ? \Sharp\Internal\size($held)
+///         : ($held instanceof \Sharp\Set ? \Sharp\Internal\size($held) : $held->count()));
 /// ```
 ///
 /// Spec section 12: a member of a value that may be any collection or an object tests the kind the value holds, a
@@ -7470,8 +7427,7 @@ fn a_member_of_a_value_that_may_be_any_collection_or_an_object_tests_each_kind()
                     ARG_LIST
                       VAR
                         ZVAL "held"
-                  STATIC_CALL
-                    ZVAL "Sharp\\ListMembers"
+                  CALL
                     ZVAL "count"
                     ARG_LIST
                       VAR
@@ -7481,9 +7437,8 @@ fn a_member_of_a_value_that_may_be_any_collection_or_an_object_tests_each_kind()
                       VAR
                         ZVAL "held"
                       ZVAL "Sharp\\Map"
-                    STATIC_CALL
-                      ZVAL "Sharp\\MapMembers"
-                      ZVAL "count"
+                    CALL
+                      ZVAL "Sharp\\Internal\\size"
                       ARG_LIST
                         VAR
                           ZVAL "held"
@@ -7492,9 +7447,8 @@ fn a_member_of_a_value_that_may_be_any_collection_or_an_object_tests_each_kind()
                         VAR
                           ZVAL "held"
                         ZVAL "Sharp\\Set"
-                      STATIC_CALL
-                        ZVAL "Sharp\\SetMembers"
-                        ZVAL "count"
+                      CALL
+                        ZVAL "Sharp\\Internal\\size"
                         ARG_LIST
                           VAR
                             ZVAL "held"
@@ -7505,6 +7459,35 @@ fn a_member_of_a_value_that_may_be_any_collection_or_an_object_tests_each_kind()
                         ARG_LIST
         "#}
     );
+
+    // The object's own method takes the arguments as the members do, a named one by its name.
+    let body = Lowered::new(
+        "namespace App.Tenant;\n\nclass Report\n{\n    public bool contains(int value) => value == 7;\n\n    public bool run(bool boxed, Set<int> tags, int wanted)\n    {\n        let held = boxed ? this : tags;\n        return held.contains(value: wanted);\n    }\n}\n",
+    )
+    .body_of("run");
+    let own = &body[body.find("METHOD_CALL").expect("the object's own method")..];
+
+    assert_eq!(own.matches("NAMED_ARG").count(), 1, "{body}");
+    assert!(own.contains(r#"ZVAL "value""#) && own.contains(r#"ZVAL "wanted""#), "{body}");
+}
+
+/// ```php
+/// return [$argument#1 = fn ($value) => 1, \is_array($held) ? \Sharp\Internal\associateBy($held, $argument#1, 'int, int')
+///     : \Sharp\Internal\associateBy($held, $argument#1, 'int, string')][1];
+/// ```
+///
+/// Spec section 12: each kind's member a value that may be a `List` or a `Map` runs makes the `Map` its own call on that
+/// kind makes, of the type arguments the checker inferred for it, not of the union of both.
+#[test]
+fn a_member_of_each_kind_makes_the_map_of_its_own_type() {
+    let body = Lowered::new(
+        "namespace App.Tenant;\n\nclass Report\n{\n    public Any run(bool listed, List<int> items, Map<string, string> names)\n    {\n        let held = listed ? items : names;\n        return held.associateBy(value => 1);\n    }\n}\n",
+    )
+    .body_of("run");
+
+    assert_eq!(body.matches(r#"ZVAL "Sharp\\Internal\\associateBy""#).count(), 2, "{body}");
+    assert_eq!(body.matches(r#"ZVAL "int, int""#).count(), 1, "{body}");
+    assert_eq!(body.matches(r#"ZVAL "int, string""#).count(), 1, "{body}");
 }
 
 /// Spec section 12: a null-safe member of a value that may be a `List`, a `Set` or null skips the null as the chain's
@@ -7534,15 +7517,13 @@ fn a_null_safe_member_of_a_value_that_may_be_either_collection_tests_null_then_e
                       ARG_LIST
                         VAR
                           ZVAL "held"
-                    STATIC_CALL
-                      ZVAL "Sharp\\ListMembers"
+                    CALL
                       ZVAL "count"
                       ARG_LIST
                         VAR
                           ZVAL "held"
-                    STATIC_CALL
-                      ZVAL "Sharp\\SetMembers"
-                      ZVAL "count"
+                    CALL
+                      ZVAL "Sharp\\Internal\\size"
                       ARG_LIST
                         VAR
                           ZVAL "held"
@@ -9860,7 +9841,7 @@ fn a_lambda_with_a_set_parameter_is_a_closure_that_makes_it_a_set_first() {
                           ZVAL "tags"
                     RETURN
                       CALL
-                        ZVAL "count"
+                        ZVAL "Sharp\\Internal\\size"
                         ARG_LIST
                           VAR
                             ZVAL "tags"

@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 
 use mago_allocator::LocalArena;
+use mago_analyzer::artifacts::MemberCall;
 use mago_codex::defaults_trait_name;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::metadata::module::BindingValueMetadata;
@@ -265,6 +266,7 @@ use types::Declaration;
 use types::DeclarationKind;
 use types::Equality;
 use types::FunctionType;
+use types::MembersByKind;
 use types::PlainParameter;
 use types::Types;
 use types::agreed_kind;
@@ -5792,10 +5794,12 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 {
                     return self.extension_access(expression, &extension, call.object, Some(&call.argument_list));
                 }
-                if let Some((members, object)) = self.types.members_by_kind(expression)
-                    && (tested || members.iter().any(|(_, member)| self.types.changes_receiver(member)))
+                if let Some(kinds) = self.types.members_by_kind(expression)
+                    && (tested || kinds.members.iter().any(|member| self.types.changes_receiver(&member.declaration)))
                 {
-                    return self.call_by_kind(expression, &members, object, !tested);
+                    let parts = (call.object, &call.method, &call.argument_list);
+
+                    return self.call_by_kind(expression, &kinds, parts, !tested);
                 }
                 if tested && self.types.is_lazy_operation(expression) {
                     return self.lazy_operation(line, call.object, &call.method, &call.argument_list);
@@ -7933,8 +7937,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     let mut children = this.children[first..first + count].to_vec();
                     children.extend(slots.iter().map(|&slot| match slot {
                         _ if this.forming => this.variable(call.span(), slot),
-                        inline::RESULT_TYPE_SLOT => this.result_type_argument(expression, line),
-                        _ => this.key_order_argument(expression, line),
+                        inline::RESULT_TYPE_SLOT => this.result_type_argument(expression, None, line),
+                        _ => this.key_order_argument(expression, None, line),
                     }));
 
                     this.node(SHARP_AST_ARG_LIST, 0, line, &children)
@@ -7952,8 +7956,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         if let Some(extension) = self.types.extension(expression) {
             return self.extension_access(expression, &extension, call.object, Some(&call.argument_list));
         }
-        if let Some((members, object)) = self.types.members_by_kind(expression) {
-            return self.call_by_kind(expression, &members, object, false);
+        if let Some(kinds) = self.types.members_by_kind(expression) {
+            return self.call_by_kind(expression, &kinds, (call.object, &call.method, &call.argument_list), false);
         }
         if let Some(inlined) = self.inlined_call(expression, call) {
             return inlined;
@@ -8128,7 +8132,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         // receiver first and then the arguments the value is called with.
         if arguments.is_none() && self.types.is_extension_method_value(access) {
             let target = self.expression(receiver);
-            let type_arguments = self.types.extension_type_arguments(access);
+            let type_arguments = self.types.extension_type_arguments(access, None);
 
             return self.receiver_closure(access, target, type_arguments.as_deref(), |this, receiver, arguments| {
                 let values: Vec<u32> = std::iter::once(receiver).chain(arguments.iter().copied()).collect();
@@ -8145,11 +8149,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 && !self.tested_links.contains(&access.span());
 
             return self.with_place(receiver, null_safe, |this, place| {
-                this.extension_call(access, extension, InlineReceiver::Place(place), arguments, element.as_ref())
+                this.extension_call(access, extension, InlineReceiver::Place(place), arguments, element.as_ref(), None)
             });
         }
 
-        self.extension_call(access, extension, InlineReceiver::Expression(receiver), arguments, element.as_ref())
+        self.extension_call(access, extension, InlineReceiver::Expression(receiver), arguments, element.as_ref(), None)
     }
 
     /// `call` run on the place `receiver`, which it passes by reference to change it where it lives, spec section 26.
@@ -8284,48 +8288,37 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.node(SHARP_AST_DIM, 0, line, &[steps, position])
     }
 
-    /// The method call `expression`, null-safe or not, on a value that may hold more than one kind of collection, or a
-    /// collection or an object, spec section 12, as [`Types::members_by_kind`] gives `members` and `object`: the member
-    /// of the kind the value holds, tested `List` first, then each other kind by the class it runs as, and an object's
-    /// own method last. The receiver runs first, as a place a `ref` member changes, as [`Self::with_place`] passes it
-    /// and skips where `null_safe` finds it null, or a value read once. Each argument but a literal or a local then
-    /// runs once, in a hidden variable:
+    /// The method call `expression`, null-safe or not, of `call`, its receiver, method and arguments, on a value that
+    /// may hold more than one kind of collection, or a collection or an object, spec section 12, as
+    /// [`Types::members_by_kind`] gives `kinds`: the member of the kind the value holds, tested `List` first, then each
+    /// other kind by the class it runs as, and an object's own method last. The receiver runs first, as a place a `ref`
+    /// member changes, as [`Self::with_place`] passes it and skips where `null_safe` finds it null, or a value read
+    /// once. Each argument but a literal or a local then runs once, in a hidden variable, and each member runs as its
+    /// own call does, as [`Self::extension_call`] lowers it:
     ///
     /// ```php
-    /// [$argument#1 = $this->wanted(), \is_array($held) ? \Sharp\ListMembers::contains($held, $argument#1)
-    ///     : \Sharp\SetMembers::contains($held, $argument#1)][1]
+    /// [$argument#1 = $this->wanted(), \is_array($held) ? \Sharp\Internal\contains($held, $argument#1)
+    ///     : \Sharp\Internal\containsKey($held, $argument#1)][1]
     /// ```
     fn call_by_kind(
         &mut self,
         expression: &Expression,
-        members: &[(Option<Word>, Declaration)],
-        object: bool,
+        kinds: &MembersByKind,
+        call: (&Expression, &ClassLikeMemberSelector, &ArgumentList),
         null_safe: bool,
     ) -> u32 {
-        let (Expression::Call(Call::Method(MethodCall { object: receiver, method, argument_list, .. }))
-        | Expression::Call(Call::NullSafeMethod(NullSafeMethodCall {
-            object: receiver,
-            method,
-            argument_list,
-            ..
-        }))) = expression
-        else {
-            unreachable!("a call by kind is a method call");
-        };
-        let call = (*receiver, method, argument_list);
+        let receiver = call.0;
         let line = self.line(expression);
         let taken = self.temporaries;
         let held = self.held_receivers.len();
-        let lowered = if members.iter().any(|(_, member)| self.types.changes_receiver(member)) {
-            self.with_place(receiver, null_safe, |this, place| {
-                this.selected_call(line, members, object, call, Some(place))
-            })
+        let lowered = if kinds.members.iter().any(|member| self.types.changes_receiver(&member.declaration)) {
+            self.with_place(receiver, null_safe, |this, place| this.selected_call(expression, kinds, call, Some(place)))
         } else if self.is_pure(receiver) {
-            self.selected_call(line, members, object, call, None)
+            self.selected_call(expression, kinds, call, None)
         } else {
             let (step, name) = self.hold_step(line, receiver, "receiver");
             self.held_receivers.push((receiver.span(), name));
-            let selected = self.selected_call(line, members, object, call, None);
+            let selected = self.selected_call(expression, kinds, call, None);
             let selected = self.node(SHARP_AST_ARRAY_ELEM, 0, line, &[selected, NULL]);
 
             self.picked_step(line, &[step, selected], 1)
@@ -8336,62 +8329,62 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         lowered
     }
 
-    /// The conditional [`Self::call_by_kind`] runs, after the arguments it holds of `call`, the receiver, the method and
-    /// the arguments. Each member takes `place`, the place [`Self::with_place`] passes, where a member changes the
-    /// receiver, and reads it otherwise. A literal or a local reads the same in every branch. Any other argument, a
-    /// lambda too, which declares its function once, is held.
+    /// The conditional [`Self::call_by_kind`] runs for the call `expression`, after the arguments it holds of `call`,
+    /// the receiver, the method and the arguments. Each member takes `place`, the place [`Self::with_place`] passes,
+    /// where a member changes the receiver, and reads it otherwise. A literal or a local reads the same in every
+    /// branch. Any other argument, a lambda too, which declares its function once, is held.
     fn selected_call(
         &mut self,
-        line: u32,
-        members: &[(Option<Word>, Declaration)],
-        object: bool,
+        expression: &Expression,
+        kinds: &MembersByKind,
         (receiver, method, argument_list): (&Expression, &ClassLikeMemberSelector, &ArgumentList),
         mut place: Option<u32>,
     ) -> u32 {
+        let line = self.line(expression);
         let mut steps = Vec::new();
-        let mut arguments = Vec::new();
         for argument in argument_list.arguments.iter() {
             let value = argument.value();
-            let rereads =
-                self.is_pure(value) && !matches!(value, Expression::ArrowFunction(_) | Expression::Closure(_));
-            let held = (!rereads).then(|| {
-                let (step, name) = self.hold_step(line, value, "argument");
-                steps.push(step);
-
-                name
-            });
-            arguments.push((argument, held));
+            if self.is_pure(value) && !matches!(value, Expression::ArrowFunction(_) | Expression::Closure(_)) {
+                continue;
+            }
+            let (step, name) = self.hold_step(line, value, "argument");
+            steps.push(step);
+            self.held_receivers.push((value.span(), name));
         }
-        let passed = |this: &mut Self| -> Vec<u32> {
-            arguments
-                .iter()
-                .map(|(argument, held)| {
-                    let value = match held {
-                        Some(name) => this.variable(argument.value().span(), name),
-                        None => this.expression(argument.value()),
-                    };
-                    match argument {
-                        Argument::Positional(_) => value,
-                        Argument::Named(named) => this.named(named, value),
-                    }
-                })
-                .collect()
-        };
         let changes = place.is_some();
         let mut calls = Vec::new();
-        for (runs_as, member) in members {
+        for member in &kinds.members {
             let value = match place.take() {
-                Some(place) => place,
-                None if changes => self.target(receiver, PlaceUse::Write),
-                None => self.expression(receiver),
+                Some(place) => InlineReceiver::Place(place),
+                None if changes => InlineReceiver::Place(self.target(receiver, PlaceUse::Write)),
+                None => InlineReceiver::Expression(receiver),
             };
-            let values: Vec<u32> = std::iter::once(value).chain(passed(self)).collect();
-            calls.push((*runs_as, self.operator_call(line, member.class, member.name.as_bytes(), &values)));
+            let element = self.types.plain_member_element(&member.declaration, receiver);
+            let arguments = Some(argument_list);
+            let call = self.extension_call(
+                expression,
+                &member.declaration,
+                value,
+                arguments,
+                element.as_ref(),
+                Some(member.call),
+            );
+            calls.push((member.runs_as, call));
         }
-        let mut selected = if object {
+        let mut selected = if kinds.object {
             let value = self.expression(receiver);
             let method = self.member(method);
-            let own = passed(self);
+            let own: Vec<u32> = argument_list
+                .arguments
+                .iter()
+                .map(|argument| {
+                    let value = self.expression(argument.value());
+                    match argument {
+                        Argument::Positional(_) => value,
+                        Argument::Named(named) => self.named(named, value),
+                    }
+                })
+                .collect();
             let own = self.node(SHARP_AST_ARG_LIST, 0, line, &own);
 
             self.node(SHARP_AST_METHOD_CALL, 0, line, &[value, method, own])
@@ -8429,8 +8422,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// The call `access` of the extension member `extension` on `receiver`, with `arguments`: the library's inline form,
-    /// or the call of the static method it runs as, as [`Self::extension_access`] says. Each argument goes in as an
-    /// element of the type `element` does, where the receiver is a collection plain PHP declares.
+    /// or the call of the static method it runs as, as [`Self::extension_access`] says, with the type arguments and the
+    /// result type of `member`, where the call runs it of several. Each argument goes in as an element of the type
+    /// `element` does, where the receiver is a collection plain PHP declares.
     fn extension_call(
         &mut self,
         access: &Expression,
@@ -8438,22 +8432,21 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         receiver: InlineReceiver,
         arguments: Option<&ArgumentList>,
         element: Option<&TUnion>,
+        member: Option<&MemberCall>,
     ) -> u32 {
         let line = self.line(access);
         let receiver = match receiver {
             InlineReceiver::Expression(receiver) => {
-                if let Some(inlined) =
-                    self.inlined(access, extension, Some(InlineReceiver::Expression(receiver)), arguments, element)
-                {
+                let inline_receiver = Some(InlineReceiver::Expression(receiver));
+                if let Some(inlined) = self.inlined(access, extension, inline_receiver, arguments, element, member) {
                     return inlined;
                 }
 
                 self.read_receiver(receiver)
             }
             InlineReceiver::Place(place) => {
-                if let Some(inlined) =
-                    self.inlined(access, extension, Some(InlineReceiver::Place(place)), arguments, element)
-                {
+                let inline_receiver = Some(InlineReceiver::Place(place));
+                if let Some(inlined) = self.inlined(access, extension, inline_receiver, arguments, element, member) {
                     return inlined;
                 }
 
@@ -8475,7 +8468,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         {
             values.extend(self.caller_positions(access.span(), list, callee, 1));
         }
-        if let Some(type_arguments) = self.types.extension_type_arguments(access) {
+        if let Some(type_arguments) = self.types.extension_type_arguments(access, member) {
             let text = self.type_text(line, &type_arguments);
             values.push(self.node(SHARP_AST_SHARP_TYPE_ARGS, 0, line, &[NULL, text]));
         }
@@ -8710,7 +8703,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 Argument::Named(named) => (named.value, false),
             };
             let parameter = argument_parameter(argument, position, parameters);
-            let takes_array = parameter.is_some_and(|parameter| parameter.takes_array(self.types.codebase()));
+            let takes_array = parameter.is_some_and(PlainParameter::takes_array);
             let value = match (spread, self.typed_local(value)) {
                 (false, Some((name, declared))) if parameter.is_some_and(PlainParameter::is_by_reference) => {
                     if self.crossing_array(&declared).is_some() {
@@ -8772,10 +8765,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         list.arguments.iter().enumerate().any(|(position, argument)| {
             let parameter = argument_parameter(argument, position, parameters);
 
-            self.received_as_array(
-                argument.value(),
-                parameter.is_some_and(|parameter| parameter.takes_array(self.types.codebase())),
-            )
+            self.received_as_array(argument.value(), parameter.is_some_and(PlainParameter::takes_array))
         })
     }
 

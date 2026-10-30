@@ -12,6 +12,7 @@ use mago_codex::ttype::TType;
 use mago_codex::ttype::add_optional_union_type;
 use mago_codex::ttype::comparator::ComparisonResult;
 use mago_codex::ttype::comparator::union_comparator;
+use mago_codex::ttype::get_list;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_never;
 use mago_codex::ttype::union::TUnion;
@@ -270,18 +271,22 @@ impl<'ctx> BlockContext<'ctx> {
     }
 
     /// The type the local `variable_id` is declared with: its written type, or the general type of its first value
-    /// when it has none, or else the type of the parameter of that name.
+    /// when it has none, or else the type of the parameter of that name, a `List` of it for a variadic one, as spec
+    /// section 7 gives a PHP# variadic parameter its values.
     pub fn declared_type(&self, variable_id: &Word) -> Option<TUnion> {
         match self.local_types.get(variable_id) {
             Some((local_type, _)) => Some(local_type.as_ref().clone()),
-            None => self
-                .scope
-                .get_function_like()?
-                .parameters
-                .iter()
-                .find(|parameter| parameter.get_name().0 == *variable_id)?
-                .get_type_metadata()
-                .map(|metadata| metadata.type_union.clone()),
+            None => {
+                let parameter = self
+                    .scope
+                    .get_function_like()?
+                    .parameters
+                    .iter()
+                    .find(|parameter| parameter.get_name().0 == *variable_id)?;
+                let declared = parameter.get_type_metadata()?.type_union.clone();
+
+                Some(if parameter.flags.is_variadic() { get_list(declared) } else { declared })
+            }
         }
     }
 

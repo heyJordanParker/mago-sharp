@@ -59,6 +59,16 @@ pub struct ResolvedMethodCall {
     pub method: Word,
 }
 
+/// What one method gives, of the several a PHP# method call runs, as [`AnalysisArtifacts::get_member_call`] says.
+#[derive(Debug, Clone)]
+pub struct MemberCall {
+    /// The method's type arguments, one per template in declaration order, as a call's own are. None for a method that
+    /// isn't generic.
+    pub type_arguments: Option<Vec<TUnion>>,
+    /// The type the method's call gives.
+    pub result: TUnion,
+}
+
 /// What a PHP# call runs, as the analysis resolved it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CallTarget {
@@ -111,6 +121,11 @@ pub struct AnalysisArtifacts {
     pub listings: HashSet<Listing>,
     /// What each PHP# call runs, keyed by the call's span.
     pub(crate) call_targets: HashMap<(u32, u32), Vec<CallTarget>>,
+    /// What each method a PHP# method call runs gives, where the call runs one of several, as on a value that may hold
+    /// more than one kind of collection, spec section 12, keyed by the call's span and the method. The call's own type
+    /// arguments are the last method's, and its type is the union of every method's. Read through
+    /// [`Self::get_member_call`].
+    pub(crate) member_calls: HashMap<((u32, u32), FunctionLikeIdentifier), MemberCall>,
     /// The type each PHP# `is`, `as`, `match` arm, catch clause or `typeof` reads while the code runs, a type parameter
     /// or a class with type arguments, keyed by the span of the type it writes. Apart from `expression_types`, because the `instanceof`
     /// a test runs as spans that type too when nothing the code writes stands before it.
@@ -183,6 +198,7 @@ impl AnalysisArtifacts {
             effect_summaries: Vec::new(),
             listings: HashSet::default(),
             call_targets: HashMap::default(),
+            member_calls: HashMap::default(),
             tested_types: HashMap::default(),
             declared_types: HashMap::default(),
             list_pattern_tuples: HashMap::default(),
@@ -383,6 +399,23 @@ impl AnalysisArtifacts {
         if !recorded.contains(&target) {
             recorded.push(target);
         }
+    }
+
+    /// What the method `callee` gives, of the several the PHP# method call `call` runs, as the analysis checked it.
+    /// None for a call that runs one method.
+    pub fn get_member_call<T>(&self, call: &T, callee: &FunctionLikeIdentifier) -> Option<&MemberCall>
+    where
+        T: HasSpan,
+    {
+        self.member_calls.get(&(get_expression_range(call), *callee))
+    }
+
+    /// Records that the method `callee`, of the several the PHP# method call at `span` runs, gives `result`, with the
+    /// type arguments its analysis just recorded for the call.
+    pub(crate) fn record_member_call(&mut self, span: Span, callee: FunctionLikeIdentifier, result: TUnion) {
+        let range = (span.start.offset, span.end.offset);
+        let type_arguments = self.inferred_type_arguments.get(&range).cloned();
+        self.member_calls.insert((range, callee), MemberCall { type_arguments, result });
     }
 
     /// Records that the PHP# test or `typeof` that writes the type `hint` reads `tested` while the code runs.

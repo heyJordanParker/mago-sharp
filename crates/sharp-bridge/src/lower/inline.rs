@@ -8,6 +8,7 @@
 
 use std::collections::HashMap;
 
+use mago_analyzer::artifacts::MemberCall;
 use mago_codex::ttype::union::TUnion;
 use mago_names::binding::Binding;
 use mago_names::binding::php_operator_name;
@@ -443,13 +444,15 @@ impl Lowering<'_, '_> {
             receiver.map(InlineReceiver::Expression),
             Some(&call.argument_list),
             None,
+            None,
         )
     }
 
     /// The call `call` of `declaration` on `receiver`, its first slot, with `arguments`, as the method's inline form on
     /// the call's line, under the rule [`Self::inlined_call`] states. A form that calls an engine function whose
-    /// parameter takes what the call gives, [`TAKES_RESULT_TYPE`] or [`TAKES_KEY_ORDER`], gets it from `call`. Each
-    /// argument goes in as an element of the type `element` does, where the receiver is a collection plain PHP declares.
+    /// parameter takes what the call gives, [`TAKES_RESULT_TYPE`] or [`TAKES_KEY_ORDER`], gets it from `call`, or from
+    /// `member`, where the call runs it of several. Each argument goes in as an element of the type `element` does,
+    /// where the receiver is a collection plain PHP declares.
     pub(super) fn inlined(
         &mut self,
         call: &Expression,
@@ -457,6 +460,7 @@ impl Lowering<'_, '_> {
         receiver: Option<InlineReceiver>,
         arguments: Option<&ArgumentList>,
         element: Option<&TUnion>,
+        member: Option<&MemberCall>,
     ) -> Option<u32> {
         let form = self.types.inline_form(declaration)?;
         let line = self.line(call);
@@ -488,8 +492,8 @@ impl Lowering<'_, '_> {
                 InlineReceiver::Place(place) => place,
             })
             .collect();
-        let result_type = form.result_type.map(|_| self.result_type_argument(call, line));
-        let key_order = form.key_order.map(|_| self.key_order_argument(call, line));
+        let result_type = form.result_type.map(|_| self.result_type_argument(call, member, line));
+        let key_order = form.key_order.map(|_| self.key_order_argument(call, member, line));
         values.extend(result_type.into_iter().chain(key_order));
 
         Some(self.copied(declaration, form, &values, line))
@@ -519,20 +523,22 @@ impl Lowering<'_, '_> {
         self.copy(form, form.root, values, line)
     }
 
-    /// The type arguments of the `Map` or the `Set` `call` gives, as the engine function's [`TAKES_RESULT_TYPE`]
-    /// parameter takes them.
-    pub(super) fn result_type_argument(&mut self, call: &Expression, line: u32) -> u32 {
-        let Some(text) = self.table_type_arguments(self.types.expression_type(call)) else {
+    /// The type arguments of the `Map` or the `Set` `call` gives, or `member` gives, where the call runs it of several,
+    /// as the engine function's [`TAKES_RESULT_TYPE`] parameter takes them.
+    pub(super) fn result_type_argument(&mut self, call: &Expression, member: Option<&MemberCall>, line: u32) -> u32 {
+        let Some(text) = self.table_type_arguments(self.types.call_type(call, member)) else {
             unreachable!("the checker refuses a type argument PHP# can't write, as `never` of `map(x => throw …)`");
         };
 
         self.type_text(line, &text)
     }
 
-    /// The `operator <=>` the checker chose for the keys `call` orders by, spec section 19, as the engine function's
-    /// [`TAKES_KEY_ORDER`] parameter takes it: its first-class callable, or null for keys of a type that declares none.
-    pub(super) fn key_order_argument(&mut self, call: &Expression, line: u32) -> u32 {
-        match self.types.sorting_operator(call).zip(php_operator_name(&BinaryOperator::Spaceship(Span::zero()), 2)) {
+    /// The `operator <=>` the checker chose for the keys `call`, or its member `member`, orders by, spec section 19, as
+    /// the engine function's [`TAKES_KEY_ORDER`] parameter takes it: its first-class callable, or null for keys of a
+    /// type that declares none.
+    pub(super) fn key_order_argument(&mut self, call: &Expression, member: Option<&MemberCall>, line: u32) -> u32 {
+        let operator = self.types.sorting_operator(call, member);
+        match operator.zip(php_operator_name(&BinaryOperator::Spaceship(Span::zero()), 2)) {
             Some((owner, name)) => {
                 let callable = self.node(SHARP_AST_CALLABLE_CONVERT, 0, line, &[]);
 

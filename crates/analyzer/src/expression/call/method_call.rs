@@ -412,7 +412,7 @@ where
             .get_expression_type(object)
             .filter(|written| written.is_nullable())
             .map(TUnion::has_nullsafe_null);
-        let members = members
+        let members: Vec<_> = members
             .into_iter()
             .map(|(member, kind)| match nullsafe_null {
                 Some(nullsafe_null) => {
@@ -431,11 +431,13 @@ where
             object,
             is_null_safe,
             |context, block_context, artifacts| {
+                let runs_one_of = members.len() > 1;
                 analyze_collection_members(
                     context,
                     block_context,
                     artifacts,
                     members,
+                    runs_one_of,
                     object,
                     type_arguments,
                     argument_list,
@@ -452,6 +454,7 @@ where
         block_context,
         artifacts,
         members,
+        true,
         object,
         type_arguments,
         argument_list,
@@ -639,12 +642,15 @@ where
 
 /// Analyzes the call of each of `members`, a kind's member with the receiver's parts of that kind, on those parts of
 /// `object`, types the call `span` as the join of what each call gives, and gives that join, or None for no member.
+/// Where the call runs one of several, a member or an object's own method, each member's type arguments and type are
+/// recorded apart, as [`AnalysisArtifacts::get_member_call`] reads them, and the call's own are the last member's.
 #[allow(clippy::too_many_arguments)]
 fn analyze_collection_members<'ctx, 'ast, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
     block_context: &mut BlockContext<'ctx>,
     artifacts: &mut AnalysisArtifacts,
     members: Vec<(MethodIdentifier, TUnion)>,
+    runs_one_of: bool,
     object: &'ast Expression<'arena>,
     type_arguments: Option<&'ast TypeArgumentList<'arena>>,
     argument_list: &'ast ArgumentList<'arena>,
@@ -656,6 +662,8 @@ where
 {
     let mut joined: Option<TUnion> = None;
     for (member, kind) in members {
+        // A member that isn't generic records no type arguments, so it keeps none of the member before it.
+        artifacts.inferred_type_arguments.remove(&(span.start.offset, span.end.offset));
         with_receiver_type(artifacts, object, kind, |artifacts| {
             analyze_extension_access(
                 context,
@@ -669,10 +677,14 @@ where
                 span,
             )
         })?;
-        let Some(given) = artifacts.get_expression_type(&span) else {
+        let Some(given) = artifacts.get_expression_type(&span).cloned() else {
             unreachable!("the analysis of a PHP# member's call gives it a type, an error's included");
         };
-        let given = add_optional_union_type(given.clone(), joined.as_ref(), context.codebase);
+        if runs_one_of {
+            let callee = FunctionLikeIdentifier::Method(member.get_class_name(), member.get_method_name());
+            artifacts.record_member_call(span, callee, given.clone());
+        }
+        let given = add_optional_union_type(given, joined.as_ref(), context.codebase);
         artifacts.set_expression_type(&span, given.clone());
         joined = Some(given);
     }

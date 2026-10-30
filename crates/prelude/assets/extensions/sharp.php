@@ -692,6 +692,11 @@ function associateBy(array|\Sharp\Map|\Sharp\Set $collection, \Closure $key, #[T
 function sortedBy(array|\Sharp\Map|\Sharp\Set $collection, \Closure $selector, #[TakesKeyOrder] ?\Closure $comparison = null): array {}
 
 /**
+ * @return int how many entries the table holds, read in constant time, or the PHP array plain PHP gives for one.
+ */
+function size(array|\Sharp\Map|\Sharp\Set $collection): int {}
+
+/**
  * @template K
  * @template V
  *
@@ -778,4 +783,4 @@ function filterEntries(\Sharp\Map $map, \Closure $predicate): \Sharp\Map {}
  *
  * @return list<T> the set of the elements `$predicate` keeps, in order.
  */
-function filterElements(\Sharp\Set $set, \Closure $predicate, #[TakesResultType] ?string $type = null): \Sharp\Set {}
+function filterElements(\Sharp\Set $set, \Closure $predicate): \Sharp\Set {}

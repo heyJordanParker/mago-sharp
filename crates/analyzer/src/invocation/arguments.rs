@@ -27,7 +27,6 @@ use mago_codex::ttype::get_iterable_value_parameter;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_never;
 use mago_codex::ttype::get_php_array_key_type;
-use mago_codex::ttype::takes_the_table_itself;
 use mago_codex::ttype::template::TemplateResult;
 use mago_codex::ttype::template::inferred_type_replacer;
 use mago_codex::ttype::union::TUnion;
@@ -97,9 +96,8 @@ fn shareable_part(union: &TUnion, is_sharp: bool) -> Option<Cow<'_, TUnion>> {
 /// keys are `int` or `string`, and a backed enum's cases as their backing values. A `Map` keyed by anything else, as a
 /// unit enum, a struct or a `float`, has no such array, where PHP would cast or refuse each key, so its call is refused
 /// here rather than failing where it runs. A `Map` whose two keys are one PHP array key, as `5` and `"5"` are, fails
-/// where it crosses, since only its data shows that. A built-in function's parameter that takes the `Map` as the object
-/// it is, as `count`'s `Countable|array`, receives no array. Returns the type plain PHP receives, `input_type` with each
-/// backed enum key its backing type, or None when it refused the call.
+/// where it crosses, since only its data shows that. Returns the type plain PHP receives, `input_type` with each backed
+/// enum key its backing type, or None when it refused the call.
 pub(super) fn check_array_crossing<'input, A>(
     context: &mut Context<'_, '_, A>,
     input_type: &'input TUnion,
@@ -112,10 +110,7 @@ pub(super) fn check_array_crossing<'input, A>(
 where
     A: Arena,
 {
-    let built_in = invocation_target.get_function_like_metadata().is_some_and(|function| function.flags.is_built_in());
-    if !parameter_type.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(_)))
-        || (built_in && takes_the_table_itself(parameter_type, context.codebase))
-    {
+    if !parameter_type.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(_))) {
         return Some(Cow::Borrowed(input_type));
     }
     let Some((key_type, value_type)) = input_type.types.iter().find_map(|atomic| match atomic {

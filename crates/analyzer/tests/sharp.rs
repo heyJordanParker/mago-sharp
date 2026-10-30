@@ -8398,6 +8398,15 @@ fn the_receiver_type_picks_among_imported_extensions_of_one_name() {
     let nested = "namespace Demo;\n\nimport App.A.One;\nimport App.B.Two;\nimport Lib.AuditedWallet;\nimport Lib.Wallet;\n\npublic class Report\n{\n    public string specific(AuditedWallet wallet) => wallet.rank();\n    public int general(Wallet wallet) => wallet.rank();\n}\n";
 
     assert_messages(nested, &[wallets, one, two], &[]);
+
+    // A `List` is no `Map` of `int` keys, spec section 12, so an extension of a `Map<int, T>` adds nothing to it.
+    let rows = (
+        "src/App/Billing/Rows.sharp",
+        "namespace App.Billing;\n\npublic static class Rows\n{\n    extension<T>(Map<int, T> rows)\n    {\n        public int width() => 0;\n    }\n}\n",
+    );
+    let kinds = "namespace Demo;\n\nimport App.Billing.Rows;\n\npublic class Report\n{\n    public int listed(List<string> names) => names.width();\n    public int keyed(Map<int, string> names) => names.width();\n}\n";
+
+    assert_messages(kinds, &[rows], &["7:52 non-existent-method: Method `width` does not exist on `List<string>`."]);
 }
 
 /// Spec section 26: an extension is chosen from the receiver's type the code shows, as in C# and Kotlin. An extension
@@ -16736,6 +16745,16 @@ fn a_set_element_and_a_map_key_search_of_a_type_parameter_need_equatable() {
         ]
     );
     assert_eq!(issues(("src/Demo/Searches.sharp", bounded), &[]), Vec::<String>::new());
+
+    // A bound of a class that declares no `operator ==` keys no `Set`, so its search is refused as its declaration is.
+    let class_bound = "namespace Demo;\n\npublic class Checks<T : Cart>\n{\n    public bool held(Set<T> items, T item) => items.contains(item);\n}\n";
+    assert_eq!(
+        equatable_written(class_bound, &[]),
+        [
+            "5:22 template-constraint-violation A `Set`'s element is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`, and `T` is none of them.",
+            "5:62 invalid-argument `contains` compares elements with `==`, and `T` declares no `operator ==`.",
+        ]
+    );
 }
 
 /// Spec section 11: `Equatable` is a bound and never a value's type, so `List<Equatable>` and an `Equatable` parameter

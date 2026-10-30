@@ -3,6 +3,7 @@ use std::sync::Arc;
 use mago_analyzer::CodebasePatternNames;
 use mago_analyzer::artifacts::AnalysisArtifacts;
 use mago_analyzer::artifacts::CallTarget;
+use mago_analyzer::artifacts::MemberCall;
 use mago_analyzer::chosen_operator;
 use mago_analyzer::effects::Effects;
 use mago_analyzer::is_collection_member;
@@ -43,7 +44,6 @@ use mago_codex::ttype::get_collection_object;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_sharp_type;
 use mago_codex::ttype::is_written_in_sharp;
-use mago_codex::ttype::takes_the_table_itself;
 use mago_codex::ttype::template::variance::Variance;
 use mago_codex::ttype::union::TUnion;
 use mago_database::file::File;
@@ -101,6 +101,24 @@ pub struct Declaration {
     pub name: Word,
     /// Whether code outside the class may use it. A class is public.
     pub public: bool,
+}
+
+/// The members a method call runs on a value that may hold more than one kind of collection, or a collection or an
+/// object, spec section 12, as [`Types::members_by_kind`] gives them.
+pub(crate) struct MembersByKind<'analysis> {
+    /// Each kind's standard library member, in the order the analysis resolved them, a `List`'s first.
+    pub(crate) members: Vec<KindMember<'analysis>>,
+    /// Whether an object the value may hold runs its own method of that name.
+    pub(crate) object: bool,
+}
+
+/// One kind's standard library member of a [`MembersByKind`].
+pub(crate) struct KindMember<'analysis> {
+    /// The class of the object the kind runs as, `None` for a `List`, which runs as a PHP array.
+    pub(crate) runs_as: Option<Word>,
+    pub(crate) declaration: Declaration,
+    /// The type arguments and the type the member's call has.
+    pub(crate) call: &'analysis MemberCall,
 }
 
 /// What a declaration is.
@@ -474,15 +492,33 @@ impl<'analysis> Types<'analysis> {
 
     /// The type arguments the access `access` of a generic extension member gives the static method it runs as, spec
     /// section 26: those the checker inferred from the receiver for the extension block's type parameters, then the
-    /// member's own, written as [`Self::type_arguments`] writes those of a `new`. None for a member that isn't generic,
-    /// and for one whose type arguments PHP# can't all write.
-    pub(crate) fn extension_type_arguments(&self, access: &Expression) -> Option<String> {
-        let span = access.span();
-        let arguments = self.artifacts.inferred_type_arguments.get(&(span.start.offset, span.end.offset))?;
+    /// member's own, written as [`Self::type_arguments`] writes those of a `new`, or those of `member`, where the call
+    /// runs it of several. None for a member that isn't generic, and for one whose type arguments PHP# can't all write.
+    pub(crate) fn extension_type_arguments(&self, access: &Expression, member: Option<&MemberCall>) -> Option<String> {
+        let arguments = self.call_type_arguments_of(access, member)?;
 
         // A collection's member may take one only a PHP docblock writes, which its static method runs without, as a
         // plain PHP caller calls it.
         arguments.iter().all(is_written_in_sharp).then(|| self.argument_texts(arguments))
+    }
+
+    /// The type arguments the checker inferred for the call `call`, or for `member`, where the call runs it of several.
+    fn call_type_arguments_of<'call>(
+        &'call self,
+        call: &Expression,
+        member: Option<&'call MemberCall>,
+    ) -> Option<&'call Vec<TUnion>> {
+        let span = call.span();
+
+        match member {
+            Some(member) => member.type_arguments.as_ref(),
+            None => self.artifacts.inferred_type_arguments.get(&(span.start.offset, span.end.offset)),
+        }
+    }
+
+    /// The type the call `call` gives, or `member` gives, where the call runs it of several.
+    pub(crate) fn call_type<'call>(&'call self, call: &Expression, member: Option<&'call MemberCall>) -> &'call TUnion {
+        member.map_or_else(|| self.expression_type(call), |member| &member.result)
     }
 
     /// The type arguments the method value `value` of a PHP# generic method takes from the function type it goes
@@ -1366,15 +1402,14 @@ impl<'analysis> Types<'analysis> {
     }
 
     /// The members the method call `call` runs on a value that may hold more than one kind of collection, or a
-    /// collection or an object, spec section 12, as the analysis resolved them: each kind's standard library member,
-    /// with the class of the object that kind runs as, `None` for a `List`, which runs as a PHP array, and whether an
-    /// object the value may hold runs its own method of that name. None for a call that runs one member, or no
-    /// collection's.
-    #[allow(clippy::type_complexity)]
-    pub(crate) fn members_by_kind(&self, call: &Expression) -> Option<(Vec<(Option<Word>, Declaration)>, bool)> {
+    /// collection or an object, spec section 12, as the analysis resolved them. None for a call that runs one member, or
+    /// no collection's.
+    pub(crate) fn members_by_kind(&self, call: &Expression) -> Option<MembersByKind<'_>> {
         let (mut members, mut object) = (Vec::new(), false);
         for callee in self.artifacts.get_callees(call) {
-            let CallTarget::FunctionLike { callee: FunctionLikeIdentifier::Method(class, method), .. } = callee else {
+            let CallTarget::FunctionLike { callee: callee @ FunctionLikeIdentifier::Method(class, method), .. } =
+                callee
+            else {
                 return None;
             };
             let metadata = self.codebase.get_method(class.as_bytes(), method.as_bytes())?;
@@ -1387,18 +1422,22 @@ impl<'analysis> Types<'analysis> {
                 Some(TAtomic::Object(object)) => object.get_name(),
                 _ => None,
             };
-            members.push((
+            let Some(member_call) = self.artifacts.get_member_call(call, callee) else {
+                unreachable!("the analysis records each member of a call that runs several");
+            };
+            members.push(KindMember {
                 runs_as,
-                Declaration {
+                declaration: Declaration {
                     kind: DeclarationKind::StaticMethod,
                     class: self.class_declaration(class.as_bytes()).name,
                     name: metadata.original_name,
                     public: true,
                 },
-            ));
+                call: member_call,
+            });
         }
 
-        (!members.is_empty() && members.len() + usize::from(object) > 1).then_some((members, object))
+        (!members.is_empty() && members.len() + usize::from(object) > 1).then_some(MembersByKind { members, object })
     }
 
     /// The slot an inline form leaves for each parameter of the engine function `function`, which `written` calls, that
@@ -2092,11 +2131,10 @@ impl<'analysis> Types<'analysis> {
     /// The class-like whose `operator <=>` the call `call`, which sorts, orders two keys by, as `<` on two values of
     /// the key type its last type argument names chooses it, spec section 19, so a `List<Priced>` sorts by `Priced`'s
     /// whatever classes it holds. A call sorts when it runs `sortedBy` or a form whose engine function takes
-    /// [`TAKES_KEY_ORDER`]. None for keys of a type that declares none, such as strings.
-    pub(crate) fn sorting_operator(&self, call: &Expression) -> Option<Word> {
-        let span = call.span();
-        let Some(key) = self.artifacts.inferred_type_arguments.get(&(span.start.offset, span.end.offset))?.last()
-        else {
+    /// [`TAKES_KEY_ORDER`]. `member` is the member the call runs, where it runs one of several. None for keys of a type
+    /// that declares none, such as strings.
+    pub(crate) fn sorting_operator(&self, call: &Expression, member: Option<&MemberCall>) -> Option<Word> {
+        let Some(key) = self.call_type_arguments_of(call, member)?.last() else {
             unreachable!("a call that sorts takes the type of its keys as its last type argument");
         };
         let key = key.to_non_nullable();
@@ -2285,9 +2323,7 @@ fn plain_parameters<'function>(
     let sharp =
         function.flags.is_sharp() || owner.get(..6).is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"sharp\\"));
 
-    let parameter = if function.flags.is_built_in() { PlainParameter::BuiltIn } else { PlainParameter::Declared };
-
-    (!sharp).then(|| function.parameters.iter().map(parameter).collect())
+    (!sharp).then(|| function.parameters.iter().map(PlainParameter::Declared).collect())
 }
 
 /// The whole type of a PHP# method or lambda, which `is` tests a closure of it by.
@@ -2312,11 +2348,10 @@ pub(crate) fn takes_array(declared: &TUnion) -> bool {
 }
 
 /// A parameter of plain PHP code a call runs, which a `Map` or a `Set` crosses into: a declared function's, method's or
-/// constructor's, one of a function PHP builds in, or one of the signature of a plain PHP closure a local holds.
+/// constructor's, or one of the signature of a plain PHP closure a local holds.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum PlainParameter<'analysis> {
     Declared(&'analysis FunctionLikeParameterMetadata),
-    BuiltIn(&'analysis FunctionLikeParameterMetadata),
     Callable(&'analysis TCallableParameter),
 }
 
@@ -2324,7 +2359,7 @@ impl<'analysis> PlainParameter<'analysis> {
     /// The name a named argument gives the parameter, without its `$`.
     pub(crate) fn name(self) -> Option<&'analysis [u8]> {
         let name = match self {
-            Self::Declared(parameter) | Self::BuiltIn(parameter) => parameter.get_name(),
+            Self::Declared(parameter) => parameter.get_name(),
             Self::Callable(parameter) => parameter.get_name()?,
         };
 
@@ -2334,32 +2369,26 @@ impl<'analysis> PlainParameter<'analysis> {
     /// The type the parameter declares.
     pub(crate) fn declared_type(self) -> Option<&'analysis TUnion> {
         match self {
-            Self::Declared(parameter) | Self::BuiltIn(parameter) => {
-                parameter.get_type_metadata().map(|declared| &declared.type_union)
-            }
+            Self::Declared(parameter) => parameter.get_type_metadata().map(|declared| &declared.type_union),
             Self::Callable(parameter) => parameter.get_type_signature(),
         }
     }
 
     /// Whether the parameter takes a PHP array, as [`takes_array`] says of the type it declares, or it declares none.
-    /// A built-in function's parameter that takes a `Map` and a `Set` as the object they are takes the object, as the
-    /// codex's [`takes_the_table_itself`] says.
-    pub(crate) fn takes_array(self, codebase: &CodebaseMetadata) -> bool {
-        self.declared_type().is_none_or(|declared| {
-            takes_array(declared) && !(matches!(self, Self::BuiltIn(_)) && takes_the_table_itself(declared, codebase))
-        })
+    pub(crate) fn takes_array(self) -> bool {
+        self.declared_type().is_none_or(takes_array)
     }
 
     pub(crate) fn is_variadic(self) -> bool {
         match self {
-            Self::Declared(parameter) | Self::BuiltIn(parameter) => parameter.flags.is_variadic(),
+            Self::Declared(parameter) => parameter.flags.is_variadic(),
             Self::Callable(parameter) => parameter.is_variadic(),
         }
     }
 
     pub(crate) fn is_by_reference(self) -> bool {
         match self {
-            Self::Declared(parameter) | Self::BuiltIn(parameter) => parameter.flags.is_by_reference(),
+            Self::Declared(parameter) => parameter.flags.is_by_reference(),
             Self::Callable(parameter) => parameter.is_by_reference(),
         }
     }
