@@ -29,7 +29,6 @@ use Mago\Sdk\Internal\Protocol\PayloadReader;
 use function array_key_exists;
 use function array_keys;
 use function count;
-use function implode;
 use function sort;
 use function strlen;
 use function strpos;
@@ -469,7 +468,6 @@ final class Codebase
      * @param list<string> $withAnyAttribute
      * @return list<MethodMetadataProjection>
      * @mago-expect lint:excessive-parameter-list
-     * @mago-expect lint:no-boolean-flag-parameter
      */
     public function findMethods(
         ?string $class = null,
@@ -505,37 +503,28 @@ final class Codebase
         }
         $attributes = array_keys($attributes);
         sort($attributes);
-        // A search across classes depends on every class it searched, so it records a listing.
-        $class === null
-            ? $this->reads?->record(Protocol::FIND_METHODS, 0, '')
-            : $this->reads?->record(Protocol::GET_CLASS_LIKES, 0, $class);
-
-        $key =
-            strtolower($class ?? '')
-            . "\0"
-            . strtolower($descendantsOf ?? '')
-            . "\0"
-            . strtolower($name)
-            . "\0"
-            . implode("\0", $attributes)
-            . "\0"
-            . $fields
-            . "\0"
-            . ($declaredOnly ? '1' : '0');
-        if (array_key_exists($key, $this->cache->methodProjections)) {
-            return $this->cache->methodProjections[$key];
-        }
-
-        $this->cancellation->throwIfCancelled();
-        $payload = Protocol::writeCodebaseFindMethodsRequest(
-            $this->cache->generation,
-            $class,
-            $descendantsOf,
-            $name,
+        // Mago matches names whatever their case, so a search names them in lowercase, and two searches that find the
+        // same methods are one search.
+        $search = Protocol::writeMethodSearch(
+            $class === null ? null : strtolower($class),
+            $descendantsOf === null ? null : strtolower($descendantsOf),
+            strtolower($name),
             $attributes,
             $fields,
             $declaredOnly,
         );
+        // A search across classes depends on every class it searched, so it records the search, whose result Mago
+        // compares when the codebase changes.
+        $class === null
+            ? $this->reads?->record(Protocol::FIND_METHODS, 0, $search)
+            : $this->reads?->record(Protocol::GET_CLASS_LIKES, 0, $class);
+
+        if (array_key_exists($search, $this->cache->methodProjections)) {
+            return $this->cache->methodProjections[$search];
+        }
+
+        $this->cancellation->throwIfCancelled();
+        $payload = Protocol::writeCodebaseFindMethodsRequest($this->cache->generation, $search);
         $response = $this->host->request($this->parentRequestId, $payload);
         [$reader, $count] = Protocol::readCodebaseFindMethodsResponse($response, $this->cache->generation, $fields);
 
@@ -544,7 +533,7 @@ final class Codebase
             $methods[] = MetadataCodec::readMethodProjection($reader, $fields);
         }
         $reader->finish();
-        $this->cache->methodProjections[$key] = $methods;
+        $this->cache->methodProjections[$search] = $methods;
 
         return $methods;
     }

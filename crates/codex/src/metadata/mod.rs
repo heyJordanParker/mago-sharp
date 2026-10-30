@@ -1366,18 +1366,19 @@ impl CodebaseMetadata {
     ///
     /// * `diff` - The computed diff between old and new code
     /// * `references` - Symbol reference graph from previous run
-    /// * `reads` - The symbols each file's extension hooks and providers read, by logical file name
+    /// * `read` - The symbols the extension callbacks read, which every file counts as its own
     ///
     /// # Returns
-    /// Returns the logical names of files whose top-level code references, or whose hooks and
-    /// providers read, an invalidated symbol. Returns `None` if the cascade was too large to compute.
-    pub fn mark_safe_symbols<'reads>(
+    /// Returns the logical names of files whose top-level code references an invalidated symbol,
+    /// and whether `read` names one. Returns `None` if the cascade was too large to compute.
+    pub fn mark_safe_symbols(
         &mut self,
         diff: &CodebaseDiff,
         references: &SymbolReferences,
-        reads: impl IntoIterator<Item = (Word, &'reads HashSet<SymbolIdentifier>)>,
-    ) -> Option<WordSet> {
-        let (invalid_symbols, partially_invalid, invalid_files) = references.get_invalid_symbols(self, diff, reads)?;
+        read: &HashSet<SymbolIdentifier>,
+    ) -> Option<(WordSet, bool)> {
+        let (invalid_symbols, partially_invalid, invalid_files, read_invalid) =
+            references.get_invalid_symbols(self, diff, read)?;
 
         // Mark all symbols in 'keep' set as safe (unless invalidated by cascade)
         for keep_symbol in diff.get_keep() {
@@ -1394,7 +1395,7 @@ impl CodebaseMetadata {
             }
         }
 
-        Some(invalid_files)
+        Some((invalid_files, read_invalid))
     }
 
     /// Merges information from another `CodebaseMetadata` into this one.

@@ -10,6 +10,7 @@
 //! finds classes by listing `*.php` files or reading their source finds PHP# classes too, spec section 27. A removed
 //! source loses its PHP file, and git's `info/exclude` keeps the files no `.gitignore` covers out of git.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
@@ -25,12 +26,15 @@ use clap::Parser;
 
 use mago_allocator::LocalArena;
 use mago_database::Database;
+use mago_database::DatabaseConfiguration;
 use mago_database::DatabaseReader;
+use mago_database::GlobSettings;
 use mago_database::error::DatabaseError;
 use mago_database::file::COMPANION_START;
 use mago_database::file::File;
 use mago_database::file::FileType;
 use mago_database::file::FolderNamespace;
+use mago_database::membership::WorkspaceMatcher;
 use mago_orchestrator::Orchestrator;
 use mago_orchestrator::service::incremental_analysis::compile::Compilation;
 use mago_orchestrator::service::incremental_analysis::compile::DispatcherModule;
@@ -271,6 +275,29 @@ fn project_database(
     Ok((database.into_static(), included))
 }
 
+/// The PHP# files of `database`, which the compile lowers, as the scope of its analysis. The compile refuses a PHP#
+/// file for the errors reported in it, and a node-analysis hook reports only in the file it inspects, so the hooks run
+/// only in these files, as they run only in the named files of `mago analyze <paths>`. A scope that names no path is
+/// the whole workspace, so a project with no PHP# file is scoped to every `.sharp` file, of which it has none. The glob
+/// settings shape only excludes, and the scope has none, so it takes the default ones.
+fn lowered_files(workspace: &Path, database: &impl DatabaseReader) -> Result<WorkspaceMatcher, Error> {
+    let paths: Vec<Cow<'_, [u8]>> = database
+        .files()
+        .filter(|file| file.file_type == FileType::Host && Dialect::of(file).is_sharp())
+        .map(|file| Cow::Owned(file.name.to_vec()))
+        .collect();
+
+    Ok(WorkspaceMatcher::from_configuration(&DatabaseConfiguration {
+        workspace: Cow::Borrowed(workspace),
+        paths,
+        includes: Vec::new(),
+        patches: Vec::new(),
+        excludes: Vec::new(),
+        extensions: vec![Cow::Borrowed(b"sharp".as_slice())],
+        glob: GlobSettings::default(),
+    })?)
+}
+
 /// Checks every PHP# file the analyzer loads, writes the compiled file of each accepted one, and deletes every other
 /// file in the `.sharp` folder, as [`CompileCommand::execute`] says.
 fn compile(configuration: &Configuration, color_choice: ColorChoice) -> Result<CommandOutcome, Error> {
@@ -370,7 +397,9 @@ fn compile(configuration: &Configuration, color_choice: ColorChoice) -> Result<C
             return Ok(ExitCode::FAILURE.into());
         }
     };
-    let mut server = Server::new(database.into_static(), decode_prelude, server_settings(&orchestrator));
+    let lowered = lowered_files(workspace, &database)?;
+    let mut server =
+        Server::new(database.into_static(), decode_prelude, server_settings(&orchestrator)).scoped_to(lowered);
     server.analyze()?;
     // The compile hides what `mago analyze` hides: a host rule's error an `ignore` entry or the baseline targets.
     let ignored =

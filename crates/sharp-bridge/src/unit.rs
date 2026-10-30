@@ -128,8 +128,8 @@ pub struct Read {
 /// so an edit that changes none of them leaves the compiled code's name unchanged.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Reads {
-    /// Each declaration the check read through its signature, and each declaration an extension read with its
-    /// ancestors, fingerprinted by codex's `DefSignatureNode::signature_hash`.
+    /// Each declaration the check read through its signature, and each declaration an extension read in the analysis,
+    /// for any file, with its ancestors, fingerprinted by codex's `DefSignatureNode::signature_hash`.
     pub signatures: Vec<Read>,
     /// Each method whose inferred return the check read, named `Class::method` and fingerprinted by the xxh3-64 of
     /// that return type's `TUnion::get_id()`.
@@ -137,8 +137,9 @@ pub struct Reads {
     /// Each library method whose body the file inlines, named `Class::method` and fingerprinted by the xxh3-64 of the
     /// inlined form's bytes.
     pub inlined: Vec<Read>,
-    /// Each set of names an extension listed while it analyzed the file, fingerprinted by a hash of the names the set
-    /// holds, so a name joining or leaving it changes the key.
+    /// Each set of names an extension listed in the analysis, for any file, since a hook may answer the file from a set
+    /// it kept from another, fingerprinted by a hash of the names the set holds, so a name joining or leaving it changes
+    /// the key. A method search is fingerprinted by the methods it finds with the fields it projects of them.
     pub listed: Vec<Read>,
     /// The function type of each method and lambda the file declares, as `Unit::function_types` gives them, since its
     /// effects come from the bodies it calls, in any file.

@@ -48,8 +48,10 @@ pub use error::ExternalAnalyzerError;
 pub use lifecycle::AFTER_FILE_ANALYSIS_BATCH_SIZE;
 pub use lifecycle::FileAnalysisSnapshot;
 use protocol::Registration;
+pub use reads::ExtensionReads;
 pub use reads::FileReads;
 pub use reads::Listing;
+pub use reads::SessionReads;
 
 mod error;
 mod lifecycle;
@@ -126,7 +128,7 @@ pub(crate) struct ForwardedCall {
 pub struct ExternalAnalysisSession {
     generation: u64,
     sources: foldhash::HashMap<FileId, Arc<File>>,
-    reads: Mutex<foldhash::HashMap<FileId, FileReads>>,
+    reads: Mutex<SessionReads>,
 }
 
 impl ExternalAnalysisSession {
@@ -138,20 +140,22 @@ impl ExternalAnalysisSession {
         Self { generation, sources, reads: Mutex::default() }
     }
 
-    /// Takes what each file's hooks and providers read from the codebase in this run.
+    /// Takes what the hooks, issue filters and providers read from the codebase in this run.
     #[must_use]
-    pub fn take_reads(&self) -> foldhash::HashMap<FileId, FileReads> {
+    pub fn take_reads(&self) -> SessionReads {
         std::mem::take(&mut self.reads.lock().unwrap_or_else(std::sync::PoisonError::into_inner))
     }
 
-    fn record_reads(&self, file_id: FileId, reads: FileReads) {
-        if !reads.is_empty() {
-            self.reads
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .entry(file_id)
-                .or_default()
-                .extend(reads);
+    /// Records what the callbacks read while Mago analyzed `file_id`, or what the before-analysis hooks read.
+    fn record_reads(&self, file_id: Option<FileId>, reads: ExtensionReads) {
+        if reads.is_empty() {
+            return;
+        }
+
+        let mut session = self.reads.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        match file_id {
+            Some(file_id) => session.files.entry(file_id).or_default().extend(reads),
+            None => session.before_analysis.extend(reads),
         }
     }
 
@@ -159,7 +163,7 @@ impl ExternalAnalysisSession {
     /// `response`, and returns the response without them.
     fn record_response_reads(&self, file_id: FileId, response: &[u8]) -> Result<Vec<u8>, ExternalAnalyzerError> {
         let (reads, response) = protocol::take_codebase_reads(response)?;
-        self.record_reads(file_id, reads);
+        self.record_reads(Some(file_id), reads);
 
         Ok(response)
     }

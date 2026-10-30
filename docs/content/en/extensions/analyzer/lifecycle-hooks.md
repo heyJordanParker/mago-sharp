@@ -121,7 +121,7 @@ Every before-analysis hook registered by an enabled plugin runs once before para
 - the common lifecycle services: `phpVersion`, `codebase`, `types`, `cancellation`, and `report()`;
 - `references`, a project-wide `ReferenceRegistry` for framework-known symbol references.
 
-This stage is appropriate for validating a framework model built during codebase scanning, reporting project-level setup problems, and registering references that are not owned by one analyzed file. It cannot add or replace codebase symbols; declarations must be supplied as initialization stubs.
+This stage is appropriate for validating a framework model built during codebase scanning, reporting project-level setup problems, and registering references that are not owned by one analyzed file. It cannot add or replace codebase symbols; declarations must be supplied as initialization stubs. A rule may read the codebase here and keep what it read for its file hooks or its plugin's providers: Mago counts what a before-analysis hook reads [as read by every file](/extensions/analyzer/codebase-metadata/#reads-and-incremental-analysis).
 
 ## After each file
 

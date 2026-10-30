@@ -22,11 +22,13 @@ use mago_analyzer::effects::Effects;
 use mago_analyzer::external::AFTER_FILE_ANALYSIS_BATCH_SIZE;
 use mago_analyzer::external::CodebaseScanFile;
 use mago_analyzer::external::CodebaseScanPlan;
+use mago_analyzer::external::ExtensionReads;
 use mago_analyzer::external::ExternalAnalysisSession;
 use mago_analyzer::external::ExternalAnalyzerError;
 use mago_analyzer::external::FileAnalysisSnapshot;
 use mago_analyzer::external::FileReads;
 use mago_analyzer::external::Listing;
+use mago_analyzer::external::SessionReads;
 use mago_analyzer::external::apply_refinements;
 use mago_analyzer::plugin::PluginRegistry;
 use mago_analyzer::settings::Settings;
@@ -44,7 +46,6 @@ use mago_codex::populator::populate_codebase_targeted;
 use mago_codex::reference::SymbolReferences;
 use mago_codex::scanner::scan_program;
 use mago_codex::signature_builder;
-use mago_codex::symbol::SymbolIdentifier;
 use mago_codex::ttype::TType;
 use mago_collector::DeferredPragmas;
 use mago_database::DatabaseReader;
@@ -90,9 +91,9 @@ struct FileState {
     codebase_issues: IssueCollection,
     deferred_pragmas: Option<DeferredPragmas>,
     late_symbol_references: SymbolReferences,
-    /// What the file's extension hooks and providers read from the codebase, kept apart from the references they
-    /// contribute: a read only decides when the file is analyzed again.
-    reads: FileReads,
+    /// What the file's analysis read from the codebase, kept apart from the references it contributes: a read only
+    /// decides when the file is analyzed again.
+    reads: AnalysisReads,
     /// What each PHP# body of the file does by itself. Every run solves the summaries of all files again, so an
     /// unchanged file's getter sees a changed callee without being analyzed again.
     effect_summaries: Vec<EffectSummary>,
@@ -101,13 +102,24 @@ struct FileState {
     project_issues: IssueCollection,
 }
 
+/// What one file's analysis read from the codebase.
+#[derive(Debug, Clone, Default)]
+struct AnalysisReads {
+    /// The sets the file's own analysis read whole.
+    listings: HashSet<Listing>,
+    /// What the extension callbacks read while Mago analyzed it.
+    extension: ExtensionReads,
+}
+
 struct SelectiveAnalysisOutput {
     result: AnalysisResult,
     native_symbol_references: SymbolReferences,
     external_symbol_references: SymbolReferences,
     late_symbol_references: SymbolReferences,
     late_symbol_references_by_file: HashMap<FileId, SymbolReferences>,
-    reads_by_file: HashMap<FileId, FileReads>,
+    reads_by_file: HashMap<FileId, AnalysisReads>,
+    /// What the before-analysis hooks read, for every file.
+    before_analysis_reads: ExtensionReads,
     per_file_issues: HashMap<FileId, IssueCollection>,
     per_file_pragmas: HashMap<FileId, DeferredPragmas>,
     snapshots: Vec<Arc<FileAnalysisSnapshot>>,
@@ -142,6 +154,8 @@ pub struct IncrementalAnalysisService {
     settings: Settings,
     parser_settings: ParserSettings,
     file_states: HashMap<FileId, FileState>,
+    /// What the before-analysis hooks read in the last analysis, which counts for every file.
+    before_analysis_reads: ExtensionReads,
     plugin_registry: Arc<PluginRegistry>,
     initialized: bool,
     codebase_issues: IssueCollection,
@@ -176,6 +190,7 @@ impl std::fmt::Debug for IncrementalAnalysisService {
             .field("settings", &self.settings)
             .field("parser_settings", &self.parser_settings)
             .field("file_states", &format_args!("{} tracked files", self.file_states.len()))
+            .field("before_analysis_reads", &self.before_analysis_reads)
             .field("plugin_registry", &"<Arc<PluginRegistry>>")
             .field("initialized", &self.initialized)
             .field("codebase_issues", &self.codebase_issues.len())
@@ -225,6 +240,7 @@ impl IncrementalAnalysisService {
             settings,
             parser_settings,
             file_states: HashMap::default(),
+            before_analysis_reads: ExtensionReads::default(),
             plugin_registry,
             initialized: false,
             codebase_issues: IssueCollection::default(),
@@ -592,7 +608,7 @@ impl IncrementalAnalysisService {
                     codebase_issues: IssueCollection::default(),
                     deferred_pragmas: None,
                     late_symbol_references: SymbolReferences::new(),
-                    reads: FileReads::default(),
+                    reads: AnalysisReads::default(),
                     effect_summaries: Vec::new(),
                     project_issues: IssueCollection::default(),
                 },
@@ -606,6 +622,7 @@ impl IncrementalAnalysisService {
             late_symbol_references,
             late_symbol_references_by_file,
             mut reads_by_file,
+            before_analysis_reads,
             per_file_issues,
             per_file_pragmas,
             snapshots,
@@ -618,6 +635,7 @@ impl IncrementalAnalysisService {
         {
             self.analyzed_files = per_file_issues.keys().copied().collect();
         }
+        self.before_analysis_reads = before_analysis_reads;
         self.external_symbol_references = external_symbol_references;
         self.late_symbol_references = late_symbol_references;
         self.native_symbol_references = native_symbol_references;
@@ -1059,6 +1077,7 @@ impl IncrementalAnalysisService {
             }
         }
 
+        let extension_reads = extension_reads(&self.file_states, &self.before_analysis_reads);
         if body_only {
             let mut merged_codebase = std::mem::take(&mut self.codebase);
             // Two-pass update: remove all old entries first, then add all new entries.
@@ -1130,6 +1149,7 @@ impl IncrementalAnalysisService {
                 late_symbol_references,
                 mut late_symbol_references_by_file,
                 mut reads_by_file,
+                before_analysis_reads,
                 mut per_file_issues,
                 per_file_pragmas,
                 snapshots,
@@ -1137,6 +1157,7 @@ impl IncrementalAnalysisService {
                 per_file_effect_summaries,
                 per_file_project_issues,
             } = self.run_analyzer_selective(&mut merged_codebase, symbol_references, &self.settings, &files_to_skip)?;
+            self.before_analysis_reads = before_analysis_reads;
             #[cfg(test)]
             {
                 self.analyzed_files = per_file_issues.keys().copied().collect();
@@ -1211,6 +1232,10 @@ impl IncrementalAnalysisService {
             self.store_project_passes(per_file_effect_summaries, per_file_project_issues);
 
             self.codebase = merged_codebase;
+            if self.dropped_a_read(&extension_reads) {
+                return self.analyze();
+            }
+
             self.symbol_references = std::mem::take(&mut analysis_result.symbol_references);
             self.refresh_late_reference_issues();
             analysis_result.issues = self.collect_all_issues();
@@ -1218,11 +1243,16 @@ impl IncrementalAnalysisService {
             return Ok(analysis_result);
         }
 
+        let session = ExternalAnalysisSession::from_files(self.database.files());
         let listings_before: HashMap<Listing, u64> = unchanged_file_ids
             .iter()
             .filter_map(|file_id| self.file_states.get(file_id))
-            .flat_map(|state| state.reads.listings.iter().copied())
-            .map(|listing| (listing, listing.answer(&self.codebase)))
+            .flat_map(|state| &state.reads.listings)
+            .chain(&extension_reads.listings)
+            .copied()
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .map(|listing| (listing, listing.answer(&self.codebase, &session)))
             .collect();
         // The analyzer refuses a class-like whose full name is also a namespace (spec section 23), on either side, so a
         // file is analyzed again when a class-like it declares names the namespace of a class-like scanned again, or
@@ -1275,8 +1305,8 @@ impl IncrementalAnalysisService {
         merged_codebase.safe_symbols.clear();
         merged_codebase.safe_symbol_members.clear();
 
-        let reads = symbols_read_by(&self.file_states, &self.database, &unchanged_file_ids);
-        let Some(mut invalid_files) = merged_codebase.mark_safe_symbols(&diff, &self.native_symbol_references, reads)
+        let Some((mut invalid_files, extension_symbol_changed)) =
+            merged_codebase.mark_safe_symbols(&diff, &self.native_symbol_references, &extension_reads.symbols)
         else {
             tracing::warn!("Invalidation cascade too expensive (>5000 steps), falling back to full analysis");
 
@@ -1314,12 +1344,16 @@ impl IncrementalAnalysisService {
         );
         let changed_listings: HashSet<Listing> = listings_before
             .into_iter()
-            .filter(|(listing, answer)| listing.answer(&merged_codebase) != *answer)
+            .filter(|(listing, answer)| listing.answer(&merged_codebase, &session) != *answer)
             .map(|(listing, _)| listing)
             .collect();
+        // Every file counts the extension callbacks' reads as its own, so a change to one runs every file again.
+        let extension_read_changed = extension_symbol_changed
+            || extension_reads.listings.iter().any(|listing| changed_listings.contains(listing));
         for file_id in &unchanged_file_ids {
             if self.file_states.get(file_id).is_some_and(|state| {
-                state.reads.listings.iter().any(|listing| changed_listings.contains(listing))
+                extension_read_changed
+                    || state.reads.listings.iter().any(|listing| changed_listings.contains(listing))
                     || state.entry_keys.class_like_names.iter().any(|name| {
                         scanned_namespaces.contains(name)
                             || namespaces_of(name).iter().any(|namespace| scanned_class_likes.contains(namespace))
@@ -1397,6 +1431,7 @@ impl IncrementalAnalysisService {
             late_symbol_references,
             mut late_symbol_references_by_file,
             mut reads_by_file,
+            before_analysis_reads,
             mut per_file_issues,
             per_file_pragmas,
             snapshots,
@@ -1408,6 +1443,7 @@ impl IncrementalAnalysisService {
         {
             self.analyzed_files = per_file_issues.keys().copied().collect();
         }
+        self.before_analysis_reads = before_analysis_reads;
         self.external_symbol_references = external_symbol_references;
         self.late_symbol_references = late_symbol_references;
         self.native_symbol_references = native_symbol_references;
@@ -1478,11 +1514,22 @@ impl IncrementalAnalysisService {
         self.store_project_passes(per_file_effect_summaries, per_file_project_issues);
 
         self.codebase = merged_codebase;
+        if self.dropped_a_read(&extension_reads) {
+            return self.analyze();
+        }
+
         self.symbol_references = std::mem::take(&mut analysis_result.symbol_references);
         self.refresh_late_reference_issues();
         analysis_result.issues = self.collect_all_issues();
 
         Ok(analysis_result)
+    }
+
+    /// Whether a read of the extension callbacks that some file held before this warm run is held by no file after it,
+    /// as when the file a rule read for stops reading. The rule may have answered other files from what it kept, with
+    /// no read of their own, so only an analysis of every file finds what each file read again, as a cold run does.
+    fn dropped_a_read(&self, held: &FileReads) -> bool {
+        !extension_reads(&self.file_states, &self.before_analysis_reads).includes(held)
     }
 
     /// Analyzes a single file and returns both its issues and the
@@ -1853,7 +1900,7 @@ impl IncrementalAnalysisService {
         let mut snapshots = Vec::new();
         let mut per_file_effect_summaries: HashMap<FileId, Vec<EffectSummary>> = HashMap::default();
         // The sets each file's analysis read whole, which join what its extensions read from the codebase.
-        let mut reads_by_file: HashMap<FileId, FileReads> = HashMap::default();
+        let mut reads_by_file: HashMap<FileId, AnalysisReads> = HashMap::default();
 
         for (file_id, mut result, snapshot, effect_summaries, listings) in results {
             let mut deferred_pragmas = result.take_deferred_pragmas();
@@ -1861,7 +1908,7 @@ impl IncrementalAnalysisService {
             per_file_issues.insert(file_id, result.issues);
             per_file_effect_summaries.insert(file_id, effect_summaries);
             if !listings.is_empty() {
-                reads_by_file.insert(file_id, FileReads { listings, ..FileReads::default() });
+                reads_by_file.insert(file_id, AnalysisReads { listings, ..AnalysisReads::default() });
             }
             if let Some(pragmas) = deferred_pragmas.pop() {
                 per_file_pragmas.insert(file_id, pragmas);
@@ -2048,8 +2095,10 @@ impl IncrementalAnalysisService {
         codebase.safe_symbols.clear();
         codebase.safe_symbol_members.clear();
 
-        for (file_id, reads) in external_session.map(|session| session.take_reads()).unwrap_or_default() {
-            reads_by_file.entry(file_id).or_default().extend(reads);
+        let SessionReads { files, before_analysis } =
+            external_session.map(|session| session.take_reads()).unwrap_or_default();
+        for (file_id, reads) in files {
+            reads_by_file.entry(file_id).or_default().extension = reads;
         }
 
         Ok(SelectiveAnalysisOutput {
@@ -2059,6 +2108,7 @@ impl IncrementalAnalysisService {
             late_symbol_references,
             late_symbol_references_by_file,
             reads_by_file,
+            before_analysis_reads: before_analysis,
             per_file_issues,
             per_file_pragmas,
             snapshots,
@@ -2154,20 +2204,30 @@ fn extensions_in(codebase: &CodebaseMetadata, file_id: FileId) -> Vec<(Word, Met
     extensions
 }
 
-/// The symbols the extension hooks and providers of each of `files` read, by file name, for the invalidation cascade.
-fn symbols_read_by<'state>(
-    file_states: &'state HashMap<FileId, FileState>,
-    database: &ReadDatabase,
-    files: &[FileId],
-) -> Vec<(Word, &'state HashSet<SymbolIdentifier>)> {
-    files
-        .iter()
-        .filter_map(|file_id| {
-            let state = file_states.get(file_id).filter(|state| !state.reads.symbols.is_empty())?;
-            let file = database.get(file_id).ok()?;
-            Some((mago_word::word(file.name.as_ref()), &state.reads.symbols))
-        })
-        .collect()
+/// What the extension hooks, issue filters and providers read from the codebase in the last analysis of each file, and
+/// the before-analysis hooks in the last analysis, taken as read by every file. A hook or provider may keep what it
+/// read before the analysis or for one file on its own object, as a rule keeps the methods a search found or a class's
+/// ancestors, and answer any later file of its worker from it with no read of its own. Which files a worker takes first
+/// changes from run to run, so only the reads of every file together name what each file read.
+fn extension_reads(file_states: &HashMap<FileId, FileState>, before_analysis: &ExtensionReads) -> FileReads {
+    let mut reads = code_reads(file_states, before_analysis);
+    reads.extend(before_analysis.issues.clone());
+    for state in file_states.values() {
+        reads.extend(state.reads.extension.issues.clone());
+    }
+
+    reads
+}
+
+/// What the plugins that register a provider read from the codebase in the last analysis, in any callback, which can
+/// change any file's analyzed code, taken as read by every file for the reasons [`extension_reads`] gives.
+fn code_reads(file_states: &HashMap<FileId, FileState>, before_analysis: &ExtensionReads) -> FileReads {
+    let mut reads = before_analysis.code.clone();
+    for state in file_states.values() {
+        reads.extend(state.reads.extension.code.clone());
+    }
+
+    reads
 }
 
 /// Keeps the keys whose entry in the merged codebase `file_id` declared.
