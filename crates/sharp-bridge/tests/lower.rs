@@ -8540,6 +8540,54 @@ fn a_list_index_write_replaces_the_element_through_set() {
     );
 }
 
+/// ```php
+/// if (\is_array($map)) { $map = \Sharp\Map::from($map, '#0, #1'); }
+/// \Sharp\Internal\put($map, $key, $value);
+/// ```
+///
+/// A `ref` member's receiver is the caller's place, by reference, so its body makes the object only of a PHP array
+/// plain PHP passes. A `Map` the place holds stays as it is: written back over itself through the reference a property
+/// types, it would cross into the property's PHP array, and `put` would refuse it. The standard library's own files
+/// call a member this way, as `TimeZone` stores the rules of a zone with `rulesByName[name] = made`.
+#[test]
+fn a_ref_member_makes_the_object_only_of_a_php_array_its_place_holds() {
+    let (path, code) = common::effect_classes::MAP_MEMBERS;
+
+    assert_eq!(
+        Lowered::named(path, code).body_of("set"),
+        indoc! {r##"
+            STMT_LIST
+              IF
+                IF_ELEM
+                  CALL
+                    ZVAL "is_array"
+                    ARG_LIST
+                      VAR
+                        ZVAL "map"
+                  STMT_LIST
+                    ASSIGN
+                      VAR
+                        ZVAL "map"
+                      STATIC_CALL
+                        ZVAL "Sharp\\Map"
+                        ZVAL "from"
+                        ARG_LIST
+                          VAR
+                            ZVAL "map"
+                          ZVAL "#0, #1"
+              CALL
+                ZVAL "Sharp\\Internal\\put"
+                ARG_LIST
+                  VAR
+                    ZVAL "map"
+                  VAR
+                    ZVAL "key"
+                  VAR
+                    ZVAL "value"
+        "##}
+    );
+}
+
 /// Spec section 12: `map[key] = value` runs the standard library's `set` member of a `Map`, as `list[i] = v` runs a
 /// `List`'s, whose inline form calls the engine's `put`, which takes the map's place by reference: a local, and an
 /// element of a `List` that exists.

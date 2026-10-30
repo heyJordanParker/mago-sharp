@@ -7445,7 +7445,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// `$p = \is_array($p) ? new \Sharp\Set($p) : $p;` for each parameter whose type holds a `Map` or a `Set`, at any
-    /// depth, since plain PHP passes a PHP array where PHP# passes the object, and
+    /// depth, since plain PHP passes a PHP array where PHP# passes the object,
+    /// `if (\is_array($p)) { $p = new \Sharp\Set($p); }` for a `ref` receiver, and
     /// `$p = \array_map(fn ($collection#N) => …, $p);` for a variadic one, which keeps each argument's position or name.
     /// A promoted one is the property its constructor declares, `$this->p = …`. Null and the object stay as they are.
     fn collection_parameters<'parameter, 'ast>(
@@ -7475,6 +7476,20 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             let line = self.line(parameter);
             let variable = &parameter.variable;
             let taken = self.temporaries;
+            // A `ref` receiver is the caller's place, which a reference a property's type holds. Written back over itself
+            // there, a `Map` or a `Set` would cross into the property's PHP array, so only a PHP array becomes the object:
+            // `if (\is_array($p)) { $p = \Sharp\Map::from($p); }`.
+            if parameter.is_by_ref_receiver() {
+                let value = self.variable(variable.span, variable.name);
+                let is_array = self.global_call(line, b"is_array", &[value]);
+                let object = self.crossed_array(variable.span, &r#type, variable.name);
+                let place = self.variable(variable.span, variable.name);
+                let assignment = self.node(SHARP_AST_ASSIGN, 0, line, &[place, object]);
+                let body = self.node(SHARP_AST_STMT_LIST, 0, line, &[assignment]);
+                let branch = self.node(SHARP_AST_IF_ELEM, 0, line, &[is_array, body]);
+                statements.push(self.node(SHARP_AST_IF, 0, line, &[branch]));
+                continue;
+            }
             let crossed = if parameter.is_variadic() {
                 let each = self.hidden("collection");
                 let first = self.variable(variable.span, &each);
@@ -7570,6 +7585,16 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// \is_array($name) ? \Sharp\Map::from($name) : $name
     /// ```
     fn crossed(&mut self, span: Span, r#type: &TUnion, name: &[u8], first: u32) -> u32 {
+        let line = self.line(span);
+        let built = self.crossed_array(span, r#type, name);
+        let is_array = self.global_call(line, b"is_array", &[first]);
+        let itself = self.variable(span, name);
+
+        self.node(SHARP_AST_CONDITIONAL, 0, line, &[is_array, built, itself])
+    }
+
+    /// The value [`Self::crossed`] makes of the variable `name` when it holds a PHP array.
+    fn crossed_array(&mut self, span: Span, r#type: &TUnion, name: &[u8]) -> u32 {
         let Some(array) = self.crossing_array(r#type) else {
             unreachable!("the caller crosses only a value that holds a `Map` or a `Set`");
         };
@@ -7631,10 +7656,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             }
         };
         self.temporaries = taken;
-        let is_array = self.global_call(line, b"is_array", &[first]);
-        let itself = self.variable(span, name);
 
-        self.node(SHARP_AST_CONDITIONAL, 0, line, &[is_array, built, itself])
+        built
     }
 
     /// Whether `r#type` is a `Map` whose keys [`Self::crossed`] takes back from a PHP array, as [`Self::key_crossing`]
