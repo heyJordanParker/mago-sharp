@@ -24799,6 +24799,95 @@ fn a_map_or_set_goes_into_a_plain_php_array_parameter_as_its_php_array() {
 }
 
 /// ```php
+/// \Lib\Calc::total(\Sharp\Internal\arrayOf($either));
+/// \Lib\Calc::total(\Sharp\Internal\arrayOf($listed));
+/// \Lib\Takers::counted($stock); // its result checked as Map<string, int>
+/// return \Lib\Takers::kept(\Sharp\Internal\arrayOf($stock));
+/// ```
+///
+/// A value that may be one of several collections, as `Map<string, int>|Set<string>` or `List<int>|Map<string, int>`,
+/// goes into a plain PHP parameter that takes `array` as the PHP array of the one it holds, spec section 12. A plain
+/// PHP type parameter takes the array as its bound does: one bounded by `\Countable` takes the `Map` itself, and one
+/// without a bound takes its PHP array.
+#[test]
+fn a_value_that_may_be_several_collections_and_a_type_parameter_take_the_php_array_as_section_12_says() {
+    let code = "namespace App.Tenant;\n\nimport Lib.Calc;\nimport Lib.Takers;\n\nclass Report\n{\n    public int run(int extra)\n    {\n        Map<string, int> stock = this.stock();\n        Set<string> tags = this.tags();\n        List<int> sizes = this.sizes();\n        let either = extra > 0 ? stock : tags;\n        let listed = extra > 0 ? sizes : stock;\n        Calc.total(either);\n        Calc.total(listed);\n        Takers.counted(stock);\n        return Takers.kept(stock);\n    }\n\n    private Map<string, int> stock() => [:];\n\n    private Set<string> tags() => [];\n\n    private List<int> sizes() => [];\n}\n";
+    let takers = (
+        "src/Lib/Takers.php",
+        "<?php namespace Lib; final class Takers {
+            /**
+             * @template T of \\Countable
+             * @param T $items
+             * @return T
+             */
+            public static function counted($items) { return $items; }
+            /**
+             * @template T
+             * @param T $items
+             */
+            public static function kept($items): int { return 0; }
+        }",
+    );
+
+    assert_eq!(
+        statements_at(code, &[takers], 5..9),
+        [
+            indoc! {r#"
+                STATIC_CALL
+                  ZVAL "Lib\\Calc"
+                  ZVAL "total"
+                  ARG_LIST
+                    CALL
+                      ZVAL "Sharp\\Internal\\arrayOf"
+                      ARG_LIST
+                        VAR
+                          ZVAL "either"
+            "#},
+            indoc! {r#"
+                STATIC_CALL
+                  ZVAL "Lib\\Calc"
+                  ZVAL "total"
+                  ARG_LIST
+                    CALL
+                      ZVAL "Sharp\\Internal\\arrayOf"
+                      ARG_LIST
+                        VAR
+                          ZVAL "listed"
+            "#},
+            indoc! {r#"
+                VERIFY_TYPE_ARGS
+                  STATIC_CALL
+                    ZVAL "Lib\\Takers"
+                    ZVAL "counted"
+                    ARG_LIST
+                      VAR
+                        ZVAL "stock"
+                      SHARP_TYPE_ARGS
+                        null
+                        ZVAL "Map<string, int>"
+                  ZVAL "Map<string, int>"
+                  ZVAL "Lib\\Takers::counted()"
+            "#},
+            indoc! {r#"
+                RETURN
+                  STATIC_CALL
+                    ZVAL "Lib\\Takers"
+                    ZVAL "kept"
+                    ARG_LIST
+                      CALL
+                        ZVAL "Sharp\\Internal\\arrayOf"
+                        ARG_LIST
+                          VAR
+                            ZVAL "stock"
+                      SHARP_TYPE_ARGS
+                        null
+                        ZVAL "Map<string, int>"
+            "#},
+        ]
+    );
+}
+
+/// ```php
 /// $context->payload = \Sharp\Internal\arrayOf($stock);
 /// \Lib\Context::$registry = \Sharp\Internal\arrayOf($stock);
 /// $context->payloads['first'] = \Sharp\Internal\arrayOf($stock);

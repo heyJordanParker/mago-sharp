@@ -764,8 +764,8 @@ where
 
         artifacts.symbol_references.add_reference_for_method_call(&block_context.scope, &constructor_declraing_id);
 
-        let mut constructor_call = Invocation::new(
-            InvocationTarget::FunctionLike {
+        let mut constructor_call = Invocation {
+            target: InvocationTarget::FunctionLike {
                 identifier: FunctionLikeIdentifier::Method(
                     constructor_declraing_id.get_class_name(),
                     constructor_declraing_id.get_method_name(),
@@ -782,12 +782,12 @@ where
                 }),
                 span: instantiation_span,
             },
-            match argument_list.as_ref() {
+            arguments_source: match argument_list.as_ref() {
                 Some(arg_list) => InvocationArgumentsSource::ArgumentList(arg_list),
                 None => InvocationArgumentsSource::None(instantiation_span),
             },
-            instantiation_span,
-        );
+            span: instantiation_span,
+        };
 
         let mut argument_types = WordMap::default();
         analyze_invocation(
@@ -1129,8 +1129,8 @@ where
     if let Some(constructor) = context.codebase.get_method_by_id(&constructor_declaring_id) {
         artifacts.symbol_references.add_reference_for_method_call(&block_context.scope, &constructor_declaring_id);
 
-        let mut constructor_call = Invocation::new(
-            InvocationTarget::FunctionLike {
+        let mut constructor_call = Invocation {
+            target: InvocationTarget::FunctionLike {
                 identifier: FunctionLikeIdentifier::Method(
                     constructor_declaring_id.get_class_name(),
                     constructor_declaring_id.get_method_name(),
@@ -1147,12 +1147,12 @@ where
                 }),
                 span: instantiation_span,
             },
-            match argument_list {
+            arguments_source: match argument_list {
                 Some(arg_list) => InvocationArgumentsSource::PartialArgumentList(arg_list),
                 None => InvocationArgumentsSource::None(instantiation_span),
             },
-            instantiation_span,
-        );
+            span: instantiation_span,
+        };
 
         let mut template_result =
             TemplateResult::new(IndexMap::with_hasher(RandomState::default()), HashMap::default());

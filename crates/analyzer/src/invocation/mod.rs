@@ -1,8 +1,5 @@
 use mago_allocator::Arena;
-use std::rc::Rc;
 use std::sync::Arc;
-
-use foldhash::HashMap;
 
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::identifier::method::MethodIdentifier;
@@ -60,10 +57,6 @@ pub struct Invocation<'ctx, 'ast, 'arena> {
     pub arguments_source: InvocationArgumentsSource<'ast, 'arena>,
     /// The source span of the entire invocation.
     pub span: Span,
-    /// The type the target receives for each argument whose value changes where it crosses into the target, by the
-    /// argument's span, as [`crate::artifacts::get_expression_range`] gives it: spec section 12 passes plain PHP each
-    /// `Map` and `Set` as its PHP array. Every other argument arrives as the type of its expression.
-    pub received_argument_types: HashMap<(u32, u32), Rc<TUnion>>,
 }
 
 /// Parameter contract supplied by a provider before argument analysis.
@@ -218,7 +211,7 @@ pub struct InvocationTargetParametersIter<'target, 'ctx> {
 
 impl<'ctx, 'ast, 'arena> Invocation<'ctx, 'ast, 'arena> {
     pub fn new(target: InvocationTarget<'ctx>, arguments: InvocationArgumentsSource<'ast, 'arena>, span: Span) -> Self {
-        Self { target, arguments_source: arguments, span, received_argument_types: HashMap::default() }
+        Self { target, arguments_source: arguments, span }
     }
 }
 

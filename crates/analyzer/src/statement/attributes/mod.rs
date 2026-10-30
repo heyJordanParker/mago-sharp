@@ -406,8 +406,8 @@ where
 
     artifacts.symbol_references.add_reference_for_method_call(&block_context.scope, &declaring_constructor_id);
 
-    let mut invocation = Invocation::new(
-        InvocationTarget::FunctionLike {
+    let mut invocation = Invocation {
+        target: InvocationTarget::FunctionLike {
             identifier: FunctionLikeIdentifier::Method(
                 declaring_constructor_id.get_class_name(),
                 declaring_constructor_id.get_method_name(),
@@ -424,12 +424,12 @@ where
             }),
             span: attribute.name.span(),
         },
-        match &attribute.argument_list {
+        arguments_source: match &attribute.argument_list {
             Some(argument_list) => InvocationArgumentsSource::AttributeArgumentList(argument_list),
             None => InvocationArgumentsSource::None(attribute.span()),
         },
-        attribute.span(),
-    );
+        span: attribute.span(),
+    };
 
     let mut template_result = TemplateResult::new(IndexMap::with_hasher(RandomState::default()), HashMap::default());
     let mut argument_types = WordMap::default();

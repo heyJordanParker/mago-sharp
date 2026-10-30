@@ -59,6 +59,10 @@ pub struct ResolvedMethodCall {
     pub method: Word,
 }
 
+/// The type each argument of one call arrives as, keyed by the argument's span, as
+/// [`AnalysisArtifacts::get_received_argument_types`] gives it.
+pub(crate) type ReceivedArguments = HashMap<(u32, u32), Rc<TUnion>>;
+
 /// What one method gives, of the several a PHP# method call runs, as [`AnalysisArtifacts::get_member_call`] says.
 #[derive(Debug, Clone)]
 pub struct MemberCall {
@@ -126,6 +130,11 @@ pub struct AnalysisArtifacts {
     /// arguments are the last method's, and its type is the union of every method's. Read through
     /// [`Self::get_member_call`].
     pub(crate) member_calls: HashMap<((u32, u32), FunctionLikeIdentifier), MemberCall>,
+    /// The type each argument of a PHP# call to plain PHP arrives as, where it is not the argument's own type, as a
+    /// `Map` a parameter that takes `array` receives as its PHP array, spec section 12, keyed by the call's span and
+    /// then the argument's. The call's analysis writes its entry anew each time it checks the call, for the target it
+    /// checks. Read through [`Self::get_received_argument_types`].
+    pub(crate) received_argument_types: HashMap<(u32, u32), ReceivedArguments>,
     /// The type each PHP# `is`, `as`, `match` arm, catch clause or `typeof` reads while the code runs, a type parameter
     /// or a class with type arguments, keyed by the span of the type it writes. Apart from `expression_types`, because the `instanceof`
     /// a test runs as spans that type too when nothing the code writes stands before it.
@@ -199,6 +208,7 @@ impl AnalysisArtifacts {
             listings: HashSet::default(),
             call_targets: HashMap::default(),
             member_calls: HashMap::default(),
+            received_argument_types: HashMap::default(),
             tested_types: HashMap::default(),
             declared_types: HashMap::default(),
             list_pattern_tuples: HashMap::default(),
@@ -399,6 +409,23 @@ impl AnalysisArtifacts {
         if !recorded.contains(&target) {
             recorded.push(target);
         }
+    }
+
+    /// The type each argument of the call at `call` arrives as, keyed by the argument's span, where the call's analysis
+    /// crossed it into plain PHP, spec section 12. None for a call that crossed none.
+    pub(crate) fn get_received_argument_types(&self, call: Span) -> Option<&ReceivedArguments> {
+        self.received_argument_types.get(&get_expression_range(&call))
+    }
+
+    /// The type of `expression`, or, where it is an argument of the call at `call` that the call's analysis crossed
+    /// into plain PHP, the type the callee receives, as [`Self::get_received_argument_types`] holds it.
+    pub(crate) fn get_received_expression_type<T>(&self, call: Option<Span>, expression: &T) -> Option<&Rc<TUnion>>
+    where
+        T: HasSpan,
+    {
+        call.and_then(|call| self.get_received_argument_types(call))
+            .and_then(|received| received.get(&get_expression_range(expression)))
+            .or_else(|| self.get_rc_expression_type(expression))
     }
 
     /// What the method `callee` gives, of the several the PHP# method call `call` runs, as the analysis checked it.

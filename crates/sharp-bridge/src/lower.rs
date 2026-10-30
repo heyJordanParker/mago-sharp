@@ -27,6 +27,7 @@ use mago_codex::ttype::get_php_declared_type;
 use mago_codex::ttype::may_hold_collection;
 use mago_codex::ttype::resolution::TypeResolutionContext;
 use mago_codex::ttype::takes_array;
+use mago_codex::ttype::takes_int_key_as_string;
 use mago_codex::ttype::union::TUnion;
 use mago_names::ResolvedNames;
 use mago_names::binding::Binding;
@@ -7620,7 +7621,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     fn key_crossing<'r#type>(&self, key_type: &'r#type TUnion) -> KeyCrossing<'r#type> {
         match self.backed_enum(key_type) {
             Some(class) => KeyCrossing::Case(class),
-            None if key_type.has_string() && !key_type.has_int() => KeyCrossing::Text,
+            None if takes_int_key_as_string(key_type) => KeyCrossing::Text,
             None => KeyCrossing::AsHeld,
         }
     }

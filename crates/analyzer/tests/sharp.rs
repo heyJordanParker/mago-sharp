@@ -8647,21 +8647,21 @@ impl ExpressionThrowTypeProvider for ThrownArgumentRecorder {
 }
 
 /// A throw type provider reads each argument of the call it answers for, and each expression it answers for, as the
-/// analysis typed it.
+/// analysis typed it. Only a plain PHP file's analysis asks throw type providers, as only it checks what a call throws,
+/// so no `Map` or `Set` crosses into a call one answers for, and a PHP# file asks none of them.
 #[test]
 fn a_throw_type_provider_reads_the_arguments_of_its_call() {
     let lib = "<?php\n\nnamespace Lib;\n\nfunction seal(array $values): void\n{\n}\n\nfinal class Vault\n{\n    public static function open(string $key): void\n    {\n    }\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nfunction run(): void\n{\n    \\Lib\\seal(['a' => 1]);\n    \\Lib\\Vault::open('k');\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib;\nimport Lib.Status;\nimport Lib.Vault;\n\nclass Run\n{\n    public static void run(Map<Status, int> counts)\n    {\n        Lib.seal(counts);\n        Vault.open(\"k\");\n    }\n}\n";
     let recorder = ThrownArgumentRecorder::default();
     let mut registry = PluginRegistry::default();
     registry.register_function_throw_provider(recorder.clone());
     registry.register_method_throw_provider(recorder.clone());
     registry.register_expression_throw_provider(recorder.clone());
+    let files = [("src/Lib/seal.php", lib), ("src/Lib/Status.php", STATUS)];
 
-    assert_eq!(
-        issues_in(&registry, settings(), ("src/Demo/run.php", php), &[("src/Lib/seal.php", lib)]),
-        Vec::<String>::new()
-    );
+    assert_eq!(issues_in(&registry, settings(), ("src/Demo/run.php", php), &files), Vec::<String>::new());
     assert_eq!(
         *recorder.0.lock().unwrap(),
         [
@@ -8671,6 +8671,141 @@ fn a_throw_type_provider_reads_the_arguments_of_its_call() {
             "expression string('k')",
             "method string('k')"
         ]
+    );
+
+    recorder.0.lock().unwrap().clear();
+    assert_eq!(issues_in(&registry, settings(), ("src/Demo/Run.sharp", sharp), &files), Vec::<String>::new());
+    assert_eq!(*recorder.0.lock().unwrap(), Vec::<String>::new());
+}
+
+/// Records the type a function call hook reads for the first argument of each call of `Lib\seal`, before and after
+/// the call's analysis.
+#[derive(Clone, Default)]
+struct SealHookRecorder(Arc<Mutex<Vec<String>>>);
+
+impl SealHookRecorder {
+    fn record(&self, when: &str, call: &NamedCall<'_, '_>, context: &HookContext<'_, '_>) {
+        if !call.calls(&[b"Lib\\seal"]) {
+            return;
+        }
+        let argument = call.argument_list.arguments.first().map(|argument| argument.value());
+        let read = argument.and_then(|argument| context.get_expression_type(argument));
+        let read = read.map_or_else(|| "none".to_string(), |r#type| r#type.get_id().to_string());
+        self.0.lock().unwrap().push(format!("{when} {read}"));
+    }
+}
+
+impl Provider for SealHookRecorder {
+    fn meta() -> &'static ProviderMeta {
+        static META: ProviderMeta =
+            ProviderMeta::new("test::seal-hook", "seal hook", "Records what a function call hook reads.");
+
+        &META
+    }
+}
+
+impl FunctionCallHook for SealHookRecorder {
+    fn before_function_call(
+        &self,
+        call: &NamedCall<'_, '_>,
+        context: &mut HookContext<'_, '_>,
+    ) -> HookResult<ExpressionHookResult> {
+        self.record("before", call, context);
+
+        Ok(ExpressionHookResult::Continue)
+    }
+
+    fn after_function_call(&self, call: &NamedCall<'_, '_>, context: &mut HookContext<'_, '_>) -> HookResult<()> {
+        self.record("after", call, context);
+
+        Ok(())
+    }
+}
+
+/// A function call hook reads each argument of the call it hooks as a provider of that call reads it: after the call's
+/// analysis, a `Map<Status, int>` PHP# passes to `Lib\seal(array $values)` is the PHP array keyed by each case's
+/// backing value, spec section 12. Before the analysis nothing has crossed, and the argument has no type yet.
+#[test]
+fn a_function_call_hook_reads_the_arguments_its_call_receives() {
+    let lib = "<?php\n\nnamespace Lib;\n\nfunction seal(array $values): void\n{\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib;\nimport Lib.Status;\n\nclass Run\n{\n    public static void run(Map<Status, int> counts)\n    {\n        Lib.seal(counts);\n    }\n}\n";
+    let recorder = SealHookRecorder::default();
+    let mut registry = PluginRegistry::default();
+    registry.register_function_call_hook(recorder.clone());
+
+    assert_eq!(
+        issues_in(
+            &registry,
+            settings(),
+            ("src/Demo/Run.sharp", sharp),
+            &[("src/Lib/seal.php", lib), ("src/Lib/Status.php", STATUS)]
+        ),
+        Vec::<String>::new()
+    );
+    assert_eq!(*recorder.0.lock().unwrap(), ["before none", "after array<string, int>"]);
+}
+
+/// Records the type a method return type provider reads for the first argument of each call it answers for, by the
+/// class of the method.
+#[derive(Clone, Default)]
+struct TakenArgumentRecorder(Arc<Mutex<Vec<String>>>);
+
+impl Provider for TakenArgumentRecorder {
+    fn meta() -> &'static ProviderMeta {
+        static META: ProviderMeta =
+            ProviderMeta::new("test::taken-arguments", "taken arguments", "Records what a provider reads.");
+
+        &META
+    }
+}
+
+impl MethodReturnTypeProvider for TakenArgumentRecorder {
+    fn targets() -> &'static [MethodTarget] {
+        static TARGETS: [MethodTarget; 2] =
+            [MethodTarget::all_methods(b"Lib\\Shelf"), MethodTarget::all_methods(b"Lib\\Counter")];
+
+        &TARGETS
+    }
+
+    fn get_return_type(
+        &self,
+        context: &ProviderContext<'_, '_, '_>,
+        class_name: &[u8],
+        _method_name: &[u8],
+        invocation: &InvocationInfo<'_, '_, '_>,
+    ) -> Option<TUnion> {
+        let read = invocation.get_argument(0, &[]).and_then(|argument| context.get_expression_type(argument));
+        let read = read.map_or_else(|| "none".to_string(), |r#type| r#type.get_id().to_string());
+        self.0.lock().unwrap().push(format!("{} {read}", String::from_utf8_lossy(class_name)));
+
+        None
+    }
+}
+
+/// A call whose receiver may be either of two classes runs each one's method, and each method's provider reads the
+/// argument as its own method receives it: `Lib\Shelf::take(array $items)` the PHP array a `Map<Status, int>` crosses
+/// into, keyed by each case's backing value, and `Lib\Counter::take(\Countable $items)` the `Map` itself, spec section
+/// 12.
+#[test]
+fn each_target_of_a_call_has_its_provider_read_what_its_own_method_receives() {
+    let lib = "<?php\n\nnamespace Lib;\n\nfinal class Shelf\n{\n    public function take(array $items): int\n    {\n        return count($items);\n    }\n}\n\nfinal class Counter\n{\n    public function take(\\Countable $items): int\n    {\n        return count($items);\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Counter;\nimport Lib.Shelf;\nimport Lib.Status;\n\nclass Run\n{\n    public static int run(Shelf|Counter taker, Map<Status, int> counts) => taker.take(counts);\n}\n";
+    let recorder = TakenArgumentRecorder::default();
+    let mut registry = PluginRegistry::default();
+    registry.register_method_provider(recorder.clone());
+
+    assert_eq!(
+        issues_in(
+            &registry,
+            settings(),
+            ("src/Demo/Run.sharp", sharp),
+            &[("src/Lib/Takers.php", lib), ("src/Lib/Status.php", STATUS)]
+        ),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        *recorder.0.lock().unwrap(),
+        ["Lib\\Counter array<enum(Lib\\Status), int>", "Lib\\Shelf array<string, int>"]
     );
 }
 
@@ -12196,6 +12331,114 @@ fn a_map_whose_keys_can_collide_passes_where_plain_php_takes_an_array() {
         .collect::<Vec<_>>(),
         Vec::<String>::new()
     );
+}
+
+/// `Lib\Sink`, a plain PHP class whose methods take PHP arrays: by value, as two parameters, by reference, and as a type
+/// parameter bounded by `\Countable` and one without a bound, each of which it gives back.
+const ARRAY_SINK: (&str, &str) = (
+    "src/Lib/Sink.php",
+    "<?php\n\nnamespace Lib;\n\nfinal class Sink\n{\n    public static function plain(array $counts): int\n    {\n        return count($counts);\n    }\n\n    public static function pair(array $first, array $second): int\n    {\n        return count($first) + count($second);\n    }\n\n    /** @param array<string, int> $values */\n    public static function fill(array &$values): void\n    {\n    }\n\n    /**\n     * @template T of \\Countable\n     * @param T $items\n     * @return T\n     */\n    public static function counted($items)\n    {\n        return $items;\n    }\n\n    /**\n     * @template T\n     * @param T $items\n     * @return T\n     */\n    public static function kept($items)\n    {\n        return $items;\n    }\n}\n",
+);
+
+/// Each issue of `sharp`, the file `src/Demo/Tally.sharp`, analyzed beside [`ARRAY_SINK`], `Lib\Status` and the struct
+/// `Lib\Spot`, as its line, column, code and message.
+fn array_sink_issues(sharp: &'static str) -> Vec<String> {
+    let spot = (
+        "src/Lib/Spot.sharp",
+        "namespace Lib;\n\npublic struct Spot\n{\n    public Spot(public int x { get; }) { }\n}\n",
+    );
+
+    analyze(
+        &PLUGIN_REGISTRY,
+        settings(),
+        ("src/Demo/Tally.sharp", sharp),
+        &[("src/Lib/Status.php", STATUS), ARRAY_SINK, spot],
+    )
+    .iter()
+    .map(|issue| format!("{} {}", located(sharp, issue), issue.message))
+    .collect()
+}
+
+/// Spec section 12: a `Map` keyed by a type parameter can hold keys no PHP array holds, as an `Equatable` struct, so a
+/// plain PHP parameter that names `array` refuses it, where the engine would pass the `Sharp\Map` object.
+#[test]
+fn a_map_keyed_by_a_type_parameter_is_refused_where_plain_php_takes_an_array() {
+    let sharp = "namespace Demo;\n\nimport Lib.Sink;\n\nclass Tally\n{\n    public static int keysOf<K : Equatable, V>(Map<K, V> m) => Sink.plain(m);\n}\n";
+
+    assert_eq!(
+        array_sink_issues(sharp),
+        [
+            "7:75 invalid-argument `Map<K, V>` can't be passed to the parameter `counts` of method `Sink.plain`, which takes a PHP array: a PHP array's keys are `int` or `string`, and this `Map`'s keys are `K`."
+        ]
+    );
+}
+
+/// Spec section 12: a value that may be one of several collections reaches an `array` parameter as the PHP array of
+/// the one it holds, so a `Map` keyed by an object anywhere in it is refused, as `Map<string, int>|List<Map<Spot, int>>`
+/// is for its `List`'s `Map<Spot, int>`. A spread into plain PHP parameters that are not variadic is refused as each
+/// `Map` it passes would be, by the parameter it starts at, and a `List` of no known length fills too few of them.
+#[test]
+fn every_map_a_value_can_hold_is_refused_where_its_keys_have_no_php_array() {
+    let sharp = "namespace Demo;\n\nimport Lib.Sink;\nimport Lib.Spot;\n\nclass Tally\n{\n    public static int either(Map<string, int>|List<Map<Spot, int>> counts) => Sink.plain(counts);\n\n    public static int spread(List<Map<Spot, int>> many) => Sink.pair(...many);\n}\n";
+
+    assert_eq!(
+        array_sink_issues(sharp),
+        [
+            "8:90 invalid-argument `Map<string, int>|List<Map<Spot, int>>` can't be passed to the parameter `counts` of method `Sink.plain`, which takes a PHP array: a PHP array's keys are `int` or `string`, and this `Map`'s keys are `Spot`.",
+            "10:73 invalid-argument `Map<Spot, int>` can't be passed to the parameter `first` of method `Sink.pair`, which takes a PHP array: a PHP array's keys are `int` or `string`, and this `Map`'s keys are `Spot`.",
+            "10:69 too-few-arguments Too few arguments provided for method `Sink.pair`.",
+        ]
+    );
+}
+
+/// Spec section 12: a local plain PHP writes through a reference parameter crosses back into the collection its type
+/// names, and a local that may hold several collections, as `Map<string, int>|Set<string>`, names none, so an `array`
+/// reference parameter refuses it. A typed local of one collection crosses there and back.
+#[test]
+fn a_reference_parameter_refuses_a_value_that_may_be_several_collections() {
+    let sharp = "namespace Demo;\n\nimport Lib.Sink;\n\nclass Tally\n{\n    public static void filled(bool pick, Map<string, int> m, Set<string> s)\n    {\n        let values = pick ? m : s;\n        Sink.fill(values);\n        Map<string, int> one = m;\n        Sink.fill(one);\n    }\n}\n";
+
+    assert_eq!(
+        array_sink_issues(sharp),
+        [
+            "10:19 invalid-argument `Map<string, int>|Set<string>` can't be passed to the reference parameter `values` of method `Sink.fill`, which takes a PHP array: the array plain PHP writes back doesn't say which of these collections it is."
+        ]
+    );
+}
+
+/// Spec section 12: a plain PHP type parameter takes the PHP array a `Map` crosses into as its bound does. One bounded
+/// by `\Countable`, which takes only objects, takes the `Map` itself, which satisfies the bound as the `Sharp\Map` it
+/// runs as, and one without a bound takes the array, keyed by each case's backing value, as its bound `mixed` does.
+#[test]
+fn a_type_parameter_takes_the_php_array_as_its_bound_does() {
+    let sharp = "namespace Demo;\n\nimport Lib.Sink;\nimport Lib.Status;\n\nclass Tally\n{\n    public static bool counted(Map<Status, int> m) => Sink.counted(m);\n\n    public static bool kept(Map<Status, int> m) => Sink.kept(m);\n}\n";
+
+    assert_eq!(
+        messages(("src/Demo/Tally.sharp", sharp), &[("src/Lib/Status.php", STATUS), ARRAY_SINK]),
+        [
+            "Invalid return type for method `Tally.counted`: expected `bool`, but found `Map<Status, int>`.",
+            "Invalid return type for method `Tally.kept`: expected `bool`, but found `Map<string, int>`.",
+        ]
+    );
+}
+
+/// A type argument meets its type parameter's bound as an argument meets its parameter's type, by one comparison. In a
+/// PHP# file an `int` meets no `float` bound, as it meets no `float` parameter, spec section 24: "An `int` where a
+/// `float` is expected is a compile error in PHP# code". A plain PHP file keeps PHP's rules, where an `int` meets both.
+#[test]
+fn a_type_argument_meets_its_bound_as_an_argument_meets_its_parameter() {
+    let sharp = "namespace Demo;\n\nclass Numbers\n{\n    public static T keep<T : float>(T value) => value;\n\n    public static float same(float value) => value;\n\n    public static float run(int count) => Numbers.keep(count) + Numbers.same(count);\n}\n";
+    let lib = "<?php\n\nnamespace Lib;\n\n/**\n * @template T of float\n * @param T $value\n * @return T\n */\nfunction keep($value)\n{\n    return $value;\n}\n\nfunction same(float $value): float\n{\n    return $value;\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nfunction run(int $count): float\n{\n    return \\Lib\\keep($count) + \\Lib\\same($count);\n}\n";
+
+    assert_eq!(
+        messages(("src/Demo/Numbers.sharp", sharp), &[]),
+        [
+            "`int` does not satisfy the bound `float` of type parameter `T`.",
+            "`int` is not `float`: convert with (float) count"
+        ]
+    );
+    assert_eq!(messages(("src/Demo/run.php", php), &[("src/Lib/functions.php", lib)]), Vec::<String>::new());
 }
 
 /// Spec section 12: `iterator_to_array` receives a `Map<Status, int>` as the PHP array keyed by each case's backing
@@ -20140,10 +20383,8 @@ fn plain_php_passes_an_int_key_where_a_map_keyed_by_string_takes_it() {
         "src/Demo/Tally.sharp",
         "namespace Demo;\n\npublic class Tally\n{\n    public static int total(Map<string, int> counts) => counts.count();\n\n    public static int states(Map<Status, int> counts) => counts.count();\n}\n",
     );
-    let status = (
-        "src/Demo/Status.sharp",
-        "namespace Demo;\n\npublic enum Status : string\n{\n    case Open = \"open\";\n}\n",
-    );
+    let status =
+        ("src/Demo/Status.sharp", "namespace Demo;\n\npublic enum Status : string\n{\n    case Open = \"open\";\n}\n");
     let php = "<?php\n\nnamespace Demo;\n\nfinal class Caller\n{\n    /** @param array<int|string, int> $counts */\n    public function totals(array $counts): int\n    {\n        return Tally::total($counts) + Tally::states($counts);\n    }\n}\n";
 
     assert_eq!(

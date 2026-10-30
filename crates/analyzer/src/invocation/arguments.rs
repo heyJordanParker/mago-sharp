@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use foldhash::HashMap;
@@ -21,8 +22,9 @@ use mago_codex::ttype::comparator::ComparisonResult;
 use mago_codex::ttype::comparator::union_comparator::can_expression_types_be_identical;
 use mago_codex::ttype::comparator::union_comparator::is_contained_by;
 use mago_codex::ttype::expander::get_signature_of_function_like_identifier;
-use mago_codex::ttype::get_array_parameters;
+use mago_codex::ttype::get_crossing_array;
 use mago_codex::ttype::get_iterable_value_parameter;
+use mago_codex::ttype::get_map_key_types;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_never;
 use mago_codex::ttype::get_php_array_form;
@@ -43,6 +45,7 @@ use mago_word::word;
 
 use crate::analyzable::Analyzable;
 use crate::artifacts::AnalysisArtifacts;
+use crate::artifacts::get_expression_range;
 use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
@@ -93,27 +96,47 @@ fn shareable_part(union: &TUnion, is_sharp: bool) -> Option<Cow<'_, TUnion>> {
     (!types.is_empty()).then(|| Cow::Owned(TUnion::from_vec(types)))
 }
 
-/// The type a plain PHP parameter declared `parameter_type` receives where PHP# passes it a value of `input_type`, spec
-/// section 12, as the bridge passes it, or None where it receives the value as it is: the PHP array the codex's
-/// [`get_php_array_form`] gives, where the parameter takes one, as the codex's [`takes_array`] says, or declares no
-/// type, which the call's analysis reads as `mixed`.
-pub(super) fn get_php_received_argument_type(
-    input_type: &TUnion,
+/// The type a plain PHP parameter declared `parameter_type` receives for `argument`, an argument of the call at `call`,
+/// where PHP# passes it a value of `passed`, spec section 12, or None where it receives the value as it is.
+///
+/// It is the PHP array the codex's [`get_php_array_form`] gives, as the bridge passes it, where the parameter takes
+/// one, as the codex's [`takes_array`] says, or declares no type, which the call's analysis reads as `mixed`. It is
+/// recorded in the call's entry of [`AnalysisArtifacts::get_received_argument_types`], for the call's providers, hooks
+/// and external requests, and a later read of the same argument in the same check of the call reads it from there.
+pub(super) fn record_received_argument_type(
+    artifacts: &mut AnalysisArtifacts,
+    call: Span,
+    argument: &Expression<'_>,
+    passed: &TUnion,
     parameter_type: &TUnion,
     codebase: &CodebaseMetadata,
 ) -> Option<TUnion> {
-    takes_array(parameter_type).then(|| get_php_array_form(input_type, codebase)).flatten()
+    let argument = get_expression_range(argument);
+    if let Some(recorded) = artifacts.get_received_argument_types(call).and_then(|received| received.get(&argument)) {
+        return Some((**recorded).clone());
+    }
+    let received = takes_array(parameter_type).then(|| get_php_array_form(passed, codebase)).flatten()?;
+    artifacts
+        .received_argument_types
+        .entry(get_expression_range(&call))
+        .or_default()
+        .insert(argument, Rc::new(received.clone()));
+
+    Some(received)
 }
 
-/// Spec section 12 passes a `Map` to a plain PHP parameter whose declared type names `array` as a PHP array, whose
-/// keys are `int` or `string`, and a backed enum's cases as their backing values. A `Map` keyed by anything else, as a
-/// unit enum, a struct or a `float`, has no such array, where PHP would cast or refuse each key, so its call is refused
-/// here rather than failing where it runs. A `Map` whose two keys are one PHP array key, as `5` and `"5"` are, fails
-/// where it crosses, since only its data shows that. `input_type` is the type the parameter receives, as
-/// [`get_php_received_argument_type`] gives it. Returns whether the parameter takes it, false when it refused the call.
+/// Spec section 12 refuses a call where plain PHP's parameter would take the object of a `Map` or a `Set` it takes as
+/// a PHP array, rather than failing where it runs.
+///
+/// `passed` is the PHP# type of the argument. A parameter whose type names `array` refuses a value that can hold a `Map`, at any depth, keyed by a type no PHP
+/// array key always holds, as a unit enum, a struct, a `float` or a type parameter, as the codex's
+/// [`get_map_key_types`] finds each key, since the bridge passes such a value as the object. A `Map` whose two keys
+/// are one PHP array key, as `5` and `"5"` are, fails where it crosses, since only its data shows that. A reference
+/// parameter that takes an array refuses a value that may be several collections, since the array plain PHP writes
+/// back doesn't say which of them it is. Returns whether the parameter takes the argument, false when it refused the call.
 pub(super) fn check_array_crossing<A>(
     context: &mut Context<'_, '_, A>,
-    input_type: &TUnion,
+    passed: &TUnion,
     parameter: InvocationTargetParameter<'_>,
     parameter_type: &TUnion,
     argument_offset: usize,
@@ -123,18 +146,22 @@ pub(super) fn check_array_crossing<A>(
 where
     A: Arena,
 {
-    if !parameter_type.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(_))) {
-        return true;
-    }
-    let Some(key_type) = input_type.types.iter().find_map(|atomic| match atomic {
-        TAtomic::Array(map @ TArray::Keyed(_)) => Some(get_array_parameters(map, context.codebase).0),
-        _ => None,
-    }) else {
-        return true;
-    };
-    if get_php_array_key_type(&key_type, context.codebase)
-        .is_some_and(|array_key_type| array_key_type.is_always_array_key(true))
-    {
+    let refused_key = parameter_type
+        .types
+        .iter()
+        .any(|atomic| matches!(atomic, TAtomic::Array(_)))
+        .then(|| {
+            get_map_key_types(passed, context.codebase).into_iter().find(|key_type| {
+                !get_php_array_key_type(key_type, context.codebase)
+                    .is_some_and(|array_key_type| array_key_type.is_always_array_key(true))
+            })
+        })
+        .flatten();
+    let refused_reference = parameter.is_by_reference()
+        && takes_array(parameter_type)
+        && get_php_array_form(passed, context.codebase).is_some()
+        && get_crossing_array(passed, context.codebase).is_none();
+    if refused_key.is_none() && !refused_reference {
         return true;
     }
 
@@ -144,7 +171,22 @@ where
     );
     let target_kind = invocation_target.guess_kind(context);
     let target = invocation_target.guess_name(context);
-    let input = display_type(context, input_type);
+    let input = display_type(context, passed);
+    let Some(key_type) = refused_key else {
+        context.collector.report_with_code(
+            IssueCode::InvalidArgument,
+            Issue::error(format!(
+                "`{input}` can't be passed to the reference {parameter} of {target_kind} `{target}`, which takes a PHP array: the array plain PHP writes back doesn't say which of these collections it is."
+            ))
+            .with_annotation(
+                Annotation::primary(input_expression.span()).with_message("This value may be one of several collections"),
+            )
+            .with_annotation(Annotation::secondary(invocation_target.span()).with_message("Plain PHP declares this call"))
+            .with_help("Pass a local whose type names one collection, such as one of the types of this union."),
+        );
+
+        return false;
+    };
     let key = display_type(context, &key_type);
     context.collector.report_with_code(
         IssueCode::InvalidArgument,
