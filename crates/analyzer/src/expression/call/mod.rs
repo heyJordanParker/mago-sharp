@@ -47,6 +47,7 @@ use crate::error::AnalysisError;
 use crate::expression::access::report_full_name;
 use crate::expression::access::report_member_of_mixed_kinds;
 use crate::expression::binary::comparison::check_element_equality;
+use crate::expression::binary::comparison::unequatable_parameter;
 use crate::invocation::Invocation;
 use crate::invocation::InvocationArgumentsSource;
 use crate::invocation::InvocationTarget;
@@ -552,9 +553,10 @@ where
     if method_call::changes_receiver(context, &extension) {
         method_call::check_stored_in_static(context, artifacts, receiver, arguments);
     }
-    // A `List`'s member compares the value of a parameter marked `ComparedByEquality` with each element as `==` does,
-    // spec section 12, once the value's type is known. A value that is no element is refused by its argument check. A
-    // `Map` and a `Set` find a key by its `==` and `hash()`, which their key type has.
+    // A collection member compares the value of a parameter marked `ComparedByEquality` with each element of a `List`,
+    // or each key of a `Map` or a `Set`, as `==` does, spec section 12, once the value's type is known. A value that is
+    // no element is refused by its argument check. A `Map` and a `Set` find a key by its `hash()` first, so a key of
+    // another type is never compared, and only a key type of a type parameter whose bound gives it no `==` is refused.
     for (parameter, argument) in metadata.parameters.iter().skip(1).zip(&arguments.arguments) {
         if parameter
             .attributes
@@ -563,31 +565,35 @@ where
             && let Argument::Positional(_) = argument
             && let Some(value_type) = artifacts.get_expression_type(argument.value())
             && let Some(receiver_type) = artifacts.get_expression_type(receiver)
-            && receiver_type
-                .types
-                .iter()
-                .all(|atomic| matches!(atomic, TAtomic::Array(TArray::List(_)) | TAtomic::Null))
+            && receiver_type.types.iter().all(|atomic| matches!(atomic, TAtomic::Array(_) | TAtomic::Null))
         {
             let element_type = receiver_type
                 .types
                 .iter()
                 .filter_map(|atomic| match atomic {
-                    TAtomic::Array(array) => Some(get_array_parameters(array, context.codebase).1),
+                    TAtomic::Array(array @ TArray::List(_)) => Some(get_array_parameters(array, context.codebase).1),
+                    TAtomic::Array(array) => Some(get_array_parameters(array, context.codebase).0),
                     _ => None,
                 })
                 .fold(None, |element_type, other| {
                     Some(add_optional_union_type(other, element_type.as_ref(), context.codebase))
                 })
                 .unwrap_or_else(get_never);
-            if union_comparator::is_contained_by(
-                context.codebase,
-                value_type,
-                &element_type,
-                false,
-                false,
-                false,
-                &mut ComparisonResult::new(),
-            ) {
+            let searches_list = receiver_type
+                .types
+                .iter()
+                .all(|atomic| matches!(atomic, TAtomic::Array(TArray::List(_)) | TAtomic::Null));
+            if (searches_list || unequatable_parameter(&element_type, context.codebase).is_some())
+                && union_comparator::is_contained_by(
+                    context.codebase,
+                    value_type,
+                    &element_type,
+                    false,
+                    false,
+                    false,
+                    &mut ComparisonResult::new(),
+                )
+            {
                 let method = metadata.original_name;
                 check_element_equality(
                     context,

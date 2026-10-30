@@ -2565,8 +2565,9 @@ where
         if key_type.types.iter().any(|atomic| matches!(atomic, TAtomic::Reference(TReference::Symbol { .. }))) {
             continue;
         }
-        // The standard library's generic members of a `List` key a `Map` or fill a `Set` with a type parameter, which
-        // each call checks with the type argument it fixes, as `lines.toSet()` on a `List<Line>`.
+        // The standard library's generic members key a `Map` or fill a `Set` with a type parameter, which each call
+        // checks with the type argument it fixes, as `lines.toSet()` on a `List<Line>` and `tags.contains(tag)` on a
+        // `Set<T>`.
         if context.source_file.is_standard_library
             && key_type.types.iter().all(|atomic| matches!(atomic, TAtomic::GenericParameter(_)))
         {

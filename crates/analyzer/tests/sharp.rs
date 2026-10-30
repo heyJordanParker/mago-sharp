@@ -16716,6 +16716,28 @@ fn a_member_compared_by_equality_needs_equatable_on_a_type_parameter() {
     assert_eq!(equatable_written(bounded, &[shelf]), Vec::<String>::new());
 }
 
+/// Spec section 12: a `Set`'s `contains` and a `Map`'s `has` compare the value with each element or key by `==`, as a
+/// `List`'s `contains` does, so on an unbounded type parameter each call is the error that names `Equatable`, beside
+/// the refusal of the `Set` or `Map` it is called on. `Equatable` gives both.
+#[test]
+fn a_set_element_and_a_map_key_search_of_a_type_parameter_need_equatable() {
+    let unbounded = "namespace Demo;\n\npublic class Searches<T>\n{\n    public bool held(Set<T> items, T item) => items.contains(item);\n\n    public bool keyed(Map<T, int> counts, T key) => counts.has(key);\n}\n";
+    let bounded = "namespace Demo;\n\npublic class Searches<T : Equatable>\n{\n    public bool held(Set<T> items, T item) => items.contains(item);\n\n    public bool keyed(Map<T, int> counts, T key) => counts.has(key);\n}\n";
+    let rule = "is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`, and `T` is a type parameter with no `Equatable` bound: bound it with `Equatable`, as in `<T : Equatable>`.";
+    let refusal = "`T` has no `==`: bound it with `Equatable`, as in `<T : Equatable>`.";
+
+    assert_eq!(
+        written(unbounded, &analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Searches.sharp", unbounded), &[])),
+        [
+            format!("5:22 template-constraint-violation A `Set`'s element {rule}"),
+            format!("5:62 invalid-argument `contains` compares elements with `==`, and {refusal}"),
+            format!("7:23 template-constraint-violation A `Map`'s key {rule}"),
+            format!("7:64 invalid-argument `has` compares elements with `==`, and {refusal}"),
+        ]
+    );
+    assert_eq!(issues(("src/Demo/Searches.sharp", bounded), &[]), Vec::<String>::new());
+}
+
 /// Spec section 11: `Equatable` is a bound and never a value's type, so `List<Equatable>` and an `Equatable` parameter
 /// are each an error, and it joins another bound with `&`, which then has `==` too.
 #[test]
