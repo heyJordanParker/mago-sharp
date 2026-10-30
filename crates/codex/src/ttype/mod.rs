@@ -1682,20 +1682,18 @@ pub fn get_crossing_array<'r#type>(r#type: &'r#type TUnion, codebase: &CodebaseM
 /// The type plain PHP code receives where a PHP# declaration gives `r#type`.
 ///
 /// It is a return, a property or a callback's argument. Where [`crosses_outward`] holds, each `Map` and `Set` in it,
-/// at any depth, is the PHP array the engine gives plain PHP, spec section 12: a `Map` is the array of its entries,
-/// keyed as [`get_php_array_key`] says, and a `Set` the list of its elements. Otherwise each is the `Sharp\Map` or
-/// `Sharp\Set` object it runs as. A `List` stays a PHP array. A function plain PHP receives takes what plain PHP may
-/// pass, and gives what plain PHP receives. A readonly value is the value it runs as, spec section 13: PHP# checks
-/// `readonly` in PHP# code only.
+/// at any depth, is the PHP array the engine gives plain PHP, as [`get_php_array_form`] types it, spec section 12.
+/// Otherwise each is the `Sharp\Map` or `Sharp\Set` object it runs as. A `List` stays a PHP array. A function plain PHP
+/// receives takes what plain PHP may pass, and gives what plain PHP receives. A readonly value is the value it runs
+/// as, spec section 13: PHP# checks `readonly` in PHP# code only.
 #[must_use]
 pub fn get_php_received_type(r#type: &TUnion, codebase: &CodebaseMetadata) -> TUnion {
     let r#type = r#type.clone().without_readonly();
 
-    if crosses_outward(&r#type, codebase) {
-        get_php_array_form(&r#type, codebase)
-    } else {
-        get_php_object_form(&r#type, codebase, Crossing::Received)
-    }
+    crosses_outward(&r#type, codebase)
+        .then(|| get_php_array_form(&r#type, codebase))
+        .flatten()
+        .unwrap_or_else(|| get_php_object_form(&r#type, codebase, Crossing::Received))
 }
 
 /// The type plain PHP code may pass where a PHP# declaration takes `r#type`.
@@ -1712,11 +1710,21 @@ pub fn get_php_passed_type(r#type: &TUnion, codebase: &CodebaseMetadata) -> TUni
         let (key_type, element_type) = get_array_parameters(array, codebase);
         let element_type = Arc::new(get_php_passed_type(&element_type, codebase));
 
+        // A PHP array that crosses into a `Map` keyed by `string` gives each `int` key back as its `string`, so plain
+        // PHP may pass an `int` key where a `string` PHP# does not know goes, as PHP holds `"5"` as `5`.
+        let mut php_key_type = get_php_array_key(&key_type, codebase)?;
+        if !php_key_type.has_int()
+            && key_type.types.iter().any(|atomic| {
+                matches!(atomic, TAtomic::Scalar(TScalar::String(text)) if text.get_known_literal_value().is_none())
+            })
+        {
+            php_key_type.types.to_mut().insert(0, INT_ATOMIC.clone());
+        }
+
         Some(match array {
-            TArray::Keyed(_) => TAtomic::Array(TArray::Keyed(TKeyedArray::new_with_parameters(
-                Arc::new(get_php_array_key(&key_type, codebase)?),
-                element_type,
-            ))),
+            TArray::Keyed(_) => {
+                TAtomic::Array(TArray::Keyed(TKeyedArray::new_with_parameters(Arc::new(php_key_type), element_type)))
+            }
             TArray::List(_) | TArray::Set(_) => TAtomic::Array(TArray::List(TList::new(element_type))),
         })
     });
@@ -1724,10 +1732,12 @@ pub fn get_php_passed_type(r#type: &TUnion, codebase: &CodebaseMetadata) -> TUni
     objects.clone_with_types(objects.types.iter().cloned().chain(array).collect())
 }
 
-/// The key type of the PHP array plain PHP holds for a `Map` keyed by `key_type`, as PHP holds each key: a backed
-/// case as its value, and a `string` that writes an integer, as `"5"`, as that `int`. So a `string` key PHP# does not
-/// know is `int|string`, and a case whose value writes no integer stays a `string`. A key decided when the code runs
-/// is any array key. None when a key has no PHP array form, as [`get_php_array_key_type`] says.
+/// The key type of the PHP array plain PHP holds for a `Map` keyed by `key_type`, as PHPStan types PHP's keys.
+///
+/// A backed case is its value, and a known `string` that writes an integer, as `"5"`, is that `int`, as PHP stores
+/// it. A known `string` that writes none, as a case's `"open"`, and a `string` PHP# does not know, stay a `string`. A
+/// case whose value is not known is `int|string`, and a key decided when the code runs is any array key. None when a
+/// key has no PHP array form, as [`get_php_array_key_type`] says.
 fn get_php_array_key(key_type: &TUnion, codebase: &CodebaseMetadata) -> Option<TUnion> {
     get_php_array_key_type(key_type, codebase)?;
     let mut values = Vec::new();
@@ -1753,7 +1763,7 @@ fn get_php_array_key(key_type: &TUnion, codebase: &CodebaseMetadata) -> Option<T
         .map(|value| match value {
             Some(TAtomic::Scalar(TScalar::String(text))) => match text.get_known_literal_value() {
                 Some(text) => (is_integer_key(text), !is_integer_key(text)),
-                None => (true, true),
+                None => (false, true),
             },
             Some(TAtomic::Scalar(TScalar::ClassLikeString(_))) => (false, true),
             Some(_) => (true, false),
@@ -1776,25 +1786,70 @@ fn is_integer_key(text: &[u8]) -> bool {
     std::str::from_utf8(text).is_ok_and(|text| text.parse::<i64>().is_ok_and(|value| value.to_string() == text))
 }
 
-/// `r#type` with each `Map` and `Set` in it, at any depth, as its PHP array, keyed as [`get_php_array_key`] says.
-fn get_php_array_form(r#type: &TUnion, codebase: &CodebaseMetadata) -> TUnion {
-    let form = |inner: &TUnion| Arc::new(get_php_array_form(inner, codebase));
-    let types = r#type.types.iter().map(|atomic| match atomic {
-        TAtomic::Array(array) => {
-            let (key_type, element_type) = get_array_parameters(array, codebase);
-            match array {
-                TArray::Keyed(_) => TAtomic::Array(TArray::Keyed(TKeyedArray::new_with_parameters(
-                    Arc::new(get_php_array_key(&key_type, codebase).unwrap_or_else(get_arraykey)),
-                    form(&element_type),
-                ))),
-                TArray::List(list) => {
-                    let mut list = list.clone();
-                    list.element_type = form(&list.element_type);
+/// Whether a plain PHP place of the declared type `declared` takes the PHP array a `Map` or a `Set` crosses into.
+///
+/// Spec section 12: a parameter, a property or an element of one takes it where its type names `array`, `iterable`,
+/// `mixed` or a type parameter. A type that takes only objects, such as `\Countable` or an interface, takes the object.
+#[must_use]
+pub fn takes_array(declared: &TUnion) -> bool {
+    declared.types.iter().any(|atomic| {
+        matches!(atomic, TAtomic::Array(_) | TAtomic::Iterable(_) | TAtomic::Mixed(_) | TAtomic::GenericParameter(_))
+    })
+}
 
-                    TAtomic::Array(TArray::List(list))
-                }
-                TArray::Set(_) => TAtomic::Array(TArray::List(TList::new(form(&element_type)))),
+/// `r#type` as the PHP array plain PHP receives for a value of it, spec section 12.
+///
+/// None where plain PHP receives the value as it is: one whose type holds no `Map` or `Set`, or holds a `Map` keyed by
+/// a type no PHP array key holds.
+///
+/// Each `Map` and `Set` in it, at any depth, is its PHP array: a `Map` keyed as [`get_php_array_key`] says, each
+/// backed case by its value, and a `Set` the list of its elements. A value that may be one of several collections, as
+/// `Map|Set` or `List|Map`, is the array of the one it holds. A function in it takes what plain PHP may pass, and gives
+/// what plain PHP receives. The bridge passes a value as this array where [`takes_array`] says the place takes one,
+/// and the analyzer types the call with it.
+#[must_use]
+pub fn get_php_array_form(r#type: &TUnion, codebase: &CodebaseMetadata) -> Option<TUnion> {
+    (holds_collection(r#type, codebase) && keys_hold_in_array(r#type, codebase))
+        .then(|| get_received_array_form(r#type, codebase))
+}
+
+/// Whether a value of `r#type` holds a `Map` or a `Set`, as the collections its type names show at any depth. `Any`, a
+/// type parameter and an `Iterable` say nothing of what they hold.
+fn holds_collection(r#type: &TUnion, codebase: &CodebaseMetadata) -> bool {
+    r#type.types.iter().any(|atomic| match atomic {
+        TAtomic::Array(list @ TArray::List(_)) => holds_collection(&get_array_parameters(list, codebase).1, codebase),
+        TAtomic::Array(_) => true,
+        _ => false,
+    })
+}
+
+/// `r#type` with each `Map` and `Set` in it, at any depth, as [`get_php_array_form`] says.
+fn get_received_array_form(r#type: &TUnion, codebase: &CodebaseMetadata) -> TUnion {
+    let form = |inner: &TUnion| get_received_array_form(inner, codebase);
+    let types = r#type.types.iter().map(|atomic| match atomic {
+        TAtomic::Array(TArray::Keyed(keyed)) => {
+            let mut keyed = keyed.clone();
+            for (_, value) in keyed.known_items.iter_mut().flat_map(BTreeMap::values_mut) {
+                *value = form(value);
             }
+            if let Some((key, value)) = keyed.parameters.as_mut() {
+                *key = Arc::new(get_php_array_key(key, codebase).unwrap_or_else(get_arraykey));
+                *value = Arc::new(form(value));
+            }
+
+            TAtomic::Array(TArray::Keyed(keyed))
+        }
+        TAtomic::Array(TArray::List(list)) => {
+            let mut list = list.clone();
+            list.element_type = Arc::new(form(&list.element_type));
+            for (_, element) in list.known_elements.iter_mut().flat_map(BTreeMap::values_mut) {
+                *element = form(element);
+            }
+
+            TAtomic::Array(TArray::List(list))
+        }
+        TAtomic::Array(TArray::Set(element_type)) => {
+            TAtomic::Array(TArray::List(TList::new(Arc::new(form(element_type)))))
         }
         atomic => get_php_signature_form(atomic, codebase, Crossing::Received),
     });

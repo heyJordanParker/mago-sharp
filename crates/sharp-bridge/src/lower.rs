@@ -22,10 +22,11 @@ use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::crosses_outward;
 use mago_codex::ttype::get_crossing_array;
 use mago_codex::ttype::get_mixed;
+use mago_codex::ttype::get_php_array_form;
 use mago_codex::ttype::get_php_declared_type;
-use mago_codex::ttype::keys_hold_in_array;
 use mago_codex::ttype::may_hold_collection;
 use mago_codex::ttype::resolution::TypeResolutionContext;
+use mago_codex::ttype::takes_array;
 use mago_codex::ttype::union::TUnion;
 use mago_names::ResolvedNames;
 use mago_names::binding::Binding;
@@ -275,7 +276,6 @@ use types::every_array_is_list;
 use types::number_kinds;
 use types::receiver_classes;
 use types::receiver_intersections;
-use types::takes_array;
 
 /// The values php-src gives the attrs the lowering emits, from `zend_compile.h` and `zend_vm_opcodes.h`. The tokens
 /// it emits are generated in `kind.rs`.
@@ -8749,15 +8749,13 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// Whether `value` crosses into plain PHP as its PHP array: where it goes takes an array, as `takes_array` says,
-    /// and the value's type holds a `Map` or a `Set` that plain PHP did not itself give, each with a PHP array, as the
-    /// codex's [`keys_hold_in_array`] says. A value whose type says nothing of what it holds, as `Any`, passes as it is.
+    /// and plain PHP did not itself give the value, whose type has a PHP array form, as the codex's
+    /// [`get_php_array_form`] says, which the analyzer types the call by too. A value whose type says nothing of what it
+    /// holds, as `Any`, passes as it is.
     fn received_as_array(&self, value: &Expression, takes_array: bool) -> bool {
-        let r#type = self.types.expression_type(value);
-
         takes_array
             && !self.plain_value(value)
-            && self.crossing_array(r#type).is_some()
-            && keys_hold_in_array(r#type, self.types.codebase())
+            && get_php_array_form(self.types.expression_type(value), self.types.codebase()).is_some()
     }
 
     /// Whether a value of `list` crosses into `parameters` as [`Self::received_as_array`] says.

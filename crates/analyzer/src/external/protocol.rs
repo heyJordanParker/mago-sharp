@@ -104,6 +104,7 @@ use mago_word::ascii_lowercase_word;
 use mago_word::word;
 
 use crate::artifacts::AnalysisArtifacts;
+use crate::artifacts::get_expression_range;
 use crate::external::AnalysisHookRegistration;
 use crate::external::AttributedEntryPoint;
 use crate::external::ClassInitializerProvider;
@@ -910,7 +911,7 @@ pub(super) fn encode_provider_request<'type_info>(
     request_kind: ProviderRequestKind,
     provider_indices: &[u16],
     target: ProviderTarget<'_>,
-    invocation: &Invocation<'_, '_, '_>,
+    invocation: &'type_info Invocation<'_, '_, '_>,
     artifacts: &'type_info AnalysisArtifacts,
     source_file: &File,
     codebase: &CodebaseMetadata,
@@ -1311,7 +1312,7 @@ fn encode_return_type_request<'type_info>(
     class: Option<&[u8]>,
     receiver_type: Option<&TUnion>,
     name: &[u8],
-    invocation: &Invocation<'_, '_, '_>,
+    invocation: &'type_info Invocation<'_, '_, '_>,
     artifacts: &'type_info AnalysisArtifacts,
     source_file: &File,
     codebase: &CodebaseMetadata,
@@ -1396,7 +1397,7 @@ fn encode_return_type_request<'type_info>(
 #[allow(clippy::too_many_arguments)]
 fn encode_return_type_arguments<'type_info>(
     mut writer: PayloadWriter,
-    invocation: &Invocation<'_, '_, '_>,
+    invocation: &'type_info Invocation<'_, '_, '_>,
     artifacts: &'type_info AnalysisArtifacts,
     source_file: &File,
     codebase: &CodebaseMetadata,
@@ -1427,8 +1428,14 @@ fn encode_return_type_arguments<'type_info>(
             .unwrap_or_default();
 
         writer.write_bytes(expression)?;
-        let argument_type =
-            include_argument_types.then(|| value.and_then(|value| artifacts.get_expression_type(value))).flatten();
+        // Each argument as the target receives it, as a plugin's provider reads it: a `Map` or a `Set` PHP# passes to
+        // plain PHP as the PHP array it crosses into, spec section 12, which is plain PHP's type.
+        let received = value.and_then(|value| invocation.received_argument_types.get(&get_expression_range(value)));
+        let (argument_type, dialect) = match received {
+            Some(received) => (Some(&**received), Dialect::Php),
+            None => (value.and_then(|value| artifacts.get_expression_type(value)), Dialect::of(source_file)),
+        };
+        let argument_type = argument_type.filter(|_| include_argument_types);
         writer.write_bool(argument_type.is_some());
         if let Some(argument_type) = argument_type {
             typed_arguments += 1;
@@ -1439,7 +1446,7 @@ fn encode_return_type_arguments<'type_info>(
                 argument_type,
                 &mut argument_types,
                 codebase,
-                Dialect::of(source_file),
+                dialect,
                 receiver_type_count,
                 0,
             )?;
@@ -3424,11 +3431,13 @@ fn validate_provider_indices(
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 pub(super) mod testing {
+    use std::rc::Rc;
     use std::sync::LazyLock;
 
     use mago_allocator::LocalArena;
     use mago_codex::populator::populate_codebase;
     use mago_codex::scanner::scan_program;
+    use mago_codex::ttype::get_php_array_form;
     use mago_codex::ttype::get_php_received_type;
     use mago_names::ResolvedNames;
     use mago_names::resolver::NameResolver;
@@ -3748,11 +3757,15 @@ pub(super) mod testing {
         ));
     }
 
-    /// A return type provider request sends each argument's type as the code of the calling file sees it: a `Map` a
-    /// PHP# file passes goes as the `Sharp\Map` object it runs as, and a keyed array plain PHP passes as an array.
+    /// A return type provider request sends each argument's type as the target receives it, as the call's analysis
+    /// records it, spec section 12: a `Map` a PHP# file passes to a plain PHP `array` parameter goes as its PHP array,
+    /// a `Map` the call records no crossing for goes as the `Sharp\Map` object it runs as, and a keyed array plain PHP
+    /// passes goes as an array.
     #[test]
-    fn a_provider_request_sends_each_argument_as_the_calling_file_sees_it() {
-        for (files, sends_map) in [([SHELF, SINK], true), ([DESK, SINK], false)] {
+    fn a_provider_request_sends_each_argument_as_the_target_receives_it() {
+        for (files, crossed, sends_map) in
+            [([SHELF, SINK], true, false), ([SHELF, SINK], false, true), ([DESK, SINK], false, false)]
+        {
             let (typed_arguments, payload) = analyzed(&files, |analysis| {
                 let call = Node::Program(analysis.program).filter_map(|node| match node {
                     Node::ArgumentList(list) => Some(*list),
@@ -3774,8 +3787,14 @@ pub(super) mod testing {
                     }),
                     span: call[0].span(),
                 };
-                let invocation =
+                let mut invocation =
                     Invocation::new(target, InvocationArgumentsSource::ArgumentList(call[0]), call[0].span());
+                if crossed {
+                    let argument = call[0].arguments.iter().next().unwrap().value();
+                    let passed = analysis.artifacts.get_expression_type(argument).unwrap();
+                    let received = get_php_array_form(passed, analysis.codebase).unwrap();
+                    invocation.received_argument_types.insert(get_expression_range(argument), Rc::new(received));
+                }
 
                 let request = encode_provider_request(
                     ProviderRequestKind::ReturnType,
@@ -3795,8 +3814,8 @@ pub(super) mod testing {
                 (request.typed_arguments, request.payload)
             });
 
-            assert_eq!(typed_arguments, 1, "{files:?}");
-            assert_eq!(names(&payload, b"Sharp\\Map"), sends_map, "{files:?}");
+            assert_eq!(typed_arguments, 1, "{files:?} {crossed}");
+            assert_eq!(names(&payload, b"Sharp\\Map"), sends_map, "{files:?} {crossed}");
         }
     }
 

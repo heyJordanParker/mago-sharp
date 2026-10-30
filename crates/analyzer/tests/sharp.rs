@@ -9977,8 +9977,8 @@ fn a_parent_s_property_read_through_this_arrives_as_through_any_other_receiver()
     assert_eq!(
         messages(("src/App/Pantry.php", pantry), &[shelf]),
         [
-            "Invalid return type for function `App\\Pantry::own`: expected `int`, but found `array<int|string, int>`.",
-            "Invalid return type for function `App\\Pantry::of`: expected `int`, but found `array<int|string, int>`.",
+            "Invalid return type for function `App\\Pantry::own`: expected `int`, but found `array<string, int>`.",
+            "Invalid return type for function `App\\Pantry::of`: expected `int`, but found `array<string, int>`.",
         ]
     );
 }
@@ -12199,16 +12199,31 @@ fn a_map_whose_keys_can_collide_passes_where_plain_php_takes_an_array() {
 }
 
 /// Spec section 12: `iterator_to_array` receives a `Map<Status, int>` as the PHP array keyed by each case's backing
-/// value, so it takes its type parameters from that array, and its result is an `array<string, int>`. A spread
-/// `List<Map<Status, int>>` passes `array_merge` each such array. The function's return type provider reads the
-/// argument as the function receives it, so it gives the same type.
+/// value, so it takes its type parameters from that array, and its result is an `array<string, int>`, since no case's
+/// value writes an integer. A spread `List<Map<Status, int>>` passes `array_merge` each such array. A `Map<string, int>`
+/// arrives keyed by `string`, as PHPStan types PHP's keys, and a `Map<Code, int>` whose case `"5"` writes an integer
+/// keyed by `int|string`, as PHP holds `"5"` as `5`. The function's return type provider reads each argument as the
+/// function receives it, so it gives the same types.
 #[test]
 fn a_plain_php_function_takes_its_type_arguments_from_the_array_a_map_crosses_into() {
-    let sharp = "namespace Sharp;\n\npublic static class Calls\n{\n    public static List<Any?> run(Map<Status, int> counts, List<Map<Status, int>> rows) => [global.iterator_to_array(counts), global.array_merge(...rows)];\n}\n";
+    let sharp = "namespace Sharp;\n\npublic static class Calls\n{\n    public static List<Any?> run(Map<Status, int> counts, List<Map<Status, int>> rows, Map<string, int> named, Map<Code, int> coded) => [global.iterator_to_array(counts), global.array_merge(...rows), global.iterator_to_array(named), global.iterator_to_array(coded)];\n}\n";
+    let code = (
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Code.sharp",
+        "namespace Sharp;\n\npublic enum Code : string\n{\n    case Five = \"5\";\n    case Tea = \"tea\";\n}\n",
+    );
 
     assert_eq!(
-        library_call_types(sharp, &[], &["global.iterator_to_array(counts)", "global.array_merge(...rows)"]),
-        ["array<string, int>", "array<string, int>"]
+        library_call_types(
+            sharp,
+            &[code],
+            &[
+                "global.iterator_to_array(counts)",
+                "global.array_merge(...rows)",
+                "global.iterator_to_array(named)",
+                "global.iterator_to_array(coded)"
+            ]
+        ),
+        ["array<string, int>", "array<string, int>", "array<string, int>", "array<int|string, int>"]
     );
 }
 
@@ -20064,9 +20079,10 @@ fn a_php_caller_passes_null_as_the_left_operand_of_op_equality() {
 
 /// Plain PHP receives a PHP# `Map` or `Set` as the PHP array the engine gives it, spec section 12, from a return, a
 /// property, a static property and a callback's argument, at any depth: a `Map` as the array of its entries, each
-/// backed enum key its backing value, and a `Set` as the list of its elements. A `string` key is `int|string`, as PHP
-/// holds `"5"` as `5`, and a case's value that writes no integer stays a `string`. So `array_merge`, `ksort` and a
-/// backed enum's `tryFrom` take them, and a parameter that takes a `string` still refuses one. Where a key, at any
+/// backed enum key its backing value, and a `Set` as the list of its elements. Each key is typed as PHPStan types PHP's
+/// keys: a `string` key stays a `string`, as PHPStan types it though PHP holds `"5"` as `5`, so a `strlen` of one has
+/// no issue, and a case's value that writes no integer stays a `string`. So `array_merge`, `ksort` and a backed enum's
+/// `tryFrom` take them, and a parameter that takes a `string` still refuses a `Set`'s list. Where a key, at any
 /// depth, has no PHP array form, as an enum without backing values, plain PHP receives the whole value as the
 /// `Sharp\Map` object, as the engine gives it. A PHP# parameter or property takes the `Sharp\Map` or `Sharp\Set`
 /// object, or the PHP array PHP# turns into one, and a function plain PHP passes may give either. A plain PHP
@@ -20100,18 +20116,40 @@ fn plain_php_receives_a_map_or_a_set_as_a_php_array() {
     assert_eq!(
         messages(("src/Demo/Caller.php", php), &[tally, size, shade]),
         [
-            "Invalid return type for function `Demo\\Caller::counts`: expected `int`, but found `array<int|string, int>`.",
+            "Invalid return type for function `Demo\\Caller::counts`: expected `int`, but found `array<string, int>`.",
             "Invalid return type for function `Demo\\Caller::seen`: expected `int`, but found `list<string>`.",
-            "Invalid return type for function `Demo\\Caller::nested`: expected `int`, but found `array<int|string, list<list<int>>>`.",
+            "Invalid return type for function `Demo\\Caller::nested`: expected `int`, but found `array<string, list<list<int>>>`.",
             "Invalid return type for function `Demo\\Caller::limits`: expected `int`, but found `array<string, int|null>`.",
             "Invalid return type for function `Demo\\Caller::shades`: expected `int`, but found `Sharp\\Map<enum(Demo\\Shade), int>`.",
             "Invalid return type for function `Demo\\Caller::nestedShades`: expected `int`, but found `Sharp\\Map<string, Sharp\\Map<enum(Demo\\Shade), int>>`.",
             "Invalid argument type for argument #1 of `strlen`: expected `string`, but found `list<string>`.",
             "Invalid argument type for argument #2 of `array_merge`: expected `array<('K.array_merge() extends array-key), ('V.array_merge() extends mixed)>`, but found `Sharp\\Map<string, Sharp\\Map<enum(Demo\\Shade), int>>`.",
             "Invalid return type for function `Demo\\Caller::read`: expected `string`, but found `int`.",
-            "Possible argument type mismatch for argument #1 of `strlen`: expected `string`, but possibly received `int|string`.",
             "Invalid return type for function `Demo\\Caller::loop`: expected `int`, but found `string`.",
-            "Invalid argument type for argument #1 of `Demo\\Tally::each`: expected `(closure(array<int|string, int>): void)`, but found `(closure(Sharp\\Map<mixed, mixed>): void)`.",
+            "Invalid argument type for argument #1 of `Demo\\Tally::each`: expected `(closure(array<string, int>): void)`, but found `(closure(Sharp\\Map<mixed, mixed>): void)`.",
+        ]
+    );
+}
+
+/// A PHP array that crosses into a `Map` keyed by `string` gives each `int` key back as its `string`, spec section 12,
+/// so plain PHP may pass an array keyed by `int|string`, as `array_flip` gives, where PHP# takes a `Map<string, int>`.
+/// A `Map<Status, int>` of a string-backed enum takes only its cases' values, so the same array may not fit it.
+#[test]
+fn plain_php_passes_an_int_key_where_a_map_keyed_by_string_takes_it() {
+    let tally = (
+        "src/Demo/Tally.sharp",
+        "namespace Demo;\n\npublic class Tally\n{\n    public static int total(Map<string, int> counts) => counts.count();\n\n    public static int states(Map<Status, int> counts) => counts.count();\n}\n",
+    );
+    let status = (
+        "src/Demo/Status.sharp",
+        "namespace Demo;\n\npublic enum Status : string\n{\n    case Open = \"open\";\n}\n",
+    );
+    let php = "<?php\n\nnamespace Demo;\n\nfinal class Caller\n{\n    /** @param array<int|string, int> $counts */\n    public function totals(array $counts): int\n    {\n        return Tally::total($counts) + Tally::states($counts);\n    }\n}\n";
+
+    assert_eq!(
+        messages(("src/Demo/Caller.php", php), &[tally, status]),
+        [
+            "Possible argument type mismatch for argument #1 of `Demo\\Tally::states`: expected `Sharp\\Map<enum(Demo\\Status), int>|array<string, int>`, but possibly received `array<int|string, int>`."
         ]
     );
 }

@@ -44,6 +44,7 @@ use mago_codex::ttype::get_collection_object;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_sharp_type;
 use mago_codex::ttype::is_written_in_sharp;
+use mago_codex::ttype::takes_array;
 use mago_codex::ttype::template::variance::Variance;
 use mago_codex::ttype::union::TUnion;
 use mago_database::file::File;
@@ -2346,15 +2347,6 @@ pub(crate) struct FunctionType {
     pub(crate) result: Option<String>,
 }
 
-/// Whether a place plain PHP declares of the type `declared`, a parameter, a property or an element of one, takes a
-/// PHP array, which a `Map` or a `Set` crosses into, spec section 12: the type names `array`, `iterable`, `mixed` or a
-/// template. A type that takes only objects, such as `\Countable` or an interface, takes the object.
-pub(crate) fn takes_array(declared: &TUnion) -> bool {
-    declared.types.iter().any(|atomic| {
-        matches!(atomic, TAtomic::Array(_) | TAtomic::Iterable(_) | TAtomic::Mixed(_) | TAtomic::GenericParameter(_))
-    })
-}
-
 /// A parameter of plain PHP code a call runs, which a `Map` or a `Set` crosses into: a declared function's, method's or
 /// constructor's, or one of the signature of a plain PHP closure a local holds.
 #[derive(Clone, Copy, Debug)]
@@ -2382,7 +2374,8 @@ impl<'analysis> PlainParameter<'analysis> {
         }
     }
 
-    /// Whether the parameter takes a PHP array, as [`takes_array`] says of the type it declares, or it declares none.
+    /// Whether the parameter takes a PHP array, as the codex's [`takes_array`] says of the type it declares, or it
+    /// declares none.
     pub(crate) fn takes_array(self) -> bool {
         self.declared_type().is_none_or(takes_array)
     }
