@@ -20238,13 +20238,17 @@ fn a_call_of_an_interface_member_checks_its_result() {
         body.contains("      ZVAL \"List<Any?>, List<int>\"\n      ZVAL \"App.Tenant.Taggable.ids()\"\n"),
         "{body}"
     );
+    // The typed local makes the `Set` and the `Map` the object after the check, as
+    // `a_set_or_a_map_an_interface_member_gives_becomes_the_object` shows.
     assert!(
-        body.contains("      ZVAL \"Set<Any?>, Set<string>\"\n      ZVAL \"App.Tenant.Taggable.names()\"\n"),
+        body.contains(
+            "              ZVAL \"Set<Any?>, Set<string>\"\n              ZVAL \"App.Tenant.Taggable.names()\"\n"
+        ),
         "{body}"
     );
     assert!(
         body.contains(
-            "      ZVAL \"Map<Any?, Any?>, Map<string, int>\"\n      ZVAL \"App.Tenant.Taggable.counts()\"\n"
+            "              ZVAL \"Map<Any?, Any?>, Map<string, int>\"\n              ZVAL \"App.Tenant.Taggable.counts()\"\n"
         ),
         "{body}"
     );
@@ -20266,6 +20270,43 @@ fn a_call_of_an_interface_member_checks_its_result() {
     );
     assert!(body.contains("      ZVAL \"App.Tenant.Relation\"\n      ZVAL \"App.Tenant.Source.read()\"\n"), "{body}");
     assert_eq!(body.matches("VERIFY_TYPE_ARGS").count(), 9, "{body}");
+}
+
+/// ```php
+/// $names = \is_array($crossing#1 = verify($owner->names(), …)) ? new \Sharp\Set<string>($crossing#1) : $crossing#1;
+/// return \Sharp\Internal\containsKey(\is_array($crossing#1 = verify($owner->names(), …)) ? new \Sharp\Set<string>(…) : …, 'b')
+///     && \Sharp\Internal\containsKey(… ? new \Sharp\Map<string, int>(…each key as a string…) : …, 'a');
+/// ```
+///
+/// Spec section 22: a plain PHP class may implement a PHP# interface's member, so the `Set` or the `Map` a call of the
+/// member gives may be the PHP array it crosses into. A typed local that holds it and a member that reads it make it the
+/// object first, as they make what a call of plain PHP gives, so each member runs on the object and a key keeps its type.
+/// A PHP# class may implement the member too, so the result plain PHP takes still crosses out as its PHP array.
+#[test]
+fn a_set_or_a_map_an_interface_member_gives_becomes_the_object() {
+    let body = Lowered::with(
+        &method_with(
+            "bool run(Taggable owner)",
+            "        Set<string> names = owner.names();\n        names.add(\"d\");\n        return owner.names().contains(\"b\") && owner.counts().has(\"a\") && Calc.total(owner.counts()) > 0;\n",
+        ),
+        &[
+            (
+                "src/App/Tenant/Taggable.sharp",
+                "namespace App.Tenant;\n\npublic interface Taggable\n{\n    Set<string> names();\n\n    Map<string, int> counts();\n}\n",
+            ),
+            (
+                "src/Lib/Calc.php",
+                "<?php namespace Lib;\nfinal class Calc { /** @param array<string, int> $counts */ public static function total(array $counts): int { return 0; } }",
+            ),
+        ],
+    )
+    .body();
+
+    assert_eq!(body.matches("ZVAL \"Sharp\\\\Set\"\n").count(), 2, "{body}");
+    assert_eq!(body.matches("ZVAL \"Sharp\\\\Map\"\n").count(), 1, "{body}");
+    assert_eq!(body.matches("ZVAL \"string\"\n").count(), 2, "{body}");
+    assert!(body.contains("ZVAL \"string, int\"\n"), "{body}");
+    assert_eq!(body.matches("ZVAL \"Sharp\\\\Internal\\\\arrayOf\"\n").count(), 1, "{body}");
 }
 
 /// ```php

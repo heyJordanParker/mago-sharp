@@ -8872,9 +8872,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.crossed_value(receiver, Some(&r#type))
     }
 
-    /// Whether `value` can be a PHP array PHP# types as a `Map` or a `Set`: what plain PHP gives, a call of it or a
-    /// property it declares, and what a local declared without a type holds. A literal, a `new`, a call of PHP#, a
-    /// property PHP# declares, a parameter and a typed local hold the object, as does an element of any of them.
+    /// Whether `value` can be a PHP array PHP# types as a `Map` or a `Set`: what plain PHP gives, a call of it, a call of
+    /// a PHP# interface's member a plain PHP class may implement, or a property it declares, and what a local declared
+    /// without a type holds. A literal, a `new`, any other call of PHP#, a property PHP# declares, a parameter and a
+    /// typed local hold the object, as does an element of any of them.
     fn may_be_php_array(&self, value: &Expression) -> bool {
         match value.unparenthesized() {
             Expression::Array(_) | Expression::Instantiation(_) | Expression::Literal(_) => false,
@@ -8883,7 +8884,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 self.may_be_php_array(conditional.then.unwrap_or(conditional.condition))
                     || self.may_be_php_array(conditional.r#else)
             }
-            Expression::Call(_) | Expression::Access(Access::Property(_)) => self.plain_value(value),
+            Expression::Call(_) => self.plain_value(value) || self.types.runs_result_checked_member(value),
+            Expression::Access(Access::Property(_)) => self.plain_value(value),
             Expression::ConstantAccess(access) => match self.names.binding(&access.name) {
                 Some(Binding::Local(local)) => local.kind != LocalKind::Parameter && self.typed_local(value).is_none(),
                 _ => true,

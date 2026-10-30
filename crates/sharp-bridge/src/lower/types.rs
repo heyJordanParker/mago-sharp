@@ -971,6 +971,14 @@ impl<'analysis> Types<'analysis> {
         (runs_in_engine && takes_function_value).then(|| method.original_name.to_string())
     }
 
+    /// Whether the call `call` runs a member of a PHP# interface, as [`Self::result_checked_member`] finds it, which a
+    /// plain PHP class may implement, so its result may be plain PHP's value: a PHP array for a `Map` or a `Set`.
+    pub(crate) fn runs_result_checked_member(&self, call: &Expression) -> bool {
+        self.artifacts.get_callees(call).any(|target| {
+            matches!(target, CallTarget::FunctionLike { callee, .. } if self.result_checked_member(callee).is_some())
+        })
+    }
+
     /// The class and the metadata of `callee` when it is a member of a PHP# interface, whose result each PHP# call
     /// checks, spec section 22.
     fn result_checked_member(
@@ -2130,9 +2138,9 @@ impl<'analysis> Types<'analysis> {
 
     /// The class-like whose `operator <=>` the call `call`, which sorts, orders two keys by, as `<` on two values of
     /// the key type its last type argument names chooses it, spec section 19, so a `List<Priced>` sorts by `Priced`'s
-    /// whatever classes it holds. A call sorts when it runs `sortedBy` or a form whose engine function takes
-    /// [`TAKES_KEY_ORDER`]. `member` is the member the call runs, where it runs one of several. None for keys of a type
-    /// that declares none, such as strings.
+    /// whatever classes it holds. A call sorts when it runs a form whose engine function takes [`TAKES_KEY_ORDER`].
+    /// `member` is the member the call runs, where it runs one of several. None for keys of a type that declares none,
+    /// such as strings.
     pub(crate) fn sorting_operator(&self, call: &Expression, member: Option<&MemberCall>) -> Option<Word> {
         let Some(key) = self.call_type_arguments_of(call, member)?.last() else {
             unreachable!("a call that sorts takes the type of its keys as its last type argument");

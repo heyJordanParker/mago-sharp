@@ -692,9 +692,9 @@ function associateBy(array|\Sharp\Map|\Sharp\Set $collection, \Closure $key, #[T
 function sortedBy(array|\Sharp\Map|\Sharp\Set $collection, \Closure $selector, #[TakesKeyOrder] ?\Closure $comparison = null): array {}
 
 /**
- * @return int how many entries the table holds, read in constant time, or the PHP array plain PHP gives for one.
+ * @return int how many entries the table holds, read in constant time.
  */
-function size(array|\Sharp\Map|\Sharp\Set $collection): int {}
+function size(\Sharp\Map|\Sharp\Set $table): int {}
 
 /**
  * @template K

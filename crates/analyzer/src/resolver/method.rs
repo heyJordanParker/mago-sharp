@@ -330,8 +330,10 @@ where
                 }
                 TAtomic::Array(array) if context.dialect.is_sharp() => {
                     // An empty value with no declared type, an empty literal the semantic checks refuse or an emptied
-                    // plain PHP array property, is neither a List nor a Map. Only `count` gives the same on each, 0,
-                    // and a `List`'s is PHP's `\count`, which counts a `Map` and a `Set` too.
+                    // plain PHP array property, is a `[]` the checker hasn't typed as a List, a Map or a Set. One
+                    // kind's `add` or `get` would judge it by that kind's `never` elements and add a wrong issue to
+                    // the refusal its type already has, so those members stay unresolved on it. `count` alone reaches
+                    // it, as the List's member, because it gives 0 on every kind.
                     if array.is_empty() {
                         if method_names.iter().all(|name| name.as_bytes() == b"count") {
                             collection_parts.extend(get_list(get_never()).types.iter().cloned());
