@@ -26,7 +26,6 @@ use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
-use crate::expression::binary::comparison::check_sorted_by_key;
 use crate::invocation::Invocation;
 use crate::invocation::InvocationArgumentsSource;
 use crate::invocation::InvocationTarget;
@@ -60,8 +59,8 @@ where
         return Ok(fetch_set_return_type(context, invocation, template_result, parameters));
     }
 
-    // `sortedBy` orders by the key its function returns, and `groupBy` and `associateBy` key the `Map` they return by it.
-    // An extension member's call passes its receiver first, and its last type argument is the key's.
+    // `groupBy` and `associateBy` key the `Map` they return by the key their function returns. An extension member's call
+    // passes its receiver first, and its last type argument is the key's.
     let selector_index =
         usize::from(matches!(invocation.arguments_source, InvocationArgumentsSource::ExtensionReceiver(..)));
     if context.dialect.is_sharp()
@@ -78,9 +77,7 @@ where
         let fills_key_parameter = argument.get_parameter_name().is_none_or(|name| name == b"key")
             && artifacts.get_expression_type(selector).is_some_and(TUnion::is_callable);
 
-        if is_collection_method(&invocation.target, b"sortedBy") {
-            check_sorted_by_key(context, selector, key_type);
-        } else if keys_a_map_by_its_function(&invocation.target) && fills_key_parameter {
+        if keys_a_map_by_its_function(&invocation.target) && fills_key_parameter {
             // A key that keys no `Map`, or a struct that holds a class instance, spec section 10, is refused.
             let is_refused = if is_key_type(key_type, context.codebase) {
                 report_class_held_by_key(context, key_type, false, selector.span())
@@ -276,16 +273,6 @@ pub(crate) fn keys_a_map_by_its_function(target: &InvocationTarget<'_>) -> bool 
 
     (is_member || made_collection(target).is_some())
         && key.types.iter().all(|atomic| matches!(atomic, TAtomic::GenericParameter(_)) && !taken.contains(&atomic))
-}
-
-/// Whether `target` is the method `method` of a PHP# `List`, `Map` or `Set`: the standard library's member, spec section
-/// 12.
-fn is_collection_method(target: &InvocationTarget<'_>, method: &[u8]) -> bool {
-    matches!(
-        (target.get_function_like_identifier(), target.get_function_like_metadata()),
-        (Some(FunctionLikeIdentifier::Method(class, called)), Some(metadata))
-            if called.as_bytes().eq_ignore_ascii_case(method) && is_collection_member(*class, metadata)
-    )
 }
 
 /// Whether `target` is the method `method` of the class `class`.

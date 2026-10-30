@@ -4,6 +4,7 @@ use std::sync::Arc;
 use mago_algebra::assertion_set::AssertionSet;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::identifier::method::MethodIdentifier;
+use mago_codex::metadata::parameter::FunctionLikeParameterMetadata;
 use mago_codex::ttype::TType;
 use mago_codex::ttype::add_optional_union_type;
 use mago_codex::ttype::atomic::TAtomic;
@@ -48,6 +49,7 @@ use crate::error::AnalysisError;
 use crate::expression::access::report_full_name;
 use crate::expression::access::report_member_of_mixed_kinds;
 use crate::expression::binary::comparison::check_element_equality;
+use crate::expression::binary::comparison::check_ordered_key;
 use crate::invocation::Invocation;
 use crate::invocation::InvocationArgumentsSource;
 use crate::invocation::InvocationTarget;
@@ -558,10 +560,19 @@ where
     // no element is refused by its argument check. A `Map` and a `Set` find a key by its `hash()` first, so a key of
     // another type is never compared, and a search is refused only where a key declaration is, by `is_key_type`.
     for (parameter, argument) in metadata.parameters.iter().skip(1).zip(&arguments.arguments) {
-        if parameter
-            .attributes
-            .iter()
-            .any(|attribute| attribute.name.as_bytes().eq_ignore_ascii_case(COMPARED_BY_EQUALITY))
+        // A collection member orders by the keys the function in a parameter marked `ComparedByOrder` gives, as
+        // `sortedBy` does, so a key type `<` cannot order is refused. The member's last type argument is the key's.
+        if is_marked(parameter, COMPARED_BY_ORDER)
+            && !argument.is_unpacked()
+            && let Some(key_type) = artifacts
+                .inferred_type_arguments
+                .get(&(span.start.offset, span.end.offset))
+                .and_then(|type_arguments| type_arguments.last())
+        {
+            let key_type = key_type.clone();
+            check_ordered_key(context, &metadata.original_name.as_str_lossy(), argument.value(), &key_type);
+        }
+        if is_marked(parameter, COMPARED_BY_EQUALITY)
             && let Argument::Positional(_) = argument
             && let Some(value_type) = artifacts.get_expression_type(argument.value())
             && let Some(receiver_type) = artifacts.get_expression_type(receiver)
@@ -613,6 +624,14 @@ where
 
 /// The prelude attribute that marks a collection member's parameter compared with the elements by `==`.
 const COMPARED_BY_EQUALITY: &[u8] = b"Sharp\\Internal\\ComparedByEquality";
+
+/// The prelude attribute that marks a collection member's parameter whose function gives the keys it orders by.
+const COMPARED_BY_ORDER: &[u8] = b"Sharp\\Internal\\ComparedByOrder";
+
+/// Whether `parameter` carries the prelude attribute `mark`.
+fn is_marked(parameter: &FunctionLikeParameterMetadata, mark: &[u8]) -> bool {
+    parameter.attributes.iter().any(|attribute| attribute.name.as_bytes().eq_ignore_ascii_case(mark))
+}
 
 /// Applies active method call assertions to narrow the return type.
 ///

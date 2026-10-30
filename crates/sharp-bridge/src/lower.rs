@@ -5288,12 +5288,12 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// `write`, as `lower` lowers it, a change in place to the `List` `place` is or holds an element of, where that
     /// `List` is a plain PHP property the checker reads as a `List`, spec section 12. The property is a `List`
     /// everywhere, writes included, so a write gets the `List`, changes it and sets it back, as a value-type property's
-    /// does. The renumbered list is set back first, and the write then changes it where it lives, so a change through
-    /// the engine's `Sharp\Collection` reaches it as it reaches any `List` property:
+    /// does. The renumbered list is set back first, and the write then changes it where it lives, so a `ref` member's
+    /// change reaches it as it reaches any `List` property:
     ///
     /// ```php
     /// [$users->names = \is_array($renumbered#1 = $users->names) ? \array_values($renumbered#1) : $renumbered#1,
-    ///     $users->names->add('cy')][1]
+    ///     \Sharp\Internal\add($users->names, 'cy')][1]
     /// ```
     ///
     /// The property's object is read once, into `$receiver#N` when it runs something. Any other write is `lower`'s.

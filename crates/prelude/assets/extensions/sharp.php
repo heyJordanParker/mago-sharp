@@ -271,6 +271,13 @@ namespace Sharp\Internal;
 final class ComparedByEquality {}
 
 /**
+ * Marks the parameter of a standard library collection member whose function gives the keys the member orders the
+ * elements by with `<=>`, as `sortedBy`'s, so the checker refuses a key type `<` cannot order.
+ */
+#[\Attribute(\Attribute::TARGET_PARAMETER)]
+final class ComparedByOrder {}
+
+/**
  * Marks the parameter of an engine function that makes a `Map` or a `Set`, which takes the type arguments of the
  * collection the call gives, as `entries`'s, so the bridge passes them from the type the checker gave the call.
  */

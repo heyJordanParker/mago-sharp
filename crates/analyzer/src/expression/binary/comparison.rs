@@ -1475,10 +1475,15 @@ pub(crate) fn report_sharp_refusal<A>(
     );
 }
 
-/// Reports `selector`, the function a PHP# `sortedBy` orders by, when `<` cannot compare two keys it returns, of
-/// `key_type`, with the report `<` gives. A `null` key sorts before every other key, so only the other keys must order.
-pub(crate) fn check_sorted_by_key<A>(context: &mut Context<'_, '_, A>, selector: &Expression<'_>, key_type: &TUnion)
-where
+/// Reports `selector`, the function the PHP# collection member `member` orders by, as `sortedBy` does, when `<` cannot
+/// compare two keys it returns, of `key_type`, with the report `<` gives. A `null` key sorts before every other key, so
+/// only the other keys must order.
+pub(crate) fn check_ordered_key<A>(
+    context: &mut Context<'_, '_, A>,
+    member: &str,
+    selector: &Expression<'_>,
+    key_type: &TUnion,
+) where
     A: Arena,
 {
     let key_name = display_operand(context, key_type);
@@ -1486,26 +1491,24 @@ where
     let issue = match ordering_refusal(&key_type, &key_type, context.codebase) {
         None => {
             let ordering = BinaryOperator::LessThan(Span::zero());
-            check_comparison_operand(context, selector, &key_type, &key_type, "The `sortedBy` key", &ordering);
+            let operand = format!("The `{member}` key");
+            check_comparison_operand(context, selector, &key_type, &key_type, &operand, &ordering);
 
             return;
         }
         Some(Refusal::DifferentTypes) => {
-            let comparison = format!("`sortedBy` cannot compare two keys of `{}`", display_operand(context, &key_type));
+            let comparison = format!("`{member}` cannot compare two keys of `{}`", display_operand(context, &key_type));
 
             different_types_issue(&comparison, "Convert the key so every key has the same type.")
         }
-        Some(refusal @ Refusal::Instance) => unordered_issue(
-            "sortedBy",
-            &display_refused_part(context, &key_type, Comparand::is_instance),
-            refusal,
-            None,
-        ),
+        Some(refusal @ Refusal::Instance) => {
+            unordered_issue(member, &display_refused_part(context, &key_type, Comparand::is_instance), refusal, None)
+        }
         Some(refusal @ Refusal::UnorderedOperand) => {
             let unordered_enum = unordered_enum(context, &key_type, &key_type);
             let part = display_refused_part(context, &key_type, Comparand::is_unordered);
 
-            unordered_issue("sortedBy", &part, refusal, unordered_enum.as_deref())
+            unordered_issue(member, &part, refusal, unordered_enum.as_deref())
         }
         Some(Refusal::Tied) => {
             let ordering = BinaryOperator::Spaceship(Span::zero());

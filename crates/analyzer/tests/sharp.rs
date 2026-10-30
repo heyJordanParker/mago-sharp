@@ -5289,6 +5289,24 @@ fn sorted_by_on_a_map_a_set_and_a_chain_refuses_a_key_with_no_order() {
     );
 }
 
+/// Spec section 12: a collection member orders by the keys the function in a parameter marked `ComparedByOrder` returns,
+/// as `sortedBy` does, so a library-style extension that marks one refuses a key with no order, named for the member.
+#[test]
+fn a_member_compared_by_order_refuses_a_key_with_no_order() {
+    let shelf = (
+        "src/Lib/ShelfMembers.sharp",
+        "namespace Lib;\n\nimport Sharp.Internal.ComparedByOrder;\n\npublic static class ShelfMembers\n{\n    extension<T>(List<T> items)\n    {\n        public List<T> rankedBy<TKey>([ComparedByOrder] Function<TKey(T)> selector) => items.sortedBy(selector);\n    }\n}\n",
+    );
+    let sharp = "namespace Demo;\n\nimport Lib.ShelfMembers;\nimport Lib.Status;\n\nclass Report\n{\n    public List<Status> a(List<Status> statuses) => statuses.rankedBy(s => s);\n\n    public List<int> b(List<int> numbers) => numbers.rankedBy(n => -n);\n}\n";
+
+    assert_eq!(
+        worded(("src/Demo/Report.sharp", sharp), &[shelf, ("src/Lib/Status.php", STATUS)]),
+        [
+            "8:71 invalid-argument `rankedBy` orders numbers, strings, and classes, structs and enums that declare `operator <=>`, and `Status` is none of them. | This returns `Status`. | A `bool` and a collection have no order, and an enum's cases have one only where it declares `operator <=>`. | Declare `public static int operator <=>(Status a, Status b)` in `Status`: an enum orders its cases once it declares `operator <=>`.",
+        ]
+    );
+}
+
 /// A loop body is analyzed more than once, and a `sortedBy` in it is refused once.
 #[test]
 fn sorted_by_in_a_loop_is_refused_once() {
@@ -13554,9 +13572,8 @@ fn a_yielded_spread_error_writes_the_spread_as_the_file_does() {
     assert!(texts(&php_issues).iter().all(|text| !text.contains("yield ...")), "{:#?}", texts(&php_issues));
 }
 
-/// `Sharp\Set` is the engine's class that makes each `Set` parameter a `Set`, which only the lowering calls, as
-/// `Sharp\Collection` is the class each collection method runs on. Neither is a class PHP# code imports and calls, so
-/// `Set.from` is an unknown method, as `\Sharp\Set::from` is in PHP.
+/// `Sharp\Set` is the engine's class that makes each `Set` parameter a `Set`, which only the lowering calls. It is no
+/// class PHP# code imports and calls, so `Set.from` is an unknown method, as `\Sharp\Set::from` is in PHP.
 #[test]
 fn the_engines_set_class_is_not_a_class_sharp_code_calls() {
     let sharp = "namespace Demo;\n\nimport Lib.Words;\nimport Sharp.Set;\n\nclass Tags\n{\n    public int count(List<string> tags)\n    {\n        const made = Set.from(tags);\n        return Words.length(made);\n    }\n}\n";
