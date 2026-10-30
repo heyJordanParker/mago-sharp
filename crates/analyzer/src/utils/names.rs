@@ -1066,7 +1066,7 @@ pub(crate) fn collection_type_parameters(receiver: &TUnion, codebase: &CodebaseM
                 get_array_parameters(array, codebase)
             }
             TAtomic::Iterable(iterable) => (iterable.get_key_type().clone(), iterable.get_value_type().clone()),
-            _ => continue,
+            _ => unreachable!("a collection member's receiver holds only its collections"),
         };
         keys = Some(add_optional_union_type(key, keys.as_ref(), codebase));
         values = Some(add_optional_union_type(value, values.as_ref(), codebase));

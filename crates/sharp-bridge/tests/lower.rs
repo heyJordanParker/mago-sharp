@@ -8588,6 +8588,108 @@ fn a_ref_member_makes_the_object_only_of_a_php_array_its_place_holds() {
     );
 }
 
+/// ```php
+/// return (\Sharp\MapMembers::set($counts, 1, $stored#1 = $extra) ? $stored#1 : $stored#1);
+/// \Sharp\MapMembers::get($counts, 2) ?? \Sharp\MapMembers::set($counts, 2, 3);
+/// ```
+///
+/// A file lowered without the members' inline forms, as a standard library file is, calls `set` and `get`. A write
+/// whose value code reads gives the value it stores, which a hidden variable holds.
+#[test]
+fn a_map_index_write_without_inline_forms_calls_the_map_s_members() {
+    let code = "namespace App.Tenant;\n\nclass Report\n{\n    public int stored(Map<int, int> counts, int extra) => counts[1] = extra;\n\n    public void kept(Map<int, int> counts)\n    {\n        counts[2] ??= 3;\n    }\n}\n";
+    let lowered = Lowered(common::checked_inlining(
+        &common::sharp_files::type_file(code),
+        code,
+        &[],
+        &InlineForms::default(),
+        lower,
+    ));
+
+    assert_eq!(
+        lowered.body_of("stored"),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "counts"
+                CONDITIONAL
+                  CALL
+                    ZVAL "is_array"
+                    ARG_LIST
+                      VAR
+                        ZVAL "counts"
+                  STATIC_CALL
+                    ZVAL "Sharp\\Map"
+                    ZVAL "from"
+                    ARG_LIST
+                      VAR
+                        ZVAL "counts"
+                      ZVAL "int, int"
+                  VAR
+                    ZVAL "counts"
+              RETURN
+                CONDITIONAL [1]
+                  STATIC_CALL
+                    ZVAL "Sharp\\MapMembers"
+                    ZVAL "set"
+                    ARG_LIST
+                      VAR
+                        ZVAL "counts"
+                      ZVAL 1
+                      ASSIGN
+                        VAR
+                          ZVAL "stored#1"
+                        VAR
+                          ZVAL "extra"
+                  VAR
+                    ZVAL "stored#1"
+                  VAR
+                    ZVAL "stored#1"
+        "#}
+    );
+    assert_eq!(
+        lowered.body_of("kept"),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "counts"
+                CONDITIONAL
+                  CALL
+                    ZVAL "is_array"
+                    ARG_LIST
+                      VAR
+                        ZVAL "counts"
+                  STATIC_CALL
+                    ZVAL "Sharp\\Map"
+                    ZVAL "from"
+                    ARG_LIST
+                      VAR
+                        ZVAL "counts"
+                      ZVAL "int, int"
+                  VAR
+                    ZVAL "counts"
+              COALESCE
+                STATIC_CALL
+                  ZVAL "Sharp\\MapMembers"
+                  ZVAL "get"
+                  ARG_LIST
+                    VAR
+                      ZVAL "counts"
+                    ZVAL 2
+                STATIC_CALL
+                  ZVAL "Sharp\\MapMembers"
+                  ZVAL "set"
+                  ARG_LIST
+                    VAR
+                      ZVAL "counts"
+                    ZVAL 2
+                    ZVAL 3
+        "#}
+    );
+}
+
 /// Spec section 12: `map[key] = value` runs the standard library's `set` member of a `Map`, as `list[i] = v` runs a
 /// `List`'s, whose inline form calls the engine's `put`, which takes the map's place by reference: a local, and an
 /// element of a `List` that exists.
