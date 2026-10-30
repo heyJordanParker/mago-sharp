@@ -1706,19 +1706,19 @@ fn report_non_existent_collection_member<A>(
     let collection = display_type(context, kind);
     // A member of the kind's collections of narrower elements, as a `List<int>`'s `max()`, names the elements it needs.
     let codebase = context.codebase;
-    let receiver_kind = kind.types.iter().find_map(|atomic| match atomic {
-        TAtomic::Array(array) => Some(std::mem::discriminant(array)),
-        _ => None,
-    });
+    let of_kind = |array: &TArray| {
+        kind.types.iter().any(
+            |atomic| matches!(atomic, TAtomic::Array(own) if std::mem::discriminant(own) == std::mem::discriminant(array)),
+        )
+    };
     let needed = codebase.extensions.get(&ascii_lowercase_word(method_name.as_bytes())).and_then(|members| {
         members.iter().find_map(|(_, member)| {
             let metadata = codebase.get_method_by_id(member)?;
             let array = metadata.parameters.first()?.get_type_metadata()?.type_union.get_single_array()?;
 
-            (is_collection_member(member.get_class_name(), metadata)
-                && receiver_kind == Some(std::mem::discriminant(array)))
-            .then(|| get_array_parameters(array, codebase).1)
-            .filter(|elements| !elements.has_template_types())
+            (is_collection_member(member.get_class_name(), metadata) && of_kind(array))
+                .then(|| get_array_parameters(array, codebase).1)
+                .filter(|elements| !elements.has_template_types())
         })
     });
     if let Some(needed) = needed {

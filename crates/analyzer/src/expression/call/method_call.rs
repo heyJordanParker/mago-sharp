@@ -431,7 +431,7 @@ where
             object,
             is_null_safe,
             |context, block_context, artifacts| {
-                if let Some(joined) = analyze_collection_members(
+                analyze_collection_members(
                     context,
                     block_context,
                     artifacts,
@@ -441,11 +441,8 @@ where
                     argument_list,
                     is_null_safe,
                     span,
-                )? {
-                    artifacts.set_expression_type(&span, joined);
-                }
-
-                Ok(())
+                )
+                .map(|_| ())
             },
         );
     }
@@ -641,7 +638,7 @@ where
 }
 
 /// Analyzes the call of each of `members`, a kind's member with the receiver's parts of that kind, on those parts of
-/// `object`, and gives the join of what each call gives, or None for no member.
+/// `object`, types the call `span` as the join of what each call gives, and gives that join, or None for no member.
 #[allow(clippy::too_many_arguments)]
 fn analyze_collection_members<'ctx, 'ast, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
@@ -672,9 +669,12 @@ where
                 span,
             )
         })?;
-        if let Some(given) = artifacts.get_expression_type(&span) {
-            joined = Some(add_optional_union_type(given.clone(), joined.as_ref(), context.codebase));
-        }
+        let Some(given) = artifacts.get_expression_type(&span) else {
+            unreachable!("the analysis of a PHP# member's call gives it a type, an error's included");
+        };
+        let given = add_optional_union_type(given.clone(), joined.as_ref(), context.codebase);
+        artifacts.set_expression_type(&span, given.clone());
+        joined = Some(given);
     }
 
     Ok(joined)

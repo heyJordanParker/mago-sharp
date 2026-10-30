@@ -7507,6 +7507,49 @@ fn a_member_of_a_value_that_may_be_any_collection_or_an_object_tests_each_kind()
     );
 }
 
+/// Spec section 12: a null-safe member of a value that may be a `List`, a `Set` or null skips the null as the chain's
+/// test, and runs the member of the kind the value holds.
+#[test]
+fn a_null_safe_member_of_a_value_that_may_be_either_collection_tests_null_then_each_kind() {
+    let body = Lowered::new(
+        "namespace App.Tenant;\n\nclass Report\n{\n    public int? run(bool listed, bool missing, List<int> items, Set<int> tags)\n    {\n        let held = missing ? null : (listed ? items : tags);\n        return held?.count();\n    }\n}\n",
+    )
+    .body_of("run");
+    let returned = &body[body.find("  RETURN").expect("the return")..];
+
+    assert_eq!(
+        format!("STMT_LIST\n{returned}"),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                CONDITIONAL [1]
+                  BINARY_OP [16]
+                    VAR
+                      ZVAL "held"
+                    ZVAL null
+                  ZVAL null
+                  CONDITIONAL [1]
+                    CALL
+                      ZVAL "is_array"
+                      ARG_LIST
+                        VAR
+                          ZVAL "held"
+                    STATIC_CALL
+                      ZVAL "Sharp\\ListMembers"
+                      ZVAL "count"
+                      ARG_LIST
+                        VAR
+                          ZVAL "held"
+                    STATIC_CALL
+                      ZVAL "Sharp\\SetMembers"
+                      ZVAL "count"
+                      ARG_LIST
+                        VAR
+                          ZVAL "held"
+        "#}
+    );
+}
+
 /// ```php
 /// return @\max(\Sharp\Internal\nonEmpty($sizes)) + @\max(\Sharp\Internal\nonEmpty($this->make()));
 /// ```
@@ -10015,6 +10058,156 @@ fn a_list_held_as_an_iterable_and_a_local_holding_a_chain_are_read_through_from(
                       ZVAL 2
                   ZVAL "toList"
                   ARG_LIST
+        "#}
+    );
+}
+
+/// Spec section 14.3: the value of a lazy operation of an `Iterable<T>` is a closure over the collection that runs the
+/// operation on its `\Sharp\Sequence::from`, and a null-safe one is that closure where the collection is not null.
+#[test]
+fn a_lazy_operation_value_is_a_closure_over_the_sequence_of_its_collection() {
+    let lowered = Lowered::new(
+        "namespace App.Tenant;\n\nclass Report\n{\n    public Iterable<int> kept(Iterable<int> sizes)\n    {\n        const keep = sizes.filter;\n        return keep((int n) => n > 1);\n    }\n\n    public bool maybe(Iterable<int>? sizes)\n    {\n        const keep = sizes?.filter;\n        return keep == null;\n    }\n}\n",
+    );
+
+    assert_eq!(
+        lowered.body_of("kept"),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "keep"
+                CALL
+                  CLOSURE "" @7-7
+                    PARAM_LIST
+                      PARAM
+                        null
+                        ZVAL "receiver"
+                        null
+                        null
+                        null
+                        null
+                    null
+                    STMT_LIST
+                      RETURN
+                        CLOSURE "" @7-7
+                          PARAM_LIST
+                            PARAM
+                              ZVAL "Closure"
+                              ZVAL "predicate"
+                              null
+                              null
+                              null
+                              null
+                          CLOSURE_USES
+                            ZVAL "receiver"
+                          STMT_LIST
+                            RETURN
+                              METHOD_CALL
+                                STATIC_CALL
+                                  ZVAL "Sharp\\Sequence"
+                                  ZVAL "from"
+                                  ARG_LIST
+                                    VAR
+                                      ZVAL "receiver"
+                                ZVAL "filter"
+                                ARG_LIST
+                                  VAR
+                                    ZVAL "predicate"
+                          null
+                          null
+                    null
+                    null
+                  ARG_LIST
+                    VAR
+                      ZVAL "sizes"
+              RETURN
+                CALL
+                  VAR
+                    ZVAL "keep"
+                  ARG_LIST
+                    ARROW_FUNC "" @8-8
+                      PARAM_LIST
+                        PARAM
+                          ZVAL [1] "int"
+                          ZVAL "n"
+                          null
+                          null
+                          null
+                          null
+                      null
+                      GREATER
+                        VAR
+                          ZVAL "n"
+                        ZVAL 1
+                      SHARP_TYPE_ARGS
+                        null
+                        ZVAL "Function<bool(int)>"
+                      null
+        "#}
+    );
+    assert_eq!(
+        lowered.body_of("maybe"),
+        indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "keep"
+                CONDITIONAL [1]
+                  BINARY_OP [16]
+                    VAR
+                      ZVAL "sizes"
+                    ZVAL null
+                  ZVAL null
+                  CALL
+                    CLOSURE "" @13-13
+                      PARAM_LIST
+                        PARAM
+                          null
+                          ZVAL "receiver"
+                          null
+                          null
+                          null
+                          null
+                      null
+                      STMT_LIST
+                        RETURN
+                          CLOSURE "" @13-13
+                            PARAM_LIST
+                              PARAM
+                                ZVAL "Closure"
+                                ZVAL "predicate"
+                                null
+                                null
+                                null
+                                null
+                            CLOSURE_USES
+                              ZVAL "receiver"
+                            STMT_LIST
+                              RETURN
+                                METHOD_CALL
+                                  STATIC_CALL
+                                    ZVAL "Sharp\\Sequence"
+                                    ZVAL "from"
+                                    ARG_LIST
+                                      VAR
+                                        ZVAL "receiver"
+                                  ZVAL "filter"
+                                  ARG_LIST
+                                    VAR
+                                      ZVAL "predicate"
+                            null
+                            null
+                      null
+                      null
+                    ARG_LIST
+                      VAR
+                        ZVAL "sizes"
+              RETURN
+                BINARY_OP [16]
+                  VAR
+                    ZVAL "keep"
+                  ZVAL null
         "#}
     );
 }
