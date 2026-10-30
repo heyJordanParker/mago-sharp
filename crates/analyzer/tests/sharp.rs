@@ -26,8 +26,12 @@ use mago_analyzer::plugin::hook::HookResult;
 use mago_analyzer::plugin::hook::NamedCall;
 use mago_analyzer::plugin::hook::StaticCall;
 use mago_analyzer::plugin::hook::StaticMethodCallHook;
+use mago_analyzer::plugin::provider::ExpressionThrowTypeProvider;
+use mago_analyzer::plugin::provider::FunctionThrowTypeProvider;
+use mago_analyzer::plugin::provider::MethodThrowTypeProvider;
 use mago_analyzer::plugin::provider::Provider;
 use mago_analyzer::plugin::provider::ProviderMeta;
+use mago_analyzer::plugin::provider::function::FunctionTarget;
 use mago_analyzer::plugin::provider::method::MethodReturnTypeProvider;
 use mago_analyzer::plugin::provider::method::MethodTarget;
 use mago_analyzer::settings::Settings;
@@ -60,6 +64,7 @@ use mago_syntax::cst::Call;
 use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Expression;
 use mago_syntax::parser::parse_file;
+use mago_word::Word;
 use mago_word::WordSet;
 use mago_word::ascii_lowercase_word;
 use mago_word::empty_word;
@@ -8570,6 +8575,105 @@ fn a_plugin_reads_an_extension_members_receiver_as_its_first_argument() {
     assert_eq!(seen, ["slug title \"-\"", "isblank title none"]);
 }
 
+/// Records the type a throw type provider reads for the first argument of each call of `Lib\seal` and of a method of
+/// `Lib\Vault`, and for each integer literal, by what it answers for.
+#[derive(Clone, Default)]
+struct ThrownArgumentRecorder(Arc<Mutex<Vec<String>>>);
+
+impl ThrownArgumentRecorder {
+    fn record(&self, answered: &str, context: &ProviderContext<'_, '_, '_>, read: Option<&Expression<'_>>) {
+        let read = read.and_then(|read| context.get_expression_type(read)).map(|r#type| r#type.get_id().to_string());
+        self.0.lock().unwrap().push(format!("{answered} {}", read.as_deref().unwrap_or("none")));
+    }
+}
+
+impl Provider for ThrownArgumentRecorder {
+    fn meta() -> &'static ProviderMeta {
+        static META: ProviderMeta =
+            ProviderMeta::new("test::thrown-arguments", "thrown arguments", "Records what throw providers read.");
+
+        &META
+    }
+}
+
+impl FunctionThrowTypeProvider for ThrownArgumentRecorder {
+    fn targets() -> FunctionTarget {
+        FunctionTarget::Exact(b"Lib\\seal")
+    }
+
+    fn get_thrown_exceptions(
+        &self,
+        context: &ProviderContext<'_, '_, '_>,
+        invocation: &InvocationInfo<'_, '_, '_>,
+    ) -> HashSet<Word> {
+        self.record("function", context, invocation.get_argument(0, &[]));
+
+        HashSet::default()
+    }
+}
+
+impl MethodThrowTypeProvider for ThrownArgumentRecorder {
+    fn targets() -> &'static [MethodTarget] {
+        static TARGETS: [MethodTarget; 1] = [MethodTarget::all_methods(b"Lib\\Vault")];
+
+        &TARGETS
+    }
+
+    fn get_thrown_exceptions(
+        &self,
+        context: &ProviderContext<'_, '_, '_>,
+        _class_name: &[u8],
+        _method_name: &[u8],
+        invocation: &InvocationInfo<'_, '_, '_>,
+    ) -> HashSet<Word> {
+        self.record("method", context, invocation.get_argument(0, &[]));
+
+        HashSet::default()
+    }
+}
+
+impl ExpressionThrowTypeProvider for ThrownArgumentRecorder {
+    fn get_thrown_exceptions(
+        &self,
+        context: &ProviderContext<'_, '_, '_>,
+        expression: &Expression<'_>,
+    ) -> HashSet<Word> {
+        if matches!(expression, Expression::Literal(_)) {
+            self.record("expression", context, Some(expression));
+        }
+
+        HashSet::default()
+    }
+}
+
+/// A throw type provider reads each argument of the call it answers for, and each expression it answers for, as the
+/// analysis typed it.
+#[test]
+fn a_throw_type_provider_reads_the_arguments_of_its_call() {
+    let lib = "<?php\n\nnamespace Lib;\n\nfunction seal(array $values): void\n{\n}\n\nfinal class Vault\n{\n    public static function open(string $key): void\n    {\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nfunction run(): void\n{\n    \\Lib\\seal(['a' => 1]);\n    \\Lib\\Vault::open('k');\n}\n";
+    let recorder = ThrownArgumentRecorder::default();
+    let mut registry = PluginRegistry::default();
+    registry.register_function_throw_provider(recorder.clone());
+    registry.register_method_throw_provider(recorder.clone());
+    registry.register_expression_throw_provider(recorder.clone());
+
+    assert_eq!(
+        issues_in(&registry, settings(), ("src/Demo/run.php", php), &[("src/Lib/seal.php", lib)]),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        *recorder.0.lock().unwrap(),
+        [
+            "expression string('a')",
+            "expression int(1)",
+            "function array{'a': int(1)}",
+            "expression string('k')",
+            "method string('k')"
+        ]
+    );
+}
+
 /// Spec section 9.1: a named constructor's `: this(…)` creates its object with the main constructor, so its arguments
 /// are checked against that constructor with PHP's codes. A class without a constructor takes `: this()` and no
 /// arguments.
@@ -12033,9 +12137,10 @@ fn map_get_has_and_remove_take_a_backed_enum_key() {
 /// keys are `int` or `string`. A `Map` keyed by a unit enum, a struct or a `float` has no such array, so the call is
 /// refused, naming the parameter and the key type, whether the parameter's type is native, of a method or a function, or
 /// from a docblock. A parameter of a plain PHP closure a local holds, which has no name, is named by its position.
-/// A spread into a variadic parameter is refused as each `Map` it passes would be. A `Map<string, int>` crosses, and so does a `Map<Status, int>` of a backed enum, with each case's backing value as
-/// its key. A parameter typed `iterable`, `mixed` or nothing takes the `Map` itself, whose keys stay `Status`, so an
-/// `iterable<string, int>` takes `Map<string, int>` and refuses `Map<Status, int>`.
+/// A spread into a variadic parameter is refused as each `Map` it passes would be. A `Map<string, int>` crosses, and so
+/// does a `Map<Status, int>` of a backed enum, with each case's backing value as its key, into a parameter typed
+/// `array`, `iterable`, `mixed` or nothing, so an `iterable<string, int>` takes both. Such a parameter takes a `Map`
+/// keyed by an object as the `Map` itself.
 #[test]
 fn a_map_keyed_by_an_object_is_refused_where_plain_php_takes_an_array() {
     let sharp = "namespace Demo;\n\nimport Lib.Pure;\nimport Lib.Sink;\nimport Lib.Spot;\nimport Lib.Status;\nimport Vendor.Sums;\n\nclass Tally\n{\n    public int total(Map<Status, int> counts, Map<Spot, int> spots, Map<string, int> named, Map<float, int> prices, Map<Pure, int> pure, List<Map<Spot, int>> many)\n    {\n        const counter = Sink.counter();\n        return Sink.plain(counts) + Sink.documented(spots) + Sums.total(spots) + Sink.plain(named) + Sink.each(counts) + Sink.anything(spots) + Sink.untyped(counts) + counter(spots) + Sink.keyed(named) + Sink.keyed(counts) + Sink.plain(prices) + Sink.plain(pure) + Sink.merged(...many);\n    }\n}\n";
@@ -12063,7 +12168,6 @@ fn a_map_keyed_by_an_object_is_refused_where_plain_php_takes_an_array() {
             "14:53 invalid-argument `Map<Spot, int>` can't be passed to the parameter `counts` of method `Sink.documented`, which takes a PHP array: a PHP array's keys are `int` or `string`, and this `Map`'s keys are `Spot`.",
             "14:73 invalid-argument `Map<Spot, int>` can't be passed to the parameter `values` of function `Sums.total`, which takes a PHP array: a PHP array's keys are `int` or `string`, and this `Map`'s keys are `Spot`.",
             "14:176 invalid-argument `Map<Spot, int>` can't be passed to the argument #1 of function value `counter`, which takes a PHP array: a PHP array's keys are `int` or `string`, and this `Map`'s keys are `Spot`.",
-            "14:216 possibly-invalid-argument Possible argument type mismatch for argument #1 of `Sink.keyed`: expected `iterable<string, int>`, but possibly received `Map<Status, int>`.",
             "14:237 invalid-argument `Map<float, int>` can't be passed to the parameter `counts` of method `Sink.plain`, which takes a PHP array: a PHP array's keys are `int` or `string`, and this `Map`'s keys are `float`.",
             "14:258 invalid-argument `Map<Pure, int>` can't be passed to the parameter `counts` of method `Sink.plain`, which takes a PHP array: a PHP array's keys are `int` or `string`, and this `Map`'s keys are `Pure`.",
             "14:281 invalid-argument `Map<Spot, int>` can't be passed to the parameter `counts` of method `Sink.merged`, which takes a PHP array: a PHP array's keys are `int` or `string`, and this `Map`'s keys are `Spot`.",
@@ -12091,6 +12195,106 @@ fn a_map_whose_keys_can_collide_passes_where_plain_php_takes_an_array() {
         .map(|issue| format!("{} {}", located(sharp, issue), issue.message))
         .collect::<Vec<_>>(),
         Vec::<String>::new()
+    );
+}
+
+/// Spec section 12: `iterator_to_array` receives a `Map<Status, int>` as the PHP array keyed by each case's backing
+/// value, so it takes its type parameters from that array, and its result is an `array<string, int>`. A spread
+/// `List<Map<Status, int>>` passes `array_merge` each such array. The function's return type provider reads the
+/// argument as the function receives it, so it gives the same type.
+#[test]
+fn a_plain_php_function_takes_its_type_arguments_from_the_array_a_map_crosses_into() {
+    let sharp = "namespace Sharp;\n\npublic static class Calls\n{\n    public static List<Any?> run(Map<Status, int> counts, List<Map<Status, int>> rows) => [global.iterator_to_array(counts), global.array_merge(...rows)];\n}\n";
+
+    assert_eq!(
+        library_call_types(sharp, &[], &["global.iterator_to_array(counts)", "global.array_merge(...rows)"]),
+        ["array<string, int>", "array<string, int>"]
+    );
+}
+
+/// A standard library file's backed enum, whose cases' values write no integer.
+const LIBRARY_STATUS: (&str, &str) = (
+    "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Status.sharp",
+    "namespace Sharp;\n\npublic enum Status : string\n{\n    case Open = \"open\";\n    case Paid = \"paid\";\n}\n",
+);
+
+/// The type of each of `calls` in `sharp`, the standard library's class `Calls`, analyzed with [`LIBRARY_STATUS`] and
+/// `others`, which give no issue.
+fn library_call_types(sharp: &'static str, others: &[(&'static str, &'static str)], calls: &[&str]) -> Vec<String> {
+    let files: Vec<_> = std::iter::once(LIBRARY_STATUS).chain(others.iter().copied()).collect();
+    let (issues, artifacts) = analyze_with_artifacts(
+        &PLUGIN_REGISTRY,
+        settings(),
+        ("vendor/heyjordanparker/php-sharp-composer/library/Sharp/Calls.sharp", sharp),
+        &files,
+    );
+    assert!(issues.is_empty(), "{issues:?}");
+
+    calls
+        .iter()
+        .map(|call| {
+            let start = sharp.find(call).unwrap() as u32;
+            artifacts.expression_types[&(start, start + call.len() as u32)].get_id().to_string()
+        })
+        .collect()
+}
+
+/// Spec section 12 passes plain PHP a `Map` keyed by a backed enum as the array keyed by each case's backing value, a
+/// `Set` as the list of its elements, and each `Map` a `List` holds as its array. So `array_keys` and `array_map` of a
+/// `Map<Status, int>`, the same calls on a `Set<Status>`, a generic function of the project whose `iterable<T, int>`
+/// takes the `Map`, and `array_values` of a `List<Map<Status, int>>` each take their type parameters from those arrays,
+/// and so do a `List` literal and a `Map` literal that hold one.
+#[test]
+fn every_plain_php_function_takes_its_type_arguments_from_what_a_collection_crosses_into() {
+    let pick = "<?php\n\nnamespace Vendor\\Pick;\n\n/**\n * @template T\n * @param iterable<T, int> $items\n * @return list<T>\n */\nfunction keys(iterable $items): array\n{\n    $keys = [];\n    foreach ($items as $key => $_) {\n        $keys[] = $key;\n    }\n    return $keys;\n}\n";
+    let sharp = "namespace Sharp;\n\nimport Vendor.Pick;\n\npublic static class Calls\n{\n    public static List<Any?> run(Map<Status, int> counts, Set<Status> statuses, List<Map<Status, int>> rows) => [global.array_keys(counts), global.array_values(counts), global.array_map(n => n + 1, counts), global.array_keys(statuses), global.array_values(statuses), global.array_map(s => s, statuses), Pick.keys(counts), global.array_values(rows), global.array_values([counts]), global.array_values([\"open\": counts])];\n}\n";
+
+    assert_eq!(
+        library_call_types(
+            sharp,
+            &[("src/Vendor/Pick/functions.php", pick)],
+            &[
+                "global.array_keys(counts)",
+                "global.array_values(counts)",
+                "global.array_map(n => n + 1, counts)",
+                "global.array_keys(statuses)",
+                "global.array_values(statuses)",
+                "global.array_map(s => s, statuses)",
+                "Pick.keys(counts)",
+                "global.array_values(rows)",
+                "global.array_values([counts])",
+                "global.array_values([\"open\": counts])",
+            ]
+        ),
+        [
+            "list<string>",
+            "list<int>",
+            "array<string, int>",
+            "list<int>",
+            "list<enum(Sharp\\Status)>",
+            "list<enum(Sharp\\Status)>",
+            "list<string>",
+            "list<array<string, int>>",
+            "non-empty-list<array<string, int>>",
+            "non-empty-list<array<string, int>>",
+        ]
+    );
+}
+
+/// A call where nothing crosses keeps the types it had: a PHP# method takes a `Map` as it is, a collection's member
+/// reads its receiver as it is, and a provider of a plain PHP function reads an argument that holds no `Map` or `Set`,
+/// as `array_merge` does a spread `List<List<int>>`, as its expression's type.
+#[test]
+fn a_call_where_nothing_crosses_keeps_the_types_of_its_arguments() {
+    let sharp = "namespace Sharp;\n\npublic static class Calls\n{\n    public static Map<Status, int> keep(Map<Status, int> counts) => counts;\n\n    public static List<Any?> run(Map<Status, int> counts, List<List<int>> lists) => [Calls.keep(counts), counts.keys(), global.array_merge(...lists), global.strlen(\"open\")];\n}\n";
+
+    assert_eq!(
+        library_call_types(
+            sharp,
+            &[],
+            &["Calls.keep(counts)", "counts.keys()", "global.array_merge(...lists)", "global.strlen(\"open\")"]
+        ),
+        ["array<enum(Sharp\\Status), int>", "list<enum(Sharp\\Status)>", "list<int>", "int(4)"]
     );
 }
 

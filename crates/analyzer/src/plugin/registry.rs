@@ -1381,7 +1381,13 @@ impl PluginRegistry {
         let mut all_issues = Vec::new();
 
         for idx in indices {
-            let provider_context = ProviderContext::new(codebase, source_file, block_context, artifacts);
+            let provider_context = ProviderContext::new(
+                codebase,
+                source_file,
+                block_context,
+                artifacts,
+                Some(&invocation.received_argument_types),
+            );
             let invocation_info = InvocationInfo::new(invocation);
 
             if let Some(ty) = self.function_providers[idx].get_return_type(&provider_context, &invocation_info) {
@@ -1434,7 +1440,13 @@ impl PluginRegistry {
         let mut all_issues = Vec::new();
 
         for idx in indices {
-            let provider_context = ProviderContext::new(codebase, source_file, block_context, artifacts);
+            let provider_context = ProviderContext::new(
+                codebase,
+                source_file,
+                block_context,
+                artifacts,
+                Some(&invocation.received_argument_types),
+            );
             let invocation_info = InvocationInfo::new(invocation);
 
             if let Some(ty) =
@@ -1735,7 +1747,13 @@ impl PluginRegistry {
         let indices = self.get_function_assertion_provider_indices(function_name);
 
         for idx in indices {
-            let provider_context = ProviderContext::new(codebase, source_file, block_context, artifacts);
+            let provider_context = ProviderContext::new(
+                codebase,
+                source_file,
+                block_context,
+                artifacts,
+                Some(&invocation.received_argument_types),
+            );
             let invocation_info = InvocationInfo::new(invocation);
 
             if let Some(assertions) =
@@ -1790,7 +1808,13 @@ impl PluginRegistry {
         let indices = self.get_method_assertion_provider_indices(class_name, method_name);
 
         for idx in indices {
-            let provider_context = ProviderContext::new(codebase, source_file, block_context, artifacts);
+            let provider_context = ProviderContext::new(
+                codebase,
+                source_file,
+                block_context,
+                artifacts,
+                Some(&invocation.received_argument_types),
+            );
             let invocation_info = InvocationInfo::new(invocation);
 
             if let Some(assertions) = self.method_assertion_providers[idx].get_assertions(
@@ -1900,7 +1924,7 @@ impl PluginRegistry {
         let mut exceptions = WordSet::default();
 
         for provider in &self.expression_throw_providers {
-            let provider_context = ProviderContext::new(codebase, source_file, block_context, artifacts);
+            let provider_context = ProviderContext::new(codebase, source_file, block_context, artifacts, None);
             exceptions.extend(provider.get_thrown_exceptions(&provider_context, expression));
         }
 
@@ -1922,7 +1946,13 @@ impl PluginRegistry {
         let indices = self.get_function_throw_provider_indices(function_name);
 
         for idx in indices {
-            let provider_context = ProviderContext::new(codebase, source_file, block_context, artifacts);
+            let provider_context = ProviderContext::new(
+                codebase,
+                source_file,
+                block_context,
+                artifacts,
+                Some(&invocation.received_argument_types),
+            );
             let invocation_info = InvocationInfo::new(invocation);
             exceptions
                 .extend(self.function_throw_providers[idx].get_thrown_exceptions(&provider_context, &invocation_info));
@@ -1947,7 +1977,13 @@ impl PluginRegistry {
         let indices = self.get_method_throw_provider_indices(class_name, method_name);
 
         for idx in indices {
-            let provider_context = ProviderContext::new(codebase, source_file, block_context, artifacts);
+            let provider_context = ProviderContext::new(
+                codebase,
+                source_file,
+                block_context,
+                artifacts,
+                Some(&invocation.received_argument_types),
+            );
             let invocation_info = InvocationInfo::new(invocation);
             exceptions.extend(self.method_throw_providers[idx].get_thrown_exceptions(
                 &provider_context,

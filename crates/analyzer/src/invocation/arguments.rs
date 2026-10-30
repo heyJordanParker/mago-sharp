@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use foldhash::HashMap;
@@ -10,7 +11,6 @@ use mago_codex::ttype::TType;
 use mago_codex::ttype::add_union_type;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
-use mago_codex::ttype::atomic::array::keyed::TKeyedArray;
 use mago_codex::ttype::atomic::array::list::TList;
 use mago_codex::ttype::atomic::callable::TCallable;
 use mago_codex::ttype::atomic::callable::TCallableSignature;
@@ -23,10 +23,12 @@ use mago_codex::ttype::comparator::union_comparator::can_expression_types_be_ide
 use mago_codex::ttype::comparator::union_comparator::is_contained_by;
 use mago_codex::ttype::expander::get_signature_of_function_like_identifier;
 use mago_codex::ttype::get_array_parameters;
+use mago_codex::ttype::get_crossing_array;
 use mago_codex::ttype::get_iterable_value_parameter;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_never;
 use mago_codex::ttype::get_php_array_key_type;
+use mago_codex::ttype::keys_hold_in_array;
 use mago_codex::ttype::template::TemplateResult;
 use mago_codex::ttype::template::inferred_type_replacer;
 use mago_codex::ttype::union::TUnion;
@@ -92,54 +94,94 @@ fn shareable_part(union: &TUnion, is_sharp: bool) -> Option<Cow<'_, TUnion>> {
     (!types.is_empty()).then(|| Cow::Owned(TUnion::from_vec(types)))
 }
 
+/// The type a plain PHP parameter declared `parameter_type` receives where PHP# passes it a value of `input_type`, spec
+/// section 12, as the bridge passes it, or None where it receives the value as it is. A parameter whose type names
+/// `array`, `iterable`, `mixed` or a type parameter, or no type, takes the PHP array of a value that holds a `Map` or a
+/// `Set` whose every key has a PHP array form, as [`get_received_array_form`] types it. A parameter that takes only
+/// objects, as `\Countable` does, takes the collection itself, and so does every parameter a `Map` keyed by an object
+/// reaches.
+pub(super) fn get_php_received_argument_type(
+    input_type: &TUnion,
+    parameter_type: &TUnion,
+    codebase: &CodebaseMetadata,
+) -> Option<TUnion> {
+    let takes_array = parameter_type.types.iter().any(|atomic| {
+        matches!(atomic, TAtomic::Array(_) | TAtomic::Iterable(_) | TAtomic::Mixed(_) | TAtomic::GenericParameter(_))
+    });
+
+    (takes_array && get_crossing_array(input_type, codebase).is_some() && keys_hold_in_array(input_type, codebase))
+        .then(|| get_received_array_form(input_type, codebase))
+}
+
+/// `r#type` with each `Map` and `Set` in it, at any depth, as the PHP array plain PHP receives from PHP#: a `Map` keyed
+/// as [`get_php_array_key_type`] says, each backed enum by its backing type, and a `Set` the list of its elements. A
+/// `string` key stays a `string`, which PHP# takes back as it is where the array returns.
+fn get_received_array_form(r#type: &TUnion, codebase: &CodebaseMetadata) -> TUnion {
+    let form = |inner: &TUnion| get_received_array_form(inner, codebase);
+    let types = r#type.types.iter().map(|atomic| match atomic {
+        TAtomic::Array(TArray::Keyed(keyed)) => {
+            let mut keyed = keyed.clone();
+            for (_, value) in keyed.known_items.iter_mut().flat_map(BTreeMap::values_mut) {
+                *value = form(value);
+            }
+            if let Some((key, value)) = keyed.parameters.as_mut() {
+                if let Some(Cow::Owned(array_key)) = get_php_array_key_type(key, codebase) {
+                    *key = Arc::new(array_key);
+                }
+                *value = Arc::new(form(value));
+            }
+
+            TAtomic::Array(TArray::Keyed(keyed))
+        }
+        TAtomic::Array(TArray::List(list)) => {
+            let mut list = list.clone();
+            list.element_type = Arc::new(form(&list.element_type));
+            for (_, element) in list.known_elements.iter_mut().flat_map(BTreeMap::values_mut) {
+                *element = form(element);
+            }
+
+            TAtomic::Array(TArray::List(list))
+        }
+        TAtomic::Array(TArray::Set(element_type)) => {
+            TAtomic::Array(TArray::List(TList::new(Arc::new(form(element_type)))))
+        }
+        atomic => atomic.clone(),
+    });
+
+    r#type.clone_with_types(types.collect())
+}
+
 /// Spec section 12 passes a `Map` to a plain PHP parameter whose declared type names `array` as a PHP array, whose
 /// keys are `int` or `string`, and a backed enum's cases as their backing values. A `Map` keyed by anything else, as a
 /// unit enum, a struct or a `float`, has no such array, where PHP would cast or refuse each key, so its call is refused
 /// here rather than failing where it runs. A `Map` whose two keys are one PHP array key, as `5` and `"5"` are, fails
-/// where it crosses, since only its data shows that. Returns the type plain PHP receives, `input_type` with each backed
-/// enum key its backing type, or None when it refused the call.
-pub(super) fn check_array_crossing<'input, A>(
+/// where it crosses, since only its data shows that. `input_type` is the type the parameter receives, as
+/// [`get_php_received_argument_type`] gives it. Returns whether the parameter takes it, false when it refused the call.
+pub(super) fn check_array_crossing<A>(
     context: &mut Context<'_, '_, A>,
-    input_type: &'input TUnion,
+    input_type: &TUnion,
     parameter: InvocationTargetParameter<'_>,
     parameter_type: &TUnion,
     argument_offset: usize,
     input_expression: &Expression<'_>,
     invocation_target: &InvocationTarget<'_>,
-) -> Option<Cow<'input, TUnion>>
+) -> bool
 where
     A: Arena,
 {
     if !parameter_type.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(_))) {
-        return Some(Cow::Borrowed(input_type));
+        return true;
     }
-    let Some((key_type, value_type)) = input_type.types.iter().find_map(|atomic| match atomic {
-        TAtomic::Array(map @ TArray::Keyed(_)) => Some(get_array_parameters(map, context.codebase)),
+    let Some(key_type) = input_type.types.iter().find_map(|atomic| match atomic {
+        TAtomic::Array(map @ TArray::Keyed(_)) => Some(get_array_parameters(map, context.codebase).0),
         _ => None,
     }) else {
-        return Some(Cow::Borrowed(input_type));
+        return true;
     };
-    let array_key_type = get_php_array_key_type(&key_type, context.codebase)
-        .filter(|array_key_type| array_key_type.is_always_array_key(true));
-    if let Some(array_key_type) = array_key_type {
-        if matches!(array_key_type, Cow::Borrowed(_)) {
-            return Some(Cow::Borrowed(input_type));
-        }
-        let crossed = TAtomic::Array(TArray::Keyed(TKeyedArray::new_with_parameters(
-            Arc::new(array_key_type.into_owned()),
-            Arc::new(value_type),
-        )));
-        let types = input_type
-            .types
-            .iter()
-            .map(
-                |atomic| {
-                    if matches!(atomic, TAtomic::Array(TArray::Keyed(_))) { crossed.clone() } else { atomic.clone() }
-                },
-            )
-            .collect();
-
-        return Some(Cow::Owned(input_type.clone_with_types(types)));
+    if get_php_array_key_type(&key_type, context.codebase)
+        .is_some_and(|array_key_type| array_key_type.is_always_array_key(true))
+    {
+        return true;
     }
 
     let parameter = parameter.get_name().map_or_else(
@@ -159,7 +201,8 @@ where
         .with_annotation(Annotation::secondary(invocation_target.span()).with_message("Plain PHP declares this call"))
         .with_help("Pass a `Map` keyed by `int` or `string`, such as one keyed by a field of each key."),
     );
-    None
+
+    false
 }
 
 /// Checks if an argument can be passed by reference.

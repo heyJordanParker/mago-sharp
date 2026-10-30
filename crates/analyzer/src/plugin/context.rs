@@ -3,6 +3,8 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use foldhash::HashMap;
+
 use mago_allocator::Arena;
 use mago_codex::context::ScopeContext;
 use mago_codex::metadata::CodebaseMetadata;
@@ -28,6 +30,7 @@ use mago_word::Word;
 use mago_word::word;
 
 use crate::artifacts::AnalysisArtifacts;
+use crate::artifacts::get_expression_range;
 use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
@@ -46,6 +49,9 @@ pub struct ProviderContext<'codebase, 'artifacts, 'block> {
     pub(crate) source_file: &'codebase File,
     pub(crate) artifacts: &'artifacts AnalysisArtifacts,
     pub(crate) block_context: &'block BlockContext<'codebase>,
+    /// The type the callee receives for each argument of the call the provider answers for, as
+    /// [`Invocation::received_argument_types`] holds it. None where the provider answers for no call.
+    pub(crate) received_argument_types: Option<&'artifacts HashMap<(u32, u32), Rc<TUnion>>>,
     pub(crate) reported_issues: RefCell<Vec<ReportedIssue>>,
 }
 
@@ -55,8 +61,16 @@ impl<'codebase, 'artifacts, 'block> ProviderContext<'codebase, 'artifacts, 'bloc
         source_file: &'codebase File,
         block_context: &'block BlockContext<'codebase>,
         artifacts: &'artifacts AnalysisArtifacts,
+        received_argument_types: Option<&'artifacts HashMap<(u32, u32), Rc<TUnion>>>,
     ) -> Self {
-        Self { codebase, source_file, artifacts, block_context, reported_issues: RefCell::new(Vec::new()) }
+        Self {
+            codebase,
+            source_file,
+            artifacts,
+            block_context,
+            received_argument_types,
+            reported_issues: RefCell::new(Vec::new()),
+        }
     }
 
     pub fn report(&self, code: IssueCode, issue: Issue) {
@@ -72,20 +86,25 @@ impl<'codebase, 'artifacts, 'block> ProviderContext<'codebase, 'artifacts, 'bloc
         self.codebase
     }
 
+    /// The type of `expr`. For an argument of the call the provider answers for, it is the value the callee receives:
+    /// a `Map` or a `Set` PHP# passes to plain PHP arrives as its PHP array, spec section 12.
     #[inline]
     pub fn get_expression_type<T>(&self, expr: &T) -> Option<&TUnion>
     where
         T: HasSpan,
     {
-        self.artifacts.get_expression_type(expr)
+        self.get_rc_expression_type(expr).map(|r#type| &**r#type)
     }
 
+    /// The type of `expr`, as [`Self::get_expression_type`] gives it.
     #[inline]
     pub fn get_rc_expression_type<T>(&self, expr: &T) -> Option<&Rc<TUnion>>
     where
         T: HasSpan,
     {
-        self.artifacts.get_rc_expression_type(expr)
+        self.received_argument_types
+            .and_then(|received| received.get(&get_expression_range(expr)))
+            .or_else(|| self.artifacts.get_rc_expression_type(expr))
     }
 
     #[inline]
