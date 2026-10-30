@@ -942,9 +942,8 @@ fn infer_templates_from_input_and_container_types<A>(
                     for template in template_types {
                         // A bound that names a type parameter is checked where the argument meets its parameter, as
                         // the type parameter's own bound check below leaves it.
-                        if !template.constraint.has_template_types()
-                            && !satisfies_bound(context, &lower_bound_type, &template.constraint)
-                        {
+                        let bound = &template.constraint;
+                        if !bound.has_template_types() && !satisfies_bound(context, &lower_bound_type, bound) {
                             violations.push(TemplateInferenceViolation {
                                 template_name: *parameter_name,
                                 inferred_bound: lower_bound_type.clone(),

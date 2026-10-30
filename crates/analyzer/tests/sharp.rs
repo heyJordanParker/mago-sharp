@@ -23,7 +23,9 @@ use mago_analyzer::plugin::hook::ExpressionHook;
 use mago_analyzer::plugin::hook::ExpressionHookResult;
 use mago_analyzer::plugin::hook::FunctionCallHook;
 use mago_analyzer::plugin::hook::HookResult;
+use mago_analyzer::plugin::hook::MethodCallHook;
 use mago_analyzer::plugin::hook::NamedCall;
+use mago_analyzer::plugin::hook::NullSafeMethodCallHook;
 use mago_analyzer::plugin::hook::StaticCall;
 use mago_analyzer::plugin::hook::StaticMethodCallHook;
 use mago_analyzer::plugin::provider::ExpressionThrowTypeProvider;
@@ -60,9 +62,12 @@ use mago_reporting::Level;
 use mago_semantics::SemanticsChecker;
 use mago_span::HasSpan;
 use mago_span::Span;
+use mago_syntax::cst::ArgumentList;
 use mago_syntax::cst::Call;
 use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Expression;
+use mago_syntax::cst::MethodCall;
+use mago_syntax::cst::NullSafeMethodCall;
 use mago_syntax::parser::parse_file;
 use mago_word::Word;
 use mago_word::WordSet;
@@ -8678,17 +8683,14 @@ fn a_throw_type_provider_reads_the_arguments_of_its_call() {
     assert_eq!(*recorder.0.lock().unwrap(), Vec::<String>::new());
 }
 
-/// Records the type a function call hook reads for the first argument of each call of `Lib\seal`, before and after
-/// the call's analysis.
+/// Records the type each call hook reads for the first argument of the call it hooks, before and after the call's
+/// analysis, for each call of a function or a method named `seal`.
 #[derive(Clone, Default)]
 struct SealHookRecorder(Arc<Mutex<Vec<String>>>);
 
 impl SealHookRecorder {
-    fn record(&self, when: &str, call: &NamedCall<'_, '_>, context: &HookContext<'_, '_>) {
-        if !call.calls(&[b"Lib\\seal"]) {
-            return;
-        }
-        let argument = call.argument_list.arguments.first().map(|argument| argument.value());
+    fn record(&self, when: &str, arguments: &ArgumentList<'_>, context: &HookContext<'_, '_>) {
+        let argument = arguments.arguments.first().map(|argument| argument.value());
         let read = argument.and_then(|argument| context.get_expression_type(argument));
         let read = read.map_or_else(|| "none".to_string(), |r#type| r#type.get_id().to_string());
         self.0.lock().unwrap().push(format!("{when} {read}"));
@@ -8698,7 +8700,7 @@ impl SealHookRecorder {
 impl Provider for SealHookRecorder {
     fn meta() -> &'static ProviderMeta {
         static META: ProviderMeta =
-            ProviderMeta::new("test::seal-hook", "seal hook", "Records what a function call hook reads.");
+            ProviderMeta::new("test::seal-hook", "seal hook", "Records what a call hook reads.");
 
         &META
     }
@@ -8710,28 +8712,64 @@ impl FunctionCallHook for SealHookRecorder {
         call: &NamedCall<'_, '_>,
         context: &mut HookContext<'_, '_>,
     ) -> HookResult<ExpressionHookResult> {
-        self.record("before", call, context);
+        if call.calls(&[b"Lib\\seal"]) {
+            self.record("before function", call.argument_list, context);
+        }
 
         Ok(ExpressionHookResult::Continue)
     }
 
     fn after_function_call(&self, call: &NamedCall<'_, '_>, context: &mut HookContext<'_, '_>) -> HookResult<()> {
-        self.record("after", call, context);
+        if call.calls(&[b"Lib\\seal"]) {
+            self.record("after function", call.argument_list, context);
+        }
 
         Ok(())
     }
 }
 
-/// A function call hook reads each argument of the call it hooks as a provider of that call reads it: after the call's
-/// analysis, a `Map<Status, int>` PHP# passes to `Lib\seal(array $values)` is the PHP array keyed by each case's
-/// backing value, spec section 12. Before the analysis nothing has crossed, and the argument has no type yet.
+impl MethodCallHook for SealHookRecorder {
+    fn after_method_call(&self, call: &MethodCall<'_>, context: &mut HookContext<'_, '_>) -> HookResult<()> {
+        self.record("after method", &call.argument_list, context);
+
+        Ok(())
+    }
+}
+
+impl NullSafeMethodCallHook for SealHookRecorder {
+    fn after_nullsafe_method_call(
+        &self,
+        call: &NullSafeMethodCall<'_>,
+        context: &mut HookContext<'_, '_>,
+    ) -> HookResult<()> {
+        self.record("after null-safe method", &call.argument_list, context);
+
+        Ok(())
+    }
+}
+
+impl StaticMethodCallHook for SealHookRecorder {
+    fn after_static_method_call(&self, call: &StaticCall<'_, '_>, context: &mut HookContext<'_, '_>) -> HookResult<()> {
+        self.record("after static method", call.argument_list, context);
+
+        Ok(())
+    }
+}
+
+/// A call hook reads each argument of the call it hooks as a provider of that call reads it: after the call's
+/// analysis, a `Map<Status, int>` PHP# passes to a plain PHP `array $values` parameter of a function, a method, a
+/// method called null-safe or a static method is the PHP array keyed by each case's backing value, spec section 12.
+/// Before the analysis nothing has crossed, and the argument has no type yet.
 #[test]
-fn a_function_call_hook_reads_the_arguments_its_call_receives() {
-    let lib = "<?php\n\nnamespace Lib;\n\nfunction seal(array $values): void\n{\n}\n";
-    let sharp = "namespace Demo;\n\nimport Lib;\nimport Lib.Status;\n\nclass Run\n{\n    public static void run(Map<Status, int> counts)\n    {\n        Lib.seal(counts);\n    }\n}\n";
+fn a_call_hook_reads_the_arguments_its_call_receives() {
+    let lib = "<?php\n\nnamespace Lib;\n\nfunction seal(array $values): void\n{\n}\n\nfinal class Vault\n{\n    public function seal(array $values): void\n    {\n    }\n\n    public static function lock(array $values): void\n    {\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib;\nimport Lib.Status;\nimport Lib.Vault;\n\nclass Run\n{\n    public static void run(Map<Status, int> counts, Vault vault, Vault? maybe)\n    {\n        Lib.seal(counts);\n        vault.seal(counts);\n        maybe?.seal(counts);\n        Vault.lock(counts);\n    }\n}\n";
     let recorder = SealHookRecorder::default();
     let mut registry = PluginRegistry::default();
     registry.register_function_call_hook(recorder.clone());
+    registry.register_method_call_hook(recorder.clone());
+    registry.register_nullsafe_method_call_hook(recorder.clone());
+    registry.register_static_method_call_hook(recorder.clone());
 
     assert_eq!(
         issues_in(
@@ -8742,7 +8780,16 @@ fn a_function_call_hook_reads_the_arguments_its_call_receives() {
         ),
         Vec::<String>::new()
     );
-    assert_eq!(*recorder.0.lock().unwrap(), ["before none", "after array<string, int>"]);
+    assert_eq!(
+        *recorder.0.lock().unwrap(),
+        [
+            "before function none",
+            "after function array<string, int>",
+            "after method array<string, int>",
+            "after null-safe method array<string, int>",
+            "after static method array<string, int>",
+        ]
+    );
 }
 
 /// Records the type a method return type provider reads for the first argument of each call it answers for, by the
@@ -12376,17 +12423,19 @@ fn a_map_keyed_by_a_type_parameter_is_refused_where_plain_php_takes_an_array() {
 /// Spec section 12: a value that may be one of several collections reaches an `array` parameter as the PHP array of
 /// the one it holds, so a `Map` keyed by an object anywhere in it is refused, as `Map<string, int>|List<Map<Spot, int>>`
 /// is for its `List`'s `Map<Spot, int>`. A spread into plain PHP parameters that are not variadic is refused as each
-/// `Map` it passes would be, by the parameter it starts at, and a `List` of no known length fills too few of them.
+/// `Map` it passes would be, by the parameter it starts at, and a `List` of no known length fills too few of them. A
+/// spread of `Map`s keyed by a backed enum passes each as its PHP array.
 #[test]
 fn every_map_a_value_can_hold_is_refused_where_its_keys_have_no_php_array() {
-    let sharp = "namespace Demo;\n\nimport Lib.Sink;\nimport Lib.Spot;\n\nclass Tally\n{\n    public static int either(Map<string, int>|List<Map<Spot, int>> counts) => Sink.plain(counts);\n\n    public static int spread(List<Map<Spot, int>> many) => Sink.pair(...many);\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Sink;\nimport Lib.Spot;\nimport Lib.Status;\n\nclass Tally\n{\n    public static int either(Map<string, int>|List<Map<Spot, int>> counts) => Sink.plain(counts);\n\n    public static int spread(List<Map<Spot, int>> many) => Sink.pair(...many);\n\n    public static int crossed(List<Map<Status, int>> many) => Sink.pair(...many);\n}\n";
 
     assert_eq!(
         array_sink_issues(sharp),
         [
-            "8:90 invalid-argument `Map<string, int>|List<Map<Spot, int>>` can't be passed to the parameter `counts` of method `Sink.plain`, which takes a PHP array: a PHP array's keys are `int` or `string`, and this `Map`'s keys are `Spot`.",
-            "10:73 invalid-argument `Map<Spot, int>` can't be passed to the parameter `first` of method `Sink.pair`, which takes a PHP array: a PHP array's keys are `int` or `string`, and this `Map`'s keys are `Spot`.",
-            "10:69 too-few-arguments Too few arguments provided for method `Sink.pair`.",
+            "9:90 invalid-argument `Map<string, int>|List<Map<Spot, int>>` can't be passed to the parameter `counts` of method `Sink.plain`, which takes a PHP array: a PHP array's keys are `int` or `string`, and this `Map`'s keys are `Spot`.",
+            "11:73 invalid-argument `Map<Spot, int>` can't be passed to the parameter `first` of method `Sink.pair`, which takes a PHP array: a PHP array's keys are `int` or `string`, and this `Map`'s keys are `Spot`.",
+            "11:69 too-few-arguments Too few arguments provided for method `Sink.pair`.",
+            "13:72 too-few-arguments Too few arguments provided for method `Sink.pair`.",
         ]
     );
 }
