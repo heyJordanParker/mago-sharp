@@ -8345,12 +8345,12 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         line: u32,
         members: &[(Option<Word>, Declaration)],
         object: bool,
-        (receiver, method, list): (&Expression, &ClassLikeMemberSelector, &ArgumentList),
+        (receiver, method, argument_list): (&Expression, &ClassLikeMemberSelector, &ArgumentList),
         mut place: Option<u32>,
     ) -> u32 {
         let mut steps = Vec::new();
         let mut arguments = Vec::new();
-        for argument in list.arguments.iter() {
+        for argument in argument_list.arguments.iter() {
             let value = argument.value();
             let rereads =
                 self.is_pure(value) && !matches!(value, Expression::ArrowFunction(_) | Expression::Closure(_));

@@ -1370,6 +1370,7 @@ impl<'analysis> Types<'analysis> {
     /// with the class of the object that kind runs as, `None` for a `List`, which runs as a PHP array, and whether an
     /// object the value may hold runs its own method of that name. None for a call that runs one member, or no
     /// collection's.
+    #[allow(clippy::type_complexity)]
     pub(crate) fn members_by_kind(&self, call: &Expression) -> Option<(Vec<(Option<Word>, Declaration)>, bool)> {
         let (mut members, mut object) = (Vec::new(), false);
         for callee in self.artifacts.get_callees(call) {
