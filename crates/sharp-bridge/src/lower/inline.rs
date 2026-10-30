@@ -73,9 +73,9 @@ pub struct InlineForm {
     /// The node each value replaces: the receiver first for an instance method, then each parameter in declaration
     /// order.
     slots: Vec<u32>,
-    /// Whether the form reads every slot in declaration order, the receiver first, before its first call, so the
-    /// values run in the order the call runs them.
-    in_order: bool,
+    /// How many slots the form reads in declaration order, the receiver first, before its first call. Their values run
+    /// in the order the call runs them, so a value in a later slot must run nothing when read.
+    in_order: usize,
     /// The node the type arguments of the collection the inlined call gives replace, [`RESULT_TYPE_SLOT`].
     result_type: Option<u32>,
     /// The node the `operator <=>` of the keys the inlined call orders by replaces, [`KEY_ORDER_SLOT`].
@@ -287,25 +287,23 @@ impl Lowering<'_, '_> {
                     return None;
                 }
 
-                let reads: Vec<usize> = steps
+                let mut each_once: Vec<usize> = steps
                     .iter()
                     .filter_map(|step| match step {
                         Step::Read(slot) => Some(*slot),
                         Step::Call => None,
                     })
                     .collect();
-                let mut each_once = reads.clone();
                 each_once.sort_unstable();
                 if each_once != (0..names.len()).collect::<Vec<_>>() {
                     return None;
                 }
 
-                let in_order =
-                    reads == each_once && steps[..reads.len()].iter().all(|step| matches!(step, Step::Read(_)));
+                let in_order = steps.iter().zip(0..).take_while(|(step, slot)| **step == Step::Read(*slot)).count();
                 (self.expression(expression), in_order)
             }
             // The native call reads each parameter once, in order, and then calls.
-            Body::Native(method) => (self.native_call(method, class), true),
+            Body::Native(method) => (self.native_call(method, class), names.len()),
         };
         let mut slots = vec![NULL; names.len()];
         let (mut result_type, mut key_order) = (None, None);
@@ -426,8 +424,8 @@ impl Lowering<'_, '_> {
     }
 
     /// The call `call` as its standard library method's inline form, when the method has one and the call passes
-    /// each parameter one positional argument. A form that reads its slots out of order, or after a call, takes only
-    /// values that do nothing when read, since inlined they run in the form's order instead of the call's.
+    /// each parameter one positional argument. A slot the form reads out of order, or after a call, takes only a value
+    /// that does nothing when read, since inlined it runs in the form's order instead of the call's.
     pub(super) fn inlined_call(&mut self, expression: &Expression, call: &MethodCall) -> Option<u32> {
         // A type parameter's class is a subclass of its bound when the code runs, which may declare its own method.
         let receiver = match self.names.static_call_class(call) {
@@ -479,7 +477,7 @@ impl Lowering<'_, '_> {
         // A place is lowered already, and reading it runs nothing.
         let runs_code =
             |value: &InlineReceiver| matches!(value, InlineReceiver::Expression(value) if !self.is_pure(value));
-        if values.len() != form.slots.len() || (!form.in_order && values.iter().any(runs_code)) {
+        if values.len() != form.slots.len() || values.iter().skip(form.in_order).any(runs_code) {
             return None;
         }
 
@@ -504,7 +502,10 @@ impl Lowering<'_, '_> {
     /// that reads its slots out of order or takes what a call gives.
     pub(super) fn inlined_operation(&mut self, declaration: &Declaration, values: &[u32], line: u32) -> Option<u32> {
         let form = self.types.inline_form(declaration)?;
-        if values.len() != form.slots.len() || !form.in_order || form.result_type.is_some() || form.key_order.is_some()
+        if values.len() != form.slots.len()
+            || form.in_order != form.slots.len()
+            || form.result_type.is_some()
+            || form.key_order.is_some()
         {
             return None;
         }

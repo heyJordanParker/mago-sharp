@@ -503,6 +503,7 @@ fn the_binder_knows_every_changing_collection_method() {
             "ListMembers.sharp.removeLast",
             "ListMembers.sharp.set",
             "MapMembers.sharp.remove",
+            "MapMembers.sharp.set",
             "SetMembers.sharp.add",
             "SetMembers.sharp.clear",
             "SetMembers.sharp.remove",
@@ -9388,7 +9389,7 @@ fn a_missing_class_is_one_error_that_names_it_as_php_sharp_does() {
             vec![missing("5:21", "App.Fresh")],
         ),
         // Only the standard library imports `Sharp.Internal`, spec section 15, so no import is the advice for one of
-        // its classes, as for the prelude's `IterableMethods`.
+        // its classes, as for the prelude's `Sequence`.
         (
             "namespace App;\n\nclass Report\n{\n    public void run(Hidden hidden)\n    {\n    }\n}\n",
             vec![missing("5:21", "App.Hidden")],
@@ -10199,6 +10200,29 @@ fn a_list_index_write_without_the_standard_library_is_refused() {
         issues[0].help.as_deref(),
         Some(
             "Install the standard library, heyjordanparker/php-sharp-composer, which declares the members of a `List`."
+        )
+    );
+}
+
+/// `map[key] = value` runs the standard library's `set` of a `Map`, as `list[i] = v` runs a `List`'s, so a project
+/// without the library is refused each write of a `Map` key.
+#[test]
+fn a_map_index_write_without_the_standard_library_is_refused() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static void reset(Map<string, int> sizes)\n    {\n        sizes[\"a\"] = 1;\n        sizes[\"b\"] ??= 2;\n    }\n}\n";
+    let (issues, _, _) =
+        analyze_with_references(&PLUGIN_REGISTRY, settings(), ("src/Demo/Report.sharp", sharp), &[], &[]);
+
+    assert_eq!(
+        issues.iter().map(|issue| format!("{} {}", located(sharp, issue), issue.message)).collect::<Vec<_>>(),
+        [
+            "7:9 non-existent-method Method `set`, which `map[key] = value` runs, does not exist on `Map<string, int>`.",
+            "8:9 non-existent-method Method `set`, which `map[key] = value` runs, does not exist on `Map<string, int>`.",
+        ]
+    );
+    assert_eq!(
+        issues[0].help.as_deref(),
+        Some(
+            "Install the standard library, heyjordanparker/php-sharp-composer, which declares the members of a `Map`."
         )
     );
 }
@@ -11821,7 +11845,7 @@ fn a_list_of_int_has_its_largest_and_smallest_element() {
         refusals(("src/Demo/Sizes.sharp", sharp), &[]),
         [
             "7:54 where-constraint-violation `max` needs elements of type `int`, and this is a `List<string>`. | Call it on a collection whose elements are `int`.",
-            "8:56 non-existent-method Method `max` does not exist on `Map<string, int>`. | A `Map<string, int>` has the methods `any`, `associateBy`, `count`, `filter`, `first`, `get`, `groupBy`, `has`, `isEmpty`, `isNotEmpty`, `keys`, `map`, `remove`, `sortedBy`, `sumOf`, `toList`, `values`.",
+            "8:56 non-existent-method Method `max` does not exist on `Map<string, int>`. | A `Map<string, int>` has the methods `any`, `associateBy`, `count`, `filter`, `first`, `get`, `groupBy`, `has`, `isEmpty`, `isNotEmpty`, `keys`, `map`, `remove`, `set`, `sortedBy`, `sumOf`, `toList`, `values`.",
         ]
     );
 }
@@ -13259,7 +13283,7 @@ fn an_iterable_has_no_index() {
     );
 }
 
-/// An `Iterable<T>` has the lazy operations of spec section 12, checked against `Sharp\Internal\IterableMethods<T>`:
+/// An `Iterable<T>` has the lazy operations of spec section 12, the standard library's `IterableMembers`:
 /// `filter` and `take` keep the element type, `map` takes the lambda's return type, and `toList` reads them into a
 /// `List<T>`.
 #[test]
@@ -13273,8 +13297,8 @@ fn lazy_operations_on_an_iterable_type_their_results_by_the_elements() {
 }
 
 /// A method an `Iterable<T>` does not have is the error a `List` or `Map` gives, naming the type the code wrote and
-/// never the class the analyzer checks it against. The method is named as the code wrote it, and a name in braces,
-/// which the checker refuses, as the analyzer read it.
+/// never the class that declares its members. The method is named as the code wrote it. A name in braces is the
+/// checker's refusal alone, as on a `List`.
 #[test]
 fn a_method_an_iterable_does_not_have_is_an_error_naming_the_iterable() {
     let sharp = "namespace Demo;\n\nclass Report\n{\n    public bool run(Iterable<Order> orders)\n    {\n        orders.toArray();\n        orders.first();\n        orders.{\"toArray\"}();\n        return true;\n    }\n}\n\nclass Order\n{\n    public Order(public bool paid { get; })\n    {\n    }\n}\n";
@@ -13285,7 +13309,6 @@ fn a_method_an_iterable_does_not_have_is_an_error_naming_the_iterable() {
         [
             "Method `toArray` does not exist on `Iterable<Order>`.",
             "Method `first` does not exist on `Iterable<Order>`.",
-            "Method `toarray` does not exist on `Iterable<Order>`."
         ]
     );
     assert_eq!(
@@ -13294,8 +13317,21 @@ fn a_method_an_iterable_does_not_have_is_an_error_naming_the_iterable() {
     );
     for issue in &issues {
         let text = format!("{issue:?}");
-        assert!(!text.contains("IterableMethods"), "{text}");
+        assert!(!text.contains("IterableMembers"), "{text}");
     }
+}
+
+/// Spec section 12: the lazy operations belong to `Iterable<T>`, so a value typed `List<T>`, though it is an
+/// `Iterable<T>`, has its own members and no `take`.
+#[test]
+fn a_list_value_has_no_lazy_operation_of_an_iterable() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public int run(List<int> numbers, Iterable<int> lazy)\n    {\n        numbers.take(2);\n        return lazy.take(2).toList().count();\n    }\n}\n";
+    let issues = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Report.sharp", sharp), &[]);
+
+    assert_eq!(
+        issues.iter().map(|issue| format!("{} {}", located(sharp, issue), issue.message)).collect::<Vec<_>>(),
+        ["7:17 non-existent-method Method `take` does not exist on `List<int>`."]
+    );
 }
 
 /// A `List` held as a `List` keeps its own eager methods, so its `filter` gives a `List` and it has no `take`. Held as

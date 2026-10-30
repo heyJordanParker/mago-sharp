@@ -5,9 +5,9 @@ use mago_analyzer::artifacts::AnalysisArtifacts;
 use mago_analyzer::artifacts::CallTarget;
 use mago_analyzer::artifacts::MemberCall;
 use mago_analyzer::chosen_operator;
+use mago_analyzer::collection_member;
 use mago_analyzer::effects::Effects;
 use mago_analyzer::is_collection_member;
-use mago_analyzer::list_member;
 use mago_codex::defaults_trait_name;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::identifier::method::MethodIdentifier;
@@ -474,7 +474,7 @@ impl<'analysis> Types<'analysis> {
 
     /// The type arguments the generic method call at `span` gives the method, as [`Self::type_arguments`] writes those
     /// of a `new`. None when the method declares no type parameter, or a built-in class declares it, whose method never
-    /// reads them, as the prelude's `Sharp\Internal\IterableMethods` declares an `Iterable`'s. A method of any project
+    /// reads them, as the prelude's `Sharp\Internal\Sequence` declares its `map`. A method of any project
     /// class, PHP# or plain PHP, may run a PHP# method that overrides or implements it,
     /// so a call through a plain PHP `@template` interface or parent carries them, and a plain PHP method ignores them.
     /// The class that declares the method decides, so `super.m()` carries them through a plain PHP parent that inherits
@@ -1390,13 +1390,14 @@ impl<'analysis> Types<'analysis> {
         })
     }
 
-    /// The standard library's member `name` of a `List`, which an operation on a List runs, as `list[i] = v` runs `set`.
-    pub(crate) fn list_operation(&self, name: &[u8]) -> Declaration {
-        let Some((class, member)) = list_member(self.codebase, name)
+    /// The standard library's member `name` of the collection whose receiver parts `kind` takes, a `List` or a `Map`,
+    /// which an operation on it runs, as `list[i] = v` and `map[key] = value` run `set`.
+    pub(crate) fn collection_operation(&self, name: &[u8], kind: fn(&TAtomic) -> bool) -> Declaration {
+        let Some((class, member)) = collection_member(self.codebase, name, kind)
             .and_then(|method| Some((method.get_class_name(), self.codebase.get_method_by_id(method)?)))
         else {
             unreachable!(
-                "the analyzer refuses an operation of a `List` without the standard library's `{}`",
+                "the analyzer refuses an operation of a collection without the standard library's `{}`",
                 String::from_utf8_lossy(name)
             )
         };
@@ -1727,16 +1728,6 @@ impl<'analysis> Types<'analysis> {
         element_type.unwrap_or_else(|| unreachable!("the checker types the value as a collection"))
     }
 
-    /// Whether the method call `call`, null-safe or not, runs a lazy operation of a PHP# `Iterable<T>`, spec section 12,
-    /// which `Sharp\Internal\IterableMethods` declares and the engine's `Sharp\Sequence` runs.
-    pub(crate) fn is_lazy_operation(&self, call: &Expression) -> bool {
-        matches!(
-            self.artifacts.get_callees(call).next(),
-            Some(CallTarget::FunctionLike { callee: FunctionLikeIdentifier::Method(class, _), .. })
-                if class.as_bytes().eq_ignore_ascii_case(b"Sharp\\Internal\\IterableMethods")
-        )
-    }
-
     /// The plain PHP function the method call `call` runs, as `Pdf.render(html)` calls one, spec section 23, with the
     /// name its declaration writes, as `abort` for Laravel's `abort()` of PHP's root namespace in `Foundation.abort(404)`.
     /// None for a call of a method.
@@ -1944,7 +1935,7 @@ impl<'analysis> Types<'analysis> {
     }
 
     /// Whether the property `property` of an object of `r#type` has hooks in a class the object can be. PHP gives no
-    /// reference to a hooked property, so a write into the `Map` it holds cannot go through one.
+    /// reference to a hooked property, so a write into the PHP array one plain PHP declares holds cannot go through one.
     pub(crate) fn property_has_hooks(&self, r#type: &TUnion, property: &[u8]) -> bool {
         let variable = [b"$", property].concat();
 

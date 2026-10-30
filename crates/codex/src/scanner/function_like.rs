@@ -57,7 +57,6 @@ use crate::metadata::flags::MetadataFlags;
 use crate::metadata::function_like::FunctionLikeKind;
 use crate::metadata::function_like::FunctionLikeMetadata;
 use crate::metadata::function_like::MethodMetadata;
-use crate::metadata::parameter::FunctionLikeParameterMetadata;
 use crate::metadata::property::PropertyMetadata;
 use crate::metadata::ttype::TypeMetadata;
 use crate::misc::GenericParent;
@@ -79,7 +78,6 @@ use crate::scanner::ttype::scan_type_parameters;
 use crate::scanner::typing_error_issue;
 use crate::scanner::version_claim::evaluate_version_attributes;
 use crate::ttype::atomic::TAtomic;
-use crate::ttype::atomic::callable::TCallable;
 use crate::ttype::builder;
 use crate::ttype::get_bool;
 use crate::ttype::get_mixed;
@@ -149,8 +147,7 @@ where
                 context,
                 scope,
             )?;
-            let takes_on = takes_on_effects(p) || runs_inside_collection_method(class_like_metadata, &parameter);
-            parameter.flags.set(MetadataFlags::TAKES_ON_EFFECTS, takes_on);
+            parameter.flags.set(MetadataFlags::TAKES_ON_EFFECTS, takes_on_effects(p));
 
             Some(parameter)
         })
@@ -253,14 +250,6 @@ where
         scope,
     );
 
-    if is_collection_class(class_like_metadata) {
-        for parameter in &mut metadata.parameters {
-            if let Some(type_metadata) = &mut parameter.type_metadata {
-                hold_map_entries(&mut type_metadata.type_union);
-            }
-        }
-    }
-
     match method.body {
         MethodBody::Concrete(block) => infer_assertions_from_block_body(block, &mut metadata, context.resolved_names),
         MethodBody::Expression(body) if method.returns_value => {
@@ -281,38 +270,6 @@ where
     }
 
     Some(metadata)
-}
-
-/// Spec section 29: whether `parameter` is a function a standard library collection method runs only inside its call,
-/// as `List.map` runs its lambda, so the call takes on that function's effects, as a PHP# method's function parameter
-/// whose type states no effects does. The prelude declares the methods of an `Iterable` on
-/// `Sharp\Internal\IterableMethods`, each taking its function as a `\Closure`. A `List`'s, `Map`'s and `Set`'s members are
-/// the standard library's PHP# methods.
-fn runs_inside_collection_method(class: &ClassLikeMetadata, parameter: &FunctionLikeParameterMetadata) -> bool {
-    is_collection_class(class)
-        && parameter.type_metadata.as_ref().is_some_and(|declared| declared.type_union.has_callable())
-}
-
-/// Whether `class` is the prelude's `Sharp\Internal\IterableMethods`, which declares the methods of PHP#'s `Iterable`.
-fn is_collection_class(class: &ClassLikeMetadata) -> bool {
-    class.name.as_bytes().eq_ignore_ascii_case(b"Sharp\\Internal\\IterableMethods")
-}
-
-/// Spec section 12: makes each `iterable<T>` a collection method takes, or its function gives, as `flatMap`'s does, the
-/// PHP# `Iterable<T>` the engine runs it as, which holds a `Map` by its `[key, value]` entries. A docblock writes only
-/// PHP's `iterable<T>`, which holds an array by its values.
-fn hold_map_entries(union: &mut TUnion) {
-    for atomic in union.types.to_mut() {
-        match atomic {
-            TAtomic::Iterable(iterable) => iterable.holds_map_entries = true,
-            TAtomic::Callable(TCallable::Signature(signature)) => {
-                if let Some(given) = signature.get_return_type_mut() {
-                    hold_map_entries(given);
-                }
-            }
-            _ => {}
-        }
-    }
 }
 
 /// Scans a PHP# law, spec section 28, as a static method that returns `bool`, so its body is analyzed as one.

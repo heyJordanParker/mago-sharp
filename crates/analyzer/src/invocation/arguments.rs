@@ -14,7 +14,6 @@ use mago_codex::ttype::atomic::array::keyed::TKeyedArray;
 use mago_codex::ttype::atomic::array::list::TList;
 use mago_codex::ttype::atomic::callable::TCallable;
 use mago_codex::ttype::atomic::callable::TCallableSignature;
-use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::cast::cast_atomic_to_callable;
 use mago_codex::ttype::combiner::CombinerOptions;
@@ -63,7 +62,6 @@ use crate::utils::names::display_sharp_type;
 use crate::utils::names::display_type;
 use crate::utils::names::display_value_type;
 use crate::utils::names::display_variable_name;
-use crate::utils::names::sharp_collection_name;
 use crate::utils::names::sharp_effect_name;
 use crate::utils::quoted_source;
 use crate::utils::report_int_for_float;
@@ -283,10 +281,7 @@ where
     else {
         return Cow::Borrowed(parameter_type);
     };
-    if metadata.template_types.is_empty()
-        || (sharp_collection_name(&TObject::new_named(*class)).is_none()
-            && collection_member_kind(*class, metadata).is_none())
-    {
+    if metadata.template_types.is_empty() || collection_member_kind(*class, metadata).is_none() {
         return Cow::Borrowed(parameter_type);
     }
 

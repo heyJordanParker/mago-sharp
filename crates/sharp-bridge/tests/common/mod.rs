@@ -100,10 +100,14 @@ const STANDARD_LIBRARY: &str = "vendor/heyjordanparker/php-sharp-composer/";
 pub static PRELUDE: LazyLock<Prelude> = LazyLock::new(Prelude::build);
 static PLUGIN_REGISTRY: LazyLock<PluginRegistry> = LazyLock::new(PluginRegistry::with_library_providers);
 
-/// The members of a `List`, a `Map` and a `Set`, whose inline forms every project's lowering inlines, as `mago compile`
-/// does.
-const COLLECTION_MEMBERS: [(&str, &str); 3] =
-    [effect_classes::LIST_MEMBERS, effect_classes::MAP_MEMBERS, effect_classes::SET_MEMBERS];
+/// The members of a `List`, a `Map`, a `Set` and an `Iterable`, whose inline forms every project's lowering inlines, as
+/// `mago compile` does.
+const COLLECTION_MEMBERS: [(&str, &str); 4] = [
+    effect_classes::LIST_MEMBERS,
+    effect_classes::MAP_MEMBERS,
+    effect_classes::SET_MEMBERS,
+    effect_classes::ITERABLE_MEMBERS,
+];
 
 /// The inline forms of [`COLLECTION_MEMBERS`].
 static COLLECTION_MEMBER_FORMS: LazyLock<InlineForms> = LazyLock::new(|| forms_of(&COLLECTION_MEMBERS));

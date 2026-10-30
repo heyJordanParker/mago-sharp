@@ -13,7 +13,6 @@ use mago_codex::ttype::TType;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::generic::TGenericParameter;
-use mago_codex::ttype::atomic::iterable::TIterable;
 use mago_codex::ttype::atomic::mixed::TMixed;
 use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::object::named::TNamedObject;
@@ -78,7 +77,6 @@ use crate::utils::names::display_atomic;
 use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_member;
 use crate::utils::names::display_method_name;
-use crate::utils::names::display_sharp_collection;
 use crate::utils::names::display_type;
 use crate::utils::names::is_prelude_stub;
 use crate::utils::names::readonly_writer;
@@ -321,7 +319,6 @@ where
             }
 
             let closure_object;
-            let collection_methods;
             let obj_type = match object_atomic {
                 TAtomic::Object(obj_type) => obj_type,
                 TAtomic::Callable(callable) if callable.is_closure() => {
@@ -345,9 +342,10 @@ where
                     collection_parts.push(object_atomic.clone());
                     continue;
                 }
-                TAtomic::Iterable(iterable) if context.dialect.is_sharp() => {
-                    collection_methods = get_iterable_methods(iterable);
-                    &collection_methods
+                // An `Iterable`'s lazy operations are the standard library's too, spec section 12.
+                TAtomic::Iterable(_) if context.dialect.is_sharp() => {
+                    collection_parts.push(object_atomic.clone());
+                    continue;
                 }
                 _ => {
                     if object_atomic.is_mixed() {
@@ -439,10 +437,7 @@ where
 
                             if resolved_magic_call_method.is_empty() {
                                 let identifier = FunctionLikeIdentifier::Method(classname, method_name);
-                                // A PHP# collection has the methods spec section 12 gives it, which no host extends.
-                                let collection = display_sharp_collection(context, obj_type);
-                                if collection.is_none()
-                                    && context.external_analysis_session.is_some()
+                                if context.external_analysis_session.is_some()
                                     && context.plugin_registry.may_have_callable_signature_provider(&identifier)
                                 {
                                     result.unresolved_methods.push(UnresolvedMethod {
@@ -455,21 +450,6 @@ where
                                     result.encountered_mixed |= has_incomplete_hierarchy;
                                 } else if has_incomplete_hierarchy {
                                     result.encountered_mixed = true;
-                                } else if let Some(collection) = collection {
-                                    report_non_existent_collection_method(
-                                        context,
-                                        object.span(),
-                                        selector.span(),
-                                        classname,
-                                        &collection,
-                                        match selector {
-                                            ClassLikeMemberSelector::Identifier(written) => word(written.value),
-                                            _ => method_name,
-                                        },
-                                    );
-
-                                    result.has_invalid_target = true;
-                                    result.lacks_sharp_method = true;
                                 } else {
                                     // A PHP# union of one generic class, as `Pair<int, Order>|Pair<string, Order>`,
                                     // misses the method once.
@@ -1568,7 +1548,7 @@ where
 /// collection its place is declared as, whatever it holds, so a method resolves on each of them, and a collection
 /// that lacks it is reported once. A place declared `Iterable<T>` has only the lazy operations, spec section 12,
 /// whatever value it was last given: a `List`, or a plain PHP class with its own methods.
-fn get_receiver_atomics<'arena, A>(
+pub(crate) fn get_receiver_atomics<'arena, A>(
     context: &Context<'_, 'arena, A>,
     block_context: &BlockContext<'_>,
     artifacts: &AnalysisArtifacts,
@@ -1608,54 +1588,21 @@ where
         .collect()
 }
 
-/// The classes whose methods the PHP# value `object` has, spec section 12, one for each `Iterable` its methods resolve
-/// on, as [`get_receiver_atomics`] finds them. None unless every type of it but `null` is an `Iterable`. A `List`'s,
-/// `Map`'s and `Set`'s members are the standard library's, and a tuple's are its named elements, spec section 30.
-pub(crate) fn get_receiver_collections<'arena, A>(
-    context: &Context<'_, 'arena, A>,
-    block_context: &BlockContext<'_>,
-    artifacts: &AnalysisArtifacts,
-    object: &Expression<'arena>,
-) -> Option<Vec<TObject>>
-where
-    A: Arena,
-{
-    let object_type = artifacts.get_expression_type(object)?;
-
-    get_receiver_atomics(context, block_context, artifacts, object, object_type)
-        .iter()
-        .filter(|atomic| !atomic.is_null())
-        .map(|atomic| match atomic {
-            TAtomic::Iterable(iterable) => Some(get_iterable_methods(iterable)),
-            _ => None,
-        })
-        .collect::<Option<Vec<_>>>()
-        .filter(|collections| !collections.is_empty())
-}
-
-/// The receiver's collection `parts`, one union for each kind among them, `List`, `Map` and `Set` in that order, which
-/// reaches that kind's members.
+/// The receiver's collection `parts`, one union for each kind among them, `List`, `Map`, `Set` and `Iterable` in that
+/// order, which reaches that kind's members.
 fn collection_kinds(parts: Vec<TAtomic>) -> Vec<TUnion> {
     let kind = |atomic: &TAtomic| match atomic {
         TAtomic::Array(TArray::Keyed(_)) => 1,
         TAtomic::Array(TArray::Set(_)) => 2,
+        TAtomic::Iterable(_) => 3,
         _ => 0,
     };
-    let mut kinds: [Vec<TAtomic>; 3] = Default::default();
+    let mut kinds: [Vec<TAtomic>; 4] = Default::default();
     for part in parts {
         kinds[kind(&part)].push(part);
     }
 
     kinds.into_iter().filter(|parts| !parts.is_empty()).map(TUnion::from_vec).collect()
-}
-
-/// The class whose lazy operations a PHP# `Iterable<T>` has, spec section 12: it is called as
-/// `Sharp\Internal\IterableMethods<T>`, typed by its elements as a `List<T>` is.
-fn get_iterable_methods(iterable: &TIterable) -> TObject {
-    let mut value = iterable.get_value_type().clone();
-    value.widen_scalars();
-
-    TObject::Named(TNamedObject::new_with_type_parameters(word("Sharp\\Internal\\IterableMethods"), Some(vec![value])))
 }
 
 /// Reports a method called with `->`, or `.` in PHP#, on `object`, whose type `object_type` holds `null`, unless the
@@ -1736,6 +1683,7 @@ fn report_non_existent_collection_member<A>(
         return;
     }
     let methods = extension_methods(context, kind);
+    let article = if collection.starts_with('I') { "An" } else { "A" };
 
     context.collector.report_with_code(
         IssueCode::NonExistentMethod,
@@ -1744,7 +1692,7 @@ fn report_non_existent_collection_member<A>(
             .with_annotation(
                 Annotation::secondary(obj_span).with_message(format!("This expression has type `{collection}`")),
             )
-            .with_help(format!("A `{collection}` has the methods {}.", methods.join(", "))),
+            .with_help(format!("{article} `{collection}` has the methods {}.", methods.join(", "))),
     );
 }
 
@@ -1885,42 +1833,6 @@ pub(crate) fn report_non_existent_method<A>(
     };
 
     context.collector.report_with_code(IssueCode::NonExistentMethod, issue);
-}
-
-/// Reports a method a PHP# `Iterable` does not have, naming the collection type the code wrote and the methods
-/// `classname`, its `Sharp\Internal\IterableMethods`, gives it.
-fn report_non_existent_collection_method<A>(
-    context: &mut Context<'_, '_, A>,
-    obj_span: Span,
-    selector_span: Span,
-    classname: Word,
-    collection: &str,
-    method_name: Word,
-) where
-    A: Arena,
-{
-    let mut methods = context
-        .codebase
-        .get_class_like(classname.as_bytes())
-        .map(|metadata| {
-            metadata
-                .methods
-                .iter()
-                .map(|method| format!("`{}`", display_method_name(context, classname, *method)))
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    methods.sort();
-
-    context.collector.report_with_code(
-        IssueCode::NonExistentMethod,
-        Issue::error(format!("Method `{method_name}` does not exist on `{collection}`."))
-            .with_annotation(Annotation::primary(selector_span).with_message("This method selection is invalid"))
-            .with_annotation(
-                Annotation::secondary(obj_span).with_message(format!("This expression has type `{collection}`")),
-            )
-            .with_help(format!("An `{collection}` has the methods {}.", methods.join(", "))),
-    );
 }
 
 pub(crate) fn report_non_documented_method<A>(

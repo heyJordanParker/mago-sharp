@@ -297,19 +297,29 @@ where
         Cow::Owned(inferred_type_replacer::replace(&parameter.type_union, &template_result, context.codebase))
     };
 
-    // A `List`, a `Map` and a `Set` are each their own kind, spec section 12, where plain PHP takes a list as an array of
-    // any key, so an extension of one kind fits no other, and a type parameter is the kind of its bound. An empty array is
-    // no kind yet.
-    fn kinds(atomic: &TAtomic) -> Vec<std::mem::Discriminant<TArray>> {
+    // A `List`, a `Map`, a `Set` and an `Iterable` are each their own kind, spec section 12, where plain PHP takes a list
+    // as an array of any key and any of them as an iterable, so an extension of one kind fits no other, and a type
+    // parameter is the kind of its bound. An `Iterable`'s members belong to a value typed `Iterable`, so an extension of
+    // one fits no value of another type, an object's class included. An empty array is no kind yet. `None` is the
+    // `Iterable` kind.
+    fn kinds(atomic: &TAtomic) -> Vec<Option<std::mem::Discriminant<TArray>>> {
         match atomic {
-            TAtomic::Array(array) if !array.is_empty() => vec![std::mem::discriminant(array)],
+            TAtomic::Array(array) if !array.is_empty() => vec![Some(std::mem::discriminant(array))],
+            TAtomic::Iterable(_) => vec![None],
             TAtomic::GenericParameter(parameter) => parameter.constraint.types.iter().flat_map(kinds).collect(),
             _ => vec![],
         }
     }
     let parameter_kinds: Vec<_> = parameter.types.iter().flat_map(kinds).collect();
-    let same_kind =
-        parameter_kinds.is_empty() || receiver.types.iter().flat_map(kinds).all(|kind| parameter_kinds.contains(&kind));
+    let same_kind = parameter_kinds.is_empty()
+        || if parameter_kinds.contains(&None) {
+            receiver.types.iter().all(|atomic| {
+                let kinds = kinds(atomic);
+                !kinds.is_empty() && kinds.iter().all(|kind| parameter_kinds.contains(kind))
+            })
+        } else {
+            receiver.types.iter().flat_map(kinds).all(|kind| parameter_kinds.contains(&kind))
+        };
 
     (same_kind
         && union_comparator::is_contained_by(
@@ -451,7 +461,7 @@ where
 
 /// Whether this file has the extension member `metadata` of the static class `class` with no import, spec section
 /// 23: the default import of `Sharp` binds the class, or the member is the standard library's, under `Sharp\`, on
-/// `string`, `int`, `float`, `List`, `Map` or `Set`.
+/// `string`, `int`, `float`, `List`, `Map`, `Set` or `Iterable`.
 pub(crate) fn is_imported_by_default<A>(
     context: &Context<'_, '_, A>,
     class: Word,
@@ -464,20 +474,24 @@ where
         || is_standard_library_member_on(class, metadata, |atomic| {
             matches!(
                 atomic,
-                TAtomic::Scalar(TScalar::String(_) | TScalar::Integer(_) | TScalar::Float(_)) | TAtomic::Array(_)
+                TAtomic::Scalar(TScalar::String(_) | TScalar::Integer(_) | TScalar::Float(_))
+                    | TAtomic::Array(_)
+                    | TAtomic::Iterable(_)
             )
         })
 }
 
 /// Whether `metadata` of the static class `class` is a member of a PHP# collection, spec section 12.
 ///
-/// It is an extension method of the standard library's, under `Sharp\`, on a `List`, a `Map` or a `Set`, which the
-/// semantic checks let take its receiver by `ref`. It is that collection's own member, so a union of collections
-/// reaches it on its parts of that kind.
+/// It is an extension method of the standard library's, under `Sharp\`, on a `List`, a `Map`, a `Set` or an
+/// `Iterable`, which the semantic checks let take a collection's receiver by `ref`. It is that collection's own member,
+/// so a union of collections reaches it on its parts of that kind.
 #[must_use]
 pub fn is_collection_member(class: Word, metadata: &FunctionLikeMetadata) -> bool {
     metadata.flags.is_extension_method()
-        && is_standard_library_member_on(class, metadata, |atomic| matches!(atomic, TAtomic::Array(_)))
+        && is_standard_library_member_on(class, metadata, |atomic| {
+            matches!(atomic, TAtomic::Array(_) | TAtomic::Iterable(_))
+        })
 }
 
 /// Whether the extension member `metadata` of the static class `class` is the standard library's member of a `List`,
@@ -486,15 +500,20 @@ pub(crate) fn is_list_member(class: Word, metadata: &FunctionLikeMetadata) -> bo
     is_standard_library_member_on(class, metadata, |atomic| matches!(atomic, TAtomic::Array(TArray::List(_))))
 }
 
-/// The standard library's member `name` of a `List`, which an operation on a List runs, as Kotlin runs an operator
-/// member: `list[i] = v` runs `set`. None when the library declares none.
+/// The standard library's member `name` of the collection whose receiver parts `kind` takes.
+///
+/// An operation on a `List` or a `Map` runs it, as Kotlin runs an operator member: `list[i] = v` and `map[key] = value`
+/// run `set`. None when the library declares none.
 #[must_use]
-pub fn list_member<'codebase>(
+pub fn collection_member<'codebase>(
     codebase: &'codebase CodebaseMetadata,
     name: &[u8],
+    kind: fn(&TAtomic) -> bool,
 ) -> Option<&'codebase MethodIdentifier> {
     codebase.extensions.get(&ascii_lowercase_word(name))?.iter().map(|(_, method)| method).find(|method| {
-        codebase.get_method_by_id(method).is_some_and(|metadata| is_list_member(method.get_class_name(), metadata))
+        codebase
+            .get_method_by_id(method)
+            .is_some_and(|metadata| is_standard_library_member_on(method.get_class_name(), metadata, kind))
     })
 }
 
