@@ -8457,21 +8457,16 @@ fn a_change_after_a_null_safe_link_reaches_the_place_below_it() {
 /// $kept#2 = $receiver#1;
 /// $receiver#1['a'] = $extra;
 /// $receiver#1 === $kept#2 || ($this->sizes = $receiver#1);
-/// $receiver#1 = $this->sizes;
-/// $kept#2 = $receiver#1;
-/// $receiver#1['b'] ??= 2;
-/// …
+/// $this->sizes['b'] ?? [$receiver#1 = $this->sizes, $kept#2 = $receiver#1, $receiver#1['b'] = 2, …][2];
 /// $receiver#1 = $this->me();
-/// $receiver#2 = $receiver#1->sizes;
-/// $kept#3 = $receiver#2;
-/// $receiver#2['c'] ??= 3;
-/// $receiver#2 === $kept#3 || ($receiver#1->sizes = $receiver#2);
+/// $receiver#1->sizes['c'] ?? [$receiver#2 = $receiver#1->sizes, $kept#3 = $receiver#2, $receiver#2['c'] = 3,
+///     $receiver#2 === $kept#3 || ($receiver#1->sizes = $receiver#2)][2];
 /// ```
 ///
 /// PHP gives no reference to a hooked property, so a write into the `Map` one holds writes a hidden copy of it, which
-/// its `set` hook then stores once the write changed it, as a member that changes the property does. A `??=` writes
-/// only for a missing key, and an object that runs something is held once. A property without hooks keeps PHP's
-/// write, as `literals_are_short_arrays_and_an_index_is_a_dim` shows.
+/// its `set` hook then stores once the write changed it, as a member that changes the property does. A `??=` writes,
+/// and reads the copy, only for a missing key, and an object that runs something is held once. A property without
+/// hooks keeps PHP's write, as `literals_are_short_arrays_and_an_index_is_a_dim` shows.
 #[test]
 fn a_write_into_a_map_a_hooked_property_holds_stores_it_through_the_property() {
     assert_eq!(
@@ -8515,38 +8510,55 @@ fn a_write_into_a_map_a_hooked_property_holds_stores_it_through_the_property() {
                       ZVAL "sizes"
                     VAR
                       ZVAL "receiver#1"
-              STMT_LIST
-                ASSIGN
-                  VAR
-                    ZVAL "receiver#1"
+              COALESCE
+                DIM
                   PROP
                     VAR
                       ZVAL "this"
                     ZVAL "sizes"
-                ASSIGN
-                  VAR
-                    ZVAL "kept#2"
-                  VAR
-                    ZVAL "receiver#1"
-                ASSIGN_COALESCE
-                  DIM
-                    VAR
-                      ZVAL "receiver#1"
-                    ZVAL "b"
+                  ZVAL "b"
+                DIM
+                  ARRAY [3]
+                    ARRAY_ELEM
+                      ASSIGN
+                        VAR
+                          ZVAL "receiver#1"
+                        PROP
+                          VAR
+                            ZVAL "this"
+                          ZVAL "sizes"
+                      null
+                    ARRAY_ELEM
+                      ASSIGN
+                        VAR
+                          ZVAL "kept#2"
+                        VAR
+                          ZVAL "receiver#1"
+                      null
+                    ARRAY_ELEM
+                      ASSIGN
+                        DIM
+                          VAR
+                            ZVAL "receiver#1"
+                          ZVAL "b"
+                        ZVAL 2
+                      null
+                    ARRAY_ELEM
+                      OR
+                        BINARY_OP [16]
+                          VAR
+                            ZVAL "receiver#1"
+                          VAR
+                            ZVAL "kept#2"
+                        ASSIGN
+                          PROP
+                            VAR
+                              ZVAL "this"
+                            ZVAL "sizes"
+                          VAR
+                            ZVAL "receiver#1"
+                      null
                   ZVAL 2
-                OR
-                  BINARY_OP [16]
-                    VAR
-                      ZVAL "receiver#1"
-                    VAR
-                      ZVAL "kept#2"
-                  ASSIGN
-                    PROP
-                      VAR
-                        ZVAL "this"
-                      ZVAL "sizes"
-                    VAR
-                      ZVAL "receiver#1"
               STMT_LIST
                 ASSIGN
                   VAR
@@ -8556,37 +8568,55 @@ fn a_write_into_a_map_a_hooked_property_holds_stores_it_through_the_property() {
                       ZVAL "this"
                     ZVAL "me"
                     ARG_LIST
-                ASSIGN
-                  VAR
-                    ZVAL "receiver#2"
-                  PROP
-                    VAR
-                      ZVAL "receiver#1"
-                    ZVAL "sizes"
-                ASSIGN
-                  VAR
-                    ZVAL "kept#3"
-                  VAR
-                    ZVAL "receiver#2"
-                ASSIGN_COALESCE
+                COALESCE
                   DIM
-                    VAR
-                      ZVAL "receiver#2"
-                    ZVAL "c"
-                  ZVAL 3
-                OR
-                  BINARY_OP [16]
-                    VAR
-                      ZVAL "receiver#2"
-                    VAR
-                      ZVAL "kept#3"
-                  ASSIGN
                     PROP
                       VAR
                         ZVAL "receiver#1"
                       ZVAL "sizes"
-                    VAR
-                      ZVAL "receiver#2"
+                    ZVAL "c"
+                  DIM
+                    ARRAY [3]
+                      ARRAY_ELEM
+                        ASSIGN
+                          VAR
+                            ZVAL "receiver#2"
+                          PROP
+                            VAR
+                              ZVAL "receiver#1"
+                            ZVAL "sizes"
+                        null
+                      ARRAY_ELEM
+                        ASSIGN
+                          VAR
+                            ZVAL "kept#3"
+                          VAR
+                            ZVAL "receiver#2"
+                        null
+                      ARRAY_ELEM
+                        ASSIGN
+                          DIM
+                            VAR
+                              ZVAL "receiver#2"
+                            ZVAL "c"
+                          ZVAL 3
+                        null
+                      ARRAY_ELEM
+                        OR
+                          BINARY_OP [16]
+                            VAR
+                              ZVAL "receiver#2"
+                            VAR
+                              ZVAL "kept#3"
+                          ASSIGN
+                            PROP
+                              VAR
+                                ZVAL "receiver#1"
+                              ZVAL "sizes"
+                            VAR
+                              ZVAL "receiver#2"
+                        null
+                    ZVAL 2
         "#}
     );
 }

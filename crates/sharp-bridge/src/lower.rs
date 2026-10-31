@@ -6431,26 +6431,62 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
     /// A write into a `Map` that a hooked property plain PHP declares holds, a PHP array, which PHP's
     /// own write changes at the place [`Self::with_place`] passes. PHP gives such a place no reference, so it is written
-    /// through a hidden copy, which its `set` then stores once the write changed it: `this.sizes[key] ??= value` is
-    /// `[$receiver#1 = $this->sizes, $kept#2 = $receiver#1, $receiver#1[$key] ??= $value, $receiver#1 === $kept#2 ||
-    /// ($this->sizes = $receiver#1)][2]`. The key, and the value of a `=`, run before the copy is read, as
-    /// [`Self::with_place`] holds them, so a change they make to the property stays. The checker refuses every other
-    /// operator, since it reads the value of the `Map` bare.
+    /// through a hidden copy, which its `set` then stores once the write changed it: `this.sizes[key] = value` is
+    /// `[$receiver#1 = $this->sizes, $kept#2 = $receiver#1, $receiver#1[$key] = $value, $receiver#1 === $kept#2 ||
+    /// ($this->sizes = $receiver#1)][2]`. The key and the value run before the copy is read, as [`Self::with_place`]
+    /// holds them, so a change they make to the property stays. A `??=` runs its value only where the property holds no
+    /// value for the key, so the copy is read behind that test, after the value runs: `this.sizes[key] ??= value` is
+    /// `$this->sizes[$key] ?? …`, the `=` write, with an object or a key that runs code held once before the test. The
+    /// checker refuses every other operator, since it reads the value of the `Map` bare.
     fn plain_map_write(&mut self, line: u32, assignment: &Assignment, access: &ArrayAccess) -> u32 {
-        let (kind, held): (_, &[(&Expression, &str)]) = match assignment.operator {
-            AssignmentOperator::Assign(_) => (SHARP_AST_ASSIGN, &[(access.index, "index"), (assignment.rhs, "value")]),
-            // `??=` runs its value only where the map holds none for the key.
-            AssignmentOperator::Coalesce(_) => (SHARP_AST_ASSIGN_COALESCE, &[(access.index, "index")]),
-            _ => unreachable!("the checker refuses `{}` on a `Map` value, which reads it bare", assignment.operator),
+        let write = |this: &mut Self| {
+            let held = [(access.index, "index"), (assignment.rhs, "value")];
+
+            this.with_place(access.array, false, &held, |this, place| {
+                let key = this.expression(access.index);
+                let element = this.node(SHARP_AST_DIM, 0, line, &[place, key]);
+                let value = this.expression(assignment.rhs);
+
+                this.node(SHARP_AST_ASSIGN, 0, line, &[element, value])
+            })
         };
+        match assignment.operator {
+            AssignmentOperator::Assign(_) => return write(self),
+            AssignmentOperator::Coalesce(_) => {}
+            _ => unreachable!("the checker refuses `{}` on a `Map` value, which reads it bare", assignment.operator),
+        }
 
-        self.with_place(access.array, false, held, |this, place| {
-            let key = this.expression(access.index);
-            let element = this.node(SHARP_AST_DIM, 0, line, &[place, key]);
-            let value = this.expression(assignment.rhs);
+        let taken = self.temporaries;
+        let receivers_before = self.held_receivers.len();
+        let Expression::Access(
+            Access::Property(PropertyAccess { object, .. })
+            | Access::NullSafeProperty(NullSafePropertyAccess { object, .. }),
+        ) = access.array.unparenthesized()
+        else {
+            unreachable!("a hooked property's `Map` is written through the property");
+        };
+        let mut steps = Vec::new();
+        for (value, base) in [(*object, "receiver"), (access.index, "index")] {
+            if !self.is_pure(value) {
+                let (step, name) = self.hold_step(line, value, base);
+                steps.push(step);
+                self.held_receivers.push((value.span(), name));
+            }
+        }
+        let property = self.target(access.array, PlaceUse::Read);
+        let key = self.expression(access.index);
+        let found = self.node(SHARP_AST_DIM, 0, line, &[property, key]);
+        let written = write(self);
+        let mut lowered = self.node(SHARP_AST_COALESCE, 0, line, &[found, written]);
+        if !steps.is_empty() {
+            let position = steps.len();
+            steps.push(self.node(SHARP_AST_ARRAY_ELEM, 0, line, &[lowered, NULL]));
+            lowered = self.picked_step(line, &steps, position);
+        }
+        self.held_receivers.truncate(receivers_before);
+        self.temporaries = taken;
 
-            this.node(kind, 0, line, &[element, value])
-        })
+        lowered
     }
 
     /// A write to the value of a `Map` at a key, spec section 12, which runs the standard library's `set` member of a
