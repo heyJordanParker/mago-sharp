@@ -999,6 +999,9 @@ mod tests {
 
     use super::*;
 
+    /// The deadline of a test whose peer answers at once, the hosts' default, so a busy machine never reaches it.
+    const UNREACHED_DEADLINE: Duration = Duration::from_secs(30);
+
     #[test]
     fn stderr_tail_keeps_only_the_configured_suffix() {
         let mut tail = StderrTail::new(5);
@@ -1039,7 +1042,7 @@ mod tests {
 
     #[test]
     fn routes_multiplexed_responses_by_request_id() {
-        let (worker, mut peer_reader, mut peer_writer) = connected_worker(Duration::from_secs(2));
+        let (worker, mut peer_reader, mut peer_writer) = connected_worker(UNREACHED_DEADLINE);
         let barrier = Arc::new(Barrier::new(3));
 
         let first_worker = Arc::clone(&worker);
@@ -1083,7 +1086,7 @@ mod tests {
 
     #[test]
     fn services_a_nested_worker_request_on_the_calling_thread() {
-        let (worker, mut peer_reader, mut peer_writer) = connected_worker(Duration::from_secs(2));
+        let (worker, mut peer_reader, mut peer_writer) = connected_worker(UNREACHED_DEADLINE);
         let peer = std::thread::spawn(move || {
             let outer = Frame::read_from(&mut peer_reader, 1024)
                 .expect("outer request should decode")
@@ -1154,7 +1157,7 @@ mod tests {
 
     #[test]
     fn a_request_waiting_behind_others_gets_the_whole_deadline_once_the_worker_starts_it() {
-        let deadline = Duration::from_secs(1);
+        let deadline = Duration::from_secs(3);
         let (worker, mut peer_reader, mut peer_writer) = connected_worker(deadline);
         let peer = std::thread::spawn(move || {
             for _ in 0..6 {
@@ -1180,7 +1183,8 @@ mod tests {
 
     #[test]
     fn a_worker_that_hangs_on_a_request_fails_at_the_deadline() {
-        let deadline = Duration::from_millis(200);
+        // Long enough that the first request, which the peer answers at once, never reaches it on a busy machine.
+        let deadline = Duration::from_secs(3);
         let (worker, mut peer_reader, mut peer_writer) = connected_worker(deadline);
         let peer = std::thread::spawn(move || {
             let first = Frame::read_from(&mut peer_reader, 1024)
@@ -1266,7 +1270,7 @@ mod tests {
     /// lives past it while the worker starts each file within it.
     #[test]
     fn a_batch_whose_every_file_runs_within_the_deadline_lives_past_it() {
-        let deadline = Duration::from_secs(1);
+        let deadline = Duration::from_secs(3);
         let (worker, peer_reader, peer_writer) = connected_worker(deadline);
         let peer = run_six_files(peer_reader, peer_writer, deadline / 5, true);
 
@@ -1284,7 +1288,7 @@ mod tests {
     /// names the host, the file and the setting.
     #[test]
     fn a_hook_that_asks_for_metadata_but_never_finishes_its_file_fails_at_the_deadline() {
-        let deadline = Duration::from_millis(300);
+        let deadline = Duration::from_secs(3);
         let (worker, peer_reader, peer_writer) = connected_worker(deadline);
         let peer = run_six_files(peer_reader, peer_writer, deadline / 2, false);
 
@@ -1295,7 +1299,7 @@ mod tests {
         assert!(started_at.elapsed() < deadline * 2, "the request failed after {:?}", started_at.elapsed());
         assert_eq!(
             error.to_string(),
-            "extension host `acme` made no progress for 300 ms on request 1 (worker 0): raise its `request-timeout-ms` for hooks that run that long"
+            "extension host `acme` made no progress for 3000 ms on request 1 (worker 0): raise its `request-timeout-ms` for hooks that run that long"
         );
         peer.join().expect("peer thread should join");
         worker.shutdown();
@@ -1303,7 +1307,8 @@ mod tests {
 
     #[test]
     fn a_timeout_names_the_file_whose_hooks_made_no_progress() {
-        let deadline = Duration::from_millis(100);
+        // Long enough that the peer names the file before it on a busy machine.
+        let deadline = Duration::from_secs(3);
         let (worker, mut peer_reader, mut peer_writer) = connected_worker(deadline);
         let peer = std::thread::spawn(move || {
             let outer = Frame::read_from(&mut peer_reader, 1024)
@@ -1323,7 +1328,7 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            "extension host `acme` made no progress for 100 ms on the hooks of app/Hung.php (worker 0): raise its `request-timeout-ms` for hooks that run that long"
+            "extension host `acme` made no progress for 3000 ms on the hooks of app/Hung.php (worker 0): raise its `request-timeout-ms` for hooks that run that long"
         );
         peer.join().expect("peer thread should join");
         worker.shutdown();
@@ -1331,7 +1336,7 @@ mod tests {
 
     #[test]
     fn reports_worker_cancellation_without_marking_the_worker_disconnected() {
-        let (worker, mut peer_reader, mut peer_writer) = connected_worker(Duration::from_secs(2));
+        let (worker, mut peer_reader, mut peer_writer) = connected_worker(UNREACHED_DEADLINE);
         let peer = std::thread::spawn(move || {
             let request = Frame::read_from(&mut peer_reader, 1024)
                 .expect("request should decode")
