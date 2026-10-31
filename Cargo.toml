@@ -357,10 +357,25 @@ inherits = 'release'
 debug = true
 strip = 'none'
 
-# The mago sharp/bin/test builds, and every test run and CI job that reads its output. It is release without link-time
-# optimization and with incremental builds, so it prints what release prints, and after a one-line change in
-# crates/analyzer it rebuilt in 15 seconds where release took 14 minutes, at 2 Cargo jobs on an M2 Max. Release sets
-# 1 codegen unit, and an incremental build reuses work per unit, so it sets Cargo's incremental default of 256.
+# The mago that sharp/bin/test, sharp/bin/hosts and sharp/bin/bench build and run, and that CI's test jobs build. The
+# tests read only mago's output, and bench counts only the engine's instructions. It is release with thin local LTO,
+# which `lto = false` means, in place of release's fat LTO, and with incremental builds. Release sets 1 codegen unit,
+# and an incremental build reuses work per unit, so it sets Cargo's incremental default of 256. It keeps release's
+# debug-assertions and overflow-checks off, so it prints what release prints: with them on, mago logs at DEBUG and its
+# collector reports a missing-code error that release never prints. Its .sharp output is byte-identical to release's.
+#
+# After a one-line change in crates/analyzer, on an M2 Max at 2 Cargo jobs, each profile's rebuild, then the time of
+# the fixture compile, sharp/bin/spec --self-test and sharp/bin/spec with that mago:
+#
+#   release, fat LTO, 1 unit                    858.1 s + 1.7 s + 10.7 s + 145.3 s = 1015.8 s
+#   dev                                          16.5 s + 6.0 s + 50.8 s + 381.0 s =  454.3 s
+#   thin local LTO, 16 units                    279.0 s + 2.8 s +  9.2 s + 145.6 s =  436.6 s
+#   thin local LTO, 16 units, incremental       134.3 s + 2.0 s +  8.5 s + 109.8 s =  254.5 s
+#   thin local LTO, 256 units, incremental       14.7 s + 2.4 s +  9.2 s + 122.8 s =  149.1 s, this profile
+#
+# CI builds it with CARGO_INCREMENTAL=0. actions/cache never saves again on an exact key match, so cached incremental
+# state would age as master moves, and with it this profile's folder compressed to 1.2 GB on that Mac, where
+# release's took 531 MB.
 [profile.test-run]
 inherits = 'release'
 lto = false
