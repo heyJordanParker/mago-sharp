@@ -238,7 +238,7 @@ pub fn run(main_start: Instant) -> Result<ExitCode, Error> {
     )?;
 
     if no_extensions {
-        configuration.extension_hosts.clear();
+        configuration.disable_extensions();
     }
     let config_load_duration = config_load_start.map(|s| s.elapsed()).unwrap_or_default();
 

@@ -388,6 +388,13 @@ pub struct Configuration {
     #[serde(default, skip_serializing)]
     #[schemars(skip)]
     pub config_file_is_explicit: bool,
+
+    /// Whether `--no-extensions` turned the extension hosts off for this run, through [`Self::disable_extensions`].
+    ///
+    /// Watch mode loads the configuration again and keeps them off.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub no_extensions: bool,
 }
 
 impl Configuration {
@@ -662,7 +669,14 @@ impl Configuration {
             editor_url: None,
             config_file: None,
             config_file_is_explicit: false,
+            no_extensions: false,
         }
+    }
+
+    /// Turns the extension hosts off for this run, as `--no-extensions` does.
+    pub fn disable_extensions(&mut self) {
+        self.extension_hosts.clear();
+        self.no_extensions = true;
     }
 }
 
