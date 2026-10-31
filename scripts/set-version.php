@@ -43,6 +43,10 @@ const VERSIONED_DOCUMENTATION_FILES = [
     'docs/content/zh/guide/installation.md',
     'docs/content/zh/guide/upgrading.md',
     'docs/content/zh/recipes/github-actions.md',
+    // The tag example in a comment, the pin examples of `mago self-update --help`, and those of the configuration schema.
+    'scripts/install.sh',
+    'src/commands/self_update.rs',
+    'src/config/mod.rs',
 ];
 
 // The fuzz crate is a workspace of its own, so its lock holds the Mago crates it builds as well.
