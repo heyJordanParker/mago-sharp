@@ -326,7 +326,7 @@ checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
 name = "mago-allocator"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "allocator-api2",
  "blink-alloc",
@@ -335,7 +335,7 @@ dependencies = [
 
 [[package]]
 name = "mago-database"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "foldhash",
  "glob",
@@ -350,14 +350,14 @@ dependencies = [
 
 [[package]]
 name = "mago-php-version"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "schemars",
 ]
 
 [[package]]
 name = "mago-reporting"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "blake3",
  "foldhash",
@@ -372,14 +372,14 @@ dependencies = [
 
 [[package]]
 name = "mago-span"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "mago-database",
 ]
 
 [[package]]
 name = "mago-syntax"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "mago-allocator",
  "mago-database",
@@ -395,7 +395,7 @@ dependencies = [
 
 [[package]]
 name = "mago-syntax-core"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "mago-allocator",
  "mago-database",
@@ -417,7 +417,7 @@ dependencies = [
 
 [[package]]
 name = "mago-text-edit"
-version = "0.5.0"
+version = "0.6.0"
 
 [[package]]
 name = "memchr"
