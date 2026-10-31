@@ -5,6 +5,8 @@ use std::collections::HashSet;
 use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
+use std::time::Instant;
 
 use mago_analyzer::external::AFTER_FILE_ANALYSIS_BATCH_SIZE;
 use mago_analyzer::external::ExternalAnalyzer;
@@ -426,5 +428,90 @@ fn orchestrator_loads_initialization_stubs_into_the_source_database() {
             .contents
             .windows(b"class ExtensionProvided".len())
             .any(|bytes| { bytes == b"class ExtensionProvided" })
+    );
+}
+
+/// An extension host whose plugin `dead-routes` has an after-analysis hook that never finishes.
+const HOST_WHOSE_AFTER_ANALYSIS_HOOK_NEVER_FINISHES: &str = r#"<?php
+
+declare(strict_types=1);
+
+use Mago\Sdk\Analyzer\AfterAnalysisContext;
+use Mago\Sdk\Analyzer\AfterAnalysisHook;
+use Mago\Sdk\Analyzer\Plugin;
+use Mago\Sdk\Analyzer\PluginDefinition;
+use Mago\Sdk\Analyzer\PluginRegistry;
+use Mago\Sdk\Extension;
+use Mago\Sdk\Worker;
+
+require $argv[1];
+
+final class DeadRoutes implements Plugin, AfterAnalysisHook
+{
+    public function getDefinition(): PluginDefinition
+    {
+        return new PluginDefinition('dead-routes', 'Dead routes', 'Reports the routes no request reaches.');
+    }
+
+    public function register(PluginRegistry $registry): void
+    {
+        $registry->registerAfterAnalysisHook($this);
+    }
+
+    public function afterAnalysis(AfterAnalysisContext $context): void
+    {
+        while (true) {
+            sleep(1);
+        }
+    }
+}
+
+(new Worker(new Extension('acme/routes', 'Routes', '1.0.0', analyzerPlugins: [new DeadRoutes()])))->run();
+"#;
+
+/// The host runs every plugin's after-analysis hooks in one request, so the error names the plugin whose hooks made no
+/// progress, as it names the file whose hooks made none.
+#[test]
+fn an_after_analysis_hook_that_never_finishes_fails_at_the_deadline_naming_its_plugin() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if !common::php_sdk_is_available(repository, "the after-analysis deadline test") {
+        return;
+    }
+
+    let temporary = tempfile::tempdir().expect("temporary host directory should be created");
+    let host = temporary.path().join("host.php");
+    std::fs::write(&host, HOST_WHOSE_AFTER_ANALYSIS_HOOK_NEVER_FINISHES).expect("host source should be written");
+    let deadline = Duration::from_secs(3);
+    let command = WorkerCommand::new("php").with_argument(host).with_argument(repository.join("vendor/autoload.php"));
+    let options =
+        WorkerPoolOptions { host: "acme".to_owned(), request_timeout: deadline, ..WorkerPoolOptions::default() };
+    let pool = WorkerPool::spawn(command, NonZeroUsize::MIN, options).expect("PHP host pool should start");
+    let analyzer = ExternalAnalyzer::initialize([Arc::new(pool)], PHPVersion::PHP85, &[], false)
+        .expect("PHP host analyzer should initialize");
+    let mut registry = PluginRegistry::with_library_providers();
+    registry.set_external_analyzer(Arc::new(ExternalAnalyzerHandle::ready(analyzer)));
+    let mut database = Database::new(common::database_configuration("/deadline-proof", vec![Cow::Borrowed(b"src")]));
+    database.add(File::new(
+        Cow::Borrowed(b"src/Route.php"),
+        FileType::Host,
+        None,
+        Cow::Borrowed(b"<?php\n\nfinal class Route {}\n"),
+    ));
+    let mut service = IncrementalAnalysisService::new(
+        database.read_only(),
+        Default::default,
+        Settings::new(PHPVersion::PHP85),
+        ParserSettings::default(),
+        Arc::new(registry),
+    );
+
+    let started_at = Instant::now();
+    let error = service.analyze().expect_err("the after-analysis hook should fail at the deadline");
+    let elapsed = started_at.elapsed();
+
+    assert!(elapsed >= deadline && elapsed < deadline * 2, "the analysis failed after {elapsed:?}");
+    assert_eq!(
+        error.to_string(),
+        "Analysis error: Plugin Error: External plugin error: external analyzer worker failed: extension host `acme` made no progress for 3000 ms on the after-analysis hooks of plugin `dead-routes` (worker 0): raise its `request-timeout-ms` for hooks that run that long"
     );
 }

@@ -113,8 +113,9 @@ pub enum WorkerError {
     CoordinatorPanic { worker: usize },
     /// A frame could not be encoded or decoded.
     Protocol { worker: usize, source: ProtocolError },
-    /// A request made no progress within its configured deadline: `file` is the file whose hooks it was running.
-    Timeout { host: String, worker: usize, request: u64, file: Option<String>, duration: Duration },
+    /// A request made no progress within its configured deadline: `running` is what the worker last said it started,
+    /// in the host's words, such as "the hooks of app/User.php".
+    Timeout { host: String, worker: usize, running: Option<String>, duration: Duration },
     /// A worker explicitly cancelled an in-flight request.
     Cancelled { worker: usize, request: u64 },
     /// A worker returned an error response.
@@ -151,11 +152,10 @@ impl std::fmt::Display for WorkerError {
             Self::Protocol { worker, source } => {
                 write!(formatter, "extension worker {worker} violated the protocol: {source}")
             }
-            Self::Timeout { host, worker, request, file, duration } => {
+            Self::Timeout { host, worker, running, duration } => {
                 write!(formatter, "extension host `{host}` made no progress for {} ms", duration.as_millis())?;
-                match file {
-                    Some(file) => write!(formatter, " on the hooks of {file}")?,
-                    None => write!(formatter, " on request {request}")?,
+                if let Some(running) = running {
+                    write!(formatter, " on {running}")?;
                 }
                 write!(formatter, " (worker {worker}): raise its `request-timeout-ms` for hooks that run that long")
             }

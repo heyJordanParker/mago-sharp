@@ -178,16 +178,16 @@ struct WorkerInner {
     trace_summary_emitted: AtomicBool,
     telemetry: WorkerTelemetry,
     started_at: Option<Instant>,
-    /// When the worker last sent a progress frame, and the file whose hooks it started then.
+    /// When the worker last sent a progress frame, and what it said it started then.
     progress: Mutex<Option<(Instant, String)>>,
 }
 
 impl WorkerInner {
-    /// The later of `started_at` and the worker's last progress, with the file whose hooks it started when that
-    /// progress is the later.
+    /// The later of `started_at` and the worker's last progress, with what the worker started when that progress is
+    /// the later.
     fn progress_since(&self, started_at: Instant) -> (Instant, Option<String>) {
         match &*lock(&self.progress) {
-            Some((at, file)) if *at > started_at => (*at, Some(file.clone())),
+            Some((at, running)) if *at > started_at => (*at, Some(running.clone())),
             _ => (started_at, None),
         }
     }
@@ -548,18 +548,18 @@ impl Worker {
         let (sender, receiver) = mpsc::channel();
         let (request_id, starts) = self.inner.send_request(payload, sender)?;
 
-        // The deadline is the longest one file's hooks may run, as Jest's `testTimeout` bounds each test rather than
-        // the run: it runs from the request's start, and again from each progress frame the worker sends as it starts
-        // a file's hooks, for any of its requests, since one PHP process runs one hook at a time and a request waits
-        // while the worker runs another's. Nested requests are not progress, so a hook that keeps asking Mago for
-        // metadata and never finishes its file fails.
+        // The deadline is the longest one file's hooks, or one plugin's project-level hooks, may run, as Jest's
+        // `testTimeout` bounds each test rather than the run: it runs from the request's start, and again from each
+        // progress frame the worker sends as it starts the hooks of a file or of a plugin, for any of its requests,
+        // since one PHP process runs one hook at a time and a request waits while the worker runs another's. Nested
+        // requests are not progress, so a hook that keeps asking Mago for metadata and never finishes its file fails.
         let mut started_at = starts.then(Instant::now);
         loop {
             let event = match started_at {
                 Some(started_at) => {
-                    let (progressed_at, file) = self.inner.progress_since(started_at);
+                    let (progressed_at, running) = self.inner.progress_since(started_at);
                     let Some(remaining) = self.request_timeout.checked_sub(progressed_at.elapsed()) else {
-                        return Err(self.timeout(request_id, file));
+                        return Err(self.timeout(request_id, running));
                     };
                     receiver.recv_timeout(remaining)
                 }
@@ -646,23 +646,18 @@ impl Worker {
         }
     }
 
-    /// Fails request `request_id`, which made no progress within the deadline on the hooks of `file`.
-    fn timeout(&self, request_id: u64, file: Option<String>) -> WorkerError {
+    /// Fails request `request_id`, which made no progress within the deadline on `running`. The request's number is
+    /// protocol detail, so only the trace log names it.
+    fn timeout(&self, request_id: u64, running: Option<String>) -> WorkerError {
         if self.inner.trace_enabled {
             self.inner.telemetry.timeouts.fetch_add(1, Ordering::Relaxed);
         }
-        tracing::trace!(worker = self.id(), request = request_id, timeout = ?self.request_timeout, "Extension worker request timed out.");
+        tracing::trace!(worker = self.id(), request = request_id, running, timeout = ?self.request_timeout, "Extension worker request timed out.");
         self.inner.take_pending(request_id);
         let _result = self.inner.send(&Frame::cancel(request_id));
         self.inner.fail(format!("request {request_id} timed out"));
 
-        WorkerError::Timeout {
-            host: self.host.clone(),
-            worker: self.id(),
-            request: request_id,
-            file,
-            duration: self.request_timeout,
-        }
+        WorkerError::Timeout { host: self.host.clone(), worker: self.id(), running, duration: self.request_timeout }
     }
 
     pub fn reserve(self: &Arc<Self>) -> WorkerReservation {
@@ -1224,8 +1219,8 @@ mod tests {
     }
 
     /// A peer that runs six files' hooks for request `outer`, each for `per_file`. Before each file's hooks it sends a
-    /// progress frame naming the file when `progress` holds, and each hook asks Mago for metadata. It answers the
-    /// request unless Mago cancels it.
+    /// progress frame naming them when `progress` holds, and each hook asks Mago for metadata. It answers the request
+    /// unless Mago cancels it.
     fn run_six_files(
         mut peer_reader: TcpStream,
         mut peer_writer: TcpStream,
@@ -1238,8 +1233,8 @@ mod tests {
                 .expect("outer request should be present");
             for id in 1..=6 {
                 if progress {
-                    let file = format!("app/F{id}.php").into_bytes();
-                    from_worker(FrameKind::Notification, 0, outer.id, file)
+                    let hooks = format!("the hooks of app/F{id}.php").into_bytes();
+                    from_worker(FrameKind::Notification, 0, outer.id, hooks)
                         .write_to(&mut peer_writer, 1024)
                         .expect("progress should encode");
                 }
@@ -1280,8 +1275,9 @@ mod tests {
         worker.shutdown();
     }
 
-    /// A hook that keeps asking Mago for metadata and never finishes its file fails at the deadline, and the error
-    /// names the host, the file and the setting.
+    /// A hook that keeps asking Mago for metadata and never finishes its file fails at the deadline. Its worker named
+    /// no hooks it started, so the error names the host and the setting, and leaves the request's number to the trace
+    /// log.
     #[test]
     fn a_hook_that_asks_for_metadata_but_never_finishes_its_file_fails_at_the_deadline() {
         let deadline = Duration::from_millis(300);
@@ -1295,7 +1291,7 @@ mod tests {
         assert!(started_at.elapsed() < deadline * 2, "the request failed after {:?}", started_at.elapsed());
         assert_eq!(
             error.to_string(),
-            "extension host `acme` made no progress for 300 ms on request 1 (worker 0): raise its `request-timeout-ms` for hooks that run that long"
+            "extension host `acme` made no progress for 300 ms (worker 0): raise its `request-timeout-ms` for hooks that run that long"
         );
         peer.join().expect("peer thread should join");
         worker.shutdown();
@@ -1309,7 +1305,7 @@ mod tests {
             let outer = Frame::read_from(&mut peer_reader, 1024)
                 .expect("request should decode")
                 .expect("request should be present");
-            from_worker(FrameKind::Notification, 0, outer.id, b"app/Hung.php".to_vec())
+            from_worker(FrameKind::Notification, 0, outer.id, b"the hooks of app/Hung.php".to_vec())
                 .write_to(&mut peer_writer, 1024)
                 .expect("progress should encode");
             peer_writer.flush().expect("progress should flush");

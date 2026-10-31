@@ -76,10 +76,10 @@ final class WorkerTest extends TestCase
         self::assertSame(
             [
                 'describe: response',
-                'a.php: start',
+                'a.php: start the hooks of a.php',
                 'a.php: query',
                 'a.php: response',
-                'b.php: start',
+                'b.php: start the hooks of b.php',
                 'b.php: response',
             ],
             $sent,
@@ -93,10 +93,10 @@ final class WorkerTest extends TestCase
         self::assertSame(
             [
                 'describe: response',
-                'a.php: start',
+                'a.php: start the hooks of a.php',
                 'a.php: query',
                 'a.php: response',
-                'c.php: start',
+                'c.php: start the hooks of c.php',
                 'c.php: response',
             ],
             $sent,
@@ -133,7 +133,15 @@ final class WorkerTest extends TestCase
 
         $sent = self::serve($worker, ['first' => self::collectRequest(), 'second' => self::collectRequest()]);
 
-        self::assertSame(['first: error The extension request was cancelled.', 'second: response'], $sent);
+        self::assertSame(
+            [
+                'first: start the worker reducer of extension `acme/metrics`',
+                'first: error The extension request was cancelled.',
+                'second: start the worker reducer of extension `acme/metrics`',
+                'second: response',
+            ],
+            $sent,
+        );
     }
 
     /**
@@ -276,7 +284,7 @@ final class WorkerTest extends TestCase
             }
 
             if ($frame->kind === FrameKind::Notification) {
-                $sent[] = "{$labels[$frame->parentId]}: start";
+                $sent[] = "{$labels[$frame->parentId]}: start {$frame->payload}";
                 continue;
             }
 

@@ -60,8 +60,8 @@ pub struct WorkerPoolOptions {
     pub host: String,
     /// Maximum payload bytes accepted in one protocol frame.
     pub maximum_payload_size: usize,
-    /// Longest one outer request may go without progress once the worker starts it: the worker's start of each
-    /// file's hooks, for any of its requests, is progress.
+    /// Longest one outer request may go without progress once the worker starts it: the worker's start of the hooks
+    /// of each file or plugin, for any of its requests, is progress.
     pub request_timeout: Duration,
     /// Grace period between the shutdown frame and forcibly killing a worker.
     pub shutdown_timeout: Duration,
