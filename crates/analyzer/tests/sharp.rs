@@ -12596,6 +12596,24 @@ fn a_plain_php_function_takes_its_type_arguments_from_the_array_a_map_crosses_in
     );
 }
 
+/// Spec section 12: a spread into plain PHP parameters that are not variadic crosses by the parameter it starts at, and
+/// one that holds no `Map` or `Set`, as a list of two `List<int>`s or a plain PHP array of two lists, crosses nothing,
+/// so each `list<int>` parameter takes its element as it is, with no issue.
+#[test]
+fn a_spread_that_crosses_nothing_fills_plain_php_parameters_with_its_elements() {
+    let pick = "<?php\n\nnamespace Vendor\\Pick;\n\n/**\n * @param list<int> $first\n * @param list<int> $second\n */\nfunction total(array $first, array $second): int\n{\n    return count($first) + count($second);\n}\n\n/** @return array{list<int>, list<int>} */\nfunction rows(): array\n{\n    return [[1], [2]];\n}\n";
+    let sharp = "namespace Sharp;\n\nimport Vendor.Pick;\n\npublic static class Calls\n{\n    public static List<int> run(List<int> first, List<int> second) => [Pick.total(...[first, second]), Pick.total(...Pick.rows())];\n}\n";
+
+    assert_eq!(
+        library_call_types(
+            sharp,
+            &[("src/Vendor/Pick/functions.php", pick)],
+            &["[first, second]", "Pick.rows()", "Pick.total(...[first, second])", "Pick.total(...Pick.rows())"]
+        ),
+        ["list{list<int>, list<int>}", "list{list<int>, list<int>}", "int", "int"]
+    );
+}
+
 /// A standard library file's backed enum, whose cases' values write no integer.
 const LIBRARY_STATUS: (&str, &str) = (
     "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Status.sharp",
