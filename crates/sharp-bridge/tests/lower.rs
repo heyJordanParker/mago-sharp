@@ -26249,13 +26249,16 @@ fn plain_php_s_array_written_into_a_php_sharp_base_s_property_crosses_as_its_typ
 }
 
 /// ```php
-/// $sorted = \Sharp\Internal\arrayOf($sorted);
-/// \Lib\Calc::sort($sorted);
-/// $sorted = \is_array($sorted) ? \Sharp\Map::from($sorted, 'int, string') : $sorted;
-/// $filled = \Sharp\Internal\arrayOf($filled);
-/// \Lib\Calc::fill($filled);
-/// $filled = \is_array($filled) ? \Sharp\Map::from($filled, 'int, string') : $filled;
-/// \Lib\Calc::bump($count);
+/// $named = \Sharp\Internal\arrayOf($named);
+/// \ksort($named);
+/// $named = \is_array($named)
+///     ? new \Sharp\Map(\array_merge([], ...\array_map(fn ($key, $value) => [(string) $key, $value], \array_keys($named), $named)))
+///     : $named;
+/// $staged = \Sharp\Internal\arrayOf($staged);
+/// \ksort($staged);
+/// $staged = \is_array($staged)
+///     ? new \Sharp\Map(\array_merge([], ...\array_map(fn ($key, $value) => [\Lib\Status::from((string) $key), $value], \array_keys($staged), $staged)))
+///     : $staged;
 /// ```
 ///
 /// A local declared with `let` that holds a `Map` has the one type the checker inferred for it, its first value's
@@ -26280,50 +26283,54 @@ fn a_let_local_crosses_into_and_back_from_a_plain_php_reference_parameter() {
     let statements: Vec<String> = (2..4).map(|position| lowered.render(lowered.child(body, position))).collect();
     for (statement, (name, key, types)) in statements.iter().zip([
         ("named", "CAST [6]", "string, int"),
-        ("staged", "STATIC_CALL\n                                  ZVAL \"Lib\\\\Status\"", "Lib.Status, int"),
+        ("staged", "STATIC_CALL\n                              ZVAL \"Lib\\\\Status\"", "Lib.Status, int"),
     ]) {
         assert!(
             statement.starts_with(&formatdoc! {r#"
-                DIM
-                  ARRAY [3]
-                    ARRAY_ELEM
-                      ASSIGN
+                STMT_LIST
+                  ASSIGN
+                    VAR
+                      ZVAL "{name}"
+                    CALL
+                      ZVAL "Sharp\\Internal\\arrayOf"
+                      ARG_LIST
                         VAR
                           ZVAL "{name}"
-                        CALL
-                          ZVAL "Sharp\\Internal\\arrayOf"
-                          ARG_LIST
-                            VAR
-                              ZVAL "{name}"
-                      null
-                    ARRAY_ELEM
+                  CALL
+                    ZVAL "ksort"
+                    ARG_LIST
+                      VAR
+                        ZVAL "{name}"
+                  ASSIGN
+                    VAR
+                      ZVAL "{name}"
+                    CONDITIONAL
                       CALL
-                        ZVAL "ksort"
+                        ZVAL "is_array"
                         ARG_LIST
                           VAR
                             ZVAL "{name}"
-                      null
-                    ARRAY_ELEM
-                      ASSIGN
-                        VAR
-                          ZVAL "{name}"
-                        CONDITIONAL
-                          CALL
-                            ZVAL "is_array"
-                            ARG_LIST
-                              VAR
-                                ZVAL "{name}"
-                          SHARP_TYPE_ARGS
-                            NEW
-                              ZVAL "Sharp\\Map"
+                      SHARP_TYPE_ARGS
+                        NEW
+                          ZVAL "Sharp\\Map"
             "#}),
             "{statement}"
         );
-        assert!(statement.contains(&format!("ARRAY_ELEM\n                                {key}")), "{statement}");
+        assert!(statement.contains(&format!("ARRAY_ELEM\n                            {key}")), "{statement}");
         assert!(statement.contains(&format!("ZVAL \"{types}\"")), "{statement}");
     }
 }
 
+/// ```php
+/// $sorted = \Sharp\Internal\arrayOf($sorted);
+/// \Lib\Calc::sort($sorted);
+/// $sorted = \is_array($sorted) ? \Sharp\Map::from($sorted, 'int, string') : $sorted;
+/// $filled = \Sharp\Internal\arrayOf($filled);
+/// \Lib\Calc::fill($filled);
+/// $filled = \is_array($filled) ? \Sharp\Map::from($filled, 'int, string') : $filled;
+/// \Lib\Calc::bump($count);
+/// ```
+///
 /// A typed local that holds a `Map` or a `Set` goes into a plain PHP reference parameter and comes back as the object
 /// of what plain PHP wrote there: as its PHP array first where the parameter takes an array, as `array` and an
 /// untyped one do, and as itself otherwise. A local of any other type goes in as it is.
