@@ -63,6 +63,7 @@ use mago_syntax::cst::Expression;
 use mago_syntax::cst::FunctionCall;
 use mago_syntax::cst::Hint;
 use mago_syntax::cst::Inheritance;
+use mago_syntax::cst::LocalIdentifier;
 use mago_syntax::cst::MethodCall;
 use mago_syntax::cst::NullSafeFunctionCall;
 use mago_syntax::cst::NullSafePropertyAccess;
@@ -694,6 +695,13 @@ impl<'analysis> Types<'analysis> {
         self.artifacts
             .get_declared_type(hint)
             .unwrap_or_else(|| unreachable!("the analysis resolves the type of each declaration's hint, not `{hint}`"))
+    }
+
+    /// The type the local a declaration without a type names as `name` takes from its first value for its whole life,
+    /// as the checker inferred it: a literal's type made general, as `Map<string, int>` for `["tea": 2]`. None where the
+    /// first value gives it no type, as `null` does.
+    pub(crate) fn inferred_local_type(&self, name: &LocalIdentifier) -> Option<&'analysis TUnion> {
+        self.artifacts.get_declared_type(name)
     }
 
     /// The type a `Map` or `Set` the collection literal `literal` makes takes, spec section 12: the collection the place

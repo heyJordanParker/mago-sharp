@@ -12380,11 +12380,12 @@ fn a_map_whose_keys_can_collide_passes_where_plain_php_takes_an_array() {
     );
 }
 
-/// `Lib\Sink`, a plain PHP class whose methods take PHP arrays: by value, as two parameters, by reference, and as a type
-/// parameter bounded by `\Countable` and one without a bound, each of which it gives back.
+/// `Lib\Sink`, a plain PHP class whose methods take PHP arrays: by value, as two parameters, by reference, one of which
+/// writes back a list, and as a type parameter bounded by `\Countable` and one without a bound, each of which it gives
+/// back.
 const ARRAY_SINK: (&str, &str) = (
     "src/Lib/Sink.php",
-    "<?php\n\nnamespace Lib;\n\nfinal class Sink\n{\n    public static function plain(array $counts): int\n    {\n        return count($counts);\n    }\n\n    public static function pair(array $first, array $second): int\n    {\n        return count($first) + count($second);\n    }\n\n    /** @param array<string, int> $values */\n    public static function fill(array &$values): void\n    {\n    }\n\n    /**\n     * @template T of \\Countable\n     * @param T $items\n     * @return T\n     */\n    public static function counted($items)\n    {\n        return $items;\n    }\n\n    /**\n     * @template T\n     * @param T $items\n     * @return T\n     */\n    public static function kept($items)\n    {\n        return $items;\n    }\n}\n",
+    "<?php\n\nnamespace Lib;\n\nfinal class Sink\n{\n    public static function plain(array $counts): int\n    {\n        return count($counts);\n    }\n\n    public static function pair(array $first, array $second): int\n    {\n        return count($first) + count($second);\n    }\n\n    /** @param array<string, int> $values */\n    public static function fill(array &$values): void\n    {\n    }\n\n    /** @param-out list<int> $values */\n    public static function renumber(array &$values): void\n    {\n        $values = array_values($values);\n    }\n\n    /**\n     * @template T of \\Countable\n     * @param T $items\n     * @return T\n     */\n    public static function counted($items)\n    {\n        return $items;\n    }\n\n    /**\n     * @template T\n     * @param T $items\n     * @return T\n     */\n    public static function kept($items)\n    {\n        return $items;\n    }\n}\n",
 );
 
 /// Each issue of `sharp`, the file `src/Demo/Tally.sharp`, analyzed beside [`ARRAY_SINK`], `Lib\Status` and the struct
@@ -12451,6 +12452,24 @@ fn a_reference_parameter_refuses_a_value_that_may_be_several_collections() {
         array_sink_issues(sharp),
         [
             "10:19 invalid-argument `Map<string, int>|Set<string>` can't be passed to the reference parameter `values` of method `Sink.fill`, which takes a PHP array: the array plain PHP writes back doesn't say which of these collections it is."
+        ]
+    );
+}
+
+/// Spec section 12: a `Map<Status, int>` local, typed or declared with `let` from a parameter or a literal, which the
+/// local holds for its whole life as a `Map<Status, int>`, goes into a plain PHP reference parameter
+/// as its PHP array keyed by each case's backing value, and comes back as the `Map` of what plain PHP wrote there,
+/// keyed by its cases again, where plain PHP writes an array a `Map<Status, int>` takes. One that writes back a list of
+/// `int`s, which no `Map<Status, int>` is, is refused where it writes it.
+#[test]
+fn a_reference_parameter_gives_a_map_keyed_by_a_backed_enum_back_as_that_map() {
+    let sharp = "namespace Demo;\n\nimport Lib.Sink;\nimport Lib.Status;\n\nclass Tally\n{\n    public static int filled(Map<Status, int> m)\n    {\n        Map<Status, int> typed = m;\n        let inferred = m;\n        let literal = [Status.Active: 1];\n        Sink.fill(typed);\n        Sink.fill(inferred);\n        Sink.fill(literal);\n        Sink.renumber(typed);\n        return inferred.count() + literal.count();\n    }\n}\n";
+
+    assert_eq!(
+        array_sink_issues(sharp),
+        [
+            "16:23 reference-constraint-violation Potentially invalid assignment to referenced variable `typed`.",
+            "16:23 invalid-local-assignment-value Invalid assignment to `typed`: it is declared as `Map<Status, int>`.",
         ]
     );
 }

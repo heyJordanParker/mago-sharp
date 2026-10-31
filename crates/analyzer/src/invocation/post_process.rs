@@ -25,6 +25,7 @@ use mago_codex::ttype::comparator::union_comparator::can_expression_types_be_ide
 use mago_codex::ttype::comparator::union_comparator::is_contained_by;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_never;
+use mago_codex::ttype::get_php_passed_type;
 use mago_codex::ttype::template::TemplateResult;
 use mago_codex::ttype::union::TUnion;
 use mago_reporting::Annotation;
@@ -40,6 +41,7 @@ use mago_word::WordSet;
 use mago_word::concat_word;
 
 use crate::artifacts::AnalysisArtifacts;
+use crate::artifacts::get_expression_range;
 use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
@@ -360,6 +362,16 @@ where
                 continue;
             }
 
+            // The collection a crossed argument is: a local's declared type, which a `let` local takes from its first
+            // value, and the argument's own type for any other place.
+            let passed_collection = artifacts
+                .get_received_argument_types(invocation.span)
+                .is_some_and(|received| received.contains_key(&get_expression_range(argument)))
+                .then(|| {
+                    argument_id
+                        .and_then(|id| block_context.local_types.get(&id))
+                        .map_or_else(|| argument_type.clone(), |(declared, _)| declared.as_ref().clone())
+                });
             let declared_had_templates = parameter_ref
                 .get_out_type()
                 .or_else(|| parameter_ref.get_type())
@@ -394,6 +406,23 @@ where
                 && !invocation.target.get_function_like_metadata().is_some_and(|metadata| metadata.flags.is_built_in())
             {
                 new_type.widen_literals();
+            }
+
+            // Spec section 12: a `Map` or a `Set` PHP# passed as its PHP array comes back as the collection the PHP
+            // array plain PHP wrote there crosses into, as `ksort` gives a `Map<Status, int>` back keyed by its cases,
+            // where that collection takes what plain PHP wrote.
+            if let Some(collection) = passed_collection
+                && is_contained_by(
+                    context.codebase,
+                    &new_type,
+                    &get_php_passed_type(&collection, context.codebase),
+                    false,
+                    false,
+                    false,
+                    &mut ComparisonResult::new(),
+                )
+            {
+                new_type = collection;
             }
 
             new_type.set_by_reference(true);

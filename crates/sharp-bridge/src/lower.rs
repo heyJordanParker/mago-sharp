@@ -4994,14 +4994,16 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 self.node(SHARP_AST_ARRAY, ZEND_ARRAY_SYNTAX_SHORT, line, &elements)
             }
         };
-        // A local declared without a type that holds a `Map` or a `Set` takes the type of its value, as a typed local
-        // does: a PHP array plain PHP gives becomes the object here, so a method that changes it changes the local, and
-        // a read of the local needs no crossing.
-        let declared = match local.hint {
-            Some(hint) => Some(self.types.declared_type(hint).clone()),
-            None => Some(self.types.expression_type(local.value).clone())
-                .filter(|inferred| self.crossing_array(inferred).is_some()),
-        };
+        // A local declared without a type that holds a `Map` or a `Set` takes the type the checker inferred for it, its
+        // first value's made general, as a typed local takes its written one: a PHP array plain PHP gives becomes the
+        // object here, so a method that changes it changes the local, a read of the local needs no crossing, and a
+        // reference parameter gives it back as that type, a `Map<Status, int>` keyed by its cases again.
+        let declared = match (local.hint, &local.target) {
+            (Some(hint), _) => Some(self.types.declared_type(hint).clone()),
+            (None, LocalTarget::Name(name)) => self.types.inferred_local_type(name).cloned(),
+            (None, LocalTarget::Unpack(_)) => Some(self.types.expression_type(local.value).clone()),
+        }
+        .filter(|declared| local.hint.is_some() || self.crossing_array(declared).is_some());
         let value = self.crossed_value(local.value, declared.as_ref());
         if let Some(declared) = declared {
             self.local_types.insert(local.target.span().start.offset, declared);
@@ -7466,14 +7468,16 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         statements
     }
 
-    /// The backed enum `r#type` is, which a `Map` keyed by it takes plain PHP's backing values for.
+    /// The backed enum `r#type` is, or whose cases it holds, as `Stage.Open|Stage.Closed`, which a `Map` keyed by it
+    /// takes plain PHP's backing values for.
     fn backed_enum<'r#type>(&self, r#type: &'r#type TUnion) -> Option<&'r#type [u8]> {
-        let [TAtomic::Object(TObject::Enum(r#enum))] = r#type.types.as_ref() else {
-            return None;
-        };
-        let name = r#enum.name.as_bytes();
+        let mut names = r#type.types.iter().map(|atomic| match atomic {
+            TAtomic::Object(TObject::Enum(r#enum)) => Some(r#enum.name.as_bytes()),
+            _ => None,
+        });
+        let name = names.next().flatten()?;
 
-        self.types.backing_type(name).is_some().then_some(name)
+        (names.all(|other| other == Some(name)) && self.types.backing_type(name).is_some()).then_some(name)
     }
 
     /// `\App\Status::from($value)`, its value cast to a `string` for a `string`-backed enum, as PHP holds an all-digit

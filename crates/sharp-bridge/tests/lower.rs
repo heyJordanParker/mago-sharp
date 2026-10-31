@@ -14,6 +14,7 @@ use std::fmt::Write;
 use std::path::Path;
 use std::thread;
 
+use indoc::formatdoc;
 use indoc::indoc;
 
 use mago_database::file::File;
@@ -25322,6 +25323,72 @@ fn plain_php_s_array_written_into_a_php_sharp_base_s_property_crosses_as_its_typ
 /// \Lib\Calc::bump($count);
 /// ```
 ///
+/// A local declared with `let` that holds a `Map` has the one type the checker inferred for it, its first value's
+/// made general, so it goes into `ksort`'s reference parameter as a typed local does: as its PHP array, keyed by a
+/// backed enum's values, and back as the `Map` of what `ksort` wrote, each key made the `string` or the case of that
+/// type again, as a literal's own keys, `"5"` or `Status.Open|Status.Shut`, would not say.
+#[test]
+fn a_let_local_crosses_into_and_back_from_a_plain_php_reference_parameter() {
+    let code = "namespace Sharp;\n\nimport Lib.Status;\n\nclass Report\n{\n    public int run()\n    {\n        let named = [\"tea\": 2, \"5\": 1];\n        let staged = [Status.Open: 1, Status.Shut: 2];\n        global.ksort(named);\n        global.ksort(staged);\n        return named.count() + staged.count();\n    }\n}\n";
+    let status =
+        ("src/Lib/Status.php", "<?php namespace Lib; enum Status: string { case Open = 'open'; case Shut = 'shut'; }");
+    let lowered = Lowered(common::checked(
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Report.sharp",
+        code,
+        &[status],
+        lower,
+    ));
+    let body = lowered.child(lowered.method_named("run"), 2);
+
+    // Each call passes the local as its PHP array, then makes what `ksort` wrote the `Map` again: with each `int` key
+    // back as its `string`, or each backing value back as its `Lib\Status` case.
+    let statements: Vec<String> = (2..4).map(|position| lowered.render(lowered.child(body, position))).collect();
+    for (statement, (name, key, types)) in statements.iter().zip([
+        ("named", "CAST [6]", "string, int"),
+        ("staged", "STATIC_CALL\n                                  ZVAL \"Lib\\\\Status\"", "Lib.Status, int"),
+    ]) {
+        assert!(
+            statement.starts_with(&formatdoc! {r#"
+                DIM
+                  ARRAY [3]
+                    ARRAY_ELEM
+                      ASSIGN
+                        VAR
+                          ZVAL "{name}"
+                        CALL
+                          ZVAL "Sharp\\Internal\\arrayOf"
+                          ARG_LIST
+                            VAR
+                              ZVAL "{name}"
+                      null
+                    ARRAY_ELEM
+                      CALL
+                        ZVAL "ksort"
+                        ARG_LIST
+                          VAR
+                            ZVAL "{name}"
+                      null
+                    ARRAY_ELEM
+                      ASSIGN
+                        VAR
+                          ZVAL "{name}"
+                        CONDITIONAL
+                          CALL
+                            ZVAL "is_array"
+                            ARG_LIST
+                              VAR
+                                ZVAL "{name}"
+                          SHARP_TYPE_ARGS
+                            NEW
+                              ZVAL "Sharp\\Map"
+            "#}),
+            "{statement}"
+        );
+        assert!(statement.contains(&format!("ARRAY_ELEM\n                                {key}")), "{statement}");
+        assert!(statement.contains(&format!("ZVAL \"{types}\"")), "{statement}");
+    }
+}
+
 /// A typed local that holds a `Map` or a `Set` goes into a plain PHP reference parameter and comes back as the object
 /// of what plain PHP wrote there: as its PHP array first where the parameter takes an array, as `array` and an
 /// untyped one do, and as itself otherwise. A local of any other type goes in as it is.

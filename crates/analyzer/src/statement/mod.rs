@@ -481,6 +481,9 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for LocalDeclaration<'arena> {
                 && !first_value.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(array) if array.is_empty()))
             {
                 let general_type = get_general_type(first_value, context.codebase);
+                if let LocalTarget::Name(name) = &self.target {
+                    artifacts.record_declared_type(name, general_type.clone());
+                }
                 block_context.local_types.insert(variable_id, (Rc::new(general_type), self.value.span()));
             }
         }
