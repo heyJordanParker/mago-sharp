@@ -15,7 +15,7 @@ nav_section = "Guide"
 `self-update` vérifie l'archive qu'il télécharge avant d'en extraire quoi que ce soit, et refuse celle qui échoue, en laissant le binaire installé tel quel :
 
 - Avec la [CLI GitHub](https://cli.github.com/) dans votre `PATH`, il vérifie l'attestation de build de l'archive avec `gh attestation verify`, qui prouve que le workflow de release l'a construite.
-- Sans elle, il vérifie le SHA-256 de l'archive avec le `mago-<version>-sha256sums.txt` de la release, et avertit que la provenance complète demande `gh` : une somme de contrôle issue de la release ne distingue pas une release remplacée. Une release qui ne publie aucun fichier de sommes, comme 0.5.0 et les précédentes, ne s'installe qu'avec `gh`.
+- Sans elle, il vérifie le SHA-256 de l'archive avec le `mago-<version>-sha256sums.txt` de la release, et avertit que la provenance complète demande `gh` : une somme de contrôle issue de la release ne distingue pas une release remplacée. Une release plus ancienne qui ne publie aucun fichier de sommes ne s'installe qu'avec `gh`.
 
 ## Flux courants
 

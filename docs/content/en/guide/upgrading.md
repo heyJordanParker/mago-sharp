@@ -15,7 +15,7 @@ nav_section = "Guide"
 `self-update` verifies the archive it downloads before it extracts anything from it, and refuses one that fails, leaving the installed binary as it was:
 
 - With the [GitHub CLI](https://cli.github.com/) on your `PATH`, it checks the archive's build attestation with `gh attestation verify`, which proves the release workflow built it.
-- Without it, it checks the archive's SHA-256 against the release's `mago-<version>-sha256sums.txt`, and warns that full provenance needs `gh`: a checksum from the release cannot tell a replaced release apart. A release that publishes no sums file, such as 0.5.0 and earlier, installs only with `gh`.
+- Without it, it checks the archive's SHA-256 against the release's `mago-<version>-sha256sums.txt`, and warns that full provenance needs `gh`: a checksum from the release cannot tell a replaced release apart. An older release that publishes no sums file installs only with `gh`.
 
 ## Common flows
 
