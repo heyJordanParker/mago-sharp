@@ -8610,11 +8610,15 @@ fn a_write_into_a_map_a_hooked_property_holds_runs_its_value_before_it_reads_the
     );
 
     assert!(
-        body.starts_with("STMT_LIST\n  STMT_LIST\n    ASSIGN\n      VAR\n        ZVAL \"value#1\"\n      METHOD_CALL\n"),
+        body.starts_with(
+            "STMT_LIST\n  STMT_LIST\n    ASSIGN\n      VAR\n        ZVAL \"value#1\"\n      METHOD_CALL\n"
+        ),
         "{body}"
     );
     assert!(
-        body.contains("    ASSIGN\n      VAR\n        ZVAL \"receiver#2\"\n      PROP\n        VAR\n          ZVAL \"this\"\n"),
+        body.contains(
+            "    ASSIGN\n      VAR\n        ZVAL \"receiver#2\"\n      PROP\n        VAR\n          ZVAL \"this\"\n"
+        ),
         "{body}"
     );
 }
@@ -9823,7 +9827,9 @@ fn a_change_runs_its_values_before_it_takes_its_place() {
 fn a_change_holds_only_a_value_that_runs_code() {
     let code = "namespace App;\n\nclass Report\n{\n    public Map<int, int>? maybe { get; set; } = null;\n\n    public void run(List<Map<string, int>> rows, List<List<int>> grid, List<int> numbers)\n    {\n        rows[0] = [\"a\": 1];\n        grid[0] = [...numbers];\n        this.maybe?.remove(this.at(4));\n    }\n\n    private int at(int n) => n;\n}\n";
 
-    assert_eq!(Lowered::new(code).body(), indoc! {r#"
+    assert_eq!(
+        Lowered::new(code).body(),
+        indoc! {r#"
             STMT_LIST
               ASSIGN
                 VAR
@@ -9977,7 +9983,8 @@ fn a_change_holds_only_a_value_that_runs_code() {
                             ZVAL "argument#1"
                       null
                   ZVAL 1
-    "#});
+    "#}
+    );
 }
 
 /// ```php
