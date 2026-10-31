@@ -53,7 +53,8 @@ use crate::expression::array_access::check_change_through_index;
 use crate::expression::assignment::PropertyWriteKind;
 use crate::expression::assignment::property_assignment;
 use crate::expression::assignment::static_property_assignment;
-use crate::resolver::extension::list_member;
+use crate::resolver::extension::CollectionKind;
+use crate::resolver::extension::collection_member;
 use crate::resolver::method::get_declared_collection;
 use crate::resolver::method::get_declared_type;
 use crate::resolver::method::with_declared_kinds;
@@ -181,20 +182,23 @@ where
         &mut current_type,
     )?;
 
-    // Spec section 12: `list[i] = v` runs the standard library's `set` of a `List`, so a project without the library
-    // has it no more than any other member of a `List`.
+    // Spec section 12: `list[i] = v` and `map[key] = value` run the standard library's `set` of a `List` and of a `Map`,
+    // so a project without the library has it no more than any other member of a collection.
     if context.dialect.is_sharp()
         && let ArrayTarget::Access(access) = array_target
         && let Some(written) = artifacts.get_expression_type(access.array)
-        && written.types.iter().all(|atomic| matches!(atomic, TAtomic::Array(TArray::List(_))))
-        && list_member(context.codebase, b"set").is_none()
+        && let Some((kind, write)) = indexed_collection(written)
+        && collection_member(context.codebase, b"set", kind).is_none()
     {
-        let list = display_sharp_type(context, written);
+        let collection = display_sharp_type(context, written);
         context.collector.report_with_code(
             IssueCode::NonExistentMethod,
-            Issue::error(format!("Method `set`, which `list[i] = v` runs, does not exist on `{list}`."))
+            Issue::error(format!("Method `set`, which `{write}` runs, does not exist on `{collection}`."))
                 .with_annotation(Annotation::primary(access.span()).with_message("This index write runs `set`."))
-                .with_help("Install the standard library, heyjordanparker/php-sharp-composer, which declares the members of a `List`."),
+                .with_help(format!(
+                    "Install the standard library, heyjordanparker/php-sharp-composer, which declares the members of a `{}`.",
+                    kind.name()
+                )),
         );
     }
 
@@ -1183,4 +1187,17 @@ where
     let error =
         ParseError::unexpected_in_sharp(left_bracket.file_id, &context.source_file.contents, left_bracket.start.offset);
     context.collector.report(Issue::from(&error));
+}
+
+/// The kind every part of `written` is when it is a `List` or a `Map`, whose index write runs the standard library's
+/// `set`, and the write as code writes it.
+fn indexed_collection(written: &TUnion) -> Option<(CollectionKind, &'static str)> {
+    let kind = CollectionKind::of(written.types.first()?)?;
+    let write = match kind {
+        CollectionKind::List => "list[i] = v",
+        CollectionKind::Map => "map[key] = value",
+        CollectionKind::Set | CollectionKind::Iterable => return None,
+    };
+
+    written.types.iter().all(|atomic| CollectionKind::of(atomic) == Some(kind)).then_some((kind, write))
 }

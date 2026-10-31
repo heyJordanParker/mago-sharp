@@ -701,27 +701,29 @@ const ZEND_LANGUAGE_PARSER_H: &str = "  enum zendtokentype
   };
 ";
 
+/// The paths in the repository of the generator and of the bridge sources whose layouts it hashes.
+const GENERATOR: &str = "scripts/regen-sharp-kinds.php";
+const LIB: &str = "crates/sharp-bridge/src/lib.rs";
+const UNIT: &str = "crates/sharp-bridge/src/unit.rs";
+
 /// The generator given only `zend_ast`, run in a copy of the repository's script and bridge sources after `edit`
-/// changes one of those sources. The copy lives as long as the returned folder.
+/// changes one of those files, named by its path in the repository. The copy lives as long as the returned folder.
 fn generator(zend_ast: &str, edit: Option<(&str, &str, &str)>) -> (tempfile::TempDir, Command) {
     let root = tempfile::tempdir().unwrap();
-    let sources = root.path().join("crates/sharp-bridge/src");
     fs::create_dir_all(root.path().join("scripts")).unwrap();
-    fs::create_dir_all(&sources).unwrap();
-    fs::copy(repository().join("scripts/regen-sharp-kinds.php"), root.path().join("scripts/regen-sharp-kinds.php"))
-        .unwrap();
-    for file in ["lib.rs", "unit.rs"] {
-        fs::copy(repository().join("crates/sharp-bridge/src").join(file), sources.join(file)).unwrap();
+    fs::create_dir_all(root.path().join("crates/sharp-bridge/src")).unwrap();
+    for file in [GENERATOR, LIB, UNIT] {
+        fs::copy(repository().join(file), root.path().join(file)).unwrap();
     }
     if let Some((file, from, to)) = edit {
-        let source = fs::read_to_string(sources.join(file)).unwrap();
+        let source = fs::read_to_string(root.path().join(file)).unwrap();
         assert!(source.contains(from), "{file} contains `{from}`");
-        fs::write(sources.join(file), source.replacen(from, to, 1)).unwrap();
+        fs::write(root.path().join(file), source.replacen(from, to, 1)).unwrap();
     }
     fs::write(root.path().join("zend_ast.h"), zend_ast).unwrap();
 
     let mut command = Command::new("php");
-    command.arg(root.path().join("scripts/regen-sharp-kinds.php")).arg(root.path().join("zend_ast.h"));
+    command.arg(root.path().join(GENERATOR)).arg(root.path().join("zend_ast.h"));
 
     (root, command)
 }
@@ -754,7 +756,7 @@ fn the_unit_abi_changes_with_the_kind_table_the_tokens_and_the_layouts() {
     let base = generated_abi(ZEND_AST_H, ZEND_LANGUAGE_PARSER_H, None);
     assert_eq!(generated_abi(ZEND_AST_H, ZEND_LANGUAGE_PARSER_H, None), base);
     assert_eq!(
-        generated_abi(ZEND_AST_H, ZEND_LANGUAGE_PARSER_H, Some(("lib.rs", "/// First line.", "/// The first line."))),
+        generated_abi(ZEND_AST_H, ZEND_LANGUAGE_PARSER_H, Some((LIB, "/// First line.", "/// The first line."))),
         base,
         "a comment is not layout"
     );
@@ -776,34 +778,38 @@ fn the_unit_abi_changes_with_the_kind_table_the_tokens_and_the_layouts() {
         ("a token", generated_abi(ZEND_AST_H, &ZEND_LANGUAGE_PARSER_H.replace("T_FILE = 347", "T_FILE = 348"), None)),
         (
             "a sharp_node field",
-            generated_abi(ZEND_AST_H, ZEND_LANGUAGE_PARSER_H, Some(("lib.rs", "pub line: u32,", "pub line: u64,"))),
+            generated_abi(ZEND_AST_H, ZEND_LANGUAGE_PARSER_H, Some((LIB, "pub line: u32,", "pub line: u64,"))),
         ),
         (
             "a sharp_value case",
             generated_abi(
                 ZEND_AST_H,
                 ZEND_LANGUAGE_PARSER_H,
-                Some(("lib.rs", "SHARP_LONG,", "SHARP_LONG,\n    SHARP_ARRAY,")),
+                Some((LIB, "SHARP_LONG,", "SHARP_LONG,\n    SHARP_ARRAY,")),
             ),
         ),
         (
             "a sharp_str field",
-            generated_abi(ZEND_AST_H, ZEND_LANGUAGE_PARSER_H, Some(("lib.rs", "pub len: u32,", "pub len: u64,"))),
+            generated_abi(ZEND_AST_H, ZEND_LANGUAGE_PARSER_H, Some((LIB, "pub len: u32,", "pub len: u64,"))),
         ),
         (
             "a header field",
             generated_abi(
                 ZEND_AST_H,
                 ZEND_LANGUAGE_PARSER_H,
-                Some(("unit.rs", "pub texts_size: u32,", "pub texts_size: u64,")),
+                Some((UNIT, "pub texts_size: u32,", "pub texts_size: u64,")),
             ),
         ),
         (
             "a sharp_input field",
+            generated_abi(ZEND_AST_H, ZEND_LANGUAGE_PARSER_H, Some((UNIT, "pub mtime_ns: i64,", "pub mtime_ns: u64,"))),
+        ),
+        (
+            "the revision",
             generated_abi(
                 ZEND_AST_H,
                 ZEND_LANGUAGE_PARSER_H,
-                Some(("unit.rs", "pub mtime_ns: i64,", "pub mtime_ns: u64,")),
+                Some((GENERATOR, "const REVISION = 1;", "const REVISION = 2;")),
             ),
         ),
     ] {

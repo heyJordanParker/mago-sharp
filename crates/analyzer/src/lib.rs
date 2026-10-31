@@ -53,11 +53,14 @@ pub mod telemetry;
 pub use crate::context::assertion::CodebasePatternNames;
 /// The engine's bridge calls the operator each PHP# operation runs, so both choose it with this rule.
 pub use crate::expression::binary::utils::chosen_operator;
-/// The engine's bridge lowers a collection's members as the analyzer resolves them, so both know them by this rule.
-pub use crate::resolver::extension::is_collection_member;
+/// The engine's bridge tests the kind a value holds, and runs that kind's members, by the kinds the analyzer knows.
+pub use crate::resolver::extension::CollectionKind;
 /// The engine's bridge lowers an operation on a `List`, as `list[i] = v`, through the standard library's member this
 /// finds.
-pub use crate::resolver::extension::list_member;
+pub use crate::resolver::extension::collection_member;
+/// The engine's bridge lowers a collection's members as the analyzer resolves them, so both know them by this rule.
+pub use crate::resolver::extension::collection_member_kind;
+pub use crate::resolver::extension::is_collection_member;
 
 mod analyzable;
 mod assertion;

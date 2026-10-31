@@ -57,7 +57,7 @@ use mago_word::ascii_lowercase_word;
 use mago_word::word;
 
 use crate::context::Context;
-use crate::resolver::extension::is_collection_member;
+use crate::resolver::extension::collection_member_kind;
 use crate::utils::quoted_source;
 use crate::visibility::display_namespace;
 use crate::visibility::list_refusing;
@@ -513,21 +513,6 @@ where
     A: Arena,
 {
     context.codebase.get_function(name.as_bytes()).map_or(name, |m| m.original_name)
-}
-
-/// Returns the PHP# collection type, as in `Iterable<int>`, that `object` stands for when it is the class
-/// [`sharp_collection_name`] names. The analyzer checks a method call on an `Iterable` against that class, and a message
-/// names the type the code wrote instead.
-#[must_use]
-pub(crate) fn display_sharp_collection<A>(context: &Context<'_, '_, A>, object: &TObject) -> Option<String>
-where
-    A: Arena,
-{
-    let collection = sharp_collection_name(object)?;
-    let parameters = object.get_type_parameters().unwrap_or_default();
-    let parameters = parameters.iter().map(|parameter| display_sharp_type(context, parameter)).collect::<Vec<_>>();
-
-    Some(format!("{collection}<{}>", parameters.join(", ")))
 }
 
 /// The name an issue gives the PHP# extension member `metadata`, spec section 26: the member on the type it extends,
@@ -1049,40 +1034,22 @@ pub(crate) fn sharp_code_class_name(
     sharp_import_alias(codebase, imported_names, scope, name).unwrap_or_else(|| short_name(name))
 }
 
-/// Returns `Iterable` when `object` is `Sharp\Internal\IterableMethods`.
-#[must_use]
-pub(crate) fn sharp_collection_name(object: &TObject) -> Option<&'static str> {
-    object.get_name()?.as_bytes().eq_ignore_ascii_case(b"Sharp\\Internal\\IterableMethods").then_some("Iterable")
-}
-
-/// Returns `List`, `Map` or `Set` when `metadata`, a member of the static class `class`, is the standard library's member
-/// of that collection, spec section 12, as `ListMembers.add` is a `List`'s, so a message writes it `List.add`.
-#[must_use]
-pub(crate) fn collection_member_kind(class: Word, metadata: &FunctionLikeMetadata) -> Option<&'static str> {
-    if !is_collection_member(class, metadata) {
-        return None;
-    }
-
-    match metadata.parameters.first()?.get_type_metadata()?.type_union.types.first()? {
-        TAtomic::Array(TArray::List(_)) => Some("List"),
-        TAtomic::Array(TArray::Keyed(_)) => Some("Map"),
-        TAtomic::Array(TArray::Set(_)) => Some("Set"),
-        _ => unreachable!("a collection member's receiver is a collection"),
-    }
-}
-
-/// The type arguments of the collection `receiver` holds, as an issue names them: a `List`'s and a `Set`'s element type,
-/// and a `Map`'s key and value types. A PHP# element type is never narrower than `int` or `string`, so a literal the
-/// analyzer knows widens to it.
+/// The type arguments of the collection `receiver` holds, as an issue names them: a `List`'s, a `Set`'s and an
+/// `Iterable`'s element type, and a `Map`'s key and value types. A PHP# element type is never narrower than `int` or
+/// `string`, so a literal the analyzer knows widens to it.
 #[must_use]
 pub(crate) fn collection_type_parameters(receiver: &TUnion, codebase: &CodebaseMetadata) -> Vec<TUnion> {
     let (mut keys, mut values): (Option<TUnion>, Option<TUnion>) = (None, None);
     let mut is_map = false;
-    let arrays =
-        receiver.types.iter().filter_map(|atomic| if let TAtomic::Array(array) = atomic { Some(array) } else { None });
-    for array in arrays {
-        is_map |= matches!(array, TArray::Keyed(_));
-        let (key, value) = get_array_parameters(array, codebase);
+    for atomic in receiver.types.iter() {
+        let (key, value) = match atomic {
+            TAtomic::Array(array) => {
+                is_map |= matches!(array, TArray::Keyed(_));
+                get_array_parameters(array, codebase)
+            }
+            TAtomic::Iterable(iterable) => (iterable.get_key_type().clone(), iterable.get_value_type().clone()),
+            _ => unreachable!("a collection member's receiver holds only its collections"),
+        };
         keys = Some(add_optional_union_type(key, keys.as_ref(), codebase));
         values = Some(add_optional_union_type(value, values.as_ref(), codebase));
     }
@@ -1107,7 +1074,7 @@ pub(crate) fn display_collection_member<A>(
 where
     A: Arena,
 {
-    let kind = collection_member_kind(class, metadata)?;
+    let kind = collection_member_kind(class, metadata)?.name();
     let parameters: Vec<String> = type_parameters.iter().map(|parameter| display_type(context, parameter)).collect();
 
     Some(format!("{kind}<{}>.{}", parameters.join(", "), metadata.original_name))

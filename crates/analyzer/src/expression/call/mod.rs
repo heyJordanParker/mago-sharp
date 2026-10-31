@@ -4,10 +4,12 @@ use std::sync::Arc;
 use mago_algebra::assertion_set::AssertionSet;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::identifier::method::MethodIdentifier;
+use mago_codex::metadata::parameter::FunctionLikeParameterMetadata;
 use mago_codex::ttype::TType;
 use mago_codex::ttype::add_optional_union_type;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
+use mago_codex::ttype::atomic::callable::TCallable;
 use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::object::named::TNamedObject;
 use mago_codex::ttype::comparator::ComparisonResult;
@@ -48,6 +50,7 @@ use crate::error::AnalysisError;
 use crate::expression::access::report_full_name;
 use crate::expression::access::report_member_of_mixed_kinds;
 use crate::expression::binary::comparison::check_element_equality;
+use crate::expression::binary::comparison::check_ordered_key;
 use crate::invocation::Invocation;
 use crate::invocation::InvocationArgumentsSource;
 use crate::invocation::InvocationTarget;
@@ -60,7 +63,7 @@ use crate::invocation::template_result::seed_extension_type_arguments;
 use crate::plugin::hook::NamedCall;
 use crate::plugin::hook::StaticCall;
 use crate::reconciler::assertion_reconciler;
-use crate::utils::names::collection_member_kind;
+use crate::resolver::extension::is_collection_member;
 use crate::utils::names::collection_type_parameters;
 use crate::utils::names::display_function_like_identifier;
 use crate::utils::quoted_source;
@@ -506,14 +509,13 @@ where
         context.codebase.get_class_like(class.as_bytes()).expect("an extension's class is a class-like");
     // A collection's member is the collection's own, spec section 12, so its class carries the receiver's element
     // types, which an issue names it with, as `List<int>.getOrNull`.
-    let class_type =
-        match artifacts.get_expression_type(receiver).filter(|_| collection_member_kind(class, metadata).is_some()) {
-            Some(receiver_type) => StaticClassType::Object(TObject::Named(TNamedObject::new_with_type_parameters(
-                class,
-                Some(collection_type_parameters(&receiver_type.to_non_nullable(), context.codebase)),
-            ))),
-            None => StaticClassType::Name(class),
-        };
+    let class_type = match artifacts.get_expression_type(receiver).filter(|_| is_collection_member(class, metadata)) {
+        Some(receiver_type) => StaticClassType::Object(TObject::Named(TNamedObject::new_with_type_parameters(
+            class,
+            Some(collection_type_parameters(&receiver_type.to_non_nullable(), context.codebase)),
+        ))),
+        None => StaticClassType::Name(class),
+    };
     let target = InvocationTarget::FunctionLike {
         identifier: FunctionLikeIdentifier::Method(class, extension.get_method_name()),
         metadata,
@@ -558,10 +560,20 @@ where
     // no element is refused by its argument check. A `Map` and a `Set` find a key by its `hash()` first, so a key of
     // another type is never compared, and a search is refused only where a key declaration is, by `is_key_type`.
     for (parameter, argument) in metadata.parameters.iter().skip(1).zip(&arguments.arguments) {
-        if parameter
-            .attributes
-            .iter()
-            .any(|attribute| attribute.name.as_bytes().eq_ignore_ascii_case(COMPARED_BY_EQUALITY))
+        // A collection member orders by the keys the function in a parameter marked `ComparedByOrder` returns, as
+        // `sortedBy` does, so a key type `<` cannot order is refused.
+        if is_marked(parameter, COMPARED_BY_ORDER)
+            && !argument.is_unpacked()
+            && let Some(TAtomic::Callable(TCallable::Signature(function))) = artifacts
+                .get_expression_type(argument.value())
+                .filter(|function| function.is_single())
+                .map(TUnion::get_single)
+            && let Some(key_type) = function.get_return_type()
+        {
+            let key_type = key_type.clone();
+            check_ordered_key(context, &metadata.original_name.as_str_lossy(), argument.value(), &key_type);
+        }
+        if is_marked(parameter, COMPARED_BY_EQUALITY)
             && let Argument::Positional(_) = argument
             && let Some(value_type) = artifacts.get_expression_type(argument.value())
             && let Some(receiver_type) = artifacts.get_expression_type(receiver)
@@ -613,6 +625,14 @@ where
 
 /// The prelude attribute that marks a collection member's parameter compared with the elements by `==`.
 const COMPARED_BY_EQUALITY: &[u8] = b"Sharp\\Internal\\ComparedByEquality";
+
+/// The prelude attribute that marks a collection member's parameter whose function gives the keys it orders by.
+const COMPARED_BY_ORDER: &[u8] = b"Sharp\\Internal\\ComparedByOrder";
+
+/// Whether `parameter` carries the prelude attribute `mark`.
+fn is_marked(parameter: &FunctionLikeParameterMetadata, mark: &[u8]) -> bool {
+    parameter.attributes.iter().any(|attribute| attribute.name.as_bytes().eq_ignore_ascii_case(mark))
+}
 
 /// Applies active method call assertions to narrow the return type.
 ///

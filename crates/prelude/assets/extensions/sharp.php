@@ -271,6 +271,13 @@ namespace Sharp\Internal;
 final class ComparedByEquality {}
 
 /**
+ * Marks the parameter of a standard library collection member whose function gives the keys the member orders the
+ * elements by with `<=>`, as `sortedBy`'s, so the checker refuses a key type `<` cannot order.
+ */
+#[\Attribute(\Attribute::TARGET_PARAMETER)]
+final class ComparedByOrder {}
+
+/**
  * Marks the parameter of an engine function that makes a `Map` or a `Set`, which takes the type arguments of the
  * collection the call gives, as `entries`'s, so the bridge passes them from the type the checker gave the call.
  */
@@ -349,41 +356,57 @@ final class LeanFunction
 }
 
 /**
- * The lazy operations of a PHP# `Iterable<T>`. The analyzer checks a call on an iterable against them, and the engine
- * runs them on `Sharp\Sequence`. `filter`, `map` and `take` read nothing until `toList()` or a loop reads the result.
+ * The engine's lazy `Iterable<T>`, which the standard library's `IterableMembers` run. `filter`, `map` and `take` read
+ * nothing until `toList()` or a loop reads the result.
  *
  * @template T
+ *
+ * @implements \IteratorAggregate<mixed, T>
  */
-final class IterableMethods
+final class Sequence implements \IteratorAggregate
 {
+    private function __construct() {}
+
+    /**
+     * @template S
+     *
+     * @param iterable<S> $source
+     *
+     * @return Sequence<S> the elements of `$source`, read only as the result is read, or `$source` itself when it is a
+     *   `Sequence`.
+     *
+     * @pure
+     */
+    public static function from(iterable $source): Sequence {}
+
     /**
      * @param \Closure(T): bool $predicate
      *
-     * @return iterable<T> the elements `$predicate` keeps, in order.
+     * @return Sequence<T> the elements `$predicate` keeps, in order.
      *
      * @mutation-free
      */
-    public function filter(\Closure $predicate): iterable {}
+    public function filter(\Closure $predicate): Sequence {}
 
     /**
      * @template R
      *
      * @param \Closure(T): R $transform
      *
-     * @return iterable<R> what `$transform` gives for each element, in order.
+     * @return Sequence<R> what `$transform` gives for each element, in order.
      *
      * @mutation-free
      */
-    public function map(\Closure $transform): iterable {}
+    public function map(\Closure $transform): Sequence {}
 
     /**
      * A negative `$count` throws `ValueError`.
      *
-     * @return iterable<T> the first `$count` elements, reading no element after them.
+     * @return Sequence<T> the first `$count` elements, reading no element after them.
      *
      * @mutation-free
      */
-    public function take(int $count): iterable {}
+    public function take(int $count): Sequence {}
 
     /**
      * @return list<T> every element, read now and numbered from 0.
@@ -391,6 +414,11 @@ final class IterableMethods
      * @mutation-free
      */
     public function toList(): array {}
+
+    /**
+     * @return \Iterator<mixed, T>
+     */
+    public function getIterator(): \Iterator {}
 }
 
 /**
@@ -730,6 +758,16 @@ function removeKey(\Sharp\Map|\Sharp\Set &$table, mixed $key): bool {}
  * @return bool whether the table did not hold `$key`.
  */
 function addKey(\Sharp\Set &$table, mixed $key): bool {}
+
+/**
+ * Inserts `$key` with `$value`, or replaces the value of an equal key, as `map[key] = value` does.
+ *
+ * @template C of iterable
+ *
+ * @param C $map
+ * @param-out C $map
+ */
+function put(\Sharp\Map &$map, mixed $key, mixed $value): void {}
 
 /**
  * @template K

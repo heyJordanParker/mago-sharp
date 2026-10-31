@@ -1,13 +1,15 @@
 use std::sync::Arc;
 
 use mago_analyzer::CodebasePatternNames;
+use mago_analyzer::CollectionKind;
 use mago_analyzer::artifacts::AnalysisArtifacts;
 use mago_analyzer::artifacts::CallTarget;
 use mago_analyzer::artifacts::MemberCall;
 use mago_analyzer::chosen_operator;
+use mago_analyzer::collection_member;
+use mago_analyzer::collection_member_kind;
 use mago_analyzer::effects::Effects;
 use mago_analyzer::is_collection_member;
-use mago_analyzer::list_member;
 use mago_codex::defaults_trait_name;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::identifier::method::MethodIdentifier;
@@ -108,15 +110,17 @@ pub struct Declaration {
 /// The members a method call runs on a value that may hold more than one kind of collection, or a collection or an
 /// object, spec section 12, as [`Types::members_by_kind`] gives them.
 pub(crate) struct MembersByKind<'analysis> {
-    /// Each kind's standard library member, in the order the analysis resolved them, a `List`'s first.
+    /// Each kind's standard library member, in [`CollectionKind`]'s order, as the analysis resolved them.
     pub(crate) members: Vec<KindMember<'analysis>>,
-    /// Whether an object the value may hold runs its own method of that name.
-    pub(crate) object: bool,
+    /// The classes whose method of that name an object the value may hold runs, its own, none when it holds no object.
+    pub(crate) objects: Vec<Word>,
 }
 
 /// One kind's standard library member of a [`MembersByKind`].
 pub(crate) struct KindMember<'analysis> {
-    /// The class of the object the kind runs as, `None` for a `List`, which runs as a PHP array.
+    pub(crate) kind: CollectionKind,
+    /// The class of the object a `Map` or a `Set` runs as, which tells it apart. None for a `List`, which runs as a PHP
+    /// array, and for an `Iterable`.
     pub(crate) runs_as: Option<Word>,
     pub(crate) declaration: Declaration,
     /// The type arguments and the type the member's call has.
@@ -476,7 +480,7 @@ impl<'analysis> Types<'analysis> {
 
     /// The type arguments the generic method call at `span` gives the method, as [`Self::type_arguments`] writes those
     /// of a `new`. None when the method declares no type parameter, or a built-in class declares it, whose method never
-    /// reads them, as the prelude's `Sharp\Internal\IterableMethods` declares an `Iterable`'s. A method of any project
+    /// reads them, as the prelude's `Sharp\Internal\Sequence` declares its `map`. A method of any project
     /// class, PHP# or plain PHP, may run a PHP# method that overrides or implements it,
     /// so a call through a plain PHP `@template` interface or parent carries them, and a plain PHP method ignores them.
     /// The class that declares the method decides, so `super.m()` carries them through a plain PHP parent that inherits
@@ -1399,13 +1403,14 @@ impl<'analysis> Types<'analysis> {
         })
     }
 
-    /// The standard library's member `name` of a `List`, which an operation on a List runs, as `list[i] = v` runs `set`.
-    pub(crate) fn list_operation(&self, name: &[u8]) -> Declaration {
-        let Some((class, member)) = list_member(self.codebase, name)
+    /// The standard library's member `name` of the collection `kind`, a `List` or a `Map`, which an operation on it runs,
+    /// as `list[i] = v` and `map[key] = value` run `set`.
+    pub(crate) fn collection_operation(&self, name: &[u8], kind: CollectionKind) -> Declaration {
+        let Some((class, member)) = collection_member(self.codebase, name, kind)
             .and_then(|method| Some((method.get_class_name(), self.codebase.get_method_by_id(method)?)))
         else {
             unreachable!(
-                "the analyzer refuses an operation of a `List` without the standard library's `{}`",
+                "the analyzer refuses an operation of a collection without the standard library's `{}`",
                 String::from_utf8_lossy(name)
             )
         };
@@ -1422,7 +1427,7 @@ impl<'analysis> Types<'analysis> {
     /// collection or an object, spec section 12, as the analysis resolved them. None for a call that runs one member, or
     /// no collection's.
     pub(crate) fn members_by_kind(&self, call: &Expression) -> Option<MembersByKind<'_>> {
-        let (mut members, mut object) = (Vec::new(), false);
+        let (mut members, mut objects) = (Vec::new(), Vec::new());
         for callee in self.artifacts.get_callees(call) {
             let CallTarget::FunctionLike { callee: callee @ FunctionLikeIdentifier::Method(class, method), .. } =
                 callee
@@ -1431,18 +1436,24 @@ impl<'analysis> Types<'analysis> {
             };
             let metadata = self.codebase.get_method(class.as_bytes(), method.as_bytes())?;
             if !metadata.flags.is_extension_method() {
-                object = true;
+                let class = self.class_declaration(class.as_bytes()).name;
+                if !objects.contains(&class) {
+                    objects.push(class);
+                }
                 continue;
             }
-            let receiver = metadata.parameters.first()?.get_type_metadata()?.type_union.get_single_array()?;
-            let runs_as = match get_collection_object(receiver, self.codebase) {
-                Some(TAtomic::Object(object)) => object.get_name(),
-                _ => None,
-            };
+            let kind = collection_member_kind(*class, metadata)?;
+            let receiver = &metadata.parameters.first()?.get_type_metadata()?.type_union;
+            let runs_as =
+                match receiver.get_single_array().and_then(|array| get_collection_object(array, self.codebase)) {
+                    Some(TAtomic::Object(object)) => object.get_name(),
+                    _ => None,
+                };
             let Some(member_call) = self.artifacts.get_member_call(call, callee) else {
                 unreachable!("the analysis records each member of a call that runs several");
             };
             members.push(KindMember {
+                kind,
                 runs_as,
                 declaration: Declaration {
                     kind: DeclarationKind::StaticMethod,
@@ -1454,7 +1465,8 @@ impl<'analysis> Types<'analysis> {
             });
         }
 
-        (!members.is_empty() && members.len() + usize::from(object) > 1).then_some(MembersByKind { members, object })
+        (!members.is_empty() && members.len() + usize::from(!objects.is_empty()) > 1)
+            .then_some(MembersByKind { members, objects })
     }
 
     /// The slot an inline form leaves for each parameter of the engine function `function`, which `written` calls, that
@@ -1736,16 +1748,6 @@ impl<'analysis> Types<'analysis> {
         element_type.unwrap_or_else(|| unreachable!("the checker types the value as a collection"))
     }
 
-    /// Whether the method call `call`, null-safe or not, runs a lazy operation of a PHP# `Iterable<T>`, spec section 12,
-    /// which `Sharp\Internal\IterableMethods` declares and the engine's `Sharp\Sequence` runs.
-    pub(crate) fn is_lazy_operation(&self, call: &Expression) -> bool {
-        matches!(
-            self.artifacts.get_callees(call).next(),
-            Some(CallTarget::FunctionLike { callee: FunctionLikeIdentifier::Method(class, _), .. })
-                if class.as_bytes().eq_ignore_ascii_case(b"Sharp\\Internal\\IterableMethods")
-        )
-    }
-
     /// The plain PHP function the method call `call` runs, as `Pdf.render(html)` calls one, spec section 23, with the
     /// name its declaration writes, as `abort` for Laravel's `abort()` of PHP's root namespace in `Foundation.abort(404)`.
     /// None for a call of a method.
@@ -1953,7 +1955,7 @@ impl<'analysis> Types<'analysis> {
     }
 
     /// Whether the property `property` of an object of `r#type` has hooks in a class the object can be. PHP gives no
-    /// reference to a hooked property, so a write into the `Map` it holds cannot go through one.
+    /// reference to a hooked property, so a write into the PHP array one plain PHP declares holds cannot go through one.
     pub(crate) fn property_has_hooks(&self, r#type: &TUnion, property: &[u8]) -> bool {
         let variable = [b"$", property].concat();
 

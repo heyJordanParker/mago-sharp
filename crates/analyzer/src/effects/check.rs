@@ -14,7 +14,6 @@ use mago_codex::ttype::TType;
 use mago_codex::ttype::TypeRef;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::callable::TCallable;
-use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::union::TUnion;
 use mago_names::binding::Binding;
 use mago_names::binding::MethodParts;
@@ -67,8 +66,8 @@ use crate::effects::events;
 use crate::effects::holding_declaration;
 use crate::effects::is_effect;
 use crate::effects::summary::parameter_index;
+use crate::resolver::extension::collection_member_kind;
 use crate::statement::function_like::FunctionLikeBody;
-use crate::utils::names::collection_member_kind;
 use crate::utils::names::display_function_like_identifier;
 use crate::utils::names::display_member;
 use crate::utils::names::display_sharp_parameter_type;
@@ -78,7 +77,6 @@ use crate::utils::names::is_sharp_namespace;
 use crate::utils::names::namespace_function;
 use crate::utils::names::sharp_class_like_name;
 use crate::utils::names::sharp_code_class_name;
-use crate::utils::names::sharp_collection_name;
 use crate::utils::names::sharp_effect_name;
 use crate::utils::names::sharp_missing_imports;
 
@@ -1062,12 +1060,11 @@ where
             CallTarget::FunctionLike { callee: callee @ FunctionLikeIdentifier::Method(class, method), .. } => {
                 let metadata = codebase.get_method(class.as_bytes(), method.as_bytes());
                 // A collection's method is written on its PHP# type, as `List.add`.
-                let collection = sharp_collection_name(&TObject::new_named(*class))
-                    .or_else(|| metadata.and_then(|metadata| collection_member_kind(*class, metadata)));
+                let collection = metadata.and_then(|metadata| collection_member_kind(*class, metadata));
                 let callee = collection.map_or_else(
                     || display_function_like_identifier(self.context, callee),
                     |collection| {
-                        display_sharp_member(collection, metadata.map_or(*method, |method| method.original_name))
+                        display_sharp_member(collection.name(), metadata.map_or(*method, |method| method.original_name))
                     },
                 );
 

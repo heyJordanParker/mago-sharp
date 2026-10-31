@@ -513,6 +513,7 @@ fn the_binder_knows_every_changing_collection_method() {
             "ListMembers.sharp.removeLast",
             "ListMembers.sharp.set",
             "MapMembers.sharp.remove",
+            "MapMembers.sharp.set",
             "SetMembers.sharp.add",
             "SetMembers.sharp.clear",
             "SetMembers.sharp.remove",
@@ -5299,6 +5300,40 @@ fn sorted_by_on_a_map_a_set_and_a_chain_refuses_a_key_with_no_order() {
     );
 }
 
+/// Spec section 12: a collection member orders by the keys the function in a parameter marked `ComparedByOrder` returns,
+/// as `sortedBy` does, so a library-style extension that marks one refuses a key with no order, named for the member.
+#[test]
+fn a_member_compared_by_order_refuses_a_key_with_no_order() {
+    let shelf = (
+        "src/Lib/ShelfMembers.sharp",
+        "namespace Lib;\n\nimport Sharp.Internal.ComparedByOrder;\n\npublic static class ShelfMembers\n{\n    extension<T>(List<T> items)\n    {\n        public List<T> rankedBy<TKey>([ComparedByOrder] Function<TKey(T)> selector) => items.sortedBy(selector);\n    }\n}\n",
+    );
+    let sharp = "namespace Demo;\n\nimport Lib.ShelfMembers;\nimport Lib.Status;\n\nclass Report\n{\n    public List<Status> a(List<Status> statuses) => statuses.rankedBy(s => s);\n\n    public List<int> b(List<int> numbers) => numbers.rankedBy(n => -n);\n}\n";
+
+    assert_eq!(
+        worded(("src/Demo/Report.sharp", sharp), &[shelf, ("src/Lib/Status.php", STATUS)]),
+        [
+            "8:71 invalid-argument `rankedBy` orders numbers, strings, and classes, structs and enums that declare `operator <=>`, and `Status` is none of them. | This returns `Status`. | A `bool` and a collection have no order, and an enum's cases have one only where it declares `operator <=>`. | Declare `public static int operator <=>(Status a, Status b)` in `Status`: an enum orders its cases once it declares `operator <=>`.",
+        ]
+    );
+}
+
+/// The key a member compared by order orders by is the type the marked argument's function returns, whatever type
+/// parameters the member declares after it.
+#[test]
+fn a_member_compared_by_order_orders_by_what_the_marked_function_returns() {
+    let shelf = (
+        "src/Lib/ShelfMembers.sharp",
+        "namespace Lib;\n\nimport Sharp.Internal.ComparedByOrder;\n\npublic static class ShelfMembers\n{\n    extension<T>(List<T> items)\n    {\n        public List<T> rankedWith<TKey, TExtra>([ComparedByOrder] Function<TKey(T)> selector, TExtra extra) => items.sortedBy(selector);\n    }\n}\n",
+    );
+    let sharp = "namespace Demo;\n\nimport Lib.ShelfMembers;\nimport Lib.Status;\n\nclass Report\n{\n    public List<Status> a(List<Status> statuses) => statuses.rankedWith(s => s, 1);\n\n    public List<int> b(List<int> numbers) => numbers.rankedWith(n => -n, true);\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Report.sharp", sharp), &[shelf, ("src/Lib/Status.php", STATUS)]),
+        ["8:73 invalid-argument"]
+    );
+}
+
 /// A loop body is analyzed more than once, and a `sortedBy` in it is refused once.
 #[test]
 fn sorted_by_in_a_loop_is_refused_once() {
@@ -9656,7 +9691,7 @@ fn a_missing_class_is_one_error_that_names_it_as_php_sharp_does() {
             vec![missing("5:21", "App.Fresh")],
         ),
         // Only the standard library imports `Sharp.Internal`, spec section 15, so no import is the advice for one of
-        // its classes, as for the prelude's `IterableMethods`.
+        // its classes, as for the prelude's `Sequence`.
         (
             "namespace App;\n\nclass Report\n{\n    public void run(Hidden hidden)\n    {\n    }\n}\n",
             vec![missing("5:21", "App.Hidden")],
@@ -10467,6 +10502,29 @@ fn a_list_index_write_without_the_standard_library_is_refused() {
         issues[0].help.as_deref(),
         Some(
             "Install the standard library, heyjordanparker/php-sharp-composer, which declares the members of a `List`."
+        )
+    );
+}
+
+/// `map[key] = value` runs the standard library's `set` of a `Map`, as `list[i] = v` runs a `List`'s, so a project
+/// without the library is refused each write of a `Map` key.
+#[test]
+fn a_map_index_write_without_the_standard_library_is_refused() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static void reset(Map<string, int> sizes)\n    {\n        sizes[\"a\"] = 1;\n        sizes[\"b\"] ??= 2;\n    }\n}\n";
+    let (issues, _, _) =
+        analyze_with_references(&PLUGIN_REGISTRY, settings(), ("src/Demo/Report.sharp", sharp), &[], &[]);
+
+    assert_eq!(
+        issues.iter().map(|issue| format!("{} {}", located(sharp, issue), issue.message)).collect::<Vec<_>>(),
+        [
+            "7:9 non-existent-method Method `set`, which `map[key] = value` runs, does not exist on `Map<string, int>`.",
+            "8:9 non-existent-method Method `set`, which `map[key] = value` runs, does not exist on `Map<string, int>`.",
+        ]
+    );
+    assert_eq!(
+        issues[0].help.as_deref(),
+        Some(
+            "Install the standard library, heyjordanparker/php-sharp-composer, which declares the members of a `Map`."
         )
     );
 }
@@ -12089,7 +12147,7 @@ fn a_list_of_int_has_its_largest_and_smallest_element() {
         refusals(("src/Demo/Sizes.sharp", sharp), &[]),
         [
             "7:54 where-constraint-violation `max` needs elements of type `int`, and this is a `List<string>`. | Call it on a collection whose elements are `int`.",
-            "8:56 non-existent-method Method `max` does not exist on `Map<string, int>`. | A `Map<string, int>` has the methods `any`, `associateBy`, `count`, `filter`, `first`, `get`, `groupBy`, `has`, `isEmpty`, `isNotEmpty`, `keys`, `map`, `remove`, `sortedBy`, `sumOf`, `toList`, `values`.",
+            "8:56 non-existent-method Method `max` does not exist on `Map<string, int>`. | A `Map<string, int>` has the methods `any`, `associateBy`, `count`, `filter`, `first`, `get`, `groupBy`, `has`, `isEmpty`, `isNotEmpty`, `keys`, `map`, `remove`, `set`, `sortedBy`, `sumOf`, `toList`, `values`.",
         ]
     );
 }
@@ -13758,6 +13816,21 @@ fn an_iterable_is_anything_a_loop_reads() {
     );
 }
 
+/// Spec section 26: a user's extension of `Iterable<T>` reaches a `List`, a `Set` and a plain PHP `iterable` too, as a
+/// value of each is an `Iterable<T>`. Only the standard library's `Iterable` members are a kind of their own, which a
+/// collection's own members hide.
+#[test]
+fn a_user_s_extension_of_an_iterable_reaches_a_list_a_set_and_a_plain_php_iterable() {
+    let rows = "namespace Demo;\n\npublic static class Rows\n{\n    extension<T>(Iterable<T> items)\n    {\n        public int lazyFrom(int start) => start;\n    }\n}\n";
+    let query = "<?php\n\nnamespace Demo;\n\nfinal class Query\n{\n    /** @return iterable<int> */\n    public static function cursor(): iterable\n    {\n        yield 1;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public int run(List<int> list, Set<int> set, Iterable<int> items) => list.lazyFrom(1) + set.lazyFrom(3) + Query.cursor().lazyFrom(4) + items.lazyFrom(5);\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Report.sharp", sharp), &[("src/Demo/Rows.sharp", rows), ("src/Demo/Query.php", query)]),
+        Vec::<String>::new()
+    );
+}
+
 /// Spec section 12: "an `Iterable` has no index". Reading one by index would read the source up to it, so the error
 /// names the two ways that read it.
 #[test]
@@ -13771,7 +13844,7 @@ fn an_iterable_has_no_index() {
     );
 }
 
-/// An `Iterable<T>` has the lazy operations of spec section 12, checked against `Sharp\Internal\IterableMethods<T>`:
+/// An `Iterable<T>` has the lazy operations of spec section 12, the standard library's `IterableMembers`:
 /// `filter` and `take` keep the element type, `map` takes the lambda's return type, and `toList` reads them into a
 /// `List<T>`.
 #[test]
@@ -13785,8 +13858,8 @@ fn lazy_operations_on_an_iterable_type_their_results_by_the_elements() {
 }
 
 /// A method an `Iterable<T>` does not have is the error a `List` or `Map` gives, naming the type the code wrote and
-/// never the class the analyzer checks it against. The method is named as the code wrote it, and a name in braces,
-/// which the checker refuses, as the analyzer read it.
+/// never the class that declares its members. The method is named as the code wrote it. A name in braces is the
+/// checker's refusal alone, as on a `List`.
 #[test]
 fn a_method_an_iterable_does_not_have_is_an_error_naming_the_iterable() {
     let sharp = "namespace Demo;\n\nclass Report\n{\n    public bool run(Iterable<Order> orders)\n    {\n        orders.toArray();\n        orders.first();\n        orders.{\"toArray\"}();\n        return true;\n    }\n}\n\nclass Order\n{\n    public Order(public bool paid { get; })\n    {\n    }\n}\n";
@@ -13797,7 +13870,6 @@ fn a_method_an_iterable_does_not_have_is_an_error_naming_the_iterable() {
         [
             "Method `toArray` does not exist on `Iterable<Order>`.",
             "Method `first` does not exist on `Iterable<Order>`.",
-            "Method `toarray` does not exist on `Iterable<Order>`."
         ]
     );
     assert_eq!(
@@ -13806,8 +13878,21 @@ fn a_method_an_iterable_does_not_have_is_an_error_naming_the_iterable() {
     );
     for issue in &issues {
         let text = format!("{issue:?}");
-        assert!(!text.contains("IterableMethods"), "{text}");
+        assert!(!text.contains("IterableMembers"), "{text}");
     }
+}
+
+/// Spec section 12: the lazy operations belong to `Iterable<T>`, so a value typed `List<T>`, though it is an
+/// `Iterable<T>`, has its own members and no `take`.
+#[test]
+fn a_list_value_has_no_lazy_operation_of_an_iterable() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public int run(List<int> numbers, Iterable<int> lazy)\n    {\n        numbers.take(2);\n        return lazy.take(2).toList().count();\n    }\n}\n";
+    let issues = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Report.sharp", sharp), &[]);
+
+    assert_eq!(
+        issues.iter().map(|issue| format!("{} {}", located(sharp, issue), issue.message)).collect::<Vec<_>>(),
+        ["7:17 non-existent-method Method `take` does not exist on `List<int>`."]
+    );
 }
 
 /// A `List` held as a `List` keeps its own eager methods, so its `filter` gives a `List` and it has no `take`. Held as
@@ -14084,9 +14169,8 @@ fn a_yielded_spread_error_writes_the_spread_as_the_file_does() {
     assert!(texts(&php_issues).iter().all(|text| !text.contains("yield ...")), "{:#?}", texts(&php_issues));
 }
 
-/// `Sharp\Set` is the engine's class that makes each `Set` parameter a `Set`, which only the lowering calls, as
-/// `Sharp\Collection` is the class each collection method runs on. Neither is a class PHP# code imports and calls, so
-/// `Set.from` is an unknown method, as `\Sharp\Set::from` is in PHP.
+/// `Sharp\Set` is the engine's class that makes each `Set` parameter a `Set`, which only the lowering calls. It is no
+/// class PHP# code imports and calls, so `Set.from` is an unknown method, as `\Sharp\Set::from` is in PHP.
 #[test]
 fn the_engines_set_class_is_not_a_class_sharp_code_calls() {
     let sharp = "namespace Demo;\n\nimport Lib.Words;\nimport Sharp.Set;\n\nclass Tags\n{\n    public int count(List<string> tags)\n    {\n        const made = Set.from(tags);\n        return Words.length(made);\n    }\n}\n";

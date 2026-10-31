@@ -140,7 +140,7 @@ pub enum sharp_kind {
 // so `ext/sharp` asserts it.
 pub const SHARP_T_FILE: u32 = 347;
 
-/// The hash of the kind table, the tokens and the layouts of the compiled file's structs.
+/// The hash of the kind table, the tokens, the layouts of the compiled file's structs and the generator's revision.
 /// An engine reads only a compiled file written for its own value.
 #[allow(clippy::unreadable_literal, clippy::big_endian_bytes)]
-pub const SHARP_UNIT_ABI: [u8; 16] = 0x198f045adf200e0349f418f7f9139a6eu128.to_be_bytes();
+pub const SHARP_UNIT_ABI: [u8; 16] = 0x28db0df44c54e7d669e278756c266211u128.to_be_bytes();

@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 
 use mago_allocator::LocalArena;
+use mago_analyzer::CollectionKind;
 use mago_analyzer::artifacts::MemberCall;
 use mago_codex::defaults_trait_name;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
@@ -542,6 +543,8 @@ struct Lowering<'lowering, 'arena> {
     tested_links: Vec<Span>,
     /// The expression of the expression statement being lowered, whose value nothing reads.
     discarded: Option<Span>,
+    /// The nodes [`Self::picked_step`] made, which an expression statement runs as one statement for each step.
+    picked_steps: HashSet<u32>,
     /// The declaration offsets of the locals a lambda captures by reference: those code writes.
     by_reference: HashSet<u32>,
     /// The PHP loops that hold the code being lowered, innermost last, inside the innermost method or lambda: each PHP#
@@ -603,6 +606,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             renumbered_places: Vec::new(),
             tested_links: Vec::new(),
             discarded: None,
+            picked_steps: HashSet::default(),
             by_reference: HashSet::default(),
             loops: Vec::new(),
             captures_type_arguments: false,
@@ -4764,7 +4768,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 let lowered = self.expression(statement.expression);
                 self.discarded = discarded;
 
-                lowered
+                self.discarded_steps(lowered)
             }
             Statement::Return(r#return) => self.r#return(r#return),
             // `emit e;` is `\Sharp\Internal\emit($e);`, which runs every listener of the event before it returns.
@@ -5291,12 +5295,12 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// `write`, as `lower` lowers it, a change in place to the `List` `place` is or holds an element of, where that
     /// `List` is a plain PHP property the checker reads as a `List`, spec section 12. The property is a `List`
     /// everywhere, writes included, so a write gets the `List`, changes it and sets it back, as a value-type property's
-    /// does. The renumbered list is set back first, and the write then changes it where it lives, so a change through
-    /// the engine's `Sharp\Collection` reaches it as it reaches any `List` property:
+    /// does. The renumbered list is set back first, and the write then changes it where it lives, so a `ref` member's
+    /// change reaches it as it reaches any `List` property:
     ///
     /// ```php
     /// [$users->names = \is_array($renumbered#1 = $users->names) ? \array_values($renumbered#1) : $renumbered#1,
-    ///     $users->names->add('cy')][1]
+    ///     \Sharp\Internal\add($users->names, 'cy')][1]
     /// ```
     ///
     /// The property's object is read once, into `$receiver#N` when it runs something. Any other write is `lower`'s.
@@ -5582,11 +5586,16 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     return self.renumbered_first(access.array, |this| this.unchecked_expression(line, expression));
                 }
                 if let Expression::ArrayAccess(access) = assignment.lhs
+                    && self.types.holds_map(access.array)
+                    && self.types.plain_place_type(access.array).is_none()
+                {
+                    return self.map_write(line, assignment, access);
+                }
+                // A `Map` plain PHP declares holds a PHP array, which PHP's own write changes where it lives, through a
+                // hidden copy where PHP gives the place no reference.
+                if let Expression::ArrayAccess(access) = assignment.lhs
+                    && self.types.holds_map(access.array)
                     && match access.array.unparenthesized() {
-                        array if self.static_accessor(array).is_some() => true,
-                        Expression::ArrayAccess(element) => {
-                            self.is_list(element.array) && self.types.plain_place_type(element.array).is_none()
-                        }
                         // `Class.name` is a static property, which PHP gives no hooks.
                         Expression::Access(Access::Property(
                             property @ PropertyAccess {
@@ -5606,7 +5615,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                         _ => false,
                     }
                 {
-                    return self.element_write(line, assignment, access);
+                    return self.plain_map_write(line, assignment, access);
                 }
 
                 // A compound assignment to an instance assigns what the operator its class declares returns.
@@ -5769,9 +5778,6 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 None if let Some(extension) = self.types.extension(expression) => {
                     self.extension_access(expression, &extension, access.object, None)
                 }
-                None if self.types.is_lazy_operation(expression) => {
-                    self.lazy_operation_value(expression, access.object)
-                }
                 None => match self.class_value(access.object) {
                     Some((class, classes)) => self.static_member(expression, class, &classes, &access.property),
                     None => {
@@ -5788,7 +5794,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 },
             },
             // A link whose chain's conditional tests the receiver, which `untested_link` found, is the static call
-            // through a class value, the extension's member, the lazy operation, the property call, or the plain method call.
+            // through a class value, the extension's member, the property call, or the plain method call.
             Expression::Call(Call::NullSafeMethod(call)) => {
                 let tested = self.tested_links.contains(&expression.span());
                 // A member that takes its receiver by `ref` tests the place it changes itself.
@@ -5803,9 +5809,6 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     let parts = (call.object, &call.method, &call.argument_list);
 
                     return self.call_by_kind(expression, &kinds, parts, !tested);
-                }
-                if tested && self.types.is_lazy_operation(expression) {
-                    return self.lazy_operation(line, call.object, &call.method, &call.argument_list);
                 }
                 if tested && let Some((class, _)) = self.class_value(call.object) {
                     let method = self.member(&call.method);
@@ -5855,9 +5858,6 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 let tested = self.tested_links.contains(&expression.span());
                 if tested && let Some(extension) = self.types.extension(expression) {
                     return self.extension_access(expression, &extension, access.object, None);
-                }
-                if tested && self.types.is_lazy_operation(expression) {
-                    return self.lazy_operation_value(expression, access.object);
                 }
                 if tested && let Some((class, classes)) = self.class_value(access.object) {
                     return self.static_member(expression, class, &classes, &access.property);
@@ -6132,31 +6132,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             && matches!(self.types.call_target(call).kind, DeclarationKind::Property { .. })
     }
 
-    /// A lazy operation of an `Iterable<T>`, spec section 12, on the engine's `Sharp\Sequence`, as
-    /// `\Sharp\Sequence::from($object)->method(arguments)`. An `object` that is itself a lazy operation, null-safe or
-    /// not, is already a `Sequence`, so a chain reads its first receiver through one `from`.
-    fn lazy_operation(
-        &mut self,
-        line: u32,
-        object: &Expression,
-        method: &ClassLikeMemberSelector,
-        arguments: &ArgumentList,
-    ) -> u32 {
-        let is_sequence =
-            matches!(object.unparenthesized(), Expression::Call(Call::Method(_) | Call::NullSafeMethod(_)))
-                && self.types.is_lazy_operation(object.unparenthesized());
-        let mut sequence = self.expression(object);
-        if !is_sequence {
-            sequence = self.sequence_from(line, sequence);
-        }
-        let method = self.member(method);
-        let arguments = self.arguments(arguments);
-
-        self.node(SHARP_AST_METHOD_CALL, 0, line, &[sequence, method, arguments])
-    }
-
     /// The `Map` `value` as the `Iterable<[TKey, TValue]>` of its entries, spec section 12, a `Sequence` of the object a
-    /// PHP array plain PHP gave becomes first: `\Sharp\Sequence::from($plans)`.
+    /// PHP array plain PHP gave becomes first: `\Sharp\Internal\Sequence::from($plans)`.
     fn map_entries(&mut self, value: &Expression) -> u32 {
         let line = self.line(value.span());
         let own = self.types.expression_type(value).clone();
@@ -6165,9 +6142,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.sequence_from(line, map)
     }
 
-    /// `$name = $name instanceof \Sharp\Map ? \Sharp\Sequence::from($name) : $name;`, the statement that gives the
-    /// parameter `parameter` a `Map` argument's entries, when it is a PHP# `Iterable<T>`, which holds a `Map` by its
-    /// entries, spec section 12. A plain PHP caller's `Map` is a checking `Sequence` of them already.
+    /// `$name = $name instanceof \Sharp\Map ? \Sharp\Internal\Sequence::from($name) : $name;`, the statement that
+    /// gives the parameter `parameter` a `Map` argument's entries, when it is a PHP# `Iterable<T>`, which holds a `Map`
+    /// by its entries, spec section 12. A plain PHP caller's `Map` is a checking `Sequence` of them already.
     fn map_entries_parameter(&mut self, parameter: &FunctionLikeParameter) -> Option<u32> {
         let hint = parameter.hint.as_ref()?;
         if parameter.is_variadic() || !holds_entries(self.types.declared_type(hint)) {
@@ -6185,10 +6162,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         Some(self.node(SHARP_AST_ASSIGN, 0, line, &[place, value]))
     }
 
-    /// `\Sharp\Sequence::from($source)`, the `Iterable<T>` that reads `source` lazily, spec section 12: a `Map`'s
-    /// entries `[key, value]`, and every other collection's elements.
+    /// `\Sharp\Internal\Sequence::from($source)`, the `Iterable<T>` that reads `source` lazily, spec section 12: a
+    /// `Map`'s entries `[key, value]`, and every other collection's elements.
     fn sequence_from(&mut self, line: u32, source: u32) -> u32 {
-        let class = self.string(ZEND_NAME_FQ, line, b"Sharp\\Sequence");
+        let class = self.string(ZEND_NAME_FQ, line, b"Sharp\\Internal\\Sequence");
         let from = self.string(0, line, b"from");
         let source = self.node(SHARP_AST_ARG_LIST, 0, line, &[source]);
 
@@ -6455,28 +6432,150 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         self.node(SHARP_AST_CALL, 0, line, &[function, arguments])
     }
 
-    /// A write into a `Map` that is the element of a `List`, a place by spec section 12, or that a hooked property
-    /// holds, which PHP gives no reference to: PHP's own write into the `Map` at the place [`Self::with_place`] passes,
-    /// which separates a `Map` another value shares first. `list[i][key] = value` is
-    /// `(\array_key_exists($i, $list) ? $list[$i][$key] = $value : throw …)`, and `this.hooked[key] ??= value` writes
-    /// a hidden copy of the property, which its `set` then stores once the write changed it:
-    /// `[$receiver#1 = $this->hooked, $kept#2 = $receiver#1, $receiver#1[$key] ??= $value, $receiver#1 === $kept#2 ||
-    /// ($this->hooked = $receiver#1)][2]`. The checker refuses every other operator there, since it reads the element
-    /// of the `Map` bare.
-    fn element_write(&mut self, line: u32, assignment: &Assignment, access: &ArrayAccess) -> u32 {
-        let kind = match assignment.operator {
-            AssignmentOperator::Assign(_) => SHARP_AST_ASSIGN,
-            AssignmentOperator::Coalesce(_) => SHARP_AST_ASSIGN_COALESCE,
-            _ => unreachable!("the checker refuses `{}` on a `Map` element, which reads it bare", assignment.operator),
+    /// A write into a `Map` that a hooked property plain PHP declares holds, a PHP array, which PHP's
+    /// own write changes at the place [`Self::with_place`] passes. PHP gives such a place no reference, so it is written
+    /// through a hidden copy, which its `set` then stores once the write changed it: `this.sizes[key] = value` is
+    /// `[$receiver#1 = $this->sizes, $kept#2 = $receiver#1, $receiver#1[$key] = $value, $receiver#1 === $kept#2 ||
+    /// ($this->sizes = $receiver#1)][2]`. The key and the value run before the copy is read, as [`Self::with_place`]
+    /// holds them, so a change they make to the property stays. A `??=` runs its value only where the property holds no
+    /// value for the key, so the copy is read behind that test, after the value runs: `this.sizes[key] ??= value` is
+    /// `$this->sizes[$key] ?? …`, the `=` write, with an object or a key that runs code held once before the test. The
+    /// checker refuses every other operator, since it reads the value of the `Map` bare.
+    fn plain_map_write(&mut self, line: u32, assignment: &Assignment, access: &ArrayAccess) -> u32 {
+        let write = |this: &mut Self| {
+            let held = [(access.index, "index"), (assignment.rhs, "value")];
+
+            this.with_place(access.array, false, &held, |this, place| {
+                let key = this.expression(access.index);
+                let element = this.node(SHARP_AST_DIM, 0, line, &[place, key]);
+                let value = this.expression(assignment.rhs);
+
+                this.node(SHARP_AST_ASSIGN, 0, line, &[element, value])
+            })
         };
+        match assignment.operator {
+            AssignmentOperator::Assign(_) => return write(self),
+            AssignmentOperator::Coalesce(_) => {}
+            _ => unreachable!("the checker refuses `{}` on a `Map` value, which reads it bare", assignment.operator),
+        }
 
-        self.with_place(access.array, false, |this, place| {
+        let taken = self.temporaries;
+        let receivers_before = self.held_receivers.len();
+        let Expression::Access(
+            Access::Property(PropertyAccess { object, .. })
+            | Access::NullSafeProperty(NullSafePropertyAccess { object, .. }),
+        ) = access.array.unparenthesized()
+        else {
+            unreachable!("a hooked property's `Map` is written through the property");
+        };
+        let mut steps = Vec::new();
+        for (value, base) in [(*object, "receiver"), (access.index, "index")] {
+            if !self.is_pure(value) {
+                let (step, name) = self.hold_step(line, value, base);
+                steps.push(step);
+                self.held_receivers.push((value.span(), name));
+            }
+        }
+        let property = self.target(access.array, PlaceUse::Read);
+        let key = self.expression(access.index);
+        let found = self.node(SHARP_AST_DIM, 0, line, &[property, key]);
+        let written = write(self);
+        let mut lowered = self.node(SHARP_AST_COALESCE, 0, line, &[found, written]);
+        if !steps.is_empty() {
+            let position = steps.len();
+            steps.push(self.node(SHARP_AST_ARRAY_ELEM, 0, line, &[lowered, NULL]));
+            lowered = self.picked_step(line, &steps, position);
+        }
+        self.held_receivers.truncate(receivers_before);
+        self.temporaries = taken;
+
+        lowered
+    }
+
+    /// A write to the value of a `Map` at a key, spec section 12, which runs the standard library's `set` member of a
+    /// `Map` on the map's place, as [`Self::with_place`] passes it, as a `List`'s index write runs a `List`'s. Its inline
+    /// form calls the engine's `put`: `map[key] = value` is `\Sharp\Internal\put($map, $key, $value)`, and
+    /// `map[key] ??= value` writes only where the map holds no value for the key, `\Sharp\Internal\get($map, $key) ??
+    /// \Sharp\Internal\put($map, $key, $value)`. The key and the value run before the place is taken, as PHP's own write
+    /// runs them, as [`Self::with_place`] and [`Self::written`] hold them. The checker refuses every other operator,
+    /// since it reads the value of the `Map` bare.
+    fn map_write(&mut self, line: u32, assignment: &Assignment, access: &ArrayAccess) -> u32 {
+        let coalesces = match assignment.operator {
+            AssignmentOperator::Assign(_) => false,
+            AssignmentOperator::Coalesce(_) => true,
+            _ => unreachable!("the checker refuses `{}` on a `Map` value, which reads it bare", assignment.operator),
+        };
+        let gives_stored = self.discarded != Some(assignment.span());
+
+        // `??=` runs its value only where the map holds none for the key, which `written` holds after the `get`.
+        let held: &[(&Expression, &str)] =
+            if coalesces { &[(access.index, "index")] } else { &[(access.index, "index"), (assignment.rhs, "value")] };
+
+        self.with_place(access.array, false, held, |this, place| {
+            let found = coalesces.then(|| {
+                let map = this.expression(access.array);
+                let key = this.expression(access.index);
+                let get = this.types.collection_operation(b"get", CollectionKind::Map);
+
+                this.member_operation(line, &get, &[map, key])
+            });
             let key = this.expression(access.index);
-            let element = this.node(SHARP_AST_DIM, 0, line, &[place, key]);
-            let value = this.expression(assignment.rhs);
+            let declared = this.types.plain_place_type(assignment.lhs);
+            let value = this
+                .stored_in_plain_place(line, assignment.rhs, declared)
+                .unwrap_or_else(|| this.expression(assignment.rhs));
+            let set = this.types.collection_operation(b"set", CollectionKind::Map);
+            let runs_code = !this.is_pure(assignment.rhs);
+            let write = this.written(line, access.span(), &set, [place, key, value], runs_code, gives_stored);
 
-            this.node(kind, 0, line, &[element, value])
+            match found {
+                Some(found) => this.node(SHARP_AST_COALESCE, 0, line, &[found, write]),
+                None => write,
+            }
         })
+    }
+
+    /// The member `operation` run on the lowered `values`, the first of them its place: its inline form, or the call of
+    /// its static method where it has none.
+    fn member_operation(&mut self, line: u32, operation: &Declaration, values: &[u32]) -> u32 {
+        self.inlined_operation(operation, values, line)
+            .unwrap_or_else(|| self.operator_call(line, operation.class, operation.name.as_bytes(), values))
+    }
+
+    /// The write a collection's `set` member makes of `[place, key, value]`, as [`Self::member_operation`] runs it. A
+    /// value that `runs_code` here, as `??=`'s does, which runs only where the key holds nothing, is held in a hidden
+    /// variable before the place is taken, so code that changes the place runs first: `[$stored#N =
+    /// $this->next(), \Sharp\Internal\put($this->counts, $key, $stored#N)][1]`. Where code reads the write, the write
+    /// `gives_stored`, the value it stores: the first step, `[$stored#N = $this->next(), …][0]`, or, for a value that
+    /// runs nothing, `\Sharp\Internal\put($map, $key, $stored#N = $value) ? $stored#N : $stored#N`, as PHP has no
+    /// expression that runs one and gives another.
+    fn written(
+        &mut self,
+        line: u32,
+        span: Span,
+        set: &Declaration,
+        [place, key, value]: [u32; 3],
+        runs_code: bool,
+        gives_stored: bool,
+    ) -> u32 {
+        if !runs_code && !gives_stored {
+            return self.member_operation(line, set, &[place, key, value]);
+        }
+        let name = self.hidden("stored");
+        let variable = self.variable(span, &name);
+        let stored = self.node(SHARP_AST_ASSIGN, 0, line, &[variable, value]);
+        self.temporaries -= 1;
+        if !runs_code {
+            let write = self.member_operation(line, set, &[place, key, stored]);
+            let [given, otherwise] = [(); 2].map(|()| self.variable(span, &name));
+
+            return self.node(SHARP_AST_CONDITIONAL, ZEND_PARENTHESIZED_CONDITIONAL, line, &[write, given, otherwise]);
+        }
+        let value = self.variable(span, &name);
+        let write = self.member_operation(line, set, &[place, key, value]);
+        let steps = [stored, write].map(|step| self.node(SHARP_AST_ARRAY_ELEM, 0, line, &[step, NULL]));
+
+        self.picked_step(line, &steps, usize::from(!gives_stored))
     }
 
     /// A write to the element of a `List` at an index, which spec section 12 makes replace the element and throw
@@ -6484,67 +6583,56 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// library's `set` member of a `List` on the list's place, as [`Self::with_place`] passes it, which gives the
     /// element it replaced. Its inline form calls the engine's `set`: `list[i] = v` is
     /// `\Sharp\Internal\set($list, $i, $v)`, and `list[i] op= v` and `++list[i]` are
-    /// `\Sharp\Internal\set($list, $i, $list[$i] op v)`, whose index runs once, in a hidden variable when it runs
-    /// something. `list[i]++` gives what `set` gives. Any other write gives the value it stores, so where code reads it,
-    /// the value is held in a hidden variable, `\Sharp\Internal\set($list, $i, $stored#N = $v) ? $stored#N : $stored#N`,
-    /// as PHP has no expression that runs one and gives another. The checker refuses `??=`, which reads the index
-    /// quietly.
+    /// `\Sharp\Internal\set($list, $i, $list[$i] op v)`. The index and the value run before the place is taken, as PHP's
+    /// own write runs them, as [`Self::with_place`] and [`Self::written`] hold them, and so does an operator a class
+    /// declares, which a compound assignment runs. `list[i]++` gives what `set` gives, and any other write gives the
+    /// value it stores. The checker refuses `??=`, which reads the index quietly.
     fn list_write(&mut self, line: u32, span: Span, access: &ArrayAccess, write: ListWrite) -> u32 {
-        let reads = !matches!(write, ListWrite::Assignment(Assignment { operator: AssignmentOperator::Assign(_), .. }));
-        let mut index = if reads { self.reread(access.index, "index") } else { Reread::once(access.index) };
         let gives_stored = self.discarded != Some(span) && !matches!(write, ListWrite::Step { postfix: true, .. });
-        let mut stored = None;
-        let set = self.with_place(access.array, false, |this, place| {
-            let written = this.read(&mut index);
-            let mut element = |lowering: &mut Self| {
+        let assigned = match write {
+            ListWrite::Assignment(assignment) => Some(assignment.rhs),
+            ListWrite::Step { .. } => None,
+        };
+        let held: Vec<(&Expression, &str)> =
+            std::iter::once((access.index, "index")).chain(assigned.map(|value| (value, "value"))).collect();
+
+        self.with_place(access.array, false, &held, |this, place| {
+            let index = this.expression(access.index);
+            let element = |lowering: &mut Self| {
                 let list = lowering.expression(access.array);
-                let index = lowering.read(&mut index);
+                let index = lowering.expression(access.index);
 
                 lowering.node(SHARP_AST_DIM, 0, line, &[list, index])
             };
-            // The variables stay taken until the value is lowered, as in a compound assignment.
-            let mut value = match write {
+            let (value, runs_code) = match write {
                 ListWrite::Assignment(assignment @ Assignment { operator: AssignmentOperator::Assign(_), .. }) => {
                     let declared = this.types.plain_place_type(assignment.lhs);
+                    let value = this
+                        .stored_in_plain_place(line, assignment.rhs, declared)
+                        .unwrap_or_else(|| this.expression(assignment.rhs));
 
-                    this.stored_in_plain_place(line, assignment.rhs, declared)
-                        .unwrap_or_else(|| this.expression(assignment.rhs))
+                    (value, false)
                 }
+                // An operator a class declares is code, which runs before the place is taken.
                 ListWrite::Assignment(assignment) => {
                     let element = element(this);
                     let value = this.expression(assignment.rhs);
+                    let runs_code = this.declared_compound_operator(assignment).is_some();
 
-                    this.compound_value(line, assignment, element, value)
+                    (this.compound_value(line, assignment, element, value), runs_code)
                 }
                 ListWrite::Step { decrement, .. } => {
                     let element = element(this);
                     let one = this.zval(line, sharp_value::SHARP_LONG, |node| node.long_value = 1);
                     let operation = if decrement { ZEND_SUB } else { ZEND_ADD };
 
-                    this.node(SHARP_AST_BINARY_OP, operation, line, &[element, one])
+                    (this.node(SHARP_AST_BINARY_OP, operation, line, &[element, one]), false)
                 }
             };
-            if gives_stored {
-                let name = this.hidden("stored");
-                let variable = this.variable(access.span(), &name);
-                value = this.node(SHARP_AST_ASSIGN, 0, line, &[variable, value]);
-                this.temporaries -= 1;
-                stored = Some(name);
-            }
+            let set = this.types.collection_operation(b"set", CollectionKind::List);
 
-            let set = this.types.list_operation(b"set");
-            let values = [place, written, value];
-
-            this.inlined_operation(&set, &values, line)
-                .unwrap_or_else(|| this.operator_call(line, set.class, set.name.as_bytes(), &values))
-        });
-        self.release(index);
-        let Some(stored) = stored else {
-            return set;
-        };
-        let [given, otherwise] = [(); 2].map(|()| self.variable(access.span(), &stored));
-
-        self.node(SHARP_AST_CONDITIONAL, ZEND_PARENTHESIZED_CONDITIONAL, line, &[set, given, otherwise])
+            this.written(line, access.span(), &set, [place, index, value], runs_code, gives_stored)
+        })
     }
 
     /// The type and the PHP name of the operator a compound assignment runs on instances, as `op_Addition` for `+=`,
@@ -6882,8 +6970,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
             link = match link {
                 Expression::Access(Access::Property(access)) => {
-                    below_php_call =
-                        below_php_call || self.types.extension(link).is_some() || self.types.is_lazy_operation(link);
+                    below_php_call = below_php_call || self.types.extension(link).is_some();
 
                     access.object
                 }
@@ -6900,7 +6987,6 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     if !self.tested_links.contains(&link.span())
                         && (below_php_call
                             || self.types.extension(link).is_some()
-                            || self.types.is_lazy_operation(link)
                             || self.is_class_value(access.object)
                             || self.is_method_value(link, access.object, &access.property))
                     {
@@ -6914,7 +7000,6 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                         && (below_php_call
                             || self.types.extension(link).is_some()
                             || self.types.members_by_kind(link).is_some()
-                            || self.types.is_lazy_operation(link)
                             || self.is_class_value(call.object)
                             || self.is_property_call(link, call.object))
                     {
@@ -7417,7 +7502,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// `$p = \is_array($p) ? new \Sharp\Set($p) : $p;` for each parameter whose type holds a `Map` or a `Set`, at any
-    /// depth, since plain PHP passes a PHP array where PHP# passes the object, and
+    /// depth, since plain PHP passes a PHP array where PHP# passes the object,
+    /// `if (\is_array($p)) { $p = new \Sharp\Set($p); }` for a `ref` receiver, and
     /// `$p = \array_map(fn ($collection#N) => …, $p);` for a variadic one, which keeps each argument's position or name.
     /// A promoted one is the property its constructor declares, `$this->p = …`. Null and the object stay as they are.
     fn collection_parameters<'parameter, 'ast>(
@@ -7447,6 +7533,20 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             let line = self.line(parameter);
             let variable = &parameter.variable;
             let taken = self.temporaries;
+            // A `ref` receiver is the caller's place, which a reference a property's type holds. Written back over itself
+            // there, a `Map` or a `Set` would cross into the property's PHP array, so only a PHP array becomes the object:
+            // `if (\is_array($p)) { $p = \Sharp\Map::from($p); }`.
+            if parameter.is_by_ref_receiver() {
+                let value = self.variable(variable.span, variable.name);
+                let is_array = self.global_call(line, b"is_array", &[value]);
+                let object = self.crossed_array(variable.span, &r#type, variable.name);
+                let place = self.variable(variable.span, variable.name);
+                let assignment = self.node(SHARP_AST_ASSIGN, 0, line, &[place, object]);
+                let body = self.node(SHARP_AST_STMT_LIST, 0, line, &[assignment]);
+                let branch = self.node(SHARP_AST_IF_ELEM, 0, line, &[is_array, body]);
+                statements.push(self.node(SHARP_AST_IF, 0, line, &[branch]));
+                continue;
+            }
             let crossed = if parameter.is_variadic() {
                 let each = self.hidden("collection");
                 let first = self.variable(variable.span, &each);
@@ -7544,6 +7644,16 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// \is_array($name) ? \Sharp\Map::from($name) : $name
     /// ```
     fn crossed(&mut self, span: Span, r#type: &TUnion, name: &[u8], first: u32) -> u32 {
+        let line = self.line(span);
+        let built = self.crossed_array(span, r#type, name);
+        let is_array = self.global_call(line, b"is_array", &[first]);
+        let itself = self.variable(span, name);
+
+        self.node(SHARP_AST_CONDITIONAL, 0, line, &[is_array, built, itself])
+    }
+
+    /// The value [`Self::crossed`] makes of the variable `name` when it holds a PHP array.
+    fn crossed_array(&mut self, span: Span, r#type: &TUnion, name: &[u8]) -> u32 {
         let Some(array) = self.crossing_array(r#type) else {
             unreachable!("the caller crosses only a value that holds a `Map` or a `Set`");
         };
@@ -7605,10 +7715,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             }
         };
         self.temporaries = taken;
-        let is_array = self.global_call(line, b"is_array", &[first]);
-        let itself = self.variable(span, name);
 
-        self.node(SHARP_AST_CONDITIONAL, 0, line, &[is_array, built, itself])
+        built
     }
 
     /// Whether `r#type` is a `Map` whose keys [`Self::crossed`] takes back from a PHP array, as [`Self::key_crossing`]
@@ -7681,28 +7789,6 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let property = self.string(0, line, variable.name);
 
         self.node(SHARP_AST_PROP, 0, line, &[this, property])
-    }
-
-    /// Spec section 14.3: the value `value` reads of the lazy operation of an `Iterable` the checker resolved it to, a
-    /// function that runs the operation on `\Sharp\Sequence::from($receiver)`, as its call does, over the collection
-    /// `receiver` gave when the value was read, as [`Self::receiver_closure`] holds it, with the arguments the value is
-    /// called with.
-    fn lazy_operation_value(&mut self, value: &Expression, receiver: &Expression) -> u32 {
-        let line = self.line(value);
-        let target = self.expression(receiver);
-        let (Expression::Access(Access::Property(PropertyAccess { property, .. }))
-        | Expression::Access(Access::NullSafeProperty(NullSafePropertyAccess { property, .. }))) = value
-        else {
-            unreachable!("a method value is a member read");
-        };
-        let member = self.member(property);
-
-        self.receiver_closure(value, target, None, |this, receiver, arguments| {
-            let receiver = this.sequence_from(line, receiver);
-            let arguments = this.node(SHARP_AST_ARG_LIST, 0, line, arguments);
-
-            this.node(SHARP_AST_METHOD_CALL, 0, line, &[receiver, member, arguments])
-        })
     }
 
     /// `fn ($parameter, …) => body`, an arrow function of untyped hidden parameters, on the line of `span`.
@@ -7825,8 +7911,14 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// What an assignment, a compound assignment, `++` or `--` writes: a local or parameter, `object.name`,
     /// `Class.name`, which php-src's grammar builds as the static property `Class::$name`, or an index of one of them,
     /// as php-src's `variable` rule takes them. `place_use` says whether the write reads the target first, as a
-    /// compound assignment, `++` and `--` do, which a generic class's static checks.
+    /// compound assignment, `++` and `--` do, which a generic class's static checks. A place a hidden variable holds
+    /// is that variable, as [`Self::with_place`] holds a static that runs accessors.
     fn target(&mut self, target: &Expression, place_use: PlaceUse) -> u32 {
+        if let Some((_, name)) = self.held_receivers.iter().find(|(span, _)| *span == target.span()) {
+            let name = name.clone();
+
+            return self.variable(target.span(), &name);
+        }
         match target {
             Expression::ConstantAccess(name)
                 if matches!(self.names.binding(&name.name), Some(Binding::Local(_) | Binding::Field)) =>
@@ -7954,9 +8046,6 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         }
         if self.names.is_current_position(call) {
             return self.position(call.object.span());
-        }
-        if self.types.is_lazy_operation(expression) {
-            return self.lazy_operation(self.line(call), call.object, &call.method, &call.argument_list);
         }
         if let Some(extension) = self.types.extension(expression) {
             return self.extension_access(expression, &extension, call.object, Some(&call.argument_list));
@@ -8153,7 +8242,13 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             let null_safe = matches!(access, Expression::Call(Call::NullSafeMethod(_)))
                 && !self.tested_links.contains(&access.span());
 
-            return self.with_place(receiver, null_safe, |this, place| {
+            let held: Vec<(&Expression, &str)> = arguments
+                .into_iter()
+                .flat_map(|list| list.arguments.iter())
+                .map(|argument| (argument.value(), "argument"))
+                .collect();
+
+            return self.with_place(receiver, null_safe, &held, |this, place| {
                 this.extension_call(access, extension, InlineReceiver::Place(place), arguments, element.as_ref(), None)
             });
         }
@@ -8168,16 +8263,28 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// - a plain PHP property the checker reads as a `List`, or an element of one, is renumbered first, as
     ///   [`Self::renumbered_first`] says.
     /// - the object of the root property and each index run once, in hidden variables when they run something.
-    /// - a property PHP gives no reference to, one with hooks or one `__get` serves, is read into a hidden variable,
-    ///   which the call changes and its `set` then stores once it changed, so a `remove` that finds nothing runs no
-    ///   `set`: `[$receiver#1 = $o->p, $kept#2 = $receiver#1, f($receiver#1), $receiver#1 === $kept#2 || ($o->p =
-    ///   $receiver#1)][2]`. A List that is the same array is identical at once, without reading its elements.
+    /// - a property PHP gives no reference to, one with hooks, one `__get` serves or a static one that runs accessors,
+    ///   is read into a hidden variable, which the call changes and its `set` then stores once it changed, so a `remove`
+    ///   that finds nothing runs no `set`: `[$receiver#1 = $o->p, $kept#2 = $receiver#1, f($receiver#1), $receiver#1
+    ///   === $kept#2 || ($o->p = $receiver#1)][2]`. A static one stores through its hidden setter, as
+    ///   [`Self::accessor_write`] writes it. A List that is the same array is identical at once, without reading its
+    ///   elements.
     /// - a `List` element is changed only where it exists, since PHP's write would add it: `(\array_key_exists(1, $l) ?
     ///   f($l[1]) : throw new \OutOfRangeException('Undefined array key ' . 1))`.
     /// - a `null_safe` call gives null for a null place: `($l === null ? null : f($l))`.
-    fn with_place(&mut self, receiver: &Expression, null_safe: bool, call: impl FnOnce(&mut Self, u32) -> u32) -> u32 {
+    /// - each of `values`, the change's key, value or arguments, that runs code runs once before the place is taken, in
+    ///   a hidden variable, as PHP's own write runs them, so no code runs while the reference is open and a change the
+    ///   code makes to the place stays: `[$value#1 = $this->at($n - 1), put($this->memo, $n, $value#1)][1]`. Behind
+    ///   `?.` they run where the place is not null, as PHP runs a null-safe call's arguments.
+    fn with_place(
+        &mut self,
+        receiver: &Expression,
+        null_safe: bool,
+        values: &[(&Expression, &str)],
+        call: impl FnOnce(&mut Self, u32) -> u32,
+    ) -> u32 {
         if self.renumbered_root(receiver).is_some() {
-            return self.renumbered_first(receiver, |this| this.with_place(receiver, null_safe, call));
+            return self.renumbered_first(receiver, |this| this.with_place(receiver, null_safe, values, call));
         }
         let line = self.line(receiver);
         let taken = self.temporaries;
@@ -8212,10 +8319,18 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 hold(self, access.index, "index", &mut steps);
             }
         }
-        let gives_no_reference = property.is_some_and(|(object, property)| {
-            matches!(property, ClassLikeMemberSelector::Identifier(name)
-                if self.types.property_gives_no_reference(self.types.expression_type(object), name.value))
-        });
+        let mut held_values = Vec::new();
+        for (value, base) in values {
+            if !self.is_pure(value) {
+                hold(self, value, base, if null_safe { &mut held_values } else { &mut steps });
+            }
+        }
+        let static_accessor = self.static_accessor(root);
+        let gives_no_reference = static_accessor.is_some()
+            || property.is_some_and(|(object, property)| {
+                matches!(property, ClassLikeMemberSelector::Identifier(name)
+                    if self.types.property_gives_no_reference(self.types.expression_type(object), name.value))
+            });
         let kept = gives_no_reference.then(|| {
             hold(self, root, "receiver", &mut steps);
             let (_, read) = self.held_receivers.last().cloned().unwrap_or_else(|| unreachable!("the property is held"));
@@ -8230,6 +8345,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
         let place = self.target(receiver, PlaceUse::Write);
         let mut lowered = call(self, place);
+        if !held_values.is_empty() {
+            let position = held_values.len();
+            held_values.push(self.node(SHARP_AST_ARRAY_ELEM, 0, line, &[lowered, NULL]));
+            lowered = self.picked_step(line, &held_values, position);
+        }
         if null_safe {
             let read = self.expression(receiver);
             let is_null = self.is_null(line, read);
@@ -8256,9 +8376,15 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 let Some((_, changed)) = self.held_receivers.pop() else {
                     unreachable!("the property PHP gives no reference to is held last");
                 };
-                let place = self.target(root, PlaceUse::Write);
                 let value = self.variable(root.span(), &changed);
-                let stored = self.node(SHARP_AST_ASSIGN, 0, line, &[place, value]);
+                let stored = match static_accessor {
+                    Some((access, name)) => self.accessor_write(access, name, value, root.span()),
+                    None => {
+                        let place = self.target(root, PlaceUse::Write);
+
+                        self.node(SHARP_AST_ASSIGN, 0, line, &[place, value])
+                    }
+                };
                 let value = self.variable(root.span(), &changed);
                 let kept = self.variable(root.span(), &kept);
                 let unchanged = self.node(SHARP_AST_BINARY_OP, ZEND_IS_IDENTICAL, line, &[value, kept]);
@@ -8285,18 +8411,48 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// `[step, …][position]` on `line`: PHP runs each of `steps`, array elements, in order, and the expression gives
-    /// the one at `position`.
+    /// the one at `position`. An expression statement that is one runs its steps as statements instead, as
+    /// [`Self::discarded_steps`] says.
     fn picked_step(&mut self, line: u32, steps: &[u32], position: usize) -> u32 {
         let steps = self.node(SHARP_AST_ARRAY, ZEND_ARRAY_SYNTAX_SHORT, line, steps);
         let position = self.zval(line, sharp_value::SHARP_LONG, |node| node.long_value = position as i64);
+        let picked = self.node(SHARP_AST_DIM, 0, line, &[steps, position]);
+        self.picked_steps.insert(picked);
 
-        self.node(SHARP_AST_DIM, 0, line, &[steps, position])
+        picked
+    }
+
+    /// The expression statement `lowered`, whose value nothing reads: a [`Self::picked_step`] runs each of its steps as
+    /// its own statement, in order, so PHP builds no array, `$index#1 = $this->at(); \Sharp\Internal\set($sizes,
+    /// $index#1, $extra);`, and a step that is one runs its own steps too. Any other expression is its own statement.
+    fn discarded_steps(&mut self, lowered: u32) -> u32 {
+        if !self.picked_steps.contains(&lowered) {
+            return lowered;
+        }
+        let picked = &self.nodes[lowered as usize];
+        let line = picked.line;
+        let steps = self.children[picked.first_child as usize];
+        let steps = &self.nodes[steps as usize];
+        let elements: Vec<u32> =
+            self.children[steps.first_child as usize..(steps.first_child + steps.child_count) as usize].to_vec();
+        let statements: Vec<u32> = elements
+            .into_iter()
+            .map(|element| {
+                let step = self.children[self.nodes[element as usize].first_child as usize];
+
+                self.discarded_steps(step)
+            })
+            .collect();
+
+        self.node(SHARP_AST_STMT_LIST, 0, line, &statements)
     }
 
     /// The method call `expression`, null-safe or not, of `call`, its receiver, method and arguments, on a value that
     /// may hold more than one kind of collection, or a collection or an object, spec section 12, as
-    /// [`Types::members_by_kind`] gives `kinds`: the member of the kind the value holds, tested `List` first, then each
-    /// other kind by the class it runs as, and an object's own method last. The receiver runs first, as a place a `ref`
+    /// [`Types::members_by_kind`] gives `kinds`: the member of the kind the value holds, tested `List` first, then a
+    /// `Map` and a `Set` by the class each runs as, then an object's own method, and last an `Iterable`'s member, which
+    /// takes every other value. An object is tested by its method's class only before an `Iterable`'s member, since an
+    /// `Iterable` may be an object too. The receiver runs first, as a place a `ref`
     /// member changes, as [`Self::with_place`] passes it and skips where `null_safe` finds it null, or a value read
     /// once. Each argument but a literal or a local then runs once, in a hidden variable, and each member runs as its
     /// own call does, as [`Self::extension_call`] lowers it:
@@ -8317,7 +8473,9 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let taken = self.temporaries;
         let held = self.held_receivers.len();
         let lowered = if kinds.members.iter().any(|member| self.types.changes_receiver(&member.declaration)) {
-            self.with_place(receiver, null_safe, |this, place| this.selected_call(expression, kinds, call, Some(place)))
+            self.with_place(receiver, null_safe, &[], |this, place| {
+                this.selected_call(expression, kinds, call, Some(place))
+            })
         } else if self.is_pure(receiver) {
             self.selected_call(expression, kinds, call, None)
         } else {
@@ -8374,9 +8532,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 element.as_ref(),
                 Some(member.call),
             );
-            calls.push((member.runs_as, call));
+            calls.push((member, call));
         }
-        let mut selected = if kinds.object {
+        let iterable = calls.pop_if(|(member, _)| member.kind == CollectionKind::Iterable).map(|(_, call)| call);
+        let own = (!kinds.objects.is_empty()).then(|| {
             let value = self.expression(receiver);
             let method = self.member(method);
             let own: Vec<u32> = argument_list
@@ -8393,16 +8552,39 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             let own = self.node(SHARP_AST_ARG_LIST, 0, line, &own);
 
             self.node(SHARP_AST_METHOD_CALL, 0, line, &[value, method, own])
-        } else {
-            let Some((_, last)) = calls.pop() else {
-                unreachable!("a call by kind runs a collection's member");
-            };
+        });
+        let mut selected = match (own, iterable) {
+            // An `Iterable` may be an object too, so an object that runs its own method is told apart by its class.
+            (Some(own), Some(iterable)) => {
+                let tests: Vec<u32> = kinds
+                    .objects
+                    .iter()
+                    .map(|class| {
+                        let tested = self.expression(receiver);
+                        let class = self.string(ZEND_NAME_FQ, line, class.as_bytes());
 
-            last
+                        self.node(SHARP_AST_INSTANCEOF, 0, line, &[tested, class])
+                    })
+                    .collect();
+                let is_object = tests
+                    .into_iter()
+                    .reduce(|either, test| self.node(SHARP_AST_OR, 0, line, &[either, test]))
+                    .unwrap_or_else(|| unreachable!("the value may hold an object"));
+
+                self.node(SHARP_AST_CONDITIONAL, ZEND_PARENTHESIZED_CONDITIONAL, line, &[is_object, own, iterable])
+            }
+            (Some(last), None) | (None, Some(last)) => last,
+            (None, None) => {
+                let Some((_, last)) = calls.pop() else {
+                    unreachable!("a call by kind runs a collection's member");
+                };
+
+                last
+            }
         };
-        for (runs_as, member_call) in calls.into_iter().rev() {
+        for (member, member_call) in calls.into_iter().rev() {
             let tested = self.expression(receiver);
-            let is_kind = match runs_as {
+            let is_kind = match member.runs_as {
                 None => self.global_call(line, b"is_array", &[tested]),
                 Some(class) => {
                     let class = self.string(ZEND_NAME_FQ, line, class.as_bytes());
