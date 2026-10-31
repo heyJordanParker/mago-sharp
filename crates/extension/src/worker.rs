@@ -1002,10 +1002,6 @@ mod tests {
     /// The deadline of a test whose peer answers at once, the hosts' default, so a busy machine never reaches it.
     const UNREACHED_DEADLINE: Duration = Duration::from_secs(30);
 
-    /// How late past its deadline a request may fail on a busy machine: a loaded runner overslept 150 ms, and a request
-    /// that waited for the default deadline instead of its own would fail 30 seconds late.
-    const LATE_BY_AT_MOST: Duration = Duration::from_secs(10);
-
     #[test]
     fn stderr_tail_keeps_only_the_configured_suffix() {
         let mut tail = StderrTail::new(5);
@@ -1220,10 +1216,7 @@ mod tests {
             1,
             "{responses:?}"
         );
-        assert!(
-            elapsed >= deadline && elapsed < deadline + LATE_BY_AT_MOST,
-            "the hung request failed after {elapsed:?}"
-        );
+        assert!(elapsed >= deadline && elapsed < deadline * 2, "the hung request failed after {elapsed:?}");
         assert!(!worker.is_running());
         peer.join().expect("peer thread should join");
         worker.shutdown();
@@ -1295,7 +1288,7 @@ mod tests {
     /// names the host, the file and the setting.
     #[test]
     fn a_hook_that_asks_for_metadata_but_never_finishes_its_file_fails_at_the_deadline() {
-        let deadline = Duration::from_millis(300);
+        let deadline = Duration::from_secs(3);
         let (worker, peer_reader, peer_writer) = connected_worker(deadline);
         let peer = run_six_files(peer_reader, peer_writer, deadline / 2, false);
 
@@ -1303,14 +1296,10 @@ mod tests {
         let mut handler = |_: &Frame| Ok(b"metadata!".to_vec());
         let error = worker.request_with_handler(b"analyze".to_vec(), &mut handler).expect_err("the request times out");
 
-        assert!(
-            started_at.elapsed() < deadline + LATE_BY_AT_MOST,
-            "the request failed after {:?}",
-            started_at.elapsed()
-        );
+        assert!(started_at.elapsed() < deadline * 2, "the request failed after {:?}", started_at.elapsed());
         assert_eq!(
             error.to_string(),
-            "extension host `acme` made no progress for 300 ms on request 1 (worker 0): raise its `request-timeout-ms` for hooks that run that long"
+            "extension host `acme` made no progress for 3000 ms on request 1 (worker 0): raise its `request-timeout-ms` for hooks that run that long"
         );
         peer.join().expect("peer thread should join");
         worker.shutdown();
@@ -1318,7 +1307,8 @@ mod tests {
 
     #[test]
     fn a_timeout_names_the_file_whose_hooks_made_no_progress() {
-        let deadline = Duration::from_millis(100);
+        // Long enough that the peer names the file before it on a busy machine.
+        let deadline = Duration::from_secs(3);
         let (worker, mut peer_reader, mut peer_writer) = connected_worker(deadline);
         let peer = std::thread::spawn(move || {
             let outer = Frame::read_from(&mut peer_reader, 1024)
@@ -1338,7 +1328,7 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            "extension host `acme` made no progress for 100 ms on the hooks of app/Hung.php (worker 0): raise its `request-timeout-ms` for hooks that run that long"
+            "extension host `acme` made no progress for 3000 ms on the hooks of app/Hung.php (worker 0): raise its `request-timeout-ms` for hooks that run that long"
         );
         peer.join().expect("peer thread should join");
         worker.shutdown();

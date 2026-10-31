@@ -161,8 +161,9 @@ impl<'config> DatabaseWatcher<'config> {
         // Build the set of explicitly configured watch paths so that events from
         // these directories are never filtered out by the default glob exclusions
         // (e.g., a project that explicitly includes `vendor/revolt` should still
-        // receive change events for files under that directory).
-        let mut unique_watch_paths = HashSet::new();
+        // receive change events for files under that directory). They keep the configuration's order, so the watcher
+        // starts on them in the same order each run.
+        let mut watched_paths: Vec<PathBuf> = Vec::new();
 
         let mut host_base_paths = Vec::new();
         for path in &config.paths {
@@ -174,7 +175,9 @@ impl<'config> DatabaseWatcher<'config> {
 
             let canonical = absolute_path.canonicalize().unwrap_or_else(|_| absolute_path.clone());
             host_base_paths.push((canonical, specificity));
-            unique_watch_paths.insert(absolute_path);
+            if !watched_paths.contains(&absolute_path) {
+                watched_paths.push(absolute_path);
+            }
         }
 
         let mut include_base_paths = Vec::new();
@@ -184,7 +187,9 @@ impl<'config> DatabaseWatcher<'config> {
             let absolute_path = if watch_path.is_absolute() { watch_path } else { config.workspace.join(watch_path) };
             let canonical = absolute_path.canonicalize().unwrap_or_else(|_| absolute_path.clone());
             include_base_paths.push((canonical, specificity));
-            unique_watch_paths.insert(absolute_path);
+            if !watched_paths.contains(&absolute_path) {
+                watched_paths.push(absolute_path);
+            }
         }
 
         let mut patch_base_paths = Vec::new();
@@ -194,16 +199,17 @@ impl<'config> DatabaseWatcher<'config> {
             let absolute_path = if watch_path.is_absolute() { watch_path } else { config.workspace.join(watch_path) };
             let canonical = absolute_path.canonicalize().unwrap_or_else(|_| absolute_path.clone());
             patch_base_paths.push((canonical, specificity));
-            unique_watch_paths.insert(absolute_path);
+            if !watched_paths.contains(&absolute_path) {
+                watched_paths.push(absolute_path);
+            }
         }
 
-        let explicit_watch_paths: Vec<PathBuf> = unique_watch_paths
+        let explicit_watch_paths: Vec<PathBuf> = watched_paths
             .iter()
             .filter(|wp| glob_excludes.is_match(wp.as_path()) || path_excludes.contains(wp.as_path()))
             .cloned()
             .collect();
 
-        let watched_paths: Vec<PathBuf> = unique_watch_paths.into_iter().collect();
         let watch_list: Vec<(PathBuf, RecursiveMode)> =
             watched_paths.iter().map(|path| (path.clone(), RecursiveMode::Recursive)).collect();
         let watcher = start_watcher(
@@ -558,10 +564,11 @@ impl Drop for DatabaseWatcher<'_> {
 ///
 /// An operating system watcher can start reporting some time after it is asked to: on a busy Mac, FSEvents starts a
 /// stream late and never reports a change made before then. So, as Watchman syncs its clients, the watcher writes and
-/// deletes a cookie file, of a name no other watcher uses, in the first watched folder, and returns once it reports
-/// the cookie, since it reports every later change after it. A watcher that reports no cookie within
-/// [`COOKIE_TIMEOUT`], as on a volume FSEvents does not cover, gives way to one that checks the files every
-/// `poll_interval`, with a warning that names the folder.
+/// deletes a cookie file, of a name no other watcher uses, in each watched folder, and returns once it reports every
+/// cookie, since it reports each later change in that folder after it. A folder the cookie cannot be written to, such
+/// as a read-only one, gets a warning that names it and the error. A watcher that reports a written cookie of no
+/// folder within [`COOKIE_TIMEOUT`], as on a volume FSEvents does not cover, gives way to one that checks the files
+/// every `poll_interval`, with a warning that names each such folder.
 ///
 /// # Errors
 ///
@@ -588,9 +595,9 @@ where
     W: NotifyWatcher + Send + 'static,
     H: EventHandler + Clone,
 {
-    static COOKIES: AtomicUsize = AtomicUsize::new(0);
-    let cookie = format!("{COOKIE_PREFIX}{}-{}", std::process::id(), COOKIES.fetch_add(1, Ordering::Relaxed));
-    let (reported, cookie_reported) = mpsc::channel();
+    static WATCHERS: AtomicUsize = AtomicUsize::new(0);
+    let cookie = format!("{COOKIE_PREFIX}{}-{}-", std::process::id(), WATCHERS.fetch_add(1, Ordering::Relaxed));
+    let (reported, cookies_reported) = mpsc::channel();
     let without_cookies = |mut handler: H| {
         let cookie = cookie.clone();
         let reported = reported.clone();
@@ -601,8 +608,8 @@ where
             let named_paths = !event.paths.is_empty();
             event.paths.retain(|path| {
                 let name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
-                if name == cookie {
-                    let _ = reported.send(());
+                if name.starts_with(&cookie) {
+                    let _ = reported.send(name.to_owned());
                 }
 
                 !name.starts_with(COOKIE_PREFIX)
@@ -619,21 +626,32 @@ where
         watcher.watch(path, *recursive_mode).map_err(DatabaseError::WatcherWatch)?;
     }
 
-    let folder = paths.iter().map(|(path, _)| path).find(|path| path.is_dir());
+    // Each folder's cookie, by its name, as the watcher reports a path under the folder's real path.
     let started = Instant::now();
-    let reports = folder.is_some_and(|folder| {
-        let path = folder.join(&cookie);
-        if std::fs::write(&path, b"").is_err() {
-            return false;
+    let mut unreported: Vec<(&Path, String)> = Vec::new();
+    for (index, folder) in paths.iter().map(|(path, _)| path.as_path()).filter(|path| path.is_dir()).enumerate() {
+        let name = format!("{cookie}{index}");
+        let path = folder.join(&name);
+        if let Err(error) = std::fs::write(&path, b"") {
+            tracing::warn!(
+                "Could not write the file watcher's cookie in {}, so a change made there as the watch starts can be missed: {error}",
+                folder.display()
+            );
+            continue;
         }
         if let Err(error) = std::fs::remove_file(&path) {
-            tracing::warn!("Could not delete the watcher's cookie file {}: {error}", path.display());
+            tracing::warn!("Could not delete the file watcher's cookie {}: {error}", path.display());
         }
-
-        cookie_reported.recv_timeout(cookie_timeout).is_ok()
-    });
-    if reports {
-        tracing::debug!("The file watcher reported its cookie after {:?}.", started.elapsed());
+        unreported.push((folder, name));
+    }
+    let deadline = started + cookie_timeout;
+    while !unreported.is_empty()
+        && let Ok(name) = cookies_reported.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+    {
+        unreported.retain(|(_, cookie)| *cookie != name);
+    }
+    if unreported.is_empty() {
+        tracing::debug!("The file watcher reported its cookies after {:?}.", started.elapsed());
 
         return Ok(Box::new(watcher));
     }
@@ -641,10 +659,15 @@ where
     drop(watcher);
     tracing::warn!(
         "The file watcher reported no change in {} within {cookie_timeout:?}, so this run checks the watched files every {poll_interval:?} instead.",
-        folder.map_or_else(|| "any watched folder".to_owned(), |folder| folder.display().to_string()),
+        unreported.iter().map(|(folder, _)| folder.display().to_string()).collect::<Vec<_>>().join(", "),
     );
-    let mut poller = PollWatcher::new(without_cookies(handler), Config::default().with_poll_interval(poll_interval))
-        .map_err(DatabaseError::WatcherInit)?;
+    // Notify's poller compares write times in whole seconds, so it also compares contents to see a second edit within
+    // the same second.
+    let mut poller = PollWatcher::new(
+        without_cookies(handler),
+        Config::default().with_poll_interval(poll_interval).with_compare_contents(true),
+    )
+    .map_err(DatabaseError::WatcherInit)?;
     for (path, recursive_mode) in paths {
         poller.watch(path, *recursive_mode).map_err(DatabaseError::WatcherWatch)?;
     }
@@ -788,9 +811,9 @@ mod tests {
     use std::sync::Arc;
     use std::sync::Mutex;
     use std::sync::PoisonError;
+    use std::time::SystemTime;
 
     use super::*;
-    use crate::DatabaseConfiguration;
 
     /// A project folder with an `app` and a `vendor` folder, at its real path.
     fn project() -> (tempfile::TempDir, PathBuf) {
@@ -808,42 +831,47 @@ mod tests {
         std::fs::write(root.join(name), contents).expect("the file should be written");
     }
 
-    /// The changes `watcher` reports first, or none when it reports nothing within a minute.
-    fn first_changes(watcher: &mut DatabaseWatcher<'_>) -> Vec<FileId> {
-        let deadline = Instant::now() + Duration::from_mins(1);
-        while Instant::now() < deadline {
-            let changed = watcher.wait().expect("the watcher should be watching");
-            if !changed.is_empty() {
-                return changed;
-            }
-        }
-
-        Vec::new()
+    /// Whether `path` names a cookie file.
+    fn is_cookie(path: &Path) -> bool {
+        path.file_name().is_some_and(|name| name.to_string_lossy().starts_with(COOKIE_PREFIX))
     }
 
-    /// A file written the moment `watch` returns is the first change reported, and no cookie ever reaches the database,
-    /// so no analysis or host sees one: not the watcher's own, nor the one a second watcher of the same folders writes,
-    /// and each is gone from its folder.
-    #[test]
-    fn a_cookie_never_reaches_the_database() {
-        let (_directory, root) = project();
-        let configuration = DatabaseConfiguration::new(&root, vec![b"app"], vec![b"vendor"], vec![], vec![b"php"]);
-        let mut watcher = DatabaseWatcher::new(Database::new(configuration.clone()));
-        let mut second = DatabaseWatcher::new(Database::new(configuration));
+    /// The paths of each event `received` gives, up to the first that names `file`, or of each within a minute when
+    /// none does.
+    fn paths_until(received: &Receiver<notify::Result<Event>>, file: &Path) -> Vec<PathBuf> {
+        let deadline = Instant::now() + Duration::from_mins(1);
+        let mut paths = Vec::new();
+        while !paths.iter().any(|path| path == file)
+            && let Ok(event) = received.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        {
+            paths.extend(event.expect("the watcher should report no error").paths);
+        }
 
-        watcher.watch(WatchOptions::default()).expect("the watcher should start");
-        second.watch(WatchOptions::default()).expect("the second watcher should start");
+        paths
+    }
+
+    /// No handler sees a cookie: not its watcher's own, nor the one a second watcher of the same folder writes once the
+    /// first is live, and each is gone from the folder.
+    #[test]
+    fn a_cookie_never_reaches_a_handler() {
+        let (_directory, root) = project();
+        let app = [(root.join("app"), RecursiveMode::Recursive)];
+        let (events, received) = mpsc::channel();
+
+        let _watcher = start_watcher(events, &app, Duration::from_millis(50)).expect("the watcher should start");
+        let _second = start_watcher(|_: notify::Result<Event>| {}, &app, Duration::from_millis(50))
+            .expect("the second watcher should start");
         write(&root, "app/a.php", "<?php\n\necho 1;\n");
 
-        assert_eq!(first_changes(&mut watcher), vec![FileId::new(b"app/a.php")]);
-        assert_eq!(watcher.database().files().count(), 1);
-        for folder in ["app", "vendor"] {
-            let names: Vec<_> = std::fs::read_dir(root.join(folder))
-                .expect("the folder should be read")
-                .map(|entry| entry.expect("the folder's entry should be read").file_name())
-                .collect();
-            assert!(names.iter().all(|name| !name.to_string_lossy().starts_with(COOKIE_PREFIX)), "{names:?}");
-        }
+        let file = root.join("app/a.php");
+        let paths = paths_until(&received, &file);
+        assert!(paths.contains(&file), "no event names {}: {paths:?}", file.display());
+        assert!(!paths.iter().any(|path| is_cookie(path)), "{paths:?}");
+        let names: Vec<PathBuf> = std::fs::read_dir(root.join("app"))
+            .expect("the folder should be read")
+            .map(|entry| entry.expect("the folder's entry should be read").path())
+            .collect();
+        assert!(!names.iter().any(|path| is_cookie(path)), "{names:?}");
     }
 
     /// The log lines a test's subscriber writes.
@@ -867,40 +895,193 @@ mod tests {
         }
     }
 
-    /// A watcher that never reports its cookie, as one on a volume FSEvents does not cover, gives way to polling: it
-    /// warns, naming the folder, and a file written after it returns is still reported.
-    #[test]
-    fn a_watcher_that_reports_no_cookie_polls_and_says_so() {
-        let (_directory, root) = project();
-        let (events, received) = mpsc::channel();
+    /// Runs `start` with a subscriber that keeps the log, and returns what `start` returns with the log.
+    fn logged<T>(start: impl FnOnce() -> T) -> (T, String) {
         let log = Log::default();
         let subscriber = tracing_subscriber::fmt().with_ansi(false).with_writer({
             let log = log.clone();
             move || log.clone()
         });
+        let started = tracing::subscriber::with_default(subscriber.finish(), start);
 
-        let _watcher = tracing::subscriber::with_default(subscriber.finish(), || {
+        (started, log.text())
+    }
+
+    /// A watcher that reports the cookie of each folder starts with no warning.
+    ///
+    /// This test and the two after it need the watcher to report each cookie within [`COOKIE_TIMEOUT`]. inotify
+    /// reports from the kernel at once, but FSEvents reports through `fseventsd`, which a Mac busy writing files can
+    /// hold up past any bound, so they run on Linux.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_watcher_that_reports_each_cookie_warns_of_nothing() {
+        let (_directory, root) = project();
+        let folders = [(root.join("app"), RecursiveMode::Recursive), (root.join("vendor"), RecursiveMode::Recursive)];
+
+        let (_watcher, log) = logged(|| {
+            start_watcher(|_: notify::Result<Event>| {}, &folders, Duration::from_millis(50))
+                .expect("the watcher should start")
+        });
+
+        assert!(!log.contains("WARN"), "{log}");
+    }
+
+    /// A watcher of only the first folder it is given, as one whose stream of a later folder never starts.
+    #[cfg(target_os = "linux")]
+    struct FirstFolderOnly {
+        watcher: RecommendedWatcher,
+        watching: bool,
+    }
+
+    #[cfg(target_os = "linux")]
+    impl NotifyWatcher for FirstFolderOnly {
+        fn new<F: EventHandler>(handler: F, config: Config) -> notify::Result<Self> {
+            Ok(Self { watcher: RecommendedWatcher::new(handler, config)?, watching: false })
+        }
+
+        fn watch(&mut self, path: &Path, recursive_mode: RecursiveMode) -> notify::Result<()> {
+            if self.watching {
+                return Ok(());
+            }
+            self.watching = true;
+
+            self.watcher.watch(path, recursive_mode)
+        }
+
+        fn unwatch(&mut self, path: &Path) -> notify::Result<()> {
+            self.watcher.unwatch(path)
+        }
+
+        fn kind() -> notify::WatcherKind {
+            RecommendedWatcher::kind()
+        }
+    }
+
+    /// A watcher that reports the cookie of one folder but not of another polls, and its warning names only the
+    /// other.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_watcher_that_misses_one_folder_s_cookie_polls_and_names_that_folder() {
+        let (_directory, root) = project();
+        let folders = [(root.join("app"), RecursiveMode::Recursive), (root.join("vendor"), RecursiveMode::Recursive)];
+
+        let (_watcher, log) = logged(|| {
+            start_watcher_of::<FirstFolderOnly, _>(
+                |_: notify::Result<Event>| {},
+                &folders,
+                Duration::from_millis(50),
+                COOKIE_TIMEOUT,
+            )
+            .expect("the poll watcher should start")
+        });
+
+        assert!(
+            log.contains(&format!(
+                "The file watcher reported no change in {} within {COOKIE_TIMEOUT:?}, so this run checks the watched files every 50ms instead.",
+                root.join("vendor").display()
+            )),
+            "{log}"
+        );
+    }
+
+    /// A folder the cookie cannot be written to gets a warning that names it and the error, and the watcher of the
+    /// other folders starts without polling.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_folder_that_takes_no_cookie_is_named_with_the_error() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_directory, root) = project();
+        let vendor = root.join("vendor");
+        let folders = [(root.join("app"), RecursiveMode::Recursive), (vendor.clone(), RecursiveMode::Recursive)];
+        std::fs::set_permissions(&vendor, std::fs::Permissions::from_mode(0o555)).expect("vendor should be read-only");
+
+        let (_watcher, log) = logged(|| {
+            start_watcher(|_: notify::Result<Event>| {}, &folders, Duration::from_millis(50))
+                .expect("the watcher should start")
+        });
+        std::fs::set_permissions(&vendor, std::fs::Permissions::from_mode(0o755)).expect("vendor should be writable");
+
+        assert!(
+            log.contains(&format!(
+                "Could not write the file watcher's cookie in {}, so a change made there as the watch starts can be missed: Permission denied",
+                vendor.display()
+            )),
+            "{log}"
+        );
+        assert!(!log.contains("checks the watched files every"), "{log}");
+    }
+
+    /// The write time of every file the poll tests save: whole seconds, so one second later is the next second.
+    const SAVED_AT: Duration = Duration::from_secs(1_700_000_000);
+
+    /// Replaces `app/a.php` in `root` with `contents` written at `modified` seconds past [`SAVED_AT`], in one rename, as
+    /// an editor that saves by renaming does, so no poll sees the contents without the write time.
+    fn save(root: &Path, contents: &str, modified: u64) {
+        let draft = root.join("a.php.draft");
+        std::fs::write(&draft, contents).expect("the draft should be written");
+        std::fs::File::options()
+            .write(true)
+            .open(&draft)
+            .and_then(|draft| draft.set_modified(SystemTime::UNIX_EPOCH + SAVED_AT + Duration::from_secs(modified)))
+            .expect("the draft's write time should be set");
+        std::fs::rename(&draft, root.join("app/a.php")).expect("the draft should replace the file");
+    }
+
+    /// Starts a watcher of `app` in `root` that never reports its cookie, so it polls every 50 ms, and gives the changes
+    /// [`DatabaseWatcher::handle_event`] makes of each event, with the log of its start.
+    fn poll_app(root: &Path) -> (Box<dyn NotifyWatcher + Send>, Receiver<Vec<ChangedFile>>, String) {
+        let (changes, received) = mpsc::channel();
+        let workspace = root.to_path_buf();
+        let extensions = HashSet::from([b"php".to_vec()]);
+        let handler = move |result: notify::Result<Event>| {
+            if let Ok(event) = result
+                && let Some(changed) = DatabaseWatcher::handle_event(
+                    event,
+                    &workspace,
+                    &GlobSet::empty(),
+                    &HashSet::new(),
+                    &extensions,
+                    &[],
+                )
+            {
+                let _ = changes.send(changed);
+            }
+        };
+        let (watcher, log) = logged(|| {
             start_watcher_of::<notify::NullWatcher, _>(
-                events,
+                handler,
                 &[(root.join("app"), RecursiveMode::Recursive)],
                 Duration::from_millis(50),
                 Duration::from_millis(50),
             )
             .expect("the poll watcher should start")
         });
-        write(&root, "app/a.php", "<?php\n\necho 1;\n");
 
-        // The folder's own write time changes too, so its event can come first.
-        let file = root.join("app/a.php");
+        (watcher, received, log)
+    }
+
+    /// Whether `received` gives a change of `app/a.php` in `root` within a minute.
+    fn reports_a_change(received: &Receiver<Vec<ChangedFile>>, root: &Path) -> bool {
+        let expected = ChangedFile { id: FileId::new(b"app/a.php"), path: root.join("app/a.php") };
         let deadline = Instant::now() + Duration::from_mins(1);
-        let mut events =
-            std::iter::from_fn(|| received.recv_timeout(deadline.saturating_duration_since(Instant::now())).ok());
-        assert!(
-            events.any(|event| event.is_ok_and(|event| event.paths.contains(&file))),
-            "no event names {}",
-            file.display()
-        );
-        let log = log.text();
+
+        std::iter::from_fn(|| received.recv_timeout(deadline.saturating_duration_since(Instant::now())).ok())
+            .any(|changes| changes.contains(&expected))
+    }
+
+    /// A watcher that never reports its cookie, as one on a volume FSEvents does not cover, gives way to polling: it
+    /// warns, naming the folder, and an edit to a file after it returns reaches the database as a change, which the
+    /// poller reports as a later write time.
+    #[test]
+    fn a_watcher_that_reports_no_cookie_polls_and_says_so() {
+        let (_directory, root) = project();
+        save(&root, "<?php echo 1;\n", 0);
+
+        let (_watcher, received, log) = poll_app(&root);
+        save(&root, "<?php echo 2;\n", 1);
+
+        assert!(reports_a_change(&received, &root), "no change of app/a.php");
         assert!(
             log.contains(&format!(
                 "The file watcher reported no change in {} within 50ms, so this run checks the watched files every 50ms instead.",
@@ -908,5 +1089,19 @@ mod tests {
             )),
             "{log}"
         );
+    }
+
+    /// The poller reports a second edit within the second of the first, which leaves the file's write time as it was.
+    #[test]
+    fn a_poll_watcher_reports_a_second_edit_within_the_same_second() {
+        let (_directory, root) = project();
+        save(&root, "<?php echo 1;\n", 0);
+
+        let (_watcher, received, _) = poll_app(&root);
+        save(&root, "<?php echo 2;\n", 1);
+        assert!(reports_a_change(&received, &root), "no change after the first edit");
+        save(&root, "<?php echo 3;\n", 1);
+
+        assert!(reports_a_change(&received, &root), "no change after the second edit");
     }
 }

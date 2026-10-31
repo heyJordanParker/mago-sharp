@@ -677,13 +677,13 @@ fn a_watch_starts_the_hosts_again_when_a_php_sharp_file_changes() {
     watch.kill().unwrap();
     watch.wait().unwrap();
 
-    let log = format!("{}\n{}", log(), std::fs::read_to_string(watch_log.path()).unwrap());
-    let runs: Vec<(&str, &str)> =
-        log.lines().take_while(|line| !line.is_empty()).filter_map(|line| line.split_once(' ')).collect();
-    assert!(runs.len() >= 2, "{log}");
-    assert_eq!(runs[0].1, "first", "{log}");
-    assert_eq!(runs[1].1, "second", "{log}");
-    assert_ne!(runs[0].0, runs[1].0, "{log}");
+    let hosts = log();
+    let runs: Vec<(&str, &str)> = hosts.lines().filter_map(|line| line.split_once(' ')).collect();
+    let failure = format!("{hosts}\n{}", std::fs::read_to_string(watch_log.path()).unwrap());
+    assert!(runs.len() >= 2, "{failure}");
+    assert_eq!(runs[0].1, "first", "{failure}");
+    assert_eq!(runs[1].1, "second", "{failure}");
+    assert_ne!(runs[0].0, runs[1].0, "{failure}");
 }
 
 /// A host that types the project's code, as one that gives a plain PHP helper its return type does, can load the

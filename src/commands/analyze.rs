@@ -427,8 +427,10 @@ impl AnalyzeCommand {
     /// Wraps watch mode in a restart loop.
     ///
     /// When configuration files, baseline files, or Composer files change,
-    /// the watch session restarts with the reloaded configuration.
-    fn run_watch_loop(&self, mut configuration: Configuration, color_choice: ColorChoice) -> Result<ExitCode, Error> {
+    /// the watch session restarts with the reloaded configuration. The watcher of those files is live before each load
+    /// of the configuration, so a change made after `mago` first read it restarts the watch too.
+    fn run_watch_loop(&self, configuration: Configuration, color_choice: ColorChoice) -> Result<ExitCode, Error> {
+        let (mut restart_watcher, mut configuration) = watch_and_reload(configuration)?;
         loop {
             let mut orchestrator = create_orchestrator(&configuration, color_choice, false, false, true);
             analyze_the_whole_workspace_without_paths(&mut orchestrator);
@@ -439,14 +441,13 @@ impl AnalyzeCommand {
                 Some(scope_to(&mut orchestrator, &configuration.source.workspace, &self.path, &[])?)
             };
 
-            // The watchers report each change from here on before the hosts' compile or the analysis reads a file, so
-            // an edit made after a file is read reaches them, and one made before is in what was read.
+            // The watcher reports each change from here on before the hosts' compile or the analysis reads a file, so
+            // an edit made after a file is read reaches it, and one made before is in what was read.
             tracing::info!("Starting watch mode. Press Ctrl+C to stop.");
             let workspace = &configuration.source.workspace;
             let mut watcher =
                 DatabaseWatcher::new(Database::new(orchestrator.database_configuration(workspace, true).into_static()));
             watcher.watch(WatchOptions { poll_interval: Some(Duration::from_millis(500)), ..Default::default() })?;
-            let restart_receiver = setup_restart_watcher(workspace, &configuration)?;
 
             let (extension_hosts, _) = compile_for_hosts(&configuration)?;
             if let Some(external_analyzer) = initialize_external_analyzer(
@@ -464,32 +465,19 @@ impl AnalyzeCommand {
                 orchestrator.load_database(workspace, true, Some(self.prelude_database()), None)?.into_static();
             *watcher.database_mut() = database;
 
-            match self.run_watch_mode(orchestrator, &configuration, color_choice, scope, watcher, &restart_receiver)? {
+            match self.run_watch_mode(
+                orchestrator,
+                &configuration,
+                color_choice,
+                scope,
+                watcher,
+                &restart_watcher.reasons,
+            )? {
                 WatchOutcome::Restart(reason) => {
                     tracing::info!("Restarting analysis: {reason}");
 
-                    // Only pin the config file path if the user explicitly passed --config.
-                    // Otherwise, let load() re-discover it (the file might have been
-                    // deleted, renamed, or a different format might now take precedence).
-                    let explicit_config =
-                        if configuration.config_file_is_explicit { configuration.config_file.as_deref() } else { None };
-
-                    match Configuration::load(
-                        Some(configuration.source.workspace.clone()),
-                        explicit_config,
-                        Some(configuration.php_version),
-                        Some(configuration.threads),
-                        configuration.allow_unsupported_php_version,
-                        configuration.no_version_check,
-                    ) {
-                        Ok(new_config) => {
-                            configuration = new_config;
-                        }
-                        Err(e) => {
-                            tracing::error!("Failed to reload configuration: {e}");
-                            tracing::info!("Continuing with previous configuration.");
-                        }
-                    }
+                    // The restart watcher stops here, once the next one is live.
+                    (restart_watcher, configuration) = watch_and_reload(configuration)?;
                 }
             }
         }
@@ -641,18 +629,62 @@ pub(crate) fn decode_prelude() -> (CodebaseMetadata, SymbolReferences) {
     (metadata, symbol_references)
 }
 
-/// Sets up a file system watcher for non-PHP files that should trigger a full restart.
-///
-/// Watches:
+/// A watcher of the non-PHP files whose change restarts watch mode, and the reason it gives for each change.
+struct RestartWatcher {
+    /// Watches while it lives.
+    _watcher: Box<dyn notify::Watcher + Send>,
+    /// The [`restart_files`] it watches.
+    files: Vec<(PathBuf, &'static str)>,
+    /// A human-readable reason for each change to one of the files.
+    reasons: mpsc::Receiver<String>,
+}
+
+/// Starts the restart watcher of `configuration`'s files, then loads the configuration again, so a change to one of
+/// them that the load misses restarts the watch. While the loaded configuration names other files, it starts the
+/// watcher of those and loads again. Each watcher stops once the next is live.
+fn watch_and_reload(mut configuration: Configuration) -> Result<(RestartWatcher, Configuration), Error> {
+    let mut restart_watcher = setup_restart_watcher(&configuration)?;
+    loop {
+        // Only pin the config file path if the user explicitly passed --config.
+        // Otherwise, let load() re-discover it (the file might have been
+        // deleted, renamed, or a different format might now take precedence).
+        let explicit_config =
+            if configuration.config_file_is_explicit { configuration.config_file.as_deref() } else { None };
+
+        let mut reloaded = match Configuration::load(
+            Some(configuration.source.workspace.clone()),
+            explicit_config,
+            Some(configuration.php_version),
+            Some(configuration.threads),
+            configuration.allow_unsupported_php_version,
+            configuration.no_version_check,
+        ) {
+            Ok(reloaded) => reloaded,
+            Err(e) => {
+                tracing::error!("Failed to reload configuration: {e}");
+                tracing::info!("Continuing with previous configuration.");
+
+                return Ok((restart_watcher, configuration));
+            }
+        };
+        if configuration.no_extensions {
+            reloaded.disable_extensions();
+        }
+        if restart_files(&reloaded) == restart_watcher.files {
+            return Ok((restart_watcher, reloaded));
+        }
+
+        restart_watcher = setup_restart_watcher(&reloaded)?;
+        configuration = reloaded;
+    }
+}
+
+/// The non-PHP files whose change restarts watch mode, each with a label for the reason:
 /// - Configuration files (`mago.toml`, `mago.dist.toml`, etc.)
 /// - Baseline file (if configured)
 /// - `composer.json` and `composer.lock` (if present)
-///
-/// Returns a receiver that delivers a human-readable reason string when a restart
-/// is triggered, for each change made after it returns, as [`start_watcher`] says.
-fn setup_restart_watcher(workspace: &Path, configuration: &Configuration) -> Result<mpsc::Receiver<String>, Error> {
-    let (tx, rx) = mpsc::channel();
-
+fn restart_files(configuration: &Configuration) -> Vec<(PathBuf, &'static str)> {
+    let workspace = configuration.source.workspace.as_path();
     let mut watch_files: Vec<(PathBuf, &'static str)> = Vec::new();
 
     if let Some(config_file) = &configuration.config_file {
@@ -675,16 +707,22 @@ fn setup_restart_watcher(workspace: &Path, configuration: &Configuration) -> Res
     watch_files.push((workspace.join("composer.json"), "composer.json"));
     watch_files.push((workspace.join("composer.lock"), "composer.lock"));
 
-    let file_labels: Vec<(PathBuf, String)> = watch_files
-        .iter()
-        .map(|(path, label)| {
-            let abs = if path.is_absolute() { path.clone() } else { workspace.join(path) };
-            (abs, label.to_string())
-        })
-        .collect();
+    watch_files
+        .into_iter()
+        .map(|(path, label)| (if path.is_absolute() { path } else { workspace.join(path) }, label))
+        .collect()
+}
+
+/// Starts a watcher of `configuration`'s [`restart_files`], which gives a human-readable reason for each change made
+/// to one after it returns, as [`start_watcher`] says.
+fn setup_restart_watcher(configuration: &Configuration) -> Result<RestartWatcher, Error> {
+    let workspace = configuration.source.workspace.as_path();
+    let (tx, rx) = mpsc::channel();
+    let files = restart_files(configuration);
+    let file_labels = files.clone();
 
     let mut watched_dirs: Vec<(PathBuf, RecursiveMode)> = Vec::new();
-    for (path, label) in &watch_files {
+    for (path, label) in &files {
         let watch_dir = path.parent().unwrap_or(workspace);
         if watched_dirs.iter().any(|(watched, _)| watched == watch_dir) {
             continue;
@@ -724,10 +762,49 @@ fn setup_restart_watcher(workspace: &Path, configuration: &Configuration) -> Res
         Duration::from_millis(500),
     )?;
 
-    // keep the watcher alive by leaking it. it will be cleaned up when the process exits
-    // or when the watch loop restarts. This is intentional: the watcher must outlive the
-    // function call since it runs on a background thread.
-    std::mem::forget(watcher);
+    Ok(RestartWatcher { _watcher: watcher, files, reasons: rx })
+}
 
-    Ok(rx)
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A change to the configuration file made before its restart watcher is live, as one saved while `mago` starts,
+    /// is in the configuration `watch_and_reload` returns, and the watcher it returns watches the baseline that the
+    /// change names, which the configuration `mago` read first did not.
+    #[test]
+    fn a_configuration_change_made_before_the_restart_watcher_is_live_is_loaded_and_watched() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let file = root.join("mago.toml");
+        std::fs::write(&file, "php-version = \"8.4\"\n").unwrap();
+        let configuration = Configuration::load(Some(root.clone()), Some(&file), None, None, false, true).unwrap();
+        std::fs::write(&file, "php-version = \"8.4\"\n\n[analyzer]\nbaseline = \"baseline.toml\"\n").unwrap();
+
+        let (restart_watcher, configuration) = watch_and_reload(configuration).unwrap();
+
+        let baseline = root.join("baseline.toml");
+        assert_eq!(configuration.analyzer.baseline.as_deref(), Some(baseline.as_path()));
+        assert!(restart_watcher.files.contains(&(baseline, "baseline file")), "{:?}", restart_watcher.files);
+    }
+
+    /// `--no-extensions` keeps the extension hosts off when watch mode loads the configuration again.
+    #[test]
+    fn a_reload_keeps_the_extension_hosts_off_under_no_extensions() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let file = root.join("mago.toml");
+        std::fs::write(
+            &file,
+            "php-version = \"8.4\"\n\n[extension-hosts.logger]\nworkers = 1\ncommand = [\"php\", \"host.php\"]\n",
+        )
+        .unwrap();
+        let mut configuration = Configuration::load(Some(root.clone()), Some(&file), None, None, false, true).unwrap();
+        assert!(configuration.extension_hosts.contains_key("logger"));
+        configuration.disable_extensions();
+
+        let (_restart_watcher, configuration) = watch_and_reload(configuration).unwrap();
+
+        assert!(configuration.extension_hosts.is_empty(), "{:?}", configuration.extension_hosts.keys());
+    }
 }
