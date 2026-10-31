@@ -13864,17 +13864,80 @@ fn a_user_s_extension_of_an_iterable_reaches_a_map_as_its_entries() {
     );
 }
 
-/// Spec section 26: an extension's receiver fixes its block's type parameters as a generic call's argument does, from
-/// every part of a union, so a `List<int>|List<string>` reaches the standard library's `count` and a user's extension
-/// of `List<T>` with `T` as `int|string`, and never `int` alone, its first part.
+/// Spec section 24: "An `int` where a `float` is expected is a compile error", so no extension whose receiver holds a
+/// `float` reaches an `int`, at any depth, as an extension of `List<float>` reaches no `List<int>`, as neither fills
+/// such a parameter of a generic call.
 #[test]
-fn a_union_of_lists_reaches_an_extension_of_a_list_with_every_part() {
-    let rows = "namespace Demo;\n\npublic static class Rows\n{\n    extension<T>(List<T> items)\n    {\n        public List<T> kept() => items;\n    }\n}\n";
-    let sharp = "namespace Demo;\n\nclass Report\n{\n    public int run(List<int>|List<string> rows)\n    {\n        List<int|string> all = rows.kept();\n        List<int> first = rows.kept();\n        return rows.count() + all.count() + first.count();\n    }\n}\n";
+fn an_int_reaches_no_extension_whose_receiver_holds_a_float() {
+    let halves = "namespace Demo;\n\npublic static class Halves\n{\n    extension(float x)\n    {\n        public float half() => x / 2.0;\n    }\n\n    extension(List<float> xs)\n    {\n        public float total() => 0.0;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public float run(int n, List<int> ns, float x, List<float> xs) => n.half() + ns.total() + x.half() + xs.total();\n}\n";
 
     assert_eq!(
-        issues(("src/Demo/Report.sharp", sharp), &[("src/Demo/Rows.sharp", rows)]),
-        ["8:27 invalid-local-assignment-value"]
+        messages(("src/Demo/Report.sharp", sharp), &[("src/Demo/Halves.sharp", halves)]),
+        ["Method `half` does not exist on `int`.", "Method `total` does not exist on `List<int>`."]
+    );
+}
+
+/// A plain PHP function and property whose value may be one of two `List`s, which PHP# code gets only from plain PHP,
+/// since spec section 24 says "`List`, `Map` and `Set` can't share a union", and an extension of `List<T>` that gives
+/// the list.
+const TWO_LISTS: [(&str, &str); 3] = [
+    (
+        "src/Demo/Feed.php",
+        "<?php\n\nnamespace Demo;\n\nfinal class Feed\n{\n    /** @return list<int>|list<string> */\n    public static function rows(): array\n    {\n        return [];\n    }\n}\n",
+    ),
+    (
+        "src/Demo/Box.php",
+        "<?php\n\nnamespace Demo;\n\nfinal class Box\n{\n    /** @var list<int>|list<string> */\n    public array $rows = [];\n}\n",
+    ),
+    (
+        "src/Demo/Rows.sharp",
+        "namespace Demo;\n\npublic static class Rows\n{\n    extension<T>(List<T> items)\n    {\n        public List<T> kept() => items;\n    }\n}\n",
+    ),
+];
+
+/// Spec section 26: an extension's receiver fixes its block's type parameters as a generic call's argument does, from
+/// every part of a value that may be one of several `List`s, so the value reaches the standard library's `count` and a
+/// user's extension of `List<T>` with `T` as `int|string`, called or read without `(…)`, and never `int` alone, its
+/// first part.
+#[test]
+fn a_value_that_may_be_one_of_two_lists_reaches_an_extension_of_a_list_with_every_part() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public int run(Box box)\n    {\n        const rows = Feed.rows();\n        List<int> whole = rows;\n        List<int|string> all = rows.kept();\n        List<int> first = rows.kept();\n        const kept = box.rows.kept;\n        List<int> again = kept();\n        return rows.count() + all.count() + first.count() + again.count();\n    }\n}\n";
+
+    let issues = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Report.sharp", sharp), &TWO_LISTS);
+
+    assert_eq!(
+        issues
+            .iter()
+            .map(|issue| {
+                let primary = issue.annotations.iter().find(|annotation| annotation.kind == AnnotationKind::Primary);
+                let primary = primary.and_then(|primary| primary.message.as_deref()).unwrap_or("");
+                format!("{} {primary}", located(sharp, issue))
+            })
+            .collect::<Vec<_>>(),
+        [
+            "8:27 invalid-local-assignment-value This value has type `List<int>|List<string>`.",
+            "10:27 invalid-local-assignment-value This value has type `List<int|string>`.",
+            "12:27 invalid-local-assignment-value This value has type `List<int|string>`.",
+        ]
+    );
+}
+
+/// Spec section 12: a member that changes its collection, as `add`, runs on each `List` a place may hold alone, as a
+/// union of collections allows only what each of them allows, so it takes no value one of them refuses, and a member
+/// that gives an element gives what any of them holds. A plain PHP property keeps both `List`s, where a `let` local
+/// takes one `List<int|string>`, a copy of either.
+#[test]
+fn a_member_that_changes_a_place_that_may_hold_one_of_two_lists_takes_only_what_both_take() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public void run(Box box)\n    {\n        box.rows.add(1);\n        box.rows.add(\"x\");\n        int last = box.rows.removeLast();\n        box.rows.clear();\n    }\n}\n";
+
+    assert_eq!(
+        messages(("src/Demo/Report.sharp", sharp), &TWO_LISTS),
+        [
+            "Invalid argument type for argument #1 of `List<string>.add`: expected `string`, but found `int`.",
+            "Invalid argument type for argument #1 of `List<int>.add`: expected `int`, but found `string`.",
+            "Invalid assignment to `last`: it is declared as `int`.",
+        ]
     );
 }
 
@@ -17450,6 +17513,29 @@ fn a_method_value_of_equatable_fixes_a_type_argument_with_equality() {
         [
             "9:46 template-constraint-violation `Cart` does not satisfy the bound `Equatable` of type parameter `T`: `Cart` declares no `operator ==`.",
             "21:38 template-constraint-violation `Cart` does not satisfy the bound `Equatable` of type parameter `TItem`: `Cart` declares no `operator ==`.",
+        ]
+    );
+}
+
+/// Spec section 11: a value that may be a `List<Point>` or a `List<DatabaseEntity>` fixes `TItem` as
+/// `DatabaseEntity|Point`, whose values may be of two types that never match, so it is outside the bound `Equatable`
+/// of an extension of `List<TItem>`, as it is of a generic call's `List<T>`, and never `Point` alone, its first part.
+#[test]
+fn a_value_that_may_be_one_of_two_lists_is_checked_against_an_equatable_bound_with_every_part() {
+    let feed = (
+        "src/Demo/Feed.php",
+        "<?php\n\nnamespace Demo;\n\nfinal class Feed\n{\n    /** @return list<Point>|list<DatabaseEntity> */\n    public static function rows(): array\n    {\n        return [];\n    }\n}\n",
+    );
+    let sharp = "namespace Demo;\n\nimport Demo.CartLists;\n\npublic class Checks\n{\n    public static bool held(Point point)\n    {\n        const rows = Feed.rows();\n        return rows.holds(point) || Generic.keys(rows) > 0;\n    }\n}\n";
+
+    let refusal = "does not satisfy the bound `Equatable` of type parameter";
+    let reason = "the values of `DatabaseEntity|Point` may be of two different types, which never match.";
+
+    assert_eq!(
+        equatable_written(sharp, &[EQUATABLE_HOLDERS[0], feed]),
+        [
+            format!("10:16 template-constraint-violation `DatabaseEntity|Point` {refusal} `TItem`: {reason}"),
+            format!("10:37 template-constraint-violation `DatabaseEntity|Point` {refusal} `T`: {reason}"),
         ]
     );
 }

@@ -392,7 +392,19 @@ where
     // Each kind of collection among the receiver's parts runs the standard library's member of that kind, analyzed on
     // those parts, and its objects run their own methods below, spec section 12, as `held.contains("tea")` on a
     // `List<string>|Set<string>|Box` runs the member or the method of the kind the value holds.
-    let members = std::mem::take(&mut method_resolution.collection_members);
+    // A member that changes its receiver runs on each part of the kind alone, so each part fixes its own type arguments
+    // and an `add` on a value that may be a `List<int>` or a `List<string>` takes only what both take, as a union of
+    // collections allows only what each of them allows.
+    let members: Vec<_> = std::mem::take(&mut method_resolution.collection_members)
+        .into_iter()
+        .flat_map(|(member, parts)| {
+            if changes_receiver(context, &member) {
+                parts.types.iter().map(|part| (member, TUnion::from_atomic(part.clone()))).collect()
+            } else {
+                vec![(member, parts)]
+            }
+        })
+        .collect();
     // A call one kind of the receiver lacks the member for is refused once, so its place is not checked too.
     let changes =
         !method_resolution.has_invalid_target && members.iter().any(|(member, _)| changes_receiver(context, member));
@@ -640,8 +652,9 @@ where
     Ok(())
 }
 
-/// Analyzes the call of each of `members`, a kind's member with the receiver's parts of that kind, on those parts of
-/// `object`, types the call `span` as the join of what each call gives, and gives that join, or None for no member.
+/// Analyzes the call of each of `members`, a kind's member with the receiver's parts of that kind, or with one of them
+/// for a member that changes its receiver, on those parts of `object`, types the call `span` as the join of what each
+/// call gives, and gives that join, or None for no member.
 /// Where the call runs one of several, a member or an object's own method, each member's type arguments and type are
 /// recorded apart, as [`AnalysisArtifacts::get_member_call`] reads them, and the call's own are the last member's.
 #[allow(clippy::too_many_arguments)]
@@ -682,7 +695,7 @@ where
         };
         if runs_one_of {
             let callee = FunctionLikeIdentifier::Method(member.get_class_name(), member.get_method_name());
-            artifacts.record_member_call(span, callee, given.clone());
+            artifacts.record_member_call(span, callee, given.clone(), context.codebase);
         }
         let given = add_optional_union_type(given, joined.as_ref(), context.codebase);
         artifacts.set_expression_type(&span, given.clone());

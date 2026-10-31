@@ -439,10 +439,30 @@ impl AnalysisArtifacts {
     }
 
     /// Records that the method `callee`, of the several the PHP# method call at `span` runs, gives `result`, with the
-    /// type arguments its analysis just recorded for the call.
-    pub(crate) fn record_member_call(&mut self, span: Span, callee: FunctionLikeIdentifier, result: TUnion) {
+    /// type arguments its analysis just recorded for the call. A method the call runs on each part of its receiver
+    /// alone, as one that changes it, is recorded once more for each part, and each record joins the earlier ones, so
+    /// the method gives what any part gives, with each type argument any part fixes, which are the call's own too.
+    pub(crate) fn record_member_call(
+        &mut self,
+        span: Span,
+        callee: FunctionLikeIdentifier,
+        mut result: TUnion,
+        codebase: &CodebaseMetadata,
+    ) {
         let range = (span.start.offset, span.end.offset);
-        let type_arguments = self.inferred_type_arguments.get(&range).cloned();
+        let mut type_arguments = self.inferred_type_arguments.get(&range).cloned();
+        if let Some(earlier) = self.member_calls.get(&(range, callee)) {
+            let join = |own: &TUnion, earlier: &TUnion| {
+                combine_union_types(own, earlier, codebase, CombinerOptions::default())
+            };
+            result = join(&result, &earlier.result);
+            if let (Some(own), Some(earlier)) = (type_arguments.as_mut(), earlier.type_arguments.as_ref()) {
+                for (own, earlier) in own.iter_mut().zip(earlier) {
+                    *own = join(own, earlier);
+                }
+                self.inferred_type_arguments.insert(range, own.clone());
+            }
+        }
         self.member_calls.insert((range, callee), MemberCall { type_arguments, result });
     }
 

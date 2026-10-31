@@ -315,10 +315,41 @@ where
     fit(context, receiver, class, metadata).is_ok()
 }
 
+/// The type arguments a value of type `receiver` gives the generic extension member `metadata`, with the type parameters
+/// it gives a type outside their bound. Each type parameter of its block, `T` in `extension<T>(List<T> items)`, takes
+/// what every part of `receiver` gives it, as a call's argument fixes a generic call's, so a `List<Order>` gives `Order`
+/// and a value that may be a `List<int>` or a `List<string>` gives `int|string`. The member's own type parameters keep
+/// their bounds for the call or the function type to fix.
+pub(crate) fn receiver_type_arguments<A>(
+    context: &Context<'_, '_, A>,
+    receiver: &TUnion,
+    metadata: &FunctionLikeMetadata,
+) -> (TemplateResult, Vec<TemplateInferenceViolation>)
+where
+    A: Arena,
+{
+    let mut template_result = TemplateResult::new(
+        metadata.template_types.iter().map(|(name, template)| (*name, vec![template.clone()])).collect(),
+        HashMap::default(),
+    );
+    let mut violations = Vec::new();
+    if let Some(parameter) = metadata.parameters.first().and_then(|parameter| parameter.get_type_metadata()) {
+        infer_templates_from_input_and_container_types(
+            context,
+            &parameter.type_union,
+            receiver,
+            &mut template_result,
+            InferenceOptions::default(),
+            &mut violations,
+        );
+    }
+
+    (template_result, violations)
+}
+
 /// How a value of type `receiver` meets the receiver of the extension member `metadata` of the static class `class`,
-/// its first parameter. The type parameters of an extension block, `T` in `extension<T>(List<T> items)`, are first
-/// inferred from `receiver`, as a call infers them from its argument, so a `List<Order>` fits as a `List<Order>` and a
-/// `List<int>|List<string>` as a `List<int|string>`. The receiver then fits by the rules of the file's dialect, as a
+/// its first parameter. The type parameters of an extension block are first fixed as [`receiver_type_arguments`] fixes
+/// them, so a `List<Order>` fits as a `List<Order>`. The receiver then fits by the rules of the file's dialect, as a
 /// call's argument does, so a `Map<TKey, TValue>` fits an `Iterable<TItem>` as the `Iterable<[TKey, TValue]>` of its
 /// entries, spec section 12, and an `int` fits no `float`, spec section 24. A receiver outside a type parameter's bound
 /// fits none, and the error names that type parameter, the type the receiver gives it and the bound. Every other
@@ -337,19 +368,7 @@ where
     let parameter = if metadata.template_types.is_empty() {
         Cow::Borrowed(&parameter.type_union)
     } else {
-        let mut template_result = TemplateResult::new(
-            metadata.template_types.iter().map(|(name, template)| (*name, vec![template.clone()])).collect(),
-            HashMap::default(),
-        );
-        let mut violations = Vec::new();
-        infer_templates_from_input_and_container_types(
-            context,
-            &parameter.type_union,
-            receiver,
-            &mut template_result,
-            InferenceOptions::default(),
-            &mut violations,
-        );
+        let (template_result, violations) = receiver_type_arguments(context, receiver, metadata);
         if let Some(violation) = violations.into_iter().next() {
             return Err(Some(violation));
         }
