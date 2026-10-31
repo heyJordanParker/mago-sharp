@@ -4,8 +4,16 @@ declare(strict_types=1);
 
 namespace Mago\Tests\Sdk\Unit;
 
+use Mago\Sdk\Analyzer\AfterAnalysisContext;
+use Mago\Sdk\Analyzer\AfterAnalysisHook;
 use Mago\Sdk\Analyzer\AfterFileAnalysisContext;
 use Mago\Sdk\Analyzer\AfterFileAnalysisHook;
+use Mago\Sdk\Analyzer\BeforeAnalysisContext;
+use Mago\Sdk\Analyzer\BeforeAnalysisHook;
+use Mago\Sdk\Analyzer\CodebaseScanContext;
+use Mago\Sdk\Analyzer\CodebaseScanHook;
+use Mago\Sdk\Analyzer\InitializationContext;
+use Mago\Sdk\Analyzer\InitializationHook;
 use Mago\Sdk\Analyzer\Plugin;
 use Mago\Sdk\Analyzer\PluginDefinition;
 use Mago\Sdk\Analyzer\PluginRegistry;
@@ -145,6 +153,93 @@ final class WorkerTest extends TestCase
     }
 
     /**
+     * A request that runs several units starts the deadline again at each, and names each one, as a request of a
+     * batch of files names each file. Mago names a request of one unit itself.
+     */
+    public function testAWorkerNamesEachUnitOfARequestAsItStartsIt(): void
+    {
+        $worker = new Worker(new Extension('acme/project', 'Project', '1.0.0', analyzerPlugins: [
+            self::projectPlugin('first'),
+            self::projectPlugin('second'),
+        ]));
+
+        $sent = self::serve($worker, [
+            'describe' => self::describeRequest(),
+            'initialize' => self::initializeRequest(),
+            'scan' => self::codebaseScanRequest(),
+            'before' => self::projectRequest(Protocol::BEFORE_ANALYSIS_REQUEST),
+            'after' => self::projectRequest(Protocol::AFTER_ANALYSIS_REQUEST),
+        ]);
+
+        self::assertSame(
+            [
+                'describe: response',
+                'initialize: start the initialization hooks of plugin `first`',
+                'initialize: start the initialization hooks of plugin `second`',
+                'initialize: response',
+                'scan: start a codebase-scan hook of plugin `first`',
+                'scan: start a codebase-scan hook of plugin `second`',
+                'scan: response',
+                'before: start the before-analysis hooks of plugin `first`',
+                'before: start the before-analysis hooks of plugin `second`',
+                'before: response',
+                'after: start the after-analysis hooks of plugin `first`',
+                'after: start the after-analysis hooks of plugin `second`',
+                'after: response',
+            ],
+            $sent,
+        );
+    }
+
+    /**
+     * A plugin `$identifier` whose initialization, codebase-scan, before-analysis and after-analysis hooks do nothing.
+     *
+     * @param non-empty-string $identifier
+     */
+    private static function projectPlugin(string $identifier): Plugin
+    {
+        return new class($identifier) implements
+            Plugin,
+            InitializationHook,
+            CodebaseScanHook,
+            BeforeAnalysisHook,
+            AfterAnalysisHook {
+            /**
+             * @param non-empty-string $identifier
+             */
+            public function __construct(
+                private readonly string $identifier,
+            ) {}
+
+            public function getDefinition(): PluginDefinition
+            {
+                return new PluginDefinition($this->identifier, $this->identifier, 'Does nothing.');
+            }
+
+            public function register(PluginRegistry $registry): void
+            {
+                $registry->registerInitializationHook($this);
+                $registry->registerCodebaseScanHook($this);
+                $registry->registerBeforeAnalysisHook($this);
+                $registry->registerAfterAnalysisHook($this);
+            }
+
+            public function initialize(InitializationContext $context): void {}
+
+            public function getTargets(): array
+            {
+                return ['App\*'];
+            }
+
+            public function scan(CodebaseScanContext $context): void {}
+
+            public function beforeAnalysis(BeforeAnalysisContext $context): void {}
+
+            public function afterAnalysis(AfterAnalysisContext $context): void {}
+        };
+    }
+
+    /**
      * @param list<AfterFileAnalysisHook> $hooks
      */
     private static function plugin(PluginDefinition $definition, array $hooks = []): Plugin
@@ -174,7 +269,7 @@ final class WorkerTest extends TestCase
 
     /**
      * Runs a worker whose rule caches the routes one codebase query finds, as an app's rule does, while Mago sends
-     * one after-file request per file at once and cancels `$cancel`'s request when the first query arrives.
+     * one after-file batch per file at once and cancels `$cancel`'s request when the first query arrives.
      *
      * @param non-empty-list<non-empty-string> $files
      *
@@ -316,12 +411,17 @@ final class WorkerTest extends TestCase
         return $message->finish();
     }
 
+    /**
+     * An after-file batch of `$file` alone. A batch runs several files' hooks, so the worker names each file as it
+     * starts its hooks, which shows when each request started.
+     */
     private static function afterFileRequest(string $file): string
     {
-        $message = self::analyzerMessage(Protocol::AFTER_FILE_ANALYSIS_REQUEST);
+        $message = self::analyzerMessage(Protocol::AFTER_FILE_ANALYSIS_BATCH_REQUEST);
         $message->writeU64(self::GENERATION);
         $message->writeU16(1);
         $message->writeU16(0);
+        $message->writeLength(1);
         $message->writeBytes($file);
         // The file's size, then its expression, inferred-return, yield-key, and yield-value counts.
         for ($count = 0; $count < 5; ++$count) {
@@ -333,6 +433,58 @@ final class WorkerTest extends TestCase
         }
         $message->writeBoolean(false);
         $message->writeBoolean(false);
+
+        return $message->finish();
+    }
+
+    /**
+     * The initialization of the first plugin, then the second.
+     */
+    private static function initializeRequest(): string
+    {
+        $message = self::analyzerMessage(Protocol::INITIALIZE_REQUEST);
+        $message->writeLength(2);
+        $message->writeU16(0);
+        $message->writeU16(1);
+
+        return $message->finish();
+    }
+
+    /**
+     * The only batch of a codebase scan, for the first plugin's codebase-scan hook, then the second's, with no file.
+     */
+    private static function codebaseScanRequest(): string
+    {
+        $message = self::analyzerMessage(Protocol::CODEBASE_SCAN_REQUEST);
+        $message->writeBoolean(true);
+        $message->writeBoolean(true);
+        $message->writeLength(2);
+        $message->writeU16(0);
+        $message->writeU16(1);
+        $message->writeLength(0);
+
+        return $message->finish();
+    }
+
+    /**
+     * A before-analysis or after-analysis request of `$kind` for the first plugin, then the second. An after-analysis
+     * request carries a project of no file and no issue.
+     */
+    private static function projectRequest(int $kind): string
+    {
+        $message = self::analyzerMessage($kind);
+        $message->writeU64(self::GENERATION);
+        $message->writeU16(2);
+        $message->writeU16(0);
+        $message->writeU16(1);
+        if ($kind === Protocol::AFTER_ANALYSIS_REQUEST) {
+            $message->writeU32(0);
+            // The project's reference summary.
+            for ($count = 0; $count < 3; ++$count) {
+                $message->writeU64(0);
+            }
+            $message->writeLength(0);
+        }
 
         return $message->finish();
     }

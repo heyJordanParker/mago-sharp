@@ -139,7 +139,7 @@ use crate::invocation::MethodTargetContext;
 
 pub const ANALYZER_PROTOCOL_MAGIC: [u8; 4] = *b"MANA";
 pub const ANALYZER_PROTOCOL_MAJOR: u16 = 1;
-pub const ANALYZER_PROTOCOL_MINOR: u16 = 12;
+pub const ANALYZER_PROTOCOL_MINOR: u16 = 13;
 
 const HEADER_LENGTH: usize = 12;
 const INITIAL_MESSAGE_CAPACITY: usize = 256;
@@ -3890,6 +3890,20 @@ pub(super) mod testing {
 
         let result = decode_initialization_response(&writer.finish(), &[0]);
         assert!(matches!(result, Err(ExternalAnalyzerError::Protocol(message)) if message.contains("more than once")));
+    }
+
+    /// A worker of protocol 1.12 sends a bare file path as a progress frame, where 1.13 sends what it starts, so Mago
+    /// refuses it instead of printing "the hooks of the hooks of app/Hung.php".
+    #[test]
+    fn a_response_of_the_protocol_before_named_progress_is_refused() {
+        let mut response = message_writer(INITIALIZE_RESPONSE).finish();
+        response[6..8].copy_from_slice(&12u16.to_be_bytes());
+
+        let refusal = message_kind(&response);
+        assert!(
+            matches!(&refusal, Err(ExternalAnalyzerError::Protocol(message)) if message == "unsupported analyzer protocol version 1.12"),
+            "{refusal:?}"
+        );
     }
 
     /// A worker of protocol 1.11 records no before-analysis reads and writes no whole method search, so Mago refuses

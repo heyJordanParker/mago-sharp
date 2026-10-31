@@ -636,7 +636,7 @@ final class Worker
         CancellationTokenInterface $cancellation,
     ): string {
         if (strncmp($payload, 'MLNT', 4) === 0) {
-            return $this->handleLinterRequest($payload, $requestId, $host, $cancellation);
+            return $this->handleLinterRequest($payload, $cancellation);
         }
 
         if (strncmp($payload, 'MANA', 4) === 0) {
@@ -706,15 +706,8 @@ final class Worker
         return WorkerProtocol::writeReduceResponse();
     }
 
-    /**
-     * @param positive-int $requestId
-     */
-    private function handleLinterRequest(
-        string $payload,
-        int $requestId,
-        HostClient $host,
-        CancellationTokenInterface $cancellation,
-    ): string {
+    private function handleLinterRequest(string $payload, CancellationTokenInterface $cancellation): string
+    {
         [$kind, $reader] = LinterProtocol::readRequest($payload);
         if ($kind === LinterProtocol::DESCRIBE_REQUEST) {
             [$this->phpVersion, $this->nodeKinds] = LinterProtocol::readDescribeRequest($reader);
@@ -744,7 +737,6 @@ final class Worker
             $this->activeRulesByNodeKind = $activeRulesByNodeKind;
         }
 
-        $host->progress($requestId, "the linter rules of {$request->file->path}");
         $reportedIssues = [];
         $targetIndex = 0;
         foreach ($request->file->getTargetNodes() as $node) {
@@ -861,7 +853,6 @@ final class Worker
                 }
 
                 $cancellation->throwIfCancelled();
-                $host->progress($requestId, "a property type provider of plugin `{$registered->plugin}`");
                 try {
                     $type = $registered->callback->getPropertyType(
                         new PropertyTypeProviderContext(
@@ -913,7 +904,6 @@ final class Worker
                 }
 
                 $cancellation->throwIfCancelled();
-                $host->progress($requestId, "a call forwarding provider of plugin `{$registered->plugin}`");
                 try {
                     $forwarded = $registered->callback->getForwardedCall($context);
                 } catch (Throwable $throwable) {
@@ -949,7 +939,6 @@ final class Worker
                 }
 
                 $cancellation->throwIfCancelled();
-                $host->progress($requestId, "a property initialization provider of plugin `{$registered->plugin}`");
                 try {
                     $initialized = $registered->callback->isPropertyInitialized(
                         new PropertyInitializationProviderContext(
@@ -994,7 +983,6 @@ final class Worker
                 }
 
                 $cancellation->throwIfCancelled();
-                $host->progress($requestId, "a class initializer provider of plugin `{$registered->plugin}`");
                 try {
                     $provided = $registered->callback->getClassInitializers(
                         new ClassInitializerProviderContext(
@@ -1030,7 +1018,6 @@ final class Worker
             $issueTypes = new TypeComparator($host, $requestId, $cancellation, $this->metadataCache, $issueReads);
             $codeCodebase = new Codebase($host, $requestId, $cancellation, $this->metadataCache, $codeReads);
             $codeTypes = new TypeComparator($host, $requestId, $cancellation, $this->metadataCache, $codeReads);
-            $host->progress($requestId, "the issue-filter hooks of {$request->file}");
             $removed = [];
             foreach ($request->issues as $issueIndex => $issue) {
                 foreach ($request->hookIndices as $hookIndex) {
@@ -1110,7 +1097,6 @@ final class Worker
                 }
 
                 $cancellation->throwIfCancelled();
-                $host->progress($requestId, "an assertion provider of plugin `{$registered->plugin}`");
                 try {
                     $assertions = $registered->callback->getAssertions($context);
                 } catch (Throwable $throwable) {
@@ -1149,7 +1135,6 @@ final class Worker
                 }
 
                 $cancellation->throwIfCancelled();
-                $host->progress($requestId, "a callable signature provider of plugin `{$registered->plugin}`");
                 try {
                     if (!$registered->callback instanceof CallableSignatureProvider) {
                         throw new ProtocolException(
@@ -1187,7 +1172,6 @@ final class Worker
             }
 
             $cancellation->throwIfCancelled();
-            $host->progress($requestId, "a return-type provider of plugin `{$registered->plugin}`");
             try {
                 $type = $registered->callback->getReturnType($context);
             } catch (Throwable $throwable) {
@@ -1322,7 +1306,9 @@ final class Worker
             default => null,
         };
         foreach ($analyses as $analysis) {
-            if ($analysis instanceof FileAnalysis) {
+            // A batch runs several files' hooks, so each file's start is progress of its own. Mago names the one file
+            // of an after-file request itself.
+            if ($analysis instanceof FileAnalysis && $kind === AnalyzerProtocol::AFTER_FILE_ANALYSIS_BATCH_REQUEST) {
                 $host->progress($requestId, "the hooks of {$analysis->file}");
             }
 

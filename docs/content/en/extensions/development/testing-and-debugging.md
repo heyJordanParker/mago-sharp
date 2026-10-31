@@ -149,7 +149,7 @@ Useful isolation switches are:
 
 ## Timeouts and cancellation
 
-The host's `request-timeout-ms` is the longest one file's hooks, or one plugin's hooks, may run: it starts again each time the worker starts the hooks of a file or of a plugin, and not at the nested metadata or comparison requests a hook makes. When a hook runs past it, the error names the hooks that made no progress, such as the after-analysis hooks of plugin `dead-routes`. When Mago cancels work, `CancellationTokenInterface` becomes cancelled and `throwIfCancelled()` raises `CancelledException`.
+The host's `request-timeout-ms` is the longest one unit of a request may run. It counts from when the worker starts a request, not while the request waits behind earlier ones, and starts again each time the worker starts one of the request's units: a file's hooks in an after-file batch, one plugin's initialization, before-analysis or after-analysis hooks, a codebase-scan hook, or an extension's worker reducer. It does not start again at the nested metadata or comparison requests a hook makes. When a hook runs past it, the error names the unit that made no progress, such as the after-analysis hooks of plugin `dead-routes`. When Mago cancels work, `CancellationTokenInterface` becomes cancelled and `throwIfCancelled()` raises `CancelledException`.
 
 Check cancellation in long scans and aggregation loops. `subscribe()` integrates cancellation with asynchronous work; always `unsubscribe()` a retained subscription after completion.
 

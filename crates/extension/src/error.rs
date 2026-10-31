@@ -113,8 +113,9 @@ pub enum WorkerError {
     CoordinatorPanic { worker: usize },
     /// A frame could not be encoded or decoded.
     Protocol { worker: usize, source: ProtocolError },
-    /// A request made no progress within its configured deadline: `running` is what the worker last said it started,
-    /// in the host's words, such as "the hooks of app/User.php".
+    /// A request made no progress within its configured deadline: `running` is the unit the worker last said the
+    /// request started, such as "the after-analysis hooks of plugin `routes`", or else what Mago named the request,
+    /// such as "the linter rules of app/User.php".
     Timeout { host: String, worker: usize, running: Option<String>, duration: Duration },
     /// A worker explicitly cancelled an in-flight request.
     Cancelled { worker: usize, request: u64 },
