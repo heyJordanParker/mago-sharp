@@ -37,8 +37,10 @@ mod template_inference;
 
 pub(crate) use resolver::rename_trait_objects;
 pub(crate) use resolver::resolve_invocation_type;
+pub(crate) use template_inference::InferenceOptions;
 pub(crate) use template_inference::TemplateInferenceViolation;
 pub(crate) use template_inference::infer_parameter_templates_from_argument;
+pub(crate) use template_inference::infer_templates_from_input_and_container_types;
 pub(crate) use template_inference::infer_unfixed_templates;
 
 pub(crate) mod arguments;

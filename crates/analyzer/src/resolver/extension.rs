@@ -27,8 +27,9 @@ use mago_word::ascii_lowercase_word;
 use crate::code::IssueCode;
 use crate::context::Context;
 use crate::expression::is_refused_type;
+use crate::invocation::InferenceOptions;
 use crate::invocation::TemplateInferenceViolation;
-use crate::invocation::infer_unfixed_templates;
+use crate::invocation::infer_templates_from_input_and_container_types;
 use crate::resolver::class_name::class_value_classes;
 use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_missing_imports;
@@ -316,10 +317,13 @@ where
 
 /// How a value of type `receiver` meets the receiver of the extension member `metadata` of the static class `class`,
 /// its first parameter. The type parameters of an extension block, `T` in `extension<T>(List<T> items)`, are first
-/// inferred from `receiver`, as a call infers them from its argument, so a `List<Order>` fits as a `List<Order>`. A
-/// receiver outside a type parameter's bound fits none, and the error names that type parameter, the type the receiver
-/// gives it and the bound. Every other receiver that fits none gives no error, as does every receiver of a member whose
-/// own receiver has no type, which only a file the parser refused declares.
+/// inferred from `receiver`, as a call infers them from its argument, so a `List<Order>` fits as a `List<Order>` and a
+/// `List<int>|List<string>` as a `List<int|string>`. The receiver then fits by the rules of the file's dialect, as a
+/// call's argument does, so a `Map<TKey, TValue>` fits an `Iterable<TItem>` as the `Iterable<[TKey, TValue]>` of its
+/// entries, spec section 12, and an `int` fits no `float`, spec section 24. A receiver outside a type parameter's bound
+/// fits none, and the error names that type parameter, the type the receiver gives it and the bound. Every other
+/// receiver that fits none gives no error, as does every receiver of a member whose own receiver has no type, which
+/// only a file the parser refused declares.
 fn fit<A>(
     context: &Context<'_, '_, A>,
     receiver: &TUnion,
@@ -337,9 +341,16 @@ where
             metadata.template_types.iter().map(|(name, template)| (*name, vec![template.clone()])).collect(),
             HashMap::default(),
         );
-        if let Some(violation) =
-            infer_unfixed_templates(context, &parameter.type_union, receiver, &mut template_result).into_iter().next()
-        {
+        let mut violations = Vec::new();
+        infer_templates_from_input_and_container_types(
+            context,
+            &parameter.type_union,
+            receiver,
+            &mut template_result,
+            InferenceOptions::default(),
+            &mut violations,
+        );
+        if let Some(violation) = violations.into_iter().next() {
             return Err(Some(violation));
         }
 
@@ -383,7 +394,7 @@ where
             false,
             false,
             false,
-            &mut ComparisonResult::new(),
+            &mut ComparisonResult::for_dialect(context.dialect),
         ))
     .then_some(())
     .ok_or(None)

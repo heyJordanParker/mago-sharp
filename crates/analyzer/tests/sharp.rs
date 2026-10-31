@@ -8351,6 +8351,7 @@ fn an_issue_on_an_extension_call_names_the_member_on_its_type_and_counts_the_arg
 
 /// Spec section 26: a `string`, an `int`, a `float` or a `bool` has the members the extensions in scope add to it, so
 /// a call of one it lacks is an error that lists them, as a collection's lists its methods, and that names the type.
+/// An `int` fits no `float`, spec section 24, so it has none of the `float`'s own methods.
 #[test]
 fn a_method_a_string_or_a_number_lacks_is_an_error_that_lists_the_methods_it_has() {
     let sharp = "namespace Demo;\n\npublic class Entity\n{\n    public int compared(string name) => name.shuffled(\"a\");\n    public int counted(int n) => n.missing();\n    public float rounded(float x) => x.missing();\n    public bool flipped(bool flag) => flag.negate();\n}\n";
@@ -8368,7 +8369,7 @@ fn a_method_a_string_or_a_number_lacks_is_an_error_that_lists_the_methods_it_has
         ),
         [
             "5:46 non-existent-method Method `shuffled` does not exist on `string`. | A `string` has the methods `capitalized`, `characters`, `codePoints`, `compareTo`, `contains`, `decapitalized`, `endsWith`, `indexOf`, `lastIndexOf`, `length`, `lines`, `lowercase`, `padEnd`, `padStart`, `parseCsv`, `removePrefix`, `removeSuffix`, `repeat`, `replace`, `slug`, `split`, `startsWith`, `substring`, `trimEnd`, `trimStart`, `trim`, `uppercase`.",
-            "6:36 non-existent-method Method `missing` does not exist on `int`. | An `int` has the methods `abs`, `ceil`, `clamp`, `floorDiv`, `floor`, `format`, `isFinite`, `mod`, `round`, `toByteString`, `toHex`.",
+            "6:36 non-existent-method Method `missing` does not exist on `int`. | An `int` has the methods `abs`, `clamp`, `floorDiv`, `format`, `mod`, `toByteString`, `toHex`.",
             "7:40 non-existent-method Method `missing` does not exist on `float`. | A `float` has the methods `abs`, `ceil`, `clamp`, `floor`, `format`, `isFinite`, `round`.",
             "8:44 non-existent-method Method `negate` does not exist on `bool`. | A `bool` has no methods.",
         ]
@@ -13846,6 +13847,34 @@ fn a_user_s_extension_of_an_iterable_reaches_a_list_a_set_and_a_plain_php_iterab
     assert_eq!(
         issues(("src/Demo/Report.sharp", sharp), &[("src/Demo/Rows.sharp", rows), ("src/Demo/Query.php", query)]),
         Vec::<String>::new()
+    );
+}
+
+/// Spec section 12: "A `Map<TKey, TValue>` is an `Iterable<[TKey, TValue]>` of its entries", so a user's extension of
+/// `Iterable<TItem>` reaches a `Map<string, int>` with `TItem` as `[string, int]`, as a generic call's parameter takes
+/// it, and never as `int`, the `Map`'s values.
+#[test]
+fn a_user_s_extension_of_an_iterable_reaches_a_map_as_its_entries() {
+    let rows = "namespace Demo;\n\npublic static class Rows\n{\n    extension<TItem>(Iterable<TItem> items)\n    {\n        public List<TItem> walked() => items.toList();\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public void run(Map<string, int> prices)\n    {\n        List<[string, int]> entries = prices.walked();\n        List<int> values = prices.walked();\n    }\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Report.sharp", sharp), &[("src/Demo/Rows.sharp", rows)]),
+        ["8:28 invalid-local-assignment-value"]
+    );
+}
+
+/// Spec section 26: an extension's receiver fixes its block's type parameters as a generic call's argument does, from
+/// every part of a union, so a `List<int>|List<string>` reaches the standard library's `count` and a user's extension
+/// of `List<T>` with `T` as `int|string`, and never `int` alone, its first part.
+#[test]
+fn a_union_of_lists_reaches_an_extension_of_a_list_with_every_part() {
+    let rows = "namespace Demo;\n\npublic static class Rows\n{\n    extension<T>(List<T> items)\n    {\n        public List<T> kept() => items;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public int run(List<int>|List<string> rows)\n    {\n        List<int|string> all = rows.kept();\n        List<int> first = rows.kept();\n        return rows.count() + all.count() + first.count();\n    }\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Report.sharp", sharp), &[("src/Demo/Rows.sharp", rows)]),
+        ["8:27 invalid-local-assignment-value"]
     );
 }
 
