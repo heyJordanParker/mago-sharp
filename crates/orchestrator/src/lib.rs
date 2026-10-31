@@ -202,6 +202,41 @@ impl<'cfg> Orchestrator<'cfg> {
     where
         'borrow: 'cfg,
     {
+        let mut loader = DatabaseLoader::new(self.database_configuration(workspace, include_externals));
+
+        if let Some(prelude_db) = prelude_database {
+            loader = loader.with_database(prelude_db);
+        }
+
+        if let Some((name, content)) = stdin_override {
+            loader = loader.with_stdin_override(name, content);
+        }
+
+        let mut result = loader.load().map_err(OrchestratorError::Database)?;
+
+        if let Some(registry) = self.plugin_registry.get() {
+            let files = registry
+                .external_initialization_files()
+                .map_err(|error| OrchestratorError::General(error.to_string()))?;
+            result.reserve(files.len());
+            for file in files {
+                result.add(file);
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// The configuration [`Self::load_database`] reads the files of `workspace` by, the files of the `includes` list
+    /// among them when `include_externals` is set, so a watcher can watch those files before they are read.
+    pub fn database_configuration<'borrow>(
+        &'borrow self,
+        workspace: &'cfg Path,
+        include_externals: bool,
+    ) -> DatabaseConfiguration<'cfg>
+    where
+        'borrow: 'cfg,
+    {
         /// Converts string patterns from the configuration into `Exclusion` types.
         fn create_excludes_from_patterns<'pat>(patterns: &[&'pat str], root: &Path) -> Vec<Exclusion<'pat>> {
             patterns
@@ -252,7 +287,7 @@ impl<'cfg> Orchestrator<'cfg> {
             Vec::new()
         };
 
-        let configuration: DatabaseConfiguration<'cfg> = DatabaseConfiguration {
+        DatabaseConfiguration {
             workspace: Cow::Borrowed(workspace),
             paths: self.config.paths.iter().map(|s| Cow::Borrowed(s.as_bytes())).collect(),
             includes,
@@ -260,31 +295,7 @@ impl<'cfg> Orchestrator<'cfg> {
             excludes,
             extensions: self.config.extensions.iter().map(|s| Cow::Borrowed(s.as_bytes())).collect(),
             glob: self.config.glob,
-        };
-
-        let mut loader = DatabaseLoader::new(configuration);
-
-        if let Some(prelude_db) = prelude_database {
-            loader = loader.with_database(prelude_db);
         }
-
-        if let Some((name, content)) = stdin_override {
-            loader = loader.with_stdin_override(name, content);
-        }
-
-        let mut result = loader.load().map_err(OrchestratorError::Database)?;
-
-        if let Some(registry) = self.plugin_registry.get() {
-            let files = registry
-                .external_initialization_files()
-                .map_err(|error| OrchestratorError::General(error.to_string()))?;
-            result.reserve(files.len());
-            for file in files {
-                result.add(file);
-            }
-        }
-
-        Ok(result)
     }
 
     /// Creates a linting service with the current configuration.

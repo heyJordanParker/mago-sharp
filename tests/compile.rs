@@ -660,12 +660,15 @@ fn a_watch_starts_the_hosts_again_when_a_php_sharp_file_changes() {
         }
     };
 
+    // The watch's own log, outside the watched project, so a failure shows what the watch saw.
+    let watch_log = tempfile::NamedTempFile::new().unwrap();
     let mut watch = Command::new(env!("CARGO_BIN_EXE_mago"))
         .args(["--no-version-check", "--colors", "never", "analyze", "--watch"])
+        .env("MAGO_LOG", "info,mago=debug,mago_database=debug")
         .env("XDG_CACHE_HOME", Path::new(env!("CARGO_TARGET_TMPDIR")).join("cache"))
         .current_dir(root)
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stderr(watch_log.reopen().unwrap())
         .spawn()
         .unwrap();
     wait_for_lines(1);
@@ -674,8 +677,9 @@ fn a_watch_starts_the_hosts_again_when_a_php_sharp_file_changes() {
     watch.kill().unwrap();
     watch.wait().unwrap();
 
-    let log = log();
-    let runs: Vec<(&str, &str)> = log.lines().filter_map(|line| line.split_once(' ')).collect();
+    let log = format!("{}\n{}", log(), std::fs::read_to_string(watch_log.path()).unwrap());
+    let runs: Vec<(&str, &str)> =
+        log.lines().take_while(|line| !line.is_empty()).filter_map(|line| line.split_once(' ')).collect();
     assert!(runs.len() >= 2, "{log}");
     assert_eq!(runs[0].1, "first", "{log}");
     assert_eq!(runs[1].1, "second", "{log}");

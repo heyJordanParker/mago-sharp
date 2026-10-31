@@ -43,11 +43,8 @@ use std::time::Instant;
 
 use clap::ColorChoice;
 use clap::Parser;
-use notify::Config;
 use notify::EventKind;
-use notify::RecommendedWatcher;
 use notify::RecursiveMode;
-use notify::Watcher as NotifyWatcher;
 
 use mago_analyzer::code::IssueCode;
 use mago_codex::metadata::CodebaseMetadata;
@@ -59,6 +56,7 @@ use mago_database::file::FileType;
 use mago_database::membership::WorkspaceMatcher;
 use mago_database::watcher::DatabaseWatcher;
 use mago_database::watcher::WatchOptions;
+use mago_database::watcher::start_watcher;
 use mago_orchestrator::Orchestrator;
 use mago_prelude::Prelude;
 use mago_reporting::CompiledIgnoreSet;
@@ -432,11 +430,23 @@ impl AnalyzeCommand {
     /// the watch session restarts with the reloaded configuration.
     fn run_watch_loop(&self, mut configuration: Configuration, color_choice: ColorChoice) -> Result<ExitCode, Error> {
         loop {
-            let database = self.prelude_database();
-
             let mut orchestrator = create_orchestrator(&configuration, color_choice, false, false, true);
             analyze_the_whole_workspace_without_paths(&mut orchestrator);
             orchestrator.add_exclude_patterns(configuration.analyzer.excludes.iter());
+            let scope = if self.path.is_empty() {
+                None
+            } else {
+                Some(scope_to(&mut orchestrator, &configuration.source.workspace, &self.path, &[])?)
+            };
+
+            // The watchers report each change from here on before the hosts' compile or the analysis reads a file, so
+            // an edit made after a file is read reaches them, and one made before is in what was read.
+            tracing::info!("Starting watch mode. Press Ctrl+C to stop.");
+            let workspace = &configuration.source.workspace;
+            let mut watcher =
+                DatabaseWatcher::new(Database::new(orchestrator.database_configuration(workspace, true).into_static()));
+            watcher.watch(WatchOptions { poll_interval: Some(Duration::from_millis(500)), ..Default::default() })?;
+            let restart_receiver = setup_restart_watcher(workspace, &configuration)?;
 
             let (extension_hosts, _) = compile_for_hosts(&configuration)?;
             if let Some(external_analyzer) = initialize_external_analyzer(
@@ -450,14 +460,11 @@ impl AnalyzeCommand {
             {
                 orchestrator.set_external_analyzer(external_analyzer);
             }
+            let database =
+                orchestrator.load_database(workspace, true, Some(self.prelude_database()), None)?.into_static();
+            *watcher.database_mut() = database;
 
-            let scope = if self.path.is_empty() {
-                None
-            } else {
-                Some(scope_to(&mut orchestrator, &configuration.source.workspace, &self.path, &[])?)
-            };
-
-            match self.run_watch_mode(orchestrator, &configuration, color_choice, database, scope)? {
+            match self.run_watch_mode(orchestrator, &configuration, color_choice, scope, watcher, &restart_receiver)? {
                 WatchOutcome::Restart(reason) => {
                     tracing::info!("Restarting analysis: {reason}");
 
@@ -490,32 +497,22 @@ impl AnalyzeCommand {
 
     /// Runs in watch mode, continuously monitoring for file changes and re-analyzing.
     ///
-    /// Also monitors configuration files, baseline files, and Composer files for changes.
-    /// When any of these files change, returns `WatchOutcome::Restart` so the caller
+    /// `watcher` holds the files the analysis reads and reports each change to them, and `restart_receiver` each change
+    /// to the configuration, baseline and Composer files, for which it returns `WatchOutcome::Restart` so the caller
     /// can reload configuration and restart.
     fn run_watch_mode(
         &self,
         orchestrator: Orchestrator<'_>,
         configuration: &Configuration,
         color_choice: ColorChoice,
-        prelude_database: Database<'static>,
         scope: Option<WorkspaceMatcher>,
+        mut watcher: DatabaseWatcher<'static>,
+        restart_receiver: &mpsc::Receiver<String>,
     ) -> Result<WatchOutcome, Error> {
-        tracing::info!("Starting watch mode. Press Ctrl+C to stop.");
-
-        let database =
-            orchestrator.load_database(&configuration.source.workspace, true, Some(prelude_database), None)?;
-        let mut server = Server::new(database.clone().into_static(), self.prelude(), server_settings(&orchestrator));
+        let mut server = Server::new(watcher.database().clone(), self.prelude(), server_settings(&orchestrator));
         if let Some(scope) = scope {
             server = server.scoped_to(scope);
         }
-
-        let mut watcher = DatabaseWatcher::new(database);
-
-        watcher.watch(WatchOptions { poll_interval: Some(Duration::from_millis(500)), ..Default::default() })?;
-
-        // Set up a separate watcher for files that should trigger a full restart.
-        let restart_receiver = setup_restart_watcher(&configuration.source.workspace, configuration)?;
 
         tracing::info!("Watching {} for changes...", configuration.source.workspace.display());
         tracing::info!("Running initial analysis...");
@@ -652,7 +649,7 @@ pub(crate) fn decode_prelude() -> (CodebaseMetadata, SymbolReferences) {
 /// - `composer.json` and `composer.lock` (if present)
 ///
 /// Returns a receiver that delivers a human-readable reason string when a restart
-/// is triggered.
+/// is triggered, for each change made after it returns, as [`start_watcher`] says.
 fn setup_restart_watcher(workspace: &Path, configuration: &Configuration) -> Result<mpsc::Receiver<String>, Error> {
     let (tx, rx) = mpsc::channel();
 
@@ -686,7 +683,21 @@ fn setup_restart_watcher(workspace: &Path, configuration: &Configuration) -> Res
         })
         .collect();
 
-    let mut watcher = RecommendedWatcher::new(
+    let mut watched_dirs: Vec<(PathBuf, RecursiveMode)> = Vec::new();
+    for (path, label) in &watch_files {
+        let watch_dir = path.parent().unwrap_or(workspace);
+        if watched_dirs.iter().any(|(watched, _)| watched == watch_dir) {
+            continue;
+        }
+        if watch_dir.is_dir() {
+            watched_dirs.push((watch_dir.to_path_buf(), RecursiveMode::NonRecursive));
+            tracing::debug!("Watching {label}: {}", path.display());
+        } else {
+            tracing::warn!("Could not watch {label} at {}: the folder does not exist", watch_dir.display());
+        }
+    }
+
+    let watcher = start_watcher(
         move |res: Result<notify::Event, notify::Error>| {
             let Ok(event) = res else {
                 return;
@@ -709,21 +720,9 @@ fn setup_restart_watcher(workspace: &Path, configuration: &Configuration) -> Res
                 }
             }
         },
-        Config::default(),
-    )
-    .map_err(|e| Error::Database(mago_database::error::DatabaseError::WatcherInit(e)))?;
-
-    let mut watched_dirs = std::collections::HashSet::new();
-    for (path, label) in &watch_files {
-        let watch_dir = path.parent().unwrap_or(workspace);
-        if watched_dirs.insert(watch_dir.to_path_buf()) {
-            if let Err(e) = watcher.watch(watch_dir, RecursiveMode::NonRecursive) {
-                tracing::warn!("Could not watch {label} at {}: {e}", watch_dir.display());
-            } else {
-                tracing::debug!("Watching {label}: {}", path.display());
-            }
-        }
-    }
+        &watched_dirs,
+        Duration::from_millis(500),
+    )?;
 
     // keep the watcher alive by leaking it. it will be cleaned up when the process exits
     // or when the watch loop restarts. This is intentional: the watcher must outlive the
