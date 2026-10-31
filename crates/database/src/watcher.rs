@@ -581,13 +581,18 @@ pub fn start_watcher<H>(
 where
     H: EventHandler + Clone,
 {
-    start_watcher_of::<RecommendedWatcher, H>(handler, paths, poll_interval, COOKIE_TIMEOUT)
+    static WATCHERS: AtomicUsize = AtomicUsize::new(0);
+    let cookie = format!("{COOKIE_PREFIX}{}-{}-", std::process::id(), WATCHERS.fetch_add(1, Ordering::Relaxed));
+
+    start_watcher_of::<RecommendedWatcher, H>(handler, paths, &cookie, poll_interval, COOKIE_TIMEOUT)
 }
 
-/// [`start_watcher`] with a watcher of type `W`, which has `cookie_timeout` to report its cookie.
+/// [`start_watcher`] with a watcher of type `W`, whose cookie in the folder at index `n` of the watched folders is
+/// named `cookie` then `n`, and which has `cookie_timeout` to report them.
 fn start_watcher_of<W, H>(
     handler: H,
     paths: &[(PathBuf, RecursiveMode)],
+    cookie: &str,
     poll_interval: Duration,
     cookie_timeout: Duration,
 ) -> Result<Box<dyn NotifyWatcher + Send>, DatabaseError>
@@ -595,11 +600,9 @@ where
     W: NotifyWatcher + Send + 'static,
     H: EventHandler + Clone,
 {
-    static WATCHERS: AtomicUsize = AtomicUsize::new(0);
-    let cookie = format!("{COOKIE_PREFIX}{}-{}-", std::process::id(), WATCHERS.fetch_add(1, Ordering::Relaxed));
     let (reported, cookies_reported) = mpsc::channel();
     let without_cookies = |mut handler: H| {
-        let cookie = cookie.clone();
+        let cookie = cookie.to_owned();
         let reported = reported.clone();
         move |result: notify::Result<Event>| {
             let Ok(mut event) = result else {
@@ -813,6 +816,9 @@ mod tests {
     use std::sync::PoisonError;
     use std::time::SystemTime;
 
+    use notify::WatcherKind;
+    use notify::event::CreateKind;
+
     use super::*;
 
     /// A project folder with an `app` and a `vendor` folder, at its real path.
@@ -907,77 +913,86 @@ mod tests {
         (started, log.text())
     }
 
+    /// The name each cookie of the tests' own watchers starts with.
+    const TEST_COOKIE: &str = ".mago-watch-cookie-test-";
+
+    /// A watcher that reports the cookie of each of the first `FOLDERS` folders it watches, as it starts on the folder,
+    /// and nothing else, as a native watcher whose stream of each later folder never starts.
+    struct ReportsCookies<const FOLDERS: usize> {
+        handler: Box<dyn EventHandler>,
+        watched: usize,
+    }
+
+    impl<const FOLDERS: usize> NotifyWatcher for ReportsCookies<FOLDERS> {
+        fn new<F>(handler: F, _config: Config) -> notify::Result<Self>
+        where
+            F: EventHandler,
+        {
+            Ok(Self { handler: Box::new(handler), watched: 0 })
+        }
+
+        fn watch(&mut self, path: &Path, _recursive_mode: RecursiveMode) -> notify::Result<()> {
+            if self.watched < FOLDERS {
+                let cookie = path.join(format!("{TEST_COOKIE}{}", self.watched));
+                self.handler.handle_event(Ok(Event::new(EventKind::Create(CreateKind::File)).add_path(cookie)));
+            }
+            self.watched += 1;
+
+            Ok(())
+        }
+
+        fn unwatch(&mut self, _path: &Path) -> notify::Result<()> {
+            Ok(())
+        }
+
+        fn kind() -> WatcherKind {
+            WatcherKind::NullWatcher
+        }
+    }
+
+    /// Starts a watcher of type `W` of `folders`, which has 50 ms to report its cookies and then polls every 50 ms, and
+    /// returns the log of its start.
+    fn start_logged<W>(folders: &[(PathBuf, RecursiveMode)]) -> String
+    where
+        W: NotifyWatcher + Send + 'static,
+    {
+        let (_watcher, log) = logged(|| {
+            start_watcher_of::<W, _>(
+                |_: notify::Result<Event>| {},
+                folders,
+                TEST_COOKIE,
+                Duration::from_millis(50),
+                Duration::from_millis(50),
+            )
+            .expect("the watcher should start")
+        });
+
+        log
+    }
+
     /// A watcher that reports the cookie of each folder starts with no warning.
-    ///
-    /// This test and the two after it need the watcher to report each cookie within [`COOKIE_TIMEOUT`]. inotify
-    /// reports from the kernel at once, but FSEvents reports through `fseventsd`, which a Mac busy writing files can
-    /// hold up past any bound, so they run on Linux.
-    #[cfg(target_os = "linux")]
     #[test]
     fn a_watcher_that_reports_each_cookie_warns_of_nothing() {
         let (_directory, root) = project();
         let folders = [(root.join("app"), RecursiveMode::Recursive), (root.join("vendor"), RecursiveMode::Recursive)];
 
-        let (_watcher, log) = logged(|| {
-            start_watcher(|_: notify::Result<Event>| {}, &folders, Duration::from_millis(50))
-                .expect("the watcher should start")
-        });
+        let log = start_logged::<ReportsCookies<2>>(&folders);
 
         assert!(!log.contains("WARN"), "{log}");
     }
 
-    /// A watcher of only the first folder it is given, as one whose stream of a later folder never starts.
-    #[cfg(target_os = "linux")]
-    struct FirstFolderOnly {
-        watcher: RecommendedWatcher,
-        watching: bool,
-    }
-
-    #[cfg(target_os = "linux")]
-    impl NotifyWatcher for FirstFolderOnly {
-        fn new<F: EventHandler>(handler: F, config: Config) -> notify::Result<Self> {
-            Ok(Self { watcher: RecommendedWatcher::new(handler, config)?, watching: false })
-        }
-
-        fn watch(&mut self, path: &Path, recursive_mode: RecursiveMode) -> notify::Result<()> {
-            if self.watching {
-                return Ok(());
-            }
-            self.watching = true;
-
-            self.watcher.watch(path, recursive_mode)
-        }
-
-        fn unwatch(&mut self, path: &Path) -> notify::Result<()> {
-            self.watcher.unwatch(path)
-        }
-
-        fn kind() -> notify::WatcherKind {
-            RecommendedWatcher::kind()
-        }
-    }
-
     /// A watcher that reports the cookie of one folder but not of another polls, and its warning names only the
     /// other.
-    #[cfg(target_os = "linux")]
     #[test]
     fn a_watcher_that_misses_one_folder_s_cookie_polls_and_names_that_folder() {
         let (_directory, root) = project();
         let folders = [(root.join("app"), RecursiveMode::Recursive), (root.join("vendor"), RecursiveMode::Recursive)];
 
-        let (_watcher, log) = logged(|| {
-            start_watcher_of::<FirstFolderOnly, _>(
-                |_: notify::Result<Event>| {},
-                &folders,
-                Duration::from_millis(50),
-                COOKIE_TIMEOUT,
-            )
-            .expect("the poll watcher should start")
-        });
+        let log = start_logged::<ReportsCookies<1>>(&folders);
 
         assert!(
             log.contains(&format!(
-                "The file watcher reported no change in {} within {COOKIE_TIMEOUT:?}, so this run checks the watched files every 50ms instead.",
+                "The file watcher reported no change in {} within 50ms, so this run checks the watched files every 50ms instead.",
                 root.join("vendor").display()
             )),
             "{log}"
@@ -986,7 +1001,7 @@ mod tests {
 
     /// A folder the cookie cannot be written to gets a warning that names it and the error, and the watcher of the
     /// other folders starts without polling.
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     #[test]
     fn a_folder_that_takes_no_cookie_is_named_with_the_error() {
         use std::os::unix::fs::PermissionsExt;
@@ -996,10 +1011,7 @@ mod tests {
         let folders = [(root.join("app"), RecursiveMode::Recursive), (vendor.clone(), RecursiveMode::Recursive)];
         std::fs::set_permissions(&vendor, std::fs::Permissions::from_mode(0o555)).expect("vendor should be read-only");
 
-        let (_watcher, log) = logged(|| {
-            start_watcher(|_: notify::Result<Event>| {}, &folders, Duration::from_millis(50))
-                .expect("the watcher should start")
-        });
+        let log = start_logged::<ReportsCookies<1>>(&folders);
         std::fs::set_permissions(&vendor, std::fs::Permissions::from_mode(0o755)).expect("vendor should be writable");
 
         assert!(
@@ -1052,6 +1064,7 @@ mod tests {
             start_watcher_of::<notify::NullWatcher, _>(
                 handler,
                 &[(root.join("app"), RecursiveMode::Recursive)],
+                TEST_COOKIE,
                 Duration::from_millis(50),
                 Duration::from_millis(50),
             )
