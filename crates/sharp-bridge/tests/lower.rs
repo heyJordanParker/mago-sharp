@@ -7601,6 +7601,25 @@ fn a_member_of_a_value_that_may_be_a_list_or_an_iterable_runs_the_iterable_s_las
     );
 }
 
+/// An object that runs its own method beside an `Iterable`'s member is told apart by each class that declares the
+/// method, once each, as `$held instanceof \App\Shelf || $held instanceof \App\Crate`, since `Low` and `High` inherit
+/// `Shelf`'s.
+#[test]
+fn an_object_of_several_classes_beside_an_iterable_is_told_apart_by_each_class_once() {
+    let code = "namespace App;\n\nclass Report\n{\n    public int run(int pick, Low low, High high, Crate crate, Iterable<int> names) => (pick == 0 ? low : (pick == 1 ? high : (pick == 2 ? crate : names))).toList().count();\n}\n";
+    let classes = [
+        ("src/App/Shelf.sharp", "namespace App;\n\nclass Shelf\n{\n    public List<int> toList() => [];\n}\n"),
+        ("src/App/Low.sharp", "namespace App;\n\nclass Low : Shelf\n{\n}\n"),
+        ("src/App/High.sharp", "namespace App;\n\nclass High : Shelf\n{\n}\n"),
+        ("src/App/Crate.sharp", "namespace App;\n\nclass Crate\n{\n    public List<int> toList() => [1];\n}\n"),
+    ];
+    let body = Lowered::with(code, &classes).body_of("run");
+
+    assert_eq!(body.matches("INSTANCEOF").count(), 2, "{body}");
+    assert!(body.contains("OR\n"), "{body}");
+    assert!(body.contains(r#"ZVAL "App\\Shelf""#) && body.contains(r#"ZVAL "App\\Crate""#), "{body}");
+}
+
 /// ```php
 /// return [$argument#1 = fn ($value) => 1, \is_array($held) ? \Sharp\Internal\associateBy($held, $argument#1, 'int, int')
 ///     : \Sharp\Internal\associateBy($held, $argument#1, 'int, string')][1];
@@ -9759,6 +9778,178 @@ fn a_change_runs_its_values_before_it_takes_its_place() {
                         ZVAL "stored#2"
     "#}
     );
+}
+
+/// ```php
+/// \Sharp\Internal\set($rows, 0, new \Sharp\Map<string, int>(['a', 1]));
+/// $value#1 = [...$numbers];
+/// \Sharp\Internal\set($grid, 0, $value#1);
+/// ($this->maybe === null ? null
+///     : [$argument#1 = $this->at(4), \Sharp\Internal\removeKey($this->maybe, $argument#1)][1]);
+/// ```
+///
+/// A change holds only a value that runs code: a collection literal of values that run nothing is written in place, a
+/// spread, which reads a sequence, is held first, and behind `?.` an argument runs only where the place is not null,
+/// as PHP runs a null-safe call's arguments.
+#[test]
+fn a_change_holds_only_a_value_that_runs_code() {
+    let code = "namespace App;\n\nclass Report\n{\n    public Map<int, int>? maybe { get; set; } = null;\n\n    public void run(List<Map<string, int>> rows, List<List<int>> grid, List<int> numbers)\n    {\n        rows[0] = [\"a\": 1];\n        grid[0] = [...numbers];\n        this.maybe?.remove(this.at(4));\n    }\n\n    private int at(int n) => n;\n}\n";
+
+    assert_eq!(Lowered::new(code).body(), indoc! {r#"
+            STMT_LIST
+              ASSIGN
+                VAR
+                  ZVAL "rows"
+                CONDITIONAL
+                  CALL
+                    ZVAL "is_array"
+                    ARG_LIST
+                      VAR
+                        ZVAL "rows"
+                  CALL
+                    ZVAL "array_map"
+                    ARG_LIST
+                      ARROW_FUNC "" @7-7
+                        PARAM_LIST
+                          PARAM
+                            null
+                            ZVAL "element#1"
+                            null
+                            null
+                            null
+                            null
+                        null
+                        CONDITIONAL
+                          CALL
+                            ZVAL "is_array"
+                            ARG_LIST
+                              VAR
+                                ZVAL "element#1"
+                          SHARP_TYPE_ARGS
+                            NEW
+                              ZVAL "Sharp\\Map"
+                              ARG_LIST
+                                CALL
+                                  ZVAL "array_merge"
+                                  ARG_LIST
+                                    ARRAY [3]
+                                    UNPACK
+                                      CALL
+                                        ZVAL "array_map"
+                                        ARG_LIST
+                                          ARROW_FUNC "" @7-7
+                                            PARAM_LIST
+                                              PARAM
+                                                null
+                                                ZVAL "key#2"
+                                                null
+                                                null
+                                                null
+                                                null
+                                              PARAM
+                                                null
+                                                ZVAL "value#3"
+                                                null
+                                                null
+                                                null
+                                                null
+                                            null
+                                            ARRAY [3]
+                                              ARRAY_ELEM
+                                                CAST [6]
+                                                  VAR
+                                                    ZVAL "key#2"
+                                                null
+                                              ARRAY_ELEM
+                                                VAR
+                                                  ZVAL "value#3"
+                                                null
+                                            null
+                                            null
+                                          CALL
+                                            ZVAL "array_keys"
+                                            ARG_LIST
+                                              VAR
+                                                ZVAL "element#1"
+                                          VAR
+                                            ZVAL "element#1"
+                            ZVAL "string, int"
+                          VAR
+                            ZVAL "element#1"
+                        null
+                        null
+                      VAR
+                        ZVAL "rows"
+                  VAR
+                    ZVAL "rows"
+              CALL
+                ZVAL "Sharp\\Internal\\set"
+                ARG_LIST
+                  VAR
+                    ZVAL "rows"
+                  ZVAL 0
+                  SHARP_TYPE_ARGS
+                    NEW
+                      ZVAL "Sharp\\Map"
+                      ARG_LIST
+                        ARRAY [3]
+                          ARRAY_ELEM
+                            ZVAL "a"
+                            null
+                          ARRAY_ELEM
+                            ZVAL 1
+                            null
+                    ZVAL "string, int"
+              STMT_LIST
+                ASSIGN
+                  VAR
+                    ZVAL "value#1"
+                  ARRAY [3]
+                    UNPACK
+                      VAR
+                        ZVAL "numbers"
+                CALL
+                  ZVAL "Sharp\\Internal\\set"
+                  ARG_LIST
+                    VAR
+                      ZVAL "grid"
+                    ZVAL 0
+                    VAR
+                      ZVAL "value#1"
+              CONDITIONAL [1]
+                BINARY_OP [16]
+                  PROP
+                    VAR
+                      ZVAL "this"
+                    ZVAL "maybe"
+                  ZVAL null
+                ZVAL null
+                DIM
+                  ARRAY [3]
+                    ARRAY_ELEM
+                      ASSIGN
+                        VAR
+                          ZVAL "argument#1"
+                        METHOD_CALL
+                          VAR
+                            ZVAL "this"
+                          ZVAL "at"
+                          ARG_LIST
+                            ZVAL 4
+                      null
+                    ARRAY_ELEM
+                      CALL
+                        ZVAL "Sharp\\Internal\\removeKey"
+                        ARG_LIST
+                          PROP
+                            VAR
+                              ZVAL "this"
+                            ZVAL "maybe"
+                          VAR
+                            ZVAL "argument#1"
+                      null
+                  ZVAL 1
+    "#});
 }
 
 /// ```php

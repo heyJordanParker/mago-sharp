@@ -569,12 +569,12 @@ impl Lowering<'_, '_> {
             Expression::ConstantAccess(name) => {
                 matches!(self.names.binding(&name.name), Some(Binding::Local(_) | Binding::This | Binding::Constant))
             }
-            // A collection literal of values that run nothing runs nothing. A spread reads a sequence, which may run.
+            // A collection literal of values that run nothing runs nothing. A spread reads a sequence, which may run, and
+            // the checker refuses an element left out.
             Expression::Array(array) => array.elements.iter().all(|element| match element {
                 ArrayElement::KeyValue(element) => self.is_pure(element.key) && self.is_pure(element.value),
                 ArrayElement::Value(element) => self.is_pure(element.value),
-                ArrayElement::Variadic(_) => false,
-                ArrayElement::Missing(_) => true,
+                ArrayElement::Variadic(_) | ArrayElement::Missing(_) => false,
             }),
             Expression::Access(Access::Property(access)) => {
                 self.types.namespace_constant(expression).is_some()
