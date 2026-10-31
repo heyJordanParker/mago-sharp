@@ -31,20 +31,20 @@ How you reference it depends on the format:
 
 ```toml
 #:schema vendor/heyjordanparker/mago-sharp/schema.json
-version = "0.5"
+version = "0.6"
 php-version = "8.3"
 ```
 
 ```yaml
 # yaml-language-server: $schema=vendor/heyjordanparker/mago-sharp/schema.json
-version: "0.5"
+version: "0.6"
 php-version: "8.3"
 ```
 
 ```json
 {
   "$schema": "vendor/heyjordanparker/mago-sharp/schema.json",
-  "version": "0.5",
+  "version": "0.6",
   "php-version": "8.3"
 }
 ```
@@ -125,7 +125,7 @@ Cycles are detected via canonical-path tracking and surface a clear error rather
 These keys live at the root of `mago.toml`.
 
 ```toml
-version = "0.5"
+version = "0.6"
 php-version = "8.2"
 threads = 8
 stack-size = 8388608     # 8 MiB
@@ -134,7 +134,7 @@ editor-url = "phpstorm://open?file=%file%&line=%line%&column=%column%"
 
 | Option | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `version` | string | none | Pins the Mago version this project is tested against. Accepts a major (`"0"`), minor (`"0.5"`), or exact (`"0.5.0"`) pin. See [version pinning](#version-pinning). |
+| `version` | string | none | Pins the Mago version this project is tested against. Accepts a major (`"0"`), minor (`"0.6"`), or exact (`"0.6.0"`) pin. See [version pinning](#version-pinning). |
 | `php-version` | string | latest stable | The PHP version Mago should target for parsing and analysis. `mago init` autodetects this from `composer.json` when possible. |
 | `allow-unsupported-php-version` | boolean | `false` | Allow Mago to run on a PHP version it does not officially support. Not recommended. |
 | `no-version-check` | boolean | `false` | Silences the warning emitted when the installed binary drifts from the pinned version. Major-version drift is always fatal. |
@@ -149,8 +149,8 @@ Pinning the version surfaces drift between the installed binary and the project'
 Three pin levels:
 
 - **Major pin** (`version = "0"`): any `0.x.y` satisfies the pin. A bump to `1.x` is a hard error because a new major may ship with incompatible defaults, schema changes, or rule behaviour. From 1.0 on, this is the default `mago init` writes.
-- **Minor pin** (`version = "0.5"`): any `0.5.y` satisfies the pin. Drift to a different minor warns; drift across majors is still fatal. Before 1.0 a new minor release may break the configuration, as in Cargo's caret rule, so this is the default `mago init` writes.
-- **Exact pin** (`version = "0.5.0"`): any drift warns; drift across majors is still fatal.
+- **Minor pin** (`version = "0.6"`): any `0.6.y` satisfies the pin. Drift to a different minor warns; drift across majors is still fatal. Before 1.0 a new minor release may break the configuration, as in Cargo's caret rule, so this is the default `mago init` writes.
+- **Exact pin** (`version = "0.6.0"`): any drift warns; drift across majors is still fatal.
 
 The warning can be silenced with `--no-version-check`, the `MAGO_NO_VERSION_CHECK` environment variable, or `no-version-check = true` in the config. None of those affect major-version drift, which is the entire point of pinning.
 

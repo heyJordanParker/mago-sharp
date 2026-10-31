@@ -15,7 +15,7 @@ nav_section = "指南"
 `self-update` 会在解压任何内容之前校验下载的归档,校验失败时拒绝安装,已安装的二进制保持不变:
 
 - 如果 `PATH` 中有 [GitHub CLI](https://cli.github.com/),它会用 `gh attestation verify` 校验归档的构建证明,证明该归档由发布工作流构建。
-- 如果没有,它会用该发行版的 `mago-<version>-sha256sums.txt` 校验归档的 SHA-256,并提示完整的来源证明需要 `gh`:来自发行版本身的校验和无法识别被替换的发行版。未发布校验和文件的发行版(例如 0.5.0 及更早版本)只能在有 `gh` 时安装。
+- 如果没有,它会用该发行版的 `mago-<version>-sha256sums.txt` 校验归档的 SHA-256,并提示完整的来源证明需要 `gh`:来自发行版本身的校验和无法识别被替换的发行版。未发布校验和文件的较早发行版只能在有 `gh` 时安装。
 
 ## 常见流程
 
@@ -37,7 +37,7 @@ mago self-update --no-confirm     # 跳过确认提示
 锁定到指定版本:
 
 ```sh
-mago self-update --tag 0.5.0
+mago self-update --tag 0.6.0
 ```
 
 ## 与项目的版本锁定同步
@@ -48,7 +48,7 @@ mago self-update --tag 0.5.0
 mago self-update --to-project-version
 ```
 
-对于精确锁定(`version = "0.5.0"`),会直接解析到对应的发布 tag。对于主版本或次版本锁定,Mago 会扫描近期的 GitHub 发布,安装仍然满足锁定的最高版本。所以即便 1.0 已发布,`version = "0"` 仍会安装最新的 0.x。`version = "0.2"` 在 0.5.x 已经流行的情况下,会回退到最新的 0.2.x。
+对于精确锁定(`version = "0.6.0"`),会直接解析到对应的发布 tag。对于主版本或次版本锁定,Mago 会扫描近期的 GitHub 发布,安装仍然满足锁定的最高版本。所以即便 1.0 已发布,`version = "0"` 仍会安装最新的 0.x。`version = "0.2"` 在 0.6.x 已经流行的情况下,会回退到最新的 0.2.x。
 
 只有在没有任何已发布版本满足锁定时,命令才会失败。
 

@@ -15,7 +15,7 @@ nav_section = "Guide"
 `self-update` verifies the archive it downloads before it extracts anything from it, and refuses one that fails, leaving the installed binary as it was:
 
 - With the [GitHub CLI](https://cli.github.com/) on your `PATH`, it checks the archive's build attestation with `gh attestation verify`, which proves the release workflow built it.
-- Without it, it checks the archive's SHA-256 against the release's `mago-<version>-sha256sums.txt`, and warns that full provenance needs `gh`: a checksum from the release cannot tell a replaced release apart. A release that publishes no sums file, such as 0.5.0 and earlier, installs only with `gh`.
+- Without it, it checks the archive's SHA-256 against the release's `mago-<version>-sha256sums.txt`, and warns that full provenance needs `gh`: a checksum from the release cannot tell a replaced release apart. An older release that publishes no sums file installs only with `gh`.
 
 ## Common flows
 
@@ -37,7 +37,7 @@ mago self-update --no-confirm     # skip the prompt
 Pin a specific version:
 
 ```sh
-mago self-update --tag 0.5.0
+mago self-update --tag 0.6.0
 ```
 
 ## Sync with the project's version pin
@@ -48,7 +48,7 @@ If your `mago.toml` uses [version pinning](/guide/configuration/#version-pinning
 mago self-update --to-project-version
 ```
 
-For an exact pin (`version = "0.5.0"`), this resolves directly to that release tag. For a major or minor pin, Mago scans recent GitHub releases and installs the highest one that still satisfies the pin. So `version = "0"` with 1.0 already shipped still installs the latest 0.x release. `version = "0.2"` with 0.5.x in the wild walks back to the latest 0.2.x.
+For an exact pin (`version = "0.6.0"`), this resolves directly to that release tag. For a major or minor pin, Mago scans recent GitHub releases and installs the highest one that still satisfies the pin. So `version = "0"` with 1.0 already shipped still installs the latest 0.x release. `version = "0.2"` with 0.6.x in the wild walks back to the latest 0.2.x.
 
 The command fails only if no published release satisfies the pin at all.
 

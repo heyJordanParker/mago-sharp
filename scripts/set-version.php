@@ -43,6 +43,16 @@ const VERSIONED_DOCUMENTATION_FILES = [
     'docs/content/zh/guide/installation.md',
     'docs/content/zh/guide/upgrading.md',
     'docs/content/zh/recipes/github-actions.md',
+    // The tag example in a comment, the pin examples of `mago self-update --help`, and those of the configuration schema.
+    'scripts/install.sh',
+    'src/commands/self_update.rs',
+    'src/config/mod.rs',
+];
+
+// The fuzz crate is a workspace of its own, so its lock holds the Mago crates it builds as well.
+const LOCK_FILES = [
+    'Cargo.lock',
+    'crates/syntax/fuzz/Cargo.lock',
 ];
 
 const MANIFEST_VERSION_DECLARATIONS = [
@@ -125,15 +135,14 @@ function minor_version(string $version): string
 /** @return array<string, string> */
 function prepare_updates(string $root, string $manifest, string $currentVersion, string $newVersion): array
 {
-    $manifestPath = $root . '/Cargo.toml';
-    $lockPath = $root . '/Cargo.lock';
+    $updates = [$root . '/Cargo.toml' => namespace\update_manifest($manifest, $newVersion)];
 
-    return (
-        [
-            $manifestPath => namespace\update_manifest($manifest, $newVersion),
-            $lockPath => namespace\update_lock(namespace\read_file($lockPath), $newVersion),
-        ] + namespace\prepare_documentation_updates($root, $currentVersion, $newVersion)
-    );
+    foreach (LOCK_FILES as $relativePath) {
+        $path = $root . '/' . $relativePath;
+        $updates[$path] = namespace\update_lock($path, namespace\read_file($path), $currentVersion, $newVersion);
+    }
+
+    return $updates + namespace\prepare_documentation_updates($root, $currentVersion, $newVersion);
 }
 
 /** @return array<string, string> */
@@ -319,8 +328,13 @@ function validate_manifest_updates(int $packageUpdates, int $workspaceUpdates, i
     }
 }
 
-function update_lock(string $lock, string $newVersion): string
+/**
+ * Moves each Mago package the lock holds at the current version to the new one. A crate with a version of its own, as
+ * the fuzz crate's 0.0.0, keeps it.
+ */
+function update_lock(string $path, string $lock, string $currentVersion, string $newVersion): string
 {
+    $currentDeclaration = sprintf('version = "%s"', $currentVersion);
     $insideMagoPackage = false;
     $replacements = 0;
     $lines = explode("\n", $lock);
@@ -339,7 +353,7 @@ function update_lock(string $lock, string $newVersion): string
             continue;
         }
 
-        if (!$insideMagoPackage || 1 !== preg_match('/^version = "[^"]+"$/', $normalized)) {
+        if (!$insideMagoPackage || $currentDeclaration !== $normalized) {
             continue;
         }
 
@@ -350,7 +364,7 @@ function update_lock(string $lock, string $newVersion): string
     unset($line);
 
     if (0 === $replacements) {
-        throw new RuntimeException('Cargo.lock does not contain any Mago packages.');
+        throw new RuntimeException(sprintf('%s holds no Mago package at version %s.', $path, $currentVersion));
     }
 
     return implode("\n", $lines);

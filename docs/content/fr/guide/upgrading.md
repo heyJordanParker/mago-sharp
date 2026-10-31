@@ -15,7 +15,7 @@ nav_section = "Guide"
 `self-update` vérifie l'archive qu'il télécharge avant d'en extraire quoi que ce soit, et refuse celle qui échoue, en laissant le binaire installé tel quel :
 
 - Avec la [CLI GitHub](https://cli.github.com/) dans votre `PATH`, il vérifie l'attestation de build de l'archive avec `gh attestation verify`, qui prouve que le workflow de release l'a construite.
-- Sans elle, il vérifie le SHA-256 de l'archive avec le `mago-<version>-sha256sums.txt` de la release, et avertit que la provenance complète demande `gh` : une somme de contrôle issue de la release ne distingue pas une release remplacée. Une release qui ne publie aucun fichier de sommes, comme 0.5.0 et les précédentes, ne s'installe qu'avec `gh`.
+- Sans elle, il vérifie le SHA-256 de l'archive avec le `mago-<version>-sha256sums.txt` de la release, et avertit que la provenance complète demande `gh` : une somme de contrôle issue de la release ne distingue pas une release remplacée. Une release plus ancienne qui ne publie aucun fichier de sommes ne s'installe qu'avec `gh`.
 
 ## Flux courants
 
@@ -37,7 +37,7 @@ mago self-update --no-confirm     # skip the prompt
 Épingler une version spécifique :
 
 ```sh
-mago self-update --tag 0.5.0
+mago self-update --tag 0.6.0
 ```
 
 ## Synchroniser avec l'épinglage de version du projet
@@ -48,7 +48,7 @@ Si votre `mago.toml` utilise l'[épinglage de version](/guide/configuration/#ver
 mago self-update --to-project-version
 ```
 
-Pour un épinglage exact (`version = "0.5.0"`), cela résout directement vers ce tag de release. Pour un épinglage majeur ou mineur, Mago parcourt les releases GitHub récentes et installe la plus haute qui satisfait toujours l'épinglage. Ainsi, `version = "0"` avec 1.0 déjà sortie installe quand même la dernière release 0.x. `version = "0.2"` avec du 0.5.x dans la nature redescend vers le dernier 0.2.x.
+Pour un épinglage exact (`version = "0.6.0"`), cela résout directement vers ce tag de release. Pour un épinglage majeur ou mineur, Mago parcourt les releases GitHub récentes et installe la plus haute qui satisfait toujours l'épinglage. Ainsi, `version = "0"` avec 1.0 déjà sortie installe quand même la dernière release 0.x. `version = "0.2"` avec du 0.6.x dans la nature redescend vers le dernier 0.2.x.
 
 La commande échoue uniquement si aucune release publiée ne satisfait l'épinglage.
 
