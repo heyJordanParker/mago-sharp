@@ -8592,6 +8592,34 @@ fn a_write_into_a_map_a_hooked_property_holds_stores_it_through_the_property() {
 }
 
 /// ```php
+/// $value#1 = $this->grown();
+/// $receiver#2 = $this->sizes;
+/// $kept#3 = $receiver#2;
+/// $receiver#2['a'] = $value#1;
+/// $receiver#2 === $kept#3 || ($this->sizes = $receiver#2);
+/// ```
+///
+/// A value that runs code runs before the hidden copy of a hooked `Map` property is read, so a change the value makes
+/// to the property stays in the copy the write stores.
+#[test]
+fn a_write_into_a_map_a_hooked_property_holds_runs_its_value_before_it_reads_the_property() {
+    let body = child_body(
+        "void run()",
+        "        this.sizes[\"a\"] = this.grown();\n    }\n\n    private int grown()\n    {\n        this.sizes[\"z\"] = 9;\n        return 1;\n",
+        "<?php namespace App\\Tenant; class Base { /** @var array<string, int> */ public array $sizes = ['a' => 0] { set { $this->sizes = $value; } } }",
+    );
+
+    assert!(
+        body.starts_with("STMT_LIST\n  STMT_LIST\n    ASSIGN\n      VAR\n        ZVAL \"value#1\"\n      METHOD_CALL\n"),
+        "{body}"
+    );
+    assert!(
+        body.contains("    ASSIGN\n      VAR\n        ZVAL \"receiver#2\"\n      PROP\n        VAR\n          ZVAL \"this\"\n"),
+        "{body}"
+    );
+}
+
+/// ```php
 /// \Sharp\Internal\set($sizes, 0, $extra);
 /// (\array_key_exists($extra, $grid) ? \Sharp\Internal\set($grid[$extra], 1, 2)
 ///     : throw new \OutOfRangeException('Undefined array key ' . $extra));

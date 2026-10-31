@@ -6433,16 +6433,18 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// own write changes at the place [`Self::with_place`] passes. PHP gives such a place no reference, so it is written
     /// through a hidden copy, which its `set` then stores once the write changed it: `this.sizes[key] ??= value` is
     /// `[$receiver#1 = $this->sizes, $kept#2 = $receiver#1, $receiver#1[$key] ??= $value, $receiver#1 === $kept#2 ||
-    /// ($this->sizes = $receiver#1)][2]`. The checker refuses every other operator, since it reads the value of the `Map`
-    /// bare.
+    /// ($this->sizes = $receiver#1)][2]`. The key, and the value of a `=`, run before the copy is read, as
+    /// [`Self::with_place`] holds them, so a change they make to the property stays. The checker refuses every other
+    /// operator, since it reads the value of the `Map` bare.
     fn plain_map_write(&mut self, line: u32, assignment: &Assignment, access: &ArrayAccess) -> u32 {
-        let kind = match assignment.operator {
-            AssignmentOperator::Assign(_) => SHARP_AST_ASSIGN,
-            AssignmentOperator::Coalesce(_) => SHARP_AST_ASSIGN_COALESCE,
+        let (kind, held): (_, &[(&Expression, &str)]) = match assignment.operator {
+            AssignmentOperator::Assign(_) => (SHARP_AST_ASSIGN, &[(access.index, "index"), (assignment.rhs, "value")]),
+            // `??=` runs its value only where the map holds none for the key.
+            AssignmentOperator::Coalesce(_) => (SHARP_AST_ASSIGN_COALESCE, &[(access.index, "index")]),
             _ => unreachable!("the checker refuses `{}` on a `Map` value, which reads it bare", assignment.operator),
         };
 
-        self.with_place(access.array, false, &[], |this, place| {
+        self.with_place(access.array, false, held, |this, place| {
             let key = this.expression(access.index);
             let element = this.node(SHARP_AST_DIM, 0, line, &[place, key]);
             let value = this.expression(assignment.rhs);
