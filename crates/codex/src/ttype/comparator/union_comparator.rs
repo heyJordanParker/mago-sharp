@@ -201,8 +201,10 @@ fn is_contained_by_atomic(
 
             return true;
         }
+        // A type parameter goes where each type its bound holds goes, as `T : int|float` goes into `int|float`. Under
+        // PHP#'s rules a bound that holds `Any` says nothing of the value, so the atomic comparison refuses it.
         TAtomic::GenericParameter(TGenericParameter { intersection_types: None, constraint, .. })
-            if !container_has_template && !union_comparison_result.sharp_rules =>
+            if !container_has_template && (!union_comparison_result.sharp_rules || !constraint.has_mixed()) =>
         {
             return are_parts_contained_by(
                 constraint.types.as_ref(),

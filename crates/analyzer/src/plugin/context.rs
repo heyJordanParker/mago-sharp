@@ -46,6 +46,9 @@ pub struct ProviderContext<'codebase, 'artifacts, 'block> {
     pub(crate) source_file: &'codebase File,
     pub(crate) artifacts: &'artifacts AnalysisArtifacts,
     pub(crate) block_context: &'block BlockContext<'codebase>,
+    /// The span of the call the provider answers for, whose arguments [`Self::get_expression_type`] reads as the callee
+    /// receives them. None where the provider answers for no call.
+    pub(crate) call: Option<Span>,
     pub(crate) reported_issues: RefCell<Vec<ReportedIssue>>,
 }
 
@@ -55,8 +58,9 @@ impl<'codebase, 'artifacts, 'block> ProviderContext<'codebase, 'artifacts, 'bloc
         source_file: &'codebase File,
         block_context: &'block BlockContext<'codebase>,
         artifacts: &'artifacts AnalysisArtifacts,
+        call: Option<Span>,
     ) -> Self {
-        Self { codebase, source_file, artifacts, block_context, reported_issues: RefCell::new(Vec::new()) }
+        Self { codebase, source_file, artifacts, block_context, call, reported_issues: RefCell::new(Vec::new()) }
     }
 
     pub fn report(&self, code: IssueCode, issue: Issue) {
@@ -72,20 +76,23 @@ impl<'codebase, 'artifacts, 'block> ProviderContext<'codebase, 'artifacts, 'bloc
         self.codebase
     }
 
+    /// The type of `expr`. For an argument of the call the provider answers for, it is the value the callee receives:
+    /// a `Map` or a `Set` PHP# passes to plain PHP arrives as its PHP array, spec section 12.
     #[inline]
     pub fn get_expression_type<T>(&self, expr: &T) -> Option<&TUnion>
     where
         T: HasSpan,
     {
-        self.artifacts.get_expression_type(expr)
+        self.get_rc_expression_type(expr).map(|r#type| &**r#type)
     }
 
+    /// The type of `expr`, as [`Self::get_expression_type`] gives it.
     #[inline]
     pub fn get_rc_expression_type<T>(&self, expr: &T) -> Option<&Rc<TUnion>>
     where
         T: HasSpan,
     {
-        self.artifacts.get_rc_expression_type(expr)
+        self.artifacts.get_received_expression_type(self.call, expr)
     }
 
     #[inline]
@@ -219,6 +226,9 @@ pub struct HookContext<'ctx, 'block> {
     pub(crate) resolved_names: &'ctx ResolvedNames<'ctx>,
     pub(crate) block_context: &'block mut BlockContext<'ctx>,
     pub(crate) artifacts: &'block mut AnalysisArtifacts,
+    /// The span of the call the hook runs after, whose arguments [`Self::get_expression_type`] reads as the callee
+    /// receives them. None for any other hook.
+    pub(crate) call: Option<Span>,
     pub(crate) reported_issues: RefCell<Vec<ReportedIssue>>,
 }
 
@@ -239,8 +249,23 @@ impl<'ctx, 'block> HookContext<'ctx, 'block> {
             resolved_names: context.resolved_names,
             artifacts,
             block_context,
+            call: None,
             reported_issues: RefCell::new(Vec::new()),
         }
+    }
+
+    /// The context of a hook that runs after the analysis of the call at `call`.
+    pub(crate) fn after_call<'arena, A>(
+        context: &Context<'ctx, 'arena, A>,
+        block_context: &'block mut BlockContext<'ctx>,
+        artifacts: &'block mut AnalysisArtifacts,
+        call: Span,
+    ) -> Self
+    where
+        'arena: 'ctx,
+        A: Arena,
+    {
+        Self { call: Some(call), ..Self::new(context, block_context, artifacts) }
     }
 
     /// Report an issue from a hook.
@@ -264,22 +289,23 @@ impl<'ctx, 'block> HookContext<'ctx, 'block> {
     pub fn resolved_names(&self) -> &'ctx ResolvedNames<'ctx> {
         self.resolved_names
     }
-    /// Get the type of an expression.
+    /// The type of `expr`. For an argument of the call the hook runs after, it is the value the callee receives: a
+    /// `Map` or a `Set` PHP# passes to plain PHP arrives as its PHP array, spec section 12.
     #[inline]
     pub fn get_expression_type<T>(&self, expr: &T) -> Option<&TUnion>
     where
         T: HasSpan,
     {
-        self.artifacts.get_expression_type(expr)
+        self.get_rc_expression_type(expr).map(|r#type| &**r#type)
     }
 
-    /// Get the type of an expression as an Rc.
+    /// The type of `expr`, as [`Self::get_expression_type`] gives it.
     #[inline]
     pub fn get_rc_expression_type<T>(&self, expr: &T) -> Option<&Rc<TUnion>>
     where
         T: HasSpan,
     {
-        self.artifacts.get_rc_expression_type(expr)
+        self.artifacts.get_received_expression_type(self.call, expr)
     }
 
     /// Get the type of a variable.

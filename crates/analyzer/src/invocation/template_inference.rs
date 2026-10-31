@@ -85,6 +85,25 @@ fn resolve_self_class(defining_entity: &GenericParent) -> Option<Word> {
     }
 }
 
+/// Whether `inferred`, what an argument fixes a template as, satisfies its bound `bound`, by the comparison the call's
+/// arguments meet their parameters with, [`verify_argument_type`](crate::invocation::arguments::verify_argument_type)'s.
+/// So in PHP# a `Map` or a `Set` satisfies an object bound as the object it runs as, as `T of \Countable`, spec section
+/// 12, and an `int` satisfies no `float` bound, as it fills no `float` parameter, spec section 24.
+fn satisfies_bound<A>(context: &Context<'_, '_, A>, inferred: &TUnion, bound: &TUnion) -> bool
+where
+    A: Arena,
+{
+    union_comparator::is_contained_by(
+        context.codebase,
+        inferred,
+        bound,
+        false,
+        false,
+        false,
+        &mut ComparisonResult::for_dialect(context.dialect),
+    )
+}
+
 fn expand_template_constraint<'ty>(
     codebase: &CodebaseMetadata,
     constraint: &'ty TUnion,
@@ -814,15 +833,7 @@ fn infer_templates_from_input_and_container_types<A>(
                                     resolve_self_class(&generic_parameter.defining_entity),
                                 );
 
-                                if !union_comparator::is_contained_by(
-                                    context.codebase,
-                                    &inferred_bound,
-                                    &constraint,
-                                    false,
-                                    false,
-                                    false,
-                                    &mut ComparisonResult::default(),
-                                ) {
+                                if !satisfies_bound(context, &inferred_bound, &constraint) {
                                     violations.push(TemplateInferenceViolation {
                                         template_name: *template_name,
                                         inferred_bound: inferred_bound.clone(),
@@ -921,17 +932,7 @@ fn infer_templates_from_input_and_container_types<A>(
                     lower_bound_type.types.iter().any(|t| matches!(t, TAtomic::GenericParameter(_)));
 
                 let constraint_union = wrap_atomic(class_string_constraint.as_ref().clone());
-                if !has_generic_parameter
-                    && !union_comparator::is_contained_by(
-                        context.codebase,
-                        &lower_bound_type,
-                        &constraint_union,
-                        false,
-                        false,
-                        false,
-                        &mut ComparisonResult::default(),
-                    )
-                {
+                if !has_generic_parameter && !satisfies_bound(context, &lower_bound_type, &constraint_union) {
                     continue;
                 }
 
@@ -939,15 +940,10 @@ fn infer_templates_from_input_and_container_types<A>(
                     && let Some(template_types) = template_result.template_types.get(parameter_name)
                 {
                     for template in template_types {
-                        if !union_comparator::is_contained_by(
-                            context.codebase,
-                            &lower_bound_type,
-                            &template.constraint,
-                            false,
-                            false,
-                            false,
-                            &mut ComparisonResult::default(),
-                        ) {
+                        // A bound that names a type parameter is checked where the argument meets its parameter, as
+                        // the type parameter's own bound check below leaves it.
+                        let bound = &template.constraint;
+                        if !bound.has_template_types() && !satisfies_bound(context, &lower_bound_type, bound) {
                             violations.push(TemplateInferenceViolation {
                                 template_name: *parameter_name,
                                 inferred_bound: lower_bound_type.clone(),
@@ -1000,15 +996,7 @@ fn infer_templates_from_input_and_container_types<A>(
         );
 
         if !expanded_constraint.has_template_types()
-            && !union_comparator::is_contained_by(
-                context.codebase,
-                &residual_input_type,
-                &expanded_constraint,
-                false,
-                false,
-                false,
-                &mut ComparisonResult::default(),
-            )
+            && !satisfies_bound(context, &residual_input_type, &expanded_constraint)
         {
             // when the input type doesn't satisfy the template constraint and this is the only
             // generic container part that could accept it, report a constraint violation.
@@ -1050,15 +1038,7 @@ fn infer_templates_from_input_and_container_types<A>(
                     resolve_self_class(&template.defining_entity),
                 );
 
-                if !union_comparator::is_contained_by(
-                    context.codebase,
-                    &residual_input_type,
-                    &resolved_template_type,
-                    false,
-                    false,
-                    false,
-                    &mut ComparisonResult::default(),
-                ) {
+                if !satisfies_bound(context, &residual_input_type, &resolved_template_type) {
                     potential_template_violations
                         .entry((*template_parameter_name, container_generic.defining_entity))
                         .or_insert_with(|| {
@@ -1115,17 +1095,7 @@ fn infer_templates_from_input_and_container_types<A>(
             continue;
         }
 
-        if re_resolved_constraint != constraint
-            && union_comparator::is_contained_by(
-                context.codebase,
-                &inferred_type,
-                &re_resolved_constraint,
-                false,
-                false,
-                false,
-                &mut ComparisonResult::default(),
-            )
-        {
+        if re_resolved_constraint != constraint && satisfies_bound(context, &inferred_type, &re_resolved_constraint) {
             continue;
         }
 

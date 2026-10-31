@@ -104,6 +104,7 @@ use mago_word::ascii_lowercase_word;
 use mago_word::word;
 
 use crate::artifacts::AnalysisArtifacts;
+use crate::artifacts::get_expression_range;
 use crate::external::AnalysisHookRegistration;
 use crate::external::AttributedEntryPoint;
 use crate::external::ClassInitializerProvider;
@@ -1427,8 +1428,16 @@ fn encode_return_type_arguments<'type_info>(
             .unwrap_or_default();
 
         writer.write_bytes(expression)?;
-        let argument_type =
-            include_argument_types.then(|| value.and_then(|value| artifacts.get_expression_type(value))).flatten();
+        // Each argument as the target receives it, as a plugin's provider reads it: a `Map` or a `Set` PHP# passes to
+        // plain PHP as the PHP array it crosses into, spec section 12, which is plain PHP's type.
+        let received = value
+            .zip(artifacts.get_received_argument_types(invocation.span))
+            .and_then(|(value, received)| received.get(&get_expression_range(value)));
+        let (argument_type, dialect) = match received {
+            Some(received) => (Some(&**received), Dialect::Php),
+            None => (value.and_then(|value| artifacts.get_expression_type(value)), Dialect::of(source_file)),
+        };
+        let argument_type = argument_type.filter(|_| include_argument_types);
         writer.write_bool(argument_type.is_some());
         if let Some(argument_type) = argument_type {
             typed_arguments += 1;
@@ -1439,7 +1448,7 @@ fn encode_return_type_arguments<'type_info>(
                 argument_type,
                 &mut argument_types,
                 codebase,
-                Dialect::of(source_file),
+                dialect,
                 receiver_type_count,
                 0,
             )?;
@@ -3433,6 +3442,8 @@ pub(super) mod testing {
     use mago_names::ResolvedNames;
     use mago_names::resolver::NameResolver;
     use mago_prelude::Prelude;
+    use mago_span::Position;
+    use mago_span::Span;
     use mago_syntax::cst::Node;
     use mago_syntax::cst::Program;
     use mago_syntax::parser::parse_file;
@@ -3748,12 +3759,22 @@ pub(super) mod testing {
         ));
     }
 
-    /// A return type provider request sends each argument's type as the code of the calling file sees it: a `Map` a
-    /// PHP# file passes goes as the `Sharp\Map` object it runs as, and a keyed array plain PHP passes as an array.
+    /// The span of the first `call` in the analyzed file, a call as its code writes it.
+    fn call_span(analysis: &Analysis<'_, '_>, call: &str) -> Span {
+        let file = analysis.file();
+        let start = std::str::from_utf8(&file.contents).unwrap().find(call).unwrap() as u32;
+
+        Span::new(file.id, Position::new(start), Position::new(start + call.len() as u32))
+    }
+
+    /// A return type provider request for a call the analysis checked sends each argument as the target receives it,
+    /// as the call's analysis recorded it, spec section 12: the `Map` `Shelf.total` passes to the plain PHP `array`
+    /// parameter of `Sink::take` goes as its PHP array, and so does the keyed array plain PHP's `Desk::total` passes.
     #[test]
-    fn a_provider_request_sends_each_argument_as_the_calling_file_sees_it() {
-        for (files, sends_map) in [([SHELF, SINK], true), ([DESK, SINK], false)] {
+    fn a_provider_request_sends_each_argument_as_the_target_receives_it() {
+        for (files, call) in [([SHELF, SINK], "Sink.take(this.stock)"), ([DESK, SINK], "Sink::take($this->stock)")] {
             let (typed_arguments, payload) = analyzed(&files, |analysis| {
+                let call_span = call_span(analysis, call);
                 let call = Node::Program(analysis.program).filter_map(|node| match node {
                     Node::ArgumentList(list) => Some(*list),
                     _ => None,
@@ -3772,10 +3793,9 @@ pub(super) mod testing {
                         class_type: StaticClassType::Name(sink.name),
                         declaring_object_type: None,
                     }),
-                    span: call[0].span(),
+                    span: call_span,
                 };
-                let invocation =
-                    Invocation::new(target, InvocationArgumentsSource::ArgumentList(call[0]), call[0].span());
+                let invocation = Invocation::new(target, InvocationArgumentsSource::ArgumentList(call[0]), call_span);
 
                 let request = encode_provider_request(
                     ProviderRequestKind::ReturnType,
@@ -3795,9 +3815,37 @@ pub(super) mod testing {
                 (request.typed_arguments, request.payload)
             });
 
-            assert_eq!(typed_arguments, 1, "{files:?}");
-            assert_eq!(names(&payload, b"Sharp\\Map"), sends_map, "{files:?}");
+            assert_eq!(typed_arguments, 1, "{call}");
+            assert!(!names(&payload, b"Sharp\\Map"), "{call}");
         }
+    }
+
+    /// A call inside a loop, which the analysis checks once per pass of the loop, keeps one record of what each of its
+    /// arguments arrives as, the one its last check wrote.
+    #[test]
+    fn a_call_checked_again_in_a_loop_keeps_one_record_of_its_arguments() {
+        let shelf = (
+            "src/App/Shelf.sharp",
+            "namespace App;\n\nimport Lib.Sink;\n\npublic class Shelf\n{\n    public Map<string, int> stock { get; set; } = [:];\n\n    public int total()\n    {\n        let total = 0;\n        for (const round of [1, 2, 3]) {\n            total += Sink.take(this.stock) + round;\n        }\n        return total;\n    }\n}\n",
+        );
+
+        analyzed(&[shelf, SINK], |analysis| {
+            let call = call_span(analysis, "Sink.take(this.stock)");
+            let recorded: Vec<String> = analysis
+                .artifacts
+                .received_argument_types
+                .iter()
+                .map(|(span, arguments)| {
+                    let mut arguments: Vec<String> =
+                        arguments.values().map(|r#type| r#type.get_id().to_string()).collect();
+                    arguments.sort();
+
+                    format!("{} {}", *span == get_expression_range(&call), arguments.join(", "))
+                })
+                .collect();
+
+            assert_eq!(recorded, ["true array<string, int>"]);
+        });
     }
 
     /// A `Map`'s key and a `Set`'s element, which a snapshot encodes as a type argument of the `Sharp\Map` or `Sharp\Set`

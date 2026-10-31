@@ -105,6 +105,7 @@ mod tests {
     use crate::ttype::atomic::generic::TGenericParameter;
     use crate::ttype::get_float;
     use crate::ttype::get_int;
+    use crate::ttype::get_mixed;
     use crate::ttype::get_named_object;
     use crate::ttype::get_null;
     use crate::ttype::get_string;
@@ -356,5 +357,36 @@ mod tests {
             );
             assert!(!result.int_for_float, "a `string` part is refused for more than an `int`");
         }
+    }
+
+    /// Under PHP#'s rules a template's value goes where each part of its constraint goes, as `T : int|float` goes into
+    /// `int|float`, where neither `int` nor `float` alone takes it. A constraint that holds `Any`, as an unbounded `T`'s,
+    /// says nothing of the value, so its value goes into no `int|float`.
+    #[test]
+    fn a_template_bounded_by_a_union_goes_where_its_whole_constraint_goes() {
+        let codebase = CodebaseMetadata::default();
+        let template = |constraint: TUnion| {
+            TUnion::from_atomic(TAtomic::GenericParameter(TGenericParameter::new(
+                word("T"),
+                Arc::new(constraint),
+                GenericParent::ClassLike(word("Box")),
+            )))
+        };
+        let number = || TUnion::new(Cow::Owned(vec![get_int().get_single().clone(), get_float().get_single().clone()]));
+
+        assert_is_contained_by(
+            &codebase,
+            &template(number()),
+            &number(),
+            true,
+            &mut ComparisonResult::for_dialect(Dialect::Sharp),
+        );
+        assert_is_contained_by(
+            &codebase,
+            &template(get_mixed()),
+            &number(),
+            false,
+            &mut ComparisonResult::for_dialect(Dialect::Sharp),
+        );
     }
 }

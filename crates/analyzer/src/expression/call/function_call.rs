@@ -193,7 +193,7 @@ where
 
     analyze(context, block_context, artifacts)?;
 
-    let mut hook_context = HookContext::new(context, block_context, artifacts);
+    let mut hook_context = HookContext::after_call(context, block_context, artifacts, call.span);
     context.plugin_registry.after_function_call(call, &mut hook_context)?;
     for reported in hook_context.take_issues() {
         context.collector.report_with_code(reported.code, reported.issue);

@@ -55,6 +55,7 @@ use mago_word::concat_word;
 
 use crate::artifacts::AnalysisArtifacts;
 use crate::artifacts::ClosureBindScope;
+use crate::artifacts::get_expression_range;
 use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
@@ -74,6 +75,7 @@ use crate::invocation::arguments::analyze_and_store_argument_type;
 use crate::invocation::arguments::check_array_crossing;
 use crate::invocation::arguments::display_for_parameter;
 use crate::invocation::arguments::get_unpacked_argument_type;
+use crate::invocation::arguments::record_received_argument_type;
 use crate::invocation::arguments::report_non_list_spread;
 use crate::invocation::arguments::verify_argument_type;
 use crate::invocation::resolver::resolve_invocation_type;
@@ -417,6 +419,12 @@ where
     // invalid-argument issue alone.
     let bound_before_arguments = context.dialect.is_sharp().then(|| template_result.clone());
 
+    // Spec section 12: PHP# code passes plain PHP each `Map` and `Set` as the PHP array its parameter takes, so each such
+    // argument fixes the target's type parameters, and meets its parameter's type, as that array.
+    let passes_to_plain_php = context.dialect.is_sharp() && !takes_php_sharp_types(&invocation.target);
+    // Each check of the call records what its arguments arrive as anew, for the target it checks.
+    artifacts.received_argument_types.remove(&get_expression_range(&invocation.span));
+
     let arg_count = invocation.arguments_source.argument_count();
     let mut analyzed_argument_types = HashMap::default();
     let mut violated_templates = WordSet::default();
@@ -543,7 +551,7 @@ where
             analyzed_argument_types.insert(*argument_offset, (narrowed_type, span));
         }
 
-        if let Some(argument_type) = analyzed_argument_types.get(argument_offset)
+        if let Some((argument_type, argument_span)) = analyzed_argument_types.get_mut(argument_offset)
             && let Some((_, parameter_ref)) = parameter
         {
             let parameter_type = get_parameter_type(
@@ -555,6 +563,18 @@ where
                 calling_instance_type,
                 method_class_type,
             );
+            if passes_to_plain_php
+                && let Some(received) = record_received_argument_type(
+                    artifacts,
+                    invocation.span,
+                    argument_expression,
+                    argument_type,
+                    &parameter_type,
+                    context.codebase,
+                )
+            {
+                *argument_type = received;
+            }
 
             let parameter_type = match &bound_before_arguments {
                 Some(bound_before_arguments) => {
@@ -567,17 +587,17 @@ where
                 violated_templates.extend(infer_parameter_templates_from_argument(
                     context,
                     &parameter_type,
-                    &argument_type.0,
+                    argument_type,
                     template_result,
                     *argument_offset,
-                    argument_type.1,
+                    *argument_span,
                     false,
                 ));
                 // A PHP# function type's type parameters are fixed by a function only, so a value that is none, which
                 // its own issue refuses, leaves them to that issue, as `groupBy(5)` does.
                 if context.dialect.is_sharp()
                     && parameter_type.types.iter().all(TAtomic::is_callable)
-                    && !argument_type.0.types.iter().any(TAtomic::is_callable)
+                    && !argument_type.types.iter().any(TAtomic::is_callable)
                 {
                     refused_function_templates.extend(
                         parameter_type.get_template_types().into_iter().filter_map(TAtomic::get_generic_parameter_name),
@@ -1018,22 +1038,17 @@ where
                         argument_value_type = literal_type;
                     }
                 }
-                let mut refused_crossing = false;
-                let mut passed_type = Cow::Borrowed(&argument_value_type);
-                if !takes_sharp_types && context.dialect.is_sharp() {
-                    match check_array_crossing(
+                // The refusal judges the argument's PHP# type, and the rest of the checks what the parameter receives.
+                let refused_crossing = passes_to_plain_php
+                    && !check_array_crossing(
                         context,
-                        &argument_value_type,
+                        artifacts.get_expression_type(argument_expression).unwrap_or(&argument_value_type),
                         parameter_ref,
                         &final_parameter_type,
                         *argument_offset,
                         argument_expression,
                         &invocation.target,
-                    ) {
-                        Some(passed) => passed_type = passed,
-                        None => refused_crossing = true,
-                    }
-                }
+                    );
 
                 if context.dialect.is_sharp()
                     && let Some(declared) =
@@ -1054,7 +1069,7 @@ where
                     && verify_argument_type(
                         context,
                         artifacts,
-                        &passed_type,
+                        &argument_value_type,
                         &effect_free_parameter_type(parameter_ref, &final_parameter_type),
                         *argument_offset,
                         argument_expression,
@@ -1246,8 +1261,21 @@ where
                     )?;
                 }
 
-                let argument_value_type =
+                let mut argument_value_type =
                     artifacts.get_expression_type(argument_expression).cloned().unwrap_or_else(get_mixed);
+                // A spread value crosses as a passed argument does, each of its elements into the variadic parameter.
+                if passes_to_plain_php
+                    && let Some(received) = record_received_argument_type(
+                        artifacts,
+                        invocation.span,
+                        argument_expression,
+                        &argument_value_type,
+                        &base_variadic_parameter_type,
+                        context.codebase,
+                    )
+                {
+                    argument_value_type = received;
+                }
 
                 let Some(unpacked_element_type) =
                     get_unpacked_argument_type(context, &argument_value_type, argument_expression.span())
@@ -1429,7 +1457,7 @@ where
 
                         replaced_type
                     } else {
-                        base_variadic_parameter_type
+                        base_variadic_parameter_type.clone()
                     };
 
                 for unpacked_argument in &unpacked_arguments {
@@ -1501,9 +1529,8 @@ where
                             continue;
                         }
 
-                        // Each spread `Map` crosses into a plain PHP array parameter as a passed one does.
-                        let passed = if context.dialect.is_sharp() && !takes_php_sharp_types(&invocation.target) {
-                            check_array_crossing(
+                        if passes_to_plain_php
+                            && !check_array_crossing(
                                 context,
                                 &unpacked_element_type,
                                 last_parameter_ref,
@@ -1512,20 +1539,35 @@ where
                                 argument_expression,
                                 &invocation.target,
                             )
-                        } else {
-                            Some(Cow::Borrowed(&unpacked_element_type))
-                        };
-                        if let Some(passed) = passed {
-                            verify_argument_type(
-                                context,
-                                artifacts,
-                                &passed,
-                                &final_variadic_parameter_type,
-                                last_parameter_offset,
-                                argument_expression,
-                                &invocation.target,
-                            );
+                        {
+                            continue;
                         }
+                        // A spread value crosses as a passed argument does, each of its elements into the variadic
+                        // parameter.
+                        let received_element_type = passes_to_plain_php
+                            .then(|| {
+                                record_received_argument_type(
+                                    artifacts,
+                                    invocation.span,
+                                    argument_expression,
+                                    &argument_value_type,
+                                    &base_variadic_parameter_type,
+                                    context.codebase,
+                                )
+                            })
+                            .flatten()
+                            .and_then(|received| {
+                                get_unpacked_argument_type(context, &received, argument_expression.span())
+                            });
+                        verify_argument_type(
+                            context,
+                            artifacts,
+                            received_element_type.as_ref().unwrap_or(&unpacked_element_type),
+                            &final_variadic_parameter_type,
+                            last_parameter_offset,
+                            argument_expression,
+                            &invocation.target,
+                        );
                     }
                 }
             } else {
@@ -2489,10 +2531,12 @@ fn insert_unpacked_parameter_type<A>(
     parameter_types.insert(parameter_name.0, parameter_type);
 }
 
-/// Validates individual elements within unpacked arrays against their corresponding parameters.
+/// Validates individual elements within unpacked arrays against their corresponding parameters. A PHP# spread into
+/// plain PHP crosses as a passed argument does, by the parameter it starts at, as the bridge passes it, spec section
+/// 12, so its elements are checked as that parameter receives them, once [`check_array_crossing`] takes them.
 fn validate_unpacked_argument_elements<'ctx, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
-    artifacts: &AnalysisArtifacts,
+    artifacts: &mut AnalysisArtifacts,
     argument_value_type: &TUnion,
     argument_expression: &Expression<'arena>,
     base_class_metadata: Option<&'ctx ClassLikeMetadata>,
@@ -2509,6 +2553,45 @@ fn validate_unpacked_argument_elements<'ctx, 'arena, A>(
     A: Arena,
 {
     let invocation_target = &invocation.target;
+    let mut argument_value_type = Cow::Borrowed(argument_value_type);
+    if context.dialect.is_sharp()
+        && !takes_php_sharp_types(invocation_target)
+        && let Some(parameter_ref) = invocation_target.get_parameter(starting_parameter_position)
+    {
+        let parameter_type = get_parameter_type(
+            context,
+            invocation_target,
+            Some(parameter_ref),
+            base_class_metadata,
+            calling_class_like_metadata,
+            calling_instance_type,
+            method_class_type,
+        );
+        if let Some(element_type) =
+            get_unpacked_argument_type(context, &argument_value_type, argument_expression.span())
+            && !check_array_crossing(
+                context,
+                &element_type,
+                parameter_ref,
+                &parameter_type,
+                starting_parameter_position,
+                argument_expression,
+                invocation_target,
+            )
+        {
+            return;
+        }
+        if let Some(received) = record_received_argument_type(
+            artifacts,
+            invocation.span,
+            argument_expression,
+            &argument_value_type,
+            &parameter_type,
+            context.codebase,
+        ) {
+            argument_value_type = Cow::Owned(received);
+        }
+    }
 
     for argument_atomic in argument_value_type.types.as_ref() {
         let TAtomic::Array(array) = argument_atomic else {

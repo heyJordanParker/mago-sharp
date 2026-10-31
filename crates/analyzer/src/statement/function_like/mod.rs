@@ -739,6 +739,7 @@ where
     parent_artifacts.resolved_method_calls.append(&mut artifacts.resolved_method_calls);
     parent_artifacts.call_targets.extend(std::mem::take(&mut artifacts.call_targets));
     parent_artifacts.member_calls.extend(std::mem::take(&mut artifacts.member_calls));
+    parent_artifacts.received_argument_types.extend(std::mem::take(&mut artifacts.received_argument_types));
     parent_artifacts.tested_types.extend(std::mem::take(&mut artifacts.tested_types));
     parent_artifacts.declared_types.extend(std::mem::take(&mut artifacts.declared_types));
     parent_artifacts.namespace_constants.extend(std::mem::take(&mut artifacts.namespace_constants));

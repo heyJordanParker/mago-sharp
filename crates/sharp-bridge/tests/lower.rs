@@ -14,6 +14,7 @@ use std::fmt::Write;
 use std::path::Path;
 use std::thread;
 
+use indoc::formatdoc;
 use indoc::indoc;
 
 use mago_database::file::File;
@@ -25736,6 +25737,95 @@ fn a_map_or_set_goes_into_a_plain_php_array_parameter_as_its_php_array() {
 }
 
 /// ```php
+/// \Lib\Calc::total(\Sharp\Internal\arrayOf($either));
+/// \Lib\Calc::total(\Sharp\Internal\arrayOf($listed));
+/// \Lib\Takers::counted($stock); // its result checked as Map<string, int>
+/// return \Lib\Takers::kept(\Sharp\Internal\arrayOf($stock));
+/// ```
+///
+/// A value that may be one of several collections, as `Map<string, int>|Set<string>` or `List<int>|Map<string, int>`,
+/// goes into a plain PHP parameter that takes `array` as the PHP array of the one it holds, spec section 12. A plain
+/// PHP type parameter takes the array as its bound does: one bounded by `\Countable` takes the `Map` itself, and one
+/// without a bound takes its PHP array.
+#[test]
+fn a_value_that_may_be_several_collections_and_a_type_parameter_take_the_php_array_as_section_12_says() {
+    let code = "namespace App.Tenant;\n\nimport Lib.Calc;\nimport Lib.Takers;\n\nclass Report\n{\n    public int run(int extra)\n    {\n        Map<string, int> stock = this.stock();\n        Set<string> tags = this.tags();\n        List<int> sizes = this.sizes();\n        let either = extra > 0 ? stock : tags;\n        let listed = extra > 0 ? sizes : stock;\n        Calc.total(either);\n        Calc.total(listed);\n        Takers.counted(stock);\n        return Takers.kept(stock);\n    }\n\n    private Map<string, int> stock() => [:];\n\n    private Set<string> tags() => [];\n\n    private List<int> sizes() => [];\n}\n";
+    let takers = (
+        "src/Lib/Takers.php",
+        "<?php namespace Lib; final class Takers {
+            /**
+             * @template T of \\Countable
+             * @param T $items
+             * @return T
+             */
+            public static function counted($items) { return $items; }
+            /**
+             * @template T
+             * @param T $items
+             */
+            public static function kept($items): int { return 0; }
+        }",
+    );
+
+    assert_eq!(
+        statements_at(code, &[takers], 5..9),
+        [
+            indoc! {r#"
+                STATIC_CALL
+                  ZVAL "Lib\\Calc"
+                  ZVAL "total"
+                  ARG_LIST
+                    CALL
+                      ZVAL "Sharp\\Internal\\arrayOf"
+                      ARG_LIST
+                        VAR
+                          ZVAL "either"
+            "#},
+            indoc! {r#"
+                STATIC_CALL
+                  ZVAL "Lib\\Calc"
+                  ZVAL "total"
+                  ARG_LIST
+                    CALL
+                      ZVAL "Sharp\\Internal\\arrayOf"
+                      ARG_LIST
+                        VAR
+                          ZVAL "listed"
+            "#},
+            indoc! {r#"
+                VERIFY_TYPE_ARGS
+                  STATIC_CALL
+                    ZVAL "Lib\\Takers"
+                    ZVAL "counted"
+                    ARG_LIST
+                      VAR
+                        ZVAL "stock"
+                      SHARP_TYPE_ARGS
+                        null
+                        ZVAL "Map<string, int>"
+                  ZVAL "Map<string, int>"
+                  ZVAL "Lib\\Takers::counted()"
+            "#},
+            indoc! {r#"
+                RETURN
+                  STATIC_CALL
+                    ZVAL "Lib\\Takers"
+                    ZVAL "kept"
+                    ARG_LIST
+                      CALL
+                        ZVAL "Sharp\\Internal\\arrayOf"
+                        ARG_LIST
+                          VAR
+                            ZVAL "stock"
+                      SHARP_TYPE_ARGS
+                        null
+                        ZVAL "Map<string, int>"
+            "#},
+        ]
+    );
+}
+
+/// ```php
 /// $context->payload = \Sharp\Internal\arrayOf($stock);
 /// \Lib\Context::$registry = \Sharp\Internal\arrayOf($stock);
 /// $context->payloads['first'] = \Sharp\Internal\arrayOf($stock);
@@ -26156,6 +26246,79 @@ fn plain_php_s_array_written_into_a_php_sharp_base_s_property_crosses_as_its_typ
             "#},
         ]
     );
+}
+
+/// ```php
+/// $named = \Sharp\Internal\arrayOf($named);
+/// \ksort($named);
+/// $named = \is_array($named)
+///     ? new \Sharp\Map(\array_merge([], ...\array_map(fn ($key, $value) => [(string) $key, $value], \array_keys($named), $named)))
+///     : $named;
+/// $staged = \Sharp\Internal\arrayOf($staged);
+/// \ksort($staged);
+/// $staged = \is_array($staged)
+///     ? new \Sharp\Map(\array_merge([], ...\array_map(fn ($key, $value) => [\Lib\Status::from((string) $key), $value], \array_keys($staged), $staged)))
+///     : $staged;
+/// ```
+///
+/// A local declared with `let` that holds a `Map` has the one type the checker inferred for it, its first value's
+/// made general, so it goes into `ksort`'s reference parameter as a typed local does: as its PHP array, keyed by a
+/// backed enum's values, and back as the `Map` of what `ksort` wrote, each key made the `string` or the case of that
+/// type again, as a literal's own keys, `"5"` or `Status.Open|Status.Shut`, would not say.
+#[test]
+fn a_let_local_crosses_into_and_back_from_a_plain_php_reference_parameter() {
+    let code = "namespace Sharp;\n\nimport Lib.Status;\n\nclass Report\n{\n    public int run()\n    {\n        let named = [\"tea\": 2, \"5\": 1];\n        let staged = [Status.Open: 1, Status.Shut: 2];\n        global.ksort(named);\n        global.ksort(staged);\n        return named.count() + staged.count();\n    }\n}\n";
+    let status =
+        ("src/Lib/Status.php", "<?php namespace Lib; enum Status: string { case Open = 'open'; case Shut = 'shut'; }");
+    let lowered = Lowered(common::checked(
+        "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Report.sharp",
+        code,
+        &[status],
+        lower,
+    ));
+    let body = lowered.child(lowered.method_named("run"), 2);
+
+    // Each call passes the local as its PHP array, then makes what `ksort` wrote the `Map` again: with each `int` key
+    // back as its `string`, or each backing value back as its `Lib\Status` case.
+    let statements: Vec<String> = (2..4).map(|position| lowered.render(lowered.child(body, position))).collect();
+    for (statement, (name, key, types)) in statements.iter().zip([
+        ("named", "CAST [6]", "string, int"),
+        ("staged", "STATIC_CALL\n                              ZVAL \"Lib\\\\Status\"", "Lib.Status, int"),
+    ]) {
+        assert!(
+            statement.starts_with(&formatdoc! {r#"
+                STMT_LIST
+                  ASSIGN
+                    VAR
+                      ZVAL "{name}"
+                    CALL
+                      ZVAL "Sharp\\Internal\\arrayOf"
+                      ARG_LIST
+                        VAR
+                          ZVAL "{name}"
+                  CALL
+                    ZVAL "ksort"
+                    ARG_LIST
+                      VAR
+                        ZVAL "{name}"
+                  ASSIGN
+                    VAR
+                      ZVAL "{name}"
+                    CONDITIONAL
+                      CALL
+                        ZVAL "is_array"
+                        ARG_LIST
+                          VAR
+                            ZVAL "{name}"
+                      SHARP_TYPE_ARGS
+                        NEW
+                          ZVAL "Sharp\\Map"
+            "#}),
+            "{statement}"
+        );
+        assert!(statement.contains(&format!("ARRAY_ELEM\n                            {key}")), "{statement}");
+        assert!(statement.contains(&format!("ZVAL \"{types}\"")), "{statement}");
+    }
 }
 
 /// ```php
