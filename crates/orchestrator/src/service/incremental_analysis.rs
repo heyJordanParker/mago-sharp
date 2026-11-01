@@ -50,6 +50,7 @@ use mago_codex::ttype::TType;
 use mago_codex::ttype::TypeRef;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::reference::TReference;
+use mago_codex::ttype::template::GenericTemplate;
 use mago_collector::DeferredPragmas;
 use mago_database::DatabaseReader;
 use mago_database::ReadDatabase;
@@ -2142,15 +2143,24 @@ fn names_a_refused_bound_type(codebase: &CodebaseMetadata, declared: &WordSet) -
         .filter(|function| function.flags.is_sharp() && function.flags.is_populated())
         .flat_map(|function| function.template_types.values());
 
-    class_templates.chain(function_templates).filter_map(|template| template.written_bound.as_ref()).any(|bound| {
-        bound.type_union.get_all_child_nodes().into_iter().any(|node| {
-            matches!(
-                node,
-                TypeRef::Atomic(TAtomic::Reference(TReference::Symbol { name, .. }))
-                    if declared.contains(&mago_word::ascii_lowercase_word(name.as_bytes()))
-            )
+    // A bound population refused for a missing type is the refused type, and a bound the checker refuses stays refused.
+    let refused_for_missing_type = |template: &&GenericTemplate| {
+        !template.bound_refused && template.constraint.types.iter().all(|atomic| matches!(atomic, TAtomic::Error))
+    };
+
+    class_templates
+        .chain(function_templates)
+        .filter(refused_for_missing_type)
+        .filter_map(|template| template.written_bound.as_ref())
+        .any(|bound| {
+            bound.type_union.get_all_child_nodes().into_iter().any(|node| {
+                matches!(
+                    node,
+                    TypeRef::Atomic(TAtomic::Reference(TReference::Symbol { name, .. }))
+                        if declared.contains(&mago_word::ascii_lowercase_word(name.as_bytes()))
+                )
+            })
         })
-    })
 }
 
 /// Scans `file` into the codebase metadata it declares, with its signature and the scan `plan` captures of it, its
@@ -3908,6 +3918,49 @@ mod tests {
         );
         assert_eq!(bounds(&service), (false, false), "the bound is Holder<TOther> again");
         assert_matches_full(&service, &db, "Holder is declared");
+    }
+
+    /// Only a bound population refused for a missing type runs a full analysis once a file declares that type, so an
+    /// edit of a class-like that an accepted bound names stays incremental.
+    #[test]
+    fn test_watch_an_edit_of_a_type_an_accepted_bound_names_stays_incremental() {
+        let bounded = "namespace App;\n\npublic static class Bounded\n{\n    public static T held<T : Holder<int>>(T value) => value;\n}\n";
+        let holder = |size: &str| {
+            format!("namespace App;\n\npublic interface Holder<TItem>\n{{\n    int size() => {size};\n}}\n")
+        };
+        let holder_id = FileId::new(b"src/Holder.sharp");
+        let mut db = make_database(vec![("src/Bounded.sharp", bounded), ("src/Holder.sharp", &holder("1"))]);
+
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+
+        db.update(holder_id, Cow::Owned(holder("2").into_bytes()));
+        service.update_database(db.read_only());
+        service.analyze_incremental(Some(&[holder_id])).expect("Incremental analysis failed.");
+        assert_eq!(service.analyzed_files, HashSet::from_iter([holder_id]), "only Holder's file is analyzed again");
+        assert_matches_full(&service, &db, "Holder.size returns 2");
+
+        // A bound the checker refuses stays refused once the type it names exists, so declaring that type stays
+        // incremental: the file that names nothing of it is not analyzed again.
+        let unioned = "namespace App;\n\npublic static class Unioned\n{\n    public static T held<T : Shelf|int>(T value) => value;\n}\n";
+        let shelf = "namespace App;\n\npublic interface Shelf\n{\n}\n";
+        let bounded_id = FileId::new(b"src/Bounded.sharp");
+        let shelf_id = FileId::new(b"src/Shelf.sharp");
+        let mut db = make_database(vec![("src/Unioned.sharp", unioned), ("src/Bounded.sharp", bounded)]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+
+        db.add(File::new(
+            Cow::Borrowed(&b"src/Shelf.sharp"[..]),
+            FileType::Host,
+            None,
+            Cow::Borrowed(shelf.as_bytes()),
+        ));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental analysis failed.");
+        assert!(service.analyzed_files.contains(&shelf_id), "{:?}", service.analyzed_files);
+        assert!(!service.analyzed_files.contains(&bounded_id), "{:?}", service.analyzed_files);
+        assert_matches_full(&service, &db, "Shelf is declared");
     }
 
     /// Spec section 11: the trait that holds a generic interface's default bodies takes the interface's type parameters,
