@@ -662,7 +662,7 @@ fn involves_external_reference(expr: &Expression<'_>, block_context: &BlockConte
 
 /// Checks a single operand of a comparison by `operator` for problematic types, naming it `subject`, as "Left operand in
 /// `<` comparison" names it in PHP and "Left operand of `<`" in PHP#. `other_type` is the other operand's. In PHP# an
-/// `Any` operand is named `Any`, with the check that narrows it.
+/// `Any` operand is named `Any`, with the check that narrows it. Gives whether it reported the operand.
 fn check_comparison_operand<A>(
     context: &mut Context<'_, '_, A>,
     operand: &Expression<'_>,
@@ -670,7 +670,8 @@ fn check_comparison_operand<A>(
     other_type: &TUnion,
     subject: &str,
     operator: &BinaryOperator<'_>,
-) where
+) -> bool
+where
     A: Arena,
 {
     let op_str = BytesDisplay(operator.as_bytes());
@@ -746,7 +747,11 @@ fn check_comparison_operand<A>(
             .with_note(format!("If this operand is `false` at runtime, PHP's specific comparison rules for `false` with `{op_str}` will apply."))
             .with_help("Ensure this operand is non-false or that comparison with `false` is intended and handled safely."),
         );
+    } else {
+        return false;
     }
+
+    true
 }
 
 /// Whether a PHP# `Any?` compares with a value of `other_type` by value, as spec sections 19 and 24 decide for a string,
@@ -1480,13 +1485,14 @@ pub(crate) fn report_sharp_refusal<A>(
 
 /// Reports `selector`, the function the PHP# collection member `member` orders by, as `sortedBy` does, when `<` cannot
 /// compare two keys it returns, of `key_type`, with the report `<` gives. A `null` key sorts before every other key, so
-/// only the other keys must order.
+/// only the other keys must order. Gives whether it reported the key.
 pub(crate) fn check_ordered_key<A>(
     context: &mut Context<'_, '_, A>,
     member: &str,
     selector: &Expression<'_>,
     key_type: &TUnion,
-) where
+) -> bool
+where
     A: Arena,
 {
     let key_name = display_operand(context, key_type);
@@ -1495,9 +1501,8 @@ pub(crate) fn check_ordered_key<A>(
         None => {
             let ordering = BinaryOperator::LessThan(Span::zero());
             let operand = format!("The `{member}` key");
-            check_comparison_operand(context, selector, &key_type, &key_type, &operand, &ordering);
 
-            return;
+            return check_comparison_operand(context, selector, &key_type, &key_type, &operand, &ordering);
         }
         Some(Refusal::DifferentTypes) => {
             let comparison = format!("`{member}` cannot compare two keys of `{}`", display_operand(context, &key_type));
@@ -1522,7 +1527,7 @@ pub(crate) fn check_ordered_key<A>(
             };
             report_tied_operator(context, &ordering, &[&key_type, &key_type], &tied, selector.span());
 
-            return;
+            return true;
         }
         Some(
             Refusal::Identity
@@ -1542,6 +1547,65 @@ pub(crate) fn check_ordered_key<A>(
         IssueCode::InvalidArgument,
         issue.with_annotation(Annotation::primary(selector.span()).with_message(format!("This returns `{key_name}`."))),
     );
+
+    true
+}
+
+/// What a PHP# search compares its value with by `==`, spec section 12, which decides the `===` test a refused search's
+/// help offers in its place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Searched {
+    /// Each element of a `List` or a `Set`, which its `any` reaches, as `carts.any(c => c === cart)`.
+    Elements,
+    /// Each key of a `Map`, which its `keys()` reaches, as `counts.keys().any(c => c === cart)`, since its `any` reaches
+    /// its values.
+    Keys,
+    /// Each value an `Iterable` gives a loop, which its `toList()` reaches, as `rows.toList().any(c => c === cart)`,
+    /// since an `Iterable` has no `any`.
+    Iterated,
+    /// The elements of a receiver of several kinds, as a `List<Cart>|Map<Cart, int>` or a `List<Cart>|Box`, which reach
+    /// them through different members or none, so no one `===` test reaches them all.
+    Kinds,
+    /// The elements of the list a spread passes, as `contains(...[cart])`, which are no one value a `===` tests.
+    Spread,
+}
+
+impl Searched {
+    /// What a search of a value of `receiver_type` compares its value with, read from every part of it, whether or not
+    /// that part's search is checked: a `List`'s or a `Set`'s elements, a `Map`'s keys, or what an `Iterable` gives a
+    /// loop, and `Kinds` where the parts differ or a part is no collection, as a class with its own `contains`. A member
+    /// that reads its receiver `by_loop`, as an extension of `Iterable<T>` does, reads a `Map` by its entries.
+    pub(crate) fn of(receiver_type: &TUnion, by_loop: bool) -> Searched {
+        receiver_type
+            .types
+            .iter()
+            .filter(|atomic| !matches!(atomic, TAtomic::Null))
+            .map(|atomic| match atomic {
+                TAtomic::Array(TArray::Keyed(_)) if by_loop => Searched::Iterated,
+                TAtomic::Array(TArray::Keyed(_)) => Searched::Keys,
+                TAtomic::Iterable(_) => Searched::Iterated,
+                TAtomic::Array(_) => Searched::Elements,
+                _ => Searched::Kinds,
+            })
+            .reduce(Searched::join)
+            .unwrap_or(Searched::Kinds)
+    }
+
+    /// What two searches with one argument compare it with together: what both compare it with, or `Kinds` where they
+    /// differ.
+    pub(crate) fn join(self, other: Searched) -> Searched {
+        if self == other { self } else { Searched::Kinds }
+    }
+
+    /// The members the help's `===` test runs through on the receiver, as `any` or `keys().any`, or none.
+    const fn identity_test(self) -> Option<&'static str> {
+        match self {
+            Searched::Elements => Some("any"),
+            Searched::Keys => Some("keys().any"),
+            Searched::Iterated => Some("toList().any"),
+            Searched::Kinds | Searched::Spread => None,
+        }
+    }
 }
 
 /// Why a search of a PHP# collection for a value of `value_type` cannot compare an element of `element_type` with it,
@@ -1567,11 +1631,14 @@ pub(crate) fn search_refusal(
     })
 }
 
-/// Reports `value`, of `value_type`, which a PHP# `List`'s `method` searches `receiver` for, when `==` cannot compare
-/// an element of `element_type` with it, as [`search_refusal`] decides: a class that declares no `operator ==` is
+/// Reports `value`, of `value_type`, which a PHP# collection's `method` searches `receiver` for, when `==` cannot
+/// compare one of `element_type` with it: each element of a `List` or a `Set`, each key of a `Map`, or each value an
+/// `Iterable` gives a loop, as `contains`, `indexOf`, `remove`, `has` and an extension's marked parameter search them.
+/// [`search_refusal`] decides it: a class that declares no `operator ==` is
 /// refused with the reason `==` gives, as is an element the operator's call does not always take, an `Iterable`
 /// element is refused, as `==` on it is, and an `Any` element is refused unless the value is a string, a number or an
-/// enum case. A `null_safe` call's help keeps its `?.`.
+/// enum case. A `null_safe` call's help keeps its `?.`. What is `searched` decides the `===` test the help offers
+/// instead, if any, and names an element a key where it is a `Map`'s. Gives whether it reported the search.
 pub(crate) fn check_element_equality<A>(
     context: &mut Context<'_, '_, A>,
     method: &str,
@@ -1580,7 +1647,9 @@ pub(crate) fn check_element_equality<A>(
     element_type: &TUnion,
     value_type: &TUnion,
     null_safe: bool,
-) where
+    searched: Searched,
+) -> bool
+where
     A: Arena,
 {
     let equality = BinaryOperator::Equal(value.span());
@@ -1590,21 +1659,22 @@ pub(crate) fn check_element_equality<A>(
     );
     let refusal = search_refusal(element_type, value_type, context.codebase);
     let (code, issue) = match refusal {
-        None => {
-            if element_type.is_mixed() {
-                let subject = format!("Each element of `List<{}>`", display_operand(context, element_type));
-                check_comparison_operand(context, value, element_type, value_type, &subject, &equality);
-            }
+        None if element_type.is_mixed() => {
+            // The receiver is named as the call writes it, since it may be several kinds of collection.
+            let element = if searched == Searched::Keys { "key" } else { "element" };
+            let subject = format!("Each {element} of `{}`", quoted_source(context, receiver.span()));
 
-            return;
+            return check_comparison_operand(context, value, element_type, value_type, &subject, &equality);
         }
+        None => return false,
         Some(Refusal::Instance) => {
             let class = display_refused_side(context, element_type, value_type, Comparand::is_instance);
-            let (receiver, value) = (quoted_source(context, receiver.span()), quoted_source(context, value.span()));
-            // The lambda names an element by the class's initial, as `l` for a `Line`, unless the call already uses it.
-            let initial = class.chars().next().map(|first| first.to_lowercase().to_string()).unwrap_or_default();
-            let element = if initial == receiver || initial == value { "element".to_owned() } else { initial };
-            let access = if null_safe { "?." } else { "." };
+            let help = match same_object_test(context, receiver, value, Some(&class), null_safe, searched) {
+                Some(test) => {
+                    format!("Declare `operator ==` and `hash()` in `{class}`, or test for the same object with {test}.")
+                }
+                None => format!("Declare `operator ==` and `hash()` in `{class}`."),
+            };
 
             (
                 IssueCode::InvalidArgument,
@@ -1612,24 +1682,23 @@ pub(crate) fn check_element_equality<A>(
                     "`{method}` compares elements with `==`, and `{class}` declares no `operator ==`."
                 ))
                 .with_note("`==` on a class instance exists only where its class declares `operator ==`.")
-                .with_help(format!(
-                    "Declare `operator ==` and `hash()` in `{class}`, or test for the same object with \
-                         `{receiver}{access}any({element} => {element} === {value})`."
-                )),
+                .with_help(help),
             )
         }
         Some(Refusal::UncheckedObject) => {
-            let (receiver, value) = (quoted_source(context, receiver.span()), quoted_source(context, value.span()));
-            let access = if null_safe { "?." } else { "." };
+            let quoted = quoted_source(context, value.span());
             let element = display_operand(context, element_type);
+            let same_object =
+                if searched == Searched::Spread { format!("an element of `{quoted}`") } else { format!("`{quoted}`") };
+            let issue = Issue::error(format!(
+                "`{method}` compares elements with `==`, and an unchecked `{element}` element can't tell the same object as {same_object} from an equal value."
+            ));
+            let issue = match same_object_test(context, receiver, value, None, null_safe, searched) {
+                Some(test) => issue.with_help(format!("Test for the same object with {test}.")),
+                None => issue,
+            };
 
-            (
-                IssueCode::InvalidArgument,
-                Issue::error(format!(
-                    "`{method}` compares elements with `==`, and an unchecked `{element}` element can't tell the same object as `{value}` from an equal value."
-                ))
-                .with_help(format!("Test for the same object with `{receiver}{access}any(element => element === {value})`.")),
-            )
+            (IssueCode::InvalidArgument, issue)
         }
         Some(Refusal::StructProperty) => {
             let issue = struct_property_issue(context, element_type, value_type);
@@ -1695,7 +1764,7 @@ pub(crate) fn check_element_equality<A>(
             };
             report_tied_operator(context, &equality, &operands, &tied, value.span());
 
-            return;
+            return true;
         }
         Some(Refusal::TypeParameter) => (
             IssueCode::InvalidArgument,
@@ -1717,6 +1786,35 @@ pub(crate) fn check_element_equality<A>(
                 .with_message(format!("Each `{element_name}` element is compared with this by `==`.")),
         ),
     );
+
+    true
+}
+
+/// The test for the same object a refused search's help offers in place of `==`, as `carts.any(c => c === cart)`, run
+/// on `receiver` through the member what is `searched` reaches its elements with, or None where no one member does.
+/// The lambda names an element by the initial of `class`, as `l` for a `Line`, unless the call already uses that
+/// name, and `element` otherwise. A `null_safe` call's test keeps its `?.`.
+fn same_object_test<A>(
+    context: &Context<'_, '_, A>,
+    receiver: &Expression<'_>,
+    value: &Expression<'_>,
+    class: Option<&str>,
+    null_safe: bool,
+    searched: Searched,
+) -> Option<String>
+where
+    A: Arena,
+{
+    let test = searched.identity_test()?;
+    let (receiver, value) = (quoted_source(context, receiver.span()), quoted_source(context, value.span()));
+    let element = class
+        .and_then(|class| class.chars().next())
+        .map(|first| first.to_lowercase().to_string())
+        .filter(|initial| *initial != receiver && *initial != value)
+        .unwrap_or_else(|| "element".to_owned());
+    let access = if null_safe { "?." } else { "." };
+
+    Some(format!("`{receiver}{access}{test}({element} => {element} === {value})`"))
 }
 
 /// The first property of the struct `name`, in declaration order, or field of a case of the enum `name`, that its own
