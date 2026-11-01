@@ -15026,6 +15026,13 @@ fn a_bound_that_names_a_missing_type_gives_one_error() {
         Vec::<String>::new()
     );
 
+    // A method without a body, of an interface or abstract, reports its bound's missing type too.
+    let bodiless = "namespace Demo;\n\npublic interface Keeper\n{\n    T kept<T : Missing>(T value);\n}\n\npublic abstract class Store\n{\n    public abstract T stored<T : Missing>(T value);\n}\n";
+    assert_eq!(
+        issues(("src/Demo/Keeper.sharp", bodiless), &[("src/Demo/Paging.sharp", PAGING)]),
+        ["5:16 non-existent-class-like", "10:34 non-existent-class-like"]
+    );
+
     // Once the type exists, the bound is the bound it writes, and a type argument outside it is an error again.
     let declared = "namespace Demo;\n\npublic interface Missing\n{\n}\n";
     let written = "namespace Demo;\n\npublic static class Bounded\n{\n    public static T held<T : Missing>(T value) => value;\n\n    public static Any? written() => Bounded.held<int>(1);\n}\n";
