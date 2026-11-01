@@ -33,6 +33,7 @@ use crate::context::scope::control_action::ControlAction;
 use crate::context::scope::finally_scope::FinallyScope;
 use crate::context::utils::inherit_branch_context_properties;
 use crate::error::AnalysisError;
+use crate::expression::is_refused_type;
 use crate::resolver::class_name::report_missing_class;
 use crate::statement::analyze_statements;
 use crate::statement::function_like::HintPlace;
@@ -519,7 +520,10 @@ where
                     })
                     .collect();
                 let throwable = word(b"Throwable");
-                if bound_classes.is_empty()
+                // A refused bound bounds nothing, and its own error is the one, so the clause catches any `Throwable`.
+                if is_refused_type(&parameter) {
+                    bound_classes = vec![throwable];
+                } else if bound_classes.is_empty()
                     || !bound_classes.iter().all(|class| {
                         context.codebase.get_class_like(class.as_bytes()).is_some_and(|metadata| {
                             metadata.kind.is_interface()

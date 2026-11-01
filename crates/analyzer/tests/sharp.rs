@@ -14925,6 +14925,23 @@ fn each_refused_bound_gives_one_error() {
         ]
     );
 
+    // A catch clause that names a type parameter whose bound is refused adds no error that the bound is no `Throwable`,
+    // whether the checker refused the bound or it names a type no file declares, while a bound that is no `Throwable`
+    // still gets it.
+    let caught = |bound: &str| {
+        let code = format!(
+            "namespace Demo;\n\npublic static class Bounded\n{{\n    public static void held<T : {bound}>()\n    {{\n        try {{\n        }} catch (T error) {{\n        }}\n    }}\n}}\n"
+        );
+
+        compile_errors(
+            ("src/Demo/Bounded.sharp", Box::leak(code.into_boxed_str())),
+            &[("src/Demo/Paging.sharp", PAGING)],
+        )
+    };
+    assert_eq!(caught("int"), [other]);
+    assert_eq!(caught("Missing"), ["Cannot find type `Demo.Missing`."]);
+    assert_eq!(caught("Line"), ["`T` is caught, so its bound must be a `Throwable`."]);
+
     // An error the refused bound has no part in, in the generic method's own body, still appears.
     let body = "namespace Demo;\n\npublic static class Bounded\n{\n    public static T held<T : int>(T value)\n    {\n        int count = \"x\";\n        return value;\n    }\n\n    public static Any? written() => Bounded.held<string>(\"x\");\n}\n";
     assert_eq!(
