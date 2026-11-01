@@ -36,6 +36,7 @@ use crate::exclusion::Exclusion;
 use crate::file::File;
 use crate::file::FileId;
 use crate::file::FileType;
+use crate::loader::DatabaseLoader;
 use crate::loader::Manifests;
 use crate::loader::calculate_pattern_specificity;
 use crate::loader::mark_package;
@@ -61,6 +62,15 @@ struct ChangedFile {
     path: PathBuf,
 }
 
+/// What an event tells [`DatabaseWatcher::wait`].
+enum Report {
+    /// These files changed.
+    Changed(Vec<ChangedFile>),
+    /// The operating system dropped events, as FSEvents and inotify do under a flood of changes, so any watched file
+    /// can have changed.
+    Dropped,
+}
+
 /// Options for configuring the file system watcher.
 #[derive(Debug, Clone)]
 pub struct WatchOptions {
@@ -80,7 +90,7 @@ pub struct DatabaseWatcher<'config> {
     database: Database<'config>,
     watcher: Option<Box<dyn NotifyWatcher + Send>>,
     watched_paths: Vec<PathBuf>,
-    receiver: Option<Receiver<Vec<ChangedFile>>>,
+    receiver: Option<Receiver<Report>>,
     /// Configured base paths paired with their loader-style specificity score.
     ///
     /// Carrying the score (computed via [`calculate_pattern_specificity`] over the original
@@ -116,6 +126,20 @@ impl<'config> DatabaseWatcher<'config> {
     /// - Directories cannot be watched
     #[inline]
     pub fn watch(&mut self, options: WatchOptions) -> Result<(), DatabaseError> {
+        self.watch_of::<RecommendedWatcher>(options, &unique_cookie(), COOKIE_TIMEOUT)
+    }
+
+    /// [`Self::watch`] with a watcher of type `W`, which [`start_watcher_of`] starts with `cookie` and
+    /// `cookie_timeout`.
+    fn watch_of<W>(
+        &mut self,
+        options: WatchOptions,
+        cookie: &str,
+        cookie_timeout: Duration,
+    ) -> Result<(), DatabaseError>
+    where
+        W: NotifyWatcher + Send + 'static,
+    {
         self.stop();
 
         let config = &self.database.configuration;
@@ -212,10 +236,10 @@ impl<'config> DatabaseWatcher<'config> {
 
         let watch_list: Vec<(PathBuf, RecursiveMode)> =
             watched_paths.iter().map(|path| (path.clone(), RecursiveMode::Recursive)).collect();
-        let watcher = start_watcher(
+        let watcher = start_watcher_of::<W, _>(
             move |res: Result<Event, notify::Error>| {
                 if let Ok(event) = res
-                    && let Some(changed) = Self::handle_event(
+                    && let Some(report) = Self::handle_event(
                         event,
                         &workspace,
                         &glob_excludes,
@@ -224,11 +248,13 @@ impl<'config> DatabaseWatcher<'config> {
                         &explicit_watch_paths,
                     )
                 {
-                    let _ = tx.send(changed);
+                    let _ = tx.send(report);
                 }
             },
             &watch_list,
+            cookie,
             options.poll_interval.unwrap_or(Duration::from_millis(DEFAULT_POLL_INTERVAL_MS)),
+            cookie_timeout,
         )?;
         for path in &watched_paths {
             tracing::debug!("Watching path: {}", path.display());
@@ -308,8 +334,21 @@ impl<'config> DatabaseWatcher<'config> {
         path_excludes: &HashSet<PathBuf>,
         extensions: &HashSet<Vec<u8>>,
         explicit_watch_paths: &[PathBuf],
-    ) -> Option<Vec<ChangedFile>> {
+    ) -> Option<Report> {
         tracing::debug!("Watcher received event: kind={:?}, paths={:?}", event.kind, event.paths);
+
+        // FSEvents names the folder whose events it dropped, and inotify names none.
+        if event.need_rescan() {
+            match event.paths.first() {
+                Some(folder) => tracing::info!(
+                    "The file watcher dropped events in {}, so this run reads the watched files again.",
+                    folder.display()
+                ),
+                None => tracing::info!("The file watcher dropped events, so this run reads the watched files again."),
+            }
+
+            return Some(Report::Dropped);
+        }
 
         // The poll watcher reports an edit as a new write time, the one change of metadata that counts as an edit.
         if matches!(event.kind, EventKind::Other | EventKind::Any | EventKind::Access(_))
@@ -379,13 +418,14 @@ impl<'config> DatabaseWatcher<'config> {
             changed_files.push(ChangedFile { id: file_id, path });
         }
 
-        if changed_files.is_empty() { None } else { Some(changed_files) }
+        if changed_files.is_empty() { None } else { Some(Report::Changed(changed_files)) }
     }
 
     /// Waits for file changes and updates the database.
     ///
     /// This method blocks until file changes are detected, then updates the database
-    /// in place and returns the IDs of changed files.
+    /// in place and returns the IDs of changed files. When the operating system dropped
+    /// events, each watched file that differs from what the database read counts as changed.
     ///
     /// # Errors
     ///
@@ -402,17 +442,29 @@ impl<'config> DatabaseWatcher<'config> {
         let workspace = config.workspace.as_ref().to_path_buf();
 
         match receiver.recv_timeout(Duration::from_millis(WAIT_INTERNAL_MS)) {
-            Ok(changed_files) => {
-                let mut all_changed = changed_files;
+            Ok(report) => {
+                let mut reports = vec![report];
                 loop {
                     match receiver.recv_timeout(Duration::from_millis(WAIT_DEBOUNCE_MS)) {
-                        Ok(more) => all_changed.extend(more),
+                        Ok(more) => reports.push(more),
                         Err(RecvTimeoutError::Timeout) => break,
                         Err(RecvTimeoutError::Disconnected) => {
                             self.stop();
                             return Err(DatabaseError::WatcherNotActive);
                         }
                     }
+                }
+
+                let mut all_changed = Vec::new();
+                let mut dropped = false;
+                for report in reports {
+                    match report {
+                        Report::Changed(changed_files) => all_changed.extend(changed_files),
+                        Report::Dropped => dropped = true,
+                    }
+                }
+                if dropped {
+                    all_changed.extend(self.changed_on_disk());
                 }
 
                 let mut latest_changes: HashMap<FileId, ChangedFile> = HashMap::new();
@@ -481,6 +533,29 @@ impl<'config> DatabaseWatcher<'config> {
                 Err(DatabaseError::WatcherNotActive)
             }
         }
+    }
+
+    /// Each file the database's configuration holds that changed, was added or was removed since the database read it,
+    /// as the loader that read the files at the start reads them now. A failed read is logged and gives no file.
+    fn changed_on_disk(&self) -> Vec<ChangedFile> {
+        let on_disk = match DatabaseLoader::new(self.database.configuration.clone()).load() {
+            Ok(on_disk) => on_disk,
+            Err(error) => {
+                tracing::error!("Failed to read the watched files again: {error}");
+
+                return Vec::new();
+            }
+        };
+
+        let added_or_edited = on_disk
+            .files()
+            .filter(|file| !self.database.get_ref(&file.id).is_ok_and(|read| read.contents == file.contents));
+        let removed = self.database.files().filter(|file| file.path.is_some() && on_disk.get_ref(&file.id).is_err());
+
+        added_or_edited
+            .chain(removed)
+            .filter_map(|file| Some(ChangedFile { id: file.id, path: file.path.clone()? }))
+            .collect()
     }
 
     /// Reads file contents with a stability check to handle partial writes.
@@ -581,10 +656,14 @@ pub fn start_watcher<H>(
 where
     H: EventHandler + Clone,
 {
-    static WATCHERS: AtomicUsize = AtomicUsize::new(0);
-    let cookie = format!("{COOKIE_PREFIX}{}-{}-", std::process::id(), WATCHERS.fetch_add(1, Ordering::Relaxed));
+    start_watcher_of::<RecommendedWatcher, H>(handler, paths, &unique_cookie(), poll_interval, COOKIE_TIMEOUT)
+}
 
-    start_watcher_of::<RecommendedWatcher, H>(handler, paths, &cookie, poll_interval, COOKIE_TIMEOUT)
+/// A start of cookie names that no other watcher of any `mago` uses.
+fn unique_cookie() -> String {
+    static WATCHERS: AtomicUsize = AtomicUsize::new(0);
+
+    format!("{COOKIE_PREFIX}{}-{}-", std::process::id(), WATCHERS.fetch_add(1, Ordering::Relaxed))
 }
 
 /// [`start_watcher`] with a watcher of type `W`, whose cookie in the folder at index `n` of the watched folders is
@@ -818,8 +897,10 @@ mod tests {
 
     use notify::WatcherKind;
     use notify::event::CreateKind;
+    use notify::event::Flag;
 
     use super::*;
+    use crate::DatabaseConfiguration;
 
     /// A project folder with an `app` and a `vendor` folder, at its real path.
     fn project() -> (tempfile::TempDir, PathBuf) {
@@ -1048,7 +1129,7 @@ mod tests {
         let extensions = HashSet::from([b"php".to_vec()]);
         let handler = move |result: notify::Result<Event>| {
             if let Ok(event) = result
-                && let Some(changed) = DatabaseWatcher::handle_event(
+                && let Some(Report::Changed(changed)) = DatabaseWatcher::handle_event(
                     event,
                     &workspace,
                     &GlobSet::empty(),
@@ -1116,5 +1197,95 @@ mod tests {
         save(&root, "<?php echo 3;\n", 1);
 
         assert!(reports_a_change(&received, &root), "no change after the second edit");
+    }
+
+    /// A watcher that reports the cookie of each folder it watches, as it starts on the folder, and then only that the
+    /// operating system dropped events, as inotify does when its queue overflows.
+    struct DropsEvents {
+        handler: Box<dyn EventHandler>,
+        watched: usize,
+    }
+
+    impl NotifyWatcher for DropsEvents {
+        fn new<F>(handler: F, _config: Config) -> notify::Result<Self>
+        where
+            F: EventHandler,
+        {
+            Ok(Self { handler: Box::new(handler), watched: 0 })
+        }
+
+        fn watch(&mut self, path: &Path, _recursive_mode: RecursiveMode) -> notify::Result<()> {
+            let cookie = path.join(format!("{TEST_COOKIE}{}", self.watched));
+            self.handler.handle_event(Ok(Event::new(EventKind::Create(CreateKind::File)).add_path(cookie)));
+            self.handler.handle_event(Ok(Event::new(EventKind::Other).set_flag(Flag::Rescan)));
+            self.watched += 1;
+
+            Ok(())
+        }
+
+        fn unwatch(&mut self, _path: &Path) -> notify::Result<()> {
+            Ok(())
+        }
+
+        fn kind() -> WatcherKind {
+            WatcherKind::NullWatcher
+        }
+    }
+
+    /// Reads the files of `app` in `root` into a database, runs `change` on them, then watches `app` with that database
+    /// by a [`DropsEvents`], and returns the watcher, the files its first wait reports as changed, and the log of both.
+    fn wait_after_dropped_events(
+        root: &Path,
+        change: impl FnOnce(),
+    ) -> (DatabaseWatcher<'static>, Vec<FileId>, String) {
+        let configuration = DatabaseConfiguration::new(root, vec![b"app"], vec![], vec![], vec![b"php"]).into_static();
+        let database = DatabaseLoader::new(configuration).load().expect("the database should read the files");
+        change();
+
+        let mut watcher = DatabaseWatcher::new(database);
+        let (changed, log) = logged(|| {
+            watcher
+                .watch_of::<DropsEvents>(WatchOptions::default(), TEST_COOKIE, Duration::from_millis(50))
+                .expect("the watcher should start");
+
+            watcher.wait().expect("the watcher should report its changes")
+        });
+
+        (watcher, changed, log)
+    }
+
+    /// An edit whose event the operating system dropped reaches the database as a change, as the watcher reads the
+    /// watched files again, with a line that says so.
+    #[test]
+    fn an_edit_the_operating_system_dropped_reaches_the_database() {
+        let (_directory, root) = project();
+        write(&root, "app/a.php", "<?php echo 1;\n");
+
+        let (watcher, changed, log) = wait_after_dropped_events(&root, || write(&root, "app/a.php", "<?php echo 2;\n"));
+
+        assert_eq!(changed, vec![FileId::new(b"app/a.php")]);
+        let file = watcher.database().get_by_name(b"app/a.php").expect("the database should hold app/a.php");
+        assert_eq!(file.contents.as_ref(), b"<?php echo 2;\n");
+        assert!(log.contains("The file watcher dropped events, so this run reads the watched files again."), "{log}");
+    }
+
+    /// A file added and one removed whose events the operating system dropped each reach the database as a change.
+    #[test]
+    fn a_file_added_and_one_removed_the_operating_system_dropped_reach_the_database() {
+        let (_directory, root) = project();
+        write(&root, "app/a.php", "<?php echo 1;\n");
+        write(&root, "app/b.php", "<?php echo 2;\n");
+
+        let (watcher, changed, _) = wait_after_dropped_events(&root, || {
+            std::fs::remove_file(root.join("app/b.php")).expect("app/b.php should be removed");
+            write(&root, "app/c.php", "<?php echo 3;\n");
+        });
+
+        assert_eq!(
+            changed.into_iter().collect::<HashSet<_>>(),
+            HashSet::from([FileId::new(b"app/b.php"), FileId::new(b"app/c.php")])
+        );
+        assert!(watcher.database().get_by_name(b"app/b.php").is_err(), "the database should not hold app/b.php");
+        assert!(watcher.database().get_by_name(b"app/c.php").is_ok(), "the database should hold app/c.php");
     }
 }
