@@ -15027,11 +15027,15 @@ fn a_bound_that_names_a_missing_type_gives_one_error() {
     );
 
     // A header that gives the class's type parameter to its interface, as `Query<T>`, adds no error.
-    let headed = "namespace Demo;\n\npublic class Table<T : Missing> : Query<T>\n{\n    public List<T> rows() => [];\n}\n";
+    let headed =
+        "namespace Demo;\n\npublic class Table<T : Missing> : Query<T>\n{\n    public List<T> rows() => [];\n}\n";
     let user = "namespace Demo;\n\npublic static class Reader\n{\n    public static List<int> read(Table<int> rows) => rows.rows();\n\n    public static List<int> queried(Query<int> query) => query.rows();\n\n    public static List<int> passed(Table<int> rows) => Reader.queried(rows);\n}\n";
     assert_eq!(compile_errors(("src/Demo/Table.sharp", headed), &[("src/Demo/Paging.sharp", PAGING)]), [missing]);
     assert_eq!(
-        compile_errors(("src/Demo/Reader.sharp", user), &[("src/Demo/Table.sharp", headed), ("src/Demo/Paging.sharp", PAGING)]),
+        compile_errors(
+            ("src/Demo/Reader.sharp", user),
+            &[("src/Demo/Table.sharp", headed), ("src/Demo/Paging.sharp", PAGING)]
+        ),
         Vec::<String>::new()
     );
 
@@ -15043,7 +15047,10 @@ fn a_bound_that_names_a_missing_type_gives_one_error() {
     );
 
     // An interface's default bodies keep its refused bound in the class that implements it.
-    let shelved = ("src/Demo/Shelved.sharp", "namespace Demo;\n\npublic interface Shelved<T : Missing>\n{\n    int kind(T item) => 1;\n}\n");
+    let shelved = (
+        "src/Demo/Shelved.sharp",
+        "namespace Demo;\n\npublic interface Shelved<T : Missing>\n{\n    int kind(T item) => 1;\n}\n",
+    );
     let rack = ("src/Demo/Rack.sharp", "namespace Demo;\n\npublic class Rack : Shelved<int>\n{\n}\n");
     let counter = (
         "src/Demo/Counter.sharp",

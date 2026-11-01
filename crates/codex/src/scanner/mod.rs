@@ -483,7 +483,8 @@ impl Scanner {
             );
         }
         for (parameter, template) in &interface_metadata.template_types {
-            let reparented = |union: &crate::ttype::union::TUnion| inferred_type_replacer::replace(union, &reparent, &self.codebase);
+            let reparented =
+                |union: &crate::ttype::union::TUnion| inferred_type_replacer::replace(union, &reparent, &self.codebase);
             let mut trait_template =
                 GenericTemplate::new(GenericParent::ClassLike(name), reparented(&template.constraint))
                     .with_default(template.default.as_ref().map(reparented));

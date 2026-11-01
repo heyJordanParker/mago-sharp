@@ -3899,7 +3899,13 @@ mod tests {
         ));
         service.update_database(db.read_only());
         service.analyze_incremental(None).expect("Incremental analysis failed.");
-        assert_eq!(errors(&service), ["Type argument `int` does not satisfy `Bounded.held<T, TOther>`'s `T`.", "touch cannot set box.size: box is readonly."]);
+        assert_eq!(
+            errors(&service),
+            [
+                "Type argument `int` does not satisfy `Bounded.held<T, TOther>`'s `T`.",
+                "touch cannot set box.size: box is readonly."
+            ]
+        );
         assert_eq!(bounds(&service), (false, false), "the bound is Holder<TOther> again");
         assert_matches_full(&service, &db, "Holder is declared");
     }
@@ -3918,7 +3924,9 @@ mod tests {
             .get_class_like(mago_codex::defaults_trait_name(b"App\\Shelved").as_bytes())
             .expect("Shelved's default bodies are a trait");
         let bound = &defaults.template_types[&mago_word::word("T")];
-        assert!(bound.constraint.types.iter().all(|atomic| matches!(atomic, mago_codex::ttype::atomic::TAtomic::Error)));
+        assert!(
+            bound.constraint.types.iter().all(|atomic| matches!(atomic, mago_codex::ttype::atomic::TAtomic::Error))
+        );
     }
 
     /// Spec section 23: a root function added beside classes that already exist takes their namespace, so a project

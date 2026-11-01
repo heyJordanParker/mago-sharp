@@ -460,11 +460,8 @@ fn refuse_missing_bounds(codebase: &mut CodebaseMetadata) {
         }
         // The type arguments the header writes, as `Shelved<TItem>`, name the class's type parameters too.
         let extended_parameters = class.template_extended_parameters.values_mut().flat_map(IndexMap::values_mut);
-        let extended_paths = class
-            .template_extended_parameter_paths
-            .values_mut()
-            .flatten()
-            .flat_map(IndexMap::values_mut);
+        let extended_paths =
+            class.template_extended_parameter_paths.values_mut().flatten().flat_map(IndexMap::values_mut);
         let extended_offsets = class.template_extended_offsets.values_mut().flatten();
         for parameter in extended_parameters.chain(extended_paths).chain(extended_offsets) {
             read(parameter);
