@@ -551,6 +551,15 @@ impl Comparison<'_, '_> {
             Comparison::Order { selector, .. } => selector.span(),
         }
     }
+
+    /// The type the member compares the argument with, without `null`, which `==` and an ordering both take: the
+    /// elements' for a search, and the keys' for an ordering.
+    fn compared_type(&self) -> TUnion {
+        match self {
+            Comparison::Search { element_type, .. } => element_type.to_non_nullable(),
+            Comparison::Order { key_type, .. } => key_type.to_non_nullable(),
+        }
+    }
 }
 
 /// Analyzes the call [`analyze_extension_access`] analyzes, and gives what it compares instead of reporting it, so a
@@ -777,8 +786,10 @@ fn searched_element_type(receiver_type: &TUnion, codebase: &CodebaseMetadata) ->
 /// the elements, as [`check_element_equality`] decides, and a function whose keys `<` cannot order, as
 /// [`check_ordered_key`] decides. A call runs one member per kind of its receiver, as `remove` on a
 /// `List<Cart>|Map<Cart, int>` runs the `List`'s and the `Map`'s, and each of them compares with the same argument, so
-/// an argument is reported once, refused or warned of. A search's help tests for the same object only through a
-/// member every part of `receiver_type`, the receiver's type as the call writes it, reaches its elements with.
+/// an argument is reported once for each type it is compared with, refused or warned of: a `sortedBy` on a
+/// `List<Status>|Map<string, Cart>` reports its `Status` keys and its `Cart` keys. A search's help tests for the same
+/// object only through a member every part of `receiver_type`, the receiver's type as the call writes it, reaches its
+/// elements with.
 pub(crate) fn report_comparisons<A>(
     context: &mut Context<'_, '_, A>,
     receiver: &Expression<'_>,
@@ -791,7 +802,8 @@ pub(crate) fn report_comparisons<A>(
     let mut reported = Vec::new();
     for comparison in comparisons {
         let argument = comparison.argument();
-        if reported.contains(&argument) {
+        let compared = (argument, comparison.compared_type());
+        if reported.contains(&compared) {
             continue;
         }
         let was_reported = match comparison {
@@ -826,7 +838,7 @@ pub(crate) fn report_comparisons<A>(
             }
         };
         if was_reported {
-            reported.push(argument);
+            reported.push(compared);
         }
     }
 }
