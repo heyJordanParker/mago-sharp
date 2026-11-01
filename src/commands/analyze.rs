@@ -737,25 +737,10 @@ fn setup_restart_watcher(configuration: &Configuration) -> Result<RestartWatcher
 
     let watcher = start_watcher(
         move |res: Result<notify::Event, notify::Error>| {
-            let Ok(event) = res else {
-                return;
-            };
-
-            if matches!(event.kind, EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)) {
-                for event_path in &event.paths {
-                    for (watched_path, label) in &file_labels {
-                        let matches = event_path
-                            .canonicalize()
-                            .ok()
-                            .and_then(|canon| watched_path.canonicalize().ok().map(|wc| canon == wc))
-                            .unwrap_or_else(|| event_path == watched_path);
-
-                        if matches {
-                            let _ = tx.send(format!("{label} changed ({})", event_path.display()));
-                            return;
-                        }
-                    }
-                }
+            if let Ok(event) = res
+                && let Some(reason) = restart_reason(&event, &file_labels)
+            {
+                let _ = tx.send(reason);
             }
         },
         &watched_dirs,
@@ -763,6 +748,41 @@ fn setup_restart_watcher(configuration: &Configuration) -> Result<RestartWatcher
     )?;
 
     Ok(RestartWatcher { _watcher: watcher, files, reasons: rx })
+}
+
+/// The reason `event` gives to restart watch mode: a change to one of the restart `files`, or events the operating
+/// system dropped in no named folder or in a folder that holds one of them.
+fn restart_reason(event: &notify::Event, files: &[(PathBuf, &'static str)]) -> Option<String> {
+    // FSEvents names the folder whose events it dropped, and inotify names none.
+    if event.need_rescan() {
+        let real = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let holds_a_file = |folder: &PathBuf| {
+            files.iter().any(|(path, _)| path.parent().is_some_and(|parent| real(parent).starts_with(real(folder))))
+        };
+
+        return (event.paths.is_empty() || event.paths.iter().any(holds_a_file))
+            .then(|| "the file watcher dropped events".to_owned());
+    }
+
+    if !matches!(event.kind, EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)) {
+        return None;
+    }
+
+    for event_path in &event.paths {
+        for (watched_path, label) in files {
+            let matches = event_path
+                .canonicalize()
+                .ok()
+                .and_then(|canon| watched_path.canonicalize().ok().map(|wc| canon == wc))
+                .unwrap_or_else(|| event_path == watched_path);
+
+            if matches {
+                return Some(format!("{label} changed ({})", event_path.display()));
+            }
+        }
+    }
+
+    None
 }
 
 #[cfg(test)]
@@ -806,5 +826,24 @@ mod tests {
         let (_restart_watcher, configuration) = watch_and_reload(configuration).unwrap();
 
         assert!(configuration.extension_hosts.is_empty(), "{:?}", configuration.extension_hosts.keys());
+    }
+
+    /// A rescan restarts the watch when it names no folder, as inotify's does, or a folder that holds a restart file,
+    /// as FSEvents' does, and not when its folder holds none. An edit to a restart file restarts it with the file's label.
+    #[test]
+    fn a_rescan_that_can_hide_a_restart_file_s_change_restarts_the_watch() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        std::fs::create_dir(root.join("app")).unwrap();
+        let file = root.join("mago.toml");
+        let files = [(file.clone(), "configuration file")];
+        let rescan = || notify::Event::new(EventKind::Other).set_flag(notify::event::Flag::Rescan);
+        let dropped = Some("the file watcher dropped events".to_owned());
+
+        assert_eq!(restart_reason(&rescan(), &files), dropped);
+        assert_eq!(restart_reason(&rescan().add_path(root.clone()), &files), dropped);
+        assert_eq!(restart_reason(&rescan().add_path(root.join("app")), &files), None);
+        let edit = notify::Event::new(EventKind::Modify(notify::event::ModifyKind::Any)).add_path(file.clone());
+        assert_eq!(restart_reason(&edit, &files), Some(format!("configuration file changed ({})", file.display())));
     }
 }

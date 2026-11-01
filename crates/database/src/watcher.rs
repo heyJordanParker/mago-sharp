@@ -67,8 +67,8 @@ enum Report {
     /// These files changed.
     Changed(Vec<ChangedFile>),
     /// The operating system dropped events, as FSEvents and inotify do under a flood of changes, so any watched file
-    /// can have changed.
-    Dropped,
+    /// can have changed. FSEvents names the folder whose events it dropped, and inotify names none.
+    Dropped(Option<PathBuf>),
 }
 
 /// Options for configuring the file system watcher.
@@ -337,17 +337,8 @@ impl<'config> DatabaseWatcher<'config> {
     ) -> Option<Report> {
         tracing::debug!("Watcher received event: kind={:?}, paths={:?}", event.kind, event.paths);
 
-        // FSEvents names the folder whose events it dropped, and inotify names none.
         if event.need_rescan() {
-            match event.paths.first() {
-                Some(folder) => tracing::info!(
-                    "The file watcher dropped events in {}, so this run reads the watched files again.",
-                    folder.display()
-                ),
-                None => tracing::info!("The file watcher dropped events, so this run reads the watched files again."),
-            }
-
-            return Some(Report::Dropped);
+            return Some(Report::Dropped(event.paths.into_iter().next()));
         }
 
         // The poll watcher reports an edit as a new write time, the one change of metadata that counts as an edit.
@@ -456,14 +447,23 @@ impl<'config> DatabaseWatcher<'config> {
                 }
 
                 let mut all_changed = Vec::new();
-                let mut dropped = false;
+                // The folders whose events the operating system dropped, each watched folder for an event that names none.
+                let mut dropped_in: Option<Vec<PathBuf>> = None;
                 for report in reports {
                     match report {
                         Report::Changed(changed_files) => all_changed.extend(changed_files),
-                        Report::Dropped => dropped = true,
+                        Report::Dropped(folder) => dropped_in
+                            .get_or_insert_default()
+                            .extend(folder.map_or_else(|| self.watched_paths.clone(), |folder| vec![folder])),
                     }
                 }
-                if dropped {
+                if let Some(mut folders) = dropped_in {
+                    folders.sort();
+                    folders.dedup();
+                    tracing::info!(
+                        "The file watcher dropped events in {}, so this run reads the watched files again.",
+                        folders.iter().map(|folder| folder.display().to_string()).collect::<Vec<_>>().join(", ")
+                    );
                     all_changed.extend(self.changed_on_disk());
                 }
 
@@ -550,7 +550,7 @@ impl<'config> DatabaseWatcher<'config> {
         let added_or_edited = on_disk
             .files()
             .filter(|file| !self.database.get_ref(&file.id).is_ok_and(|read| read.contents == file.contents));
-        let removed = self.database.files().filter(|file| file.path.is_some() && on_disk.get_ref(&file.id).is_err());
+        let removed = self.database.files().filter(|file| on_disk.get_ref(&file.id).is_err());
 
         added_or_edited
             .chain(removed)
@@ -1201,46 +1201,42 @@ mod tests {
 
     /// A watcher that reports the cookie of each folder it watches, as it starts on the folder, and then only that the
     /// operating system dropped events, as inotify does when its queue overflows.
-    struct DropsEvents {
-        handler: Box<dyn EventHandler>,
-        watched: usize,
-    }
+    struct DropsEvents(ReportsCookies<{ usize::MAX }>);
 
     impl NotifyWatcher for DropsEvents {
-        fn new<F>(handler: F, _config: Config) -> notify::Result<Self>
+        fn new<F>(handler: F, config: Config) -> notify::Result<Self>
         where
             F: EventHandler,
         {
-            Ok(Self { handler: Box::new(handler), watched: 0 })
+            ReportsCookies::<{ usize::MAX }>::new(handler, config).map(Self)
         }
 
-        fn watch(&mut self, path: &Path, _recursive_mode: RecursiveMode) -> notify::Result<()> {
-            let cookie = path.join(format!("{TEST_COOKIE}{}", self.watched));
-            self.handler.handle_event(Ok(Event::new(EventKind::Create(CreateKind::File)).add_path(cookie)));
-            self.handler.handle_event(Ok(Event::new(EventKind::Other).set_flag(Flag::Rescan)));
-            self.watched += 1;
+        fn watch(&mut self, path: &Path, recursive_mode: RecursiveMode) -> notify::Result<()> {
+            self.0.watch(path, recursive_mode)?;
+            self.0.handler.handle_event(Ok(Event::new(EventKind::Other).set_flag(Flag::Rescan)));
 
             Ok(())
         }
 
-        fn unwatch(&mut self, _path: &Path) -> notify::Result<()> {
-            Ok(())
+        fn unwatch(&mut self, path: &Path) -> notify::Result<()> {
+            self.0.unwatch(path)
         }
 
         fn kind() -> WatcherKind {
-            WatcherKind::NullWatcher
+            ReportsCookies::<{ usize::MAX }>::kind()
         }
     }
 
-    /// Reads the files of `app` in `root` into a database, runs `change` on them, then watches `app` with that database
-    /// by a [`DropsEvents`], and returns the watcher, the files its first wait reports as changed, and the log of both.
+    /// Reads the files of `app` in `root` into a database, runs `change` on the files and the database, then watches
+    /// `app` with that database by a [`DropsEvents`], and returns the watcher, the files its first wait reports as
+    /// changed, and the log of both.
     fn wait_after_dropped_events(
         root: &Path,
-        change: impl FnOnce(),
+        change: impl FnOnce(&mut Database<'static>),
     ) -> (DatabaseWatcher<'static>, Vec<FileId>, String) {
         let configuration = DatabaseConfiguration::new(root, vec![b"app"], vec![], vec![], vec![b"php"]).into_static();
-        let database = DatabaseLoader::new(configuration).load().expect("the database should read the files");
-        change();
+        let mut database = DatabaseLoader::new(configuration).load().expect("the database should read the files");
+        change(&mut database);
 
         let mut watcher = DatabaseWatcher::new(database);
         let (changed, log) = logged(|| {
@@ -1261,12 +1257,17 @@ mod tests {
         let (_directory, root) = project();
         write(&root, "app/a.php", "<?php echo 1;\n");
 
-        let (watcher, changed, log) = wait_after_dropped_events(&root, || write(&root, "app/a.php", "<?php echo 2;\n"));
+        let (watcher, changed, log) =
+            wait_after_dropped_events(&root, |_| write(&root, "app/a.php", "<?php echo 2;\n"));
 
         assert_eq!(changed, vec![FileId::new(b"app/a.php")]);
         let file = watcher.database().get_by_name(b"app/a.php").expect("the database should hold app/a.php");
         assert_eq!(file.contents.as_ref(), b"<?php echo 2;\n");
-        assert!(log.contains("The file watcher dropped events, so this run reads the watched files again."), "{log}");
+        let line = format!(
+            "The file watcher dropped events in {}, so this run reads the watched files again.",
+            root.join("app").display()
+        );
+        assert_eq!(log.matches(&line).count(), 1, "{log}");
     }
 
     /// A file added and one removed whose events the operating system dropped each reach the database as a change.
@@ -1276,7 +1277,7 @@ mod tests {
         write(&root, "app/a.php", "<?php echo 1;\n");
         write(&root, "app/b.php", "<?php echo 2;\n");
 
-        let (watcher, changed, _) = wait_after_dropped_events(&root, || {
+        let (watcher, changed, _) = wait_after_dropped_events(&root, |_| {
             std::fs::remove_file(root.join("app/b.php")).expect("app/b.php should be removed");
             write(&root, "app/c.php", "<?php echo 3;\n");
         });
@@ -1287,5 +1288,24 @@ mod tests {
         );
         assert!(watcher.database().get_by_name(b"app/b.php").is_err(), "the database should not hold app/b.php");
         assert!(watcher.database().get_by_name(b"app/c.php").is_ok(), "the database should hold app/c.php");
+    }
+
+    /// A file with no path, as a built-in stub is, stays in the database when the operating system drops events, and is
+    /// not reported as changed.
+    #[test]
+    fn a_file_with_no_path_stays_when_the_operating_system_drops_events() {
+        let (_directory, root) = project();
+        write(&root, "app/a.php", "<?php echo 1;\n");
+        let (watcher, changed, _) = wait_after_dropped_events(&root, |database| {
+            database.add(File::new(
+                Cow::Borrowed(b"stubs/core.php"),
+                FileType::Builtin,
+                None,
+                Cow::Borrowed(b"<?php\n"),
+            ));
+        });
+
+        assert_eq!(changed, Vec::new());
+        assert!(watcher.database().get_by_name(b"stubs/core.php").is_ok(), "the database should hold the stub");
     }
 }
