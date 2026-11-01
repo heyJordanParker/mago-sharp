@@ -491,7 +491,7 @@ where
 /// Analyzes a member a PHP# extension adds to its receiver's type, spec section 26, as the call of the static method
 /// `extension` it runs as with `arguments`, whose first argument is the receiver. `type_arguments` are the member's
 /// own, written after its name. Through `?.`, a `null` receiver skips the call, so the result may be `null` too, as it
-/// may below a `?.` earlier in the chain. Each search the call makes is checked for `==`, as [`report_searches`] does.
+/// may below a `?.` earlier in the chain. What the call compares is checked, as [`report_comparisons`] does.
 pub(crate) fn analyze_extension_access<'ctx, 'ast, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
     block_context: &mut BlockContext<'ctx>,
@@ -506,7 +506,7 @@ pub(crate) fn analyze_extension_access<'ctx, 'ast, 'arena, A>(
 where
     A: Arena,
 {
-    let searches = analyze_extension_call(
+    let comparisons = analyze_extension_call(
         context,
         block_context,
         artifacts,
@@ -517,24 +517,40 @@ where
         is_null_safe,
         span,
     )?;
-    report_searches(context, receiver, &searches, is_null_safe);
+    report_comparisons(context, receiver, &comparisons, is_null_safe);
 
     Ok(())
 }
 
-/// A value a collection member's call compares by `==` with the elements of its receiver, spec section 12, as
-/// `contains` compares its argument: the member's name, the argument, the type of what it passes, the type of the
-/// elements, and what the search compares it with.
-pub(crate) struct Search<'ast, 'arena> {
-    method: Word,
-    value: &'ast Expression<'arena>,
-    value_type: TUnion,
-    element_type: TUnion,
-    searched: Searched,
+/// An argument a collection member's call compares with, spec section 12, which is checked once every kind of the
+/// receiver has run its member.
+pub(crate) enum Comparison<'ast, 'arena> {
+    /// A value the member compares by `==` with the receiver's elements, as `contains` compares its argument: the
+    /// member's name, the argument, the type of what it passes, the type of the elements, and what it is compared with.
+    Search {
+        method: Word,
+        value: &'ast Expression<'arena>,
+        value_type: TUnion,
+        element_type: TUnion,
+        searched: Searched,
+    },
+    /// A function whose keys the member orders by `<`, as `sortedBy` orders by its `selector`: the member's name, the
+    /// argument, and the type of the keys it returns.
+    Order { method: Word, selector: &'ast Expression<'arena>, key_type: TUnion },
 }
 
-/// Analyzes the call [`analyze_extension_access`] analyzes, and gives the searches it makes instead of reporting them,
-/// so a call that runs one member per kind of its receiver reports each search once, as [`report_searches`] does.
+impl Comparison<'_, '_> {
+    /// The argument the member compares with.
+    fn argument(&self) -> Span {
+        match self {
+            Comparison::Search { value, .. } => value.span(),
+            Comparison::Order { selector, .. } => selector.span(),
+        }
+    }
+}
+
+/// Analyzes the call [`analyze_extension_access`] analyzes, and gives what it compares instead of reporting it, so a
+/// call that runs one member per kind of its receiver reports each argument once, as [`report_comparisons`] does.
 #[allow(clippy::expect_used)]
 pub(crate) fn analyze_extension_call<'ctx, 'ast, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
@@ -546,7 +562,7 @@ pub(crate) fn analyze_extension_call<'ctx, 'ast, 'arena, A>(
     arguments: Option<&'ast ArgumentList<'arena>>,
     is_null_safe: bool,
     span: Span,
-) -> Result<Vec<Search<'ast, 'arena>>, AnalysisError>
+) -> Result<Vec<Comparison<'ast, 'arena>>, AnalysisError>
 where
     A: Arena,
 {
@@ -614,7 +630,7 @@ where
     if method_call::changes_receiver(context, &extension) {
         method_call::check_stored_in_static(context, artifacts, receiver, arguments);
     }
-    let mut searches = Vec::new();
+    let mut comparisons = Vec::new();
     // A collection member compares the value of a parameter marked `ComparedByEquality` with each element of a `List`,
     // or each key of a `Map` or a `Set`, as `==` does, spec section 12, once the value's type is known. A value that is
     // no element is refused by its argument check. Each argument meets the parameter the call's argument checks pair it
@@ -634,8 +650,11 @@ where
                 artifacts.get_expression_type(value).filter(|function| function.is_single()).map(TUnion::get_single)
             && let Some(key_type) = function.get_return_type()
         {
-            let key_type = key_type.clone();
-            check_ordered_key(context, &metadata.original_name.as_str_lossy(), value, &key_type);
+            comparisons.push(Comparison::Order {
+                method: metadata.original_name,
+                selector: value,
+                key_type: key_type.clone(),
+            });
         }
         // A spread, as `contains(...[cart])`, passes the elements of the list it spreads, so the search compares those.
         if is_marked(parameter, COMPARED_BY_EQUALITY)
@@ -646,8 +665,9 @@ where
                     Some(value_type)
                 }
             })
-            && let Some(receiver_type) =
-                artifacts.get_expression_type(receiver).map(|written| read_receiver(metadata, written, context.codebase))
+            && let Some(receiver_type) = artifacts
+                .get_expression_type(receiver)
+                .map(|written| read_receiver(metadata, written, context.codebase))
             && let Some(element_type) = searched_element_type(&receiver_type, context.codebase)
             && union_comparator::is_contained_by(
                 context.codebase,
@@ -659,7 +679,7 @@ where
                 &mut ComparisonResult::new(),
             )
         {
-            searches.push(Search {
+            comparisons.push(Comparison::Search {
                 method: metadata.original_name,
                 value,
                 value_type,
@@ -669,7 +689,7 @@ where
         }
     }
 
-    Ok(searches)
+    Ok(comparisons)
 }
 
 /// `receiver_type` as the collection member `metadata` reads its receiver, spec section 12: a member whose receiver is
@@ -680,11 +700,10 @@ fn read_receiver<'receiver>(
     receiver_type: &'receiver TUnion,
     codebase: &CodebaseMetadata,
 ) -> Cow<'receiver, TUnion> {
-    let Some(container) = metadata
-        .parameters
-        .first()
-        .and_then(|receiver| receiver.get_type_metadata())
-        .and_then(|receiver| receiver.type_union.types.iter().find(|atomic| matches!(atomic, TAtomic::Iterable(_))))
+    let Some(container) =
+        metadata.parameters.first().and_then(|receiver| receiver.get_type_metadata()).and_then(|receiver| {
+            receiver.type_union.types.iter().find(|atomic| matches!(atomic, TAtomic::Iterable(_)))
+        })
     else {
         return Cow::Borrowed(receiver_type);
     };
@@ -739,41 +758,53 @@ fn searched_element_type(receiver_type: &TUnion, codebase: &CodebaseMetadata) ->
     (compares_each || !is_key_type(&element_type, codebase)).then_some(element_type)
 }
 
-/// Reports each of `searches`, the searches a call on `receiver` makes, whose value `==` cannot compare with the
-/// elements, as [`check_element_equality`] decides. A call runs one member per kind of its receiver, as `remove` on a
-/// `List<Cart>|Map<Cart, int>` runs the `List`'s and the `Map`'s, and each of them searches with the same argument, so
-/// an argument is reported once, refused or warned of. Its help tests for the same object only through a member every
-/// kind's search reaches its elements with.
-pub(crate) fn report_searches<A>(
+/// Reports each of `comparisons`, what a call on `receiver` compares: a search whose value `==` cannot compare with
+/// the elements, as [`check_element_equality`] decides, and a function whose keys `<` cannot order, as
+/// [`check_ordered_key`] decides. A call runs one member per kind of its receiver, as `remove` on a
+/// `List<Cart>|Map<Cart, int>` runs the `List`'s and the `Map`'s, and each of them compares with the same argument, so
+/// an argument is reported once, refused or warned of. A search's help tests for the same object only through a
+/// member every kind's search reaches its elements with.
+pub(crate) fn report_comparisons<A>(
     context: &mut Context<'_, '_, A>,
     receiver: &Expression<'_>,
-    searches: &[Search<'_, '_>],
+    comparisons: &[Comparison<'_, '_>],
     is_null_safe: bool,
 ) where
     A: Arena,
 {
     let mut reported = Vec::new();
-    for search in searches {
-        let argument = search.value.span();
+    for comparison in comparisons {
+        let argument = comparison.argument();
         if reported.contains(&argument) {
             continue;
         }
-        let joined = searches
-            .iter()
-            .filter(|other| other.value.span() == argument)
-            .map(|other| other.searched)
-            .reduce(Searched::join)
-            .unwrap_or(search.searched);
-        if check_element_equality(
-            context,
-            &search.method.as_str_lossy(),
-            receiver,
-            search.value,
-            &search.element_type,
-            &search.value_type,
-            is_null_safe,
-            joined,
-        ) {
+        let was_reported = match comparison {
+            Comparison::Search { method, value, value_type, element_type, searched } => {
+                let joined = comparisons
+                    .iter()
+                    .filter(|other| other.argument() == argument)
+                    .filter_map(|other| match other {
+                        Comparison::Search { searched, .. } => Some(*searched),
+                        Comparison::Order { .. } => None,
+                    })
+                    .fold(*searched, Searched::join);
+
+                check_element_equality(
+                    context,
+                    &method.as_str_lossy(),
+                    receiver,
+                    value,
+                    element_type,
+                    value_type,
+                    is_null_safe,
+                    joined,
+                )
+            }
+            Comparison::Order { method, selector, key_type } => {
+                check_ordered_key(context, &method.as_str_lossy(), selector, key_type)
+            }
+        };
+        if was_reported {
             reported.push(argument);
         }
     }

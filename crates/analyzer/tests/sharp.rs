@@ -5343,6 +5343,15 @@ fn sorted_by_in_a_loop_is_refused_once() {
     assert_eq!(issues(("src/Demo/Report.sharp", sharp), &[("src/Lib/Status.php", STATUS)]), ["11:40 invalid-argument"]);
 }
 
+/// A call on a value that may be several kinds of collection runs each kind's `sortedBy`, and each one orders by what
+/// the same function returns, so a key with no order is refused once for the call.
+#[test]
+fn sorted_by_on_several_kinds_of_collection_is_refused_once() {
+    let sharp = "namespace Demo;\n\nimport Lib.Status;\n\nclass Report\n{\n    public List<Status> a(List<Status>|Map<string, Status> statuses) => statuses.sortedBy(s => s);\n}\n";
+
+    assert_eq!(issues(("src/Demo/Report.sharp", sharp), &[("src/Lib/Status.php", STATUS)]), ["7:91 invalid-argument"]);
+}
+
 /// `sortedBy` by a number, a string or an instance of a class that declares `operator <=>` still orders, and so does a
 /// key of each that may be `null`, as a `null` key sorts first.
 #[test]

@@ -1485,13 +1485,14 @@ pub(crate) fn report_sharp_refusal<A>(
 
 /// Reports `selector`, the function the PHP# collection member `member` orders by, as `sortedBy` does, when `<` cannot
 /// compare two keys it returns, of `key_type`, with the report `<` gives. A `null` key sorts before every other key, so
-/// only the other keys must order.
+/// only the other keys must order. Gives whether it reported the key.
 pub(crate) fn check_ordered_key<A>(
     context: &mut Context<'_, '_, A>,
     member: &str,
     selector: &Expression<'_>,
     key_type: &TUnion,
-) where
+) -> bool
+where
     A: Arena,
 {
     let key_name = display_operand(context, key_type);
@@ -1500,9 +1501,8 @@ pub(crate) fn check_ordered_key<A>(
         None => {
             let ordering = BinaryOperator::LessThan(Span::zero());
             let operand = format!("The `{member}` key");
-            check_comparison_operand(context, selector, &key_type, &key_type, &operand, &ordering);
 
-            return;
+            return check_comparison_operand(context, selector, &key_type, &key_type, &operand, &ordering);
         }
         Some(Refusal::DifferentTypes) => {
             let comparison = format!("`{member}` cannot compare two keys of `{}`", display_operand(context, &key_type));
@@ -1527,7 +1527,7 @@ pub(crate) fn check_ordered_key<A>(
             };
             report_tied_operator(context, &ordering, &[&key_type, &key_type], &tied, selector.span());
 
-            return;
+            return true;
         }
         Some(
             Refusal::Identity
@@ -1547,6 +1547,8 @@ pub(crate) fn check_ordered_key<A>(
         IssueCode::InvalidArgument,
         issue.with_annotation(Annotation::primary(selector.span()).with_message(format!("This returns `{key_name}`."))),
     );
+
+    true
 }
 
 /// What a PHP# search compares its value with by `==`, spec section 12, which decides the `===` test a refused search's

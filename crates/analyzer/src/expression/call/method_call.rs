@@ -55,7 +55,7 @@ use crate::expression::call::analyze_invocation_targets;
 use crate::expression::call::function_call::resolve_callable_targets;
 use crate::expression::call::record_external_method_call;
 use crate::expression::call::record_external_method_call_targets;
-use crate::expression::call::report_searches;
+use crate::expression::call::report_comparisons;
 use crate::expression::call::static_method_call::analyze_static_method_call;
 use crate::expression::constant_access::field_storage;
 use crate::expression::instantiation::bare_generic_class;
@@ -659,8 +659,8 @@ where
 /// call gives, and gives that join, or None for no member.
 /// Where the call runs one of several, a member or an object's own method, each member's type arguments and type are
 /// recorded apart, as [`AnalysisArtifacts::get_member_call`] reads them, and the call's own are the last member's.
-/// The searches every member makes are reported together once they are all known, so an argument each kind's member
-/// searches with is refused once for the call.
+/// What every member compares is reported together once it is all known, so an argument each kind's member searches
+/// or orders by is reported once for the call.
 #[allow(clippy::too_many_arguments)]
 fn analyze_collection_members<'ctx, 'ast, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
@@ -678,11 +678,11 @@ where
     A: Arena,
 {
     let mut joined: Option<TUnion> = None;
-    let mut searches = Vec::new();
+    let mut comparisons = Vec::new();
     for (member, kind) in members {
         // A member that isn't generic records no type arguments, so it keeps none of the member before it.
         artifacts.inferred_type_arguments.remove(&(span.start.offset, span.end.offset));
-        searches.extend(with_receiver_type(artifacts, object, kind, |artifacts| {
+        comparisons.extend(with_receiver_type(artifacts, object, kind, |artifacts| {
             analyze_extension_call(
                 context,
                 block_context,
@@ -706,7 +706,7 @@ where
         artifacts.set_expression_type(&span, given.clone());
         joined = Some(given);
     }
-    report_searches(context, object, &searches, is_null_safe);
+    report_comparisons(context, object, &comparisons, is_null_safe);
 
     Ok(joined)
 }
