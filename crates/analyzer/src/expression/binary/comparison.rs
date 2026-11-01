@@ -1541,13 +1541,36 @@ pub(crate) fn check_ordered_key<A>(
     );
 }
 
+/// What a PHP# search compares its value with by `==`, spec section 12, which decides the `===` test a refused search's
+/// help offers in its place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Searched {
+    /// Each element of a `List` or a `Set`, which its `any` reaches, as `carts.any(c => c === cart)`.
+    Elements,
+    /// Each key of a `Map`, which its `keys()` reaches, as `counts.keys().any(c => c === cart)`, since its `any` reaches
+    /// its values.
+    Keys,
+    /// The elements of the list a spread passes, as `contains(...[cart])`, which are no one value a `===` tests.
+    Spread,
+}
+
+impl Searched {
+    /// The members the help's `===` test runs through on the receiver, as `any` or `keys().any`, or none.
+    const fn identity_test(self) -> Option<&'static str> {
+        match self {
+            Searched::Elements => Some("any"),
+            Searched::Keys => Some("keys().any"),
+            Searched::Spread => None,
+        }
+    }
+}
+
 /// Reports `value`, of `value_type`, which a PHP# `List`'s `method` searches `receiver` for, when `==` cannot compare
 /// an element of `element_type` with it, as spec section 12 decides: "`contains`, a `List`'s `remove`, `indexOf` and
 /// `Set<T>` need `==` on the element type." A search refuses what `element == value` refuses, so it agrees with
 /// `any(element => element == value)`: a class that declares no `operator ==` is refused with the reason `==` gives, as
 /// is an element the operator's call does not always take, an `Iterable` element is refused, as `==` on it is, and an `Any` element is refused unless the value is a string, a number or an enum case. A `null_safe` call's
-/// help keeps its `?.`. A `spread` value, as `contains(...[cart])`, is the list whose elements the call passes, so no
-/// help names it as the one value `===` would test.
+/// help keeps its `?.`. What is `searched` decides the `===` test the help offers instead, if any.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn check_element_equality<A>(
     context: &mut Context<'_, '_, A>,
@@ -1557,7 +1580,7 @@ pub(crate) fn check_element_equality<A>(
     element_type: &TUnion,
     value_type: &TUnion,
     null_safe: bool,
-    spread: bool,
+    searched: Searched,
 ) where
     A: Arena,
 {
@@ -1587,20 +1610,23 @@ pub(crate) fn check_element_equality<A>(
         }
         Some(Refusal::Instance) => {
             let class = display_refused_side(context, element_type, value_type, Comparand::is_instance);
-            let help = if spread {
-                format!("Declare `operator ==` and `hash()` in `{class}`.")
-            } else {
-                let (receiver, value) = (quoted_source(context, receiver.span()), quoted_source(context, value.span()));
-                // The lambda names an element by the class's initial, as `l` for a `Line`, unless the call already uses
-                // it.
-                let initial = class.chars().next().map(|first| first.to_lowercase().to_string()).unwrap_or_default();
-                let element = if initial == receiver || initial == value { "element".to_owned() } else { initial };
-                let access = if null_safe { "?." } else { "." };
+            let help = match searched.identity_test() {
+                None => format!("Declare `operator ==` and `hash()` in `{class}`."),
+                Some(test) => {
+                    let (receiver, value) =
+                        (quoted_source(context, receiver.span()), quoted_source(context, value.span()));
+                    // The lambda names an element by the class's initial, as `l` for a `Line`, unless the call already
+                    // uses it.
+                    let initial =
+                        class.chars().next().map(|first| first.to_lowercase().to_string()).unwrap_or_default();
+                    let element = if initial == receiver || initial == value { "element".to_owned() } else { initial };
+                    let access = if null_safe { "?." } else { "." };
 
-                format!(
-                    "Declare `operator ==` and `hash()` in `{class}`, or test for the same object with \
-                         `{receiver}{access}any({element} => {element} === {value})`."
-                )
+                    format!(
+                        "Declare `operator ==` and `hash()` in `{class}`, or test for the same object with \
+                         `{receiver}{access}{test}({element} => {element} === {value})`."
+                    )
+                }
             };
 
             (
@@ -1616,15 +1642,16 @@ pub(crate) fn check_element_equality<A>(
             let (receiver, value) = (quoted_source(context, receiver.span()), quoted_source(context, value.span()));
             let access = if null_safe { "?." } else { "." };
             let element = display_operand(context, element_type);
-            let issue = if spread {
-                Issue::error(format!(
-                    "`{method}` compares elements with `==`, and an unchecked `{element}` element can't tell the same object as an element of `{value}` from an equal value."
-                ))
-            } else {
-                Issue::error(format!(
-                    "`{method}` compares elements with `==`, and an unchecked `{element}` element can't tell the same object as `{value}` from an equal value."
-                ))
-                .with_help(format!("Test for the same object with `{receiver}{access}any(element => element === {value})`."))
+            let same_object =
+                if searched == Searched::Spread { format!("an element of `{value}`") } else { format!("`{value}`") };
+            let issue = Issue::error(format!(
+                "`{method}` compares elements with `==`, and an unchecked `{element}` element can't tell the same object as {same_object} from an equal value."
+            ));
+            let issue = match searched.identity_test() {
+                Some(test) => issue.with_help(format!(
+                    "Test for the same object with `{receiver}{access}{test}(element => element === {value})`."
+                )),
+                None => issue,
             };
 
             (IssueCode::InvalidArgument, issue)

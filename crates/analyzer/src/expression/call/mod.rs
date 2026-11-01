@@ -48,6 +48,7 @@ use crate::context::scope::control_action::ControlAction;
 use crate::error::AnalysisError;
 use crate::expression::access::report_full_name;
 use crate::expression::access::report_member_of_mixed_kinds;
+use crate::expression::binary::comparison::Searched;
 use crate::expression::binary::comparison::check_element_equality;
 use crate::expression::binary::comparison::check_ordered_key;
 use crate::invocation::Invocation;
@@ -620,6 +621,14 @@ where
                     &mut ComparisonResult::new(),
                 )
             {
+                // The receiver holds the parts of one kind, as `analyze_collection_members` passes them.
+                let searched = if argument.is_unpacked() {
+                    Searched::Spread
+                } else if receiver_type.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(TArray::Keyed(_)))) {
+                    Searched::Keys
+                } else {
+                    Searched::Elements
+                };
                 let method = metadata.original_name;
                 check_element_equality(
                     context,
@@ -629,7 +638,7 @@ where
                     &element_type,
                     &value_type,
                     is_null_safe,
-                    argument.is_unpacked(),
+                    searched,
                 );
             }
         }
