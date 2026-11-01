@@ -15033,6 +15033,18 @@ fn a_bound_that_names_a_missing_type_gives_one_error() {
         ["5:16 non-existent-class-like", "10:34 non-existent-class-like"]
     );
 
+    // An interface's default bodies keep its refused bound in the class that implements it.
+    let shelved = ("src/Demo/Shelved.sharp", "namespace Demo;\n\npublic interface Shelved<T : Missing>\n{\n    int kind(T item) => 1;\n}\n");
+    let rack = ("src/Demo/Rack.sharp", "namespace Demo;\n\npublic class Rack : Shelved<int>\n{\n}\n");
+    let counter = (
+        "src/Demo/Counter.sharp",
+        "namespace Demo;\n\npublic static class Counter\n{\n    public static int count(Rack rack) => rack.kind(1);\n}\n",
+    );
+    let paging = ("src/Demo/Paging.sharp", PAGING);
+    assert_eq!(compile_errors(shelved, &[rack, counter, paging]), [missing]);
+    assert_eq!(compile_errors(rack, &[shelved, counter, paging]), Vec::<String>::new());
+    assert_eq!(compile_errors(counter, &[shelved, rack, paging]), Vec::<String>::new());
+
     // Once the type exists, the bound is the bound it writes, and a type argument outside it is an error again.
     let declared = "namespace Demo;\n\npublic interface Missing\n{\n}\n";
     let written = "namespace Demo;\n\npublic static class Bounded\n{\n    public static T held<T : Missing>(T value) => value;\n\n    public static Any? written() => Bounded.held<int>(1);\n}\n";

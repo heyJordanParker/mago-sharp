@@ -483,15 +483,17 @@ impl Scanner {
             );
         }
         for (parameter, template) in &interface_metadata.template_types {
-            let constraint = inferred_type_replacer::replace(&template.constraint, &reparent, &self.codebase);
-            let default = template
-                .default
-                .as_ref()
-                .map(|default| inferred_type_replacer::replace(default, &reparent, &self.codebase));
-            defaults.add_template_type(
-                *parameter,
-                GenericTemplate::new(GenericParent::ClassLike(name), constraint).with_default(default),
-            );
+            let reparented = |union: &crate::ttype::union::TUnion| inferred_type_replacer::replace(union, &reparent, &self.codebase);
+            let mut trait_template =
+                GenericTemplate::new(GenericParent::ClassLike(name), reparented(&template.constraint))
+                    .with_default(template.default.as_ref().map(reparented));
+            // The trait's bound is the interface's as written, so population refuses it as it refuses the interface's.
+            trait_template.written_bound = template.written_bound.clone().map(|mut bound| {
+                bound.type_union = reparented(&bound.type_union);
+                bound
+            });
+            trait_template.bound_refused = template.bound_refused;
+            defaults.add_template_type(*parameter, trait_template);
         }
 
         for member in &interface.members {

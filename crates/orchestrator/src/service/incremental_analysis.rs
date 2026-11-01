@@ -3870,6 +3870,23 @@ mod tests {
         assert_matches_full(&service, &db, "Holder is declared");
     }
 
+    /// Spec section 11: the trait that holds a generic interface's default bodies takes the interface's type parameters,
+    /// with their bounds as written, so a bound that names a missing type is refused in the trait too.
+    #[test]
+    fn test_a_default_bodies_trait_keeps_its_interfaces_refused_bound() {
+        let shelved = "namespace App;\n\npublic interface Shelved<T : Holder<int>>\n{\n    int kind(T item) => 1;\n}\n";
+        let db = make_database(vec![("src/Shelved.sharp", shelved)]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+
+        let defaults = service
+            .codebase
+            .get_class_like(mago_codex::defaults_trait_name(b"App\\Shelved").as_bytes())
+            .expect("Shelved's default bodies are a trait");
+        let bound = &defaults.template_types[&mago_word::word("T")];
+        assert!(bound.constraint.types.iter().all(|atomic| matches!(atomic, mago_codex::ttype::atomic::TAtomic::Error)));
+    }
+
     /// Spec section 23: a root function added beside classes that already exist takes their namespace, so a project
     /// file's `Foundation.abort(…)`, refused while no `abort` existed, compiles once the helpers file declares it, and
     /// is refused again once an edit of the helpers drops it, though the project file never changed.
