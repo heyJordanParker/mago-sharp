@@ -4425,6 +4425,88 @@ pub(super) mod testing {
         writer.finish()
     }
 
+    /// A registration of one plugin, `demo`, with an after-file hook and one provider or hook of every kind a
+    /// request runs alone: a return-type and callable signature provider of the function `demo_fn` and of the member
+    /// `stock` of `Lib\Shelf`, an assertion provider of each, a property type, property initialization and call
+    /// forwarding provider of that member, a class initializer provider of `Lib\Shelf`, and an issue-filter hook of
+    /// `non-existent-function`.
+    pub fn registration_response_with_every_provider() -> Vec<u8> {
+        let mut writer = message_writer(DESCRIBE_RESPONSE);
+        writer.write_u32(1);
+        writer.write_string("demo/extension").unwrap();
+        writer.write_string("Demo").unwrap();
+        writer.write_string("1.0.0").unwrap();
+        writer.write_bool(false);
+        writer.write_u32(1);
+        writer.write_string("demo").unwrap();
+        writer.write_string("Demo analyzer").unwrap();
+        writer.write_string("Test provider").unwrap();
+        writer.write_bool(true);
+        // An after-file hook, and no alias.
+        writer.write_u8(2);
+        writer.write_u32(0);
+        // The return-type providers, which also give callable signatures.
+        write_demo_function_provider(&mut writer, |writer| writer.write_u8(super::super::PROVIDER_CALLABLE_SIGNATURE));
+        writer.write_u32(1);
+        writer.write_u16(0);
+        writer.write_u8(super::super::PROVIDER_CALLABLE_SIGNATURE);
+        writer.write_u32(1);
+        writer.write_bytes(b"Lib\\Shelf").unwrap();
+        writer.write_bytes(b"stock").unwrap();
+        // The property type and property initialization providers.
+        write_stock_provider(&mut writer);
+        write_stock_provider(&mut writer);
+        // The class initializer provider.
+        writer.write_u32(1);
+        writer.write_u16(0);
+        writer.write_u32(1);
+        writer.write_bytes(b"Lib\\Shelf").unwrap();
+        // No entry point or attributed entry point, then the issue-filter hook.
+        writer.write_u32(0);
+        writer.write_u32(0);
+        writer.write_u32(1);
+        writer.write_u16(0);
+        writer.write_u32(1);
+        writer.write_string("non-existent-function").unwrap();
+        // No node, method-call or class-like analysis hook, then the assertion providers, which memoize nothing.
+        writer.write_u32(0);
+        writer.write_u32(0);
+        writer.write_u32(0);
+        write_demo_function_provider(&mut writer, |writer| writer.write_bool(false));
+        writer.write_u32(1);
+        writer.write_u16(0);
+        writer.write_bool(false);
+        writer.write_u32(1);
+        writer.write_bytes(b"Lib\\Shelf").unwrap();
+        writer.write_bytes(b"stock").unwrap();
+        // No codebase-scan hook, then the call forwarding provider.
+        writer.write_u32(0);
+        write_stock_provider(&mut writer);
+        writer.finish()
+    }
+
+    /// A provider list of one provider, index 0, for the function `demo_fn`, whose capabilities `write_capabilities`
+    /// writes.
+    fn write_demo_function_provider(writer: &mut PayloadWriter, write_capabilities: impl FnOnce(&mut PayloadWriter)) {
+        writer.write_u32(1);
+        writer.write_u16(0);
+        write_capabilities(writer);
+        writer.write_u32(1);
+        writer.write_u8(TARGET_EXACT);
+        writer.write_bytes(b"demo_fn").unwrap();
+    }
+
+    /// A nested request that asks whether request-local type handle 0 equals `mixed`, as a hook that compares an
+    /// argument's type does.
+    pub fn type_comparison_of_handle_zero() -> Vec<u8> {
+        let mut writer = message_writer(TYPE_COMPARISON_REQUEST);
+        writer.write_u8(TYPE_COMPARISON_EQUAL);
+        writer.write_u8(TYPE_REFERENCE);
+        writer.write_u32(0);
+        writer.write_u8(TYPE_MIXED);
+        writer.finish()
+    }
+
     /// A provider list of one provider, index 0, for the member `stock` of `Lib\Shelf`.
     fn write_stock_provider(writer: &mut PayloadWriter) {
         writer.write_u32(1);

@@ -3913,16 +3913,55 @@ mod tests {
         }
     }
 
+    /// A worker with one provider or hook of every kind a request runs alone, and an after-file hook, whose callback
+    /// compares a request-local type and then never finishes, so each request misses its deadline as a hung worker's
+    /// does, under the name Mago gave it.
+    #[derive(Debug)]
+    struct HangingTransport;
+
+    impl AnalyzerTransport for HangingTransport {
+        fn broadcast(&self, _payload: &[u8]) -> Result<Vec<Vec<u8>>, WorkerError> {
+            Ok(vec![protocol::testing::registration_response_with_every_provider()])
+        }
+
+        #[cfg_attr(coverage_nightly, coverage(off))]
+        fn request(&self, _payload: Vec<u8>, _running: Option<&dyn Display>) -> Result<Vec<u8>, WorkerError> {
+            unreachable!("Mago services nested queries for every request these tests send")
+        }
+
+        fn request_with_handler<H>(
+            &self,
+            _payload: Vec<u8>,
+            running: Option<&dyn Display>,
+            handler: &mut H,
+        ) -> Result<Vec<u8>, WorkerError>
+        where
+            H: WorkerRequestHandler,
+        {
+            let _answer = handler.handle(&Frame::request(1, protocol::testing::type_comparison_of_handle_zero()));
+
+            Err(WorkerError::Timeout {
+                host: "acme".to_owned(),
+                worker: 0,
+                running: running.map(ToString::to_string),
+                duration: Duration::from_secs(30),
+            })
+        }
+    }
+
     impl AnalyzerTransport for TestTransport {
         fn broadcast(&self, _payload: &[u8]) -> Result<Vec<Vec<u8>>, WorkerError> {
             Ok(vec![protocol::testing::registration_response()])
         }
 
+        // The tests of this worker read its registration only, and route no request to it.
+        #[cfg_attr(coverage_nightly, coverage(off))]
         fn request(&self, payload: Vec<u8>, _running: Option<&dyn Display>) -> Result<Vec<u8>, WorkerError> {
             self.requests.lock().unwrap().push(payload);
             Ok(protocol::testing::named_object_response("Demo\\Service"))
         }
 
+        #[cfg_attr(coverage_nightly, coverage(off))]
         fn request_with_handler<H>(
             &self,
             payload: Vec<u8>,
@@ -3949,10 +3988,12 @@ mod tests {
             Ok(responses)
         }
 
+        #[cfg_attr(coverage_nightly, coverage(off))]
         fn request(&self, _payload: Vec<u8>, _running: Option<&dyn Display>) -> Result<Vec<u8>, WorkerError> {
             unreachable!("initialization tests do not issue routed requests")
         }
 
+        #[cfg_attr(coverage_nightly, coverage(off))]
         fn request_with_handler<H>(
             &self,
             _payload: Vec<u8>,
@@ -3971,10 +4012,12 @@ mod tests {
             Ok(vec![self.0.clone()])
         }
 
+        #[cfg_attr(coverage_nightly, coverage(off))]
         fn request(&self, _payload: Vec<u8>, _running: Option<&dyn Display>) -> Result<Vec<u8>, WorkerError> {
             unreachable!("registration tests do not issue routed requests")
         }
 
+        #[cfg_attr(coverage_nightly, coverage(off))]
         fn request_with_handler<H>(
             &self,
             _payload: Vec<u8>,
@@ -4110,6 +4153,171 @@ mod tests {
         assert_eq!(
             backend.provider_names("assertion", plugin_of, &[9]).to_string(),
             "the assertion providers of plugin `routes`"
+        );
+    }
+
+    /// A request that runs one unit, a provider request of every kind, an issue-filter request and an after-file
+    /// request, is named by what Mago sent it for, so a worker that hangs on it is named in the deadline's error.
+    #[test]
+    fn a_request_that_misses_its_deadline_is_named_by_what_it_runs() {
+        use mago_codex::metadata::flags::MetadataFlags;
+        use mago_codex::metadata::property::PropertyMetadata;
+        use mago_codex::misc::VariableIdentifier;
+        use mago_codex::ttype::atomic::callable::TCallableSignature;
+        use mago_codex::ttype::expander::StaticClassType;
+        use mago_reporting::Issue;
+        use mago_word::word;
+
+        use crate::invocation::InvocationArgumentsSource;
+        use crate::invocation::InvocationTarget;
+        use crate::invocation::MethodInvocationKind;
+        use crate::invocation::MethodTargetContext;
+
+        let analyzer =
+            ExternalAnalyzer::initialize_transports([Arc::new(HangingTransport)], PHPVersion::PHP85, &[], false)
+                .expect("registration should succeed");
+        let arena = mago_allocator::LocalArena::new();
+        let file =
+            Arc::new(File::ephemeral(Cow::Borrowed(b"src/Route.php"), Cow::Borrowed(b"<?php\nmissing_route();\n")));
+        let program = mago_syntax::parser::parse_file(&arena, &file);
+        let names = mago_names::resolver::NameResolver::new(&arena).resolve(program);
+        let session = ExternalAnalysisSession::from_files([Arc::clone(&file)]);
+        let codebase = CodebaseMetadata::new();
+        let artifacts = AnalysisArtifacts::default();
+        let span = Span::new(file.id, Position::new(6), Position::new(21));
+        let shelf = ClassLikeMetadata::new(
+            ascii_lowercase_word(b"Lib\\Shelf"),
+            word(b"Lib\\Shelf"),
+            span,
+            None,
+            MetadataFlags::empty(),
+        );
+        let function = Invocation::new(
+            InvocationTarget::Callable {
+                source: None,
+                signature: TCallableSignature::new(false, false),
+                effective_signature: None,
+                span,
+            },
+            InvocationArgumentsSource::None(span),
+            span,
+        );
+        let method = Invocation::new(
+            InvocationTarget::ExternalMethod {
+                identifier: FunctionLikeIdentifier::Method(shelf.name, word(b"stock")),
+                effective_signature: None,
+                method_context: MethodTargetContext {
+                    invocation_kind: MethodInvocationKind::Instance,
+                    declaring_method_id: None,
+                    class_like_metadata: &shelf,
+                    class_type: StaticClassType::Name(shelf.name),
+                    declaring_object_type: None,
+                },
+                span,
+            },
+            InvocationArgumentsSource::None(span),
+            span,
+        );
+        let stock = PropertyMetadata::new(VariableIdentifier(word(b"$stock")), MetadataFlags::empty());
+        let issues = IssueCollection::from([
+            Issue::error("Function `missing_route` is not defined.").with_code("non-existent-function")
+        ]);
+        let (class, member) = (b"Lib\\Shelf".as_slice(), b"stock".as_slice());
+
+        let results = [
+            analyzer
+                .get_function_return_type(b"demo_fn", &function, &artifacts, &file, &codebase, &session, None)
+                .err(),
+            analyzer.get_method_return_type(class, member, &method, &artifacts, &file, &codebase, &session, None).err(),
+            analyzer
+                .get_function_callable_signature(b"demo_fn", &function, &artifacts, &file, &codebase, &session)
+                .err(),
+            analyzer
+                .get_method_callable_signature(class, member, &method, &artifacts, &file, &codebase, &session)
+                .err(),
+            analyzer.get_function_assertions(b"demo_fn", &function, &artifacts, &file, &codebase, &session, None).err(),
+            analyzer.get_method_assertions(class, member, &method, &artifacts, &file, &codebase, &session, None).err(),
+            analyzer
+                .get_property_type(class, member, PropertyAccessKind::Read, &get_mixed(), span, &codebase, &session)
+                .err(),
+            analyzer.is_property_initialized(class, &stock, &file, &codebase, &session).err(),
+            analyzer.get_class_initializers(&shelf, &file, &codebase, &session).err(),
+            analyzer.get_forwarded_call(class, member, true, &get_mixed(), &file, &codebase, &session).err(),
+            analyzer.filter_issues(&file, issues, &codebase, &session).err(),
+            analyzer.run_after_file_analysis_hooks(&file, program, &names, &artifacts, &codebase, &session).err(),
+        ];
+        assert_eq!(
+            results.map(|error| error.map(|error| error.to_string())),
+            [
+                "the return-type providers of plugin `demo`",
+                "the return-type providers of plugin `demo`",
+                "the callable signature providers of plugin `demo`",
+                "the callable signature providers of plugin `demo`",
+                "the assertion providers of plugin `demo`",
+                "the assertion providers of plugin `demo`",
+                "the property type providers of plugin `demo`",
+                "the property initialization providers of plugin `demo`",
+                "the class initializer providers of plugin `demo`",
+                "the call forwarding providers of plugin `demo`",
+                "the issue-filter hooks of src/Route.php",
+                "the hooks of src/Route.php",
+            ]
+            .map(|running| Some(format!(
+                "external analyzer worker failed: extension host `acme` made no progress for 30000 ms on {running} \
+                 (worker 0): raise its `request-timeout-ms` for hooks that run that long"
+            )))
+        );
+    }
+
+    /// The handler of a request whose worker sends no nested request.
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn answers_no_nested_request(_request: &Frame) -> Result<Vec<u8>, Vec<u8>> {
+        unreachable!("the worker reads every request and sends nothing")
+    }
+
+    /// Mago's worker pool hands the name of a request to the worker that runs it, so a worker that never answers is
+    /// named in the deadline's error, whichever way Mago sends the request.
+    #[cfg(unix)]
+    #[test]
+    fn a_worker_pool_names_the_request_its_worker_never_answers() {
+        use mago_extension::WorkerCommand;
+        use mago_extension::WorkerPoolOptions;
+
+        let options = WorkerPoolOptions {
+            host: "acme".to_owned(),
+            request_timeout: Duration::from_millis(50),
+            ..WorkerPoolOptions::default()
+        };
+        let worker = WorkerCommand::new("sh").with_arguments(["-c", "cat > /dev/null"]);
+        let pool = WorkerPool::spawn(worker, std::num::NonZeroUsize::MIN, options).expect("the worker should start");
+        let mut handler = answers_no_nested_request;
+
+        let errors = [
+            AnalyzerTransport::request(&pool, b"lint".to_vec(), Some(&"the request")).err(),
+            AnalyzerTransport::request_with_handler(
+                &pool,
+                b"lint".to_vec(),
+                Some(&"the handled request"),
+                &mut handler,
+            )
+            .err(),
+            AnalyzerTransport::request_with_handler_affinity(
+                &pool,
+                b"lint".to_vec(),
+                Some(&"the request with affinity"),
+                b"Lib\\Shelf",
+                &mut handler,
+            )
+            .err(),
+        ];
+        pool.shutdown();
+
+        assert_eq!(
+            errors.map(|error| error.map(|error| error.to_string())),
+            ["the request", "the handled request", "the request with affinity"].map(|running| Some(format!(
+                "extension host `acme` made no progress for 50 ms on {running} (worker 0): raise its \
+                 `request-timeout-ms` for hooks that run that long"
+            )))
         );
     }
 
