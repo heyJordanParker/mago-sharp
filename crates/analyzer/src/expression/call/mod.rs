@@ -517,7 +517,9 @@ where
         is_null_safe,
         span,
     )?;
-    report_comparisons(context, receiver, &comparisons, is_null_safe);
+    if let Some(receiver_type) = artifacts.get_expression_type(receiver).cloned() {
+        report_comparisons(context, receiver, &receiver_type, &comparisons, is_null_safe);
+    }
 
     Ok(())
 }
@@ -526,13 +528,15 @@ where
 /// receiver has run its member.
 pub(crate) enum Comparison<'ast, 'arena> {
     /// A value the member compares by `==` with the receiver's elements, as `contains` compares its argument: the
-    /// member's name, the argument, the type of what it passes, the type of the elements, and what it is compared with.
+    /// member's name, the argument, the type of what it passes, the type of the elements, whether the argument is a
+    /// spread, and whether the member reads its receiver by a loop, as an extension of `Iterable<T>` does.
     Search {
         method: Word,
         value: &'ast Expression<'arena>,
         value_type: TUnion,
         element_type: TUnion,
-        searched: Searched,
+        spread: bool,
+        by_loop: bool,
     },
     /// A function whose keys the member orders by `<`, as `sortedBy` orders by its `selector`: the member's name, the
     /// argument, and the type of the keys it returns.
@@ -684,7 +688,8 @@ where
                 value,
                 value_type,
                 element_type,
-                searched: if argument.is_unpacked() { Searched::Spread } else { Searched::of(&receiver_type) },
+                spread: argument.is_unpacked(),
+                by_loop: loop_container(metadata).is_some(),
             });
         }
     }
@@ -701,11 +706,7 @@ fn read_receiver<'receiver>(
     receiver_type: &'receiver TUnion,
     codebase: &CodebaseMetadata,
 ) -> Cow<'receiver, TUnion> {
-    let Some(container) =
-        metadata.parameters.first().and_then(|receiver| receiver.get_type_metadata()).and_then(|receiver| {
-            receiver.type_union.types.iter().find(|atomic| matches!(atomic, TAtomic::Iterable(_)))
-        })
-    else {
+    let Some(container) = loop_container(metadata) else {
         return Cow::Borrowed(receiver_type);
     };
 
@@ -726,6 +727,16 @@ fn read_receiver<'receiver>(
             })
             .collect(),
     ))
+}
+
+/// The `Iterable` the collection member `metadata` takes its receiver as, which reads it by a loop, as an extension of
+/// `Iterable<T>` does, or None for a member that takes a `List`, `Map` or `Set` as it is.
+fn loop_container(metadata: &FunctionLikeMetadata) -> Option<&TAtomic> {
+    metadata
+        .parameters
+        .first()
+        .and_then(|receiver| receiver.get_type_metadata())
+        .and_then(|receiver| receiver.type_union.types.iter().find(|atomic| matches!(atomic, TAtomic::Iterable(_))))
 }
 
 /// The type of the elements a search of a value of `receiver_type` compares by `==` with the value of a collection
@@ -767,10 +778,11 @@ fn searched_element_type(receiver_type: &TUnion, codebase: &CodebaseMetadata) ->
 /// [`check_ordered_key`] decides. A call runs one member per kind of its receiver, as `remove` on a
 /// `List<Cart>|Map<Cart, int>` runs the `List`'s and the `Map`'s, and each of them compares with the same argument, so
 /// an argument is reported once, refused or warned of. A search's help tests for the same object only through a
-/// member every kind's search reaches its elements with.
+/// member every part of `receiver_type`, the receiver's type as the call writes it, reaches its elements with.
 pub(crate) fn report_comparisons<A>(
     context: &mut Context<'_, '_, A>,
     receiver: &Expression<'_>,
+    receiver_type: &TUnion,
     comparisons: &[Comparison<'_, '_>],
     is_null_safe: bool,
 ) where
@@ -783,15 +795,20 @@ pub(crate) fn report_comparisons<A>(
             continue;
         }
         let was_reported = match comparison {
-            Comparison::Search { method, value, value_type, element_type, searched } => {
-                let joined = comparisons
-                    .iter()
-                    .filter(|other| other.argument() == argument)
-                    .filter_map(|other| match other {
-                        Comparison::Search { searched, .. } => Some(*searched),
-                        Comparison::Order { .. } => None,
-                    })
-                    .fold(*searched, Searched::join);
+            Comparison::Search { method, value, value_type, element_type, spread, .. } => {
+                let joined = if *spread {
+                    Searched::Spread
+                } else {
+                    comparisons
+                        .iter()
+                        .filter(|other| other.argument() == argument)
+                        .filter_map(|other| match other {
+                            Comparison::Search { by_loop, .. } => Some(Searched::of(receiver_type, *by_loop)),
+                            Comparison::Order { .. } => None,
+                        })
+                        .reduce(Searched::join)
+                        .unwrap_or(Searched::Kinds)
+                };
 
                 check_element_equality(
                     context,

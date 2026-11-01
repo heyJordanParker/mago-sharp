@@ -706,7 +706,10 @@ where
         artifacts.set_expression_type(&span, given.clone());
         joined = Some(given);
     }
-    report_comparisons(context, object, &comparisons, is_null_safe);
+    // The receiver has its written type again, every part of it, which the help of a search reads.
+    if let Some(receiver_type) = artifacts.get_expression_type(object).cloned() {
+        report_comparisons(context, object, &receiver_type, &comparisons, is_null_safe);
+    }
 
     Ok(joined)
 }

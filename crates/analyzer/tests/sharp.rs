@@ -12407,6 +12407,24 @@ fn a_search_of_several_kinds_of_collection_is_refused_once() {
     );
 }
 
+/// Spec section 12: a refused search's help tests for the same object through a member every part of the receiver
+/// reaches its elements with, whether or not that part's search is checked. A `Map<Money, int>` searches its keys by
+/// `hash()`, so only the `List<Any?>` part refuses `things.remove(price)`, but the `Map`'s `any` reaches its `int`
+/// values, so the help offers no `any`. A `Box` that declares its own `contains` has no `any`, so neither does the
+/// help of `held.contains(cart)` on a `List<Cart>|Box`.
+#[test]
+fn a_search_s_help_fits_every_part_of_the_receiver() {
+    let sharp = "namespace Demo;\n\nclass Shelf\n{\n    public bool run(List<Any?>|Map<Money, int> things, List<Cart>|Box held, Money price, Cart cart)\n    {\n        bool removed = things.remove(price);\n        bool kept = held.contains(cart);\n        return removed || kept;\n    }\n}\n\nclass Cart\n{\n}\n\nclass Box\n{\n    public bool contains(Cart cart) => true;\n}\n\nclass Money\n{\n    public Money(public int cents { get; })\n    {\n    }\n\n    public static bool operator ==(Money a, Money b) => a.cents == b.cents;\n\n    public int hash() => this.cents;\n}\n";
+
+    assert_eq!(
+        refusals(("src/Demo/Shelf.sharp", sharp), &[]),
+        [
+            "7:38 invalid-argument `remove` compares elements with `==`, and an unchecked `Any?` element can't tell the same object as `price` from an equal value. | ",
+            "8:35 invalid-argument `contains` compares elements with `==`, and `Cart` declares no `operator ==`. | Declare `operator ==` and `hash()` in `Cart`.",
+        ]
+    );
+}
+
 /// Spec section 12: an `Any?` element compares by value only with a string, a number, a `bool`, an enum case, a
 /// struct or a collection, so a search of a `List<Any?>|Set<Any?>` for an `Any?` value is warned of once for the call,
 /// though each kind's member searches with it, and the warning names the receiver as the call writes it, which fits

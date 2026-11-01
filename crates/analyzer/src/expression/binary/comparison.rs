@@ -1563,28 +1563,32 @@ pub(crate) enum Searched {
     /// Each value an `Iterable` gives a loop, which its `toList()` reaches, as `rows.toList().any(c => c === cart)`,
     /// since an `Iterable` has no `any`.
     Iterated,
-    /// The elements of a receiver of several kinds, as a `List<Cart>|Map<Cart, int>`, which reach them through
-    /// different members, so no one `===` test reaches them all.
+    /// The elements of a receiver of several kinds, as a `List<Cart>|Map<Cart, int>` or a `List<Cart>|Box`, which reach
+    /// them through different members or none, so no one `===` test reaches them all.
     Kinds,
     /// The elements of the list a spread passes, as `contains(...[cart])`, which are no one value a `===` tests.
     Spread,
 }
 
 impl Searched {
-    /// What a search of a value of `receiver_type`, a `List`, `Iterable`, `Map` or `Set`, or a union of them, compares
-    /// its value with.
-    pub(crate) fn of(receiver_type: &TUnion) -> Searched {
+    /// What a search of a value of `receiver_type` compares its value with, read from every part of it, whether or not
+    /// that part's search is checked: a `List`'s or a `Set`'s elements, a `Map`'s keys, or what an `Iterable` gives a
+    /// loop, and `Kinds` where the parts differ or a part is no collection, as a class with its own `contains`. A member
+    /// that reads its receiver `by_loop`, as an extension of `Iterable<T>` does, reads a `Map` by its entries.
+    pub(crate) fn of(receiver_type: &TUnion, by_loop: bool) -> Searched {
         receiver_type
             .types
             .iter()
-            .filter_map(|atomic| match atomic {
-                TAtomic::Array(TArray::Keyed(_)) => Some(Searched::Keys),
-                TAtomic::Iterable(_) => Some(Searched::Iterated),
-                TAtomic::Array(_) => Some(Searched::Elements),
-                _ => None,
+            .filter(|atomic| !matches!(atomic, TAtomic::Null))
+            .map(|atomic| match atomic {
+                TAtomic::Array(TArray::Keyed(_)) if by_loop => Searched::Iterated,
+                TAtomic::Array(TArray::Keyed(_)) => Searched::Keys,
+                TAtomic::Iterable(_) => Searched::Iterated,
+                TAtomic::Array(_) => Searched::Elements,
+                _ => Searched::Kinds,
             })
             .reduce(Searched::join)
-            .unwrap_or(Searched::Elements)
+            .unwrap_or(Searched::Kinds)
     }
 
     /// What two searches with one argument compare it with together: what both compare it with, or `Kinds` where they
