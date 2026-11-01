@@ -140,12 +140,6 @@ where
             left_block_context.reconciled_expression_clauses.iter().map(|v| &**v).collect::<HashSet<_>>();
 
         context_clauses.retain(|c| !left_reconciled_clauses_hashed.contains(c));
-        if context_clauses.len() == 1 {
-            let first = &context_clauses[0];
-            if first.wedge && first.possibilities.is_empty() {
-                context_clauses.clear();
-            }
-        }
     }
 
     let simplified_clauses = saturate_clauses(context_clauses, &context.settings.algebra_thresholds());
