@@ -30,12 +30,14 @@ use mago_database::DatabaseConfiguration;
 use mago_database::DatabaseReader;
 use mago_database::GlobSettings;
 use mago_database::error::DatabaseError;
+use mago_database::error::IOAction;
 use mago_database::file::COMPANION_START;
 use mago_database::file::File;
 use mago_database::file::FileType;
 use mago_database::file::FolderNamespace;
 use mago_database::membership::WorkspaceMatcher;
 use mago_orchestrator::Orchestrator;
+use mago_orchestrator::OrchestratorError;
 use mago_orchestrator::service::incremental_analysis::compile::Compilation;
 use mago_orchestrator::service::incremental_analysis::compile::DispatcherModule;
 use mago_orchestrator::service::incremental_analysis::compile::Listener;
@@ -137,7 +139,10 @@ pub(crate) fn compile_for_hosts(
     let root = workspace.canonicalize().map_err(|error| Error::CanonicalizingPath(workspace.clone(), error))?;
     let project: String =
         unit::source_hash(root.as_os_str().as_encoded_bytes()).iter().map(|byte| format!("{byte:02x}")).collect();
-    let folder = mago_sharp_lean::cache_root().map_err(DatabaseError::from)?.join("hosts").join(project);
+    let folder = mago_sharp_lean::cache_root()
+        .map_err(|error| OrchestratorError::General(error.to_string()))?
+        .join("hosts")
+        .join(project);
     let mut without_hosts = configuration.clone();
     without_hosts.extension_hosts.clear();
 
@@ -183,7 +188,7 @@ fn compile_into(configuration: &Configuration, root: &Path, folder: &Path) -> Re
     let mut changed = false;
     let mut write = |path: &Path, bytes: &[u8]| -> Result<(), Error> {
         if std::fs::read(path).ok().as_deref() != Some(bytes) {
-            write_by_rename(path, bytes).map_err(DatabaseError::from)?;
+            write_by_rename(path, bytes).map_err(|error| DatabaseError::io(IOAction::WriteFile, path, error))?;
             changed = true;
         }
         Ok(())
@@ -194,7 +199,7 @@ fn compile_into(configuration: &Configuration, root: &Path, folder: &Path) -> Re
     for (file_id, compilation) in compilations? {
         let file = database.get_ref(&file_id)?;
         let source = file.path.clone().unwrap_or_else(|| root.join(String::from_utf8_lossy(&file.name).as_ref()));
-        let Some(compiled) = host_compiled_path(root, folder, &source).map_err(DatabaseError::from)? else {
+        let Some(compiled) = host_compiled_path(root, folder, &source)? else {
             continue;
         };
         match compilation {
@@ -235,15 +240,15 @@ fn compile_into(configuration: &Configuration, root: &Path, folder: &Path) -> Re
     let path = folder.join(HOST_REPORT);
     write(&path, &report)?;
     written.insert(path);
-    let deleted = delete_all_but(folder, &written, &folder.join(PACKAGE_FOLDER)).map_err(DatabaseError::from)?;
+    let deleted = delete_all_but(folder, &written, &folder.join(PACKAGE_FOLDER))?;
 
     Ok(changed || deleted > 0)
 }
 
 /// Where the hosts' compile of the project at `root` into `folder` puts the compiled file of `source`, at its real path
 /// relative to `root` with `.sharp` replaced by `.sharpc`, or none when `source` is a link outside `root`.
-fn host_compiled_path(root: &Path, folder: &Path, source: &Path) -> std::io::Result<Option<PathBuf>> {
-    let real = source.canonicalize()?;
+fn host_compiled_path(root: &Path, folder: &Path, source: &Path) -> Result<Option<PathBuf>, DatabaseError> {
+    let real = source.canonicalize().map_err(|error| DatabaseError::io(IOAction::ResolvePath, source, error))?;
 
     Ok(real.strip_prefix(root).ok().map(|relative| folder.join(relative).with_extension("sharpc")))
 }
@@ -344,13 +349,13 @@ fn compile(configuration: &Configuration, color_choice: ColorChoice) -> Result<C
         let php = format!("{}.php", type_file.strip_suffix(".sharp").unwrap_or(type_file));
         let listing = match listings.entry(folder.clone()) {
             Entry::Occupied(listing) => listing.into_mut(),
-            Entry::Vacant(listing) => listing.insert(file_names(&folder).map_err(DatabaseError::from)?),
+            Entry::Vacant(listing) => listing.insert(file_names(&folder)?),
         };
         // PHP names a class whatever its case, and a disk that ignores case opens `order.php` for `Order.php`.
         let named: Vec<&String> = listing.iter().filter(|name| name.eq_ignore_ascii_case(&php)).collect();
         let mut someone_wrote = None;
         for name in &named {
-            if !written_by_compile(&folder.join(name)).map_err(DatabaseError::from)? {
+            if !written_by_compile(&folder.join(name))? {
                 someone_wrote = Some(name);
                 break;
             }
@@ -364,26 +369,32 @@ fn compile(configuration: &Configuration, color_choice: ColorChoice) -> Result<C
         }
         // A rename onto a file of another case keeps that file's name on a disk that ignores case.
         for name in named.into_iter().filter(|name| **name != php) {
-            std::fs::remove_file(folder.join(name)).or_else(ignore_missing).map_err(DatabaseError::from)?;
+            let path = folder.join(name);
+            std::fs::remove_file(&path)
+                .or_else(ignore_missing)
+                .map_err(|error| DatabaseError::io(IOAction::DeleteFile, &path, error))?;
         }
         let path = folder.join(&php);
         let contents = beside(&declared);
-        if !listing.contains(&php) || std::fs::read(&path).map_err(DatabaseError::from)? != contents.as_bytes() {
-            write_by_rename(&path, contents.as_bytes()).map_err(DatabaseError::from)?;
+        if !listing.contains(&php)
+            || std::fs::read(&path).map_err(|error| DatabaseError::io(IOAction::ReadFile, &path, error))?
+                != contents.as_bytes()
+        {
+            write_by_rename(&path, contents.as_bytes())
+                .map_err(|error| DatabaseError::io(IOAction::WriteFile, &path, error))?;
         }
         written_beside.insert(path);
     }
     // A removed source's PHP file is in a folder that holds a source, or held one at the last compile.
     let compiled_folder = root.join(unit::COMPILED_FOLDER);
-    source_folders(&root, &compiled_folder, &compiled_folder, &mut folders).map_err(DatabaseError::from)?;
+    source_folders(&root, &compiled_folder, &compiled_folder, &mut folders)?;
     for folder in folders {
-        for name in file_names(&folder).map_err(DatabaseError::from)? {
+        for name in file_names(&folder)? {
             let path = folder.join(&name);
-            if name.ends_with(".php")
-                && !written_beside.contains(&path)
-                && written_by_compile(&path).map_err(DatabaseError::from)?
-            {
-                std::fs::remove_file(&path).or_else(ignore_missing).map_err(DatabaseError::from)?;
+            if name.ends_with(".php") && !written_beside.contains(&path) && written_by_compile(&path)? {
+                std::fs::remove_file(&path)
+                    .or_else(ignore_missing)
+                    .map_err(|error| DatabaseError::io(IOAction::DeleteFile, &path, error))?;
             }
         }
     }
@@ -436,10 +447,13 @@ fn compile(configuration: &Configuration, color_choice: ColorChoice) -> Result<C
         let file = database.get_ref(&file_id)?;
         let name = String::from_utf8_lossy(&file.name);
         let source = file.path.clone().unwrap_or_else(|| root.join(name.as_ref()));
-        let Some(compiled) = unit::compiled_path(&root, &source).map_err(DatabaseError::from)? else {
+        let Some(compiled) = unit::compiled_path(&root, &source)? else {
             tracing::error!(
                 "{name} is a link to {}, outside the project, so it was not compiled. Install the package as a copy instead of a link.",
-                source.canonicalize().map_err(DatabaseError::from)?.display()
+                source
+                    .canonicalize()
+                    .map_err(|error| DatabaseError::io(IOAction::ResolvePath, &source, error))?
+                    .display()
             );
             failed = true;
             continue;
@@ -447,7 +461,8 @@ fn compile(configuration: &Configuration, color_choice: ColorChoice) -> Result<C
 
         match compilation {
             Compilation::Accepted(bytes) => {
-                write_by_rename(&compiled, &bytes).map_err(DatabaseError::from)?;
+                write_by_rename(&compiled, &bytes)
+                    .map_err(|error| DatabaseError::io(IOAction::WriteFile, &compiled, error))?;
                 written.insert(compiled);
                 accepted.insert(file_id);
             }
@@ -474,12 +489,11 @@ fn compile(configuration: &Configuration, color_choice: ColorChoice) -> Result<C
             listeners.iter().filter(|listener| accepted.contains(&listener.file_id)).collect();
         let table = compiled_folder.join(LISTENERS);
         write_by_rename(&table, &listener_table(&inputs, &accepted, server.dispatcher_module().as_ref()))
-            .map_err(DatabaseError::from)?;
+            .map_err(|error| DatabaseError::io(IOAction::WriteFile, &table, error))?;
         written.insert(table);
     }
     if compiled_folder.is_dir() {
-        delete_all_but(&compiled_folder, &written, &compiled_folder.join(PACKAGE_FOLDER))
-            .map_err(DatabaseError::from)?;
+        delete_all_but(&compiled_folder, &written, &compiled_folder.join(PACKAGE_FOLDER))?;
     }
 
     for folder in package_compiled_folders(&root, database) {
@@ -550,15 +564,15 @@ fn compile(configuration: &Configuration, color_choice: ColorChoice) -> Result<C
 fn every_compiled_file_is_current(root: &Path, folder: &Path, database: &impl DatabaseReader) -> Result<bool, Error> {
     for file in database.files().filter(|file| file.file_type == FileType::Host && Dialect::of(file).is_sharp()) {
         let source = file.path.clone().unwrap_or_else(|| root.join(String::from_utf8_lossy(&file.name).as_ref()));
-        let Some(compiled) = host_compiled_path(root, folder, &source).map_err(DatabaseError::from)? else {
+        let Some(compiled) = host_compiled_path(root, folder, &source)? else {
             continue;
         };
         let bytes = match std::fs::read(&compiled) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-            Err(error) => return Err(DatabaseError::from(error).into()),
+            Err(error) => return Err(DatabaseError::io(IOAction::ReadFile, &compiled, error).into()),
         };
-        if unit::is_stale(root, &bytes).map_err(DatabaseError::from)? {
+        if unit::is_stale(root, &bytes)? {
             return Ok(false);
         }
     }
@@ -639,7 +653,7 @@ fn listener_inputs(root: &Path, database: &impl DatabaseReader) -> Result<Vec<un
 
     let mut inputs = Vec::with_capacity(paths.len());
     for path in paths {
-        inputs.extend(unit::stamp(root, &path).map_err(DatabaseError::from)?);
+        inputs.extend(unit::stamp(root, &path)?);
     }
 
     Ok(inputs)
@@ -732,15 +746,15 @@ fn beside(declared: &DeclaredType) -> String {
 }
 
 /// Whether the file at `path` is one `mago compile` wrote beside a source, which starts with [`COMPANION_START`].
-fn written_by_compile(path: &Path) -> std::io::Result<bool> {
+fn written_by_compile(path: &Path) -> Result<bool, DatabaseError> {
     let mut start = Vec::with_capacity(COMPANION_START.len());
-    match std::fs::File::open(path) {
-        Ok(file) => file.take(COMPANION_START.len() as u64).read_to_end(&mut start)?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(error),
-    };
-
-    Ok(start == COMPANION_START.as_bytes())
+    let read =
+        std::fs::File::open(path).and_then(|file| file.take(COMPANION_START.len() as u64).read_to_end(&mut start));
+    match read {
+        Ok(_) => Ok(start == COMPANION_START.as_bytes()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(DatabaseError::io(IOAction::ReadFile, path, error)),
+    }
 }
 
 /// The type a PHP# source declares named like its file, spec section 27.
@@ -790,16 +804,17 @@ fn declared_type(file: &File) -> Option<DeclaredType> {
 }
 
 /// The names of the files in `folder`, exactly as the folder holds them, or none when it is gone.
-fn file_names(folder: &Path) -> std::io::Result<Vec<String>> {
+fn file_names(folder: &Path) -> Result<Vec<String>, DatabaseError> {
     let entries = match std::fs::read_dir(folder) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(error),
+        Err(error) => return Err(DatabaseError::io(IOAction::OpenFolder, folder, error)),
     };
+    let walk = |error| DatabaseError::io(IOAction::WalkFolder, folder, error);
     let mut names = Vec::new();
     for entry in entries {
-        let entry = entry?;
-        if entry.file_type()?.is_file() {
+        let entry = entry.map_err(walk)?;
+        if entry.file_type().map_err(walk)?.is_file() {
             names.push(entry.file_name().to_string_lossy().into_owned());
         }
     }
@@ -809,17 +824,23 @@ fn file_names(folder: &Path) -> std::io::Result<Vec<String>> {
 
 /// Adds to `folders` the folder of the source of each compiled file under `folder` of the compiled folder `compiled`,
 /// outside `vendor/` and the folder the Lean step owns.
-fn source_folders(root: &Path, compiled: &Path, folder: &Path, folders: &mut BTreeSet<PathBuf>) -> std::io::Result<()> {
+fn source_folders(
+    root: &Path,
+    compiled: &Path,
+    folder: &Path,
+    folders: &mut BTreeSet<PathBuf>,
+) -> Result<(), DatabaseError> {
     let entries = match std::fs::read_dir(folder) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error),
+        Err(error) => return Err(DatabaseError::io(IOAction::OpenFolder, folder, error)),
     };
+    let walk = |error| DatabaseError::io(IOAction::WalkFolder, folder, error);
     for entry in entries {
-        let entry = entry?;
+        let entry = entry.map_err(walk)?;
         let path = entry.path();
         let relative = path.strip_prefix(compiled).unwrap_or(&path);
-        if entry.file_type()?.is_dir() {
+        if entry.file_type().map_err(walk)?.is_dir() {
             if relative != Path::new(PACKAGE_FOLDER) && relative != Path::new("vendor") {
                 source_folders(root, compiled, &path, folders)?;
             }
@@ -843,23 +864,25 @@ fn files(count: usize) -> String {
 
 /// Deletes every file under `folder` that is not in `kept` and not under the folder `owned`, which the Lean step owns,
 /// then every folder left empty, `folder` included. Returns how many files it deleted.
-fn delete_all_but(folder: &Path, kept: &BTreeSet<PathBuf>, owned: &Path) -> std::io::Result<usize> {
+fn delete_all_but(folder: &Path, kept: &BTreeSet<PathBuf>, owned: &Path) -> Result<usize, DatabaseError> {
+    let open = |error| DatabaseError::io(IOAction::OpenFolder, folder, error);
+    let walk = |error| DatabaseError::io(IOAction::WalkFolder, folder, error);
     let mut deleted = 0;
-    for entry in std::fs::read_dir(folder)? {
-        let entry = entry?;
+    for entry in std::fs::read_dir(folder).map_err(open)? {
+        let entry = entry.map_err(walk)?;
         let path = entry.path();
         if path == owned || kept.contains(&path) {
             continue;
         }
-        if entry.file_type()?.is_dir() {
+        if entry.file_type().map_err(walk)?.is_dir() {
             deleted += delete_all_but(&path, kept, owned)?;
         } else {
-            std::fs::remove_file(&path)?;
+            std::fs::remove_file(&path).map_err(|error| DatabaseError::io(IOAction::DeleteFile, &path, error))?;
             deleted += 1;
         }
     }
-    if std::fs::read_dir(folder)?.next().is_none() {
-        std::fs::remove_dir(folder)?;
+    if std::fs::read_dir(folder).map_err(open)?.next().is_none() {
+        std::fs::remove_dir(folder).map_err(|error| DatabaseError::io(IOAction::DeleteFolder, folder, error))?;
     }
 
     Ok(deleted)

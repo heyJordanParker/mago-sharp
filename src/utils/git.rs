@@ -16,6 +16,7 @@ use std::process::Stdio;
 use mago_database::Database;
 use mago_database::DatabaseReader;
 use mago_database::error::DatabaseError;
+use mago_database::error::IOAction;
 use mago_database::file::File;
 use mago_database::file::FileId;
 
@@ -62,7 +63,7 @@ pub fn get_staged_file(workspace: &Path, path: &Path) -> Result<File, Error> {
         .arg(index_path)
         .current_dir(workspace)
         .output()
-        .map_err(|e| Error::Database(DatabaseError::IOError(e)))?;
+        .map_err(|error| Error::RunningGit { command: "cat-file", error })?;
 
     Ok(File::ephemeral(Cow::Borrowed(b"<stdin>"), Cow::Owned(output.stdout)))
 }
@@ -90,7 +91,7 @@ pub fn update_staged_file(workspace: &Path, path: &Path, new_content: Vec<u8>) -
         .arg(cacheinfo)
         .current_dir(workspace)
         .status()
-        .map_err(|e| Error::Database(DatabaseError::IOError(e)))?;
+        .map_err(|error| Error::RunningGit { command: "update-index", error })?;
 
     Ok(())
 }
@@ -156,10 +157,10 @@ where
         cmd.arg(path);
     }
 
-    let status = cmd.current_dir(workspace).status().map_err(|e| Error::Database(DatabaseError::IOError(e)))?;
+    let status = cmd.current_dir(workspace).status().map_err(|error| Error::RunningGit { command: "add", error })?;
 
     if !status.success() {
-        return Err(Error::Database(DatabaseError::IOError(std::io::Error::other("git add failed"))));
+        return Err(Error::RunningGit { command: "add", error: std::io::Error::other(status.to_string()) });
     }
 
     Ok(())
@@ -197,7 +198,7 @@ pub fn exclude(workspace: &Path, owner: &str, paths: &[PathBuf]) -> Result<(), E
     let before = match std::fs::read_to_string(&file) {
         Ok(contents) => contents,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(error) => return Err(Error::Database(DatabaseError::IOError(error))),
+        Err(error) => return Err(DatabaseError::io(IOAction::ReadFile, &file, error).into()),
     };
     let mut after = String::new();
     let mut kept = true;
@@ -396,7 +397,7 @@ fn get_staged_files(workspace: &Path) -> Result<Vec<PathBuf>, Error> {
         .args(["diff", "--cached", "--name-only", "--diff-filter=ACMR"])
         .current_dir(workspace)
         .output()
-        .map_err(|e| Error::Database(DatabaseError::IOError(e)))?;
+        .map_err(|error| Error::RunningGit { command: "diff", error })?;
 
     if !output.status.success() {
         return Err(Error::NotAGitRepository);
@@ -422,7 +423,7 @@ fn get_files_with_unstaged_changes(workspace: &Path) -> Result<HashSet<PathBuf>,
         .args(["diff", "--name-only"])
         .current_dir(workspace)
         .output()
-        .map_err(|e| Error::Database(DatabaseError::IOError(e)))?;
+        .map_err(|error| Error::RunningGit { command: "diff", error })?;
 
     Ok(String::from_utf8_lossy(&output.stdout).lines().filter(|l| !l.is_empty()).map(PathBuf::from).collect())
 }
@@ -446,14 +447,14 @@ fn create_blob(workspace: &Path, path: &Path, content: Vec<u8>) -> Result<String
         .arg(path)
         .current_dir(workspace)
         .spawn()
-        .map_err(|e| Error::Database(DatabaseError::IOError(e)))?;
+        .map_err(|error| Error::RunningGit { command: "hash-object", error })?;
 
     let mut stdin = child.stdin.take().expect("failed to get stdin");
     std::thread::spawn(move || {
         stdin.write_all(&content).expect("failed to write to stdin");
     });
 
-    let output = child.wait_with_output().map_err(|e| Error::Database(DatabaseError::IOError(e)))?;
+    let output = child.wait_with_output().map_err(|error| Error::RunningGit { command: "hash-object", error })?;
 
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
@@ -474,7 +475,7 @@ fn get_mode(workspace: &Path, path: &Path) -> Result<String, Error> {
         .arg(path)
         .current_dir(workspace)
         .output()
-        .map_err(|e| Error::Database(DatabaseError::IOError(e)))?;
+        .map_err(|error| Error::RunningGit { command: "ls-files", error })?;
 
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }

@@ -212,6 +212,12 @@ pub enum Error {
     /// errors, disk full, or I/O failures.
     CreatingBaselineFile(std::io::Error),
 
+    /// Failed to read the standard input, which a command reads as a file's contents.
+    ReadingStdin(std::io::Error),
+
+    /// Failed to run the `git` subcommand `command`, or it exited with an error.
+    RunningGit { command: &'static str, error: std::io::Error },
+
     /// Failed to parse the `composer.json` file.
     ///
     /// This error occurs when `composer.json` contains invalid JSON syntax or unexpected
@@ -350,6 +356,8 @@ impl std::fmt::Display for Error {
             Self::ParsingComposerJson(error) => write!(f, "Failed to parse the `composer.json` file: {error}"),
             Self::ReadingBaselineFile(error) => write!(f, "Failed to read the baseline file: {error}"),
             Self::CreatingBaselineFile(error) => write!(f, "Failed to create the baseline file: {error}"),
+            Self::ReadingStdin(error) => write!(f, "Failed to read the standard input: {error}"),
+            Self::RunningGit { command, error } => write!(f, "Failed to run `git {command}`: {error}"),
             Self::Analysis(error) => write!(f, "Failed to analyze the source code: {error}"),
             Self::ThreadPoolBuildError(error) => {
                 write!(f, "Failed to build the thread pool: {error}")
@@ -425,6 +433,8 @@ impl std::error::Error for Error {
             Self::ParsingComposerJson(error) => Some(error),
             Self::ReadingBaselineFile(error) => Some(error),
             Self::CreatingBaselineFile(error) => Some(error),
+            Self::ReadingStdin(error) => Some(error),
+            Self::RunningGit { error, .. } => Some(error),
             Self::Analysis(error) => Some(error),
             Self::ThreadPoolBuildError(error) => Some(error),
             Self::Orchestrator(error) => Some(error),

@@ -1,6 +1,39 @@
+use std::path::Path;
 use std::path::PathBuf;
 
 use globset::Error as GlobSetError;
+
+/// What the database was doing to a path when the file system failed it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IOAction {
+    ReadFile,
+    WriteFile,
+    DeleteFile,
+    OpenFolder,
+    /// Reading the entries of a folder that opened.
+    WalkFolder,
+    CreateFolder,
+    DeleteFolder,
+    /// Finding the real path a path resolves to.
+    ResolvePath,
+    ReadMetadata,
+}
+
+impl std::fmt::Display for IOAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::ReadFile => "read the file",
+            Self::WriteFile => "write the file",
+            Self::DeleteFile => "delete the file",
+            Self::OpenFolder => "open the folder",
+            Self::WalkFolder => "walk the folder",
+            Self::CreateFolder => "create the folder",
+            Self::DeleteFolder => "delete the folder",
+            Self::ResolvePath => "resolve the path",
+            Self::ReadMetadata => "read the metadata of",
+        })
+    }
+}
 
 /// The primary error type for all database loading and mutation operations.
 ///
@@ -10,8 +43,8 @@ use globset::Error as GlobSetError;
 pub enum DatabaseError {
     /// An attempt was made to access a file that does not exist in the database.
     FileNotFound,
-    /// An error occurred during a filesystem read or write operation.
-    IOError(std::io::Error),
+    /// The file system failed `action` on `path`.
+    IOError { action: IOAction, path: PathBuf, error: std::io::Error },
     /// The set of user-provided glob patterns could not be compiled into a `GlobSet`.
     InvalidGlobSet(GlobSetError),
     /// An error occurred while processing a glob pattern.
@@ -43,7 +76,7 @@ impl std::fmt::Display for DatabaseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::FileNotFound => write!(f, "file not found in database"),
-            Self::IOError(err) => write!(f, "I/O error: {err}"),
+            Self::IOError { action, path, error } => write!(f, "can't {action} `{}`: {error}", path.display()),
             Self::InvalidGlobSet(err) => write!(f, "failed to build exclusion filter from patterns: {err}"),
             Self::Glob(err) => write!(f, "glob pattern error: {err}"),
             Self::FileTooLarge(path, size, max_size) => {
@@ -75,7 +108,7 @@ impl std::error::Error for DatabaseError {
     #[inline]
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::IOError(err) => Some(err),
+            Self::IOError { error, .. } => Some(error),
             Self::InvalidGlobSet(err) => Some(err),
             #[cfg(feature = "watcher")]
             Self::WatcherInit(err) | Self::WatcherWatch(err) => Some(err),
@@ -84,10 +117,26 @@ impl std::error::Error for DatabaseError {
     }
 }
 
-impl From<std::io::Error> for DatabaseError {
+impl DatabaseError {
+    /// The error of the file system failing `action` on `path`. An `std::io::Error` becomes a `DatabaseError` only
+    /// here, so each one names the path it failed on.
     #[inline]
-    fn from(error: std::io::Error) -> Self {
-        Self::IOError(error)
+    #[must_use]
+    pub fn io(action: IOAction, path: &Path, error: std::io::Error) -> Self {
+        Self::IOError { action, path: path.to_path_buf(), error }
+    }
+}
+
+/// Lets code that returns `std::io::Result` fail with a `DatabaseError`, whose message names the path, keeping the kind
+/// of the I/O error it holds.
+impl From<DatabaseError> for std::io::Error {
+    fn from(error: DatabaseError) -> Self {
+        let kind = match &error {
+            DatabaseError::IOError { error, .. } => error.kind(),
+            _ => std::io::ErrorKind::Other,
+        };
+
+        std::io::Error::new(kind, error)
     }
 }
 

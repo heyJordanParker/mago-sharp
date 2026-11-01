@@ -14,6 +14,8 @@ use std::path::PathBuf;
 use std::time::UNIX_EPOCH;
 
 use mago_build_id::BUILD_ID;
+use mago_database::error::DatabaseError;
+use mago_database::error::IOAction;
 use xxhash_rust::xxh3::Xxh3;
 use xxhash_rust::xxh3::xxh3_128;
 
@@ -363,7 +365,7 @@ pub fn header(bytes: &[u8]) -> Result<Header, FormatError> {
 /// # Errors
 ///
 /// Returns the error of reading the file or the folder, other than its absence.
-pub fn stamp(root: &Path, path: &[u8]) -> io::Result<Option<Input>> {
+pub fn stamp(root: &Path, path: &[u8]) -> Result<Option<Input>, DatabaseError> {
     if let Some(folder) = path.strip_suffix(SOURCE_LISTING.as_bytes())
         && (folder.is_empty() || folder.ends_with(b"/"))
     {
@@ -384,9 +386,12 @@ pub fn stamp(root: &Path, path: &[u8]) -> io::Result<Option<Input>> {
     let contents = match std::fs::read(&full) {
         Ok(contents) => contents,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error),
+        Err(error) => return Err(DatabaseError::io(IOAction::ReadFile, &full, error)),
     };
-    let mtime_ns = match std::fs::metadata(&full)?.modified()?.duration_since(UNIX_EPOCH) {
+    let modified = std::fs::metadata(&full)
+        .and_then(|metadata| metadata.modified())
+        .map_err(|error| DatabaseError::io(IOAction::ReadMetadata, &full, error))?;
+    let mtime_ns = match modified.duration_since(UNIX_EPOCH) {
         Ok(after) => i64::try_from(after.as_nanos()).unwrap_or(i64::MAX),
         Err(before) => i64::try_from(before.duration().as_nanos()).map_or(i64::MIN, |nanos| -nanos),
     };
@@ -398,14 +403,16 @@ pub fn stamp(root: &Path, path: &[u8]) -> io::Result<Option<Input>> {
 /// as macOS's does by default, opens `environment.php` for `Environment.php`. Linux does not, so a file is there only
 /// under its exact name, and a compile on either disk stamps the same inputs, as the engine's
 /// `sharp_folder_holds_name` reads them. A folder that is not there holds nothing.
-fn folder_holds_name(full: &Path) -> io::Result<bool> {
-    let entries = match std::fs::read_dir(full.parent().unwrap_or(full)) {
+fn folder_holds_name(full: &Path) -> Result<bool, DatabaseError> {
+    let folder = full.parent().unwrap_or(full);
+    let entries = match std::fs::read_dir(folder) {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(error),
+        Err(error) => return Err(DatabaseError::io(IOAction::OpenFolder, folder, error)),
     };
     for entry in entries {
-        if Some(entry?.file_name().as_os_str()) == full.file_name() {
+        let entry = entry.map_err(|error| DatabaseError::io(IOAction::WalkFolder, folder, error))?;
+        if Some(entry.file_name().as_os_str()) == full.file_name() {
             return Ok(true);
         }
     }
@@ -414,15 +421,15 @@ fn folder_holds_name(full: &Path) -> io::Result<bool> {
 }
 
 /// The listing of `folder` that [`SOURCE_LISTING`] stamps.
-fn source_listing(folder: &Path) -> io::Result<Vec<u8>> {
+fn source_listing(folder: &Path) -> Result<Vec<u8>, DatabaseError> {
     let entries = match std::fs::read_dir(folder) {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(error),
+        Err(error) => return Err(DatabaseError::io(IOAction::OpenFolder, folder, error)),
     };
     let mut names = Vec::new();
     for entry in entries {
-        let entry = entry?;
+        let entry = entry.map_err(|error| DatabaseError::io(IOAction::WalkFolder, folder, error))?;
         let mut name = entry.file_name().into_encoded_bytes();
         let source = name.len() > b".sharp".len() && name.ends_with(b".sharp");
         // A link whose target is gone, or a file deleted since the folder was read, is neither, as the loader and the
@@ -450,8 +457,8 @@ fn source_listing(folder: &Path) -> io::Result<Vec<u8>> {
 /// # Errors
 ///
 /// Returns the error of resolving the real path of `source`.
-pub fn compiled_path(root: &Path, source: &Path) -> io::Result<Option<PathBuf>> {
-    let real = source.canonicalize()?;
+pub fn compiled_path(root: &Path, source: &Path) -> Result<Option<PathBuf>, DatabaseError> {
+    let real = source.canonicalize().map_err(|error| DatabaseError::io(IOAction::ResolvePath, source, error))?;
 
     Ok(real.strip_prefix(root).ok().map(|relative| root.join(COMPILED_FOLDER).join(relative).with_extension("sharpc")))
 }
@@ -465,7 +472,7 @@ pub fn compiled_path(root: &Path, source: &Path) -> io::Result<Option<PathBuf>> 
 /// # Errors
 ///
 /// Returns the error of reading an input.
-pub fn is_stale(root: &Path, bytes: &[u8]) -> io::Result<bool> {
+pub fn is_stale(root: &Path, bytes: &[u8]) -> Result<bool, DatabaseError> {
     let Ok(header) = header(bytes) else {
         return Ok(true);
     };

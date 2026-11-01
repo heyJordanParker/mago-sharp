@@ -9,6 +9,7 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use crate::error::DatabaseError;
+use crate::error::IOAction;
 use crate::file::File;
 use crate::file::FileType;
 
@@ -66,9 +67,9 @@ const MAXIMUM_FILE_SIZE: usize = 256 * 1024 * 1024;
 ///
 /// # Errors
 ///
-/// Returns a [`DatabaseError::IOError`] if the file cannot be read from the filesystem.
+/// Returns a [`DatabaseError::IOError`] naming `path` if the file cannot be read from the filesystem.
 pub(crate) fn read_file(workspace: &Path, path: &Path, file_type: FileType) -> Result<File, DatabaseError> {
-    let bytes = read(path)?;
+    let bytes = read(path).map_err(|error| DatabaseError::io(IOAction::ReadFile, path, error))?;
 
     if bytes.len() > MAXIMUM_FILE_SIZE {
         return Err(DatabaseError::FileTooLarge(path.to_path_buf(), bytes.len(), MAXIMUM_FILE_SIZE));

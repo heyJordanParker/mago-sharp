@@ -501,7 +501,7 @@ fn workspace_relative_string(path: &Path, workspace: &Path) -> String {
 fn read_listed_file(workspace: &Path, path: &Path, file_type: FileType) -> Option<Result<File, DatabaseError>> {
     match read_file(workspace, path, file_type) {
         Ok(file) if file.is_companion() => None,
-        Err(DatabaseError::IOError(error)) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(DatabaseError::IOError { error, .. }) if error.kind() == std::io::ErrorKind::NotFound => None,
         result => Some(result),
     }
 }
@@ -809,6 +809,7 @@ mod tests {
     use super::*;
     use crate::DatabaseReader;
     use crate::GlobSettings;
+    use crate::error::IOAction;
     use std::borrow::Cow;
     use tempfile::TempDir;
 
@@ -1177,7 +1178,28 @@ mod tests {
 
         assert!(matches!(read("src/a.php"), Some(Ok(_))));
         assert!(read("src/gone.php").is_none());
-        assert!(matches!(read("src"), Some(Err(DatabaseError::IOError(_)))));
+        assert!(matches!(read("src"), Some(Err(DatabaseError::IOError { action: IOAction::ReadFile, .. }))));
+    }
+
+    /// A file the loader can't read fails the load with its path and what the loader was doing.
+    #[cfg(unix)]
+    #[test]
+    fn a_file_the_loader_cannot_read_is_named_in_the_error() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = TempDir::new().unwrap();
+        create_test_file(&temp_dir, "src/a.php", "<?php");
+        let file = temp_dir.path().canonicalize().unwrap().join("src/a.php");
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let loaded = DatabaseLoader::new(create_test_config(&temp_dir, vec!["src"], vec![])).load();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let Err(error) = loaded else { panic!("a file that can't be read should fail the load") };
+        assert_eq!(
+            error.to_string(),
+            format!("can't read the file `{}`: Permission denied (os error 13)", file.display())
+        );
     }
 
     #[test]

@@ -26,6 +26,7 @@ use mago_codex::reference::SymbolReferences;
 use mago_codex::symbol::SymbolIdentifier;
 use mago_codex::ttype::TType;
 use mago_database::DatabaseReader;
+use mago_database::error::DatabaseError;
 use mago_database::file::File;
 use mago_database::file::FileId;
 use mago_database::file::FileType;
@@ -230,7 +231,7 @@ impl IncrementalAnalysisService {
     /// `check` fails.
     pub fn compile(
         &mut self,
-        mut stamp: impl FnMut(&[u8]) -> std::io::Result<Option<Input>>,
+        mut stamp: impl FnMut(&[u8]) -> Result<Option<Input>, DatabaseError>,
         check: impl FnOnce(Vec<Translation>) -> std::io::Result<HashMap<FileId, IssueCollection>>,
         standard_library: &Library,
         refusing: impl FnOnce(IssueCollection) -> IssueCollection,
@@ -420,10 +421,12 @@ impl IncrementalAnalysisService {
                         let input = match stamps.get(&path) {
                             Some(input) => input.clone(),
                             None => {
-                                let input =
-                                    stamp(&path).map_err(mago_database::error::DatabaseError::from)?.unwrap_or_else(
-                                        || Input { path: path.clone(), size: 0, mtime_ns: 0, hash: [0; 16] },
-                                    );
+                                let input = stamp(&path)?.unwrap_or_else(|| Input {
+                                    path: path.clone(),
+                                    size: 0,
+                                    mtime_ns: 0,
+                                    hash: [0; 16],
+                                });
                                 stamps.insert(path, input.clone());
                                 input
                             }
@@ -1074,12 +1077,12 @@ mod tests {
     }
 
     /// Stamps every input as an empty file, so a test sees which inputs a file has.
-    fn empty_stamp(path: &[u8]) -> std::io::Result<Option<Input>> {
+    fn empty_stamp(path: &[u8]) -> Result<Option<Input>, DatabaseError> {
         Ok(Some(Input { path: path.to_vec(), size: 0, mtime_ns: 0, hash: [0; 16] }))
     }
 
     /// Stamps each file of `database` with its size and hash, and `composer.lock` as an empty file.
-    fn database_stamp(database: &Database<'static>) -> impl FnMut(&[u8]) -> std::io::Result<Option<Input>> {
+    fn database_stamp(database: &Database<'static>) -> impl FnMut(&[u8]) -> Result<Option<Input>, DatabaseError> {
         let database = database.read_only();
 
         move |path| {
@@ -1104,7 +1107,7 @@ mod tests {
     /// Each compiled file of `service` by its name.
     fn compile(
         service: &mut IncrementalAnalysisService,
-        stamp: impl FnMut(&[u8]) -> std::io::Result<Option<Input>>,
+        stamp: impl FnMut(&[u8]) -> Result<Option<Input>, DatabaseError>,
     ) -> std::collections::BTreeMap<String, Compilation> {
         let compiled = service.compile(stamp, proved, &Library::default(), |issues| issues).expect("the compile runs");
         let database = service.database();

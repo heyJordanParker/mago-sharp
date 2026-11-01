@@ -494,7 +494,7 @@ impl<'config> DatabaseWatcher<'config> {
                                     tracing::debug!("Added new file to database: {}", changed_file.path.display());
                                 }
                                 Err(e) => {
-                                    tracing::error!("Failed to load new file {}: {}", changed_file.path.display(), e);
+                                    tracing::error!("Failed to load a new file: {e}");
                                 }
                             }
                         }

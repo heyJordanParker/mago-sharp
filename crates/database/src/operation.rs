@@ -2,6 +2,7 @@ use std::borrow::Cow;
 use std::path::PathBuf;
 
 use crate::error::DatabaseError;
+use crate::error::IOAction;
 
 #[derive(Debug)]
 pub(crate) enum FilesystemOperation {
@@ -14,14 +15,10 @@ impl FilesystemOperation {
     pub fn execute(self) -> Result<(), DatabaseError> {
         match self {
             Self::Write(path, content) => {
-                std::fs::write(path, content)?;
-
-                Ok(())
+                std::fs::write(&path, content).map_err(|error| DatabaseError::io(IOAction::WriteFile, &path, error))
             }
             Self::Delete(path) => {
-                std::fs::remove_file(path)?;
-
-                Ok(())
+                std::fs::remove_file(&path).map_err(|error| DatabaseError::io(IOAction::DeleteFile, &path, error))
             }
         }
     }

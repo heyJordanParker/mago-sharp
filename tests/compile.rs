@@ -1612,6 +1612,58 @@ fn compile_warns_when_the_exclude_file_cannot_be_written() {
     assert!(!printed(&output).contains(&format!("{}/.tmp", info.display())), "{}", printed(&output));
 }
 
+/// A `.sharp` folder the compile can't open fails the compile with the folder's path and what the compile was doing.
+#[cfg(unix)]
+#[test]
+fn compile_names_the_sharp_folder_it_cannot_open() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = project(ORDER, MONEY);
+    let root = std::fs::canonicalize(directory.path()).unwrap();
+    compile_succeeds(&root);
+    let compiled = root.join(".sharp");
+    std::fs::set_permissions(&compiled, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    let output = compile(&root);
+    std::fs::set_permissions(&compiled, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    assert!(!output.status.success(), "{}", printed(&output));
+    assert!(
+        printed(&output).contains(&format!(
+            "Failed to load database: can't open the folder `{}`: Permission denied (os error 13)",
+            compiled.display()
+        )),
+        "{}",
+        printed(&output)
+    );
+}
+
+/// A folder the compile's walk of `.sharp` reaches and can't open is the one the error names, not `.sharp`.
+#[cfg(unix)]
+#[test]
+fn compile_names_the_folder_its_walk_of_the_sharp_folder_cannot_open() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = project(ORDER, MONEY);
+    let root = std::fs::canonicalize(directory.path()).unwrap();
+    compile_succeeds(&root);
+    let app = root.join(".sharp/app");
+    std::fs::set_permissions(&app, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    let output = compile(&root);
+    std::fs::set_permissions(&app, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    assert!(!output.status.success(), "{}", printed(&output));
+    assert!(
+        printed(&output).contains(&format!(
+            "Failed to load database: can't open the folder `{}`: Permission denied (os error 13)",
+            app.display()
+        )),
+        "{}",
+        printed(&output)
+    );
+}
+
 /// A repository git refuses to read, as a checkout another user owns in a container or a CI job, or a broken `.git`,
 /// fails no compile: the block lists every PHP file, as with no git to run, and the compile warns once with git's
 /// reason.

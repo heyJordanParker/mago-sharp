@@ -48,7 +48,6 @@ use clap::Parser;
 use mago_database::Database;
 use mago_database::DatabaseReader;
 use mago_database::change::ChangeLog;
-use mago_database::error::DatabaseError;
 use mago_database::file::File;
 use mago_orchestrator::service::format::FileFormatStatus;
 use mago_orchestrator::service::format::FormatResult;
@@ -255,7 +254,7 @@ impl FormatCommand {
     ) -> Result<ExitCode, Error> {
         // PHP source is binary-safe, so read raw bytes: a buffer piped in may not be valid UTF-8.
         let mut content: Vec<u8> = Vec::new();
-        std::io::stdin().read_to_end(&mut content).map_err(|e| Error::Database(DatabaseError::IOError(e)))?;
+        std::io::stdin().read_to_end(&mut content).map_err(Error::ReadingStdin)?;
 
         let Some(filepath) = self.stdin_filepath.as_deref() else {
             let file = File::ephemeral(Cow::Borrowed(b"<stdin>"), Cow::Owned(content));

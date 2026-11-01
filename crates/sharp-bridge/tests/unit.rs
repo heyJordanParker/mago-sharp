@@ -21,6 +21,8 @@ use std::process::Command;
 use std::slice;
 
 use mago_build_id::BUILD_ID;
+use mago_database::error::DatabaseError;
+use mago_database::error::IOAction;
 use mago_sharp_bridge::SHARP_UNIT_ABI;
 use mago_sharp_bridge::Unit;
 use mago_sharp_bridge::lower;
@@ -359,6 +361,9 @@ fn stamp_gives_the_size_and_hash_of_a_file_and_none_where_no_file_is() {
     assert_eq!(stamp(directory.path(), b"gone/Missing.sharp").unwrap(), None, "a missing folder holds no file");
     for under_a_file in [&b"app/Report.sharp/Inner.php"[..], b"app/Report.sharp/*.sharp"] {
         let error = stamp(directory.path(), under_a_file).expect_err("a file is no folder to read");
+        let DatabaseError::IOError { action, path, error } = error else { panic!("{error}") };
+        assert_eq!(action, IOAction::OpenFolder, "{}", String::from_utf8_lossy(under_a_file));
+        assert!(path.ends_with("app/Report.sharp"), "{}", path.display());
         assert_eq!(error.kind(), std::io::ErrorKind::NotADirectory, "{}", String::from_utf8_lossy(under_a_file));
     }
 }
