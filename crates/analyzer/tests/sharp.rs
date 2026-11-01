@@ -13941,6 +13941,34 @@ fn a_member_that_changes_a_place_that_may_hold_one_of_two_lists_takes_only_what_
     );
 }
 
+/// Spec section 14.4: `maybe?.rows` is the place `maybe.rows` is, where `maybe` is not null, so its read keeps each
+/// `List` the plain PHP property may hold beside the `null`, and a member that changes it takes only what both take and
+/// writes back the property's own type, as on `box.rows`.
+#[test]
+fn a_member_that_changes_a_place_through_null_safe_access_keeps_each_list_it_may_hold() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public void run(Box box, Box? maybe)\n    {\n        maybe?.rows.clear();\n        maybe?.rows.add(1);\n        box.rows.add(1);\n        maybe?.rows.add(\"x\");\n        box.rows.add(\"x\");\n        List<int>? held = maybe?.rows;\n    }\n}\n";
+
+    let issues = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Report.sharp", sharp), &TWO_LISTS);
+
+    assert_eq!(
+        issues
+            .iter()
+            .map(|issue| {
+                let primary = issue.annotations.iter().find(|annotation| annotation.kind == AnnotationKind::Primary);
+                let primary = primary.and_then(|primary| primary.message.as_deref()).unwrap_or("");
+                format!("{} {} {primary}", located(sharp, issue), issue.message)
+            })
+            .collect::<Vec<_>>(),
+        [
+            "8:25 invalid-argument Invalid argument type for argument #1 of `List<string>.add`: expected `string`, but found `int`. This has type `int`",
+            "9:22 invalid-argument Invalid argument type for argument #1 of `List<string>.add`: expected `string`, but found `int`. This has type `int`",
+            "10:25 invalid-argument Invalid argument type for argument #1 of `List<int>.add`: expected `int`, but found `string`. This has type `string`",
+            "11:22 invalid-argument Invalid argument type for argument #1 of `List<int>.add`: expected `int`, but found `string`. This has type `string`",
+            "12:27 invalid-local-assignment-value Invalid assignment to `held`: it is declared as `List<int>?`. This value has type `(List<int>|List<string>)?`.",
+        ]
+    );
+}
+
 /// Spec section 12: "an `Iterable` has no index". Reading one by index would read the source up to it, so the error
 /// names the two ways that read it.
 #[test]
