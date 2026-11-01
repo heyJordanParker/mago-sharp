@@ -2514,14 +2514,13 @@ where
     let unfixed: Vec<String> = templates
         .iter()
         .zip(&type_arguments)
-        .filter(|((name, _), type_argument)| type_argument.is_none() && !violated_templates.contains(name))
+        // A bound the checker refused fixes nothing it names, so such a type parameter is left to the refusal, as a
+        // call leaves it.
+        .filter(|((name, template), type_argument)| {
+            type_argument.is_none() && !violated_templates.contains(name) && !template.named_by_refused_bound
+        })
         .map(|((name, _), _)| format!("`{name}`"))
         .collect();
-    // A bound the checker refused fixes nothing it names, so the value takes the type arguments the rest fixes, and the
-    // refusal is the one error, as for a call. The refused method never runs, so nothing is recorded for it.
-    if !unfixed.is_empty() && templates.values().any(|template| is_refused_type(&template.constraint)) {
-        return inferred_type_replacer::replace(&value, &template_result, context.codebase);
-    }
     if !unfixed.is_empty() {
         let arguments = if unfixed.len() == 1 { "argument" } else { "arguments" };
         context.collector.report_with_code(

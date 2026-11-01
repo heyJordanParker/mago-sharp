@@ -242,7 +242,6 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Expression<'arena> {
                         anonymous_class.extends.as_ref(),
                         anonymous_class.implements.as_ref(),
                         None,
-                        None,
                         class_like_metadata,
                         anonymous_class.members.as_slice(),
                     )?;

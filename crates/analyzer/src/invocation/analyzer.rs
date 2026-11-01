@@ -1896,8 +1896,8 @@ where
 /// and from the declared type its result goes into. A type argument none fixes, `None` in `type_arguments`, is refused,
 /// as C#'s CS0411, instead of running with its bound. An argument or declared type outside the bound fixes one of
 /// `violated_templates`, whose own issue names the bound. Plain PHP's generics keep their fallback. A bound the checker
-/// refused fixes nothing it names, as `TB` in `<TA : TB & Shape, TB>`, so a target with one reports no unfixed type
-/// argument and leaves its one error to the refusal.
+/// refused fixes nothing it names, as `TB` in `<TA : TB & Shape, TB>`, so such a type parameter is left to the
+/// refusal's one error.
 fn report_unfixed_type_arguments<A>(
     context: &mut Context<'_, '_, A>,
     invocation: &Invocation<'_, '_, '_>,
@@ -1911,7 +1911,9 @@ fn report_unfixed_type_arguments<A>(
     let unfixed: Vec<_> = template_types
         .iter()
         .zip(type_arguments)
-        .filter(|((name, _), type_argument)| type_argument.is_none() && !violated_templates.contains(name))
+        .filter(|((name, template), type_argument)| {
+            type_argument.is_none() && !violated_templates.contains(name) && !template.named_by_refused_bound
+        })
         .map(|(template, _)| template)
         .collect();
     // A named argument no parameter takes is refused on its own, as `groupBy(selector: …)` is, and fixes nothing.
@@ -1921,8 +1923,7 @@ fn report_unfixed_type_arguments<A>(
             metadata.parameters.iter().all(|parameter| parameter.get_name().0 != name)
         })
     });
-    let has_refused_bound = template_types.values().any(|template| is_refused_type(&template.constraint));
-    if unfixed.is_empty() || names_no_parameter || has_refused_bound {
+    if unfixed.is_empty() || names_no_parameter {
         return;
     }
 

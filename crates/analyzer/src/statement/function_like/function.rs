@@ -124,7 +124,6 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Function<'arena> {
             "function",
             function_name,
             None,
-            None,
         );
 
         if context.settings.find_unused_parameters {

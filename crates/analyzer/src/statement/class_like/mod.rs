@@ -75,7 +75,6 @@ use mago_syntax::cst::Module;
 use mago_syntax::cst::ModuleMember;
 use mago_syntax::cst::Property;
 use mago_syntax::cst::Trait;
-use mago_syntax::cst::TypeParameterList;
 use mago_syntax::token::is_sharp_keyword;
 use mago_word::Word;
 use mago_word::WordMap;
@@ -100,7 +99,6 @@ use crate::statement::class_like::method_signature::SignatureCompatibilityIssue;
 use crate::statement::function_like::FunctionLikeBody;
 use crate::statement::function_like::HintPlace;
 use crate::statement::function_like::analyze_function_like;
-use crate::statement::function_like::named_in_refused_bounds;
 use crate::statement::function_like::report_invalid_template_arguments;
 use crate::statement::function_like::report_undefined_type_references;
 use crate::utils::missing_type_hints;
@@ -464,11 +462,10 @@ fn type_contains_template_param(type_union: &TUnion, param_name: Word, defining_
 /// - A method parameter type
 /// - A method return type
 /// - An `@extends`, `@implements`, or `@use` annotation
-/// - A bound of `type_parameters` the checker refused, as `TOther` in `<TOther, THolder : Order & TOther>`
+/// - A bound the checker refused, as `TOther` in `<TOther, THolder : Order & TOther>`
 fn check_unused_template_parameters<'ctx, A>(
     context: &mut Context<'ctx, '_, A>,
     class_like_metadata: &'ctx ClassLikeMetadata,
-    type_parameters: Option<&TypeParameterList<'_>>,
 ) where
     A: Arena,
 {
@@ -480,17 +477,14 @@ fn check_unused_template_parameters<'ctx, A>(
         return;
     }
 
-    let named_by_refused_bounds =
-        named_in_refused_bounds(type_parameters, &class_like_metadata.template_types, context.resolved_names);
-
     let class_name = class_like_metadata.name;
     let class_original_name = display_class_like_name(context, class_like_metadata.original_name);
     let class_kind_str = class_like_metadata.kind.as_str();
     let class_name_span = class_like_metadata.name_span.unwrap_or(class_like_metadata.span);
     let sharp_class = context.dialect.is_sharp().then(|| short_name(class_original_name));
 
-    'templates: for (template_name, _) in &class_like_metadata.template_types {
-        if template_name.as_bytes().starts_with(b"_") || named_by_refused_bounds.contains(&template_name.as_bytes()) {
+    'templates: for (template_name, template) in &class_like_metadata.template_types {
+        if template_name.as_bytes().starts_with(b"_") || template.named_by_refused_bound {
             continue;
         }
 
@@ -617,7 +611,6 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Class<'arena> {
             self.extends.as_ref(),
             self.implements.as_ref(),
             self.inheritance.as_ref(),
-            self.type_parameters.as_ref(),
             class_like_metadata,
             self.members.as_slice(),
         )?;
@@ -764,7 +757,6 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Interface<'arena> {
             self.extends.as_ref(),
             None,
             self.inheritance.as_ref(),
-            self.type_parameters.as_ref(),
             class_like_metadata,
             self.members.as_slice(),
         )?;
@@ -878,7 +870,6 @@ where
         None,
         None,
         event.inheritance.as_ref(),
-        event.type_parameters.as_ref(),
         class_like_metadata,
         &[],
     )?;
@@ -943,7 +934,6 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Trait<'arena> {
             artifacts,
             Some(self.name.span),
             self.span(),
-            None,
             None,
             None,
             None,
@@ -1090,7 +1080,6 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Enum<'arena> {
             None,
             self.implements.as_ref(),
             self.inheritance.as_ref(),
-            self.type_parameters.as_ref(),
             class_like_metadata,
             self.members.as_slice(),
         )?;
@@ -1206,7 +1195,6 @@ pub(crate) fn analyze_class_like<'ctx, 'ast, 'arena, A>(
     extends_ast: Option<&'ast Extends<'arena>>,
     implements_ast: Option<&'ast Implements<'arena>>,
     inheritance_ast: Option<&'ast Inheritance<'arena>>,
-    type_parameters: Option<&'ast TypeParameterList<'arena>>,
     class_like_metadata: &'ctx ClassLikeMetadata,
     members: &'ast [ClassLikeMember<'arena>],
 ) -> Result<(), AnalysisError>
@@ -1579,7 +1567,7 @@ where
     }
 
     if has_complete_hierarchy {
-        check_unused_template_parameters(context, class_like_metadata, type_parameters);
+        check_unused_template_parameters(context, class_like_metadata);
     }
     check_class_like_properties(context, class_like_metadata);
     check_docblock_declared_members(context, class_like_metadata, declaration_span);

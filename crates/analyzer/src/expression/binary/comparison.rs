@@ -844,34 +844,9 @@ fn collection_parts<'union>(union: &'union TUnion, codebase: &CodebaseMetadata) 
     Some((array, value))
 }
 
-/// The side of `lhs_type` and `rhs_type` that [`Refusal::Collection`] refuses: the first that holds an `Iterable`, or
-/// else the first that is not one collection, as a type parameter bound by one.
-fn unsupported_collection<'union>(
-    lhs_type: &'union TUnion,
-    rhs_type: &'union TUnion,
-    codebase: &CodebaseMetadata,
-) -> &'union TUnion {
-    let not_one_collection = if collection_parts(lhs_type, codebase).is_none() { lhs_type } else { rhs_type };
-
-    [lhs_type, rhs_type].into_iter().find(|side| side.has_iterable()).unwrap_or(not_one_collection)
-}
-
-/// Why `==` does not compare `part`, which [`Refusal::Collection`] refuses, spec section 19: it compares a `List`, a
-/// `Map` or a `Set`, and an `Iterable` is none of them, while a type parameter bound by one may be another type. Each
-/// is an `Iterable`, whose `toList()` gives a `List` that `==` compares.
-fn collection_reason<A>(context: &Context<'_, '_, A>, part: &TUnion) -> String
-where
-    A: Arena,
-{
-    if part.has_iterable() {
-        "`==` compares a `List`, a `Map` or a `Set`, and an `Iterable` is none of them".to_owned()
-    } else {
-        format!(
-            "`==` compares a `List`, a `Map` or a `Set`, and `{}` may be another type",
-            display_operand(context, part)
-        )
-    }
-}
+/// Why `==` does not compare a value that [`Refusal::Collection`] refuses, spec section 19: an `Iterable`, whose
+/// `toList()` gives a `List` that `==` compares.
+const COLLECTION_REASON: &str = "`==` compares a `List`, a `Map` or a `Set`, and an `Iterable` is none of them";
 
 /// Whether PHP# `==` compares a value of `lhs_type` with one of `rhs_type` as two collections, by value, spec section
 /// 19, which tests no identity a type could narrow by.
@@ -901,14 +876,9 @@ fn collection_refusal(
             _ if is_union(lhs_type) || is_union(rhs_type) => {
                 return union_refusal(operator, lhs_type, rhs_type, codebase, visiting);
             }
-            (lhs, rhs) => {
-                let holds_no_collection =
-                    |union: &TUnion| !comparands(union, codebase).contains(&Comparand::Collection);
-                let one_beside_other = (lhs.is_some() && holds_no_collection(rhs_type))
-                    || (rhs.is_some() && holds_no_collection(lhs_type));
-
-                return Some(if one_beside_other { Refusal::DifferentTypes } else { Refusal::Collection });
-            }
+            // One collection beside a type that holds none. A type parameter holds one only through a collection bound,
+            // which PHP# refuses, so it bounds nothing.
+            _ => return Some(Refusal::DifferentTypes),
         };
     let is_set = |array: &TArray| matches!(array, TArray::Set(_));
     if discriminant(lhs_array) != discriminant(rhs_array)
@@ -1015,7 +985,7 @@ where
         Some(Refusal::StructProperty) => {
             struct_property_issue(context, lhs_type, rhs_type).message.trim_end_matches('.').to_owned()
         }
-        Some(Refusal::Collection) => collection_reason(context, unsupported_collection(lhs_type, rhs_type, codebase)),
+        Some(Refusal::Collection) => COLLECTION_REASON.to_owned(),
         Some(Refusal::TypeParameter) => type_parameter_reason(lhs_type, rhs_type, codebase),
         _ => format!("`{}` never equals `{}`", display_operand(context, lhs_type), display_operand(context, rhs_type)),
     }
@@ -1396,18 +1366,11 @@ pub(crate) fn report_sharp_refusal<A>(
                 ),
             )
         }
-        Refusal::Collection => {
-            let part = unsupported_collection(lhs_type, rhs_type, context.codebase);
-
-            (
-                IssueCode::InvalidOperand,
-                Issue::error(format!(
-                    "{}: compare `a.toList() {equality} b.toList()`.",
-                    collection_reason(context, part)
-                ))
+        Refusal::Collection => (
+            IssueCode::InvalidOperand,
+            Issue::error(format!("{COLLECTION_REASON}: compare `a.toList() {equality} b.toList()`."))
                 .with_note(format!("{pair}.")),
-            )
-        }
+        ),
         Refusal::Instance => {
             let class = part(Comparand::is_instance);
 
@@ -1632,18 +1595,11 @@ pub(crate) fn check_element_equality<A>(
             ))
             .with_note("A search compares each element with the value by `==`."),
         ),
-        Some(Refusal::Collection) => {
-            let part = unsupported_collection(element_type, value_type, context.codebase);
-
-            (
-                IssueCode::InvalidArgument,
-                Issue::error(format!(
-                    "`{method}` compares elements with `==`, and {}.",
-                    collection_reason(context, part)
-                ))
+        Some(Refusal::Collection) => (
+            IssueCode::InvalidArgument,
+            Issue::error(format!("`{method}` compares elements with `==`, and {COLLECTION_REASON}."))
                 .with_help("Compare each element's `toList()` with `==`, as in `a.toList() == b.toList()`."),
-            )
-        }
+        ),
         // A struct equals only the same struct, and declares no operator to change that.
         Some(Refusal::DifferentTypes)
             if comparands(element_type, context.codebase)
@@ -1879,9 +1835,7 @@ where
     let issue = Issue::error(format!("`{struct}` can't compare by value: {why}.", struct = r#struct)).with_note(note);
 
     match reason {
-        Some(Refusal::Collection) => {
-            issue.with_note(format!("{}.", collection_reason(context, &property_type.to_non_nullable())))
-        }
+        Some(Refusal::Collection) => issue.with_note(format!("{COLLECTION_REASON}.")),
         _ => issue,
     }
 }

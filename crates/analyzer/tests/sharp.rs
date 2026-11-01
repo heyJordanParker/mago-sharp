@@ -14512,7 +14512,8 @@ fn a_type_parameter_joined_in_a_bound_gives_one_error() {
 
 /// Spec section 11: every other bound the semantics checker refuses bounds nothing too, so a type argument outside
 /// what the bound writes, written on the call or inferred from its argument, adds no second error, nor does a type
-/// parameter that only the refused bound would have fixed. A type written twice
+/// parameter that only the refused bound would have fixed, while one no bound names is still unfixed and unused. A
+/// type written twice
 /// is refused as redundant, and the bound keeps the type it writes once, so an argument outside it is still an error,
 /// as it is once the second `Shareable` is removed.
 #[test]
@@ -14584,12 +14585,26 @@ fn each_refused_bound_gives_one_error() {
         ["A type parameter is a bound alone, as in `<TSub : T>`: it joins no other bound with `&`."]
     );
     assert_eq!(through_bound("T : List<TOther>, TOther"), [other]);
+    assert_eq!(through_bound("T : TOther<int>, TOther"), [other]);
     assert_eq!(
         through_bound("T : TOther, TOther : T"),
         [
             "A type parameter can't bound itself: the bound of `T` leads back to `T`.",
             "A type parameter can't bound itself: the bound of `TOther` leads back to `TOther`.",
         ]
+    );
+    // `TUnused`, which no bound names, is still unfixed and unused.
+    let unused = "namespace Demo;\n\npublic static class Bounded\n{\n    public static T held<TUnused, T : TOther & Shareable, TOther>(T value) => value;\n\n    public static Any? called() => Bounded.held(1);\n}\n";
+    assert_eq!(
+        compile_errors(("src/Demo/Bounded.sharp", unused), &[("src/Demo/Paging.sharp", PAGING)]),
+        [
+            "A type parameter is a bound alone, as in `<TSub : T>`: it joins no other bound with `&`.",
+            "Nothing fixes the type argument `TUnused` of the call to `Bounded.held`.",
+        ]
+    );
+    assert_eq!(
+        issues(("src/Demo/Bounded.sharp", unused), &[("src/Demo/Paging.sharp", PAGING)]),
+        ["5:21 unused-template-parameter", "7:36 missing-template-parameter"]
     );
 
     assert_eq!(

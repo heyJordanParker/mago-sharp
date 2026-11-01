@@ -18,6 +18,7 @@ use mago_names::binding::MethodParts;
 use mago_names::binding::SUPERGLOBALS;
 use mago_names::binding::php_method_name;
 use mago_names::binding::php_operator_name;
+use mago_names::bounds_itself;
 use mago_names::scope::php_name;
 use mago_reporting::Annotation;
 use mago_reporting::AnnotationKind;
@@ -131,8 +132,6 @@ use mago_syntax::cst::TryCatchClause;
 use mago_syntax::cst::TryFinallyClause;
 use mago_syntax::cst::TupleHint;
 use mago_syntax::cst::TypeOf;
-use mago_syntax::cst::TypeParameter;
-use mago_syntax::cst::TypeParameterBound;
 use mago_syntax::cst::TypeParameterList;
 use mago_syntax::cst::TypePattern;
 use mago_syntax::cst::UnaryPostfix;
@@ -872,19 +871,14 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
         }
         (Node::TypeParameter(_), Place::TypeParameter) => Some(Place::TypeParameter),
         (Node::TypeParameterBound(bound), Place::TypeParameter) => {
-            if is_slice_bound(&bound.hint, context) {
+            if context.names.is_bound(&bound.hint, is_standard_library_namespace(context.program)) {
                 return match &bound.hint {
                     Hint::Intersection(intersection) => check_intersection(intersection, Place::TypeParameter, context),
+                    // The standard library's `sumOf` gives a number, `int|float`, a bound only it writes.
+                    Hint::Union(_) => false,
                     _ => true,
                 }
                 .then_some(Place::TypeParameter);
-            }
-            // The standard library's `sumOf` gives a number, `int|float`, a bound only it writes.
-            if is_standard_library_namespace(context.program)
-                && matches!(&bound.hint, Hint::Union(union)
-                    if matches!((union.left, union.right), (Hint::Integer(_), Hint::Float(_))))
-            {
-                return None;
             }
 
             let message = if matches!(bound.hint, Hint::Union(_)) {
@@ -902,7 +896,8 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
 
             None
         }
-        // `is_slice_bound` decided the bound, and a generic class's type arguments in it are a parameter's types.
+        // `ResolvedNames::is_bound` decided the bound, and a generic class's type arguments in it are a parameter's
+        // types.
         (
             Node::Hint(Hint::Object(_) | Hint::Identifier(_) | Hint::Intersection(_)) | Node::IntersectionHint(_),
             Place::TypeParameter,
@@ -5018,62 +5013,13 @@ fn check_type_parameters(list: &TypeParameterList, place: Place, context: &mut C
     }
 }
 
-/// Whether the bound of `parameter` names it, through the bounds of the other type parameters of `list` it names, as
-/// `<T : T>` and `<TA : TB, TB : TA>` do.
-fn bounds_itself(list: &TypeParameterList, parameter: &TypeParameter) -> bool {
-    let mut current = parameter;
-    for _ in 0..list.parameters.len() {
-        let Some(TypeParameterBound { hint: Hint::Identifier(Identifier::Local(bound)), .. }) = &current.bound else {
-            return false;
-        };
-        if bound.value == parameter.name.value {
-            return true;
-        }
-        let Some(next) = list.parameters.iter().find(|other| other.name.value == bound.value) else {
-            return false;
-        };
-        current = next;
-    }
-
-    false
-}
-
-/// Whether a type parameter's bound is another type parameter, as in `<TSub : T>`, or a class bound, as spec section
-/// 11 writes it.
-fn is_slice_bound(hint: &Hint, context: &Context<'_, '_, '_>) -> bool {
-    is_type_parameter_bound(hint, context) || is_class_bound(hint, context)
-}
-
-/// Whether `hint` is a type parameter, a bound that stands alone, as Java's `<U extends T>` does.
-fn is_type_parameter_bound(hint: &Hint, context: &Context<'_, '_, '_>) -> bool {
-    matches!(hint, Hint::Identifier(name @ Identifier::Local(_)) if context.names.is_type_parameter(name))
-}
-
 /// Whether `hint` joins a type parameter with other bounds by `&`, as in `<TL : Order & TA>`.
 fn joins_type_parameter(hint: &Hint, context: &Context<'_, '_, '_>) -> bool {
     match hint {
         Hint::Intersection(intersection) => {
             joins_type_parameter(intersection.left, context) || joins_type_parameter(intersection.right, context)
         }
-        hint => is_type_parameter_bound(hint, context),
-    }
-}
-
-/// Whether `hint` is `Object`, a class or an interface, a generic class type, or several of them joined with `&`.
-/// Mago's own check of an intersection refuses `Object` in one.
-fn is_class_bound(hint: &Hint, context: &Context<'_, '_, '_>) -> bool {
-    match hint {
-        Hint::Object(object) => object.value == OBJECT,
-        Hint::Identifier(name @ Identifier::Local(_)) => !context.names.is_type_parameter(name),
-        // A dotted name is a case type or a full name, which the analyzer refuses with the import to add, spec section
-        // 23.
-        Hint::Identifier(Identifier::Dotted(_)) => true,
-        Hint::Generic(generic) => {
-            built_in_generic_arity(generic.name.value).is_none() && !context.names.is_type_parameter(&generic.name)
-        }
-        Hint::Intersection(intersection) => {
-            is_class_bound(intersection.left, context) && is_class_bound(intersection.right, context)
-        }
+        Hint::Identifier(name @ Identifier::Local(_)) => context.names.is_type_parameter(name),
         _ => false,
     }
 }
@@ -5092,7 +5038,7 @@ fn check_intersection(intersection: &IntersectionHint, place: Place, context: &m
         let message = match member {
             // The walk refuses parentheses around one type.
             Hint::Parenthesized(_) => continue,
-            Hint::Identifier(_) | Hint::Generic(_) if is_class_bound(member, context) => {
+            Hint::Identifier(_) | Hint::Generic(_) if context.names.is_class_bound(member) => {
                 let Some(first) = members[..index].iter().find(|earlier| is_same_type(earlier, member, context)) else {
                     continue;
                 };

@@ -3,18 +3,18 @@ use std::sync::Arc;
 use mago_allocator::Arena;
 use mago_names::EQUATABLE;
 use mago_names::ResolvedNames;
+use mago_names::TypeParametersNamed;
 use mago_names::kind::NameKind;
 use mago_names::scope::NamespaceScope;
 use mago_phpdoc_syntax::cst::r#type::Type;
 use mago_span::HasSpan;
 use mago_syntax::cst::Hint;
 use mago_syntax::cst::Identifier;
-use mago_syntax::cst::TypeParameter;
-use mago_syntax::cst::TypeParameterBound;
 use mago_syntax::cst::TypeParameterList;
 use mago_syntax::cst::UnionHint;
 use mago_syntax::cst::built_in_generic_arity;
 use mago_syntax::dialect::Dialect;
+use mago_syntax::walker::Walker;
 use mago_word::Word;
 use mago_word::word;
 
@@ -97,9 +97,10 @@ pub fn get_type_metadata_from_type(
 
 /// The templates a PHP# type parameter list declares, in order, spec section 11: each is the template a `@template`
 /// tag declares for `defining_entity`, its bound the tag's `of`, `mixed` without one, or the refused type for a bound
-/// the checker refuses outside the standard library. Every name of the list is a template while the bounds are read,
-/// so a bound names a type parameter of its own list, its own or a later one, as in `<TItem : Comparable<TItem>>`. The
-/// bounds are read once per type parameter, each time with the templates of the read before, so a bound sees the bound
+/// the checker refuses, and each type parameter such a bound names is
+/// [named by a refused bound](GenericTemplate::named_by_refused_bound). Every name of the list is a template while the
+/// bounds are read, so a bound names a type parameter of its own list, its own or a later one, as in
+/// `<TItem : Comparable<TItem>>`. The bounds are read once per type parameter, each time with the templates of the read before, so a bound sees the bound
 /// of every type parameter it names, directly or through another bound, as
 /// `<TKey : DatabaseEntity, TItem : Holder<TKey>>` sees `TKey`'s. `type_context` holds the templates once the list is
 /// read.
@@ -122,23 +123,32 @@ where
     }
 
     let mut templates = Vec::new();
+    let mut named_by_refused_bounds = Vec::new();
     for _ in &type_parameters.parameters {
+        named_by_refused_bounds.clear();
         templates = type_parameters
             .parameters
             .iter()
             .map(|parameter| {
                 let constraint = match &parameter.bound {
                     None => get_mixed(),
-                    // The checker refuses the bound, so it bounds nothing a type argument or a use could fail, and its
-                    // one error is the checker's. The standard library's `sumOf` bounds its result by `int|float`.
-                    Some(_)
-                        if !context.file.is_standard_library
-                            && is_refused_bound(type_parameters, parameter, context.resolved_names) =>
-                    {
-                        wrap_atomic(TAtomic::Error)
-                    }
                     Some(bound) => {
-                        get_type_metadata_from_hint(&bound.hint, Some(classname), &*type_context, context).type_union
+                        let written =
+                            get_type_metadata_from_hint(&bound.hint, Some(classname), &*type_context, context)
+                                .type_union;
+                        // The checker refuses the bound, so it bounds nothing a type argument or a use could fail, and
+                        // its one error is the checker's.
+                        if context.resolved_names.is_refused_bound(
+                            type_parameters,
+                            parameter,
+                            context.file.is_standard_library,
+                        ) {
+                            TypeParametersNamed(context.resolved_names)
+                                .walk_type_parameter_bound(bound, &mut named_by_refused_bounds);
+                            wrap_atomic(TAtomic::Error)
+                        } else {
+                            written
+                        }
                     }
                 };
 
@@ -151,59 +161,11 @@ where
         }
     }
 
+    for (name, template) in &mut templates {
+        template.named_by_refused_bound = named_by_refused_bounds.contains(&name.as_bytes());
+    }
+
     templates
-}
-
-/// Whether the semantics checker refuses the bound of `parameter`, a type parameter of `list`, spec section 11. It
-/// accepts `Object`, another type parameter alone, unless the bounds lead back to `parameter`, and classes, interfaces
-/// and `Equatable`, by name or as a generic class type, joined with `&`. It refuses a union, `int`, `Shareable?` and
-/// `TItem & Shareable`.
-fn is_refused_bound(
-    list: &TypeParameterList<'_>,
-    parameter: &TypeParameter<'_>,
-    resolved_names: &ResolvedNames<'_>,
-) -> bool {
-    match parameter.bound.as_ref().map(|bound| &bound.hint) {
-        None => false,
-        Some(Hint::Identifier(name)) if resolved_names.is_type_parameter(name) => bounds_itself(list, parameter),
-        Some(hint) => !is_class_bound(hint, resolved_names),
-    }
-}
-
-/// Whether `hint` is `Object`, a class or an interface, a generic class type, or several of them joined with `&`.
-fn is_class_bound(hint: &Hint<'_>, resolved_names: &ResolvedNames<'_>) -> bool {
-    match hint {
-        Hint::Object(object) => object.value == b"Object",
-        Hint::Identifier(name @ Identifier::Local(_)) => !resolved_names.is_type_parameter(name),
-        Hint::Identifier(Identifier::Dotted(_)) => true,
-        Hint::Generic(generic) => {
-            built_in_generic_arity(generic.name.value).is_none() && !resolved_names.is_type_parameter(&generic.name)
-        }
-        Hint::Intersection(intersection) => {
-            is_class_bound(intersection.left, resolved_names) && is_class_bound(intersection.right, resolved_names)
-        }
-        _ => false,
-    }
-}
-
-/// Whether the bound of `parameter` names it, through the bounds of the other type parameters of `list` it names, as
-/// `<T : T>` and `<TA : TB, TB : TA>` do.
-fn bounds_itself(list: &TypeParameterList<'_>, parameter: &TypeParameter<'_>) -> bool {
-    let mut current = parameter;
-    for _ in 0..list.parameters.len() {
-        let Some(TypeParameterBound { hint: Hint::Identifier(Identifier::Local(bound)), .. }) = &current.bound else {
-            return false;
-        };
-        if bound.value == parameter.name.value {
-            return true;
-        }
-        let Some(next) = list.parameters.iter().find(|other| other.name.value == bound.value) else {
-            return false;
-        };
-        current = next;
-    }
-
-    false
 }
 
 /// Converts a type written in code into its `TUnion`, resolving class names through `resolved_names`.
