@@ -506,7 +506,8 @@ pub(crate) fn analyze_extension_access<'ctx, 'ast, 'arena, A>(
 where
     A: Arena,
 {
-    let comparisons = analyze_extension_call(
+    // The call ran on its whole receiver, so each search read the receiver's every part.
+    analyze_extension_call(
         context,
         block_context,
         artifacts,
@@ -516,26 +517,23 @@ where
         arguments,
         is_null_safe,
         span,
-    )?;
-    if let Some(receiver_type) = artifacts.get_expression_type(receiver).cloned() {
-        report_comparisons(context, receiver, &receiver_type, &comparisons, is_null_safe);
-    }
-
-    Ok(())
+    )
+    .map(|comparisons| report_comparisons(context, receiver, None, &comparisons, is_null_safe))
 }
 
 /// An argument a collection member's call compares with, spec section 12, which is checked once every kind of the
 /// receiver has run its member.
 pub(crate) enum Comparison<'ast, 'arena> {
     /// A value the member compares by `==` with the receiver's elements, as `contains` compares its argument: the
-    /// member's name, the argument, the type of what it passes, the type of the elements, whether the argument is a
-    /// spread, and whether the member reads its receiver by a loop, as an extension of `Iterable<T>` does.
+    /// member's name, the argument, the type of what it passes, the type of the elements, what it is compared with on
+    /// the receiver the call ran on, and whether the member reads its receiver by a loop, as an extension of
+    /// `Iterable<T>` does.
     Search {
         method: Word,
         value: &'ast Expression<'arena>,
         value_type: TUnion,
         element_type: TUnion,
-        spread: bool,
+        searched: Searched,
         by_loop: bool,
     },
     /// A function whose keys the member orders by `<`, as `sortedBy` orders by its `selector`: the member's name, the
@@ -678,10 +676,9 @@ where
                     Some(value_type)
                 }
             })
-            && let Some(receiver_type) = artifacts
-                .get_expression_type(receiver)
-                .map(|written| read_receiver(metadata, written, context.codebase))
-            && let Some(element_type) = searched_element_type(&receiver_type, context.codebase)
+            && let Some(written) = artifacts.get_expression_type(receiver)
+            && let Some(element_type) =
+                searched_element_type(&read_receiver(metadata, written, context.codebase), context.codebase)
             && union_comparator::is_contained_by(
                 context.codebase,
                 &value_type,
@@ -692,13 +689,14 @@ where
                 &mut ComparisonResult::new(),
             )
         {
+            let by_loop = loop_container(metadata).is_some();
             comparisons.push(Comparison::Search {
                 method: metadata.original_name,
                 value,
                 value_type,
                 element_type,
-                spread: argument.is_unpacked(),
-                by_loop: loop_container(metadata).is_some(),
+                searched: if argument.is_unpacked() { Searched::Spread } else { Searched::of(written, by_loop) },
+                by_loop,
             });
         }
     }
@@ -788,12 +786,13 @@ fn searched_element_type(receiver_type: &TUnion, codebase: &CodebaseMetadata) ->
 /// `List<Cart>|Map<Cart, int>` runs the `List`'s and the `Map`'s, and each of them compares with the same argument, so
 /// an argument is reported once for each type it is compared with, refused or warned of: a `sortedBy` on a
 /// `List<Status>|Map<string, Cart>` reports its `Status` keys and its `Cart` keys. A search's help tests for the same
-/// object only through a member every part of `receiver_type`, the receiver's type as the call writes it, reaches its
-/// elements with.
+/// object only through a member every part of the receiver's written type reaches its elements with. A call that ran
+/// on its parts of one kind at a time gives that type as `written_receiver`, and a call that ran on the whole receiver
+/// gives None, since each search read it whole.
 pub(crate) fn report_comparisons<A>(
     context: &mut Context<'_, '_, A>,
     receiver: &Expression<'_>,
-    receiver_type: &TUnion,
+    written_receiver: Option<&TUnion>,
     comparisons: &[Comparison<'_, '_>],
     is_null_safe: bool,
 ) where
@@ -807,19 +806,11 @@ pub(crate) fn report_comparisons<A>(
             continue;
         }
         let was_reported = match comparison {
-            Comparison::Search { method, value, value_type, element_type, spread, .. } => {
-                let joined = if *spread {
-                    Searched::Spread
-                } else {
-                    comparisons
-                        .iter()
-                        .filter(|other| other.argument() == argument)
-                        .filter_map(|other| match other {
-                            Comparison::Search { by_loop, .. } => Some(Searched::of(receiver_type, *by_loop)),
-                            Comparison::Order { .. } => None,
-                        })
-                        .reduce(Searched::join)
-                        .unwrap_or(Searched::Kinds)
+            Comparison::Search { method, value, value_type, element_type, searched, by_loop } => {
+                // A spread keeps its own message, whatever the receiver holds.
+                let joined = match written_receiver {
+                    Some(written) if *searched != Searched::Spread => Searched::of(written, *by_loop),
+                    _ => *searched,
                 };
 
                 check_element_equality(
