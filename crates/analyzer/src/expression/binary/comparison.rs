@@ -662,7 +662,7 @@ fn involves_external_reference(expr: &Expression<'_>, block_context: &BlockConte
 
 /// Checks a single operand of a comparison by `operator` for problematic types, naming it `subject`, as "Left operand in
 /// `<` comparison" names it in PHP and "Left operand of `<`" in PHP#. `other_type` is the other operand's. In PHP# an
-/// `Any` operand is named `Any`, with the check that narrows it.
+/// `Any` operand is named `Any`, with the check that narrows it. Gives whether it reported the operand.
 fn check_comparison_operand<A>(
     context: &mut Context<'_, '_, A>,
     operand: &Expression<'_>,
@@ -670,7 +670,8 @@ fn check_comparison_operand<A>(
     other_type: &TUnion,
     subject: &str,
     operator: &BinaryOperator<'_>,
-) where
+) -> bool
+where
     A: Arena,
 {
     let op_str = BytesDisplay(operator.as_bytes());
@@ -746,7 +747,11 @@ fn check_comparison_operand<A>(
             .with_note(format!("If this operand is `false` at runtime, PHP's specific comparison rules for `false` with `{op_str}` will apply."))
             .with_help("Ensure this operand is non-false or that comparison with `false` is intended and handled safely."),
         );
+    } else {
+        return false;
     }
+
+    true
 }
 
 /// Whether a PHP# `Any?` compares with a value of `other_type` by value, as spec sections 19 and 24 decide for a string,
@@ -1625,7 +1630,7 @@ pub(crate) fn search_refusal(
 /// refused with the reason `==` gives, as is an element the operator's call does not always take, an `Iterable`
 /// element is refused, as `==` on it is, and an `Any` element is refused unless the value is a string, a number or an
 /// enum case. A `null_safe` call's help keeps its `?.`. What is `searched` decides the `===` test the help offers
-/// instead, if any. Gives whether it refused the search.
+/// instead, if any, and names an element a key where it is a `Map`'s. Gives whether it reported the search.
 pub(crate) fn check_element_equality<A>(
     context: &mut Context<'_, '_, A>,
     method: &str,
@@ -1646,14 +1651,14 @@ where
     );
     let refusal = search_refusal(element_type, value_type, context.codebase);
     let (code, issue) = match refusal {
-        None => {
-            if element_type.is_mixed() {
-                let subject = format!("Each element of `List<{}>`", display_operand(context, element_type));
-                check_comparison_operand(context, value, element_type, value_type, &subject, &equality);
-            }
+        None if element_type.is_mixed() => {
+            // The receiver is named as the call writes it, since it may be several kinds of collection.
+            let element = if searched == Searched::Keys { "key" } else { "element" };
+            let subject = format!("Each {element} of `{}`", quoted_source(context, receiver.span()));
 
-            return false;
+            return check_comparison_operand(context, value, element_type, value_type, &subject, &equality);
         }
+        None => return false,
         Some(Refusal::Instance) => {
             let class = display_refused_side(context, element_type, value_type, Comparand::is_instance);
             let help = match searched.identity_test() {

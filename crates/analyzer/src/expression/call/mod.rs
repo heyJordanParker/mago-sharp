@@ -742,8 +742,8 @@ fn searched_element_type(receiver_type: &TUnion, codebase: &CodebaseMetadata) ->
 /// Reports each of `searches`, the searches a call on `receiver` makes, whose value `==` cannot compare with the
 /// elements, as [`check_element_equality`] decides. A call runs one member per kind of its receiver, as `remove` on a
 /// `List<Cart>|Map<Cart, int>` runs the `List`'s and the `Map`'s, and each of them searches with the same argument, so
-/// an argument is refused once. Its help tests for the same object only through a member every kind's search reaches
-/// its elements with.
+/// an argument is reported once, refused or warned of. Its help tests for the same object only through a member every
+/// kind's search reaches its elements with.
 pub(crate) fn report_searches<A>(
     context: &mut Context<'_, '_, A>,
     receiver: &Expression<'_>,
@@ -752,10 +752,10 @@ pub(crate) fn report_searches<A>(
 ) where
     A: Arena,
 {
-    let mut refused = Vec::new();
+    let mut reported = Vec::new();
     for search in searches {
         let argument = search.value.span();
-        if refused.contains(&argument) {
+        if reported.contains(&argument) {
             continue;
         }
         let joined = searches
@@ -774,7 +774,7 @@ pub(crate) fn report_searches<A>(
             is_null_safe,
             joined,
         ) {
-            refused.push(argument);
+            reported.push(argument);
         }
     }
 }
