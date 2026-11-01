@@ -5344,11 +5344,11 @@ fn sorted_by_in_a_loop_is_refused_once() {
 }
 
 /// A call on a value that may be several kinds of collection runs each kind's `sortedBy`, and each one orders by what
-/// the same function returns, so a key with no order is refused once for the call. Where the kinds' keys differ, as
-/// a `Status` and a `Cart`, each key is refused.
+/// the same function returns, so a key with no order is refused once for the call, through `?.` too. Where the
+/// kinds' keys differ, as a `Status` and a `Cart`, each key is refused.
 #[test]
 fn sorted_by_on_several_kinds_of_collection_is_refused_once() {
-    let sharp = "namespace Demo;\n\nimport Lib.Status;\n\nclass Report\n{\n    public List<Status> a(List<Status>|Map<string, Status> statuses) => statuses.sortedBy(s => s);\n\n    public int b(List<Status>|Map<string, Cart> items) => items.sortedBy(x => x).count();\n}\n\nclass Cart\n{\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Status;\n\nclass Report\n{\n    public List<Status> a(List<Status>|Map<string, Status> statuses) => statuses.sortedBy(s => s);\n\n    public int b(List<Status>|Map<string, Cart> items) => items.sortedBy(x => x).count();\n\n    public List<Status>? c((List<Status>|Map<string, Status>)? maybe) => maybe?.sortedBy(s => s);\n}\n\nclass Cart\n{\n}\n";
 
     let status = "invalid-argument `sortedBy` orders numbers, strings, and classes, structs and enums that declare `operator <=>`, and `Status` is none of them. | Declare `public static int operator <=>(Status a, Status b)` in `Status`: an enum orders its cases once it declares `operator <=>`.";
 
@@ -5358,6 +5358,7 @@ fn sorted_by_on_several_kinds_of_collection_is_refused_once() {
             format!("7:91 {status}"),
             format!("9:74 {status}"),
             "9:74 invalid-argument `sortedBy` orders numbers, strings, and classes, structs and enums that declare `operator <=>`, and `Cart` is none of them. | Order a number or a string taken from the value instead.".to_owned(),
+            format!("11:90 {status}"),
         ]
     );
 }
@@ -12394,10 +12395,11 @@ fn a_search_of_an_iterable_reads_a_set_by_its_elements() {
 /// Spec section 12: a call on a value that may be several kinds of collection runs each kind's member, and each one
 /// searches with the same argument, so a search `==` cannot make is refused once for the call. Its help tests for the
 /// same object only through a member every kind reaches its elements with: `any` on a `List|Set`, and none on a
-/// `List|Map`, whose `any` reaches the `Map`'s values and whose `List` has no `keys()`.
+/// `List|Map`, whose `any` reaches the `Map`'s values and whose `List` has no `keys()`. Through `?.` on a
+/// `(List<Cart>|Map<Cart, int>)?`, the search is refused once too.
 #[test]
 fn a_search_of_several_kinds_of_collection_is_refused_once() {
-    let sharp = "namespace Demo;\n\nclass Shelf\n{\n    public bool run(List<Cart>|Map<Cart, int> things, List<Cart>|Set<Cart> held, Cart cart)\n    {\n        bool removed = things.remove(cart);\n        bool kept = held.contains(cart);\n        return removed || kept;\n    }\n}\n\nclass Cart\n{\n}\n";
+    let sharp = "namespace Demo;\n\nclass Shelf\n{\n    public bool run(List<Cart>|Map<Cart, int> things, List<Cart>|Set<Cart> held, Cart cart, (List<Cart>|Map<Cart, int>)? maybe)\n    {\n        bool removed = things.remove(cart);\n        bool kept = held.contains(cart);\n        bool dropped = maybe?.remove(cart) ?? false;\n        return removed || kept || dropped;\n    }\n}\n\nclass Cart\n{\n}\n";
 
     let keys = "an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares";
     let key = format!("is anything with `==` and `hash()`: {keys} `operator ==`, and `Cart` is none of them.");
@@ -12409,10 +12411,12 @@ fn a_search_of_several_kinds_of_collection_is_refused_once() {
         [
             format!("5:21 template-constraint-violation A `Map`'s key {key} | Key the `Map` by {declared}"),
             format!("5:55 template-constraint-violation A `Set`'s element {key} | Fill the `Set` with {declared}"),
+            format!("5:93 template-constraint-violation A `Map`'s key {key} | Key the `Map` by {declared}"),
             format!("7:38 invalid-argument `remove` {refusal}."),
             format!(
                 "8:35 invalid-argument `contains` {refusal}, or test for the same object with `held.any(c => c === cart)`."
             ),
+            format!("9:38 invalid-argument `remove` {refusal}."),
         ]
     );
 }
