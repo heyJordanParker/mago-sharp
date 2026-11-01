@@ -85,7 +85,8 @@ pub struct ExternalExtension {
 
 pub(crate) trait LinterTransport: std::fmt::Debug + Send + Sync {
     fn broadcast(&self, payload: &[u8]) -> Result<Vec<Vec<u8>>, WorkerError>;
-    fn request(&self, payload: Vec<u8>) -> Result<Vec<u8>, WorkerError>;
+    /// Sends one lint request, named by `running` for its deadline's error.
+    fn request(&self, payload: Vec<u8>, running: &dyn std::fmt::Display) -> Result<Vec<u8>, WorkerError>;
 }
 
 impl LinterTransport for WorkerPool {
@@ -93,8 +94,8 @@ impl LinterTransport for WorkerPool {
         Self::broadcast(self, payload)
     }
 
-    fn request(&self, payload: Vec<u8>) -> Result<Vec<u8>, WorkerError> {
-        Self::request(self, payload)
+    fn request(&self, payload: Vec<u8>, running: &dyn std::fmt::Display) -> Result<Vec<u8>, WorkerError> {
+        Self::request(self, payload, Some(running))
     }
 }
 
@@ -266,11 +267,15 @@ impl<T> ExternalLinter<T> {
                 file_nodes = file_nodes.saturating_add(request.nodes as u64);
             }
             let ipc_start = self.trace_enabled.then(Instant::now);
-            let response = backend.transport.request(request.payload).inspect_err(|_| {
-                if self.trace_enabled {
-                    self.telemetry.errors.fetch_add(1, Ordering::Relaxed);
-                }
-            })?;
+            // A lint request runs one file's rules, so Mago names them and the worker sends no progress for it.
+            let response = backend
+                .transport
+                .request(request.payload, &format_args!("the linter rules of {}", mago_bytes::BytesDisplay(&file.name)))
+                .inspect_err(|_| {
+                    if self.trace_enabled {
+                        self.telemetry.errors.fetch_add(1, Ordering::Relaxed);
+                    }
+                })?;
             if let Some(start) = ipc_start {
                 let elapsed = duration_nanos(start.elapsed());
                 file_ipc_ns = file_ipc_ns.saturating_add(elapsed);
@@ -499,10 +504,57 @@ mod tests {
             Ok(vec![self.registration.clone(); self.workers])
         }
 
-        fn request(&self, payload: Vec<u8>) -> Result<Vec<u8>, mago_extension::WorkerError> {
+        fn request(
+            &self,
+            payload: Vec<u8>,
+            _running: &dyn std::fmt::Display,
+        ) -> Result<Vec<u8>, mago_extension::WorkerError> {
             *self.request.lock().unwrap() = Some(testing::decode_lint_request(&payload).unwrap());
             Ok(self.response.clone())
         }
+    }
+
+    /// A worker with one rule, which keeps the name Mago gives each request and reports nothing.
+    #[derive(Debug, Default)]
+    struct NamingTransport {
+        names: Mutex<Vec<String>>,
+    }
+
+    impl LinterTransport for NamingTransport {
+        fn broadcast(&self, _payload: &[u8]) -> Result<Vec<Vec<u8>>, mago_extension::WorkerError> {
+            Ok(vec![testing::describe_response(
+                "acme/tools",
+                "Acme Tools",
+                "1.0.0",
+                &[("acme/no-run", "No run", "Disallows this call.", Level::Warning, true, &[NodeKind::FunctionCall])],
+            )])
+        }
+
+        fn request(
+            &self,
+            _payload: Vec<u8>,
+            running: &dyn std::fmt::Display,
+        ) -> Result<Vec<u8>, mago_extension::WorkerError> {
+            self.names.lock().unwrap().push(running.to_string());
+            Ok(testing::lint_response(&[]))
+        }
+    }
+
+    /// A lint request runs one file's rules, so Mago names it by the file, for the deadline's error, and the worker
+    /// sends no progress for it.
+    #[test]
+    fn a_lint_request_is_named_by_its_file() {
+        let arena = LocalArena::new();
+        let file = File::ephemeral(Cow::Borrowed(b"src/test.php"), Cow::Borrowed(b"<?php\nrun();\n"));
+        let program = parse_file(&arena, &file);
+        let resolved_names = NameResolver::new(&arena).resolve(program);
+        let transport = Arc::new(NamingTransport::default());
+        let external = ExternalLinter::initialize_transports([Arc::clone(&transport)], PHPVersion::PHP85)
+            .expect("registration should succeed");
+
+        external.lint(&file, program, &resolved_names, None).expect("external lint should succeed");
+
+        assert_eq!(*transport.names.lock().unwrap(), ["the linter rules of src/test.php"]);
     }
 
     #[test]
@@ -714,7 +766,11 @@ mod tests {
                 ])
             }
 
-            fn request(&self, _payload: Vec<u8>) -> Result<Vec<u8>, mago_extension::WorkerError> {
+            fn request(
+                &self,
+                _payload: Vec<u8>,
+                _running: &dyn std::fmt::Display,
+            ) -> Result<Vec<u8>, mago_extension::WorkerError> {
                 unreachable!()
             }
         }

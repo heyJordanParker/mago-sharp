@@ -170,6 +170,18 @@ final class InvocationTest extends TestCase
     }
 
     /**
+     * Mago of protocol 1.12 prints a progress frame as the file whose hooks it names, so the worker, whose frames name
+     * what it starts, refuses its first request.
+     */
+    public function testDescribeRequestOfTheProtocolBeforeNamedProgressIsRejected(): void
+    {
+        $this->expectException(ProtocolException::class);
+        $this->expectExceptionMessage('Unsupported analyzer protocol version 1.12.');
+
+        Protocol::readRequest(pack('N3', 0x4D41_4E41, (1 << 16) | 12, Protocol::DESCRIBE_REQUEST << 16));
+    }
+
+    /**
      * @return iterable<string, array{string, int}>
      */
     public static function unhandledResponses(): iterable
