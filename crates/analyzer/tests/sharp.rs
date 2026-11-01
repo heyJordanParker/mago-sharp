@@ -5319,18 +5319,18 @@ fn a_member_compared_by_order_refuses_a_key_with_no_order() {
 }
 
 /// The key a member compared by order orders by is the type the marked argument's function returns, whatever type
-/// parameters the member declares after it.
+/// parameters the member declares after it, and whatever order named arguments give it in.
 #[test]
 fn a_member_compared_by_order_orders_by_what_the_marked_function_returns() {
     let shelf = (
         "src/Lib/ShelfMembers.sharp",
         "namespace Lib;\n\nimport Sharp.Internal.ComparedByOrder;\n\npublic static class ShelfMembers\n{\n    extension<T>(List<T> items)\n    {\n        public List<T> rankedWith<TKey, TExtra>([ComparedByOrder] Function<TKey(T)> selector, TExtra extra) => items.sortedBy(selector);\n    }\n}\n",
     );
-    let sharp = "namespace Demo;\n\nimport Lib.ShelfMembers;\nimport Lib.Status;\n\nclass Report\n{\n    public List<Status> a(List<Status> statuses) => statuses.rankedWith(s => s, 1);\n\n    public List<int> b(List<int> numbers) => numbers.rankedWith(n => -n, true);\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.ShelfMembers;\nimport Lib.Status;\n\nclass Report\n{\n    public List<Status> a(List<Status> statuses) => statuses.rankedWith(s => s, 1);\n\n    public List<int> b(List<int> numbers) => numbers.rankedWith(n => -n, true);\n\n    public List<Status> c(List<Status> statuses) => statuses.rankedWith(extra: 1, selector: s => s);\n}\n";
 
     assert_eq!(
         issues(("src/Demo/Report.sharp", sharp), &[shelf, ("src/Lib/Status.php", STATUS)]),
-        ["8:73 invalid-argument"]
+        ["8:73 invalid-argument", "12:93 invalid-argument"]
     );
 }
 
@@ -12016,7 +12016,7 @@ fn collection_methods_take_and_give_the_types_of_their_elements() {
 /// struct, so a search of a struct beside another type, a number or a struct, is refused as `==` refuses it.
 #[test]
 fn a_search_needs_equality_on_the_element_type() {
-    let sharp = "namespace Demo;\n\nclass Shelf\n{\n    public int search(List<Line> lines, Line line, List<List<int>> rows, List<Money> prices, Money price, List<string> tags, List<int|float> amounts, List<Coin> coins, Coin coin, List<Line> ls, Line l, List<Any?> loose, Any? value, List<Line>? held, List<Money|Line> goods, List<Money|int> tallies, List<Money|Ticket> tickets, List<Coin|Line> pocket, List<Money?> wallet, List<Order> orders, Order order, List<List<Line>> shelves, List<Spot|int> spots, List<Address|Spot> places, Spot spot)\n    {\n        bool kept = lines.contains(line);\n        int? at = lines.indexOf(line);\n        bool row = rows.contains([1]);\n        bool found = prices.contains(price) && tags.contains(\"vip\") && amounts.contains(1);\n        int? priced = prices.indexOf(price);\n        bool same = lines.any(l => l === line);\n        bool minted = coins.contains(coin);\n        bool named = ls.contains(l) || ls.any(element => element === l);\n        bool any = loose.contains(value) || loose.any(x => x == value);\n        bool maybe = held?.contains(line) ?? false;\n        bool fixed = held?.any(l => l === line) ?? false;\n        bool dropped = lines.remove(line);\n        bool vip = loose.contains(\"vip\") && loose.any(x => x == \"vip\");\n        bool equal = lines.any(x => x == line);\n        bool either = goods.contains(price) || goods.any(x => x == price);\n        bool paid = loose.contains(price);\n        int? counted = tallies.indexOf(price);\n        bool spent = tickets.remove(price);\n        bool pocketed = pocket.contains(coin);\n        bool saved = wallet.contains(price) && wallet.any(x => x == price);\n        bool ordered = orders.contains(order);\n        bool shelved = shelves.contains(lines);\n        bool spotted = spots.contains(spot) || places.contains(spot);\n        return (kept || row || found || same || minted || named || any || maybe || fixed || dropped || vip || equal || either || paid || spent || pocketed || saved || ordered || shelved || spotted ? 1 : 0) + (at ?? 0) + (priced ?? 0) + (counted ?? 0);\n    }\n}\n\nclass Line\n{\n}\n\nclass Ticket\n{\n    public Ticket(public int serial { get; })\n    {\n    }\n\n    public static bool operator ==(Ticket a, Ticket b) => a.serial == b.serial;\n\n    public int hash() => this.serial;\n}\n\nclass Money\n{\n    public Money(public int cents { get; })\n    {\n    }\n\n    public static bool operator ==(Money a, Money b) => a.cents == b.cents;\n\n    public int hash() => this.cents;\n}\n\nclass Coin\n{\n    public Coin(public int cents { get; })\n    {\n    }\n\n    public static bool operator ==(Coin a, int cents) => a.cents == cents;\n\n    public int hash() => this.cents;\n}\n\nstruct Order\n{\n    public Order(public Line line { get; }) { }\n}\n\nstruct Spot\n{\n    public Spot(public int x { get; }) { }\n}\n\nstruct Address\n{\n    public Address(public string city { get; }) { }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Shelf\n{\n    public int search(List<Line> lines, Line line, List<List<int>> rows, List<Money> prices, Money price, List<string> tags, List<int|float> amounts, List<Coin> coins, Coin coin, List<Line> ls, Line l, List<Any?> loose, Any? value, List<Line>? held, List<Money|Line> goods, List<Money|int> tallies, List<Money|Ticket> tickets, List<Coin|Line> pocket, List<Money?> wallet, List<Order> orders, Order order, List<List<Line>> shelves, List<Spot|int> spots, List<Address|Spot> places, Spot spot)\n    {\n        bool kept = lines.contains(line);\n        int? at = lines.indexOf(line);\n        bool row = rows.contains([1]);\n        bool found = prices.contains(price) && tags.contains(\"vip\") && amounts.contains(1);\n        int? priced = prices.indexOf(price);\n        bool same = lines.any(l => l === line);\n        bool minted = coins.contains(coin);\n        bool named = ls.contains(l) || ls.any(element => element === l);\n        bool any = loose.contains(value) || loose.any(x => x == value);\n        bool maybe = held?.contains(line) ?? held?.contains(value: line) ?? false;\n        bool fixed = held?.any(l => l === line) ?? false;\n        bool dropped = lines.remove(line);\n        bool vip = loose.contains(\"vip\") && loose.any(x => x == \"vip\");\n        bool equal = lines.any(x => x == line);\n        bool either = goods.contains(price) || goods.any(x => x == price);\n        bool paid = loose.contains(price);\n        int? counted = tallies.indexOf(price);\n        bool spent = tickets.remove(price);\n        bool pocketed = pocket.contains(coin);\n        bool saved = wallet.contains(price) && wallet.any(x => x == price);\n        bool ordered = orders.contains(order);\n        bool shelved = shelves.contains(lines);\n        bool spotted = spots.contains(spot) || places.contains(spot);\n        return (kept || row || found || same || minted || named || any || maybe || fixed || dropped || vip || equal || either || paid || spent || pocketed || saved || ordered || shelved || spotted ? 1 : 0) + (at ?? 0) + (priced ?? 0) + (counted ?? 0);\n    }\n}\n\nclass Line\n{\n}\n\nclass Ticket\n{\n    public Ticket(public int serial { get; })\n    {\n    }\n\n    public static bool operator ==(Ticket a, Ticket b) => a.serial == b.serial;\n\n    public int hash() => this.serial;\n}\n\nclass Money\n{\n    public Money(public int cents { get; })\n    {\n    }\n\n    public static bool operator ==(Money a, Money b) => a.cents == b.cents;\n\n    public int hash() => this.cents;\n}\n\nclass Coin\n{\n    public Coin(public int cents { get; })\n    {\n    }\n\n    public static bool operator ==(Coin a, int cents) => a.cents == cents;\n\n    public int hash() => this.cents;\n}\n\nstruct Order\n{\n    public Order(public Line line { get; }) { }\n}\n\nstruct Spot\n{\n    public Spot(public int x { get; }) { }\n}\n\nstruct Address\n{\n    public Address(public string city { get; }) { }\n}\n";
 
     assert_eq!(
         refusals(("src/Demo/Shelf.sharp", sharp), &[]),
@@ -12029,6 +12029,7 @@ fn a_search_needs_equality_on_the_element_type() {
             "15:60 mixed-operand Left operand of `==` is `Any?`, which compares by value only with a string, a number, a `bool`, an enum case, a struct or a collection. | Check the value with `is` or `match` first, as in `if (value is int n)`, and compare `n`.",
             "15:65 mixed-operand Right operand of `==` is `Any?`, which compares by value only with a string, a number, a `bool`, an enum case, a struct or a collection. | Check the value with `is` or `match` first, as in `if (value is int n)`, and compare `n`.",
             "16:37 invalid-argument `contains` compares elements with `==`, and `Line` declares no `operator ==`. | Declare `operator ==` and `hash()` in `Line`, or test for the same object with `held?.any(l => l === line)`.",
+            "16:68 invalid-argument `contains` compares elements with `==`, and `Line` declares no `operator ==`. | Declare `operator ==` and `hash()` in `Line`, or test for the same object with `held?.any(l => l === line)`.",
             "18:37 invalid-argument `remove` compares elements with `==`, and `Line` declares no `operator ==`. | Declare `operator ==` and `hash()` in `Line`, or test for the same object with `lines.any(l => l === line)`.",
             "20:37 invalid-operand `==` cannot compare `Line` with `Line`: `Line` declares no `operator ==`. | Use `===` to test whether both sides are the same object.",
             "21:38 invalid-argument `contains` compares elements with `==`, and the `operator ==` of `Money` does not take `Line|Money` and `Money`. | Make the `operator ==` of `Money` take `Line|Money` and `Money`.",
@@ -12047,30 +12048,36 @@ fn a_search_needs_equality_on_the_element_type() {
 
 /// Spec section 12: a search compares the value it is given with each element by `==`, whether the call passes it by
 /// position or by its parameter's name, so `carts.contains(value: cart)` is refused as `carts.contains(cart)` is, and
-/// so are a `List`'s `indexOf` and `remove`, a `Set`'s `contains` and a `Map`'s `has` given `value:` or `key:`. The
-/// same named calls on a class that declares `operator ==` compile.
+/// so are a `List`'s `indexOf` and `remove`, a `Set`'s `contains` and a `Map`'s `has` given `value:` or `key:`. A
+/// spread passes the elements of its list, so `carts.contains(...[cart])` is refused too, with no help that names
+/// `[cart]` as the one value `===` would test. The same named and spread calls on a class that declares `operator ==`
+/// compile.
 #[test]
 fn a_named_search_argument_needs_equality_as_a_positional_one_does() {
-    let sharp = "namespace Demo;\n\nclass Shelf\n{\n    public bool search(List<Cart> carts, Cart cart, List<Money> prices, Money price, Set<Cart> held, Map<Cart, int> counts, Set<Money> wallet, Map<Money, int> ledger)\n    {\n        bool named = carts.contains(value: cart);\n        bool positional = carts.contains(cart);\n        int? at = carts.indexOf(value: cart);\n        int? atPositional = carts.indexOf(cart);\n        bool dropped = carts.remove(value: cart);\n        bool droppedPositional = carts.remove(cart);\n        bool kept = held.contains(value: cart);\n        bool keptPositional = held.contains(cart);\n        bool keyed = counts.has(key: cart);\n        bool keyedPositional = counts.has(cart);\n        bool priced = prices.contains(value: price) && prices.indexOf(value: price) != null && prices.remove(value: price);\n        bool paid = wallet.contains(value: price) && ledger.has(key: price);\n        return named || positional || at != null || atPositional != null || dropped || droppedPositional || kept || keptPositional || keyed || keyedPositional || priced || paid;\n    }\n}\n\nclass Cart\n{\n}\n\nclass Money\n{\n    public Money(public int cents { get; })\n    {\n    }\n\n    public static bool operator ==(Money a, Money b) => a.cents == b.cents;\n\n    public int hash() => this.cents;\n}\n";
+    let sharp = "namespace Demo;\n\nclass Shelf\n{\n    public bool search(List<Cart> carts, Cart cart, List<Money> prices, Money price, Set<Cart> held, Map<Cart, int> counts, Set<Money> wallet, Map<Money, int> ledger, List<Any?> loose)\n    {\n        bool named = carts.contains(value: cart);\n        bool positional = carts.contains(cart);\n        int? at = carts.indexOf(value: cart);\n        int? atPositional = carts.indexOf(cart);\n        bool dropped = carts.remove(value: cart);\n        bool droppedPositional = carts.remove(cart);\n        bool kept = held.contains(value: cart);\n        bool keptPositional = held.contains(cart);\n        bool keyed = counts.has(key: cart);\n        bool keyedPositional = counts.has(cart);\n        bool spread = carts.contains(...[cart]);\n        bool spreadPriced = prices.contains(...[price]);\n        bool spreadLoose = loose.contains(...[price]);\n        bool priced = prices.contains(value: price) && prices.indexOf(value: price) != null && prices.remove(value: price);\n        bool paid = wallet.contains(value: price) && ledger.has(key: price);\n        return named || positional || at != null || atPositional != null || dropped || droppedPositional || kept || keptPositional || keyed || keyedPositional || spread || spreadPriced || spreadLoose || priced || paid;\n    }\n}\n\nclass Cart\n{\n}\n\nclass Money\n{\n    public Money(public int cents { get; })\n    {\n    }\n\n    public static bool operator ==(Money a, Money b) => a.cents == b.cents;\n\n    public int hash() => this.cents;\n}\n";
 
-    let key = "is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`, and `Cart` is none of them.";
-    let refusal = "compares elements with `==`, and `Cart` declares no `operator ==`.";
+    let keys = "an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares";
+    let key = format!("is anything with `==` and `hash()`: {keys} `operator ==`, and `Cart` is none of them.");
+    let declared = format!("{keys} `public static bool operator ==` with `public int hash()`.");
+    let refusal = "compares elements with `==`, and `Cart` declares no `operator ==`. | Declare `operator ==` and `hash()` in `Cart`";
 
     assert_eq!(
-        written(sharp, &analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Shelf.sharp", sharp), &[])),
+        refusals(("src/Demo/Shelf.sharp", sharp), &[]),
         [
-            format!("5:86 template-constraint-violation A `Set`'s element {key}"),
-            format!("5:102 template-constraint-violation A `Map`'s key {key}"),
-            format!("7:44 invalid-argument `contains` {refusal}"),
-            format!("8:42 invalid-argument `contains` {refusal}"),
-            format!("9:40 invalid-argument `indexOf` {refusal}"),
-            format!("10:43 invalid-argument `indexOf` {refusal}"),
-            format!("11:44 invalid-argument `remove` {refusal}"),
-            format!("12:47 invalid-argument `remove` {refusal}"),
-            format!("13:42 invalid-argument `contains` {refusal}"),
-            format!("14:45 invalid-argument `contains` {refusal}"),
-            format!("15:38 invalid-argument `has` {refusal}"),
-            format!("16:43 invalid-argument `has` {refusal}"),
+            format!("5:86 template-constraint-violation A `Set`'s element {key} | Fill the `Set` with {declared}"),
+            format!("5:102 template-constraint-violation A `Map`'s key {key} | Key the `Map` by {declared}"),
+            format!("7:44 invalid-argument `contains` {refusal}, or test for the same object with `carts.any(c => c === cart)`."),
+            format!("8:42 invalid-argument `contains` {refusal}, or test for the same object with `carts.any(c => c === cart)`."),
+            format!("9:40 invalid-argument `indexOf` {refusal}, or test for the same object with `carts.any(c => c === cart)`."),
+            format!("10:43 invalid-argument `indexOf` {refusal}, or test for the same object with `carts.any(c => c === cart)`."),
+            format!("11:44 invalid-argument `remove` {refusal}, or test for the same object with `carts.any(c => c === cart)`."),
+            format!("12:47 invalid-argument `remove` {refusal}, or test for the same object with `carts.any(c => c === cart)`."),
+            format!("13:42 invalid-argument `contains` {refusal}, or test for the same object with `held.any(c => c === cart)`."),
+            format!("14:45 invalid-argument `contains` {refusal}, or test for the same object with `held.any(c => c === cart)`."),
+            format!("15:38 invalid-argument `has` {refusal}, or test for the same object with `counts.any(c => c === cart)`."),
+            format!("16:43 invalid-argument `has` {refusal}, or test for the same object with `counts.any(c => c === cart)`."),
+            format!("17:41 invalid-argument `contains` {refusal}."),
+            "19:46 invalid-argument `contains` compares elements with `==`, and an unchecked `Any?` element can't tell the same object as an element of `[price]` from an equal value. | ".to_owned(),
         ]
     );
 }

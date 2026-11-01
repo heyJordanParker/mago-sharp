@@ -1546,7 +1546,9 @@ pub(crate) fn check_ordered_key<A>(
 /// `Set<T>` need `==` on the element type." A search refuses what `element == value` refuses, so it agrees with
 /// `any(element => element == value)`: a class that declares no `operator ==` is refused with the reason `==` gives, as
 /// is an element the operator's call does not always take, an `Iterable` element is refused, as `==` on it is, and an `Any` element is refused unless the value is a string, a number or an enum case. A `null_safe` call's
-/// help keeps its `?.`.
+/// help keeps its `?.`. A `spread` value, as `contains(...[cart])`, is the list whose elements the call passes, so no
+/// help names it as the one value `===` would test.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn check_element_equality<A>(
     context: &mut Context<'_, '_, A>,
     method: &str,
@@ -1555,6 +1557,7 @@ pub(crate) fn check_element_equality<A>(
     element_type: &TUnion,
     value_type: &TUnion,
     null_safe: bool,
+    spread: bool,
 ) where
     A: Arena,
 {
@@ -1584,11 +1587,21 @@ pub(crate) fn check_element_equality<A>(
         }
         Some(Refusal::Instance) => {
             let class = display_refused_side(context, element_type, value_type, Comparand::is_instance);
-            let (receiver, value) = (quoted_source(context, receiver.span()), quoted_source(context, value.span()));
-            // The lambda names an element by the class's initial, as `l` for a `Line`, unless the call already uses it.
-            let initial = class.chars().next().map(|first| first.to_lowercase().to_string()).unwrap_or_default();
-            let element = if initial == receiver || initial == value { "element".to_owned() } else { initial };
-            let access = if null_safe { "?." } else { "." };
+            let help = if spread {
+                format!("Declare `operator ==` and `hash()` in `{class}`.")
+            } else {
+                let (receiver, value) = (quoted_source(context, receiver.span()), quoted_source(context, value.span()));
+                // The lambda names an element by the class's initial, as `l` for a `Line`, unless the call already uses
+                // it.
+                let initial = class.chars().next().map(|first| first.to_lowercase().to_string()).unwrap_or_default();
+                let element = if initial == receiver || initial == value { "element".to_owned() } else { initial };
+                let access = if null_safe { "?." } else { "." };
+
+                format!(
+                    "Declare `operator ==` and `hash()` in `{class}`, or test for the same object with \
+                         `{receiver}{access}any({element} => {element} === {value})`."
+                )
+            };
 
             (
                 IssueCode::InvalidArgument,
@@ -1596,24 +1609,25 @@ pub(crate) fn check_element_equality<A>(
                     "`{method}` compares elements with `==`, and `{class}` declares no `operator ==`."
                 ))
                 .with_note("`==` on a class instance exists only where its class declares `operator ==`.")
-                .with_help(format!(
-                    "Declare `operator ==` and `hash()` in `{class}`, or test for the same object with \
-                         `{receiver}{access}any({element} => {element} === {value})`."
-                )),
+                .with_help(help),
             )
         }
         Some(Refusal::UncheckedObject) => {
             let (receiver, value) = (quoted_source(context, receiver.span()), quoted_source(context, value.span()));
             let access = if null_safe { "?." } else { "." };
             let element = display_operand(context, element_type);
-
-            (
-                IssueCode::InvalidArgument,
+            let issue = if spread {
+                Issue::error(format!(
+                    "`{method}` compares elements with `==`, and an unchecked `{element}` element can't tell the same object as an element of `{value}` from an equal value."
+                ))
+            } else {
                 Issue::error(format!(
                     "`{method}` compares elements with `==`, and an unchecked `{element}` element can't tell the same object as `{value}` from an equal value."
                 ))
-                .with_help(format!("Test for the same object with `{receiver}{access}any(element => element === {value})`.")),
-            )
+                .with_help(format!("Test for the same object with `{receiver}{access}any(element => element === {value})`."))
+            };
+
+            (IssueCode::InvalidArgument, issue)
         }
         Some(Refusal::StructProperty) => {
             let issue = struct_property_issue(context, element_type, value_type);

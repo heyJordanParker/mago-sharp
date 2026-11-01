@@ -58,6 +58,7 @@ use crate::invocation::MethodInvocationKind;
 use crate::invocation::MethodTargetContext;
 use crate::invocation::analyzer::analyze_invocation;
 use crate::invocation::analyzer::get_parameter_of_argument;
+use crate::invocation::arguments::get_unpacked_argument_type;
 use crate::invocation::post_process::post_invocation_process;
 use crate::invocation::return_type_fetcher::fetch_invocation_return_type;
 use crate::invocation::template_result::seed_extension_type_arguments;
@@ -580,8 +581,15 @@ where
             let key_type = key_type.clone();
             check_ordered_key(context, &metadata.original_name.as_str_lossy(), value, &key_type);
         }
+        // A spread, as `contains(...[cart])`, passes the elements of the list it spreads, so the search compares those.
         if is_marked(parameter, COMPARED_BY_EQUALITY)
-            && let Some(value_type) = artifacts.get_expression_type(value)
+            && let Some(value_type) = artifacts.get_expression_type(value).cloned().and_then(|value_type| {
+                if argument.is_unpacked() {
+                    get_unpacked_argument_type(context, &value_type, value.span())
+                } else {
+                    Some(value_type)
+                }
+            })
             && let Some(receiver_type) = artifacts.get_expression_type(receiver)
             && receiver_type.types.iter().all(|atomic| matches!(atomic, TAtomic::Array(_) | TAtomic::Null))
         {
@@ -604,7 +612,7 @@ where
             if (searches_list || !is_key_type(&element_type, context.codebase))
                 && union_comparator::is_contained_by(
                     context.codebase,
-                    value_type,
+                    &value_type,
                     &element_type,
                     false,
                     false,
@@ -619,8 +627,9 @@ where
                     receiver,
                     value,
                     &element_type,
-                    value_type,
+                    &value_type,
                     is_null_safe,
+                    argument.is_unpacked(),
                 );
             }
         }
