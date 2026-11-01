@@ -7,7 +7,6 @@
 #![allow(clippy::big_endian_bytes, clippy::little_endian_bytes)]
 
 use std::io;
-use std::io::Read as _;
 use std::mem::offset_of;
 use std::mem::size_of;
 use std::path::Path;
@@ -384,15 +383,11 @@ pub fn stamp(root: &Path, path: &[u8]) -> Result<Option<Input>, DatabaseError> {
     if !folder_holds_name(&full)? {
         return Ok(None);
     }
-    // The modification time is taken before the contents, from the same open file. A write between the two leaves a
-    // stamp whose time is older than the file's, so the engine hashes the file instead of trusting the time and size.
-    let read = std::fs::File::open(&full).and_then(|mut file| {
-        let modified = file.metadata()?.modified()?;
-        let mut contents = Vec::new();
-        file.read_to_end(&mut contents)?;
-
-        Ok((contents, modified))
-    });
+    // The modification time is taken before the contents. A write between the two leaves a stamp whose time is older
+    // than the file's, so the engine hashes the file instead of trusting the time and size.
+    let read = std::fs::metadata(&full)
+        .and_then(|metadata| metadata.modified())
+        .and_then(|modified| Ok((std::fs::read(&full)?, modified)));
     let (contents, modified) = match read {
         Ok(read) => read,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
