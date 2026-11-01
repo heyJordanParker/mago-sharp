@@ -7,6 +7,8 @@ use clap::ColorChoice;
 use diffy::PatchFormatter;
 
 use mago_database::change::ChangeLog;
+use mago_database::error::DatabaseError;
+use mago_database::error::IOAction;
 use mago_database::file::File;
 use mago_linter::integration::IntegrationSet;
 use mago_linter::settings::RulesSettings;
@@ -26,24 +28,28 @@ pub mod version;
 
 /// Writes `bytes` to a new file beside `path` and renames it over `path`, so a reader sees the old file or the new
 /// one, never part of one. The file gets the mode any new file gets, `0644` under the usual umask, so a server that
-/// runs PHP as another user reads it.
-pub(crate) fn write_by_rename(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+/// runs PHP as another user reads it. A folder that can't be created is named as the folder, and every other failure as
+/// a failed write of `path`.
+pub(crate) fn write_by_rename(path: &Path, bytes: &[u8]) -> Result<(), DatabaseError> {
     let folder = path.parent().unwrap_or(path);
-    std::fs::create_dir_all(folder)?;
+    std::fs::create_dir_all(folder).map_err(|error| DatabaseError::io(IOAction::CreateFolder, folder, error))?;
+    let failed = |error: std::io::Error| DatabaseError::io(IOAction::WriteFile, path, error);
     let mut builder = tempfile::Builder::new();
     #[cfg(unix)]
     builder.permissions(std::os::unix::fs::PermissionsExt::from_mode(0o666));
-    let mut file = builder.tempfile_in(folder)?;
-    file.write_all(bytes)?;
-    let (file, written) = file.keep().map_err(|error| error.error)?;
+    let mut file = builder.tempfile_in(folder).map_err(failed)?;
+    file.write_all(bytes).map_err(failed)?;
+    let (file, written) = file.keep().map_err(|error| failed(error.error))?;
     drop(file);
 
     // `NamedTempFile::persist` renames with `MoveFileExW` alone, which fails on Windows while a reader holds the old
     // file open. `std::fs::rename` then falls back to a POSIX rename, which replaces it when every reader opened it with
     // `FILE_SHARE_DELETE`, as Rust's `File::open` does, and leaves each reader the old file.
-    std::fs::rename(&written, path).inspect_err(|_| {
-        let _ = std::fs::remove_file(&written);
-    })
+    std::fs::rename(&written, path)
+        .inspect_err(|_| {
+            let _ = std::fs::remove_file(&written);
+        })
+        .map_err(failed)
 }
 
 /// Determines whether colors should be used on stdout, by the rule [`ReportingColorChoice::should_use_colors`] holds.

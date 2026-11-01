@@ -188,7 +188,7 @@ fn compile_into(configuration: &Configuration, root: &Path, folder: &Path) -> Re
     let mut changed = false;
     let mut write = |path: &Path, bytes: &[u8]| -> Result<(), Error> {
         if std::fs::read(path).ok().as_deref() != Some(bytes) {
-            write_by_rename(path, bytes).map_err(|error| DatabaseError::io(IOAction::WriteFile, path, error))?;
+            write_by_rename(path, bytes)?;
             changed = true;
         }
         Ok(())
@@ -380,8 +380,7 @@ fn compile(configuration: &Configuration, color_choice: ColorChoice) -> Result<C
             || std::fs::read(&path).map_err(|error| DatabaseError::io(IOAction::ReadFile, &path, error))?
                 != contents.as_bytes()
         {
-            write_by_rename(&path, contents.as_bytes())
-                .map_err(|error| DatabaseError::io(IOAction::WriteFile, &path, error))?;
+            write_by_rename(&path, contents.as_bytes())?;
         }
         written_beside.insert(path);
     }
@@ -461,8 +460,7 @@ fn compile(configuration: &Configuration, color_choice: ColorChoice) -> Result<C
 
         match compilation {
             Compilation::Accepted(bytes) => {
-                write_by_rename(&compiled, &bytes)
-                    .map_err(|error| DatabaseError::io(IOAction::WriteFile, &compiled, error))?;
+                write_by_rename(&compiled, &bytes)?;
                 written.insert(compiled);
                 accepted.insert(file_id);
             }
@@ -488,8 +486,7 @@ fn compile(configuration: &Configuration, color_choice: ColorChoice) -> Result<C
         let accepted: Vec<&Listener> =
             listeners.iter().filter(|listener| accepted.contains(&listener.file_id)).collect();
         let table = compiled_folder.join(LISTENERS);
-        write_by_rename(&table, &listener_table(&inputs, &accepted, server.dispatcher_module().as_ref()))
-            .map_err(|error| DatabaseError::io(IOAction::WriteFile, &table, error))?;
+        write_by_rename(&table, &listener_table(&inputs, &accepted, server.dispatcher_module().as_ref()))?;
         written.insert(table);
     }
     if compiled_folder.is_dir() {

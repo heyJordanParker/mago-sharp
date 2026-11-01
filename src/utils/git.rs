@@ -245,7 +245,11 @@ pub fn exclude(workspace: &Path, owner: &str, paths: &[PathBuf]) -> Result<(), E
         warn_untracked(
             workspace,
             &untracked,
-            &format!("{} can't be replaced, as {folder} can't be written: {}", file.display(), error.kind()),
+            &format!(
+                "{} can't be replaced, as {folder} can't be written: {}",
+                file.display(),
+                std::io::Error::from(error).kind()
+            ),
             &format!("Make {folder} writable"),
         );
     }

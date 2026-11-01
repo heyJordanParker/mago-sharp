@@ -1674,6 +1674,37 @@ fn compile_names_the_folder_its_walk_of_the_sharp_folder_cannot_open() {
     );
 }
 
+/// A folder of `.sharp` the compile can't create is named as the folder, not as the compiled file it would hold. Root
+/// writes into a folder of mode 555, so the test has nothing to show there.
+#[cfg(unix)]
+#[test]
+fn compile_names_the_folder_of_the_sharp_folder_it_cannot_create() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = project(ORDER, MONEY);
+    let root = std::fs::canonicalize(directory.path()).unwrap();
+    compile_succeeds(&root);
+    let compiled = root.join(".sharp");
+    let app = compiled.join("app");
+    std::fs::remove_dir_all(&app).unwrap();
+    std::fs::set_permissions(&compiled, std::fs::Permissions::from_mode(0o555)).unwrap();
+    if std::fs::create_dir(&app).is_ok() {
+        std::fs::set_permissions(&compiled, std::fs::Permissions::from_mode(0o755)).unwrap();
+        return;
+    }
+
+    let output = compile(&root);
+    std::fs::set_permissions(&compiled, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    assert!(!output.status.success(), "{}", printed(&output));
+    assert!(
+        printed(&output)
+            .contains(&format!("mago: can't create the folder `{}`: Permission denied (os error 13)", app.display())),
+        "{}",
+        printed(&output)
+    );
+}
+
 /// A repository git refuses to read, as a checkout another user owns in a container or a CI job, or a broken `.git`,
 /// fails no compile: the block lists every PHP file, as with no git to run, and the compile warns once with git's
 /// reason.
