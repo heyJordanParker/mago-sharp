@@ -249,7 +249,7 @@ where
         let declaring_class_name = context
             .codebase
             .get_class_like(declaring_class.as_bytes())
-            .map_or_else(|| declaring_class, |metadata| metadata.original_name);
+            .map_or(declaring_class, |metadata| metadata.original_name);
 
         let method = display_member(context, declaring_class_name, BytesDisplay(method_name));
         let issue_title = format!("Cannot access {visibility} method `{method}`.");
