@@ -71,11 +71,11 @@ use crate::version_check::VersionPinParseError;
 /// to be accessed programmatically or logged for debugging.
 #[derive(Debug)]
 pub enum Error {
-    /// Failed to load or scan the file database.
+    /// A database error, or a file or folder a command failed to read, write or delete.
     ///
-    /// This error occurs during file system scanning when the database loader encounters
-    /// issues such as permission errors, invalid paths, or I/O failures while discovering
-    /// PHP files in the workspace.
+    /// An I/O error prints as its own message, which names the action and the path, as "can't write the file
+    /// `.sharp/app/Order.sharpc`: …", since it may come from a write or a delete and not from loading the database.
+    /// Every other database error prints after "Failed to load database:".
     Database(DatabaseError),
 
     /// Failed to generate or output analysis reports.
@@ -307,6 +307,8 @@ pub enum Error {
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            // An I/O error's message names what failed, a read, a write or a delete, and which path.
+            Self::Database(error @ DatabaseError::IOError { .. }) => write!(f, "{error}"),
             Self::Database(error) => write!(f, "Failed to load database: {error}"),
             Self::Reporting(error) => write!(f, "Failed to report results: {error}"),
             Self::BuildingRuntime(error) => write!(f, "Failed to build the runtime: {error}"),

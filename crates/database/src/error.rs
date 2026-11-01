@@ -3,7 +3,9 @@ use std::path::PathBuf;
 
 use globset::Error as GlobSetError;
 
-/// What the database was doing to a path when the file system failed it.
+/// What mago was doing to a path when the file system failed it: loading the database, or reading, writing or deleting
+/// a file a command keeps, as `mago compile` does in the `.sharp` folder. The message of an error names it, so it reads
+/// alone, with no word about the database.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IOAction {
     ReadFile,
