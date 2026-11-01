@@ -3,6 +3,7 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::fmt::Display;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::OnceLock;
@@ -515,6 +516,11 @@ struct ProviderRegistration<T> {
     targets: Vec<T>,
 }
 
+/// The plugin of the provider of `providers` registered at `index`.
+fn provider_plugin<T>(providers: &[ProviderRegistration<T>], index: u16) -> Option<u16> {
+    providers.iter().find(|provider| provider.index == index).map(|provider| provider.plugin)
+}
+
 type FunctionProvider = ProviderRegistration<FunctionTarget>;
 type MethodProvider = ProviderRegistration<MethodTarget>;
 type PropertyProvider = ProviderRegistration<PropertyTarget>;
@@ -750,19 +756,26 @@ pub trait AnalyzerTransport: std::fmt::Debug + Send + Sync {
         payloads.iter().map(|payload| self.broadcast(payload)).collect()
     }
 
-    /// Sends one provider request to an available worker.
+    /// Sends one provider request to an available worker. `running` names what the request runs, for its
+    /// deadline's error when the worker names nothing it started.
     ///
     /// # Errors
     ///
     /// Returns an error if no worker can process the request.
-    fn request(&self, payload: Vec<u8>) -> Result<Vec<u8>, WorkerError>;
+    fn request(&self, payload: Vec<u8>, running: Option<&dyn Display>) -> Result<Vec<u8>, WorkerError>;
 
-    /// Sends one provider request while servicing nested analyzer queries.
+    /// Sends one request, named by `running` as [`Self::request`] names it, while servicing nested analyzer
+    /// queries.
     ///
     /// # Errors
     ///
     /// Returns an error if the worker or nested query handler fails.
-    fn request_with_handler<H>(&self, payload: Vec<u8>, handler: &mut H) -> Result<Vec<u8>, WorkerError>
+    fn request_with_handler<H>(
+        &self,
+        payload: Vec<u8>,
+        running: Option<&dyn Display>,
+        handler: &mut H,
+    ) -> Result<Vec<u8>, WorkerError>
     where
         H: WorkerRequestHandler;
 
@@ -777,13 +790,14 @@ pub trait AnalyzerTransport: std::fmt::Debug + Send + Sync {
     fn request_with_handler_affinity<H>(
         &self,
         payload: Vec<u8>,
+        running: Option<&dyn Display>,
         _affinity: &[u8],
         handler: &mut H,
     ) -> Result<Vec<u8>, WorkerError>
     where
         H: WorkerRequestHandler,
     {
-        self.request_with_handler(payload, handler)
+        self.request_with_handler(payload, running, handler)
     }
 }
 
@@ -804,27 +818,33 @@ impl AnalyzerTransport for WorkerPool {
         Self::broadcast_sequence(self, group, payloads)
     }
 
-    fn request(&self, payload: Vec<u8>) -> Result<Vec<u8>, WorkerError> {
-        Self::request(self, payload)
+    fn request(&self, payload: Vec<u8>, running: Option<&dyn Display>) -> Result<Vec<u8>, WorkerError> {
+        Self::request(self, payload, running)
     }
 
-    fn request_with_handler<H>(&self, payload: Vec<u8>, handler: &mut H) -> Result<Vec<u8>, WorkerError>
+    fn request_with_handler<H>(
+        &self,
+        payload: Vec<u8>,
+        running: Option<&dyn Display>,
+        handler: &mut H,
+    ) -> Result<Vec<u8>, WorkerError>
     where
         H: WorkerRequestHandler,
     {
-        Self::request_with_handler(self, payload, handler)
+        Self::request_with_handler(self, payload, running, handler)
     }
 
     fn request_with_handler_affinity<H>(
         &self,
         payload: Vec<u8>,
+        running: Option<&dyn Display>,
         affinity: &[u8],
         handler: &mut H,
     ) -> Result<Vec<u8>, WorkerError>
     where
         H: WorkerRequestHandler,
     {
-        Self::request_with_handler_affinity(self, payload, affinity, handler)
+        Self::request_with_handler_affinity(self, payload, running, affinity, handler)
     }
 }
 
@@ -902,6 +922,35 @@ fn provider_capabilities<T>(providers: &[ProviderRegistration<T>]) -> Box<[u8]> 
 }
 
 impl<T> Backend<T> {
+    /// Names the `kind` providers at `indices` by their plugins, which `plugin_of` finds for each provider index, as
+    /// "the return-type providers of plugin `routes`", for the deadline's error of the request that runs them. A
+    /// provider request is one unit, so Mago names it from what it sent and the worker sends no progress for it.
+    fn provider_names<'names>(
+        &'names self,
+        kind: &'names str,
+        plugin_of: impl Fn(u16) -> Option<u16> + 'names,
+        indices: &'names [u16],
+    ) -> impl Display + 'names {
+        std::fmt::from_fn(move |formatter| {
+            let mut plugins = Vec::new();
+            for index in indices {
+                let plugin = plugin_of(*index).and_then(|plugin| self.registration.plugins.get(usize::from(plugin)));
+                if let Some(plugin) = plugin
+                    && !plugins.contains(&plugin.identifier.as_str())
+                {
+                    plugins.push(plugin.identifier.as_str());
+                }
+            }
+
+            write!(formatter, "the {kind} providers of plugin{}", if plugins.len() > 1 { "s" } else { "" })?;
+            for (position, plugin) in plugins.iter().enumerate() {
+                write!(formatter, "{} `{plugin}`", if position == 0 { "" } else { "," })?;
+            }
+
+            Ok(())
+        })
+    }
+
     fn new(transport: Arc<T>, registration: Registration) -> Self {
         let (function_exact, function_wildcard) = index_function_providers(&registration.function_providers);
         let (function_signature_exact, function_signature_wildcard) = index_function_providers(
@@ -1803,7 +1852,11 @@ where
             let ipc_start = self.trace_enabled.then(Instant::now);
             let response = backend
                 .transport
-                .request_with_handler(request, &mut handler)
+                .request_with_handler(
+                    request,
+                    Some(&format_args!("the issue-filter hooks of {}", mago_bytes::BytesDisplay(&file.name))),
+                    &mut handler,
+                )
                 .inspect_err(|_| self.record_issue_filter_error())?;
 
             if let Some(start) = ipc_start {
@@ -1891,9 +1944,18 @@ where
             self.telemetry.lifecycle_request_bytes.fetch_add(request.len() as u64, Ordering::Relaxed);
         }
 
+        // Only an after-file request names a file, whose hooks are its one unit, so Mago names them. The worker names
+        // each unit of the other phases as it starts it.
+        let file_hooks = default_file.map(|file| {
+            std::fmt::from_fn(move |formatter| {
+                write!(formatter, "the hooks of {}", mago_bytes::BytesDisplay(&file.name))
+            })
+        });
         let ipc_start = self.trace_enabled.then(Instant::now);
-        let response =
-            backend.transport.request_with_handler(request, handler).inspect_err(|_| self.record_lifecycle_error())?;
+        let response = backend
+            .transport
+            .request_with_handler(request, file_hooks.as_ref().map(|hooks| hooks as &dyn Display), handler)
+            .inspect_err(|_| self.record_lifecycle_error())?;
 
         if let Some(start) = ipc_start {
             self.telemetry.lifecycle_ipc_ns.fetch_add(duration_nanos(start.elapsed()), Ordering::Relaxed);
@@ -2244,11 +2306,14 @@ where
         Ok(issues)
     }
 
-    /// Sends `request`, made while Mago analyzed `file_id`, or answers it from the memoized responses.
+    /// Sends `request`, made while Mago analyzed `file_id` and named by `running`, or answers it from the memoized
+    /// responses.
+    #[allow(clippy::too_many_arguments)]
     fn exchange_provider_request(
         &self,
         backend: &Backend<T>,
         request: &mut protocol::ReturnTypeRequest<'_>,
+        running: &dyn Display,
         file_id: FileId,
         affinity: &[u8],
         codebase: &CodebaseMetadata,
@@ -2281,9 +2346,10 @@ where
             response
         } else {
             let payload = std::mem::take(&mut request.payload);
-            let response = self.exchange_provider_payload(backend, payload, affinity, codebase, session, |handle| {
-                protocol::resolve_type_handle(&request.types, handle)
-            })?;
+            let response =
+                self.exchange_provider_payload(backend, payload, running, affinity, codebase, session, |handle| {
+                    protocol::resolve_type_handle(&request.types, handle)
+                })?;
             if let Some(cache_key) = cache_key {
                 backend.provider_response_cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(
                     generation,
@@ -2309,10 +2375,12 @@ where
         result
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn exchange_provider_payload<'type_info>(
         &self,
         backend: &Backend<T>,
         request: Vec<u8>,
+        running: &dyn Display,
         affinity: &[u8],
         codebase: &CodebaseMetadata,
         session: &ExternalAnalysisSession,
@@ -2336,7 +2404,7 @@ where
         }
         let response = backend
             .transport
-            .request_with_handler_affinity(request, affinity, &mut handler)
+            .request_with_handler_affinity(request, Some(running), affinity, &mut handler)
             .inspect_err(|_| self.record_error())?;
         if let Some(start) = ipc_start {
             self.telemetry.ipc_ns.fetch_add(duration_nanos(start.elapsed()), Ordering::Relaxed);
@@ -2346,10 +2414,12 @@ where
         Ok(response)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn dispatch_assertion_request(
         &self,
         backend: &Backend<T>,
         mut request: protocol::ReturnTypeRequest<'_>,
+        running: &dyn Display,
         file_id: FileId,
         affinity: &[u8],
         codebase: &CodebaseMetadata,
@@ -2358,7 +2428,8 @@ where
         if self.trace_enabled {
             self.telemetry.assertion_requests.fetch_add(1, Ordering::Relaxed);
         }
-        let response = self.exchange_provider_request(backend, &mut request, file_id, affinity, codebase, session)?;
+        let response =
+            self.exchange_provider_request(backend, &mut request, running, file_id, affinity, codebase, session)?;
         let result = self.decode_provider_response(|| {
             protocol::decode_assertion_response(&response, |handle| {
                 protocol::resolve_type_handle(&request.types, handle)
@@ -2489,9 +2560,18 @@ where
                 self.telemetry.encode_ns.fetch_add(duration_nanos(start.elapsed()), Ordering::Relaxed);
             }
 
+            let plugin_of = |index| match target {
+                CallableTarget::Function(_) => {
+                    provider_plugin(&backend.registration.function_assertion_providers, index)
+                }
+                CallableTarget::Method { .. } => {
+                    provider_plugin(&backend.registration.method_assertion_providers, index)
+                }
+            };
             let assertions = self.dispatch_assertion_request(
                 backend,
                 request,
+                &backend.provider_names("assertion", plugin_of, indices.as_slice()),
                 source_file.id,
                 target.affinity(),
                 codebase,
@@ -2516,10 +2596,12 @@ where
         Ok(None)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn dispatch_callable_signature_request(
         &self,
         backend: &Backend<T>,
         mut request: protocol::ReturnTypeRequest<'_>,
+        running: &dyn Display,
         file_id: FileId,
         affinity: &[u8],
         codebase: &CodebaseMetadata,
@@ -2528,7 +2610,8 @@ where
         if self.trace_enabled {
             self.telemetry.signature_requests.fetch_add(1, Ordering::Relaxed);
         }
-        let response = self.exchange_provider_request(backend, &mut request, file_id, affinity, codebase, session)?;
+        let response =
+            self.exchange_provider_request(backend, &mut request, running, file_id, affinity, codebase, session)?;
         let result = self.decode_provider_response(|| {
             protocol::decode_callable_signature_response(&response, |handle| {
                 protocol::resolve_type_handle(&request.types, handle)
@@ -2664,9 +2747,14 @@ where
                 self.telemetry.encode_ns.fetch_add(duration_nanos(start.elapsed()), Ordering::Relaxed);
             }
 
+            let plugin_of = |index| match target {
+                CallableTarget::Function(_) => provider_plugin(&backend.registration.function_providers, index),
+                CallableTarget::Method { .. } => provider_plugin(&backend.registration.method_providers, index),
+            };
             let signature = self.dispatch_callable_signature_request(
                 backend,
                 request,
+                &backend.provider_names("callable signature", plugin_of, indices.as_slice()),
                 source_file.id,
                 target.affinity(),
                 codebase,
@@ -2818,9 +2906,14 @@ where
             if let Some(start) = encode_start {
                 self.telemetry.encode_ns.fetch_add(duration_nanos(start.elapsed()), Ordering::Relaxed);
             }
+            let plugin_of = |index| match target {
+                CallableTarget::Function(_) => provider_plugin(&backend.registration.function_providers, index),
+                CallableTarget::Method { .. } => provider_plugin(&backend.registration.method_providers, index),
+            };
             let response = self.exchange_provider_request(
                 backend,
                 &mut request,
+                &backend.provider_names("return-type", plugin_of, indices.as_slice()),
                 source_file.id,
                 target.affinity(),
                 codebase,
@@ -2930,10 +3023,20 @@ where
                 self.telemetry.request_bytes.fetch_add(request.payload.len() as u64, Ordering::Relaxed);
             }
 
-            let response =
-                self.exchange_provider_payload(backend, request.payload, class, codebase, session, |handle| {
-                    protocol::resolve_type_handle(&request.types, handle)
-                })?;
+            let running = backend.provider_names(
+                "property type",
+                |index| provider_plugin(&backend.registration.property_providers, index),
+                indices.as_slice(),
+            );
+            let response = self.exchange_provider_payload(
+                backend,
+                request.payload,
+                &running,
+                class,
+                codebase,
+                session,
+                |handle| protocol::resolve_type_handle(&request.types, handle),
+            )?;
             let response = session.record_response_reads(span.file_id, &response)?;
 
             let decode_start = self.trace_enabled.then(Instant::now);
@@ -3011,10 +3114,20 @@ where
             )
             .inspect_err(|_| self.record_error())?;
 
-            let response =
-                self.exchange_provider_payload(backend, request.payload, class, codebase, session, |handle| {
-                    protocol::resolve_type_handle(&request.types, handle)
-                })?;
+            let running = backend.provider_names(
+                "call forwarding",
+                |index| provider_plugin(&backend.registration.call_forwarding_providers, index),
+                indices.as_slice(),
+            );
+            let response = self.exchange_provider_payload(
+                backend,
+                request.payload,
+                &running,
+                class,
+                codebase,
+                session,
+                |handle| protocol::resolve_type_handle(&request.types, handle),
+            )?;
             let response = session.record_response_reads(source_file.id, &response)?;
 
             let result = protocol::decode_call_forwarding_response(&response, |handle| {
@@ -3087,9 +3200,22 @@ where
                 self.telemetry.request_bytes.fetch_add(request.len() as u64, Ordering::Relaxed);
             }
 
+            let running = backend.provider_names(
+                "property initialization",
+                |index| provider_plugin(&backend.registration.property_initialization_providers, index),
+                indices.as_slice(),
+            );
             let response = session.record_response_reads(
                 source_file.id,
-                &self.exchange_provider_payload(backend, request, declaring_class, codebase, session, |_| None)?,
+                &self.exchange_provider_payload(
+                    backend,
+                    request,
+                    &running,
+                    declaring_class,
+                    codebase,
+                    session,
+                    |_| None,
+                )?,
             )?;
 
             let decode_start = self.trace_enabled.then(Instant::now);
@@ -3184,10 +3310,22 @@ where
                 self.telemetry.request_bytes.fetch_add(request.len() as u64, Ordering::Relaxed);
             }
 
+            let running = backend.provider_names(
+                "class initializer",
+                |index| provider_plugin(&backend.registration.class_initializer_providers, index),
+                indices.as_slice(),
+            );
             let response = session.record_response_reads(
                 source_file.id,
-                &self
-                    .exchange_provider_payload(backend, request, class.name.as_bytes(), codebase, session, |_| None)?,
+                &self.exchange_provider_payload(
+                    backend,
+                    request,
+                    &running,
+                    class.name.as_bytes(),
+                    codebase,
+                    session,
+                    |_| None,
+                )?,
             )?;
 
             let decode_start = self.trace_enabled.then(Instant::now);
@@ -3720,6 +3858,7 @@ mod tests {
     use mago_codex::ttype::atomic::array::TArray;
     use mago_codex::ttype::atomic::array::keyed::TKeyedArray;
     use mago_codex::ttype::get_int;
+    use mago_codex::ttype::get_mixed;
     use mago_codex::ttype::get_string;
     use mago_extension::WorkerError;
     use mago_span::Position;
@@ -3741,10 +3880,11 @@ mod tests {
     struct RegistrationTransport(Vec<u8>);
 
     /// A worker with a property type provider and a call forwarding provider, which declines every request it gets
-    /// and keeps each one.
+    /// and keeps each one, with the name Mago gave it.
     #[derive(Debug, Default)]
     struct DecliningTransport {
         requests: Mutex<Vec<Vec<u8>>>,
+        names: Mutex<Vec<Option<String>>>,
     }
 
     impl AnalyzerTransport for DecliningTransport {
@@ -3752,18 +3892,60 @@ mod tests {
             Ok(vec![protocol::testing::registration_response_with_property_providers()])
         }
 
-        fn request(&self, payload: Vec<u8>) -> Result<Vec<u8>, WorkerError> {
+        fn request(&self, payload: Vec<u8>, running: Option<&dyn Display>) -> Result<Vec<u8>, WorkerError> {
             let response = protocol::testing::declined_response(&payload);
             self.requests.lock().unwrap().push(payload);
+            self.names.lock().unwrap().push(running.map(ToString::to_string));
 
             Ok(response)
         }
 
-        fn request_with_handler<H>(&self, payload: Vec<u8>, _handler: &mut H) -> Result<Vec<u8>, WorkerError>
+        fn request_with_handler<H>(
+            &self,
+            payload: Vec<u8>,
+            running: Option<&dyn Display>,
+            _handler: &mut H,
+        ) -> Result<Vec<u8>, WorkerError>
         where
             H: WorkerRequestHandler,
         {
-            self.request(payload)
+            self.request(payload, running)
+        }
+    }
+
+    /// A worker with one provider or hook of every kind a request runs alone, and an after-file hook, whose callback
+    /// compares a request-local type and then never finishes, so each request misses its deadline as a hung worker's
+    /// does, under the name Mago gave it.
+    #[derive(Debug)]
+    struct HangingTransport;
+
+    impl AnalyzerTransport for HangingTransport {
+        fn broadcast(&self, _payload: &[u8]) -> Result<Vec<Vec<u8>>, WorkerError> {
+            Ok(vec![protocol::testing::registration_response_with_every_provider()])
+        }
+
+        #[cfg_attr(coverage_nightly, coverage(off))]
+        fn request(&self, _payload: Vec<u8>, _running: Option<&dyn Display>) -> Result<Vec<u8>, WorkerError> {
+            unreachable!("Mago services nested queries for every request these tests send")
+        }
+
+        fn request_with_handler<H>(
+            &self,
+            _payload: Vec<u8>,
+            running: Option<&dyn Display>,
+            handler: &mut H,
+        ) -> Result<Vec<u8>, WorkerError>
+        where
+            H: WorkerRequestHandler,
+        {
+            let _answer = handler.handle(&Frame::request(1, protocol::testing::type_comparison_of_handle_zero()));
+
+            Err(WorkerError::Timeout {
+                host: "acme".to_owned(),
+                worker: 0,
+                running: running.map(ToString::to_string),
+                duration: Duration::from_secs(30),
+            })
         }
     }
 
@@ -3772,16 +3954,24 @@ mod tests {
             Ok(vec![protocol::testing::registration_response()])
         }
 
-        fn request(&self, payload: Vec<u8>) -> Result<Vec<u8>, WorkerError> {
+        // The tests of this worker read its registration only, and route no request to it.
+        #[cfg_attr(coverage_nightly, coverage(off))]
+        fn request(&self, payload: Vec<u8>, _running: Option<&dyn Display>) -> Result<Vec<u8>, WorkerError> {
             self.requests.lock().unwrap().push(payload);
             Ok(protocol::testing::named_object_response("Demo\\Service"))
         }
 
-        fn request_with_handler<H>(&self, payload: Vec<u8>, _handler: &mut H) -> Result<Vec<u8>, WorkerError>
+        #[cfg_attr(coverage_nightly, coverage(off))]
+        fn request_with_handler<H>(
+            &self,
+            payload: Vec<u8>,
+            running: Option<&dyn Display>,
+            _handler: &mut H,
+        ) -> Result<Vec<u8>, WorkerError>
         where
             H: WorkerRequestHandler,
         {
-            self.request(payload)
+            self.request(payload, running)
         }
     }
 
@@ -3798,11 +3988,18 @@ mod tests {
             Ok(responses)
         }
 
-        fn request(&self, _payload: Vec<u8>) -> Result<Vec<u8>, WorkerError> {
+        #[cfg_attr(coverage_nightly, coverage(off))]
+        fn request(&self, _payload: Vec<u8>, _running: Option<&dyn Display>) -> Result<Vec<u8>, WorkerError> {
             unreachable!("initialization tests do not issue routed requests")
         }
 
-        fn request_with_handler<H>(&self, _payload: Vec<u8>, _handler: &mut H) -> Result<Vec<u8>, WorkerError>
+        #[cfg_attr(coverage_nightly, coverage(off))]
+        fn request_with_handler<H>(
+            &self,
+            _payload: Vec<u8>,
+            _running: Option<&dyn Display>,
+            _handler: &mut H,
+        ) -> Result<Vec<u8>, WorkerError>
         where
             H: WorkerRequestHandler,
         {
@@ -3815,11 +4012,18 @@ mod tests {
             Ok(vec![self.0.clone()])
         }
 
-        fn request(&self, _payload: Vec<u8>) -> Result<Vec<u8>, WorkerError> {
+        #[cfg_attr(coverage_nightly, coverage(off))]
+        fn request(&self, _payload: Vec<u8>, _running: Option<&dyn Display>) -> Result<Vec<u8>, WorkerError> {
             unreachable!("registration tests do not issue routed requests")
         }
 
-        fn request_with_handler<H>(&self, _payload: Vec<u8>, _handler: &mut H) -> Result<Vec<u8>, WorkerError>
+        #[cfg_attr(coverage_nightly, coverage(off))]
+        fn request_with_handler<H>(
+            &self,
+            _payload: Vec<u8>,
+            _running: Option<&dyn Display>,
+            _handler: &mut H,
+        ) -> Result<Vec<u8>, WorkerError>
         where
             H: WorkerRequestHandler,
         {
@@ -3886,6 +4090,235 @@ mod tests {
             .map(|request| protocol::testing::names(request, b"Sharp\\Map"))
             .collect();
         assert_eq!(sent_maps, [true, true, false, false]);
+    }
+
+    /// A provider request is one unit, so Mago names it by the providers' kind and plugin, for the deadline's error,
+    /// and the worker sends no progress for it.
+    #[test]
+    fn a_provider_request_is_named_by_its_kind_and_plugin() {
+        let transport = Arc::new(DecliningTransport::default());
+        let analyzer = ExternalAnalyzer::initialize_transports([Arc::clone(&transport)], PHPVersion::PHP85, &[], false)
+            .expect("registration should succeed");
+        let php = Arc::new(File::ephemeral(Cow::Borrowed(b"src/App/Report.php"), Cow::Borrowed(b"<?php\n")));
+        let session = ExternalAnalysisSession::from_files([Arc::clone(&php)]);
+        let codebase = CodebaseMetadata::new();
+        let span = Span::new(php.id, Position::new(0), Position::new(1));
+
+        analyzer
+            .get_property_type(
+                b"Lib\\Shelf",
+                b"stock",
+                PropertyAccessKind::Read,
+                &get_mixed(),
+                span,
+                &codebase,
+                &session,
+            )
+            .expect("the request should succeed");
+        analyzer
+            .get_forwarded_call(b"Lib\\Shelf", b"stock", true, &get_mixed(), &php, &codebase, &session)
+            .expect("the request should succeed");
+
+        assert_eq!(
+            *transport.names.lock().unwrap(),
+            [
+                Some("the property type providers of plugin `demo`".to_owned()),
+                Some("the call forwarding providers of plugin `demo`".to_owned()),
+            ]
+        );
+    }
+
+    /// Providers of several plugins are named by every plugin once, in the order Mago sent them.
+    #[test]
+    fn providers_of_several_plugins_are_named_by_each_plugin_once() {
+        let transport = Arc::new(DecliningTransport::default());
+        let analyzer = ExternalAnalyzer::initialize_transports([transport], PHPVersion::PHP85, &[], false)
+            .expect("registration should succeed");
+        let backend = &analyzer.backends[0];
+        let mut routes = backend.registration.plugins[0].clone();
+        routes.index = 1;
+        routes.identifier = "routes".to_owned();
+        let mut registration = backend.registration.clone();
+        registration.plugins.push(routes);
+        let backend = Backend::new(Arc::clone(&backend.transport), registration);
+        let provider =
+            |plugin, index| ProviderRegistration { plugin, index, capabilities: 0, targets: Vec::<u8>::new() };
+        let providers = [provider(1, 4), provider(0, 7), provider(1, 9)];
+        let plugin_of = |index| provider_plugin(&providers, index);
+
+        assert_eq!(
+            backend.provider_names("return-type", plugin_of, &[4, 7, 9]).to_string(),
+            "the return-type providers of plugins `routes`, `demo`"
+        );
+        assert_eq!(
+            backend.provider_names("assertion", plugin_of, &[9]).to_string(),
+            "the assertion providers of plugin `routes`"
+        );
+    }
+
+    /// A request that runs one unit, a provider request of every kind, an issue-filter request and an after-file
+    /// request, is named by what Mago sent it for, so a worker that hangs on it is named in the deadline's error.
+    #[test]
+    fn a_request_that_misses_its_deadline_is_named_by_what_it_runs() {
+        use mago_codex::metadata::flags::MetadataFlags;
+        use mago_codex::metadata::property::PropertyMetadata;
+        use mago_codex::misc::VariableIdentifier;
+        use mago_codex::ttype::atomic::callable::TCallableSignature;
+        use mago_codex::ttype::expander::StaticClassType;
+        use mago_reporting::Issue;
+        use mago_word::word;
+
+        use crate::invocation::InvocationArgumentsSource;
+        use crate::invocation::InvocationTarget;
+        use crate::invocation::MethodInvocationKind;
+        use crate::invocation::MethodTargetContext;
+
+        let analyzer =
+            ExternalAnalyzer::initialize_transports([Arc::new(HangingTransport)], PHPVersion::PHP85, &[], false)
+                .expect("registration should succeed");
+        let arena = mago_allocator::LocalArena::new();
+        let file =
+            Arc::new(File::ephemeral(Cow::Borrowed(b"src/Route.php"), Cow::Borrowed(b"<?php\nmissing_route();\n")));
+        let program = mago_syntax::parser::parse_file(&arena, &file);
+        let names = mago_names::resolver::NameResolver::new(&arena).resolve(program);
+        let session = ExternalAnalysisSession::from_files([Arc::clone(&file)]);
+        let codebase = CodebaseMetadata::new();
+        let artifacts = AnalysisArtifacts::default();
+        let span = Span::new(file.id, Position::new(6), Position::new(21));
+        let shelf = ClassLikeMetadata::new(
+            ascii_lowercase_word(b"Lib\\Shelf"),
+            word(b"Lib\\Shelf"),
+            span,
+            None,
+            MetadataFlags::empty(),
+        );
+        let function = Invocation::new(
+            InvocationTarget::Callable {
+                source: None,
+                signature: TCallableSignature::new(false, false),
+                effective_signature: None,
+                span,
+            },
+            InvocationArgumentsSource::None(span),
+            span,
+        );
+        let method = Invocation::new(
+            InvocationTarget::ExternalMethod {
+                identifier: FunctionLikeIdentifier::Method(shelf.name, word(b"stock")),
+                effective_signature: None,
+                method_context: MethodTargetContext {
+                    invocation_kind: MethodInvocationKind::Instance,
+                    declaring_method_id: None,
+                    class_like_metadata: &shelf,
+                    class_type: StaticClassType::Name(shelf.name),
+                    declaring_object_type: None,
+                },
+                span,
+            },
+            InvocationArgumentsSource::None(span),
+            span,
+        );
+        let stock = PropertyMetadata::new(VariableIdentifier(word(b"$stock")), MetadataFlags::empty());
+        let issues = IssueCollection::from([
+            Issue::error("Function `missing_route` is not defined.").with_code("non-existent-function")
+        ]);
+        let (class, member) = (b"Lib\\Shelf".as_slice(), b"stock".as_slice());
+
+        let results = [
+            analyzer
+                .get_function_return_type(b"demo_fn", &function, &artifacts, &file, &codebase, &session, None)
+                .err(),
+            analyzer.get_method_return_type(class, member, &method, &artifacts, &file, &codebase, &session, None).err(),
+            analyzer
+                .get_function_callable_signature(b"demo_fn", &function, &artifacts, &file, &codebase, &session)
+                .err(),
+            analyzer
+                .get_method_callable_signature(class, member, &method, &artifacts, &file, &codebase, &session)
+                .err(),
+            analyzer.get_function_assertions(b"demo_fn", &function, &artifacts, &file, &codebase, &session, None).err(),
+            analyzer.get_method_assertions(class, member, &method, &artifacts, &file, &codebase, &session, None).err(),
+            analyzer
+                .get_property_type(class, member, PropertyAccessKind::Read, &get_mixed(), span, &codebase, &session)
+                .err(),
+            analyzer.is_property_initialized(class, &stock, &file, &codebase, &session).err(),
+            analyzer.get_class_initializers(&shelf, &file, &codebase, &session).err(),
+            analyzer.get_forwarded_call(class, member, true, &get_mixed(), &file, &codebase, &session).err(),
+            analyzer.filter_issues(&file, issues, &codebase, &session).err(),
+            analyzer.run_after_file_analysis_hooks(&file, program, &names, &artifacts, &codebase, &session).err(),
+        ];
+        assert_eq!(
+            results.map(|error| error.map(|error| error.to_string())),
+            [
+                "the return-type providers of plugin `demo`",
+                "the return-type providers of plugin `demo`",
+                "the callable signature providers of plugin `demo`",
+                "the callable signature providers of plugin `demo`",
+                "the assertion providers of plugin `demo`",
+                "the assertion providers of plugin `demo`",
+                "the property type providers of plugin `demo`",
+                "the property initialization providers of plugin `demo`",
+                "the class initializer providers of plugin `demo`",
+                "the call forwarding providers of plugin `demo`",
+                "the issue-filter hooks of src/Route.php",
+                "the hooks of src/Route.php",
+            ]
+            .map(|running| Some(format!(
+                "external analyzer worker failed: extension host `acme` made no progress for 30000 ms on {running} \
+                 (worker 0): raise its `request-timeout-ms` for hooks that run that long"
+            )))
+        );
+    }
+
+    /// The handler of a request whose worker sends no nested request.
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn answers_no_nested_request(_request: &Frame) -> Result<Vec<u8>, Vec<u8>> {
+        unreachable!("the worker reads every request and sends nothing")
+    }
+
+    /// Mago's worker pool hands the name of a request to the worker that runs it, so a worker that never answers is
+    /// named in the deadline's error, whichever way Mago sends the request.
+    #[cfg(unix)]
+    #[test]
+    fn a_worker_pool_names_the_request_its_worker_never_answers() {
+        use mago_extension::WorkerCommand;
+        use mago_extension::WorkerPoolOptions;
+
+        let options = WorkerPoolOptions {
+            host: "acme".to_owned(),
+            request_timeout: Duration::from_millis(50),
+            ..WorkerPoolOptions::default()
+        };
+        let worker = WorkerCommand::new("sh").with_arguments(["-c", "cat > /dev/null"]);
+        let pool = WorkerPool::spawn(worker, std::num::NonZeroUsize::MIN, options).expect("the worker should start");
+        let mut handler = answers_no_nested_request;
+
+        let errors = [
+            AnalyzerTransport::request(&pool, b"lint".to_vec(), Some(&"the request")).err(),
+            AnalyzerTransport::request_with_handler(
+                &pool,
+                b"lint".to_vec(),
+                Some(&"the handled request"),
+                &mut handler,
+            )
+            .err(),
+            AnalyzerTransport::request_with_handler_affinity(
+                &pool,
+                b"lint".to_vec(),
+                Some(&"the request with affinity"),
+                b"Lib\\Shelf",
+                &mut handler,
+            )
+            .err(),
+        ];
+        pool.shutdown();
+
+        assert_eq!(
+            errors.map(|error| error.map(|error| error.to_string())),
+            ["the request", "the handled request", "the request with affinity"].map(|running| Some(format!(
+                "extension host `acme` made no progress for 50 ms on {running} (worker 0): raise its \
+                 `request-timeout-ms` for hooks that run that long"
+            )))
+        );
     }
 
     #[test]

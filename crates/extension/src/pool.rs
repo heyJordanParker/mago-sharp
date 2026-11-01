@@ -1,3 +1,4 @@
+use std::fmt::Display;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -60,8 +61,10 @@ pub struct WorkerPoolOptions {
     pub host: String,
     /// Maximum payload bytes accepted in one protocol frame.
     pub maximum_payload_size: usize,
-    /// Longest one outer request may go without progress once the worker starts it: the worker's start of each
-    /// file's hooks, for any of its requests, is progress.
+    /// Longest one unit of a request may run. It counts from when the worker starts the request, not while the
+    /// request waits behind earlier ones, and starts again each time the worker starts one of the request's units: a
+    /// file's hooks in an after-file batch, one plugin's initialization, before-analysis or after-analysis hooks, a
+    /// codebase-scan hook, or an extension's worker reducer.
     pub request_timeout: Duration,
     /// Grace period between the shutdown frame and forcibly killing a worker.
     pub shutdown_timeout: Duration,
@@ -284,28 +287,41 @@ impl WorkerPool {
         tracing::trace!(active_workers = self.active_workers.load(Ordering::Relaxed), "Enabled worker reduction.");
     }
 
-    /// Sends a request through the least-loaded worker and blocks for its response.
+    /// Sends a request through the least-loaded worker and blocks for its response. `running` names what the
+    /// request runs, such as "the linter rules of app/User.php", for its deadline's error when the worker names
+    /// nothing it started.
     ///
     /// # Errors
     ///
     /// Returns an error when no worker is available, communication fails, the
     /// deadline expires, or the worker returns an error response.
-    pub fn request(&self, payload: Vec<u8>) -> Result<Vec<u8>, WorkerError> {
-        self.request_inner(payload, None, |worker, payload| worker.request(payload), false)
+    pub fn request(&self, payload: Vec<u8>, running: Option<&dyn Display>) -> Result<Vec<u8>, WorkerError> {
+        self.request_inner(payload, None, |worker, payload| worker.request(payload, running), false)
     }
 
-    /// Sends a request and services nested worker requests on the calling thread.
+    /// Sends a request, named by `running` as [`Self::request`] names it, and services nested worker requests on
+    /// the calling thread.
     ///
     /// # Errors
     ///
     /// Returns an error when no worker is available, communication fails, the
     /// deadline expires, the nested handler fails to respond, or the worker
     /// returns an error response.
-    pub fn request_with_handler<H>(&self, payload: Vec<u8>, handler: &mut H) -> Result<Vec<u8>, WorkerError>
+    pub fn request_with_handler<H>(
+        &self,
+        payload: Vec<u8>,
+        running: Option<&dyn Display>,
+        handler: &mut H,
+    ) -> Result<Vec<u8>, WorkerError>
     where
         H: WorkerRequestHandler,
     {
-        self.request_inner(payload, None, |worker, payload| worker.request_with_handler(payload, handler), true)
+        self.request_inner(
+            payload,
+            None,
+            |worker, payload| worker.request_with_handler(payload, running, handler),
+            true,
+        )
     }
 
     /// Sends a nested-request-capable request with a stable worker-affinity key.
@@ -319,6 +335,7 @@ impl WorkerPool {
     pub fn request_with_handler_affinity<H>(
         &self,
         payload: Vec<u8>,
+        running: Option<&dyn Display>,
         affinity: &[u8],
         handler: &mut H,
     ) -> Result<Vec<u8>, WorkerError>
@@ -328,7 +345,7 @@ impl WorkerPool {
         self.request_inner(
             payload,
             Some(affinity),
-            |worker, payload| worker.request_with_handler(payload, handler),
+            |worker, payload| worker.request_with_handler(payload, running, handler),
             true,
         )
     }
@@ -458,7 +475,7 @@ impl WorkerPool {
                             let reservation = worker.reserve();
                             let responses = payloads
                                 .iter()
-                                .map(|payload| reservation.worker().request(payload.clone()))
+                                .map(|payload| reservation.worker().request(payload.clone(), None))
                                 .collect::<Result<Vec<_>, _>>();
                             (reservation, responses)
                         }),
@@ -662,7 +679,7 @@ impl WorkerPool {
                 .enumerate()
                 .map(|(index, worker)| {
                     let request = request.clone();
-                    (index, scope.spawn(move || worker.request(request)))
+                    (index, scope.spawn(move || worker.request(request, None)))
                 })
                 .collect::<Vec<_>>()
                 .into_iter()
@@ -731,7 +748,7 @@ impl WorkerPool {
             request_bytes = request.len(),
             "Sending the complete worker reduction batch to the surviving worker."
         );
-        let response = leader.request(request)?;
+        let response = leader.request(request, None)?;
         reduction::decode_reduce_response(leader_index, &response)?;
         tracing::trace!(
             leader = leader_index,
@@ -978,7 +995,7 @@ impl WorkerPool {
         tracing::trace!(worker = index, bootstrap_requests = bootstraps.len(), "Initializing extension worker state.");
         for bootstrap in &bootstraps {
             let bootstrap_start = self.trace_enabled.then(Instant::now);
-            let response = match worker.request(bootstrap.request.clone()) {
+            let response = match worker.request(bootstrap.request.clone(), None) {
                 Ok(response) => response,
                 Err(error) => {
                     worker.shutdown();
@@ -1316,7 +1333,7 @@ mod tests {
         let pool = WorkerPool::spawn(command, NonZeroUsize::MIN, WorkerPoolOptions::default())
             .expect("worker process should start");
 
-        assert_eq!(pool.request(b"ping".to_vec()).expect("request should succeed"), b"pong");
+        assert_eq!(pool.request(b"ping".to_vec(), None).expect("request should succeed"), b"pong");
         pool.shutdown();
     }
 }

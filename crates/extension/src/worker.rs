@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
+use std::fmt::Display;
 use std::io::BufReader;
 use std::io::BufWriter;
 use std::io::Read;
@@ -178,17 +179,25 @@ struct WorkerInner {
     trace_summary_emitted: AtomicBool,
     telemetry: WorkerTelemetry,
     started_at: Option<Instant>,
-    /// When the worker last sent a progress frame, and the file whose hooks it started then.
-    progress: Mutex<Option<(Instant, String)>>,
+    /// The request the worker last sent a progress frame for, when, and what it said the request started then.
+    progress: Mutex<Option<(u64, Instant, String)>>,
 }
 
 impl WorkerInner {
-    /// The later of `started_at` and the worker's last progress, with the file whose hooks it started when that
-    /// progress is the later.
-    fn progress_since(&self, started_at: Instant) -> (Instant, Option<String>) {
+    /// The later of `started_at` and the last progress of request `request_id`. The reader can route a request's
+    /// first progress before the request's own thread wakes to record `started_at`, so the progress still counts.
+    fn progressed_at(&self, request_id: u64, started_at: Instant) -> Instant {
         match &*lock(&self.progress) {
-            Some((at, file)) if *at > started_at => (*at, Some(file.clone())),
-            _ => (started_at, None),
+            Some((request, at, _)) if *request == request_id => (*at).max(started_at),
+            _ => started_at,
+        }
+    }
+
+    /// What the worker last said request `request_id` started, if it said anything.
+    fn running(&self, request_id: u64) -> Option<String> {
+        match &*lock(&self.progress) {
+            Some((request, _, running)) if *request == request_id => Some(running.clone()),
+            _ => None,
         }
     }
 
@@ -288,7 +297,8 @@ impl WorkerInner {
         }
 
         if frame.kind == FrameKind::Notification {
-            *lock(&self.progress) = Some((Instant::now(), String::from_utf8_lossy(&frame.payload).into_owned()));
+            *lock(&self.progress) =
+                Some((frame.parent_id, Instant::now(), String::from_utf8_lossy(&frame.payload).into_owned()));
         }
 
         let pending_id = match frame.kind {
@@ -524,18 +534,31 @@ impl Worker {
         self.inner.in_flight.load(Ordering::Relaxed)
     }
 
-    pub fn request(&self, payload: Vec<u8>) -> Result<Vec<u8>, WorkerError> {
-        self.request_inner::<fn(&Frame) -> Result<Vec<u8>, Vec<u8>>>(payload, None)
+    /// Sends `payload` and waits for its response. `running` names what the request runs, for its deadline's error
+    /// when the worker names nothing it started.
+    pub fn request(&self, payload: Vec<u8>, running: Option<&dyn Display>) -> Result<Vec<u8>, WorkerError> {
+        self.request_inner::<fn(&Frame) -> Result<Vec<u8>, Vec<u8>>>(payload, running, None)
     }
 
-    pub fn request_with_handler<H>(&self, payload: Vec<u8>, handler: &mut H) -> Result<Vec<u8>, WorkerError>
+    /// Sends `payload`, as [`Self::request`] does, and answers the worker's nested requests with `handler`.
+    pub fn request_with_handler<H>(
+        &self,
+        payload: Vec<u8>,
+        running: Option<&dyn Display>,
+        handler: &mut H,
+    ) -> Result<Vec<u8>, WorkerError>
     where
         H: WorkerRequestHandler,
     {
-        self.request_inner(payload, Some(handler))
+        self.request_inner(payload, running, Some(handler))
     }
 
-    fn request_inner<H>(&self, payload: Vec<u8>, mut handler: Option<&mut H>) -> Result<Vec<u8>, WorkerError>
+    fn request_inner<H>(
+        &self,
+        payload: Vec<u8>,
+        running: Option<&dyn Display>,
+        mut handler: Option<&mut H>,
+    ) -> Result<Vec<u8>, WorkerError>
     where
         H: WorkerRequestHandler,
     {
@@ -548,18 +571,19 @@ impl Worker {
         let (sender, receiver) = mpsc::channel();
         let (request_id, starts) = self.inner.send_request(payload, sender)?;
 
-        // The deadline is the longest one file's hooks may run, as Jest's `testTimeout` bounds each test rather than
-        // the run: it runs from the request's start, and again from each progress frame the worker sends as it starts
-        // a file's hooks, for any of its requests, since one PHP process runs one hook at a time and a request waits
-        // while the worker runs another's. Nested requests are not progress, so a hook that keeps asking Mago for
-        // metadata and never finishes its file fails.
+        // The deadline is the longest one unit of a request may run, as Jest's `testTimeout` bounds each test rather
+        // than the run. It runs from the request's start, not while the request waits behind earlier ones, and again
+        // from each progress frame the worker sends for the request as it starts one of its units: a file's hooks in
+        // an after-file batch, one plugin's initialization, before-analysis or after-analysis hooks, a codebase-scan
+        // hook, or an extension's worker reducer. Nested requests are not progress, so a hook that keeps asking Mago
+        // for metadata and never finishes its file fails.
         let mut started_at = starts.then(Instant::now);
         loop {
             let event = match started_at {
                 Some(started_at) => {
-                    let (progressed_at, file) = self.inner.progress_since(started_at);
+                    let progressed_at = self.inner.progressed_at(request_id, started_at);
                     let Some(remaining) = self.request_timeout.checked_sub(progressed_at.elapsed()) else {
-                        return Err(self.timeout(request_id, file));
+                        return Err(self.timeout(request_id, running));
                     };
                     receiver.recv_timeout(remaining)
                 }
@@ -646,23 +670,20 @@ impl Worker {
         }
     }
 
-    /// Fails request `request_id`, which made no progress within the deadline on the hooks of `file`.
-    fn timeout(&self, request_id: u64, file: Option<String>) -> WorkerError {
+    /// Fails request `request_id`, which made no progress within the deadline. The error names the unit the worker
+    /// last said the request started, or else what Mago named the request, `running`. The request's number is
+    /// protocol detail, so only the trace log names it.
+    fn timeout(&self, request_id: u64, running: Option<&dyn Display>) -> WorkerError {
         if self.inner.trace_enabled {
             self.inner.telemetry.timeouts.fetch_add(1, Ordering::Relaxed);
         }
-        tracing::trace!(worker = self.id(), request = request_id, timeout = ?self.request_timeout, "Extension worker request timed out.");
+        let running = self.inner.running(request_id).or_else(|| running.map(ToString::to_string));
+        tracing::trace!(worker = self.id(), request = request_id, running, timeout = ?self.request_timeout, "Extension worker request timed out.");
         self.inner.take_pending(request_id);
         let _result = self.inner.send(&Frame::cancel(request_id));
         self.inner.fail(format!("request {request_id} timed out"));
 
-        WorkerError::Timeout {
-            host: self.host.clone(),
-            worker: self.id(),
-            request: request_id,
-            file,
-            duration: self.request_timeout,
-        }
+        WorkerError::Timeout { host: self.host.clone(), worker: self.id(), running, duration: self.request_timeout }
     }
 
     pub fn reserve(self: &Arc<Self>) -> WorkerReservation {
@@ -1049,13 +1070,13 @@ mod tests {
         let first_barrier = Arc::clone(&barrier);
         let first = std::thread::spawn(move || {
             first_barrier.wait();
-            first_worker.request(b"first".to_vec()).expect("first request should succeed")
+            first_worker.request(b"first".to_vec(), None).expect("first request should succeed")
         });
         let second_worker = Arc::clone(&worker);
         let second_barrier = Arc::clone(&barrier);
         let second = std::thread::spawn(move || {
             second_barrier.wait();
-            second_worker.request(b"second".to_vec()).expect("second request should succeed")
+            second_worker.request(b"second".to_vec(), None).expect("second request should succeed")
         });
         barrier.wait();
 
@@ -1126,13 +1147,14 @@ mod tests {
             Ok(b"metadata!".to_vec())
         };
         let response =
-            worker.request_with_handler(b"analyze".to_vec(), &mut handler).expect("outer request should succeed");
+            worker.request_with_handler(b"analyze".to_vec(), None, &mut handler).expect("outer request should succeed");
         assert_eq!(response, b"done");
 
         worker.shutdown();
         peer.join().expect("peer thread should join");
     }
 
+    /// A request whose worker names nothing it started fails under the name Mago gave it.
     #[test]
     fn a_timed_out_request_stops_the_worker() {
         let (worker, mut peer_reader, peer_writer) = connected_worker(Duration::from_millis(20));
@@ -1146,8 +1168,12 @@ mod tests {
             assert_eq!(cancel.kind, FrameKind::Cancel);
         });
 
-        let error = worker.request(Vec::new()).expect_err("request should time out");
-        assert!(matches!(error, WorkerError::Timeout { .. }));
+        let error =
+            worker.request(Vec::new(), Some(&"the linter rules of app/User.php")).expect_err("request should time out");
+        assert_eq!(
+            error.to_string(),
+            "extension host `acme` made no progress for 20 ms on the linter rules of app/User.php (worker 0): raise its `request-timeout-ms` for hooks that run that long"
+        );
         assert!(!worker.is_running());
 
         drop(peer_writer);
@@ -1228,8 +1254,8 @@ mod tests {
     }
 
     /// A peer that runs six files' hooks for request `outer`, each for `per_file`. Before each file's hooks it sends a
-    /// progress frame naming the file when `progress` holds, and each hook asks Mago for metadata. It answers the
-    /// request unless Mago cancels it.
+    /// progress frame naming them when `progress` holds, and each hook asks Mago for metadata. It answers the request
+    /// unless Mago cancels it.
     fn run_six_files(
         mut peer_reader: TcpStream,
         mut peer_writer: TcpStream,
@@ -1242,8 +1268,8 @@ mod tests {
                 .expect("outer request should be present");
             for id in 1..=6 {
                 if progress {
-                    let file = format!("app/F{id}.php").into_bytes();
-                    from_worker(FrameKind::Notification, 0, outer.id, file)
+                    let hooks = format!("the hooks of app/F{id}.php").into_bytes();
+                    from_worker(FrameKind::Notification, 0, outer.id, hooks)
                         .write_to(&mut peer_writer, 1024)
                         .expect("progress should encode");
                 }
@@ -1276,7 +1302,7 @@ mod tests {
 
         let started_at = Instant::now();
         let mut handler = |_: &Frame| Ok(b"metadata!".to_vec());
-        let response = worker.request_with_handler(b"analyze".to_vec(), &mut handler);
+        let response = worker.request_with_handler(b"analyze".to_vec(), None, &mut handler);
 
         assert_eq!(response.expect("the request should finish"), b"done");
         assert!(started_at.elapsed() > deadline, "the request took {:?}", started_at.elapsed());
@@ -1284,8 +1310,9 @@ mod tests {
         worker.shutdown();
     }
 
-    /// A hook that keeps asking Mago for metadata and never finishes its file fails at the deadline, and the error
-    /// names the host, the file and the setting.
+    /// A hook that keeps asking Mago for metadata and never finishes its file fails at the deadline. Its worker named
+    /// no hooks it started, so the error names the host and the setting, and leaves the request's number to the trace
+    /// log.
     #[test]
     fn a_hook_that_asks_for_metadata_but_never_finishes_its_file_fails_at_the_deadline() {
         let deadline = Duration::from_secs(3);
@@ -1294,12 +1321,13 @@ mod tests {
 
         let started_at = Instant::now();
         let mut handler = |_: &Frame| Ok(b"metadata!".to_vec());
-        let error = worker.request_with_handler(b"analyze".to_vec(), &mut handler).expect_err("the request times out");
+        let error =
+            worker.request_with_handler(b"analyze".to_vec(), None, &mut handler).expect_err("the request times out");
 
         assert!(started_at.elapsed() < deadline * 2, "the request failed after {:?}", started_at.elapsed());
         assert_eq!(
             error.to_string(),
-            "extension host `acme` made no progress for 3000 ms on request 1 (worker 0): raise its `request-timeout-ms` for hooks that run that long"
+            "extension host `acme` made no progress for 3000 ms (worker 0): raise its `request-timeout-ms` for hooks that run that long"
         );
         peer.join().expect("peer thread should join");
         worker.shutdown();
@@ -1314,7 +1342,7 @@ mod tests {
             let outer = Frame::read_from(&mut peer_reader, 1024)
                 .expect("request should decode")
                 .expect("request should be present");
-            from_worker(FrameKind::Notification, 0, outer.id, b"app/Hung.php".to_vec())
+            from_worker(FrameKind::Notification, 0, outer.id, b"the hooks of app/Hung.php".to_vec())
                 .write_to(&mut peer_writer, 1024)
                 .expect("progress should encode");
             peer_writer.flush().expect("progress should flush");
@@ -1324,12 +1352,55 @@ mod tests {
             assert_eq!(cancel.kind, FrameKind::Cancel);
         });
 
-        let error = worker.request(Vec::new()).expect_err("request should time out");
+        let error = worker.request(Vec::new(), None).expect_err("request should time out");
 
         assert_eq!(
             error.to_string(),
             "extension host `acme` made no progress for 3000 ms on the hooks of app/Hung.php (worker 0): raise its `request-timeout-ms` for hooks that run that long"
         );
+        peer.join().expect("peer thread should join");
+        worker.shutdown();
+    }
+
+    /// The reader routes request 2's first progress before request 2's thread wakes to the start the response of
+    /// request 1 gives it, so the progress names request 2's unit when request 2 never finishes.
+    #[test]
+    fn progress_routed_before_its_request_starts_still_names_the_request() {
+        let deadline = Duration::from_secs(3);
+        let (worker, mut peer_reader, mut peer_writer) = connected_worker(deadline);
+        let peer = std::thread::spawn(move || {
+            let mut requests = [0, 1].map(|_| {
+                Frame::read_from(&mut peer_reader, 1024)
+                    .expect("request should decode")
+                    .expect("request should be present")
+            });
+            requests.sort_by_key(|request| request.id);
+            let [first, second] = requests;
+            from_worker(FrameKind::Notification, 0, second.id, b"the after-analysis hooks of plugin `late`".to_vec())
+                .write_to(&mut peer_writer, 1024)
+                .expect("progress should encode");
+            Frame::response(first.id, 0, first.payload)
+                .write_to(&mut peer_writer, 1024)
+                .expect("response should encode");
+            peer_writer.flush().expect("progress and response should flush");
+            let cancel = Frame::read_from(&mut peer_reader, 1024)
+                .expect("cancellation should decode")
+                .expect("cancellation should be present");
+            assert_eq!((cancel.kind, cancel.id), (FrameKind::Cancel, second.id));
+        });
+
+        let started_at = Instant::now();
+        let responses = send_at_once::<2>(&worker);
+        let elapsed = started_at.elapsed();
+
+        let errors = responses.iter().filter_map(|response| response.as_ref().err()).collect::<Vec<_>>();
+        assert_eq!(
+            errors.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            [
+                "extension host `acme` made no progress for 3000 ms on the after-analysis hooks of plugin `late` (worker 0): raise its `request-timeout-ms` for hooks that run that long"
+            ]
+        );
+        assert!(elapsed >= deadline && elapsed < deadline * 2, "the hung request failed after {elapsed:?}");
         peer.join().expect("peer thread should join");
         worker.shutdown();
     }
@@ -1350,7 +1421,7 @@ mod tests {
             assert_eq!(shutdown.kind, FrameKind::Shutdown);
         });
 
-        let error = worker.request(Vec::new()).expect_err("request should be cancelled");
+        let error = worker.request(Vec::new(), None).expect_err("request should be cancelled");
         assert!(matches!(error, WorkerError::Cancelled { worker: 0, request: 1 }));
         assert!(worker.is_running());
 
@@ -1364,7 +1435,7 @@ mod tests {
             let requests: [_; N] = std::array::from_fn(|_| {
                 scope.spawn(|| {
                     barrier.wait();
-                    worker.request(b"request".to_vec())
+                    worker.request(b"request".to_vec(), None)
                 })
             });
 
