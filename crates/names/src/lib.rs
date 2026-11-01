@@ -77,6 +77,11 @@ pub const LEAN_FUNCTION: &str = "Sharp\\Internal\\LeanFunction";
 /// running code checks.
 pub const EQUATABLE: &str = "Equatable";
 
+/// How PHP# writes PHP's `object`, spec section 24.
+///
+/// The parser reads both as `Hint::Object`, and only `Object` is PHP#.
+pub const OBJECT: &[u8] = b"Object";
+
 /// The class-likes that a bare name in a `.sharp` file names by default, spec section 23, and that a class-like of the
 /// file's namespace can win over: every class-like the standard library or the prelude declares directly in `Sharp`,
 /// then the [standard root classes](STANDARD_ROOT_CLASSES), but the [fixed one](fixed_default_class).
@@ -376,12 +381,21 @@ impl<'arena> ResolvedNames<'arena> {
 
     /// Returns whether `hint` is a class bound, spec section 11.
     ///
-    /// It is `Object`, a class or an interface, by name or as a generic class type, or several of them joined with
-    /// `&`. `Equatable` is a name too. A type parameter is none of them.
+    /// It is `Object` alone, or a class or an interface, by name or as a generic class type, or several of them joined
+    /// with `&`. `Equatable` is a name too. A type parameter is none of them, and `Object`, which holds any object,
+    /// joins no other bound.
     #[must_use]
     pub fn is_class_bound(&self, hint: &Hint<'_>) -> bool {
         match hint {
-            Hint::Object(object) => object.value == b"Object",
+            Hint::Object(object) => object.value == OBJECT,
+            hint => self.joins_classes(hint),
+        }
+    }
+
+    /// Whether `hint` is a class or an interface, by name or as a generic class type, or several of them joined with
+    /// `&`.
+    fn joins_classes(&self, hint: &Hint<'_>) -> bool {
+        match hint {
             Hint::Identifier(name @ Identifier::Local(_)) => !self.is_type_parameter(name),
             // A dotted name is a case type or a full name, which the analyzer refuses with the import to add, spec
             // section 23.
@@ -390,7 +404,7 @@ impl<'arena> ResolvedNames<'arena> {
                 built_in_generic_arity(generic.name.value).is_none() && !self.is_type_parameter(&generic.name)
             }
             Hint::Intersection(intersection) => {
-                self.is_class_bound(intersection.left) && self.is_class_bound(intersection.right)
+                self.joins_classes(intersection.left) && self.joins_classes(intersection.right)
             }
             _ => false,
         }

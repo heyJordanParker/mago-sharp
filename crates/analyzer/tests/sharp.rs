@@ -13648,14 +13648,15 @@ fn a_read_refused_by_its_key_or_a_set_still_gives_the_value_of_its_collection() 
 }
 
 /// `==` on an `Iterable` is refused, as the element of a list, in a search of a list of them, and as a struct's
-/// property. Each refusal says that `==` compares a `List`, a `Map` or a `Set`, and an `Iterable` is none of them. Each
-/// is an `Iterable`, so `toList()` gives a `List` to compare, which the refusal names and which compiles.
+/// property. Each refusal says that `==` compares a `List`, a `Map` or a `Set`, and an `Iterable` is none of them, and
+/// a type parameter narrowed to a collection may be another type. Each is an `Iterable`, so `toList()` gives a `List`
+/// to compare, which the refusal names and which compiles.
 #[test]
 fn equality_of_an_iterable_names_its_to_list() {
     let fixed = "namespace Demo;\n\nclass Report\n{\n    public static bool same(Iterable<int> items, Iterable<int> others) => items.toList() == others.toList();\n}\n";
     assert_eq!(refusals(("src/Demo/Report.sharp", fixed), &[]), Vec::<String>::new());
 
-    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static bool same(Iterable<int> items, Iterable<int> others) => items == others;\n\n    public static bool rows(List<Iterable<int>> rows, List<Iterable<int>> others, Iterable<int> row) => rows == others || rows.contains(row);\n\n    public static bool streamed(Streamed a, Streamed b) => a == b;\n}\n\nstruct Streamed\n{\n    public Streamed(public Iterable<int> items { get; }) { }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static bool same(Iterable<int> items, Iterable<int> others) => items == others;\n\n    public static bool rows(List<Iterable<int>> rows, List<Iterable<int>> others, Iterable<int> row) => rows == others || rows.contains(row);\n\n    public static bool streamed(Streamed a, Streamed b) => a == b;\n\n    public static bool narrowed<T>(T items, List<int> others) => items is List<Any?> && items == others;\n}\n\nstruct Streamed\n{\n    public Streamed(public Iterable<int> items { get; }) { }\n}\n";
     let issues = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Report.sharp", sharp), &[]);
     let notes: Vec<_> = issues.iter().map(|issue| issue.notes.last().map(String::as_str).unwrap_or_default()).collect();
     let iterable = "`==` compares a `List`, a `Map` or a `Set`, and an `Iterable` is none of them";
@@ -13667,6 +13668,7 @@ fn equality_of_an_iterable_names_its_to_list() {
             format!("7:105 invalid-operand `==` compares `List<Iterable<int>>` with `List<Iterable<int>>` element by element, and {iterable}. | "),
             format!("7:137 invalid-argument `contains` compares elements with `==`, and {iterable}. | Compare each element's `toList()` with `==`, as in `a.toList() == b.toList()`."),
             "9:60 invalid-operand `Streamed` can't compare by value: `items` is an `Iterable<int>`, which `==` does not compare. | ".to_owned(),
+            "11:89 invalid-operand `==` compares a `List`, a `Map` or a `Set`, and `T` may be another type: compare `a.toList() == b.toList()`. | ".to_owned(),
         ]
     );
     assert_eq!(
@@ -13676,6 +13678,7 @@ fn equality_of_an_iterable_names_its_to_list() {
             "Two lists are equal when their elements are, in order, two maps when they hold equal values under the same keys, and two sets when they hold equal elements, in any order.".to_owned(),
             String::new(),
             format!("{iterable}."),
+            "`==` cannot compare `T` with `List<int>`.".to_owned(),
         ]
     );
 }
@@ -14511,18 +14514,18 @@ fn a_type_parameter_joined_in_a_bound_gives_one_error() {
 }
 
 /// Spec section 11: every other bound the semantics checker refuses bounds nothing too, so a type argument outside
-/// what the bound writes, written on the call or inferred from its argument, adds no second error, nor does a type
-/// parameter that only the refused bound would have fixed, while one no bound names is still unfixed and unused. A
-/// type written twice
-/// is refused as redundant, and the bound keeps the type it writes once, so an argument outside it is still an error,
-/// as it is once the second `Shareable` is removed.
+/// what the bound writes, written on the call or inferred from its argument, and `===` on two of its values add no
+/// second error. Nor does a type parameter that only the refused bound would have fixed, while one no bound names, and
+/// the bounded type parameter itself, are still unfixed and unused, and an error in the generic method's body still
+/// appears. A type written twice is refused as redundant, and the bound keeps the type it writes once, so an argument
+/// outside it is still an error, as it is once the second `Shareable` is removed.
 #[test]
 fn each_refused_bound_gives_one_error() {
     // `held` written with `parameters`, and called with `value` of the type `argument`, which is outside what the bound
     // writes: once with the type argument written, and once inferred.
     let errors = |parameters: &str, argument: &str, value: &str| {
         let code = format!(
-            "namespace Demo;\n\npublic static class Bounded\n{{\n    public static T held<{parameters}>(T value, TOther other) => value;\n\n    public static Any? written() => Bounded.held<{argument}, Line>({value}, new Line());\n\n    public static Any? inferred() => Bounded.held({value}, new Line());\n}}\n"
+            "namespace Demo;\n\npublic static class Bounded\n{{\n    public static T held<{parameters}>(T value, TOther other) => value;\n\n    public static bool same<{parameters}>(T value, T other, TOther third) => value === other;\n\n    public static Any? written() => Bounded.held<{argument}, Line>({value}, new Line());\n\n    public static Any? inferred() => Bounded.held({value}, new Line());\n}}\n"
         );
 
         compile_errors(
@@ -14533,21 +14536,13 @@ fn each_refused_bound_gives_one_error() {
     let other = "A bound is `Object`, `Equatable`, a class, an interface or a type parameter, as in `<TItem : DatabaseEntity>`.";
     let mut wrong = Vec::new();
     for (parameters, argument, value, refusals) in [
-        ("T : int|string, TOther", "float", "1.5", &["A bound can't be a union: join several bounds with `&`."][..]),
-        ("T : int, TOther", "string", "\"x\"", &[other]),
+        ("T : int, TOther", "string", "\"x\"", &[other][..]),
         ("T : Shareable?, TOther", "int", "1", &[other]),
         ("T : Any, TOther", "Any?", "null", &[other]),
         ("T : List<int>, TOther", "int", "1", &[other]),
         ("T : Function<int()>, TOther", "int", "1", &[other]),
         ("T : TOther<int>, TOther", "int", "1", &[other]),
-        ("T : Shareable & int, TOther", "int", "1", &[other]),
         ("T : Shareable? & Line, TOther", "int", "1", &[other]),
-        (
-            "T : Object & Shareable, TOther",
-            "int",
-            "1",
-            &["`Object` is a bound alone, as in `<TValue : Object>`: it joins no other bound with `&`."],
-        ),
         ("T : T, TOther", "int", "1", &["A type parameter can't bound itself: the bound of `T` leads back to `T`."]),
         (
             "T : TOther, TOther : T",
@@ -14559,8 +14554,9 @@ fn each_refused_bound_gives_one_error() {
             ],
         ),
     ] {
+        // `held` and `same` each declare the bound, and the checker refuses it in each.
         let errors = errors(parameters, argument, value);
-        if errors != refusals {
+        if errors != [refusals, refusals].concat() {
             wrong.push(format!("<{parameters}>: {errors:#?}"));
         }
     }
@@ -14568,10 +14564,11 @@ fn each_refused_bound_gives_one_error() {
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 
     // `TOther` is fixed through `T`'s bound alone, as `<T : TOther, TOther>` fixes it, so a refused bound leaves a call
-    // and a method value without an error that nothing fixes `TOther`.
+    // and a method value without an error that nothing fixes `TOther`, and a call that writes both type arguments
+    // without an error that reads the bound.
     let through_bound = |parameters: &str| {
         let code = format!(
-            "namespace Demo;\n\npublic static class Bounded\n{{\n    public static T held<{parameters}>(T value) => value;\n\n    public static Any? called() => Bounded.held(1);\n\n    public static Function<int(int)> valued() => Bounded.held;\n}}\n"
+            "namespace Demo;\n\npublic static class Bounded\n{{\n    public static T held<{parameters}>(T value) => value;\n\n    public static Any? called() => Bounded.held(1);\n\n    public static Any? written() => Bounded.held<int, int>(1);\n\n    public static Function<int(int)> valued() => Bounded.held;\n}}\n"
         );
 
         compile_errors(
@@ -14579,42 +14576,86 @@ fn each_refused_bound_gives_one_error() {
             &[("src/Demo/Paging.sharp", PAGING)],
         )
     };
+    let joined = "A type parameter is a bound alone, as in `<TSub : T>`: it joins no other bound with `&`.";
+    let looped =
+        |name: &str| format!("A type parameter can't bound itself: the bound of `{name}` leads back to `{name}`.");
     assert_eq!(through_bound("T : TOther, TOther"), Vec::<String>::new());
+    assert_eq!(through_bound("T : TOther & Shareable, TOther"), [joined]);
+    assert_eq!(through_bound("T : TOther|int, TOther"), ["A bound can't be a union: join several bounds with `&`."]);
+    assert_eq!(through_bound("T : Query<TOther> & int, TOther"), [other]);
     assert_eq!(
-        through_bound("T : TOther & Shareable, TOther"),
-        ["A type parameter is a bound alone, as in `<TSub : T>`: it joins no other bound with `&`."]
+        through_bound("T : Object & Query<TOther>, TOther"),
+        ["`Object` is a bound alone, as in `<TValue : Object>`: it joins no other bound with `&`."]
     );
     assert_eq!(through_bound("T : List<TOther>, TOther"), [other]);
     assert_eq!(through_bound("T : TOther<int>, TOther"), [other]);
-    assert_eq!(
-        through_bound("T : TOther, TOther : T"),
-        [
-            "A type parameter can't bound itself: the bound of `T` leads back to `T`.",
-            "A type parameter can't bound itself: the bound of `TOther` leads back to `TOther`.",
-        ]
-    );
-    // `TUnused`, which no bound names, is still unfixed and unused.
-    let unused = "namespace Demo;\n\npublic static class Bounded\n{\n    public static T held<TUnused, T : TOther & Shareable, TOther>(T value) => value;\n\n    public static Any? called() => Bounded.held(1);\n}\n";
+    assert_eq!(through_bound("T : TOther, TOther : T"), [looped("T"), looped("TOther")]);
+
+    // `TUnused`, which no bound names, is still unfixed and unused, and a type parameter its own refused bound names is
+    // still unfixed, as `<T>` is.
+    let unused = "namespace Demo;\n\npublic static class Bounded\n{\n    public static T held<TUnused, T : TOther & Shareable, TOther>(T value) => value;\n\n    public static Any? called() => Bounded.held(1);\n\n    public static Any? written() => Bounded.held<int, int, int>(1);\n}\n";
     assert_eq!(
         compile_errors(("src/Demo/Bounded.sharp", unused), &[("src/Demo/Paging.sharp", PAGING)]),
-        [
-            "A type parameter is a bound alone, as in `<TSub : T>`: it joins no other bound with `&`.",
-            "Nothing fixes the type argument `TUnused` of the call to `Bounded.held`.",
-        ]
+        [joined, "Nothing fixes the type argument `TUnused` of the call to `Bounded.held`."]
     );
     assert_eq!(
         issues(("src/Demo/Bounded.sharp", unused), &[("src/Demo/Paging.sharp", PAGING)]),
         ["5:21 unused-template-parameter", "7:36 missing-template-parameter"]
+    );
+    let own = "namespace Demo;\n\npublic static class Bounded\n{\n    public static T looped<T : T>(T value) => value;\n\n    public static void free<T : T>()\n    {\n    }\n\n    public static void listed<T : List<T>>()\n    {\n    }\n\n    public static Any called() => Bounded.looped(1);\n\n    public static void unfixed()\n    {\n        Bounded.free();\n        Bounded.listed();\n    }\n\n    public static void written()\n    {\n        Bounded.listed<int>();\n    }\n}\n";
+    assert_eq!(
+        compile_errors(("src/Demo/Bounded.sharp", own), &[("src/Demo/Paging.sharp", PAGING)]),
+        [
+            looped("T"),
+            looped("T"),
+            other.to_owned(),
+            "Nothing fixes the type argument `T` of the call to `Bounded.free`.".to_owned(),
+            "Nothing fixes the type argument `T` of the call to `Bounded.listed`.".to_owned(),
+        ]
+    );
+
+    // An error the refused bound has no part in, in the generic method's own body, still appears.
+    let body = "namespace Demo;\n\npublic static class Bounded\n{\n    public static T held<T : int>(T value)\n    {\n        int count = \"x\";\n        return value;\n    }\n\n    public static Any? written() => Bounded.held<string>(\"x\");\n}\n";
+    assert_eq!(
+        compile_errors(("src/Demo/Bounded.sharp", body), &[("src/Demo/Paging.sharp", PAGING)]),
+        [other, "Invalid assignment to `count`: it is declared as `int`."]
     );
 
     assert_eq!(
         errors("T : Shareable & Shareable, TOther", "int", "1"),
         [
             "Duplicate type `Shareable` is redundant.",
+            "Duplicate type `Shareable` is redundant.",
             "Type argument `int` does not satisfy `Bounded.held<T, TOther>`'s `T`.",
             "`int` does not satisfy the bound `Shareable & Shareable` of type parameter `T`.",
         ]
     );
+}
+
+/// Spec section 26: a receiver whose bound the checker refused fits any value, so its extension member is the least
+/// specific and runs only where no other extension's fits: `xs.shared()` on a `List<int>` runs the `List<int>`
+/// extension's, and `order.shared()` and `"x".shared()`, which the refused bound does not keep out, the refused one's,
+/// each with no error.
+#[test]
+fn an_extension_whose_receiver_bound_is_refused_is_the_least_specific() {
+    let refused = (
+        "src/Demo/Refused.sharp",
+        "namespace Demo;\n\npublic static class Refused\n{\n    extension<T : Shareable?>(T value)\n    {\n        public int shared() => 1;\n    }\n}\n",
+    );
+    let counts = (
+        "src/Demo/Counts.sharp",
+        "namespace Demo;\n\npublic static class Counts\n{\n    extension(List<int> items)\n    {\n        public int shared() => 2;\n    }\n}\n",
+    );
+    let calls = "namespace Demo;\n\npublic static class Calls\n{\n    public static int listed(List<int> xs) => xs.shared();\n\n    public static int ordered(SharedOrder order) => order.shared();\n\n    public static int texted() => \"x\".shared();\n}\n";
+    let paging = ("src/Demo/Paging.sharp", PAGING);
+
+    assert_eq!(
+        compile_errors(refused, &[paging]),
+        [
+            "A bound is `Object`, `Equatable`, a class, an interface or a type parameter, as in `<TItem : DatabaseEntity>`."
+        ]
+    );
+    assert_eq!(compile_errors(("src/Demo/Calls.sharp", calls), &[refused, counts, paging]), Vec::<String>::new());
 }
 
 /// A bound may name a type parameter of its own list, its own or a later one, as C#'s `T : IComparable<T>` does:

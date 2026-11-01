@@ -2038,6 +2038,7 @@ pub fn check_unused_function_template_parameters<'ctx, A>(
         Some(FunctionLikeBody::Law(_)) => unreachable!("a law declares no type parameter"),
         None => {}
     }
+
     'templates: for (template_name, template) in &function_like_metadata.template_types {
         if template_name.as_bytes().starts_with(b"_")
             || template.named_by_refused_bound

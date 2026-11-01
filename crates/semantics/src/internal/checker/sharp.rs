@@ -9,6 +9,7 @@ use mago_casing::to_class_case;
 use mago_casing::to_constant_case;
 use mago_database::file::FolderNamespace;
 use mago_names::EQUATABLE;
+use mago_names::OBJECT;
 use mago_names::ResolvedNames;
 use mago_names::binding::Binding;
 use mago_names::binding::BindingError;
@@ -167,9 +168,6 @@ use crate::internal::context::Context;
 
 /// How PHP# writes PHP's `mixed`. The parser reads both as `Hint::Mixed`, and only `Any` is PHP#.
 const ANY: &[u8] = b"Any";
-
-/// How PHP# writes PHP's `object`, spec section 24. The parser reads both as `Hint::Object`, and only `Object` is PHP#.
-const OBJECT: &[u8] = b"Object";
 
 /// Checks a PHP# file against the slice: the only constructs a `.sharp` file may use, and the contract the
 /// engine's lowering implements.
@@ -881,10 +879,15 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
                 .then_some(Place::TypeParameter);
             }
 
+            let names = context.names;
             let message = if matches!(bound.hint, Hint::Union(_)) {
                 "A bound can't be a union: join several bounds with `&`."
-            } else if joins_type_parameter(&bound.hint, context) {
+            } else if joins(&bound.hint, |member| {
+                matches!(member, Hint::Identifier(name @ Identifier::Local(_)) if names.is_type_parameter(name))
+            }) {
                 "A type parameter is a bound alone, as in `<TSub : T>`: it joins no other bound with `&`."
+            } else if joins(&bound.hint, |member| matches!(member, Hint::Object(object) if object.value == OBJECT)) {
+                "`Object` is a bound alone, as in `<TValue : Object>`: it joins no other bound with `&`."
             } else {
                 "A bound is `Object`, `Equatable`, a class, an interface or a type parameter, as in `<TItem : DatabaseEntity>`."
             };
@@ -5013,22 +5016,20 @@ fn check_type_parameters(list: &TypeParameterList, place: Place, context: &mut C
     }
 }
 
-/// Whether `hint` joins a type parameter with other bounds by `&`, as in `<TL : Order & TA>`.
-fn joins_type_parameter(hint: &Hint, context: &Context<'_, '_, '_>) -> bool {
+/// Whether the intersection `hint` joins a type for which `alone` holds with other bounds by `&`, as the type parameter
+/// `TA` in `<TL : Order & TA>` or `Object` in `<T : Object & Shareable>`, each a bound alone.
+fn joins(hint: &Hint, alone: impl Fn(&Hint) -> bool + Copy) -> bool {
     match hint {
-        Hint::Intersection(intersection) => {
-            joins_type_parameter(intersection.left, context) || joins_type_parameter(intersection.right, context)
-        }
-        Hint::Identifier(name @ Identifier::Local(_)) => context.names.is_type_parameter(name),
-        _ => false,
+        Hint::Intersection(intersection) => joins(intersection.left, alone) || joins(intersection.right, alone),
+        member => alone(member),
     }
 }
 
 /// Decides each type an intersection joins with `&`, spec sections 11 and 24, as `Shippable & Billable` or the bound
-/// `<TItem : DatabaseEntity & Shareable>`: a class or an interface, written by its name and its type arguments. A bound
-/// at `place` [`Place::TypeParameter`] that joins `Object` is refused as `Object` alone, which holds any object, and
-/// `T?` among the types is the whole intersection with null, written `(A & B)?` as a union is. A type written twice is
-/// an error, as it is in a union. Returns whether every type is a class or an interface.
+/// `<TItem : DatabaseEntity & Shareable>`: a class or an interface, written by its name and its type arguments. `T?`
+/// among the types is the whole intersection with null, written `(A & B)?` as a union is. A type written twice is an
+/// error, as it is in a union. A bound that joins `Object` never gets here, since `ResolvedNames::is_bound` refuses it.
+/// Returns whether every type is a class or an interface.
 fn check_intersection(intersection: &IntersectionHint, place: Place, context: &mut Context<'_, '_, '_>) -> bool {
     let mut members = Vec::new();
     intersection_members(intersection, &mut members);
@@ -5055,9 +5056,6 @@ fn check_intersection(intersection: &IntersectionHint, place: Place, context: &m
                 joined = false;
 
                 continue;
-            }
-            Hint::Object(object) if place == Place::TypeParameter && object.value == OBJECT => {
-                "`Object` is a bound alone, as in `<TValue : Object>`: it joins no other bound with `&`.".to_owned()
             }
             Hint::Nullable(nullable) => {
                 let written = context.get_code_snippet(intersection);

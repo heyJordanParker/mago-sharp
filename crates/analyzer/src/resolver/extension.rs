@@ -391,7 +391,8 @@ where
 
 /// The members of `candidates` whose receiver fits inside every other candidate's, as C# overload resolution and
 /// Kotlin pick the most specific receiver, spec section 26: an extension on `AuditedWallet` over one on `Wallet`. All
-/// of `candidates` when none does, so they stay ambiguous.
+/// of `candidates` when none does, so they stay ambiguous. A receiver the checker refused, as a type parameter whose
+/// bound it refused, fits any value, so it is the least specific, and its member wins only when it fits alone.
 fn most_specific<'ctx, A>(
     context: &Context<'_, '_, A>,
     candidates: Vec<(MethodIdentifier, &'ctx FunctionLikeMetadata)>,
@@ -399,17 +400,29 @@ fn most_specific<'ctx, A>(
 where
     A: Arena,
 {
-    let specific: Vec<_> = candidates
+    let receiver = |metadata: &'ctx FunctionLikeMetadata| {
+        metadata.parameters.first().and_then(|parameter| parameter.get_type_metadata())
+    };
+    let ranked: Vec<_> = candidates
+        .iter()
+        .filter(|(_, metadata)| !receiver(metadata).is_some_and(|own| is_refused_type(&own.type_union)))
+        .copied()
+        .collect();
+    if ranked.is_empty() {
+        return candidates;
+    }
+
+    let specific: Vec<_> = ranked
         .iter()
         .filter(|(_, metadata)| {
-            metadata.parameters.first().and_then(|parameter| parameter.get_type_metadata()).is_some_and(|own| {
-                candidates.iter().all(|(method, other)| fits(context, &own.type_union, method.get_class_name(), other))
+            receiver(metadata).is_some_and(|own| {
+                ranked.iter().all(|(method, other)| fits(context, &own.type_union, method.get_class_name(), other))
             })
         })
         .copied()
         .collect();
 
-    if specific.is_empty() { candidates } else { specific }
+    if specific.is_empty() { ranked } else { specific }
 }
 
 /// The start of the error for the extensions `candidates`, which compete for the member `written`, naming where each
