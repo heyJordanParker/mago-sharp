@@ -91,11 +91,12 @@ impl CollectionKind {
     }
 
     /// The help for a member of the kind that a project without the standard library lacks, as it lacks them all:
-    /// the library to install.
+    /// the library to install, as "… which declares the members of an `Iterable`."
     #[must_use]
     pub fn missing_library_help(self) -> String {
         format!(
-            "Install the standard library, heyjordanparker/php-sharp-composer, which declares the members of a `{}`.",
+            "Install the standard library, heyjordanparker/php-sharp-composer, which declares the members of {} `{}`.",
+            self.article().to_lowercase(),
             self.name()
         )
     }
@@ -291,15 +292,15 @@ where
 }
 
 /// The extension methods a call on a value of type `receiver` reaches in this file and can call, each written as
-/// `` `name` ``, in order and once each: those of the file's namespace, its imports and the standard library's on the
-/// types every file has them for, whose receiver fits, and whose search can compare the receiver's elements, as
-/// [`can_compare_elements`] decides for the call.
+/// `` `name` ``, in the order of their names, so `remove` comes before `removeLast`, and once each: those of the file's
+/// namespace, its imports and the standard library's on the types every file has them for, whose receiver fits, and
+/// whose search can compare the receiver's elements, as [`can_compare_elements`] decides for the call.
 pub(crate) fn extension_methods<A>(context: &Context<'_, '_, A>, receiver: &TUnion) -> Vec<String>
 where
     A: Arena,
 {
     let codebase = context.codebase;
-    let mut methods: Vec<String> = codebase
+    let mut names: Vec<String> = codebase
         .extensions
         .values()
         .flatten()
@@ -310,12 +311,12 @@ where
                 && fits(context, receiver, *class, metadata)
                 && can_compare_elements(metadata, receiver, codebase)
         })
-        .map(|(_, metadata)| format!("`{}`", metadata.original_name))
+        .map(|(_, metadata)| metadata.original_name.to_string())
         .collect();
-    methods.sort();
-    methods.dedup();
+    names.sort();
+    names.dedup();
 
-    methods
+    names.into_iter().map(|name| format!("`{name}`")).collect()
 }
 
 /// Whether a value of type `receiver` fits the receiver of the extension member `metadata` of the static class `class`,
@@ -579,6 +580,16 @@ pub fn collection_member<'codebase>(
     kind: CollectionKind,
 ) -> Option<&'codebase MethodIdentifier> {
     codebase.extensions.get(&ascii_lowercase_word(name))?.iter().map(|(_, method)| method).find(|method| {
+        codebase
+            .get_method_by_id(method)
+            .is_some_and(|metadata| collection_member_kind(method.get_class_name(), metadata) == Some(kind))
+    })
+}
+
+/// Whether the standard library declares any member of the collection `kind`, as [`collection_member`] finds one. A
+/// project without the library has none of them, whatever extensions of its own it declares.
+pub(crate) fn library_declares_members(codebase: &CodebaseMetadata, kind: CollectionKind) -> bool {
+    codebase.extensions.values().flatten().any(|(_, method)| {
         codebase
             .get_method_by_id(method)
             .is_some_and(|metadata| collection_member_kind(method.get_class_name(), metadata) == Some(kind))

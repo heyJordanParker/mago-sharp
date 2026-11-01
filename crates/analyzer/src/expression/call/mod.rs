@@ -635,7 +635,9 @@ fn searched_element_type(receiver_type: &TUnion, codebase: &CodebaseMetadata) ->
 /// Whether a call of the collection member `metadata` on a value of `receiver_type` can pass an element to each of
 /// its parameters marked `ComparedByEquality`, which a search compares with the receiver's elements by `==`, as
 /// [`search_refusal`] decides, spec section 11. A `List<TItem : Object>` has no `contains`, `indexOf` or `remove`,
-/// since `==` cannot compare two `TItem`s, and a `List<int>` has all three.
+/// since `==` cannot compare two `TItem`s, and a `List<int>` has all three. A nullable element without `==` hides
+/// them too, as `List<Cart?>` does for a `Cart` without `operator ==`, though its `contains(null)` passes, since `==`
+/// lifts `null`.
 pub(crate) fn can_compare_elements(
     metadata: &FunctionLikeMetadata,
     receiver_type: &TUnion,
