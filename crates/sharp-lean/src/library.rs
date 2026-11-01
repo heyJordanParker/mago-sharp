@@ -27,6 +27,8 @@ use std::thread;
 use std::time::Duration;
 
 use mago_build_id::BUILD_ID;
+use mago_database::error::DatabaseError;
+use mago_database::error::IOAction;
 use sha2::Digest;
 use sha2::Sha256;
 
@@ -412,9 +414,15 @@ fn unbuilt(failure: impl std::fmt::Display) -> io::Error {
 pub(crate) fn build(lake: &Lake) -> io::Result<PathBuf> {
     let builds = cache_root()?.join("lean");
     let library = builds.join(format!("{BUILD_ID:032x}"));
-    fs::create_dir_all(&builds)?;
-    let lock = fs::File::options().create(true).truncate(false).write(true).open(builds.join("build.lock"))?;
-    lock.lock()?;
+    fs::create_dir_all(&builds).map_err(|error| DatabaseError::io(IOAction::CreateFolder, &builds, error))?;
+    let lock_file = builds.join("build.lock");
+    let _lock = fs::File::options()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_file)
+        .and_then(|lock| lock.lock().map(|()| lock))
+        .map_err(|error| DatabaseError::io(IOAction::WriteFile, &lock_file, error))?;
     if is_built(&library) {
         return Ok(library);
     }
@@ -425,8 +433,9 @@ pub(crate) fn build(lake: &Lake) -> io::Result<PathBuf> {
     }
     for (path, source) in PACKAGE {
         let target = staging.join(path);
-        fs::create_dir_all(target.parent().unwrap_or(&staging))?;
-        fs::write(target, source)?;
+        let folder = target.parent().unwrap_or(&staging);
+        fs::create_dir_all(folder).map_err(|error| DatabaseError::io(IOAction::CreateFolder, folder, error))?;
+        fs::write(&target, source).map_err(|error| DatabaseError::io(IOAction::WriteFile, &target, error))?;
     }
 
     let output = lake.command().arg("build").current_dir(&staging).output()?;
@@ -437,10 +446,10 @@ pub(crate) fn build(lake: &Lake) -> io::Result<PathBuf> {
 
     fs::rename(&staging, &library).map_err(unbuilt)?;
 
-    for entry in fs::read_dir(&builds)? {
-        let old = entry?.path();
+    for entry in fs::read_dir(&builds).map_err(|error| DatabaseError::io(IOAction::OpenFolder, &builds, error))? {
+        let old = entry.map_err(|error| DatabaseError::io(IOAction::WalkFolder, &builds, error))?.path();
         if old.is_dir() && old != library {
-            fs::remove_dir_all(old)?;
+            fs::remove_dir_all(&old).map_err(|error| DatabaseError::io(IOAction::DeleteFolder, &old, error))?;
         }
     }
 
@@ -511,9 +520,15 @@ pub(crate) fn first_call(command: &mut Command) -> io::Result<Output> {
 
 /// The exclusive lock on `elan.lock` in `cache`, held across threads and processes alike until it is dropped.
 fn install_lock(cache: &Path) -> io::Result<fs::File> {
-    fs::create_dir_all(cache)?;
-    let lock = fs::File::options().create(true).truncate(false).write(true).open(cache.join("elan.lock"))?;
-    lock.lock()?;
+    fs::create_dir_all(cache).map_err(|error| DatabaseError::io(IOAction::CreateFolder, cache, error))?;
+    let lock_file = cache.join("elan.lock");
+    let lock = fs::File::options()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_file)
+        .and_then(|lock| lock.lock().map(|()| lock))
+        .map_err(|error| DatabaseError::io(IOAction::WriteFile, &lock_file, error))?;
 
     Ok(lock)
 }
@@ -604,7 +619,9 @@ fn elan(home: &Path) -> Command {
 /// Deletes `folder` and everything in it, if it exists.
 fn remove_folder(folder: &Path) -> io::Result<()> {
     match fs::remove_dir_all(folder) {
-        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+        Err(error) if error.kind() != io::ErrorKind::NotFound => {
+            Err(DatabaseError::io(IOAction::DeleteFolder, folder, error).into())
+        }
         _ => Ok(()),
     }
 }

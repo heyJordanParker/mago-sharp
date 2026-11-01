@@ -2354,6 +2354,32 @@ fn compile_runs_the_lake_on_the_path_and_installs_no_lean() {
     assert!(!cache.path().join("mago/elan").exists(), "{}", printed(&output));
 }
 
+/// A cache folder the law checker can't create, as one a root container left, is named with what failed.
+#[cfg(unix)]
+#[test]
+fn compile_names_the_cache_folder_the_law_checker_cannot_create() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = lawful_project(&[("app/Shared/Money.sharp", LAWFUL_MONEY)]);
+    let lake = tempfile::tempdir().unwrap();
+    write(lake.path(), "lake", "#!/bin/sh\n[ \"$1\" = --version ]\n");
+    std::fs::set_permissions(lake.path().join("lake"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let cache = unwritable_cache();
+
+    let output =
+        command(directory.path(), "never").env("PATH", lake.path()).env("XDG_CACHE_HOME", &cache).output().unwrap();
+
+    assert!(!output.status.success(), "{}", printed(&output));
+    assert!(
+        printed(&output).contains(&format!(
+            "The laws could not be checked: can't create the folder `{}`: File exists (os error 17).",
+            cache.join("mago").display()
+        )),
+        "{}",
+        printed(&output)
+    );
+}
+
 /// Puts a `lake` first on the `PATH` that runs the real one, except that its first `--version`, the call on which elan
 /// installs a missing Lean, installs into the empty folder `toolchain` in `folder`, as elan does, with no lock of its
 /// own: an install takes a second, and an install that starts while another runs leaves `overlap` in `folder`.
