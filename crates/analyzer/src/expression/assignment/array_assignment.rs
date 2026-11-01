@@ -195,10 +195,7 @@ where
             IssueCode::NonExistentMethod,
             Issue::error(format!("Method `set`, which `{write}` runs, does not exist on `{collection}`."))
                 .with_annotation(Annotation::primary(access.span()).with_message("This index write runs `set`."))
-                .with_help(format!(
-                    "Install the standard library, heyjordanparker/php-sharp-composer, which declares the members of a `{}`.",
-                    kind.name()
-                )),
+                .with_help(kind.missing_library_help()),
         );
     }
 

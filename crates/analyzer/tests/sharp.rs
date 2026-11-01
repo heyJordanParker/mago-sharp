@@ -44,6 +44,7 @@ use mago_codex::reference::SymbolReferences;
 use mago_codex::scanner::scan_program;
 use mago_codex::ttype::TType;
 use mago_codex::ttype::get_int;
+use mago_codex::ttype::get_null;
 use mago_codex::ttype::union::TUnion;
 use mago_database::DatabaseReader;
 use mago_database::file::File;
@@ -6196,6 +6197,53 @@ fn a_lambda_fits_a_function_type_only_with_its_parameters_and_its_void() {
     );
 }
 
+/// Spec section 14.1: a call that returns `void` gives no value through `?.` as through `.`, though `?.` types it
+/// `null`. Each use of its value is refused once, with the error its `.` twin gets: an assigned value, an argument, the
+/// value a method, a computed property or a `get` accessor that returns one returns, an operand and an interpolation,
+/// below a `?.` in a chain, and a function value's, a collection member's and a class value's static call alike. A
+/// lambda gives a value only where its function type's result is no `Any?` and holds no type parameter, as Kotlin's
+/// `() -> Any?` takes a `Unit` lambda, so `Scope.run(() => box.save())` compiles, and so do a lambda for a `void`
+/// function type, a lambda without a function type, and the call as a statement of its own. A `?.` call is a value
+/// where a part of its receiver runs a method that returns one, and a `never` method's call is no `void` one.
+#[test]
+fn a_void_call_through_null_safe_access_gives_no_value() {
+    let sharp = "namespace Demo;\n\nimport Sharp.Scope;\n\nclass Box\n{\n    public void save() { }\n\n    public static void make() { }\n\n    public never fail() => this.fail();\n}\n\nclass Counter\n{\n    public void count() { }\n}\n\nclass Holder\n{\n    public Box box { get; } = new Box();\n}\n\nclass Report\n{\n    private Box box = new Box();\n\n    public Any? saved => this.box.save();\n\n    public Any? held { get { return this.box.save(); } }\n\n    public static void log(Any? value) { }\n\n    public Any? sure(Box box)\n    {\n        return box.save();\n    }\n\n    public Any? maybe(Box? maybe)\n    {\n        return maybe?.save();\n    }\n\n    public Any? sureArrow(Box box) => box.save();\n\n    public Any? maybeArrow(Box? maybe) => maybe?.save();\n\n    public Any? stops(Box box) => box.fail();\n\n    public Any? maybeStops(Box? maybe) => maybe?.fail();\n\n    public void lambdas(Box box, Box? maybe)\n    {\n        Function<void()> a = () => box.save();\n        Function<void()> b = () => maybe?.save();\n        Function<Any?()> c = () => box.save();\n        Function<Any?()> d = () => maybe?.save();\n        const e = () => box.save();\n        const f = () => maybe?.save();\n        Function<int()> g = () => box.save();\n        Function<int?()> h = () => maybe?.save();\n        Scope.run(() => box.save());\n        Scope.run(() => maybe?.save());\n        int i = Scope.run(() => box.save());\n    }\n\n    public void run(Box box, Box? maybe, Holder held, Holder? holder, Function<void()> done, Function<void()>? hook, List<int> kept, List<int>? seen, bool flag, (List<int>|Counter)? counted)\n    {\n        const a = box.save();\n        const b = maybe?.save();\n        Report.log(box.save());\n        Report.log(maybe?.save());\n        const c = box.save() ?? 1;\n        const d = maybe?.save() ?? 1;\n        const e = `${box.save()}`;\n        const f = `${maybe?.save()}`;\n        const g = held.box.save();\n        const h = holder?.box.save();\n        const i = done();\n        const j = hook?.();\n        const k = kept.clear();\n        const l = seen?.clear();\n        const m = Box.make();\n        const type = flag ? typeof(Box) : null;\n        const n = type?.make();\n        const o = counted?.count();\n        maybe?.save();\n        holder?.box.save();\n        hook?.();\n        seen?.clear();\n        type?.make();\n    }\n}\n";
+    let no_value = |at: &str, call: &str| {
+        format!(
+            "{at} no-value: `{call}` returns nothing, so it has no value to use: call it as a statement of its own."
+        )
+    };
+
+    let expected = [
+        no_value("28:26", "this.box.save()"),
+        no_value("30:37", "this.box.save()"),
+        no_value("36:16", "box.save()"),
+        no_value("41:16", "maybe?.save()"),
+        no_value("44:39", "box.save()"),
+        no_value("46:43", "maybe?.save()"),
+        no_value("60:35", "box.save()"),
+        no_value("61:36", "maybe?.save()"),
+        no_value("64:33", "box.save()"),
+        no_value("69:19", "box.save()"),
+        no_value("70:19", "maybe?.save()"),
+        no_value("71:20", "box.save()"),
+        no_value("72:20", "maybe?.save()"),
+        no_value("73:19", "box.save()"),
+        no_value("74:19", "maybe?.save()"),
+        no_value("75:22", "box.save()"),
+        no_value("76:22", "maybe?.save()"),
+        no_value("77:19", "held.box.save()"),
+        no_value("78:19", "holder?.box.save()"),
+        no_value("79:19", "done()"),
+        no_value("80:19", "hook?.()"),
+        no_value("81:19", "kept.clear()"),
+        no_value("82:19", "seen?.clear()"),
+        no_value("83:19", "Box.make()"),
+        no_value("85:19", "type?.make()"),
+    ];
+    assert_messages(sharp, &[SCOPE], &expected.iter().map(String::as_str).collect::<Vec<_>>());
+}
+
 /// Spec section 14.3 with Jordan's rule that PHP# code never reasons about PHP underneath: a plain PHP library's
 /// function that changes the variable an argument names is no function value, since PHP# passes every argument by
 /// value, and a direct call that would change a PHP# variable is refused too, by position or by name. A call that
@@ -8368,7 +8416,7 @@ fn a_method_a_string_or_a_number_lacks_is_an_error_that_lists_the_methods_it_has
             ]
         ),
         [
-            "5:46 non-existent-method Method `shuffled` does not exist on `string`. | A `string` has the methods `capitalized`, `characters`, `codePoints`, `compareTo`, `contains`, `decapitalized`, `endsWith`, `indexOf`, `lastIndexOf`, `length`, `lines`, `lowercase`, `padEnd`, `padStart`, `parseCsv`, `removePrefix`, `removeSuffix`, `repeat`, `replace`, `slug`, `split`, `startsWith`, `substring`, `trimEnd`, `trimStart`, `trim`, `uppercase`.",
+            "5:46 non-existent-method Method `shuffled` does not exist on `string`. | A `string` has the methods `capitalized`, `characters`, `codePoints`, `compareTo`, `contains`, `decapitalized`, `endsWith`, `indexOf`, `lastIndexOf`, `length`, `lines`, `lowercase`, `padEnd`, `padStart`, `parseCsv`, `removePrefix`, `removeSuffix`, `repeat`, `replace`, `slug`, `split`, `startsWith`, `substring`, `trim`, `trimEnd`, `trimStart`, `uppercase`.",
             "6:36 non-existent-method Method `missing` does not exist on `int`. | An `int` has the methods `abs`, `clamp`, `floorDiv`, `format`, `mod`, `toByteString`, `toHex`.",
             "7:40 non-existent-method Method `missing` does not exist on `float`. | A `float` has the methods `abs`, `ceil`, `clamp`, `floor`, `format`, `isFinite`, `round`.",
             "8:44 non-existent-method Method `negate` does not exist on `bool`. | A `bool` has no methods.",
@@ -10530,6 +10578,47 @@ fn a_map_index_write_without_the_standard_library_is_refused() {
     );
 }
 
+/// A project without the standard library has no member of a `List`, an `Iterable` or a `Set`, so a method one lacks
+/// names the library to install, as an index write does, and never an empty list of methods. An extension the project
+/// declares itself is listed before it, and never stands in for the library.
+#[test]
+fn a_method_a_collection_lacks_without_the_standard_library_names_the_library() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static int size(List<int> sizes) => sizes.missing();\n    public static int read(Iterable<int> rows) => rows.missing();\n    public static int held(Set<int> tags) => tags.missing();\n}\n";
+    let largest = (
+        "src/Demo/Sizes.sharp",
+        "namespace Demo;\n\npublic static class Sizes\n{\n    extension(List<int> sizes)\n    {\n        public int largest() => 0;\n    }\n}\n",
+    );
+    let refusals = |others: &[(&'static str, &'static str)]| {
+        let (issues, _, _) =
+            analyze_with_references(&PLUGIN_REGISTRY, settings(), ("src/Demo/Report.sharp", sharp), others, &[]);
+
+        issues
+            .iter()
+            .map(|issue| {
+                format!("{} {} | {}", located(sharp, issue), issue.message, issue.help.as_deref().unwrap_or_default())
+            })
+            .collect::<Vec<_>>()
+    };
+    let install = "Install the standard library, heyjordanparker/php-sharp-composer, which declares the members of";
+
+    assert_eq!(
+        refusals(&[]),
+        [
+            format!("5:54 non-existent-method Method `missing` does not exist on `List<int>`. | {install} a `List`."),
+            format!(
+                "6:56 non-existent-method Method `missing` does not exist on `Iterable<int>`. | {install} an `Iterable`."
+            ),
+            format!("7:51 non-existent-method Method `missing` does not exist on `Set<int>`. | {install} a `Set`."),
+        ]
+    );
+    assert_eq!(
+        refusals(&[largest])[0],
+        format!(
+            "5:54 non-existent-method Method `missing` does not exist on `List<int>`. | A `List<int>` has the methods `largest`. {install} a `List`."
+        )
+    );
+}
+
 /// A `List`'s keys are the `int`s from 0 to its last index, so a read whose index may be anything else is an error,
 /// as an unchecked `Any` is (spec section 24). A plain PHP `list<int>` keeps reading a wider key, as PHP does.
 #[test]
@@ -12193,6 +12282,99 @@ fn a_list_of_int_has_its_largest_and_smallest_element() {
     );
 }
 
+/// Spec section 11: "`contains`, `indexOf` and `remove` on a `List`, a `Map` key, a `Set` element and a value pattern
+/// each need `Equatable`", so the methods a collection lacking a method lists leave them out where its elements have no `==`, as
+/// a `TItem : Object` and a class that declares no `operator ==`, and list them where they have one, as an `int` and a
+/// `TItem : Equatable`. A `Set<TItem : Object>` leaves out `add` too, which compares the value with each element.
+#[test]
+fn a_collection_lacking_a_method_lists_only_the_methods_its_elements_let_it_call() {
+    let sharp = "namespace Demo;\n\npublic static class Shelf\n{\n    public static int objects<TItem : Object>(List<TItem> items) => items.missing();\n    public static int numbers(List<int> items) => items.missing();\n    public static int carts(List<Cart> carts) => carts.missing();\n    public static int equatables<TItem : Equatable>(List<TItem> items) => items.missing();\n    public static int sets<TItem : Object>(Set<TItem> items) => items.missing();\n}\n";
+
+    assert_eq!(
+        refusals(("src/Demo/Shelf.sharp", sharp), &[("src/Demo/Cart.php", CART)])
+            .into_iter()
+            .filter(|refusal| refusal.contains("non-existent-method"))
+            .collect::<Vec<_>>(),
+        [
+            "5:75 non-existent-method Method `missing` does not exist on `List<TItem>`. | A `List<TItem>` has the methods `add`, `all`, `any`, `associateBy`, `chunked`, `clear`, `count`, `distinct`, `entries`, `filter`, `first`, `flatMap`, `fold`, `getOrNull`, `groupBy`, `insert`, `isEmpty`, `isNotEmpty`, `last`, `map`, `removeAt`, `removeFirst`, `removeLast`, `reversed`, `set`, `slice`, `sortedBy`, `sumOf`, `toList`, `toSet`.",
+            "6:57 non-existent-method Method `missing` does not exist on `List<int>`. | A `List<int>` has the methods `add`, `all`, `any`, `associateBy`, `chunked`, `clear`, `contains`, `count`, `distinct`, `entries`, `filter`, `first`, `flatMap`, `fold`, `getOrNull`, `groupBy`, `indexOf`, `insert`, `isEmpty`, `isNotEmpty`, `last`, `map`, `max`, `min`, `remove`, `removeAt`, `removeFirst`, `removeLast`, `reversed`, `set`, `slice`, `sortedBy`, `sumOf`, `toList`, `toSet`.",
+            "7:56 non-existent-method Method `missing` does not exist on `List<Cart>`. | A `List<Cart>` has the methods `add`, `all`, `any`, `associateBy`, `chunked`, `clear`, `count`, `distinct`, `entries`, `filter`, `first`, `flatMap`, `fold`, `getOrNull`, `groupBy`, `insert`, `isEmpty`, `isNotEmpty`, `last`, `map`, `removeAt`, `removeFirst`, `removeLast`, `reversed`, `set`, `slice`, `sortedBy`, `sumOf`, `toList`, `toSet`.",
+            "8:81 non-existent-method Method `missing` does not exist on `List<TItem>`. | A `List<TItem>` has the methods `add`, `all`, `any`, `associateBy`, `chunked`, `clear`, `contains`, `count`, `distinct`, `entries`, `filter`, `first`, `flatMap`, `fold`, `getOrNull`, `groupBy`, `indexOf`, `insert`, `isEmpty`, `isNotEmpty`, `last`, `map`, `remove`, `removeAt`, `removeFirst`, `removeLast`, `reversed`, `set`, `slice`, `sortedBy`, `sumOf`, `toList`, `toSet`.",
+            "9:71 non-existent-method Method `missing` does not exist on `Set<TItem>`. | A `Set<TItem>` has the methods `any`, `clear`, `count`, `filter`, `first`, `isEmpty`, `isNotEmpty`, `map`, `sortedBy`, `sumOf`, `toList`.",
+        ]
+    );
+}
+
+/// A library-style extension of `Iterable<T>` whose parameter is marked `ComparedByEquality` reaches every value a
+/// loop reads, and its call compares that value with what the receiver gives a loop, spec section 12: each element of
+/// a `List` or an `Iterable`, or each key of a `Map` or a `Set`. So an `Iterable<int>` lacking a method lists it, and an
+/// `Iterable<Cart>` or a `List<Cart>` of a class without `operator ==` leaves it out, as it refuses the call.
+#[test]
+fn a_marked_extension_of_an_iterable_is_listed_where_its_call_compares_no_elements_it_cannot() {
+    let sharp = "namespace Demo;\n\nimport Lib.RowMembers;\n\npublic static class Rows\n{\n    public static int numbers(Iterable<int> rows) => rows.missing();\n    public static int carts(List<Cart> carts) => carts.missing();\n    public static int iterated(Iterable<Cart> rows) => rows.missing();\n}\n";
+
+    assert_eq!(
+        refusals(("src/Demo/Rows.sharp", sharp), &[ROW_MEMBERS, ("src/Demo/Cart.php", CART)])
+            .into_iter()
+            .filter(|refusal| refusal.contains("non-existent-method"))
+            .collect::<Vec<_>>(),
+        [
+            "7:59 non-existent-method Method `missing` does not exist on `Iterable<int>`. | An `Iterable<int>` has the methods `filter`, `holds`, `map`, `take`, `toList`.",
+            "8:56 non-existent-method Method `missing` does not exist on `List<Cart>`. | A `List<Cart>` has the methods `add`, `all`, `any`, `associateBy`, `chunked`, `clear`, `count`, `distinct`, `entries`, `filter`, `first`, `flatMap`, `fold`, `getOrNull`, `groupBy`, `insert`, `isEmpty`, `isNotEmpty`, `last`, `map`, `removeAt`, `removeFirst`, `removeLast`, `reversed`, `set`, `slice`, `sortedBy`, `sumOf`, `toList`, `toSet`.",
+            "9:61 non-existent-method Method `missing` does not exist on `Iterable<Cart>`. | An `Iterable<Cart>` has the methods `filter`, `map`, `take`, `toList`.",
+        ]
+    );
+}
+
+/// A library-style extension of `Iterable<T>` whose `holds` compares its value with each value the receiver gives a
+/// loop, for the tests of a search of an `Iterable`.
+const ROW_MEMBERS: (&str, &str) = (
+    "src/Lib/RowMembers.sharp",
+    "namespace Lib;\n\nimport Sharp.Internal.ComparedByEquality;\n\npublic static class RowMembers\n{\n    extension<T>(Iterable<T> items)\n    {\n        public bool holds([ComparedByEquality] T value) => false;\n    }\n}\n",
+);
+
+/// Spec section 12: a search of an `Iterable` compares its value with each value the `Iterable` gives a loop by `==`,
+/// as a `List`'s `contains` does, so `rows.holds(cart)` on an `Iterable<Cart>` of a class without `operator ==` is
+/// refused. An `Iterable` has no `any`, so the help tests for the same object through `toList()`, which compiles, and
+/// an `Iterable<int>` searches with no issue.
+#[test]
+fn a_search_of_an_iterable_needs_equality_on_what_it_gives_a_loop() {
+    let sharp = "namespace Demo;\n\nimport Lib.RowMembers;\n\npublic static class Rows\n{\n    public static bool carts(Iterable<Cart> rows, Cart cart) => rows.holds(cart);\n    public static bool same(Iterable<Cart> rows, Cart cart) => rows.toList().any(c => c === cart);\n    public static bool numbers(Iterable<int> rows) => rows.holds(1);\n}\n";
+
+    assert_eq!(
+        refusals(("src/Demo/Rows.sharp", sharp), &[ROW_MEMBERS, ("src/Demo/Cart.php", CART)]),
+        [
+            "7:76 invalid-argument `holds` compares elements with `==`, and `Cart` declares no `operator ==`. | Declare `operator ==` and `hash()` in `Cart`, or test for the same object with `rows.toList().any(c => c === cart)`.",
+        ]
+    );
+}
+
+/// Spec section 12: a call on a value that may be several kinds of collection runs each kind's member, and each one
+/// searches with the same argument, so a search `==` cannot make is refused once for the call. Its help tests for the
+/// same object only through a member every kind reaches its elements with: `any` on a `List|Set`, and none on a
+/// `List|Map`, whose `any` reaches the `Map`'s values and whose `List` has no `keys()`.
+#[test]
+fn a_search_of_several_kinds_of_collection_is_refused_once() {
+    let sharp = "namespace Demo;\n\nclass Shelf\n{\n    public bool run(List<Cart>|Map<Cart, int> things, List<Cart>|Set<Cart> held, Cart cart)\n    {\n        bool removed = things.remove(cart);\n        bool kept = held.contains(cart);\n        return removed || kept;\n    }\n}\n\nclass Cart\n{\n}\n";
+
+    let keys = "an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares";
+    let key = format!("is anything with `==` and `hash()`: {keys} `operator ==`, and `Cart` is none of them.");
+    let declared = format!("{keys} `public static bool operator ==` with `public int hash()`.");
+    let refusal = "compares elements with `==`, and `Cart` declares no `operator ==`. | Declare `operator ==` and `hash()` in `Cart`";
+
+    assert_eq!(
+        refusals(("src/Demo/Shelf.sharp", sharp), &[]),
+        [
+            format!("5:21 template-constraint-violation A `Map`'s key {key} | Key the `Map` by {declared}"),
+            format!("5:55 template-constraint-violation A `Set`'s element {key} | Fill the `Set` with {declared}"),
+            format!("7:38 invalid-argument `remove` {refusal}."),
+            format!(
+                "8:35 invalid-argument `contains` {refusal}, or test for the same object with `held.any(c => c === cart)`."
+            ),
+        ]
+    );
+}
+
 /// The semantic checks refuse an empty literal declared without a type, so a method called on it reports nothing
 /// more, and never names the `Map<never, never>` the literal alone would give.
 #[test]
@@ -12590,16 +12772,17 @@ fn a_type_parameter_takes_the_php_array_as_its_bound_does() {
 }
 
 /// A type argument meets its type parameter's bound as an argument meets its parameter's type, by one comparison. In a
-/// PHP# file an `int` meets no `float` bound, as it meets no `float` parameter, spec section 24: "An `int` where a
-/// `float` is expected is a compile error in PHP# code". A plain PHP file keeps PHP's rules, where an `int` meets both.
+/// PHP# file an `int` meets no `float` bound of a plain PHP function, as it meets no `float` parameter, spec section 24:
+/// "An `int` where a `float` is expected is a compile error in PHP# code". A plain PHP file keeps PHP's rules, where an
+/// `int` meets both.
 #[test]
 fn a_type_argument_meets_its_bound_as_an_argument_meets_its_parameter() {
-    let sharp = "namespace Demo;\n\nclass Numbers\n{\n    public static T keep<T : float>(T value) => value;\n\n    public static float same(float value) => value;\n\n    public static float run(int count) => Numbers.keep(count) + Numbers.same(count);\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib;\n\nclass Numbers\n{\n    public static float run(int count) => Lib.keep(count) + Lib.same(count);\n}\n";
     let lib = "<?php\n\nnamespace Lib;\n\n/**\n * @template T of float\n * @param T $value\n * @return T\n */\nfunction keep($value)\n{\n    return $value;\n}\n\nfunction same(float $value): float\n{\n    return $value;\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nfunction run(int $count): float\n{\n    return \\Lib\\keep($count) + \\Lib\\same($count);\n}\n";
 
     assert_eq!(
-        messages(("src/Demo/Numbers.sharp", sharp), &[]),
+        messages(("src/Demo/Numbers.sharp", sharp), &[("src/Lib/functions.php", lib)]),
         [
             "`int` does not satisfy the bound `float` of type parameter `T`.",
             "`int` is not `float`: convert with (float) count"
@@ -13689,14 +13872,14 @@ fn a_read_refused_by_its_key_or_a_set_still_gives_the_value_of_its_collection() 
 
 /// `==` on an `Iterable` is refused, as the element of a list, in a search of a list of them, and as a struct's
 /// property. Each refusal says that `==` compares a `List`, a `Map` or a `Set`, and an `Iterable` is none of them, and
-/// a type parameter bound by a collection may be another type. Each is an `Iterable`, so `toList()` gives a `List` to
-/// compare, which the refusal names and which compiles.
+/// a type parameter narrowed to a collection may be another type. Each is an `Iterable`, so `toList()` gives a `List`
+/// to compare, which the refusal names and which compiles.
 #[test]
 fn equality_of_an_iterable_names_its_to_list() {
-    let fixed = "namespace Demo;\n\nclass Report\n{\n    public static bool same(Iterable<int> items, Iterable<int> others) => items.toList() == others.toList();\n\n    public static bool bound<T : List<int>>(T items, List<int> others) => items.toList() == others.toList();\n}\n";
+    let fixed = "namespace Demo;\n\nclass Report\n{\n    public static bool same(Iterable<int> items, Iterable<int> others) => items.toList() == others.toList();\n}\n";
     assert_eq!(refusals(("src/Demo/Report.sharp", fixed), &[]), Vec::<String>::new());
 
-    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static bool same(Iterable<int> items, Iterable<int> others) => items == others;\n\n    public static bool rows(List<Iterable<int>> rows, List<Iterable<int>> others, Iterable<int> row) => rows == others || rows.contains(row);\n\n    public static bool streamed(Streamed a, Streamed b) => a == b;\n\n    public static bool bound<T : List<int>>(T items, List<int> others) => items == others;\n}\n\nstruct Streamed\n{\n    public Streamed(public Iterable<int> items { get; }) { }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static bool same(Iterable<int> items, Iterable<int> others) => items == others;\n\n    public static bool rows(List<Iterable<int>> rows, List<Iterable<int>> others, Iterable<int> row) => rows == others || rows.contains(row);\n\n    public static bool streamed(Streamed a, Streamed b) => a == b;\n\n    public static bool narrowed<T>(T items, List<int> others) => items is List<Any?> && items == others;\n}\n\nstruct Streamed\n{\n    public Streamed(public Iterable<int> items { get; }) { }\n}\n";
     let issues = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Report.sharp", sharp), &[]);
     let notes: Vec<_> = issues.iter().map(|issue| issue.notes.last().map(String::as_str).unwrap_or_default()).collect();
     let iterable = "`==` compares a `List`, a `Map` or a `Set`, and an `Iterable` is none of them";
@@ -13708,7 +13891,7 @@ fn equality_of_an_iterable_names_its_to_list() {
             format!("7:105 invalid-operand `==` compares `List<Iterable<int>>` with `List<Iterable<int>>` element by element, and {iterable}. | "),
             format!("7:137 invalid-argument `contains` compares elements with `==`, and {iterable}. | Compare each element's `toList()` with `==`, as in `a.toList() == b.toList()`."),
             "9:60 invalid-operand `Streamed` can't compare by value: `items` is an `Iterable<int>`, which `==` does not compare. | ".to_owned(),
-            "11:75 invalid-operand `==` compares a `List`, a `Map` or a `Set`, and `T` may be another type: compare `a.toList() == b.toList()`. | ".to_owned(),
+            "11:89 invalid-operand `==` compares a `List`, a `Map` or a `Set`, and `T` may be another type: compare `a.toList() == b.toList()`. | ".to_owned(),
         ]
     );
     assert_eq!(
@@ -13978,6 +14161,89 @@ fn a_member_that_changes_a_place_that_may_hold_one_of_two_lists_takes_only_what_
             "Invalid argument type for argument #1 of `List<int>.add`: expected `int`, but found `string`.",
             "Invalid assignment to `last`: it is declared as `int`.",
         ]
+    );
+}
+
+/// Spec section 14.4: `maybe?.rows` is the place `maybe.rows` is, where `maybe` is not null, so its read keeps each
+/// `List` the plain PHP property may hold beside the `null`, and a member that changes it takes only what both take and
+/// writes back the property's own type, as on `box.rows`.
+#[test]
+fn a_member_that_changes_a_place_through_null_safe_access_keeps_each_list_it_may_hold() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public void run(Box box, Box? maybe)\n    {\n        maybe?.rows.clear();\n        maybe?.rows.add(1);\n        box.rows.add(1);\n        maybe?.rows.add(\"x\");\n        box.rows.add(\"x\");\n        List<int>? held = maybe?.rows;\n    }\n}\n";
+
+    let issues = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Report.sharp", sharp), &TWO_LISTS);
+
+    assert_eq!(
+        issues
+            .iter()
+            .map(|issue| {
+                let primary = issue.annotations.iter().find(|annotation| annotation.kind == AnnotationKind::Primary);
+                let primary = primary.and_then(|primary| primary.message.as_deref()).unwrap_or("");
+                format!("{} {} {primary}", located(sharp, issue), issue.message)
+            })
+            .collect::<Vec<_>>(),
+        [
+            "8:25 invalid-argument Invalid argument type for argument #1 of `List<string>.add`: expected `string`, but found `int`. This has type `int`",
+            "9:22 invalid-argument Invalid argument type for argument #1 of `List<string>.add`: expected `string`, but found `int`. This has type `int`",
+            "10:25 invalid-argument Invalid argument type for argument #1 of `List<int>.add`: expected `int`, but found `string`. This has type `string`",
+            "11:22 invalid-argument Invalid argument type for argument #1 of `List<int>.add`: expected `int`, but found `string`. This has type `string`",
+            "12:27 invalid-local-assignment-value Invalid assignment to `held`: it is declared as `List<int>?`. This value has type `(List<int>|List<string>)?`.",
+        ]
+    );
+}
+
+/// Spec section 14.4: `maybe?.feed()` gives what `shelf.feed()` gives, or `null`, so a plain PHP method that may return
+/// a `List<int>` or a `List<string>` keeps both beside the `null`, on a receiver that may be null and on one an earlier
+/// `?.` of the chain gives, and a method that never returns gives only the `null`.
+#[test]
+fn a_null_safe_call_keeps_each_list_its_method_may_return() {
+    let shelf = (
+        "src/Demo/Shelf.php",
+        "<?php\n\nnamespace Demo;\n\nfinal class Shelf\n{\n    /** @return list<int>|list<string> */\n    public function feed(): array\n    {\n        return [];\n    }\n\n    public function stop(): never\n    {\n        throw new \\RuntimeException();\n    }\n}\n",
+    );
+    let holder = (
+        "src/Demo/Holder.php",
+        "<?php\n\nnamespace Demo;\n\nfinal class Holder\n{\n    public Shelf $shelf;\n\n    public function __construct()\n    {\n        $this->shelf = new Shelf();\n    }\n}\n",
+    );
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public void run(Shelf shelf, Shelf? maybe, Holder? holder)\n    {\n        List<int> whole = shelf.feed();\n        List<int>? held = maybe?.feed();\n        List<int>? deep = holder?.shelf.feed();\n        maybe?.stop();\n    }\n}\n";
+
+    let (issues, artifacts) =
+        analyze_with_artifacts(&PLUGIN_REGISTRY, settings(), ("src/Demo/Report.sharp", sharp), &[shelf, holder]);
+    let stop = sharp.find("maybe?.stop()").unwrap() as u32;
+
+    assert_eq!(
+        artifacts
+            .expression_types
+            .get(&(stop, stop + "maybe?.stop()".len() as u32))
+            .map(|r#type| TUnion::clone(r#type)),
+        Some(get_null())
+    );
+    assert_eq!(
+        issues
+            .iter()
+            .map(|issue| {
+                let primary = issue.annotations.iter().find(|annotation| annotation.kind == AnnotationKind::Primary);
+                let primary = primary.and_then(|primary| primary.message.as_deref()).unwrap_or("");
+                format!("{} {primary}", located(sharp, issue))
+            })
+            .collect::<Vec<_>>(),
+        [
+            "7:27 invalid-local-assignment-value This value has type `List<int>|List<string>`.",
+            "8:27 invalid-local-assignment-value This value has type `(List<int>|List<string>)?`.",
+            "9:27 invalid-local-assignment-value This value has type `(List<int>|List<string>)?`.",
+        ]
+    );
+}
+
+/// A refused read reports nothing again, so a read through `?.` of an element a tuple lacks is refused once, and the
+/// `null` the `?.` may give does not make the value it gives a second mistake.
+#[test]
+fn a_refused_read_through_null_safe_access_reports_only_itself() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public int run([int count, string]? pair)\n    {\n        int count = pair?.missing;\n        return count;\n    }\n}\n";
+
+    assert_eq!(
+        messages(("src/Demo/Report.sharp", sharp), &[]),
+        ["`[int count, string]` has no element named `missing`: its one named element is `count`."]
     );
 }
 
@@ -14615,6 +14881,178 @@ fn a_written_or_inferred_type_argument_outside_its_bound_is_reported() {
         ),
         ["5:90 template-constraint-violation", "9:29 template-constraint-violation"]
     );
+}
+
+/// Spec section 11: a type parameter is a bound alone, so `TPart : TItem & Shareable` is the semantics checker's one
+/// error. The refused bound bounds nothing, so a call that writes `TPart`'s type argument or infers it adds no error
+/// that reads the bound as `never`, and an error the bound has no part in still appears. A class's refused bound adds
+/// no error where a type or a header writes its type arguments, and no warning that `TItem`, which only that bound
+/// names, is unused.
+#[test]
+fn a_type_parameter_joined_in_a_bound_gives_one_error() {
+    let sharp = "namespace Demo;\n\npublic static class Parts\n{\n    public static TPart joined<TItem, TPart : TItem & Shareable>(TItem whole, TPart part) => part;\n\n    public static Any written() => Parts.joined<int, string>(1, \"x\");\n\n    public static Any inferred() => Parts.joined(1, \"x\");\n\n    public static int count() => \"x\";\n}\n";
+    let pair = "namespace Demo;\n\npublic class Pair<TItem, TPart : TItem & Shareable>\n{\n    public TPart? part { get; set; } = null;\n}\n";
+    let uses = "namespace Demo;\n\npublic class Parted : Pair<int, string>\n{\n    public static Any? held(Pair<int, string> pair) => pair.part;\n}\n";
+    let joined = "A type parameter is a bound alone, as in `<TSub : T>`: it joins no other bound with `&`.";
+
+    assert_eq!(
+        compile_errors(("src/Demo/Parts.sharp", sharp), &[("src/Demo/Paging.sharp", PAGING)]),
+        [joined, "Invalid return type for method `Parts.count`: expected `int`, but found `string`."]
+    );
+    assert_eq!(compile_errors(("src/Demo/Pair.sharp", pair), &[("src/Demo/Paging.sharp", PAGING)]), [joined]);
+    assert_eq!(issues(("src/Demo/Pair.sharp", pair), &[("src/Demo/Paging.sharp", PAGING)]), Vec::<String>::new());
+    assert_eq!(
+        compile_errors(
+            ("src/Demo/Parted.sharp", uses),
+            &[("src/Demo/Pair.sharp", pair), ("src/Demo/Paging.sharp", PAGING)]
+        ),
+        Vec::<String>::new()
+    );
+}
+
+/// Spec section 11: every other bound the semantics checker refuses bounds nothing too, so a type argument outside
+/// what the bound writes, written on the call or inferred from its argument, and `===` on two of its values add no
+/// second error. Nor does a type parameter that only the refused bound would have fixed, while one no bound names, and
+/// the bounded type parameter itself, are still unfixed and unused, and an error in the generic method's body still
+/// appears. A type written twice is refused as redundant, and the bound keeps the type it writes once, so an argument
+/// outside it is still an error, as it is once the second `Shareable` is removed.
+#[test]
+fn each_refused_bound_gives_one_error() {
+    // `held` written with `parameters`, and called with `value` of the type `argument`, which is outside what the bound
+    // writes: once with the type argument written, and once inferred.
+    let errors = |parameters: &str, argument: &str, value: &str| {
+        let code = format!(
+            "namespace Demo;\n\npublic static class Bounded\n{{\n    public static T held<{parameters}>(T value, TOther other) => value;\n\n    public static bool same<{parameters}>(T value, T other, TOther third) => value === other;\n\n    public static Any? written() => Bounded.held<{argument}, Line>({value}, new Line());\n\n    public static Any? inferred() => Bounded.held({value}, new Line());\n}}\n"
+        );
+
+        compile_errors(
+            ("src/Demo/Bounded.sharp", Box::leak(code.into_boxed_str())),
+            &[("src/Demo/Paging.sharp", PAGING)],
+        )
+    };
+    let other = "A bound is `Object`, `Equatable`, a class, an interface or a type parameter, as in `<TItem : DatabaseEntity>`.";
+    let mut wrong = Vec::new();
+    for (parameters, argument, value, refusals) in [
+        ("T : int, TOther", "string", "\"x\"", &[other][..]),
+        ("T : Shareable?, TOther", "int", "1", &[other]),
+        ("T : Any, TOther", "Any?", "null", &[other]),
+        ("T : List<int>, TOther", "int", "1", &[other]),
+        ("T : Function<int()>, TOther", "int", "1", &[other]),
+        ("T : TOther<int>, TOther", "int", "1", &[other]),
+        ("T : Shareable? & Line, TOther", "int", "1", &[other]),
+        ("T : T, TOther", "int", "1", &["A type parameter can't bound itself: the bound of `T` leads back to `T`."]),
+        (
+            "T : TOther, TOther : T",
+            "int",
+            "1",
+            &[
+                "A type parameter can't bound itself: the bound of `T` leads back to `T`.",
+                "A type parameter can't bound itself: the bound of `TOther` leads back to `TOther`.",
+            ],
+        ),
+    ] {
+        // `held` and `same` each declare the bound, and the checker refuses it in each.
+        let errors = errors(parameters, argument, value);
+        if errors != [refusals, refusals].concat() {
+            wrong.push(format!("<{parameters}>: {errors:#?}"));
+        }
+    }
+
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+
+    // `TOther` is fixed through `T`'s bound alone, as `<T : TOther, TOther>` fixes it, so a refused bound leaves a call
+    // and a method value without an error that nothing fixes `TOther`, and a call that writes both type arguments
+    // without an error that reads the bound.
+    let through_bound = |parameters: &str| {
+        let code = format!(
+            "namespace Demo;\n\npublic static class Bounded\n{{\n    public static T held<{parameters}>(T value) => value;\n\n    public static Any? called() => Bounded.held(1);\n\n    public static Any? written() => Bounded.held<int, int>(1);\n\n    public static Function<int(int)> valued() => Bounded.held;\n}}\n"
+        );
+
+        compile_errors(
+            ("src/Demo/Bounded.sharp", Box::leak(code.into_boxed_str())),
+            &[("src/Demo/Paging.sharp", PAGING)],
+        )
+    };
+    let joined = "A type parameter is a bound alone, as in `<TSub : T>`: it joins no other bound with `&`.";
+    let looped =
+        |name: &str| format!("A type parameter can't bound itself: the bound of `{name}` leads back to `{name}`.");
+    assert_eq!(through_bound("T : TOther, TOther"), Vec::<String>::new());
+    assert_eq!(through_bound("T : TOther & Shareable, TOther"), [joined]);
+    assert_eq!(through_bound("T : TOther|int, TOther"), ["A bound can't be a union: join several bounds with `&`."]);
+    assert_eq!(through_bound("T : Query<TOther> & int, TOther"), [other]);
+    assert_eq!(
+        through_bound("T : Object & Query<TOther>, TOther"),
+        ["`Object` is a bound alone, as in `<TValue : Object>`: it joins no other bound with `&`."]
+    );
+    assert_eq!(through_bound("T : List<TOther>, TOther"), [other]);
+    assert_eq!(through_bound("T : TOther<int>, TOther"), [other]);
+    assert_eq!(through_bound("T : TOther, TOther : T"), [looped("T"), looped("TOther")]);
+
+    // `TUnused`, which no bound names, is still unfixed and unused, and a type parameter its own refused bound names is
+    // still unfixed, as `<T>` is.
+    let unused = "namespace Demo;\n\npublic static class Bounded\n{\n    public static T held<TUnused, T : TOther & Shareable, TOther>(T value) => value;\n\n    public static Any? called() => Bounded.held(1);\n\n    public static Any? written() => Bounded.held<int, int, int>(1);\n}\n";
+    assert_eq!(
+        compile_errors(("src/Demo/Bounded.sharp", unused), &[("src/Demo/Paging.sharp", PAGING)]),
+        [joined, "Nothing fixes the type argument `TUnused` of the call to `Bounded.held`."]
+    );
+    assert_eq!(
+        issues(("src/Demo/Bounded.sharp", unused), &[("src/Demo/Paging.sharp", PAGING)]),
+        ["5:21 unused-template-parameter", "7:36 missing-template-parameter"]
+    );
+    let own = "namespace Demo;\n\npublic static class Bounded\n{\n    public static T looped<T : T>(T value) => value;\n\n    public static void free<T : T>()\n    {\n    }\n\n    public static void listed<T : List<T>>()\n    {\n    }\n\n    public static Any called() => Bounded.looped(1);\n\n    public static void unfixed()\n    {\n        Bounded.free();\n        Bounded.listed();\n    }\n\n    public static void written()\n    {\n        Bounded.listed<int>();\n    }\n}\n";
+    assert_eq!(
+        compile_errors(("src/Demo/Bounded.sharp", own), &[("src/Demo/Paging.sharp", PAGING)]),
+        [
+            looped("T"),
+            looped("T"),
+            other.to_owned(),
+            "Nothing fixes the type argument `T` of the call to `Bounded.free`.".to_owned(),
+            "Nothing fixes the type argument `T` of the call to `Bounded.listed`.".to_owned(),
+        ]
+    );
+
+    // An error the refused bound has no part in, in the generic method's own body, still appears.
+    let body = "namespace Demo;\n\npublic static class Bounded\n{\n    public static T held<T : int>(T value)\n    {\n        int count = \"x\";\n        return value;\n    }\n\n    public static Any? written() => Bounded.held<string>(\"x\");\n}\n";
+    assert_eq!(
+        compile_errors(("src/Demo/Bounded.sharp", body), &[("src/Demo/Paging.sharp", PAGING)]),
+        [other, "Invalid assignment to `count`: it is declared as `int`."]
+    );
+
+    assert_eq!(
+        errors("T : Shareable & Shareable, TOther", "int", "1"),
+        [
+            "Duplicate type `Shareable` is redundant.",
+            "Duplicate type `Shareable` is redundant.",
+            "Type argument `int` does not satisfy `Bounded.held<T, TOther>`'s `T`.",
+            "`int` does not satisfy the bound `Shareable & Shareable` of type parameter `T`.",
+        ]
+    );
+}
+
+/// Spec section 26: a receiver whose bound the checker refused fits any value, so its extension member is the least
+/// specific and runs only where no other extension's fits: `xs.shared()` on a `List<int>` runs the `List<int>`
+/// extension's, and `order.shared()` and `"x".shared()`, which the refused bound does not keep out, the refused one's,
+/// each with no error.
+#[test]
+fn an_extension_whose_receiver_bound_is_refused_is_the_least_specific() {
+    let refused = (
+        "src/Demo/Refused.sharp",
+        "namespace Demo;\n\npublic static class Refused\n{\n    extension<T : Shareable?>(T value)\n    {\n        public int shared() => 1;\n    }\n}\n",
+    );
+    let counts = (
+        "src/Demo/Counts.sharp",
+        "namespace Demo;\n\npublic static class Counts\n{\n    extension(List<int> items)\n    {\n        public int shared() => 2;\n    }\n}\n",
+    );
+    let calls = "namespace Demo;\n\npublic static class Calls\n{\n    public static int listed(List<int> xs) => xs.shared();\n\n    public static int ordered(SharedOrder order) => order.shared();\n\n    public static int texted() => \"x\".shared();\n}\n";
+    let paging = ("src/Demo/Paging.sharp", PAGING);
+
+    assert_eq!(
+        compile_errors(refused, &[paging]),
+        [
+            "A bound is `Object`, `Equatable`, a class, an interface or a type parameter, as in `<TItem : DatabaseEntity>`."
+        ]
+    );
+    assert_eq!(compile_errors(("src/Demo/Calls.sharp", calls), &[refused, counts, paging]), Vec::<String>::new());
 }
 
 /// A bound may name a type parameter of its own list, its own or a later one, as C#'s `T : IComparable<T>` does:
@@ -18332,9 +18770,10 @@ fn self_on_a_php_intersection_keeps_every_part() {
     assert_eq!(explained(("src/Demo/Report.sharp", sharp), &[("src/Demo/Lib.php", lib)]), Vec::<String>::new());
 }
 
-/// The checker refuses a bound that names a type parameter, and the analysis reports nothing more on a call through it:
-/// `box.same()` on a `TOuter : TInner` is typed through `TInner`'s bound, and `holder.held()` on a
-/// `THolder : Order & TOther & Holder<int>` is the `int?` of its `Holder<int>` part, as its method value's call is.
+/// A bound may name a type parameter, and the analysis reports nothing on a call through it: `box.same()` on a
+/// `TOuter : TInner` is typed through `TInner`'s bound. The checker refuses `THolder : Order & TOther & Holder<int>`,
+/// which joins `TOther` with other bounds, so that bound bounds nothing, and `holder.held()` and its method value report
+/// nothing more, nor does `TOther`, which only the refused bound names.
 #[test]
 fn a_call_on_a_type_parameter_bounded_by_a_type_parameter_reports_only_the_refused_bound() {
     let sharp = "namespace Demo;\n\npublic interface Holder<TValue>\n{\n    public TValue? held();\n}\n\npublic class Order\n{\n}\n\npublic class Box<T>\n{\n    public required Box(public T value { get; }) { }\n\n    public Self same() => this;\n}\n\npublic class Report\n{\n    public TOuter chain<TInner : Box<int>, TOuter : TInner>(TOuter box) => box.same();\n\n    public int? hold<TOther, THolder : Order & TOther & Holder<int>>(THolder holder) => holder.held();\n\n    public Function<int?()> holdValue<TOther, THolder : Order & TOther & Holder<int>>(THolder holder) => holder.held;\n}\n";

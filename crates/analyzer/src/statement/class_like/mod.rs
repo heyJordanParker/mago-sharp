@@ -462,6 +462,7 @@ fn type_contains_template_param(type_union: &TUnion, param_name: Word, defining_
 /// - A method parameter type
 /// - A method return type
 /// - An `@extends`, `@implements`, or `@use` annotation
+/// - A bound the checker refused, as `TOther` in `<TOther, THolder : Order & TOther>`
 fn check_unused_template_parameters<'ctx, A>(
     context: &mut Context<'ctx, '_, A>,
     class_like_metadata: &'ctx ClassLikeMetadata,
@@ -482,8 +483,8 @@ fn check_unused_template_parameters<'ctx, A>(
     let class_name_span = class_like_metadata.name_span.unwrap_or(class_like_metadata.span);
     let sharp_class = context.dialect.is_sharp().then(|| short_name(class_original_name));
 
-    'templates: for (template_name, _) in &class_like_metadata.template_types {
-        if template_name.as_bytes().starts_with(b"_") {
+    'templates: for (template_name, template) in &class_like_metadata.template_types {
+        if template_name.as_bytes().starts_with(b"_") || template.named_by_refused_bound {
             continue;
         }
 

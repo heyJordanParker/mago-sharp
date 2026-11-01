@@ -125,6 +125,9 @@ pub struct AnalysisArtifacts {
     pub listings: HashSet<Listing>,
     /// What each PHP# call runs, keyed by the call's span.
     pub(crate) call_targets: HashMap<(u32, u32), Vec<CallTarget>>,
+    /// The PHP# calls whose every target returns `void`, where `?.` adds `null` to the call's type, keyed by the call's
+    /// span. The call gives no value through `?.` as through `.`, spec section 14.1.
+    pub(crate) null_safe_void_calls: HashSet<(u32, u32)>,
     /// What each method a PHP# method call runs gives, where the call runs one of several, as on a value that may hold
     /// more than one kind of collection, spec section 12, keyed by the call's span and the method. The call's own type
     /// arguments are the last method's, and its type is the union of every method's. Read through
@@ -208,6 +211,7 @@ impl AnalysisArtifacts {
             effect_summaries: Vec::new(),
             listings: HashSet::default(),
             call_targets: HashMap::default(),
+            null_safe_void_calls: HashSet::default(),
             member_calls: HashMap::default(),
             received_argument_types: HashMap::default(),
             tested_types: HashMap::default(),

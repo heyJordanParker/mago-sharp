@@ -4,6 +4,8 @@ use std::sync::Arc;
 use mago_algebra::assertion_set::AssertionSet;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::identifier::method::MethodIdentifier;
+use mago_codex::metadata::CodebaseMetadata;
+use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::metadata::parameter::FunctionLikeParameterMetadata;
 use mago_codex::ttype::TType;
 use mago_codex::ttype::add_optional_union_type;
@@ -18,7 +20,6 @@ use mago_codex::ttype::expander::StaticClassType;
 use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_never;
-use mago_codex::ttype::get_null;
 use mago_codex::ttype::get_void;
 use mago_codex::ttype::is_key_type;
 use mago_codex::ttype::template::TemplateResult;
@@ -41,6 +42,7 @@ use crate::analyzable::Analyzable;
 use crate::artifacts::AnalysisArtifacts;
 use crate::artifacts::CallTarget;
 use crate::artifacts::ResolvedMethodCall;
+use crate::artifacts::get_expression_range;
 use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
@@ -51,6 +53,7 @@ use crate::expression::access::report_member_of_mixed_kinds;
 use crate::expression::binary::comparison::Searched;
 use crate::expression::binary::comparison::check_element_equality;
 use crate::expression::binary::comparison::check_ordered_key;
+use crate::expression::binary::comparison::search_refusal;
 use crate::invocation::Invocation;
 use crate::invocation::InvocationArgumentsSource;
 use crate::invocation::InvocationTarget;
@@ -148,18 +151,24 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Call<'arena> {
 
 /// Refuses the result of a call that returns nothing where code uses it as a value, as an argument, an assigned value,
 /// an element or an operand, as C# and Java refuse it: a `void` method or function value gives no value, spec section
-/// 14.1.
+/// 14.1. Through `?.` the call's type is the `null` it adds, so the targets' `void` decides, while a part of the receiver
+/// whose method returns a value, as a `List`'s `count` beside a `void` one, leaves the call a value. The call then has
+/// the type of a refused value, so nothing that reads its value reports the same mistake again.
 fn report_void_result_used<A>(
     context: &mut Context<'_, '_, A>,
     block_context: &BlockContext<'_>,
-    artifacts: &AnalysisArtifacts,
+    artifacts: &mut AnalysisArtifacts,
     call: &Call<'_>,
 ) where
     A: Arena,
 {
+    let Some(result) = artifacts.get_expression_type(call) else {
+        return;
+    };
     if !context.dialect.is_sharp()
         || !block_context.flags.inside_general_use()
-        || !artifacts.get_expression_type(call).is_some_and(|result| result.is_void())
+        || !(result.is_void()
+            || (result.is_null() && artifacts.null_safe_void_calls.contains(&get_expression_range(call))))
     {
         return;
     }
@@ -172,6 +181,7 @@ fn report_void_result_used<A>(
         ))
         .with_annotation(Annotation::primary(call.span()).with_message("Used as a value here.")),
     );
+    artifacts.set_expression_type(call, TUnion::from_atomic(TAtomic::Error));
 }
 
 /// Analyzes `expression` by the kind of call it is.
@@ -423,16 +433,15 @@ where
             return Ok(());
         } else if encountered_mixed_targets {
             get_mixed()
-        } else if should_add_null {
-            let mut result_with_null = add_optional_union_type(get_null(), Some(&resulting_type), context.codebase);
-            if all_targets_non_nullable_return {
-                result_with_null.set_nullsafe_null(true);
+        } else if should_add_null || (object_has_nullsafe_null && all_targets_non_nullable_return) {
+            // A `void` call gives no value to use beside the `null` of `?.`, spec section 14.1.
+            if resulting_type.is_void() {
+                artifacts.null_safe_void_calls.insert((call_span.start.offset, call_span.end.offset));
             }
-
-            result_with_null
-        } else if object_has_nullsafe_null && all_targets_non_nullable_return {
-            let mut result_with_null = add_optional_union_type(get_null(), Some(&resulting_type), context.codebase);
-            result_with_null.set_nullsafe_null(true);
+            // The `null` stands beside the result's parts, so `maybe?.feed()` keeps each `List` a method may return, as
+            // `shelf.feed()` does, spec section 14.4.
+            let mut result_with_null = resulting_type.as_nullable();
+            result_with_null.set_nullsafe_null(all_targets_non_nullable_return);
             result_with_null
         } else {
             resulting_type
@@ -479,8 +488,7 @@ where
 /// Analyzes a member a PHP# extension adds to its receiver's type, spec section 26, as the call of the static method
 /// `extension` it runs as with `arguments`, whose first argument is the receiver. `type_arguments` are the member's
 /// own, written after its name. Through `?.`, a `null` receiver skips the call, so the result may be `null` too, as it
-/// may below a `?.` earlier in the chain.
-#[allow(clippy::expect_used)]
+/// may below a `?.` earlier in the chain. Each search the call makes is checked for `==`, as [`report_searches`] does.
 pub(crate) fn analyze_extension_access<'ctx, 'ast, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
     block_context: &mut BlockContext<'ctx>,
@@ -492,6 +500,50 @@ pub(crate) fn analyze_extension_access<'ctx, 'ast, 'arena, A>(
     is_null_safe: bool,
     span: Span,
 ) -> Result<(), AnalysisError>
+where
+    A: Arena,
+{
+    let searches = analyze_extension_call(
+        context,
+        block_context,
+        artifacts,
+        extension,
+        receiver,
+        type_arguments,
+        arguments,
+        is_null_safe,
+        span,
+    )?;
+    report_searches(context, receiver, &searches, is_null_safe);
+
+    Ok(())
+}
+
+/// A value a collection member's call compares by `==` with the elements of its receiver, spec section 12, as
+/// `contains` compares its argument: the member's name, the argument, the type of what it passes, the type of the
+/// elements, and what the search compares it with.
+pub(crate) struct Search<'ast, 'arena> {
+    method: Word,
+    value: &'ast Expression<'arena>,
+    value_type: TUnion,
+    element_type: TUnion,
+    searched: Searched,
+}
+
+/// Analyzes the call [`analyze_extension_access`] analyzes, and gives the searches it makes instead of reporting them,
+/// so a call that runs one member per kind of its receiver reports each search once, as [`report_searches`] does.
+#[allow(clippy::expect_used)]
+pub(crate) fn analyze_extension_call<'ctx, 'ast, 'arena, A>(
+    context: &mut Context<'ctx, 'arena, A>,
+    block_context: &mut BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+    extension: MethodIdentifier,
+    receiver: &'ast Expression<'arena>,
+    type_arguments: Option<&'ast TypeArgumentList<'arena>>,
+    arguments: Option<&'ast ArgumentList<'arena>>,
+    is_null_safe: bool,
+    span: Span,
+) -> Result<Vec<Search<'ast, 'arena>>, AnalysisError>
 where
     A: Arena,
 {
@@ -553,18 +605,18 @@ where
     )?;
 
     let Some(arguments) = arguments.filter(|_| context.dialect.is_sharp()) else {
-        return Ok(());
+        return Ok(Vec::new());
     };
     // The arguments a member that changes its receiver stores have their types once the invocation is analyzed.
     if method_call::changes_receiver(context, &extension) {
         method_call::check_stored_in_static(context, artifacts, receiver, arguments);
     }
+    let mut searches = Vec::new();
     // A collection member compares the value of a parameter marked `ComparedByEquality` with each element of a `List`,
     // or each key of a `Map` or a `Set`, as `==` does, spec section 12, once the value's type is known. A value that is
-    // no element is refused by its argument check. A `Map` and a `Set` find a key by its `hash()` first, so a key of
-    // another type is never compared, and a search is refused only where a key declaration is, by `is_key_type`. Each
-    // argument meets the parameter the call's argument checks pair it with, by its name or else its position, so
-    // `contains(value: cart)` is checked as `contains(cart)` is. The receiver is the first argument.
+    // no element is refused by its argument check. Each argument meets the parameter the call's argument checks pair it
+    // with, by its name or else its position, so `contains(value: cart)` is checked as `contains(cart)` is. The
+    // receiver is the first argument.
     for (offset, argument) in arguments_source.iter_arguments().enumerate().skip(1) {
         let (Some((_, InvocationTargetParameter::FunctionLike(parameter))), Some(value)) =
             (get_parameter_of_argument(&target, &argument, offset), argument.value())
@@ -592,59 +644,118 @@ where
                 }
             })
             && let Some(receiver_type) = artifacts.get_expression_type(receiver)
-            && receiver_type.types.iter().all(|atomic| matches!(atomic, TAtomic::Array(_) | TAtomic::Null))
+            && let Some(element_type) = searched_element_type(receiver_type, context.codebase)
+            && union_comparator::is_contained_by(
+                context.codebase,
+                &value_type,
+                &element_type,
+                false,
+                false,
+                false,
+                &mut ComparisonResult::new(),
+            )
         {
-            let element_type = receiver_type
-                .types
-                .iter()
-                .filter_map(|atomic| match atomic {
-                    TAtomic::Array(array @ TArray::List(_)) => Some(get_array_parameters(array, context.codebase).1),
-                    TAtomic::Array(array) => Some(get_array_parameters(array, context.codebase).0),
-                    _ => None,
-                })
-                .fold(None, |element_type, other| {
-                    Some(add_optional_union_type(other, element_type.as_ref(), context.codebase))
-                })
-                .unwrap_or_else(get_never);
-            let searches_list = receiver_type
-                .types
-                .iter()
-                .all(|atomic| matches!(atomic, TAtomic::Array(TArray::List(_)) | TAtomic::Null));
-            if (searches_list || !is_key_type(&element_type, context.codebase))
-                && union_comparator::is_contained_by(
-                    context.codebase,
-                    &value_type,
-                    &element_type,
-                    false,
-                    false,
-                    false,
-                    &mut ComparisonResult::new(),
-                )
-            {
-                // The receiver holds the parts of one kind, as `analyze_collection_members` passes them.
-                let searched = if argument.is_unpacked() {
-                    Searched::Spread
-                } else if receiver_type.types.iter().any(|atomic| matches!(atomic, TAtomic::Array(TArray::Keyed(_)))) {
-                    Searched::Keys
-                } else {
-                    Searched::Elements
-                };
-                let method = metadata.original_name;
-                check_element_equality(
-                    context,
-                    &method.as_str_lossy(),
-                    receiver,
-                    value,
-                    &element_type,
-                    &value_type,
-                    is_null_safe,
-                    searched,
-                );
-            }
+            searches.push(Search {
+                method: metadata.original_name,
+                value,
+                value_type,
+                element_type,
+                searched: if argument.is_unpacked() { Searched::Spread } else { Searched::of(receiver_type) },
+            });
         }
     }
 
-    Ok(())
+    Ok(searches)
+}
+
+/// The type of the elements a search of a value of `receiver_type` compares by `==` with the value of a collection
+/// member's parameter marked `ComparedByEquality`, spec section 12: each element of a `List`, each value an `Iterable`
+/// gives a loop, or each key of a `Map` or a `Set`. None where no search is checked: a receiver that may be no `List`,
+/// `Iterable`, `Map` or `Set`, or a `Map` or a `Set` whose key type keys one. A `Map` and a `Set` find a key by its
+/// `hash()` first, so a key of another type is never compared, and a search is refused only where a key declaration
+/// is, by `is_key_type`. A `List` and an `Iterable` compare each element in turn.
+fn searched_element_type(receiver_type: &TUnion, codebase: &CodebaseMetadata) -> Option<TUnion> {
+    if !receiver_type
+        .types
+        .iter()
+        .all(|atomic| matches!(atomic, TAtomic::Array(_) | TAtomic::Iterable(_) | TAtomic::Null))
+    {
+        return None;
+    }
+
+    let element_type = receiver_type
+        .types
+        .iter()
+        .filter_map(|atomic| match atomic {
+            TAtomic::Array(array @ TArray::List(_)) => Some(get_array_parameters(array, codebase).1),
+            TAtomic::Array(array) => Some(get_array_parameters(array, codebase).0),
+            TAtomic::Iterable(iterable) => Some(iterable.get_value_type().clone()),
+            _ => None,
+        })
+        .fold(None, |element_type, other| Some(add_optional_union_type(other, element_type.as_ref(), codebase)))
+        .unwrap_or_else(get_never);
+    let compares_each = receiver_type
+        .types
+        .iter()
+        .all(|atomic| matches!(atomic, TAtomic::Array(TArray::List(_)) | TAtomic::Iterable(_) | TAtomic::Null));
+
+    (compares_each || !is_key_type(&element_type, codebase)).then_some(element_type)
+}
+
+/// Reports each of `searches`, the searches a call on `receiver` makes, whose value `==` cannot compare with the
+/// elements, as [`check_element_equality`] decides. A call runs one member per kind of its receiver, as `remove` on a
+/// `List<Cart>|Map<Cart, int>` runs the `List`'s and the `Map`'s, and each of them searches with the same argument, so
+/// an argument is refused once. Its help tests for the same object only through a member every kind's search reaches
+/// its elements with.
+pub(crate) fn report_searches<A>(
+    context: &mut Context<'_, '_, A>,
+    receiver: &Expression<'_>,
+    searches: &[Search<'_, '_>],
+    is_null_safe: bool,
+) where
+    A: Arena,
+{
+    let mut refused = Vec::new();
+    for search in searches {
+        let argument = search.value.span();
+        if refused.contains(&argument) {
+            continue;
+        }
+        let joined = searches
+            .iter()
+            .filter(|other| other.value.span() == argument)
+            .map(|other| other.searched)
+            .reduce(Searched::join)
+            .unwrap_or(search.searched);
+        if check_element_equality(
+            context,
+            &search.method.as_str_lossy(),
+            receiver,
+            search.value,
+            &search.element_type,
+            &search.value_type,
+            is_null_safe,
+            joined,
+        ) {
+            refused.push(argument);
+        }
+    }
+}
+
+/// Whether a call of the collection member `metadata` on a value of `receiver_type` can pass an element to each of
+/// its parameters marked `ComparedByEquality`, which a search compares with the receiver's elements by `==`, as
+/// [`search_refusal`] decides, spec section 11. A `List<TItem : Object>` has no `contains`, `indexOf` or `remove`,
+/// since `==` cannot compare two `TItem`s, and a `List<int>` has all three. A nullable element without `==` hides
+/// them too, as `List<Cart?>` does for a `Cart` without `operator ==`, though its `contains(null)` passes, since `==`
+/// lifts `null`.
+pub(crate) fn can_compare_elements(
+    metadata: &FunctionLikeMetadata,
+    receiver_type: &TUnion,
+    codebase: &CodebaseMetadata,
+) -> bool {
+    !metadata.parameters.iter().skip(1).any(|parameter| is_marked(parameter, COMPARED_BY_EQUALITY))
+        || searched_element_type(receiver_type, codebase)
+            .is_none_or(|element_type| search_refusal(&element_type, &element_type, codebase).is_none())
 }
 
 /// The prelude attribute that marks a collection member's parameter compared with the elements by `==`.

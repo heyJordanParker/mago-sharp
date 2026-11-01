@@ -49,6 +49,7 @@ use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
+use crate::expression::is_refused_type;
 use crate::invocation::InvocationTarget;
 use crate::invocation::InvocationTargetParameter;
 use crate::invocation::analyzer::adjust_offset_for_variadic;
@@ -394,6 +395,12 @@ where
         );
 
         return false;
+    }
+
+    // A refused parameter type, as a type parameter whose bound the checker refused, takes any value, null too, and its
+    // one error is the refusal's.
+    if is_refused_type(parameter_type) {
+        return true;
     }
 
     let takes_null =

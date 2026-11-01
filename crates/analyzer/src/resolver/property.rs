@@ -2509,7 +2509,11 @@ where
     let unfixed: Vec<String> = templates
         .iter()
         .zip(&type_arguments)
-        .filter(|((name, _), type_argument)| type_argument.is_none() && !violated_templates.contains(name))
+        // A bound the checker refused fixes nothing it names, so such a type parameter is left to the refusal, as a
+        // call leaves it.
+        .filter(|((name, template), type_argument)| {
+            type_argument.is_none() && !violated_templates.contains(name) && !template.named_by_refused_bound
+        })
         .map(|((name, _), _)| format!("`{name}`"))
         .collect();
     if !unfixed.is_empty() {

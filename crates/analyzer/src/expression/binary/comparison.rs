@@ -65,6 +65,7 @@ use crate::expression::binary::utils::is_always_less_than;
 use crate::expression::binary::utils::is_always_less_than_or_equal;
 use crate::expression::binary::utils::report_tied_operator;
 use crate::expression::binary::utils::takes_operands;
+use crate::expression::is_refused_type;
 use crate::expression::with_type_arguments;
 use crate::statement::class_like::r#struct::data_enum;
 use crate::statement::class_like::r#struct::declares_equality;
@@ -1100,8 +1101,10 @@ pub(crate) fn sharp_refusal(
     rhs_type: &TUnion,
     codebase: &CodebaseMetadata,
 ) -> Option<Refusal> {
-    // A comparison no source writes, as the `===` a list pattern's count runs as, has no operator token to refuse.
-    if operator.span().length() == 0 {
+    // A comparison no source writes, as the `===` a list pattern's count runs as, has no operator token to refuse. A
+    // refused side, as a value of a type parameter whose bound the checker refused, has its one error already, as an
+    // arithmetic operand has.
+    if operator.span().length() == 0 || is_refused_type(lhs_type) || is_refused_type(rhs_type) {
         return None;
     }
 
@@ -1550,28 +1553,79 @@ pub(crate) enum Searched {
     /// Each key of a `Map`, which its `keys()` reaches, as `counts.keys().any(c => c === cart)`, since its `any` reaches
     /// its values.
     Keys,
+    /// Each value an `Iterable` gives a loop, which its `toList()` reaches, as `rows.toList().any(c => c === cart)`,
+    /// since an `Iterable` has no `any`.
+    Iterated,
+    /// The elements of a receiver of several kinds, as a `List<Cart>|Map<Cart, int>`, which reach them through
+    /// different members, so no one `===` test reaches them all.
+    Kinds,
     /// The elements of the list a spread passes, as `contains(...[cart])`, which are no one value a `===` tests.
     Spread,
 }
 
 impl Searched {
+    /// What a search of a value of `receiver_type`, a `List`, `Iterable`, `Map` or `Set`, or a union of them, compares
+    /// its value with.
+    pub(crate) fn of(receiver_type: &TUnion) -> Searched {
+        receiver_type
+            .types
+            .iter()
+            .filter_map(|atomic| match atomic {
+                TAtomic::Array(TArray::Keyed(_)) => Some(Searched::Keys),
+                TAtomic::Iterable(_) => Some(Searched::Iterated),
+                TAtomic::Array(_) => Some(Searched::Elements),
+                _ => None,
+            })
+            .reduce(Searched::join)
+            .unwrap_or(Searched::Elements)
+    }
+
+    /// What two searches with one argument compare it with together: what both compare it with, or `Kinds` where they
+    /// differ.
+    pub(crate) fn join(self, other: Searched) -> Searched {
+        if self == other { self } else { Searched::Kinds }
+    }
+
     /// The members the help's `===` test runs through on the receiver, as `any` or `keys().any`, or none.
     const fn identity_test(self) -> Option<&'static str> {
         match self {
             Searched::Elements => Some("any"),
             Searched::Keys => Some("keys().any"),
-            Searched::Spread => None,
+            Searched::Iterated => Some("toList().any"),
+            Searched::Kinds | Searched::Spread => None,
         }
     }
 }
 
+/// Why a search of a PHP# collection for a value of `value_type` cannot compare an element of `element_type` with it,
+/// or `None` when it can, as spec section 12 decides: "`contains`, a `List`'s `remove`, `indexOf` and `Set<T>` need
+/// `==` on the element type." A search refuses what `element == value` refuses, so it agrees with
+/// `any(element => element == value)`. `==` checks the operands of a declared operator as the arguments of its call,
+/// so `Money::op_Equality` refuses a `Money|Line` element as `element == money` does. An `Any` element is refused
+/// only by the value it is compared with, which [`check_element_equality`] checks.
+pub(crate) fn search_refusal(
+    element_type: &TUnion,
+    value_type: &TUnion,
+    codebase: &CodebaseMetadata,
+) -> Option<Refusal> {
+    // A search is always written in the source, so it skips the check `sharp_refusal` makes for a comparison no source
+    // writes, and `refusal` reads no span.
+    let equality = BinaryOperator::Equal(Span::zero());
+
+    refusal(&equality, element_type, value_type, codebase, &mut Vec::new()).or_else(|| {
+        let method = get_comparison_method(&equality, element_type, value_type, codebase)?.chosen()?;
+        let operands = [&element_type.to_non_nullable(), &value_type.to_non_nullable()];
+
+        (!element_type.is_mixed() && !takes_operands(codebase, method, &operands)).then_some(Refusal::DifferentTypes)
+    })
+}
+
 /// Reports `value`, of `value_type`, which a PHP# `List`'s `method` searches `receiver` for, when `==` cannot compare
-/// an element of `element_type` with it, as spec section 12 decides: "`contains`, a `List`'s `remove`, `indexOf` and
-/// `Set<T>` need `==` on the element type." A search refuses what `element == value` refuses, so it agrees with
-/// `any(element => element == value)`: a class that declares no `operator ==` is refused with the reason `==` gives, as
-/// is an element the operator's call does not always take, an `Iterable` element is refused, as `==` on it is, and an `Any` element is refused unless the value is a string, a number or an enum case. A `null_safe` call's
-/// help keeps its `?.`. What is `searched` decides the `===` test the help offers instead, if any.
-#[allow(clippy::too_many_arguments)]
+/// an element of `element_type` with it, as [`search_refusal`] decides: a class that declares no `operator ==` is
+/// refused with the reason `==` gives, as is an element the operator's call does not always take, an `Iterable`
+/// element is refused, as `==` on it is, and an `Any` element is refused unless the value is a string, a number or an
+/// enum case. A `null_safe` call's help keeps its `?.`. What is `searched` decides the `===` test the help offers
+/// instead, if any. Gives whether it refused the search.
 pub(crate) fn check_element_equality<A>(
     context: &mut Context<'_, '_, A>,
     method: &str,
@@ -1581,24 +1635,16 @@ pub(crate) fn check_element_equality<A>(
     value_type: &TUnion,
     null_safe: bool,
     searched: Searched,
-) where
+) -> bool
+where
     A: Arena,
 {
-    // The operator's span only marks it as written in the source, which `sharp_refusal` checks.
     let equality = BinaryOperator::Equal(value.span());
     let (element_name, value_name) = (
         display_operand(context, &element_type.to_non_nullable()),
         display_operand(context, &value_type.to_non_nullable()),
     );
-    // `==` checks the operands of a declared operator as the arguments of its call, so `Money::op_Equality` refuses a
-    // `Money|Line` element as `element == money` does. An `Any` element keeps its own report.
-    let refusal = sharp_refusal(&equality, element_type, value_type, context.codebase).or_else(|| {
-        let method = get_comparison_method(&equality, element_type, value_type, context.codebase)?.chosen()?;
-        let operands = [&element_type.to_non_nullable(), &value_type.to_non_nullable()];
-
-        (!element_type.is_mixed() && !takes_operands(context.codebase, method, &operands))
-            .then_some(Refusal::DifferentTypes)
-    });
+    let refusal = search_refusal(element_type, value_type, context.codebase);
     let (code, issue) = match refusal {
         None => {
             if element_type.is_mixed() {
@@ -1606,7 +1652,7 @@ pub(crate) fn check_element_equality<A>(
                 check_comparison_operand(context, value, element_type, value_type, &subject, &equality);
             }
 
-            return;
+            return false;
         }
         Some(Refusal::Instance) => {
             let class = display_refused_side(context, element_type, value_type, Comparand::is_instance);
@@ -1720,7 +1766,7 @@ pub(crate) fn check_element_equality<A>(
             };
             report_tied_operator(context, &equality, &operands, &tied, value.span());
 
-            return;
+            return true;
         }
         Some(Refusal::TypeParameter) => (
             IssueCode::InvalidArgument,
@@ -1742,6 +1788,8 @@ pub(crate) fn check_element_equality<A>(
                 .with_message(format!("Each `{element_name}` element is compared with this by `==`.")),
         ),
     );
+
+    true
 }
 
 /// The first property of the struct `name`, in declaration order, or field of a case of the enum `name`, that its own

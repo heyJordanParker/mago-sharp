@@ -2564,10 +2564,15 @@ pub(crate) fn is_refused(expression: &Expression<'_>) -> bool {
 }
 
 /// Whether `union` is the type of a refused PHP# expression: one that failed to parse, or an index read of a container
-/// that gives no value, such as an `int`. A check that judges an operand's kind skips it, and the expression that reads
-/// it gets the same type, because the expression's own error already reports it.
+/// that gives no value, such as an `int`, or a value of a type parameter whose bound the checker refused, which bounds
+/// nothing. A check that judges an operand's kind skips it, and the expression that reads it gets the same type,
+/// because the expression's own error, or the bound's, already reports it.
 pub(crate) fn is_refused_type(union: &TUnion) -> bool {
-    union.types.iter().any(|atomic| matches!(atomic, TAtomic::Error))
+    union.types.iter().any(|atomic| match atomic {
+        TAtomic::Error => true,
+        TAtomic::GenericParameter(parameter) => is_refused_type(&parameter.constraint),
+        _ => false,
+    })
 }
 
 /// Whether an arm of `pattern_match`, an expression or a statement, tests its value against a type no test can run
