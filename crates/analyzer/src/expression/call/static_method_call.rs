@@ -426,6 +426,7 @@ where
             call.span,
             MethodInvocationKind::Static,
             !has_resolved_methods,
+            false,
         )?;
     }
 

@@ -558,6 +558,8 @@ where
             .and_then(|expected| closure_result_type(context, expected));
     }
 
+    report_undefined_bound_types(context, &function_like_metadata.template_types);
+
     if let Some(return_type) = &function_like_metadata.return_type_metadata {
         report_undefined_type_references(context, return_type);
         report_invalid_template_arguments(context, return_type, HintPlace::Declaration);
@@ -2206,6 +2208,20 @@ where
 {
     if !type_metadata.inferred {
         report_undefined_types(context, &type_metadata.type_union, type_metadata.span);
+    }
+}
+
+/// Reports each type a PHP# bound of `templates` names that no analyzed file or stub declares, once, where the bound is
+/// written, spec section 11. Population reads such a bound as the refused type, so a use of its type parameter reports
+/// nothing more. A bound the checker refuses is the checker's one error.
+pub(crate) fn report_undefined_bound_types<A>(context: &mut Context<'_, '_, A>, templates: &TemplateTypes)
+where
+    A: Arena,
+{
+    for template in templates.values().filter(|template| !template.bound_refused) {
+        if let Some(bound) = &template.written_bound {
+            report_undefined_type_references(context, bound);
+        }
     }
 }
 

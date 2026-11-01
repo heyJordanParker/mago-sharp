@@ -624,6 +624,7 @@ where
                     span,
                     MethodInvocationKind::Instance,
                     !has_resolved_methods,
+                    is_null_safe && method_resolution.encountered_null,
                 )
             },
         )?;
@@ -982,7 +983,8 @@ where
 
 /// Gives return-type providers the first opportunity to describe an
 /// undocumented magic call, then falls back to the magic method's declaration.
-#[allow(clippy::expect_used)]
+/// `should_add_null` adds the `null` of a `?->` whose object may be null.
+#[allow(clippy::expect_used, clippy::too_many_arguments)]
 pub(super) fn analyze_undocumented_method_return_type<'ctx, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
     block_context: &mut BlockContext<'ctx>,
@@ -993,6 +995,7 @@ pub(super) fn analyze_undocumented_method_return_type<'ctx, 'arena, A>(
     span: Span,
     invocation_kind: MethodInvocationKind,
     analyze_arguments: bool,
+    should_add_null: bool,
 ) -> Result<(), AnalysisError>
 where
     A: Arena,
@@ -1100,6 +1103,9 @@ where
     }
 
     let mut resulting_type = resulting_type.unwrap_or_else(get_mixed);
+    if should_add_null {
+        resulting_type = resulting_type.as_nullable();
+    }
     if let Some(existing_type) = artifacts.get_expression_type(&span) {
         resulting_type = add_optional_union_type(resulting_type, Some(existing_type), context.codebase);
     }

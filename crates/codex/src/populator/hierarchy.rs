@@ -488,14 +488,17 @@ pub fn populate_class_like_types(
     }
 
     for template in metadata.template_types.values_mut() {
-        if template.constraint.needs_population() || force_repopulation {
-            populate_union_type(
-                &mut template.constraint,
-                codebase_symbols,
-                Some(&class_like_reference_source),
-                symbol_references,
-                force_repopulation,
-            );
+        let written_bound = template.written_bound.as_mut().map(|bound| &mut bound.type_union);
+        for constraint in std::iter::once(&mut template.constraint).chain(written_bound) {
+            if constraint.needs_population() || force_repopulation {
+                populate_union_type(
+                    constraint,
+                    codebase_symbols,
+                    Some(&class_like_reference_source),
+                    symbol_references,
+                    force_repopulation,
+                );
+            }
         }
 
         if let Some(default) = template.default.as_mut()

@@ -1,3 +1,6 @@
+use std::sync::Arc;
+
+use foldhash::HashMap;
 use foldhash::HashSet;
 
 use mago_word::Word;
@@ -9,10 +12,22 @@ use crate::metadata::CodebaseMetadata;
 use crate::metadata::class_like::ClassLikeMetadata;
 use crate::metadata::constant::ConstantMetadata;
 use crate::metadata::flags::MetadataFlags;
+use crate::misc::GenericParent;
 use crate::reference::ReferenceSource;
 use crate::reference::SymbolReferences;
 use crate::symbol::SymbolIdentifier;
 use crate::symbol::Symbols;
+use crate::ttype::TType;
+use crate::ttype::atomic::TAtomic;
+use crate::ttype::atomic::array::TArray;
+use crate::ttype::atomic::callable::TCallable;
+use crate::ttype::atomic::object::TObject;
+use crate::ttype::atomic::reference::TReference;
+use crate::ttype::atomic::scalar::TScalar;
+use crate::ttype::atomic::scalar::class_like_string::TClassLikeString;
+use crate::ttype::template::GenericTemplate;
+use crate::ttype::template::refuse_bounds;
+use crate::ttype::union::TUnion;
 use crate::ttype::union::populate_union_type;
 
 mod docblock;
@@ -288,6 +303,8 @@ fn populate_codebase_inner(
         }
     }
 
+    refuse_missing_bounds(codebase);
+
     // A module's services are no symbol of their own, and a change to any module re-analyzes the whole project, so
     // every binding's service is populated each time.
     for module in &mut codebase.modules {
@@ -397,6 +414,191 @@ fn populate_sealed_interfaces(codebase: &mut CodebaseMetadata) {
         if let Some(metadata) = codebase.class_likes.get_mut(&interface) {
             metadata.permitted_inheritors = Some(implementers);
         }
+    }
+}
+
+/// Spec section 11: a PHP# bound that names a type no file declares, as `T : Missing`, bounds nothing, as a bound the
+/// checker refuses does, so its one error is the missing type's. Each PHP# template's bound is derived from the bound it
+/// writes, and each type parameter a PHP# type names reads its bound from its template, on every population, so a
+/// population after `Missing` exists gives the real bound back.
+fn refuse_missing_bounds(codebase: &mut CodebaseMetadata) {
+    let CodebaseMetadata { symbols, class_likes, function_likes, .. } = codebase;
+    let declares = |name: Word| symbols.get_kind(ascii_lowercase_word(name.as_bytes())).is_some();
+
+    let sharp_classes = class_likes.values_mut().filter(|class| class.flags.is_sharp());
+    let sharp_functions = function_likes.values_mut().filter(|function| function.flags.is_sharp());
+    let mut bounds: HashMap<(GenericParent, Word), TUnion> = HashMap::default();
+    for template_types in sharp_classes
+        .map(|class| &mut class.template_types)
+        .chain(sharp_functions.map(|function| &mut function.template_types))
+    {
+        refuse_bounds(template_types.iter_mut(), declares);
+        for (name, template) in template_types.iter() {
+            bounds.insert((template.defining_entity, *name), template.constraint.clone());
+        }
+    }
+    if bounds.is_empty() {
+        return;
+    }
+
+    let read = |union: &mut TUnion| read_bounds(union, &bounds, 0);
+    for class in class_likes.values_mut().filter(|class| class.flags.is_sharp()) {
+        for template in class.template_types.values_mut() {
+            read_template(template, &read);
+        }
+        for property in class.properties.values_mut() {
+            for type_metadata in property.type_declaration_metadata.iter_mut().chain(property.type_metadata.iter_mut())
+            {
+                read(&mut type_metadata.type_union);
+            }
+        }
+        for parameter in class.template_extended_parameters.values_mut().flat_map(|parameters| parameters.values_mut())
+        {
+            read(parameter);
+        }
+    }
+    for function in function_likes.values_mut().filter(|function| function.flags.is_sharp()) {
+        for template in function.template_types.values_mut() {
+            read_template(template, &read);
+        }
+        let context_templates = function
+            .type_resolution_context
+            .iter_mut()
+            .flat_map(|context| context.get_template_definitions_mut().iter_mut())
+            .flat_map(|(name, templates)| templates.iter_mut().map(move |template| (*name, template)));
+        for (name, template) in context_templates {
+            if let Some(bound) = bounds.get(&(template.defining_entity, name))
+                && is_refused(bound) != is_refused(&template.constraint)
+            {
+                template.constraint = bound.clone();
+            }
+            read_template(template, &read);
+        }
+        let return_types =
+            function.return_type_declaration_metadata.iter_mut().chain(function.return_type_metadata.iter_mut());
+        let parameter_types = function.parameters.iter_mut().flat_map(|parameter| {
+            parameter
+                .type_declaration_metadata
+                .iter_mut()
+                .chain(parameter.type_metadata.iter_mut())
+                .chain(parameter.out_type.iter_mut())
+                .chain(parameter.default_type.iter_mut())
+        });
+        for type_metadata in return_types.chain(parameter_types).chain(function.thrown_types.iter_mut()) {
+            read(&mut type_metadata.type_union);
+        }
+    }
+}
+
+/// Gives each type parameter `template`'s bound and written bound name the bound its own template has.
+fn read_template(template: &mut GenericTemplate, read: &impl Fn(&mut TUnion)) {
+    read(&mut template.constraint);
+    if let Some(bound) = template.written_bound.as_mut() {
+        read(&mut bound.type_union);
+    }
+}
+
+/// Gives each type parameter `union` names, at any depth, the bound of its template in `bounds`, keyed by the type
+/// parameter's declaration and name. A bound names type parameters too, `depth` levels below `union`, and a bound that
+/// leads back to its own type parameter is the refused type, so no chain is longer than the type parameters it names.
+fn read_bounds(union: &mut TUnion, bounds: &HashMap<(GenericParent, Word), TUnion>, depth: usize) {
+    const MAX_DEPTH: usize = 16;
+    if depth > MAX_DEPTH || !union.has_template_types() {
+        return;
+    }
+
+    let read = |union: &mut TUnion| read_bounds(union, bounds, depth + 1);
+    for atomic in union.types.to_mut() {
+        read_atomic_bounds(atomic, &read, bounds);
+    }
+}
+
+/// Whether `bound` is the refused type, which a refused bound is.
+fn is_refused(bound: &TUnion) -> bool {
+    bound.types.iter().all(|atomic| matches!(atomic, TAtomic::Error))
+}
+
+/// [`read_bounds`] for one atomic type.
+fn read_atomic_bounds(
+    atomic: &mut TAtomic,
+    read: &impl Fn(&mut TUnion),
+    bounds: &HashMap<(GenericParent, Word), TUnion>,
+) {
+    let read_atomic = |atomic: &mut TAtomic| read_atomic_bounds(atomic, read, bounds);
+    match atomic {
+        TAtomic::GenericParameter(parameter) => {
+            // The bound a type names may differ from its template's, as `readonly T`'s is readonly, so it changes only
+            // when its refusal does.
+            match bounds.get(&(parameter.defining_entity, parameter.parameter_name)) {
+                Some(bound) if is_refused(bound) => {
+                    if !is_refused(&parameter.constraint) {
+                        parameter.constraint = Arc::new(bound.clone());
+                    }
+                }
+                Some(bound) if is_refused(&parameter.constraint) => {
+                    let mut bound = bound.clone();
+                    read(&mut bound);
+                    parameter.constraint = Arc::new(bound);
+                }
+                _ => read(Arc::make_mut(&mut parameter.constraint)),
+            }
+            for intersection_type in parameter.intersection_types.iter_mut().flatten() {
+                read_atomic(intersection_type);
+            }
+        }
+        TAtomic::Array(TArray::List(list)) => {
+            read(Arc::make_mut(&mut list.element_type));
+            for (_, element) in list.known_elements.iter_mut().flat_map(|elements| elements.values_mut()) {
+                read(element);
+            }
+        }
+        TAtomic::Array(TArray::Keyed(keyed)) => {
+            for (_, item) in keyed.known_items.iter_mut().flat_map(|items| items.values_mut()) {
+                read(item);
+            }
+            if let Some((key, value)) = keyed.parameters.as_mut() {
+                read(Arc::make_mut(key));
+                read(Arc::make_mut(value));
+            }
+        }
+        TAtomic::Array(TArray::Set(element)) => read(Arc::make_mut(element)),
+        TAtomic::Callable(TCallable::Signature(signature)) => {
+            if let Some(return_type) = signature.get_return_type_mut() {
+                read(return_type);
+            }
+            for parameter in signature.get_parameters_mut() {
+                if let Some(parameter_type) = parameter.get_type_signature_mut() {
+                    read(parameter_type);
+                }
+            }
+        }
+        TAtomic::Object(TObject::Named(named)) => {
+            for parameter in named.get_type_parameters_mut().into_iter().flatten() {
+                read(parameter);
+            }
+            for intersection_type in named.get_intersection_types_mut().into_iter().flatten() {
+                read_atomic(intersection_type);
+            }
+        }
+        TAtomic::Iterable(iterable) => {
+            read(iterable.get_key_type_mut());
+            read(iterable.get_value_type_mut());
+        }
+        TAtomic::Reference(TReference::Symbol { parameters, intersection_types, .. }) => {
+            for parameter in parameters.iter_mut().flatten() {
+                read(parameter);
+            }
+            for intersection_type in intersection_types.iter_mut().flatten() {
+                read_atomic(intersection_type);
+            }
+        }
+        TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::OfType { constraint, .. })) => {
+            read(Arc::make_mut(constraint));
+        }
+        TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::Generic { constraint, .. })) => {
+            read_atomic(Arc::make_mut(constraint));
+        }
+        _ => {}
     }
 }
 

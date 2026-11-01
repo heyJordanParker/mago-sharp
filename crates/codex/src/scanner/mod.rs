@@ -1252,6 +1252,7 @@ fn reparent_types(method: &mut FunctionLikeMetadata, reparent: &TemplateResult, 
     // A bound of the method's own type parameters, as `TBox : Query<T>`, names the interface's too.
     for template in method.template_types.values_mut() {
         template.constraint = inferred_type_replacer::replace(&template.constraint, reparent, codebase);
+        replace(&mut template.written_bound);
     }
 }
 

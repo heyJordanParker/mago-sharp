@@ -587,6 +587,10 @@ where
                 walk(context, block_context, artifacts, union_hint.left, caught, caught_types);
                 walk(context, block_context, artifacts, union_hint.right, caught, caught_types);
             }
+            // The semantics checker refuses a PHP# catch type in parentheses, so the clause catches the type inside.
+            Hint::Parenthesized(parenthesized) if context.dialect.is_sharp() => {
+                walk(context, block_context, artifacts, parenthesized.hint, caught, caught_types);
+            }
             _ => {
                 context.collector.report_with_code(
                     IssueCode::InvalidCatchType,

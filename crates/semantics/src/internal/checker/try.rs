@@ -45,6 +45,8 @@ pub fn check_try<'arena>(r#try: &Try<'arena>, context: &mut Context<'_, '_, 'are
 fn check_try_catch_hint(hint: &Hint, union_supported: bool, context: &mut Context) {
     match hint {
         Hint::Identifier(_) => {}
+        // `check_slice` refuses a PHP# type in parentheses with the type to write instead.
+        Hint::Parenthesized(_) if context.program.dialect.is_sharp() => {}
         Hint::Generic(generic) if built_in_generic_arity(generic.name.value).is_none() => {}
         Hint::Union(union) => {
             if !union_supported {

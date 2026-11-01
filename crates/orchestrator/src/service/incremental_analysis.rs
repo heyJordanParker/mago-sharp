@@ -3822,6 +3822,54 @@ mod tests {
         assert_matches_full(&service, &db, "the class beside the helpers is deleted");
     }
 
+    /// Spec section 11: a bound that names a type no file declares is the refused type only while the type is missing.
+    /// Declaring it in another file gives the unchanged file's bound back, clears the type parameters it marked as
+    /// named by a refused bound, and checks the type arguments against the bound again.
+    #[test]
+    fn test_watch_a_bound_whose_missing_type_is_declared_later_bounds_again() {
+        let bounded = "namespace App;\n\npublic static class Bounded\n{\n    public static T held<T : Holder<TOther>, TOther>(T value, TOther other) => value;\n\n    public static Any? written() => Bounded.held<int, int>(1, 2);\n}\n";
+        let holder = "namespace App;\n\npublic interface Holder<TItem>\n{\n}\n";
+        let mut db = make_database(vec![("src/Bounded.sharp", bounded)]);
+        let errors = |service: &IncrementalAnalysisService| {
+            service
+                .collect_all_issues()
+                .iter()
+                .filter(|issue| issue.level == mago_reporting::Level::Error)
+                .map(|issue| issue.message.clone())
+                .collect::<Vec<_>>()
+        };
+        let bounds = |service: &IncrementalAnalysisService| {
+            let held = service.codebase.get_method(b"App\\Bounded", b"held").expect("Bounded.held is declared");
+            let template = |name: &str| &held.template_types[&mago_word::word(name)];
+
+            (
+                template("T")
+                    .constraint
+                    .types
+                    .iter()
+                    .all(|atomic| matches!(atomic, mago_codex::ttype::atomic::TAtomic::Error)),
+                template("TOther").named_by_refused_bound,
+            )
+        };
+
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+        assert_eq!(errors(&service), ["Cannot find type `App.Holder`."]);
+        assert_eq!(bounds(&service), (true, true), "the bound names a missing type");
+
+        db.add(File::new(
+            Cow::Borrowed(&b"src/Holder.sharp"[..]),
+            FileType::Host,
+            None,
+            Cow::Borrowed(holder.as_bytes()),
+        ));
+        service.update_database(db.read_only());
+        service.analyze_incremental(None).expect("Incremental analysis failed.");
+        assert_eq!(errors(&service), ["Type argument `int` does not satisfy `Bounded.held<T, TOther>`'s `T`."]);
+        assert_eq!(bounds(&service), (false, false), "the bound is Holder<TOther> again");
+        assert_matches_full(&service, &db, "Holder is declared");
+    }
+
     /// Spec section 23: a root function added beside classes that already exist takes their namespace, so a project
     /// file's `Foundation.abort(…)`, refused while no `abort` existed, compiles once the helpers file declares it, and
     /// is refused again once an edit of the helpers drops it, though the project file never changed.
