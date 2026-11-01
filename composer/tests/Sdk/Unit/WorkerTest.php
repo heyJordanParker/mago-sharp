@@ -33,6 +33,7 @@ use Mago\Sdk\Syntax\NodeKind;
 use Mago\Sdk\Worker;
 use Mago\Sdk\WorkerReducer;
 use Mago\Sdk\WorkerReductionContext;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use Revolt\EventLoop;
 use RuntimeException;
@@ -186,6 +187,40 @@ final class WorkerTest extends TestCase
                 'after: start the after-analysis hooks of plugin `first`',
                 'after: start the after-analysis hooks of plugin `second`',
                 'after: response',
+            ],
+            $sent,
+        );
+    }
+
+    /**
+     * @return iterable<string, array{int}>
+     */
+    public static function magoMinorsOfAnotherProtocol(): iterable
+    {
+        $minor = Protocol::VERSION_U32 & 0xFFFF;
+        yield 'an older mago' => [$minor - 1];
+        yield 'a newer mago' => [$minor + 1];
+    }
+
+    /**
+     * A mago of another analyzer protocol than this SDK's gets its first request refused, with the extension, both
+     * protocols, the package the SDK comes from and the commands that make the two match. A mago before 0.6.1 prints
+     * this text as the whole error.
+     */
+    #[DataProvider('magoMinorsOfAnotherProtocol')]
+    public function testAWorkerRefusesAMagoOfAnotherProtocolNamingThePackage(int $magoMinor): void
+    {
+        $worker = new Worker(new Extension('acme/routes', 'Routes', '1.0.0'));
+        $magoVersion = (Protocol::VERSION_U32 & 0xFFFF_0000) | $magoMinor;
+
+        $sent = self::serve($worker, ['describe' => self::describeRequest($magoVersion)]);
+
+        self::assertSame(
+            [
+                "describe: error The worker of `acme/routes` can't read mago's request: Mago speaks analyzer protocol "
+                . "1.{$magoMinor}, and this worker's SDK, from `heyjordanparker/mago-sharp`, speaks 1.13. Run the mago "
+                . 'of that release with `vendor/bin/mago`, or require the release of your mago with `composer require '
+                . '--dev "heyjordanparker/mago-sharp:<the version mago --version prints>"`.',
             ],
             $sent,
         );
@@ -399,9 +434,9 @@ final class WorkerTest extends TestCase
         $writer->write($codec->encode(new Frame(FrameKind::Shutdown, 0, 0, 0, '')));
     }
 
-    private static function describeRequest(): string
+    private static function describeRequest(int $version = Protocol::VERSION_U32): string
     {
-        $message = self::analyzerMessage(Protocol::DESCRIBE_REQUEST);
+        $message = self::analyzerMessage(Protocol::DESCRIBE_REQUEST, $version);
         $message->writeU32(PHPVersion::fromParts(8, 4)->id);
         $message->writeCount(NodeKind::cases());
         foreach (NodeKind::cases() as $kind) {
@@ -506,9 +541,9 @@ final class WorkerTest extends TestCase
         return $message->finish();
     }
 
-    private static function analyzerMessage(int $kind): PayloadWriter
+    private static function analyzerMessage(int $kind, int $version = Protocol::VERSION_U32): PayloadWriter
     {
-        return new PayloadWriter(pack('N3', self::ANALYZER_MAGIC, Protocol::VERSION_U32, $kind << 16));
+        return new PayloadWriter(pack('N3', self::ANALYZER_MAGIC, $version, $kind << 16));
     }
 
     private static function collectRequest(): string

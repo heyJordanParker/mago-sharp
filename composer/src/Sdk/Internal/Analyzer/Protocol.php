@@ -198,7 +198,12 @@ final class Protocol
         if ($version !== self::VERSION_U32) {
             $major = $version >> 16;
             $minor = $version & 0xffff;
-            throw new ProtocolException("Unsupported analyzer protocol version {$major}.{$minor}.");
+            throw new ProtocolException(
+                "Mago speaks analyzer protocol {$major}.{$minor}, and this worker's SDK, from "
+                . '`heyjordanparker/mago-sharp`, speaks ' . self::MAJOR . '.' . self::MINOR . '. Run the mago of that '
+                . 'release with `vendor/bin/mago`, or require the release of your mago with `composer require --dev '
+                . '"heyjordanparker/mago-sharp:<the version mago --version prints>"`.',
+            );
         }
 
         $message = $header[3];

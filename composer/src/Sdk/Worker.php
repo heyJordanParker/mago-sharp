@@ -74,11 +74,13 @@ use Throwable;
 
 use function array_key_exists;
 use function array_key_first;
+use function array_map;
 use function array_values;
 use function count;
 use function defined;
 use function fclose;
 use function fwrite;
+use function implode;
 use function in_array;
 use function is_array;
 use function ob_end_flush;
@@ -778,7 +780,21 @@ final class Worker
         HostClient $host,
         CancellationTokenInterface $cancellation,
     ): string {
-        [$kind, $reader] = AnalyzerProtocol::readRequest($payload);
+        try {
+            [$kind, $reader] = AnalyzerProtocol::readRequest($payload);
+        } catch (ProtocolException $exception) {
+            $extensions = implode(', ', array_map(
+                static fn(Extension $extension): string => "`{$extension->identifier}`",
+                $this->extensions,
+            ));
+
+            throw new ProtocolException(
+                "The worker of {$extensions} can't read mago's request: {$exception->getMessage()}",
+                0,
+                $exception,
+            );
+        }
+
         if ($kind === AnalyzerProtocol::DESCRIBE_REQUEST) {
             [$this->phpVersion, $this->nodeKinds] = AnalyzerProtocol::readDescribeRequest($reader);
 

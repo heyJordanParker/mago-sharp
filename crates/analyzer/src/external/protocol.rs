@@ -89,6 +89,7 @@ use mago_codex::visibility::Visibility;
 use mago_database::file::File;
 use mago_extension::PayloadReader;
 use mago_extension::PayloadWriter;
+use mago_extension::WorkerError;
 use mago_extension::source::write_node_kind_table;
 use mago_php_version::PHPVersion;
 use mago_reporting::AnnotationKind;
@@ -3339,6 +3340,26 @@ pub(super) fn take_codebase_reads(response: &[u8]) -> Result<(ExtensionReads, Ve
     let reads = ExtensionReads::decode(&mut reader)?;
 
     Ok((reads, [header, &response[response.len() - reader.remaining()..]].concat()))
+}
+
+/// Turns a worker's refusal of Mago's first request, the describe request, into an error that says what to install.
+/// Every SDK checks a request's analyzer protocol version before it reads anything else, so a worker refuses the
+/// handshake when its SDK speaks another version. The 0.6.0 SDK says so with Mago's version alone, as "Unsupported
+/// analyzer protocol version 1.13.", so the error quotes the worker for its own side.
+pub(super) fn refused_handshake(error: WorkerError) -> ExternalAnalyzerError {
+    let WorkerError::Remote { host, payload, .. } = error else {
+        return error.into();
+    };
+
+    let version = env!("CARGO_PKG_VERSION");
+    protocol(format!(
+        "extension host `{host}` refused the handshake of mago {version}, which speaks analyzer protocol \
+         {ANALYZER_PROTOCOL_MAJOR}.{ANALYZER_PROTOCOL_MINOR}: {} The host's worker runs on the SDK in \
+         `heyjordanparker/mago-sharp`, so require the release of this mago with `composer require --dev \
+         \"heyjordanparker/mago-sharp:{version}\"`, or run the mago of the release the project requires with \
+         `vendor/bin/mago`.",
+        String::from_utf8_lossy(&payload).trim_end()
+    ))
 }
 
 pub(super) fn message_kind(payload: &[u8]) -> Result<u16, ExternalAnalyzerError> {

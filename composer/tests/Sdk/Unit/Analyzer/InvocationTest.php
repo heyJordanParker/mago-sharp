@@ -152,7 +152,7 @@ final class InvocationTest extends TestCase
     {
         $major = Protocol::VERSION_U32 >> 16;
         $this->expectException(ProtocolException::class);
-        $this->expectExceptionMessage(sprintf('Unsupported analyzer protocol version %d.%d.', $major, $minor));
+        $this->expectExceptionMessage(sprintf('Mago speaks analyzer protocol %d.%d,', $major, $minor));
 
         Protocol::readRequest(pack('N3', 0x4D41_4E41, ($major << 16) | $minor, $kind << 16));
     }
@@ -164,7 +164,7 @@ final class InvocationTest extends TestCase
     public function testDescribeRequestOfTheProtocolBeforeWholeMethodSearchesIsRejected(): void
     {
         $this->expectException(ProtocolException::class);
-        $this->expectExceptionMessage('Unsupported analyzer protocol version 1.11.');
+        $this->expectExceptionMessage('Mago speaks analyzer protocol 1.11,');
 
         Protocol::readRequest(pack('N3', 0x4D41_4E41, (1 << 16) | 11, Protocol::DESCRIBE_REQUEST << 16));
     }
@@ -176,7 +176,7 @@ final class InvocationTest extends TestCase
     public function testDescribeRequestOfTheProtocolBeforeNamedProgressIsRejected(): void
     {
         $this->expectException(ProtocolException::class);
-        $this->expectExceptionMessage('Unsupported analyzer protocol version 1.12.');
+        $this->expectExceptionMessage('Mago speaks analyzer protocol 1.12,');
 
         Protocol::readRequest(pack('N3', 0x4D41_4E41, (1 << 16) | 12, Protocol::DESCRIBE_REQUEST << 16));
     }
