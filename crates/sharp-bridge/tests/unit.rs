@@ -368,6 +368,29 @@ fn stamp_gives_the_size_and_hash_of_a_file_and_none_where_no_file_is() {
     }
 }
 
+/// An input file the stamp can't read fails it with the file's path and "read the file". Root reads a file of mode
+/// 000, so the test has nothing to show there.
+#[cfg(unix)]
+#[test]
+fn stamp_names_an_input_file_it_cannot_read() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    write(directory.path(), "app/Report.sharp", SOURCE);
+    let file = directory.path().join("app/Report.sharp");
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o000)).unwrap();
+    if fs::read(&file).is_ok() {
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
+        return;
+    }
+
+    let stamped = stamp(directory.path(), b"app/Report.sharp");
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
+
+    let error = stamped.expect_err("a file that can't be read can't be stamped");
+    assert_eq!(error.to_string(), format!("can't read the file `{}`: Permission denied (os error 13)", file.display()));
+}
+
 /// `SOURCE_LISTING` stamps the names of a folder's `.sharp` files and of its namespace folders, so a file or a folder
 /// whose name starts with an uppercase letter appearing, going or being renamed changes the stamp, and an edit, a file
 /// of another kind, a lowercase folder named like a source, a file below the folder, a file named only `.sharp`, and a

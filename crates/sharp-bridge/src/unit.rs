@@ -7,6 +7,7 @@
 #![allow(clippy::big_endian_bytes, clippy::little_endian_bytes)]
 
 use std::io;
+use std::io::Read as _;
 use std::mem::offset_of;
 use std::mem::size_of;
 use std::path::Path;
@@ -383,14 +384,20 @@ pub fn stamp(root: &Path, path: &[u8]) -> Result<Option<Input>, DatabaseError> {
     if !folder_holds_name(&full)? {
         return Ok(None);
     }
-    let contents = match std::fs::read(&full) {
-        Ok(contents) => contents,
+    // The modification time is taken before the contents, from the same open file. A write between the two leaves a
+    // stamp whose time is older than the file's, so the engine hashes the file instead of trusting the time and size.
+    let read = std::fs::File::open(&full).and_then(|mut file| {
+        let modified = file.metadata()?.modified()?;
+        let mut contents = Vec::new();
+        file.read_to_end(&mut contents)?;
+
+        Ok((contents, modified))
+    });
+    let (contents, modified) = match read {
+        Ok(read) => read,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(DatabaseError::io(IOAction::ReadFile, &full, error)),
     };
-    let modified = std::fs::metadata(&full)
-        .and_then(|metadata| metadata.modified())
-        .map_err(|error| DatabaseError::io(IOAction::ReadMetadata, &full, error))?;
     let mtime_ns = match modified.duration_since(UNIX_EPOCH) {
         Ok(after) => i64::try_from(after.as_nanos()).unwrap_or(i64::MAX),
         Err(before) => i64::try_from(before.duration().as_nanos()).map_or(i64::MIN, |nanos| -nanos),
