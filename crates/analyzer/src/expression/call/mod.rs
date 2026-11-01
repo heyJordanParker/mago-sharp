@@ -284,7 +284,8 @@ pub(super) fn with_null_safe_null(
     object_has_nullsafe_null: bool,
 ) -> TUnion {
     let holds_own_null = resulting_type.is_nullable();
-    if !should_add_null && !(object_has_nullsafe_null && !holds_own_null) {
+    let adds_null = should_add_null || (object_has_nullsafe_null && !holds_own_null);
+    if !adds_null {
         return resulting_type;
     }
 
