@@ -125,13 +125,8 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Return<'arena> {
                     .filter(|(_, accessor)| accessor.name.as_bytes() == b"get")
                     .and_then(|_| accessor_property_type(block_context)),
             };
-            analyze_returned_value(
-                context,
-                block_context,
-                artifacts,
-                return_value,
-                declared.map(|declared| &declared.type_union),
-            )?;
+            let declared = declared.map(|declared| &declared.type_union);
+            analyze_returned_value(context, block_context, artifacts, return_value, declared)?;
 
             let inferred_return_type = artifacts.get_rc_expression_type(&return_value).cloned();
 
