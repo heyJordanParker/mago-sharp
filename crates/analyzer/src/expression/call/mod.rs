@@ -18,7 +18,6 @@ use mago_codex::ttype::expander::StaticClassType;
 use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_never;
-use mago_codex::ttype::get_null;
 use mago_codex::ttype::get_void;
 use mago_codex::ttype::is_key_type;
 use mago_codex::ttype::template::TemplateResult;
@@ -146,9 +145,8 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Call<'arena> {
 
 /// Refuses the result of a call that returns nothing where code uses it as a value, as an argument, an assigned value,
 /// an element or an operand, as C# and Java refuse it: a `void` method or function value gives no value, spec section
-/// 14.1. Through `?.` the call's type is the `null` it adds, beside the `void` itself on a function value's call, so the
-/// targets' `void` decides, while a part of the receiver whose method returns a value, as a `List`'s `count` beside a
-/// `void` one, leaves the call a value. The call then has
+/// 14.1. Through `?.` the call's type is the `null` it adds, so the targets' `void` decides, while a part of the receiver
+/// whose method returns a value, as a `List`'s `count` beside a `void` one, leaves the call a value. The call then has
 /// the type of a refused value, so nothing that reads its value reports the same mistake again.
 fn report_void_result_used<A>(
     context: &mut Context<'_, '_, A>,
@@ -164,8 +162,7 @@ fn report_void_result_used<A>(
     if !context.dialect.is_sharp()
         || !block_context.flags.inside_general_use()
         || !(result.is_void()
-            || (result.types.iter().all(|atomic| matches!(atomic, TAtomic::Null | TAtomic::Void))
-                && artifacts.null_safe_void_calls.contains(&get_expression_range(call))))
+            || (result.is_null() && artifacts.null_safe_void_calls.contains(&get_expression_range(call))))
     {
         return;
     }
@@ -435,11 +432,10 @@ where
             if resulting_type.is_void() {
                 artifacts.null_safe_void_calls.insert((call_span.start.offset, call_span.end.offset));
             }
-            let mut result_with_null = add_optional_union_type(get_null(), Some(&resulting_type), context.codebase);
-            if all_targets_non_nullable_return {
-                result_with_null.set_nullsafe_null(true);
-            }
-
+            // The `null` stands beside the result's parts, so `maybe?.feed()` keeps each `List` a method may return, as
+            // `shelf.feed()` does, spec section 14.4.
+            let mut result_with_null = resulting_type.as_nullable();
+            result_with_null.set_nullsafe_null(all_targets_non_nullable_return);
             result_with_null
         } else {
             resulting_type

@@ -44,6 +44,7 @@ use mago_codex::reference::SymbolReferences;
 use mago_codex::scanner::scan_program;
 use mago_codex::ttype::TType;
 use mago_codex::ttype::get_int;
+use mago_codex::ttype::get_null;
 use mago_codex::ttype::union::TUnion;
 use mago_database::DatabaseReader;
 use mago_database::file::File;
@@ -13985,6 +13986,89 @@ fn a_member_that_changes_a_place_that_may_hold_one_of_two_lists_takes_only_what_
             "Invalid argument type for argument #1 of `List<int>.add`: expected `int`, but found `string`.",
             "Invalid assignment to `last`: it is declared as `int`.",
         ]
+    );
+}
+
+/// Spec section 14.4: `maybe?.rows` is the place `maybe.rows` is, where `maybe` is not null, so its read keeps each
+/// `List` the plain PHP property may hold beside the `null`, and a member that changes it takes only what both take and
+/// writes back the property's own type, as on `box.rows`.
+#[test]
+fn a_member_that_changes_a_place_through_null_safe_access_keeps_each_list_it_may_hold() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public void run(Box box, Box? maybe)\n    {\n        maybe?.rows.clear();\n        maybe?.rows.add(1);\n        box.rows.add(1);\n        maybe?.rows.add(\"x\");\n        box.rows.add(\"x\");\n        List<int>? held = maybe?.rows;\n    }\n}\n";
+
+    let issues = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Report.sharp", sharp), &TWO_LISTS);
+
+    assert_eq!(
+        issues
+            .iter()
+            .map(|issue| {
+                let primary = issue.annotations.iter().find(|annotation| annotation.kind == AnnotationKind::Primary);
+                let primary = primary.and_then(|primary| primary.message.as_deref()).unwrap_or("");
+                format!("{} {} {primary}", located(sharp, issue), issue.message)
+            })
+            .collect::<Vec<_>>(),
+        [
+            "8:25 invalid-argument Invalid argument type for argument #1 of `List<string>.add`: expected `string`, but found `int`. This has type `int`",
+            "9:22 invalid-argument Invalid argument type for argument #1 of `List<string>.add`: expected `string`, but found `int`. This has type `int`",
+            "10:25 invalid-argument Invalid argument type for argument #1 of `List<int>.add`: expected `int`, but found `string`. This has type `string`",
+            "11:22 invalid-argument Invalid argument type for argument #1 of `List<int>.add`: expected `int`, but found `string`. This has type `string`",
+            "12:27 invalid-local-assignment-value Invalid assignment to `held`: it is declared as `List<int>?`. This value has type `(List<int>|List<string>)?`.",
+        ]
+    );
+}
+
+/// Spec section 14.4: `maybe?.feed()` gives what `shelf.feed()` gives, or `null`, so a plain PHP method that may return
+/// a `List<int>` or a `List<string>` keeps both beside the `null`, on a receiver that may be null and on one an earlier
+/// `?.` of the chain gives, and a method that never returns gives only the `null`.
+#[test]
+fn a_null_safe_call_keeps_each_list_its_method_may_return() {
+    let shelf = (
+        "src/Demo/Shelf.php",
+        "<?php\n\nnamespace Demo;\n\nfinal class Shelf\n{\n    /** @return list<int>|list<string> */\n    public function feed(): array\n    {\n        return [];\n    }\n\n    public function stop(): never\n    {\n        throw new \\RuntimeException();\n    }\n}\n",
+    );
+    let holder = (
+        "src/Demo/Holder.php",
+        "<?php\n\nnamespace Demo;\n\nfinal class Holder\n{\n    public Shelf $shelf;\n\n    public function __construct()\n    {\n        $this->shelf = new Shelf();\n    }\n}\n",
+    );
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public void run(Shelf shelf, Shelf? maybe, Holder? holder)\n    {\n        List<int> whole = shelf.feed();\n        List<int>? held = maybe?.feed();\n        List<int>? deep = holder?.shelf.feed();\n        maybe?.stop();\n    }\n}\n";
+
+    let (issues, artifacts) =
+        analyze_with_artifacts(&PLUGIN_REGISTRY, settings(), ("src/Demo/Report.sharp", sharp), &[shelf, holder]);
+    let stop = sharp.find("maybe?.stop()").unwrap() as u32;
+
+    assert_eq!(
+        artifacts
+            .expression_types
+            .get(&(stop, stop + "maybe?.stop()".len() as u32))
+            .map(|r#type| TUnion::clone(r#type)),
+        Some(get_null())
+    );
+    assert_eq!(
+        issues
+            .iter()
+            .map(|issue| {
+                let primary = issue.annotations.iter().find(|annotation| annotation.kind == AnnotationKind::Primary);
+                let primary = primary.and_then(|primary| primary.message.as_deref()).unwrap_or("");
+                format!("{} {primary}", located(sharp, issue))
+            })
+            .collect::<Vec<_>>(),
+        [
+            "7:27 invalid-local-assignment-value This value has type `List<int>|List<string>`.",
+            "8:27 invalid-local-assignment-value This value has type `(List<int>|List<string>)?`.",
+            "9:27 invalid-local-assignment-value This value has type `(List<int>|List<string>)?`.",
+        ]
+    );
+}
+
+/// A refused read reports nothing again, so a read through `?.` of an element a tuple lacks is refused once, and the
+/// `null` the `?.` may give does not make the value it gives a second mistake.
+#[test]
+fn a_refused_read_through_null_safe_access_reports_only_itself() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public int run([int count, string]? pair)\n    {\n        int count = pair?.missing;\n        return count;\n    }\n}\n";
+
+    assert_eq!(
+        messages(("src/Demo/Report.sharp", sharp), &[]),
+        ["`[int count, string]` has no element named `missing`: its one named element is `count`."]
     );
 }
 

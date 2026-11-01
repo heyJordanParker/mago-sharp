@@ -192,8 +192,9 @@ where
         if resolution_result.has_invalid_path && resulting_expression_type.is_none() && context.dialect.is_sharp() {
             resulting_expression_type = Some(TUnion::from_atomic(TAtomic::Error));
         } else if resolution_result.has_invalid_path || resolution_result.encountered_null {
-            resulting_expression_type =
-                Some(add_optional_union_type(get_null(), resulting_expression_type.as_ref(), context.codebase));
+            // The `null` stands beside the properties' types, which keep their parts, so `maybe?.rows` on a property
+            // that may hold a `List<int>` or a `List<string>` keeps both, as `box.rows` does, spec section 14.4.
+            resulting_expression_type = Some(resulting_expression_type.map_or_else(get_null, TUnion::as_nullable));
         }
     }
 
