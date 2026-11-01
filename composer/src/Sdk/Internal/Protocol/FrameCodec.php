@@ -8,6 +8,7 @@ use Mago\Sdk\Exception\InvalidArgumentException;
 use Mago\Sdk\Exception\ProtocolException;
 use Mago\Sdk\Internal\Io\ResourceReader;
 
+use function Mago\Internal\release_mismatch;
 use function pack;
 use function strlen;
 use function unpack;
@@ -66,7 +67,10 @@ final class FrameCodec
         if ($version !== self::VERSION_U32) {
             $major = $version >> 16;
             $minor = $version & 0xffff;
-            throw new ProtocolException("Unsupported extension frame protocol version {$major}.{$minor}.");
+            throw new ProtocolException(release_mismatch(
+                "speaks extension frame protocol {$major}.{$minor}",
+                'speaks ' . self::PROTOCOL_MAJOR . '.' . self::PROTOCOL_MINOR,
+            ));
         }
 
         $metadata = $fields[3];

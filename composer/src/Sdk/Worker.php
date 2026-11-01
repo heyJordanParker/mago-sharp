@@ -74,19 +74,21 @@ use Throwable;
 
 use function array_key_exists;
 use function array_key_first;
+use function array_map;
 use function array_values;
 use function count;
 use function defined;
 use function fclose;
 use function fwrite;
+use function implode;
 use function in_array;
 use function is_array;
 use function ob_end_flush;
 use function ob_get_level;
 use function ob_start;
 use function str_contains;
-use function strncmp;
 use function strtolower;
+use function substr;
 
 use const STDERR;
 use const STDIN;
@@ -635,31 +637,45 @@ final class Worker
         HostClient $host,
         CancellationTokenInterface $cancellation,
     ): string {
-        if (strncmp($payload, 'MLNT', 4) === 0) {
-            return $this->handleLinterRequest($payload, $cancellation);
+        $protocol = match (substr($payload, 0, 4)) {
+            'MLNT' => LinterProtocol::class,
+            'MANA' => AnalyzerProtocol::class,
+            'MEXT' => WorkerProtocol::class,
+            default => throw new ProtocolException('Unknown Mago extension capability protocol.'),
+        };
+
+        try {
+            [$kind, $reader] = $protocol::readRequest($payload);
+        } catch (ProtocolException $exception) {
+            $extensions = implode(', ', array_map(
+                static fn(Extension $extension): string => "`{$extension->identifier}`",
+                $this->extensions,
+            ));
+
+            throw new ProtocolException(
+                "The worker of {$extensions} can't read mago's request: {$exception->getMessage()}",
+                0,
+                $exception,
+            );
         }
 
-        if (strncmp($payload, 'MANA', 4) === 0) {
-            return $this->handleAnalyzerRequest($payload, $requestId, $host, $cancellation);
-        }
-
-        if (strncmp($payload, 'MEXT', 4) === 0) {
-            return $this->handleWorkerRequest($payload, $requestId, $host, $cancellation);
-        }
-
-        throw new ProtocolException('Unknown Mago extension capability protocol.');
+        return match ($protocol) {
+            LinterProtocol::class => $this->handleLinterRequest($kind, $reader, $cancellation),
+            AnalyzerProtocol::class => $this->handleAnalyzerRequest($kind, $reader, $requestId, $host, $cancellation),
+            WorkerProtocol::class => $this->handleWorkerRequest($kind, $reader, $requestId, $host, $cancellation),
+        };
     }
 
     /**
      * @param positive-int $requestId
      */
     private function handleWorkerRequest(
-        string $payload,
+        int $kind,
+        PayloadReader $reader,
         int $requestId,
         HostClient $host,
         CancellationTokenInterface $cancellation,
     ): string {
-        [$kind, $reader] = WorkerProtocol::readRequest($payload);
         if ($kind === WorkerProtocol::COLLECT_REQUEST) {
             $reader->finish();
             $payloads = [];
@@ -706,9 +722,11 @@ final class Worker
         return WorkerProtocol::writeReduceResponse();
     }
 
-    private function handleLinterRequest(string $payload, CancellationTokenInterface $cancellation): string
-    {
-        [$kind, $reader] = LinterProtocol::readRequest($payload);
+    private function handleLinterRequest(
+        int $kind,
+        PayloadReader $reader,
+        CancellationTokenInterface $cancellation,
+    ): string {
         if ($kind === LinterProtocol::DESCRIBE_REQUEST) {
             [$this->phpVersion, $this->nodeKinds] = LinterProtocol::readDescribeRequest($reader);
 
@@ -773,12 +791,12 @@ final class Worker
      * @param positive-int $requestId
      */
     private function handleAnalyzerRequest(
-        string $payload,
+        int $kind,
+        PayloadReader $reader,
         int $requestId,
         HostClient $host,
         CancellationTokenInterface $cancellation,
     ): string {
-        [$kind, $reader] = AnalyzerProtocol::readRequest($payload);
         if ($kind === AnalyzerProtocol::DESCRIBE_REQUEST) {
             [$this->phpVersion, $this->nodeKinds] = AnalyzerProtocol::readDescribeRequest($reader);
 
