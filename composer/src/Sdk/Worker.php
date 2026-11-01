@@ -644,14 +644,21 @@ final class Worker
         }
 
         if (strncmp($payload, 'MEXT', 4) === 0) {
-            return $this->handleWorkerRequest($payload, $cancellation);
+            return $this->handleWorkerRequest($payload, $requestId, $host, $cancellation);
         }
 
         throw new ProtocolException('Unknown Mago extension capability protocol.');
     }
 
-    private function handleWorkerRequest(string $payload, CancellationTokenInterface $cancellation): string
-    {
+    /**
+     * @param positive-int $requestId
+     */
+    private function handleWorkerRequest(
+        string $payload,
+        int $requestId,
+        HostClient $host,
+        CancellationTokenInterface $cancellation,
+    ): string {
         [$kind, $reader] = WorkerProtocol::readRequest($payload);
         if ($kind === WorkerProtocol::COLLECT_REQUEST) {
             $reader->finish();
@@ -659,6 +666,7 @@ final class Worker
             foreach ($this->workerReducerIndices as $extensionIndex) {
                 $cancellation->throwIfCancelled();
                 $extension = $this->extensions[$extensionIndex];
+                $host->progress($requestId, "the worker reducer of extension `{$extension->identifier}`");
                 try {
                     $payloads[$extensionIndex] = $extension->workerReducer?->collect() ?? '';
                 } catch (CancelledException $exception) {
@@ -679,6 +687,7 @@ final class Worker
         foreach ($this->workerReducerIndices as $extensionIndex) {
             $cancellation->throwIfCancelled();
             $extension = $this->extensions[$extensionIndex];
+            $host->progress($requestId, "the worker reducer of extension `{$extension->identifier}`");
             try {
                 $extension->workerReducer?->reduce(
                     new WorkerReductionContext($payloadsByExtension[$extensionIndex], $cancellation),
@@ -777,11 +786,11 @@ final class Worker
         }
 
         if ($kind === AnalyzerProtocol::INITIALIZE_REQUEST) {
-            return $this->handleAnalyzerInitialization($reader, $cancellation);
+            return $this->handleAnalyzerInitialization($reader, $requestId, $host, $cancellation);
         }
 
         if ($kind === AnalyzerProtocol::CODEBASE_SCAN_REQUEST) {
-            return $this->handleCodebaseScanRequest($reader, $cancellation);
+            return $this->handleCodebaseScanRequest($reader, $requestId, $host, $cancellation);
         }
 
         if (
@@ -1181,8 +1190,13 @@ final class Worker
         return AnalyzerProtocol::writeReturnTypeResponse(null);
     }
 
+    /**
+     * @param positive-int $requestId
+     */
     private function handleAnalyzerInitialization(
         PayloadReader $reader,
+        int $requestId,
+        HostClient $host,
         CancellationTokenInterface $cancellation,
     ): string {
         $pluginIndices = AnalyzerProtocol::readInitializationRequest($reader);
@@ -1194,6 +1208,7 @@ final class Worker
             }
 
             $cancellation->throwIfCancelled();
+            $host->progress($requestId, "the initialization hooks of plugin `{$registered->definition->identifier}`");
             $context = new InitializationContext($this->phpVersion, $cancellation);
             try {
                 foreach ($registered->initializationHooks as $hook) {
@@ -1213,8 +1228,15 @@ final class Worker
         return AnalyzerProtocol::writeInitializationResponse($stubs);
     }
 
-    private function handleCodebaseScanRequest(PayloadReader $reader, CancellationTokenInterface $cancellation): string
-    {
+    /**
+     * @param positive-int $requestId
+     */
+    private function handleCodebaseScanRequest(
+        PayloadReader $reader,
+        int $requestId,
+        HostClient $host,
+        CancellationTokenInterface $cancellation,
+    ): string {
         [$firstBatch, $lastBatch, $activeHooks, $filesByHook] = AnalyzerProtocol::readCodebaseScanRequest($reader);
         $refinements = [];
         foreach ($activeHooks as $hookIndex) {
@@ -1223,6 +1245,7 @@ final class Worker
                 throw new ProtocolException("Codebase-scan request targets unknown hook {$hookIndex}.");
             }
             $cancellation->throwIfCancelled();
+            $host->progress($requestId, "a codebase-scan hook of plugin `{$registered->plugin}`");
             $context = new CodebaseScanContext(
                 $this->phpVersion,
                 $cancellation,
@@ -1277,9 +1300,16 @@ final class Worker
         $contributedReferences = [];
         $recordedReads = [];
         $analyses = is_array($request->analysis) ? $request->analysis : [$request->analysis];
+        $projectHooks = match ($kind) {
+            AnalyzerProtocol::BEFORE_ANALYSIS_REQUEST => 'before-analysis',
+            AnalyzerProtocol::AFTER_ANALYSIS_REQUEST => 'after-analysis',
+            default => null,
+        };
         foreach ($analyses as $analysis) {
-            if ($analysis instanceof FileAnalysis) {
-                $host->progress($requestId, $analysis->file);
+            // A batch runs several files' hooks, so each file's start is progress of its own. Mago names the one file
+            // of an after-file request itself.
+            if ($analysis instanceof FileAnalysis && $kind === AnalyzerProtocol::AFTER_FILE_ANALYSIS_BATCH_REQUEST) {
+                $host->progress($requestId, "the hooks of {$analysis->file}");
             }
 
             // A file's hooks read for it, and the before-analysis hooks for every file, since a rule may keep what it
@@ -1297,7 +1327,13 @@ final class Worker
                     throw new ProtocolException("Mago requested unregistered analyzer plugin index {$pluginIndex}.");
                 }
 
-                $providing = array_key_exists($registered->definition->identifier, $this->pluginsWithProviders);
+                $identifier = $registered->definition->identifier;
+                // One request runs every plugin's project-level hooks, so each plugin's start is progress of its own.
+                if ($projectHooks !== null) {
+                    $host->progress($requestId, "the {$projectHooks} hooks of plugin `{$identifier}`");
+                }
+
+                $providing = array_key_exists($identifier, $this->pluginsWithProviders);
                 $fileCodebase = match (true) {
                     !$recording => $codebase,
                     $providing => $codeCodebase,
@@ -1368,7 +1404,6 @@ final class Worker
                         }
                     }
                 } catch (Throwable $throwable) {
-                    $identifier = $registered->definition->identifier;
                     throw new ProtocolException(
                         "Analyzer lifecycle hook in `{$identifier}` failed: {$throwable->getMessage()}",
                         0,

@@ -437,11 +437,8 @@ impl<'config> DatabaseLoader<'config> {
                 return Some(Ok(FileWithSpecificity { file, specificity }));
             }
 
-            match read_file(workspace, &path, file_type) {
-                Ok(file) if file.is_companion() => None,
-                Ok(file) => Some(Ok(FileWithSpecificity { file, specificity })),
-                Err(e) => Some(Err(e)),
-            }
+            read_listed_file(workspace, &path, file_type)
+                .map(|file| file.map(|file| FileWithSpecificity { file, specificity }))
         };
 
         let (direct_files, directory_files) = rayon::join(
@@ -496,6 +493,16 @@ fn workspace_relative_string(path: &Path, workspace: &Path) -> String {
     #[cfg(not(windows))]
     {
         relative.into_owned()
+    }
+}
+
+/// Reads the file a walk listed at `path`, or none when it is a companion or is gone by the time it is read, as a file
+/// deleted during the walk is.
+fn read_listed_file(workspace: &Path, path: &Path, file_type: FileType) -> Option<Result<File, DatabaseError>> {
+    match read_file(workspace, path, file_type) {
+        Ok(file) if file.is_companion() => None,
+        Err(DatabaseError::IOError(error)) if error.kind() == std::io::ErrorKind::NotFound => None,
+        result => Some(result),
     }
 }
 
@@ -1158,6 +1165,19 @@ mod tests {
         let names: Vec<String> = db.files().map(|f| name_str(&f.name).into_owned()).collect();
         assert!(names.iter().any(|n| n.ends_with("bin/run.php")), "run.php should be loaded, got {names:?}");
         assert!(!names.iter().any(|n| n.ends_with("bin/console")), "extensionless console should be skipped");
+    }
+
+    /// A file a walk listed that is gone by the time it is read, as one deleted during the walk, is left out, while any
+    /// other failure to read one is an error.
+    #[test]
+    fn a_listed_file_that_is_gone_when_read_is_left_out() {
+        let temp_dir = TempDir::new().unwrap();
+        create_test_file(&temp_dir, "src/a.php", "<?php");
+        let read = |name: &str| read_listed_file(temp_dir.path(), &temp_dir.path().join(name), FileType::Host);
+
+        assert!(matches!(read("src/a.php"), Some(Ok(_))));
+        assert!(read("src/gone.php").is_none());
+        assert!(matches!(read("src"), Some(Err(DatabaseError::IOError(_)))));
     }
 
     #[test]
