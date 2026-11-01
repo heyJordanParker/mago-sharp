@@ -71,13 +71,13 @@ use crate::expression::with::is_set_by_with;
 use crate::external::PropertyAccessKind;
 use crate::invocation::analyzer::report_type_arguments_without_equality;
 use crate::invocation::infer_parameter_templates_from_argument;
-use crate::invocation::infer_unfixed_templates;
 use crate::invocation::rename_trait_objects;
 use crate::resolver::class_name::class_value_classes;
 use crate::resolver::class_name::holds_no_class;
 use crate::resolver::class_name::report_non_existent_class_like;
 use crate::resolver::extension::Extension;
 use crate::resolver::extension::is_collection_member;
+use crate::resolver::extension::receiver_type_arguments;
 use crate::resolver::extension::resolve_extension;
 use crate::resolver::method::check_call_through_readonly;
 use crate::resolver::method::get_receiver_atomics;
@@ -2350,9 +2350,9 @@ where
 
 /// Spec section 14.3: the value a read without `(…)` at `read_span` gives of the extension method `extension` on a
 /// receiver of type `receiver`, spec section 26: the closure of the static method it runs as, without its first
-/// parameter, the receiver. The type parameters of the extension's block take what the receiver gives them, as a call
-/// infers them, and the method's own take theirs from the function type the read goes into, as
-/// [`fix_type_arguments`] fixes a generic method's.
+/// parameter, the receiver. The type parameters of the extension's block take what the receiver gives them, as
+/// [`receiver_type_arguments`] fixes them for a call, and the method's own take theirs from the function type the read
+/// goes into, as [`fix_type_arguments`] fixes a generic method's.
 pub(crate) fn resolve_extension_value<A>(
     context: &mut Context<'_, '_, A>,
     artifacts: &mut AnalysisArtifacts,
@@ -2381,13 +2381,8 @@ where
         return value;
     }
 
-    let mut template_result = unfixed_type_arguments(metadata);
-    let receiver_parameter = metadata
-        .parameters
-        .first()
-        .and_then(|parameter| parameter.get_type_metadata())
-        .map_or_else(get_mixed, |parameter| parameter.type_union.clone());
-    infer_unfixed_templates(context, &receiver_parameter, receiver, &mut template_result);
+    // The read reaches the extension only where the receiver fits it, so the receiver's type arguments are in bounds.
+    let (template_result, _) = receiver_type_arguments(context, receiver, metadata);
     let method_name = display_sharp_member(display_class_like_name(context, class), metadata.original_name);
 
     fix_type_arguments(context, artifacts, value, metadata, &method_name, read_span, template_result)
