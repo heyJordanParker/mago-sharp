@@ -187,6 +187,23 @@ enum ExtendsDirective {
     Many(Vec<String>),
 }
 
+/// The command-line flags [`Configuration::load`] takes, each `None` or `false` when the user did not pass it.
+#[derive(Debug, Clone, Default)]
+pub struct CliOverrides {
+    /// `--workspace`.
+    pub workspace: Option<PathBuf>,
+    /// `--config`, which replaces the search for a configuration file.
+    pub config: Option<PathBuf>,
+    /// `--php-version`.
+    pub php_version: Option<PHPVersion>,
+    /// `--threads`.
+    pub threads: Option<usize>,
+    /// `--allow-unsupported-php-version`.
+    pub allow_unsupported_php_version: bool,
+    /// `--no-version-check`.
+    pub no_version_check: bool,
+}
+
 /// The main configuration structure for Mago CLI.
 ///
 /// Aggregates all settings: top-level scalars (`php-version`, `threads`, …) plus
@@ -381,13 +398,13 @@ pub struct Configuration {
     #[schemars(skip)]
     pub config_file: Option<PathBuf>,
 
-    /// Whether the configuration file was explicitly provided via `--config` CLI flag.
+    /// The command-line flags [`Self::load`] applied.
     ///
-    /// When `true`, the config file path is pinned and won't be re-discovered on reload.
-    /// When `false`, the config file is auto-discovered and may change between reloads.
-    #[serde(default, skip_serializing)]
+    /// Watch mode loads the configuration again with them, so a flag the user passed still wins, and a value the
+    /// file or the environment gave is read again.
+    #[serde(skip)]
     #[schemars(skip)]
-    pub config_file_is_explicit: bool,
+    pub cli_overrides: CliOverrides,
 
     /// Whether `--no-extensions` turned the extension hosts off for this run, through [`Self::disable_extensions`].
     ///
@@ -439,9 +456,16 @@ impl Configuration {
         no_version_check: bool,
     ) -> Result<Configuration, Error> {
         let workspace_dir = workspace.clone().unwrap_or_else(|| CURRENT_DIR.to_path_buf());
+        let cli_overrides = CliOverrides {
+            workspace: workspace.clone(),
+            config: file.map(Path::to_path_buf),
+            php_version,
+            threads,
+            allow_unsupported_php_version,
+            no_version_check,
+        };
 
         let resolved_config_file: Option<(PathBuf, ConfigFormat)>;
-        let config_file_is_explicit;
         if let Some(file) = file {
             tracing::debug!("Sourcing configuration from {}.", file.display());
 
@@ -449,8 +473,6 @@ impl Configuration {
                 file.to_path_buf(),
                 ConfigFormat::for_path(file).ok_or_else(|| Error::UnsupportedConfigExtension(file.to_path_buf()))?,
             ));
-
-            config_file_is_explicit = true;
         } else {
             let fallback_roots = [
                 std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from),
@@ -464,8 +486,6 @@ impl Configuration {
             } else {
                 tracing::debug!("No configuration file found, using defaults and environment variables.");
             }
-
-            config_file_is_explicit = false;
         }
 
         let mut configuration: Configuration = if let Some((path, format)) = &resolved_config_file {
@@ -480,7 +500,7 @@ impl Configuration {
         configuration.apply_env_overrides()?;
 
         configuration.config_file = resolved_config_file.as_ref().map(|(p, _)| p.clone());
-        configuration.config_file_is_explicit = config_file_is_explicit;
+        configuration.cli_overrides = cli_overrides;
 
         if allow_unsupported_php_version && !configuration.allow_unsupported_php_version {
             tracing::warn!("Allowing unsupported PHP versions.");
@@ -668,7 +688,7 @@ impl Configuration {
             guard: GuardConfiguration::default(),
             editor_url: None,
             config_file: None,
-            config_file_is_explicit: false,
+            cli_overrides: CliOverrides::default(),
             no_extensions: false,
         }
     }
