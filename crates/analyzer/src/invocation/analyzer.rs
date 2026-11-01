@@ -1895,7 +1895,9 @@ where
 /// Spec section 11: a call of a PHP# generic method takes its type arguments from its arguments, from those it writes
 /// and from the declared type its result goes into. A type argument none fixes, `None` in `type_arguments`, is refused,
 /// as C#'s CS0411, instead of running with its bound. An argument or declared type outside the bound fixes one of
-/// `violated_templates`, whose own issue names the bound. Plain PHP's generics keep their fallback.
+/// `violated_templates`, whose own issue names the bound. Plain PHP's generics keep their fallback. A bound the checker
+/// refused fixes nothing it names, as `TB` in `<TA : TB & Shape, TB>`, so a target with one reports no unfixed type
+/// argument and leaves its one error to the refusal.
 fn report_unfixed_type_arguments<A>(
     context: &mut Context<'_, '_, A>,
     invocation: &Invocation<'_, '_, '_>,
@@ -1919,7 +1921,8 @@ fn report_unfixed_type_arguments<A>(
             metadata.parameters.iter().all(|parameter| parameter.get_name().0 != name)
         })
     });
-    if unfixed.is_empty() || names_no_parameter {
+    let has_refused_bound = template_types.values().any(|template| is_refused_type(&template.constraint));
+    if unfixed.is_empty() || names_no_parameter || has_refused_bound {
         return;
     }
 

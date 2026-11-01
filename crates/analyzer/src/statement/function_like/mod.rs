@@ -76,6 +76,7 @@ use mago_syntax::cst::FunctionLikeParameterList;
 use mago_syntax::cst::Law;
 use mago_syntax::cst::LocalIdentifier;
 use mago_syntax::cst::Statement;
+use mago_syntax::cst::TypeParameterList;
 use mago_syntax::walker::Walker;
 use mago_text_edit::Safety;
 use mago_text_edit::TextEdit;
@@ -94,6 +95,7 @@ use crate::expression::binary::comparison::missing_equality;
 use crate::expression::binary::comparison::unbounded_parameter_reason;
 use crate::expression::binary::comparison::unequatable_parameter;
 use crate::expression::instantiation::report_missing_type_arguments;
+use crate::expression::is_refused_type;
 use crate::formula::get_formula;
 use crate::reconciler::reconcile_keyed_types;
 use crate::resolver::class_name::report_missing_class;
@@ -1997,12 +1999,15 @@ fn type_contains_function_template_param(
 /// - A parameter type
 /// - The return type
 /// - The PHP# `body`, as `catch (TError error)` names it, since a call can write its type argument
+/// - A bound of `type_parameters` the checker refused, as `TOther` in `<TOther, THolder : Order & TOther>`, since
+///   that bound bounds nothing and its refusal settles what it names
 pub fn check_unused_function_template_parameters<'ctx, A>(
     context: &mut Context<'ctx, '_, A>,
     function_like_metadata: &'ctx FunctionLikeMetadata,
     name_span: Span,
     kind_str: &str,
     display_name: Word,
+    type_parameters: Option<&TypeParameterList<'_>>,
     body: Option<FunctionLikeBody<'_, '_>>,
 ) where
     A: Arena,
@@ -2037,6 +2042,11 @@ pub fn check_unused_function_template_parameters<'ctx, A>(
         Some(FunctionLikeBody::Law(_)) => unreachable!("a law declares no type parameter"),
         None => {}
     }
+    named_in_body.extend(named_in_refused_bounds(
+        type_parameters,
+        &function_like_metadata.template_types,
+        context.resolved_names,
+    ));
 
     'templates: for (template_name, _) in &function_like_metadata.template_types {
         if template_name.as_bytes().starts_with(b"_") || named_in_body.contains(&template_name.as_bytes()) {
@@ -2083,6 +2093,27 @@ pub fn check_unused_function_template_parameters<'ctx, A>(
             Issue::warning(message).with_annotation(Annotation::primary(name_span).with_message(label)).with_help(help),
         );
     }
+}
+
+/// The type parameters each bound of `type_parameters` that the checker refused names, as `TOther` in
+/// `<TOther, THolder : Order & TOther>`. Such a bound bounds nothing, so whether it uses them is its refusal's to
+/// settle, and none of them is unused.
+pub(crate) fn named_in_refused_bounds<'arena>(
+    type_parameters: Option<&TypeParameterList<'arena>>,
+    templates: &TemplateTypes,
+    resolved_names: &ResolvedNames<'arena>,
+) -> Vec<&'arena [u8]> {
+    let walker = TypeParametersNamed(resolved_names);
+    let mut named = Vec::new();
+    for parameter in type_parameters.iter().flat_map(|list| list.parameters.iter()) {
+        if let Some(bound) = &parameter.bound
+            && templates.get(&word(parameter.name.value)).is_some_and(|template| is_refused_type(&template.constraint))
+        {
+            walker.walk_type_parameter_bound(bound, &mut named);
+        }
+    }
+
+    named
 }
 
 /// Collects each name of a PHP# type parameter a body writes, as the binder bound it.

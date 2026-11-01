@@ -92,6 +92,7 @@ where
         None,
         None,
         r#struct.inheritance.as_ref(),
+        r#struct.type_parameters.as_ref(),
         class_like_metadata,
         r#struct.members.as_slice(),
     )?;
