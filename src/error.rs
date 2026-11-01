@@ -215,8 +215,12 @@ pub enum Error {
     /// Failed to read the standard input, which a command reads as a file's contents.
     ReadingStdin(std::io::Error),
 
-    /// Failed to run the `git` subcommand `command`, or it exited with an error.
-    RunningGit { command: &'static str, error: std::io::Error },
+    /// Failed to start the `git` subcommand `command`, as when no `git` is on the `PATH`.
+    RunningGit { command: &'static str, source: std::io::Error },
+
+    /// The `git` subcommand `command` ran and exited with `status`. `reason` is the first line git printed to stderr,
+    /// which says why.
+    GitFailed { command: &'static str, status: std::process::ExitStatus, reason: String },
 
     /// Failed to parse the `composer.json` file.
     ///
@@ -363,7 +367,8 @@ impl std::fmt::Display for Error {
                 write!(f, "Failed to create the baseline file `{}`: {source}", path.display())
             }
             Self::ReadingStdin(error) => write!(f, "Failed to read the standard input: {error}"),
-            Self::RunningGit { command, error } => write!(f, "Failed to run `git {command}`: {error}"),
+            Self::RunningGit { command, source } => write!(f, "Failed to run `git {command}`: {source}"),
+            Self::GitFailed { command, status, reason } => write!(f, "`git {command}` failed ({status}): {reason}"),
             Self::Analysis(error) => write!(f, "Failed to analyze the source code: {error}"),
             Self::ThreadPoolBuildError(error) => {
                 write!(f, "Failed to build the thread pool: {error}")
@@ -440,7 +445,7 @@ impl std::error::Error for Error {
             Self::ReadingBaselineFile { source, .. } => Some(source),
             Self::CreatingBaselineFile { source, .. } => Some(source),
             Self::ReadingStdin(error) => Some(error),
-            Self::RunningGit { error, .. } => Some(error),
+            Self::RunningGit { source, .. } => Some(source),
             Self::Analysis(error) => Some(error),
             Self::ThreadPoolBuildError(error) => Some(error),
             Self::Orchestrator(error) => Some(error),

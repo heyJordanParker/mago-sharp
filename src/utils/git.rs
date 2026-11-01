@@ -11,6 +11,7 @@ use std::io::Write as _;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
+use std::process::Output;
 use std::process::Stdio;
 
 use mago_database::Database;
@@ -58,12 +59,8 @@ pub fn get_staged_file(workspace: &Path, path: &Path) -> Result<File, Error> {
     let mut index_path = OsString::from(":");
     index_path.push(path);
 
-    let output = Command::new("git")
-        .args(["cat-file", "-p"])
-        .arg(index_path)
-        .current_dir(workspace)
-        .output()
-        .map_err(|error| Error::RunningGit { command: "cat-file", error })?;
+    let output =
+        run_git("cat-file", Command::new("git").args(["cat-file", "-p"]).arg(index_path).current_dir(workspace))?;
 
     Ok(File::ephemeral(Cow::Borrowed(b"<stdin>"), Cow::Owned(output.stdout)))
 }
@@ -86,12 +83,10 @@ pub fn update_staged_file(workspace: &Path, path: &Path, new_content: Vec<u8>) -
     cacheinfo.push(",");
     cacheinfo.push(path.as_os_str());
 
-    Command::new("git")
-        .args(["update-index", "--cacheinfo"])
-        .arg(cacheinfo)
-        .current_dir(workspace)
-        .status()
-        .map_err(|error| Error::RunningGit { command: "update-index", error })?;
+    run_git(
+        "update-index",
+        Command::new("git").args(["update-index", "--cacheinfo"]).arg(cacheinfo).current_dir(workspace),
+    )?;
 
     Ok(())
 }
@@ -157,11 +152,7 @@ where
         cmd.arg(path);
     }
 
-    let status = cmd.current_dir(workspace).status().map_err(|error| Error::RunningGit { command: "add", error })?;
-
-    if !status.success() {
-        return Err(Error::RunningGit { command: "add", error: std::io::Error::other(status.to_string()) });
-    }
+    run_git("add", cmd.current_dir(workspace))?;
 
     Ok(())
 }
@@ -397,15 +388,10 @@ fn is_git_repository(workspace: &Path) -> bool {
 ///
 /// A vector of paths relative to the workspace, or an error if git command fails.
 fn get_staged_files(workspace: &Path) -> Result<Vec<PathBuf>, Error> {
-    let output = Command::new("git")
-        .args(["diff", "--cached", "--name-only", "--diff-filter=ACMR"])
-        .current_dir(workspace)
-        .output()
-        .map_err(|error| Error::RunningGit { command: "diff", error })?;
-
-    if !output.status.success() {
-        return Err(Error::NotAGitRepository);
-    }
+    let output = run_git(
+        "diff",
+        Command::new("git").args(["diff", "--cached", "--name-only", "--diff-filter=ACMR"]).current_dir(workspace),
+    )?;
 
     Ok(String::from_utf8_lossy(&output.stdout).lines().filter(|l| !l.is_empty()).map(PathBuf::from).collect())
 }
@@ -423,11 +409,7 @@ fn get_staged_files(workspace: &Path) -> Result<Vec<PathBuf>, Error> {
 ///
 /// A HashSet of paths (relative to workspace) that have unstaged changes.
 fn get_files_with_unstaged_changes(workspace: &Path) -> Result<HashSet<PathBuf>, Error> {
-    let output = Command::new("git")
-        .args(["diff", "--name-only"])
-        .current_dir(workspace)
-        .output()
-        .map_err(|error| Error::RunningGit { command: "diff", error })?;
+    let output = run_git("diff", Command::new("git").args(["diff", "--name-only"]).current_dir(workspace))?;
 
     Ok(String::from_utf8_lossy(&output.stdout).lines().filter(|l| !l.is_empty()).map(PathBuf::from).collect())
 }
@@ -447,18 +429,20 @@ fn create_blob(workspace: &Path, path: &Path, content: Vec<u8>) -> Result<String
     let mut child = Command::new("git")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .args(["hash-object", "-w", "--stdin", "--path"])
         .arg(path)
         .current_dir(workspace)
         .spawn()
-        .map_err(|error| Error::RunningGit { command: "hash-object", error })?;
+        .map_err(|source| Error::RunningGit { command: "hash-object", source })?;
 
     let mut stdin = child.stdin.take().expect("failed to get stdin");
     std::thread::spawn(move || {
         stdin.write_all(&content).expect("failed to write to stdin");
     });
 
-    let output = child.wait_with_output().map_err(|error| Error::RunningGit { command: "hash-object", error })?;
+    let output = child.wait_with_output().map_err(|source| Error::RunningGit { command: "hash-object", source })?;
+    let output = succeeded("hash-object", output)?;
 
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
@@ -474,12 +458,33 @@ fn create_blob(workspace: &Path, path: &Path, content: Vec<u8>) -> Result<String
 ///
 /// A string containing the object mode for the path
 fn get_mode(workspace: &Path, path: &Path) -> Result<String, Error> {
-    let output = Command::new("git")
-        .args(["ls-files", "--format=%(objectmode)"])
-        .arg(path)
-        .current_dir(workspace)
-        .output()
-        .map_err(|error| Error::RunningGit { command: "ls-files", error })?;
+    let output = run_git(
+        "ls-files",
+        Command::new("git").args(["ls-files", "--format=%(objectmode)"]).arg(path).current_dir(workspace),
+    )?;
 
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+/// Runs `git`, a command that runs the `git` subcommand `command`, and returns its output.
+///
+/// # Errors
+///
+/// Returns [`Error::RunningGit`] when git can't start, and [`Error::GitFailed`] when it exits with an error.
+fn run_git(command: &'static str, git: &mut Command) -> Result<Output, Error> {
+    let output = git.output().map_err(|source| Error::RunningGit { command, source })?;
+
+    succeeded(command, output)
+}
+
+/// The `output` of the `git` subcommand `command`, or [`Error::GitFailed`] with the first line git printed to stderr
+/// when it exited with an error, as `ignored_by_gitignore` reads git's reason.
+fn succeeded(command: &'static str, output: Output) -> Result<Output, Error> {
+    if output.status.success() {
+        return Ok(output);
+    }
+
+    let reason = String::from_utf8_lossy(&output.stderr).lines().next().unwrap_or_default().trim().to_string();
+
+    Err(Error::GitFailed { command, status: output.status, reason })
 }
