@@ -1665,10 +1665,8 @@ fn compile_names_the_folder_its_walk_of_the_sharp_folder_cannot_open() {
 
     assert!(!output.status.success(), "{}", printed(&output));
     assert!(
-        printed(&output).contains(&format!(
-            "mago: can't open the folder `{}`: Permission denied (os error 13)",
-            app.display()
-        )),
+        printed(&output)
+            .contains(&format!("mago: can't open the folder `{}`: Permission denied (os error 13)", app.display())),
         "{}",
         printed(&output)
     );
