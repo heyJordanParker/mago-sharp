@@ -15074,6 +15074,26 @@ fn a_null_safe_magic_call_may_give_null() {
         ["7:19 non-documented-method", "7:12 nullable-return-statement", "7:12 invalid-return-statement"]
     );
     assert_eq!(issues(("src/Lib/count.php", code("Bag")), &[("src/Lib/Bag.php", bag)]), ["7:19 non-documented-method"]);
+
+    // A magic call types as the declared method of its return type does, in a chain after `?->` and as a static call
+    // through `?->`: `untagged` runs `__call` or `__callStatic`, and `declared` and `counting` are declared.
+    let shelf = "<?php\n\nnamespace Lib;\n\nfinal class Shelf\n{\n    /** @param list<mixed> $arguments */\n    public function __call(string $name, array $arguments): Shelf\n    {\n        return $this;\n    }\n\n    public function declared(): Shelf\n    {\n        return $this;\n    }\n\n    /** @param list<mixed> $arguments */\n    public static function __callStatic(string $name, array $arguments): int\n    {\n        return 0;\n    }\n\n    public static function counting(): int\n    {\n        return 0;\n    }\n}\n\nfinal class Crate\n{\n    public function __construct(public Shelf $shelf) {}\n}\n";
+    let typed = |signature: &str, body: &str| {
+        let code: &'static str = Box::leak(
+            format!("<?php\n\nnamespace Lib;\n\nfunction {signature}\n{{\n    return {body};\n}}\n").into_boxed_str(),
+        );
+
+        issues(("src/Lib/use.php", code), &[("src/Lib/Shelf.php", shelf)])
+            .into_iter()
+            .filter(|issue| !issue.ends_with("non-documented-method"))
+            .collect::<Vec<_>>()
+    };
+    for (signature, magic, declared) in [
+        ("chained(?Shelf $shelf): Shelf", "$shelf?->untagged()->untagged()", "$shelf?->declared()->declared()"),
+        ("counted(?Crate $crate): int", "$crate?->shelf::untagged()", "$crate?->shelf::counting()"),
+    ] {
+        assert_eq!(typed(signature, magic), typed(signature, declared), "{magic}");
+    }
 }
 
 /// Parentheses go only around a union or an intersection before `?`, so a single type in them, in a bound or in any

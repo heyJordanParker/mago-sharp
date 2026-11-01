@@ -55,6 +55,7 @@ use crate::expression::call::function_call::resolve_callable_targets;
 use crate::expression::call::record_external_method_call;
 use crate::expression::call::record_external_method_call_targets;
 use crate::expression::call::static_method_call::analyze_static_method_call;
+use crate::expression::call::with_null_safe_null;
 use crate::expression::constant_access::field_storage;
 use crate::expression::instantiation::bare_generic_class;
 use crate::expression::is_refused_type;
@@ -614,7 +615,7 @@ where
             object,
             is_null_safe,
             |context, block_context, artifacts| {
-                analyze_undocumented_method_return_type(
+                let magic_type = analyze_undocumented_method_return_type(
                     context,
                     block_context,
                     artifacts,
@@ -624,8 +625,19 @@ where
                     span,
                     MethodInvocationKind::Instance,
                     !has_resolved_methods,
+                )?;
+                let object_has_nullsafe_null =
+                    artifacts.get_expression_type(object).is_some_and(|t| t.has_nullsafe_null());
+                record_magic_call_type(
+                    context,
+                    artifacts,
+                    span,
+                    magic_type,
                     is_null_safe && method_resolution.encountered_null,
-                )
+                    object_has_nullsafe_null,
+                );
+
+                Ok(())
             },
         )?;
     }
@@ -983,8 +995,8 @@ where
 
 /// Gives return-type providers the first opportunity to describe an
 /// undocumented magic call, then falls back to the magic method's declaration.
-/// `should_add_null` adds the `null` of a `?->` whose object may be null.
-#[allow(clippy::expect_used, clippy::too_many_arguments)]
+/// Returns the call's type, which the caller gives the `null` of `?->` as a declared call's.
+#[allow(clippy::expect_used)]
 pub(super) fn analyze_undocumented_method_return_type<'ctx, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
     block_context: &mut BlockContext<'ctx>,
@@ -995,8 +1007,7 @@ pub(super) fn analyze_undocumented_method_return_type<'ctx, 'arena, A>(
     span: Span,
     invocation_kind: MethodInvocationKind,
     analyze_arguments: bool,
-    should_add_null: bool,
-) -> Result<(), AnalysisError>
+) -> Result<TUnion, AnalysisError>
 where
     A: Arena,
 {
@@ -1102,17 +1113,25 @@ where
         resulting_type = Some(add_optional_union_type(return_type, resulting_type.as_ref(), context.codebase));
     }
 
-    let mut resulting_type = resulting_type.unwrap_or_else(get_mixed);
-    if should_add_null {
-        resulting_type = resulting_type.as_nullable();
-    }
-    if let Some(existing_type) = artifacts.get_expression_type(&span) {
-        resulting_type = add_optional_union_type(resulting_type, Some(existing_type), context.codebase);
-    }
+    Ok(resulting_type.unwrap_or_else(get_mixed))
+}
+
+/// Gives the call at `span` the type `magic_type` of its magic targets, with the `null` of `?->` as
+/// [`with_null_safe_null`] gives a declared call's, beside the type its declared targets gave it.
+pub(super) fn record_magic_call_type<A>(
+    context: &Context<'_, '_, A>,
+    artifacts: &mut AnalysisArtifacts,
+    span: Span,
+    magic_type: TUnion,
+    should_add_null: bool,
+    object_has_nullsafe_null: bool,
+) where
+    A: Arena,
+{
+    let magic_type = with_null_safe_null(artifacts, span, magic_type, should_add_null, object_has_nullsafe_null);
+    let resulting_type = add_optional_union_type(magic_type, artifacts.get_expression_type(&span), context.codebase);
 
     artifacts.set_expression_type(&span, resulting_type);
-
-    Ok(())
 }
 
 /// Checks if an expression ultimately derives from `$this` through a chain of method calls
