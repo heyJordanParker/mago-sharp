@@ -18,7 +18,6 @@ use mago_codex::ttype::expander::StaticClassType;
 use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_never;
-use mago_codex::ttype::get_null;
 use mago_codex::ttype::get_void;
 use mago_codex::ttype::is_key_type;
 use mago_codex::ttype::template::TemplateResult;
@@ -420,16 +419,11 @@ where
             return Ok(());
         } else if encountered_mixed_targets {
             get_mixed()
-        } else if should_add_null {
-            let mut result_with_null = add_optional_union_type(get_null(), Some(&resulting_type), context.codebase);
-            if all_targets_non_nullable_return {
-                result_with_null.set_nullsafe_null(true);
-            }
-
-            result_with_null
-        } else if object_has_nullsafe_null && all_targets_non_nullable_return {
-            let mut result_with_null = add_optional_union_type(get_null(), Some(&resulting_type), context.codebase);
-            result_with_null.set_nullsafe_null(true);
+        } else if should_add_null || (object_has_nullsafe_null && all_targets_non_nullable_return) {
+            // The `null` stands beside the result's parts, so `maybe?.feed()` keeps each `List` a method may return, as
+            // `shelf.feed()` does, spec section 14.4.
+            let mut result_with_null = resulting_type.as_nullable();
+            result_with_null.set_nullsafe_null(all_targets_non_nullable_return);
             result_with_null
         } else {
             resulting_type

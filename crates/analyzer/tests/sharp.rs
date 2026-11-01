@@ -13969,6 +13969,35 @@ fn a_member_that_changes_a_place_through_null_safe_access_keeps_each_list_it_may
     );
 }
 
+/// Spec section 14.4: `maybe?.feed()` gives what `shelf.feed()` gives, or `null`, so a plain PHP method that may return
+/// a `List<int>` or a `List<string>` keeps both beside the `null`, and one that never returns gives only the `null`.
+#[test]
+fn a_null_safe_call_keeps_each_list_its_method_may_return() {
+    let shelf = (
+        "src/Demo/Shelf.php",
+        "<?php\n\nnamespace Demo;\n\nfinal class Shelf\n{\n    /** @return list<int>|list<string> */\n    public function feed(): array\n    {\n        return [];\n    }\n\n    public function stop(): never\n    {\n        throw new \\RuntimeException();\n    }\n}\n",
+    );
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public void run(Shelf shelf, Shelf? maybe)\n    {\n        List<int> whole = shelf.feed();\n        List<int>? held = maybe?.feed();\n        int stopped = maybe?.stop();\n    }\n}\n";
+
+    let issues = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Report.sharp", sharp), &[shelf]);
+
+    assert_eq!(
+        issues
+            .iter()
+            .map(|issue| {
+                let primary = issue.annotations.iter().find(|annotation| annotation.kind == AnnotationKind::Primary);
+                let primary = primary.and_then(|primary| primary.message.as_deref()).unwrap_or("");
+                format!("{} {primary}", located(sharp, issue))
+            })
+            .collect::<Vec<_>>(),
+        [
+            "7:27 invalid-local-assignment-value This value has type `List<int>|List<string>`.",
+            "8:27 invalid-local-assignment-value This value has type `(List<int>|List<string>)?`.",
+            "9:23 invalid-local-assignment-value This value has type `null`.",
+        ]
+    );
+}
+
 /// Spec section 12: "an `Iterable` has no index". Reading one by index would read the source up to it, so the error
 /// names the two ways that read it.
 #[test]
