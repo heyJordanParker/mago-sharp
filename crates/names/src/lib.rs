@@ -392,6 +392,33 @@ impl<'arena> ResolvedNames<'arena> {
         }
     }
 
+    /// Returns whether `hint`, which [is no bound](Self::is_bound), is one once the parentheses it writes are gone, as
+    /// `(Shareable)`, `(TItem)` and `(Shareable) & DatabaseEntity` are, so the parentheses are its one error, spec
+    /// section 11.
+    #[must_use]
+    pub fn is_bound_in_parentheses(&self, hint: &Hint<'_>, in_standard_library: bool) -> bool {
+        match hint {
+            Hint::Parenthesized(parenthesized) => {
+                self.is_bound(parenthesized.hint, in_standard_library)
+                    || self.is_bound_in_parentheses(parenthesized.hint, in_standard_library)
+            }
+            Hint::Intersection(_) => self.joins_classes_in_parentheses(hint),
+            _ => false,
+        }
+    }
+
+    /// Whether `hint` [joins classes](Self::joins_classes), each of them in parentheses or not.
+    fn joins_classes_in_parentheses(&self, hint: &Hint<'_>) -> bool {
+        match hint {
+            Hint::Parenthesized(parenthesized) => self.joins_classes_in_parentheses(parenthesized.hint),
+            Hint::Intersection(intersection) => {
+                self.joins_classes_in_parentheses(intersection.left)
+                    && self.joins_classes_in_parentheses(intersection.right)
+            }
+            member => self.joins_classes(member),
+        }
+    }
+
     /// Whether `hint` is a class or an interface, by name or as a generic class type, or several of them joined with
     /// `&`.
     fn joins_classes(&self, hint: &Hint<'_>) -> bool {

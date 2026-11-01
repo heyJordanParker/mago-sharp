@@ -128,7 +128,7 @@ pub fn refuse_bounds<'templates>(
 
 /// Calls `visit` on each atomic type `union` writes, at any depth, but none a type parameter's own bound holds: the
 /// bound of `T` is written where `T` is declared.
-pub(crate) fn for_each_written_part(union: &TUnion, visit: &mut impl FnMut(&TAtomic)) {
+fn for_each_written_part(union: &TUnion, visit: &mut impl FnMut(&TAtomic)) {
     fn walk(node: TypeRef<'_>, visit: &mut impl FnMut(&TAtomic)) {
         if let TypeRef::Atomic(atomic) = node {
             visit(atomic);

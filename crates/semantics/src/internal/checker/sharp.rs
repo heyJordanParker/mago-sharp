@@ -882,7 +882,7 @@ fn enter(node: Node<'_, '_>, place: Place, context: &mut Context<'_, '_, '_>) ->
             }
             // A bound once its parentheses are gone, as `(Shareable)`, is the walk's one error at each pair of
             // parentheses, which names the bound to write.
-            if is_bound_in_parentheses(&bound.hint, in_standard_library, context.names) {
+            if context.names.is_bound_in_parentheses(&bound.hint, in_standard_library) {
                 return Some(Place::TypeParameter);
             }
 
@@ -5032,31 +5032,6 @@ fn check_type_parameters(list: &TypeParameterList, place: Place, context: &mut C
                 .with_annotation(Annotation::primary(variance.span).with_message("Written here.")),
             );
         }
-    }
-}
-
-/// Whether `hint`, a bound `ResolvedNames::is_bound` refuses, is one once the parentheses it writes are gone, as
-/// `(Shareable)`, `(TItem)` and `(Shareable) & DatabaseEntity` are, so the parentheses are its one error.
-fn is_bound_in_parentheses(hint: &Hint, in_standard_library: bool, names: &ResolvedNames) -> bool {
-    /// Whether `hint` joins classes and interfaces with `&`, each of them in parentheses or not.
-    fn joins_classes(hint: &Hint, names: &ResolvedNames) -> bool {
-        match hint {
-            Hint::Parenthesized(parenthesized) => joins_classes(parenthesized.hint, names),
-            Hint::Intersection(intersection) => {
-                joins_classes(intersection.left, names) && joins_classes(intersection.right, names)
-            }
-            Hint::Object(_) => false,
-            member => names.is_class_bound(member),
-        }
-    }
-
-    match hint {
-        Hint::Parenthesized(parenthesized) => {
-            names.is_bound(parenthesized.hint, in_standard_library)
-                || is_bound_in_parentheses(parenthesized.hint, in_standard_library, names)
-        }
-        Hint::Intersection(_) => joins_classes(hint, names),
-        _ => false,
     }
 }
 

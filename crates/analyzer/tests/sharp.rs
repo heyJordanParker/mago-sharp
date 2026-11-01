@@ -15026,6 +15026,15 @@ fn a_bound_that_names_a_missing_type_gives_one_error() {
         Vec::<String>::new()
     );
 
+    // A header that gives the class's type parameter to its interface, as `Query<T>`, adds no error.
+    let headed = "namespace Demo;\n\npublic class Table<T : Missing> : Query<T>\n{\n    public List<T> rows() => [];\n}\n";
+    let user = "namespace Demo;\n\npublic static class Reader\n{\n    public static List<int> read(Table<int> rows) => rows.rows();\n\n    public static List<int> queried(Query<int> query) => query.rows();\n\n    public static List<int> passed(Table<int> rows) => Reader.queried(rows);\n}\n";
+    assert_eq!(compile_errors(("src/Demo/Table.sharp", headed), &[("src/Demo/Paging.sharp", PAGING)]), [missing]);
+    assert_eq!(
+        compile_errors(("src/Demo/Reader.sharp", user), &[("src/Demo/Table.sharp", headed), ("src/Demo/Paging.sharp", PAGING)]),
+        Vec::<String>::new()
+    );
+
     // A method without a body, of an interface or abstract, reports its bound's missing type too.
     let bodiless = "namespace Demo;\n\npublic interface Keeper\n{\n    T kept<T : Missing>(T value);\n}\n\npublic abstract class Store\n{\n    public abstract T stored<T : Missing>(T value);\n}\n";
     assert_eq!(

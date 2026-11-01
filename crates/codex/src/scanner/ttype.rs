@@ -125,35 +125,48 @@ where
             .insert(word(parameter.name.value), vec![GenericTemplate::new(defining_entity, get_mixed())]);
     }
 
+    // Whether the checker refuses each bound, and the other type parameters the binder finds in a refused one, which its
+    // refusal marks: a refused bound reads as no type PHP# has, as `Query<TOther> & int` reads as nothing.
+    let refusals: Vec<(bool, Vec<&[u8]>)> = type_parameters
+        .parameters
+        .iter()
+        .map(|parameter| {
+            let refused =
+                context.resolved_names.is_refused_bound(type_parameters, parameter, context.file.is_standard_library);
+            let mut named = Vec::new();
+            if let Some(bound) = &parameter.bound
+                && refused
+            {
+                TypeParametersNamed(context.resolved_names).walk_type_parameter_bound(bound, &mut named);
+                named.retain(|name| *name != parameter.name.value);
+            }
+
+            (refused, named)
+        })
+        .collect();
+
     let mut templates: Vec<(Word, GenericTemplate)> = Vec::new();
     for _ in &type_parameters.parameters {
         templates = type_parameters
             .parameters
             .iter()
-            .map(|parameter| {
+            .zip(&refusals)
+            .map(|(parameter, (refused, named))| {
                 let mut template = GenericTemplate::new(defining_entity, get_mixed());
                 if let Some(bound) = &parameter.bound {
                     let mut written =
                         get_type_metadata_from_hint(&bound.hint, Some(classname), &*type_context, context);
                     template.constraint = written.type_union.clone();
-                    template.bound_refused = context.resolved_names.is_refused_bound(
-                        type_parameters,
-                        parameter,
-                        context.file.is_standard_library,
-                    );
-                    // A refused bound reads as no type PHP# has, as `Query<TOther> & int` reads as nothing, so it keeps
-                    // the type parameters the binder finds in it, which its refusal marks.
-                    let mut named = Vec::new();
-                    TypeParametersNamed(context.resolved_names).walk_type_parameter_bound(bound, &mut named);
+                    template.bound_refused = *refused;
                     let named: Vec<TAtomic> = named
-                        .into_iter()
-                        .filter(|name| *name != parameter.name.value)
+                        .iter()
                         .filter_map(|name| {
-                            type_context.get_template_definition(word(name)).map(|definitions| (name, definitions))
+                            let definitions = type_context.get_template_definition(word(name))?;
+
+                            Some(builder::get_template_atomic(definitions, word(name)))
                         })
-                        .map(|(name, definitions)| builder::get_template_atomic(definitions, word(name)))
                         .collect();
-                    if template.bound_refused && !named.is_empty() {
+                    if !named.is_empty() {
                         written.type_union = TUnion::from_vec(named);
                     }
                     template.written_bound = Some(written);
