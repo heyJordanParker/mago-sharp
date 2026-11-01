@@ -427,52 +427,16 @@ impl AnalyzeCommand {
     /// Wraps watch mode in a restart loop.
     ///
     /// When configuration files, baseline files, or Composer files change,
-    /// the watch session restarts with the reloaded configuration. The watcher of those files is live before each load
-    /// of the configuration, so a change made after `mago` first read it restarts the watch too.
+    /// the watch session restarts with the reloaded configuration, in a thread pool of its `threads` and `stack-size`.
+    /// The watcher of those files is live before each load of the configuration, so a change made after `mago` first
+    /// read it restarts the watch too.
     fn run_watch_loop(&self, configuration: Configuration, color_choice: ColorChoice) -> Result<ExitCode, Error> {
         let (mut restart_watcher, mut configuration) = watch_and_reload(configuration)?;
         loop {
-            let mut orchestrator = create_orchestrator(&configuration, color_choice, false, false, true);
-            analyze_the_whole_workspace_without_paths(&mut orchestrator);
-            orchestrator.add_exclude_patterns(configuration.analyzer.excludes.iter());
-            let scope = if self.path.is_empty() {
-                None
-            } else {
-                Some(scope_to(&mut orchestrator, &configuration.source.workspace, &self.path, &[])?)
-            };
-
-            // The watcher reports each change from here on before the hosts' compile or the analysis reads a file, so
-            // an edit made after a file is read reaches it, and one made before is in what was read.
-            tracing::info!("Starting watch mode. Press Ctrl+C to stop.");
-            let workspace = &configuration.source.workspace;
-            let mut watcher =
-                DatabaseWatcher::new(Database::new(orchestrator.database_configuration(workspace, true).into_static()));
-            watcher.watch(WatchOptions { poll_interval: Some(Duration::from_millis(500)), ..Default::default() })?;
-
-            let (extension_hosts, _) = compile_for_hosts(&configuration)?;
-            if let Some(external_analyzer) = initialize_external_analyzer(
-                &extension_hosts,
-                configuration.php_version,
-                configuration.threads,
-                &configuration.analyzer.plugins,
-                configuration.analyzer.disable_default_plugins,
-            )
-            .map_err(|error| mago_orchestrator::OrchestratorError::General(error.to_string()))?
+            let restart_reasons = &mut restart_watcher.reasons;
+            match session_thread_pool(&configuration)?
+                .install(|| self.run_watch_session(&configuration, color_choice, restart_reasons))?
             {
-                orchestrator.set_external_analyzer(external_analyzer);
-            }
-            let database =
-                orchestrator.load_database(workspace, true, Some(self.prelude_database()), None)?.into_static();
-            *watcher.database_mut() = database;
-
-            match self.run_watch_mode(
-                orchestrator,
-                &configuration,
-                color_choice,
-                scope,
-                watcher,
-                &restart_watcher.reasons,
-            )? {
                 WatchOutcome::Restart(reason) => {
                     tracing::info!("Restarting analysis: {reason}");
 
@@ -481,6 +445,50 @@ impl AnalyzeCommand {
                 }
             }
         }
+    }
+
+    /// Runs one watch session under `configuration`, until a change to `restart_reasons`' files restarts it.
+    ///
+    /// `restart_reasons` is borrowed mutably, which lets the session move to the thread pool it runs in.
+    fn run_watch_session(
+        &self,
+        configuration: &Configuration,
+        color_choice: ColorChoice,
+        restart_reasons: &mut mpsc::Receiver<String>,
+    ) -> Result<WatchOutcome, Error> {
+        let mut orchestrator = create_orchestrator(configuration, color_choice, false, false, true);
+        analyze_the_whole_workspace_without_paths(&mut orchestrator);
+        orchestrator.add_exclude_patterns(configuration.analyzer.excludes.iter());
+        let scope = if self.path.is_empty() {
+            None
+        } else {
+            Some(scope_to(&mut orchestrator, &configuration.source.workspace, &self.path, &[])?)
+        };
+
+        // The watcher reports each change from here on before the hosts' compile or the analysis reads a file, so
+        // an edit made after a file is read reaches it, and one made before is in what was read.
+        tracing::info!("Starting watch mode. Press Ctrl+C to stop.");
+        let workspace = &configuration.source.workspace;
+        let mut watcher =
+            DatabaseWatcher::new(Database::new(orchestrator.database_configuration(workspace, true).into_static()));
+        watcher.watch(WatchOptions { poll_interval: Some(Duration::from_millis(500)), ..Default::default() })?;
+
+        let (extension_hosts, _) = compile_for_hosts(configuration)?;
+        if let Some(external_analyzer) = initialize_external_analyzer(
+            &extension_hosts,
+            configuration.php_version,
+            configuration.threads,
+            &configuration.analyzer.plugins,
+            configuration.analyzer.disable_default_plugins,
+        )
+        .map_err(|error| mago_orchestrator::OrchestratorError::General(error.to_string()))?
+        {
+            orchestrator.set_external_analyzer(external_analyzer);
+        }
+        let database = orchestrator.load_database(workspace, true, Some(self.prelude_database()), None)?.into_static();
+        *watcher.database_mut() = database;
+
+        self.run_watch_mode(orchestrator, configuration, color_choice, scope, watcher, restart_reasons)
     }
 
     /// Runs in watch mode, continuously monitoring for file changes and re-analyzing.
@@ -639,26 +647,16 @@ struct RestartWatcher {
     reasons: mpsc::Receiver<String>,
 }
 
-/// Starts the restart watcher of `configuration`'s files, then loads the configuration again, so a change to one of
-/// them that the load misses restarts the watch. While the loaded configuration names other files, it starts the
-/// watcher of those and loads again. Each watcher stops once the next is live.
+/// Starts the restart watcher of `configuration`'s files, then loads the configuration again under the same
+/// command-line flags and checks it as a fresh start does, so a change to one of the files that the load misses
+/// restarts the watch. A load or check that fails keeps `configuration`. While the loaded configuration names other
+/// files, it starts the watcher of those and loads again. Each watcher stops once the next is live.
 fn watch_and_reload(mut configuration: Configuration) -> Result<(RestartWatcher, Configuration), Error> {
     let mut restart_watcher = setup_restart_watcher(&configuration)?;
     loop {
-        // Only pin the config file path if the user explicitly passed --config.
-        // Otherwise, let load() re-discover it (the file might have been
-        // deleted, renamed, or a different format might now take precedence).
-        let explicit_config =
-            if configuration.config_file_is_explicit { configuration.config_file.as_deref() } else { None };
-
-        let mut reloaded = match Configuration::load(
-            Some(configuration.source.workspace.clone()),
-            explicit_config,
-            Some(configuration.php_version),
-            Some(configuration.threads),
-            configuration.allow_unsupported_php_version,
-            configuration.no_version_check,
-        ) {
+        let reloaded = match Configuration::load(configuration.cli_overrides.clone())
+            .and_then(|reloaded| reloaded.check_versions().map(|()| reloaded))
+        {
             Ok(reloaded) => reloaded,
             Err(e) => {
                 tracing::error!("Failed to reload configuration: {e}");
@@ -667,9 +665,6 @@ fn watch_and_reload(mut configuration: Configuration) -> Result<(RestartWatcher,
                 return Ok((restart_watcher, configuration));
             }
         };
-        if configuration.no_extensions {
-            reloaded.disable_extensions();
-        }
         if restart_files(&reloaded) == restart_watcher.files {
             return Ok((restart_watcher, reloaded));
         }
@@ -677,6 +672,15 @@ fn watch_and_reload(mut configuration: Configuration) -> Result<(RestartWatcher,
         restart_watcher = setup_restart_watcher(&reloaded)?;
         configuration = reloaded;
     }
+}
+
+/// Builds the thread pool a watch session runs its analysis in, from `configuration`'s `threads` and `stack-size`, as
+/// `mago` builds its global pool from the configuration it first loads.
+fn session_thread_pool(configuration: &Configuration) -> Result<rayon::ThreadPool, Error> {
+    Ok(rayon::ThreadPoolBuilder::new()
+        .num_threads(configuration.threads)
+        .stack_size(configuration.stack_size)
+        .build()?)
 }
 
 /// The non-PHP files whose change restarts watch mode, each with a label for the reason:
@@ -787,7 +791,10 @@ fn restart_reason(event: &notify::Event, files: &[(PathBuf, &'static str)]) -> O
 
 #[cfg(test)]
 mod tests {
+    use mago_php_version::PHPVersion;
+
     use super::*;
+    use crate::config::CliOverrides;
 
     /// A change to the configuration file made before its restart watcher is live, as one saved while `mago` starts,
     /// is in the configuration `watch_and_reload` returns, and the watcher it returns watches the baseline that the
@@ -798,7 +805,13 @@ mod tests {
         let root = directory.path().canonicalize().unwrap();
         let file = root.join("mago.toml");
         std::fs::write(&file, "php-version = \"8.4\"\n").unwrap();
-        let configuration = Configuration::load(Some(root.clone()), Some(&file), None, None, false, true).unwrap();
+        let configuration = Configuration::load(CliOverrides {
+            workspace: Some(root.clone()),
+            config: Some(file.clone()),
+            no_version_check: true,
+            ..Default::default()
+        })
+        .unwrap();
         std::fs::write(&file, "php-version = \"8.4\"\n\n[analyzer]\nbaseline = \"baseline.toml\"\n").unwrap();
 
         let (restart_watcher, configuration) = watch_and_reload(configuration).unwrap();
@@ -819,9 +832,14 @@ mod tests {
             "php-version = \"8.4\"\n\n[extension-hosts.logger]\nworkers = 1\ncommand = [\"php\", \"host.php\"]\n",
         )
         .unwrap();
-        let mut configuration = Configuration::load(Some(root.clone()), Some(&file), None, None, false, true).unwrap();
-        assert!(configuration.extension_hosts.contains_key("logger"));
-        configuration.disable_extensions();
+        let cli_overrides = CliOverrides {
+            workspace: Some(root.clone()),
+            config: Some(file.clone()),
+            no_version_check: true,
+            ..Default::default()
+        };
+        assert!(Configuration::load(cli_overrides.clone()).unwrap().extension_hosts.contains_key("logger"));
+        let configuration = Configuration::load(CliOverrides { no_extensions: true, ..cli_overrides }).unwrap();
 
         let (_restart_watcher, configuration) = watch_and_reload(configuration).unwrap();
 
@@ -845,5 +863,129 @@ mod tests {
         assert_eq!(restart_reason(&rescan().add_path(root.join("app")), &files), None);
         let edit = notify::Event::new(EventKind::Modify(notify::event::ModifyKind::Any)).add_path(file.clone());
         assert_eq!(restart_reason(&edit, &files), Some(format!("configuration file changed ({})", file.display())));
+    }
+
+    /// A reload reads each value the edited configuration file gives, as a fresh start does, while a `--php-version`
+    /// passed on the command line still wins over the file.
+    #[test]
+    fn a_reload_reads_the_edited_php_version_and_threads_and_keeps_a_command_line_php_version() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let file = root.join("mago.toml");
+
+        let cli_overrides = CliOverrides {
+            workspace: Some(root.clone()),
+            config: Some(file.clone()),
+            no_version_check: true,
+            ..Default::default()
+        };
+
+        temp_env::with_vars([("MAGO_PHP_VERSION", None::<&str>), ("MAGO_THREADS", None)], || {
+            std::fs::write(&file, "php-version = \"8.3\"\nthreads = 2\n").unwrap();
+            let configuration = Configuration::load(cli_overrides.clone()).unwrap();
+            std::fs::write(&file, "php-version = \"8.5\"\nthreads = 3\n").unwrap();
+
+            let (_restart_watcher, configuration) = watch_and_reload(configuration).unwrap();
+
+            assert_eq!((configuration.php_version, configuration.threads), (PHPVersion::PHP85, 3));
+
+            let configuration =
+                Configuration::load(CliOverrides { php_version: Some(PHPVersion::PHP83), ..cli_overrides.clone() })
+                    .unwrap();
+            std::fs::write(&file, "php-version = \"8.4\"\nthreads = 4\n").unwrap();
+
+            let (_restart_watcher, configuration) = watch_and_reload(configuration).unwrap();
+
+            assert_eq!((configuration.php_version, configuration.threads), (PHPVersion::PHP83, 4));
+        });
+    }
+
+    /// A watch session after a reload analyzes on the reloaded `threads`, which the global pool `mago` built at start
+    /// does not have.
+    #[test]
+    fn a_session_after_a_reload_runs_on_the_reloaded_thread_count() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let file = root.join("mago.toml");
+
+        temp_env::with_var("MAGO_THREADS", None::<&str>, || {
+            std::fs::write(&file, "threads = 2\n").unwrap();
+            let configuration = Configuration::load(CliOverrides {
+                workspace: Some(root.clone()),
+                config: Some(file.clone()),
+                no_version_check: true,
+                ..Default::default()
+            })
+            .unwrap();
+            std::fs::write(&file, "threads = 3\n").unwrap();
+
+            let (_restart_watcher, configuration) = watch_and_reload(configuration).unwrap();
+
+            assert_eq!(session_thread_pool(&configuration).unwrap().install(rayon::current_num_threads), 3);
+        });
+    }
+
+    /// A reload to a PHP version a fresh start refuses keeps the previous configuration.
+    #[test]
+    fn a_reload_to_an_unsupported_php_version_keeps_the_previous_configuration() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let file = root.join("mago.toml");
+
+        temp_env::with_vars([("MAGO_PHP_VERSION", None::<&str>), ("MAGO_ALLOW_UNSUPPORTED_PHP_VERSION", None)], || {
+            std::fs::write(&file, "php-version = \"8.3\"\n").unwrap();
+            let configuration = Configuration::load(CliOverrides {
+                workspace: Some(root.clone()),
+                config: Some(file.clone()),
+                no_version_check: true,
+                ..Default::default()
+            })
+            .unwrap();
+            std::fs::write(&file, "php-version = \"7.4\"\n").unwrap();
+
+            let (_restart_watcher, configuration) = watch_and_reload(configuration).unwrap();
+
+            assert_eq!(configuration.php_version, PHPVersion::PHP83);
+        });
+    }
+
+    /// A reload reads again the workspace, `allow-unsupported-php-version` and `no-version-check` the edited
+    /// configuration file gives, when the command line set none of them.
+    #[test]
+    fn a_reload_reads_the_edited_workspace_and_version_checks() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let file = root.join("mago.toml");
+        for workspace in ["first", "second"] {
+            std::fs::create_dir(root.join(workspace)).unwrap();
+        }
+
+        temp_env::with_vars(
+            [("MAGO_ALLOW_UNSUPPORTED_PHP_VERSION", None::<&str>), ("MAGO_NO_VERSION_CHECK", None)],
+            || {
+                std::fs::write(
+                    &file,
+                    format!(
+                        "allow-unsupported-php-version = true\nno-version-check = true\n\n[source]\nworkspace = {:?}\n",
+                        root.join("first")
+                    ),
+                )
+                .unwrap();
+                let configuration =
+                    Configuration::load(CliOverrides { config: Some(file.clone()), ..Default::default() }).unwrap();
+                std::fs::write(&file, format!("[source]\nworkspace = {:?}\n", root.join("second"))).unwrap();
+
+                let (_restart_watcher, configuration) = watch_and_reload(configuration).unwrap();
+
+                assert_eq!(
+                    (
+                        configuration.source.workspace,
+                        configuration.allow_unsupported_php_version,
+                        configuration.no_version_check
+                    ),
+                    (root.join("second"), false, false)
+                );
+            },
+        );
     }
 }

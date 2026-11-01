@@ -118,11 +118,8 @@ fn do_match(fqcn_parts: &[&[u8]], pattern_parts: &[&[u8]], is_constant: bool) ->
             let is_last = fqcn_parts.len() == 1 && pattern_parts.len() == 1;
             let case_sensitive = is_constant && is_last;
 
-            if segment_matches(f_part, p_part, case_sensitive) {
-                do_match(&fqcn_parts[1..], &pattern_parts[1..], is_constant)
-            } else {
-                false
-            }
+            segment_matches(f_part, p_part, case_sensitive)
+                && do_match(&fqcn_parts[1..], &pattern_parts[1..], is_constant)
         }
         (None, Some(_)) => pattern_parts.len() == 1 && pattern_parts[0] == b"**",
         _ => false,

@@ -54,16 +54,11 @@ use tracing::trace;
 
 use crate::commands::CliArguments;
 use crate::commands::MagoCommand;
+use crate::config::CliOverrides;
 use crate::config::Configuration;
-use crate::consts::MAXIMUM_PHP_VERSION;
-use crate::consts::MINIMUM_PHP_VERSION;
-use crate::consts::VERSION;
-use crate::consts::version_pin;
 use crate::error::Error;
 use crate::utils::configure_colors;
 use crate::utils::logger::initialize_logger;
-use crate::version_check::VersionCheck;
-use crate::version_check::VersionPin;
 
 mod baseline;
 mod commands;
@@ -228,35 +223,22 @@ pub fn run(main_start: Instant) -> Result<ExitCode, Error> {
     } = arguments;
 
     let config_load_start = trace_enabled.then(Instant::now);
-    let mut configuration = Configuration::load(
+    let configuration = Configuration::load(CliOverrides {
         workspace,
-        config.as_deref(),
+        config,
         php_version,
         threads,
         allow_unsupported_php_version,
         no_version_check,
-    )?;
-
-    if no_extensions {
-        configuration.disable_extensions();
-    }
+        no_extensions,
+    })?;
     let config_load_duration = config_load_start.map(|s| s.elapsed()).unwrap_or_default();
 
     if let MagoCommand::SelfUpdate(cmd) = command {
         return commands::self_update::execute(cmd, configuration.version);
     }
 
-    check_project_version(&configuration)?;
-
-    if !configuration.allow_unsupported_php_version {
-        if configuration.php_version < MINIMUM_PHP_VERSION {
-            return Err(Error::PHPVersionIsTooOld(MINIMUM_PHP_VERSION, configuration.php_version));
-        }
-
-        if configuration.php_version > MAXIMUM_PHP_VERSION {
-            return Err(Error::PHPVersionIsTooNew(MAXIMUM_PHP_VERSION, configuration.php_version));
-        }
-    }
+    configuration.check_versions()?;
 
     let rayon_init_start = trace_enabled.then(Instant::now);
     rayon::ThreadPoolBuilder::new()
@@ -303,45 +285,4 @@ pub fn run(main_start: Instant) -> Result<ExitCode, Error> {
     }
 
     result
-}
-
-/// Verifies that the installed mago binary satisfies the `version` pin in
-/// `mago.toml`, if one is set.
-fn check_project_version(configuration: &Configuration) -> Result<(), Error> {
-    let Some(pin_string) = configuration.version.as_deref() else {
-        // TODO(azjezz): we should start emitting a warning here when nearing version 2.0
-        return Ok(());
-    };
-
-    let pin = VersionPin::parse(pin_string)?;
-    let result = pin.check(VERSION)?;
-
-    match result {
-        VersionCheck::Match => Ok(()),
-        VersionCheck::MajorDrift => {
-            tracing::error!("Major versions may have incompatible config schemas; refusing to run.");
-            tracing::error!("Set `version = \"{}\"` in mago.toml to use this mago binary.", version_pin());
-
-            Err(Error::ProjectMajorVersionMismatch(pin.to_string(), VERSION.to_string()))
-        }
-        VersionCheck::MinorDrift | VersionCheck::PatchDrift => {
-            if configuration.no_version_check {
-                return Ok(());
-            }
-
-            if result.is_fatal(configuration.version_drift_fail_level) {
-                tracing::error!("mago.toml is pinned to `{pin}` but the installed mago binary is `{VERSION}`.");
-                tracing::error!("Run `mago self-update --to-project-version` to sync.");
-                tracing::error!("Pass `--no-version-check` or set `MAGO_NO_VERSION_CHECK=1` to bypass this check.");
-
-                return Err(Error::ProjectVersionMismatch(pin.to_string(), VERSION.to_string()));
-            }
-
-            tracing::warn!("mago.toml is pinned to `{pin}` but the installed mago binary is `{VERSION}`.");
-            tracing::warn!("Run `mago self-update --to-project-version` to sync.");
-            tracing::warn!("Pass `--no-version-check` or set `MAGO_NO_VERSION_CHECK=1` to silence this warning.");
-
-            Ok(())
-        }
-    }
 }
