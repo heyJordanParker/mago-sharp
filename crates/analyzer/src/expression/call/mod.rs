@@ -42,6 +42,7 @@ use crate::analyzable::Analyzable;
 use crate::artifacts::AnalysisArtifacts;
 use crate::artifacts::CallTarget;
 use crate::artifacts::ResolvedMethodCall;
+use crate::artifacts::get_expression_range;
 use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
@@ -145,18 +146,20 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Call<'arena> {
 
 /// Refuses the result of a call that returns nothing where code uses it as a value, as an argument, an assigned value,
 /// an element or an operand, as C# and Java refuse it: a `void` method or function value gives no value, spec section
-/// 14.1.
+/// 14.1. Through `?.` the call's type holds the `null` it adds, so the targets' `void` decides. The call then has the
+/// type of a refused value, so nothing that reads its value reports the same mistake again.
 fn report_void_result_used<A>(
     context: &mut Context<'_, '_, A>,
     block_context: &BlockContext<'_>,
-    artifacts: &AnalysisArtifacts,
+    artifacts: &mut AnalysisArtifacts,
     call: &Call<'_>,
 ) where
     A: Arena,
 {
     if !context.dialect.is_sharp()
         || !block_context.flags.inside_general_use()
-        || !artifacts.get_expression_type(call).is_some_and(|result| result.is_void())
+        || !(artifacts.get_expression_type(call).is_some_and(TUnion::is_void)
+            || artifacts.null_safe_void_calls.contains(&get_expression_range(call)))
     {
         return;
     }
@@ -169,6 +172,7 @@ fn report_void_result_used<A>(
         ))
         .with_annotation(Annotation::primary(call.span()).with_message("Used as a value here.")),
     );
+    artifacts.set_expression_type(call, TUnion::from_atomic(TAtomic::Error));
 }
 
 /// Analyzes `expression` by the kind of call it is.
@@ -420,16 +424,16 @@ where
             return Ok(());
         } else if encountered_mixed_targets {
             get_mixed()
-        } else if should_add_null {
+        } else if should_add_null || (object_has_nullsafe_null && all_targets_non_nullable_return) {
+            // A `void` call gives no value to use beside the `null` of `?.`, spec section 14.1.
+            if context.dialect.is_sharp() && resulting_type.is_void() {
+                artifacts.null_safe_void_calls.insert((call_span.start.offset, call_span.end.offset));
+            }
             let mut result_with_null = add_optional_union_type(get_null(), Some(&resulting_type), context.codebase);
             if all_targets_non_nullable_return {
                 result_with_null.set_nullsafe_null(true);
             }
 
-            result_with_null
-        } else if object_has_nullsafe_null && all_targets_non_nullable_return {
-            let mut result_with_null = add_optional_union_type(get_null(), Some(&resulting_type), context.codebase);
-            result_with_null.set_nullsafe_null(true);
             result_with_null
         } else {
             resulting_type

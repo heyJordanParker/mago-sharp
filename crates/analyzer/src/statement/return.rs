@@ -123,7 +123,11 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Return<'arena> {
             expect_type(context, artifacts, return_value, declared.as_ref());
 
             block_context.flags.set_inside_return(true);
+            // A function that returns a value uses the returned one, so a `void` call gives it none, spec section 14.1.
+            let was_inside_general_use = block_context.flags.inside_general_use();
+            block_context.flags.set_inside_general_use(declared.as_ref().is_some_and(|declared| !declared.is_void()));
             return_value.analyze(context, block_context, artifacts)?;
+            block_context.flags.set_inside_general_use(was_inside_general_use);
             block_context.flags.set_inside_return(false);
             // A lambda's result is checked against the function type that takes it, as a declared return type is.
             if let Some(declared) = &declared {
