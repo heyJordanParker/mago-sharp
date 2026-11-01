@@ -7737,54 +7737,87 @@ fn a_variadic_parameter_is_a_list_that_spreads_into_methods_and_php_functions_wi
     assert_eq!(issues(("src/Demo/Report.sharp", sharp), &[math]), Vec::<String>::new());
 }
 
-/// The issues of `analyzed` as `line:column code`, and the type of the first expression in it written `expression`.
-fn issues_and_type(analyzed: (&'static str, &'static str), expression: &str) -> (Vec<String>, Option<String>) {
+/// The issues of `analyzed` as `line:column code`, and the type of the first expression in it written as each of
+/// `expressions`, from one analysis.
+fn issues_and_types(
+    analyzed: (&'static str, &'static str),
+    expressions: &[&str],
+) -> (Vec<String>, Vec<Option<String>>) {
     let (issues, artifacts) = analyze_with_artifacts(&PLUGIN_REGISTRY, settings(), analyzed, &[]);
-    let start = analyzed.1.find(expression).unwrap() as u32;
-    let span = (start, start + expression.len() as u32);
+    let type_at = |expression: &&str| {
+        let start = analyzed.1.find(expression).unwrap() as u32;
+        artifacts
+            .expression_types
+            .get(&(start, start + expression.len() as u32))
+            .map(|r#type| r#type.get_id().to_string())
+    };
 
-    (
-        issues.iter().map(|issue| located(analyzed.1, issue)).collect(),
-        artifacts.expression_types.get(&span).map(|r#type| r#type.get_id().to_string()),
-    )
+    (issues.iter().map(|issue| located(analyzed.1, issue)).collect(), expressions.iter().map(type_at).collect())
 }
 
 /// Spec sections 7 and 11: a spread's elements are arguments the call receives, so each fixes the type arguments of the
-/// parameter it fills. A variadic parameter takes every element of the spread, as its check reads them.
+/// parameter its position fills, a variadic parameter's from each element from its own position on, beside a named
+/// argument and through a union of lists.
 #[test]
 fn a_spread_into_a_generic_method_s_parameters_fixes_its_type_arguments() {
-    let sharp = "namespace Demo;\n\nclass Pairs\n{\n    public static List<T> pair<T>(T a, T b) => [a, b];\n\n    public static TSecond last<TFirst, TSecond>(TFirst first, TSecond second) => second;\n\n    public static List<TRest> rest<TFirst, TRest>(TFirst first, TRest ...rest) => rest;\n\n    public static int count()\n    {\n        const spread = Pairs.pair(...[1, 2]);\n        const rest = Pairs.rest(...[1, \"tea\", \"cup\"]);\n        return spread.count() + rest.count();\n    }\n\n    public static string name()\n    {\n        const last = Pairs.last(...[1, \"tea\"]);\n        return last;\n    }\n}\n";
-    let analyzed = ("src/Demo/Pairs.sharp", sharp);
+    let sharp = "namespace Demo;\n\nclass Pairs\n{\n    public static List<T> pair<T>(T a, T b) => [a, b];\n\n    public static TSecond last<TFirst, TSecond>(TFirst first, TSecond second) => second;\n\n    public static List<TRest> rest<TFirst, TRest>(TFirst first, TRest ...rest) => rest;\n\n    public static int count(bool flag)\n    {\n        const spread = Pairs.pair(...[1, 2]);\n        const rest = Pairs.rest(...[1, \"tea\", \"cup\"]);\n        const either = Pairs.pair(...(flag ? [1, 2] : [\"a\", \"b\"]));\n        return spread.count() + rest.count() + either.count();\n    }\n\n    public static string name()\n    {\n        const last = Pairs.last(...[1, \"tea\"]);\n        return last;\n    }\n\n    public static string named()\n    {\n        const named = Pairs.last(...[1], second: \"tea\");\n        return named;\n    }\n}\n";
+    let expressions = [
+        "Pairs.pair(...[1, 2])",
+        "Pairs.rest(...[1, \"tea\", \"cup\"])",
+        "Pairs.pair(...(flag ? [1, 2] : [\"a\", \"b\"]))",
+        "Pairs.last(...[1, \"tea\"])",
+        "Pairs.last(...[1], second: \"tea\")",
+    ];
 
-    assert_eq!(issues_and_type(analyzed, "Pairs.pair(...[1, 2])"), (vec![], Some("list<int>".to_owned())));
-    assert_eq!(issues_and_type(analyzed, "Pairs.last(...[1, \"tea\"])"), (vec![], Some("string".to_owned())));
     assert_eq!(
-        issues_and_type(analyzed, "Pairs.rest(...[1, \"tea\", \"cup\"])"),
-        (vec![], Some("list<int|string>".to_owned()))
+        issues_and_types(("src/Demo/Pairs.sharp", sharp), &expressions),
+        (
+            vec![],
+            ["list<int>", "list<string>", "list<int|string>", "string", "string"]
+                .map(|r#type| Some(r#type.to_owned()))
+                .to_vec()
+        )
     );
 }
 
 /// Spec section 7: a spread works the same into plain PHP, so a plain PHP spread fixes a `@template` as the arguments it
-/// spreads would.
+/// spreads would. A `mixed` spread's elements are `mixed`, so it fixes and breaks a bound as a `mixed` argument does,
+/// and its own issue says the value may not be iterable.
 #[test]
 fn a_plain_php_spread_into_a_template_function_s_parameters_fixes_its_template() {
     let php = "<?php\n\nnamespace Demo;\n\n/**\n * @template T\n *\n * @param T $a\n * @param T $b\n *\n * @return list<T>\n */\nfunction pair(mixed $a, mixed $b): array\n{\n    return [$a, $b];\n}\n\n/** @return list<1|2> */\nfunction spread(): array\n{\n    return pair(...[1, 2]);\n}\n";
+    let mixed = "<?php\n\nnamespace Demo;\n\n/**\n * @template T of int\n *\n * @param T ...$values\n *\n * @return list<T>\n */\nfunction many(int ...$values): array\n{\n    return array_values($values);\n}\n\nfunction spread(mixed $values): mixed\n{\n    return many(...$values);\n}\n\nfunction passed(mixed $value): mixed\n{\n    return many($value);\n}\n";
 
     assert_eq!(
-        issues_and_type(("src/Demo/pair.php", php), "pair(...[1, 2])"),
-        (vec![], Some("list<int(1)|int(2)>".to_owned()))
+        issues_and_types(("src/Demo/pair.php", php), &["pair(...[1, 2])"]),
+        (vec![], vec![Some("list<int(1)|int(2)>".to_owned())])
+    );
+    assert_eq!(
+        issues_and_types(("src/Demo/many.php", mixed), &["many(...$values)", "many($value)"]),
+        (
+            [
+                "19:20 mixed-argument",
+                "19:20 template-constraint-violation",
+                "19:20 mixed-argument",
+                "24:17 template-constraint-violation",
+                "24:17 mixed-argument",
+            ]
+            .map(str::to_owned)
+            .to_vec(),
+            vec![Some("list<int>".to_owned()), Some("list<int>".to_owned())]
+        )
     );
 }
 
-/// A type argument the call writes is fixed before any argument, so a spread's element outside it is refused, into a
-/// parameter and into a variadic one.
+/// A type argument the call writes is fixed before any argument, so a spread's element outside it is the invalid
+/// argument alone, never a type argument outside its bound, into a parameter and into a variadic one.
 #[test]
 fn a_spread_element_outside_a_written_type_argument_is_refused() {
-    let sharp = "namespace Demo;\n\nclass Pairs\n{\n    public static List<T> pair<T>(T a, T b) => [a, b];\n\n    public static List<T> many<T>(T ...values) => values;\n\n    public static int count()\n    {\n        const paired = Pairs.pair<int>(...[1, \"tea\"]);\n        const listed = Pairs.many<int>(...[1, \"tea\"]);\n        return paired.count() + listed.count();\n    }\n}\n";
+    let sharp = "namespace Demo;\n\npublic interface Shareable\n{\n}\n\nclass Pairs\n{\n    public static List<T> pair<T : Shareable>(T a, T b) => [a, b];\n\n    public static List<T> many<T>(T ...values) => values;\n\n    public static int count()\n    {\n        const paired = Pairs.pair<Shareable>(...[1, 2]);\n        const listed = Pairs.many<int>(...[1, \"tea\"]);\n        return paired.count() + listed.count();\n    }\n}\n";
 
     assert_eq!(
         issues(("src/Demo/Pairs.sharp", sharp), &[]),
-        ["11:43 invalid-argument", "12:43 possibly-invalid-argument"]
+        ["15:49 invalid-argument", "15:49 invalid-argument", "16:43 possibly-invalid-argument"]
     );
 }
 
@@ -7795,8 +7828,52 @@ fn a_spread_of_unknown_length_fixes_type_arguments_with_its_element_type() {
     let sharp = "namespace Demo;\n\nclass Pairs\n{\n    public static List<T> pair<T>(T a, T b) => [a, b];\n\n    public static int run(List<int> numbers)\n    {\n        const spread = Pairs.pair(...numbers);\n        return spread.count();\n    }\n}\n";
 
     assert_eq!(
-        issues_and_type(("src/Demo/Pairs.sharp", sharp), "Pairs.pair(...numbers)"),
-        (vec!["9:34 too-few-arguments".to_owned()], Some("list<int>".to_owned()))
+        issues_and_types(("src/Demo/Pairs.sharp", sharp), &["Pairs.pair(...numbers)"]),
+        (vec!["9:34 too-few-arguments".to_owned()], vec![Some("list<int>".to_owned())])
+    );
+}
+
+/// After a spread of unknown length, a later spread may start at any later parameter, so each of its elements fixes and
+/// is checked against each parameter it may fill.
+#[test]
+fn a_spread_after_one_of_unknown_length_may_fill_any_later_parameter() {
+    let sharp = "namespace Demo;\n\nclass Pairs\n{\n    public static TSecond last<TFirst, TSecond>(TFirst first, TSecond second) => second;\n\n    public static string label(string name, int count) => name;\n\n    public static int|string first(List<int> numbers)\n    {\n        const last = Pairs.last(...numbers, ...[\"tea\", 1]);\n        return last;\n    }\n\n    public static string named(List<string> names) => Pairs.label(...names, ...[\"cup\", 2]);\n}\n";
+
+    assert_eq!(
+        issues_and_types(("src/Demo/Pairs.sharp", sharp), &["Pairs.last(...numbers, ...[\"tea\", 1])"]),
+        (
+            vec![
+                "15:70 invalid-argument".to_owned(),
+                "15:80 possibly-invalid-argument".to_owned(),
+                "15:80 possibly-invalid-argument".to_owned(),
+            ],
+            vec![Some("int|string".to_owned())]
+        )
+    );
+}
+
+/// Spec section 7: a spread into a method with a variadic parameter fills its parameters by position, so each element
+/// is checked against the parameter it lands in, the variadic one included.
+#[test]
+fn a_spread_into_a_variadic_method_is_checked_by_position() {
+    let sharp = "namespace Demo;\n\nclass Tags\n{\n    public static int tagged(int count, string ...tags) => count;\n\n    public static int run()\n    {\n        return Tags.tagged(...[1, \"tea\"]) + Tags.tagged(...[\"tea\", \"cup\"]);\n    }\n}\n";
+
+    assert_eq!(issues(("src/Demo/Tags.sharp", sharp), &[]), ["9:60 invalid-argument"]);
+}
+
+/// A type argument a spread puts outside its parameter's bound is reported once, by the issue that names the bound, as
+/// a direct argument's is, an `Equatable` bound's too.
+#[test]
+fn a_spread_outside_a_type_parameter_s_bound_is_reported_once_by_the_bound() {
+    let sharp = "namespace Demo;\n\npublic interface Shareable\n{\n}\n\npublic class Cart\n{\n}\n\nclass Pairs\n{\n    public static List<T> shared<T : Shareable>(T a, T b) => [a, b];\n\n    public static bool same<T : Equatable>(T a, T b) => a == b;\n\n    public static int run()\n    {\n        const shared = Pairs.shared(...[1, 2]);\n        return shared.count();\n    }\n\n    public static bool both(Cart first, Cart second) => Pairs.same(...[first, second]) && Pairs.same(first, second);\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Pairs.sharp", sharp), &[]),
+        [
+            "19:40 template-constraint-violation",
+            "23:57 template-constraint-violation",
+            "23:91 template-constraint-violation"
+        ]
     );
 }
 

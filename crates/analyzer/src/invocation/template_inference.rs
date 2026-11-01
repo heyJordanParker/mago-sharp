@@ -1202,6 +1202,32 @@ pub fn infer_parameter_templates_from_argument<A>(
 where
     A: Arena,
 {
+    let violations = infer_parameter_templates_unreported(
+        context,
+        parameter_type,
+        argument_type,
+        template_result,
+        argument_offset,
+        is_callable_argument,
+    );
+
+    report_template_violations(context, violations, argument_span)
+}
+
+/// Infers template types for a parameter from a passed argument as [`infer_parameter_templates_from_argument`] does,
+/// and returns the violations it found unreported, for a caller that reports several arguments' violations once, as a
+/// spread's elements are.
+pub fn infer_parameter_templates_unreported<A>(
+    context: &Context<'_, '_, A>,
+    parameter_type: &TUnion,
+    argument_type: &TUnion,
+    template_result: &mut TemplateResult,
+    argument_offset: usize,
+    is_callable_argument: bool,
+) -> Vec<TemplateInferenceViolation>
+where
+    A: Arena,
+{
     // Spec section 11: a PHP# argument fixes a type argument as its general type, so `5` fixes `int`, as C# and
     // TypeScript infer, and `Holder.of(5)` is a `Holder<int>`.
     let mut general = argument_type.clone();
@@ -1222,6 +1248,19 @@ where
         &mut violations,
     );
 
+    violations
+}
+
+/// Reports each of `violations`, an argument at `argument_span` outside a template's constraint, and returns the
+/// templates they name. The argument fixes them, though it may add no bound for them.
+pub fn report_template_violations<A>(
+    context: &mut Context<'_, '_, A>,
+    violations: Vec<TemplateInferenceViolation>,
+    argument_span: Span,
+) -> WordSet
+where
+    A: Arena,
+{
     let (kind, sentence_kind, constrained, constraint_kind) = if context.dialect.is_sharp() {
         ("type parameter", "Type parameter", "is bounded by", "bound")
     } else {
