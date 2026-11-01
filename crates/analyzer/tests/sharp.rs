@@ -44,6 +44,7 @@ use mago_codex::reference::SymbolReferences;
 use mago_codex::scanner::scan_program;
 use mago_codex::ttype::TType;
 use mago_codex::ttype::get_int;
+use mago_codex::ttype::get_null;
 use mago_codex::ttype::union::TUnion;
 use mago_database::DatabaseReader;
 use mago_database::file::File;
@@ -8368,7 +8369,7 @@ fn a_method_a_string_or_a_number_lacks_is_an_error_that_lists_the_methods_it_has
             ]
         ),
         [
-            "5:46 non-existent-method Method `shuffled` does not exist on `string`. | A `string` has the methods `capitalized`, `characters`, `codePoints`, `compareTo`, `contains`, `decapitalized`, `endsWith`, `indexOf`, `lastIndexOf`, `length`, `lines`, `lowercase`, `padEnd`, `padStart`, `parseCsv`, `removePrefix`, `removeSuffix`, `repeat`, `replace`, `slug`, `split`, `startsWith`, `substring`, `trimEnd`, `trimStart`, `trim`, `uppercase`.",
+            "5:46 non-existent-method Method `shuffled` does not exist on `string`. | A `string` has the methods `capitalized`, `characters`, `codePoints`, `compareTo`, `contains`, `decapitalized`, `endsWith`, `indexOf`, `lastIndexOf`, `length`, `lines`, `lowercase`, `padEnd`, `padStart`, `parseCsv`, `removePrefix`, `removeSuffix`, `repeat`, `replace`, `slug`, `split`, `startsWith`, `substring`, `trim`, `trimEnd`, `trimStart`, `uppercase`.",
             "6:36 non-existent-method Method `missing` does not exist on `int`. | An `int` has the methods `abs`, `clamp`, `floorDiv`, `format`, `mod`, `toByteString`, `toHex`.",
             "7:40 non-existent-method Method `missing` does not exist on `float`. | A `float` has the methods `abs`, `ceil`, `clamp`, `floor`, `format`, `isFinite`, `round`.",
             "8:44 non-existent-method Method `negate` does not exist on `bool`. | A `bool` has no methods.",
@@ -10530,6 +10531,47 @@ fn a_map_index_write_without_the_standard_library_is_refused() {
     );
 }
 
+/// A project without the standard library has no member of a `List`, an `Iterable` or a `Set`, so a method one lacks
+/// names the library to install, as an index write does, and never an empty list of methods. An extension the project
+/// declares itself is listed before it, and never stands in for the library.
+#[test]
+fn a_method_a_collection_lacks_without_the_standard_library_names_the_library() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static int size(List<int> sizes) => sizes.missing();\n    public static int read(Iterable<int> rows) => rows.missing();\n    public static int held(Set<int> tags) => tags.missing();\n}\n";
+    let largest = (
+        "src/Demo/Sizes.sharp",
+        "namespace Demo;\n\npublic static class Sizes\n{\n    extension(List<int> sizes)\n    {\n        public int largest() => 0;\n    }\n}\n",
+    );
+    let refusals = |others: &[(&'static str, &'static str)]| {
+        let (issues, _, _) =
+            analyze_with_references(&PLUGIN_REGISTRY, settings(), ("src/Demo/Report.sharp", sharp), others, &[]);
+
+        issues
+            .iter()
+            .map(|issue| {
+                format!("{} {} | {}", located(sharp, issue), issue.message, issue.help.as_deref().unwrap_or_default())
+            })
+            .collect::<Vec<_>>()
+    };
+    let install = "Install the standard library, heyjordanparker/php-sharp-composer, which declares the members of";
+
+    assert_eq!(
+        refusals(&[]),
+        [
+            format!("5:54 non-existent-method Method `missing` does not exist on `List<int>`. | {install} a `List`."),
+            format!(
+                "6:56 non-existent-method Method `missing` does not exist on `Iterable<int>`. | {install} an `Iterable`."
+            ),
+            format!("7:51 non-existent-method Method `missing` does not exist on `Set<int>`. | {install} a `Set`."),
+        ]
+    );
+    assert_eq!(
+        refusals(&[largest])[0],
+        format!(
+            "5:54 non-existent-method Method `missing` does not exist on `List<int>`. | A `List<int>` has the methods `largest`. {install} a `List`."
+        )
+    );
+}
+
 /// A `List`'s keys are the `int`s from 0 to its last index, so a read whose index may be anything else is an error,
 /// as an unchecked `Any` is (spec section 24). A plain PHP `list<int>` keeps reading a wider key, as PHP does.
 #[test]
@@ -12149,6 +12191,53 @@ fn a_list_of_int_has_its_largest_and_smallest_element() {
         [
             "7:54 where-constraint-violation `max` needs elements of type `int`, and this is a `List<string>`. | Call it on a collection whose elements are `int`.",
             "8:56 non-existent-method Method `max` does not exist on `Map<string, int>`. | A `Map<string, int>` has the methods `any`, `associateBy`, `count`, `filter`, `first`, `get`, `groupBy`, `has`, `isEmpty`, `isNotEmpty`, `keys`, `map`, `remove`, `set`, `sortedBy`, `sumOf`, `toList`, `values`.",
+        ]
+    );
+}
+
+/// Spec section 11: "`contains`, `indexOf` and `remove` on a `List`, a `Map` key, a `Set` element and a value pattern
+/// each need `Equatable`", so the methods a collection lacking a method lists leave them out where its elements have no `==`, as
+/// a `TItem : Object` and a class that declares no `operator ==`, and list them where they have one, as an `int` and a
+/// `TItem : Equatable`. A `Set<TItem : Object>` leaves out `add` too, which compares the value with each element.
+#[test]
+fn a_collection_lacking_a_method_lists_only_the_methods_its_elements_let_it_call() {
+    let sharp = "namespace Demo;\n\npublic static class Shelf\n{\n    public static int objects<TItem : Object>(List<TItem> items) => items.missing();\n    public static int numbers(List<int> items) => items.missing();\n    public static int carts(List<Cart> carts) => carts.missing();\n    public static int equatables<TItem : Equatable>(List<TItem> items) => items.missing();\n    public static int sets<TItem : Object>(Set<TItem> items) => items.missing();\n}\n";
+
+    assert_eq!(
+        refusals(("src/Demo/Shelf.sharp", sharp), &[("src/Demo/Cart.php", CART)])
+            .into_iter()
+            .filter(|refusal| refusal.contains("non-existent-method"))
+            .collect::<Vec<_>>(),
+        [
+            "5:75 non-existent-method Method `missing` does not exist on `List<TItem>`. | A `List<TItem>` has the methods `add`, `all`, `any`, `associateBy`, `chunked`, `clear`, `count`, `distinct`, `entries`, `filter`, `first`, `flatMap`, `fold`, `getOrNull`, `groupBy`, `insert`, `isEmpty`, `isNotEmpty`, `last`, `map`, `removeAt`, `removeFirst`, `removeLast`, `reversed`, `set`, `slice`, `sortedBy`, `sumOf`, `toList`, `toSet`.",
+            "6:57 non-existent-method Method `missing` does not exist on `List<int>`. | A `List<int>` has the methods `add`, `all`, `any`, `associateBy`, `chunked`, `clear`, `contains`, `count`, `distinct`, `entries`, `filter`, `first`, `flatMap`, `fold`, `getOrNull`, `groupBy`, `indexOf`, `insert`, `isEmpty`, `isNotEmpty`, `last`, `map`, `max`, `min`, `remove`, `removeAt`, `removeFirst`, `removeLast`, `reversed`, `set`, `slice`, `sortedBy`, `sumOf`, `toList`, `toSet`.",
+            "7:56 non-existent-method Method `missing` does not exist on `List<Cart>`. | A `List<Cart>` has the methods `add`, `all`, `any`, `associateBy`, `chunked`, `clear`, `count`, `distinct`, `entries`, `filter`, `first`, `flatMap`, `fold`, `getOrNull`, `groupBy`, `insert`, `isEmpty`, `isNotEmpty`, `last`, `map`, `removeAt`, `removeFirst`, `removeLast`, `reversed`, `set`, `slice`, `sortedBy`, `sumOf`, `toList`, `toSet`.",
+            "8:81 non-existent-method Method `missing` does not exist on `List<TItem>`. | A `List<TItem>` has the methods `add`, `all`, `any`, `associateBy`, `chunked`, `clear`, `contains`, `count`, `distinct`, `entries`, `filter`, `first`, `flatMap`, `fold`, `getOrNull`, `groupBy`, `indexOf`, `insert`, `isEmpty`, `isNotEmpty`, `last`, `map`, `remove`, `removeAt`, `removeFirst`, `removeLast`, `reversed`, `set`, `slice`, `sortedBy`, `sumOf`, `toList`, `toSet`.",
+            "9:71 non-existent-method Method `missing` does not exist on `Set<TItem>`. | A `Set<TItem>` has the methods `any`, `clear`, `count`, `filter`, `first`, `isEmpty`, `isNotEmpty`, `map`, `sortedBy`, `sumOf`, `toList`.",
+        ]
+    );
+}
+
+/// A library-style extension of `Iterable<T>` whose parameter is marked `ComparedByEquality` reaches every value a
+/// loop reads, and its call compares that value with the elements only where they are a `List`'s, a `Map`'s keys or a
+/// `Set`'s, spec section 12. So an `Iterable<int>` lacking a method lists it, and a `List<Cart>` of a class without
+/// `operator ==` leaves it out, as it refuses the call.
+#[test]
+fn a_marked_extension_of_an_iterable_is_listed_where_its_call_compares_no_elements_it_cannot() {
+    let rows = (
+        "src/Lib/RowMembers.sharp",
+        "namespace Lib;\n\nimport Sharp.Internal.ComparedByEquality;\n\npublic static class RowMembers\n{\n    extension<T>(Iterable<T> items)\n    {\n        public bool holds([ComparedByEquality] T value) => false;\n    }\n}\n",
+    );
+    let sharp = "namespace Demo;\n\nimport Lib.RowMembers;\n\npublic static class Rows\n{\n    public static int numbers(Iterable<int> rows) => rows.missing();\n    public static int carts(List<Cart> carts) => carts.missing();\n}\n";
+
+    assert_eq!(
+        refusals(("src/Demo/Rows.sharp", sharp), &[rows, ("src/Demo/Cart.php", CART)])
+            .into_iter()
+            .filter(|refusal| refusal.contains("non-existent-method"))
+            .collect::<Vec<_>>(),
+        [
+            "7:59 non-existent-method Method `missing` does not exist on `Iterable<int>`. | An `Iterable<int>` has the methods `filter`, `holds`, `map`, `take`, `toList`.",
+            "8:56 non-existent-method Method `missing` does not exist on `List<Cart>`. | A `List<Cart>` has the methods `add`, `all`, `any`, `associateBy`, `chunked`, `clear`, `count`, `distinct`, `entries`, `filter`, `first`, `flatMap`, `fold`, `getOrNull`, `groupBy`, `insert`, `isEmpty`, `isNotEmpty`, `last`, `map`, `removeAt`, `removeFirst`, `removeLast`, `reversed`, `set`, `slice`, `sortedBy`, `sumOf`, `toList`, `toSet`.",
         ]
     );
 }
@@ -13939,6 +14028,89 @@ fn a_member_that_changes_a_place_that_may_hold_one_of_two_lists_takes_only_what_
             "Invalid argument type for argument #1 of `List<int>.add`: expected `int`, but found `string`.",
             "Invalid assignment to `last`: it is declared as `int`.",
         ]
+    );
+}
+
+/// Spec section 14.4: `maybe?.rows` is the place `maybe.rows` is, where `maybe` is not null, so its read keeps each
+/// `List` the plain PHP property may hold beside the `null`, and a member that changes it takes only what both take and
+/// writes back the property's own type, as on `box.rows`.
+#[test]
+fn a_member_that_changes_a_place_through_null_safe_access_keeps_each_list_it_may_hold() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public void run(Box box, Box? maybe)\n    {\n        maybe?.rows.clear();\n        maybe?.rows.add(1);\n        box.rows.add(1);\n        maybe?.rows.add(\"x\");\n        box.rows.add(\"x\");\n        List<int>? held = maybe?.rows;\n    }\n}\n";
+
+    let issues = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Report.sharp", sharp), &TWO_LISTS);
+
+    assert_eq!(
+        issues
+            .iter()
+            .map(|issue| {
+                let primary = issue.annotations.iter().find(|annotation| annotation.kind == AnnotationKind::Primary);
+                let primary = primary.and_then(|primary| primary.message.as_deref()).unwrap_or("");
+                format!("{} {} {primary}", located(sharp, issue), issue.message)
+            })
+            .collect::<Vec<_>>(),
+        [
+            "8:25 invalid-argument Invalid argument type for argument #1 of `List<string>.add`: expected `string`, but found `int`. This has type `int`",
+            "9:22 invalid-argument Invalid argument type for argument #1 of `List<string>.add`: expected `string`, but found `int`. This has type `int`",
+            "10:25 invalid-argument Invalid argument type for argument #1 of `List<int>.add`: expected `int`, but found `string`. This has type `string`",
+            "11:22 invalid-argument Invalid argument type for argument #1 of `List<int>.add`: expected `int`, but found `string`. This has type `string`",
+            "12:27 invalid-local-assignment-value Invalid assignment to `held`: it is declared as `List<int>?`. This value has type `(List<int>|List<string>)?`.",
+        ]
+    );
+}
+
+/// Spec section 14.4: `maybe?.feed()` gives what `shelf.feed()` gives, or `null`, so a plain PHP method that may return
+/// a `List<int>` or a `List<string>` keeps both beside the `null`, on a receiver that may be null and on one an earlier
+/// `?.` of the chain gives, and a method that never returns gives only the `null`.
+#[test]
+fn a_null_safe_call_keeps_each_list_its_method_may_return() {
+    let shelf = (
+        "src/Demo/Shelf.php",
+        "<?php\n\nnamespace Demo;\n\nfinal class Shelf\n{\n    /** @return list<int>|list<string> */\n    public function feed(): array\n    {\n        return [];\n    }\n\n    public function stop(): never\n    {\n        throw new \\RuntimeException();\n    }\n}\n",
+    );
+    let holder = (
+        "src/Demo/Holder.php",
+        "<?php\n\nnamespace Demo;\n\nfinal class Holder\n{\n    public Shelf $shelf;\n\n    public function __construct()\n    {\n        $this->shelf = new Shelf();\n    }\n}\n",
+    );
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public void run(Shelf shelf, Shelf? maybe, Holder? holder)\n    {\n        List<int> whole = shelf.feed();\n        List<int>? held = maybe?.feed();\n        List<int>? deep = holder?.shelf.feed();\n        maybe?.stop();\n    }\n}\n";
+
+    let (issues, artifacts) =
+        analyze_with_artifacts(&PLUGIN_REGISTRY, settings(), ("src/Demo/Report.sharp", sharp), &[shelf, holder]);
+    let stop = sharp.find("maybe?.stop()").unwrap() as u32;
+
+    assert_eq!(
+        artifacts
+            .expression_types
+            .get(&(stop, stop + "maybe?.stop()".len() as u32))
+            .map(|r#type| TUnion::clone(r#type)),
+        Some(get_null())
+    );
+    assert_eq!(
+        issues
+            .iter()
+            .map(|issue| {
+                let primary = issue.annotations.iter().find(|annotation| annotation.kind == AnnotationKind::Primary);
+                let primary = primary.and_then(|primary| primary.message.as_deref()).unwrap_or("");
+                format!("{} {primary}", located(sharp, issue))
+            })
+            .collect::<Vec<_>>(),
+        [
+            "7:27 invalid-local-assignment-value This value has type `List<int>|List<string>`.",
+            "8:27 invalid-local-assignment-value This value has type `(List<int>|List<string>)?`.",
+            "9:27 invalid-local-assignment-value This value has type `(List<int>|List<string>)?`.",
+        ]
+    );
+}
+
+/// A refused read reports nothing again, so a read through `?.` of an element a tuple lacks is refused once, and the
+/// `null` the `?.` may give does not make the value it gives a second mistake.
+#[test]
+fn a_refused_read_through_null_safe_access_reports_only_itself() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public int run([int count, string]? pair)\n    {\n        int count = pair?.missing;\n        return count;\n    }\n}\n";
+
+    assert_eq!(
+        messages(("src/Demo/Report.sharp", sharp), &[]),
+        ["`[int count, string]` has no element named `missing`: its one named element is `count`."]
     );
 }
 
