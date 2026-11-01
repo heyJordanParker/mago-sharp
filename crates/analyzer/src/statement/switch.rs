@@ -191,7 +191,7 @@ where
                 previously_matching_case = Some(case.span());
             }
 
-            previous_empty_cases = vec![];
+            previous_empty_cases.clear();
         }
 
         let all_options_returned = self.case_exit_types.values().all(|t| *t == ControlAction::Return);
