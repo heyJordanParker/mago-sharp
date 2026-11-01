@@ -5,12 +5,16 @@ use std::collections::HashSet;
 use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
+use std::time::Instant;
 
 use mago_analyzer::external::AFTER_FILE_ANALYSIS_BATCH_SIZE;
 use mago_analyzer::external::ExternalAnalyzer;
 use mago_analyzer::external::ExternalAnalyzerHandle;
 use mago_analyzer::plugin::PluginRegistry;
 use mago_analyzer::settings::Settings;
+use mago_codex::metadata::CodebaseMetadata;
+use mago_codex::reference::SymbolReferences;
 use mago_database::Database;
 use mago_database::DatabaseReader;
 use mago_database::GlobSettings;
@@ -25,6 +29,7 @@ use mago_guard::settings::Settings as GuardSettings;
 use mago_linter::settings::Settings as LinterSettings;
 use mago_orchestrator::Orchestrator;
 use mago_orchestrator::OrchestratorConfiguration;
+use mago_orchestrator::service::analysis::AnalysisService;
 use mago_orchestrator::service::incremental_analysis::IncrementalAnalysisService;
 use mago_php_version::PHPVersion;
 use mago_reporting::IssueCollection;
@@ -426,5 +431,274 @@ fn orchestrator_loads_initialization_stubs_into_the_source_database() {
             .contents
             .windows(b"class ExtensionProvided".len())
             .any(|bytes| { bytes == b"class ExtensionProvided" })
+    );
+}
+
+/// The `request-timeout-ms` of each host the deadline tests start.
+const DEADLINE: Duration = Duration::from_secs(3);
+
+/// An extension host whose plugin `slow-routes` has an after-analysis hook that runs for 0.6 times `DEADLINE`, and
+/// whose plugin `dead-routes` has one that never finishes.
+const HOST_WHOSE_SECOND_AFTER_ANALYSIS_HOOK_NEVER_FINISHES: &str = r#"<?php
+
+declare(strict_types=1);
+
+use Mago\Sdk\Analyzer\AfterAnalysisContext;
+use Mago\Sdk\Analyzer\AfterAnalysisHook;
+use Mago\Sdk\Analyzer\Plugin;
+use Mago\Sdk\Analyzer\PluginDefinition;
+use Mago\Sdk\Analyzer\PluginRegistry;
+use Mago\Sdk\Extension;
+use Mago\Sdk\Worker;
+
+require $argv[1];
+
+final class Routes implements Plugin, AfterAnalysisHook
+{
+    public function __construct(
+        private readonly string $identifier,
+        private readonly ?int $microseconds,
+    ) {}
+
+    public function getDefinition(): PluginDefinition
+    {
+        return new PluginDefinition($this->identifier, $this->identifier, 'Reports the routes no request reaches.');
+    }
+
+    public function register(PluginRegistry $registry): void
+    {
+        $registry->registerAfterAnalysisHook($this);
+    }
+
+    public function afterAnalysis(AfterAnalysisContext $context): void
+    {
+        if ($this->microseconds !== null) {
+            usleep($this->microseconds);
+
+            return;
+        }
+
+        while (true) {
+            sleep(1);
+        }
+    }
+}
+
+(new Worker(new Extension('acme/routes', 'Routes', '1.0.0', analyzerPlugins: [
+    new Routes('slow-routes', 1_800_000),
+    new Routes('dead-routes', null),
+])))->run();
+"#;
+
+/// An extension host whose plugin `hung-filter` has an issue-filter hook for `non-existent-function` that never
+/// finishes.
+const HOST_WHOSE_ISSUE_FILTER_NEVER_FINISHES: &str = r#"<?php
+
+declare(strict_types=1);
+
+use Mago\Sdk\Analyzer\IssueFilterContext;
+use Mago\Sdk\Analyzer\IssueFilterDecision;
+use Mago\Sdk\Analyzer\IssueFilterHook;
+use Mago\Sdk\Analyzer\Plugin;
+use Mago\Sdk\Analyzer\PluginDefinition;
+use Mago\Sdk\Analyzer\PluginRegistry;
+use Mago\Sdk\Extension;
+use Mago\Sdk\Worker;
+
+require $argv[1];
+
+final class HungFilter implements Plugin, IssueFilterHook
+{
+    public function getDefinition(): PluginDefinition
+    {
+        return new PluginDefinition('hung-filter', 'Hung filter', 'Never decides.');
+    }
+
+    public function register(PluginRegistry $registry): void
+    {
+        $registry->registerIssueFilterHook($this);
+    }
+
+    public function getCodes(): array
+    {
+        return ['non-existent-function'];
+    }
+
+    public function filterIssue(IssueFilterContext $context): IssueFilterDecision
+    {
+        while (true) {
+            sleep(1);
+        }
+    }
+}
+
+(new Worker(new Extension('acme/filter', 'Filter', '1.0.0', analyzerPlugins: [new HungFilter()])))->run();
+"#;
+
+/// An extension host whose plugin `hung-file` has an after-file hook that never finishes.
+const HOST_WHOSE_AFTER_FILE_HOOK_NEVER_FINISHES: &str = r#"<?php
+
+declare(strict_types=1);
+
+use Mago\Sdk\Analyzer\AfterFileAnalysisContext;
+use Mago\Sdk\Analyzer\AfterFileAnalysisHook;
+use Mago\Sdk\Analyzer\Plugin;
+use Mago\Sdk\Analyzer\PluginDefinition;
+use Mago\Sdk\Analyzer\PluginRegistry;
+use Mago\Sdk\Extension;
+use Mago\Sdk\Worker;
+
+require $argv[1];
+
+final class HungFile implements Plugin, AfterFileAnalysisHook
+{
+    public function getDefinition(): PluginDefinition
+    {
+        return new PluginDefinition('hung-file', 'Hung file', 'Never finishes a file.');
+    }
+
+    public function register(PluginRegistry $registry): void
+    {
+        $registry->registerAfterFileAnalysisHook($this);
+    }
+
+    public function getRequirements(): array
+    {
+        return [];
+    }
+
+    public function afterFileAnalysis(AfterFileAnalysisContext $context): void
+    {
+        while (true) {
+            sleep(1);
+        }
+    }
+}
+
+(new Worker(new Extension('acme/file', 'File', '1.0.0', analyzerPlugins: [new HungFile()])))->run();
+"#;
+
+/// The plugin registry of an extension host `acme` of one worker that runs `source`, a PHP worker script written into
+/// `directory`, with `DEADLINE` as its `request-timeout-ms`.
+fn deadline_registry(source: &str, directory: &Path) -> PluginRegistry {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let host = directory.join("host.php");
+    std::fs::write(&host, source).expect("host source should be written");
+    let command = WorkerCommand::new("php").with_argument(host).with_argument(repository.join("vendor/autoload.php"));
+    let options =
+        WorkerPoolOptions { host: "acme".to_owned(), request_timeout: DEADLINE, ..WorkerPoolOptions::default() };
+    let pool = WorkerPool::spawn(command, NonZeroUsize::MIN, options).expect("PHP host pool should start");
+    let analyzer = ExternalAnalyzer::initialize([Arc::new(pool)], PHPVersion::PHP85, &[], false)
+        .expect("PHP host analyzer should initialize");
+    let mut registry = PluginRegistry::with_library_providers();
+    registry.set_external_analyzer(Arc::new(ExternalAnalyzerHandle::ready(analyzer)));
+    registry
+}
+
+/// A project of one file, `src/Route.php`, which calls a function that does not exist.
+fn deadline_database() -> Database<'static> {
+    let mut database = Database::new(common::database_configuration("/deadline-proof", vec![Cow::Borrowed(b"src")]));
+    database.add(File::new(
+        Cow::Borrowed(b"src/Route.php"),
+        FileType::Host,
+        None,
+        Cow::Borrowed(b"<?php\n\nfinal class Route {}\n\nmissing_route();\n"),
+    ));
+    database
+}
+
+/// The host runs every plugin's after-analysis hooks in one request, and starts the deadline again at each plugin's,
+/// so a plugin's hooks that finish in time leave the next plugin its whole deadline. The error names the plugin whose
+/// hooks made no progress, as it names the file whose hooks made none.
+#[test]
+fn an_after_analysis_hook_that_never_finishes_fails_at_the_deadline_naming_its_plugin() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if !common::php_sdk_is_available(repository, "the after-analysis deadline test") {
+        return;
+    }
+
+    let temporary = tempfile::tempdir().expect("temporary host directory should be created");
+    let registry = deadline_registry(HOST_WHOSE_SECOND_AFTER_ANALYSIS_HOOK_NEVER_FINISHES, temporary.path());
+    let database = deadline_database();
+    let mut service = IncrementalAnalysisService::new(
+        database.read_only(),
+        Default::default,
+        Settings::new(PHPVersion::PHP85),
+        ParserSettings::default(),
+        Arc::new(registry),
+    );
+
+    let started_at = Instant::now();
+    let error = service.analyze().expect_err("the after-analysis hook should fail at the deadline");
+    let elapsed = started_at.elapsed();
+
+    // `slow-routes` runs for 0.6 times the deadline, then `dead-routes` hangs for the whole deadline.
+    assert!(elapsed > DEADLINE * 6 / 5 && elapsed < DEADLINE * 13 / 5, "the analysis failed after {elapsed:?}");
+    assert_eq!(
+        error.to_string(),
+        "Analysis error: Plugin Error: External plugin error: external analyzer worker failed: extension host `acme` made no progress for 3000 ms on the after-analysis hooks of plugin `dead-routes` (worker 0): raise its `request-timeout-ms` for hooks that run that long"
+    );
+}
+
+/// An issue-filter request runs one file's issue-filter hooks, so Mago names it by the file, and the worker sends no
+/// progress for it.
+#[test]
+fn an_issue_filter_that_never_finishes_fails_at_the_deadline_naming_its_file() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if !common::php_sdk_is_available(repository, "the issue-filter deadline test") {
+        return;
+    }
+
+    let temporary = tempfile::tempdir().expect("temporary host directory should be created");
+    let registry = deadline_registry(HOST_WHOSE_ISSUE_FILTER_NEVER_FINISHES, temporary.path());
+    let database = deadline_database();
+    let mut service = IncrementalAnalysisService::new(
+        database.read_only(),
+        Default::default,
+        Settings::new(PHPVersion::PHP85),
+        ParserSettings::default(),
+        Arc::new(registry),
+    );
+
+    let started_at = Instant::now();
+    let error = service.analyze().expect_err("the issue filter should fail at the deadline");
+    let elapsed = started_at.elapsed();
+
+    assert!(elapsed >= DEADLINE && elapsed < DEADLINE * 2, "the analysis failed after {elapsed:?}");
+    assert_eq!(
+        error.to_string(),
+        "Analysis error: Plugin Error: External plugin error: external analyzer worker failed: extension host `acme` made no progress for 3000 ms on the issue-filter hooks of src/Route.php (worker 0): raise its `request-timeout-ms` for hooks that run that long"
+    );
+}
+
+/// An after-file request runs one file's hooks, so Mago names it by the file, and the worker sends no progress for
+/// it.
+#[test]
+fn an_after_file_hook_that_never_finishes_fails_at_the_deadline_naming_its_file() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if !common::php_sdk_is_available(repository, "the after-file deadline test") {
+        return;
+    }
+
+    let temporary = tempfile::tempdir().expect("temporary host directory should be created");
+    let registry = deadline_registry(HOST_WHOSE_AFTER_FILE_HOOK_NEVER_FINISHES, temporary.path());
+    let database = deadline_database();
+    let service = AnalysisService::new(
+        database.read_only(),
+        CodebaseMetadata::new(),
+        SymbolReferences::new(),
+        Settings::new(PHPVersion::PHP85),
+        ParserSettings::default(),
+        Arc::new(registry),
+    );
+
+    let started_at = Instant::now();
+    let error = service.oneshot(FileId::new(b"src/Route.php")).expect_err("the after-file hook should fail");
+    let elapsed = started_at.elapsed();
+
+    assert!(elapsed >= DEADLINE && elapsed < DEADLINE * 2, "the analysis failed after {elapsed:?}");
+    assert_eq!(
+        error.to_string(),
+        "Analysis error: Plugin Error: External plugin error: external analyzer worker failed: extension host `acme` made no progress for 3000 ms on the hooks of src/Route.php (worker 0): raise its `request-timeout-ms` for hooks that run that long"
     );
 }

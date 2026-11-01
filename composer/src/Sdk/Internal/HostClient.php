@@ -49,13 +49,14 @@ final class HostClient
     }
 
     /**
-     * Tells Mago that request `$parentId` starts the hooks of `$file`, which starts its deadline again.
+     * Tells Mago that request `$parentId` starts `$running`, such as "the hooks of app/User.php", which starts its
+     * deadline again. An error for a deadline the request then misses says it made no progress on `$running`.
      *
      * @param int<1, max> $parentId
      */
-    public function progress(int $parentId, string $file): void
+    public function progress(int $parentId, string $running): void
     {
-        $this->writer->write($this->codec->encode(Frame::notification($parentId, $file)));
+        $this->writer->write($this->codec->encode(Frame::notification($parentId, $running)));
     }
 
     public function accept(Frame $frame): bool
