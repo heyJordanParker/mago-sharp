@@ -6198,12 +6198,15 @@ fn a_lambda_fits_a_function_type_only_with_its_parameters_and_its_void() {
 
 /// Spec section 14.1: a call that returns `void` gives no value through `?.` as through `.`, though `?.` types it
 /// `null`. Each use of its value is refused once, with the error its `.` twin gets: an assigned value, an argument, the
-/// value a function that returns one returns, an operand and an interpolation, below a `?.` in a chain, and a function
-/// value's and a collection member's call alike. A lambda for a `void` function type, a lambda without a function type
-/// and the call as a statement of its own compile.
+/// value a method, a computed property or a `get` accessor that returns one returns, an operand and an interpolation,
+/// below a `?.` in a chain, and a function value's, a collection member's and a class value's static call alike. A
+/// lambda gives a value only where its function type's result is no `Any?` and holds no type parameter, as Kotlin's
+/// `() -> Any?` takes a `Unit` lambda, so `Scope.run(() => box.save())` compiles, and so do a lambda for a `void`
+/// function type, a lambda without a function type, and the call as a statement of its own. A `?.` call is a value
+/// where a part of its receiver runs a method that returns one, and a `never` method's call is no `void` one.
 #[test]
 fn a_void_call_through_null_safe_access_gives_no_value() {
-    let sharp = "namespace Demo;\n\nclass Box\n{\n    public void save() { }\n}\n\nclass Holder\n{\n    public Box box { get; } = new Box();\n}\n\nclass Report\n{\n    public static void log(Any? value) { }\n\n    public Any? sure(Box box)\n    {\n        return box.save();\n    }\n\n    public Any? maybe(Box? maybe)\n    {\n        return maybe?.save();\n    }\n\n    public Any? sureArrow(Box box) => box.save();\n\n    public Any? maybeArrow(Box? maybe) => maybe?.save();\n\n    public void quiet(Box box, Box? maybe)\n    {\n        Function<void()> a = () => box.save();\n        Function<void()> b = () => maybe?.save();\n        Function<Any?()> c = () => box.save();\n        Function<Any?()> d = () => maybe?.save();\n        const e = () => box.save();\n        const f = () => maybe?.save();\n    }\n\n    public void run(Box box, Box? maybe, Holder held, Holder? holder, Function<void()> done, Function<void()>? hook, List<int> kept, List<int>? seen)\n    {\n        const a = box.save();\n        const b = maybe?.save();\n        Report.log(box.save());\n        Report.log(maybe?.save());\n        const c = box.save() ?? 1;\n        const d = maybe?.save() ?? 1;\n        const e = `${box.save()}`;\n        const f = `${maybe?.save()}`;\n        const g = held.box.save();\n        const h = holder?.box.save();\n        const i = done();\n        const j = hook?.();\n        const k = kept.clear();\n        const l = seen?.clear();\n        maybe?.save();\n        holder?.box.save();\n        hook?.();\n        seen?.clear();\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Sharp.Scope;\n\nclass Box\n{\n    public void save() { }\n\n    public static void make() { }\n\n    public never fail() => this.fail();\n}\n\nclass Counter\n{\n    public void count() { }\n}\n\nclass Holder\n{\n    public Box box { get; } = new Box();\n}\n\nclass Report\n{\n    private Box box = new Box();\n\n    public Any? saved => this.box.save();\n\n    public Any? held { get { return this.box.save(); } }\n\n    public static void log(Any? value) { }\n\n    public Any? sure(Box box)\n    {\n        return box.save();\n    }\n\n    public Any? maybe(Box? maybe)\n    {\n        return maybe?.save();\n    }\n\n    public Any? sureArrow(Box box) => box.save();\n\n    public Any? maybeArrow(Box? maybe) => maybe?.save();\n\n    public Any? stops(Box box) => box.fail();\n\n    public Any? maybeStops(Box? maybe) => maybe?.fail();\n\n    public void lambdas(Box box, Box? maybe)\n    {\n        Function<void()> a = () => box.save();\n        Function<void()> b = () => maybe?.save();\n        Function<Any?()> c = () => box.save();\n        Function<Any?()> d = () => maybe?.save();\n        const e = () => box.save();\n        const f = () => maybe?.save();\n        Function<int()> g = () => box.save();\n        Function<int?()> h = () => maybe?.save();\n        Scope.run(() => box.save());\n        Scope.run(() => maybe?.save());\n        int i = Scope.run(() => box.save());\n    }\n\n    public void run(Box box, Box? maybe, Holder held, Holder? holder, Function<void()> done, Function<void()>? hook, List<int> kept, List<int>? seen, bool flag, (List<int>|Counter)? counted)\n    {\n        const a = box.save();\n        const b = maybe?.save();\n        Report.log(box.save());\n        Report.log(maybe?.save());\n        const c = box.save() ?? 1;\n        const d = maybe?.save() ?? 1;\n        const e = `${box.save()}`;\n        const f = `${maybe?.save()}`;\n        const g = held.box.save();\n        const h = holder?.box.save();\n        const i = done();\n        const j = hook?.();\n        const k = kept.clear();\n        const l = seen?.clear();\n        const m = Box.make();\n        const type = flag ? typeof(Box) : null;\n        const n = type?.make();\n        const o = counted?.count();\n        maybe?.save();\n        holder?.box.save();\n        hook?.();\n        seen?.clear();\n        type?.make();\n    }\n}\n";
     let no_value = |at: &str, call: &str| {
         format!(
             "{at} no-value: `{call}` returns nothing, so it has no value to use: call it as a statement of its own."
@@ -6211,28 +6214,33 @@ fn a_void_call_through_null_safe_access_gives_no_value() {
     };
 
     let expected = [
-        no_value("19:16", "box.save()"),
-        no_value("24:16", "maybe?.save()"),
-        no_value("27:39", "box.save()"),
-        no_value("29:43", "maybe?.save()"),
-        no_value("35:36", "box.save()"),
-        no_value("36:36", "maybe?.save()"),
-        no_value("43:19", "box.save()"),
-        no_value("44:19", "maybe?.save()"),
-        no_value("45:20", "box.save()"),
-        no_value("46:20", "maybe?.save()"),
-        no_value("47:19", "box.save()"),
-        no_value("48:19", "maybe?.save()"),
-        no_value("49:22", "box.save()"),
-        no_value("50:22", "maybe?.save()"),
-        no_value("51:19", "held.box.save()"),
-        no_value("52:19", "holder?.box.save()"),
-        no_value("53:19", "done()"),
-        no_value("54:19", "hook?.()"),
-        no_value("55:19", "kept.clear()"),
-        no_value("56:19", "seen?.clear()"),
+        no_value("28:26", "this.box.save()"),
+        no_value("30:37", "this.box.save()"),
+        no_value("36:16", "box.save()"),
+        no_value("41:16", "maybe?.save()"),
+        no_value("44:39", "box.save()"),
+        no_value("46:43", "maybe?.save()"),
+        no_value("60:35", "box.save()"),
+        no_value("61:36", "maybe?.save()"),
+        no_value("64:33", "box.save()"),
+        no_value("69:19", "box.save()"),
+        no_value("70:19", "maybe?.save()"),
+        no_value("71:20", "box.save()"),
+        no_value("72:20", "maybe?.save()"),
+        no_value("73:19", "box.save()"),
+        no_value("74:19", "maybe?.save()"),
+        no_value("75:22", "box.save()"),
+        no_value("76:22", "maybe?.save()"),
+        no_value("77:19", "held.box.save()"),
+        no_value("78:19", "holder?.box.save()"),
+        no_value("79:19", "done()"),
+        no_value("80:19", "hook?.()"),
+        no_value("81:19", "kept.clear()"),
+        no_value("82:19", "seen?.clear()"),
+        no_value("83:19", "Box.make()"),
+        no_value("85:19", "type?.make()"),
     ];
-    assert_messages(sharp, &[], &expected.iter().map(String::as_str).collect::<Vec<_>>());
+    assert_messages(sharp, &[SCOPE], &expected.iter().map(String::as_str).collect::<Vec<_>>());
 }
 
 /// Spec section 14.3 with Jordan's rule that PHP# code never reasons about PHP underneath: a plain PHP library's

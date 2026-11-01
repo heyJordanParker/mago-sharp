@@ -764,15 +764,44 @@ fn analyze_returned_expression<'ctx, 'arena, A>(
 where
     A: Arena,
 {
-    let return_type = function_like_metadata.return_type_metadata.as_ref();
-    let declared =
-        return_type.map(|return_type| return_type.type_union.clone()).or_else(|| artifacts.lambda_result.clone());
+    let declared = function_like_metadata.return_type_metadata.as_ref().map(|return_type| &return_type.type_union);
+    analyze_returned_value(context, block_context, artifacts, value, declared)?;
+    block_context.conditionally_referenced_variable_ids.clear();
+
+    let value_type = artifacts.get_rc_expression_type(value).cloned().unwrap_or_else(|| Rc::new(get_mixed()));
+    handle_return_value(context, block_context, artifacts, Some(value), value_type, value.span());
+
+    Ok(())
+}
+
+/// Analyzes `value`, which a body returns, against `declared`, the return type of the method, function or `get`
+/// accessor the body belongs to, or else the result of the function type a lambda goes into. The value is used where
+/// the body returns one, so a `void` call there gives none, spec section 14.1. A lambda's result is its callee's, and a
+/// result that holds a type parameter or is `Any?` takes a lambda that gives nothing too, as Kotlin's `() -> Any?`
+/// takes a `Unit` lambda, so `Scope.run(() => job.handle())` compiles.
+pub(crate) fn analyze_returned_value<'ctx, 'arena, A>(
+    context: &mut Context<'ctx, 'arena, A>,
+    block_context: &mut BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+    value: &Expression<'arena>,
+    declared: Option<&TUnion>,
+) -> Result<(), AnalysisError>
+where
+    A: Arena,
+{
+    let uses_value = match declared {
+        Some(declared) => !declared.is_void(),
+        None => artifacts
+            .lambda_result
+            .as_ref()
+            .is_some_and(|result| !result.is_void() && !result.is_mixed() && !result.has_template_types()),
+    };
+    let declared = declared.cloned().or_else(|| artifacts.lambda_result.clone());
     expect_type(context, artifacts, value, declared.as_ref());
 
     block_context.flags.set_inside_return(true);
-    // A function that returns a value uses the returned one, so a `void` call gives it none, spec section 14.1.
     let was_inside_general_use = block_context.flags.inside_general_use();
-    block_context.flags.set_inside_general_use(declared.as_ref().is_some_and(|declared| !declared.is_void()));
+    block_context.flags.set_inside_general_use(uses_value);
     value.analyze(context, block_context, artifacts)?;
     block_context.flags.set_inside_general_use(was_inside_general_use);
     block_context.flags.set_inside_return(false);
@@ -780,10 +809,6 @@ where
     if let Some(declared) = &declared {
         check_sharp_literal_kind(context, Some(block_context), artifacts, value, declared);
     }
-    block_context.conditionally_referenced_variable_ids.clear();
-
-    let value_type = artifacts.get_rc_expression_type(value).cloned().unwrap_or_else(|| Rc::new(get_mixed()));
-    handle_return_value(context, block_context, artifacts, Some(value), value_type, value.span());
 
     Ok(())
 }

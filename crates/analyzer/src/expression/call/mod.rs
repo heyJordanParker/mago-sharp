@@ -146,8 +146,10 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Call<'arena> {
 
 /// Refuses the result of a call that returns nothing where code uses it as a value, as an argument, an assigned value,
 /// an element or an operand, as C# and Java refuse it: a `void` method or function value gives no value, spec section
-/// 14.1. Through `?.` the call's type holds the `null` it adds, so the targets' `void` decides. The call then has the
-/// type of a refused value, so nothing that reads its value reports the same mistake again.
+/// 14.1. Through `?.` the call's type is the `null` it adds, beside the `void` itself on a function value's call, so the
+/// targets' `void` decides, while a part of the receiver whose method returns a value, as a `List`'s `count` beside a
+/// `void` one, leaves the call a value. The call then has
+/// the type of a refused value, so nothing that reads its value reports the same mistake again.
 fn report_void_result_used<A>(
     context: &mut Context<'_, '_, A>,
     block_context: &BlockContext<'_>,
@@ -156,10 +158,14 @@ fn report_void_result_used<A>(
 ) where
     A: Arena,
 {
+    let Some(result) = artifacts.get_expression_type(call) else {
+        return;
+    };
     if !context.dialect.is_sharp()
         || !block_context.flags.inside_general_use()
-        || !(artifacts.get_expression_type(call).is_some_and(TUnion::is_void)
-            || artifacts.null_safe_void_calls.contains(&get_expression_range(call)))
+        || !(result.is_void()
+            || (result.types.iter().all(|atomic| matches!(atomic, TAtomic::Null | TAtomic::Void))
+                && artifacts.null_safe_void_calls.contains(&get_expression_range(call))))
     {
         return;
     }
@@ -426,7 +432,7 @@ where
             get_mixed()
         } else if should_add_null || (object_has_nullsafe_null && all_targets_non_nullable_return) {
             // A `void` call gives no value to use beside the `null` of `?.`, spec section 14.1.
-            if context.dialect.is_sharp() && resulting_type.is_void() {
+            if resulting_type.is_void() {
                 artifacts.null_safe_void_calls.insert((call_span.start.offset, call_span.end.offset));
             }
             let mut result_with_null = add_optional_union_type(get_null(), Some(&resulting_type), context.codebase);
