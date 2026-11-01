@@ -10529,6 +10529,31 @@ fn a_map_index_write_without_the_standard_library_is_refused() {
     );
 }
 
+/// A project without the standard library has no member of a `List`, so a method a `List` lacks names the library to
+/// install, as an index write does, and never an empty list of methods.
+#[test]
+fn a_method_a_list_lacks_without_the_standard_library_names_the_library() {
+    let sharp =
+        "namespace Demo;\n\nclass Report\n{\n    public static int size(List<int> sizes) => sizes.missing();\n}\n";
+    let (issues, _, _) =
+        analyze_with_references(&PLUGIN_REGISTRY, settings(), ("src/Demo/Report.sharp", sharp), &[], &[]);
+
+    assert_eq!(
+        issues
+            .iter()
+            .map(|issue| format!(
+                "{} {} | {}",
+                located(sharp, issue),
+                issue.message,
+                issue.help.as_deref().unwrap_or_default()
+            ))
+            .collect::<Vec<_>>(),
+        [
+            "5:54 non-existent-method Method `missing` does not exist on `List<int>`. | Install the standard library, heyjordanparker/php-sharp-composer, which declares the members of a `List`."
+        ]
+    );
+}
+
 /// A `List`'s keys are the `int`s from 0 to its last index, so a read whose index may be anything else is an error,
 /// as an unchecked `Any` is (spec section 24). A plain PHP `list<int>` keeps reading a wider key, as PHP does.
 #[test]
@@ -12148,6 +12173,23 @@ fn a_list_of_int_has_its_largest_and_smallest_element() {
         [
             "7:54 where-constraint-violation `max` needs elements of type `int`, and this is a `List<string>`. | Call it on a collection whose elements are `int`.",
             "8:56 non-existent-method Method `max` does not exist on `Map<string, int>`. | A `Map<string, int>` has the methods `any`, `associateBy`, `count`, `filter`, `first`, `get`, `groupBy`, `has`, `isEmpty`, `isNotEmpty`, `keys`, `map`, `remove`, `set`, `sortedBy`, `sumOf`, `toList`, `values`.",
+        ]
+    );
+}
+
+/// Spec section 11: "`contains`, `indexOf` and `remove` on a `List` ... each need `Equatable`", so the methods a
+/// `List` lacking a method lists leave them out where its elements have no `==`, as a `TItem : Object` and a class that
+/// declares no `operator ==`, and list them where they have one, as an `int`.
+#[test]
+fn a_list_lacking_a_method_lists_only_the_methods_its_elements_let_it_call() {
+    let sharp = "namespace Demo;\n\npublic static class Shelf\n{\n    public static int objects<TItem : Object>(List<TItem> items) => items.missing();\n    public static int numbers(List<int> items) => items.missing();\n    public static int carts(List<Cart> carts) => carts.missing();\n}\n";
+
+    assert_eq!(
+        refusals(("src/Demo/Shelf.sharp", sharp), &[("src/Demo/Cart.php", CART)]),
+        [
+            "5:75 non-existent-method Method `missing` does not exist on `List<TItem>`. | A `List<TItem>` has the methods `add`, `all`, `any`, `associateBy`, `chunked`, `clear`, `count`, `distinct`, `entries`, `filter`, `first`, `flatMap`, `fold`, `getOrNull`, `groupBy`, `insert`, `isEmpty`, `isNotEmpty`, `last`, `map`, `removeAt`, `removeFirst`, `removeLast`, `reversed`, `set`, `slice`, `sortedBy`, `sumOf`, `toList`, `toSet`.",
+            "6:57 non-existent-method Method `missing` does not exist on `List<int>`. | A `List<int>` has the methods `add`, `all`, `any`, `associateBy`, `chunked`, `clear`, `contains`, `count`, `distinct`, `entries`, `filter`, `first`, `flatMap`, `fold`, `getOrNull`, `groupBy`, `indexOf`, `insert`, `isEmpty`, `isNotEmpty`, `last`, `map`, `max`, `min`, `removeAt`, `removeFirst`, `removeLast`, `remove`, `reversed`, `set`, `slice`, `sortedBy`, `sumOf`, `toList`, `toSet`.",
+            "7:56 non-existent-method Method `missing` does not exist on `List<Cart>`. | A `List<Cart>` has the methods `add`, `all`, `any`, `associateBy`, `chunked`, `clear`, `count`, `distinct`, `entries`, `filter`, `first`, `flatMap`, `fold`, `getOrNull`, `groupBy`, `insert`, `isEmpty`, `isNotEmpty`, `last`, `map`, `removeAt`, `removeFirst`, `removeLast`, `reversed`, `set`, `slice`, `sortedBy`, `sumOf`, `toList`, `toSet`.",
         ]
     );
 }

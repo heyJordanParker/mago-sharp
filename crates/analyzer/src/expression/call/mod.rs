@@ -4,6 +4,8 @@ use std::sync::Arc;
 use mago_algebra::assertion_set::AssertionSet;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::identifier::method::MethodIdentifier;
+use mago_codex::metadata::CodebaseMetadata;
+use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::metadata::parameter::FunctionLikeParameterMetadata;
 use mago_codex::ttype::TType;
 use mago_codex::ttype::add_optional_union_type;
@@ -51,6 +53,7 @@ use crate::expression::access::report_full_name;
 use crate::expression::access::report_member_of_mixed_kinds;
 use crate::expression::binary::comparison::check_element_equality;
 use crate::expression::binary::comparison::check_ordered_key;
+use crate::expression::binary::comparison::search_refusal;
 use crate::invocation::Invocation;
 use crate::invocation::InvocationArgumentsSource;
 use crate::invocation::InvocationTarget;
@@ -557,8 +560,7 @@ where
     }
     // A collection member compares the value of a parameter marked `ComparedByEquality` with each element of a `List`,
     // or each key of a `Map` or a `Set`, as `==` does, spec section 12, once the value's type is known. A value that is
-    // no element is refused by its argument check. A `Map` and a `Set` find a key by its `hash()` first, so a key of
-    // another type is never compared, and a search is refused only where a key declaration is, by `is_key_type`.
+    // no element is refused by its argument check.
     for (parameter, argument) in metadata.parameters.iter().skip(1).zip(&arguments.arguments) {
         // A collection member orders by the keys the function in a parameter marked `ComparedByOrder` returns, as
         // `sortedBy` does, so a key type `<` cannot order is refused.
@@ -577,50 +579,71 @@ where
             && let Argument::Positional(_) = argument
             && let Some(value_type) = artifacts.get_expression_type(argument.value())
             && let Some(receiver_type) = artifacts.get_expression_type(receiver)
-            && receiver_type.types.iter().all(|atomic| matches!(atomic, TAtomic::Array(_) | TAtomic::Null))
+            && let Some(element_type) = searched_element_type(receiver_type, context.codebase)
+            && union_comparator::is_contained_by(
+                context.codebase,
+                value_type,
+                &element_type,
+                false,
+                false,
+                false,
+                &mut ComparisonResult::new(),
+            )
         {
-            let element_type = receiver_type
-                .types
-                .iter()
-                .filter_map(|atomic| match atomic {
-                    TAtomic::Array(array @ TArray::List(_)) => Some(get_array_parameters(array, context.codebase).1),
-                    TAtomic::Array(array) => Some(get_array_parameters(array, context.codebase).0),
-                    _ => None,
-                })
-                .fold(None, |element_type, other| {
-                    Some(add_optional_union_type(other, element_type.as_ref(), context.codebase))
-                })
-                .unwrap_or_else(get_never);
-            let searches_list = receiver_type
-                .types
-                .iter()
-                .all(|atomic| matches!(atomic, TAtomic::Array(TArray::List(_)) | TAtomic::Null));
-            if (searches_list || !is_key_type(&element_type, context.codebase))
-                && union_comparator::is_contained_by(
-                    context.codebase,
-                    value_type,
-                    &element_type,
-                    false,
-                    false,
-                    false,
-                    &mut ComparisonResult::new(),
-                )
-            {
-                let method = metadata.original_name;
-                check_element_equality(
-                    context,
-                    &method.as_str_lossy(),
-                    receiver,
-                    argument.value(),
-                    &element_type,
-                    value_type,
-                    is_null_safe,
-                );
-            }
+            let method = metadata.original_name;
+            check_element_equality(
+                context,
+                &method.as_str_lossy(),
+                receiver,
+                argument.value(),
+                &element_type,
+                value_type,
+                is_null_safe,
+            );
         }
     }
 
     Ok(())
+}
+
+/// The type of the elements a search of a value of `receiver_type` compares by `==` with the value of a collection
+/// member's parameter marked `ComparedByEquality`, spec section 12: each element of a `List`, or each key of a `Map` or
+/// a `Set`. None where no search is checked: a receiver that may be no `List`, `Map` or `Set`, or a `Map` or a `Set`
+/// whose key type keys one. A `Map` and a `Set` find a key by its `hash()` first, so a key of another type is never
+/// compared, and a search is refused only where a key declaration is, by `is_key_type`.
+fn searched_element_type(receiver_type: &TUnion, codebase: &CodebaseMetadata) -> Option<TUnion> {
+    if !receiver_type.types.iter().all(|atomic| matches!(atomic, TAtomic::Array(_) | TAtomic::Null)) {
+        return None;
+    }
+
+    let element_type = receiver_type
+        .types
+        .iter()
+        .filter_map(|atomic| match atomic {
+            TAtomic::Array(array @ TArray::List(_)) => Some(get_array_parameters(array, codebase).1),
+            TAtomic::Array(array) => Some(get_array_parameters(array, codebase).0),
+            _ => None,
+        })
+        .fold(None, |element_type, other| Some(add_optional_union_type(other, element_type.as_ref(), codebase)))
+        .unwrap_or_else(get_never);
+    let searches_list =
+        receiver_type.types.iter().all(|atomic| matches!(atomic, TAtomic::Array(TArray::List(_)) | TAtomic::Null));
+
+    (searches_list || !is_key_type(&element_type, codebase)).then_some(element_type)
+}
+
+/// Whether a call of the collection member `metadata` on a value of `receiver_type` can pass an element to each of
+/// its parameters marked `ComparedByEquality`, which a search compares with the receiver's elements by `==`, as
+/// [`search_refusal`] decides, spec section 11. A `List<TItem : Object>` has no `contains`, `indexOf` or `remove`,
+/// since `==` cannot compare two `TItem`s, and a `List<int>` has all three.
+pub(crate) fn can_compare_elements(
+    metadata: &FunctionLikeMetadata,
+    receiver_type: &TUnion,
+    codebase: &CodebaseMetadata,
+) -> bool {
+    !metadata.parameters.iter().skip(1).any(|parameter| is_marked(parameter, COMPARED_BY_EQUALITY))
+        || searched_element_type(receiver_type, codebase)
+            .is_none_or(|element_type| search_refusal(&element_type, &element_type, codebase).is_none())
 }
 
 /// The prelude attribute that marks a collection member's parameter compared with the elements by `==`.

@@ -26,6 +26,7 @@ use mago_word::ascii_lowercase_word;
 
 use crate::code::IssueCode;
 use crate::context::Context;
+use crate::expression::call::can_compare_elements;
 use crate::expression::is_refused_type;
 use crate::invocation::TemplateInferenceViolation;
 use crate::invocation::infer_unfixed_templates;
@@ -87,6 +88,16 @@ impl CollectionKind {
             Self::Iterable => "An",
             Self::List | Self::Map | Self::Set => "A",
         }
+    }
+
+    /// The help for a member of the kind that a project without the standard library lacks, as it lacks them all:
+    /// the library to install.
+    #[must_use]
+    pub fn missing_library_help(self) -> String {
+        format!(
+            "Install the standard library, heyjordanparker/php-sharp-composer, which declares the members of a `{}`.",
+            self.name()
+        )
     }
 }
 
@@ -279,9 +290,10 @@ where
     }
 }
 
-/// The extension methods a call on a value of type `receiver` reaches in this file, each written as `` `name` ``, in
-/// order and once each: those of the file's namespace, its imports and the standard library's on the types every file
-/// has them for, whose receiver fits.
+/// The extension methods a call on a value of type `receiver` reaches in this file and can call, each written as
+/// `` `name` ``, in order and once each: those of the file's namespace, its imports and the standard library's on the
+/// types every file has them for, whose receiver fits, and whose search can compare the receiver's elements, as
+/// [`can_compare_elements`] decides for the call.
 pub(crate) fn extension_methods<A>(context: &Context<'_, '_, A>, receiver: &TUnion) -> Vec<String>
 where
     A: Arena,
@@ -296,6 +308,7 @@ where
             metadata.flags.contains(MetadataFlags::EXTENSION_METHOD)
                 && (is_imported_or_in_namespace(context, *class) || is_imported_by_default(context, *class, metadata))
                 && fits(context, receiver, *class, metadata)
+                && can_compare_elements(metadata, receiver, codebase)
         })
         .map(|(_, metadata)| format!("`{}`", metadata.original_name))
         .collect();

@@ -1644,8 +1644,8 @@ fn scalar_name(atomic: &TAtomic) -> Option<&'static str> {
     })
 }
 
-/// Reports a member the `parts` of a receiver, of one `kind` of collection, lack, naming the members that kind has,
-/// which the standard library declares.
+/// Reports a member the `parts` of a receiver, of one `kind` of collection, lack, naming the members they can call,
+/// which the standard library declares, or the library to install in a project without it.
 fn report_non_existent_collection_member<A>(
     context: &mut Context<'_, '_, A>,
     (kind, parts): (CollectionKind, &TUnion),
@@ -1680,8 +1680,13 @@ fn report_non_existent_collection_member<A>(
 
         return;
     }
+    // Each kind has members of the standard library's on every collection of it, so one with none lacks the library.
     let methods = extension_methods(context, parts);
-    let article = kind.article();
+    let help = if methods.is_empty() {
+        kind.missing_library_help()
+    } else {
+        format!("{} `{collection}` has the methods {}.", kind.article(), methods.join(", "))
+    };
 
     context.collector.report_with_code(
         IssueCode::NonExistentMethod,
@@ -1690,7 +1695,7 @@ fn report_non_existent_collection_member<A>(
             .with_annotation(
                 Annotation::secondary(obj_span).with_message(format!("This expression has type `{collection}`")),
             )
-            .with_help(format!("{article} `{collection}` has the methods {}.", methods.join(", "))),
+            .with_help(help),
     );
 }
 
