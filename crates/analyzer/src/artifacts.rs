@@ -456,12 +456,15 @@ impl AnalysisArtifacts {
                 combine_union_types(own, earlier, codebase, CombinerOptions::default())
             };
             result = join(&result, &earlier.result);
-            if let (Some(own), Some(earlier)) = (type_arguments.as_mut(), earlier.type_arguments.as_ref()) {
-                for (own, earlier) in own.iter_mut().zip(earlier) {
-                    *own = join(own, earlier);
-                }
-                self.inferred_type_arguments.insert(range, own.clone());
+            let (Some(own), Some(earlier)) = (type_arguments.as_mut(), earlier.type_arguments.as_ref()) else {
+                unreachable!(
+                    "a method recorded once per part of its receiver changes it, which only the standard library's generic collection members do, and a generic call records its type arguments"
+                );
+            };
+            for (own, earlier) in own.iter_mut().zip(earlier) {
+                *own = join(own, earlier);
             }
+            self.inferred_type_arguments.insert(range, own.clone());
         }
         self.member_calls.insert((range, callee), MemberCall { type_arguments, result });
     }

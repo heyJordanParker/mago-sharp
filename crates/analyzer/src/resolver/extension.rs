@@ -332,17 +332,20 @@ where
         metadata.template_types.iter().map(|(name, template)| (*name, vec![template.clone()])).collect(),
         HashMap::default(),
     );
-    let mut violations = Vec::new();
-    if let Some(parameter) = metadata.parameters.first().and_then(|parameter| parameter.get_type_metadata()) {
-        infer_templates_from_input_and_container_types(
-            context,
-            &parameter.type_union,
-            receiver,
-            &mut template_result,
-            InferenceOptions::default(),
-            &mut violations,
+    let Some(parameter) = metadata.parameters.first().and_then(|parameter| parameter.get_type_metadata()) else {
+        unreachable!(
+            "a receiver meets only an extension member whose receiver, its first parameter, has a type, as fit checks"
         );
-    }
+    };
+    let mut violations = Vec::new();
+    infer_templates_from_input_and_container_types(
+        context,
+        &parameter.type_union,
+        receiver,
+        &mut template_result,
+        InferenceOptions::default(),
+        &mut violations,
+    );
 
     (template_result, violations)
 }
