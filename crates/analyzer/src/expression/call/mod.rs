@@ -693,8 +693,9 @@ where
 }
 
 /// `receiver_type` as the collection member `metadata` reads its receiver, spec section 12: a member whose receiver is
-/// a PHP# `Iterable<T>` reads a `Map` by its `[TKey, TValue]` entries, as a loop does, so each `Map` part is read as the
-/// `Iterable` of its entries. Every other member reads its receiver as it is.
+/// a PHP# `Iterable<T>` reads a `Map` by its `[TKey, TValue]` entries and a `Set` by its elements, as a loop does, so
+/// each `Map` or `Set` part is read as the `Iterable` of what the loop gives, and compared element by element, never
+/// found by its `hash()`. Every other member reads its receiver as it is.
 fn read_receiver<'receiver>(
     metadata: &FunctionLikeMetadata,
     receiver_type: &'receiver TUnion,
@@ -717,6 +718,9 @@ fn read_receiver<'receiver>(
                     let (key, value) = get_array_parameters(array, codebase);
                     let entry = sharp_iterable_value(atomic, container, &key, value);
                     TAtomic::Iterable(TIterable::sharp_of(Arc::new(entry)))
+                }
+                TAtomic::Array(array @ TArray::Set(_)) => {
+                    TAtomic::Iterable(TIterable::sharp_of(Arc::new(get_array_parameters(array, codebase).0)))
                 }
                 _ => atomic.clone(),
             })

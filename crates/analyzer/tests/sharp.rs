@@ -12360,6 +12360,27 @@ fn a_search_of_an_iterable_needs_equality_on_what_it_gives_a_loop() {
     );
 }
 
+/// Spec section 12: an `Iterable` reads a `Set` by its elements, as a loop does, so an extension of `Iterable<T>` on a
+/// `Set<Money|Ticket>` compares each element with the value by `==`, as it does on a `List<Money|Ticket>`, and is
+/// refused where `Money`'s `operator ==` cannot take a `Ticket`. A `Set` finds its own keys by `hash()`, but the
+/// extension never does. So the help of a method the `Set<Money|Ticket>` lacks leaves `holds` out, and a `Set<Money>`
+/// searches with no issue.
+#[test]
+fn a_search_of_an_iterable_reads_a_set_by_its_elements() {
+    let sharp = "namespace Demo;\n\nimport Lib.RowMembers;\n\npublic static class Rows\n{\n    public static bool held(Set<Money|Ticket> wallet, Money price) => wallet.holds(price);\n    public static bool listed(List<Money|Ticket> wallet, Money price) => wallet.holds(price);\n    public static bool same(Set<Money> wallet, Money price) => wallet.holds(price);\n    public static int missing(Set<Money|Ticket> wallet) => wallet.missing();\n}\n\nclass Ticket\n{\n    public Ticket(public int serial { get; })\n    {\n    }\n\n    public static bool operator ==(Ticket a, Ticket b) => a.serial == b.serial;\n\n    public int hash() => this.serial;\n}\n\nclass Money\n{\n    public Money(public int cents { get; })\n    {\n    }\n\n    public static bool operator ==(Money a, Money b) => a.cents == b.cents;\n\n    public int hash() => this.cents;\n}\n";
+
+    let refusal = "invalid-argument `holds` compares elements with `==`, and the `operator ==` of `Money` does not take `Ticket|Money` and `Money`. | Make the `operator ==` of `Money` take `Ticket|Money` and `Money`.";
+
+    assert_eq!(
+        refusals(("src/Demo/Rows.sharp", sharp), &[ROW_MEMBERS]),
+        [
+            format!("7:84 {refusal}"),
+            format!("8:87 {refusal}"),
+            "10:67 non-existent-method Method `missing` does not exist on `Set<Money|Ticket>`. | A `Set<Money|Ticket>` has the methods `add`, `any`, `clear`, `contains`, `count`, `filter`, `first`, `isEmpty`, `isNotEmpty`, `map`, `remove`, `sortedBy`, `sumOf`, `toList`.".to_owned(),
+        ]
+    );
+}
+
 /// Spec section 12: a call on a value that may be several kinds of collection runs each kind's member, and each one
 /// searches with the same argument, so a search `==` cannot make is refused once for the call. Its help tests for the
 /// same object only through a member every kind reaches its elements with: `any` on a `List|Set`, and none on a
