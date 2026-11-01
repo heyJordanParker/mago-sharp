@@ -119,8 +119,9 @@ pub enum WorkerError {
     Timeout { host: String, worker: usize, running: Option<String>, duration: Duration },
     /// A worker explicitly cancelled an in-flight request.
     Cancelled { worker: usize, request: u64 },
-    /// A worker returned an error response.
-    Remote { worker: usize, request: u64, payload: Vec<u8> },
+    /// A worker returned an error response. `host` names the worker's host, so a caller that knows what the request
+    /// was can say which host refused it.
+    Remote { host: String, worker: usize, request: u64, payload: Vec<u8> },
     /// A worker sent a request but no host-side handler was installed.
     UnexpectedRequest { worker: usize, request: u64 },
     /// A worker connection stopped before completing the request.
@@ -163,7 +164,7 @@ impl std::fmt::Display for WorkerError {
             Self::Cancelled { worker, request } => {
                 write!(formatter, "extension worker {worker} cancelled request {request}")
             }
-            Self::Remote { worker, request, payload } => write!(
+            Self::Remote { worker, request, payload, .. } => write!(
                 formatter,
                 "extension worker {worker} rejected request {request}: {}",
                 String::from_utf8_lossy(payload)

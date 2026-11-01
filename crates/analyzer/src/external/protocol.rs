@@ -89,6 +89,7 @@ use mago_codex::visibility::Visibility;
 use mago_database::file::File;
 use mago_extension::PayloadReader;
 use mago_extension::PayloadWriter;
+use mago_extension::WorkerError;
 use mago_extension::source::write_node_kind_table;
 use mago_php_version::PHPVersion;
 use mago_reporting::AnnotationKind;
@@ -3339,6 +3340,31 @@ pub(super) fn take_codebase_reads(response: &[u8]) -> Result<(ExtensionReads, Ve
     let reads = ExtensionReads::decode(&mut reader)?;
 
     Ok((reads, [header, &response[response.len() - reader.remaining()..]].concat()))
+}
+
+/// How every SDK release before 0.6.1 starts its refusal of a request of another analyzer protocol. Those releases
+/// can't change, so a refusal that starts with it always comes from a worker on an SDK older than this mago's.
+const PRE_0_6_1_SDK_REFUSAL: &[u8] = b"Unsupported analyzer protocol version ";
+
+/// Says what to install when a worker on an SDK before 0.6.1 refuses Mago's first request, the describe request. That
+/// SDK names Mago's protocol alone and no fix. Every other refusal passes through unchanged: an SDK of 0.6.1 or later
+/// names both protocols and the fixes itself, and any other failure, such as an extension's own exception, says what
+/// failed.
+pub(super) fn refused_handshake(error: WorkerError) -> ExternalAnalyzerError {
+    match &error {
+        WorkerError::Remote { host, payload, .. } if payload.starts_with(PRE_0_6_1_SDK_REFUSAL) => {
+            let version = env!("CARGO_PKG_VERSION");
+            protocol(format!(
+                "extension host `{host}` refused the handshake of mago {version}, which speaks analyzer protocol \
+                 {ANALYZER_PROTOCOL_MAJOR}.{ANALYZER_PROTOCOL_MINOR}: {} Its SDK is from a \
+                 `heyjordanparker/mago-sharp` release before 0.6.1, so require the release of this mago with \
+                 `composer require --dev \"heyjordanparker/mago-sharp:{version}\"`, or run the mago of the release \
+                 the project requires with `vendor/bin/mago`.",
+                String::from_utf8_lossy(payload).trim_end()
+            ))
+        }
+        _ => error.into(),
+    }
 }
 
 pub(super) fn message_kind(payload: &[u8]) -> Result<u16, ExternalAnalyzerError> {

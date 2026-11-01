@@ -9,6 +9,7 @@ use Mago\Sdk\Internal\Protocol\PayloadReader;
 use Mago\Sdk\Internal\Protocol\PayloadWriter;
 
 use function count;
+use function Mago\Internal\release_mismatch;
 use function pack;
 use function strlen;
 use function unpack;
@@ -137,7 +138,10 @@ final class Protocol
         if ($header[2] !== self::VERSION_U32) {
             $major = $header[2] >> 16;
             $minor = $header[2] & 0xffff;
-            throw new ProtocolException("Unsupported worker management protocol version {$major}.{$minor}.");
+            throw new ProtocolException(release_mismatch(
+                "speaks worker management protocol {$major}.{$minor}",
+                'speaks ' . (self::VERSION_U32 >> 16) . '.' . (self::VERSION_U32 & 0xffff),
+            ));
         }
 
         $message = $header[3];

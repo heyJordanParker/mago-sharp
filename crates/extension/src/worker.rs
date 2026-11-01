@@ -601,6 +601,7 @@ impl Worker {
                                 self.inner.telemetry.remote_errors.fetch_add(1, Ordering::Relaxed);
                             }
                             return Err(WorkerError::Remote {
+                                host: self.host.clone(),
                                 worker: self.id(),
                                 request: request_id,
                                 payload: frame.payload,

@@ -9,10 +9,9 @@ use Mago\Sdk\Internal\Protocol\PayloadReader;
 use Mago\Sdk\PHPVersion;
 use Mago\Sdk\Syntax\NodeKind;
 use Mago\Sdk\Syntax\SourceFile;
-use RuntimeException;
 
 use function count;
-use function Mago\Internal\get_version;
+use function Mago\Internal\release_mismatch;
 use function strlen;
 
 /**
@@ -23,8 +22,6 @@ use function strlen;
 final class SourceFileCodec
 {
     private const MAXIMUM_NODE_KINDS = 65_536;
-
-    private const PACKAGE = 'heyjordanparker/mago-sharp';
 
     /**
      * @param list<NodeKind> $kinds
@@ -76,38 +73,19 @@ final class SourceFileCodec
         $kinds = NodeKind::cases();
         $count = $reader->readCount(self::MAXIMUM_NODE_KINDS);
         if ($count !== count($kinds)) {
-            throw self::differentNodeKinds("sent {$count} node kinds", 'knows ' . count($kinds));
+            throw new ProtocolException(release_mismatch("sent {$count} node kinds", 'knows ' . count($kinds)));
         }
 
         for ($index = 0; $index < $count; ++$index) {
             $name = $reader->readString();
             if ($name !== $kinds[$index]->value) {
-                throw self::differentNodeKinds(
+                throw new ProtocolException(release_mismatch(
                     "names node kind {$index} `{$name}`",
                     "names it `{$kinds[$index]->value}`",
-                );
+                ));
             }
         }
 
         return $kinds;
-    }
-
-    /**
-     * The error for a `mago` whose node-kind table is not this SDK's: what each side holds, this SDK's version when
-     * Composer gives one, and the fix, since `mago` and the SDK are released together at one version.
-     */
-    private static function differentNodeKinds(string $mago, string $sdk): ProtocolException
-    {
-        $package = self::PACKAGE;
-        try {
-            $named = "{$package} " . get_version();
-        } catch (RuntimeException) {
-            $named = $package;
-        }
-
-        return new ProtocolException(
-            "`mago` {$mago}, and the extension SDK, {$named}, {$sdk}. `mago` and {$package} must be the "
-            . "same version: run the `mago` that {$package} installs, or require the {$package} version of your `mago`.",
-        );
     }
 }

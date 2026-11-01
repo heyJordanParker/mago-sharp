@@ -20,6 +20,11 @@ use function Mago\Internal\get_version;
 
 final class SourceFileCodecTest extends TestCase
 {
+    private const FIX =
+        '. `mago` and heyjordanparker/mago-sharp must be the same release: run the `mago` that '
+            . 'heyjordanparker/mago-sharp installs, `vendor/bin/mago`, or require the heyjordanparker/mago-sharp release '
+            . '`mago --version` prints.';
+
     public function testAMagoWithAnotherNumberOfNodeKindsNamesBothCountsAndTheFix(): void
     {
         $kinds = NodeKind::cases();
@@ -32,9 +37,7 @@ final class SourceFileCodecTest extends TestCase
             . self::sdkVersion()
             . ', knows '
             . count($kinds)
-            . '. `mago` and heyjordanparker/mago-sharp must be the '
-            . 'same version: run the `mago` that heyjordanparker/mago-sharp installs, or require the '
-            . 'heyjordanparker/mago-sharp version of your `mago`.',
+            . self::FIX,
         ));
 
         SourceFileCodec::readNodeKinds(self::table($sent));
@@ -50,9 +53,8 @@ final class SourceFileCodecTest extends TestCase
             . self::sdkVersion()
             . ', names it `'
             . $kinds[2]->value
-            . '`. `mago` and heyjordanparker/mago-sharp must '
-            . 'be the same version: run the `mago` that heyjordanparker/mago-sharp installs, or require the '
-            . 'heyjordanparker/mago-sharp version of your `mago`.',
+            . '`'
+            . self::FIX,
         ));
 
         SourceFileCodec::readNodeKinds(self::table($sent));
@@ -87,8 +89,7 @@ final class SourceFileCodecTest extends TestCase
             . count($sent)
             . ' node kinds, and the extension SDK, heyjordanparker/mago-sharp, knows '
             . count($kinds)
-            . '. `mago` and heyjordanparker/mago-sharp must be the same version: run the `mago` that '
-            . 'heyjordanparker/mago-sharp installs, or require the heyjordanparker/mago-sharp version of your `mago`.',
+            . self::FIX,
         ));
 
         SourceFileCodec::readNodeKinds(self::table($sent));

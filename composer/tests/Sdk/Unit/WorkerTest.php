@@ -33,6 +33,7 @@ use Mago\Sdk\Syntax\NodeKind;
 use Mago\Sdk\Worker;
 use Mago\Sdk\WorkerReducer;
 use Mago\Sdk\WorkerReductionContext;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use Revolt\EventLoop;
 use RuntimeException;
@@ -40,6 +41,7 @@ use RuntimeException;
 use function array_diff;
 use function array_keys;
 use function fclose;
+use function Mago\Internal\get_version;
 use function pack;
 
 /**
@@ -186,6 +188,61 @@ final class WorkerTest extends TestCase
                 'after: start the after-analysis hooks of plugin `first`',
                 'after: start the after-analysis hooks of plugin `second`',
                 'after: response',
+            ],
+            $sent,
+        );
+    }
+
+    /**
+     * @return iterable<string, array{string, string, string}>
+     */
+    public static function requestsOfAnotherProtocol(): iterable
+    {
+        $major = Protocol::VERSION_U32 >> 16;
+        $minor = Protocol::VERSION_U32 & 0xFFFF;
+        foreach (['an older' => $minor - 1, 'a newer' => $minor + 1] as $mago => $magoMinor) {
+            yield "{$mago} mago's analyzer describe request" => [
+                self::describeRequest(($major << 16) | $magoMinor),
+                "analyzer protocol {$major}.{$magoMinor}",
+                "{$major}.{$minor}",
+            ];
+        }
+
+        yield 'a linter describe request of another protocol' => [
+            pack('N3', 0x4D4C_4E54, 0x0001_0001, 1 << 16),
+            'linter protocol 1.1',
+            '1.2',
+        ];
+        yield 'a worker management request of another protocol' => [
+            pack('N3', self::WORKER_MAGIC, 0x0001_0001, WorkerProtocol::COLLECT_REQUEST << 16),
+            'worker management protocol 1.1',
+            '1.0',
+        ];
+    }
+
+    /**
+     * A mago of another protocol than this SDK's gets its request refused, with the extension, both protocols, the
+     * SDK's package and release, and the ways to make the two match. A mago before 0.6.1 prints this text as the whole
+     * error.
+     */
+    #[DataProvider('requestsOfAnotherProtocol')]
+    public function testAWorkerRefusesAMagoOfAnotherProtocolNamingThePackage(
+        string $request,
+        string $magoProtocol,
+        string $sdkProtocol,
+    ): void {
+        $worker = new Worker(new Extension('acme/routes', 'Routes', '1.0.0'));
+
+        $sent = self::serve($worker, ['request' => $request]);
+
+        self::assertSame(
+            [
+                "request: error The worker of `acme/routes` can't read mago's request: `mago` speaks {$magoProtocol}, "
+                    . 'and the extension SDK, heyjordanparker/mago-sharp '
+                    . get_version()
+                    . ", speaks {$sdkProtocol}. `mago` and heyjordanparker/mago-sharp must be the same release: run the "
+                    . '`mago` that heyjordanparker/mago-sharp installs, `vendor/bin/mago`, or require the '
+                    . 'heyjordanparker/mago-sharp release `mago --version` prints.',
             ],
             $sent,
         );
@@ -399,9 +456,9 @@ final class WorkerTest extends TestCase
         $writer->write($codec->encode(new Frame(FrameKind::Shutdown, 0, 0, 0, '')));
     }
 
-    private static function describeRequest(): string
+    private static function describeRequest(int $version = Protocol::VERSION_U32): string
     {
-        $message = self::analyzerMessage(Protocol::DESCRIBE_REQUEST);
+        $message = self::analyzerMessage(Protocol::DESCRIBE_REQUEST, $version);
         $message->writeU32(PHPVersion::fromParts(8, 4)->id);
         $message->writeCount(NodeKind::cases());
         foreach (NodeKind::cases() as $kind) {
@@ -506,9 +563,9 @@ final class WorkerTest extends TestCase
         return $message->finish();
     }
 
-    private static function analyzerMessage(int $kind): PayloadWriter
+    private static function analyzerMessage(int $kind, int $version = Protocol::VERSION_U32): PayloadWriter
     {
-        return new PayloadWriter(pack('N3', self::ANALYZER_MAGIC, Protocol::VERSION_U32, $kind << 16));
+        return new PayloadWriter(pack('N3', self::ANALYZER_MAGIC, $version, $kind << 16));
     }
 
     private static function collectRequest(): string
