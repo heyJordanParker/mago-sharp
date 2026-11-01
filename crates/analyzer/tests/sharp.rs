@@ -12217,6 +12217,30 @@ fn a_collection_lacking_a_method_lists_only_the_methods_its_elements_let_it_call
     );
 }
 
+/// A library-style extension of `Iterable<T>` whose parameter is marked `ComparedByEquality` reaches every value a
+/// loop reads, and its call compares that value with the elements only where they are a `List`'s, a `Map`'s keys or a
+/// `Set`'s, spec section 12. So an `Iterable<int>` lacking a method lists it, and a `List<Cart>` of a class without
+/// `operator ==` leaves it out, as it refuses the call.
+#[test]
+fn a_marked_extension_of_an_iterable_is_listed_where_its_call_compares_no_elements_it_cannot() {
+    let rows = (
+        "src/Lib/RowMembers.sharp",
+        "namespace Lib;\n\nimport Sharp.Internal.ComparedByEquality;\n\npublic static class RowMembers\n{\n    extension<T>(Iterable<T> items)\n    {\n        public bool holds([ComparedByEquality] T value) => false;\n    }\n}\n",
+    );
+    let sharp = "namespace Demo;\n\nimport Lib.RowMembers;\n\npublic static class Rows\n{\n    public static int numbers(Iterable<int> rows) => rows.missing();\n    public static int carts(List<Cart> carts) => carts.missing();\n}\n";
+
+    assert_eq!(
+        refusals(("src/Demo/Rows.sharp", sharp), &[rows, ("src/Demo/Cart.php", CART)])
+            .into_iter()
+            .filter(|refusal| refusal.contains("non-existent-method"))
+            .collect::<Vec<_>>(),
+        [
+            "7:59 non-existent-method Method `missing` does not exist on `Iterable<int>`. | An `Iterable<int>` has the methods `filter`, `holds`, `map`, `take`, `toList`.",
+            "8:56 non-existent-method Method `missing` does not exist on `List<Cart>`. | A `List<Cart>` has the methods `add`, `all`, `any`, `associateBy`, `chunked`, `clear`, `count`, `distinct`, `entries`, `filter`, `first`, `flatMap`, `fold`, `getOrNull`, `groupBy`, `insert`, `isEmpty`, `isNotEmpty`, `last`, `map`, `removeAt`, `removeFirst`, `removeLast`, `reversed`, `set`, `slice`, `sortedBy`, `sumOf`, `toList`, `toSet`.",
+        ]
+    );
+}
+
 /// The semantic checks refuse an empty literal declared without a type, so a method called on it reports nothing
 /// more, and never names the `Map<never, never>` the literal alone would give.
 #[test]
