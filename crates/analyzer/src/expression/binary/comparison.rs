@@ -1631,8 +1631,10 @@ pub(crate) fn search_refusal(
     })
 }
 
-/// Reports `value`, of `value_type`, which a PHP# `List`'s `method` searches `receiver` for, when `==` cannot compare
-/// an element of `element_type` with it, as [`search_refusal`] decides: a class that declares no `operator ==` is
+/// Reports `value`, of `value_type`, which a PHP# collection's `method` searches `receiver` for, when `==` cannot
+/// compare one of `element_type` with it: each element of a `List` or a `Set`, each key of a `Map`, or each value an
+/// `Iterable` gives a loop, as `contains`, `indexOf`, `remove`, `has` and an extension's marked parameter search them.
+/// [`search_refusal`] decides it: a class that declares no `operator ==` is
 /// refused with the reason `==` gives, as is an element the operator's call does not always take, an `Iterable`
 /// element is refused, as `==` on it is, and an `Any` element is refused unless the value is a string, a number or an
 /// enum case. A `null_safe` call's help keeps its `?.`. What is `searched` decides the `===` test the help offers
@@ -1667,23 +1669,11 @@ where
         None => return false,
         Some(Refusal::Instance) => {
             let class = display_refused_side(context, element_type, value_type, Comparand::is_instance);
-            let help = match searched.identity_test() {
-                None => format!("Declare `operator ==` and `hash()` in `{class}`."),
+            let help = match same_object_test(context, receiver, value, Some(&class), null_safe, searched) {
                 Some(test) => {
-                    let (receiver, value) =
-                        (quoted_source(context, receiver.span()), quoted_source(context, value.span()));
-                    // The lambda names an element by the class's initial, as `l` for a `Line`, unless the call already
-                    // uses it.
-                    let initial =
-                        class.chars().next().map(|first| first.to_lowercase().to_string()).unwrap_or_default();
-                    let element = if initial == receiver || initial == value { "element".to_owned() } else { initial };
-                    let access = if null_safe { "?." } else { "." };
-
-                    format!(
-                        "Declare `operator ==` and `hash()` in `{class}`, or test for the same object with \
-                         `{receiver}{access}{test}({element} => {element} === {value})`."
-                    )
+                    format!("Declare `operator ==` and `hash()` in `{class}`, or test for the same object with {test}.")
                 }
+                None => format!("Declare `operator ==` and `hash()` in `{class}`."),
             };
 
             (
@@ -1696,18 +1686,15 @@ where
             )
         }
         Some(Refusal::UncheckedObject) => {
-            let (receiver, value) = (quoted_source(context, receiver.span()), quoted_source(context, value.span()));
-            let access = if null_safe { "?." } else { "." };
+            let quoted = quoted_source(context, value.span());
             let element = display_operand(context, element_type);
             let same_object =
-                if searched == Searched::Spread { format!("an element of `{value}`") } else { format!("`{value}`") };
+                if searched == Searched::Spread { format!("an element of `{quoted}`") } else { format!("`{quoted}`") };
             let issue = Issue::error(format!(
                 "`{method}` compares elements with `==`, and an unchecked `{element}` element can't tell the same object as {same_object} from an equal value."
             ));
-            let issue = match searched.identity_test() {
-                Some(test) => issue.with_help(format!(
-                    "Test for the same object with `{receiver}{access}{test}(element => element === {value})`."
-                )),
+            let issue = match same_object_test(context, receiver, value, None, null_safe, searched) {
+                Some(test) => issue.with_help(format!("Test for the same object with {test}.")),
                 None => issue,
             };
 
@@ -1801,6 +1788,33 @@ where
     );
 
     true
+}
+
+/// The test for the same object a refused search's help offers in place of `==`, as `carts.any(c => c === cart)`, run
+/// on `receiver` through the member what is `searched` reaches its elements with, or None where no one member does.
+/// The lambda names an element by the initial of `class`, as `l` for a `Line`, unless the call already uses that
+/// name, and `element` otherwise. A `null_safe` call's test keeps its `?.`.
+fn same_object_test<A>(
+    context: &Context<'_, '_, A>,
+    receiver: &Expression<'_>,
+    value: &Expression<'_>,
+    class: Option<&str>,
+    null_safe: bool,
+    searched: Searched,
+) -> Option<String>
+where
+    A: Arena,
+{
+    let test = searched.identity_test()?;
+    let (receiver, value) = (quoted_source(context, receiver.span()), quoted_source(context, value.span()));
+    let element = class
+        .and_then(|class| class.chars().next())
+        .map(|first| first.to_lowercase().to_string())
+        .filter(|initial| *initial != receiver && *initial != value)
+        .unwrap_or_else(|| "element".to_owned());
+    let access = if null_safe { "?." } else { "." };
+
+    Some(format!("`{receiver}{access}{test}({element} => {element} === {value})`"))
 }
 
 /// The first property of the struct `name`, in declaration order, or field of a case of the enum `name`, that its own
