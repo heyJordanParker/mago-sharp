@@ -30,6 +30,7 @@ use crate::expression::call::analyze_invocation_targets;
 use crate::expression::call::method_call::add_called_property_targets;
 use crate::expression::call::method_call::analyze_undocumented_method_return_type;
 use crate::expression::call::method_call::prepare_unresolved_method_targets;
+use crate::expression::call::method_call::record_magic_call_type;
 use crate::expression::call::record_external_method_call;
 use crate::expression::call::record_external_method_call_targets;
 use crate::expression::instantiation::bare_generic_class;
@@ -416,7 +417,7 @@ where
     }
 
     if !method_resolution.undocumented_methods.is_empty() {
-        analyze_undocumented_method_return_type(
+        let magic_type = analyze_undocumented_method_return_type(
             context,
             block_context,
             artifacts,
@@ -427,6 +428,14 @@ where
             MethodInvocationKind::Static,
             !has_resolved_methods,
         )?;
+        record_magic_call_type(
+            context,
+            artifacts,
+            call.span,
+            magic_type,
+            expression_is_nullsafe(call.class) || method_resolution.encountered_null,
+            class_has_nullsafe_null,
+        );
     }
 
     if context.plugin_registry.has_static_method_call_hooks() {

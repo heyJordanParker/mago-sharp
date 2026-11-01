@@ -87,14 +87,17 @@ pub fn populate_function_like_metadata(
         .flat_map(|context| context.get_template_definitions_mut().values_mut().flatten());
 
     for template in metadata.template_types.values_mut().chain(context_templates) {
-        if force_type_population || template.constraint.needs_population() {
-            populate_union_type(
-                &mut template.constraint,
-                codebase_symbols,
-                Some(reference_source),
-                symbol_references,
-                force_type_population,
-            );
+        let written_bound = template.written_bound.as_mut().map(|bound| &mut bound.type_union);
+        for constraint in std::iter::once(&mut template.constraint).chain(written_bound) {
+            if force_type_population || constraint.needs_population() {
+                populate_union_type(
+                    constraint,
+                    codebase_symbols,
+                    Some(reference_source),
+                    symbol_references,
+                    force_type_population,
+                );
+            }
         }
 
         if let Some(default) = template.default.as_mut()

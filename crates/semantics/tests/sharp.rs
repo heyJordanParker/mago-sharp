@@ -533,7 +533,6 @@ fn a_php_form_php_sharp_never_has_fails_as_a_typo_does() {
             vec![
                 "5:12 Unexpected `private(set)`",
                 "6:13 Write `Calc` without parentheses: they go only around a union or an intersection before `?`, as in `(int|string)?`.",
-                "6:14 Type `Calc` cannot be parenthesized.",
                 "7:20 Unexpected `&`",
                 "8:20 An accessor takes no `final`: remove it.",
                 "9:30 `willSet` takes no access level: it runs inside `set`.",
@@ -4813,10 +4812,20 @@ fn a_nullable_union_is_checked_as_its_union_and_never_joins_another_union() {
 }
 
 #[test]
-fn a_single_type_in_parentheses_with_a_question_mark_after_it_reports_only_the_php_errors() {
+fn a_single_type_in_parentheses_with_a_question_mark_after_it_names_the_nullable_type() {
     let code = leak(method("        return 1;\n").replace("int extra", "(Calc)? extra"));
 
-    assert_eq!(issues(code), ["5:20 Type `(Calc)` cannot be nullable.", "5:21 Type `Calc` cannot be parenthesized."]);
+    assert_eq!(
+        issues(code),
+        [
+            "5:20 Write `Calc?` without parentheses: they go only around a union or an intersection before `?`, as in `(int|string)?`."
+        ]
+    );
+    // A plain PHP file keeps PHP's own errors.
+    assert_eq!(
+        issues_in("src/Report.php", "<?php\n\nfunction f((Calc) $x) {}\n"),
+        ["3:13 Type `Calc` cannot be parenthesized."]
+    );
 }
 
 #[test]

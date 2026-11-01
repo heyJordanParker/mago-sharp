@@ -279,6 +279,33 @@ where
     }
 }
 
+/// The type `resulting_type` of the call at `call_span` with the `null` of `?->`: when its object may be null,
+/// `should_add_null`, or when a `?->` before it in the chain gave the object a null, `object_has_nullsafe_null`, and
+/// the call's own result holds no null. Each declared, magic and static call gets it here.
+pub(super) fn with_null_safe_null(
+    artifacts: &mut AnalysisArtifacts,
+    call_span: Span,
+    resulting_type: TUnion,
+    should_add_null: bool,
+    object_has_nullsafe_null: bool,
+) -> TUnion {
+    let holds_own_null = resulting_type.is_nullable();
+    let adds_null = should_add_null || (object_has_nullsafe_null && !holds_own_null);
+    if !adds_null {
+        return resulting_type;
+    }
+
+    // A `void` call gives no value to use beside the `null` of `?.`, spec section 14.1.
+    if resulting_type.is_void() {
+        artifacts.null_safe_void_calls.insert((call_span.start.offset, call_span.end.offset));
+    }
+    // The `null` stands beside the result's parts, so `maybe?.feed()` keeps each `List` a method may return, as
+    // `shelf.feed()` does, spec section 14.4.
+    let mut result_with_null = resulting_type.as_nullable();
+    result_with_null.set_nullsafe_null(!holds_own_null);
+    result_with_null
+}
+
 fn analyze_invocation_targets<'ctx, 'ast, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
     block_context: &mut BlockContext<'ctx>,
@@ -337,7 +364,6 @@ where
         });
 
     let mut resulting_type = None;
-    let mut all_targets_non_nullable_return = !invocation_targets.is_empty();
     for target in invocation_targets {
         if let InvocationTarget::FunctionLike { metadata, .. } = &target {
             let name = metadata.name;
@@ -408,7 +434,6 @@ where
             &argument_types,
         )?;
 
-        all_targets_non_nullable_return &= !return_type.is_nullable();
         resulting_type = Some(add_optional_union_type(return_type, resulting_type.as_ref(), context.codebase));
 
         post_invocation_process(
@@ -436,18 +461,8 @@ where
             return Ok(());
         } else if encountered_mixed_targets {
             get_mixed()
-        } else if should_add_null || (object_has_nullsafe_null && all_targets_non_nullable_return) {
-            // A `void` call gives no value to use beside the `null` of `?.`, spec section 14.1.
-            if resulting_type.is_void() {
-                artifacts.null_safe_void_calls.insert((call_span.start.offset, call_span.end.offset));
-            }
-            // The `null` stands beside the result's parts, so `maybe?.feed()` keeps each `List` a method may return, as
-            // `shelf.feed()` does, spec section 14.4.
-            let mut result_with_null = resulting_type.as_nullable();
-            result_with_null.set_nullsafe_null(all_targets_non_nullable_return);
-            result_with_null
         } else {
-            resulting_type
+            with_null_safe_null(artifacts, call_span, resulting_type, should_add_null, object_has_nullsafe_null)
         }
     } else {
         analyze_invocation_arguments_source(context, block_context, artifacts, &invocation_arguments)?;

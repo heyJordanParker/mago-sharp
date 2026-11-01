@@ -985,6 +985,12 @@ pub fn populate_atomic_type(
 
                         *unpopulated_atomic = TAtomic::Object(TObject::Named(named_object));
                     }
+                } else if let Some(intersection_types) = intersection_types {
+                    // A type no file declares stays a name, and the types joined to it with `&` are populated alone,
+                    // so `Missing & Shareable` names only `Missing` as missing.
+                    for intersection_type in intersection_types {
+                        populate!(atomic intersection_type);
+                    }
                 }
             }
             TReference::Member { class_like_name, member_selector } => {

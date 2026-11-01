@@ -15092,6 +15092,23 @@ fn each_refused_bound_gives_one_error() {
         ]
     );
 
+    // A catch clause that names a type parameter whose bound is refused adds no error that the bound is no `Throwable`,
+    // whether the checker refused the bound or it names a type no file declares, while a bound that is no `Throwable`
+    // still gets it.
+    let caught = |bound: &str| {
+        let code = format!(
+            "namespace Demo;\n\npublic static class Bounded\n{{\n    public static void held<T : {bound}>()\n    {{\n        try {{\n        }} catch (T error) {{\n        }}\n    }}\n}}\n"
+        );
+
+        compile_errors(
+            ("src/Demo/Bounded.sharp", Box::leak(code.into_boxed_str())),
+            &[("src/Demo/Paging.sharp", PAGING)],
+        )
+    };
+    assert_eq!(caught("int"), [other]);
+    assert_eq!(caught("Missing"), ["Cannot find type `Demo.Missing`."]);
+    assert_eq!(caught("Line"), ["`T` is caught, so its bound must be a `Throwable`."]);
+
     // An error the refused bound has no part in, in the generic method's own body, still appears.
     let body = "namespace Demo;\n\npublic static class Bounded\n{\n    public static T held<T : int>(T value)\n    {\n        int count = \"x\";\n        return value;\n    }\n\n    public static Any? written() => Bounded.held<string>(\"x\");\n}\n";
     assert_eq!(
@@ -15106,6 +15123,219 @@ fn each_refused_bound_gives_one_error() {
             "Duplicate type `Shareable` is redundant.",
             "Type argument `int` does not satisfy `Bounded.held<T, TOther>`'s `T`.",
             "`int` does not satisfy the bound `Shareable & Shareable` of type parameter `T`.",
+        ]
+    );
+}
+
+/// Spec section 11: a bound that names a type no file declares bounds nothing, as a bound the checker refuses does, so
+/// the missing type is its one error, once, where the bound is written. A use of the type parameter, a call that writes
+/// or infers its type argument, a type parameter bounded by it and a class type that writes its type argument add
+/// nothing. A type the bound joins with `&` that exists is not missing, and an error the bound has no part in still
+/// appears, as `Nothing fixes` does for a type parameter no argument fixes, bounded or not.
+#[test]
+fn a_bound_that_names_a_missing_type_gives_one_error() {
+    let missing = "Cannot find type `Demo.Missing`.";
+    let errors = |members: &str| {
+        let code: &'static str =
+            Box::leak(format!("namespace Demo;\n\npublic static class Bounded\n{{\n{members}}}\n").into_boxed_str());
+
+        compile_errors(("src/Demo/Bounded.sharp", code), &[("src/Demo/Paging.sharp", PAGING)])
+    };
+    let mut wrong = Vec::new();
+    for members in [
+        "    public static T held<T : Missing>(T value) => value;\n\n    public static Any? called() => Bounded.held(1);\n",
+        "    public static T held<T : Missing>(T value) => value;\n\n    public static Any? written() => Bounded.held<int>(1);\n",
+        "    public static T held<T : Missing>(List<T> values) => values[0];\n\n    public static Any? listed() => Bounded.held([1]);\n",
+        "    public static T held<T : Missing, TOther : T>(T value, TOther other) => value;\n\n    public static Any? called() => Bounded.held(1, 2);\n",
+        "    public static T held<T : Missing & Shareable>(T value) => value;\n\n    public static Any? called() => Bounded.held(1);\n",
+        "    public static T held<T : Shareable & Missing>(T value) => value;\n\n    public static Any? called() => Bounded.held(1);\n",
+        "    public static T held<T : Query<Missing>>(T value) => value;\n\n    public static Any? called() => Bounded.held(1);\n",
+        "    public static bool same<T : Missing>(T a, T b) => a === b;\n",
+    ] {
+        let errors = errors(members);
+        if errors != [missing] {
+            wrong.push(format!("{members}{errors:#?}"));
+        }
+    }
+
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+
+    // The bound is the error's place, never a use of the type parameter.
+    let held = "namespace Demo;\n\npublic static class Bounded\n{\n    public static T held<T : Missing>(T value) => value;\n}\n";
+    assert_eq!(
+        issues(("src/Demo/Bounded.sharp", held), &[("src/Demo/Paging.sharp", PAGING)]),
+        ["5:30 non-existent-class-like"]
+    );
+    // A type parameter nothing fixes is unfixed, as an unbounded one is, and an error in the body still appears.
+    assert_eq!(
+        errors(
+            "    public static void free<T : Missing>()\n    {\n    }\n\n    public static void called()\n    {\n        Bounded.free();\n    }\n"
+        ),
+        [missing, "Nothing fixes the type argument `T` of the call to `Bounded.free`."]
+    );
+    assert_eq!(
+        errors(
+            "    public static T held<T : Missing>(T value)\n    {\n        int count = \"x\";\n        return value;\n    }\n"
+        ),
+        [missing, "Invalid assignment to `count`: it is declared as `int`."]
+    );
+
+    // A class's bound gives its one error where the class declares it, and none where a call or a type writes or fixes
+    // its type argument.
+    let boxed = "namespace Demo;\n\npublic class Boxed<T : Missing>\n{\n    public static Boxed<T> of(T value) => new Boxed<T>();\n}\n";
+    let user = "namespace Demo;\n\npublic class User\n{\n    public static Any made() => Boxed.of(1);\n\n    public static Any typed(Boxed<int> boxed) => boxed;\n}\n";
+    assert_eq!(compile_errors(("src/Demo/Boxed.sharp", boxed), &[("src/Demo/Paging.sharp", PAGING)]), [missing]);
+    assert_eq!(
+        compile_errors(
+            ("src/Demo/User.sharp", user),
+            &[("src/Demo/Boxed.sharp", boxed), ("src/Demo/Paging.sharp", PAGING)]
+        ),
+        Vec::<String>::new()
+    );
+
+    // A header that gives the class's type parameter to its interface, as `Query<T>`, adds no error.
+    let headed =
+        "namespace Demo;\n\npublic class Table<T : Missing> : Query<T>\n{\n    public List<T> rows() => [];\n}\n";
+    let user = "namespace Demo;\n\npublic static class Reader\n{\n    public static List<int> read(Table<int> rows) => rows.rows();\n\n    public static List<int> queried(Query<int> query) => query.rows();\n\n    public static List<int> passed(Table<int> rows) => Reader.queried(rows);\n}\n";
+    assert_eq!(compile_errors(("src/Demo/Table.sharp", headed), &[("src/Demo/Paging.sharp", PAGING)]), [missing]);
+    assert_eq!(
+        compile_errors(
+            ("src/Demo/Reader.sharp", user),
+            &[("src/Demo/Table.sharp", headed), ("src/Demo/Paging.sharp", PAGING)]
+        ),
+        Vec::<String>::new()
+    );
+
+    // A method without a body, of an interface or abstract, reports its bound's missing type too.
+    let bodiless = "namespace Demo;\n\npublic interface Keeper\n{\n    T kept<T : Missing>(T value);\n}\n\npublic abstract class Store\n{\n    public abstract T stored<T : Missing>(T value);\n}\n";
+    assert_eq!(
+        issues(("src/Demo/Keeper.sharp", bodiless), &[("src/Demo/Paging.sharp", PAGING)]),
+        ["5:16 non-existent-class-like", "10:34 non-existent-class-like"]
+    );
+
+    // An interface's default bodies keep its refused bound in the class that implements it.
+    let shelved = (
+        "src/Demo/Shelved.sharp",
+        "namespace Demo;\n\npublic interface Shelved<T : Missing>\n{\n    int kind(T item) => 1;\n}\n",
+    );
+    let rack = ("src/Demo/Rack.sharp", "namespace Demo;\n\npublic class Rack : Shelved<int>\n{\n}\n");
+    let counter = (
+        "src/Demo/Counter.sharp",
+        "namespace Demo;\n\npublic static class Counter\n{\n    public static int count(Rack rack) => rack.kind(1);\n}\n",
+    );
+    let paging = ("src/Demo/Paging.sharp", PAGING);
+    assert_eq!(compile_errors(shelved, &[rack, counter, paging]), [missing]);
+    assert_eq!(compile_errors(rack, &[shelved, counter, paging]), Vec::<String>::new());
+    assert_eq!(compile_errors(counter, &[shelved, rack, paging]), Vec::<String>::new());
+
+    // Once the type exists, the bound is the bound it writes, and a type argument outside it is an error again.
+    let declared = "namespace Demo;\n\npublic interface Missing\n{\n}\n";
+    let written = "namespace Demo;\n\npublic static class Bounded\n{\n    public static T held<T : Missing>(T value) => value;\n\n    public static Any? written() => Bounded.held<int>(1);\n}\n";
+    assert_eq!(
+        compile_errors(
+            ("src/Demo/Bounded.sharp", written),
+            &[("src/Demo/Missing.sharp", declared), ("src/Demo/Paging.sharp", PAGING)]
+        ),
+        ["Type argument `int` does not satisfy `Bounded.held<T>`'s `T`."]
+    );
+}
+
+/// A method only `__call` runs, reached through `?->` on an object that may be null, gives the `null` the `?->` adds
+/// beside the magic method's return type, as a declared method's call does.
+#[test]
+fn a_null_safe_magic_call_may_give_null() {
+    let bag = "<?php\n\nnamespace Lib;\n\nfinal class Bag\n{\n    /** @param list<mixed> $arguments */\n    public function __call(string $name, array $arguments): int\n    {\n        return 0;\n    }\n}\n";
+    let code = |object: &str| -> &'static str {
+        Box::leak(
+            format!("<?php\n\nnamespace Lib;\n\nfunction count_of({object} $bag): int\n{{\n    return $bag?->untagged();\n}}\n")
+                .into_boxed_str(),
+        )
+    };
+
+    assert_eq!(
+        issues(("src/Lib/count.php", code("?Bag")), &[("src/Lib/Bag.php", bag)]),
+        ["7:19 non-documented-method", "7:12 nullable-return-statement", "7:12 invalid-return-statement"]
+    );
+    assert_eq!(issues(("src/Lib/count.php", code("Bag")), &[("src/Lib/Bag.php", bag)]), ["7:19 non-documented-method"]);
+
+    // A magic call types as the declared method of its return type does, in a chain after `?->` and as a static call
+    // through `?->`: `untagged` runs `__call` or `__callStatic`, and `declared` and `counting` are declared.
+    let shelf = "<?php\n\nnamespace Lib;\n\nfinal class Shelf\n{\n    /** @param list<mixed> $arguments */\n    public function __call(string $name, array $arguments): Shelf\n    {\n        return $this;\n    }\n\n    public function declared(): Shelf\n    {\n        return $this;\n    }\n\n    /** @param list<mixed> $arguments */\n    public static function __callStatic(string $name, array $arguments): int\n    {\n        return 0;\n    }\n\n    public static function counting(): int\n    {\n        return 0;\n    }\n}\n\nfinal class Crate\n{\n    public function __construct(public Shelf $shelf) {}\n}\n";
+    let typed = |signature: &str, body: &str| {
+        let code: &'static str = Box::leak(
+            format!("<?php\n\nnamespace Lib;\n\nfunction {signature}\n{{\n    return {body};\n}}\n").into_boxed_str(),
+        );
+
+        issues(("src/Lib/use.php", code), &[("src/Lib/Shelf.php", shelf)])
+            .into_iter()
+            .filter(|issue| !issue.ends_with("non-documented-method"))
+            .collect::<Vec<_>>()
+    };
+    for (signature, magic, declared) in [
+        ("chained(?Shelf $shelf): Shelf", "$shelf?->untagged()->untagged()", "$shelf?->declared()->declared()"),
+        ("counted(?Crate $crate): int", "$crate?->shelf::untagged()", "$crate?->shelf::counting()"),
+    ] {
+        assert_eq!(typed(signature, magic), typed(signature, declared), "{magic}");
+    }
+}
+
+/// Parentheses go only around a union or an intersection before `?`, so a single type in them, in a bound or in any
+/// other place a type is written, is the one error that names the type to write, as `(Shareable)` names `Shareable`
+/// and `(Line)?` names `Line?`. A bound refused once its parentheses are gone keeps its own error instead.
+#[test]
+fn a_type_in_parentheses_gives_one_error_that_names_the_type_to_write() {
+    let parentheses = |written: &str| {
+        format!(
+            "Write `{written}` without parentheses: they go only around a union or an intersection before `?`, as in `(int|string)?`."
+        )
+    };
+    let mut wrong = Vec::new();
+    for (members, written) in [
+        ("public static T held<T : (Shareable)>(T value) => value;", "Shareable"),
+        ("public static T held<T : (Shareable) & DatabaseEntity>(T value) => value;", "Shareable"),
+        ("public static T held<T : (Shareable & DatabaseEntity)>(T value) => value;", "Shareable & DatabaseEntity"),
+        ("public static T held<T : (Object)>(T value) => value;", "Object"),
+        ("public static T held<TOther, T : (TOther)>(T value, TOther other) => value;", "TOther"),
+        ("public static T held<T : Query<(Line)>>(T value) => value;", "Line"),
+        ("private (Line) line = new Line();", "Line"),
+        ("private (Line)? line = null;", "Line?"),
+        ("private (Line)|int line = 1;", "Line"),
+        ("private List<(Line)> lines = [];", "Line"),
+        ("public void run((Line) line) { }", "Line"),
+        ("public void join((Shareable) & DatabaseEntity entity) { }", "Shareable"),
+        ("public (Line) run() => new Line();", "Line"),
+        ("public Any run() => typeof((Line));", "Line"),
+        ("public Any run(Any value) => value as (Line);", "Line"),
+        ("public Any run() => new PaginatedList<(Order)>([]);", "Order"),
+        ("public void run(Class<(Line)> line) { }", "Line"),
+        ("public void run() { try { } catch ((Throwable) error) { } }", "Throwable"),
+        ("public void run() { const keep = ((Line) line) => line; }", "Line"),
+    ] {
+        let code: &'static str =
+            Box::leak(format!("namespace Demo;\n\npublic class Grouped\n{{\n    {members}\n}}\n").into_boxed_str());
+        let errors = compile_errors(("src/Demo/Grouped.sharp", code), &[("src/Demo/Paging.sharp", PAGING)]);
+        if errors != [parentheses(written)] {
+            wrong.push(format!("{members}: {errors:#?}"));
+        }
+    }
+
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+
+    // The parentheses hide no other error: a bound that is none without them is refused as such.
+    let refused = |members: &str| {
+        let code: &'static str =
+            Box::leak(format!("namespace Demo;\n\npublic class Grouped\n{{\n    {members}\n}}\n").into_boxed_str());
+
+        compile_errors(("src/Demo/Grouped.sharp", code), &[("src/Demo/Paging.sharp", PAGING)])
+    };
+    assert_eq!(
+        refused("public static T held<T : (Line|Order)>(T value) => value;"),
+        ["A bound can't be a union: join several bounds with `&`."]
+    );
+    assert_eq!(
+        refused("public static T held<T : (Object) & Shareable>(T value) => value;"),
+        [
+            "A bound is `Object`, `Equatable`, a class, an interface or a type parameter, as in `<TItem : DatabaseEntity>`."
         ]
     );
 }

@@ -4,7 +4,12 @@ use indexmap::IndexMap;
 
 use mago_word::Word;
 
+use crate::metadata::ttype::TypeMetadata;
 use crate::misc::GenericParent;
+use crate::ttype::TType;
+use crate::ttype::TypeRef;
+use crate::ttype::atomic::TAtomic;
+use crate::ttype::atomic::reference::TReference;
 use crate::ttype::union::TUnion;
 
 pub mod bounds;
@@ -26,11 +31,16 @@ pub struct GenericTemplate {
     /// The default type used when no explicit generic argument is provided
     /// (e.g., `string` for `@template T of int|string = string`).
     pub default: Option<TUnion>,
-    /// Whether a PHP# bound of the same list that the checker refused names this type parameter.
+    /// Whether a refused PHP# bound of the same list names this type parameter, as [`refuse_bounds`] decides.
     ///
     /// `TOther` in `<T : List<TOther>, TOther>` is one. The refused bound is the refused type, so it no longer fixes or
     /// uses the type parameter, and a call reports no type argument of it unfixed, nor the type parameter unused.
     pub named_by_refused_bound: bool,
+    /// The bound a PHP# type parameter writes, as the scanner read it and population resolves it. [`refuse_bounds`]
+    /// derives `constraint` and `named_by_refused_bound` from it on every scan and population.
+    pub written_bound: Option<TypeMetadata>,
+    /// Whether the semantics checker refuses `written_bound`, as `ResolvedNames::is_refused_bound` decides.
+    pub bound_refused: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -56,6 +66,8 @@ impl GenericTemplate {
             constraint: template_type,
             default: None,
             named_by_refused_bound: false,
+            written_bound: None,
+            bound_refused: false,
         }
     }
 
@@ -65,6 +77,75 @@ impl GenericTemplate {
         self.default = default;
         self
     }
+}
+
+/// Refuses each bound of one PHP# type parameter list that PHP# refuses, from its written bound, spec section 11.
+///
+/// A bound is refused when the checker refuses it, or when it names a type `declares` says no file declares, as
+/// `T : Missing` does. A refused bound bounds nothing, so its `constraint` is the refused type, and each other type
+/// parameter of the list it names is named by a refused bound, so the bound's one error is the checker's or the missing
+/// type's. Any other bound keeps its `constraint`. Declaring a type a refused bound names runs a full analysis, which
+/// scans the bound again.
+pub fn refuse_bounds<'templates>(
+    templates: impl IntoIterator<Item = (&'templates Word, &'templates mut GenericTemplate)>,
+    declares: impl Fn(Word) -> bool,
+) {
+    let mut templates: Vec<(&Word, &mut GenericTemplate)> = templates.into_iter().collect();
+    let mut named_by_refused_bounds = Vec::new();
+    let refused: Vec<bool> = templates
+        .iter()
+        .map(|(name, template)| {
+            let Some(bound) = &template.written_bound else {
+                return false;
+            };
+            let mut names_missing_type = false;
+            let mut named = Vec::new();
+            for_each_written_part(&bound.type_union, &mut |atomic| match atomic {
+                TAtomic::Reference(TReference::Symbol { name, .. }) => names_missing_type |= !declares(*name),
+                TAtomic::GenericParameter(parameter)
+                    if parameter.defining_entity == template.defining_entity && parameter.parameter_name != **name =>
+                {
+                    named.push(parameter.parameter_name);
+                }
+                _ => {}
+            });
+            let is_refused = template.bound_refused || names_missing_type;
+            if is_refused {
+                named_by_refused_bounds.extend(named);
+            }
+
+            is_refused
+        })
+        .collect();
+
+    for ((name, template), refused) in templates.iter_mut().zip(refused) {
+        if refused {
+            template.constraint = TUnion::from_atomic(TAtomic::Error);
+        }
+        template.named_by_refused_bound |= named_by_refused_bounds.contains(*name);
+    }
+}
+
+/// Calls `visit` on each atomic type `union` writes, at any depth, but none a type parameter's own bound holds: the
+/// bound of `T` is written where `T` is declared.
+fn for_each_written_part(union: &TUnion, visit: &mut impl FnMut(&TAtomic)) {
+    fn walk(node: TypeRef<'_>, visit: &mut impl FnMut(&TAtomic)) {
+        if let TypeRef::Atomic(atomic) = node {
+            visit(atomic);
+            if let TAtomic::GenericParameter(parameter) = atomic {
+                for intersection_type in parameter.intersection_types.iter().flatten() {
+                    walk(TypeRef::Atomic(intersection_type), visit);
+                }
+
+                return;
+            }
+        }
+        for child in node.get_child_nodes() {
+            walk(child, visit);
+        }
+    }
+
+    walk(TypeRef::Union(union), visit);
 }
 
 impl TemplateResult {
