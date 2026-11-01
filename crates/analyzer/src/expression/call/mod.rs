@@ -1,4 +1,5 @@
 use mago_allocator::Arena;
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use mago_algebra::assertion_set::AssertionSet;
@@ -12,6 +13,7 @@ use mago_codex::ttype::add_optional_union_type;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::callable::TCallable;
+use mago_codex::ttype::atomic::iterable::TIterable;
 use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::object::named::TNamedObject;
 use mago_codex::ttype::comparator::ComparisonResult;
@@ -22,6 +24,7 @@ use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_never;
 use mago_codex::ttype::get_void;
 use mago_codex::ttype::is_key_type;
+use mago_codex::ttype::sharp_iterable_value;
 use mago_codex::ttype::template::TemplateResult;
 use mago_codex::ttype::union::TUnion;
 use mago_reporting::Annotation;
@@ -643,8 +646,9 @@ where
                     Some(value_type)
                 }
             })
-            && let Some(receiver_type) = artifacts.get_expression_type(receiver)
-            && let Some(element_type) = searched_element_type(receiver_type, context.codebase)
+            && let Some(receiver_type) =
+                artifacts.get_expression_type(receiver).map(|written| read_receiver(metadata, written, context.codebase))
+            && let Some(element_type) = searched_element_type(&receiver_type, context.codebase)
             && union_comparator::is_contained_by(
                 context.codebase,
                 &value_type,
@@ -660,12 +664,45 @@ where
                 value,
                 value_type,
                 element_type,
-                searched: if argument.is_unpacked() { Searched::Spread } else { Searched::of(receiver_type) },
+                searched: if argument.is_unpacked() { Searched::Spread } else { Searched::of(&receiver_type) },
             });
         }
     }
 
     Ok(searches)
+}
+
+/// `receiver_type` as the collection member `metadata` reads its receiver, spec section 12: a member whose receiver is
+/// a PHP# `Iterable<T>` reads a `Map` by its `[TKey, TValue]` entries, as a loop does, so each `Map` part is read as the
+/// `Iterable` of its entries. Every other member reads its receiver as it is.
+fn read_receiver<'receiver>(
+    metadata: &FunctionLikeMetadata,
+    receiver_type: &'receiver TUnion,
+    codebase: &CodebaseMetadata,
+) -> Cow<'receiver, TUnion> {
+    let Some(container) = metadata
+        .parameters
+        .first()
+        .and_then(|receiver| receiver.get_type_metadata())
+        .and_then(|receiver| receiver.type_union.types.iter().find(|atomic| matches!(atomic, TAtomic::Iterable(_))))
+    else {
+        return Cow::Borrowed(receiver_type);
+    };
+
+    Cow::Owned(TUnion::from_vec(
+        receiver_type
+            .types
+            .iter()
+            .map(|atomic| match atomic {
+                TAtomic::Array(array @ TArray::Keyed(_)) => {
+                    let (key, value) = get_array_parameters(array, codebase);
+                    let entry = sharp_iterable_value(atomic, container, &key, value);
+                    TAtomic::Iterable(TIterable::sharp_of(Arc::new(entry)))
+                }
+                _ => atomic.clone(),
+            })
+            .collect(),
+    ))
 }
 
 /// The type of the elements a search of a value of `receiver_type` compares by `==` with the value of a collection
@@ -754,7 +791,7 @@ pub(crate) fn can_compare_elements(
     codebase: &CodebaseMetadata,
 ) -> bool {
     !metadata.parameters.iter().skip(1).any(|parameter| is_marked(parameter, COMPARED_BY_EQUALITY))
-        || searched_element_type(receiver_type, codebase)
+        || searched_element_type(&read_receiver(metadata, receiver_type, codebase), codebase)
             .is_none_or(|element_type| search_refusal(&element_type, &element_type, codebase).is_none())
 }
 

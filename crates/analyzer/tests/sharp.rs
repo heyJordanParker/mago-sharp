@@ -12336,15 +12336,17 @@ const ROW_MEMBERS: (&str, &str) = (
 /// Spec section 12: a search of an `Iterable` compares its value with each value the `Iterable` gives a loop by `==`,
 /// as a `List`'s `contains` does, so `rows.holds(cart)` on an `Iterable<Cart>` of a class without `operator ==` is
 /// refused. An `Iterable` has no `any`, so the help tests for the same object through `toList()`, which compiles, and
-/// an `Iterable<int>` searches with no issue.
+/// an `Iterable<int>` searches with no issue. An `Iterable` reads a `Map` by its entries, so the extension on a
+/// `Map<string, Cart>` compares `[string, Cart]` pairs, which `==` cannot, and on a `Map<string, int>` it can.
 #[test]
 fn a_search_of_an_iterable_needs_equality_on_what_it_gives_a_loop() {
-    let sharp = "namespace Demo;\n\nimport Lib.RowMembers;\n\npublic static class Rows\n{\n    public static bool carts(Iterable<Cart> rows, Cart cart) => rows.holds(cart);\n    public static bool same(Iterable<Cart> rows, Cart cart) => rows.toList().any(c => c === cart);\n    public static bool numbers(Iterable<int> rows) => rows.holds(1);\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.RowMembers;\n\npublic static class Rows\n{\n    public static bool carts(Iterable<Cart> rows, Cart cart) => rows.holds(cart);\n    public static bool same(Iterable<Cart> rows, Cart cart) => rows.toList().any(c => c === cart);\n    public static bool numbers(Iterable<int> rows) => rows.holds(1);\n    public static bool entries(Map<string, Cart> counts, Cart cart) => counts.holds([\"a\", cart]);\n    public static bool counted(Map<string, int> counts) => counts.holds([\"a\", 1]);\n}\n";
 
     assert_eq!(
         refusals(("src/Demo/Rows.sharp", sharp), &[ROW_MEMBERS, ("src/Demo/Cart.php", CART)]),
         [
             "7:76 invalid-argument `holds` compares elements with `==`, and `Cart` declares no `operator ==`. | Declare `operator ==` and `hash()` in `Cart`, or test for the same object with `rows.toList().any(c => c === cart)`.",
+            "10:85 invalid-argument `holds` compares elements with `==`, and `Cart` declares no `operator ==`. | ",
         ]
     );
 }
