@@ -79,14 +79,13 @@ impl GenericTemplate {
     }
 }
 
-/// Derives the `constraint` and `named_by_refused_bound` of each template of one PHP# type parameter list from its
-/// written bound, spec section 11.
+/// Refuses each bound of one PHP# type parameter list that PHP# refuses, from its written bound, spec section 11.
 ///
 /// A bound is refused when the checker refuses it, or when it names a type `declares` says no file declares, as
-/// `T : Missing` does. A refused bound bounds nothing, so it is the refused type, and each other type parameter of the
-/// list it names is named by a refused bound, so the bound's one error is the checker's or the missing type's. Any other
-/// bound is the bound as written, so a population after `Missing` exists gives the real bound back. A template without
-/// a written bound keeps its constraint.
+/// `T : Missing` does. A refused bound bounds nothing, so its `constraint` is the refused type, and each other type
+/// parameter of the list it names is named by a refused bound, so the bound's one error is the checker's or the missing
+/// type's. Any other bound keeps its `constraint`. Declaring a type a refused bound names runs a full analysis, which
+/// scans the bound again.
 pub fn refuse_bounds<'templates>(
     templates: impl IntoIterator<Item = (&'templates Word, &'templates mut GenericTemplate)>,
     declares: impl Fn(Word) -> bool,
@@ -120,10 +119,10 @@ pub fn refuse_bounds<'templates>(
         .collect();
 
     for ((name, template), refused) in templates.iter_mut().zip(refused) {
-        if let Some(bound) = &template.written_bound {
-            template.constraint = if refused { TUnion::from_atomic(TAtomic::Error) } else { bound.type_union.clone() };
+        if refused {
+            template.constraint = TUnion::from_atomic(TAtomic::Error);
         }
-        template.named_by_refused_bound = named_by_refused_bounds.contains(*name);
+        template.named_by_refused_bound |= named_by_refused_bounds.contains(*name);
     }
 }
 

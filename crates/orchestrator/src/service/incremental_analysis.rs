@@ -47,6 +47,9 @@ use mago_codex::reference::SymbolReferences;
 use mago_codex::scanner::scan_program;
 use mago_codex::signature_builder;
 use mago_codex::ttype::TType;
+use mago_codex::ttype::TypeRef;
+use mago_codex::ttype::atomic::TAtomic;
+use mago_codex::ttype::atomic::reference::TReference;
 use mago_collector::DeferredPragmas;
 use mago_database::DatabaseReader;
 use mago_database::ReadDatabase;
@@ -1301,6 +1304,11 @@ impl IncrementalAnalysisService {
         if class_like_removed {
             return self.analyze();
         }
+        // Population refuses a PHP# bound that names a missing type, and only a scan reads the bound again, so a
+        // class-like declared under a name such a bound writes runs a full analysis too.
+        if names_a_refused_bound_type(&merged_codebase, &scanned_class_likes) {
+            return self.analyze();
+        }
 
         merged_codebase.safe_symbols.clear();
         merged_codebase.safe_symbol_members.clear();
@@ -2117,6 +2125,32 @@ impl IncrementalAnalysisService {
             per_file_project_issues,
         })
     }
+}
+
+/// Whether a PHP# bound of a populated declaration in `codebase` names a type that population left missing and that
+/// `declared`, the lowercase names of the class-likes a scan just declared, now holds: such a bound was refused, spec
+/// section 11. A declaration the scan just read is unpopulated, and reads its bounds afresh.
+fn names_a_refused_bound_type(codebase: &CodebaseMetadata, declared: &WordSet) -> bool {
+    let class_templates = codebase
+        .class_likes
+        .values()
+        .filter(|class| class.flags.is_sharp() && class.flags.is_populated())
+        .flat_map(|class| class.template_types.values());
+    let function_templates = codebase
+        .function_likes
+        .values()
+        .filter(|function| function.flags.is_sharp() && function.flags.is_populated())
+        .flat_map(|function| function.template_types.values());
+
+    class_templates.chain(function_templates).filter_map(|template| template.written_bound.as_ref()).any(|bound| {
+        bound.type_union.get_all_child_nodes().into_iter().any(|node| {
+            matches!(
+                node,
+                TypeRef::Atomic(TAtomic::Reference(TReference::Symbol { name, .. }))
+                    if declared.contains(&mago_word::ascii_lowercase_word(name.as_bytes()))
+            )
+        })
+    })
 }
 
 /// Scans `file` into the codebase metadata it declares, with its signature and the scan `plan` captures of it, its
@@ -3827,8 +3861,8 @@ mod tests {
     /// named by a refused bound, and checks the type arguments against the bound again.
     #[test]
     fn test_watch_a_bound_whose_missing_type_is_declared_later_bounds_again() {
-        let bounded = "namespace App;\n\npublic static class Bounded\n{\n    public static T held<T : Holder<TOther>, TOther>(T value, TOther other) => value;\n\n    public static Any? written() => Bounded.held<int, int>(1, 2);\n}\n";
-        let holder = "namespace App;\n\npublic interface Holder<TItem>\n{\n}\n";
+        let bounded = "namespace App;\n\npublic static class Bounded\n{\n    public static T held<T : Holder<TOther>, TOther>(T value, TOther other) => value;\n\n    public static Any? written() => Bounded.held<int, int>(1, 2);\n\n    public static void touch<TBox : Holder<int>>(readonly TBox box)\n    {\n        box.size = 1;\n    }\n}\n";
+        let holder = "namespace App;\n\npublic interface Holder<TItem>\n{\n    int size { get; set; }\n}\n";
         let mut db = make_database(vec![("src/Bounded.sharp", bounded)]);
         let errors = |service: &IncrementalAnalysisService| {
             service
@@ -3854,7 +3888,7 @@ mod tests {
 
         let mut service = make_watch_service(&db);
         service.analyze().expect("Initial analysis failed.");
-        assert_eq!(errors(&service), ["Cannot find type `App.Holder`."]);
+        assert_eq!(errors(&service), ["Cannot find type `App.Holder`.", "Cannot find type `App.Holder`."]);
         assert_eq!(bounds(&service), (true, true), "the bound names a missing type");
 
         db.add(File::new(
@@ -3865,7 +3899,7 @@ mod tests {
         ));
         service.update_database(db.read_only());
         service.analyze_incremental(None).expect("Incremental analysis failed.");
-        assert_eq!(errors(&service), ["Type argument `int` does not satisfy `Bounded.held<T, TOther>`'s `T`."]);
+        assert_eq!(errors(&service), ["Type argument `int` does not satisfy `Bounded.held<T, TOther>`'s `T`.", "touch cannot set box.size: box is readonly."]);
         assert_eq!(bounds(&service), (false, false), "the bound is Holder<TOther> again");
         assert_matches_full(&service, &db, "Holder is declared");
     }

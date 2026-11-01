@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use foldhash::HashMap;
 use foldhash::HashSet;
 
 use mago_word::Word;
@@ -418,30 +417,36 @@ fn populate_sealed_interfaces(codebase: &mut CodebaseMetadata) {
 }
 
 /// Spec section 11: a PHP# bound that names a type no file declares, as `T : Missing`, bounds nothing, as a bound the
-/// checker refuses does, so its one error is the missing type's. Each PHP# template's bound is derived from the bound it
-/// writes, and each type parameter a PHP# type names reads its bound from its template, on every population, so a
-/// population after `Missing` exists gives the real bound back.
+/// checker refuses does, so its one error is the missing type's. The step refuses each such template's bound, and the
+/// bound of each type parameter a PHP# type names whose template it refused. Declaring a type a refused bound names
+/// runs a full analysis, which scans every bound again.
 fn refuse_missing_bounds(codebase: &mut CodebaseMetadata) {
     let CodebaseMetadata { symbols, class_likes, function_likes, .. } = codebase;
     let declares = |name: Word| symbols.get_kind(ascii_lowercase_word(name.as_bytes())).is_some();
 
     let sharp_classes = class_likes.values_mut().filter(|class| class.flags.is_sharp());
     let sharp_functions = function_likes.values_mut().filter(|function| function.flags.is_sharp());
-    let mut bounds: HashMap<(GenericParent, Word), TUnion> = HashMap::default();
+    // The type parameters whose bound names a missing type: the checker's refusals are refused where they are scanned.
+    let mut refused: HashSet<(GenericParent, Word)> = HashSet::default();
     for template_types in sharp_classes
         .map(|class| &mut class.template_types)
         .chain(sharp_functions.map(|function| &mut function.template_types))
     {
         refuse_bounds(template_types.iter_mut(), declares);
-        for (name, template) in template_types.iter() {
-            bounds.insert((template.defining_entity, *name), template.constraint.clone());
-        }
+        refused.extend(
+            template_types
+                .iter()
+                .filter(|(_, template)| {
+                    template.written_bound.is_some() && !template.bound_refused && is_refused(&template.constraint)
+                })
+                .map(|(name, template)| (template.defining_entity, *name)),
+        );
     }
-    if bounds.is_empty() {
+    if refused.is_empty() {
         return;
     }
 
-    let read = |union: &mut TUnion| read_bounds(union, &bounds, 0);
+    let read = |union: &mut TUnion| refuse_type_parameters(union, &refused);
     for class in class_likes.values_mut().filter(|class| class.flags.is_sharp()) {
         for template in class.template_types.values_mut() {
             read_template(template, &read);
@@ -467,10 +472,8 @@ fn refuse_missing_bounds(codebase: &mut CodebaseMetadata) {
             .flat_map(|context| context.get_template_definitions_mut().iter_mut())
             .flat_map(|(name, templates)| templates.iter_mut().map(move |template| (*name, template)));
         for (name, template) in context_templates {
-            if let Some(bound) = bounds.get(&(template.defining_entity, name))
-                && is_refused(bound) != is_refused(&template.constraint)
-            {
-                template.constraint = bound.clone();
+            if refused.contains(&(template.defining_entity, name)) {
+                template.constraint = TUnion::from_atomic(TAtomic::Error);
             }
             read_template(template, &read);
         }
@@ -490,7 +493,7 @@ fn refuse_missing_bounds(codebase: &mut CodebaseMetadata) {
     }
 }
 
-/// Gives each type parameter `template`'s bound and written bound name the bound its own template has.
+/// Refuses the bound of each refused type parameter `template`'s bound and written bound name.
 fn read_template(template: &mut GenericTemplate, read: &impl Fn(&mut TUnion)) {
     read(&mut template.constraint);
     if let Some(bound) = template.written_bound.as_mut() {
@@ -498,18 +501,16 @@ fn read_template(template: &mut GenericTemplate, read: &impl Fn(&mut TUnion)) {
     }
 }
 
-/// Gives each type parameter `union` names, at any depth, the bound of its template in `bounds`, keyed by the type
-/// parameter's declaration and name. A bound names type parameters too, `depth` levels below `union`, and a bound that
-/// leads back to its own type parameter is the refused type, so no chain is longer than the type parameters it names.
-fn read_bounds(union: &mut TUnion, bounds: &HashMap<(GenericParent, Word), TUnion>, depth: usize) {
-    const MAX_DEPTH: usize = 16;
-    if depth > MAX_DEPTH || !union.has_template_types() {
+/// Refuses the bound of each type parameter `union` names, at any depth, that `refused` holds, keyed by the type
+/// parameter's declaration and name.
+fn refuse_type_parameters(union: &mut TUnion, refused: &HashSet<(GenericParent, Word)>) {
+    if !union.has_template_types() {
         return;
     }
 
-    let read = |union: &mut TUnion| read_bounds(union, bounds, depth + 1);
+    let read = |union: &mut TUnion| refuse_type_parameters(union, refused);
     for atomic in union.types.to_mut() {
-        read_atomic_bounds(atomic, &read, bounds);
+        refuse_atomic_type_parameters(atomic, &read, refused);
     }
 }
 
@@ -518,29 +519,21 @@ fn is_refused(bound: &TUnion) -> bool {
     bound.types.iter().all(|atomic| matches!(atomic, TAtomic::Error))
 }
 
-/// [`read_bounds`] for one atomic type.
-fn read_atomic_bounds(
+/// [`refuse_type_parameters`] for one atomic type.
+fn refuse_atomic_type_parameters(
     atomic: &mut TAtomic,
     read: &impl Fn(&mut TUnion),
-    bounds: &HashMap<(GenericParent, Word), TUnion>,
+    refused: &HashSet<(GenericParent, Word)>,
 ) {
-    let read_atomic = |atomic: &mut TAtomic| read_atomic_bounds(atomic, read, bounds);
+    let read_atomic = |atomic: &mut TAtomic| refuse_atomic_type_parameters(atomic, read, refused);
     match atomic {
         TAtomic::GenericParameter(parameter) => {
-            // The bound a type names may differ from its template's, as `readonly T`'s is readonly, so it changes only
-            // when its refusal does.
-            match bounds.get(&(parameter.defining_entity, parameter.parameter_name)) {
-                Some(bound) if is_refused(bound) => {
-                    if !is_refused(&parameter.constraint) {
-                        parameter.constraint = Arc::new(bound.clone());
-                    }
+            if refused.contains(&(parameter.defining_entity, parameter.parameter_name)) {
+                if !is_refused(&parameter.constraint) {
+                    parameter.constraint = Arc::new(TUnion::from_atomic(TAtomic::Error));
                 }
-                Some(bound) if is_refused(&parameter.constraint) => {
-                    let mut bound = bound.clone();
-                    read(&mut bound);
-                    parameter.constraint = Arc::new(bound);
-                }
-                _ => read(Arc::make_mut(&mut parameter.constraint)),
+            } else {
+                read(Arc::make_mut(&mut parameter.constraint));
             }
             for intersection_type in parameter.intersection_types.iter_mut().flatten() {
                 read_atomic(intersection_type);

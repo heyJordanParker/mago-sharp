@@ -99,8 +99,8 @@ pub fn get_type_metadata_from_type(
 /// The templates a PHP# type parameter list declares, in order, spec section 11.
 ///
 /// Each is the template a `@template` tag declares for `defining_entity`, its bound the tag's `of`, or `mixed` without
-/// one. Its [written bound](GenericTemplate::written_bound) is what [`refuse_bounds`] reads the bound and its refusal
-/// from, now and on each population.
+/// one. [`refuse_bounds`] refuses a bound from its [written bound](GenericTemplate::written_bound), now and on each
+/// population.
 ///
 /// Every name of the list is a template while the bounds are read, so a bound names a type parameter of its own list,
 /// its own or a later one, as in `<TItem : Comparable<TItem>>`. The bounds are read once per type parameter, each time
@@ -135,6 +135,7 @@ where
                 if let Some(bound) = &parameter.bound {
                     let mut written =
                         get_type_metadata_from_hint(&bound.hint, Some(classname), &*type_context, context);
+                    template.constraint = written.type_union.clone();
                     template.bound_refused = context.resolved_names.is_refused_bound(
                         type_parameters,
                         parameter,
