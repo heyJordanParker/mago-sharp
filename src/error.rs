@@ -200,17 +200,17 @@ pub enum Error {
     /// failures.
     ReadingComposerJson(std::io::Error),
 
-    /// Failed to read the baseline file.
+    /// Failed to read the baseline file at `path`.
     ///
     /// This error occurs when loading an existing baseline file for incremental issue
     /// tracking fails due to missing file, permission errors, or I/O failures.
-    ReadingBaselineFile(std::io::Error),
+    ReadingBaselineFile { path: PathBuf, source: std::io::Error },
 
-    /// Failed to create or write the baseline file.
+    /// Failed to create or write the baseline file at `path`, or to move the file already there aside.
     ///
     /// This error occurs when generating a new baseline file fails due to permission
     /// errors, disk full, or I/O failures.
-    CreatingBaselineFile(std::io::Error),
+    CreatingBaselineFile { path: PathBuf, source: std::io::Error },
 
     /// Failed to read the standard input, which a command reads as a file's contents.
     ReadingStdin(std::io::Error),
@@ -356,8 +356,12 @@ impl std::fmt::Display for Error {
             Self::WritingConfiguration(error) => write!(f, "Failed to write the configuration file: {error}"),
             Self::ReadingComposerJson(error) => write!(f, "Failed to read the `composer.json` file: {error}"),
             Self::ParsingComposerJson(error) => write!(f, "Failed to parse the `composer.json` file: {error}"),
-            Self::ReadingBaselineFile(error) => write!(f, "Failed to read the baseline file: {error}"),
-            Self::CreatingBaselineFile(error) => write!(f, "Failed to create the baseline file: {error}"),
+            Self::ReadingBaselineFile { path, source } => {
+                write!(f, "Failed to read the baseline file `{}`: {source}", path.display())
+            }
+            Self::CreatingBaselineFile { path, source } => {
+                write!(f, "Failed to create the baseline file `{}`: {source}", path.display())
+            }
             Self::ReadingStdin(error) => write!(f, "Failed to read the standard input: {error}"),
             Self::RunningGit { command, error } => write!(f, "Failed to run `git {command}`: {error}"),
             Self::Analysis(error) => write!(f, "Failed to analyze the source code: {error}"),
@@ -433,8 +437,8 @@ impl std::error::Error for Error {
             Self::WritingConfiguration(error) => Some(error),
             Self::ReadingComposerJson(error) => Some(error),
             Self::ParsingComposerJson(error) => Some(error),
-            Self::ReadingBaselineFile(error) => Some(error),
-            Self::CreatingBaselineFile(error) => Some(error),
+            Self::ReadingBaselineFile { source, .. } => Some(source),
+            Self::CreatingBaselineFile { source, .. } => Some(source),
             Self::ReadingStdin(error) => Some(error),
             Self::RunningGit { error, .. } => Some(error),
             Self::Analysis(error) => Some(error),
