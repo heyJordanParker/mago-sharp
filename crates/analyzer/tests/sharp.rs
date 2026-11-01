@@ -12045,6 +12045,36 @@ fn a_search_needs_equality_on_the_element_type() {
     );
 }
 
+/// Spec section 12: a search compares the value it is given with each element by `==`, whether the call passes it by
+/// position or by its parameter's name, so `carts.contains(value: cart)` is refused as `carts.contains(cart)` is, and
+/// so are a `List`'s `indexOf` and `remove`, a `Set`'s `contains` and a `Map`'s `has` given `value:` or `key:`. The
+/// same named calls on a class that declares `operator ==` compile.
+#[test]
+fn a_named_search_argument_needs_equality_as_a_positional_one_does() {
+    let sharp = "namespace Demo;\n\nclass Shelf\n{\n    public bool search(List<Cart> carts, Cart cart, List<Money> prices, Money price, Set<Cart> held, Map<Cart, int> counts, Set<Money> wallet, Map<Money, int> ledger)\n    {\n        bool named = carts.contains(value: cart);\n        bool positional = carts.contains(cart);\n        int? at = carts.indexOf(value: cart);\n        int? atPositional = carts.indexOf(cart);\n        bool dropped = carts.remove(value: cart);\n        bool droppedPositional = carts.remove(cart);\n        bool kept = held.contains(value: cart);\n        bool keptPositional = held.contains(cart);\n        bool keyed = counts.has(key: cart);\n        bool keyedPositional = counts.has(cart);\n        bool priced = prices.contains(value: price) && prices.indexOf(value: price) != null && prices.remove(value: price);\n        bool paid = wallet.contains(value: price) && ledger.has(key: price);\n        return named || positional || at != null || atPositional != null || dropped || droppedPositional || kept || keptPositional || keyed || keyedPositional || priced || paid;\n    }\n}\n\nclass Cart\n{\n}\n\nclass Money\n{\n    public Money(public int cents { get; })\n    {\n    }\n\n    public static bool operator ==(Money a, Money b) => a.cents == b.cents;\n\n    public int hash() => this.cents;\n}\n";
+
+    let key = "is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`, and `Cart` is none of them.";
+    let refusal = "compares elements with `==`, and `Cart` declares no `operator ==`.";
+
+    assert_eq!(
+        written(sharp, &analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Shelf.sharp", sharp), &[])),
+        [
+            format!("5:86 template-constraint-violation A `Set`'s element {key}"),
+            format!("5:102 template-constraint-violation A `Map`'s key {key}"),
+            format!("7:44 invalid-argument `contains` {refusal}"),
+            format!("8:42 invalid-argument `contains` {refusal}"),
+            format!("9:40 invalid-argument `indexOf` {refusal}"),
+            format!("10:43 invalid-argument `indexOf` {refusal}"),
+            format!("11:44 invalid-argument `remove` {refusal}"),
+            format!("12:47 invalid-argument `remove` {refusal}"),
+            format!("13:42 invalid-argument `contains` {refusal}"),
+            format!("14:45 invalid-argument `contains` {refusal}"),
+            format!("15:38 invalid-argument `has` {refusal}"),
+            format!("16:43 invalid-argument `has` {refusal}"),
+        ]
+    );
+}
+
 /// A `List` and a `Map` have `count()`, the number of elements they hold, as spec sections 21 and 24 call it. Its
 /// result is an `int`, so it is no condition on its own.
 #[test]

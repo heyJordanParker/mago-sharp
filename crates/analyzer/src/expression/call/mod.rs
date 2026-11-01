@@ -27,7 +27,6 @@ use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_span::HasSpan;
 use mago_span::Span;
-use mago_syntax::cst::Argument;
 use mago_syntax::cst::ArgumentList;
 use mago_syntax::cst::Call;
 use mago_syntax::cst::ClassLikeMemberSelector;
@@ -54,9 +53,11 @@ use crate::expression::binary::comparison::check_ordered_key;
 use crate::invocation::Invocation;
 use crate::invocation::InvocationArgumentsSource;
 use crate::invocation::InvocationTarget;
+use crate::invocation::InvocationTargetParameter;
 use crate::invocation::MethodInvocationKind;
 use crate::invocation::MethodTargetContext;
 use crate::invocation::analyzer::analyze_invocation;
+use crate::invocation::analyzer::get_parameter_of_argument;
 use crate::invocation::post_process::post_invocation_process;
 use crate::invocation::return_type_fetcher::fetch_invocation_return_type;
 use crate::invocation::template_result::seed_extension_type_arguments;
@@ -532,14 +533,15 @@ where
     };
     let skips_null = is_null_safe && artifacts.get_expression_type(receiver).is_some_and(TUnion::is_nullable);
     let receiver_has_nullsafe_null = artifacts.get_expression_type(receiver).is_some_and(TUnion::has_nullsafe_null);
+    let arguments_source = InvocationArgumentsSource::ExtensionReceiver(receiver, arguments);
 
     analyze_invocation_targets(
         context,
         block_context,
         artifacts,
         template_result,
-        vec![target],
-        InvocationArgumentsSource::ExtensionReceiver(receiver, arguments),
+        vec![target.clone()],
+        arguments_source,
         span,
         None,
         false,
@@ -558,24 +560,28 @@ where
     // A collection member compares the value of a parameter marked `ComparedByEquality` with each element of a `List`,
     // or each key of a `Map` or a `Set`, as `==` does, spec section 12, once the value's type is known. A value that is
     // no element is refused by its argument check. A `Map` and a `Set` find a key by its `hash()` first, so a key of
-    // another type is never compared, and a search is refused only where a key declaration is, by `is_key_type`.
-    for (parameter, argument) in metadata.parameters.iter().skip(1).zip(&arguments.arguments) {
+    // another type is never compared, and a search is refused only where a key declaration is, by `is_key_type`. Each
+    // argument meets the parameter the call's argument checks pair it with, by its name or else its position, so
+    // `contains(value: cart)` is checked as `contains(cart)` is. The receiver is the first argument.
+    for (offset, argument) in arguments_source.iter_arguments().enumerate().skip(1) {
+        let (Some((_, InvocationTargetParameter::FunctionLike(parameter))), Some(value)) =
+            (get_parameter_of_argument(&target, &argument, offset), argument.value())
+        else {
+            continue;
+        };
         // A collection member orders by the keys the function in a parameter marked `ComparedByOrder` returns, as
         // `sortedBy` does, so a key type `<` cannot order is refused.
         if is_marked(parameter, COMPARED_BY_ORDER)
             && !argument.is_unpacked()
-            && let Some(TAtomic::Callable(TCallable::Signature(function))) = artifacts
-                .get_expression_type(argument.value())
-                .filter(|function| function.is_single())
-                .map(TUnion::get_single)
+            && let Some(TAtomic::Callable(TCallable::Signature(function))) =
+                artifacts.get_expression_type(value).filter(|function| function.is_single()).map(TUnion::get_single)
             && let Some(key_type) = function.get_return_type()
         {
             let key_type = key_type.clone();
-            check_ordered_key(context, &metadata.original_name.as_str_lossy(), argument.value(), &key_type);
+            check_ordered_key(context, &metadata.original_name.as_str_lossy(), value, &key_type);
         }
         if is_marked(parameter, COMPARED_BY_EQUALITY)
-            && let Argument::Positional(_) = argument
-            && let Some(value_type) = artifacts.get_expression_type(argument.value())
+            && let Some(value_type) = artifacts.get_expression_type(value)
             && let Some(receiver_type) = artifacts.get_expression_type(receiver)
             && receiver_type.types.iter().all(|atomic| matches!(atomic, TAtomic::Array(_) | TAtomic::Null))
         {
@@ -611,7 +617,7 @@ where
                     context,
                     &method.as_str_lossy(),
                     receiver,
-                    argument.value(),
+                    value,
                     &element_type,
                     value_type,
                     is_null_safe,
