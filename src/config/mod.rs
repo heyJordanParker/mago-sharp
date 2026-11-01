@@ -113,7 +113,9 @@ use crate::config::parser::ParserConfiguration;
 use crate::config::source::SourceConfiguration;
 use crate::consts::*;
 use crate::error::Error;
+use crate::version_check::VersionCheck;
 use crate::version_check::VersionDriftFailLevel;
+use crate::version_check::VersionPin;
 
 pub mod analyzer;
 pub mod extension;
@@ -185,6 +187,25 @@ const _: () = {
 enum ExtendsDirective {
     One(String),
     Many(Vec<String>),
+}
+
+/// The command-line flags [`Configuration::load`] takes, each `None` or `false` when the user did not pass it.
+#[derive(Debug, Clone, Default)]
+pub struct CliOverrides {
+    /// `--workspace`.
+    pub workspace: Option<PathBuf>,
+    /// `--config`, which replaces the search for a configuration file.
+    pub config: Option<PathBuf>,
+    /// `--php-version`.
+    pub php_version: Option<PHPVersion>,
+    /// `--threads`.
+    pub threads: Option<usize>,
+    /// `--allow-unsupported-php-version`.
+    pub allow_unsupported_php_version: bool,
+    /// `--no-version-check`.
+    pub no_version_check: bool,
+    /// `--no-extensions`.
+    pub no_extensions: bool,
 }
 
 /// The main configuration structure for Mago CLI.
@@ -377,24 +398,17 @@ pub struct Configuration {
     ///
     /// This is set during configuration loading and is not user-configurable.
     /// It is used by watch mode to monitor the configuration file for changes.
-    #[serde(default, skip_serializing)]
+    #[serde(skip)]
     #[schemars(skip)]
     pub config_file: Option<PathBuf>,
 
-    /// Whether the configuration file was explicitly provided via `--config` CLI flag.
+    /// The command-line flags [`Self::load`] applied.
     ///
-    /// When `true`, the config file path is pinned and won't be re-discovered on reload.
-    /// When `false`, the config file is auto-discovered and may change between reloads.
-    #[serde(default, skip_serializing)]
-    #[schemars(skip)]
-    pub config_file_is_explicit: bool,
-
-    /// Whether `--no-extensions` turned the extension hosts off for this run, through [`Self::disable_extensions`].
-    ///
-    /// Watch mode loads the configuration again and keeps them off.
+    /// Watch mode loads the configuration again with them, so a flag the user passed still wins, and a value the
+    /// file or the environment gave is read again.
     #[serde(skip)]
     #[schemars(skip)]
-    pub no_extensions: bool,
+    pub cli_overrides: CliOverrides,
 }
 
 impl Configuration {
@@ -408,18 +422,22 @@ impl Configuration {
     ///    directory) and merged before the layer's own keys apply.
     /// 3. Deserialize the merged document into [`Configuration`] once.
     /// 4. Apply env-var overrides for the top-level scalars (`MAGO_PHP_VERSION`, …).
-    /// 5. Apply the explicit CLI overrides passed in here.
+    /// 5. Apply the CLI overrides passed in here.
     /// 6. Normalize (clamp, validate, fill defaults).
+    /// 7. Turn the extension hosts off under `--no-extensions`, so their configuration is still checked.
     ///
     /// # Arguments
     ///
+    /// `cli_overrides` holds the command-line flags:
+    ///
     /// * `workspace` — workspace directory; defaults to cwd.
-    /// * `file` — explicit config file (`--config`); when given, fallback search is skipped.
-    /// * `php_version` — CLI override for `php-version`.
-    /// * `threads` — CLI override for `threads`.
+    /// * `config` — explicit config file; when given, fallback search is skipped.
+    /// * `php_version` — override for `php-version`.
+    /// * `threads` — override for `threads`.
     /// * `allow_unsupported_php_version` — only forces `true`; never forces `false`.
     /// * `no_version_check` — only forces `true`; never forces `false`. Does not affect
     ///   the fatal behaviour on major-version drift.
+    /// * `no_extensions` — turns every extension host off.
     ///
     /// # Errors
     ///
@@ -430,27 +448,17 @@ impl Configuration {
     /// - `InvalidExtendsEntry` — `extends` is not a string or array of strings.
     /// - `EnvVarParse` — an `MAGO_*` env var is set but its value can't be parsed.
     /// - Normalization errors (invalid source paths, etc.).
-    pub fn load(
-        workspace: Option<PathBuf>,
-        file: Option<&Path>,
-        php_version: Option<PHPVersion>,
-        threads: Option<usize>,
-        allow_unsupported_php_version: bool,
-        no_version_check: bool,
-    ) -> Result<Configuration, Error> {
-        let workspace_dir = workspace.clone().unwrap_or_else(|| CURRENT_DIR.to_path_buf());
+    pub fn load(cli_overrides: CliOverrides) -> Result<Configuration, Error> {
+        let workspace_dir = cli_overrides.workspace.clone().unwrap_or_else(|| CURRENT_DIR.to_path_buf());
 
         let resolved_config_file: Option<(PathBuf, ConfigFormat)>;
-        let config_file_is_explicit;
-        if let Some(file) = file {
+        if let Some(file) = &cli_overrides.config {
             tracing::debug!("Sourcing configuration from {}.", file.display());
 
             resolved_config_file = Some((
-                file.to_path_buf(),
-                ConfigFormat::for_path(file).ok_or_else(|| Error::UnsupportedConfigExtension(file.to_path_buf()))?,
+                file.clone(),
+                ConfigFormat::for_path(file).ok_or_else(|| Error::UnsupportedConfigExtension(file.clone()))?,
             ));
-
-            config_file_is_explicit = true;
         } else {
             let fallback_roots = [
                 std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from),
@@ -464,8 +472,6 @@ impl Configuration {
             } else {
                 tracing::debug!("No configuration file found, using defaults and environment variables.");
             }
-
-            config_file_is_explicit = false;
         }
 
         let mut configuration: Configuration = if let Some((path, format)) = &resolved_config_file {
@@ -480,36 +486,35 @@ impl Configuration {
         configuration.apply_env_overrides()?;
 
         configuration.config_file = resolved_config_file.as_ref().map(|(p, _)| p.clone());
-        configuration.config_file_is_explicit = config_file_is_explicit;
 
-        if allow_unsupported_php_version && !configuration.allow_unsupported_php_version {
+        if cli_overrides.allow_unsupported_php_version && !configuration.allow_unsupported_php_version {
             tracing::warn!("Allowing unsupported PHP versions.");
 
             configuration.allow_unsupported_php_version = true;
         }
 
-        if no_version_check && !configuration.no_version_check {
+        if cli_overrides.no_version_check && !configuration.no_version_check {
             tracing::info!("Silencing project version drift warning.");
 
             configuration.no_version_check = true;
         }
 
-        if let Some(php_version) = php_version {
+        if let Some(php_version) = cli_overrides.php_version {
             tracing::info!("Overriding PHP version with {}.", php_version);
 
             configuration.php_version = php_version;
         }
 
-        if let Some(threads) = threads {
+        if let Some(threads) = cli_overrides.threads {
             tracing::info!("Overriding thread count with {}.", threads);
 
             configuration.threads = threads;
         }
 
-        if let Some(workspace) = workspace {
+        if let Some(workspace) = &cli_overrides.workspace {
             tracing::info!("Overriding workspace directory with {}.", workspace.display());
 
-            configuration.source.workspace = workspace;
+            configuration.source.workspace = workspace.clone();
         }
 
         if configuration.editor_url.is_none() {
@@ -517,6 +522,11 @@ impl Configuration {
         }
 
         configuration.normalize()?;
+
+        if cli_overrides.no_extensions {
+            configuration.extension_hosts.clear();
+        }
+        configuration.cli_overrides = cli_overrides;
 
         Ok(configuration)
     }
@@ -668,15 +678,69 @@ impl Configuration {
             guard: GuardConfiguration::default(),
             editor_url: None,
             config_file: None,
-            config_file_is_explicit: false,
-            no_extensions: false,
+            cli_overrides: CliOverrides::default(),
         }
     }
 
-    /// Turns the extension hosts off for this run, as `--no-extensions` does.
-    pub fn disable_extensions(&mut self) {
-        self.extension_hosts.clear();
-        self.no_extensions = true;
+    /// Refuses a run under a `version` pin the installed mago binary drifts too far from, or under a `php-version`
+    /// outside the supported range unless `allow-unsupported-php-version` is set.
+    ///
+    /// [`Self::load`] leaves these checks out, so `mago self-update --to-project-version` loads under a pin the
+    /// installed binary does not satisfy.
+    pub fn check_versions(&self) -> Result<(), Error> {
+        self.check_project_version()?;
+
+        if !self.allow_unsupported_php_version {
+            if self.php_version < MINIMUM_PHP_VERSION {
+                return Err(Error::PHPVersionIsTooOld(MINIMUM_PHP_VERSION, self.php_version));
+            }
+
+            if self.php_version > MAXIMUM_PHP_VERSION {
+                return Err(Error::PHPVersionIsTooNew(MAXIMUM_PHP_VERSION, self.php_version));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Verifies that the installed mago binary satisfies the `version` pin in `mago.toml`, if one is set.
+    fn check_project_version(&self) -> Result<(), Error> {
+        let Some(pin_string) = self.version.as_deref() else {
+            // TODO(azjezz): we should start emitting a warning here when nearing version 2.0
+            return Ok(());
+        };
+
+        let pin = VersionPin::parse(pin_string)?;
+        let result = pin.check(VERSION)?;
+
+        match result {
+            VersionCheck::Match => Ok(()),
+            VersionCheck::MajorDrift => {
+                tracing::error!("Major versions may have incompatible config schemas; refusing to run.");
+                tracing::error!("Set `version = \"{}\"` in mago.toml to use this mago binary.", version_pin());
+
+                Err(Error::ProjectMajorVersionMismatch(pin.to_string(), VERSION.to_string()))
+            }
+            VersionCheck::MinorDrift | VersionCheck::PatchDrift => {
+                if self.no_version_check {
+                    return Ok(());
+                }
+
+                if result.is_fatal(self.version_drift_fail_level) {
+                    tracing::error!("mago.toml is pinned to `{pin}` but the installed mago binary is `{VERSION}`.");
+                    tracing::error!("Run `mago self-update --to-project-version` to sync.");
+                    tracing::error!("Pass `--no-version-check` or set `MAGO_NO_VERSION_CHECK=1` to bypass this check.");
+
+                    return Err(Error::ProjectVersionMismatch(pin.to_string(), VERSION.to_string()));
+                }
+
+                tracing::warn!("mago.toml is pinned to `{pin}` but the installed mago binary is `{VERSION}`.");
+                tracing::warn!("Run `mago self-update --to-project-version` to sync.");
+                tracing::warn!("Pass `--no-version-check` or set `MAGO_NO_VERSION_CHECK=1` to silence this warning.");
+
+                Ok(())
+            }
+        }
     }
 }
 
@@ -833,7 +897,7 @@ mod tests {
                 ("MAGO_PHP_VERSION", None),
                 ("MAGO_ALLOW_UNSUPPORTED_PHP_VERSION", None),
             ],
-            || Configuration::load(workspace_path, None, None, None, false, false).unwrap(),
+            || Configuration::load(CliOverrides { workspace: workspace_path, ..Default::default() }).unwrap(),
         )
     }
 
@@ -899,11 +963,17 @@ environment = { APP_ENV = "test" }
         let configuration_file = directory.join("mago.toml");
         write_file(&configuration_file, "[extension-hosts.php]\n");
 
-        let error = Configuration::load(None, Some(&configuration_file), None, None, false, false)
-            .expect_err("enabled extension without a command should fail");
+        for no_extensions in [false, true] {
+            let error = Configuration::load(CliOverrides {
+                config: Some(configuration_file.clone()),
+                no_extensions,
+                ..Default::default()
+            })
+            .expect_err("enabled extension without a command should fail, under --no-extensions too");
 
-        assert!(matches!(error, Error::InvalidExtensionHostConfiguration(_)));
-        assert!(error.to_string().contains("extension host `php` must define a non-empty command"));
+            assert!(matches!(error, Error::InvalidExtensionHostConfiguration(_)));
+            assert!(error.to_string().contains("extension host `php` must define a non-empty command"));
+        }
     }
 
     #[test]
@@ -1018,7 +1088,14 @@ environment = { APP_ENV = "test" }
                 ("MAGO_PHP_VERSION", None),
                 ("MAGO_ALLOW_UNSUPPORTED_PHP_VERSION", None),
             ],
-            || Configuration::load(Some(workspace_path), Some(&config_file_path), None, None, false, false).unwrap(),
+            || {
+                Configuration::load(CliOverrides {
+                    workspace: Some(workspace_path),
+                    config: Some(config_file_path),
+                    ..Default::default()
+                })
+                .unwrap()
+            },
         );
 
         assert_eq!(config.threads, 3);
@@ -1042,7 +1119,14 @@ environment = { APP_ENV = "test" }
                 ("MAGO_PHP_VERSION", None),
                 ("MAGO_ALLOW_UNSUPPORTED_PHP_VERSION", None),
             ],
-            || Configuration::load(Some(workspace_path), Some(&config_file_path), None, None, false, false).unwrap(),
+            || {
+                Configuration::load(CliOverrides {
+                    workspace: Some(workspace_path),
+                    config: Some(config_file_path),
+                    ..Default::default()
+                })
+                .unwrap()
+            },
         );
 
         assert_eq!(config.threads, 1);
@@ -1075,7 +1159,10 @@ environment = { APP_ENV = "test" }
                 ("MAGO_PHP_VERSION", None),
                 ("MAGO_ALLOW_UNSUPPORTED_PHP_VERSION", None),
             ],
-            || Configuration::load(Some(workspace_path.clone()), None, None, None, false, false).unwrap(),
+            || {
+                Configuration::load(CliOverrides { workspace: Some(workspace_path.clone()), ..Default::default() })
+                    .unwrap()
+            },
         );
 
         assert_eq!(config.threads, 2);
@@ -1108,7 +1195,7 @@ environment = { APP_ENV = "test" }
                 ("MAGO_PHP_VERSION", None),
                 ("MAGO_ALLOW_UNSUPPORTED_PHP_VERSION", None),
             ],
-            || Configuration::load(None, Some(file), None, None, false, false).unwrap(),
+            || Configuration::load(CliOverrides { config: Some(file.to_path_buf()), ..Default::default() }).unwrap(),
         )
     }
 
@@ -1253,7 +1340,7 @@ environment = { APP_ENV = "test" }
         write_file(&dir.join("a.toml"), "extends = \"b.toml\"\n");
         write_file(&dir.join("b.toml"), "extends = \"a.toml\"\n");
 
-        let result = Configuration::load(None, Some(&dir.join("a.toml")), None, None, false, false);
+        let result = Configuration::load(CliOverrides { config: Some(dir.join("a.toml")), ..Default::default() });
         assert!(result.is_err(), "expected cycle to be detected");
     }
 
