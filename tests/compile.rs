@@ -1613,6 +1613,7 @@ fn compile_warns_when_the_exclude_file_cannot_be_written() {
 }
 
 /// A `.sharp` folder the compile can't open fails the compile with the folder's path and what the compile was doing.
+/// Root opens a folder of mode 000, so the test has nothing to show there.
 #[cfg(unix)]
 #[test]
 fn compile_names_the_sharp_folder_it_cannot_open() {
@@ -1623,6 +1624,10 @@ fn compile_names_the_sharp_folder_it_cannot_open() {
     compile_succeeds(&root);
     let compiled = root.join(".sharp");
     std::fs::set_permissions(&compiled, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read_dir(&compiled).is_ok() {
+        std::fs::set_permissions(&compiled, std::fs::Permissions::from_mode(0o755)).unwrap();
+        return;
+    }
 
     let output = compile(&root);
     std::fs::set_permissions(&compiled, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -1638,7 +1643,8 @@ fn compile_names_the_sharp_folder_it_cannot_open() {
     );
 }
 
-/// A folder the compile's walk of `.sharp` reaches and can't open is the one the error names, not `.sharp`.
+/// A folder the compile's walk of `.sharp` reaches and can't open is the one the error names, not `.sharp`. Root opens
+/// a folder of mode 000, so the test has nothing to show there.
 #[cfg(unix)]
 #[test]
 fn compile_names_the_folder_its_walk_of_the_sharp_folder_cannot_open() {
@@ -1649,6 +1655,10 @@ fn compile_names_the_folder_its_walk_of_the_sharp_folder_cannot_open() {
     compile_succeeds(&root);
     let app = root.join(".sharp/app");
     std::fs::set_permissions(&app, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read_dir(&app).is_ok() {
+        std::fs::set_permissions(&app, std::fs::Permissions::from_mode(0o755)).unwrap();
+        return;
+    }
 
     let output = compile(&root);
     std::fs::set_permissions(&app, std::fs::Permissions::from_mode(0o755)).unwrap();

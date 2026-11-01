@@ -1181,7 +1181,8 @@ mod tests {
         assert!(matches!(read("src"), Some(Err(DatabaseError::IOError { action: IOAction::ReadFile, .. }))));
     }
 
-    /// A file the loader can't read fails the load with its path and what the loader was doing.
+    /// A file the loader can't read fails the load with its path and what the loader was doing. Root reads a file of
+    /// mode 000, so the test has nothing to show there.
     #[cfg(unix)]
     #[test]
     fn a_file_the_loader_cannot_read_is_named_in_the_error() {
@@ -1191,6 +1192,10 @@ mod tests {
         create_test_file(&temp_dir, "src/a.php", "<?php");
         let file = temp_dir.path().canonicalize().unwrap().join("src/a.php");
         std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read(&file).is_ok() {
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+            return;
+        }
 
         let loaded = DatabaseLoader::new(create_test_config(&temp_dir, vec!["src"], vec![])).load();
         std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
