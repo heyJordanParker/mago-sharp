@@ -31,6 +31,7 @@ use mago_codex::ttype::combiner::CombinerOptions;
 use mago_codex::ttype::expander;
 use mago_codex::ttype::expander::StaticClassType;
 use mago_codex::ttype::expander::TypeExpansionOptions;
+use mago_codex::ttype::get_iterable_value_parameter;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_never;
 use mago_codex::ttype::get_php_passed_type;
@@ -789,37 +790,43 @@ where
     // Restore the previous closure bind scope after analyzing closure arguments
     artifacts.closure_bind_scope = previous_bind_scope;
 
+    // Spec sections 7 and 11: a spread's elements are arguments the call receives, by position from the parameter the
+    // spread starts at, so each fixes the type arguments of the parameter it fills, as the same argument written there
+    // does. A variadic parameter takes every element of the spread, as its check reads them.
     if !unpacked_arguments.is_empty()
-        && invocation
+        && let Some(last_parameter) = invocation
             .target
             .parameter_count()
             .checked_sub(1)
             .and_then(|offset| invocation.target.get_parameter(offset))
-            .is_some_and(|parameter| !parameter.is_variadic())
     {
         let mut current_parameter_position = 0;
         for argument in invocation.arguments_source.iter_arguments() {
-            if argument.is_unpacked() {
-                let Some(argument_expression) = argument.value() else {
-                    continue;
-                };
+            if !argument.is_unpacked() {
+                current_parameter_position += 1;
+                continue;
+            }
+            let Some(argument_expression) = argument.value() else {
+                continue;
+            };
 
-                if artifacts.get_expression_type(argument_expression).is_none() {
-                    analyze_and_store_argument_type(
-                        context,
-                        block_context,
-                        artifacts,
-                        &invocation.target,
-                        argument_expression,
-                        usize::MAX,
-                        &mut analyzed_argument_types,
-                        false,
-                        None,
-                    )?;
-                }
+            if artifacts.get_expression_type(argument_expression).is_none() {
+                analyze_and_store_argument_type(
+                    context,
+                    block_context,
+                    artifacts,
+                    &invocation.target,
+                    argument_expression,
+                    usize::MAX,
+                    &mut analyzed_argument_types,
+                    last_parameter.is_variadic() && last_parameter.is_by_reference(),
+                    None,
+                )?;
+            }
 
-                let argument_value_type =
-                    artifacts.get_expression_type(argument_expression).cloned().unwrap_or_else(get_mixed);
+            let argument_value_type =
+                artifacts.get_expression_type(argument_expression).cloned().unwrap_or_else(get_mixed);
+            if !last_parameter.is_variadic() {
                 populate_parameter_types_from_unpacked(
                     context,
                     &argument_value_type,
@@ -827,19 +834,111 @@ where
                     current_parameter_position,
                     parameter_types,
                 );
+            }
 
-                current_parameter_position += argument_value_type
+            let filled_parameters: Vec<(usize, bool, TUnion)> = invocation
+                .target
+                .iter_parameters()
+                .enumerate()
+                .filter(|(offset, parameter)| *offset >= current_parameter_position || parameter.is_variadic())
+                .filter_map(|(offset, parameter)| {
+                    let parameter_type = get_parameter_type(
+                        context,
+                        &invocation.target,
+                        Some(parameter),
+                        base_class_metadata,
+                        calling_class_like_metadata,
+                        calling_instance_type,
+                        method_class_type,
+                    );
+                    let parameter_type = match &bound_before_arguments {
+                        Some(bound_before_arguments) => {
+                            inferred_type_replacer::replace(&parameter_type, bound_before_arguments, context.codebase)
+                        }
+                        None => parameter_type,
+                    };
+
+                    parameter_type.has_template_types().then_some((offset, parameter.is_variadic(), parameter_type))
+                })
+                .collect();
+
+            if !filled_parameters.is_empty() {
+                // A spread value crosses as a passed argument does, by the parameter it starts at, spec section 12.
+                let starting_parameter_type = invocation
+                    .target
+                    .get_parameter(adjust_offset_for_variadic(&invocation.target, current_parameter_position))
+                    .filter(|_| passes_to_plain_php)
+                    .map(|parameter| {
+                        get_parameter_type(
+                            context,
+                            &invocation.target,
+                            Some(parameter),
+                            base_class_metadata,
+                            calling_class_like_metadata,
+                            calling_instance_type,
+                            method_class_type,
+                        )
+                    });
+                let spread_type = starting_parameter_type
+                    .and_then(|parameter_type| {
+                        record_received_argument_type(
+                            artifacts,
+                            invocation.span,
+                            argument_expression,
+                            &argument_value_type,
+                            &parameter_type,
+                            context.codebase,
+                        )
+                    })
+                    .unwrap_or_else(|| argument_value_type.clone());
+                // A part that is no iterable fixes nothing, and the spread's check reports it.
+                let other_atomics: Vec<TAtomic> = spread_type
                     .types
                     .iter()
-                    .filter_map(|atomic| match atomic {
-                        TAtomic::Array(array) => Some(array.get_minimum_size()),
-                        _ => None,
+                    .filter(|atomic| {
+                        !matches!(atomic, TAtomic::Array(TArray::List(_)))
+                            && get_iterable_value_parameter(atomic, context.codebase).is_some()
                     })
-                    .min()
-                    .unwrap_or(0);
-            } else {
-                current_parameter_position += 1;
+                    .cloned()
+                    .collect();
+                let other_element_type = if other_atomics.is_empty() {
+                    None
+                } else {
+                    get_unpacked_argument_type(context, &TUnion::from_vec(other_atomics), argument_expression.span())
+                };
+
+                for (parameter_offset, is_variadic, parameter_type) in filled_parameters {
+                    let index = (!is_variadic).then(|| parameter_offset - current_parameter_position);
+                    let Some(element_type) = spread_list_elements(&spread_type, index)
+                        .chain(other_element_type.clone())
+                        .reduce(|elements, element| {
+                            add_union_type(elements, &element, context.codebase, CombinerOptions::default())
+                        })
+                    else {
+                        continue;
+                    };
+
+                    violated_templates.extend(infer_parameter_templates_from_argument(
+                        context,
+                        &parameter_type,
+                        &element_type,
+                        template_result,
+                        parameter_offset,
+                        argument_expression.span(),
+                        false,
+                    ));
+                }
             }
+
+            current_parameter_position += argument_value_type
+                .types
+                .iter()
+                .filter_map(|atomic| match atomic {
+                    TAtomic::Array(array) => Some(array.get_minimum_size()),
+                    _ => None,
+                })
+                .min()
+                .unwrap_or(0);
         }
     }
 
@@ -1223,76 +1322,6 @@ where
             }
 
             parameter_types.insert(parameter_name.0, default_type.into_owned());
-        }
-    }
-
-    if !unpacked_arguments.is_empty()
-        && let Some(last_parameter_offset) = invocation.target.parameter_count().checked_sub(1)
-        && let Some(last_parameter_ref) = invocation.target.get_parameter(last_parameter_offset)
-        && last_parameter_ref.is_variadic()
-    {
-        let base_variadic_parameter_type = get_parameter_type(
-            context,
-            &invocation.target,
-            Some(last_parameter_ref),
-            base_class_metadata,
-            calling_class_like_metadata,
-            calling_instance_type,
-            method_class_type,
-        );
-
-        if base_variadic_parameter_type.has_template_types() {
-            for unpacked_argument in &unpacked_arguments {
-                let Some(argument_expression) = unpacked_argument.value() else {
-                    continue;
-                };
-
-                if artifacts.get_expression_type(argument_expression).is_none() {
-                    analyze_and_store_argument_type(
-                        context,
-                        block_context,
-                        artifacts,
-                        &invocation.target,
-                        argument_expression,
-                        usize::MAX,
-                        &mut analyzed_argument_types,
-                        last_parameter_ref.is_by_reference(),
-                        None,
-                    )?;
-                }
-
-                let mut argument_value_type =
-                    artifacts.get_expression_type(argument_expression).cloned().unwrap_or_else(get_mixed);
-                // A spread value crosses as a passed argument does, each of its elements into the variadic parameter.
-                if passes_to_plain_php
-                    && let Some(received) = record_received_argument_type(
-                        artifacts,
-                        invocation.span,
-                        argument_expression,
-                        &argument_value_type,
-                        &base_variadic_parameter_type,
-                        context.codebase,
-                    )
-                {
-                    argument_value_type = received;
-                }
-
-                let Some(unpacked_element_type) =
-                    get_unpacked_argument_type(context, &argument_value_type, argument_expression.span())
-                else {
-                    continue;
-                };
-
-                violated_templates.extend(infer_parameter_templates_from_argument(
-                    context,
-                    &base_variadic_parameter_type,
-                    &unpacked_element_type,
-                    template_result,
-                    last_parameter_offset,
-                    argument_expression.span(),
-                    false,
-                ));
-            }
         }
     }
 
@@ -2394,6 +2423,40 @@ where
     }
 
     parameter_type
+}
+
+/// The types of the elements a spread of `spread` passes a parameter from its lists: the element `index` places after
+/// the parameter the spread starts at, or with no `index` every element, as a variadic parameter's check reads them.
+fn spread_list_elements(spread: &TUnion, index: Option<usize>) -> impl Iterator<Item = TUnion> + '_ {
+    spread
+        .types
+        .iter()
+        .filter_map(move |atomic| match atomic {
+            TAtomic::Array(TArray::List(list))
+                if index.is_none_or(|index| list.known_count.is_none_or(|count| index < count)) =>
+            {
+                Some(list)
+            }
+            _ => None,
+        })
+        .flat_map(move |list| {
+            let known_elements = list
+                .known_elements
+                .iter()
+                .flatten()
+                .filter(move |(offset, _)| index.is_none_or(|index| **offset == index))
+                .map(|(_, (_, element))| element)
+                .collect::<Vec<_>>();
+            let beyond_known = (!list.element_type.is_never() && (index.is_none() || known_elements.is_empty()))
+                .then_some(list.element_type.as_ref());
+
+            known_elements.into_iter().chain(beyond_known)
+        })
+        .map(|element| {
+            let mut element = element.clone();
+            element.set_possibly_undefined(false, None);
+            element
+        })
 }
 
 /// Adds statically known unpacked elements to the invocation's parameter map.

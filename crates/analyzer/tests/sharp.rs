@@ -7737,6 +7737,69 @@ fn a_variadic_parameter_is_a_list_that_spreads_into_methods_and_php_functions_wi
     assert_eq!(issues(("src/Demo/Report.sharp", sharp), &[math]), Vec::<String>::new());
 }
 
+/// The issues of `analyzed` as `line:column code`, and the type of the first expression in it written `expression`.
+fn issues_and_type(analyzed: (&'static str, &'static str), expression: &str) -> (Vec<String>, Option<String>) {
+    let (issues, artifacts) = analyze_with_artifacts(&PLUGIN_REGISTRY, settings(), analyzed, &[]);
+    let start = analyzed.1.find(expression).unwrap() as u32;
+    let span = (start, start + expression.len() as u32);
+
+    (
+        issues.iter().map(|issue| located(analyzed.1, issue)).collect(),
+        artifacts.expression_types.get(&span).map(|r#type| r#type.get_id().to_string()),
+    )
+}
+
+/// Spec sections 7 and 11: a spread's elements are arguments the call receives, so each fixes the type arguments of the
+/// parameter it fills. A variadic parameter takes every element of the spread, as its check reads them.
+#[test]
+fn a_spread_into_a_generic_method_s_parameters_fixes_its_type_arguments() {
+    let sharp = "namespace Demo;\n\nclass Pairs\n{\n    public static List<T> pair<T>(T a, T b) => [a, b];\n\n    public static TSecond last<TFirst, TSecond>(TFirst first, TSecond second) => second;\n\n    public static List<TRest> rest<TFirst, TRest>(TFirst first, TRest ...rest) => rest;\n\n    public static int count()\n    {\n        const spread = Pairs.pair(...[1, 2]);\n        const rest = Pairs.rest(...[1, \"tea\", \"cup\"]);\n        return spread.count() + rest.count();\n    }\n\n    public static string name()\n    {\n        const last = Pairs.last(...[1, \"tea\"]);\n        return last;\n    }\n}\n";
+    let analyzed = ("src/Demo/Pairs.sharp", sharp);
+
+    assert_eq!(issues_and_type(analyzed, "Pairs.pair(...[1, 2])"), (vec![], Some("list<int>".to_owned())));
+    assert_eq!(issues_and_type(analyzed, "Pairs.last(...[1, \"tea\"])"), (vec![], Some("string".to_owned())));
+    assert_eq!(
+        issues_and_type(analyzed, "Pairs.rest(...[1, \"tea\", \"cup\"])"),
+        (vec![], Some("list<int|string>".to_owned()))
+    );
+}
+
+/// Spec section 7: a spread works the same into plain PHP, so a plain PHP spread fixes a `@template` as the arguments it
+/// spreads would.
+#[test]
+fn a_plain_php_spread_into_a_template_function_s_parameters_fixes_its_template() {
+    let php = "<?php\n\nnamespace Demo;\n\n/**\n * @template T\n *\n * @param T $a\n * @param T $b\n *\n * @return list<T>\n */\nfunction pair(mixed $a, mixed $b): array\n{\n    return [$a, $b];\n}\n\n/** @return list<1|2> */\nfunction spread(): array\n{\n    return pair(...[1, 2]);\n}\n";
+
+    assert_eq!(
+        issues_and_type(("src/Demo/pair.php", php), "pair(...[1, 2])"),
+        (vec![], Some("list<int(1)|int(2)>".to_owned()))
+    );
+}
+
+/// A type argument the call writes is fixed before any argument, so a spread's element outside it is refused, into a
+/// parameter and into a variadic one.
+#[test]
+fn a_spread_element_outside_a_written_type_argument_is_refused() {
+    let sharp = "namespace Demo;\n\nclass Pairs\n{\n    public static List<T> pair<T>(T a, T b) => [a, b];\n\n    public static List<T> many<T>(T ...values) => values;\n\n    public static int count()\n    {\n        const paired = Pairs.pair<int>(...[1, \"tea\"]);\n        const listed = Pairs.many<int>(...[1, \"tea\"]);\n        return paired.count() + listed.count();\n    }\n}\n";
+
+    assert_eq!(
+        issues(("src/Demo/Pairs.sharp", sharp), &[]),
+        ["11:43 invalid-argument", "12:43 possibly-invalid-argument"]
+    );
+}
+
+/// A spread of a `List` whose length is unknown fixes the type arguments of each parameter it may fill with its element
+/// type. The call is refused only for the arguments it may lack.
+#[test]
+fn a_spread_of_unknown_length_fixes_type_arguments_with_its_element_type() {
+    let sharp = "namespace Demo;\n\nclass Pairs\n{\n    public static List<T> pair<T>(T a, T b) => [a, b];\n\n    public static int run(List<int> numbers)\n    {\n        const spread = Pairs.pair(...numbers);\n        return spread.count();\n    }\n}\n";
+
+    assert_eq!(
+        issues_and_type(("src/Demo/Pairs.sharp", sharp), "Pairs.pair(...numbers)"),
+        (vec!["9:34 too-few-arguments".to_owned()], Some("list<int>".to_owned()))
+    );
+}
+
 #[test]
 fn a_union_type_is_checked_as_php_checks_its_twin() {
     let sharp = "namespace Demo;\n\nimport Lib.Calc;\n\nclass Report\n{\n    private int|string key = 1;\n\n    public int|string find(int|Calc id)\n    {\n        int|string found = this.key;\n        if (found == 1) {\n            return 1.5;\n        }\n        return id;\n    }\n}\n";
