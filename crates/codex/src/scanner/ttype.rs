@@ -3,6 +3,7 @@ use std::sync::Arc;
 use mago_allocator::Arena;
 use mago_names::EQUATABLE;
 use mago_names::ResolvedNames;
+use mago_names::TypeParametersNamed;
 use mago_names::kind::NameKind;
 use mago_names::scope::NamespaceScope;
 use mago_phpdoc_syntax::cst::r#type::Type;
@@ -13,6 +14,7 @@ use mago_syntax::cst::TypeParameterList;
 use mago_syntax::cst::UnionHint;
 use mago_syntax::cst::built_in_generic_arity;
 use mago_syntax::dialect::Dialect;
+use mago_syntax::walker::Walker;
 use mago_word::Word;
 use mago_word::word;
 
@@ -93,14 +95,17 @@ pub fn get_type_metadata_from_type(
     })
 }
 
-/// The templates a PHP# type parameter list declares, in order, spec section 11: each is the template a `@template`
-/// tag declares for `defining_entity`, its bound the tag's `of`, `mixed` without one, or the error type for a union
-/// bound outside the standard library, which the checker refuses. Every name of the list is a
-/// template while the bounds are read, so a bound names a type parameter of its own list, its own or a later one, as in
-/// `<TItem : Comparable<TItem>>`. The bounds are read once per type parameter, each time with the templates of the read
-/// before, so a bound sees the bound of every type parameter it names, directly or through another bound, as
-/// `<TKey : DatabaseEntity, TItem : Holder<TKey>>` sees `TKey`'s. `type_context` holds the templates once the list is
-/// read.
+/// The templates a PHP# type parameter list declares, in order, spec section 11.
+///
+/// Each is the template a `@template` tag declares for `defining_entity`, its bound the tag's `of`, `mixed` without
+/// one, or the refused type for a bound the checker refuses. Each other type parameter such a bound names is
+/// [named by a refused bound](GenericTemplate::named_by_refused_bound).
+///
+/// Every name of the list is a template while the bounds are read, so a bound names a type parameter of its own list,
+/// its own or a later one, as in `<TItem : Comparable<TItem>>`. The bounds are read once per type parameter, each time
+/// with the templates of the read before, so a bound sees the bound of every type parameter it names, directly or
+/// through another bound, as `<TKey : DatabaseEntity, TItem : Holder<TKey>>` sees `TKey`'s. `type_context` holds the
+/// templates once the list is read.
 pub fn scan_type_parameters<'arena, A>(
     type_parameters: &'arena TypeParameterList<'arena>,
     defining_entity: GenericParent,
@@ -119,25 +124,45 @@ where
             .insert(word(parameter.name.value), vec![GenericTemplate::new(defining_entity, get_mixed())]);
     }
 
+    // Whether the checker refuses each bound, and the other type parameters each refused bound names.
+    let refused: Vec<bool> = type_parameters
+        .parameters
+        .iter()
+        .map(|parameter| {
+            context.resolved_names.is_refused_bound(type_parameters, parameter, context.file.is_standard_library)
+        })
+        .collect();
+    let mut named_by_refused_bounds = Vec::new();
+    for (parameter, refused) in type_parameters.parameters.iter().zip(&refused) {
+        if let Some(bound) = &parameter.bound
+            && *refused
+        {
+            let mut named = Vec::new();
+            TypeParametersNamed(context.resolved_names).walk_type_parameter_bound(bound, &mut named);
+            named_by_refused_bounds.extend(named.into_iter().filter(|name| *name != parameter.name.value));
+        }
+    }
+
     let mut templates = Vec::new();
     for _ in &type_parameters.parameters {
         templates = type_parameters
             .parameters
             .iter()
-            .map(|parameter| {
+            .zip(&refused)
+            .map(|(parameter, refused)| {
                 let constraint = match &parameter.bound {
                     None => get_mixed(),
-                    // The checker refuses a union bound outside the standard library, whose `sumOf` bounds its result
-                    // by `int|float`, so there it bounds nothing a type argument could fail.
-                    Some(bound) if matches!(bound.hint, Hint::Union(_)) && !context.file.is_standard_library => {
-                        wrap_atomic(TAtomic::Error)
-                    }
+                    // The checker refuses the bound, so it bounds nothing a type argument or a use could fail, and its
+                    // one error is the checker's.
+                    Some(_) if *refused => wrap_atomic(TAtomic::Error),
                     Some(bound) => {
                         get_type_metadata_from_hint(&bound.hint, Some(classname), &*type_context, context).type_union
                     }
                 };
+                let mut template = GenericTemplate::new(defining_entity, constraint);
+                template.named_by_refused_bound = named_by_refused_bounds.contains(&parameter.name.value);
 
-                (word(parameter.name.value), GenericTemplate::new(defining_entity, constraint))
+                (word(parameter.name.value), template)
             })
             .collect();
 

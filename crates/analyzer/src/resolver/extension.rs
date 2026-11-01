@@ -26,6 +26,7 @@ use mago_word::ascii_lowercase_word;
 
 use crate::code::IssueCode;
 use crate::context::Context;
+use crate::expression::call::can_compare_elements;
 use crate::expression::is_refused_type;
 use crate::invocation::InferenceOptions;
 use crate::invocation::TemplateInferenceViolation;
@@ -88,6 +89,17 @@ impl CollectionKind {
             Self::Iterable => "An",
             Self::List | Self::Map | Self::Set => "A",
         }
+    }
+
+    /// The help for a member of the kind that a project without the standard library lacks, as it lacks them all:
+    /// the library to install, as "… which declares the members of an `Iterable`."
+    #[must_use]
+    pub fn missing_library_help(self) -> String {
+        format!(
+            "Install the standard library, heyjordanparker/php-sharp-composer, which declares the members of {} `{}`.",
+            self.article().to_lowercase(),
+            self.name()
+        )
     }
 }
 
@@ -280,15 +292,16 @@ where
     }
 }
 
-/// The extension methods a call on a value of type `receiver` reaches in this file, each written as `` `name` ``, in
-/// order and once each: those of the file's namespace, its imports and the standard library's on the types every file
-/// has them for, whose receiver fits.
+/// The extension methods a call on a value of type `receiver` reaches in this file and can call, each written as
+/// `` `name` ``, in the order of their names, so `remove` comes before `removeLast`, and once each: those of the file's
+/// namespace, its imports and the standard library's on the types every file has them for, whose receiver fits, and
+/// whose search can compare the receiver's elements, as [`can_compare_elements`] decides for the call.
 pub(crate) fn extension_methods<A>(context: &Context<'_, '_, A>, receiver: &TUnion) -> Vec<String>
 where
     A: Arena,
 {
     let codebase = context.codebase;
-    let mut methods: Vec<String> = codebase
+    let mut names: Vec<String> = codebase
         .extensions
         .values()
         .flatten()
@@ -297,13 +310,14 @@ where
             metadata.flags.contains(MetadataFlags::EXTENSION_METHOD)
                 && (is_imported_or_in_namespace(context, *class) || is_imported_by_default(context, *class, metadata))
                 && fits(context, receiver, *class, metadata)
+                && can_compare_elements(metadata, receiver, codebase)
         })
-        .map(|(_, metadata)| format!("`{}`", metadata.original_name))
+        .map(|(_, metadata)| metadata.original_name.to_string())
         .collect();
-    methods.sort();
-    methods.dedup();
+    names.sort();
+    names.dedup();
 
-    methods
+    names.into_iter().map(|name| format!("`{name}`")).collect()
 }
 
 /// Whether a value of type `receiver` fits the receiver of the extension member `metadata` of the static class `class`,
@@ -424,7 +438,8 @@ where
 
 /// The members of `candidates` whose receiver fits inside every other candidate's, as C# overload resolution and
 /// Kotlin pick the most specific receiver, spec section 26: an extension on `AuditedWallet` over one on `Wallet`. All
-/// of `candidates` when none does, so they stay ambiguous.
+/// of `candidates` when none does, so they stay ambiguous. A receiver the checker refused, as a type parameter whose
+/// bound it refused, fits any value, so it is the least specific, and its member wins only when it fits alone.
 fn most_specific<'ctx, A>(
     context: &Context<'_, '_, A>,
     candidates: Vec<(MethodIdentifier, &'ctx FunctionLikeMetadata)>,
@@ -432,17 +447,29 @@ fn most_specific<'ctx, A>(
 where
     A: Arena,
 {
-    let specific: Vec<_> = candidates
+    let receiver = |metadata: &'ctx FunctionLikeMetadata| {
+        metadata.parameters.first().and_then(|parameter| parameter.get_type_metadata())
+    };
+    let ranked: Vec<_> = candidates
+        .iter()
+        .filter(|(_, metadata)| !receiver(metadata).is_some_and(|own| is_refused_type(&own.type_union)))
+        .copied()
+        .collect();
+    if ranked.is_empty() {
+        return candidates;
+    }
+
+    let specific: Vec<_> = ranked
         .iter()
         .filter(|(_, metadata)| {
-            metadata.parameters.first().and_then(|parameter| parameter.get_type_metadata()).is_some_and(|own| {
-                candidates.iter().all(|(method, other)| fits(context, &own.type_union, method.get_class_name(), other))
+            receiver(metadata).is_some_and(|own| {
+                ranked.iter().all(|(method, other)| fits(context, &own.type_union, method.get_class_name(), other))
             })
         })
         .copied()
         .collect();
 
-    if specific.is_empty() { candidates } else { specific }
+    if specific.is_empty() { ranked } else { specific }
 }
 
 /// The start of the error for the extensions `candidates`, which compete for the member `written`, naming where each
@@ -599,6 +626,16 @@ pub fn collection_member<'codebase>(
     kind: CollectionKind,
 ) -> Option<&'codebase MethodIdentifier> {
     codebase.extensions.get(&ascii_lowercase_word(name))?.iter().map(|(_, method)| method).find(|method| {
+        codebase
+            .get_method_by_id(method)
+            .is_some_and(|metadata| collection_member_kind(method.get_class_name(), metadata) == Some(kind))
+    })
+}
+
+/// Whether the standard library declares any member of the collection `kind`, as [`collection_member`] finds one. A
+/// project without the library has none of them, whatever extensions of its own it declares.
+pub(crate) fn library_declares_members(codebase: &CodebaseMetadata, kind: CollectionKind) -> bool {
+    codebase.extensions.values().flatten().any(|(_, method)| {
         codebase
             .get_method_by_id(method)
             .is_some_and(|metadata| collection_member_kind(method.get_class_name(), metadata) == Some(kind))

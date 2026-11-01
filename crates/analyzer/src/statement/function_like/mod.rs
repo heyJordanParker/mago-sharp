@@ -58,7 +58,7 @@ use mago_codex::ttype::template::inferred_type_replacer;
 use mago_codex::ttype::union::TUnion;
 use mago_codex::ttype::wrap_atomic;
 use mago_codex::visibility::Visibility;
-use mago_names::ResolvedNames;
+use mago_names::TypeParametersNamed;
 use mago_names::binding::php_variable_name;
 use mago_names::display_sharp_member;
 use mago_php_version::feature::Feature;
@@ -74,7 +74,6 @@ use mago_syntax::cst::ConstructorInitializer;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::FunctionLikeParameterList;
 use mago_syntax::cst::Law;
-use mago_syntax::cst::LocalIdentifier;
 use mago_syntax::cst::Statement;
 use mago_syntax::walker::Walker;
 use mago_text_edit::Safety;
@@ -2026,6 +2025,8 @@ fn type_contains_function_template_param(
 /// - A parameter type
 /// - The return type
 /// - The PHP# `body`, as `catch (TError error)` names it, since a call can write its type argument
+/// - A bound the checker refused, as `TOther` in `<TOther, THolder : Order & TOther>`, since that bound bounds nothing
+///   and its refusal settles what it names
 pub fn check_unused_function_template_parameters<'ctx, A>(
     context: &mut Context<'ctx, '_, A>,
     function_like_metadata: &'ctx FunctionLikeMetadata,
@@ -2067,8 +2068,11 @@ pub fn check_unused_function_template_parameters<'ctx, A>(
         None => {}
     }
 
-    'templates: for (template_name, _) in &function_like_metadata.template_types {
-        if template_name.as_bytes().starts_with(b"_") || named_in_body.contains(&template_name.as_bytes()) {
+    'templates: for (template_name, template) in &function_like_metadata.template_types {
+        if template_name.as_bytes().starts_with(b"_")
+            || template.named_by_refused_bound
+            || named_in_body.contains(&template_name.as_bytes())
+        {
             continue;
         }
 
@@ -2111,17 +2115,6 @@ pub fn check_unused_function_template_parameters<'ctx, A>(
             IssueCode::UnusedTemplateParameter,
             Issue::warning(message).with_annotation(Annotation::primary(name_span).with_message(label)).with_help(help),
         );
-    }
-}
-
-/// Collects each name of a PHP# type parameter a body writes, as the binder bound it.
-struct TypeParametersNamed<'names, 'arena>(&'names ResolvedNames<'arena>);
-
-impl<'ast, 'arena> Walker<'ast, 'arena, Vec<&'arena [u8]>> for TypeParametersNamed<'_, '_> {
-    fn walk_in_local_identifier(&self, identifier: &'ast LocalIdentifier<'arena>, names: &mut Vec<&'arena [u8]>) {
-        if self.0.is_type_parameter(identifier) {
-            names.push(identifier.value);
-        }
     }
 }
 

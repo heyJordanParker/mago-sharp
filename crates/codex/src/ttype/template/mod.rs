@@ -26,6 +26,11 @@ pub struct GenericTemplate {
     /// The default type used when no explicit generic argument is provided
     /// (e.g., `string` for `@template T of int|string = string`).
     pub default: Option<TUnion>,
+    /// Whether a PHP# bound of the same list that the checker refused names this type parameter.
+    ///
+    /// `TOther` in `<T : List<TOther>, TOther>` is one. The refused bound is the refused type, so it no longer fixes or
+    /// uses the type parameter, and a call reports no type argument of it unfixed, nor the type parameter unused.
+    pub named_by_refused_bound: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -46,7 +51,12 @@ impl GenericTemplate {
     /// Creates a new `GenericTemplate` with the given source and constraint type.
     #[must_use]
     pub fn new(template_source: GenericParent, template_type: TUnion) -> Self {
-        Self { defining_entity: template_source, constraint: template_type, default: None }
+        Self {
+            defining_entity: template_source,
+            constraint: template_type,
+            default: None,
+            named_by_refused_bound: false,
+        }
     }
 
     /// Returns the same `GenericTemplate` with the given default type set.

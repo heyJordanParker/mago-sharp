@@ -9,11 +9,20 @@ use mago_syntax::cst::Closure;
 use mago_syntax::cst::ConstantAccess;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::GenericClass;
+use mago_syntax::cst::Hint;
+use mago_syntax::cst::Identifier;
+use mago_syntax::cst::LocalIdentifier;
 use mago_syntax::cst::MethodCall;
 use mago_syntax::cst::PropertyAccess;
 use mago_syntax::cst::PropertyHookBody;
 use mago_syntax::cst::PropertyHookList;
+use mago_syntax::cst::TypeParameter;
+use mago_syntax::cst::TypeParameterBound;
+use mago_syntax::cst::TypeParameterList;
+use mago_syntax::cst::UnionHint;
+use mago_syntax::cst::built_in_generic_arity;
 use mago_syntax::walker::MutWalker;
+use mago_syntax::walker::Walker;
 use mago_syntax::walker::walk_property_hook_list_mut;
 
 use crate::binding::Binding;
@@ -68,6 +77,11 @@ pub const LEAN_FUNCTION: &str = "Sharp\\Internal\\LeanFunction";
 /// running code checks.
 pub const EQUATABLE: &str = "Equatable";
 
+/// How PHP# writes PHP's `object`, spec section 24.
+///
+/// The parser reads both as `Hint::Object`, and only `Object` is PHP#.
+pub const OBJECT: &[u8] = b"Object";
+
 /// The class-likes that a bare name in a `.sharp` file names by default, spec section 23, and that a class-like of the
 /// file's namespace can win over: every class-like the standard library or the prelude declares directly in `Sharp`,
 /// then the [standard root classes](STANDARD_ROOT_CLASSES), but the [fixed one](fixed_default_class).
@@ -110,6 +124,42 @@ pub(crate) fn shadows_a_default_class(name: &[u8]) -> bool {
 /// The name a `.sharp` file writes the default class-like `class` by: `Math` for `Sharp\Math`.
 pub(crate) fn default_short_name(class: &str) -> &[u8] {
     class.rsplit('\\').next().unwrap_or(class).as_bytes()
+}
+
+/// Whether the bound of `parameter`, a type parameter of `list`, leads back to it.
+///
+/// It leads back through the bounds of the other type parameters of `list` it names, as `<T : T>` and
+/// `<TA : TB, TB : TA>` do. C# refuses such a circular constraint (CS0454), and so does PHP#, spec section 11.
+#[must_use]
+pub fn bounds_itself(list: &TypeParameterList<'_>, parameter: &TypeParameter<'_>) -> bool {
+    let mut current = parameter;
+    for _ in 0..list.parameters.len() {
+        let Some(TypeParameterBound { hint: Hint::Identifier(Identifier::Local(bound)), .. }) = &current.bound else {
+            return false;
+        };
+        if bound.value == parameter.name.value {
+            return true;
+        }
+        let Some(next) = list.parameters.iter().find(|other| other.name.value == bound.value) else {
+            return false;
+        };
+        current = next;
+    }
+
+    false
+}
+
+/// Collects each name of a PHP# type parameter the code it walks writes, as the binder bound it.
+///
+/// It collects `TError` in a body's `catch (TError error)`, or `TOther` in a bound's `List<TOther>`.
+pub struct TypeParametersNamed<'names, 'arena>(pub &'names ResolvedNames<'arena>);
+
+impl<'ast, 'arena> Walker<'ast, 'arena, Vec<&'arena [u8]>> for TypeParametersNamed<'_, '_> {
+    fn walk_in_local_identifier(&self, identifier: &'ast LocalIdentifier<'arena>, names: &mut Vec<&'arena [u8]>) {
+        if self.0.is_type_parameter(identifier) {
+            names.push(identifier.value);
+        }
+    }
 }
 
 /// The last segment of the full name `name`, as a PHP# import writes it.
@@ -294,6 +344,70 @@ impl<'arena> ResolvedNames<'arena> {
         T: HasPosition,
     {
         matches!(self.binding(name), Some(Binding::TypeParameter { .. }))
+    }
+
+    /// Returns whether PHP# refuses the bound of `parameter`, a type parameter of `list`, spec section 11.
+    ///
+    /// It refuses one that [is no bound](Self::is_bound), as a union, `int`, `Shareable?` or `TItem & Shareable`, and
+    /// one that [leads back to `parameter`](bounds_itself), as in `<T : T>` and `<TA : TB, TB : TA>`.
+    ///
+    /// The checker and the scanner both read this, so the bound the checker refuses is the bound the scanner reads as
+    /// the refused type.
+    #[must_use]
+    pub fn is_refused_bound(
+        &self,
+        list: &TypeParameterList<'_>,
+        parameter: &TypeParameter<'_>,
+        in_standard_library: bool,
+    ) -> bool {
+        parameter
+            .bound
+            .as_ref()
+            .is_some_and(|bound| !self.is_bound(&bound.hint, in_standard_library) || bounds_itself(list, parameter))
+    }
+
+    /// Returns whether `hint` is a bound PHP# writes, spec section 11.
+    ///
+    /// It is a type parameter alone, or [a class bound](Self::is_class_bound). `in_standard_library` also accepts the
+    /// `int|float` the standard library's `sumOf` bounds its result by.
+    #[must_use]
+    pub fn is_bound(&self, hint: &Hint<'_>, in_standard_library: bool) -> bool {
+        match hint {
+            Hint::Identifier(name @ Identifier::Local(_)) if self.is_type_parameter(name) => true,
+            Hint::Union(UnionHint { left: Hint::Integer(_), right: Hint::Float(_), .. }) => in_standard_library,
+            hint => self.is_class_bound(hint),
+        }
+    }
+
+    /// Returns whether `hint` is a class bound, spec section 11.
+    ///
+    /// It is `Object` alone, or a class or an interface, by name or as a generic class type, or several of them joined
+    /// with `&`. `Equatable` is a name too. A type parameter is none of them, and `Object`, which holds any object,
+    /// joins no other bound.
+    #[must_use]
+    pub fn is_class_bound(&self, hint: &Hint<'_>) -> bool {
+        match hint {
+            Hint::Object(object) => object.value == OBJECT,
+            hint => self.joins_classes(hint),
+        }
+    }
+
+    /// Whether `hint` is a class or an interface, by name or as a generic class type, or several of them joined with
+    /// `&`.
+    fn joins_classes(&self, hint: &Hint<'_>) -> bool {
+        match hint {
+            Hint::Identifier(name @ Identifier::Local(_)) => !self.is_type_parameter(name),
+            // A dotted name is a case type or a full name, which the analyzer refuses with the import to add, spec
+            // section 23.
+            Hint::Identifier(Identifier::Dotted(_)) => true,
+            Hint::Generic(generic) => {
+                built_in_generic_arity(generic.name.value).is_none() && !self.is_type_parameter(&generic.name)
+            }
+            Hint::Intersection(intersection) => {
+                self.joins_classes(intersection.left) && self.joins_classes(intersection.right)
+            }
+            _ => false,
+        }
     }
 
     /// Returns the class of a PHP# static call, `Class.method()`: the object of `call` when the binder bound it to a
