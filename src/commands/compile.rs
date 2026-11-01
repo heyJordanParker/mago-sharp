@@ -810,11 +810,12 @@ fn file_names(folder: &Path) -> Result<Vec<String>, DatabaseError> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => return Err(DatabaseError::io(IOAction::OpenFolder, folder, error)),
     };
-    let walk = |error| DatabaseError::io(IOAction::WalkFolder, folder, error);
     let mut names = Vec::new();
     for entry in entries {
-        let entry = entry.map_err(walk)?;
-        if entry.file_type().map_err(walk)?.is_file() {
+        let entry = entry.map_err(|error| DatabaseError::io(IOAction::WalkFolder, folder, error))?;
+        let file_type =
+            entry.file_type().map_err(|error| DatabaseError::io(IOAction::ReadMetadata, &entry.path(), error))?;
+        if file_type.is_file() {
             names.push(entry.file_name().to_string_lossy().into_owned());
         }
     }
@@ -835,12 +836,11 @@ fn source_folders(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(DatabaseError::io(IOAction::OpenFolder, folder, error)),
     };
-    let walk = |error| DatabaseError::io(IOAction::WalkFolder, folder, error);
     for entry in entries {
-        let entry = entry.map_err(walk)?;
+        let entry = entry.map_err(|error| DatabaseError::io(IOAction::WalkFolder, folder, error))?;
         let path = entry.path();
         let relative = path.strip_prefix(compiled).unwrap_or(&path);
-        if entry.file_type().map_err(walk)?.is_dir() {
+        if entry.file_type().map_err(|error| DatabaseError::io(IOAction::ReadMetadata, &path, error))?.is_dir() {
             if relative != Path::new(PACKAGE_FOLDER) && relative != Path::new("vendor") {
                 source_folders(root, compiled, &path, folders)?;
             }
@@ -866,15 +866,14 @@ fn files(count: usize) -> String {
 /// then every folder left empty, `folder` included. Returns how many files it deleted.
 fn delete_all_but(folder: &Path, kept: &BTreeSet<PathBuf>, owned: &Path) -> Result<usize, DatabaseError> {
     let open = |error| DatabaseError::io(IOAction::OpenFolder, folder, error);
-    let walk = |error| DatabaseError::io(IOAction::WalkFolder, folder, error);
     let mut deleted = 0;
     for entry in std::fs::read_dir(folder).map_err(open)? {
-        let entry = entry.map_err(walk)?;
+        let entry = entry.map_err(|error| DatabaseError::io(IOAction::WalkFolder, folder, error))?;
         let path = entry.path();
         if path == owned || kept.contains(&path) {
             continue;
         }
-        if entry.file_type().map_err(walk)?.is_dir() {
+        if entry.file_type().map_err(|error| DatabaseError::io(IOAction::ReadMetadata, &path, error))?.is_dir() {
             deleted += delete_all_but(&path, kept, owned)?;
         } else {
             std::fs::remove_file(&path).map_err(|error| DatabaseError::io(IOAction::DeleteFile, &path, error))?;

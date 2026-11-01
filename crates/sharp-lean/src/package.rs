@@ -581,12 +581,11 @@ fn write_if_changed(path: &Path, bytes: &[u8]) -> Result<bool, DatabaseError> {
 
 /// Deletes every `.lean` file under `folder` that is not in `kept`, then every folder left empty, `folder` included.
 fn delete_all_but(folder: &Path, kept: &HashSet<PathBuf>) -> Result<bool, DatabaseError> {
-    let walk = |error: io::Error| DatabaseError::io(IOAction::WalkFolder, folder, error);
     let mut empty = true;
     for entry in fs::read_dir(folder).map_err(|error| DatabaseError::io(IOAction::OpenFolder, folder, error))? {
-        let entry = entry.map_err(walk)?;
+        let entry = entry.map_err(|error| DatabaseError::io(IOAction::WalkFolder, folder, error))?;
         let path = entry.path();
-        if entry.file_type().map_err(walk)?.is_dir() {
+        if entry.file_type().map_err(|error| DatabaseError::io(IOAction::ReadMetadata, &path, error))?.is_dir() {
             empty &= delete_all_but(&path, kept)?;
         } else if kept.contains(&path) {
             empty = false;

@@ -12,7 +12,8 @@ pub enum IOAction {
     WriteFile,
     DeleteFile,
     OpenFolder,
-    /// Reading the entries of a folder that opened.
+    /// Reading the next entry of a folder that opened. An entry whose type can't be read is `ReadMetadata` on the
+    /// entry's own path.
     WalkFolder,
     CreateFolder,
     DeleteFolder,
