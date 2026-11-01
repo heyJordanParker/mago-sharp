@@ -4031,18 +4031,13 @@ mod tests {
         }
     }
 
-    /// A worker of host `acme` on the 0.6.0 SDK, which refuses Mago's first request because it speaks protocol 1.12.
+    /// A worker of host `acme` that refuses Mago's first request with the text it holds.
     #[derive(Debug)]
-    struct OldSdkTransport;
+    struct RefusingTransport(Vec<u8>);
 
-    impl AnalyzerTransport for OldSdkTransport {
+    impl AnalyzerTransport for RefusingTransport {
         fn broadcast(&self, _payload: &[u8]) -> Result<Vec<Vec<u8>>, WorkerError> {
-            Err(WorkerError::Remote {
-                host: "acme".to_owned(),
-                worker: 0,
-                request: 1,
-                payload: b"Unsupported analyzer protocol version 1.13.".to_vec(),
-            })
+            Err(WorkerError::Remote { host: "acme".to_owned(), worker: 0, request: 1, payload: self.0.clone() })
         }
 
         #[cfg_attr(coverage_nightly, coverage(off))]
@@ -4064,26 +4059,52 @@ mod tests {
         }
     }
 
-    /// A worker refuses Mago's first request only when its SDK speaks another analyzer protocol, and the 0.6.0 SDK
-    /// says so with Mago's own version alone, so Mago names the host, its own release and protocol, and the command
-    /// that fixes it.
-    #[test]
-    fn a_worker_that_refuses_the_handshake_names_the_package_to_require() {
-        let refusal =
-            ExternalAnalyzer::initialize_transports([Arc::new(OldSdkTransport)], PHPVersion::PHP85, &[], false)
-                .expect_err("a refused handshake should fail initialization");
+    /// The error initialization gives when a worker refuses Mago's first request with `refusal`.
+    fn handshake_error(refusal: &str) -> String {
+        ExternalAnalyzer::initialize_transports(
+            [Arc::new(RefusingTransport(refusal.as_bytes().to_vec()))],
+            PHPVersion::PHP85,
+            &[],
+            false,
+        )
+        .expect_err("a refused handshake should fail initialization")
+        .to_string()
+    }
 
+    /// An SDK before 0.6.1 refuses Mago's first request naming Mago's protocol alone, so Mago names the host, its own
+    /// release and protocol, where the SDK comes from, and the commands that fix it.
+    #[test]
+    fn a_worker_on_an_sdk_before_0_6_1_that_refuses_the_handshake_names_the_package_to_require() {
+        let speaks = format!("{}.{}", protocol::ANALYZER_PROTOCOL_MAJOR, protocol::ANALYZER_PROTOCOL_MINOR);
         let version = env!("CARGO_PKG_VERSION");
+
         assert_eq!(
-            refusal.to_string(),
+            handshake_error(&format!("Unsupported analyzer protocol version {speaks}.")),
             format!(
                 "external analyzer protocol error: extension host `acme` refused the handshake of mago {version}, which \
-                 speaks analyzer protocol 1.13: Unsupported analyzer protocol version 1.13. The host's worker runs on \
-                 the SDK in `heyjordanparker/mago-sharp`, so require the release of this mago with `composer require \
-                 --dev \"heyjordanparker/mago-sharp:{version}\"`, or run the mago of the release the project requires \
-                 with `vendor/bin/mago`."
+                 speaks analyzer protocol {speaks}: Unsupported analyzer protocol version {speaks}. Its SDK is from \
+                 a `heyjordanparker/mago-sharp` release before 0.6.1, so require the release of this mago with \
+                 `composer require --dev \"heyjordanparker/mago-sharp:{version}\"`, or run the mago of the release the \
+                 project requires with `vendor/bin/mago`."
             )
         );
+    }
+
+    /// A describe request runs the extension's own code, which may fail for its own reason, and an SDK of 0.6.1 or
+    /// later names the fixes for a protocol mismatch itself, so Mago passes either refusal through as the worker gave
+    /// it.
+    #[test]
+    fn a_handshake_refused_for_any_other_reason_passes_through_unchanged() {
+        for refusal in [
+            "config/routes.php not found",
+            "The worker of `acme/routes` can't read mago's request: `mago` speaks analyzer protocol 1.14, and the \
+             extension SDK, heyjordanparker/mago-sharp 0.6.1, speaks 1.13.",
+        ] {
+            assert_eq!(
+                handshake_error(refusal),
+                format!("external analyzer worker failed: extension worker 0 rejected request 1: {refusal}")
+            );
+        }
     }
 
     #[test]

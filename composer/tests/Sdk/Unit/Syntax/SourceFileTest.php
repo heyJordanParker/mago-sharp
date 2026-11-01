@@ -145,12 +145,12 @@ final class SourceFileTest extends TestCase
         yield 'analyzer' => [
             AnalyzerProtocol::class,
             pack('N3', 0x4D41_4E41, 0x0001_000A, 1 << 16),
-            'Mago speaks analyzer protocol 1.10,',
+            '`mago` speaks analyzer protocol 1.10,',
         ];
         yield 'linter' => [
             LinterProtocol::class,
             pack('N3', 0x4D4C_4E54, 0x0001_0001, 1 << 16),
-            'Unsupported linter protocol version 1.1.',
+            '`mago` speaks linter protocol 1.1,',
         ];
     }
 

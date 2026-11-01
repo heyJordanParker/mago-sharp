@@ -14,6 +14,7 @@ use Mago\Sdk\Reporting\Issue;
 use Mago\Sdk\Syntax\NodeKind;
 
 use function count;
+use function Mago\Internal\release_mismatch;
 use function pack;
 use function strlen;
 use function unpack;
@@ -51,7 +52,10 @@ final class Protocol
         if ($version !== self::VERSION_U32) {
             $major = $version >> 16;
             $minor = $version & 0xffff;
-            throw new ProtocolException("Unsupported linter protocol version {$major}.{$minor}.");
+            throw new ProtocolException(release_mismatch(
+                "speaks linter protocol {$major}.{$minor}",
+                'speaks ' . self::MAJOR . '.' . self::MINOR,
+            ));
         }
 
         $message = $header[3];

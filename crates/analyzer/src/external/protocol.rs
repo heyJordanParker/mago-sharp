@@ -3342,24 +3342,29 @@ pub(super) fn take_codebase_reads(response: &[u8]) -> Result<(ExtensionReads, Ve
     Ok((reads, [header, &response[response.len() - reader.remaining()..]].concat()))
 }
 
-/// Turns a worker's refusal of Mago's first request, the describe request, into an error that says what to install.
-/// Every SDK checks a request's analyzer protocol version before it reads anything else, so a worker refuses the
-/// handshake when its SDK speaks another version. The 0.6.0 SDK says so with Mago's version alone, as "Unsupported
-/// analyzer protocol version 1.13.", so the error quotes the worker for its own side.
-pub(super) fn refused_handshake(error: WorkerError) -> ExternalAnalyzerError {
-    let WorkerError::Remote { host, payload, .. } = error else {
-        return error.into();
-    };
+/// How every SDK release before 0.6.1 starts its refusal of a request of another analyzer protocol. Those releases
+/// can't change, so a refusal that starts with it always comes from a worker on an SDK older than this mago's.
+const PRE_0_6_1_SDK_REFUSAL: &[u8] = b"Unsupported analyzer protocol version ";
 
-    let version = env!("CARGO_PKG_VERSION");
-    protocol(format!(
-        "extension host `{host}` refused the handshake of mago {version}, which speaks analyzer protocol \
-         {ANALYZER_PROTOCOL_MAJOR}.{ANALYZER_PROTOCOL_MINOR}: {} The host's worker runs on the SDK in \
-         `heyjordanparker/mago-sharp`, so require the release of this mago with `composer require --dev \
-         \"heyjordanparker/mago-sharp:{version}\"`, or run the mago of the release the project requires with \
-         `vendor/bin/mago`.",
-        String::from_utf8_lossy(&payload).trim_end()
-    ))
+/// Says what to install when a worker on an SDK before 0.6.1 refuses Mago's first request, the describe request. That
+/// SDK names Mago's protocol alone and no fix. Every other refusal passes through unchanged: an SDK of 0.6.1 or later
+/// names both protocols and the fixes itself, and any other failure, such as an extension's own exception, says what
+/// failed.
+pub(super) fn refused_handshake(error: WorkerError) -> ExternalAnalyzerError {
+    match &error {
+        WorkerError::Remote { host, payload, .. } if payload.starts_with(PRE_0_6_1_SDK_REFUSAL) => {
+            let version = env!("CARGO_PKG_VERSION");
+            protocol(format!(
+                "extension host `{host}` refused the handshake of mago {version}, which speaks analyzer protocol \
+                 {ANALYZER_PROTOCOL_MAJOR}.{ANALYZER_PROTOCOL_MINOR}: {} Its SDK is from a \
+                 `heyjordanparker/mago-sharp` release before 0.6.1, so require the release of this mago with \
+                 `composer require --dev \"heyjordanparker/mago-sharp:{version}\"`, or run the mago of the release \
+                 the project requires with `vendor/bin/mago`.",
+                String::from_utf8_lossy(payload).trim_end()
+            ))
+        }
+        _ => error.into(),
+    }
 }
 
 pub(super) fn message_kind(payload: &[u8]) -> Result<u16, ExternalAnalyzerError> {

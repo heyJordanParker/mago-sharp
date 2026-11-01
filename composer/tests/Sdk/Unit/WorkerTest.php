@@ -41,6 +41,7 @@ use RuntimeException;
 use function array_diff;
 use function array_keys;
 use function fclose;
+use function Mago\Internal\get_version;
 use function pack;
 
 /**
@@ -193,34 +194,55 @@ final class WorkerTest extends TestCase
     }
 
     /**
-     * @return iterable<string, array{int}>
+     * @return iterable<string, array{string, string, string}>
      */
-    public static function magoMinorsOfAnotherProtocol(): iterable
+    public static function requestsOfAnotherProtocol(): iterable
     {
+        $major = Protocol::VERSION_U32 >> 16;
         $minor = Protocol::VERSION_U32 & 0xFFFF;
-        yield 'an older mago' => [$minor - 1];
-        yield 'a newer mago' => [$minor + 1];
+        foreach (['an older' => $minor - 1, 'a newer' => $minor + 1] as $mago => $magoMinor) {
+            yield "{$mago} mago's analyzer describe request" => [
+                self::describeRequest(($major << 16) | $magoMinor),
+                "analyzer protocol {$major}.{$magoMinor}",
+                "{$major}.{$minor}",
+            ];
+        }
+
+        yield 'a linter describe request of another protocol' => [
+            pack('N3', 0x4D4C_4E54, 0x0001_0001, 1 << 16),
+            'linter protocol 1.1',
+            '1.2',
+        ];
+        yield 'a worker management request of another protocol' => [
+            pack('N3', self::WORKER_MAGIC, 0x0001_0001, WorkerProtocol::COLLECT_REQUEST << 16),
+            'worker management protocol 1.1',
+            '1.0',
+        ];
     }
 
     /**
-     * A mago of another analyzer protocol than this SDK's gets its first request refused, with the extension, both
-     * protocols, the package the SDK comes from and the commands that make the two match. A mago before 0.6.1 prints
-     * this text as the whole error.
+     * A mago of another protocol than this SDK's gets its request refused, with the extension, both protocols, the
+     * SDK's package and release, and the ways to make the two match. A mago before 0.6.1 prints this text as the whole
+     * error.
      */
-    #[DataProvider('magoMinorsOfAnotherProtocol')]
-    public function testAWorkerRefusesAMagoOfAnotherProtocolNamingThePackage(int $magoMinor): void
-    {
+    #[DataProvider('requestsOfAnotherProtocol')]
+    public function testAWorkerRefusesAMagoOfAnotherProtocolNamingThePackage(
+        string $request,
+        string $magoProtocol,
+        string $sdkProtocol,
+    ): void {
         $worker = new Worker(new Extension('acme/routes', 'Routes', '1.0.0'));
-        $magoVersion = (Protocol::VERSION_U32 & 0xFFFF_0000) | $magoMinor;
 
-        $sent = self::serve($worker, ['describe' => self::describeRequest($magoVersion)]);
+        $sent = self::serve($worker, ['request' => $request]);
 
         self::assertSame(
             [
-                "describe: error The worker of `acme/routes` can't read mago's request: Mago speaks analyzer protocol "
-                . "1.{$magoMinor}, and this worker's SDK, from `heyjordanparker/mago-sharp`, speaks 1.13. Run the mago "
-                . 'of that release with `vendor/bin/mago`, or require the release of your mago with `composer require '
-                . '--dev "heyjordanparker/mago-sharp:<the version mago --version prints>"`.',
+                "request: error The worker of `acme/routes` can't read mago's request: `mago` speaks {$magoProtocol}, "
+                    . 'and the extension SDK, heyjordanparker/mago-sharp '
+                    . get_version()
+                    . ", speaks {$sdkProtocol}. `mago` and heyjordanparker/mago-sharp must be the same release: run the "
+                    . '`mago` that heyjordanparker/mago-sharp installs, `vendor/bin/mago`, or require the '
+                    . 'heyjordanparker/mago-sharp release `mago --version` prints.',
             ],
             $sent,
         );
