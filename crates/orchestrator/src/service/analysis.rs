@@ -27,6 +27,7 @@ use mago_names::resolver::NamespaceClasses;
 use mago_reporting::Issue;
 use mago_reporting::IssueCollection;
 use mago_semantics::SemanticsChecker;
+use mago_semantics::drop_follow_on_issues;
 use mago_syntax::parser::parse_file_with_settings;
 use mago_syntax::settings::ParserSettings;
 use mago_word::WordSet;
@@ -35,7 +36,6 @@ use crate::error::OrchestratorError;
 use crate::service::body_return::resolve_body_returns;
 use crate::service::incremental_analysis::receiver_changing_members;
 use crate::service::issue_reconciliation::DeferredIssueReconciler;
-use crate::service::issue_reconciliation::drop_follow_on_issues;
 
 pub struct AnalysisService {
     database: ReadDatabase,

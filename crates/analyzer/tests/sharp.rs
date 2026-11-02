@@ -61,6 +61,7 @@ use mago_reporting::AnnotationKind;
 use mago_reporting::Issue;
 use mago_reporting::Level;
 use mago_semantics::SemanticsChecker;
+use mago_semantics::drop_follow_on_issues;
 use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::ArgumentList;
@@ -9602,20 +9603,35 @@ fn a_full_name_anywhere_in_code_names_the_import_to_add() {
 }
 
 /// The errors `mago compile` prints for `analyzed`, analyzed together with `others`: the semantic checks' first, then
-/// the analysis's.
+/// the parse errors, then the analyzer's, without the ones `drop_follow_on_issues` drops as `mago compile` does.
 fn compile_errors(analyzed: (&'static str, &'static str), others: &[(&'static str, &'static str)]) -> Vec<String> {
     let arena = LocalArena::new();
     let file = File::ephemeral(Cow::Borrowed(analyzed.0.as_bytes()), Cow::Borrowed(analyzed.1.as_bytes()));
     let program = parse_file(&arena, &file);
     let names = NameResolver::new(&arena).resolve(program);
     let semantic_issues = SemanticsChecker::new(PHPVersion::ENGINE).check(&file, program, &names);
+    // `analyze` gives the file's parse errors first, then the analyzer's issues.
+    let mut parse_errors = analyze(&PLUGIN_REGISTRY, settings(), analyzed, others);
+    let analyzer_issues = parse_errors.split_off(program.errors.len());
+    let analyzer_issues =
+        drop_follow_on_issues(&file, program.errors, &semantic_issues, analyzer_issues.into_iter().collect());
 
     semantic_issues
         .into_iter()
-        .chain(analyze(&PLUGIN_REGISTRY, settings(), analyzed, others))
+        .chain(parse_errors)
+        .chain(analyzer_issues)
         .filter(|issue| issue.level == Level::Error)
         .map(|issue| issue.message)
         .collect()
+}
+
+/// Spec sections 27 and 29 refuse a superglobal, and a refused file never runs, so `mago compile` prints the refusal
+/// alone on its line, and none of the analyzer's errors about the superglobal read as a constant.
+#[test]
+fn a_refused_line_gives_its_refusal_alone() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public void host()\n    {\n        const host = _SERVER[\"HTTP_HOST\"];\n    }\n}\n";
+
+    assert_eq!(compile_errors(("src/Demo/Report.sharp", sharp), &[]), ["Unexpected `_SERVER`"]);
 }
 
 /// Spec section 23 names what a name without its import needs: a standard library class its file doesn't import, as
@@ -18460,13 +18476,7 @@ fn equatable_is_no_return_type_and_joins_no_object() {
             refusal,
             refusal,
             "`Object` is a bound alone, as in `<TValue : Object>`: it joins no other bound with `&`.",
-            "Cannot find type `Demo.Equatable`.",
         ]
-    );
-    // The class value reads `Equatable` as a class name, which no file declares.
-    assert_eq!(
-        written(sharp, &analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Shapes.sharp", sharp), &EQUATABLE_CLASSES)),
-        ["9:41 non-existent-class-like Cannot find type `Demo.Equatable`."]
     );
 }
 
