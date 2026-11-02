@@ -54,7 +54,6 @@ use mago_names::STANDARD_ROOT_CLASSES;
 use mago_names::resolver::ChangingMembers;
 use mago_names::resolver::NameResolver;
 use mago_names::resolver::NamespaceClasses;
-use mago_php_version::PHPVersion;
 use mago_prelude::Prelude;
 use mago_reporting::Annotation;
 use mago_reporting::AnnotationKind;
@@ -236,13 +235,17 @@ fn analyze_with_references(
     populate_codebase(&mut metadata, &mut symbol_references, WordSet::default(), HashSet::default());
 
     let (file, program, names) = &programs[0];
+    let semantic_issues = SemanticsChecker::new(settings.version).check(file, program, names);
     let mut result = AnalysisResult::new(symbol_references);
     let artifacts = Analyzer::new(&arena, file, names, &metadata, registry, settings)
         .analyze_with_artifacts(program, &mut result)
         .expect("analysis succeeds");
+    let analyzer_issues = drop_follow_on_issues(file, program.errors, &semantic_issues, result.issues);
 
-    // The analyzed file's parse errors come first, as `mago analyze` reports them beside the analysis.
-    let issues: Vec<Issue> = program.errors.iter().map(Issue::from).chain(result.issues).collect();
+    // The analyzed file's parse errors, then its semantic issues, then the analyzer's issues without the follow-ons of
+    // a refusal, as `mago analyze` and `mago compile` report them.
+    let issues: Vec<Issue> =
+        program.errors.iter().map(Issue::from).chain(semantic_issues).chain(analyzer_issues).collect();
     assert_speaks_sharp(file_ids.iter().map(|(name, _)| *name), &issues);
 
     (issues, artifacts, result.symbol_references)
@@ -9602,24 +9605,10 @@ fn a_full_name_anywhere_in_code_names_the_import_to_add() {
     );
 }
 
-/// The errors `mago compile` prints for `analyzed`, analyzed together with `others`: the semantic checks' first, then
-/// the parse errors, then the analyzer's, without the ones `drop_follow_on_issues` drops as `mago compile` does.
+/// The errors `mago compile` prints for `analyzed`, analyzed together with `others`, as their messages.
 fn compile_errors(analyzed: (&'static str, &'static str), others: &[(&'static str, &'static str)]) -> Vec<String> {
-    let arena = LocalArena::new();
-    let file = File::ephemeral(Cow::Borrowed(analyzed.0.as_bytes()), Cow::Borrowed(analyzed.1.as_bytes()));
-    let program = parse_file(&arena, &file);
-    let names = NameResolver::new(&arena).resolve(program);
-    let semantic_issues = SemanticsChecker::new(PHPVersion::ENGINE).check(&file, program, &names);
-    // `analyze` gives the file's parse errors first, then the analyzer's issues.
-    let mut parse_errors = analyze(&PLUGIN_REGISTRY, settings(), analyzed, others);
-    let analyzer_issues = parse_errors.split_off(program.errors.len());
-    let analyzer_issues =
-        drop_follow_on_issues(&file, program.errors, &semantic_issues, analyzer_issues.into_iter().collect());
-
-    semantic_issues
+    analyze(&PLUGIN_REGISTRY, settings(), analyzed, others)
         .into_iter()
-        .chain(parse_errors)
-        .chain(analyzer_issues)
         .filter(|issue| issue.level == Level::Error)
         .map(|issue| issue.message)
         .collect()
@@ -9632,6 +9621,19 @@ fn a_refused_line_gives_its_refusal_alone() {
     let sharp = "namespace Demo;\n\nclass Report\n{\n    public void host()\n    {\n        const host = _SERVER[\"HTTP_HOST\"];\n    }\n}\n";
 
     assert_eq!(compile_errors(("src/Demo/Report.sharp", sharp), &[]), ["Unexpected `_SERVER`"]);
+}
+
+/// Spec section 11: `Equatable` is a bound and never a value's type, so the semantic check refuses
+/// `typeof(Equatable)`. The file never runs, so `mago analyze` reports the refusal alone on its line, and not the
+/// analyzer's missing class `Demo.Equatable` too.
+#[test]
+fn a_line_the_semantic_check_refuses_gives_its_refusal_alone() {
+    let sharp = "namespace Demo;\n\nclass Shapes\n{\n    public static Any named() => typeof(Equatable);\n}\n";
+
+    assert_eq!(
+        written(sharp, &analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Shapes.sharp", sharp), &[])),
+        ["5:41 semantics `Equatable` is a bound, as in `<T : Equatable>`, and never a value's type."]
+    );
 }
 
 /// Spec section 23 names what a name without its import needs: a standard library class its file doesn't import, as
