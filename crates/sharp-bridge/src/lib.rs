@@ -6,6 +6,7 @@
 //! HHVM's `hackc-translator.cpp` turns hackc's unit into runtime structures. cbindgen writes this file's layout and
 //! the compiled file's layout in `unit.rs` to `sharp_unit.h` in `OUT_DIR`.
 
+// Throwaway: LINUX's Mago cache rebuilds this crate and what depends on it, and nothing else.
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 #![allow(non_camel_case_types)]
 
