@@ -808,46 +808,101 @@ where
         let mut current_parameter_position = 0;
         let mut starts_exactly = true;
         for argument in invocation.arguments_source.iter_arguments() {
-            if !argument.is_unpacked() {
-                current_parameter_position += 1;
-                continue;
-            }
-            let Some(argument_expression) = argument.value() else {
-                continue;
-            };
+            if argument.is_unpacked() {
+                let Some(argument_expression) = argument.value() else {
+                    continue;
+                };
 
-            if artifacts.get_expression_type(argument_expression).is_none() {
-                analyze_and_store_argument_type(
-                    context,
-                    block_context,
-                    artifacts,
-                    &invocation.target,
-                    argument_expression,
-                    usize::MAX,
-                    &mut analyzed_argument_types,
-                    last_parameter.is_variadic() && last_parameter.is_by_reference(),
-                    None,
-                )?;
-            }
+                if artifacts.get_expression_type(argument_expression).is_none() {
+                    analyze_and_store_argument_type(
+                        context,
+                        block_context,
+                        artifacts,
+                        &invocation.target,
+                        argument_expression,
+                        usize::MAX,
+                        &mut analyzed_argument_types,
+                        last_parameter.is_variadic() && last_parameter.is_by_reference(),
+                        None,
+                    )?;
+                }
 
-            let argument_value_type =
-                artifacts.get_expression_type(argument_expression).cloned().unwrap_or_else(get_mixed);
-            if !last_parameter.is_variadic() {
-                populate_parameter_types_from_unpacked(
-                    context,
-                    &argument_value_type,
-                    &invocation.target,
-                    current_parameter_position,
-                    parameter_types,
-                );
-            }
+                let argument_value_type =
+                    artifacts.get_expression_type(argument_expression).cloned().unwrap_or_else(get_mixed);
+                if !last_parameter.is_variadic() {
+                    populate_parameter_types_from_unpacked(
+                        context,
+                        &argument_value_type,
+                        &invocation.target,
+                        current_parameter_position,
+                        parameter_types,
+                    );
+                }
 
-            // A spread value crosses as a passed argument does, by the parameter it starts at, spec section 12.
-            let received_type = invocation
-                .target
-                .get_parameter(adjust_offset_for_variadic(&invocation.target, current_parameter_position))
-                .filter(|_| passes_to_plain_php)
-                .and_then(|parameter| {
+                // A spread value crosses as a passed argument does, by the parameter it starts at, spec section 12.
+                let received_type = invocation
+                    .target
+                    .get_parameter(adjust_offset_for_variadic(&invocation.target, current_parameter_position))
+                    .filter(|_| passes_to_plain_php)
+                    .and_then(|parameter| {
+                        let parameter_type = get_parameter_type(
+                            context,
+                            &invocation.target,
+                            Some(parameter),
+                            base_class_metadata,
+                            calling_class_like_metadata,
+                            calling_instance_type,
+                            method_class_type,
+                        );
+
+                        record_received_argument_type(
+                            artifacts,
+                            invocation.span,
+                            argument_expression,
+                            &argument_value_type,
+                            &parameter_type,
+                            context.codebase,
+                        )
+                    })
+                    .unwrap_or_else(|| argument_value_type.clone());
+                let other_atomics: Vec<TAtomic> = received_type
+                    .types
+                    .iter()
+                    .filter(|atomic| !matches!(atomic, TAtomic::Array(TArray::List(_))))
+                    .cloned()
+                    .collect();
+                let other_element_type = if other_atomics.is_empty() {
+                    None
+                } else {
+                    get_unpacked_argument_type(context, &TUnion::from_vec(other_atomics), argument_expression.span())
+                };
+                let exact_length = exact_spread_length(&argument_value_type);
+                let minimum_size = argument_value_type
+                    .types
+                    .iter()
+                    .map(|atomic| match atomic {
+                        TAtomic::Array(array) => array.get_minimum_size(),
+                        _ => 0,
+                    })
+                    .min()
+                    .unwrap_or(0);
+                let placement = SpreadPlacement {
+                    expression: argument_expression,
+                    start: current_parameter_position,
+                    starts_exactly,
+                    has_exact_length: exact_length.is_some(),
+                    value_type: argument_value_type,
+                    received_type,
+                    other_element_type,
+                    minimum_size,
+                };
+
+                // A spread's elements outside a type parameter's bound are reported once, as one argument's are.
+                let mut violations = Vec::new();
+                for (parameter_offset, parameter) in invocation.target.iter_parameters().enumerate() {
+                    if !placement.fills(parameter_offset, parameter.is_variadic()) {
+                        continue;
+                    }
                     let parameter_type = get_parameter_type(
                         context,
                         &invocation.target,
@@ -857,100 +912,45 @@ where
                         calling_instance_type,
                         method_class_type,
                     );
-
-                    record_received_argument_type(
-                        artifacts,
-                        invocation.span,
-                        argument_expression,
-                        &argument_value_type,
-                        &parameter_type,
-                        context.codebase,
-                    )
-                })
-                .unwrap_or_else(|| argument_value_type.clone());
-            let other_atomics: Vec<TAtomic> = received_type
-                .types
-                .iter()
-                .filter(|atomic| !matches!(atomic, TAtomic::Array(TArray::List(_))))
-                .cloned()
-                .collect();
-            let other_element_type = if other_atomics.is_empty() {
-                None
-            } else {
-                get_unpacked_argument_type(context, &TUnion::from_vec(other_atomics), argument_expression.span())
-            };
-            let exact_length = exact_spread_length(&argument_value_type);
-            let minimum_size = argument_value_type
-                .types
-                .iter()
-                .map(|atomic| match atomic {
-                    TAtomic::Array(array) => array.get_minimum_size(),
-                    _ => 0,
-                })
-                .min()
-                .unwrap_or(0);
-            let placement = SpreadPlacement {
-                expression: argument_expression,
-                start: current_parameter_position,
-                starts_exactly,
-                has_exact_length: exact_length.is_some(),
-                value_type: argument_value_type,
-                received_type,
-                other_element_type,
-                minimum_size,
-            };
-
-            // A spread's elements outside a type parameter's bound are reported once, as one argument's are.
-            let mut violations = Vec::new();
-            for (parameter_offset, parameter) in invocation.target.iter_parameters().enumerate() {
-                if !placement.fills(parameter_offset, parameter.is_variadic()) {
-                    continue;
-                }
-                let parameter_type = get_parameter_type(
-                    context,
-                    &invocation.target,
-                    Some(parameter),
-                    base_class_metadata,
-                    calling_class_like_metadata,
-                    calling_instance_type,
-                    method_class_type,
-                );
-                let parameter_type = match &bound_before_arguments {
-                    Some(bound_before_arguments) => {
-                        inferred_type_replacer::replace(&parameter_type, bound_before_arguments, context.codebase)
+                    let parameter_type = match &bound_before_arguments {
+                        Some(bound_before_arguments) => {
+                            inferred_type_replacer::replace(&parameter_type, bound_before_arguments, context.codebase)
+                        }
+                        None => parameter_type,
+                    };
+                    if !parameter_type.has_template_types() {
+                        continue;
                     }
-                    None => parameter_type,
-                };
-                if !parameter_type.has_template_types() {
-                    continue;
+                    let Some(element_type) = placement
+                        .list_elements_at(parameter_offset, parameter.is_variadic(), context.codebase)
+                        .into_iter()
+                        .chain(placement.other_element_type.clone())
+                        .reduce(|elements, element| {
+                            add_union_type(elements, &element, context.codebase, CombinerOptions::default())
+                        })
+                    else {
+                        continue;
+                    };
+
+                    violations.extend(infer_parameter_templates_unreported(
+                        context,
+                        &parameter_type,
+                        &element_type,
+                        template_result,
+                        parameter_offset,
+                        false,
+                    ));
                 }
-                let Some(element_type) = placement
-                    .list_elements_at(parameter_offset, parameter.is_variadic(), context.codebase)
-                    .into_iter()
-                    .chain(placement.other_element_type.clone())
-                    .reduce(|elements, element| {
-                        add_union_type(elements, &element, context.codebase, CombinerOptions::default())
-                    })
-                else {
-                    continue;
-                };
+                let mut reported = WordSet::default();
+                violations.retain(|violation| reported.insert(violation.template_name));
+                violated_templates.extend(report_template_violations(context, violations, argument_expression.span()));
 
-                violations.extend(infer_parameter_templates_unreported(
-                    context,
-                    &parameter_type,
-                    &element_type,
-                    template_result,
-                    parameter_offset,
-                    false,
-                ));
+                current_parameter_position += minimum_size;
+                starts_exactly &= exact_length.is_some();
+                spread_placements.push(placement);
+            } else {
+                current_parameter_position += 1;
             }
-            let mut reported = WordSet::default();
-            violations.retain(|violation| reported.insert(violation.template_name));
-            violated_templates.extend(report_template_violations(context, violations, argument_expression.span()));
-
-            current_parameter_position += minimum_size;
-            starts_exactly &= exact_length.is_some();
-            spread_placements.push(placement);
         }
     }
 

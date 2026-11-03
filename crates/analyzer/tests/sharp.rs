@@ -7892,10 +7892,11 @@ fn a_spread_element_outside_a_written_type_argument_is_refused() {
 /// Spec section 7: a spread of unknown length fills only a `...` parameter, as in Kotlin and TypeScript, into a PHP#
 /// method and into plain PHP alike. Anywhere else, a parameter with a default included, it is refused once, with the
 /// parameters it may not fill, which leave out one a named argument fills, in place of too few arguments or a type
-/// argument nothing fixes. A spread of a list literal fills parameters as its elements written out do.
+/// argument nothing fixes. After the arguments that fill every parameter, with no `...` one, it is refused as one that
+/// may fill none. A spread of a list literal fills parameters as its elements written out do.
 #[test]
 fn a_spread_of_unknown_length_fills_only_a_variadic_parameter() {
-    let spreads = "namespace Demo;\n\nimport Lib.Pair;\nimport Vendor.Math;\n\nclass Spreads\n{\n    public static int run(List<int> numbers, List<Position> extra, List<string> tags, List<int> prices)\n    {\n        return Pairs.pair(...numbers).count()\n            + Reports.logSlow(\"slow\", ...extra)\n            + Tags.tagged(...tags)\n            + Tags.tagged(1, ...tags)\n            + Money.sum(...numbers)\n            + Math.max(0, ...prices)\n            + Pair.of(...numbers)\n            + Pairs.scale(...numbers, factor: 2)\n            + Pairs.pair(...[1, 2]).count();\n    }\n}\n";
+    let spreads = "namespace Demo;\n\nimport Lib.Pair;\nimport Vendor.Math;\n\nclass Spreads\n{\n    public static int run(List<int> numbers, List<Position> extra, List<string> tags, List<int> prices)\n    {\n        return Pairs.pair(...numbers).count()\n            + Reports.logSlow(\"slow\", ...extra)\n            + Tags.tagged(...tags)\n            + Tags.tagged(1, ...tags)\n            + Money.sum(...numbers)\n            + Math.max(0, ...prices)\n            + Pair.of(...numbers)\n            + Pairs.scale(...numbers, factor: 2)\n            + Pairs.pair(1, 2, ...numbers).count()\n            + Pairs.pair(...[1, 2]).count();\n    }\n}\n";
     let others = [
         (
             "src/Demo/Pairs.sharp",
@@ -7936,6 +7937,7 @@ fn a_spread_of_unknown_length_fills_only_a_variadic_parameter() {
             refused("12:30", "tags", "`count`"),
             refused("16:26", "numbers", "`a` and `b`"),
             refused("17:30", "numbers", "`first` and `second`"),
+            "18:35 invalid-argument `numbers` may fill no parameter of `Pairs.pair`. A spread of unknown length fills only a ... parameter. | Pass each value as an argument of its own, or spread a list literal, whose length is known.".to_owned(),
         ]
     );
 }
