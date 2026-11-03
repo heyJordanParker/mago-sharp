@@ -5385,10 +5385,9 @@ fn check_self_type(keyword: &Keyword, place: Place, context: &mut Context<'_, '_
 
 /// Decides `new` on a class written by its short name, on `Self`, or on PHP's `self` or `static`. `new Self(…)` needs
 /// the class's constructor marked `required`, spec section 25, because `Self` can be any subclass, unless no class
-/// extends the class, and names no type
-/// arguments, spec section 11, because `Self` is the class with its own type parameters, which a static member of a
-/// generic class can't name. PHP's `self` and `static`, and `Self` in such a static member, are reported at the
-/// keyword, so the arguments are still checked. `new` of a type parameter creates its type argument while the code
+/// extends the class. It names no type arguments, spec section 11, because `Self` is the class with its own type
+/// parameters, which a static member of a generic class can't name. PHP's `self` and `static`, and `Self` in such a
+/// static member, are reported at the keyword, so the arguments are still checked. `new` of a type parameter creates its type argument while the code
 /// runs, which carries its own type arguments, so it names none.
 fn check_instantiation(instantiation: &Instantiation, context: &mut Context<'_, '_, '_>) -> Option<Place> {
     match instantiation.class {
