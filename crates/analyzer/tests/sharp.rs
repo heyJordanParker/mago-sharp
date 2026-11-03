@@ -7579,19 +7579,15 @@ fn a_match_over_a_closed_set_needs_no_default() {
     );
 }
 
-/// A case written in a class is the semantic check's error. No class runs as it, so the analyzer adds nothing.
+/// A case written in a class is the semantic check's error, once per case, in PHP#'s words, which name where the case
+/// goes. No class runs as it, so the analyzer adds nothing.
 #[test]
 fn a_case_written_in_a_class_is_left_to_the_semantic_check() {
     let code = "namespace App;\n\nclass Shop\n{\n    case Open;\n    case Paid(string id);\n}\n";
 
     assert_eq!(
         messages(("src/App/Shop.sharp", code), &[]),
-        [
-            "Class `Shop` cannot contain enum cases.",
-            "Class `Shop` cannot contain enum cases.",
-            "A class has no cases: declare `Open` in an enum.",
-            "A class has no cases: declare `Paid` in an enum.",
-        ]
+        ["A class has no cases: declare `Open` in an enum.", "A class has no cases: declare `Paid` in an enum."]
     );
 }
 

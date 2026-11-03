@@ -280,6 +280,8 @@ pub fn check_class<'ast, 'arena>(class: &'ast Class<'arena>, context: &mut Conte
 
     for member in &class.members {
         match &member {
+            // `check_slice` refuses a PHP# class's case, naming the enum it goes in.
+            ClassLikeMember::EnumCase(_) if context.program.dialect.is_sharp() => {}
             ClassLikeMember::EnumCase(case) => {
                 context.report(
                     Issue::error(format!("Class `{class_name}` cannot contain enum cases."))
@@ -429,6 +431,8 @@ pub fn check_interface<'ast, 'arena>(interface: &'ast Interface<'arena>, context
                         .with_help("Remove the trait use statement."),
                 );
             }
+            // `check_slice` refuses a PHP# interface's case, naming the enum it goes in.
+            ClassLikeMember::EnumCase(_) if context.program.dialect.is_sharp() => {}
             ClassLikeMember::EnumCase(case) => {
                 context.report(
                     Issue::error(format!("Interface `{interface_name}` cannot contain enum cases."))

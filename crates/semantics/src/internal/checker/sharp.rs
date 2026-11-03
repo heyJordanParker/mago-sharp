@@ -5998,8 +5998,10 @@ fn broken_rule(node: Node<'_, '_>, place: Place, context: &Context<'_, '_, '_>) 
             BytesDisplay(law.name.value)
         ))
         .with_note(supported(place)),
-        (Node::ClassLikeMember(ClassLikeMember::EnumCase(case)), Place::Class) => {
-            error(format!("A class has no cases: declare `{}` in an enum.", BytesDisplay(case.item.name().value)))
+        (Node::ClassLikeMember(ClassLikeMember::EnumCase(case)), Place::Class | Place::Interface) => {
+            let owner = if place == Place::Class { "A class" } else { "An interface" };
+
+            error(format!("{owner} has no cases: declare `{}` in an enum.", BytesDisplay(case.item.name().value)))
                 .with_note(supported(place))
         }
         (Node::Expression(Expression::Self_(keyword)), Place::Body | Place::Constant) if is_sharp_self(keyword) => {
