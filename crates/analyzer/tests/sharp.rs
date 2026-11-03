@@ -7604,7 +7604,7 @@ fn a_class_named_as_a_case_is_an_error_that_names_the_case() {
         analyze(&PLUGIN_REGISTRY, settings(), analyzed, others).into_iter().map(|issue| issue.message).collect()
     };
 
-    let case = "The case `PaymentResult.Paid` runs as a class of that name, which another file declares.";
+    let case = "The case `PaymentResult.Paid` runs as a class of that name, which is already defined in `app/Paid.sharp`.";
     let class = "Class `Paid` clashes with the case `PaymentResult.Paid`, which runs as a class of that name.";
     // The codebase keeps the declaration whose file's path sorts first, and the other one is reported: the enum's
     // `src/App/PaymentResult.sharp` sorts before `src/App/PaymentResult/Paid.sharp` and after `app/Paid.sharp`.

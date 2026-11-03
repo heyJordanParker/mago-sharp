@@ -27,6 +27,7 @@ use crate::statement::attributes::AttributeTarget;
 use crate::statement::attributes::analyze_attributes;
 use crate::statement::class_like::constant::path_back;
 use crate::statement::class_like::constant::report_cycle;
+use crate::statement::class_like::defined_in;
 use crate::statement::function_like::FunctionLikeBody;
 use crate::statement::function_like::analyze_function_like;
 use crate::utils::names::display_class_like_name;
@@ -136,8 +137,9 @@ where
         context.collector.report_with_code(
             IssueCode::DuplicateDefinition,
             Issue::error(format!(
-                "The case `{}` runs as a class of that name, which another file declares.",
+                "The case `{}` runs as a class of that name, which is already defined {}.",
                 display_member(context, enum_metadata.original_name, BytesDisplay(name.value)),
+                defined_in(context, case_metadata.span),
             ))
             .with_annotation(Annotation::primary(name.span).with_message("Case declared here."))
             .with_annotation(Annotation::secondary(case_metadata.span).with_message("Class declared here."))
