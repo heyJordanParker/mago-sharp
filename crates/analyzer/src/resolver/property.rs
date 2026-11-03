@@ -77,6 +77,7 @@ use crate::resolver::class_name::holds_no_class;
 use crate::resolver::class_name::report_non_existent_class_like;
 use crate::resolver::extension::Extension;
 use crate::resolver::extension::is_collection_member;
+use crate::resolver::extension::lacks_member;
 use crate::resolver::extension::receiver_type_arguments;
 use crate::resolver::extension::resolve_extension;
 use crate::resolver::method::check_call_through_readonly;
@@ -146,6 +147,9 @@ pub struct PropertyResolutionResult {
     /// The static method of the extension's computed property a PHP# read runs, spec section 26, which leaves the
     /// other properties empty.
     pub extension: Option<MethodIdentifier>,
+    /// The static method of the extension's computed property a PHP# read runs on the receiver's parts that declare no
+    /// member of its name, with those parts, beside the properties the other parts read, spec section 26.
+    pub part_extension: Option<(MethodIdentifier, TUnion)>,
     /// True when the object is a PHP# class value and the member is no member of `Class`, so the access reads or
     /// writes a static member of the classes the value holds, spec section 25, which leaves the properties empty.
     pub class_value: bool,
@@ -193,14 +197,30 @@ where
     } else {
         (*object_type).clone()
     };
+    // Spec section 26: an extension member is read on the parts of the receiver that declare no member of its name,
+    // alone when no part declares one, and beside each other part's own member otherwise, as `caption` on an
+    // `Order|string` reads `Order`'s property on an `Order` and the extension's on a `string`.
+    //
+    // `rest_resolved` is whether those parts were resolved here, beside the other parts.
+    let mut rest_resolved = false;
     if context.dialect.is_sharp()
         && let ClassLikeMemberSelector::Identifier(name) = property_selector
-        && let Some(extension) = resolve_extension(context, &receiver, name, MetadataFlags::EXTENSION_PROPERTY)
+        && let parts = receiver
+            .types
+            .iter()
+            .filter(|part| lacks_member(context.codebase, part, name.value))
+            .cloned()
+            .collect::<Vec<_>>()
+        && !parts.is_empty()
+        && let rest = TUnion::from_vec(parts)
+        && let Some(extension) = resolve_extension(context, &rest, name, MetadataFlags::EXTENSION_PROPERTY)
         && !matches!(extension, Extension::Value(method) if holds_tuple
         && context.codebase.get_method_by_id(&method).is_some_and(|metadata| {
             is_collection_member(method.get_class_name(), metadata)
         }))
     {
+        // A read of a part that declares the member reads its own beside the rest, below.
+        let partial = rest.types.len() < receiver.types.iter().filter(|atomic| !atomic.is_null()).count();
         match extension {
             Extension::Member(_) if for_assignment => {
                 result.has_error_path = true;
@@ -213,6 +233,7 @@ where
                     .with_annotation(Annotation::primary(name.span()).with_message("Written here.")),
                 );
             }
+            Extension::Member(method) if partial => result.part_extension = Some((method, rest.clone())),
             Extension::Member(method) => result.extension = Some(method),
             Extension::Value(_) if for_assignment => {
                 result.has_error_path = true;
@@ -235,7 +256,7 @@ where
                 });
                 let property_type = match changing {
                     Some(parameters) => report_changing_method_value(context, read, parameters),
-                    None => resolve_extension_value(context, artifacts, method, &receiver.to_non_nullable(), read),
+                    None => resolve_extension_value(context, artifacts, method, &rest, read),
                 };
                 artifacts.record_call_target(
                     read,
@@ -244,7 +265,8 @@ where
                         class: None,
                     },
                 );
-                result.encountered_null = is_null_safe && object_type.is_nullable();
+                // The other parts' reads below meet the `null` of a partial read's receiver.
+                result.encountered_null |= !partial && is_null_safe && object_type.is_nullable();
                 result.properties.push(ResolvedProperty {
                     property_span: None,
                     property_name: concat_word!("$", name.value),
@@ -256,11 +278,17 @@ where
             }
             Extension::Refused => result.has_error_path = true,
         }
-        if object_type.is_nullable() && !is_null_safe && !object_type.has_nullsafe_null() {
-            report_access_on_null(context, block_context, object_expression.span(), operator_span, false, false);
-        }
+        if partial && !for_assignment && !matches!(extension, Extension::Refused) {
+            let classes = context.codebase.get_classes_hidden_by_extension(&receiver, name.value);
+            artifacts.record_own_member_reads(object_expression.span().join(name.span()), classes);
+            rest_resolved = true;
+        } else {
+            if object_type.is_nullable() && !is_null_safe && !object_type.has_nullsafe_null() {
+                report_access_on_null(context, block_context, object_expression.span(), operator_span, false, false);
+            }
 
-        return Ok(result);
+            return Ok(result);
+        }
     }
 
     if context.dialect.is_sharp()
@@ -287,6 +315,14 @@ where
 
     let mut object_atomics = object_type.types.iter().map(|atomic| (atomic, atomic)).collect::<Vec<_>>();
     while let Some((object_atomic, written_atomic)) = object_atomics.pop() {
+        // This part was resolved above, with the other parts that declare no member of the name.
+        if rest_resolved
+            && let ClassLikeMemberSelector::Identifier(name) = property_selector
+            && lacks_member(context.codebase, written_atomic, name.value)
+        {
+            continue;
+        }
+
         if let TAtomic::GenericParameter(TGenericParameter { constraint, .. }) = object_atomic {
             object_atomics.extend(constraint.types.iter().map(|bound| (bound, written_atomic)));
 

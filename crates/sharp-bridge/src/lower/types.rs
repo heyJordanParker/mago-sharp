@@ -108,17 +108,21 @@ pub struct Declaration {
 }
 
 /// The members a method call runs on a value that may hold more than one kind of collection, or a collection or an
-/// object, spec section 12, as [`Types::members_by_kind`] gives them.
+/// object, spec section 12, or an object and a value an extension of the method's name takes, spec section 26, as
+/// [`Types::members_by_kind`] gives them.
 pub(crate) struct MembersByKind<'analysis> {
-    /// Each kind's standard library member, in [`CollectionKind`]'s order, as the analysis resolved them.
+    /// Each kind's standard library member, in [`CollectionKind`]'s order, or the one extension the parts that declare
+    /// no member of its name run, as the analysis resolved them.
     pub(crate) members: Vec<KindMember<'analysis>>,
     /// The classes whose method of that name an object the value may hold runs, its own, none when it holds no object.
     pub(crate) objects: Vec<Word>,
 }
 
-/// One kind's standard library member of a [`MembersByKind`].
+/// One kind's standard library member of a [`MembersByKind`], or the extension it runs on the value's other parts.
 pub(crate) struct KindMember<'analysis> {
-    pub(crate) kind: CollectionKind,
+    /// The kind of collection the member is the standard library's member of. None for an extension that runs on every
+    /// part of the value that declares no member of its name, as `label()` on an `Order|string` runs on a `string`.
+    pub(crate) kind: Option<CollectionKind>,
     /// The class of the object a `Map` or a `Set` runs as, which tells it apart. None for a `List`, which runs as a PHP
     /// array, and for an `Iterable`.
     pub(crate) runs_as: Option<Word>,
@@ -1403,6 +1407,15 @@ impl<'analysis> Types<'analysis> {
         })
     }
 
+    /// The classes whose own member the read `read` of an extension member reads on the parts of its receiver of those
+    /// classes, spec section 26, as the analysis resolved them, each by the name its declaration writes. None for a read
+    /// that reads the extension's member on its whole receiver.
+    pub(crate) fn own_member_reads(&self, read: &Expression) -> Option<Vec<Word>> {
+        let classes = self.artifacts.get_own_member_reads(read)?;
+
+        Some(classes.iter().map(|class| self.class_declaration(class.as_bytes()).name).collect())
+    }
+
     /// The standard library's member `name` of the collection `kind`, a `List` or a `Map`, which an operation on it runs,
     /// as `list[i] = v` and `map[key] = value` run `set`.
     pub(crate) fn collection_operation(&self, name: &[u8], kind: CollectionKind) -> Declaration {
@@ -1424,10 +1437,10 @@ impl<'analysis> Types<'analysis> {
     }
 
     /// The members the method call `call` runs on a value that may hold more than one kind of collection, or a
-    /// collection or an object, spec section 12, as the analysis resolved them. None for a call that runs one member, or
-    /// no collection's.
+    /// collection or an object, spec section 12, or an object and a value an extension takes, spec section 26, as the
+    /// analysis resolved them. None for a call that runs one member, or no extension's.
     pub(crate) fn members_by_kind(&self, call: &Expression) -> Option<MembersByKind<'_>> {
-        let (mut members, mut objects) = (Vec::new(), Vec::new());
+        let (mut extensions, mut objects) = (Vec::new(), Vec::new());
         for callee in self.artifacts.get_callees(call) {
             let CallTarget::FunctionLike { callee: callee @ FunctionLikeIdentifier::Method(class, method), .. } =
                 callee
@@ -1435,38 +1448,47 @@ impl<'analysis> Types<'analysis> {
                 return None;
             };
             let metadata = self.codebase.get_method(class.as_bytes(), method.as_bytes())?;
-            if !metadata.flags.is_extension_method() {
+            if metadata.flags.is_extension_method() {
+                extensions.push((callee, *class, metadata));
+            } else {
                 let class = self.class_declaration(class.as_bytes()).name;
                 if !objects.contains(&class) {
                     objects.push(class);
                 }
-                continue;
             }
-            let kind = collection_member_kind(*class, metadata)?;
-            let receiver = &metadata.parameters.first()?.get_type_metadata()?.type_union;
-            let runs_as =
-                match receiver.get_single_array().and_then(|array| get_collection_object(array, self.codebase)) {
-                    Some(TAtomic::Object(object)) => object.get_name(),
-                    _ => None,
-                };
-            let Some(member_call) = self.artifacts.get_member_call(call, callee) else {
-                unreachable!("the analysis records each member of a call that runs several");
-            };
-            members.push(KindMember {
-                kind,
-                runs_as,
-                declaration: Declaration {
-                    kind: DeclarationKind::StaticMethod,
-                    class: self.class_declaration(class.as_bytes()).name,
-                    name: metadata.original_name,
-                    public: true,
-                },
-                call: member_call,
-            });
+        }
+        if extensions.is_empty() || extensions.len() + usize::from(!objects.is_empty()) < 2 {
+            return None;
         }
 
-        (!members.is_empty() && members.len() + usize::from(!objects.is_empty()) > 1)
-            .then_some(MembersByKind { members, objects })
+        let members = extensions
+            .into_iter()
+            .map(|(callee, class, metadata)| {
+                let receiver = &metadata.parameters.first()?.get_type_metadata()?.type_union;
+                let runs_as =
+                    match receiver.get_single_array().and_then(|array| get_collection_object(array, self.codebase)) {
+                        Some(TAtomic::Object(object)) => object.get_name(),
+                        _ => None,
+                    };
+                let Some(call) = self.artifacts.get_member_call(call, callee) else {
+                    unreachable!("the analysis records each member of a call that runs several");
+                };
+
+                Some(KindMember {
+                    kind: collection_member_kind(class, metadata),
+                    runs_as,
+                    declaration: Declaration {
+                        kind: DeclarationKind::StaticMethod,
+                        class: self.class_declaration(class.as_bytes()).name,
+                        name: metadata.original_name,
+                        public: true,
+                    },
+                    call,
+                })
+            })
+            .collect::<Option<Vec<_>>>()?;
+
+        Some(MembersByKind { members, objects })
     }
 
     /// The slot an inline form leaves for each parameter of the engine function `function`, which `written` calls, that

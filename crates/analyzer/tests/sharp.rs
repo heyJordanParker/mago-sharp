@@ -9502,6 +9502,96 @@ fn an_extension_named_like_a_real_member_of_its_type_is_an_error() {
     );
 }
 
+/// Spec section 26: on a union receiver, as `Order|string`, an extension member is an error only when every type of the
+/// union declares the member, "because otherwise the extension runs on the rest". So `label()` runs the extension on a
+/// `string`, `Order.label()` on an `Order`, and on an `Order|string` each part's: the call records both. `badge()`,
+/// which `Order` lacks, runs the extension on the whole union. A member each part declares is still refused where the
+/// extension declares it.
+#[test]
+fn an_extension_on_a_union_runs_on_the_parts_that_lack_a_member_of_its_name() {
+    let order = "namespace App.Billing;\n\npublic class Order\n{\n    public Order() { }\n\n    public string label() => \"order\";\n}\n";
+    let ticket = "namespace App.Billing;\n\npublic class Ticket\n{\n    public Ticket() { }\n\n    public string label() => \"ticket\";\n}\n";
+    let labels = "namespace App.Billing;\n\npublic static class UnionLabels\n{\n    extension(Order|string value)\n    {\n        public string label() => \"text\";\n        public string badge() => \"badge\";\n    }\n}\n";
+    let pairs = "namespace App.Billing;\n\npublic static class PairLabels\n{\n    extension(Order|Ticket either)\n    {\n        public string label() => \"either\";\n    }\n}\n";
+    let calls = "namespace App.Billing;\n\npublic class Labels\n{\n    public string text(string text) => text.label();\n    public string order(Order order) => order.label();\n    public string mixed(Order|string mixed) => mixed.label();\n    public string badge(Order|string value) => value.badge();\n}\n";
+    let others = [
+        ("src/App/Billing/Order.sharp", order),
+        ("src/App/Billing/Ticket.sharp", ticket),
+        ("src/App/Billing/UnionLabels.sharp", labels),
+        ("src/App/Billing/PairLabels.sharp", pairs),
+    ];
+
+    assert_messages(("src/App/Billing/UnionLabels.sharp", labels), &others[..2], &[]);
+    assert_messages(
+        ("src/App/Billing/PairLabels.sharp", pairs),
+        &others[..2],
+        &[
+            "7:23 duplicate-definition: `Order` and `Ticket` already declare `label()`, so this extension member never runs.",
+        ],
+    );
+    assert_messages(("src/App/Billing/Labels.sharp", calls), &others, &[]);
+    let extension = |member: &str| {
+        format!(
+            r#"FunctionLike {{ callee: Method("app\\billing\\unionlabels", "{member}"), class: Some("app\\billing\\unionlabels") }}"#
+        )
+    };
+    let own = r#"FunctionLike { callee: Method("App\\Billing\\Order", "label"), class: Some("app\\billing\\order") }"#
+        .to_owned();
+    assert_eq!(
+        recorded_callees(
+            ("src/App/Billing/Labels.sharp", calls),
+            &others,
+            &["text.label()", "order.label()", "mixed.label()", "value.badge()"]
+        ),
+        [vec![extension("label")], vec![own.clone()], vec![extension("label"), own], vec![extension("badge")],]
+    );
+}
+
+/// Spec section 26: on a union receiver, an extension member is read on the parts that declare no member of its name,
+/// and a part's own member on that part, a computed property as a method's value, so a read of either on an
+/// `Order|string` has the type of each and no error, and the read records the classes that read their own.
+#[test]
+fn an_extension_read_on_a_union_reads_each_parts_member() {
+    let order = "namespace App.Billing;\n\npublic class Order\n{\n    public Order() { }\n\n    public string caption => \"order\";\n\n    public string label() => \"order\";\n}\n";
+    let captions = "namespace App.Billing;\n\npublic static class Captions\n{\n    extension(Order|string value)\n    {\n        public string caption => \"text\";\n\n        public string label() => \"text\";\n    }\n}\n";
+    let reads = "namespace App.Billing;\n\npublic class Reads\n{\n    public string caption(Order|string value) => value.caption;\n\n    public Function<string()> labeler(Order|string label) => label.label;\n}\n";
+    let others = [("src/App/Billing/Order.sharp", order), ("src/App/Billing/Captions.sharp", captions)];
+    let analyzed = ("src/App/Billing/Reads.sharp", reads);
+
+    assert_messages(analyzed, &others, &[]);
+    let (_, artifacts) = analyze_with_artifacts(&PLUGIN_REGISTRY, settings(), analyzed, &others);
+    let own = |read: &str| {
+        let start = reads.find(read).unwrap() as u32;
+
+        artifacts.get_own_member_reads(&Span::dummy(start, start + read.len() as u32)).map(<[Word]>::to_vec)
+    };
+    assert_eq!(own("value.caption"), Some(vec![word("app\\billing\\order")]));
+    assert_eq!(own("label.label"), Some(vec![word("app\\billing\\order")]));
+}
+
+/// Spec section 26: the receiver's type picks the extension, so an extension of `string` and one of `int` add nothing to
+/// a `string|int`, and one of `string` nothing to a `Box|string`. The call gets one error, on the receiver's type, whose
+/// help names each part that has the member, so no error says a `string` lacks a member its help lists.
+#[test]
+fn a_member_an_extension_gives_one_part_of_a_union_is_missing_on_the_union() {
+    let names = "namespace App.Billing;\n\npublic static class Names\n{\n    extension(string value)\n    {\n        public string label() => value;\n    }\n}\n";
+    let calls = "namespace App.Billing;\n\npublic class Labels\n{\n    public string either(string|int value) => value.label();\n    public string boxed(Box|string value) => value.label();\n}\n";
+    let counts = "namespace App.Billing;\n\npublic static class Counts\n{\n    extension(int value)\n    {\n        public string label() => \"count\";\n    }\n}\n";
+    let others = [
+        ("src/App/Billing/Names.sharp", names),
+        ("src/App/Billing/Counts.sharp", counts),
+        ("src/App/Billing/Box.sharp", "namespace App.Billing;\n\npublic class Box\n{\n}\n"),
+    ];
+
+    assert_eq!(
+        worded(("src/App/Billing/Labels.sharp", calls), &others),
+        [
+            "5:53 non-existent-method Method `label` does not exist on `int|string`. | This method selection is invalid | This expression has type `int|string` | Only an `int` and a `string` have the extension member `label`: test the value with `is` first, and call `label` there.",
+            "6:52 non-existent-method Method `label` does not exist on `string|Box`. | This method selection is invalid | This expression has type `string|Box` | Only a `string` has the extension member `label`: test the value with `is` first, and call `label` there.",
+        ]
+    );
+}
+
 /// Spec section 26: an extension member's body reads its receiver as a parameter of the receiver's type.
 #[test]
 fn an_extension_member_reads_its_receiver_as_a_parameter_of_its_type() {

@@ -306,18 +306,56 @@ where
         .values()
         .flatten()
         .filter_map(|(_, method)| Some((method.get_class_name(), codebase.get_method_by_id(method)?)))
-        .filter(|(class, metadata)| {
-            metadata.flags.contains(MetadataFlags::EXTENSION_METHOD)
-                && (is_imported_or_in_namespace(context, *class) || is_imported_by_default(context, *class, metadata))
-                && fits(context, receiver, *class, metadata)
-                && can_compare_elements(metadata, receiver, codebase)
-        })
+        .filter(|(class, metadata)| is_callable_on(context, receiver, *class, metadata))
         .map(|(_, metadata)| metadata.original_name.to_string())
         .collect();
     names.sort();
     names.dedup();
 
     names.into_iter().map(|name| format!("`{name}`")).collect()
+}
+
+/// Whether [`extension_methods`] names `name`, compared ignoring case, for a value of type `receiver`, through an
+/// extension that is no collection's own member, which a collection's kind reaches apart, spec section 12.
+pub(crate) fn has_extension_method<A>(context: &Context<'_, '_, A>, receiver: &TUnion, name: &[u8]) -> bool
+where
+    A: Arena,
+{
+    let codebase = context.codebase;
+
+    codebase.extensions.get(&ascii_lowercase_word(name)).is_some_and(|members| {
+        members.iter().any(|(_, method)| {
+            codebase.get_method_by_id(method).is_some_and(|metadata| {
+                let class = method.get_class_name();
+
+                !is_collection_member(class, metadata) && is_callable_on(context, receiver, class, metadata)
+            })
+        })
+    })
+}
+
+/// Whether a call on a value of type `receiver` in this file reaches and can call the extension method `metadata` of
+/// the static class `class`, as [`extension_methods`] lists them.
+fn is_callable_on<A>(
+    context: &Context<'_, '_, A>,
+    receiver: &TUnion,
+    class: Word,
+    metadata: &FunctionLikeMetadata,
+) -> bool
+where
+    A: Arena,
+{
+    metadata.flags.contains(MetadataFlags::EXTENSION_METHOD)
+        && (is_imported_or_in_namespace(context, class) || is_imported_by_default(context, class, metadata))
+        && fits(context, receiver, class, metadata)
+        && can_compare_elements(metadata, receiver, context.codebase)
+}
+
+/// Whether `part`, one type of a receiver, is a value that declares no member `name` of its own, so an extension of
+/// that name runs on it, spec section 26: anything but `null` and a class that declares or inherits the member, as
+/// [`CodebaseMetadata::get_classes_hidden_by_extension`] finds it.
+pub(crate) fn lacks_member(codebase: &CodebaseMetadata, part: &TAtomic, name: &[u8]) -> bool {
+    !part.is_null() && codebase.get_classes_hidden_by_extension(&TUnion::from_atomic(part.clone()), name).is_empty()
 }
 
 /// Whether a value of type `receiver` fits the receiver of the extension member `metadata` of the static class `class`,

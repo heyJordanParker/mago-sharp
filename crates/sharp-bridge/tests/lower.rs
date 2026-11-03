@@ -7500,6 +7500,175 @@ fn a_member_of_a_value_that_may_be_any_collection_or_an_object_tests_each_kind()
 }
 
 /// ```php
+/// return $value instanceof \App\Billing\Order ? $value->label() : \App\Billing\Labels::label($value);
+/// ```
+///
+/// Spec section 26: an extension on a union receiver runs on the parts that declare no member of its name, so a call on
+/// an `Order|string` runs `Order`'s own method on an `Order`, told apart by its class, and the extension on the rest.
+#[test]
+fn an_extension_on_a_union_runs_on_the_parts_without_its_member_beside_the_objects_own_method() {
+    let files = lowered_each(
+        &[
+            (
+                "src/App/Billing/Order.sharp",
+                "namespace App.Billing;\n\npublic class Order\n{\n    public Order() { }\n\n    public string label() => \"order\";\n}\n",
+            ),
+            (
+                "src/App/Billing/Labels.sharp",
+                "namespace App.Billing;\n\npublic static class Labels\n{\n    extension(Order|string value)\n    {\n        public string label() => \"text\";\n    }\n}\n",
+            ),
+            (
+                "src/App/Billing/Shelf.sharp",
+                "namespace App.Billing;\n\npublic class Shelf\n{\n    public static string label(Order|string value) => value.label();\n}\n",
+            ),
+        ],
+        &[],
+    );
+
+    assert_eq!(
+        files[2].body_of("label"),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                CONDITIONAL [1]
+                  INSTANCEOF
+                    VAR
+                      ZVAL "value"
+                    ZVAL "App\\Billing\\Order"
+                  METHOD_CALL
+                    VAR
+                      ZVAL "value"
+                    ZVAL "label"
+                    ARG_LIST
+                  STATIC_CALL
+                    ZVAL "App\\Billing\\Labels"
+                    ZVAL "label"
+                    ARG_LIST
+                      VAR
+                        ZVAL "value"
+        "#}
+    );
+}
+
+/// ```php
+/// return $value instanceof \App\Billing\Order ? $value->caption : \App\Billing\Captions::caption($value);
+/// return [$receiver#1 = $this->pick(), $receiver#1 instanceof \App\Billing\Order ? $receiver#1->label(...)
+///     : (function ($receiver) { return function () use ($receiver) {
+///         return \App\Billing\Captions::label($receiver); }; })($receiver#1)][1];
+/// ```
+///
+/// Spec section 26: a read of an extension member on a union receiver reads the member of the parts that declare one
+/// on them, told apart by their class, a property or a method's value, and the extension's on the rest. A receiver that
+/// is no local runs once.
+#[test]
+fn an_extension_read_on_a_union_reads_the_objects_own_member_beside_the_extensions() {
+    let files = lowered_each(
+        &[
+            (
+                "src/App/Billing/Order.sharp",
+                "namespace App.Billing;\n\npublic class Order\n{\n    public Order() { }\n\n    public string caption => \"order\";\n\n    public string label() => \"order\";\n}\n",
+            ),
+            (
+                "src/App/Billing/Captions.sharp",
+                "namespace App.Billing;\n\npublic static class Captions\n{\n    extension(Order|string value)\n    {\n        public string caption => \"text\";\n\n        public string label() => \"text\";\n    }\n}\n",
+            ),
+            (
+                "src/App/Billing/Reads.sharp",
+                "namespace App.Billing;\n\npublic class Reads\n{\n    public string caption(Order|string value) => value.caption;\n\n    public Function<string()> labeler() => this.pick().label;\n\n    public Order|string pick() => \"text\";\n}\n",
+            ),
+        ],
+        &[],
+    );
+
+    assert_eq!(
+        files[2].body_of("caption"),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                CONDITIONAL [1]
+                  INSTANCEOF
+                    VAR
+                      ZVAL "value"
+                    ZVAL "App\\Billing\\Order"
+                  PROP
+                    VAR
+                      ZVAL "value"
+                    ZVAL "caption"
+                  STATIC_CALL
+                    ZVAL "App\\Billing\\Captions"
+                    ZVAL "caption"
+                    ARG_LIST
+                      VAR
+                        ZVAL "value"
+        "#}
+    );
+    assert_eq!(
+        files[2].body_of("labeler"),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                DIM
+                  ARRAY [3]
+                    ARRAY_ELEM
+                      ASSIGN
+                        VAR
+                          ZVAL "receiver#1"
+                        METHOD_CALL
+                          VAR
+                            ZVAL "this"
+                          ZVAL "pick"
+                          ARG_LIST
+                      null
+                    ARRAY_ELEM
+                      CONDITIONAL [1]
+                        INSTANCEOF
+                          VAR
+                            ZVAL "receiver#1"
+                          ZVAL "App\\Billing\\Order"
+                        METHOD_CALL
+                          VAR
+                            ZVAL "receiver#1"
+                          ZVAL "label"
+                          CALLABLE_CONVERT
+                        CALL
+                          CLOSURE "" @7-7
+                            PARAM_LIST
+                              PARAM
+                                null
+                                ZVAL "receiver"
+                                null
+                                null
+                                null
+                                null
+                            null
+                            STMT_LIST
+                              RETURN
+                                CLOSURE "" @7-7
+                                  PARAM_LIST
+                                  CLOSURE_USES
+                                    ZVAL "receiver"
+                                  STMT_LIST
+                                    RETURN
+                                      STATIC_CALL
+                                        ZVAL "App\\Billing\\Captions"
+                                        ZVAL "label"
+                                        ARG_LIST
+                                          VAR
+                                            ZVAL "receiver"
+                                  null
+                                  null
+                            null
+                            null
+                          ARG_LIST
+                            VAR
+                              ZVAL "receiver#1"
+                      null
+                  ZVAL 1
+        "#}
+    );
+}
+
+/// ```php
 /// return \count([$receiver#1 = ($listed ? $items : $names),
 ///         \is_array($receiver#1) ? $receiver#1 : \Sharp\Internal\Sequence::from($receiver#1)->toList()][1])
 ///     + \count([$receiver#1 = ($listed ? $this : $names), $receiver#1 instanceof \App\Tenant\Report

@@ -8214,7 +8214,92 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// caller's position, as [`Self::caller_positions`] says, and a generic member's call ends with its type
     /// arguments, as any generic call does. A method read without `(…)` is its value, spec section 14.3, a closure over
     /// the receiver, as [`Self::receiver_closure`] writes it, that calls the static method with no caller's position.
+    /// A read whose receiver may be a class that declares a member of the name reads that member on it, as
+    /// [`Self::read_by_class`] writes it.
     fn extension_access(
+        &mut self,
+        access: &Expression,
+        extension: &Declaration,
+        receiver: &Expression,
+        arguments: Option<&ArgumentList>,
+    ) -> u32 {
+        if arguments.is_none()
+            && let Some(classes) = self.types.own_member_reads(access)
+        {
+            return self.read_by_class(access, extension, receiver, &classes);
+        }
+
+        self.extension_on_whole(access, extension, receiver, arguments)
+    }
+
+    /// The read `access` of the member `extension` adds, on a `receiver` whose parts of `classes` declare a member of
+    /// its name, spec section 26: that member on an object of those classes, a property or a method's value, and the
+    /// extension's on any other value, as [`Self::extension_on_whole`] lowers it:
+    ///
+    /// ```php
+    /// $value instanceof \App\Billing\Order ? $value->caption : \App\Billing\Captions::caption($value)
+    /// ```
+    ///
+    /// A receiver that is no literal or local runs once, in a hidden variable.
+    fn read_by_class(
+        &mut self,
+        access: &Expression,
+        extension: &Declaration,
+        receiver: &Expression,
+        classes: &[Word],
+    ) -> u32 {
+        let line = self.line(access);
+        let (taken, held) = (self.temporaries, self.held_receivers.len());
+        let step = (!self.is_pure(receiver)).then(|| {
+            let (step, name) = self.hold_step(line, receiver, "receiver");
+            self.held_receivers.push((receiver.span(), name));
+
+            step
+        });
+        let tests: Vec<u32> = classes
+            .iter()
+            .map(|class| {
+                let tested = self.expression(receiver);
+                let class = self.string(ZEND_NAME_FQ, line, class.as_bytes());
+
+                self.node(SHARP_AST_INSTANCEOF, 0, line, &[tested, class])
+            })
+            .collect();
+        let is_object = tests
+            .into_iter()
+            .reduce(|either, test| self.node(SHARP_AST_OR, 0, line, &[either, test]))
+            .unwrap_or_else(|| unreachable!("a read by class reads a class's own member"));
+        let name = extension.name.as_bytes();
+        let own_kind = agreed_kind(classes.iter().map(|class| {
+            let class = class.as_bytes();
+            self.types.read_member(class, name).unwrap_or_else(|| self.types.member_declaration(class, name)).kind
+        }));
+        let object = self.expression(receiver);
+        let member = self.string(0, line, name);
+        let own = match own_kind {
+            DeclarationKind::Method { .. } | DeclarationKind::StaticMethod => {
+                self.method_value(access, SHARP_AST_METHOD_CALL, object, member)
+            }
+            _ => self.node(SHARP_AST_PROP, 0, line, &[object, member]),
+        };
+        let rest = self.extension_on_whole(access, extension, receiver, None);
+        let selected = self.node(SHARP_AST_CONDITIONAL, ZEND_PARENTHESIZED_CONDITIONAL, line, &[is_object, own, rest]);
+        let lowered = match step {
+            Some(step) => {
+                let selected = self.node(SHARP_AST_ARRAY_ELEM, 0, line, &[selected, NULL]);
+
+                self.picked_step(line, &[step, selected], 1)
+            }
+            None => selected,
+        };
+        self.held_receivers.truncate(held);
+        self.temporaries = taken;
+
+        lowered
+    }
+
+    /// [`Self::extension_access`] on the whole of `receiver`, which the extension's member reads or calls alone.
+    fn extension_on_whole(
         &mut self,
         access: &Expression,
         extension: &Declaration,
@@ -8448,11 +8533,12 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// The method call `expression`, null-safe or not, of `call`, its receiver, method and arguments, on a value that
-    /// may hold more than one kind of collection, or a collection or an object, spec section 12, as
-    /// [`Types::members_by_kind`] gives `kinds`: the member of the kind the value holds, tested `List` first, then a
-    /// `Map` and a `Set` by the class each runs as, then an object's own method, and last an `Iterable`'s member, which
-    /// takes every other value. An object is tested by its method's class only before an `Iterable`'s member, since an
-    /// `Iterable` may be an object too. The receiver runs first, as a place a `ref`
+    /// may hold more than one kind of collection, or a collection or an object, spec section 12, or an object and a
+    /// value an extension takes, spec section 26, as [`Types::members_by_kind`] gives `kinds`: the member of the kind the
+    /// value holds, tested `List` first, then a `Map` and a `Set` by the class each runs as, then an object's own method,
+    /// and last an `Iterable`'s member or the extension, which takes every other value. An object is tested by its
+    /// method's class only before that last member, since an `Iterable` may be an object too, and so may a value the
+    /// extension takes. The receiver runs first, as a place a `ref`
     /// member changes, as [`Self::with_place`] passes it and skips where `null_safe` finds it null, or a value read
     /// once. Each argument but a literal or a local then runs once, in a hidden variable, and each member runs as its
     /// own call does, as [`Self::extension_call`] lowers it:
@@ -8534,7 +8620,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             );
             calls.push((member, call));
         }
-        let iterable = calls.pop_if(|(member, _)| member.kind == CollectionKind::Iterable).map(|(_, call)| call);
+        // An `Iterable`'s member, or an extension on the parts that declare no member of its name, takes every value the
+        // other members and the objects' own methods leave.
+        let rest = calls
+            .pop_if(|(member, _)| member.kind.is_none_or(|kind| kind == CollectionKind::Iterable))
+            .map(|(_, call)| call);
         let own = (!kinds.objects.is_empty()).then(|| {
             let value = self.expression(receiver);
             let method = self.member(method);
@@ -8553,9 +8643,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
 
             self.node(SHARP_AST_METHOD_CALL, 0, line, &[value, method, own])
         });
-        let mut selected = match (own, iterable) {
-            // An `Iterable` may be an object too, so an object that runs its own method is told apart by its class.
-            (Some(own), Some(iterable)) => {
+        let mut selected = match (own, rest) {
+            // An `Iterable` may be an object too, and an extension may take an object, so an object that runs its own
+            // method is told apart by its class.
+            (Some(own), Some(rest)) => {
                 let tests: Vec<u32> = kinds
                     .objects
                     .iter()
@@ -8571,7 +8662,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     .reduce(|either, test| self.node(SHARP_AST_OR, 0, line, &[either, test]))
                     .unwrap_or_else(|| unreachable!("the value may hold an object"));
 
-                self.node(SHARP_AST_CONDITIONAL, ZEND_PARENTHESIZED_CONDITIONAL, line, &[is_object, own, iterable])
+                self.node(SHARP_AST_CONDITIONAL, ZEND_PARENTHESIZED_CONDITIONAL, line, &[is_object, own, rest])
             }
             (Some(last), None) | (None, Some(last)) => last,
             (None, None) => {
