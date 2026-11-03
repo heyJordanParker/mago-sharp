@@ -1408,6 +1408,12 @@ impl<'analysis> Types<'analysis> {
         })
     }
 
+    /// Whether the member `member` of the class `class` a call runs is a property that holds a function, spec section
+    /// 14.3, which the call calls, where it is no method.
+    pub(crate) fn holds_function(&self, class: &[u8], member: &[u8]) -> bool {
+        matches!(self.declared_member(class, member), Some(Declaration { kind: DeclarationKind::Property { .. }, .. }))
+    }
+
     /// The classes of the receiver's parts whose own member the call or read `access` runs, beside an extension or a
     /// collection's member on the other parts, spec sections 12 and 26, as the analysis resolved them, each by the name
     /// its declaration writes. Each is the part's own class, so a test of the value's class finds it. None for an access

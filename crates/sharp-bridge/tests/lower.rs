@@ -7551,6 +7551,58 @@ fn an_extension_on_a_union_runs_on_the_parts_without_its_member_beside_the_objec
 }
 
 /// ```php
+/// return $value instanceof \App\Billing\Order ? ($value->label)() : \App\Billing\Labels::label($value);
+/// ```
+///
+/// Spec section 14.3: a part whose member of the name is a property that holds a function calls that function, as a
+/// call of the property on that part alone does, beside the extension the other parts run.
+#[test]
+fn a_part_whose_member_is_a_property_that_holds_a_function_calls_it_beside_the_extension() {
+    let files = lowered_each(
+        &[
+            (
+                "src/App/Billing/Order.sharp",
+                "namespace App.Billing;\n\npublic class Order\n{\n    public Order() { }\n\n    public Function<string()> label => () => \"order\";\n}\n",
+            ),
+            (
+                "src/App/Billing/Labels.sharp",
+                "namespace App.Billing;\n\npublic static class Labels\n{\n    extension(Order|string value)\n    {\n        public string label() => \"text\";\n    }\n}\n",
+            ),
+            (
+                "src/App/Billing/Calls.sharp",
+                "namespace App.Billing;\n\npublic class Calls\n{\n    public string called(Order|string value) => value.label();\n}\n",
+            ),
+        ],
+        &[],
+    );
+
+    assert_eq!(
+        files[2].body_of("called"),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                CONDITIONAL [1]
+                  INSTANCEOF
+                    VAR
+                      ZVAL "value"
+                    ZVAL "App\\Billing\\Order"
+                  CALL
+                    PROP
+                      VAR
+                        ZVAL "value"
+                      ZVAL "label"
+                    ARG_LIST
+                  STATIC_CALL
+                    ZVAL "App\\Billing\\Labels"
+                    ZVAL "label"
+                    ARG_LIST
+                      VAR
+                        ZVAL "value"
+        "#}
+    );
+}
+
+/// ```php
 /// return $value instanceof \App\Billing\PhpOrder ? $value->label() : \App\Billing\Labels::label($value);
 /// ```
 ///

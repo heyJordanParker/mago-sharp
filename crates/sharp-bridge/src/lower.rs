@@ -8625,10 +8625,22 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let rest = calls
             .pop_if(|(member, _)| member.kind.is_none_or(|kind| kind == CollectionKind::Iterable))
             .map(|(_, call)| call);
-        let own = (!kinds.objects.is_empty()).then(|| {
+        // An object runs its own method, or calls the function its property of the name holds, spec section 14.3, as a
+        // call on that object alone does.
+        let name = match method {
+            ClassLikeMemberSelector::Identifier(name) => name.value,
+            _ => unreachable!("check_slice refuses the member name `{method}`"),
+        };
+        let (properties, methods): (Vec<Word>, Vec<Word>) =
+            kinds.objects.iter().copied().partition(|class| self.types.holds_function(class.as_bytes(), name));
+        let mut own = Vec::new();
+        for (classes, property) in [(methods, false), (properties, true)] {
+            if classes.is_empty() {
+                continue;
+            }
             let value = self.expression(receiver);
-            let method = self.member(method);
-            let own: Vec<u32> = argument_list
+            let member = self.member(method);
+            let arguments: Vec<u32> = argument_list
                 .arguments
                 .iter()
                 .map(|argument| {
@@ -8639,33 +8651,20 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     }
                 })
                 .collect();
-            let own = self.node(SHARP_AST_ARG_LIST, 0, line, &own);
+            let arguments = self.node(SHARP_AST_ARG_LIST, 0, line, &arguments);
+            let call = if property {
+                let property = self.node(SHARP_AST_PROP, 0, line, &[value, member]);
 
-            self.node(SHARP_AST_METHOD_CALL, 0, line, &[value, method, own])
-        });
-        let mut selected = match (own, rest) {
-            // An `Iterable` may be an object too, and an extension may take an object, so an object that runs its own
-            // method is told apart by its class.
-            (Some(own), Some(rest)) => {
-                let tests: Vec<u32> = kinds
-                    .objects
-                    .iter()
-                    .map(|class| {
-                        let tested = self.expression(receiver);
-                        let class = self.string(ZEND_NAME_FQ, line, class.as_bytes());
-
-                        self.node(SHARP_AST_INSTANCEOF, 0, line, &[tested, class])
-                    })
-                    .collect();
-                let is_object = tests
-                    .into_iter()
-                    .reduce(|either, test| self.node(SHARP_AST_OR, 0, line, &[either, test]))
-                    .unwrap_or_else(|| unreachable!("the value may hold an object"));
-
-                self.node(SHARP_AST_CONDITIONAL, ZEND_PARENTHESIZED_CONDITIONAL, line, &[is_object, own, rest])
-            }
-            (Some(last), None) | (None, Some(last)) => last,
-            (None, None) => {
+                self.node(SHARP_AST_CALL, 0, line, &[property, arguments])
+            } else {
+                self.node(SHARP_AST_METHOD_CALL, 0, line, &[value, member, arguments])
+            };
+            own.push((classes, call));
+        }
+        // The last of the members runs on what the others leave, untested.
+        let mut selected = match rest.or_else(|| own.pop().map(|(_, call)| call)) {
+            Some(last) => last,
+            None => {
                 let Some((_, last)) = calls.pop() else {
                     unreachable!("a call by kind runs a collection's member");
                 };
@@ -8673,6 +8672,13 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 last
             }
         };
+        // An `Iterable` may be an object too, and an extension may take an object, so an object that runs its own
+        // member is told apart by its class.
+        for (classes, call) in own.into_iter().rev() {
+            let is_object = self.instance_of_any(line, receiver, &classes);
+            selected =
+                self.node(SHARP_AST_CONDITIONAL, ZEND_PARENTHESIZED_CONDITIONAL, line, &[is_object, call, selected]);
+        }
         for (member, member_call) in calls.into_iter().rev() {
             let tested = self.expression(receiver);
             let is_kind = match member.runs_as {
@@ -8697,6 +8703,26 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         steps.push(self.node(SHARP_AST_ARRAY_ELEM, 0, line, &[selected, NULL]));
 
         self.picked_step(line, &steps, position)
+    }
+
+    /// The test that `value` is an instance of one of `classes`, as
+    /// `$value instanceof \App\Order || $value instanceof \App\Ticket`, which tells apart the parts of a value that run
+    /// their own member.
+    fn instance_of_any(&mut self, line: u32, value: &Expression, classes: &[Word]) -> u32 {
+        let tests: Vec<u32> = classes
+            .iter()
+            .map(|class| {
+                let tested = self.expression(value);
+                let class = self.string(ZEND_NAME_FQ, line, class.as_bytes());
+
+                self.node(SHARP_AST_INSTANCEOF, 0, line, &[tested, class])
+            })
+            .collect();
+
+        tests
+            .into_iter()
+            .reduce(|either, test| self.node(SHARP_AST_OR, 0, line, &[either, test]))
+            .unwrap_or_else(|| unreachable!("a part of the value runs its own member"))
     }
 
     /// The call `access` of the extension member `extension` on `receiver`, with `arguments`: the library's inline form,
