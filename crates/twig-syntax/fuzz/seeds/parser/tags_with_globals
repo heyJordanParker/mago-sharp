@@ -1,3 +1,0 @@
-{% with [] only %}
-    {{ global }}
-{% endwith %}

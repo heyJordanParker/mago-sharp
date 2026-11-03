@@ -1,6 +1,0 @@
-{% set hash = {
-  'foo': 'FOO',
-  'bar': 'BAR',
-} %}
-
-{{ hash[key] }}

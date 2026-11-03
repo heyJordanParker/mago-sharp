@@ -1,3 +1,0 @@
-{% extends 'foo.html' %}
-
-{% set foo = "foo" %}

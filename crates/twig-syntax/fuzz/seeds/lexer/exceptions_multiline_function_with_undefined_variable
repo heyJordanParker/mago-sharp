@@ -1,5 +1,0 @@
-{{ include('foo',
-   with_context=with_context
-) }}
---TEMPLATE(foo)--
-Foo

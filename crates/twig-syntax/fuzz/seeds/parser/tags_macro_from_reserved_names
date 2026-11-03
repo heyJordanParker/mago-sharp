@@ -1,6 +1,0 @@
-{% from _self import input as true %}
-
-{{ true('username') }}
-
-{% macro input(name) -%}
-{% endmacro %}
