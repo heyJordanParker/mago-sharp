@@ -1,5 +1,0 @@
-{% extends foo %}
-
-{% block content %}New{% endblock %}
---TEMPLATE(foo.twig)--
-{% block content %}Default{% endblock %}

@@ -1,5 +1,0 @@
-{% extends ["", "bar.twig"] %}
---TEMPLATE(bar.twig)--
-{% block content %}
-foo
-{% endblock %}

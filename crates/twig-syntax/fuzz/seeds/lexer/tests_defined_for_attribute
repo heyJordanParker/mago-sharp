@@ -1,4 +1,0 @@
-{{ nested.("definedVar")     is     defined ? 'ok' : 'ko' }}
-{{ nested.("undefinedVar")   is not defined ? 'ok' : 'ko' }}
-{{ nested.(definedVarName)   is     defined ? 'ok' : 'ko' }}
-{{ nested.(undefinedVarName) is not defined ? 'ok' : 'ko' }}

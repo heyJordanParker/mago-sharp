@@ -1,3 +1,0 @@
-{{ include("foo.twig") }}
---TEMPLATE(foo.twig)--
-<p>Test</p>

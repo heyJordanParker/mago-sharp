@@ -40,10 +40,6 @@ sharp-header destination:
 build:
     cargo build --release
 
-# Builds the webassembly module.
-build-wasm:
-    cd crates/wasm && wasm-pack build --release --out-dir pkg
-
 # Detects problems using rustfmt, clippy, and cargo check, and runs the linter and analyzer.
 check:
     cargo run -- fmt --check
@@ -93,14 +89,6 @@ fuzz-sharp-parser:
         ../../semantics/tests/fixtures \
         ../../../tests/fixtures/sharp
 
-# Fuzz the Twig lexer.
-fuzz-twig-lexer:
-    cd crates/twig-syntax/fuzz && cargo +nightly fuzz run lexer corpus/lexer seeds/lexer
-
-# Fuzz the Twig parser.
-fuzz-twig-parser:
-    cd crates/twig-syntax/fuzz && cargo +nightly fuzz run parser corpus/parser seeds/parser
-
 # Publishes all crates to crates.io in the correct order.
 publish:
     # Note: the order of publishing is important, as some crates depend on others.
@@ -116,7 +104,6 @@ publish:
     cargo publish -p mago-syntax-core
     cargo publish -p mago-syntax
     cargo publish -p mago-phpdoc-syntax
-    cargo publish -p mago-twig-syntax
     cargo publish -p mago-flags
     cargo publish -p mago-hir
     cargo publish -p mago-collector
@@ -133,7 +120,6 @@ publish:
     cargo publish -p mago-analyzer
     cargo publish -p mago-linter
     cargo publish -p mago-orchestrator
-    cargo publish -p mago-wasm
     cargo publish
 
 # Cleans all build artifacts from the workspace.

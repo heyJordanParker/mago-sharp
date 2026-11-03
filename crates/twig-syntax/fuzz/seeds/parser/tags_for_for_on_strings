@@ -1,6 +1,0 @@
-{% set jp = "諺 / ことわざ" %}
-
-{% for letter in jp|split('') -%}
-    -{{- letter }}
-    {{- loop.last ? '.' }}
-{%- endfor %}

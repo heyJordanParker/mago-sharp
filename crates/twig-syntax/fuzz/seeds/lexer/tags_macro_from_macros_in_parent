@@ -1,9 +1,0 @@
-{% from "macros" import hello %}
-
-{{ hello() }}
---TEMPLATE(macros)--
-{% extends "parent" %}
---TEMPLATE(parent)--
-{% macro hello() %}
-    Test
-{% endmacro %}

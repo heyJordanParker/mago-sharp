@@ -1,3 +1,0 @@
-{% macro foo() %}
-    {% extends "foo.twig" %}
-{% endmacro %}

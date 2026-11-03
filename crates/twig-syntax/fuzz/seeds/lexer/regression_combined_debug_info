@@ -1,8 +1,0 @@
-{% block content %}
-    {{ foo }}
-    {{ include("foo") }}
-{% endblock %}
-index
---TEMPLATE(foo)--
-foo
-{{ foo.bar }}

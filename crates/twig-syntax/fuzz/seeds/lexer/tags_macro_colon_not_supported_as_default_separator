@@ -1,3 +1,0 @@
-{% macro test(foo: "foo") -%}
-    {{ foo }}
-{%- endmacro %}

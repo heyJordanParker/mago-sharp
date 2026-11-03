@@ -50,7 +50,6 @@
             pkgs.rustup
             pkgs.pkg-config
             pkgs.just
-            pkgs.wasm-pack
             php
             composer
           ] ++ pkgs.lib.optionals isDarwin [

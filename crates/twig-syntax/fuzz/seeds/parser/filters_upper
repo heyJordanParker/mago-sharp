@@ -1,3 +1,0 @@
-{{ "I like Twig."|upper }}
-*{{ ""|upper }}*
-*{{ null|upper }}*

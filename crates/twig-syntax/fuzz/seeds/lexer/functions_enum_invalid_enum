@@ -1,3 +1,0 @@
-{% for c in enum('Twig\\Tests\\NonExistentEnum').cases() %}
-    {{~ c.name }}
-{% endfor %}

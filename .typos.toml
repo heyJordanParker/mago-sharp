@@ -4,8 +4,6 @@ extend-exclude = [
     "crates/formatter/tests/",
     "crates/codex/tests/",
     "crates/analyzer/tests/cases/",
-    "crates/twig-syntax/tests/fixtures/",
-    "crates/twig-syntax/fuzz/seeds/",
     "crates/prelude/assets/extensions",
     "docs/",
 ]

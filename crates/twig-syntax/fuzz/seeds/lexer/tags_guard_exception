@@ -1,5 +1,0 @@
-{% guard function foobar %}
-    {{ foobar() }}
-{% else %}
-    {{ foobar() }}
-{% endguard %}

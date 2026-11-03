@@ -1,7 +1,0 @@
-{{ include('included.twig') }}
-
---TEMPLATE(included.twig)--
-
-
-
-{% extends dynamic %}
