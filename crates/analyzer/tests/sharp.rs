@@ -17831,8 +17831,10 @@ fn a_type_parameter_bounded_by_a_class_takes_one_class() {
 /// Spec section 11: a type parameter bounded by an interface takes a union, because an interface declares no static
 /// member its code could reach through the type argument. A static method, a static property and a constructor are each
 /// refused where the interface declares one, so `TItem.make()` on a `TItem : Labeled` reads `Labeled`'s members, which
-/// have no `make`, and `Tagged<Fancy|Plain>` compiles. An interface's operator is its own, which the code runs on its
-/// trait, never through the type argument.
+/// have no `make`, and is refused as a missing method alone, and `Tagged<Fancy|Plain>` compiles. An interface's operator
+/// is its own, which the code runs on its trait, never through the type argument. `new TItem()` and
+/// `new (typeof(TItem))()` are refused in PHP#'s words, since an interface has no objects. A plain PHP interface may
+/// declare a static method, which a type argument that is the interface itself lacks, so a call of it keeps its warning.
 #[test]
 fn an_interface_declares_no_static_member_a_type_parameter_reaches_through_its_type_argument() {
     let declared = |member: &str| format!("namespace Demo;\n\npublic interface Labeled\n{{\n    {member}\n}}\n");
@@ -17878,9 +17880,26 @@ fn an_interface_declares_no_static_member_a_type_parameter_reaches_through_its_t
     assert_messages(
         ("src/Demo/Tagged.sharp", tagged),
         &others,
+        &["5:45 non-existent-method: Method `Labeled.make` does not exist."],
+    );
+
+    // An interface has no objects, so `new` of a type parameter bounded by one is refused in PHP#'s words.
+    let created = "namespace Demo;\n\npublic class Created<TItem : Labeled>\n{\n    public TItem made() => new TItem();\n\n    public TItem valued() => new (typeof(TItem))();\n}\n";
+    let refused_new = |at: &str| {
+        format!(
+            "{at} unsafe-instantiation: `TItem`'s bound `Labeled` is an interface, so `new` of it creates no object. Bound `TItem` by a class."
+        )
+    };
+    assert_messages(("src/Demo/Created.sharp", created), &others, &[&refused_new("5:32"), &refused_new("7:34")]);
+
+    // A plain PHP interface may declare a static method, which a type argument that is the interface itself lacks.
+    let php_labeled =
+        "<?php\n\nnamespace Demo;\n\ninterface Labeled\n{\n    public static function make(): string;\n}\n";
+    assert_messages(
+        ("src/Demo/Tagged.sharp", tagged),
+        &[("src/Demo/Labeled.php", php_labeled), others[1], others[2]],
         &[
             "5:39 possibly-static-access-on-interface: Potential static method call on interface `Labeled` via `class-string`.",
-            "5:45 non-existent-method: Method `Labeled.make` does not exist.",
         ],
     );
     assert_messages(

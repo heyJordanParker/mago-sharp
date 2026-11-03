@@ -594,6 +594,25 @@ where
         _ => None,
     };
 
+    // Spec section 25: `new TItem()` and `new (typeof(TItem))()` create the type argument, which a `TItem` bounded by
+    // an interface may be, and an interface has no objects.
+    if context.dialect.is_sharp()
+        && metadata.kind.is_interface()
+        && let ResolutionOrigin::SpecificClassLikeString(TClassLikeString::Generic { parameter_name, .. }) =
+            &classname.origin
+    {
+        context.collector.report_with_code(
+            IssueCode::UnsafeInstantiation,
+            Issue::error(format!(
+                "`{parameter_name}`'s bound `{classname_str}` is an interface, so `new` of it creates no object. Bound `{parameter_name}` by a class."
+            ))
+            .with_annotation(Annotation::primary(class_expression_span).with_message("Created here."))
+            .with_help(format!("Bound `{parameter_name}` by a class that implements `{classname_str}`.")),
+        );
+        argument_list.analyze(context, block_context, artifacts)?;
+
+        return Ok(refused_instantiation(context));
+    }
     if classname.is_from_class_string() && (metadata.kind.is_interface() || metadata.kind.is_trait()) {
         let kind_name = if metadata.kind.is_interface() { "interface" } else { "trait" };
 
