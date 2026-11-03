@@ -37,11 +37,11 @@ use crate::context::block::BlockContext;
 use crate::context::scope::control_action::ControlAction;
 use crate::effects::summary::record_function_values;
 use crate::error::AnalysisError;
-use crate::expression::array::check_sharp_literal_kind;
 use crate::expression::array::get_set_literal_type;
 use crate::expression::is_refused;
+use crate::statement::class_like::property::accessor_property_type;
+use crate::statement::function_like::analyze_returned_value;
 use crate::statement::function_like::body_return_type;
-use crate::statement::function_like::expect_type;
 use crate::statement::function_like::get_scope_static_class_type;
 use crate::statement::function_like::known_type_or_error;
 use crate::utils::docblock::check_docblock_type_incompatibility;
@@ -116,19 +116,17 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Return<'arena> {
         }
 
         let inferred_return_type = if let Some(return_value) = self.value.as_ref() {
-            let return_type = block_context.scope.get_function_like().and_then(body_return_type);
-            let declared = return_type
-                .map(|return_type| return_type.type_union.clone())
-                .or_else(|| artifacts.lambda_result.clone());
-            expect_type(context, artifacts, return_value, declared.as_ref());
-
-            block_context.flags.set_inside_return(true);
-            return_value.analyze(context, block_context, artifacts)?;
-            block_context.flags.set_inside_return(false);
-            // A lambda's result is checked against the function type that takes it, as a declared return type is.
-            if let Some(declared) = &declared {
-                check_sharp_literal_kind(context, Some(block_context), artifacts, return_value, declared);
-            }
+            // A `get` accessor returns its property's type, as a method returns its result type.
+            let declared = match block_context.scope.get_function_like() {
+                Some(function) => body_return_type(function),
+                None => block_context
+                    .scope
+                    .get_property_hook()
+                    .filter(|(_, accessor)| accessor.name.as_bytes() == b"get")
+                    .and_then(|_| accessor_property_type(block_context)),
+            };
+            let declared = declared.map(|declared| &declared.type_union);
+            analyze_returned_value(context, block_context, artifacts, return_value, declared)?;
 
             let inferred_return_type = artifacts.get_rc_expression_type(&return_value).cloned();
 
@@ -345,7 +343,7 @@ pub fn handle_return_value<'ctx, A>(
                 let type_declaration_span = function_like_metadata
                     .return_type_metadata
                     .as_ref()
-                    .map_or_else(|| function_like_metadata.span, |signature| signature.span);
+                    .map_or(function_like_metadata.span, |signature| signature.span);
 
                 if let Some(return_value) = return_value {
                     context.collector.report_with_code(

@@ -1,7 +1,6 @@
 use std::io::Read;
 use std::path::Path;
 
-use mago_database::error::DatabaseError;
 use mago_orchestrator::Orchestrator;
 
 use crate::error::Error;
@@ -19,15 +18,14 @@ pub fn resolve_stdin_override(
         return Ok(None);
     }
     if path.len() != 1 {
-        return Err(Error::Database(DatabaseError::IOError(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "When using --stdin-input, exactly one file path must be provided.",
-        ))));
+        return Err(Error::InvalidArgument(
+            "When using --stdin-input, exactly one file path must be provided.".to_string(),
+        ));
     }
     let path = &path[0];
     // PHP source is binary-safe, so read raw bytes: a buffer piped in may not be valid UTF-8.
     let mut content = Vec::new();
-    std::io::stdin().read_to_end(&mut content).map_err(|e| Error::Database(DatabaseError::IOError(e)))?;
+    std::io::stdin().read_to_end(&mut content).map_err(Error::ReadingStdin)?;
 
     #[cfg(windows)]
     let mut logical_name = path.strip_prefix(workspace).unwrap_or(path.as_path()).to_string_lossy().replace('\\', "/");

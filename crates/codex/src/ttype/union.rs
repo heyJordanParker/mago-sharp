@@ -358,14 +358,23 @@ impl TUnion {
         }
     }
 
-    /// Adds `null` to the union type, making it nullable.
+    /// Adds `null` to the union type, making it nullable, as the combiner joins `null` with it, but beside the union's
+    /// parts, which it never merges: a refused PHP# type absorbs the `null`, `never` and `void` drop beside it, and a
+    /// `mixed` may then hold it, so it is neither non-null nor truthy.
     #[must_use]
     pub fn as_nullable(mut self) -> TUnion {
+        if self.types.iter().any(|atomic| matches!(atomic, TAtomic::Error)) {
+            return self.clone_with_types(vec![TAtomic::Error]);
+        }
+
         let types = self.types.to_mut();
+        types.retain(|atomic| !matches!(atomic, TAtomic::Never | TAtomic::Void));
 
         for atomic in types.iter_mut() {
             if let TAtomic::Mixed(mixed) = atomic {
-                *mixed = mixed.with_is_non_null(false);
+                let truthiness =
+                    if mixed.is_truthy() { TMixedTruthiness::Undetermined } else { mixed.get_truthiness() };
+                *mixed = mixed.with_is_non_null(false).with_truthiness(truthiness);
             }
         }
 
@@ -1688,5 +1697,33 @@ fn atomic_has_widenable(atomic: &TAtomic, kind: WidenKind) -> bool {
                 || union_has_widenable(&conditional.otherwise, kind)
         }
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::ttype::atomic::mixed::TMixed;
+    use crate::ttype::get_int;
+    use crate::ttype::get_list;
+    use crate::ttype::get_never;
+    use crate::ttype::get_null;
+    use crate::ttype::get_string;
+    use crate::ttype::get_void;
+
+    #[test]
+    fn test_as_nullable_adds_null_as_the_combiner_joins_it() {
+        let two_lists =
+            TUnion::from_vec([get_list(get_int()).types.as_ref(), get_list(get_string()).types.as_ref()].concat());
+
+        assert_eq!(
+            two_lists.clone().as_nullable(),
+            TUnion::from_vec([two_lists.types.as_ref(), get_null().types.as_ref()].concat())
+        );
+        assert_eq!(get_never().as_nullable(), get_null());
+        assert_eq!(get_void().as_nullable(), get_null());
+        assert_eq!(TUnion::from_atomic(TAtomic::Error).as_nullable(), TUnion::from_atomic(TAtomic::Error));
+        assert_eq!(TUnion::from_atomic(TAtomic::Mixed(TMixed::truthy())).as_nullable(), get_mixed());
     }
 }

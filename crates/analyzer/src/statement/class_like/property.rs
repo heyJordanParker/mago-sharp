@@ -55,6 +55,7 @@ use crate::statement::attributes::AttributeTarget;
 use crate::statement::attributes::analyze_attributes;
 use crate::statement::function_like::FunctionLikeBody;
 use crate::statement::function_like::add_properties_to_context;
+use crate::statement::function_like::analyze_returned_value;
 use crate::statement::function_like::expect_type;
 use crate::statement::function_like::get_this_type;
 use crate::statement::function_like::known_type_or_error;
@@ -724,25 +725,22 @@ where
 {
     // A `get` accessor returns its property's value, so its expression goes into the property's type, as a method's
     // goes into its result type.
-    if hook_name == b"get" {
-        let declared = accessor_property_type(hook_block_context).map(|r#type| r#type.type_union.clone());
-        expect_type(context, artifacts, expr_body.expression, declared.as_ref());
+    if hook_name != b"get" {
+        return expr_body.expression.analyze(context, hook_block_context, artifacts);
     }
-    expr_body.expression.analyze(context, hook_block_context, artifacts)?;
 
-    if hook_name == b"get" {
-        let value_type =
-            artifacts.get_rc_expression_type(&expr_body.expression).cloned().unwrap_or_else(|| Rc::new(get_mixed()));
-
-        handle_return_value(
-            context,
-            hook_block_context,
-            artifacts,
-            Some(expr_body.expression),
-            value_type,
-            expr_body.expression.span(),
-        );
-    }
+    let declared = accessor_property_type(hook_block_context).map(|r#type| &r#type.type_union);
+    analyze_returned_value(context, hook_block_context, artifacts, expr_body.expression, declared)?;
+    let value_type =
+        artifacts.get_rc_expression_type(&expr_body.expression).cloned().unwrap_or_else(|| Rc::new(get_mixed()));
+    handle_return_value(
+        context,
+        hook_block_context,
+        artifacts,
+        Some(expr_body.expression),
+        value_type,
+        expr_body.expression.span(),
+    );
 
     Ok(())
 }

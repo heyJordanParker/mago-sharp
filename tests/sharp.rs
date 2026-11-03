@@ -1031,6 +1031,28 @@ fn lint_and_format_skip_a_staged_sharp_file() {
     assert!(stderr.contains("Formatted and re-staged 1 file(s)."), "{stderr}");
 }
 
+/// A git that refuses to re-stage a formatted file, as one whose index another git holds the lock of, fails `fmt
+/// --staged` with the command and git's reason, and never says the file was re-staged.
+#[test]
+fn format_staged_fails_with_git_s_reason_when_git_refuses_to_re_stage() {
+    let directory = messy_workspace();
+    for arguments in [&["init", "--quiet"][..], &["add", "src"][..]] {
+        assert!(Command::new("git").args(arguments).current_dir(directory.path()).status().unwrap().success());
+    }
+    std::fs::write(directory.path().join(".git/index.lock"), "").unwrap();
+
+    let (output, _) = run_in_messy_workspace(&directory, "fmt", &["--staged"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(!output.status.success(), "{stderr}");
+    assert!(!stderr.contains("re-staged"), "{stderr}");
+    assert!(
+        stderr.contains("`git update-index` failed (exit status: 128): fatal: Unable to create")
+            && stderr.contains("index.lock"),
+        "{stderr}"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn lint_format_and_guard_never_read_a_discovered_sharp_file() {

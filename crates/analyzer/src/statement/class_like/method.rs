@@ -58,6 +58,7 @@ use crate::statement::function_like::analyze_function_like;
 use crate::statement::function_like::check_unused_function_template_parameters;
 use crate::statement::function_like::record_signature_types;
 use crate::statement::function_like::rejected_nullable_parameter;
+use crate::statement::function_like::report_undefined_bound_types;
 use crate::statement::function_like::unused_parameter;
 use crate::statement::function_like::unused_parameter::utils::is_variable_used_in_expression;
 use crate::utils::missing_type_hints;
@@ -381,8 +382,10 @@ where
 
     if context.dialect.is_sharp() && matches!(method.body, MethodBody::Abstract(_)) {
         check_declaration_uses(context, class_like_metadata, method_metadata, method.name_span);
-        // A method without a body runs no analysis of its own, which records the types its hints write.
+        // A method without a body runs no analysis of its own, which records the types its hints write and reports
+        // its bounds' missing types.
         record_signature_types(artifacts, method_metadata);
+        report_undefined_bound_types(context, &method_metadata.template_types);
     }
 
     let body = match method.body {

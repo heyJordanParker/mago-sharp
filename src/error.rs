@@ -71,11 +71,11 @@ use crate::version_check::VersionPinParseError;
 /// to be accessed programmatically or logged for debugging.
 #[derive(Debug)]
 pub enum Error {
-    /// Failed to load or scan the file database.
+    /// A database error, or a file or folder a command failed to read, write or delete.
     ///
-    /// This error occurs during file system scanning when the database loader encounters
-    /// issues such as permission errors, invalid paths, or I/O failures while discovering
-    /// PHP files in the workspace.
+    /// An I/O error prints as its own message, which names the action and the path, as "can't write the file
+    /// `.sharp/app/Order.sharpc`: …", since it may come from a write or a delete and not from loading the database.
+    /// Every other database error prints after "Failed to load database:".
     Database(DatabaseError),
 
     /// Failed to generate or output analysis reports.
@@ -200,17 +200,27 @@ pub enum Error {
     /// failures.
     ReadingComposerJson(std::io::Error),
 
-    /// Failed to read the baseline file.
+    /// Failed to read the baseline file at `path`.
     ///
     /// This error occurs when loading an existing baseline file for incremental issue
     /// tracking fails due to missing file, permission errors, or I/O failures.
-    ReadingBaselineFile(std::io::Error),
+    ReadingBaselineFile { path: PathBuf, source: std::io::Error },
 
-    /// Failed to create or write the baseline file.
+    /// Failed to create or write the baseline file at `path`, or to move the file already there aside.
     ///
     /// This error occurs when generating a new baseline file fails due to permission
     /// errors, disk full, or I/O failures.
-    CreatingBaselineFile(std::io::Error),
+    CreatingBaselineFile { path: PathBuf, source: std::io::Error },
+
+    /// Failed to read the standard input, which a command reads as a file's contents.
+    ReadingStdin(std::io::Error),
+
+    /// Failed to start the `git` subcommand `command`, as when no `git` is on the `PATH`.
+    RunningGit { command: &'static str, source: std::io::Error },
+
+    /// The `git` subcommand `command` ran and exited with `status`. `reason` is the first line git printed to stderr,
+    /// which says why.
+    GitFailed { command: &'static str, status: std::process::ExitStatus, reason: String },
 
     /// Failed to parse the `composer.json` file.
     ///
@@ -301,6 +311,8 @@ pub enum Error {
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            // An I/O error's message names what failed, a read, a write or a delete, and which path.
+            Self::Database(error @ DatabaseError::IOError { .. }) => write!(f, "{error}"),
             Self::Database(error) => write!(f, "Failed to load database: {error}"),
             Self::Reporting(error) => write!(f, "Failed to report results: {error}"),
             Self::BuildingRuntime(error) => write!(f, "Failed to build the runtime: {error}"),
@@ -348,8 +360,15 @@ impl std::fmt::Display for Error {
             Self::WritingConfiguration(error) => write!(f, "Failed to write the configuration file: {error}"),
             Self::ReadingComposerJson(error) => write!(f, "Failed to read the `composer.json` file: {error}"),
             Self::ParsingComposerJson(error) => write!(f, "Failed to parse the `composer.json` file: {error}"),
-            Self::ReadingBaselineFile(error) => write!(f, "Failed to read the baseline file: {error}"),
-            Self::CreatingBaselineFile(error) => write!(f, "Failed to create the baseline file: {error}"),
+            Self::ReadingBaselineFile { path, source } => {
+                write!(f, "Failed to read the baseline file `{}`: {source}", path.display())
+            }
+            Self::CreatingBaselineFile { path, source } => {
+                write!(f, "Failed to create the baseline file `{}`: {source}", path.display())
+            }
+            Self::ReadingStdin(error) => write!(f, "Failed to read the standard input: {error}"),
+            Self::RunningGit { command, source } => write!(f, "Failed to run `git {command}`: {source}"),
+            Self::GitFailed { command, status, reason } => write!(f, "`git {command}` failed ({status}): {reason}"),
             Self::Analysis(error) => write!(f, "Failed to analyze the source code: {error}"),
             Self::ThreadPoolBuildError(error) => {
                 write!(f, "Failed to build the thread pool: {error}")
@@ -423,8 +442,10 @@ impl std::error::Error for Error {
             Self::WritingConfiguration(error) => Some(error),
             Self::ReadingComposerJson(error) => Some(error),
             Self::ParsingComposerJson(error) => Some(error),
-            Self::ReadingBaselineFile(error) => Some(error),
-            Self::CreatingBaselineFile(error) => Some(error),
+            Self::ReadingBaselineFile { source, .. } => Some(source),
+            Self::CreatingBaselineFile { source, .. } => Some(source),
+            Self::ReadingStdin(error) => Some(error),
+            Self::RunningGit { source, .. } => Some(source),
             Self::Analysis(error) => Some(error),
             Self::ThreadPoolBuildError(error) => Some(error),
             Self::Orchestrator(error) => Some(error),

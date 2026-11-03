@@ -100,6 +100,7 @@ use crate::statement::function_like::FunctionLikeBody;
 use crate::statement::function_like::HintPlace;
 use crate::statement::function_like::analyze_function_like;
 use crate::statement::function_like::report_invalid_template_arguments;
+use crate::statement::function_like::report_undefined_bound_types;
 use crate::statement::function_like::report_undefined_type_references;
 use crate::utils::missing_type_hints;
 use crate::utils::names::and_list;
@@ -462,6 +463,7 @@ fn type_contains_template_param(type_union: &TUnion, param_name: Word, defining_
 /// - A method parameter type
 /// - A method return type
 /// - An `@extends`, `@implements`, or `@use` annotation
+/// - A bound the checker refused, as `TOther` in `<TOther, THolder : Order & TOther>`
 fn check_unused_template_parameters<'ctx, A>(
     context: &mut Context<'ctx, '_, A>,
     class_like_metadata: &'ctx ClassLikeMetadata,
@@ -482,8 +484,8 @@ fn check_unused_template_parameters<'ctx, A>(
     let class_name_span = class_like_metadata.name_span.unwrap_or(class_like_metadata.span);
     let sharp_class = context.dialect.is_sharp().then(|| short_name(class_original_name));
 
-    'templates: for (template_name, _) in &class_like_metadata.template_types {
-        if template_name.as_bytes().starts_with(b"_") {
+    'templates: for (template_name, template) in &class_like_metadata.template_types {
+        if template_name.as_bytes().starts_with(b"_") || template.named_by_refused_bound {
             continue;
         }
 
@@ -1568,6 +1570,7 @@ where
     if has_complete_hierarchy {
         check_unused_template_parameters(context, class_like_metadata);
     }
+    report_undefined_bound_types(context, &class_like_metadata.template_types);
     check_class_like_properties(context, class_like_metadata);
     check_docblock_declared_members(context, class_like_metadata, declaration_span);
     if links_to_sharp {

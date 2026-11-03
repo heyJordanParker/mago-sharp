@@ -3,6 +3,7 @@ use std::sync::Arc;
 use mago_allocator::Arena;
 use mago_names::EQUATABLE;
 use mago_names::ResolvedNames;
+use mago_names::TypeParametersNamed;
 use mago_names::kind::NameKind;
 use mago_names::scope::NamespaceScope;
 use mago_phpdoc_syntax::cst::r#type::Type;
@@ -13,6 +14,7 @@ use mago_syntax::cst::TypeParameterList;
 use mago_syntax::cst::UnionHint;
 use mago_syntax::cst::built_in_generic_arity;
 use mago_syntax::dialect::Dialect;
+use mago_syntax::walker::Walker;
 use mago_word::Word;
 use mago_word::word;
 
@@ -59,6 +61,7 @@ use crate::ttype::get_true;
 use crate::ttype::get_void;
 use crate::ttype::resolution::TypeResolutionContext;
 use crate::ttype::template::GenericTemplate;
+use crate::ttype::template::refuse_bounds;
 use crate::ttype::union::TUnion;
 use crate::ttype::wrap_atomic;
 
@@ -93,14 +96,17 @@ pub fn get_type_metadata_from_type(
     })
 }
 
-/// The templates a PHP# type parameter list declares, in order, spec section 11: each is the template a `@template`
-/// tag declares for `defining_entity`, its bound the tag's `of`, `mixed` without one, or the error type for a union
-/// bound outside the standard library, which the checker refuses. Every name of the list is a
-/// template while the bounds are read, so a bound names a type parameter of its own list, its own or a later one, as in
-/// `<TItem : Comparable<TItem>>`. The bounds are read once per type parameter, each time with the templates of the read
-/// before, so a bound sees the bound of every type parameter it names, directly or through another bound, as
-/// `<TKey : DatabaseEntity, TItem : Holder<TKey>>` sees `TKey`'s. `type_context` holds the templates once the list is
-/// read.
+/// The templates a PHP# type parameter list declares, in order, spec section 11.
+///
+/// Each is the template a `@template` tag declares for `defining_entity`, its bound the tag's `of`, or `mixed` without
+/// one. [`refuse_bounds`] refuses a bound from its [written bound](GenericTemplate::written_bound), now and on each
+/// population.
+///
+/// Every name of the list is a template while the bounds are read, so a bound names a type parameter of its own list,
+/// its own or a later one, as in `<TItem : Comparable<TItem>>`. The bounds are read once per type parameter, each time
+/// with the templates of the read before, so a bound sees the bound of every type parameter it names, directly or
+/// through another bound, as `<TKey : DatabaseEntity, TItem : Holder<TKey>>` sees `TKey`'s. `type_context` holds the
+/// templates once the list is read.
 pub fn scan_type_parameters<'arena, A>(
     type_parameters: &'arena TypeParameterList<'arena>,
     defining_entity: GenericParent,
@@ -119,27 +125,58 @@ where
             .insert(word(parameter.name.value), vec![GenericTemplate::new(defining_entity, get_mixed())]);
     }
 
-    let mut templates = Vec::new();
+    // Whether the checker refuses each bound, and the other type parameters the binder finds in a refused one, which its
+    // refusal marks: a refused bound reads as no type PHP# has, as `Query<TOther> & int` reads as nothing.
+    let refusals: Vec<(bool, Vec<&[u8]>)> = type_parameters
+        .parameters
+        .iter()
+        .map(|parameter| {
+            let refused =
+                context.resolved_names.is_refused_bound(type_parameters, parameter, context.file.is_standard_library);
+            let mut named = Vec::new();
+            if let Some(bound) = &parameter.bound
+                && refused
+            {
+                TypeParametersNamed(context.resolved_names).walk_type_parameter_bound(bound, &mut named);
+                named.retain(|name| *name != parameter.name.value);
+            }
+
+            (refused, named)
+        })
+        .collect();
+
+    let mut templates: Vec<(Word, GenericTemplate)> = Vec::new();
     for _ in &type_parameters.parameters {
         templates = type_parameters
             .parameters
             .iter()
-            .map(|parameter| {
-                let constraint = match &parameter.bound {
-                    None => get_mixed(),
-                    // The checker refuses a union bound outside the standard library, whose `sumOf` bounds its result
-                    // by `int|float`, so there it bounds nothing a type argument could fail.
-                    Some(bound) if matches!(bound.hint, Hint::Union(_)) && !context.file.is_standard_library => {
-                        wrap_atomic(TAtomic::Error)
-                    }
-                    Some(bound) => {
-                        get_type_metadata_from_hint(&bound.hint, Some(classname), &*type_context, context).type_union
-                    }
-                };
+            .zip(&refusals)
+            .map(|(parameter, (refused, named))| {
+                let mut template = GenericTemplate::new(defining_entity, get_mixed());
+                if let Some(bound) = &parameter.bound {
+                    let mut written =
+                        get_type_metadata_from_hint(&bound.hint, Some(classname), &*type_context, context);
+                    template.constraint = written.type_union.clone();
+                    template.bound_refused = *refused;
+                    let named: Vec<TAtomic> = named
+                        .iter()
+                        .filter_map(|name| {
+                            let definitions = type_context.get_template_definition(word(name))?;
 
-                (word(parameter.name.value), GenericTemplate::new(defining_entity, constraint))
+                            Some(builder::get_template_atomic(definitions, word(name)))
+                        })
+                        .collect();
+                    if !named.is_empty() {
+                        written.type_union = TUnion::from_vec(named);
+                    }
+                    template.written_bound = Some(written);
+                }
+
+                (word(parameter.name.value), template)
             })
             .collect();
+        // Population decides which types exist, so the scan reads each bound as the checker decides it.
+        refuse_bounds(templates.iter_mut().map(|(name, template)| (&*name, template)), |_| true);
 
         for (name, definition) in &templates {
             type_context.get_template_definitions_mut().insert(*name, vec![definition.clone()]);

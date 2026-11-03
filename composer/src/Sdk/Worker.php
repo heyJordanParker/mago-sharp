@@ -74,19 +74,21 @@ use Throwable;
 
 use function array_key_exists;
 use function array_key_first;
+use function array_map;
 use function array_values;
 use function count;
 use function defined;
 use function fclose;
 use function fwrite;
+use function implode;
 use function in_array;
 use function is_array;
 use function ob_end_flush;
 use function ob_get_level;
 use function ob_start;
 use function str_contains;
-use function strncmp;
 use function strtolower;
+use function substr;
 
 use const STDERR;
 use const STDIN;
@@ -635,30 +637,52 @@ final class Worker
         HostClient $host,
         CancellationTokenInterface $cancellation,
     ): string {
-        if (strncmp($payload, 'MLNT', 4) === 0) {
-            return $this->handleLinterRequest($payload, $cancellation);
+        $protocol = match (substr($payload, 0, 4)) {
+            'MLNT' => LinterProtocol::class,
+            'MANA' => AnalyzerProtocol::class,
+            'MEXT' => WorkerProtocol::class,
+            default => throw new ProtocolException('Unknown Mago extension capability protocol.'),
+        };
+
+        try {
+            [$kind, $reader] = $protocol::readRequest($payload);
+        } catch (ProtocolException $exception) {
+            $extensions = implode(', ', array_map(
+                static fn(Extension $extension): string => "`{$extension->identifier}`",
+                $this->extensions,
+            ));
+
+            throw new ProtocolException(
+                "The worker of {$extensions} can't read mago's request: {$exception->getMessage()}",
+                0,
+                $exception,
+            );
         }
 
-        if (strncmp($payload, 'MANA', 4) === 0) {
-            return $this->handleAnalyzerRequest($payload, $requestId, $host, $cancellation);
-        }
-
-        if (strncmp($payload, 'MEXT', 4) === 0) {
-            return $this->handleWorkerRequest($payload, $cancellation);
-        }
-
-        throw new ProtocolException('Unknown Mago extension capability protocol.');
+        return match ($protocol) {
+            LinterProtocol::class => $this->handleLinterRequest($kind, $reader, $cancellation),
+            AnalyzerProtocol::class => $this->handleAnalyzerRequest($kind, $reader, $requestId, $host, $cancellation),
+            WorkerProtocol::class => $this->handleWorkerRequest($kind, $reader, $requestId, $host, $cancellation),
+        };
     }
 
-    private function handleWorkerRequest(string $payload, CancellationTokenInterface $cancellation): string
-    {
-        [$kind, $reader] = WorkerProtocol::readRequest($payload);
+    /**
+     * @param positive-int $requestId
+     */
+    private function handleWorkerRequest(
+        int $kind,
+        PayloadReader $reader,
+        int $requestId,
+        HostClient $host,
+        CancellationTokenInterface $cancellation,
+    ): string {
         if ($kind === WorkerProtocol::COLLECT_REQUEST) {
             $reader->finish();
             $payloads = [];
             foreach ($this->workerReducerIndices as $extensionIndex) {
                 $cancellation->throwIfCancelled();
                 $extension = $this->extensions[$extensionIndex];
+                $host->progress($requestId, "the worker reducer of extension `{$extension->identifier}`");
                 try {
                     $payloads[$extensionIndex] = $extension->workerReducer?->collect() ?? '';
                 } catch (CancelledException $exception) {
@@ -679,6 +703,7 @@ final class Worker
         foreach ($this->workerReducerIndices as $extensionIndex) {
             $cancellation->throwIfCancelled();
             $extension = $this->extensions[$extensionIndex];
+            $host->progress($requestId, "the worker reducer of extension `{$extension->identifier}`");
             try {
                 $extension->workerReducer?->reduce(
                     new WorkerReductionContext($payloadsByExtension[$extensionIndex], $cancellation),
@@ -697,9 +722,11 @@ final class Worker
         return WorkerProtocol::writeReduceResponse();
     }
 
-    private function handleLinterRequest(string $payload, CancellationTokenInterface $cancellation): string
-    {
-        [$kind, $reader] = LinterProtocol::readRequest($payload);
+    private function handleLinterRequest(
+        int $kind,
+        PayloadReader $reader,
+        CancellationTokenInterface $cancellation,
+    ): string {
         if ($kind === LinterProtocol::DESCRIBE_REQUEST) {
             [$this->phpVersion, $this->nodeKinds] = LinterProtocol::readDescribeRequest($reader);
 
@@ -764,12 +791,12 @@ final class Worker
      * @param positive-int $requestId
      */
     private function handleAnalyzerRequest(
-        string $payload,
+        int $kind,
+        PayloadReader $reader,
         int $requestId,
         HostClient $host,
         CancellationTokenInterface $cancellation,
     ): string {
-        [$kind, $reader] = AnalyzerProtocol::readRequest($payload);
         if ($kind === AnalyzerProtocol::DESCRIBE_REQUEST) {
             [$this->phpVersion, $this->nodeKinds] = AnalyzerProtocol::readDescribeRequest($reader);
 
@@ -777,11 +804,11 @@ final class Worker
         }
 
         if ($kind === AnalyzerProtocol::INITIALIZE_REQUEST) {
-            return $this->handleAnalyzerInitialization($reader, $cancellation);
+            return $this->handleAnalyzerInitialization($reader, $requestId, $host, $cancellation);
         }
 
         if ($kind === AnalyzerProtocol::CODEBASE_SCAN_REQUEST) {
-            return $this->handleCodebaseScanRequest($reader, $cancellation);
+            return $this->handleCodebaseScanRequest($reader, $requestId, $host, $cancellation);
         }
 
         if (
@@ -1181,8 +1208,13 @@ final class Worker
         return AnalyzerProtocol::writeReturnTypeResponse(null);
     }
 
+    /**
+     * @param positive-int $requestId
+     */
     private function handleAnalyzerInitialization(
         PayloadReader $reader,
+        int $requestId,
+        HostClient $host,
         CancellationTokenInterface $cancellation,
     ): string {
         $pluginIndices = AnalyzerProtocol::readInitializationRequest($reader);
@@ -1194,6 +1226,7 @@ final class Worker
             }
 
             $cancellation->throwIfCancelled();
+            $host->progress($requestId, "the initialization hooks of plugin `{$registered->definition->identifier}`");
             $context = new InitializationContext($this->phpVersion, $cancellation);
             try {
                 foreach ($registered->initializationHooks as $hook) {
@@ -1213,8 +1246,15 @@ final class Worker
         return AnalyzerProtocol::writeInitializationResponse($stubs);
     }
 
-    private function handleCodebaseScanRequest(PayloadReader $reader, CancellationTokenInterface $cancellation): string
-    {
+    /**
+     * @param positive-int $requestId
+     */
+    private function handleCodebaseScanRequest(
+        PayloadReader $reader,
+        int $requestId,
+        HostClient $host,
+        CancellationTokenInterface $cancellation,
+    ): string {
         [$firstBatch, $lastBatch, $activeHooks, $filesByHook] = AnalyzerProtocol::readCodebaseScanRequest($reader);
         $refinements = [];
         foreach ($activeHooks as $hookIndex) {
@@ -1223,6 +1263,7 @@ final class Worker
                 throw new ProtocolException("Codebase-scan request targets unknown hook {$hookIndex}.");
             }
             $cancellation->throwIfCancelled();
+            $host->progress($requestId, "a codebase-scan hook of plugin `{$registered->plugin}`");
             $context = new CodebaseScanContext(
                 $this->phpVersion,
                 $cancellation,
@@ -1277,9 +1318,16 @@ final class Worker
         $contributedReferences = [];
         $recordedReads = [];
         $analyses = is_array($request->analysis) ? $request->analysis : [$request->analysis];
+        $projectHooks = match ($kind) {
+            AnalyzerProtocol::BEFORE_ANALYSIS_REQUEST => 'before-analysis',
+            AnalyzerProtocol::AFTER_ANALYSIS_REQUEST => 'after-analysis',
+            default => null,
+        };
         foreach ($analyses as $analysis) {
-            if ($analysis instanceof FileAnalysis) {
-                $host->progress($requestId, $analysis->file);
+            // A batch runs several files' hooks, so each file's start is progress of its own. Mago names the one file
+            // of an after-file request itself.
+            if ($analysis instanceof FileAnalysis && $kind === AnalyzerProtocol::AFTER_FILE_ANALYSIS_BATCH_REQUEST) {
+                $host->progress($requestId, "the hooks of {$analysis->file}");
             }
 
             // A file's hooks read for it, and the before-analysis hooks for every file, since a rule may keep what it
@@ -1297,7 +1345,13 @@ final class Worker
                     throw new ProtocolException("Mago requested unregistered analyzer plugin index {$pluginIndex}.");
                 }
 
-                $providing = array_key_exists($registered->definition->identifier, $this->pluginsWithProviders);
+                $identifier = $registered->definition->identifier;
+                // One request runs every plugin's project-level hooks, so each plugin's start is progress of its own.
+                if ($projectHooks !== null) {
+                    $host->progress($requestId, "the {$projectHooks} hooks of plugin `{$identifier}`");
+                }
+
+                $providing = array_key_exists($identifier, $this->pluginsWithProviders);
                 $fileCodebase = match (true) {
                     !$recording => $codebase,
                     $providing => $codeCodebase,
@@ -1368,7 +1422,6 @@ final class Worker
                         }
                     }
                 } catch (Throwable $throwable) {
-                    $identifier = $registered->definition->identifier;
                     throw new ProtocolException(
                         "Analyzer lifecycle hook in `{$identifier}` failed: {$throwable->getMessage()}",
                         0,

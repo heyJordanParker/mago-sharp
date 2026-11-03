@@ -125,6 +125,9 @@ pub struct AnalysisArtifacts {
     pub listings: HashSet<Listing>,
     /// What each PHP# call runs, keyed by the call's span.
     pub(crate) call_targets: HashMap<(u32, u32), Vec<CallTarget>>,
+    /// The PHP# calls whose every target returns `void`, where `?.` adds `null` to the call's type, keyed by the call's
+    /// span. The call gives no value through `?.` as through `.`, spec section 14.1.
+    pub(crate) null_safe_void_calls: HashSet<(u32, u32)>,
     /// What each method a PHP# method call runs gives, where the call runs one of several, as on a value that may hold
     /// more than one kind of collection, spec section 12, keyed by the call's span and the method. The call's own type
     /// arguments are the last method's, and its type is the union of every method's. Read through
@@ -208,6 +211,7 @@ impl AnalysisArtifacts {
             effect_summaries: Vec::new(),
             listings: HashSet::default(),
             call_targets: HashMap::default(),
+            null_safe_void_calls: HashSet::default(),
             member_calls: HashMap::default(),
             received_argument_types: HashMap::default(),
             tested_types: HashMap::default(),
@@ -439,10 +443,33 @@ impl AnalysisArtifacts {
     }
 
     /// Records that the method `callee`, of the several the PHP# method call at `span` runs, gives `result`, with the
-    /// type arguments its analysis just recorded for the call.
-    pub(crate) fn record_member_call(&mut self, span: Span, callee: FunctionLikeIdentifier, result: TUnion) {
+    /// type arguments its analysis just recorded for the call. A method the call runs on each part of its receiver
+    /// alone, as one that changes it, is recorded once more for each part, and each record joins the earlier ones, so
+    /// the method gives what any part gives, with each type argument any part fixes, which are the call's own too.
+    pub(crate) fn record_member_call(
+        &mut self,
+        span: Span,
+        callee: FunctionLikeIdentifier,
+        mut result: TUnion,
+        codebase: &CodebaseMetadata,
+    ) {
         let range = (span.start.offset, span.end.offset);
-        let type_arguments = self.inferred_type_arguments.get(&range).cloned();
+        let mut type_arguments = self.inferred_type_arguments.get(&range).cloned();
+        if let Some(earlier) = self.member_calls.get(&(range, callee)) {
+            let join = |own: &TUnion, earlier: &TUnion| {
+                combine_union_types(own, earlier, codebase, CombinerOptions::default())
+            };
+            result = join(&result, &earlier.result);
+            let (Some(own), Some(earlier)) = (type_arguments.as_mut(), earlier.type_arguments.as_ref()) else {
+                unreachable!(
+                    "a method recorded once per part of its receiver changes it, which only the standard library's generic collection members do, and a generic call records its type arguments"
+                );
+            };
+            for (own, earlier) in own.iter_mut().zip(earlier) {
+                *own = join(own, earlier);
+            }
+            self.inferred_type_arguments.insert(range, own.clone());
+        }
         self.member_calls.insert((range, callee), MemberCall { type_arguments, result });
     }
 

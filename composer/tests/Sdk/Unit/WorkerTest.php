@@ -4,8 +4,16 @@ declare(strict_types=1);
 
 namespace Mago\Tests\Sdk\Unit;
 
+use Mago\Sdk\Analyzer\AfterAnalysisContext;
+use Mago\Sdk\Analyzer\AfterAnalysisHook;
 use Mago\Sdk\Analyzer\AfterFileAnalysisContext;
 use Mago\Sdk\Analyzer\AfterFileAnalysisHook;
+use Mago\Sdk\Analyzer\BeforeAnalysisContext;
+use Mago\Sdk\Analyzer\BeforeAnalysisHook;
+use Mago\Sdk\Analyzer\CodebaseScanContext;
+use Mago\Sdk\Analyzer\CodebaseScanHook;
+use Mago\Sdk\Analyzer\InitializationContext;
+use Mago\Sdk\Analyzer\InitializationHook;
 use Mago\Sdk\Analyzer\Plugin;
 use Mago\Sdk\Analyzer\PluginDefinition;
 use Mago\Sdk\Analyzer\PluginRegistry;
@@ -25,6 +33,7 @@ use Mago\Sdk\Syntax\NodeKind;
 use Mago\Sdk\Worker;
 use Mago\Sdk\WorkerReducer;
 use Mago\Sdk\WorkerReductionContext;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use Revolt\EventLoop;
 use RuntimeException;
@@ -32,6 +41,7 @@ use RuntimeException;
 use function array_diff;
 use function array_keys;
 use function fclose;
+use function Mago\Internal\get_version;
 use function pack;
 
 /**
@@ -76,10 +86,10 @@ final class WorkerTest extends TestCase
         self::assertSame(
             [
                 'describe: response',
-                'a.php: start',
+                'a.php: start the hooks of a.php',
                 'a.php: query',
                 'a.php: response',
-                'b.php: start',
+                'b.php: start the hooks of b.php',
                 'b.php: response',
             ],
             $sent,
@@ -93,10 +103,10 @@ final class WorkerTest extends TestCase
         self::assertSame(
             [
                 'describe: response',
-                'a.php: start',
+                'a.php: start the hooks of a.php',
                 'a.php: query',
                 'a.php: response',
-                'c.php: start',
+                'c.php: start the hooks of c.php',
                 'c.php: response',
             ],
             $sent,
@@ -133,7 +143,157 @@ final class WorkerTest extends TestCase
 
         $sent = self::serve($worker, ['first' => self::collectRequest(), 'second' => self::collectRequest()]);
 
-        self::assertSame(['first: error The extension request was cancelled.', 'second: response'], $sent);
+        self::assertSame(
+            [
+                'first: start the worker reducer of extension `acme/metrics`',
+                'first: error The extension request was cancelled.',
+                'second: start the worker reducer of extension `acme/metrics`',
+                'second: response',
+            ],
+            $sent,
+        );
+    }
+
+    /**
+     * A request that runs several units starts the deadline again at each, and names each one, as a request of a
+     * batch of files names each file. Mago names a request of one unit itself.
+     */
+    public function testAWorkerNamesEachUnitOfARequestAsItStartsIt(): void
+    {
+        $worker = new Worker(new Extension('acme/project', 'Project', '1.0.0', analyzerPlugins: [
+            self::projectPlugin('first'),
+            self::projectPlugin('second'),
+        ]));
+
+        $sent = self::serve($worker, [
+            'describe' => self::describeRequest(),
+            'initialize' => self::initializeRequest(),
+            'scan' => self::codebaseScanRequest(),
+            'before' => self::projectRequest(Protocol::BEFORE_ANALYSIS_REQUEST),
+            'after' => self::projectRequest(Protocol::AFTER_ANALYSIS_REQUEST),
+        ]);
+
+        self::assertSame(
+            [
+                'describe: response',
+                'initialize: start the initialization hooks of plugin `first`',
+                'initialize: start the initialization hooks of plugin `second`',
+                'initialize: response',
+                'scan: start a codebase-scan hook of plugin `first`',
+                'scan: start a codebase-scan hook of plugin `second`',
+                'scan: response',
+                'before: start the before-analysis hooks of plugin `first`',
+                'before: start the before-analysis hooks of plugin `second`',
+                'before: response',
+                'after: start the after-analysis hooks of plugin `first`',
+                'after: start the after-analysis hooks of plugin `second`',
+                'after: response',
+            ],
+            $sent,
+        );
+    }
+
+    /**
+     * @return iterable<string, array{string, string, string}>
+     */
+    public static function requestsOfAnotherProtocol(): iterable
+    {
+        $major = Protocol::VERSION_U32 >> 16;
+        $minor = Protocol::VERSION_U32 & 0xFFFF;
+        foreach (['an older' => $minor - 1, 'a newer' => $minor + 1] as $mago => $magoMinor) {
+            yield "{$mago} mago's analyzer describe request" => [
+                self::describeRequest(($major << 16) | $magoMinor),
+                "analyzer protocol {$major}.{$magoMinor}",
+                "{$major}.{$minor}",
+            ];
+        }
+
+        yield 'a linter describe request of another protocol' => [
+            pack('N3', 0x4D4C_4E54, 0x0001_0001, 1 << 16),
+            'linter protocol 1.1',
+            '1.2',
+        ];
+        yield 'a worker management request of another protocol' => [
+            pack('N3', self::WORKER_MAGIC, 0x0001_0001, WorkerProtocol::COLLECT_REQUEST << 16),
+            'worker management protocol 1.1',
+            '1.0',
+        ];
+    }
+
+    /**
+     * A mago of another protocol than this SDK's gets its request refused, with the extension, both protocols, the
+     * SDK's package and release, and the ways to make the two match. A mago before 0.6.1 prints this text as the whole
+     * error.
+     */
+    #[DataProvider('requestsOfAnotherProtocol')]
+    public function testAWorkerRefusesAMagoOfAnotherProtocolNamingThePackage(
+        string $request,
+        string $magoProtocol,
+        string $sdkProtocol,
+    ): void {
+        $worker = new Worker(new Extension('acme/routes', 'Routes', '1.0.0'));
+
+        $sent = self::serve($worker, ['request' => $request]);
+
+        self::assertSame(
+            [
+                "request: error The worker of `acme/routes` can't read mago's request: `mago` speaks {$magoProtocol}, "
+                    . 'and the extension SDK, heyjordanparker/mago-sharp '
+                    . get_version()
+                    . ", speaks {$sdkProtocol}. `mago` and heyjordanparker/mago-sharp must be the same release: run the "
+                    . '`mago` that heyjordanparker/mago-sharp installs, `vendor/bin/mago`, or require the '
+                    . 'heyjordanparker/mago-sharp release `mago --version` prints.',
+            ],
+            $sent,
+        );
+    }
+
+    /**
+     * A plugin `$identifier` whose initialization, codebase-scan, before-analysis and after-analysis hooks do nothing.
+     *
+     * @param non-empty-string $identifier
+     */
+    private static function projectPlugin(string $identifier): Plugin
+    {
+        return new class($identifier) implements
+            Plugin,
+            InitializationHook,
+            CodebaseScanHook,
+            BeforeAnalysisHook,
+            AfterAnalysisHook {
+            /**
+             * @param non-empty-string $identifier
+             */
+            public function __construct(
+                private readonly string $identifier,
+            ) {}
+
+            public function getDefinition(): PluginDefinition
+            {
+                return new PluginDefinition($this->identifier, $this->identifier, 'Does nothing.');
+            }
+
+            public function register(PluginRegistry $registry): void
+            {
+                $registry->registerInitializationHook($this);
+                $registry->registerCodebaseScanHook($this);
+                $registry->registerBeforeAnalysisHook($this);
+                $registry->registerAfterAnalysisHook($this);
+            }
+
+            public function initialize(InitializationContext $context): void {}
+
+            public function getTargets(): array
+            {
+                return ['App\*'];
+            }
+
+            public function scan(CodebaseScanContext $context): void {}
+
+            public function beforeAnalysis(BeforeAnalysisContext $context): void {}
+
+            public function afterAnalysis(AfterAnalysisContext $context): void {}
+        };
     }
 
     /**
@@ -166,7 +326,7 @@ final class WorkerTest extends TestCase
 
     /**
      * Runs a worker whose rule caches the routes one codebase query finds, as an app's rule does, while Mago sends
-     * one after-file request per file at once and cancels `$cancel`'s request when the first query arrives.
+     * one after-file batch per file at once and cancels `$cancel`'s request when the first query arrives.
      *
      * @param non-empty-list<non-empty-string> $files
      *
@@ -276,7 +436,7 @@ final class WorkerTest extends TestCase
             }
 
             if ($frame->kind === FrameKind::Notification) {
-                $sent[] = "{$labels[$frame->parentId]}: start";
+                $sent[] = "{$labels[$frame->parentId]}: start {$frame->payload}";
                 continue;
             }
 
@@ -296,9 +456,9 @@ final class WorkerTest extends TestCase
         $writer->write($codec->encode(new Frame(FrameKind::Shutdown, 0, 0, 0, '')));
     }
 
-    private static function describeRequest(): string
+    private static function describeRequest(int $version = Protocol::VERSION_U32): string
     {
-        $message = self::analyzerMessage(Protocol::DESCRIBE_REQUEST);
+        $message = self::analyzerMessage(Protocol::DESCRIBE_REQUEST, $version);
         $message->writeU32(PHPVersion::fromParts(8, 4)->id);
         $message->writeCount(NodeKind::cases());
         foreach (NodeKind::cases() as $kind) {
@@ -308,12 +468,17 @@ final class WorkerTest extends TestCase
         return $message->finish();
     }
 
+    /**
+     * An after-file batch of `$file` alone. A batch runs several files' hooks, so the worker names each file as it
+     * starts its hooks, which shows when each request started.
+     */
     private static function afterFileRequest(string $file): string
     {
-        $message = self::analyzerMessage(Protocol::AFTER_FILE_ANALYSIS_REQUEST);
+        $message = self::analyzerMessage(Protocol::AFTER_FILE_ANALYSIS_BATCH_REQUEST);
         $message->writeU64(self::GENERATION);
         $message->writeU16(1);
         $message->writeU16(0);
+        $message->writeLength(1);
         $message->writeBytes($file);
         // The file's size, then its expression, inferred-return, yield-key, and yield-value counts.
         for ($count = 0; $count < 5; ++$count) {
@@ -325,6 +490,58 @@ final class WorkerTest extends TestCase
         }
         $message->writeBoolean(false);
         $message->writeBoolean(false);
+
+        return $message->finish();
+    }
+
+    /**
+     * The initialization of the first plugin, then the second.
+     */
+    private static function initializeRequest(): string
+    {
+        $message = self::analyzerMessage(Protocol::INITIALIZE_REQUEST);
+        $message->writeLength(2);
+        $message->writeU16(0);
+        $message->writeU16(1);
+
+        return $message->finish();
+    }
+
+    /**
+     * The only batch of a codebase scan, for the first plugin's codebase-scan hook, then the second's, with no file.
+     */
+    private static function codebaseScanRequest(): string
+    {
+        $message = self::analyzerMessage(Protocol::CODEBASE_SCAN_REQUEST);
+        $message->writeBoolean(true);
+        $message->writeBoolean(true);
+        $message->writeLength(2);
+        $message->writeU16(0);
+        $message->writeU16(1);
+        $message->writeLength(0);
+
+        return $message->finish();
+    }
+
+    /**
+     * A before-analysis or after-analysis request of `$kind` for the first plugin, then the second. An after-analysis
+     * request carries a project of no file and no issue.
+     */
+    private static function projectRequest(int $kind): string
+    {
+        $message = self::analyzerMessage($kind);
+        $message->writeU64(self::GENERATION);
+        $message->writeU16(2);
+        $message->writeU16(0);
+        $message->writeU16(1);
+        if ($kind === Protocol::AFTER_ANALYSIS_REQUEST) {
+            $message->writeU32(0);
+            // The project's reference summary.
+            for ($count = 0; $count < 3; ++$count) {
+                $message->writeU64(0);
+            }
+            $message->writeLength(0);
+        }
 
         return $message->finish();
     }
@@ -346,9 +563,9 @@ final class WorkerTest extends TestCase
         return $message->finish();
     }
 
-    private static function analyzerMessage(int $kind): PayloadWriter
+    private static function analyzerMessage(int $kind, int $version = Protocol::VERSION_U32): PayloadWriter
     {
-        return new PayloadWriter(pack('N3', self::ANALYZER_MAGIC, Protocol::VERSION_U32, $kind << 16));
+        return new PayloadWriter(pack('N3', self::ANALYZER_MAGIC, $version, $kind << 16));
     }
 
     private static function collectRequest(): string

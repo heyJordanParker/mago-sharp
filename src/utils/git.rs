@@ -11,11 +11,13 @@ use std::io::Write as _;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
+use std::process::Output;
 use std::process::Stdio;
 
 use mago_database::Database;
 use mago_database::DatabaseReader;
 use mago_database::error::DatabaseError;
+use mago_database::error::IOAction;
 use mago_database::file::File;
 use mago_database::file::FileId;
 
@@ -57,12 +59,8 @@ pub fn get_staged_file(workspace: &Path, path: &Path) -> Result<File, Error> {
     let mut index_path = OsString::from(":");
     index_path.push(path);
 
-    let output = Command::new("git")
-        .args(["cat-file", "-p"])
-        .arg(index_path)
-        .current_dir(workspace)
-        .output()
-        .map_err(|e| Error::Database(DatabaseError::IOError(e)))?;
+    let output =
+        run_git("cat-file", Command::new("git").args(["cat-file", "-p"]).arg(index_path).current_dir(workspace))?;
 
     Ok(File::ephemeral(Cow::Borrowed(b"<stdin>"), Cow::Owned(output.stdout)))
 }
@@ -85,12 +83,10 @@ pub fn update_staged_file(workspace: &Path, path: &Path, new_content: Vec<u8>) -
     cacheinfo.push(",");
     cacheinfo.push(path.as_os_str());
 
-    Command::new("git")
-        .args(["update-index", "--cacheinfo"])
-        .arg(cacheinfo)
-        .current_dir(workspace)
-        .status()
-        .map_err(|e| Error::Database(DatabaseError::IOError(e)))?;
+    run_git(
+        "update-index",
+        Command::new("git").args(["update-index", "--cacheinfo"]).arg(cacheinfo).current_dir(workspace),
+    )?;
 
     Ok(())
 }
@@ -156,11 +152,7 @@ where
         cmd.arg(path);
     }
 
-    let status = cmd.current_dir(workspace).status().map_err(|e| Error::Database(DatabaseError::IOError(e)))?;
-
-    if !status.success() {
-        return Err(Error::Database(DatabaseError::IOError(std::io::Error::other("git add failed"))));
-    }
+    run_git("add", cmd.current_dir(workspace))?;
 
     Ok(())
 }
@@ -197,7 +189,7 @@ pub fn exclude(workspace: &Path, owner: &str, paths: &[PathBuf]) -> Result<(), E
     let before = match std::fs::read_to_string(&file) {
         Ok(contents) => contents,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(error) => return Err(Error::Database(DatabaseError::IOError(error))),
+        Err(error) => return Err(DatabaseError::io(IOAction::ReadFile, &file, error).into()),
     };
     let mut after = String::new();
     let mut kept = true;
@@ -244,7 +236,11 @@ pub fn exclude(workspace: &Path, owner: &str, paths: &[PathBuf]) -> Result<(), E
         warn_untracked(
             workspace,
             &untracked,
-            &format!("{} can't be replaced, as {folder} can't be written: {}", file.display(), error.kind()),
+            &format!(
+                "{} can't be replaced, as {folder} can't be written: {}",
+                file.display(),
+                std::io::Error::from(error).kind()
+            ),
             &format!("Make {folder} writable"),
         );
     }
@@ -392,15 +388,10 @@ fn is_git_repository(workspace: &Path) -> bool {
 ///
 /// A vector of paths relative to the workspace, or an error if git command fails.
 fn get_staged_files(workspace: &Path) -> Result<Vec<PathBuf>, Error> {
-    let output = Command::new("git")
-        .args(["diff", "--cached", "--name-only", "--diff-filter=ACMR"])
-        .current_dir(workspace)
-        .output()
-        .map_err(|e| Error::Database(DatabaseError::IOError(e)))?;
-
-    if !output.status.success() {
-        return Err(Error::NotAGitRepository);
-    }
+    let output = run_git(
+        "diff",
+        Command::new("git").args(["diff", "--cached", "--name-only", "--diff-filter=ACMR"]).current_dir(workspace),
+    )?;
 
     Ok(String::from_utf8_lossy(&output.stdout).lines().filter(|l| !l.is_empty()).map(PathBuf::from).collect())
 }
@@ -418,11 +409,7 @@ fn get_staged_files(workspace: &Path) -> Result<Vec<PathBuf>, Error> {
 ///
 /// A HashSet of paths (relative to workspace) that have unstaged changes.
 fn get_files_with_unstaged_changes(workspace: &Path) -> Result<HashSet<PathBuf>, Error> {
-    let output = Command::new("git")
-        .args(["diff", "--name-only"])
-        .current_dir(workspace)
-        .output()
-        .map_err(|e| Error::Database(DatabaseError::IOError(e)))?;
+    let output = run_git("diff", Command::new("git").args(["diff", "--name-only"]).current_dir(workspace))?;
 
     Ok(String::from_utf8_lossy(&output.stdout).lines().filter(|l| !l.is_empty()).map(PathBuf::from).collect())
 }
@@ -442,18 +429,20 @@ fn create_blob(workspace: &Path, path: &Path, content: Vec<u8>) -> Result<String
     let mut child = Command::new("git")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .args(["hash-object", "-w", "--stdin", "--path"])
         .arg(path)
         .current_dir(workspace)
         .spawn()
-        .map_err(|e| Error::Database(DatabaseError::IOError(e)))?;
+        .map_err(|source| Error::RunningGit { command: "hash-object", source })?;
 
     let mut stdin = child.stdin.take().expect("failed to get stdin");
     std::thread::spawn(move || {
         stdin.write_all(&content).expect("failed to write to stdin");
     });
 
-    let output = child.wait_with_output().map_err(|e| Error::Database(DatabaseError::IOError(e)))?;
+    let output = child.wait_with_output().map_err(|source| Error::RunningGit { command: "hash-object", source })?;
+    let output = succeeded("hash-object", output)?;
 
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
@@ -469,12 +458,33 @@ fn create_blob(workspace: &Path, path: &Path, content: Vec<u8>) -> Result<String
 ///
 /// A string containing the object mode for the path
 fn get_mode(workspace: &Path, path: &Path) -> Result<String, Error> {
-    let output = Command::new("git")
-        .args(["ls-files", "--format=%(objectmode)"])
-        .arg(path)
-        .current_dir(workspace)
-        .output()
-        .map_err(|e| Error::Database(DatabaseError::IOError(e)))?;
+    let output = run_git(
+        "ls-files",
+        Command::new("git").args(["ls-files", "--format=%(objectmode)"]).arg(path).current_dir(workspace),
+    )?;
 
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+/// Runs `git`, a command that runs the `git` subcommand `command`, and returns its output.
+///
+/// # Errors
+///
+/// Returns [`Error::RunningGit`] when git can't start, and [`Error::GitFailed`] when it exits with an error.
+fn run_git(command: &'static str, git: &mut Command) -> Result<Output, Error> {
+    let output = git.output().map_err(|source| Error::RunningGit { command, source })?;
+
+    succeeded(command, output)
+}
+
+/// The `output` of the `git` subcommand `command`, or [`Error::GitFailed`] with the first line git printed to stderr
+/// when it exited with an error, as `ignored_by_gitignore` reads git's reason.
+fn succeeded(command: &'static str, output: Output) -> Result<Output, Error> {
+    if output.status.success() {
+        return Ok(output);
+    }
+
+    let reason = String::from_utf8_lossy(&output.stderr).lines().next().unwrap_or_default().trim().to_string();
+
+    Err(Error::GitFailed { command, status: output.status, reason })
 }

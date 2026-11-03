@@ -704,6 +704,10 @@ where
     analyze_rest_of_chain(context, block_context, artifacts, object, true, analyze)?;
     artifacts.set_rc_expression_type(object, object_type);
     let member_type = artifacts.get_expression_type(&span).cloned().unwrap_or_else(get_mixed);
+    // A `void` call gives no value to use beside the `null` of `?.`, spec section 14.1.
+    if member_type.is_void() {
+        artifacts.null_safe_void_calls.insert((span.start.offset, span.end.offset));
+    }
     artifacts.set_expression_type(&span, member_type.as_nullable());
 
     Ok(())

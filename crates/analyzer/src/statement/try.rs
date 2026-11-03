@@ -33,6 +33,7 @@ use crate::context::scope::control_action::ControlAction;
 use crate::context::scope::finally_scope::FinallyScope;
 use crate::context::utils::inherit_branch_context_properties;
 use crate::error::AnalysisError;
+use crate::expression::is_refused_type;
 use crate::resolver::class_name::report_missing_class;
 use crate::statement::analyze_statements;
 use crate::statement::function_like::HintPlace;
@@ -452,13 +453,11 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Try<'arena> {
             block_context.possibly_thrown_exceptions.entry(possibly_thrown_exception).or_default().extend(throw_spans);
         }
 
-        block_context.flags.set_has_returned(if finally_has_returned {
-            true
-        } else if !try_block_control_actions.contains(ControlAction::None) {
-            self.catch_clauses.is_empty() || all_catches_leave
-        } else {
-            false
-        });
+        block_context.flags.set_has_returned(
+            finally_has_returned
+                || (!try_block_control_actions.contains(ControlAction::None)
+                    && (self.catch_clauses.is_empty() || all_catches_leave)),
+        );
 
         Ok(())
     }
@@ -521,7 +520,10 @@ where
                     })
                     .collect();
                 let throwable = word(b"Throwable");
-                if bound_classes.is_empty()
+                // A refused bound bounds nothing, and its own error is the one, so the clause catches any `Throwable`.
+                if is_refused_type(&parameter) {
+                    bound_classes = vec![throwable];
+                } else if bound_classes.is_empty()
                     || !bound_classes.iter().all(|class| {
                         context.codebase.get_class_like(class.as_bytes()).is_some_and(|metadata| {
                             metadata.kind.is_interface()
@@ -588,6 +590,10 @@ where
             Hint::Union(union_hint) => {
                 walk(context, block_context, artifacts, union_hint.left, caught, caught_types);
                 walk(context, block_context, artifacts, union_hint.right, caught, caught_types);
+            }
+            // The semantics checker refuses a PHP# catch type in parentheses, so the clause catches the type inside.
+            Hint::Parenthesized(parenthesized) if context.dialect.is_sharp() => {
+                walk(context, block_context, artifacts, parenthesized.hint, caught, caught_types);
             }
             _ => {
                 context.collector.report_with_code(

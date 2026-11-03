@@ -10,6 +10,8 @@ use crate::internal::context::Context;
 #[inline]
 pub fn check_hint(hint: &Hint, context: &mut Context<'_, '_, '_>) {
     match hint {
+        // `check_slice` refuses a PHP# type in parentheses with the type to write instead.
+        Hint::Parenthesized(_) if context.program.dialect.is_sharp() => {}
         Hint::Parenthesized(parenthesized_hint) if !parenthesized_hint.hint.is_parenthesizable() => {
             let val = BytesDisplay(context.get_code_snippet(parenthesized_hint.hint));
 
@@ -38,13 +40,9 @@ pub fn check_hint(hint: &Hint, context: &mut Context<'_, '_, '_>) {
             }
 
             // PHP# writes `Any?` for PHP's `mixed`, and `(int|string)?` and `(Shippable & Billable)?` for a union and an
-            // intersection that hold null, and `check_slice` checks each.
+            // intersection that hold null, and `check_slice` checks each, and refuses `(Calc)?` as `Calc?`.
             let is_sharp_nullable = context.program.dialect.is_sharp()
-                && match nullable_hint.hint {
-                    Hint::Mixed(_) => true,
-                    Hint::Parenthesized(parenthesized) => parenthesized.hint.is_parenthesizable(),
-                    _ => false,
-                };
+                && matches!(nullable_hint.hint, Hint::Mixed(_) | Hint::Parenthesized(_));
 
             if !is_sharp_nullable && (nullable_hint.hint.is_standalone() || nullable_hint.hint.is_complex()) {
                 let val = BytesDisplay(context.get_code_snippet(nullable_hint.hint));

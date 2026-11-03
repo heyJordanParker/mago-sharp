@@ -58,7 +58,7 @@ use mago_codex::ttype::template::inferred_type_replacer;
 use mago_codex::ttype::union::TUnion;
 use mago_codex::ttype::wrap_atomic;
 use mago_codex::visibility::Visibility;
-use mago_names::ResolvedNames;
+use mago_names::TypeParametersNamed;
 use mago_names::binding::php_variable_name;
 use mago_names::display_sharp_member;
 use mago_php_version::feature::Feature;
@@ -74,7 +74,6 @@ use mago_syntax::cst::ConstructorInitializer;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::FunctionLikeParameterList;
 use mago_syntax::cst::Law;
-use mago_syntax::cst::LocalIdentifier;
 use mago_syntax::cst::Statement;
 use mago_syntax::walker::Walker;
 use mago_text_edit::Safety;
@@ -559,6 +558,8 @@ where
             .and_then(|expected| closure_result_type(context, expected));
     }
 
+    report_undefined_bound_types(context, &function_like_metadata.template_types);
+
     if let Some(return_type) = &function_like_metadata.return_type_metadata {
         report_undefined_type_references(context, return_type);
         report_invalid_template_arguments(context, return_type, HintPlace::Declaration);
@@ -764,22 +765,51 @@ fn analyze_returned_expression<'ctx, 'arena, A>(
 where
     A: Arena,
 {
-    let return_type = function_like_metadata.return_type_metadata.as_ref();
-    let declared =
-        return_type.map(|return_type| return_type.type_union.clone()).or_else(|| artifacts.lambda_result.clone());
+    let declared = function_like_metadata.return_type_metadata.as_ref().map(|return_type| &return_type.type_union);
+    analyze_returned_value(context, block_context, artifacts, value, declared)?;
+    block_context.conditionally_referenced_variable_ids.clear();
+
+    let value_type = artifacts.get_rc_expression_type(value).cloned().unwrap_or_else(|| Rc::new(get_mixed()));
+    handle_return_value(context, block_context, artifacts, Some(value), value_type, value.span());
+
+    Ok(())
+}
+
+/// Analyzes `value`, which a body returns, against `declared`, the return type of the method, function or `get`
+/// accessor the body belongs to, or else the result of the function type a lambda goes into. The value is used where
+/// the body returns one, so a `void` call there gives none, spec section 14.1. A lambda's result is its callee's, and a
+/// result that holds a type parameter or is `Any?` takes a lambda that gives nothing too, as Kotlin's `() -> Any?`
+/// takes a `Unit` lambda, so `Scope.run(() => job.handle())` compiles.
+pub(crate) fn analyze_returned_value<'ctx, 'arena, A>(
+    context: &mut Context<'ctx, 'arena, A>,
+    block_context: &mut BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+    value: &Expression<'arena>,
+    declared: Option<&TUnion>,
+) -> Result<(), AnalysisError>
+where
+    A: Arena,
+{
+    let uses_value = match declared {
+        Some(declared) => !declared.is_void(),
+        None => artifacts
+            .lambda_result
+            .as_ref()
+            .is_some_and(|result| !result.is_void() && !result.is_mixed() && !result.has_template_types()),
+    };
+    let declared = declared.cloned().or_else(|| artifacts.lambda_result.clone());
     expect_type(context, artifacts, value, declared.as_ref());
 
     block_context.flags.set_inside_return(true);
+    let was_inside_general_use = block_context.flags.inside_general_use();
+    block_context.flags.set_inside_general_use(uses_value);
     value.analyze(context, block_context, artifacts)?;
+    block_context.flags.set_inside_general_use(was_inside_general_use);
     block_context.flags.set_inside_return(false);
     // A lambda's result is checked against the function type that takes it, as a declared return type is.
     if let Some(declared) = &declared {
         check_sharp_literal_kind(context, Some(block_context), artifacts, value, declared);
     }
-    block_context.conditionally_referenced_variable_ids.clear();
-
-    let value_type = artifacts.get_rc_expression_type(value).cloned().unwrap_or_else(|| Rc::new(get_mixed()));
-    handle_return_value(context, block_context, artifacts, Some(value), value_type, value.span());
 
     Ok(())
 }
@@ -1997,6 +2027,8 @@ fn type_contains_function_template_param(
 /// - A parameter type
 /// - The return type
 /// - The PHP# `body`, as `catch (TError error)` names it, since a call can write its type argument
+/// - A bound the checker refused, as `TOther` in `<TOther, THolder : Order & TOther>`, since that bound bounds nothing
+///   and its refusal settles what it names
 pub fn check_unused_function_template_parameters<'ctx, A>(
     context: &mut Context<'ctx, '_, A>,
     function_like_metadata: &'ctx FunctionLikeMetadata,
@@ -2038,8 +2070,11 @@ pub fn check_unused_function_template_parameters<'ctx, A>(
         None => {}
     }
 
-    'templates: for (template_name, _) in &function_like_metadata.template_types {
-        if template_name.as_bytes().starts_with(b"_") || named_in_body.contains(&template_name.as_bytes()) {
+    'templates: for (template_name, template) in &function_like_metadata.template_types {
+        if template_name.as_bytes().starts_with(b"_")
+            || template.named_by_refused_bound
+            || named_in_body.contains(&template_name.as_bytes())
+        {
             continue;
         }
 
@@ -2082,17 +2117,6 @@ pub fn check_unused_function_template_parameters<'ctx, A>(
             IssueCode::UnusedTemplateParameter,
             Issue::warning(message).with_annotation(Annotation::primary(name_span).with_message(label)).with_help(help),
         );
-    }
-}
-
-/// Collects each name of a PHP# type parameter a body writes, as the binder bound it.
-struct TypeParametersNamed<'names, 'arena>(&'names ResolvedNames<'arena>);
-
-impl<'ast, 'arena> Walker<'ast, 'arena, Vec<&'arena [u8]>> for TypeParametersNamed<'_, '_> {
-    fn walk_in_local_identifier(&self, identifier: &'ast LocalIdentifier<'arena>, names: &mut Vec<&'arena [u8]>) {
-        if self.0.is_type_parameter(identifier) {
-            names.push(identifier.value);
-        }
     }
 }
 
@@ -2184,6 +2208,20 @@ where
 {
     if !type_metadata.inferred {
         report_undefined_types(context, &type_metadata.type_union, type_metadata.span);
+    }
+}
+
+/// Reports each type a PHP# bound of `templates` names that no analyzed file or stub declares, once, where the bound is
+/// written, spec section 11. Population reads such a bound as the refused type, so a use of its type parameter reports
+/// nothing more. A bound the checker refuses is the checker's one error.
+pub(crate) fn report_undefined_bound_types<A>(context: &mut Context<'_, '_, A>, templates: &TemplateTypes)
+where
+    A: Arena,
+{
+    for template in templates.values().filter(|template| !template.bound_refused) {
+        if let Some(bound) = &template.written_bound {
+            report_undefined_type_references(context, bound);
+        }
     }
 }
 

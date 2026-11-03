@@ -9,6 +9,7 @@ use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::reference::SymbolReferences;
 use mago_database::Database;
 use mago_database::DatabaseReader;
+use mago_database::error::DatabaseError;
 use mago_database::file::FileId;
 use mago_database::membership::WorkspaceMatcher;
 use mago_orchestrator::error::OrchestratorError;
@@ -123,7 +124,7 @@ impl Server {
     /// Returns [`ServerError`] when no analysis ran yet, or when re-analyzing a file, `stamp` or `check` fails.
     pub fn compile(
         &mut self,
-        stamp: impl FnMut(&[u8]) -> std::io::Result<Option<Input>>,
+        stamp: impl FnMut(&[u8]) -> Result<Option<Input>, DatabaseError>,
         check: impl FnOnce(Vec<Translation>) -> std::io::Result<HashMap<FileId, IssueCollection>>,
         standard_library: &Library,
         refusing: impl FnOnce(IssueCollection) -> IssueCollection,

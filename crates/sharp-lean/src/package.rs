@@ -9,6 +9,8 @@ use std::path::PathBuf;
 use foldhash::HashMap;
 use foldhash::HashSet;
 use mago_analyzer::graph::strongly_connected_parts;
+use mago_database::error::DatabaseError;
+use mago_database::error::IOAction;
 use mago_database::file::FileId;
 use mago_sharp_bridge::unit::COMPILED_FOLDER;
 use serde::Deserialize;
@@ -432,7 +434,8 @@ impl Package {
     /// `library::first_call`'s lock. With no `lake` on the `PATH`, the package is built by the `lake` of the elan Mago
     /// installs in its cache folder.
     pub(crate) fn toolchain(&mut self) -> io::Result<Toolchain> {
-        fs::create_dir_all(&self.directory)?;
+        fs::create_dir_all(&self.directory)
+            .map_err(|error| DatabaseError::io(IOAction::CreateFolder, &self.directory, error))?;
         write_if_changed(&self.directory.join("lean-toolchain"), library::TOOLCHAIN.as_bytes())?;
 
         let output = match library::first_call(self.lake.command().arg("--version").current_dir(&self.directory)) {
@@ -467,8 +470,11 @@ impl Package {
             toml::to_string(&Lakefile { name: "laws", require: [Require { name: "sharp", path: library }], lean_lib })
                 .map_err(io::Error::other)?;
         if write_if_changed(&self.directory.join("lakefile.toml"), lakefile.as_bytes())? {
-            match fs::remove_file(self.directory.join("lake-manifest.json")) {
-                Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+            let manifest = self.directory.join("lake-manifest.json");
+            match fs::remove_file(&manifest) {
+                Err(error) if error.kind() != io::ErrorKind::NotFound => {
+                    return Err(DatabaseError::io(IOAction::DeleteFile, &manifest, error).into());
+                }
                 _ => {}
             }
         }
@@ -552,40 +558,43 @@ impl Package {
 
 /// Writes `bytes` to `path` by rename unless the file already holds them, so Lake keeps the trace of an unchanged
 /// module. Returns whether it wrote.
-fn write_if_changed(path: &Path, bytes: &[u8]) -> io::Result<bool> {
+fn write_if_changed(path: &Path, bytes: &[u8]) -> Result<bool, DatabaseError> {
     if fs::read(path).is_ok_and(|current| current == bytes) {
         return Ok(false);
     }
 
     let folder = path.parent().unwrap_or(path);
-    fs::create_dir_all(folder)?;
-    let file = tempfile::NamedTempFile::new_in(folder)?;
-    fs::write(file.path(), bytes)?;
-    let (file, written) = file.keep().map_err(|error| error.error)?;
+    fs::create_dir_all(folder).map_err(|error| DatabaseError::io(IOAction::CreateFolder, folder, error))?;
+    let failed = |error: io::Error| DatabaseError::io(IOAction::WriteFile, path, error);
+    let file = tempfile::NamedTempFile::new_in(folder).map_err(failed)?;
+    fs::write(file.path(), bytes).map_err(failed)?;
+    let (file, written) = file.keep().map_err(|error| failed(error.error))?;
     drop(file);
-    fs::rename(&written, path).inspect_err(|_| {
-        let _ = fs::remove_file(&written);
-    })?;
+    fs::rename(&written, path)
+        .inspect_err(|_| {
+            let _ = fs::remove_file(&written);
+        })
+        .map_err(failed)?;
 
     Ok(true)
 }
 
 /// Deletes every `.lean` file under `folder` that is not in `kept`, then every folder left empty, `folder` included.
-fn delete_all_but(folder: &Path, kept: &HashSet<PathBuf>) -> io::Result<bool> {
+fn delete_all_but(folder: &Path, kept: &HashSet<PathBuf>) -> Result<bool, DatabaseError> {
     let mut empty = true;
-    for entry in fs::read_dir(folder)? {
-        let entry = entry?;
+    for entry in fs::read_dir(folder).map_err(|error| DatabaseError::io(IOAction::OpenFolder, folder, error))? {
+        let entry = entry.map_err(|error| DatabaseError::io(IOAction::WalkFolder, folder, error))?;
         let path = entry.path();
-        if entry.file_type()?.is_dir() {
+        if entry.file_type().map_err(|error| DatabaseError::io(IOAction::ReadMetadata, &path, error))?.is_dir() {
             empty &= delete_all_but(&path, kept)?;
         } else if kept.contains(&path) {
             empty = false;
         } else {
-            fs::remove_file(&path)?;
+            fs::remove_file(&path).map_err(|error| DatabaseError::io(IOAction::DeleteFile, &path, error))?;
         }
     }
     if empty {
-        fs::remove_dir(folder)?;
+        fs::remove_dir(folder).map_err(|error| DatabaseError::io(IOAction::DeleteFolder, folder, error))?;
     }
 
     Ok(empty)

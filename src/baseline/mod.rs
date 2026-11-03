@@ -28,12 +28,13 @@ struct BaselineHeader {
 /// * `baseline` - The `Baseline` object to serialize.
 /// * `backup` - If `true`, renames an existing baseline file to `[path].bkp`. If `false`, deletes it.
 pub fn serialize_baseline(path: &Path, baseline: &Baseline, backup: bool) -> Result<(), Error> {
+    let failed = |source| Error::CreatingBaselineFile { path: path.to_path_buf(), source };
     if path.exists() {
         if backup {
             let backup_path = path.with_extension("toml.bkp");
-            fs::rename(path, backup_path).map_err(Error::CreatingBaselineFile)?;
+            fs::rename(path, backup_path).map_err(failed)?;
         } else {
-            fs::remove_file(path).map_err(Error::CreatingBaselineFile)?;
+            fs::remove_file(path).map_err(failed)?;
         }
     }
 
@@ -42,7 +43,7 @@ pub fn serialize_baseline(path: &Path, baseline: &Baseline, backup: bool) -> Res
         Baseline::Loose(loose) => toml::to_string_pretty(loose).map_err(Error::SerializingToml)?,
     };
 
-    fs::write(path, toml_string).map_err(Error::CreatingBaselineFile)?;
+    fs::write(path, toml_string).map_err(failed)?;
     Ok(())
 }
 
@@ -61,7 +62,8 @@ pub fn serialize_baseline(path: &Path, baseline: &Baseline, backup: bool) -> Res
 /// * `Ok((baseline, needs_warning))` - The deserialized baseline and whether a warning is needed.
 /// * `Err(_)` - If reading or parsing the file fails.
 pub fn unserialize_baseline(path: &Path) -> Result<(Baseline, bool), Error> {
-    let toml_string = fs::read_to_string(path).map_err(Error::ReadingBaselineFile)?;
+    let toml_string =
+        fs::read_to_string(path).map_err(|source| Error::ReadingBaselineFile { path: path.to_path_buf(), source })?;
 
     // First pass: detect variant from header
     let header: BaselineHeader = toml::from_str(&toml_string).map_err(Error::DeserializingToml)?;
@@ -280,11 +282,33 @@ variant = "strict"
         let result = unserialize_baseline(&nonexistent_path);
         assert!(result.is_err(), "Should fail when file doesn't exist");
 
-        if let Err(Error::ReadingBaselineFile(_)) = result {
+        if let Err(Error::ReadingBaselineFile { .. }) = result {
             // Expected error type
         } else {
             panic!("Expected ReadingBaselineFile error");
         }
+    }
+
+    #[test]
+    fn a_baseline_file_that_fails_to_read_or_write_is_named() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let missing = temp_dir.path().join("missing/baseline.toml");
+
+        let read = unserialize_baseline(&missing).expect_err("a missing file can't be read");
+        let written = serialize_baseline(&missing, &Baseline::Strict(StrictBaseline::new()), false)
+            .expect_err("a file in a missing folder can't be written");
+
+        assert_eq!(
+            read.to_string(),
+            format!("Failed to read the baseline file `{}`: No such file or directory (os error 2)", missing.display())
+        );
+        assert_eq!(
+            written.to_string(),
+            format!(
+                "Failed to create the baseline file `{}`: No such file or directory (os error 2)",
+                missing.display()
+            )
+        );
     }
 
     #[test]

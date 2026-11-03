@@ -9,6 +9,8 @@ use std::path::PathBuf;
 use foldhash::HashMap;
 use foldhash::HashSet;
 use mago_analyzer::graph::strongly_connected_parts;
+use mago_database::error::DatabaseError;
+use mago_database::error::IOAction;
 use mago_database::file::FileId;
 use mago_reporting::Issue;
 use mago_reporting::IssueCollection;
@@ -121,7 +123,9 @@ impl Lean {
 
         if translations.iter().all(|translation| translation.laws.is_empty()) {
             match fs::remove_dir_all(&package.directory) {
-                Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+                Err(error) if error.kind() != io::ErrorKind::NotFound => {
+                    return Err(DatabaseError::io(IOAction::DeleteFolder, &package.directory, error).into());
+                }
                 _ => return Ok(issues),
             }
         }
@@ -232,10 +236,10 @@ impl Lean {
             return Ok(true);
         };
 
-        match fs::read(compiled) {
-            Ok(bytes) => unit::is_stale(&self.root, &bytes),
+        match fs::read(&compiled) {
+            Ok(bytes) => Ok(unit::is_stale(&self.root, &bytes)?),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(true),
-            Err(error) => Err(error),
+            Err(error) => Err(DatabaseError::io(IOAction::ReadFile, &compiled, error).into()),
         }
     }
 

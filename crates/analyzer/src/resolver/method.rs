@@ -65,6 +65,7 @@ use crate::resolver::extension::Extension;
 use crate::resolver::extension::collection_member_kind;
 use crate::resolver::extension::extension_methods;
 use crate::resolver::extension::is_collection_member;
+use crate::resolver::extension::library_declares_members;
 use crate::resolver::extension::resolve_extension;
 use crate::resolver::property::DeclaredPropertyKind;
 use crate::resolver::property::get_localized_property_type;
@@ -1644,8 +1645,8 @@ fn scalar_name(atomic: &TAtomic) -> Option<&'static str> {
     })
 }
 
-/// Reports a member the `parts` of a receiver, of one `kind` of collection, lack, naming the members that kind has,
-/// which the standard library declares.
+/// Reports a member the `parts` of a receiver, of one `kind` of collection, lack, naming the members they can call,
+/// which the standard library declares, and in a project without the library, the library to install.
 fn report_non_existent_collection_member<A>(
     context: &mut Context<'_, '_, A>,
     (kind, parts): (CollectionKind, &TUnion),
@@ -1682,6 +1683,16 @@ fn report_non_existent_collection_member<A>(
     }
     let methods = extension_methods(context, parts);
     let article = kind.article();
+    let listed = if methods.is_empty() {
+        format!("{article} `{collection}` has no methods.")
+    } else {
+        format!("{article} `{collection}` has the methods {}.", methods.join(", "))
+    };
+    let help = match (library_declares_members(context.codebase, kind), methods.is_empty()) {
+        (true, _) => listed,
+        (false, true) => kind.missing_library_help(),
+        (false, false) => format!("{listed} {}", kind.missing_library_help()),
+    };
 
     context.collector.report_with_code(
         IssueCode::NonExistentMethod,
@@ -1690,7 +1701,7 @@ fn report_non_existent_collection_member<A>(
             .with_annotation(
                 Annotation::secondary(obj_span).with_message(format!("This expression has type `{collection}`")),
             )
-            .with_help(format!("{article} `{collection}` has the methods {}.", methods.join(", "))),
+            .with_help(help),
     );
 }
 

@@ -89,6 +89,7 @@ use mago_codex::visibility::Visibility;
 use mago_database::file::File;
 use mago_extension::PayloadReader;
 use mago_extension::PayloadWriter;
+use mago_extension::WorkerError;
 use mago_extension::source::write_node_kind_table;
 use mago_php_version::PHPVersion;
 use mago_reporting::AnnotationKind;
@@ -139,7 +140,7 @@ use crate::invocation::MethodTargetContext;
 
 pub const ANALYZER_PROTOCOL_MAGIC: [u8; 4] = *b"MANA";
 pub const ANALYZER_PROTOCOL_MAJOR: u16 = 1;
-pub const ANALYZER_PROTOCOL_MINOR: u16 = 12;
+pub const ANALYZER_PROTOCOL_MINOR: u16 = 13;
 
 const HEADER_LENGTH: usize = 12;
 const INITIAL_MESSAGE_CAPACITY: usize = 256;
@@ -3341,6 +3342,31 @@ pub(super) fn take_codebase_reads(response: &[u8]) -> Result<(ExtensionReads, Ve
     Ok((reads, [header, &response[response.len() - reader.remaining()..]].concat()))
 }
 
+/// How every SDK release before 0.6.1 starts its refusal of a request of another analyzer protocol. Those releases
+/// can't change, so a refusal that starts with it always comes from a worker on an SDK older than this mago's.
+const PRE_0_6_1_SDK_REFUSAL: &[u8] = b"Unsupported analyzer protocol version ";
+
+/// Says what to install when a worker on an SDK before 0.6.1 refuses Mago's first request, the describe request. That
+/// SDK names Mago's protocol alone and no fix. Every other refusal passes through unchanged: an SDK of 0.6.1 or later
+/// names both protocols and the fixes itself, and any other failure, such as an extension's own exception, says what
+/// failed.
+pub(super) fn refused_handshake(error: WorkerError) -> ExternalAnalyzerError {
+    match &error {
+        WorkerError::Remote { host, payload, .. } if payload.starts_with(PRE_0_6_1_SDK_REFUSAL) => {
+            let version = env!("CARGO_PKG_VERSION");
+            protocol(format!(
+                "extension host `{host}` refused the handshake of mago {version}, which speaks analyzer protocol \
+                 {ANALYZER_PROTOCOL_MAJOR}.{ANALYZER_PROTOCOL_MINOR}: {} Its SDK is from a \
+                 `heyjordanparker/mago-sharp` release before 0.6.1, so require the release of this mago with \
+                 `composer require --dev \"heyjordanparker/mago-sharp:{version}\"`, or run the mago of the release \
+                 the project requires with `vendor/bin/mago`.",
+                String::from_utf8_lossy(payload).trim_end()
+            ))
+        }
+        _ => error.into(),
+    }
+}
+
 pub(super) fn message_kind(payload: &[u8]) -> Result<u16, ExternalAnalyzerError> {
     if payload.len() < HEADER_LENGTH {
         return Err(protocol("analyzer message is shorter than its header"));
@@ -3892,6 +3918,20 @@ pub(super) mod testing {
         assert!(matches!(result, Err(ExternalAnalyzerError::Protocol(message)) if message.contains("more than once")));
     }
 
+    /// A worker of protocol 1.12 sends a bare file path as a progress frame, where 1.13 sends what it starts, so Mago
+    /// refuses it instead of printing "the hooks of the hooks of app/Hung.php".
+    #[test]
+    fn a_response_of_the_protocol_before_named_progress_is_refused() {
+        let mut response = message_writer(INITIALIZE_RESPONSE).finish();
+        response[6..8].copy_from_slice(&12u16.to_be_bytes());
+
+        let refusal = message_kind(&response);
+        assert!(
+            matches!(&refusal, Err(ExternalAnalyzerError::Protocol(message)) if message == "unsupported analyzer protocol version 1.12"),
+            "{refusal:?}"
+        );
+    }
+
     /// A worker of protocol 1.11 records no before-analysis reads and writes no whole method search, so Mago refuses
     /// its responses instead of reading them as 1.12.
     #[test]
@@ -4408,6 +4448,88 @@ pub(super) mod testing {
             writer.write_u32(0);
         }
         write_stock_provider(&mut writer);
+        writer.finish()
+    }
+
+    /// A registration of one plugin, `demo`, with an after-file hook and one provider or hook of every kind a
+    /// request runs alone: a return-type and callable signature provider of the function `demo_fn` and of the member
+    /// `stock` of `Lib\Shelf`, an assertion provider of each, a property type, property initialization and call
+    /// forwarding provider of that member, a class initializer provider of `Lib\Shelf`, and an issue-filter hook of
+    /// `non-existent-function`.
+    pub fn registration_response_with_every_provider() -> Vec<u8> {
+        let mut writer = message_writer(DESCRIBE_RESPONSE);
+        writer.write_u32(1);
+        writer.write_string("demo/extension").unwrap();
+        writer.write_string("Demo").unwrap();
+        writer.write_string("1.0.0").unwrap();
+        writer.write_bool(false);
+        writer.write_u32(1);
+        writer.write_string("demo").unwrap();
+        writer.write_string("Demo analyzer").unwrap();
+        writer.write_string("Test provider").unwrap();
+        writer.write_bool(true);
+        // An after-file hook, and no alias.
+        writer.write_u8(2);
+        writer.write_u32(0);
+        // The return-type providers, which also give callable signatures.
+        write_demo_function_provider(&mut writer, |writer| writer.write_u8(super::super::PROVIDER_CALLABLE_SIGNATURE));
+        writer.write_u32(1);
+        writer.write_u16(0);
+        writer.write_u8(super::super::PROVIDER_CALLABLE_SIGNATURE);
+        writer.write_u32(1);
+        writer.write_bytes(b"Lib\\Shelf").unwrap();
+        writer.write_bytes(b"stock").unwrap();
+        // The property type and property initialization providers.
+        write_stock_provider(&mut writer);
+        write_stock_provider(&mut writer);
+        // The class initializer provider.
+        writer.write_u32(1);
+        writer.write_u16(0);
+        writer.write_u32(1);
+        writer.write_bytes(b"Lib\\Shelf").unwrap();
+        // No entry point or attributed entry point, then the issue-filter hook.
+        writer.write_u32(0);
+        writer.write_u32(0);
+        writer.write_u32(1);
+        writer.write_u16(0);
+        writer.write_u32(1);
+        writer.write_string("non-existent-function").unwrap();
+        // No node, method-call or class-like analysis hook, then the assertion providers, which memoize nothing.
+        writer.write_u32(0);
+        writer.write_u32(0);
+        writer.write_u32(0);
+        write_demo_function_provider(&mut writer, |writer| writer.write_bool(false));
+        writer.write_u32(1);
+        writer.write_u16(0);
+        writer.write_bool(false);
+        writer.write_u32(1);
+        writer.write_bytes(b"Lib\\Shelf").unwrap();
+        writer.write_bytes(b"stock").unwrap();
+        // No codebase-scan hook, then the call forwarding provider.
+        writer.write_u32(0);
+        write_stock_provider(&mut writer);
+        writer.finish()
+    }
+
+    /// A provider list of one provider, index 0, for the function `demo_fn`, whose capabilities `write_capabilities`
+    /// writes.
+    fn write_demo_function_provider(writer: &mut PayloadWriter, write_capabilities: impl FnOnce(&mut PayloadWriter)) {
+        writer.write_u32(1);
+        writer.write_u16(0);
+        write_capabilities(writer);
+        writer.write_u32(1);
+        writer.write_u8(TARGET_EXACT);
+        writer.write_bytes(b"demo_fn").unwrap();
+    }
+
+    /// A nested request that asks whether request-local type handle 0 equals `mixed`, as a hook that compares an
+    /// argument's type does.
+    pub fn type_comparison_of_handle_zero() -> Vec<u8> {
+        let mut writer = message_writer(TYPE_COMPARISON_REQUEST);
+        writer.write_u8(TYPE_COMPARISON_EQUAL);
+        writer.write_u8(TYPE_REFERENCE);
+        writer.write_u32(0);
+        writer.write_u8(TYPE_MIXED);
         writer.finish()
     }
 

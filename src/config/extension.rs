@@ -55,8 +55,10 @@ pub struct ExtensionHostConfiguration {
     /// Maximum bytes accepted in one extension protocol frame.
     pub maximum_payload_size: usize,
 
-    /// Longest one file's hooks may run, in milliseconds, or one request that runs no file's hooks once the worker
-    /// starts it.
+    /// Longest one unit of a request may run, in milliseconds. It counts from when the worker starts a request, not
+    /// while the request waits behind earlier ones, and starts again each time the worker starts one of the request's
+    /// units: a file's hooks in an after-file batch, one plugin's initialization, before-analysis or after-analysis
+    /// hooks, a codebase-scan hook, or an extension's worker reducer.
     pub request_timeout_ms: u64,
 
     /// Grace period for worker shutdown, in milliseconds.

@@ -1612,6 +1612,97 @@ fn compile_warns_when_the_exclude_file_cannot_be_written() {
     assert!(!printed(&output).contains(&format!("{}/.tmp", info.display())), "{}", printed(&output));
 }
 
+/// A `.sharp` folder the compile can't open fails the compile with the folder's path and what the compile was doing.
+/// Root opens a folder of mode 000, so the test has nothing to show there.
+#[cfg(unix)]
+#[test]
+fn compile_names_the_sharp_folder_it_cannot_open() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = project(ORDER, MONEY);
+    let root = std::fs::canonicalize(directory.path()).unwrap();
+    compile_succeeds(&root);
+    let compiled = root.join(".sharp");
+    std::fs::set_permissions(&compiled, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read_dir(&compiled).is_ok() {
+        std::fs::set_permissions(&compiled, std::fs::Permissions::from_mode(0o755)).unwrap();
+        return;
+    }
+
+    let output = compile(&root);
+    std::fs::set_permissions(&compiled, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    assert!(!output.status.success(), "{}", printed(&output));
+    assert!(
+        printed(&output).contains(&format!(
+            "mago: can't open the folder `{}`: Permission denied (os error 13)",
+            compiled.display()
+        )),
+        "{}",
+        printed(&output)
+    );
+}
+
+/// A folder the compile's walk of `.sharp` reaches and can't open is the one the error names, not `.sharp`. Root opens
+/// a folder of mode 000, so the test has nothing to show there.
+#[cfg(unix)]
+#[test]
+fn compile_names_the_folder_its_walk_of_the_sharp_folder_cannot_open() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = project(ORDER, MONEY);
+    let root = std::fs::canonicalize(directory.path()).unwrap();
+    compile_succeeds(&root);
+    let app = root.join(".sharp/app");
+    std::fs::set_permissions(&app, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read_dir(&app).is_ok() {
+        std::fs::set_permissions(&app, std::fs::Permissions::from_mode(0o755)).unwrap();
+        return;
+    }
+
+    let output = compile(&root);
+    std::fs::set_permissions(&app, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    assert!(!output.status.success(), "{}", printed(&output));
+    assert!(
+        printed(&output)
+            .contains(&format!("mago: can't open the folder `{}`: Permission denied (os error 13)", app.display())),
+        "{}",
+        printed(&output)
+    );
+}
+
+/// A folder of `.sharp` the compile can't create is named as the folder, not as the compiled file it would hold. Root
+/// writes into a folder of mode 555, so the test has nothing to show there.
+#[cfg(unix)]
+#[test]
+fn compile_names_the_folder_of_the_sharp_folder_it_cannot_create() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = project(ORDER, MONEY);
+    let root = std::fs::canonicalize(directory.path()).unwrap();
+    compile_succeeds(&root);
+    let compiled = root.join(".sharp");
+    let app = compiled.join("app");
+    std::fs::remove_dir_all(&app).unwrap();
+    std::fs::set_permissions(&compiled, std::fs::Permissions::from_mode(0o555)).unwrap();
+    if std::fs::create_dir(&app).is_ok() {
+        std::fs::set_permissions(&compiled, std::fs::Permissions::from_mode(0o755)).unwrap();
+        return;
+    }
+
+    let output = compile(&root);
+    std::fs::set_permissions(&compiled, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    assert!(!output.status.success(), "{}", printed(&output));
+    assert!(
+        printed(&output)
+            .contains(&format!("mago: can't create the folder `{}`: Permission denied (os error 13)", app.display())),
+        "{}",
+        printed(&output)
+    );
+}
+
 /// A repository git refuses to read, as a checkout another user owns in a container or a CI job, or a broken `.git`,
 /// fails no compile: the block lists every PHP file, as with no git to run, and the compile warns once with git's
 /// reason.
@@ -2259,6 +2350,32 @@ fn compile_runs_the_lake_on_the_path_and_installs_no_lean() {
 
     assert!(printed(&output).contains("the lake on the PATH ran build"), "{}", printed(&output));
     assert!(!cache.path().join("mago/elan").exists(), "{}", printed(&output));
+}
+
+/// A cache folder the law checker can't create, as one a root container left, is named with what failed.
+#[cfg(unix)]
+#[test]
+fn compile_names_the_cache_folder_the_law_checker_cannot_create() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = lawful_project(&[("app/Shared/Money.sharp", LAWFUL_MONEY)]);
+    let lake = tempfile::tempdir().unwrap();
+    write(lake.path(), "lake", "#!/bin/sh\n[ \"$1\" = --version ]\n");
+    std::fs::set_permissions(lake.path().join("lake"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let cache = unwritable_cache();
+
+    let output =
+        command(directory.path(), "never").env("PATH", lake.path()).env("XDG_CACHE_HOME", &cache).output().unwrap();
+
+    assert!(!output.status.success(), "{}", printed(&output));
+    assert!(
+        printed(&output).contains(&format!(
+            "The laws could not be checked: can't create the folder `{}`: File exists (os error 17).",
+            cache.join("mago").display()
+        )),
+        "{}",
+        printed(&output)
+    );
 }
 
 /// Puts a `lake` first on the `PATH` that runs the real one, except that its first `--version`, the call on which elan

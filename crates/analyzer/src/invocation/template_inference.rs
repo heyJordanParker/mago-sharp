@@ -181,7 +181,10 @@ where
     input_objects
 }
 
-fn infer_templates_from_input_and_container_types<A>(
+/// Infers the templates `container_type` holds from `input_type`, the type of the value that meets it, adding each
+/// bound to `template_result` and each template the value falls outside the bound of to `violations`. With
+/// [`InferenceOptions::default`], every part of a union input adds its bound, as a call's argument does.
+pub fn infer_templates_from_input_and_container_types<A>(
     context: &Context<'_, '_, A>,
     container_type: &TUnion,
     input_type: &TUnion,

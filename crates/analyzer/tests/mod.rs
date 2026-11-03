@@ -96,6 +96,16 @@ test_case!(list_destructure_string_key_in_known_items);
 test_case!(list_destructure_string_key_in_union);
 test_case!(list_destructure_string_key_simple);
 test_case!(list_destructure_with_holes_no_warn);
+// The left side has two clauses of two possibilities each, so its negation of four possibilities exceeds a negation
+// complexity of 3, and its negated formula of four clauses exceeds a formula size of 3. The right side's negated
+// left side, `!is_int($door)` and `!is_string($door)`, then fills a saturation complexity of 2 exactly.
+test_case!(logical_or_right_side_keeps_narrowing_when_left_side_cannot_be_negated, {
+    let mut settings = default_test_settings();
+    settings.negation_complexity_threshold = 3;
+    settings.formula_size_threshold = 3;
+    settings.saturation_complexity_threshold = 2;
+    settings
+});
 test_case!(loops_foreach_union_cast_not_always_entered);
 test_case!(do_while_iteration_dependent_conditions);
 test_case!(array_map_non_empty_array);

@@ -130,6 +130,29 @@ function get_version(): string
 }
 
 /**
+ * The error for a `mago` and an extension SDK of different releases, as "`mago` speaks analyzer protocol 1.12, and the
+ * extension SDK, heyjordanparker/mago-sharp 0.6.1, speaks 1.13.": what each side holds, this SDK's release when
+ * Composer gives one, and the fix, since `mago` and the SDK release together at one version.
+ *
+ * @internal
+ */
+function release_mismatch(string $mago, string $sdk): string
+{
+    $package = 'heyjordanparker/mago-sharp';
+    try {
+        $named = "{$package} " . namespace\get_version();
+    } catch (RuntimeException) {
+        $named = $package;
+    }
+
+    return (
+        "`mago` {$mago}, and the extension SDK, {$named}, {$sdk}. `mago` and {$package} must be the same release: "
+        . "run the `mago` that {$package} installs, `vendor/bin/mago`, or require the {$package} release "
+        . '`mago --version` prints.'
+    );
+}
+
+/**
  * Detect the CPU architecture from the system.
  *
  * Maps the raw `php_uname('m')` value to a normalized Rust target architecture name.

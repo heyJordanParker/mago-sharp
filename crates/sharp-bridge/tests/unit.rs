@@ -21,6 +21,8 @@ use std::process::Command;
 use std::slice;
 
 use mago_build_id::BUILD_ID;
+use mago_database::error::DatabaseError;
+use mago_database::error::IOAction;
 use mago_sharp_bridge::SHARP_UNIT_ABI;
 use mago_sharp_bridge::Unit;
 use mago_sharp_bridge::lower;
@@ -359,8 +361,34 @@ fn stamp_gives_the_size_and_hash_of_a_file_and_none_where_no_file_is() {
     assert_eq!(stamp(directory.path(), b"gone/Missing.sharp").unwrap(), None, "a missing folder holds no file");
     for under_a_file in [&b"app/Report.sharp/Inner.php"[..], b"app/Report.sharp/*.sharp"] {
         let error = stamp(directory.path(), under_a_file).expect_err("a file is no folder to read");
+        let DatabaseError::IOError { action, path, error } = error else { panic!("{error}") };
+        assert_eq!(action, IOAction::OpenFolder, "{}", String::from_utf8_lossy(under_a_file));
+        assert!(path.ends_with("app/Report.sharp"), "{}", path.display());
         assert_eq!(error.kind(), std::io::ErrorKind::NotADirectory, "{}", String::from_utf8_lossy(under_a_file));
     }
+}
+
+/// An input file the stamp can't read fails it with the file's path and "read the file". Root reads a file of mode
+/// 000, so the test has nothing to show there.
+#[cfg(unix)]
+#[test]
+fn stamp_names_an_input_file_it_cannot_read() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    write(directory.path(), "app/Report.sharp", SOURCE);
+    let file = directory.path().join("app/Report.sharp");
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o000)).unwrap();
+    if fs::read(&file).is_ok() {
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
+        return;
+    }
+
+    let stamped = stamp(directory.path(), b"app/Report.sharp");
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
+
+    let error = stamped.expect_err("a file that can't be read can't be stamped");
+    assert_eq!(error.to_string(), format!("can't read the file `{}`: Permission denied (os error 13)", file.display()));
 }
 
 /// `SOURCE_LISTING` stamps the names of a folder's `.sharp` files and of its namespace folders, so a file or a folder
