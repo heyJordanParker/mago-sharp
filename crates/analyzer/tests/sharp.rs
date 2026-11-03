@@ -14473,9 +14473,27 @@ fn a_struct_never_changes() {
     assert_eq!(each_file(reported, &fixed, &[]), vec![Vec::<String>::new(); 2]);
 }
 
+/// Asserts that of two files that declare one full name, each analyzed beside the other and `others`, exactly one gets
+/// its "already defined elsewhere" message, the first's or the second's. The declaration whose span sorts first keeps
+/// the name, and a span sorts by its `FileId`, which std's `DefaultHasher` gives from the file's name and Rust keeps
+/// stable across no release, so either file may be the duplicate.
+fn assert_one_duplicate(
+    first: ((&'static str, &'static str), &str),
+    second: ((&'static str, &'static str), &str),
+    others: &[(&'static str, &'static str)],
+) {
+    let beside = |file| others.iter().copied().chain([file]).collect::<Vec<_>>();
+    let found = [messages(first.0, &beside(second.0)), messages(second.0, &beside(first.0))];
+    let first_lost = [vec![first.1.to_owned()], Vec::new()];
+    let second_lost = [Vec::new(), vec![second.1.to_owned()]];
+
+    assert!(found == first_lost || found == second_lost, "{found:?}");
+}
+
 /// Spec section 10: a struct can't inherit or be inherited, and implements interfaces. A class in a struct's header
 /// and a class that extends a struct are each refused, an interface in the header compiles, and a name that names no
-/// type is refused once, as a type that cannot be found. A class declared first under a struct's name keeps it.
+/// type is refused once, as a type that cannot be found. Of a class and a struct that two files declare under one full
+/// name, exactly one keeps it.
 #[test]
 fn a_struct_inherits_nothing_implements_interfaces_and_is_declared_once() {
     let sharp = [
@@ -14503,7 +14521,11 @@ fn a_struct_inherits_nothing_implements_interfaces_and_is_declared_once() {
     );
     let class = ("src/Demo/Dup.sharp", "namespace Demo;\n\nclass Dup\n{\n}\n");
     let structure = ("app/Demo/Dup.sharp", "namespace Demo;\n\nstruct Dup\n{\n}\n");
-    assert_eq!(messages(structure, &[class]), ["Struct `Dup` is already defined elsewhere."]);
+    assert_one_duplicate(
+        (class, "Class `Dup` is already defined elsewhere."),
+        (structure, "Struct `Dup` is already defined elsewhere."),
+        &[],
+    );
 }
 
 /// Spec section 10: `==` on a struct compares each property with its own `==`, so a struct with a property `==` can't
@@ -28362,32 +28384,33 @@ fn an_event_is_a_final_class_whose_parameters_are_get_only_properties() {
 }
 
 /// Spec section 15: no event extends another, so an event's header names interfaces only, and a type names an event
-/// only once: an interface, a class or another event of the same full name keeps the name.
+/// only once: of an event and an interface, a class or another event that two files declare under one full name,
+/// exactly one keeps it.
 #[test]
 fn an_event_header_names_interfaces_and_an_event_is_declared_once() {
     let base = ("app/Shop/Base.sharp", "namespace App.Shop;\n\npublic class Base\n{\n}\n");
     let based = ("app/Shop/Moved.sharp", "namespace App.Shop;\n\npublic event Moved(int id) : Base, OrderEvent;\n");
-    // Of two files that declare one full name, the declaration whose span sorts first keeps it, as `mago analyze` keeps
-    // it, so each pair puts the event in the file that sorts later.
     let moved = ("src/Shop/Moved.sharp", "namespace App.Shop;\n\npublic event Moved(int id);\n");
     let cart = ("app/Shop/Cart.sharp", "namespace App.Shop;\n\npublic event Cart(int id);\n");
-    let first = ("app/Shop/Moved.sharp", "namespace App.Shop;\n\npublic event Moved(int id);\n");
+    let twice = ("app/Shop/Moved.sharp", "namespace App.Shop;\n\npublic event Moved(int id);\n");
     let interface = ("app/Shop/Moved.sharp", "namespace App.Shop;\n\npublic interface Moved { }\n");
     let class = ("src/Shop/Cart.sharp", "namespace App.Shop;\n\npublic class Cart\n{\n}\n");
     let with_base: Vec<_> = ORDER_EVENTS.iter().copied().chain([base]).collect();
-    let with_first: Vec<_> = ORDER_EVENTS.iter().copied().chain([first]).collect();
+    let moved_twice = "Event `Moved` is already defined elsewhere.";
 
-    assert_eq!(messages(interface, &[moved]), Vec::<String>::new());
-    assert_eq!(messages(moved, &[interface]), ["Event `Moved` is already defined elsewhere."]);
-    assert_eq!(messages(class, &[cart]), Vec::<String>::new());
-    assert_eq!(messages(cart, &[class]), ["Event `Cart` is already defined elsewhere."]);
+    assert_one_duplicate((moved, moved_twice), (interface, "Interface `Moved` is already defined elsewhere."), &[]);
+    assert_one_duplicate(
+        (cart, "Event `Cart` is already defined elsewhere."),
+        (class, "Class `Cart` is already defined elsewhere."),
+        &[],
+    );
+    assert_one_duplicate((moved, moved_twice), (twice, moved_twice), &ORDER_EVENTS);
     assert_eq!(
         worded(based, &with_base),
         [
             "3:30 invalid-event An event's header names interfaces and traits only, and `Base` is neither. | Named here. | No event extends another: a family of events shares an interface."
         ]
     );
-    assert_eq!(messages(moved, &with_first), ["Event `Moved` is already defined elsewhere."]);
 }
 
 /// Spec section 15: the interface a family of events shares states the get-only properties each event gives, so an
