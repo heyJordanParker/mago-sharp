@@ -2852,10 +2852,10 @@ fn a_generic_type_in_a_header_links_its_class_by_its_name() {
     assert_eq!(issues(("src/Demo/Lost.sharp", lost), &[]), ["3:21 non-existent-class-like"]);
 }
 
-/// `List`, `Map` and `Class` are never classes, so the binder resolves no name for them, and a header that names one,
-/// which `check_slice` refuses, links no parent.
+/// `List`, `Map` and `Class` are never classes, so `check_slice` refuses a header that names one, and its three
+/// refusals show alone on the header line.
 #[test]
-fn a_header_naming_a_built_in_generic_type_links_no_parent() {
+fn a_header_naming_a_built_in_generic_type_shows_its_refusals_alone() {
     let sharp = "namespace Demo;\n\npublic class Lines : List<int>, Map<string, int>, Class<Lines>\n{\n}\n";
 
     assert_eq!(issues(("src/Demo/Lines.sharp", sharp), &[]), ["3:22 semantics", "3:33 semantics", "3:51 semantics"]);
@@ -3913,10 +3913,10 @@ fn a_static_member_of_a_missing_class_is_one_error() {
     assert_eq!(worded(("src/Demo/Reads.sharp", sharp), &[]), [unknown("5:33"), unknown("6:35"), unknown("7:39")]);
 }
 
-/// A member written as an expression, `Pdf.{"render"}(html)`, names no function of the namespace, so the analysis,
-/// which still reads the file, reads it as a static call. The checker refuses the member, and `mago` prints only that.
+/// A member written as an expression, `Pdf.{"render"}(html)`, is a parse refusal, and it shows alone on its line, as
+/// `mago` prints it.
 #[test]
-fn a_member_written_as_an_expression_after_a_namespace_calls_no_function() {
+fn a_member_written_as_an_expression_after_a_namespace_shows_its_refusal_alone() {
     let pdf = "<?php\n\nnamespace Vendor\\Pdf;\n\nfunction render(string $html): string\n{\n    return $html;\n}\n";
     let sharp = "namespace Demo;\n\nimport Vendor.Pdf;\n\nclass Report\n{\n    public static void draft(string html) { Pdf.{\"render\"}(html); }\n}\n";
 
@@ -9576,9 +9576,9 @@ fn an_extension_block_infers_its_type_parameters_from_the_receiver() {
 }
 
 /// Spec section 26: an extension holds methods and computed properties. Semantics refuses any other member and a
-/// member declared twice, so the analyzer checks neither: only the first `label` runs.
+/// member declared twice, and the refusals of the constant and the second `label` show alone on their lines.
 #[test]
-fn the_analyzer_checks_only_the_members_an_extension_holds_once() {
+fn an_extension_member_semantics_refuses_shows_its_refusal_alone() {
     let sharp = "namespace App.Shared.Text;\n\npublic static class TextExtensions\n{\n    extension(string value)\n    {\n        public const int LIMIT = 1;\n        public string label() => value;\n        public int label() => value;\n    }\n}\n";
 
     assert_eq!(issues(("src/App/Shared/Text/TextExtensions.sharp", sharp), &[]), ["9:20 semantics", "7:9 semantics"]);
@@ -15184,9 +15184,10 @@ fn a_declare_body_runs_as_written_in_a_sharp_file() {
     assert_eq!(issues(("src/Demo/Report.php", php), &[]), ["7:21 missing-return-statement"]);
 }
 
-/// The semantic checks refuse `TRUE` as `true` written in another case, so its value keeps its type and adds no issue.
+/// The semantic checks refuse `TRUE`, `False` and `NULL` as a keyword written in another case, and the refusal shows
+/// alone on its line.
 #[test]
-fn true_false_or_null_in_another_case_keeps_its_value_type() {
+fn true_false_or_null_in_another_case_shows_its_refusal_alone() {
     for (returns, value) in [("bool", "TRUE"), ("bool", "False"), ("int?", "NULL")] {
         let code = Box::leak(
             format!("namespace Demo;\n\nclass Report\n{{\n    public {returns} run()\n    {{\n        return {value};\n    }}\n}}\n")
@@ -17563,15 +17564,22 @@ fn an_intersection_joins_at_most_one_class() {
     );
 }
 
-/// Spec section 24: `int & string` joins nothing a value can be, which the semantics checker refuses, so the type adds
-/// no second error, in the body that reads the parameter or in a call to it, in PHP# or in PHP.
+/// Spec section 24: `int&string` joins nothing a value can be, which the semantics checker refuses, so in PHP the type
+/// adds no second error, in the body that reads the parameter or in a call to it.
 #[test]
 fn an_intersection_of_types_that_never_join_adds_no_second_error() {
-    let sharp = "namespace Demo;\n\npublic class Desk\n{\n    public int count(int & string amount) => amount;\n\n    public int run() => this.count(5);\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nfunction count_of(int&string $amount): int\n{\n    return $amount;\n}\n\ncount_of(5);\n";
 
-    assert_eq!(issues(("src/Demo/Desk.sharp", sharp), &[]), ["5:22 semantics", "5:28 semantics"]);
     assert_eq!(issues(("src/Demo/Count.php", php), &[]), ["5:19 semantics", "5:23 semantics"]);
+}
+
+/// Spec section 24: `int & string` joins nothing a value can be, so the semantics checker refuses it twice, and the
+/// two refusals show alone on the line that declares and reads the parameter. A call to the method adds no error.
+#[test]
+fn an_intersection_of_types_that_never_join_shows_its_refusals_alone() {
+    let sharp = "namespace Demo;\n\npublic class Desk\n{\n    public int count(int & string amount) => amount;\n\n    public int run() => this.count(5);\n}\n";
+
+    assert_eq!(issues(("src/Demo/Desk.sharp", sharp), &[]), ["5:22 semantics", "5:28 semantics"]);
 }
 
 /// `value is TItem`, `value as TItem` and a `match` arm of the type `TItem`, in an expression or in a statement, add no
@@ -18637,10 +18645,10 @@ fn a_missing_class_with_type_arguments_is_reported() {
     assert_eq!(each_file(issues, &declared, &[]), vec![Vec::<String>::new(); 2]);
 }
 
-/// A type test PHP# refuses still declares the name it binds, typed as written, so a use of the name reports nothing
-/// more than the refusal.
+/// A nullable type pattern is refused, and the refusal shows alone on the line that tests the value and uses the name
+/// the pattern binds.
 #[test]
-fn a_refused_type_test_still_declares_its_name() {
+fn a_refused_type_test_shows_its_refusal_alone() {
     let r#box = (
         "src/Demo/Box.sharp",
         "namespace Demo;\n\npublic class Box<TItem>\n{\n    public TItem? first() => null;\n}\n",
@@ -21709,10 +21717,9 @@ fn self_on_a_php_intersection_keeps_every_part() {
 
 /// A bound may name a type parameter, and the analysis reports nothing on a call through it: `box.same()` on a
 /// `TOuter : TInner` is typed through `TInner`'s bound. The checker refuses `THolder : Order & TOther & Holder<int>`,
-/// which joins `TOther` with other bounds, so that bound bounds nothing, and `holder.held()` and its method value report
-/// nothing more, nor does `TOther`, which only the refused bound names.
+/// which joins `TOther` with other bounds, and its refusal shows alone on each line that declares it.
 #[test]
-fn a_call_on_a_type_parameter_bounded_by_a_type_parameter_reports_only_the_refused_bound() {
+fn a_type_parameter_bound_takes_a_call_and_a_bound_joining_one_shows_its_refusal_alone() {
     let declared = [
         ("src/Demo/Holder.sharp", "namespace Demo;\n\npublic interface Holder<TValue>\n{\n    TValue? held();\n}\n"),
         ("src/Demo/Order.sharp", "namespace Demo;\n\npublic class Order\n{\n}\n"),
@@ -22002,9 +22009,9 @@ fn a_named_constructor_of_a_generic_class_takes_the_type_arguments_of_its_new() 
 /// `Map<string, int>`, as the literal `["k": [1]]` is `Map<string, List<int>>`, `non-empty-string` is `string`,
 /// `positive-int` is `int` and `class-string` is `Class<Object>`. A written type argument the value fits compiles. A
 /// `new` infers none, so it needs its type argument written. An argument the checker refuses, as it does
-/// `Pager.class() as Class<Object>|null`, adds no refusal of the type argument it fixes.
+/// `Pager.class() as Class<Object>|null`, shows its refusal alone on its line.
 #[test]
-fn a_type_argument_php_sharp_cant_write_is_refused() {
+fn a_type_argument_php_sharp_cant_write_is_refused_and_a_refused_argument_shows_its_refusal_alone() {
     let php = "<?php\n\nnamespace Lib;\n\nfinal class Pager\n{\n    /** @return array{a: int} */\n    public static function shape(): array\n    {\n        return ['a' => 1];\n    }\n\n    /** @return array-key */\n    public static function key(): int|string\n    {\n        return 1;\n    }\n\n    /** @return scalar */\n    public static function scalar(): int|float|string|bool\n    {\n        return 1;\n    }\n\n    /** @return numeric */\n    public static function numeric(): int|float|string\n    {\n        return 1;\n    }\n\n    /** @return resource */\n    public static function resource(): mixed\n    {\n        return STDIN;\n    }\n\n    /** @return list<int> */\n    public static function list(): array\n    {\n        return [1];\n    }\n\n    /** @return non-empty-string */\n    public static function text(): string\n    {\n        return 'a';\n    }\n\n    /** @return positive-int */\n    public static function count(): int\n    {\n        return 1;\n    }\n\n    /** @return class-string */\n    public static function class(): string\n    {\n        return self::class;\n    }\n}\n";
     let sharp = "namespace Demo;\n\nimport Lib.Pager;\n\npublic class Registry\n{\n    public static T keep<T>(T value) => value;\n\n    public T hold<T>(T value) => value;\n\n    public void run()\n    {\n        Registry.keep(Pager.shape());\n        Registry.keep(Pager.key());\n        Registry.keep(Pager.scalar());\n        Registry.keep(Pager.numeric());\n        this.hold(Pager.resource());\n        Registry.keep(Pager.list());\n        Registry.keep(Pager.text());\n        Registry.keep(Pager.count());\n        this.hold(Pager.class());\n        Registry.keep<Map<string, int>>(Pager.shape());\n        Registry.keep<int|string>(Pager.key());\n        Crate<Map<string, int>> crate = new Crate<Map<string, int>>(Pager.shape());\n        let inferred = new Crate(Pager.shape());\n        Registry.keep([1, 2]);\n        Registry.keep([\"k\": [1]]);\n        Registry.keep(Pager.class() as Class<Object>|null);\n    }\n}\n";
     let crate_ = (
