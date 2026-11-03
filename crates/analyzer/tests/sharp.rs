@@ -7889,33 +7889,70 @@ fn a_spread_element_outside_a_written_type_argument_is_refused() {
     );
 }
 
-/// A spread of a `List` whose length is unknown fixes the type arguments of each parameter it may fill with its element
-/// type. The call is refused only for the arguments it may lack.
+/// Spec section 7: a spread of unknown length fills only a `...` parameter, as in Kotlin and TypeScript, into a PHP#
+/// method and into plain PHP alike. Anywhere else, a parameter with a default included, it is refused once, with the
+/// parameters it may not fill, which leave out one a named argument fills, in place of too few arguments or a type
+/// argument nothing fixes. A spread of a list literal fills parameters as its elements written out do.
 #[test]
-fn a_spread_of_unknown_length_fixes_type_arguments_with_its_element_type() {
-    let sharp = "namespace Demo;\n\nclass Pairs\n{\n    public static List<T> pair<T>(T a, T b) => [a, b];\n\n    public static int run(List<int> numbers)\n    {\n        const spread = Pairs.pair(...numbers);\n        return spread.count();\n    }\n}\n";
+fn a_spread_of_unknown_length_fills_only_a_variadic_parameter() {
+    let spreads = "namespace Demo;\n\nimport Lib.Pair;\nimport Vendor.Math;\n\nclass Spreads\n{\n    public static int run(List<int> numbers, List<Position> extra, List<string> tags, List<int> prices)\n    {\n        return Pairs.pair(...numbers).count()\n            + Reports.logSlow(\"slow\", ...extra)\n            + Tags.tagged(...tags)\n            + Tags.tagged(1, ...tags)\n            + Money.sum(...numbers)\n            + Math.max(0, ...prices)\n            + Pair.of(...numbers)\n            + Pairs.scale(...numbers, factor: 2)\n            + Pairs.pair(...[1, 2]).count();\n    }\n}\n";
+    let others = [
+        (
+            "src/Demo/Pairs.sharp",
+            "namespace Demo;\n\nclass Pairs\n{\n    public static List<T> pair<T>(T a, T b) => [a, b];\n\n    public static int scale(int first, int second = 0, int factor = 1) => (first + second) * factor;\n}\n",
+        ),
+        (
+            "src/Demo/Reports.sharp",
+            "namespace Demo;\n\nclass Reports\n{\n    public static int logSlow(string message, Position caller = Position.current()) => caller.line;\n}\n",
+        ),
+        (
+            "src/Demo/Tags.sharp",
+            "namespace Demo;\n\nclass Tags\n{\n    public static int tagged(int count, string ...tags) => count + tags.count();\n}\n",
+        ),
+        (
+            "src/Demo/Money.sharp",
+            "namespace Demo;\n\nclass Money\n{\n    public static int sum(int ...values) => values.count();\n}\n",
+        ),
+        (
+            "src/Lib/Pair.php",
+            "<?php\n\nnamespace Lib;\n\nfinal class Pair\n{\n    public static function of(int $a, int $b): int\n    {\n        return $a + $b;\n    }\n}\n",
+        ),
+        (
+            "src/Vendor/Math/functions.php",
+            "<?php\n\nnamespace Vendor\\Math;\n\nfunction max(int $value, int ...$values): int\n{\n    return \\max($value, ...$values);\n}\n",
+        ),
+    ];
+    let refused = |at: &str, spread: &str, parameters: &str| {
+        format!(
+            "{at} invalid-argument `{spread}` may not fill {parameters}. A spread of unknown length fills only a ... parameter. | Pass each value as an argument of its own, or spread a list literal, whose length is known."
+        )
+    };
 
     assert_eq!(
-        issues_and_types(("src/Demo/Pairs.sharp", sharp), &["Pairs.pair(...numbers)"]),
-        (vec!["9:34 too-few-arguments".to_owned()], vec![Some("list<int>".to_owned())])
+        refusals(("src/Demo/Spreads.sharp", spreads), &others),
+        [
+            refused("10:30", "numbers", "`a` and `b`"),
+            refused("11:42", "extra", "`caller`"),
+            refused("12:30", "tags", "`count`"),
+            refused("16:26", "numbers", "`a` and `b`"),
+            refused("17:30", "numbers", "`first` and `second`"),
+        ]
     );
 }
 
-/// After a spread of unknown length, a later spread may start at any later parameter, so each of its elements fixes and
-/// is checked against each parameter it may fill.
+/// Plain PHP spreads a list of any length into any parameter. After a spread of unknown length, a later spread may
+/// start at any later parameter, so each of its elements fixes and is checked against each parameter it may fill.
 #[test]
-fn a_spread_after_one_of_unknown_length_may_fill_any_later_parameter() {
-    let sharp = "namespace Demo;\n\nclass Pairs\n{\n    public static TSecond last<TFirst, TSecond>(TFirst first, TSecond second) => second;\n\n    public static string label(string name, int count) => name;\n\n    public static int|string first(List<int> numbers)\n    {\n        const last = Pairs.last(...numbers, ...[\"tea\", 1]);\n        return last;\n    }\n\n    public static string named(List<string> names) => Pairs.label(...names, ...[\"cup\", 2]);\n}\n";
+fn a_plain_php_spread_after_one_of_unknown_length_may_fill_any_later_parameter() {
+    let php = "<?php\n\nnamespace Demo;\n\n/**\n * @template TFirst\n * @template TSecond\n *\n * @param TFirst $first\n * @param TSecond $second\n *\n * @return TSecond\n */\nfunction last(mixed $first, mixed $second): mixed\n{\n    return $second;\n}\n\nfunction label(string $name, int $count): string\n{\n    return $name;\n}\n\n/** @param list<int> $numbers */\nfunction first(array $numbers): mixed\n{\n    return last(...$numbers, ...['tea', 1]);\n}\n\n/** @param list<string> $names */\nfunction named(array $names): string\n{\n    return label(...$names, ...['cup', 2]);\n}\n";
 
     assert_eq!(
-        issues_and_types(("src/Demo/Pairs.sharp", sharp), &["Pairs.last(...numbers, ...[\"tea\", 1])"]),
+        issues_and_types(("src/Demo/spreads.php", php), &["last(...$numbers, ...['tea', 1])"]),
         (
-            vec![
-                "15:70 invalid-argument".to_owned(),
-                "15:80 possibly-invalid-argument".to_owned(),
-                "15:80 possibly-invalid-argument".to_owned(),
-            ],
-            vec![Some("int|string".to_owned())]
+            ["33:21 invalid-argument", "33:32 possibly-invalid-argument", "33:32 possibly-invalid-argument"]
+                .map(str::to_owned)
+                .to_vec(),
+            vec![Some("int|string('tea')".to_owned())]
         )
     );
 }
@@ -12926,19 +12963,17 @@ fn a_map_keyed_by_a_type_parameter_is_refused_where_plain_php_takes_an_array() {
 /// Spec section 12: a value that may be one of several collections reaches an `array` parameter as the PHP array of
 /// the one it holds, so a `Map` keyed by an object anywhere in it is refused, as `Map<string, int>|List<Map<Spot, int>>`
 /// is for its `List`'s `Map<Spot, int>`. A spread into plain PHP parameters that are not variadic is refused as each
-/// `Map` it passes would be, by the parameter it starts at, and a `List` of no known length fills too few of them. A
-/// spread of `Map`s keyed by a backed enum passes each as its PHP array.
+/// `Map` it passes would be, by the parameter it starts at. A spread of `Map`s keyed by a backed enum passes each as its
+/// PHP array.
 #[test]
 fn every_map_a_value_can_hold_is_refused_where_its_keys_have_no_php_array() {
-    let sharp = "namespace Demo;\n\nimport Lib.Sink;\nimport Lib.Spot;\nimport Lib.Status;\n\nclass Tally\n{\n    public static int either(Map<string, int>|List<Map<Spot, int>> counts) => Sink.plain(counts);\n\n    public static int spread(List<Map<Spot, int>> many) => Sink.pair(...many);\n\n    public static int crossed(List<Map<Status, int>> many) => Sink.pair(...many);\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Sink;\nimport Lib.Spot;\nimport Lib.Status;\n\nclass Tally\n{\n    public static int either(Map<string, int>|List<Map<Spot, int>> counts) => Sink.plain(counts);\n\n    public static int spread(Map<Spot, int> a, Map<Spot, int> b) => Sink.pair(...[a, b]);\n\n    public static int crossed(Map<Status, int> a, Map<Status, int> b) => Sink.pair(...[a, b]);\n}\n";
 
     assert_eq!(
         array_sink_issues(sharp),
         [
             "9:90 invalid-argument `Map<string, int>|List<Map<Spot, int>>` can't be passed to the parameter `counts` of method `Sink.plain`, which takes a PHP array: a PHP array's keys are `int` or `string`, and this `Map`'s keys are `Spot`.",
-            "11:73 invalid-argument `Map<Spot, int>` can't be passed to the parameter `first` of method `Sink.pair`, which takes a PHP array: a PHP array's keys are `int` or `string`, and this `Map`'s keys are `Spot`.",
-            "11:69 too-few-arguments Too few arguments provided for method `Sink.pair`.",
-            "13:72 too-few-arguments Too few arguments provided for method `Sink.pair`.",
+            "11:82 invalid-argument `Map<Spot, int>` can't be passed to the parameter `first` of method `Sink.pair`, which takes a PHP array: a PHP array's keys are `int` or `string`, and this `Map`'s keys are `Spot`.",
         ]
     );
 }

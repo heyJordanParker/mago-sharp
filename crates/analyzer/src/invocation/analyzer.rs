@@ -53,6 +53,7 @@ use mago_word::Word;
 use mago_word::WordMap;
 use mago_word::WordSet;
 use mago_word::concat_word;
+use mago_word::word;
 
 use crate::artifacts::AnalysisArtifacts;
 use crate::artifacts::ClosureBindScope;
@@ -93,6 +94,7 @@ use crate::statement::function_like::is_member_read;
 use crate::statement::function_like::known_type_or_error;
 use crate::statement::function_like::takes_declared_type;
 use crate::utils::expression::get_block_expression_id;
+use crate::utils::names::and_list;
 use crate::utils::names::display_type;
 use crate::utils::names::display_variable_name;
 use crate::utils::names::is_prelude_stub;
@@ -891,6 +893,7 @@ where
                 expression: argument_expression,
                 start: current_parameter_position,
                 starts_exactly,
+                has_exact_length: exact_length.is_some(),
                 value_type: argument_value_type,
                 received_type,
                 other_element_type,
@@ -1454,10 +1457,28 @@ where
     let mut number_of_provided_parameters = non_closure_arguments.len() + closure_arguments.len();
 
     // Spec section 7: each element of a spread is checked against the parameter its placement gives it, as the same
-    // argument written there is.
+    // argument written there is. A PHP# spread of unknown length fills only a `...` parameter, as in Kotlin and
+    // TypeScript, so one that would start before it is refused, and the parameters it would fill are counted as given.
+    let variadic_offset = invocation
+        .target
+        .parameter_count()
+        .checked_sub(1)
+        .filter(|offset| invocation.target.get_parameter(*offset).is_some_and(|parameter| parameter.is_variadic()));
+    let mut refused_spread = false;
     for placement in &spread_placements {
         number_of_provided_parameters += placement.minimum_size;
         let argument_expression = placement.expression;
+
+        // A value that is no list is refused on its own, by `report_non_list_spread`.
+        if context.dialect.is_sharp()
+            && !placement.has_exact_length
+            && placement.value_type.types.iter().all(TAtomic::is_list)
+            && variadic_offset.is_none_or(|offset| placement.start < offset)
+        {
+            report_spread_of_unknown_length(context, invocation, placement);
+            refused_spread = true;
+            break;
+        }
 
         let starting_offset = adjust_offset_for_variadic(&invocation.target, placement.start);
         if passes_to_plain_php
@@ -1655,6 +1676,7 @@ where
     }
 
     let should_check_argument_count = match invocation.arguments_source {
+        _ if refused_spread => false,
         InvocationArgumentsSource::PartialArgumentList(_) => {
             (non_closure_arguments.len() + closure_arguments.len()) < number_of_required_parameters
         }
@@ -1915,6 +1937,53 @@ fn report_unfixed_type_arguments<A>(
                 "A generic method call takes its type arguments from its arguments, from the ones it writes and from the declared type its result goes into.",
             )
             .with_help(help),
+    );
+}
+
+/// Spec section 7: a PHP# spread of unknown length fills only a `...` parameter, as Kotlin spreads only into a `vararg`
+/// and TypeScript spreads a list that is no tuple only into a rest parameter. `placement`, such a spread that would start
+/// before it, is refused with the parameters it may not fill, into a PHP# method and into plain PHP alike.
+fn report_spread_of_unknown_length<A>(
+    context: &mut Context<'_, '_, A>,
+    invocation: &Invocation<'_, '_, '_>,
+    placement: &SpreadPlacement<'_, '_>,
+) where
+    A: Arena,
+{
+    // A parameter a named argument fills is no parameter the spread may fill.
+    let named: Vec<Word> = invocation
+        .arguments_source
+        .iter_arguments()
+        .filter_map(|argument| argument.get_parameter_name())
+        .map(php_variable_name)
+        .collect();
+    let parameters: Vec<Word> = invocation
+        .target
+        .iter_parameters()
+        .enumerate()
+        .filter(|(offset, parameter)| *offset >= placement.start && !parameter.is_variadic())
+        .filter_map(|(_, parameter)| parameter.get_name())
+        .filter(|name| !named.contains(&name.0))
+        .map(|name| word(trim_start_byte(name.0.as_bytes(), b'$')))
+        .collect();
+    let spread = quoted_source(context, placement.expression.span());
+    let message = if parameters.is_empty() {
+        let method_name = invocation.target.guess_name(context);
+        format!(
+            "`{spread}` may fill no parameter of `{method_name}`. A spread of unknown length fills only a ... parameter."
+        )
+    } else {
+        format!(
+            "`{spread}` may not fill {}. A spread of unknown length fills only a ... parameter.",
+            and_list(&parameters)
+        )
+    };
+
+    context.collector.report_with_code(
+        IssueCode::InvalidArgument,
+        Issue::error(message)
+            .with_annotation(Annotation::primary(placement.expression.span()).with_message("Its length is unknown"))
+            .with_help("Pass each value as an argument of its own, or spread a list literal, whose length is known."),
     );
 }
 
@@ -2370,6 +2439,8 @@ struct SpreadPlacement<'ast, 'arena> {
     start: usize,
     /// Whether the spread starts at `start` exactly, as it does while every spread before it has an exact length.
     starts_exactly: bool,
+    /// Whether the spread's own length is known, as a list literal's is.
+    has_exact_length: bool,
     /// The PHP# type of the spread value.
     value_type: TUnion,
     /// The type the call receives for the value: the PHP array plain PHP takes, spec section 12, or the value's own.
@@ -2426,10 +2497,16 @@ impl SpreadPlacement<'_, '_> {
     }
 }
 
-/// The number of elements `spread` holds, when each part of it is a list of that one known length.
+/// The number of elements `spread` holds, when each part of it is a list of that one known length: a count it knows,
+/// or elements it knows each of, none of them optional.
 fn exact_spread_length(spread: &TUnion) -> Option<usize> {
     let mut lengths = spread.types.iter().map(|atomic| match atomic {
-        TAtomic::Array(TArray::List(list)) => list.known_count,
+        TAtomic::Array(TArray::List(list)) => list.known_count.or_else(|| {
+            let known_elements = list.known_elements.as_ref()?;
+
+            (list.element_type.is_never() && known_elements.values().all(|(is_optional, _)| !is_optional))
+                .then_some(known_elements.len())
+        }),
         _ => None,
     });
     let length = lengths.next().flatten()?;
