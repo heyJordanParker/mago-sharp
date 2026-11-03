@@ -76,9 +76,9 @@ impl SemanticsChecker {
 
 /// Returns the analyzer issues of one file to report beside its parse errors and semantic issues.
 ///
-/// In a PHP# file, an analyzer issue on a line that holds a parse error or a semantic error, or whose span holds one, as
-/// `exit(` does with a refused argument on the next line, is dropped as a follow-on of that refusal, as a missing
-/// `: super(…)` is beside the parse error of `: base(row)`. The file cannot run until the refusal is fixed, so an issue
+/// In a PHP# file, an analyzer issue on a line that holds a parse error or a semantic error, or whose span overlaps
+/// one, as `exit(` does with a refused argument on the next line, is dropped as a follow-on of that refusal, as a
+/// missing `: super(…)` is beside the parse error of `: base(row)`. The file cannot run until the refusal is fixed, so an issue
 /// dropped there shows up one fix later at worst. A PHP file keeps every analyzer issue.
 #[must_use]
 pub fn drop_follow_on_issues(

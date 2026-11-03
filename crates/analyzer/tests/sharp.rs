@@ -74,6 +74,7 @@ use mago_syntax::cst::Expression;
 use mago_syntax::cst::MethodCall;
 use mago_syntax::cst::NullSafeMethodCall;
 use mago_syntax::cst::Program;
+use mago_syntax::dialect::Dialect;
 use mago_syntax::parser::parse_file;
 use mago_word::Word;
 use mago_word::WordSet;
@@ -192,7 +193,8 @@ fn analyze_with_artifacts(
 
 /// Analyzes `analyzed` together with `others` and the standard library files `library` under `settings` and the
 /// plugins of `registry`, and returns its issues, the analysis artifacts and the symbol references the analysis
-/// recorded, with the prelude's.
+/// recorded, with the prelude's. The issues are what `mago compile` prints for `analyzed`, with one difference: a
+/// `vendor/` file is analyzed when it is `analyzed`, where `mago compile` analyzes no vendored file.
 fn analyze_with_references(
     registry: &PluginRegistry,
     settings: Settings,
@@ -266,11 +268,21 @@ fn analyze_with_references(
         .analyze_with_artifacts(program, &mut result)
         .expect("analysis succeeds");
     let analyzer_issues = drop_follow_on_issues(file, program.errors, &semantic_issues, result.issues);
+    let codebase_issues = metadata
+        .take_issues(true)
+        .into_iter()
+        .filter(|issue| issue.primary_span().is_some_and(|span| span.file_id == file.id));
 
     // The analyzed file's parse errors, then its semantic issues, then the analyzer's issues without the follow-ons of
-    // a refusal, as `mago analyze` and `mago compile` report them.
-    let issues: Vec<Issue> =
-        program.errors.iter().map(Issue::from).chain(semantic_issues).chain(analyzer_issues).collect();
+    // a refusal, then the codebase's issues in it, as `mago analyze` and `mago compile` report them.
+    let issues: Vec<Issue> = program
+        .errors
+        .iter()
+        .map(Issue::from)
+        .chain(semantic_issues)
+        .chain(analyzer_issues)
+        .chain(codebase_issues)
+        .collect();
     assert_speaks_sharp(file_ids.iter().map(|(name, _)| *name), &issues);
 
     (issues, artifacts, result.symbol_references)
@@ -279,7 +291,7 @@ fn analyze_with_references(
 /// Asserts that `mago compile` accepts `file` when it is a `.sharp` file: the semantic check gives it no error. A
 /// helper that reads its files without the semantic check calls it, so its fixtures follow the module's rule too.
 fn assert_compiles(file: &File, program: &Program<'_>, names: &ResolvedNames<'_>) {
-    if !file.name.ends_with(b".sharp") {
+    if !Dialect::of(file).is_sharp() {
         return;
     }
 
@@ -1341,15 +1353,10 @@ fn a_type_in_a_message_names_a_renamed_class_by_its_new_name() {
 #[test]
 fn an_unknown_class_imported_under_another_name_is_reported_as_its_plain_import_is() {
     let settings = || Settings { check_use_statements: true, ..settings() };
-    let reported = |code: &'static str| -> Vec<String> {
-        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Report.sharp", code), &[])
-            .iter()
-            .map(|issue| format!("{} {}", located(code, issue), issue.message))
-            .collect()
-    };
+    let report = |code: &'static str| reported_with(settings(), ("src/Demo/Report.sharp", code), &[]);
 
-    let plain = reported("namespace Demo;\n\nimport Nope.Thing;\n\nclass Report\n{\n}\n");
-    let renamed = reported("namespace Demo;\n\nimport Nope.Thing as T;\n\nclass Report\n{\n}\n");
+    let plain = report("namespace Demo;\n\nimport Nope.Thing;\n\nclass Report\n{\n}\n");
+    let renamed = report("namespace Demo;\n\nimport Nope.Thing as T;\n\nclass Report\n{\n}\n");
 
     assert_eq!(
         plain,
@@ -3048,7 +3055,7 @@ fn a_property_overrides_a_sharp_override_with_its_type_and_access_level() {
 /// section 6.1, measured against that override alone, so each break is one error. A field can't replace it.
 #[test]
 fn an_override_that_does_not_match_the_sharp_override_is_an_error() {
-    let reported = |sharp: &'static str| {
+    let coded = |sharp: &'static str| {
         analyze(
             &PLUGIN_REGISTRY,
             settings(),
@@ -3062,19 +3069,19 @@ fn an_override_that_does_not_match_the_sharp_override_is_an_error() {
     let error = |code: &str, message: &str| vec![(code.to_owned(), message.to_owned())];
 
     assert_eq!(
-        reported(
+        coded(
             "namespace Demo;\n\npublic class RushOrder : Order\n{\n    protected override string table { get; set; } = \"rush_orders\";\n}\n"
         ),
         error("incompatible-property-type", "Property `RushOrder.table` has an incompatible type declaration.")
     );
     assert_eq!(
-        reported(
+        coded(
             "namespace Demo;\n\npublic class RushOrder : Order\n{\n    protected override int table { get; set; } = 5;\n}\n"
         ),
         error("incompatible-property-type", "Property `RushOrder.table` has an incompatible type declaration.")
     );
     assert_eq!(
-        reported(
+        coded(
             "namespace Demo;\n\npublic class RushOrder : Order\n{\n    public override string? table { get; set; } = \"rush_orders\";\n}\n"
         ),
         error(
@@ -3083,7 +3090,7 @@ fn an_override_that_does_not_match_the_sharp_override_is_an_error() {
         )
     );
     assert_eq!(
-        reported(
+        coded(
             "namespace Demo;\n\npublic class RushOrder : Order\n{\n    protected string? table = \"rush_orders\";\n}\n"
         ),
         error(
@@ -3092,7 +3099,7 @@ fn an_override_that_does_not_match_the_sharp_override_is_an_error() {
         )
     );
     assert_eq!(
-        reported(
+        coded(
             "namespace Demo;\n\npublic class RushOrder : Order\n{\n    protected string? table { get; set; } = \"rush_orders\";\n}\n"
         ),
         error("missing-override-attribute", "Missing `override` modifier on overriding property `RushOrder.table`.")
@@ -4326,14 +4333,6 @@ const CELL: &str = "<?php\n\nnamespace Lib;\n\n/** @template T */\nfinal class C
 
 const BOXES: &str = "<?php\n\nnamespace Lib;\n\n/** @template-covariant T */\nfinal class Box\n{\n    /** @param T $item */\n    public function __construct(public readonly mixed $item) {}\n}\n\nfinal class Boxes\n{\n    /** @param Box<float> $box */\n    public static function unbox(Box $box): float\n    {\n        return $box->item;\n    }\n\n    /** @param iterable<float> $values */\n    public static function total(iterable $values): float\n    {\n        $sum = 0.0;\n        foreach ($values as $value) {\n            $sum += $value;\n        }\n\n        return $sum;\n    }\n}\n";
 
-/// The issues of `analyzed`, each as its position, its code and its message, without the annotations.
-fn titled(analyzed: (&'static str, &'static str), others: &[(&'static str, &'static str)]) -> Vec<String> {
-    analyze(&PLUGIN_REGISTRY, settings(), analyzed, others)
-        .iter()
-        .map(|issue| format!("{} {}", located(analyzed.1, issue), issue.message))
-        .collect()
-}
-
 /// Spec section 24 refuses an `int` where a `float` is expected in PHP# code, wherever the value lands. Each place
 /// reports it once, at the value, with the issue code it gives any value of the wrong type, a `float` type argument too,
 /// written on a call or on `new` and carried to a method. One row per place, one line each.
@@ -4416,7 +4415,7 @@ fn a_value_refused_for_more_than_an_int_keeps_the_message_of_its_place() {
     let sharp = "namespace Demo;\n\nimport Lib.Box;\nimport Lib.Boxes;\n\nclass Report\n{\n    public float either(int|string value) => value;\n    public List<float> intFirst() => [1, \"a\"];\n    public List<float> stringFirst() => [\"a\", 1];\n    public float boxed() => Boxes.unbox(new Box<int>(1));\n    public float total(List<int> ints) => Boxes.total(ints);\n    public float|List<float> collection(int|List<int> value) => value;\n    public float|Function<float()> callable(int|Function<int()> value) => value;\n    public Function<float(int)> half() => (float amount) => amount / 2.0;\n}\n";
 
     assert_eq!(
-        titled(("src/Demo/Report.sharp", sharp), &[("src/Lib/Boxes.php", BOXES)]),
+        reported(("src/Demo/Report.sharp", sharp), &[("src/Lib/Boxes.php", BOXES)]),
         [
             "8:46 invalid-return-statement Invalid return type for method `Report.either`: expected `float`, but found `int|string`.",
             "9:38 invalid-return-statement Invalid return type for method `Report.intFirst`: expected `List<float>`, but found `List<int|string>`.",
@@ -4512,14 +4511,8 @@ fn not_before_is_adds_no_issue_and_not_of_a_value_that_is_not_bool_keeps_its_rep
     let design = "<?php\n\nnamespace Demo;\n\ninterface HasDesign\n{\n}\n";
     let sharp = "namespace Demo;\n\nclass Report\n{\n    public static bool run(Any entity, int done)\n    {\n        if (!entity is HasDesign) {\n            return true;\n        }\n        if (!done) {\n            return false;\n        }\n        return true;\n    }\n}\n";
 
-    let issues: Vec<String> =
-        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Report.sharp", sharp), &[("src/Demo/HasDesign.php", design)])
-            .iter()
-            .map(|issue| format!("{} {}", located(sharp, issue), issue.message))
-            .collect();
-
     assert_eq!(
-        issues,
+        reported(("src/Demo/Report.sharp", sharp), &[("src/Demo/HasDesign.php", design)]),
         [
             "7:13 semantics Write `entity is not HasDesign`: `!` applies to `entity` before `is` tests it.",
             "10:14 invalid-operand `!` takes a `bool`, but this is `int`.",
@@ -6336,10 +6329,7 @@ fn function_call_hooks_see_a_global_call_as_php_call() {
                 .get(&(start, start + text.len() as u32))
                 .map(|r#type| r#type.get_id().to_string())
         };
-        let messages: Vec<String> =
-            issues.iter().map(|issue| format!("{} {}", located(analyzed.1, issue), issue.message)).collect();
-
-        (messages, type_at(up), type_at(down))
+        (written(analyzed.1, &issues), type_at(up), type_at(down))
     };
 
     assert_eq!(
@@ -7433,12 +7423,8 @@ fn a_data_case_is_a_type_of_its_own() {
     // A dotted type names a case, and never a class of another namespace, which is a full name, spec section 23.
     let order = ("src/App/Shop/Order.sharp", "namespace App.Shop;\n\npublic class Order { }\n");
     let dotted = "namespace App;\n\nclass Till\n{\n    public bool open(Shop.Order order) => true;\n}\n";
-    let messages: Vec<String> = analyze(&PLUGIN_REGISTRY, settings(), ("src/App/Till.sharp", dotted), &[order])
-        .into_iter()
-        .map(|issue| format!("{} {}", located(dotted, &issue), issue.message))
-        .collect();
     assert_eq!(
-        messages,
+        reported(("src/App/Till.sharp", dotted), &[order]),
         [
             "5:22 non-existent-class-like Full names appear only in `import` lines: add `import App.Shop.Order;` and write `Order`."
         ]
@@ -7914,14 +7900,8 @@ fn a_match_on_a_list_whose_every_arm_has_when_misses_every_list() {
 fn a_default_after_arms_that_handle_every_length_is_reported_as_an_enum_s_is() {
     let sharp = "namespace Demo;\n\nimport Lib.Status;\n\nclass Report\n{\n    public static int size(List<int> values) => match (values) {\n        [] => 0,\n        [int first, ...List<int> rest] => first,\n        default => -1,\n    };\n\n    public static string label(Status status) => match (status) {\n        Status.Open => \"open\",\n        Status.Closed => \"closed\",\n        Status.Archived => \"archived\",\n        default => \"other\",\n    };\n\n    public static string joined(Status status) => match (status) {\n        Status.Open => \"open\",\n        Status.Closed or Status.Archived => \"done\",\n        default => \"other\",\n    };\n}\n";
 
-    let reported: Vec<String> =
-        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Report.sharp", sharp), &[("src/Lib/Status.php", TICKETS)])
-            .iter()
-            .map(|issue| format!("{} {}", located(sharp, issue), issue.message))
-            .collect();
-
     assert_eq!(
-        reported,
+        reported(("src/Demo/Report.sharp", sharp), &[("src/Lib/Status.php", TICKETS)]),
         [
             "9:9 match-arm-always-true This match arm is always `true`, making subsequent arms unreachable.",
             "16:9 match-arm-always-true This match arm is always `true`, making subsequent arms unreachable.",
@@ -8276,12 +8256,7 @@ fn an_expression_the_parser_refuses_reports_only_its_parse_error() {
     let store = "<?php\n\nnamespace Demo;\n\nfinal class Store\n{\n    public static function name(): string\n    {\n        return 'a';\n    }\n\n    public static function maybe(): ?string\n    {\n        return null;\n    }\n\n    public static function keep(mixed $value): void\n    {\n    }\n}\n";
     let sharp = "namespace Demo;\n\nclass Report\n{\n    public static void run(Store store)\n    {\n        string? text = Store.maybe();\n        text .= Store.name();\n        int wrong = \"a\";\n        Store.keep(text ?? \"\");\n        Store.keep(store->missing());\n        Store.keep(Store::missing());\n        Store.keep(store?->missing());\n        Store.keep(fn(int x) => x.missing());\n        Store.keep(function(int x) { return x.missing(); });\n        Store.keep([\"a\" => Store.missing()]);\n        Store.keep(match (store) { Store found when found == store ? true : Store.missing() => 1, default => 2 });\n        let found = store->missing();\n        Store.keep(found);\n        Map<string, int> counts = [\"a\" => 1];\n        Store.keep(wrong);\n        Store.keep(counts);\n        let report = new Report();\n        report.label = store->missing();\n        Store.keep(report.label);\n        Store.keep(found + 1);\n        Store.keep(found.missing());\n        Store.keep(found.name);\n        int either = Store.maybe() ?? found;\n    }\n\n    public static Map<string, int> made() => [\"a\" => 1, \"b\" => 2];\n\n    public static int counted(Store store)\n    {\n        let found = store->missing();\n        return found;\n    }\n\n    public static void used(Store store, List<int> items)\n    {\n        let found = store->missing();\n        Store.keep(found - 1);\n        Store.keep(found < 1);\n        Store.keep(found == 1);\n        Store.keep(found && found);\n        Store.keep(!found);\n        Store.keep(-found);\n        Store.keep(found[0]);\n        Store.keep(`a ${found}`);\n        if (found) { Store.keep(1); }\n        while (found) { break; }\n        Store.keep(found ? 1 : 2);\n        Store.keep(match (found) { 1 => 2, default => 3 });\n        Store.keep(found is Store);\n        for (const value of found) { Store.keep(value); }\n        Store.keep(found?.name);\n        Store.keep(found ?? 1);\n        int number = found;\n        number += found;\n        Store.keep(found.missing().other());\n        Store.keep(items[found]);\n        Store.keep(found(1));\n        int called = found(1);\n        Store.keep(found + \"a\");\n        found.name = \"a\";\n        found[0] = 1;\n        throw found;\n    }\n\n    private string label = \"\";\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    public static function run(Store $store): void\n    {\n        $text = Store::maybe();\n        $text .= Store::name();\n        printf($text ?? '');\n        printf($store->missing());\n        printf(Store::missing());\n        printf($store?->missing());\n        Store::keep(fn(int $x) => $x->missing());\n        Store::keep(function (int $x) { return $x->missing(); });\n        Store::keep(['a' => Store::missing()]);\n    }\n}\n";
-    let reports = |analyzed: (&'static str, &'static str)| -> Vec<String> {
-        analyze(&PLUGIN_REGISTRY, settings(), analyzed, &[("src/Demo/Store.php", store)])
-            .iter()
-            .map(|issue| format!("{} {}", located(analyzed.1, issue), issue.message))
-            .collect()
-    };
+    let reports = |analyzed| reported(analyzed, &[("src/Demo/Store.php", store)]);
 
     assert_eq!(
         reports(("src/Demo/Report.php", php)),
@@ -11714,10 +11689,7 @@ fn a_null_safe_access_on_an_index_reads_a_missing_key_as_null() {
 fn an_index_write_replaces_a_list_element_and_an_append_fails_as_a_typo_does() {
     let sharp = "namespace Demo;\n\nclass Sizes\n{\n    public List<int> held { get; private set; } = [];\n\n    public void change(List<int> sizes, List<List<int>> grid, Map<string, List<int>> groups, Set<int> tags, Map<int, string> names, Map<string, string>? maybe)\n    {\n        sizes[0] = 1;\n        sizes[0] += 1;\n        sizes[1]++;\n        --sizes[1];\n        grid[0][1] = 1;\n        this.held[0] = 2;\n        groups[\"b\"] = [1];\n        sizes[] = 3;\n        this.held[] = 4;\n        grid[0][] = 5;\n        groups[] = [1];\n        tags[] = 1;\n        names[] = \"a\";\n        maybe[] = \"b\";\n    }\n}\n";
     assert_eq!(
-        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Sizes.sharp", sharp), &[])
-            .iter()
-            .map(|issue| format!("{} {}", located(sharp, issue), issue.message))
-            .collect::<Vec<_>>(),
+        reported(("src/Demo/Sizes.sharp", sharp), &[]),
         [
             "16:14 parse Unexpected `[`",
             "17:18 parse Unexpected `[`",
@@ -11739,7 +11711,7 @@ fn a_list_index_write_without_the_standard_library_is_refused() {
         analyze_with_references(&PLUGIN_REGISTRY, settings(), ("src/Demo/Report.sharp", sharp), &[], &[]);
 
     assert_eq!(
-        issues.iter().map(|issue| format!("{} {}", located(sharp, issue), issue.message)).collect::<Vec<_>>(),
+        written(sharp, &issues),
         [
             "7:9 non-existent-method Method `set`, which `list[i] = v` runs, does not exist on `List<int>`.",
             "8:9 non-existent-method Method `set`, which `list[i] = v` runs, does not exist on `List<int>`.",
@@ -11767,7 +11739,7 @@ fn a_map_index_write_without_the_standard_library_is_refused() {
         analyze_with_references(&PLUGIN_REGISTRY, settings(), ("src/Demo/Report.sharp", sharp), &[], &[]);
 
     assert_eq!(
-        issues.iter().map(|issue| format!("{} {}", located(sharp, issue), issue.message)).collect::<Vec<_>>(),
+        written(sharp, &issues),
         [
             "7:9 non-existent-method Method `set`, which `map[key] = value` runs, does not exist on `Map<string, int>`.",
             "8:9 non-existent-method Method `set`, which `map[key] = value` runs, does not exist on `Map<string, int>`.",
@@ -12178,10 +12150,7 @@ fn an_empty_list_literal_where_a_map_is_declared_is_an_error() {
 
     let message = "invalid-array-element `[]` is an empty List. An empty Map is written `[:]`.";
     assert_eq!(
-        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Counts.sharp", sharp), &[])
-            .iter()
-            .map(|issue| format!("{} {}", located(sharp, issue), issue.message))
-            .collect::<Vec<_>>(),
+        reported(("src/Demo/Counts.sharp", sharp), &[]),
         [
             format!("5:41 {message}"),
             format!("7:57 {message}"),
@@ -12202,10 +12171,7 @@ fn an_empty_map_literal_where_a_list_is_declared_is_an_error() {
 
     let message = "invalid-array-element `[:]` is an empty Map. An empty List is written `[]`.";
     assert_eq!(
-        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Tags.sharp", sharp), &[])
-            .iter()
-            .map(|issue| format!("{} {}", located(sharp, issue), issue.message))
-            .collect::<Vec<_>>(),
+        reported(("src/Demo/Tags.sharp", sharp), &[]),
         [
             format!("5:34 {message}"),
             format!("7:49 {message}"),
@@ -12227,10 +12193,7 @@ fn a_map_literal_where_a_set_is_declared_is_an_error() {
 
     let empty = "invalid-array-element `[:]` is an empty Map. An empty Set is written `[]`.";
     assert_eq!(
-        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Tags.sharp", sharp), &[])
-            .iter()
-            .map(|issue| format!("{} {}", located(sharp, issue), issue.message))
-            .collect::<Vec<_>>(),
+        reported(("src/Demo/Tags.sharp", sharp), &[]),
         [
             format!("5:33 {empty}"),
             format!("7:47 {empty}"),
@@ -12250,10 +12213,7 @@ fn a_place_declared_a_list_or_a_set_refuses_an_empty_map() {
         "namespace Demo;\n\nclass Tags\n{\n    public List<int>|Set<int> ids()\n    {\n        return [:];\n    }\n}\n";
 
     assert_eq!(
-        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Tags.sharp", sharp), &[])
-            .iter()
-            .map(|issue| format!("{} {}", located(sharp, issue), issue.message))
-            .collect::<Vec<_>>(),
+        reported(("src/Demo/Tags.sharp", sharp), &[]),
         [
             "5:22 semantics A type can't be both a `List<int>` and a `Set<int>`.",
             "7:16 invalid-array-element `[:]` is an empty Map. An empty List is written `[]`.",
@@ -12302,10 +12262,7 @@ fn a_method_one_collection_of_a_union_lacks_is_refused_once_naming_it() {
     let sharp = "namespace Demo;\n\nclass Tags\n{\n    public int run(bool ready, Set<int> ids, Map<string, int> counts)\n    {\n        let tags = ready ? ids : counts;\n        tags.add(1);\n        tags.contains(1);\n        tags.get(\"a\");\n        return tags.any(n => n > 0) ? tags.sumOf(n => n) : 0;\n    }\n}\n";
 
     assert_eq!(
-        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Tags.sharp", sharp), &[])
-            .iter()
-            .map(|issue| format!("{} {}", located(sharp, issue), issue.message))
-            .collect::<Vec<_>>(),
+        reported(("src/Demo/Tags.sharp", sharp), &[]),
         [
             "8:14 non-existent-method Method `add` does not exist on `Map<string, int>`.",
             "9:14 non-existent-method Method `contains` does not exist on `Map<string, int>`.",
@@ -12423,10 +12380,7 @@ fn a_compound_write_to_a_local_that_may_be_a_list_or_a_set_is_refused_as_a_write
     let sharp = "namespace Demo;\n\nclass Sizes\n{\n    public void run(bool ready, List<int> sizes, Set<int> ids)\n    {\n        let x = ready ? sizes : ids;\n        x[0] = 1;\n        x[1] += 1;\n    }\n}\n";
 
     assert_eq!(
-        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Sizes.sharp", sharp), &[])
-            .iter()
-            .map(|issue| format!("{} {}", located(sharp, issue), issue.message))
-            .collect::<Vec<_>>(),
+        reported(("src/Demo/Sizes.sharp", sharp), &[]),
         ["8:9 invalid-array-access A `Set<int>` has no index.", "9:9 invalid-array-access A `Set<int>` has no index."]
     );
 }
@@ -12439,10 +12393,7 @@ fn a_list_literal_where_a_map_is_declared_is_an_error() {
 
     let message = "invalid-array-element A Map literal is written `[key: value]`.";
     assert_eq!(
-        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Names.sharp", sharp), &[])
-            .iter()
-            .map(|issue| format!("{} {}", located(sharp, issue), issue.message))
-            .collect::<Vec<_>>(),
+        reported(("src/Demo/Names.sharp", sharp), &[]),
         [
             format!("5:39 {message}"),
             format!("7:57 {message}"),
@@ -12463,10 +12414,7 @@ fn a_map_literal_where_a_list_is_declared_is_an_error() {
 
     let message = "invalid-array-element A List literal is written `[a, b]`.";
     assert_eq!(
-        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Sizes.sharp", sharp), &[])
-            .iter()
-            .map(|issue| format!("{} {}", located(sharp, issue), issue.message))
-            .collect::<Vec<_>>(),
+        reported(("src/Demo/Sizes.sharp", sharp), &[]),
         [
             format!("5:31 {message}"),
             format!("7:43 {message}"),
@@ -12499,10 +12447,7 @@ fn a_literal_of_the_other_collection_passed_to_a_function_local_is_an_error() {
     let sharp = "namespace Demo;\n\nclass Counter\n{\n    public int run()\n    {\n        Function<int(List<string>)> size = names => names.count();\n        return size([:]);\n    }\n}\n";
 
     assert_eq!(
-        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Counter.sharp", sharp), &[])
-            .iter()
-            .map(|issue| format!("{} {}", located(sharp, issue), issue.message))
-            .collect::<Vec<_>>(),
+        reported(("src/Demo/Counter.sharp", sharp), &[]),
         ["8:21 invalid-array-element `[:]` is an empty Map. An empty List is written `[]`."]
     );
 }
@@ -12513,10 +12458,7 @@ fn a_literal_of_the_other_collection_passed_to_a_function_parameter_is_an_error(
     let sharp = "namespace Demo;\n\nclass Counter\n{\n    public int run(Function<int(Map<string, int>)> total) => total([]);\n}\n";
 
     assert_eq!(
-        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Counter.sharp", sharp), &[])
-            .iter()
-            .map(|issue| format!("{} {}", located(sharp, issue), issue.message))
-            .collect::<Vec<_>>(),
+        reported(("src/Demo/Counter.sharp", sharp), &[]),
         ["5:68 invalid-array-element `[]` is an empty List. An empty Map is written `[:]`."]
     );
 }
@@ -12527,10 +12469,7 @@ fn a_literal_of_the_other_collection_passed_to_a_function_property_is_an_error()
     let sharp = "namespace Demo;\n\nclass Counter\n{\n    private Function<int(List<int>)> size;\n\n    public Counter()\n    {\n        this.size = sizes => sizes.count();\n    }\n\n    public int run() => this.size([0: 1]);\n}\n";
 
     assert_eq!(
-        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Counter.sharp", sharp), &[])
-            .iter()
-            .map(|issue| format!("{} {}", located(sharp, issue), issue.message))
-            .collect::<Vec<_>>(),
+        reported(("src/Demo/Counter.sharp", sharp), &[]),
         ["12:35 invalid-array-element A List literal is written `[a, b]`."]
     );
 }
@@ -12576,10 +12515,7 @@ fn a_value_that_may_be_a_function_value_or_a_php_closure_of_one_signature_keeps_
 
     let message = "invalid-array-element `[:]` is an empty Map. An empty List is written `[]`.";
     assert_eq!(
-        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Counter.sharp", sharp), &[("src/Lib/Hooks.php", HOOKS)])
-            .iter()
-            .map(|issue| format!("{} {}", located(sharp, issue), issue.message))
-            .collect::<Vec<_>>(),
+        reported(("src/Demo/Counter.sharp", sharp), &[("src/Lib/Hooks.php", HOOKS)]),
         [
             format!("10:23 {message}"),
             format!("16:23 {message}"),
@@ -12599,15 +12535,7 @@ fn a_literal_of_the_other_collection_passed_to_a_method_value_is_an_error() {
 
     let message = "invalid-array-element `[:]` is an empty Map. An empty List is written `[]`.";
     assert_eq!(
-        analyze(
-            &PLUGIN_REGISTRY,
-            settings(),
-            ("src/Demo/Counter.sharp", sharp),
-            &[("src/Lib/Adder.php", adder), ("src/Lib/Hooks.php", HOOKS)]
-        )
-        .iter()
-        .map(|issue| format!("{} {}", located(sharp, issue), issue.message))
-        .collect::<Vec<_>>(),
+        reported(("src/Demo/Counter.sharp", sharp), &[("src/Lib/Adder.php", adder), ("src/Lib/Hooks.php", HOOKS)]),
         [
             format!("13:20 {message}"),
             format!("13:34 {message}"),
@@ -12625,10 +12553,7 @@ fn a_literal_of_the_other_collection_passed_to_a_lambda_is_an_error() {
 
     let message = "invalid-array-element `[:]` is an empty Map. An empty List is written `[]`.";
     assert_eq!(
-        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Counter.sharp", sharp), &[("src/Lib/Hooks.php", HOOKS)])
-            .iter()
-            .map(|issue| format!("{} {}", located(sharp, issue), issue.message))
-            .collect::<Vec<_>>(),
+        reported(("src/Demo/Counter.sharp", sharp), &[("src/Lib/Hooks.php", HOOKS)]),
         [format!("12:21 {message}"), format!("12:35 {message}"), format!("12:48 {message}")]
     );
 }
@@ -12641,10 +12566,7 @@ fn a_php_message_names_a_function_type_as_a_php_closure_type() {
     let php = "<?php\n\nnamespace Lib;\n\nuse Demo\\Counter;\n\nfunction run(Counter $counter): int\n{\n    return $counter->apply(1);\n}\n";
 
     assert_eq!(
-        analyze(&PLUGIN_REGISTRY, settings(), ("src/Lib/run.php", php), &[("src/Demo/Counter.sharp", sharp)])
-            .iter()
-            .map(|issue| format!("{} {}", located(php, issue), issue.message))
-            .collect::<Vec<_>>(),
+        reported(("src/Lib/run.php", php), &[("src/Demo/Counter.sharp", sharp)]),
         [
             "9:28 invalid-argument Invalid argument type for argument #1 of `Demo\\Counter::apply`: expected `(closure(list<string>): int)`, but found `int(1)`."
         ]
@@ -12659,10 +12581,7 @@ fn a_php_message_names_a_function_type_with_effects_as_a_php_closure_type() {
     let php = "<?php\n\nnamespace Lib;\n\nuse Demo\\Counter;\n\nfunction run(Counter $counter): int\n{\n    return $counter->apply(1);\n}\n";
 
     assert_eq!(
-        analyze(&PLUGIN_REGISTRY, settings(), ("src/Lib/run.php", php), &[("src/Demo/Counter.sharp", sharp)])
-            .iter()
-            .map(|issue| format!("{} {}", located(php, issue), issue.message))
-            .collect::<Vec<_>>(),
+        reported(("src/Lib/run.php", php), &[("src/Demo/Counter.sharp", sharp)]),
         [
             "9:28 invalid-argument Invalid argument type for argument #1 of `Demo\\Counter::apply`: expected `(closure(list<string>): int)`, but found `int(1)`."
         ]
@@ -12815,10 +12734,7 @@ fn a_function_type_refuses_a_function_value_with_an_effect_it_does_not_list() {
     let sharp = "namespace App.Shop;\n\npublic class Pricing\n{\n    private Function<int(int)> rate;\n\n    public Pricing(Function<int(int) uses Http> fetch)\n    {\n        this.rate = fetch;\n        Function<int(int)> local = fetch;\n        Pricing.apply(fetch);\n        Pricing.mail(fetch);\n    }\n\n    public static int apply(Function<int(int)> step) => step(1);\n\n    public static int mail(Function<int(int) uses Mail> step) => step(1);\n\n    public Function<int(int)> current(Function<int(int) uses Http> fetch) => fetch;\n\n    public int price() => this.rate(2);\n}\n";
 
     assert_eq!(
-        analyze(&PLUGIN_REGISTRY, settings(), ("src/App/Shop/Pricing.sharp", sharp), &[])
-            .iter()
-            .map(|issue| format!("{} {}", located(sharp, issue), issue.message))
-            .collect::<Vec<_>>(),
+        reported(("src/App/Shop/Pricing.sharp", sharp), &[]),
         [
             "9:21 invalid-property-assignment-value Invalid type for property `Pricing.rate`: expected `Function<int(int)>`, but got `Function<int(int) uses Http>`.",
             "10:36 invalid-local-assignment-value Invalid assignment to `local`: it is declared as `Function<int(int)>`.",
@@ -12835,10 +12751,7 @@ fn a_nullable_function_type_refuses_a_function_value_with_an_effect_it_does_not_
     let sharp = "namespace App.Shop;\n\npublic class Pricing\n{\n    public static int apply(Function<int(int) uses Mail>? step) => step == null ? 0 : step(1);\n\n    public int run(Function<int(int) uses Http> fetch, Function<int(int) uses Http>? maybe) => Pricing.apply(fetch) + Pricing.apply(maybe);\n}\n";
 
     assert_eq!(
-        analyze(&PLUGIN_REGISTRY, settings(), ("src/App/Shop/Pricing.sharp", sharp), &[])
-            .iter()
-            .map(|issue| format!("{} {}", located(sharp, issue), issue.message))
-            .collect::<Vec<_>>(),
+        reported(("src/App/Shop/Pricing.sharp", sharp), &[]),
         [
             "7:110 invalid-argument `fetch` has the effect `Http`, so a `Function<int(int) uses Mail>?` cannot hold it.",
             "7:133 invalid-argument `maybe` has the effect `Http`, so a `Function<int(int) uses Mail>?` cannot hold it.",
@@ -12871,10 +12784,7 @@ fn a_function_value_keeps_its_parameter_collections_through_a_copy_a_template_an
 
     let message = "invalid-array-element `[:]` is an empty Map. An empty List is written `[]`.";
     assert_eq!(
-        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Counter.sharp", sharp), &[("src/Lib/Pass.php", pass)])
-            .iter()
-            .map(|issue| format!("{} {}", located(sharp, issue), issue.message))
-            .collect::<Vec<_>>(),
+        reported(("src/Demo/Counter.sharp", sharp), &[("src/Lib/Pass.php", pass)]),
         [format!("12:26 {message}"), format!("12:38 {message}"), format!("14:27 {message}")]
     );
 }
@@ -12885,10 +12795,7 @@ fn a_list_literal_on_the_right_of_null_coalescing_where_a_map_is_declared_is_an_
     let sharp = "namespace Demo;\n\nclass Options\n{\n    public Map<string, int> run(Map<string, int>? given)\n    {\n        Map<string, int> options = given ?? [];\n        return options;\n    }\n}\n";
 
     assert_eq!(
-        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Options.sharp", sharp), &[])
-            .iter()
-            .map(|issue| format!("{} {}", located(sharp, issue), issue.message))
-            .collect::<Vec<_>>(),
+        reported(("src/Demo/Options.sharp", sharp), &[]),
         ["7:45 invalid-array-element `[]` is an empty List. An empty Map is written `[:]`."]
     );
 }
@@ -12900,13 +12807,7 @@ fn a_list_literal_in_a_ternary_branch_where_a_map_is_declared_is_an_error() {
     let sharp = "namespace Demo;\n\nclass Counts\n{\n    public Map<string, int> run(bool ready, Map<string, int>? given, Map<string, int> seed)\n    {\n        Map<string, int> counts = ready ? [] : seed;\n        Map<string, int> nested = ready ? seed : (given ?? []);\n        return ready ? counts : nested;\n    }\n}\n";
 
     let message = "invalid-array-element `[]` is an empty List. An empty Map is written `[:]`.";
-    assert_eq!(
-        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Counts.sharp", sharp), &[])
-            .iter()
-            .map(|issue| format!("{} {}", located(sharp, issue), issue.message))
-            .collect::<Vec<_>>(),
-        [format!("7:43 {message}"), format!("8:60 {message}")]
-    );
+    assert_eq!(reported(("src/Demo/Counts.sharp", sharp), &[]), [format!("7:43 {message}"), format!("8:60 {message}")]);
 }
 
 /// Every arm of a `match` flows into the place, so each arm's literal is checked as the place's.
@@ -12916,10 +12817,7 @@ fn a_list_literal_in_a_match_arm_where_a_map_is_returned_is_an_error() {
     let sharp = "namespace Demo;\n\nclass Counts\n{\n    public Map<string, int> run(Kind kind, Map<string, int> seed)\n    {\n        return match (kind) { Kind.None => [], default => seed };\n    }\n}\n";
 
     assert_eq!(
-        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Counts.sharp", sharp), &[("src/Demo/Kind.sharp", kind_sharp)])
-            .iter()
-            .map(|issue| format!("{} {}", located(sharp, issue), issue.message))
-            .collect::<Vec<_>>(),
+        reported(("src/Demo/Counts.sharp", sharp), &[("src/Demo/Kind.sharp", kind_sharp)]),
         ["7:44 invalid-array-element `[]` is an empty List. An empty Map is written `[:]`."]
     );
 }
@@ -12930,10 +12828,7 @@ fn a_list_literal_assigned_with_null_coalescing_to_a_map_is_an_error() {
     let sharp = "namespace Demo;\n\nclass Counts\n{\n    public Map<string, int> run(Map<string, int>? counts)\n    {\n        counts ??= [];\n        return counts;\n    }\n}\n";
 
     assert_eq!(
-        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Counts.sharp", sharp), &[])
-            .iter()
-            .map(|issue| format!("{} {}", located(sharp, issue), issue.message))
-            .collect::<Vec<_>>(),
+        reported(("src/Demo/Counts.sharp", sharp), &[]),
         ["7:20 invalid-array-element `[]` is an empty List. An empty Map is written `[:]`."]
     );
 }
@@ -13039,10 +12934,7 @@ fn a_sharp_parents_method_called_on_a_php_subclass_keeps_its_parameter_collectio
 
     assert_eq!(issues(("src/Demo/Report.php", php), &[base, child]), Vec::<String>::new());
     assert_eq!(
-        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Report.sharp", sharp), &[base, child])
-            .iter()
-            .map(|issue| format!("{} {}", located(sharp, issue), issue.message))
-            .collect::<Vec<_>>(),
+        reported(("src/Demo/Report.sharp", sharp), &[base, child]),
         ["5:64 invalid-array-element `[:]` is an empty Map. An empty List is written `[]`."]
     );
 }
@@ -13054,10 +12946,7 @@ fn a_map_literal_added_to_a_list_of_lists_is_an_error() {
     let sharp = "namespace Demo;\n\nclass Grid\n{\n    public void fill(List<List<int>> rows)\n    {\n        rows.add([]);\n        rows.add([:]);\n    }\n}\n";
 
     assert_eq!(
-        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Grid.sharp", sharp), &[])
-            .iter()
-            .map(|issue| format!("{} {}", located(sharp, issue), issue.message))
-            .collect::<Vec<_>>(),
+        reported(("src/Demo/Grid.sharp", sharp), &[]),
         ["8:18 invalid-array-element `[:]` is an empty Map. An empty List is written `[]`."]
     );
 }
@@ -13069,10 +12958,7 @@ fn a_map_literal_written_into_a_list_of_lists_is_an_error() {
     let sharp = "namespace Demo;\n\nclass Grid\n{\n    public void fill(List<List<int>> rows)\n    {\n        rows[0] = [1];\n        rows[0] = [:];\n    }\n}\n";
 
     assert_eq!(
-        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Grid.sharp", sharp), &[])
-            .iter()
-            .map(|issue| format!("{} {}", located(sharp, issue), issue.message))
-            .collect::<Vec<_>>(),
+        reported(("src/Demo/Grid.sharp", sharp), &[]),
         ["8:19 invalid-array-element `[:]` is an empty Map. An empty List is written `[]`."]
     );
 }
@@ -13143,16 +13029,10 @@ fn a_sharp_list_property_refuses_a_map_literal_where_it_is_declared_and_inherite
             "namespace Demo;\n\npublic class Counts : Sizes\n{\n    public void reset()\n    {\n        this.all = [:];\n        this.seed = [:];\n    }\n}\n",
         ),
     ];
-    let said = |analyzed: (&'static str, &'static str), others: &[(&'static str, &'static str)]| -> Vec<String> {
-        analyze(&PLUGIN_REGISTRY, settings(), analyzed, others)
-            .iter()
-            .map(|issue| format!("{} {}", located(analyzed.1, issue), issue.message))
-            .collect()
-    };
 
     let message = "invalid-array-element `[:]` is an empty Map. An empty List is written `[]`.";
     assert_eq!(
-        each_file(said, &sharp, &[]),
+        each_file(reported, &sharp, &[]),
         [vec![format!("13:20 {message}")], vec![format!("7:20 {message}"), format!("8:21 {message}")]]
     );
 }
@@ -13163,10 +13043,7 @@ fn a_sharp_list_property_refuses_a_map_literal_through_a_parameter() {
     let sharp = "namespace Demo;\n\npublic class Sizes\n{\n    public List<int> all { get; set; } = [];\n\n    public void clear(Sizes other)\n    {\n        other.all = [:];\n    }\n}\n";
 
     assert_eq!(
-        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Sizes.sharp", sharp), &[])
-            .iter()
-            .map(|issue| format!("{} {}", located(sharp, issue), issue.message))
-            .collect::<Vec<_>>(),
+        reported(("src/Demo/Sizes.sharp", sharp), &[]),
         ["9:21 invalid-array-element `[:]` is an empty Map. An empty List is written `[]`."]
     );
 }
@@ -13179,10 +13056,7 @@ fn a_sharp_list_property_refuses_a_map_literal_through_a_local_and_a_property_of
 
     let message = "invalid-array-element `[:]` is an empty Map. An empty List is written `[]`.";
     assert_eq!(
-        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Sizes.sharp", sharp), &[])
-            .iter()
-            .map(|issue| format!("{} {}", located(sharp, issue), issue.message))
-            .collect::<Vec<_>>(),
+        reported(("src/Demo/Sizes.sharp", sharp), &[]),
         [format!("14:20 {message}"), format!("15:25 {message}")]
     );
 }
@@ -13208,10 +13082,7 @@ fn a_sharp_list_property_refuses_a_map_literal_through_an_index() {
     let sharp = "namespace Demo;\n\npublic class Sizes\n{\n    public List<int> all { get; set; } = [];\n\n    public void clear(List<Sizes> others)\n    {\n        others[0].all = [:];\n    }\n}\n";
 
     assert_eq!(
-        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Sizes.sharp", sharp), &[])
-            .iter()
-            .map(|issue| format!("{} {}", located(sharp, issue), issue.message))
-            .collect::<Vec<_>>(),
+        reported(("src/Demo/Sizes.sharp", sharp), &[]),
         ["9:25 invalid-array-element `[:]` is an empty Map. An empty List is written `[]`."]
     );
 }
@@ -13222,10 +13093,7 @@ fn a_sharp_list_property_refuses_a_map_literal_through_a_call() {
     let sharp = "namespace Demo;\n\npublic class Sizes\n{\n    public List<int> all { get; set; } = [];\n\n    public Sizes(public Sizes peer { get; })\n    {\n    }\n\n    public Sizes next() => this.peer;\n\n    public void clear()\n    {\n        this.next().all = [:];\n    }\n}\n";
 
     assert_eq!(
-        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Sizes.sharp", sharp), &[])
-            .iter()
-            .map(|issue| format!("{} {}", located(sharp, issue), issue.message))
-            .collect::<Vec<_>>(),
+        reported(("src/Demo/Sizes.sharp", sharp), &[]),
         ["15:27 invalid-array-element `[:]` is an empty Map. An empty List is written `[]`."]
     );
 }
@@ -13236,10 +13104,7 @@ fn a_sharp_list_property_refuses_a_map_literal_through_a_property_of_a_property(
     let sharp = "namespace Demo;\n\npublic class Sizes\n{\n    public List<int> all { get; set; } = [];\n\n    public Sizes(public Sizes peer { get; })\n    {\n    }\n\n    public void clear()\n    {\n        this.peer.peer.all = [:];\n    }\n}\n";
 
     assert_eq!(
-        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Sizes.sharp", sharp), &[])
-            .iter()
-            .map(|issue| format!("{} {}", located(sharp, issue), issue.message))
-            .collect::<Vec<_>>(),
+        reported(("src/Demo/Sizes.sharp", sharp), &[]),
         ["13:30 invalid-array-element `[:]` is an empty Map. An empty List is written `[]`."]
     );
 }
@@ -13266,10 +13131,7 @@ fn a_local_copied_from_a_php_array_property_refuses_a_list_literal() {
     let sharp = "namespace Demo;\n\nimport Lib.Store;\n\nclass Report\n{\n    public int run(Store store)\n    {\n        let items = store.items;\n        items = [];\n        return items.count();\n    }\n}\n";
 
     assert_eq!(
-        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Report.sharp", sharp), &[STORE])
-            .iter()
-            .map(|issue| format!("{} {}", located(sharp, issue), issue.message))
-            .collect::<Vec<_>>(),
+        reported(("src/Demo/Report.sharp", sharp), &[STORE]),
         ["10:17 invalid-array-element `[]` is an empty List. An empty Map is written `[:]`."]
     );
 }
@@ -13992,9 +13854,7 @@ fn a_map_keyed_by_an_object_is_refused_where_plain_php_takes_an_array() {
         "<?php\n\nnamespace Vendor\\Sums;\n\nfunction total(array $values): int\n{\n    return count($values);\n}\n";
 
     assert_eq!(
-        analyze(
-            &PLUGIN_REGISTRY,
-            settings(),
+        reported(
             ("src/Demo/Tally.sharp", sharp),
             &[
                 ("src/Lib/Status.php", STATUS),
@@ -14002,10 +13862,7 @@ fn a_map_keyed_by_an_object_is_refused_where_plain_php_takes_an_array() {
                 ("src/Lib/Spot.sharp", spot),
                 ("src/Vendor/Sums/functions.php", sums)
             ]
-        )
-        .iter()
-        .map(|issue| format!("{} {}", located(sharp, issue), issue.message))
-        .collect::<Vec<_>>(),
+        ),
         [
             "14:53 invalid-argument `Map<Spot, int>` can't be passed to the parameter `counts` of method `Sink.documented`, which takes a PHP array: a PHP array's keys are `int` or `string`, and this `Map`'s keys are `Spot`.",
             "14:73 invalid-argument `Map<Spot, int>` can't be passed to the parameter `values` of function `Sums.total`, which takes a PHP array: a PHP array's keys are `int` or `string`, and this `Map`'s keys are `Spot`.",
@@ -14027,15 +13884,7 @@ fn a_map_whose_keys_can_collide_passes_where_plain_php_takes_an_array() {
     let sink = "<?php\n\nnamespace Lib;\n\nfinal class Sink\n{\n    public static function plain(array $counts): int\n    {\n        return count($counts);\n    }\n\n    /** @return array<string, mixed> */\n    public static function fields(object $value): array\n    {\n        return get_object_vars($value);\n    }\n}\n";
 
     assert_eq!(
-        analyze(
-            &PLUGIN_REGISTRY,
-            settings(),
-            ("src/Demo/Tally.sharp", sharp),
-            &[("src/Lib/Status.php", STATUS), ("src/Lib/Sink.php", sink)]
-        )
-        .iter()
-        .map(|issue| format!("{} {}", located(sharp, issue), issue.message))
-        .collect::<Vec<_>>(),
+        reported(("src/Demo/Tally.sharp", sharp), &[("src/Lib/Status.php", STATUS), ("src/Lib/Sink.php", sink)]),
         Vec::<String>::new()
     );
 }
@@ -14056,15 +13905,7 @@ fn array_sink_issues(sharp: &'static str) -> Vec<String> {
         "namespace Lib;\n\npublic struct Spot\n{\n    public Spot(public int x { get; }) { }\n}\n",
     );
 
-    analyze(
-        &PLUGIN_REGISTRY,
-        settings(),
-        ("src/Demo/Tally.sharp", sharp),
-        &[("src/Lib/Status.php", STATUS), ARRAY_SINK, spot],
-    )
-    .iter()
-    .map(|issue| format!("{} {}", located(sharp, issue), issue.message))
-    .collect()
+    reported(("src/Demo/Tally.sharp", sharp), &[("src/Lib/Status.php", STATUS), ARRAY_SINK, spot])
 }
 
 /// Spec section 12: a `Map` keyed by a type parameter can hold keys no PHP array holds, as an `Equatable` struct, so a
@@ -14409,7 +14250,16 @@ fn written(code: &str, issues: &[Issue]) -> Vec<String> {
 
 /// Every issue of `analyzed`, analyzed together with `others`, as `written` writes it.
 fn reported(analyzed: (&'static str, &'static str), others: &[(&'static str, &'static str)]) -> Vec<String> {
-    written(analyzed.1, &analyze(&PLUGIN_REGISTRY, settings(), analyzed, others))
+    reported_with(settings(), analyzed, others)
+}
+
+/// Every issue of `analyzed` under `settings`, analyzed together with `others`, as `written` writes it.
+fn reported_with(
+    settings: Settings,
+    analyzed: (&'static str, &'static str),
+    others: &[(&'static str, &'static str)],
+) -> Vec<String> {
+    written(analyzed.1, &analyze(&PLUGIN_REGISTRY, settings, analyzed, others))
 }
 
 /// Spec section 10: a struct never changes, so a write to its property after it is created is refused, in its own
@@ -14933,7 +14783,7 @@ fn every_struct_parses() {
     ];
     let key = "namespace Sharp;\n\nimport Attribute;\n\n[Attribute(Attribute.TARGET_PARAMETER | Attribute.TARGET_PROPERTY)]\npublic class Key\n{\n    public Key(public string name { get; }) { }\n}\n";
     let others = [("src/Sharp/Key.sharp", key)];
-    let helped = |analyzed: (&'static str, &'static str), others: &[(&'static str, &'static str)]| -> Vec<String> {
+    let helps = |analyzed: (&'static str, &'static str), others: &[(&'static str, &'static str)]| -> Vec<String> {
         analyze(&PLUGIN_REGISTRY, settings(), analyzed, others).into_iter().filter_map(|issue| issue.help).collect()
     };
 
@@ -14950,7 +14800,7 @@ fn every_struct_parses() {
         ]
     );
     assert_eq!(
-        each_file(helped, &sharp, &others).concat(),
+        each_file(helps, &sharp, &others).concat(),
         [
             "Give `plan` another key with `[Key(\"…\")]`.",
             "Give `x` another key with `[Key(\"…\")]`.",
@@ -15976,7 +15826,7 @@ fn an_iterable_has_no_index() {
     let issues = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Report.sharp", sharp), &[]);
 
     assert_eq!(
-        issues.iter().map(|issue| format!("{} {}", located(sharp, issue), issue.message)).collect::<Vec<_>>(),
+        written(sharp, &issues),
         ["7:16 invalid-array-access An `Iterable` has no index: loop over `rows`, or read `rows.toList()`."]
     );
 }
@@ -16037,10 +15887,7 @@ fn a_list_value_has_no_lazy_operation_of_an_iterable() {
     let sharp = "namespace Demo;\n\nclass Report\n{\n    public int run(List<int> numbers, Iterable<int> items)\n    {\n        numbers.take(2);\n        return items.take(2).toList().count();\n    }\n}\n";
     let issues = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Report.sharp", sharp), &[]);
 
-    assert_eq!(
-        issues.iter().map(|issue| format!("{} {}", located(sharp, issue), issue.message)).collect::<Vec<_>>(),
-        ["7:17 non-existent-method Method `take` does not exist on `List<int>`."]
-    );
+    assert_eq!(written(sharp, &issues), ["7:17 non-existent-method Method `take` does not exist on `List<int>`."]);
 }
 
 /// A `List` held as a `List` keeps its own eager methods, so its `filter` gives a `List` and it has no `take`. Held as
@@ -16207,10 +16054,7 @@ fn a_nullable_tuple_keeps_its_element_names() {
     let item = ("src/Demo/Item.sharp", "namespace Demo;\n\nclass Item\n{\n}\n");
 
     assert_eq!(
-        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Store.sharp", sharp), &[item])
-            .iter()
-            .map(|issue| format!("{} {}", located(sharp, issue), issue.message))
-            .collect::<Vec<_>>(),
+        reported(("src/Demo/Store.sharp", sharp), &[item]),
         [
             "5:61 invalid-return-statement Invalid return type for method `Store.wrong`: expected `[Item first, int count]?`, but found `List<int>`.",
             "9:42 invalid-local-assignment-value Invalid assignment to `maybe`: it is declared as `[Item first, int count]?`.",
@@ -16411,10 +16255,7 @@ fn an_empty_list_literal_written_as_a_value_of_a_map_of_maps_is_an_error() {
 
     let message = "invalid-array-element `[]` is an empty List. An empty Map is written `[:]`.";
     assert_eq!(
-        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Tally.sharp", sharp), &[])
-            .iter()
-            .map(|issue| format!("{} {}", located(sharp, issue), issue.message))
-            .collect::<Vec<_>>(),
+        reported(("src/Demo/Tally.sharp", sharp), &[]),
         [format!("9:23 {message}"), format!("12:27 {message}"), format!("14:22 {message}")]
     );
 }
@@ -16426,10 +16267,7 @@ fn an_empty_list_literal_written_two_levels_into_a_list_of_maps_is_an_error() {
     let sharp = "namespace Demo;\n\nclass Tally\n{\n    public int put()\n    {\n        List<Map<string, Map<string, int>>> deep = [[:]];\n        deep[0][\"b\"] = [];\n        deep[0][\"b\"] = [:];\n        deep.add([:]);\n        return deep.count();\n    }\n}\n";
 
     assert_eq!(
-        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Tally.sharp", sharp), &[])
-            .iter()
-            .map(|issue| format!("{} {}", located(sharp, issue), issue.message))
-            .collect::<Vec<_>>(),
+        reported(("src/Demo/Tally.sharp", sharp), &[]),
         ["8:24 invalid-array-element `[]` is an empty List. An empty Map is written `[:]`."]
     );
 }
@@ -16441,10 +16279,7 @@ fn an_empty_map_literal_written_as_a_value_of_a_map_of_lists_or_of_sets_is_an_er
     let sharp = "namespace Demo;\n\nclass Tally\n{\n    public int put(Map<string, List<int>> lists, Map<string, Set<int>> sets)\n    {\n        lists[\"a\"] = [:];\n        lists[\"a\"] = [];\n        lists[\"a\"] = [1];\n        sets[\"a\"] = [:];\n        return lists.count() + sets.count();\n    }\n}\n";
 
     assert_eq!(
-        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Tally.sharp", sharp), &[])
-            .iter()
-            .map(|issue| format!("{} {}", located(sharp, issue), issue.message))
-            .collect::<Vec<_>>(),
+        reported(("src/Demo/Tally.sharp", sharp), &[]),
         [
             "7:22 invalid-array-element `[:]` is an empty Map. An empty List is written `[]`.",
             "10:21 invalid-array-element `[:]` is an empty Map. An empty Set is written `[]`.",
@@ -18469,7 +18304,7 @@ fn out_and_in_are_checked_on_every_member() {
             "namespace Demo;\n\npublic class Single<out TItem>\n{\n    public Single(private TItem item) { }\n\n    public Single.of(TItem item) : this(item) { }\n\n    public TItem get() => this.item;\n}\n",
         ),
     ];
-    let noted = |analyzed: (&'static str, &'static str), others: &[(&'static str, &'static str)]| -> Vec<String> {
+    let notes = |analyzed: (&'static str, &'static str), others: &[(&'static str, &'static str)]| -> Vec<String> {
         analyze(&PLUGIN_REGISTRY, settings(), analyzed, others).into_iter().flat_map(|issue| issue.notes).collect()
     };
 
@@ -18483,7 +18318,7 @@ fn out_and_in_are_checked_on_every_member() {
         ]
     );
     assert_eq!(
-        each_file(noted, &files, &[]).concat(),
+        each_file(notes, &files, &[]).concat(),
         ["An `out` type parameter is only handed out, and an `in` type parameter is only taken in."; 4]
     );
 }
@@ -18574,7 +18409,7 @@ fn a_variance_breaking_private_member_is_reachable_only_through_this() {
             "namespace Demo;\n\npublic class Slot<out TItem>\n{\n    public TItem? held { get; private set; } = null;\n\n    public void swap(Slot<Any?> other)\n    {\n        other.held = 1;\n    }\n\n    public Any? read(Slot<Any?> other) => other.held;\n}\n",
         ),
     ];
-    let noted = |analyzed: (&'static str, &'static str), others: &[(&'static str, &'static str)]| -> Vec<String> {
+    let notes = |analyzed: (&'static str, &'static str), others: &[(&'static str, &'static str)]| -> Vec<String> {
         analyze(&PLUGIN_REGISTRY, settings(), analyzed, others).into_iter().flat_map(|issue| issue.notes).collect()
     };
 
@@ -18590,7 +18425,7 @@ fn a_variance_breaking_private_member_is_reachable_only_through_this() {
         ]
     );
     assert_eq!(
-        each_file(noted, &sharp, &[]).concat(),
+        each_file(notes, &sharp, &[]).concat(),
         ["A private member may break the marker, and is then reachable only through `this`."; 6]
     );
 
@@ -24577,12 +24412,8 @@ fn a_project_s_extern_of_what_the_standard_library_declares_is_refused_on_the_pr
     let stubs =
         ("app/Stubs/Exceptions.sharp", "namespace App.Stubs;\n\nimport LogicException;\n\nextern LogicException;\n");
 
-    let refused: Vec<String> = analyze(&PLUGIN_REGISTRY, settings(), stubs, &[BUILTINS])
-        .iter()
-        .map(|issue| format!("{} {}", located(stubs.1, issue), issue.message))
-        .collect();
     assert_eq!(
-        refused,
+        reported(stubs, &[BUILTINS]),
         ["5:1 duplicate-extern `LogicException` is already declared pure by the standard library: delete this line."]
     );
     assert_eq!(analyze(&PLUGIN_REGISTRY, settings(), BUILTINS, &[stubs]).len(), 0);
@@ -24599,12 +24430,10 @@ fn an_extern_written_with_a_renamed_import_declares_the_same_target() {
     let second =
         ("app/Stubs/Stripe.sharp", "namespace App.Stubs;\n\nimport Stripe.StripeClient as Client;\n\nextern Client;\n");
 
-    let refused: Vec<String> = analyze(&PLUGIN_REGISTRY, settings(), second, &[first, STRIPE])
-        .iter()
-        .map(|issue| format!("{} {}", located(second.1, issue), issue.message))
-        .collect();
-
-    assert_eq!(refused, ["5:1 duplicate-extern `Client` already has an `extern` declaration."]);
+    assert_eq!(
+        reported(second, &[first, STRIPE]),
+        ["5:1 duplicate-extern `Client` already has an `extern` declaration."]
+    );
 }
 
 /// An `extern` target that names no class, method or function is reported with the code a call of it would get. An
