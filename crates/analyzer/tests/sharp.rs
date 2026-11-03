@@ -12958,7 +12958,7 @@ fn a_php_parents_static_method_called_on_a_sharp_class_takes_either_literal() {
 /// PHP# has no partial application, so a plain PHP parent's method partially applied through a PHP# class is refused at
 /// its `?`, and the refusal shows alone.
 #[test]
-fn a_php_parents_method_partially_applied_on_a_sharp_class_takes_either_literal() {
+fn a_php_parents_method_partially_applied_on_a_sharp_class_shows_its_refusal_alone() {
     let sharp = "namespace Demo;\n\nclass Report\n{\n    public int run(Rows rows)\n    {\n        const keep = rows.pair(?, [:]);\n        return keep([]);\n    }\n}\n";
 
     assert_eq!(issues(("src/Demo/Report.sharp", sharp), &[STORE, ROWS]), ["7:32 parse"]);
@@ -13703,7 +13703,7 @@ fn a_search_s_help_fits_every_part_of_the_receiver() {
 /// Spec section 12: a `Set<Any?>` holds no element `==` and `hash()` compare, and a type can't be both a `List` and a
 /// `Set`, so a search of a `List<Any?>|Set<Any?>` shows the two refusals of its type alone.
 #[test]
-fn a_search_of_several_kinds_with_any_elements_is_warned_of_once() {
+fn a_search_of_several_kinds_with_any_elements_shows_the_refusals_of_its_type_alone() {
     let sharp = "namespace Demo;\n\nclass Shelf\n{\n    public bool run(List<Any?>|Set<Any?> loose, Any? value) => loose.contains(value);\n}\n";
 
     assert_eq!(
@@ -17277,10 +17277,10 @@ fn a_plain_php_docblock_parent_is_the_parent_of_its_class() {
     assert_eq!(worded(("src/Demo/Walker.sharp", sharp), &[("src/Lib/Node.php", php)]), Vec::<String>::new());
 }
 
-/// `TItem.make()`, `TItem.size`, `TItem.size.length` and `typeof(TItem).make()`, which `check_slice` refuses, read no
-/// constant named `TItem`, and their refused values add no issue.
+/// `TItem.make()`, `TItem.size` and `typeof(TItem).make()` on a `TItem : Maker` read the static members `Maker`
+/// declares, never a constant named `TItem`, so neither file reports an issue.
 #[test]
-fn a_type_parameter_before_a_dot_is_not_read_as_a_constant() {
+fn a_type_parameter_before_a_dot_reads_its_bounds_static_members_with_no_issue() {
     let sharp = [
         (
             "src/Demo/Maker.sharp",
@@ -17626,7 +17626,7 @@ fn a_return_type_that_would_erase_wider_than_the_parent_return_type_is_an_error(
 /// another type than the `virtual` one it overrides is refused, from a PHP# class or a PHP class whose
 /// `@extends Slot<Order>` names it, and one whose parent's bound erases to the same type is not.
 #[test]
-fn a_field_whose_type_erases_to_another_type_than_the_parent_field_is_an_error() {
+fn a_property_whose_type_erases_to_another_type_than_the_parent_property_is_an_error() {
     let order = ("src/Demo/Order.sharp", "namespace Demo;\n\npublic class Order\n{\n}\n");
     let unbound = (
         "src/Demo/Slot.sharp",
@@ -23792,9 +23792,10 @@ fn an_enum_instantiation_help_writes_the_name_the_file_binds() {
     );
 }
 
-/// A `match` that misses cases of an enum its file doesn't import names the import the missing arms need.
+/// An empty `match` over an enum its file doesn't import shows only its refusal, the missing `default` arm.
+/// match-not-exhaustive's advice to import the enum sits on that refused line, so no user sees it.
 #[test]
-fn a_match_that_misses_cases_of_an_unimported_enum_names_the_import() {
+fn an_empty_match_over_an_unimported_enum_shows_its_refusal_alone() {
     let sharp = "namespace Demo;\n\nimport Lib.Ticket;\n\nclass Report\n{\n    public static string state(Ticket ticket) => match (ticket.status()) {\n    };\n}\n";
 
     let issues =
@@ -23817,10 +23818,11 @@ fn a_match_that_misses_cases_of_an_enum_imported_under_another_name_writes_them_
     );
 }
 
-/// An import of the enum's short name would clash with the file's import of another enum, so the missing arms are
-/// written with the alias the import needs.
+/// An empty `match` over an enum whose short name the file imports for another enum shows only its refusal, the
+/// missing `default` arm. match-not-exhaustive's advice to import the enum under an alias sits on that refused line,
+/// so no user sees it.
 #[test]
-fn a_match_that_misses_cases_of_an_enum_whose_short_name_the_file_imports_writes_them_with_an_alias() {
+fn an_empty_match_over_an_enum_whose_short_name_the_file_imports_shows_its_refusal_alone() {
     let billing_status =
         ("src/Billing/Status.php", "<?php\n\nnamespace Billing;\n\nenum Status\n{\n    case Due;\n}\n");
     let sharp = "namespace Demo;\n\nimport Lib.Ticket;\nimport Billing.Status;\n\nclass Report\n{\n    public static string state(Ticket ticket) => match (ticket.status()) {\n    };\n}\n";
