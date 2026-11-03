@@ -71,6 +71,7 @@ use crate::resolver::class_name::report_class_value_of_no_class;
 use crate::resolver::class_name::report_missing_class;
 use crate::resolver::class_name::report_non_existent_class_like;
 use crate::resolver::class_name::resolve_classnames_from_expression;
+use crate::resolver::class_name::type_parameter_of_no_class;
 use crate::statement::class_like::requiring_class;
 use crate::statement::function_like::get_this_type;
 use crate::utils::names::article;
@@ -153,11 +154,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Instantiation<'arena> {
             });
             let (issue, created) = match parameter {
                 Some(class_value @ TClassLikeString::Generic { parameter_name, .. }) => (
-                    Issue::error(format!("`{parameter_name}` can stand for a type that is not a class."))
-                        .with_annotation(
-                            Annotation::primary(value.expression.span()).with_message("Used as a class here."),
-                        )
-                        .with_help(format!("Bound `{parameter_name}` by a class, as in `<{parameter_name} : Order>`.")),
+                    type_parameter_of_no_class(parameter_name, value.expression.span()),
                     wrap_atomic(class_value.get_object_type(context.codebase)),
                 ),
                 _ => {

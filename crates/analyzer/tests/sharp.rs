@@ -17706,21 +17706,23 @@ fn a_type_parameter_before_a_dot_reads_its_bounds_static_members_with_no_issue()
 
 /// `TItem.member` reads the member of the type argument's class, which its bound declares, so a missing member is
 /// reported on the bound, and a static method read without a call is its function value. A type parameter that can
-/// stand for a type that is not a class has no members to read, so a property read on it reports that once and reads
-/// nothing.
+/// stand for a type that is not a class has no members to read, so a call or a property read on it, or on its
+/// `typeof`, reports that once and reads nothing.
 #[test]
 fn a_static_member_of_a_type_parameter_is_its_bounds() {
     let maker = (
         "src/Demo/Maker.sharp",
         "namespace Demo;\n\npublic abstract class Maker\n{\n    public static int make() => 1;\n}\n",
     );
-    let sharp = "namespace Demo;\n\npublic abstract class Builder<TItem : Maker, TAny>\n{\n    public int build() => TItem.make();\n\n    public int missing() => TItem.unknown();\n\n    public int open() => TAny.make();\n\n    public int read() => TAny.size;\n\n    public int maker() => TItem.make;\n\n    public abstract TItem made(TAny value);\n}\n";
+    let sharp = "namespace Demo;\n\npublic abstract class Builder<TItem : Maker, TAny>\n{\n    public int build() => TItem.make();\n\n    public int missing() => TItem.unknown();\n\n    public int open() => TAny.make();\n\n    public int read() => TAny.size;\n\n    public int typed() => typeof(TAny).make();\n\n    public int typedRead() => typeof(TAny).size;\n\n    public int maker() => TItem.make;\n\n    public abstract TItem made(TAny value);\n}\n";
 
     assert_eq!(messages(maker, &[]), Vec::<String>::new());
     assert_eq!(
         messages(("src/Demo/Builder.sharp", sharp), &[maker]),
         [
             "Method `Maker.unknown` does not exist.",
+            "`TAny` can stand for a type that is not a class.",
+            "`TAny` can stand for a type that is not a class.",
             "`TAny` can stand for a type that is not a class.",
             "`TAny` can stand for a type that is not a class.",
             "Invalid return type for method `Builder.maker`: expected `int`, but found `Function<int()>`.",
