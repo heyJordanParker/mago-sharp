@@ -146,10 +146,10 @@ pub struct CodebaseMetadata {
     pub patch_function_likes: HashMap<(Word, Word), FunctionLikeMetadata>,
     /// Per-patch constant metadata, keyed by FQN.
     pub patch_constants: WordMap<ConstantMetadata>,
-    /// The name of each host or vendored file the scan read, its path from the workspace, keyed by the file. Spec
-    /// section 23: a function or constant a plain PHP library declares in PHP's root namespace belongs to the namespace
-    /// of the class-likes in its folder. Of two declarations of one name, the one whose file's name sorts first keeps
-    /// it, and the duplicate's error names that file.
+    /// The name of each host or vendored file the scan read, its path from the workspace, or its absolute path for a
+    /// file outside the workspace, keyed by the file. Spec section 23: a function or constant a plain PHP library
+    /// declares in PHP's root namespace belongs to the namespace of the class-likes in its folder. Of two declarations
+    /// of one name, the one whose file's name sorts first keeps it, and the duplicate's error names that file.
     #[cfg_attr(feature = "serde", serde(default))]
     file_names: HashMap<FileId, Word>,
     /// The namespaces of the class-likes in each folder of `file_names`, sorted, which the populator gathers.
