@@ -17828,6 +17828,73 @@ fn a_type_parameter_bounded_by_a_class_takes_one_class() {
     assert_messages(("src/Demo/Fancies.sharp", header), &others, &[&refused("3:24", "Builder<Maker>")]);
 }
 
+/// Spec section 11: a type parameter bounded by an interface takes a union, because an interface declares no static
+/// member its code could reach through the type argument. A static method, a static property and a constructor are each
+/// refused where the interface declares one, so `TItem.make()` on a `TItem : Labeled` reads `Labeled`'s members, which
+/// have no `make`, and `Tagged<Fancy|Plain>` compiles. An interface's operator is its own, which the code runs on its
+/// trait, never through the type argument.
+#[test]
+fn an_interface_declares_no_static_member_a_type_parameter_reaches_through_its_type_argument() {
+    let declared = |member: &str| format!("namespace Demo;\n\npublic interface Labeled\n{{\n    {member}\n}}\n");
+    let refused = |member: &'static str| {
+        let code: &'static str = declared(member).leak();
+
+        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Labeled.sharp", code), &[])
+            .iter()
+            .map(|issue| format!("{}: {}", located(code, issue), issue.message))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        refused("static string make();"),
+        ["5:5 semantics: An interface method takes no modifier but `override`: every interface method is public."]
+    );
+    assert_eq!(refused("static string tag { get; }"), ["5:12 parse: Unexpected `string`"]);
+    assert_eq!(
+        refused("required Labeled();"),
+        [
+            "5:14 semantics: An interface method needs a return type in PHP#.",
+            "5:5 semantics: An interface method takes no modifier but `override`: every interface method is public.",
+        ]
+    );
+    assert_eq!(
+        refused("required Labeled.fromJson(string json);"),
+        ["5:22 semantics: An interface has no constructor: a named constructor creates an object of its own class."]
+    );
+
+    let others = [
+        ("src/Demo/Labeled.sharp", "namespace Demo;\n\npublic interface Labeled\n{\n}\n"),
+        (
+            "src/Demo/Fancy.sharp",
+            "namespace Demo;\n\npublic class Fancy : Labeled\n{\n    public static string make() => \"fancy\";\n}\n",
+        ),
+        (
+            "src/Demo/Plain.sharp",
+            "namespace Demo;\n\npublic class Plain : Labeled\n{\n    public static string make() => \"plain\";\n}\n",
+        ),
+    ];
+    let tagged = "namespace Demo;\n\npublic class Tagged<TItem : Labeled>\n{\n    public string made(TItem item) => TItem.make();\n}\n";
+    let calls = "namespace Demo;\n\npublic class Calls\n{\n    public Tagged<Fancy|Plain> union() => new Tagged<Fancy|Plain>();\n}\n";
+
+    assert_messages(
+        ("src/Demo/Tagged.sharp", tagged),
+        &others,
+        &[
+            "5:39 possibly-static-access-on-interface: Potential static method call on interface `Labeled` via `class-string`.",
+            "5:45 non-existent-method: Method `Labeled.make` does not exist.",
+        ],
+    );
+    assert_messages(
+        ("src/Demo/Calls.sharp", calls),
+        &[
+            others[0],
+            others[1],
+            others[2],
+            ("src/Demo/Tagged.sharp", "namespace Demo;\n\npublic class Tagged<TItem : Labeled>\n{\n}\n"),
+        ],
+        &[],
+    );
+}
+
 /// `new TItem(…)` creates the type argument the code runs with, so it has the type `TItem`, and its arguments are
 /// checked against the constructor of `TItem`'s bound, which must be `required`, as `new Self(…)` needs, since the type
 /// argument can be any subclass of the bound.
