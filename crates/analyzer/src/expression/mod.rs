@@ -940,32 +940,31 @@ where
     let (assertions, _) =
         find_satisfying_assignments(&saturate_clauses(clauses.iter(), &thresholds), None, &mut WordSet::default());
 
-    let tested = tested_variable(pattern_match, first_hidden, context);
-    let left = if assertions.is_empty() {
-        value_type.clone()
-    } else {
-        let mut unhandled_context = block_context.clone();
-        // The hidden variable that holds a value no local names, as a call's result, is assigned in the arms' PHP, so
-        // the `match`'s own context holds it as the value it tests.
-        if let Some(variable) = tested {
-            unhandled_context.locals.entry(variable).or_insert_with(|| Rc::new(value_type.clone()));
-        }
-        reconcile_keyed_types(
-            context,
-            &assertions,
-            IndexMap::new(),
-            &mut unhandled_context,
-            &mut WordSet::default(),
-            &WordSet::default(),
-            &pattern_match.span(),
-            false,
-            false,
-        );
+    // A `match` with an arm tests a variable, the local it names or the hidden variable its PHP assigns first, and the
+    // value no arm handles is that variable once each test is false. A `match` whose tests assert nothing leaves it all.
+    let left = match tested_variable(pattern_match, first_hidden, context) {
+        Some(tested) if !assertions.is_empty() => {
+            let mut unhandled_context = block_context.clone();
+            // The hidden variable that holds a value no local names, as a call's result, is assigned in the arms' PHP,
+            // so the `match`'s own context holds it as the value it tests.
+            unhandled_context.locals.entry(tested).or_insert_with(|| Rc::new(value_type.clone()));
+            reconcile_keyed_types(
+                context,
+                &assertions,
+                IndexMap::new(),
+                &mut unhandled_context,
+                &mut WordSet::default(),
+                &WordSet::default(),
+                &pattern_match.span(),
+                false,
+                false,
+            );
 
-        // Only the tested value is left to handle: the PHP of a pattern narrows the hidden variables of its items too.
-        tested
-            .and_then(|variable| unhandled_context.locals.get(&variable))
-            .map_or_else(|| value_type.clone(), |left| (**left).clone())
+            // Only the tested value is left to handle: the PHP of a pattern narrows the hidden variables of its items
+            // too.
+            unhandled_context.locals.get(&tested).map_or_else(|| value_type.clone(), |left| (**left).clone())
+        }
+        _ => value_type.clone(),
     };
 
     let atomics = || left.types.iter();

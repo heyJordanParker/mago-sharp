@@ -9953,6 +9953,64 @@ fn a_member_a_part_takes_from_a_trait_is_recorded_under_the_parts_own_class() {
     assert_eq!(own("label.label"), Some(vec![word("App\\Billing\\PhpOrder")]));
 }
 
+/// Two parts of one generic class, as `Box<int>|Box<string>`, are instances of that one class, so a call and a read on
+/// a union that holds both record the class once, and the value is tested against it once.
+#[test]
+fn two_parts_of_one_generic_class_are_recorded_under_the_class_once() {
+    let boxed = "namespace App.Billing;\n\npublic class Box<T>\n{\n    public Box(public T item { get; }) { }\n\n    public string label() => \"box\";\n}\n";
+    let labels = "namespace App.Billing;\n\npublic static class Labels\n{\n    extension(string value)\n    {\n        public string label() => \"text\";\n    }\n}\n";
+    let calls = "namespace App.Billing;\n\npublic class Calls\n{\n    public string called(Box<int>|Box<string>|string value) => value.label();\n\n    public Function<string()> read(Box<int>|Box<string>|string label) => label.label;\n}\n";
+    let others = [("src/App/Billing/Box.sharp", boxed), ("src/App/Billing/Labels.sharp", labels)];
+    let analyzed = ("src/App/Billing/Calls.sharp", calls);
+
+    assert_messages(analyzed, &others, &[]);
+    let (_, artifacts) = analyze_with_artifacts(&PLUGIN_REGISTRY, settings(), analyzed, &others);
+    let own = |access: &str| {
+        let start = calls.find(access).unwrap() as u32;
+
+        artifacts.get_own_member_classes(&Span::dummy(start, start + access.len() as u32)).map(<[Word]>::to_vec)
+    };
+    assert_eq!(own("value.label()"), Some(vec![word("App\\Billing\\Box")]));
+    assert_eq!(own("label.label"), Some(vec![word("App\\Billing\\Box")]));
+}
+
+/// A call of a member that is an extension's computed property on the parts that lack it, as `value.label()` on an
+/// `Order|string` whose extension gives a `string` the property `label`, is refused once, as a call of the property on
+/// those parts alone is, and adds no error for the part that runs its own method.
+#[test]
+fn a_call_of_an_extension_property_beside_a_parts_own_method_is_one_error() {
+    let order = "namespace App.Billing;\n\npublic class Order\n{\n    public string label() => \"order\";\n}\n";
+    let labels = "namespace App.Billing;\n\npublic static class Labels\n{\n    extension(string value)\n    {\n        public string label => \"text\";\n    }\n}\n";
+    let calls = "namespace App.Billing;\n\npublic class Calls\n{\n    public string text(string value) => value.label();\n\n    public string called(Order|string value) => value.label();\n}\n";
+    let others = [("src/App/Billing/Order.sharp", order), ("src/App/Billing/Labels.sharp", labels)];
+
+    let refused = |at: &str| {
+        format!(
+            "{at} non-existent-method: `label` is a computed property of `string`, not a method: read it without `(…)`."
+        )
+    };
+
+    assert_messages(("src/App/Billing/Calls.sharp", calls), &others, &[&refused("5:47"), &refused("7:55")]);
+}
+
+/// Spec section 25: `new (typeof(TItem))()` creates an object only when `TItem`'s bound is a class, and a bound that is
+/// another type parameter is that parameter's bound. So `TItem : TBase` creates one when `TBase : Maker`, and is refused
+/// when `TBase` has no bound, since it can stand for `int`.
+#[test]
+fn new_of_the_class_value_of_a_type_parameter_bounded_by_another_reads_that_bound() {
+    let sharp = "namespace Demo;\n\npublic class Builder<TBase, TItem : TBase>\n{\n    public TItem make() => new (typeof(TItem))();\n}\n";
+    let maker =
+        ("src/Demo/Maker.sharp", "namespace Demo;\n\npublic class Maker\n{\n    public required Maker() { }\n}\n");
+    let bounded = "namespace Demo;\n\npublic class Builder<TBase : Maker, TItem : TBase>\n{\n    public TItem make() => new (typeof(TItem))();\n}\n";
+
+    assert_messages(
+        ("src/Demo/Builder.sharp", sharp),
+        &[],
+        &["5:33 invalid-class-string-expression: `TItem` can stand for a type that is not a class."],
+    );
+    assert_messages(("src/Demo/Builder.sharp", bounded), &[maker], &[]);
+}
+
 /// Spec section 26: the receiver's type picks the extension, so an extension of `string` and one of `int` add nothing to
 /// a `string|int`, and one of `string` nothing to a `Box|string`. The call gets one error, on the receiver's type, whose
 /// help names each part that has the member, so no error says a `string` lacks a member its help lists.
@@ -27583,6 +27641,15 @@ fn a_getter_reaching_through_a_foreign_object_has_the_effect_of_its_class() {
     ] {
         assert_eq!(effect_issues(&[form, payments]), [refused], "{}", form.1);
     }
+
+    // A member named by an expression, as `this.payments.{"fee"}`, is a parse refusal, so the getter's summary reads no
+    // member of the class through it, and the refusal shows alone. The orchestrator's
+    // `test_a_member_named_by_an_expression_gives_a_law_no_effect` shows a law that reaches the getter adds nothing.
+    let named = (
+        "app/Shop/Checkout.sharp",
+        "namespace App.Shop;\n\nimport App.Billing.Payments;\n\npublic class Checkout\n{\n    public Checkout(private Payments payments) { }\n\n    public int total => this.payments.{\"fee\"};\n}\n",
+    );
+    assert_eq!(reported(named, &[payments]), ["9:39 parse Unexpected `{`"]);
 
     // A subclass of a `foreign` class is that class's object, so it has that class's effect.
     let gateway = (

@@ -1468,17 +1468,22 @@ impl<'analysis> Types<'analysis> {
         let members = extensions
             .into_iter()
             .map(|(callee, class, metadata)| {
-                let receiver = &metadata.parameters.first()?.get_type_metadata()?.type_union;
-                let runs_as =
-                    match receiver.get_single_array().and_then(|array| get_collection_object(array, self.codebase)) {
-                        Some(TAtomic::Object(object)) => object.get_name(),
-                        _ => None,
-                    };
+                // The member's first parameter is its receiver, whose type a `Map` or a `Set` runs as an object of.
+                let runs_as = match metadata
+                    .parameters
+                    .first()
+                    .and_then(|receiver| receiver.get_type_metadata())
+                    .and_then(|receiver| receiver.type_union.get_single_array())
+                    .and_then(|array| get_collection_object(array, self.codebase))
+                {
+                    Some(TAtomic::Object(object)) => object.get_name(),
+                    _ => None,
+                };
                 let Some(call) = self.artifacts.get_member_call(call, callee) else {
                     unreachable!("the analysis records each member of a call that runs several");
                 };
 
-                Some(KindMember {
+                KindMember {
                     kind: collection_member_kind(class, metadata),
                     runs_as,
                     declaration: Declaration {
@@ -1488,9 +1493,9 @@ impl<'analysis> Types<'analysis> {
                         public: true,
                     },
                     call,
-                })
+                }
             })
-            .collect::<Option<Vec<_>>>()?;
+            .collect();
 
         Some(MembersByKind { members, objects })
     }
