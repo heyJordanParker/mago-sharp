@@ -558,14 +558,20 @@ fn condition_variables<'ast, 'arena>(
             condition_variables(binary.lhs, holds, variables);
             condition_variables(binary.rhs, holds, variables);
         }
-        Expression::Is(is) => match is.pattern {
-            Pattern::Not(not) if !holds => pattern_variables(not.pattern, variables),
-            Pattern::Not(_) => {}
-            pattern if holds => pattern_variables(pattern, variables),
-            _ => {}
+        Expression::Is(is) => match (is.pattern, holds != is_refused_not(is)) {
+            (Pattern::Not(not), false) => pattern_variables(not.pattern, variables),
+            (Pattern::Not(_), true) => {}
+            (pattern, true) => pattern_variables(pattern, variables),
+            (_, false) => {}
         },
         _ => {}
     }
+}
+
+/// Whether `is` is `!x is T`, which the slice refuses for the `x is not T` its error asks for. Its variables bind as
+/// that form's, as the analyzer narrows it, so the refusal shows alone.
+fn is_refused_not(is: &Is<'_>) -> bool {
+    matches!(is.value, Expression::UnaryPrefix(UnaryPrefix { operator: UnaryPrefixOperator::Not(_), .. }))
 }
 
 /// Whether every path through a statement ends in `return`, `throw`, `break` or `continue`, decision 020's rule for an
@@ -1220,7 +1226,7 @@ where
     }
 
     fn walk_in_is(&mut self, is: &'ast Is<'arena>, _context: &mut NameResolutionContext<'arena, A>) {
-        let negated = matches!(is.pattern, Pattern::Not(_));
+        let negated = matches!(is.pattern, Pattern::Not(_)) != is_refused_not(is);
         self.pattern_kinds.push(LocalKind::Pattern { test: is.span(), negated });
     }
 

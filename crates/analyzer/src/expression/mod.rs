@@ -72,7 +72,6 @@ use mago_syntax::cst::PropertyAccess;
 use mago_syntax::cst::RestPattern;
 use mago_syntax::cst::Statement;
 use mago_syntax::cst::TypePattern;
-use mago_syntax::cst::UnaryPrefixOperator;
 use mago_syntax::utils::pattern::PatternNames;
 use mago_syntax::utils::pattern::PhpShape;
 use mago_syntax::utils::pattern::called_functions;
@@ -2552,17 +2551,15 @@ pub(crate) fn with_type_arguments(
     inferred_type_replacer::replace(declared, &template_result, codebase)
 }
 
-/// Whether an error already refuses `expression`. `check_slice` refuses it when it failed to parse, it is `!x is T`, or
-/// it tests or converts a value to a type with no [type test](mago_syntax::utils::pattern::has_type_test) in `is`, `as`
-/// or a `match` arm. Its type is the error type in PHP# and `never` in PHP, a variable its `is` pattern names holds the
-/// type written beside it, and it adds no other issue.
+/// Whether an error already refuses `expression`. `check_slice` refuses it when it failed to parse, or it tests or
+/// converts a value to a type with no [type test](mago_syntax::utils::pattern::has_type_test) in `is`, `as` or a
+/// `match` arm. Its type is the error type in PHP# and `never` in PHP, a variable its `is` pattern names holds the type
+/// written beside it, and it adds no other issue. A refused `!x is T` is not one of these: `php_shape` gives it the
+/// PHP of the `x is not T` its error asks for, which adds no issue of its own.
 pub(crate) fn is_refused(expression: &Expression<'_>) -> bool {
     match expression {
         Expression::Error(_) => true,
-        Expression::Is(is) => {
-            matches!(is.value, Expression::UnaryPrefix(prefix) if matches!(prefix.operator, UnaryPrefixOperator::Not(_)))
-                || type_pattern_hints(is.pattern).into_iter().any(|hint| !has_type_test(hint))
-        }
+        Expression::Is(is) => type_pattern_hints(is.pattern).into_iter().any(|hint| !has_type_test(hint)),
         Expression::As(r#as) => !has_type_test(r#as.hint),
         Expression::PatternMatch(pattern_match) => is_refused_match(pattern_match),
         _ => false,

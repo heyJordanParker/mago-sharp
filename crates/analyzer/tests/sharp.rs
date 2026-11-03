@@ -4516,13 +4516,14 @@ fn a_condition_that_is_not_bool_is_an_invalid_operand_everywhere() {
 }
 
 /// `check_slice` refuses `!entity is HasDesign` and writes `entity is not HasDesign`, and the refusal shows alone, while
-/// `!` on any other value that is not `bool` keeps its report. The name a refused test binds is typed as written, so
-/// a later line that reads it adds no issue.
+/// `!` on any other value that is not `bool` keeps its report. The refused test is analyzed as the `x is not T` its
+/// error asks for, so a line after a branch that leaves on it reads the value, and the name it binds, as `T`, and a
+/// method that returns it adds no issue.
 #[test]
 fn not_before_is_adds_no_issue_and_not_of_a_value_that_is_not_bool_keeps_its_report() {
     let design = "<?php\n\nnamespace Demo;\n\ninterface HasDesign\n{\n    public function ready(): bool;\n}\n";
     let sharp = "namespace Demo;\n\nclass Report\n{\n    public static bool run(Any entity, int done)\n    {\n        if (!entity is HasDesign) {\n            return true;\n        }\n        if (!done) {\n            return false;\n        }\n        return true;\n    }\n}\n";
-    let bound = "namespace Demo;\n\nclass Report\n{\n    public static bool run(Any entity)\n    {\n        if (!entity is HasDesign design) {\n            return design.ready();\n        }\n        return false;\n    }\n}\n";
+    let bound = "namespace Demo;\n\nclass Report\n{\n    public static bool run(Any entity)\n    {\n        if (!entity is HasDesign design) {\n            return false;\n        }\n        return design.ready();\n    }\n}\n";
 
     assert_eq!(
         reported(("src/Demo/Report.sharp", sharp), &[("src/Demo/HasDesign.php", design)]),
@@ -4534,6 +4535,17 @@ fn not_before_is_adds_no_issue_and_not_of_a_value_that_is_not_bool_keeps_its_rep
     assert_eq!(
         reported(("src/Demo/Report.sharp", bound), &[("src/Demo/HasDesign.php", design)]),
         ["7:13 semantics Write `entity is not HasDesign design`: `!` applies to `entity` before `is` tests it."]
+    );
+    let narrowed = "namespace Demo;\n\nclass Report\n{\n    public static bool run(Any entity)\n    {\n        if (!entity is HasDesign) {\n            return false;\n        }\n        return entity.ready();\n    }\n}\n";
+    assert_eq!(
+        reported(("src/Demo/Report.sharp", narrowed), &[("src/Demo/HasDesign.php", design)]),
+        ["7:13 semantics Write `entity is not HasDesign`: `!` applies to `entity` before `is` tests it."]
+    );
+    let value =
+        "namespace Demo;\n\nclass Report\n{\n    public static bool run(Any entity) => !entity is HasDesign;\n}\n";
+    assert_eq!(
+        reported(("src/Demo/Report.sharp", value), &[("src/Demo/HasDesign.php", design)]),
+        ["5:43 semantics Write `entity is not HasDesign`: `!` applies to `entity` before `is` tests it."]
     );
 }
 
@@ -7604,7 +7616,8 @@ fn a_class_named_as_a_case_is_an_error_that_names_the_case() {
         analyze(&PLUGIN_REGISTRY, settings(), analyzed, others).into_iter().map(|issue| issue.message).collect()
     };
 
-    let case = "The case `PaymentResult.Paid` runs as a class of that name, which is already defined in `app/Paid.sharp`.";
+    let case =
+        "The case `PaymentResult.Paid` runs as a class of that name, which is already defined in `app/Paid.sharp`.";
     let class = "Class `Paid` clashes with the case `PaymentResult.Paid`, which runs as a class of that name.";
     // The codebase keeps the declaration whose file's path sorts first, and the other one is reported: the enum's
     // `src/App/PaymentResult.sharp` sorts before `src/App/PaymentResult/Paid.sharp` and after `app/Paid.sharp`.
