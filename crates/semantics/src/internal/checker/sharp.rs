@@ -6745,8 +6745,8 @@ struct ClassLike<'ast, 'arena> {
     members: &'ast Sequence<'arena, ClassLikeMember<'arena>>,
     is_static: bool,
     is_foreign: bool,
-    /// Whether no class can extend it: a `final` class, spec section 22, or a struct, which is never inherited, spec
-    /// section 10.
+    /// Whether no class can extend it: a `final` class, spec section 22, a struct, which is never inherited, spec
+    /// section 10, or an enum.
     is_final: bool,
 }
 
