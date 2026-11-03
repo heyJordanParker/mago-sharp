@@ -125,7 +125,7 @@ pub(crate) struct KindMember<'analysis> {
     /// part of the value that declares no member of its name, as `label()` on an `Order|string` runs on a `string`.
     pub(crate) kind: Option<CollectionKind>,
     /// The class of the object a `Map` or a `Set` runs as, which tells it apart. None for a `List`, which runs as a PHP
-    /// array, and for an `Iterable`.
+    /// array, for an `Iterable`, and for an extension whose receiver is no `Map` or `Set`.
     pub(crate) runs_as: Option<Word>,
     pub(crate) declaration: Declaration,
     /// The type arguments and the type the member's call has.
