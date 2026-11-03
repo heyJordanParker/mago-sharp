@@ -842,6 +842,22 @@ fn unused_parameters_of_an_expression_body_are_found_as_in_php() {
     assert_eq!(codes(&sharp_issues), codes(&php_issues));
 }
 
+/// A constructor parameter that declares a `private` property no method reads is an unused property, as its PHP
+/// twin's promoted property is. The constructor has a block body, since the semantic check refuses a property declared
+/// on an expression-bodied constructor's parameter.
+#[test]
+fn a_promoted_property_no_method_reads_is_found_as_in_php() {
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    private int count = 0;\n\n    public Report(private int start)\n    {\n        this.count = start;\n    }\n}\n";
+    let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    private int $count = 0;\n\n    public function __construct(private int $start)\n    {\n        $this->count = $start;\n    }\n}\n";
+    let settings = || Settings { find_unused_parameters: true, ..settings() };
+
+    let sharp_issues = issues_with(settings(), ("src/Demo/Report.sharp", sharp), &[]);
+    let php_issues = issues_with(settings(), ("src/Demo/Report.php", php), &[]);
+
+    assert_eq!(sharp_issues, ["7:31 unused-property", "5:17 write-only-property"]);
+    assert_eq!(codes(&sharp_issues), codes(&php_issues));
+}
+
 #[test]
 fn a_for_counter_has_the_type_of_its_value_as_in_php() {
     let sharp = "namespace Demo;\n\nclass Report\n{\n    public static string total(int extra)\n    {\n        let total = 0;\n        for (let step = 0; step < extra; step++) {\n            total += step;\n        }\n        return total;\n    }\n}\n";
