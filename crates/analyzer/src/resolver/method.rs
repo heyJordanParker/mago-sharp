@@ -87,6 +87,7 @@ use crate::utils::names::display_member;
 use crate::utils::names::display_method_name;
 use crate::utils::names::display_type;
 use crate::utils::names::is_prelude_stub;
+use crate::utils::names::joined_with_and;
 use crate::utils::names::readonly_writer;
 use crate::utils::names::sharp_method_declaration;
 use crate::utils::quoted_source;
@@ -1815,11 +1816,7 @@ fn report_extension_of_parts<A>(
             format!("{} `{part}`", article(&part))
         })
         .collect();
-    let parts = match parts.as_slice() {
-        [only] => format!("{only} has"),
-        [rest @ .., last] => format!("{} and {last} have", rest.join(", ")),
-        [] => unreachable!("a part of the receiver has the extension"),
-    };
+    let parts = format!("{} {}", joined_with_and(&parts), if parts.len() == 1 { "has" } else { "have" });
 
     context.collector.report_with_code(
         IssueCode::NonExistentMethod,

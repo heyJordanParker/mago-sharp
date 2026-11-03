@@ -1003,9 +1003,13 @@ where
 /// The names `names` as an English list, each in backticks: "`A`", "`A` and `B`", "`A`, `B` and `C`".
 #[must_use]
 pub(crate) fn and_list(names: &[Word]) -> String {
-    let names: Vec<String> = names.iter().map(|name| format!("`{name}`")).collect();
+    joined_with_and(&names.iter().map(|name| format!("`{name}`")).collect::<Vec<_>>())
+}
 
-    match names.split_last() {
+/// The phrases `items` as an English list: "a", "a and b", "a, b and c".
+#[must_use]
+pub(crate) fn joined_with_and(items: &[String]) -> String {
+    match items.split_last() {
         Some((last, [])) => last.clone(),
         Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
         None => String::new(),
