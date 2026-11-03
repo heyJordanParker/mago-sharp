@@ -1,10 +1,16 @@
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
+use std::collections::HashSet;
+
 use mago_database::file::File;
 use mago_names::ResolvedNames;
 use mago_php_version::PHPVersion;
+use mago_reporting::Issue;
 use mago_reporting::IssueCollection;
+use mago_reporting::Level;
 use mago_syntax::cst::Program;
+use mago_syntax::dialect::Dialect;
+use mago_syntax::error::ParseError;
 use mago_syntax::walker::Walker;
 
 use crate::internal::CheckingWalker;
@@ -66,4 +72,42 @@ impl SemanticsChecker {
 
         context.finalize()
     }
+}
+
+/// Returns the analyzer issues of one file to report beside its parse errors and semantic issues.
+///
+/// In a PHP# file, an analyzer issue on a line that holds a parse error or a semantic error, or whose span overlaps
+/// one, as `exit(` does with a refused argument on the next line, is dropped as a follow-on of that refusal, as a
+/// missing `: super(…)` is beside the parse error of `: base(row)`. The file cannot run until the refusal is fixed, so an issue
+/// dropped there shows up one fix later at worst. A PHP file keeps every analyzer issue.
+#[must_use]
+pub fn drop_follow_on_issues(
+    file: &File,
+    parse_errors: &[ParseError],
+    semantic_issues: &IssueCollection,
+    analyzer_issues: IssueCollection,
+) -> IssueCollection {
+    if !Dialect::of(file).is_sharp() {
+        return analyzer_issues;
+    }
+
+    let refusals: Vec<_> = semantic_issues
+        .iter()
+        .filter(|issue| issue.level == Level::Error)
+        .filter_map(|issue| issue.primary_span())
+        .filter(|span| span.file_id == file.id)
+        .chain(parse_errors.iter().filter_map(|error| Issue::from(error).primary_span()))
+        .collect();
+    let refused_lines: HashSet<u32> = refusals.iter().map(|span| file.line_number(span.start.offset)).collect();
+
+    analyzer_issues
+        .into_iter()
+        .filter(|issue| {
+            issue.primary_span().is_none_or(|span| {
+                span.file_id != file.id
+                    || !(refused_lines.contains(&file.line_number(span.start.offset))
+                        || refusals.iter().any(|refusal| !refusal.is_before(&span) && !span.is_before(refusal)))
+            })
+        })
+        .collect()
 }

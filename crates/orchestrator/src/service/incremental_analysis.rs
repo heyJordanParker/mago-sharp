@@ -65,6 +65,7 @@ use mago_php_version::PHPVersion;
 use mago_reporting::Issue;
 use mago_reporting::IssueCollection;
 use mago_semantics::SemanticsChecker;
+use mago_semantics::drop_follow_on_issues;
 use mago_syntax::parser::parse_file_with_settings;
 use mago_syntax::settings::ParserSettings;
 use mago_word::Word;
@@ -76,7 +77,6 @@ use crate::progress::create_progress_bar;
 use crate::progress::remove_progress_bar;
 use crate::service::body_return::resolve_body_returns;
 use crate::service::issue_reconciliation::DeferredIssueReconciler;
-use crate::service::issue_reconciliation::drop_follow_on_issues;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::service::telemetry::HangWatcher;
 #[cfg(not(target_arch = "wasm32"))]
