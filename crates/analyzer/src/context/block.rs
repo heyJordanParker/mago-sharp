@@ -277,7 +277,7 @@ impl<'ctx> BlockContext<'ctx> {
 
     /// Whether the PHP variable `variable` is a local in scope here, spec section 3: one of `locals`, or one of the
     /// scopes around a PHP# lambda.
-    pub fn is_local_in_scope(&self, variable: &Word) -> bool {
+    pub(crate) fn is_local_in_scope(&self, variable: &Word) -> bool {
         self.locals.contains_key(variable) || self.enclosing_locals.contains(variable)
     }
 

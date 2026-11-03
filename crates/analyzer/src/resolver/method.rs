@@ -69,6 +69,7 @@ use crate::resolver::extension::has_extension_method;
 use crate::resolver::extension::is_collection_member;
 use crate::resolver::extension::lacks_member;
 use crate::resolver::extension::library_declares_members;
+use crate::resolver::extension::parts_without_member;
 use crate::resolver::extension::resolve_extension;
 use crate::resolver::property::DeclaredPropertyKind;
 use crate::resolver::property::get_localized_property_type;
@@ -264,16 +265,8 @@ where
     if context.dialect.is_sharp()
         && let ClassLikeMemberSelector::Identifier(name) = selector
         && let Some(object_type) = artifacts.get_expression_type(object).cloned()
-        && let parts = object_type
-            .types
-            .iter()
-            .filter(|part| lacks_member(context.codebase, part, name.value))
-            .cloned()
-            .collect::<Vec<_>>()
-        && !parts.is_empty()
+        && let Some((rest, whole)) = parts_without_member(context.codebase, &object_type, name.value)
     {
-        let whole = parts.len() == object_type.types.iter().filter(|atomic| !atomic.is_null()).count();
-        let rest = TUnion::from_vec(parts.clone());
         match resolve_extension(context, &rest, name, MetadataFlags::EXTENSION_METHOD) {
             Some(Extension::Member(method))
                 if context
@@ -310,7 +303,8 @@ where
             None => {
                 // An extension that fits one part alone gives the receiver no member, so the call is refused once, on
                 // the parts the extension would run on, and no error says a part lacks a member an extension gives it.
-                let given: Vec<TAtomic> = parts
+                let given: Vec<TAtomic> = rest
+                    .types
                     .iter()
                     .filter(|part| has_extension_method(context, &TUnion::from_atomic((*part).clone()), name.value))
                     .cloned()

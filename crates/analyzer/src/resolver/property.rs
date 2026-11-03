@@ -79,6 +79,7 @@ use crate::resolver::extension::Extension;
 use crate::resolver::extension::is_collection_member;
 use crate::resolver::extension::lacks_member;
 use crate::resolver::extension::own_member_classes;
+use crate::resolver::extension::parts_without_member;
 use crate::resolver::extension::receiver_type_arguments;
 use crate::resolver::extension::resolve_extension;
 use crate::resolver::method::check_call_through_readonly;
@@ -206,14 +207,7 @@ where
     let mut rest_resolved = false;
     if context.dialect.is_sharp()
         && let ClassLikeMemberSelector::Identifier(name) = property_selector
-        && let parts = receiver
-            .types
-            .iter()
-            .filter(|part| lacks_member(context.codebase, part, name.value))
-            .cloned()
-            .collect::<Vec<_>>()
-        && !parts.is_empty()
-        && let rest = TUnion::from_vec(parts)
+        && let Some((rest, whole)) = parts_without_member(context.codebase, &receiver, name.value)
         && let Some(extension) = resolve_extension(context, &rest, name, MetadataFlags::EXTENSION_PROPERTY)
         && !matches!(extension, Extension::Value(method) if holds_tuple
         && context.codebase.get_method_by_id(&method).is_some_and(|metadata| {
@@ -221,7 +215,7 @@ where
         }))
     {
         // A read of a part that declares the member reads its own beside the rest, below.
-        let partial = rest.types.len() < receiver.types.iter().filter(|atomic| !atomic.is_null()).count();
+        let partial = !whole;
         match extension {
             Extension::Member(_) if for_assignment => {
                 result.has_error_path = true;

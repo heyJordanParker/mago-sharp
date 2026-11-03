@@ -358,6 +358,23 @@ pub(crate) fn lacks_member(codebase: &CodebaseMetadata, part: &TAtomic, name: &[
     !part.is_null() && codebase.get_classes_hidden_by_extension(&TUnion::from_atomic(part.clone()), name).is_empty()
 }
 
+/// The parts of `receiver` that declare no member `name` of their own, which an extension of that name runs on, spec
+/// section 26, and whether they are the whole receiver, its `null` aside. None when every part declares the member.
+pub(crate) fn parts_without_member(
+    codebase: &CodebaseMetadata,
+    receiver: &TUnion,
+    name: &[u8],
+) -> Option<(TUnion, bool)> {
+    let parts: Vec<TAtomic> =
+        receiver.types.iter().filter(|part| lacks_member(codebase, part, name)).cloned().collect();
+    if parts.is_empty() {
+        return None;
+    }
+    let whole = parts.len() == receiver.types.iter().filter(|part| !part.is_null()).count();
+
+    Some((TUnion::from_vec(parts), whole))
+}
+
 /// The classes of the parts of `receiver` that declare or inherit a member `name` of their own, a type parameter's by
 /// its bound, which a call or read of `name` runs on those parts beside an extension or a collection's member on the
 /// others, spec sections 12 and 26. Each is the part's own class, never the trait or the parent that declares the

@@ -8249,48 +8249,41 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         classes: &[Word],
     ) -> u32 {
         let line = self.line(access);
+
+        self.with_held_receiver(line, receiver, |this| {
+            let is_object = this.instance_of_any(line, receiver, classes);
+            let name = extension.name.as_bytes();
+            let own_kind = agreed_kind(classes.iter().map(|class| {
+                let class = class.as_bytes();
+                this.types.read_member(class, name).unwrap_or_else(|| this.types.member_declaration(class, name)).kind
+            }));
+            let object = this.expression(receiver);
+            let member = this.string(0, line, name);
+            let own = match own_kind {
+                DeclarationKind::Method { .. } | DeclarationKind::StaticMethod => {
+                    this.method_value(access, SHARP_AST_METHOD_CALL, object, member)
+                }
+                _ => this.node(SHARP_AST_PROP, 0, line, &[object, member]),
+            };
+            let rest = this.extension_on_whole(access, extension, receiver, None);
+
+            this.node(SHARP_AST_CONDITIONAL, ZEND_PARENTHESIZED_CONDITIONAL, line, &[is_object, own, rest])
+        })
+    }
+
+    /// What `build` lowers on `receiver`, which it reads more than once, after a receiver that is no literal or local
+    /// runs once, in a hidden variable each of its reads reads, as `[$receiver#1 = $this->pick(), …][1]`.
+    fn with_held_receiver(&mut self, line: u32, receiver: &Expression, build: impl FnOnce(&mut Self) -> u32) -> u32 {
         let (taken, held) = (self.temporaries, self.held_receivers.len());
-        let step = (!self.is_pure(receiver)).then(|| {
+        let lowered = if self.is_pure(receiver) {
+            build(self)
+        } else {
             let (step, name) = self.hold_step(line, receiver, "receiver");
             self.held_receivers.push((receiver.span(), name));
+            let selected = build(self);
+            let selected = self.node(SHARP_AST_ARRAY_ELEM, 0, line, &[selected, NULL]);
 
-            step
-        });
-        let tests: Vec<u32> = classes
-            .iter()
-            .map(|class| {
-                let tested = self.expression(receiver);
-                let class = self.string(ZEND_NAME_FQ, line, class.as_bytes());
-
-                self.node(SHARP_AST_INSTANCEOF, 0, line, &[tested, class])
-            })
-            .collect();
-        let is_object = tests
-            .into_iter()
-            .reduce(|either, test| self.node(SHARP_AST_OR, 0, line, &[either, test]))
-            .unwrap_or_else(|| unreachable!("a read by class reads a class's own member"));
-        let name = extension.name.as_bytes();
-        let own_kind = agreed_kind(classes.iter().map(|class| {
-            let class = class.as_bytes();
-            self.types.read_member(class, name).unwrap_or_else(|| self.types.member_declaration(class, name)).kind
-        }));
-        let object = self.expression(receiver);
-        let member = self.string(0, line, name);
-        let own = match own_kind {
-            DeclarationKind::Method { .. } | DeclarationKind::StaticMethod => {
-                self.method_value(access, SHARP_AST_METHOD_CALL, object, member)
-            }
-            _ => self.node(SHARP_AST_PROP, 0, line, &[object, member]),
-        };
-        let rest = self.extension_on_whole(access, extension, receiver, None);
-        let selected = self.node(SHARP_AST_CONDITIONAL, ZEND_PARENTHESIZED_CONDITIONAL, line, &[is_object, own, rest]);
-        let lowered = match step {
-            Some(step) => {
-                let selected = self.node(SHARP_AST_ARRAY_ELEM, 0, line, &[selected, NULL]);
-
-                self.picked_step(line, &[step, selected], 1)
-            }
-            None => selected,
+            self.picked_step(line, &[step, selected], 1)
         };
         self.held_receivers.truncate(held);
         self.temporaries = taken;
@@ -8556,22 +8549,14 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     ) -> u32 {
         let receiver = call.0;
         let line = self.line(expression);
-        let taken = self.temporaries;
-        let held = self.held_receivers.len();
-        let lowered = if kinds.members.iter().any(|member| self.types.changes_receiver(&member.declaration)) {
-            self.with_place(receiver, null_safe, &[], |this, place| {
-                this.selected_call(expression, kinds, call, Some(place))
-            })
-        } else if self.is_pure(receiver) {
-            self.selected_call(expression, kinds, call, None)
-        } else {
-            let (step, name) = self.hold_step(line, receiver, "receiver");
-            self.held_receivers.push((receiver.span(), name));
-            let selected = self.selected_call(expression, kinds, call, None);
-            let selected = self.node(SHARP_AST_ARRAY_ELEM, 0, line, &[selected, NULL]);
+        if !kinds.members.iter().any(|member| self.types.changes_receiver(&member.declaration)) {
+            return self.with_held_receiver(line, receiver, |this| this.selected_call(expression, kinds, call, None));
+        }
 
-            self.picked_step(line, &[step, selected], 1)
-        };
+        let (taken, held) = (self.temporaries, self.held_receivers.len());
+        let lowered = self.with_place(receiver, null_safe, &[], |this, place| {
+            this.selected_call(expression, kinds, call, Some(place))
+        });
         self.held_receivers.truncate(held);
         self.temporaries = taken;
 
