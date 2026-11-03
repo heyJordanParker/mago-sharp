@@ -53,6 +53,7 @@ use mago_database::DatabaseReader;
 use mago_database::file::File;
 use mago_database::file::FileId;
 use mago_database::file::FileType;
+use mago_names::ResolvedNames;
 use mago_names::STANDARD_ROOT_CLASSES;
 use mago_names::resolver::ChangingMembers;
 use mago_names::resolver::NameResolver;
@@ -72,6 +73,7 @@ use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::MethodCall;
 use mago_syntax::cst::NullSafeMethodCall;
+use mago_syntax::cst::Program;
 use mago_syntax::parser::parse_file;
 use mago_word::Word;
 use mago_word::WordSet;
@@ -274,6 +276,22 @@ fn analyze_with_references(
     (issues, artifacts, result.symbol_references)
 }
 
+/// Asserts that `mago compile` accepts `file` when it is a `.sharp` file: the semantic check gives it no error. A
+/// helper that reads its files without the semantic check calls it, so its fixtures follow the module's rule too.
+fn assert_compiles(file: &File, program: &Program<'_>, names: &ResolvedNames<'_>) {
+    if !file.name.ends_with(b".sharp") {
+        return;
+    }
+
+    let refused: Vec<String> = SemanticsChecker::new(settings().version)
+        .check(file, program, names)
+        .into_iter()
+        .filter(|issue| issue.level == Level::Error)
+        .map(|issue| issue.message)
+        .collect();
+    assert!(refused.is_empty(), "`mago compile` refuses {}: {refused:?}", String::from_utf8_lossy(&file.name));
+}
+
 /// The too-wide warnings of a project of `files`, as `mago analyze` gives them once it has analyzed every file: each
 /// as `path line:column message`, in the order the files and lines are written.
 fn too_wide(files: &[(&'static str, &'static str)]) -> Vec<String> {
@@ -297,6 +315,7 @@ fn too_wide(files: &[(&'static str, &'static str)]) -> Vec<String> {
         let program = parse_file(&arena, file);
         assert!(!program.has_errors(), "{:?} did not parse: {:?}", file.name, program.errors);
         let names = NameResolver::new(&arena).resolve(program);
+        assert_compiles(file, program, &names);
         metadata.extend(scan_program(&arena, file, program, &names, settings().version));
         programs.push((file, program, names));
     }
@@ -5453,7 +5472,14 @@ fn expression_bodies_and_computed_properties_are_checked_as_php_checks_their_twi
     assert_eq!(codes(&sharp_issues), codes(&php_issues));
 }
 
-const CUSTOMER: &str = "namespace Demo;\n\nclass Customer\n{\n    public string name { get; set; } = \"\";\n\n    public string label()\n    {\n        return this.name;\n    }\n}\n\nclass Plan\n{\n    public int price { get; set; } = 0;\n}\n";
+/// A `Customer` whose `name` is never null, and a `Plan` with a `price`.
+const CUSTOMER: [(&str, &str); 2] = [
+    (
+        "src/Demo/Customer.sharp",
+        "namespace Demo;\n\nclass Customer\n{\n    public string name { get; set; } = \"\";\n\n    public string label()\n    {\n        return this.name;\n    }\n}\n",
+    ),
+    ("src/Demo/Plan.sharp", "namespace Demo;\n\nclass Plan\n{\n    public int price { get; set; } = 0;\n}\n"),
+];
 
 /// Analyzes `analyzed` together with `others`, and returns its errors as `line:column code`.
 fn errors(analyzed: (&'static str, &'static str), others: &[(&'static str, &'static str)]) -> Vec<String> {
@@ -5470,7 +5496,7 @@ fn a_null_check_on_a_value_that_is_never_null_is_an_error() {
     let sharp = "namespace Demo;\n\nclass Billing\n{\n    public void renew(Customer customer, Plan plan, Plan? maybe)\n    {\n        const a = customer != null;\n        const b = customer == null;\n        const c = customer !== null;\n        const d = null === customer;\n        const price = plan.price ?? 0;\n        let total = plan.price;\n        total ??= 1;\n        const name = customer?.name;\n        const label = customer?.label();\n        const e = maybe ?? plan;\n        const f = maybe?.price;\n        const g = maybe !== null;\n    }\n}\n";
 
     assert_eq!(
-        errors(("src/Demo/Billing.sharp", sharp), &[("src/Demo/Customer.sharp", CUSTOMER)]),
+        errors(("src/Demo/Billing.sharp", sharp), &CUSTOMER),
         [
             "7:19 redundant-comparison",
             "8:19 redundant-comparison",
@@ -5488,11 +5514,10 @@ fn a_null_check_on_a_value_that_is_never_null_is_an_error() {
 fn a_null_check_on_a_value_that_is_never_null_keeps_its_php_report() {
     let php = "<?php\n\nnamespace Demo;\n\nclass Billing\n{\n    public function renew(Customer $customer, Plan $plan, ?Plan $maybe): void\n    {\n        $a = $customer != null;\n        $b = $customer == null;\n        $c = $customer !== null;\n        $d = null === $customer;\n        $price = $plan->price ?? 0;\n        $total = $plan->price;\n        $total ??= 1;\n        $name = $customer?->name;\n        $label = $customer?->label();\n        $e = $maybe ?? $plan;\n        $f = $maybe?->price;\n        $g = $maybe !== null;\n    }\n}\n";
 
-    let levelled: Vec<_> =
-        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Billing.php", php), &[("src/Demo/Customer.sharp", CUSTOMER)])
-            .iter()
-            .map(|issue| format!("{} {:?}", located(php, issue), issue.level))
-            .collect();
+    let levelled: Vec<_> = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Billing.php", php), &CUSTOMER)
+        .iter()
+        .map(|issue| format!("{} {:?}", located(php, issue), issue.level))
+        .collect();
 
     assert_eq!(
         levelled,
@@ -5519,10 +5544,7 @@ fn a_redundant_null_check_names_the_test_it_is_written_with() {
     let sharp = "namespace Demo;\n\nclass Billing\n{\n    public void renew(Customer report)\n    {\n        const a = report is null;\n        const b = report is not null;\n        const c = report == null;\n        const d = report != null;\n        const e = match (report) {\n            null => 0,\n            default => 1,\n        };\n    }\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nclass Billing\n{\n    public function renew(Customer $report): void\n    {\n        $a = $report === null;\n        $b = $report !== null;\n    }\n}\n";
     let redundant = |analyzed| -> Vec<String> {
-        worded(analyzed, &[("src/Demo/Customer.sharp", CUSTOMER)])
-            .into_iter()
-            .filter(|line| line.contains(" redundant-comparison "))
-            .collect()
+        worded(analyzed, &CUSTOMER).into_iter().filter(|line| line.contains(" redundant-comparison ")).collect()
     };
 
     let sharp_report = |at: &str, check: &str| {
@@ -5560,7 +5582,7 @@ fn a_redundant_null_check_names_its_pattern_without_its_comments() {
     let delivery =
         ("src/Demo/Delivery.sharp", "namespace Demo;\n\nenum Delivery\n{\n    case Noted(string note);\n}\n");
     let redundant = |analyzed| -> Vec<String> {
-        worded(analyzed, &[("src/Demo/Customer.sharp", CUSTOMER), delivery])
+        worded(analyzed, &CUSTOMER.iter().copied().chain([delivery]).collect::<Vec<_>>())
             .into_iter()
             .filter(|line| line.contains(" redundant-comparison "))
             .map(|line| line.split(" | ").next().unwrap_or_default().to_owned())
@@ -6067,21 +6089,13 @@ fn a_nullable_return_type_on_a_method_that_never_returns_null_is_an_error() {
     let sharp = "namespace Demo;\n\nclass Ledger\n{\n    private Customer customer;\n\n    public Ledger(Customer customer)\n    {\n        this.customer = customer;\n    }\n\n    public Customer? owner(bool known)\n    {\n        if (known) {\n            return this.cached();\n        }\n        return this.find(known);\n    }\n\n    private Customer? cached()\n    {\n        return this.customer;\n    }\n\n    private Customer? find(bool known)\n    {\n        if (known) {\n            return this.customer;\n        }\n        return null;\n    }\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nclass Ledger\n{\n    public function __construct(private Customer $customer)\n    {\n    }\n\n    public function owner(): ?Customer\n    {\n        return $this->cached();\n    }\n\n    private function cached(): ?Customer\n    {\n        return $this->customer;\n    }\n}\n";
 
-    assert_eq!(
-        errors(("src/Demo/Ledger.sharp", sharp), &[("src/Demo/Customer.sharp", CUSTOMER)]),
-        ["20:13 overly-wide-return-type"]
-    );
-    assert_eq!(issues(("src/Demo/Ledger.php", php), &[("src/Demo/Customer.sharp", CUSTOMER)]), Vec::<String>::new());
+    assert_eq!(errors(("src/Demo/Ledger.sharp", sharp), &CUSTOMER), ["20:13 overly-wide-return-type"]);
+    assert_eq!(issues(("src/Demo/Ledger.php", php), &CUSTOMER), Vec::<String>::new());
 
-    let help = analyze(
-        &PLUGIN_REGISTRY,
-        settings(),
-        ("src/Demo/Ledger.sharp", sharp),
-        &[("src/Demo/Customer.sharp", CUSTOMER)],
-    )
-    .into_iter()
-    .find(|issue| issue.code.as_deref() == Some("overly-wide-return-type"))
-    .and_then(|issue| issue.help);
+    let help = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Ledger.sharp", sharp), &CUSTOMER)
+        .into_iter()
+        .find(|issue| issue.code.as_deref() == Some("overly-wide-return-type"))
+        .and_then(|issue| issue.help);
     assert_eq!(help.as_deref(), Some("Remove `null` from the return type, giving `Customer`."));
 }
 
@@ -6106,24 +6120,21 @@ fn a_closed_method_drops_a_nullable_return_type_and_an_open_one_keeps_it() {
     let php = "<?php\n\nnamespace Demo;\n\nclass Source\n{\n    final public function owner(Customer $customer): ?Customer\n    {\n        return $customer;\n    }\n\n    final public function first(Customer $customer): ?Customer\n    {\n        return $customer;\n    }\n\n    public function fallback(Customer $customer): ?Customer\n    {\n        return $customer;\n    }\n}\n\nclass Archive extends Source\n{\n    #[\\Override]\n    public function fallback(Customer $customer): ?Customer\n    {\n        return $customer;\n    }\n}\n\nclass Vault extends Archive\n{\n    #[\\Override]\n    final public function fallback(Customer $customer): ?Customer\n    {\n        return $customer;\n    }\n}\n";
 
     assert_eq!(
-        each_file(errors, &sharp, &[("src/Demo/Customer.sharp", CUSTOMER)]),
+        each_file(errors, &sharp, &CUSTOMER),
         [
             vec!["5:12 overly-wide-return-type", "10:12 overly-wide-return-type"],
             vec![],
             vec!["5:27 overly-wide-return-type"],
         ]
     );
-    assert_eq!(issues(("src/Demo/Source.php", php), &[("src/Demo/Customer.sharp", CUSTOMER)]), Vec::<String>::new());
+    assert_eq!(issues(("src/Demo/Source.php", php), &CUSTOMER), Vec::<String>::new());
 }
 
 #[test]
 fn an_abstract_method_keeps_its_nullable_return_type() {
     let sharp = "namespace Demo;\n\nabstract class Source\n{\n    public abstract Customer? current();\n}\n";
 
-    assert_eq!(
-        errors(("src/Demo/Source.sharp", sharp), &[("src/Demo/Customer.sharp", CUSTOMER)]),
-        Vec::<String>::new()
-    );
+    assert_eq!(errors(("src/Demo/Source.sharp", sharp), &CUSTOMER), Vec::<String>::new());
 }
 
 /// Spec section 14.4: a nullable parameter that the method rejects on every path drops its `?`, and the caller checks.
@@ -6134,23 +6145,15 @@ fn a_nullable_parameter_the_method_rejects_on_every_path_is_an_error() {
     let php = "<?php\n\nnamespace Demo;\n\nuse RuntimeException;\n\nclass Billing\n{\n    public function notify(?Customer $customer): void\n    {\n        $c = $customer ?? throw new RuntimeException(\"none\");\n    }\n}\n";
 
     assert_eq!(
-        errors(("src/Demo/Billing.sharp", sharp), &[("src/Demo/Customer.sharp", CUSTOMER)]),
+        errors(("src/Demo/Billing.sharp", sharp), &CUSTOMER),
         ["7:24 rejected-nullable-parameter", "12:26 rejected-nullable-parameter", "39:28 rejected-nullable-parameter"]
     );
-    assert!(
-        !codes(&issues(("src/Demo/Billing.php", php), &[("src/Demo/Customer.sharp", CUSTOMER)]))
-            .contains(&"rejected-nullable-parameter")
-    );
+    assert!(!codes(&issues(("src/Demo/Billing.php", php), &CUSTOMER)).contains(&"rejected-nullable-parameter"));
 
-    let help = analyze(
-        &PLUGIN_REGISTRY,
-        settings(),
-        ("src/Demo/Billing.sharp", sharp),
-        &[("src/Demo/Customer.sharp", CUSTOMER)],
-    )
-    .into_iter()
-    .find(|issue| issue.code.as_deref() == Some("rejected-nullable-parameter"))
-    .and_then(|issue| issue.help);
+    let help = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Billing.sharp", sharp), &CUSTOMER)
+        .into_iter()
+        .find(|issue| issue.code.as_deref() == Some("rejected-nullable-parameter"))
+        .and_then(|issue| issue.help);
     assert_eq!(help.as_deref(), Some("Declare `customer` as `Customer`, and check for null where the value enters."));
 }
 
@@ -18066,13 +18069,19 @@ fn a_plain_php_class_missing_a_php_sharp_property_is_told_of_the_property() {
 #[test]
 fn a_php_class_overriding_an_erased_sharp_method_is_refused_and_a_sharp_class_is_widened() {
     let order_box = "<?php\n\nnamespace Demo;\n\n/** @extends Box<Order> */\nclass OrderBox extends Box\n{\n    public function put(Order $item): void\n    {\n    }\n}\n";
-    let sharp_box = "namespace Demo;\n\npublic class Order\n{\n}\n\npublic class Box<TItem>\n{\n    public virtual void put(TItem item)\n    {\n    }\n}\n";
+    let sharp_box = [
+        ("src/Demo/Order.sharp", "namespace Demo;\n\npublic class Order\n{\n}\n"),
+        (
+            "src/Demo/Box.sharp",
+            "namespace Demo;\n\npublic class Box<TItem>\n{\n    public virtual void put(TItem item)\n    {\n    }\n}\n",
+        ),
+    ];
     let php_box = "<?php\n\nnamespace Demo;\n\nclass Order\n{\n}\n\n/** @template TItem */\nclass Box\n{\n    /** @param TItem $item */\n    public function put(mixed $item): void\n    {\n    }\n}\n";
     let sharp_order_box = "namespace Demo;\n\npublic class OrderBox : Box<Order>\n{\n    public override void put(Order item)\n    {\n    }\n}\n";
 
     assert_eq!(explained(("src/Demo/OrderBox.php", order_box), &[("src/Demo/Box.php", php_box)]), Vec::<String>::new());
     assert_eq!(
-        explained(("src/Demo/OrderBox.php", order_box), &[("src/Demo/Box.sharp", sharp_box)]),
+        explained(("src/Demo/OrderBox.php", order_box), &sharp_box),
         [
             "8:31 incompatible-parameter-type Parameter `$item` of `Demo\\OrderBox::put()` must take at least `mixed`, the type `Demo\\Box::put()` erases it to. Write `$item` with a type that erases to `mixed`, or bound the type parameter, as in `Box<TItem : Order>`, so both sides erase to the bound.",
         ]
@@ -18190,7 +18199,11 @@ fn the_type_arguments_of_new_fix_the_type_parameters_of_the_class() {
 /// generics slice names.
 #[test]
 fn an_inherited_constructor_and_method_take_the_type_arguments_of_the_header() {
-    let tray = "namespace Demo;\n\npublic class Tray<TItem : DatabaseEntity>\n{\n    private List<TItem> items = [];\n\n    public void replace(List<TItem> items)\n    {\n        this.items = items;\n    }\n\n    public List<TItem> all() => this.items;\n}\n\npublic class OrderTray : Tray<Order>\n{\n}\n";
+    let tray = (
+        "src/Demo/Tray.sharp",
+        "namespace Demo;\n\npublic class Tray<TItem : DatabaseEntity>\n{\n    private List<TItem> items = [];\n\n    public void replace(List<TItem> items)\n    {\n        this.items = items;\n    }\n\n    public List<TItem> all() => this.items;\n}\n",
+    );
+    let order_tray = ("src/Demo/OrderTray.sharp", "namespace Demo;\n\npublic class OrderTray : Tray<Order>\n{\n}\n");
     let invoice = ("src/Demo/Invoice.sharp", "namespace Demo;\n\npublic class Invoice : DatabaseEntity\n{\n}\n");
     let sharp = "namespace Demo;\n\npublic class Report\n{\n    public static OrderPage paged(List<Order> orders) => new OrderPage(orders);\n\n    public static OrderList<Order> listed(List<Order> orders) => new OrderList<Order>(orders);\n\n    public static OrderPage invoicePaged(List<Invoice> invoices) => new OrderPage(invoices);\n\n    public static OrderList<Order> invoiceListed(List<Invoice> invoices) => new OrderList<Order>(invoices);\n\n    public static void ordered(OrderTray tray, List<Order> orders)\n    {\n        tray.replace(orders);\n    }\n\n    public static void invoiced(OrderTray tray, List<Invoice> invoices)\n    {\n        tray.replace(invoices);\n    }\n}\n";
     let constructed = "Invalid argument type for argument #1 of `PaginatedList.__construct`: expected `List<Order>`, but found `List<Invoice>`.";
@@ -18198,7 +18211,7 @@ fn an_inherited_constructor_and_method_take_the_type_arguments_of_the_header() {
     assert_eq!(
         messages(
             ("src/Demo/Report.sharp", sharp),
-            &PAGING.iter().copied().chain([("src/Demo/Tray.sharp", tray), invoice]).collect::<Vec<_>>()
+            &PAGING.iter().copied().chain([tray, order_tray, invoice]).collect::<Vec<_>>()
         ),
         [
             constructed,
@@ -19263,11 +19276,18 @@ fn a_type_names_the_type_arguments_of_a_plain_php_generic_class() {
 /// any `List`'s is.
 #[test]
 fn a_static_member_of_a_class_with_type_arguments_has_its_type_arguments_for_its_type_parameters() {
-    let counter = "namespace Demo;\n\npublic class Order\n{\n}\n\npublic class Customer\n{\n}\n\npublic class Counter<TItem>\n{\n    public static List<TItem> items { get; set; } = [];\n\n    public static TItem? latest { get; set; }\n\n    public static void track(TItem item)\n    {\n        Counter<TItem>.items.add(item);\n        Counter<TItem>.latest = item;\n    }\n\n    public static TItem? last() => Counter<TItem>.items.last();\n}\n";
+    let counter = [
+        ("src/Demo/Order.sharp", "namespace Demo;\n\npublic class Order\n{\n}\n"),
+        ("src/Demo/Customer.sharp", "namespace Demo;\n\npublic class Customer\n{\n}\n"),
+        (
+            "src/Demo/Counter.sharp",
+            "namespace Demo;\n\npublic class Counter<TItem>\n{\n    public static List<TItem> items { get; set; } = [];\n\n    public static TItem? latest { get; set; } = null;\n\n    public static void track(TItem item)\n    {\n        Counter<TItem>.items.add(item);\n        Counter<TItem>.latest = item;\n    }\n\n    public static TItem? last() => Counter<TItem>.items.last();\n}\n",
+        ),
+    ];
     let usage = "namespace Demo;\n\npublic class Report\n{\n    public static void run()\n    {\n        Counter<Order>.items.add(new Order());\n        Counter<Order>.items.add(new Customer());\n        Counter<Order>.latest = new Customer();\n        Counter<Order>.track(new Customer());\n        Counter<List<Order>>.items.add([new Order()]);\n        Counter<List<Order>>.items.add(new Order());\n        Counter<Order>.items[0] = new Order();\n    }\n\n    public static Order? latest() => Counter<Order>.latest;\n\n    public static Customer? wrong() => Counter<Order>.last();\n}\n";
 
     assert_eq!(
-        messages(("src/Demo/Report.sharp", usage), &[("src/Demo/Counter.sharp", counter)]),
+        messages(("src/Demo/Report.sharp", usage), &counter),
         [
             "Invalid argument type for argument #1 of `List<Order>.add`: expected `Order`, but found `Customer`.",
             "Invalid property assignment value",
@@ -20422,13 +20442,15 @@ fn a_php_template_key_bounded_by_a_backed_enum_keeps_upstreams_key_type() {
 /// PHP twin catches the class alone, so its variable has the class.
 #[test]
 fn a_catch_variable_of_a_generic_class_has_its_type_arguments() {
-    let failures =
-        "namespace Demo;\n\nimport RuntimeException;\n\npublic class Failure<TItem> : RuntimeException\n{\n}\n";
+    let failure = (
+        "src/Demo/Failure.sharp",
+        "namespace Demo;\n\nimport RuntimeException;\n\npublic class Failure<TItem> : RuntimeException\n{\n}\n",
+    );
     let sharp = "namespace Demo;\n\nimport Exception;\nimport LogicException;\n\npublic class Report\n{\n    public static int run(int extra)\n    {\n        try {\n            return extra;\n        } catch (Failure<int> numbers) {\n            return numbers;\n        } catch (Failure<string> texts) {\n            return texts;\n        } catch (LogicException | Failure<bool> either) {\n            return either;\n        } catch (Exception failure) {\n            return failure;\n        }\n    }\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nuse Exception;\n\nclass Report\n{\n    public static function run(int $extra): int\n    {\n        try {\n            return $extra;\n        } catch (Failure $numbers) {\n            return $numbers;\n        } catch (Exception $failure) {\n            return $failure;\n        }\n    }\n}\n";
 
     assert_eq!(
-        messages(("src/Demo/Report.sharp", sharp), &[("src/Demo/Failures.sharp", failures)]),
+        messages(("src/Demo/Report.sharp", sharp), &[failure]),
         [
             "Invalid return type for method `Report.run`: expected `int`, but found `Failure<int>`.",
             "Invalid return type for method `Report.run`: expected `int`, but found `Failure<string>`.",
@@ -20437,7 +20459,7 @@ fn a_catch_variable_of_a_generic_class_has_its_type_arguments() {
         ]
     );
     assert_eq!(
-        messages(("src/Demo/Report.php", php), &[("src/Demo/Failures.sharp", failures)]),
+        messages(("src/Demo/Report.php", php), &[failure]),
         [
             "Invalid return type for function `Demo\\Report::run`: expected `int`, but found `Demo\\Failure<mixed>`.",
             "Invalid return type for function `Demo\\Report::run`: expected `int`, but found `Exception`.",
@@ -20464,13 +20486,16 @@ fn a_catch_clause_of_a_type_parameter_catches_what_its_bound_holds() {
 /// without type arguments, and `typeof(Box)` is a `Class<Box>`. The plain PHP twin keeps Mago's issues.
 #[test]
 fn a_class_type_names_a_generic_class_without_its_type_arguments() {
-    let classes = "namespace Demo;\n\npublic class Box<TItem>\n{\n    public TItem? first() => null;\n}\n";
+    let r#box = (
+        "src/Demo/Box.sharp",
+        "namespace Demo;\n\npublic class Box<TItem>\n{\n    public TItem? first() => null;\n}\n",
+    );
     let sharp = "namespace Demo;\n\npublic class Report\n{\n    private Class<Box> kind = typeof(Box);\n\n    public Class<Box> kept() => this.kind;\n\n    public static int keep(int number) => number;\n\n    public static int counted() => Report.keep(typeof(Box));\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    /** @var class-string<Box> */\n    private string $kind = Box::class;\n\n    /** @return class-string<Box> */\n    public function kept(): string\n    {\n        return $this->kind;\n    }\n}\n";
 
-    assert_eq!(explained(("src/Demo/Report.php", php), &[("src/Demo/Classes.sharp", classes)]), Vec::<String>::new());
+    assert_eq!(explained(("src/Demo/Report.php", php), &[r#box]), Vec::<String>::new());
     assert_eq!(
-        explained(("src/Demo/Report.sharp", sharp), &[("src/Demo/Classes.sharp", classes)]),
+        explained(("src/Demo/Report.sharp", sharp), &[r#box]),
         [
             "11:48 invalid-argument Invalid argument type for argument #1 of `Report.keep`: expected `int`, but found `Class<Box>`. Change the argument value to match `int`, or update the parameter's type declaration."
         ]
@@ -20580,9 +20605,16 @@ const CLASS_MEMBERS: (&str, &str) = (
 /// shows the type the call gives.
 #[test]
 fn a_member_of_class_wins_over_a_static_of_the_held_class() {
-    let classes = "namespace Demo;\n\nimport Attribute;\n\n[Attribute]\npublic class Listen\n{\n    public Listen(public string topic { get; }) { }\n}\n\n[Listen(\"orders\")]\npublic class Order\n{\n    public static string defaultTag() => \"order\";\n}\n";
+    let listen = (
+        "src/Demo/Listen.sharp",
+        "namespace Demo;\n\nimport Attribute;\n\n[Attribute]\npublic class Listen\n{\n    public Listen(public string topic { get; }) { }\n}\n",
+    );
+    let order = (
+        "src/Demo/Order.sharp",
+        "namespace Demo;\n\n[Listen(\"orders\")]\npublic class Order\n{\n    public static string defaultTag() => \"order\";\n}\n",
+    );
     let sharp = "namespace Demo;\n\npublic class Report\n{\n    public int written() => typeof(Order).attributes<Listen>();\n\n    public int typed(Class<Order> type) => type.attributes<Listen>();\n\n    public int inferred()\n    {\n        const type = typeof(Order);\n        return type.attributes<Listen>();\n    }\n\n    public int tag()\n    {\n        const type = typeof(Order);\n        return type.defaultTag();\n    }\n\n    public Any? text(string name) => name.attributes<Listen>();\n}\n";
-    let others = [("src/Demo/Classes.sharp", classes), CLASS_MEMBERS];
+    let others = [listen, order, CLASS_MEMBERS];
 
     assert_eq!(issues(CLASS_MEMBERS, &[]), Vec::<String>::new());
     assert_eq!(
@@ -20599,7 +20631,7 @@ fn a_member_of_class_wins_over_a_static_of_the_held_class() {
 
 /// A class value is one by its type, whatever expression gives it, spec section 25: `Class.of(order)`, a field and a
 /// nullable field through `?.` reach the statics of the class they hold as `typeof(Order)` and a local do, a static
-/// field is read and written, and a constant read. `Class`'s own members are the members whose receiver is a class
+/// property is read and written, and a constant read. `Class`'s own members are the members whose receiver is a class
 /// value, so an imported `string` extension named `attributes`, which a class value would fit, never reaches one, and
 /// `Class`'s `attributes` wins over a plain PHP class's static `attributes`. Each wrong return shows the type the access
 /// gives.
@@ -20609,7 +20641,12 @@ fn a_class_value_reaches_class_members_and_the_statics_of_its_class_whatever_exp
         "src/Demo/Legacy.php",
         "<?php\n\nnamespace Demo;\n\nclass Legacy\n{\n    public static function attributes(): string\n    {\n        return 'legacy';\n    }\n}\n",
     );
-    let classes = "namespace Demo;\n\nimport Attribute;\n\n[Attribute]\npublic class Listen\n{\n}\n\npublic class Order\n{\n    public const int LIMIT = 3;\n\n    public static int count = 0;\n\n    public static string defaultTag() => \"order\";\n}\n";
+    let listen =
+        ("src/Demo/Listen.sharp", "namespace Demo;\n\nimport Attribute;\n\n[Attribute]\npublic class Listen\n{\n}\n");
+    let order = (
+        "src/Demo/Order.sharp",
+        "namespace Demo;\n\npublic class Order\n{\n    public const int LIMIT = 3;\n\n    public static int count { get; set; } = 0;\n\n    public static string defaultTag() => \"order\";\n}\n",
+    );
     let text = (
         "src/Demo/Lists/TextExtensions.sharp",
         "namespace Demo.Lists;\n\npublic static class TextExtensions\n{\n    extension(string text)\n    {\n        public List<string> attributes<TAttribute>() => [text];\n    }\n}\n",
@@ -20617,7 +20654,7 @@ fn a_class_value_reaches_class_members_and_the_statics_of_its_class_whatever_exp
     let sharp = "namespace Demo;\n\nimport Demo.Lists.TextExtensions;\n\npublic class Report\n{\n    private Class<Order> kept = typeof(Order);\n\n    private Class<Order>? maybe = null;\n\n    public static string direct(Order order) => Class.of(order).defaultTag();\n\n    public string viaField() => this.kept.defaultTag();\n\n    public string? viaNullableField() => this.maybe?.defaultTag();\n\n    public int counted()\n    {\n        this.kept.count = this.kept.count + 1;\n        return this.kept.count;\n    }\n\n    public static int limit(Order order) => Class.of(order).LIMIT;\n\n    public static bool shadowed(Class<Order> type) => type.attributes<Listen>();\n\n    public static bool legacy() => typeof(Legacy).attributes<Listen>();\n}\n";
 
     assert_eq!(
-        messages(("src/Demo/Report.sharp", sharp), &[("src/Demo/Classes.sharp", classes), CLASS_MEMBERS, text, legacy]),
+        messages(("src/Demo/Report.sharp", sharp), &[listen, order, CLASS_MEMBERS, text, legacy]),
         [
             "Invalid return type for method `Report.shadowed`: expected `bool`, but found `List<Listen>`.",
             "Invalid return type for method `Report.legacy`: expected `bool`, but found `List<Listen>`.",
@@ -20632,11 +20669,17 @@ fn a_class_value_reaches_class_members_and_the_statics_of_its_class_whatever_exp
 #[test]
 fn an_object_bound_takes_any_object_and_nothing_else() {
     let legacy = ("src/Demo/Legacy.php", "<?php\n\nnamespace Demo;\n\nclass Legacy\n{\n}\n");
-    let classes = "namespace Demo;\n\nimport Attribute;\n\n[Attribute]\npublic class Listen\n{\n}\n\npublic interface Shareable\n{\n}\n\npublic class Order : Shareable\n{\n}\n";
+    let declared = [
+        ("src/Demo/Listen.sharp", "namespace Demo;\n\nimport Attribute;\n\n[Attribute]\npublic class Listen\n{\n}\n"),
+        ("src/Demo/Shareable.sharp", "namespace Demo;\n\npublic interface Shareable\n{\n}\n"),
+        ("src/Demo/Order.sharp", "namespace Demo;\n\npublic class Order : Shareable\n{\n}\n"),
+        CLASS_MEMBERS,
+        legacy,
+    ];
     let sharp = "namespace Demo;\n\npublic class Report\n{\n    public static TValue keep<TValue : Object>(TValue value) => value;\n\n    public static void run(Order order, Shareable shared, Legacy legacy)\n    {\n        Report.keep(order);\n        Report.keep(shared);\n        Report.keep(legacy);\n        Report.keep(1);\n        Report.keep<int>(1);\n    }\n\n    public static Any listens() => typeof(Order).attributes<Listen>();\n\n    public static Any numbers() => typeof(Order).attributes<int>();\n}\n";
 
     assert_eq!(
-        worded(("src/Demo/Report.sharp", sharp), &[("src/Demo/Classes.sharp", classes), CLASS_MEMBERS, legacy]),
+        worded(("src/Demo/Report.sharp", sharp), &declared),
         [
             "12:21 template-constraint-violation `int` does not satisfy the bound `Object` of type parameter `TValue`. | This argument has type `int`, which is not compatible with the required bound `Object`. | Type parameter `TValue` is bounded by `Object`. | Ensure the argument's type satisfies the bound.",
             "13:20 template-constraint-violation Type argument `int` does not satisfy `Report.keep<TValue>`'s `TValue`. | `int` is supplied for `TValue` here... | ...but `TValue` is bounded by `Object`. | Supply a type contained by `Object`.",
@@ -20852,17 +20895,18 @@ fn a_value_that_may_be_one_of_two_lists_is_checked_against_an_equatable_bound_wi
 /// `Class<Box<Invoice>>` share the plain class name, so it does not satisfy `Equatable`, whose values key a `Map`.
 #[test]
 fn a_class_value_with_type_arguments_does_not_satisfy_equatable() {
-    let boxes = (
-        "src/Demo/Box.sharp",
-        "namespace Demo;\n\npublic class Box<TItem>\n{\n}\n\npublic class Order : DatabaseEntity\n{\n}\n\npublic class Invoice : DatabaseEntity\n{\n}\n",
-    );
+    let boxes = [
+        ("src/Demo/Box.sharp", "namespace Demo;\n\npublic class Box<TItem>\n{\n}\n"),
+        ("src/Demo/Order.sharp", "namespace Demo;\n\npublic class Order : DatabaseEntity\n{\n}\n"),
+        ("src/Demo/Invoice.sharp", "namespace Demo;\n\npublic class Invoice : DatabaseEntity\n{\n}\n"),
+    ];
     let sharp = "namespace Demo;\n\npublic class Checks\n{\n    public static int keyed() => Generic.keys([typeof(Box<Order>), typeof(Box<Invoice>)]);\n\n    public static bool same() => Generic.same(typeof(Box<Order>), typeof(Box<Invoice>));\n\n    public static bool compared(Class<Box<Order>> a, Class<Box<Order>> b) => a == b;\n\n    public static bool plain(Class<Order> a, Class<Order> b) => Generic.same(a, b);\n\n    public static bool held<TItem>(Class<TItem> a, Class<TItem> b) => Generic.same(a, b);\n}\n";
     let refusal = "template-constraint-violation `Class<Box<Invoice>>|Class<Box<Order>>` does not satisfy the bound `Equatable` of type parameter `T`: a class value with type arguments can't key a `Map`.";
 
     // A class value without type arguments keys no `Map` either, spec section 12, so it is outside the bound too, and
     // so is the class value of a type parameter.
     assert_eq!(
-        equatable_written(sharp, &[boxes]),
+        equatable_written(sharp, &boxes),
         [
             format!("5:34 {refusal}"),
             format!("7:34 {refusal}"),
@@ -21107,11 +21151,17 @@ fn new_through_a_class_value_gives_the_object_the_type_arguments_it_names_or_the
 /// wrong return shows the type the expression has.
 #[test]
 fn a_class_value_with_type_arguments_carries_them_to_its_static_members() {
-    let classes = "namespace Demo;\n\npublic class Order\n{\n}\n\npublic class Tally<TItem>\n{\n    public static List<TItem> items { get; set; } = [];\n\n    public static TItem? last() => null;\n}\n";
+    let classes = [
+        ("src/Demo/Order.sharp", "namespace Demo;\n\npublic class Order\n{\n}\n"),
+        (
+            "src/Demo/Tally.sharp",
+            "namespace Demo;\n\npublic class Tally<TItem>\n{\n    public static List<TItem> items { get; set; } = [];\n\n    public static TItem? last() => null;\n}\n",
+        ),
+    ];
     let sharp = "namespace Demo;\n\npublic class Report\n{\n    public Class<Tally<int>> value() => typeof(Tally<Order>);\n\n    public List<int> items()\n    {\n        Class<Tally<Order>> type = typeof(Tally<Order>);\n        return type.items;\n    }\n\n    public int? last()\n    {\n        Class<Tally<Order>> type = typeof(Tally<Order>);\n        return type.last();\n    }\n}\n";
 
     assert_eq!(
-        worded(("src/Demo/Report.sharp", sharp), &[("src/Demo/Classes.sharp", classes)]),
+        worded(("src/Demo/Report.sharp", sharp), &classes),
         [
             "5:41 invalid-return-statement Invalid return type for method `Report.value`: expected `Class<Tally<int>>`, but found `Class<Tally<Order>>`. | This has type `Class<Tally<Order>>` | The type `Class<Tally<Order>>` returned here is not compatible with the declared return type `Class<Tally<int>>`. | Change the return value to match `Class<Tally<int>>`, or update the method's return type declaration.",
             "10:16 invalid-return-statement Invalid return type for method `Report.items`: expected `List<int>`, but found `List<Order>`. | This has type `List<Order>` | The type `List<Order>` returned here is not compatible with the declared return type `List<int>`. | Change the return value to match `List<int>`, or update the method's return type declaration.",
@@ -21125,13 +21175,19 @@ fn a_class_value_with_type_arguments_carries_them_to_its_static_members() {
 /// arguments, and so does a type written as a type argument. A class value is still a `Map`'s value, as in section 25.
 #[test]
 fn a_class_value_keys_no_map_written_as_a_type_a_literal_or_inferred() {
-    let classes = "namespace Demo;\n\npublic class Order\n{\n    public Order(public int id { get; }) { }\n\n    public Class<Order> kind() => typeof(Order);\n}\n\npublic class Box<TItem>\n{\n}\n";
+    let classes = [
+        (
+            "src/Demo/Order.sharp",
+            "namespace Demo;\n\npublic class Order\n{\n    public Order(public int id { get; }) { }\n\n    public Class<Order> kind() => typeof(Order);\n}\n",
+        ),
+        ("src/Demo/Box.sharp", "namespace Demo;\n\npublic class Box<TItem>\n{\n}\n"),
+    ];
     let sharp = "namespace Demo;\n\npublic class Keys\n{\n    public Map<Class<Order>, int> typed() => [:];\n\n    public Map<Class<Box<Order>>, int> typedGeneric() => [:];\n\n    public Any literal() => [typeof(Order): 1];\n\n    public Any literalGeneric() => [typeof(Box<Order>): 1];\n\n    public Any grouped(List<Order> orders) => orders.groupBy((Order order) => order.kind());\n\n    public Any associated(List<Order> orders) => orders.associateBy((Order order) => order.kind());\n\n    public Any made() => new Box<Map<Class<Order>, int>>();\n\n    public Map<string, Class<Order>> values() => [\"order\": typeof(Order)];\n\n    public Map<int, List<Order>> byId(List<Order> orders) => orders.groupBy((Order order) => order.id);\n}\n";
     let rule = "A `Map`'s key is anything with `==` and `hash()`: an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `operator ==`";
     let help = "Key the `Map` by an `int`, a `float`, a `string`, a `bool`, `null`, an enum, a struct, a `List`, `Set` or `Map` of them, or a class that declares `public static bool operator ==` with `public int hash()`.";
 
     assert_eq!(
-        worded(("src/Demo/Keys.sharp", sharp), &[("src/Demo/Classes.sharp", classes)]),
+        worded(("src/Demo/Keys.sharp", sharp), &classes),
         [
             format!(
                 "5:12 template-constraint-violation {rule}, and `Class<Order>` is none of them. | `Class<Order>` keys this `Map`. | {help}"
@@ -21188,11 +21244,21 @@ fn a_type_written_as_a_type_argument_is_checked_as_a_type() {
 /// changes that field. Reading the field twice reads it twice.
 #[test]
 fn a_write_through_a_class_value_writes_the_static_field_of_the_class_it_holds() {
-    let classes = "namespace Demo;\n\npublic class Order\n{\n}\n\npublic class Plain\n{\n    public static int count { get; set; } = 0;\n}\n\npublic class Tally<TItem>\n{\n    public static int count { get; set; } = 0;\n\n    public static List<TItem> items { get; set; } = [];\n}\n";
+    let classes = [
+        ("src/Demo/Order.sharp", "namespace Demo;\n\npublic class Order\n{\n}\n"),
+        (
+            "src/Demo/Plain.sharp",
+            "namespace Demo;\n\npublic class Plain\n{\n    public static int count { get; set; } = 0;\n}\n",
+        ),
+        (
+            "src/Demo/Tally.sharp",
+            "namespace Demo;\n\npublic class Tally<TItem>\n{\n    public static int count { get; set; } = 0;\n\n    public static List<TItem> items { get; set; } = [];\n}\n",
+        ),
+    ];
     let sharp = "namespace Demo;\n\npublic class Writes\n{\n    public int plain()\n    {\n        Class<Plain> type = typeof(Plain);\n        type.count = 1;\n        type.count += 2;\n        type.count++;\n        return type.count + type.count;\n    }\n\n    public int generic(Order order)\n    {\n        Class<Tally<Order>> type = typeof(Tally<Order>);\n        type.count = 5;\n        type.items.add(order);\n        return type.count + type.items.count();\n    }\n\n    public void wrong()\n    {\n        Class<Plain> plain = typeof(Plain);\n        plain.count = \"one\";\n        Class<Tally<Order>> type = typeof(Tally<Order>);\n        type.items = [1];\n    }\n}\n";
 
     assert_eq!(
-        issues(("src/Demo/Writes.sharp", sharp), &[("src/Demo/Classes.sharp", classes)]),
+        issues(("src/Demo/Writes.sharp", sharp), &classes),
         ["25:9 invalid-property-assignment-value", "27:9 invalid-property-assignment-value"]
     );
 }
@@ -21452,7 +21518,13 @@ fn an_override_of_a_php_callable_parameter_must_take_a_callable() {
 /// `static` keeps Mago's issues.
 #[test]
 fn a_plain_php_caller_of_a_method_returning_self_gets_the_receivers_type() {
-    let sharp = "namespace Demo;\n\npublic class Box<TItem>\n{\n    public Self same() => this;\n}\n\npublic class Pair<TFirst, TSecond> : Box<int>\n{\n    public TFirst? first() => null;\n\n    public TSecond? second() => null;\n}\n";
+    let sharp = [
+        ("src/Demo/Box.sharp", "namespace Demo;\n\npublic class Box<TItem>\n{\n    public Self same() => this;\n}\n"),
+        (
+            "src/Demo/Pair.sharp",
+            "namespace Demo;\n\npublic class Pair<TFirst, TSecond> : Box<int>\n{\n    public TFirst? first() => null;\n\n    public TSecond? second() => null;\n}\n",
+        ),
+    ];
     let php_box = "<?php\n\nnamespace Demo;\n\n/** @template TItem */\nclass Box\n{\n    public function same(): static\n    {\n        return $this;\n    }\n}\n\n/**\n * @template TFirst\n * @template TSecond\n * @extends Box<int>\n */\nclass Pair extends Box\n{\n    /** @return TFirst|null */\n    public function first(): mixed\n    {\n        return null;\n    }\n\n    /** @return TSecond|null */\n    public function second(): mixed\n    {\n        return null;\n    }\n}\n";
     let caller = "<?php\n\nnamespace Demo;\n\nfinal class Caller\n{\n    /**\n     * @param Pair<int, string> $pair\n     * @return Pair<int, string>\n     */\n    public function run(Pair $pair): Pair\n    {\n        return $pair->same();\n    }\n}\n";
 
@@ -21462,7 +21534,7 @@ fn a_plain_php_caller_of_a_method_returning_self_gets_the_receivers_type() {
             "13:16 less-specific-nested-return-statement Returned type `Demo\\Pair<mixed, mixed>&static` is less specific than the declared return type `Demo\\Pair<int, string>` for function `Demo\\Caller::run` due to nested 'mixed'. Ensure the structure returned by `Demo\\Caller::run` strictly adheres to the types specified in the `Demo\\Pair<int, string>` return type declaration."
         ]
     );
-    assert_eq!(explained(("src/Demo/Caller.php", caller), &[("src/Demo/Box.sharp", sharp)]), Vec::<String>::new());
+    assert_eq!(explained(("src/Demo/Caller.php", caller), &sharp), Vec::<String>::new());
 }
 
 /// Plain PHP reads a template key beside a backed enum as upstream Mago does: the container's key stays as written,
@@ -21788,7 +21860,13 @@ fn self_in_a_php_trait_is_the_class_that_uses_it() {
 #[test]
 fn a_mixin_method_called_from_sharp_has_the_type_upstream_gives_it() {
     let builder = "<?php\n\nnamespace Lib;\n\nclass Order\n{\n}\n\n/** @template TModel */\nclass Builder\n{\n    /** @return TModel|null */\n    public function first(): mixed\n    {\n        return null;\n    }\n\n    /** @return static */\n    public function latest(): static\n    {\n        return $this;\n    }\n}\n\n/** @mixin Builder<Order> */\nclass Repository\n{\n    /** @param list<mixed> $arguments */\n    public function __call(string $name, array $arguments): mixed\n    {\n        return null;\n    }\n}\n";
-    let sharp_builder = "namespace Lib;\n\npublic class Order\n{\n}\n\npublic class Builder<TModel>\n{\n    public TModel? first() => null;\n\n    public Self latest() => this;\n}\n";
+    let sharp_builder = [
+        ("src/Lib/Order.sharp", "namespace Lib;\n\npublic class Order\n{\n}\n"),
+        (
+            "src/Lib/Builder.sharp",
+            "namespace Lib;\n\npublic class Builder<TModel>\n{\n    public TModel? first() => null;\n\n    public Self latest() => this;\n}\n",
+        ),
+    ];
     let repository = "<?php\n\nnamespace Lib;\n\n/** @mixin Builder<Order> */\nclass Repository\n{\n    /** @param list<mixed> $arguments */\n    public function __call(string $name, array $arguments): mixed\n    {\n        return null;\n    }\n}\n";
     let sharp = "namespace Demo;\n\nimport Lib.Order;\nimport Lib.Repository;\n\npublic class Report\n{\n    public static Order? first(Repository repository) => repository.first();\n\n    public static Repository latest(Repository repository) => repository.latest();\n\n    public static Repository latestOf<TRepository : Repository>(TRepository repository) => repository.latest();\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nuse Lib\\Order;\nuse Lib\\Repository;\n\nclass Report\n{\n    public static function first(Repository $repository): ?Order\n    {\n        return $repository->first();\n    }\n\n    public static function latest(Repository $repository): Repository\n    {\n        return $repository->latest();\n    }\n}\n";
@@ -21798,7 +21876,7 @@ fn a_mixin_method_called_from_sharp_has_the_type_upstream_gives_it() {
     assert_eq!(
         explained(
             ("src/Demo/Report.php", php),
-            &[("src/Lib/Builder.sharp", sharp_builder), ("src/Lib/Repository.php", repository)]
+            &[sharp_builder[0], sharp_builder[1], ("src/Lib/Repository.php", repository)]
         ),
         Vec::<String>::new()
     );
@@ -24412,6 +24490,7 @@ fn summarized(files: &[(&'static str, &'static str)]) -> (CodebaseMetadata, Vec<
         assert!(!program.has_errors(), "{} did not parse: {:?}", String::from_utf8_lossy(&file.name), program.errors);
 
         let names = NameResolver::new(&arena).resolve(program);
+        assert_compiles(file, program, &names);
         metadata.extend(scan_program(&arena, file, program, &names, settings().version));
         programs.push((file, program, names));
     }
@@ -26606,7 +26685,7 @@ fn a_getter_with_an_effect_compiles_and_a_law_reading_it_is_refused() {
 fn a_write_of_a_property_carries_its_observers_effects_once_the_object_is_built() {
     let quiet = (
         "app/Shop/Tag.sharp",
-        "namespace App.Shop;\n\npublic class Tag\n{\n    public string name { get; set; didSet => this.name.length; } = \"\";\n\n    public Tag()\n    {\n        this.name = \"new\";\n    }\n\n    public static Tag renamed()\n    {\n        const tag = new Tag();\n        tag.name = \"old\";\n        return tag;\n    }\n}\n",
+        "namespace App.Shop;\n\npublic class Tag\n{\n    public string name { get; set; didSet => field.length; } = \"\";\n\n    public Tag()\n    {\n        this.name = \"new\";\n    }\n\n    public static Tag renamed()\n    {\n        const tag = new Tag();\n        tag.name = \"old\";\n        return tag;\n    }\n}\n",
     );
     let timed = (
         "app/Shop/Tag.sharp",
@@ -26655,7 +26734,7 @@ fn a_static_property_s_reads_and_writes_carry_its_accessors_effects() {
 fn a_use_of_a_class_s_statics_has_the_effects_of_their_initial_values() {
     let started = (
         "app/Shop/Started.sharp",
-        "namespace App.Shop;\n\nimport Acme.Chrono;\n\npublic class Started\n{\n    public static int at { get; } = Chrono.now();\n\n    public static int size { get; } = 3;\n\n    public static int doubled() => size * 2;\n}\n",
+        "namespace App.Shop;\n\nimport Acme.Chrono;\n\npublic class Started\n{\n    public static int at { get; } = Chrono.now();\n\n    public static int size { get; } = 3;\n\n    public static int doubled() => Started.size * 2;\n}\n",
     );
     let fixed = (
         "app/Shop/Fixed.sharp",
@@ -26752,16 +26831,32 @@ fn a_generic_behavior_takes_its_type_arguments() {
 /// name that is no class is the error any unknown class is.
 #[test]
 fn a_behavior_implements_behavior_for_the_property_s_type() {
-    let behavior = BEHAVIOR_LIBRARY;
-    let behaviors = (
-        "src/Demo/Behaviors.sharp",
-        "namespace Demo;\n\nimport Lib.Words;\nimport Sharp.Behavior;\n\npublic class Trimmed : Behavior<string>\n{\n    public string get(string value) => value;\n\n    public string set(string value) => Words.trim(value);\n}\n\npublic abstract class Base : Behavior<string>\n{\n    public string get(string value) => value;\n\n    public abstract string set(string value);\n}\n\npublic class Logged : Behavior<string>\n{\n    public Logged(private string prefix)\n    {\n    }\n\n    public string get(string value) => value;\n\n    public string set(string value) => this.prefix + value;\n}\n\npublic class Plain\n{\n}\n\npublic class Hidden : Behavior<string>\n{\n    private Hidden()\n    {\n    }\n\n    public string get(string value) => value;\n\n    public string set(string value) => value;\n}\n",
-    );
+    let behaviors = [
+        BEHAVIOR_LIBRARY,
+        (
+            "src/Demo/Trimmed.sharp",
+            "namespace Demo;\n\nimport Lib.Words;\nimport Sharp.Behavior;\n\npublic class Trimmed : Behavior<string>\n{\n    public string get(string value) => value;\n\n    public string set(string value) => Words.trim(value);\n}\n",
+        ),
+        (
+            "src/Demo/Base.sharp",
+            "namespace Demo;\n\nimport Sharp.Behavior;\n\npublic abstract class Base : Behavior<string>\n{\n    public string get(string value) => value;\n\n    public abstract string set(string value);\n}\n",
+        ),
+        (
+            "src/Demo/Logged.sharp",
+            "namespace Demo;\n\nimport Sharp.Behavior;\n\npublic class Logged : Behavior<string>\n{\n    public Logged(private string prefix)\n    {\n    }\n\n    public string get(string value) => value;\n\n    public string set(string value) => this.prefix + value;\n}\n",
+        ),
+        ("src/Demo/Plain.sharp", "namespace Demo;\n\npublic class Plain\n{\n}\n"),
+        (
+            "src/Demo/Hidden.sharp",
+            "namespace Demo;\n\nimport Sharp.Behavior;\n\npublic class Hidden : Behavior<string>\n{\n    private Hidden()\n    {\n    }\n\n    public string get(string value) => value;\n\n    public string set(string value) => value;\n}\n",
+        ),
+        WORDS,
+    ];
     let order = "namespace Demo;\n\nimport Sharp.Behavior;\n\npublic class Order\n{\n    public string name { get; set; } via Trimmed = \"\";\n    public int count { get; set; } via Trimmed = 0;\n    public string code { get; set; } via Missing = \"\";\n    public string kind { get; set; } via Behavior = \"\";\n    public string base { get; set; } via Base = \"\";\n    public string log { get; set; } via Logged = \"\";\n    public string note { get; set; } via Plain = \"\";\n    public string word { get; set; } via Hidden = \"\";\n}\n";
     let note = "A behavior runs the property's `get` and `set`: it is a class that implements `Behavior` for the property's type, and PHP# creates one for each object with no arguments.";
 
     assert_eq!(
-        worded(("src/Demo/Order.sharp", order), &[behavior, behaviors, WORDS]),
+        worded(("src/Demo/Order.sharp", order), &behaviors),
         [
             format!(
                 "8:40 invalid-property-behavior `Trimmed` is a `Behavior<string>`, and `count` is an `int`. | Named here. | {note} | Name a behavior that implements `Behavior<int>`, as `count` is an `int`."
@@ -26793,7 +26888,7 @@ fn a_behavior_implements_behavior_for_the_property_s_type() {
     );
     let promoted = "namespace Demo;\n\nimport Sharp.Behavior;\n\npublic class Order\n{\n    public Order(\n        public string name { get; set; } via Trimmed, Shouted<int> = \"\",\n        public int count { get; set; } via Trimmed = 0,\n        public string code { get; set; } via Missing = \"\",\n        public string kind { get; set; } via Behavior = \"\",\n    ) { }\n}\n";
     assert_eq!(
-        worded(("src/Demo/Order.sharp", promoted), &[behavior, behaviors, shouted]),
+        worded(("src/Demo/Order.sharp", promoted), &behaviors.iter().copied().chain([shouted]).collect::<Vec<_>>()),
         [
             format!(
                 "9:44 invalid-property-behavior `Trimmed` is a `Behavior<string>`, and `count` is an `int`. | Named here. | {note} | Name a behavior that implements `Behavior<int>`, as `count` is an `int`."
@@ -26807,12 +26902,12 @@ fn a_behavior_implements_behavior_for_the_property_s_type() {
 
     // An untyped property is the parser's error, so its behaviors have no type to be checked against.
     let untyped = "namespace Demo;\n\npublic class Order\n{\n    public name { get; set; } via Trimmed = \"\";\n}\n";
-    assert_eq!(issues(("src/Demo/Order.sharp", untyped), &[behavior, behaviors]), ["5:12 parse"]);
+    assert_eq!(issues(("src/Demo/Order.sharp", untyped), &behaviors), ["5:12 parse"]);
 
     // A behavior that names no class is semantics' error, so the analyzer checks nothing more of it.
     let no_class =
         "namespace Demo;\n\npublic class Order\n{\n    public string name { get; set; } via string = \"\";\n}\n";
-    assert_eq!(issues(("src/Demo/Order.sharp", no_class), &[behavior, behaviors]), ["5:42 semantics"]);
+    assert_eq!(issues(("src/Demo/Order.sharp", no_class), &behaviors), ["5:42 semantics"]);
 }
 
 /// Spec section 6.2: an observer sees `value`, the written value, and `field`, the stored one, each of
@@ -27091,7 +27186,7 @@ fn environment_require_is_called_on_an_environment_object() {
 fn a_getter_reaching_through_a_foreign_object_has_the_effect_of_its_class() {
     let payments = (
         "app/Billing/Payments.sharp",
-        "namespace App.Billing;\n\npublic foreign class Payments\n{\n    public int fee = 30;\n\n    public int charge(int cents) => cents;\n}\n",
+        "namespace App.Billing;\n\npublic foreign class Payments\n{\n    public int fee { get; } = 30;\n\n    public int charge(int cents) => cents;\n}\n",
     );
     let field = (
         "app/Shop/Checkout.sharp",
@@ -27104,10 +27199,6 @@ fn a_getter_reaching_through_a_foreign_object_has_the_effect_of_its_class() {
     let read = (
         "app/Shop/Checkout.sharp",
         "namespace App.Shop;\n\nimport App.Billing.Payments;\n\npublic class Checkout\n{\n    public Checkout(private Payments payments) { }\n\n    public int total => this.payments.fee;\n\n    law totaled(Checkout checkout) => checkout.total > 0;\n}\n",
-    );
-    let named_at_run_time = (
-        "app/Shop/Checkout.sharp",
-        "namespace App.Shop;\n\nimport App.Billing.Payments;\n\npublic class Checkout\n{\n    public Checkout(private Payments payments) { }\n\n    public int total => this.payments.{\"fee\"};\n\n    law totaled(Checkout checkout) => checkout.total > 0;\n}\n",
     );
 
     for (form, refused) in [
@@ -27122,10 +27213,6 @@ fn a_getter_reaching_through_a_foreign_object_has_the_effect_of_its_class() {
         (
             read,
             "app/Shop/Checkout.sharp:11:39 impure-law: Law `totaled` reaches `Checkout.total`, which calls `Payments.fee` with the effect `Payments`. Laws hold only over pure code.",
-        ),
-        (
-            named_at_run_time,
-            "app/Shop/Checkout.sharp:11:39 impure-law: Law `totaled` reaches `Checkout.total`, which calls `Payments` with the effect `Payments`. Laws hold only over pure code.",
         ),
     ] {
         assert_eq!(effect_issues(&[form, payments]), [refused], "{}", form.1);
@@ -27540,7 +27627,7 @@ fn the_files_a_call_reaches_are_its_methods_its_overrides_and_its_accessors() {
 fn applying_an_operator_has_the_effects_of_its_body() {
     let money = (
         "app/Shop/Money.sharp",
-        "namespace App.Shop;\n\nimport Acme.Chrono;\n\npublic class Money\n{\n    public Money(public int cents) { }\n\n    public int hash() => this.cents;\n\n    public static Money operator +(Money a, Money b) => new Money(a.cents + b.cents + Chrono.now());\n\n    public static Money operator -(Money a) => new Money(Chrono.now() - a.cents);\n\n    public static bool operator ==(Money a, Money b) => a.cents == b.cents + Chrono.now();\n\n    public static int operator <=>(Money a, Money b) => a.cents - b.cents + Chrono.now();\n}\n",
+        "namespace App.Shop;\n\nimport Acme.Chrono;\n\npublic class Money\n{\n    public Money(public int cents { get; }) { }\n\n    public int hash() => this.cents;\n\n    public static Money operator +(Money a, Money b) => new Money(a.cents + b.cents + Chrono.now());\n\n    public static Money operator -(Money a) => new Money(Chrono.now() - a.cents);\n\n    public static bool operator ==(Money a, Money b) => a.cents == b.cents + Chrono.now();\n\n    public static int operator <=>(Money a, Money b) => a.cents - b.cents + Chrono.now();\n}\n",
     );
     let cart = (
         "app/Shop/Cart.sharp",
@@ -28247,7 +28334,7 @@ fn a_php_call_of_a_law_is_a_non_existent_method_that_names_the_law_as_php_writes
 fn a_getter_applying_a_pure_operator_passes() {
     let money = (
         "app/Shop/Money.sharp",
-        "namespace App.Shop;\n\npublic class Money\n{\n    public Money(public int cents) { }\n\n    public static Money operator +(Money a, Money b) => new Money(a.cents + b.cents);\n}\n",
+        "namespace App.Shop;\n\npublic class Money\n{\n    public Money(public int cents { get; }) { }\n\n    public static Money operator +(Money a, Money b) => new Money(a.cents + b.cents);\n}\n",
     );
     let cart = (
         "app/Shop/Cart.sharp",
@@ -29037,10 +29124,23 @@ const JSON: (&str, &str) = (
 /// an `int` and a `string` key a JSON object.
 #[test]
 fn json_encode_refuses_a_map_keyed_by_an_object_without_to_string() {
-    let shapes = (
-        "app/Shop/Shapes.sharp",
-        "namespace App.Shop;\n\npublic struct Point\n{\n    public Point(public int x { get; }) { }\n}\n\npublic struct Tag\n{\n    public Tag(public string name { get; }) { }\n\n    public string toString() => this.name;\n}\n\npublic struct Board\n{\n    public Board(public Map<Point, int> counts { get; }) { }\n}\n\npublic enum Plain\n{\n    case Low;\n}\n\npublic enum Coded : string\n{\n    case Low = \"low\";\n}\n",
-    );
+    let shapes = [
+        JSON,
+        (
+            "app/Shop/Point.sharp",
+            "namespace App.Shop;\n\npublic struct Point\n{\n    public Point(public int x { get; }) { }\n}\n",
+        ),
+        (
+            "app/Shop/Tag.sharp",
+            "namespace App.Shop;\n\npublic struct Tag\n{\n    public Tag(public string name { get; }) { }\n\n    public string toString() => this.name;\n}\n",
+        ),
+        (
+            "app/Shop/Board.sharp",
+            "namespace App.Shop;\n\npublic struct Board\n{\n    public Board(public Map<Point, int> counts { get; }) { }\n}\n",
+        ),
+        ("app/Shop/Plain.sharp", "namespace App.Shop;\n\npublic enum Plain\n{\n    case Low;\n}\n"),
+        ("app/Shop/Coded.sharp", "namespace App.Shop;\n\npublic enum Coded : string\n{\n    case Low = \"low\";\n}\n"),
+    ];
     let report = (
         "app/Shop/Report.sharp",
         "namespace App.Shop;\n\nimport Sharp.Encoding.Json;\n\npublic class Report\n{\n    public static void run(Map<Point, int> points, Map<Tag, int> tags, List<Map<Point, int>> nested, Map<string, Point> values, Map<int, string> numbered, Any? raw, Board board, Map<float, int> floats, Map<Plain, int> plains, Map<bool, int> flags, Map<Coded, int> coded)\n    {\n        Report.keep(Json.encode(tags));\n        Report.keep(Json.encode(values));\n        Report.keep(Json.encode(numbered));\n        Report.keep(Json.encode(raw));\n        Report.keep(Json.encode(points));\n        Report.keep(Json.encode(nested));\n        Report.keep(Json.encode(board));\n        Report.keep(Json.encode(floats));\n        Report.keep(Json.encode(plains));\n        Report.keep(Json.encode(flags));\n        Report.keep(Json.encode(coded));\n    }\n\n    public static void keep(string json)\n    {\n    }\n}\n",
@@ -29049,7 +29149,7 @@ fn json_encode_refuses_a_map_keyed_by_an_object_without_to_string() {
 
     assert_eq!(worded(JSON, &[]), Vec::<String>::new());
     assert_eq!(
-        refusals(report, &[JSON, shapes]),
+        refusals(report, &shapes),
         [
             format!("13:33 {point}"),
             format!("14:33 {point}"),
@@ -30125,11 +30225,10 @@ fn a_readonly_value_calls_only_readonly_methods() {
 /// operands, which are readonly by definition.
 #[test]
 fn a_readonly_value_stays_readonly_through_narrowing_and_operators() {
-    let shapes = "namespace App;\n\npublic class Shape\n{\n    public int size { get; set; } = 0;\n}\n\npublic class Circle : Shape\n{\n    public int radius { get; set; } = 0;\n}\n";
     let view = "namespace App;\n\npublic class Tag\n{\n    public int count { get; set; } = 0;\n\n    public static bool operator ==(Tag a, Tag b)\n    {\n        a.count = 1;\n        return true;\n    }\n\n    public int hash() => this.count;\n\n    public static Tag operator +(Tag a, Tag b) => a;\n\n    public static readonly Tag operator -(Tag a, Tag b) => a;\n\n    public void show(readonly Shape shape, Shape other, bool flag)\n    {\n        if (shape is Circle c) {\n            c.radius = 1;\n        }\n        const either = flag ? shape : other;\n        either.size = 2;\n        Circle? viaAs = shape as Circle;\n    }\n\n    public void put<T : Shape>(readonly T item, readonly List<Shape> shapes)\n    {\n        item.size = 3;\n        const first = shapes.first(s => s.size > 0);\n        first.size = 4;\n        shapes.map(s => s.size = 5);\n    }\n}\n";
 
     assert_eq!(
-        messages(("src/Tag.sharp", view), &[("src/Shapes.sharp", shapes)]),
+        messages(("src/Tag.sharp", view), &READONLY_SHAPES),
         [
             "operator == cannot set a.count: a is readonly.",
             "operator + cannot return a: a is readonly. Declare the return type `readonly Tag`, or return a new value.",
@@ -30232,10 +30331,13 @@ fn readonly_holds_only_types_php_sharp_checks() {
 }
 
 /// The shapes the spec section 13 tests narrow and pass to type parameters.
-const READONLY_SHAPES: (&str, &str) = (
-    "src/Shapes.sharp",
-    "namespace App;\n\npublic class Shape\n{\n    public int size { get; set; } = 0;\n}\n\npublic class Circle : Shape\n{\n    public int radius { get; set; } = 0;\n}\n",
-);
+const READONLY_SHAPES: [(&str, &str); 2] = [
+    ("src/Shape.sharp", "namespace App;\n\npublic class Shape\n{\n    public int size { get; set; } = 0;\n}\n"),
+    (
+        "src/Circle.sharp",
+        "namespace App;\n\npublic class Circle : Shape\n{\n    public int radius { get; set; } = 0;\n}\n",
+    ),
+];
 
 /// Spec section 13: a method value runs its method, so one read through a readonly value is a call of that method.
 #[test]
@@ -30279,7 +30381,7 @@ fn a_type_parameter_takes_a_readonly_value_only_when_written_readonly() {
     let probes = "namespace App;\n\npublic class Probes\n{\n    public void touch<TShape : Shape>(TShape x) { x.size = 1; }\n\n    public void look<TShape : Shape>(readonly TShape x) { }\n\n    public void keep(Shape s) { s.size = 1; }\n\n    public TShape give<TShape : Shape>(readonly TShape item) { return item; }\n\n    public void pass(readonly Shape s)\n    {\n        this.touch(s);\n        this.look(s);\n    }\n\n    public void hold<T : Shape>(readonly T item)\n    {\n        this.keep(item);\n        Shape local = item;\n        if (item is Circle c) {\n            c.radius = 1;\n        }\n    }\n}\n";
 
     assert_eq!(
-        messages(("src/Probes.sharp", probes), &[READONLY_SHAPES]),
+        messages(("src/Probes.sharp", probes), &READONLY_SHAPES),
         [
             "give cannot return item: item is readonly. Declare the return type `readonly TShape`.",
             "pass cannot pass s to Probes.touch: s is readonly. Declare the parameter `readonly TShape x`.",
