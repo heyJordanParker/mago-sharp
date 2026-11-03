@@ -136,10 +136,13 @@ fn issues_in(
     analyze(registry, settings, analyzed, others).iter().map(|issue| located(analyzed.1, issue)).collect()
 }
 
+/// A reader of one analyzed file's issues beside `others`, as `issues` or `messages`.
+type Reader = fn((&'static str, &'static str), &[(&'static str, &'static str)]) -> Vec<String>;
+
 /// Reads each file of `files` with `read`, as `issues` or `messages`, analyzed together with the rest of `files` and
 /// `others`, in the order of `files`.
 fn each_file(
-    read: fn((&'static str, &'static str), &[(&'static str, &'static str)]) -> Vec<String>,
+    read: Reader,
     files: &[(&'static str, &'static str)],
     others: &[(&'static str, &'static str)],
 ) -> Vec<Vec<String>> {
@@ -14591,7 +14594,7 @@ fn a_struct_with_a_field_that_has_no_equality_has_none() {
     let analyzed = ("vendor/heyjordanparker/php-sharp-composer/library/Sharp/Time/Zones.sharp", zones);
 
     assert_eq!(
-        written(zones, &analyze(&PLUGIN_REGISTRY, settings(), analyzed, &[zone, meeting, r#where])),
+        reported(analyzed, &[zone, meeting, r#where]),
         [
             "5:41 invalid-operand `Zone` can't compare by value: `rules` is a `DateTimeZone`, which declares no `operator ==`.",
             "7:42 invalid-operand `Zone` can't compare by value: `rules` is a `DateTimeZone`, which declares no `operator ==`.",
