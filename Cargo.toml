@@ -19,7 +19,7 @@ package.homepage = "https://github.com/heyJordanParker/php-sharp"
 package.repository = "https://github.com/heyJordanParker/php-sharp"
 package.rust-version = "1.97.0"
 members = ["crates/*", "docs"]
-exclude = ["crates/syntax/fuzz", "crates/twig-syntax/fuzz"]
+exclude = ["crates/syntax/fuzz"]
 
 [workspace.lints.rust]
 unknown_lints = "allow"
@@ -163,7 +163,6 @@ inline_modules = "allow"
 mago-syntax-core = { path = "crates/syntax-core", version = "0.6.1" }
 mago-syntax = { path = "crates/syntax", version = "0.6.1" }
 mago-phpdoc-syntax = { path = "crates/phpdoc-syntax", version = "0.6.1" }
-mago-twig-syntax = { path = "crates/twig-syntax", version = "0.6.1" }
 mago-casing = { path = "crates/casing", version = "0.6.1" }
 mago-composer = { path = "crates/composer", version = "0.6.1" }
 mago-text-edit = { path = "crates/text-edit", version = "0.6.1" }
@@ -177,7 +176,6 @@ mago-linter = { path = "crates/linter", version = "0.6.1" }
 mago-names = { path = "crates/names", version = "0.6.1" }
 mago-reporting = { path = "crates/reporting", version = "0.6.1", default-features = false }
 mago-span = { path = "crates/span", version = "0.6.1" }
-mago-wasm = { path = "crates/wasm", version = "0.6.1" }
 mago-php-version = { path = "crates/php-version", version = "0.6.1" }
 mago-analyzer = { path = "crates/analyzer", version = "0.6.1" }
 mago-algebra = { path = "crates/algebra", version = "0.6.1" }

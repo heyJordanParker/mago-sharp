@@ -1,1 +1,0 @@
-{{ attribute(var=var, template="tpl") }}

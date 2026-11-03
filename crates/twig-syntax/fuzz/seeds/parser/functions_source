@@ -1,6 +1,0 @@
-FOO
-{{ source("foo.twig") }}
-
-BAR
---TEMPLATE(foo.twig)--
-{{ foo }}<br />

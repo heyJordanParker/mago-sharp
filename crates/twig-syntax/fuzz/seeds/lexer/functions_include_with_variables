@@ -1,4 +1,0 @@
-{{ include("foo.twig", {'foo': 'bar'}) }}
-{{- include("foo.twig", vars) }}
---TEMPLATE(foo.twig)--
-{{ foo }}

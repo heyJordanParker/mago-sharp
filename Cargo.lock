@@ -2006,43 +2006,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mago-twig-syntax"
-version = "0.6.1"
-dependencies = [
- "codspeed-criterion-compat",
- "indoc",
- "mago-allocator",
- "mago-database",
- "mago-span",
- "mago-syntax-core",
- "memchr",
- "paste",
- "serde",
- "strum 0.28.0",
-]
-
-[[package]]
-name = "mago-wasm"
-version = "0.6.1"
-dependencies = [
- "mago-allocator",
- "mago-analyzer",
- "mago-database",
- "mago-formatter",
- "mago-linter",
- "mago-orchestrator",
- "mago-php-version",
- "mago-prelude",
- "mago-reporting",
- "mago-syntax",
- "mago-word",
- "serde",
- "serde-wasm-bindgen",
- "serde_json",
- "wasm-bindgen",
-]
-
-[[package]]
 name = "mago-word"
 version = "0.6.1"
 dependencies = [
@@ -2954,17 +2917,6 @@ dependencies = [
  "syn 2.0.119",
  "thiserror",
  "typed-builder",
-]
-
-[[package]]
-name = "serde-wasm-bindgen"
-version = "0.6.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8302e169f0eddcc139c70f139d19d6467353af16f9fce27e8c30158036a1e16b"
-dependencies = [
- "js-sys",
- "serde",
- "wasm-bindgen",
 ]
 
 [[package]]

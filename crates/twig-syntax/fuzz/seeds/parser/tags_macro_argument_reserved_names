@@ -1,5 +1,0 @@
-{% import _self as macros %}
-
-{% macro input(true, false, null) %}
-    {{ true }}
-{% endmacro %}

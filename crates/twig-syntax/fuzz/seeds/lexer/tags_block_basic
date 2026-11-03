@@ -1,4 +1,0 @@
-{% block title1 %}FOO{% endblock %}
-{% block title2 foo|lower %}
---TEMPLATE(foo.twig)--
-{% block content %}{% endblock %}

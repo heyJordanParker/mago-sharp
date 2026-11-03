@@ -1,4 +1,0 @@
-{{ "super helpful"|capitalize }}
-{{ "a"|capitalize }}
-*{{ ""|capitalize }}*
-*{{ null|capitalize }}*

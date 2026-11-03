@@ -1,3 +1,0 @@
-{% set foo %}{{ foo }}{% endset %}
-
-{{ foo }}

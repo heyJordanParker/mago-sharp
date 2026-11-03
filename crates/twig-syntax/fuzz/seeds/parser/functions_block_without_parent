@@ -1,4 +1,0 @@
-{% extends "parent.twig" %}
-{% block label %}{{ parent() }}{% endblock %}
---TEMPLATE(parent.twig)--
-{{ block('label') }}

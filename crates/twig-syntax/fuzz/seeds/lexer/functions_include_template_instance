@@ -1,3 +1,0 @@
-{{ include(foo) }} FOO
---TEMPLATE(foo.twig)--
-BAR

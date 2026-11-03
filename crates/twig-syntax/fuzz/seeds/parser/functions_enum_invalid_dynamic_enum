@@ -1,4 +1,0 @@
-{% set from_variable = 'Twig\\Tests\\NonExistentEnum' %}
-{% for c in enum(from_variable).cases() %}
-    {{~ c.name }}
-{% endfor %}

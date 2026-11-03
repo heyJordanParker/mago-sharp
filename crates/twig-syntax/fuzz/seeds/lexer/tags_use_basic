@@ -1,5 +1,0 @@
-{% use "blocks.twig" %}
-
-{{ block('content') }}
---TEMPLATE(blocks.twig)--
-{% block content 'foo' %}
