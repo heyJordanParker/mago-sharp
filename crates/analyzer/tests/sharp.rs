@@ -17788,6 +17788,46 @@ fn a_static_member_of_a_type_parameter_is_its_bounds() {
     );
 }
 
+/// Spec section 11: a type parameter bounded by a class takes one class, since its code reaches the type argument's
+/// statics, which a union of classes has none of. So `Fancy|Plain` is refused where a call, a type, a method call or a
+/// class header writes it for `TItem : Maker`, and the error names the type to write. A type parameter bounded by an
+/// interface or by no type keeps taking a union, as `List<int|string>` does.
+#[test]
+fn a_type_parameter_bounded_by_a_class_takes_one_class() {
+    let others = [
+        ("src/Demo/Maker.sharp", "namespace Demo;\n\npublic class Maker\n{\n    public static int make() => 1;\n}\n"),
+        ("src/Demo/Labeled.sharp", "namespace Demo;\n\npublic interface Labeled\n{\n}\n"),
+        ("src/Demo/Fancy.sharp", "namespace Demo;\n\npublic class Fancy : Maker, Labeled\n{\n}\n"),
+        ("src/Demo/Plain.sharp", "namespace Demo;\n\npublic class Plain : Maker, Labeled\n{\n}\n"),
+        (
+            "src/Demo/Builder.sharp",
+            "namespace Demo;\n\npublic class Builder<TItem : Maker>\n{\n    public int build() => TItem.make();\n}\n",
+        ),
+        ("src/Demo/Pair.sharp", "namespace Demo;\n\npublic class Pair<TFirst, TItem : Maker>\n{\n}\n"),
+        ("src/Demo/Tagged.sharp", "namespace Demo;\n\npublic class Tagged<TItem : Labeled>\n{\n}\n"),
+    ];
+    let builds = "namespace Demo;\n\npublic class Builds\n{\n    public static int made<TItem : Maker>() => TItem.make();\n\n    public int union() => new Builder<Fancy|Plain>().build();\n\n    public int hinted(Builder<Fancy|Plain> builder) => builder.build();\n\n    public int method() => Builds.made<Fancy|Plain>();\n\n    public Pair<int, Fancy|Plain>? paired() => null;\n\n    public int one() => new Builder<Fancy>().build();\n\n    public Tagged<Fancy|Plain>? tagged() => null;\n\n    public List<int|string> values() => [];\n}\n";
+    let header = "namespace Demo;\n\npublic class Fancies : Builder<Fancy|Plain>\n{\n}\n";
+
+    let refused = |at: &str, written: &str| {
+        format!(
+            "{at} template-constraint-violation: `TItem`'s bound is a class, so its type argument is one class. Write `{written}`."
+        )
+    };
+
+    assert_messages(
+        ("src/Demo/Builds.sharp", builds),
+        &others,
+        &[
+            &refused("7:38", "Builder<Maker>"),
+            &refused("9:23", "Builder<Maker>"),
+            &refused("11:39", "Builds.made<Maker>"),
+            &refused("13:12", "Pair<int, Maker>"),
+        ],
+    );
+    assert_messages(("src/Demo/Fancies.sharp", header), &others, &[&refused("3:24", "Builder<Maker>")]);
+}
+
 /// `new TItem(…)` creates the type argument the code runs with, so it has the type `TItem`, and its arguments are
 /// checked against the constructor of `TItem`'s bound, which must be `required`, as `new Self(…)` needs, since the type
 /// argument can be any subclass of the bound.
