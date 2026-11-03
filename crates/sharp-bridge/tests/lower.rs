@@ -7550,6 +7550,242 @@ fn an_extension_on_a_union_runs_on_the_parts_without_its_member_beside_the_objec
     );
 }
 
+/// Spec section 26: an extension member runs beside the own member of every union shape, each part told apart by its
+/// own class: both of three parts, the union's after the `null` test of `?.`, an interface, a plain PHP class, one
+/// whose member a trait gives, and a type parameter's bound. A receiver that is no local runs once, in a hidden
+/// variable.
+#[test]
+fn an_extension_member_runs_beside_the_own_member_of_every_union_shape() {
+    let plain_order = "<?php\n\nnamespace App\\Billing;\n\nclass PlainOrder\n{\n    public function label(): string\n    {\n        return 'plain order';\n    }\n}\n";
+    let has_label = "<?php\n\nnamespace App\\Billing;\n\ntrait HasLabel\n{\n    public function label(): string\n    {\n        return 'trait';\n    }\n}\n";
+    let php_order = "<?php\n\nnamespace App\\Billing;\n\nclass PhpOrder\n{\n    use HasLabel;\n}\n";
+    let files = lowered_each(
+        &[
+            (
+                "src/App/Billing/Order.sharp",
+                "namespace App.Billing;\n\npublic class Order\n{\n    public Order() { }\n\n    public string caption => \"order caption\";\n\n    public string label() => \"order\";\n}\n",
+            ),
+            (
+                "src/App/Billing/Ticket.sharp",
+                "namespace App.Billing;\n\npublic class Ticket\n{\n    public Ticket() { }\n\n    public string label() => \"ticket\";\n}\n",
+            ),
+            (
+                "src/App/Billing/Labeled.sharp",
+                "namespace App.Billing;\n\npublic interface Labeled\n{\n    string label();\n}\n",
+            ),
+            (
+                "src/App/Billing/Labels.sharp",
+                "namespace App.Billing;\n\npublic static class Labels\n{\n    extension(Order|string value)\n    {\n        public string caption => \"caption\";\n\n        public string label() => \"text\";\n    }\n}\n",
+            ),
+            (
+                "src/App/Billing/Shapes.sharp",
+                "namespace App.Billing;\n\npublic class Shapes\n{\n    public string three(Order|Ticket|string value) => value.label();\n\n    public string? maybe((Order|string)? value) => value?.label();\n\n    public string? maybeCaption((Order|string)? value) => value?.caption;\n\n    public string named(Labeled|string value) => value.label();\n\n    public string plain(PlainOrder|string value) => value.label();\n\n    public string traited(PhpOrder|string value) => value.label();\n\n    public string bounded<T : Order>(T|string value) => value.label();\n\n    public string picked() => this.pick().label();\n\n    public Order|string pick() => \"picked\";\n}\n",
+            ),
+        ],
+        &[
+            ("src/App/Billing/PlainOrder.php", plain_order),
+            ("src/App/Billing/HasLabel.php", has_label),
+            ("src/App/Billing/PhpOrder.php", php_order),
+        ],
+    );
+    let bodies: String = ["three", "maybe", "maybeCaption", "named", "plain", "traited", "bounded", "picked"]
+        .iter()
+        .map(|&method| [method, ":\n", &files[4].body_of(method)].concat())
+        .collect();
+
+    assert_eq!(
+        bodies,
+        indoc! {r#"
+            three:
+            STMT_LIST
+              RETURN
+                CONDITIONAL [1]
+                  OR
+                    INSTANCEOF
+                      VAR
+                        ZVAL "value"
+                      ZVAL "App\\Billing\\Order"
+                    INSTANCEOF
+                      VAR
+                        ZVAL "value"
+                      ZVAL "App\\Billing\\Ticket"
+                  METHOD_CALL
+                    VAR
+                      ZVAL "value"
+                    ZVAL "label"
+                    ARG_LIST
+                  STATIC_CALL
+                    ZVAL "App\\Billing\\Labels"
+                    ZVAL "label"
+                    ARG_LIST
+                      VAR
+                        ZVAL "value"
+            maybe:
+            STMT_LIST
+              RETURN
+                CONDITIONAL [1]
+                  BINARY_OP [16]
+                    VAR
+                      ZVAL "value"
+                    ZVAL null
+                  ZVAL null
+                  CONDITIONAL [1]
+                    INSTANCEOF
+                      VAR
+                        ZVAL "value"
+                      ZVAL "App\\Billing\\Order"
+                    METHOD_CALL
+                      VAR
+                        ZVAL "value"
+                      ZVAL "label"
+                      ARG_LIST
+                    STATIC_CALL
+                      ZVAL "App\\Billing\\Labels"
+                      ZVAL "label"
+                      ARG_LIST
+                        VAR
+                          ZVAL "value"
+            maybeCaption:
+            STMT_LIST
+              RETURN
+                CONDITIONAL [1]
+                  BINARY_OP [16]
+                    VAR
+                      ZVAL "value"
+                    ZVAL null
+                  ZVAL null
+                  CONDITIONAL [1]
+                    INSTANCEOF
+                      VAR
+                        ZVAL "value"
+                      ZVAL "App\\Billing\\Order"
+                    PROP
+                      VAR
+                        ZVAL "value"
+                      ZVAL "caption"
+                    STATIC_CALL
+                      ZVAL "App\\Billing\\Labels"
+                      ZVAL "caption"
+                      ARG_LIST
+                        VAR
+                          ZVAL "value"
+            named:
+            STMT_LIST
+              RETURN
+                VERIFY_TYPE_ARGS
+                  CONDITIONAL [1]
+                    INSTANCEOF
+                      VAR
+                        ZVAL "value"
+                      ZVAL "App\\Billing\\Labeled"
+                    METHOD_CALL
+                      VAR
+                        ZVAL "value"
+                      ZVAL "label"
+                      ARG_LIST
+                    STATIC_CALL
+                      ZVAL "App\\Billing\\Labels"
+                      ZVAL "label"
+                      ARG_LIST
+                        VAR
+                          ZVAL "value"
+                  ZVAL "string"
+                  ZVAL "App.Billing.Labeled.label()"
+            plain:
+            STMT_LIST
+              RETURN
+                CONDITIONAL [1]
+                  INSTANCEOF
+                    VAR
+                      ZVAL "value"
+                    ZVAL "App\\Billing\\PlainOrder"
+                  METHOD_CALL
+                    VAR
+                      ZVAL "value"
+                    ZVAL "label"
+                    ARG_LIST
+                  STATIC_CALL
+                    ZVAL "App\\Billing\\Labels"
+                    ZVAL "label"
+                    ARG_LIST
+                      VAR
+                        ZVAL "value"
+            traited:
+            STMT_LIST
+              RETURN
+                CONDITIONAL [1]
+                  INSTANCEOF
+                    VAR
+                      ZVAL "value"
+                    ZVAL "App\\Billing\\PhpOrder"
+                  METHOD_CALL
+                    VAR
+                      ZVAL "value"
+                    ZVAL "label"
+                    ARG_LIST
+                  STATIC_CALL
+                    ZVAL "App\\Billing\\Labels"
+                    ZVAL "label"
+                    ARG_LIST
+                      VAR
+                        ZVAL "value"
+            bounded:
+            STMT_LIST
+              RETURN
+                CONDITIONAL [1]
+                  INSTANCEOF
+                    VAR
+                      ZVAL "value"
+                    ZVAL "App\\Billing\\Order"
+                  METHOD_CALL
+                    VAR
+                      ZVAL "value"
+                    ZVAL "label"
+                    ARG_LIST
+                  STATIC_CALL
+                    ZVAL "App\\Billing\\Labels"
+                    ZVAL "label"
+                    ARG_LIST
+                      VAR
+                        ZVAL "value"
+            picked:
+            STMT_LIST
+              RETURN
+                DIM
+                  ARRAY [3]
+                    ARRAY_ELEM
+                      ASSIGN
+                        VAR
+                          ZVAL "receiver#1"
+                        METHOD_CALL
+                          VAR
+                            ZVAL "this"
+                          ZVAL "pick"
+                          ARG_LIST
+                      null
+                    ARRAY_ELEM
+                      CONDITIONAL [1]
+                        INSTANCEOF
+                          VAR
+                            ZVAL "receiver#1"
+                          ZVAL "App\\Billing\\Order"
+                        METHOD_CALL
+                          VAR
+                            ZVAL "receiver#1"
+                          ZVAL "label"
+                          ARG_LIST
+                        STATIC_CALL
+                          ZVAL "App\\Billing\\Labels"
+                          ZVAL "label"
+                          ARG_LIST
+                            VAR
+                              ZVAL "receiver#1"
+                      null
+                  ZVAL 1
+        "#}
+    );
+}
+
 /// ```php
 /// return $value instanceof \App\Billing\Order ? ($value->label)() : \App\Billing\Labels::label($value);
 /// ```

@@ -9844,6 +9844,76 @@ fn an_extension_read_on_a_union_reads_each_parts_member() {
     assert_eq!(own("label.label"), Some(vec![word("App\\Billing\\Order")]));
 }
 
+/// The classes of the union shapes an extension member runs beside: two classes, a nullable union through `?.`, an
+/// interface, a plain PHP class and a type parameter by its bound, whose calls and reads compile with no issue.
+fn union_shape_files() -> [(&'static str, &'static str); 7] {
+    [
+        (
+            "src/App/Billing/Order.sharp",
+            "namespace App.Billing;\n\npublic class Order\n{\n    public Order() { }\n\n    public string caption => \"order caption\";\n\n    public string label() => \"order\";\n}\n",
+        ),
+        (
+            "src/App/Billing/Ticket.sharp",
+            "namespace App.Billing;\n\npublic class Ticket\n{\n    public Ticket() { }\n\n    public string label() => \"ticket\";\n}\n",
+        ),
+        (
+            "src/App/Billing/Labeled.sharp",
+            "namespace App.Billing;\n\npublic interface Labeled\n{\n    string label();\n}\n",
+        ),
+        (
+            "src/App/Billing/PlainOrder.php",
+            "<?php\n\nnamespace App\\Billing;\n\nclass PlainOrder\n{\n    public function label(): string\n    {\n        return 'plain order';\n    }\n}\n",
+        ),
+        (
+            "src/App/Billing/HasLabel.php",
+            "<?php\n\nnamespace App\\Billing;\n\ntrait HasLabel\n{\n    public function label(): string\n    {\n        return 'trait';\n    }\n}\n",
+        ),
+        (
+            "src/App/Billing/PhpOrder.php",
+            "<?php\n\nnamespace App\\Billing;\n\nclass PhpOrder\n{\n    use HasLabel;\n}\n",
+        ),
+        (
+            "src/App/Billing/Labels.sharp",
+            "namespace App.Billing;\n\npublic static class Labels\n{\n    extension(Order|string value)\n    {\n        public string caption => \"caption\";\n\n        public string label() => \"text\";\n    }\n}\n",
+        ),
+    ]
+}
+
+/// The calls and reads of each union shape [`union_shape_files`] declares.
+const UNION_SHAPES: &str = "namespace App.Billing;\n\npublic class Shapes\n{\n    public string three(Order|Ticket|string value) => value.label();\n\n    public string? maybe((Order|string)? value) => value?.label();\n\n    public string? maybeCaption((Order|string)? value) => value?.caption;\n\n    public string named(Labeled|string value) => value.label();\n\n    public string plain(PlainOrder|string value) => value.label();\n\n    public string traited(PhpOrder|string value) => value.label();\n\n    public string bounded<T : Order>(T|string value) => value.label();\n\n    public string picked() => this.pick().label();\n\n    public Order|string pick() => \"picked\";\n}\n";
+
+/// Spec section 26: an extension member runs beside the own member of every union shape, so each call and read
+/// compiles with no issue, and records the classes of the parts that run their own: both of three parts, the union's
+/// through `?.`, an interface, a plain PHP class, one whose member a trait gives, and a type parameter's bound. A
+/// receiver that is no local records the same.
+#[test]
+fn an_extension_member_runs_beside_the_own_member_of_every_union_shape() {
+    let others = union_shape_files();
+    let analyzed = ("src/App/Billing/Shapes.sharp", UNION_SHAPES);
+
+    assert_messages(analyzed, &others, &[]);
+    let (_, artifacts) = analyze_with_artifacts(&PLUGIN_REGISTRY, settings(), analyzed, &others);
+    let own = |method: &str, access: &str| {
+        let after = UNION_SHAPES.find(&format!(" {method}")).unwrap();
+        let start = (after + UNION_SHAPES[after..].find(access).unwrap()) as u32;
+        let classes = artifacts.get_own_member_classes(&Span::dummy(start, start + access.len() as u32));
+
+        classes.map(|classes| classes.iter().map(Word::to_string).collect::<Vec<_>>())
+    };
+    let order = || Some(vec!["App\\Billing\\Order".to_owned()]);
+    assert_eq!(
+        own("three", "value.label()"),
+        Some(vec!["App\\Billing\\Order".to_owned(), "App\\Billing\\Ticket".to_owned()])
+    );
+    assert_eq!(own("maybe", "value?.label()"), order());
+    assert_eq!(own("maybeCaption", "value?.caption"), order());
+    assert_eq!(own("named", "value.label()"), Some(vec!["App\\Billing\\Labeled".to_owned()]));
+    assert_eq!(own("plain", "value.label()"), Some(vec!["App\\Billing\\PlainOrder".to_owned()]));
+    assert_eq!(own("traited", "value.label()"), Some(vec!["App\\Billing\\PhpOrder".to_owned()]));
+    assert_eq!(own("bounded", "value.label()"), order());
+    assert_eq!(own("picked", "this.pick().label()"), order());
+}
+
 /// A part's own member may come from a trait, which no value is an instance of, so a call and a read on a union record
 /// the part's own class, which a test of the value's class finds, never the trait that declares the member.
 #[test]
