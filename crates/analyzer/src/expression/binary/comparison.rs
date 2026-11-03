@@ -21,6 +21,7 @@ use mago_codex::ttype::is_key_type;
 use mago_codex::ttype::template::inferred_type_replacer;
 use mago_codex::ttype::union::TUnion;
 use mago_names::binding::php_operator_name;
+use mago_names::binding::php_variable_name;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_span::HasSpan;
@@ -1638,9 +1639,11 @@ pub(crate) fn search_refusal(
 /// refused with the reason `==` gives, as is an element the operator's call does not always take, an `Iterable`
 /// element is refused, as `==` on it is, and an `Any` element is refused unless the value is a string, a number or an
 /// enum case. A `null_safe` call's help keeps its `?.`. What is `searched` decides the `===` test the help offers
-/// instead, if any, and names an element a key where it is a `Map`'s. Gives whether it reported the search.
+/// instead, if any, and names an element a key where it is a `Map`'s, and `block_context` holds the locals in scope at
+/// the call, whose names the test's lambda leaves free. Gives whether it reported the search.
 pub(crate) fn check_element_equality<A>(
     context: &mut Context<'_, '_, A>,
+    block_context: &BlockContext<'_>,
     method: &str,
     receiver: &Expression<'_>,
     value: &Expression<'_>,
@@ -1669,12 +1672,15 @@ where
         None => return false,
         Some(Refusal::Instance) => {
             let class = display_refused_side(context, element_type, value_type, Comparand::is_instance);
-            let help = match same_object_test(context, receiver, value, Some(&class), null_safe, searched) {
-                Some(test) => {
-                    format!("Declare `operator ==` and `hash()` in `{class}`, or test for the same object with {test}.")
-                }
-                None => format!("Declare `operator ==` and `hash()` in `{class}`."),
-            };
+            let help =
+                match same_object_test(context, block_context, (receiver, value), Some(&class), null_safe, searched) {
+                    Some(test) => {
+                        format!(
+                            "Declare `operator ==` and `hash()` in `{class}`, or test for the same object with {test}."
+                        )
+                    }
+                    None => format!("Declare `operator ==` and `hash()` in `{class}`."),
+                };
 
             (
                 IssueCode::InvalidArgument,
@@ -1693,7 +1699,7 @@ where
             let issue = Issue::error(format!(
                 "`{method}` compares elements with `==`, and an unchecked `{element}` element can't tell the same object as {same_object} from an equal value."
             ));
-            let issue = match same_object_test(context, receiver, value, None, null_safe, searched) {
+            let issue = match same_object_test(context, block_context, (receiver, value), None, null_safe, searched) {
                 Some(test) => issue.with_help(format!("Test for the same object with {test}.")),
                 None => issue,
             };
@@ -1792,12 +1798,13 @@ where
 
 /// The test for the same object a refused search's help offers in place of `==`, as `carts.any(c => c === cart)`, run
 /// on `receiver` through the member what is `searched` reaches its elements with, or None where no one member does.
-/// The lambda names an element by the initial of `class`, as `l` for a `Line`, unless the call already uses that
-/// name, and `element` otherwise. A `null_safe` call's test keeps its `?.`.
+/// The lambda's parameter can't reuse the name of a local in scope at the call, spec section 3, as `block_context`
+/// holds them, so it names an element by the initial of `class`, as `l` for a `Line`, or else `element`, or else
+/// `element` with the lowest number no local has. A `null_safe` call's test keeps its `?.`.
 fn same_object_test<A>(
     context: &Context<'_, '_, A>,
-    receiver: &Expression<'_>,
-    value: &Expression<'_>,
+    block_context: &BlockContext<'_>,
+    (receiver, value): (&Expression<'_>, &Expression<'_>),
     class: Option<&str>,
     null_safe: bool,
     searched: Searched,
@@ -1807,11 +1814,17 @@ where
 {
     let test = searched.identity_test()?;
     let (receiver, value) = (quoted_source(context, receiver.span()), quoted_source(context, value.span()));
-    let element = class
-        .and_then(|class| class.chars().next())
-        .map(|first| first.to_lowercase().to_string())
-        .filter(|initial| *initial != receiver && *initial != value)
-        .unwrap_or_else(|| "element".to_owned());
+    let free = |name: &String| !block_context.is_local_in_scope(&php_variable_name(name.as_bytes()));
+    let initial = class.and_then(|class| class.chars().next()).map(|first| first.to_lowercase().to_string());
+    let element = initial.filter(free).unwrap_or_else(|| {
+        let (mut element, mut number) = ("element".to_owned(), 0);
+        while !free(&element) {
+            number += 1;
+            element = format!("element{number}");
+        }
+
+        element
+    });
     let access = if null_safe { "?." } else { "." };
 
     Some(format!("`{receiver}{access}{test}({element} => {element} === {value})`"))

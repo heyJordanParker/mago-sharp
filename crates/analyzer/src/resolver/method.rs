@@ -56,6 +56,7 @@ use crate::effects::ReadonlyCall;
 use crate::error::AnalysisError;
 use crate::expression::constant_access::field_storage;
 use crate::expression::instantiation::bare_generic_class;
+use crate::expression::is_refused_type;
 use crate::resolver::class_name::class_value_classes;
 use crate::resolver::class_name::holds_no_class;
 use crate::resolver::class_name::report_non_existent_class_like;
@@ -64,8 +65,11 @@ use crate::resolver::extension::CollectionKind;
 use crate::resolver::extension::Extension;
 use crate::resolver::extension::collection_member_kind;
 use crate::resolver::extension::extension_methods;
+use crate::resolver::extension::has_extension_method;
 use crate::resolver::extension::is_collection_member;
+use crate::resolver::extension::lacks_member;
 use crate::resolver::extension::library_declares_members;
+use crate::resolver::extension::parts_without_member;
 use crate::resolver::extension::resolve_extension;
 use crate::resolver::property::DeclaredPropertyKind;
 use crate::resolver::property::get_localized_property_type;
@@ -76,12 +80,14 @@ use crate::statement::class_like::law::uncallable_law;
 use crate::utils::expression::analyze_member_object;
 use crate::utils::expression::get_bare_name_variable_id;
 use crate::utils::expression::is_this;
+use crate::utils::names::article;
 use crate::utils::names::display_atomic;
 use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_member;
 use crate::utils::names::display_method_name;
 use crate::utils::names::display_type;
 use crate::utils::names::is_prelude_stub;
+use crate::utils::names::joined_with_and;
 use crate::utils::names::readonly_writer;
 use crate::utils::names::sharp_method_declaration;
 use crate::utils::quoted_source;
@@ -200,9 +206,10 @@ pub struct MethodResolutionResult {
     pub called_properties: Vec<CalledProperty>,
     /// The static method of the extension a PHP# call runs, spec section 26, which leaves the other targets empty.
     pub extension: Option<MethodIdentifier>,
-    /// The standard library's member a PHP# call runs for each kind of collection the receiver may be, spec section 12,
-    /// with the receiver's parts of that kind, beside the other targets, which the receiver's objects run.
-    pub collection_members: Vec<(MethodIdentifier, TUnion)>,
+    /// The extension members a PHP# call runs on parts of the receiver, each with those parts, beside the other targets,
+    /// which the receiver's other parts run: the standard library's member of each kind of collection the receiver may
+    /// be, spec section 12, or the extension the parts that declare no member of its name run, spec section 26.
+    pub part_members: Vec<(MethodIdentifier, TUnion)>,
     /// True when the receiver is a PHP# class value and the method is no member of `Class`, so the call is a static
     /// call on the classes the value holds, spec section 25, which leaves the other targets empty.
     pub class_value: bool,
@@ -249,26 +256,68 @@ where
 
     let resolved_selectors = resolve_member_selector(context, block_context, artifacts, selector, false)?;
 
-    // A collection's members are the kind's own, which the receiver's collection parts reach below, each kind its own.
+    // Spec section 26: an extension runs on the parts of the receiver that declare no member of its name, alone when no
+    // part declares one, and beside each other part's own member otherwise, as `label()` on an `Order|string` runs
+    // `Order`'s method on an `Order` and the extension on a `string`. A collection's members are the kind's own, which
+    // the receiver's collection parts reach below, each kind its own.
+    //
+    // `rest_resolved` is whether those parts were resolved here, as the extension's or as one refusal.
+    let mut rest_resolved = false;
     if context.dialect.is_sharp()
         && let ClassLikeMemberSelector::Identifier(name) = selector
         && let Some(object_type) = artifacts.get_expression_type(object).cloned()
-        && let Some(extension) = resolve_extension(context, &object_type, name, MetadataFlags::EXTENSION_METHOD)
-        && !matches!(extension, Extension::Member(method)
-        if context.codebase.get_method_by_id(&method).is_some_and(|metadata| {
-            is_collection_member(method.get_class_name(), metadata)
-        }))
+        && let Some((rest, whole)) = parts_without_member(context.codebase, &object_type, name.value)
     {
-        match extension {
-            Extension::Member(method) => result.extension = Some(method),
-            Extension::Value(_) => unreachable!("a call reaches an extension member, never its value"),
-            Extension::Refused => result.has_invalid_target = true,
-        }
-        if object_type.is_nullable() && !is_null_safe {
-            report_method_access_on_null(context, object, &object_type);
-        }
+        match resolve_extension(context, &rest, name, MetadataFlags::EXTENSION_METHOD) {
+            Some(Extension::Member(method))
+                if context
+                    .codebase
+                    .get_method_by_id(&method)
+                    .is_some_and(|metadata| is_collection_member(method.get_class_name(), metadata)) => {}
+            Some(extension @ (Extension::Member(_) | Extension::Refused)) if whole => {
+                match extension {
+                    Extension::Member(method) => result.extension = Some(method),
+                    _ => result.has_invalid_target = true,
+                }
+                if object_type.is_nullable() && !is_null_safe {
+                    report_method_access_on_null(context, object, &object_type);
+                }
 
-        return Ok(result);
+                return Ok(result);
+            }
+            Some(Extension::Member(method)) => {
+                result.part_members.push((method, rest));
+                rest_resolved = true;
+            }
+            Some(Extension::Refused) => {
+                result.has_invalid_target = true;
+
+                return Ok(result);
+            }
+            Some(Extension::Value(_)) => unreachable!("a call reaches an extension member, never its value"),
+            // A part of a type the checker refused, as one no file declares, reported itself, so the call reports
+            // nothing again.
+            None if is_refused_type(&rest) => {
+                result.has_invalid_target = true;
+                rest_resolved = true;
+            }
+            None => {
+                // An extension that fits one part alone gives the receiver no member, so the call is refused once, on
+                // the parts the extension would run on, and no error says a part lacks a member an extension gives it.
+                let given: Vec<TAtomic> = rest
+                    .types
+                    .iter()
+                    .filter(|part| has_extension_method(context, &TUnion::from_atomic((*part).clone()), name.value))
+                    .cloned()
+                    .collect();
+                if !given.is_empty() {
+                    report_extension_of_parts(context, (&rest, &given), object.span(), selector.span(), name.value);
+                    result.has_invalid_target = true;
+                    result.lacks_sharp_method = true;
+                    rest_resolved = true;
+                }
+            }
+        }
     }
 
     if context.dialect.is_sharp()
@@ -303,6 +352,14 @@ where
         let mut object_atomics = receivers.iter().map(|atomic| (atomic, atomic)).collect::<Vec<_>>();
 
         while let Some((object_atomic, written_atomic)) = object_atomics.pop() {
+            // This part was resolved above, with the other parts that declare no member of the name.
+            if rest_resolved
+                && let ClassLikeMemberSelector::Identifier(name) = selector
+                && lacks_member(context.codebase, written_atomic, name.value)
+            {
+                continue;
+            }
+
             if let TAtomic::GenericParameter(TGenericParameter { constraint, .. }) = object_atomic {
                 object_atomics.extend(constraint.types.iter().map(|bound| (bound, written_atomic)));
                 continue;
@@ -575,7 +632,7 @@ where
                         .get_method_by_id(&method)
                         .is_some_and(|metadata| is_collection_member(method.get_class_name(), metadata)) =>
                 {
-                    result.collection_members.push((method, parts));
+                    result.part_members.push((method, parts));
                 }
                 // A refusal the resolution reported stands alone.
                 resolved => {
@@ -1734,6 +1791,43 @@ fn report_non_existent_scalar_method<A>(
                 Annotation::secondary(obj_span).with_message(format!("This expression has type `{scalar}`")),
             )
             .with_help(help),
+    );
+}
+
+/// Reports a method no extension gives the `receiver` as a whole, though one gives each of its parts `given` alone, spec
+/// section 26: the receiver's type picks the extension, so the call has no member, and its help names the parts that
+/// have one, which a test with `is` reaches.
+fn report_extension_of_parts<A>(
+    context: &mut Context<'_, '_, A>,
+    (receiver, given): (&TUnion, &[TAtomic]),
+    obj_span: Span,
+    selector_span: Span,
+    method_name: &[u8],
+) where
+    A: Arena,
+{
+    let receiver = display_type(context, receiver);
+    let name = String::from_utf8_lossy(method_name);
+    let parts: Vec<String> = given
+        .iter()
+        .map(|part| {
+            let part = display_type(context, &TUnion::from_atomic(part.clone()));
+
+            format!("{} `{part}`", article(&part))
+        })
+        .collect();
+    let parts = format!("{} {}", joined_with_and(&parts), if parts.len() == 1 { "has" } else { "have" });
+
+    context.collector.report_with_code(
+        IssueCode::NonExistentMethod,
+        Issue::error(format!("Method `{name}` does not exist on `{receiver}`."))
+            .with_annotation(Annotation::primary(selector_span).with_message("This method selection is invalid"))
+            .with_annotation(
+                Annotation::secondary(obj_span).with_message(format!("This expression has type `{receiver}`")),
+            )
+            .with_help(format!(
+                "Only {parts} the extension member `{name}`: test the value with `is` first, and call `{name}` there."
+            )),
     );
 }
 

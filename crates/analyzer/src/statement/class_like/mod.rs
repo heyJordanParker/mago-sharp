@@ -99,9 +99,11 @@ use crate::statement::class_like::method_signature::SignatureCompatibilityIssue;
 use crate::statement::function_like::FunctionLikeBody;
 use crate::statement::function_like::HintPlace;
 use crate::statement::function_like::analyze_function_like;
+use crate::statement::function_like::is_union_for_a_class_bound;
 use crate::statement::function_like::report_invalid_template_arguments;
 use crate::statement::function_like::report_undefined_bound_types;
 use crate::statement::function_like::report_undefined_type_references;
+use crate::statement::function_like::report_union_for_a_class_bound;
 use crate::utils::missing_type_hints;
 use crate::utils::names::and_list;
 use crate::utils::names::article;
@@ -167,7 +169,7 @@ fn report_duplicate_definition<A>(
     };
     context.collector.report_with_code(
         IssueCode::DuplicateDefinition,
-        Issue::error(format!("{title} `{name}` is already defined elsewhere."))
+        Issue::error(format!("{title} `{name}` is already defined {}.", defined_in(context, original_span)))
             .with_annotation(
                 Annotation::primary(duplicate_span).with_message(format!("Duplicate {kind} definition here")),
             )
@@ -178,6 +180,19 @@ fn report_duplicate_definition<A>(
                 "Consider using namespaces to avoid naming conflicts, or remove one of the duplicate definitions.",
             ),
     );
+}
+
+/// Where the declaration at `original_span` that keeps a duplicated name is, as a duplicate's error says it: in the
+/// file the codebase names, the one whose name sorts first, as "in `app/Shop/Cart.sharp`", or "elsewhere" in a file
+/// it names none for, a built-in's.
+pub(crate) fn defined_in<A>(context: &Context<'_, '_, A>, original_span: Span) -> String
+where
+    A: Arena,
+{
+    context
+        .codebase
+        .file_name(original_span.file_id)
+        .map_or_else(|| "elsewhere".to_owned(), |file| format!("in `{file}`"))
 }
 
 /// Refuses a class-like whose full name is also a namespace, as `App\Tenant\Store` is beside a class in
@@ -2926,6 +2941,32 @@ fn check_template_parameters<'ctx, A>(
                 );
 
                 if is_type_compatible(context.codebase, &extended_type, &replaced_template_type) {
+                    // Spec section 11: a header's union for a type parameter bounded by a class is refused, as a
+                    // written one anywhere else is.
+                    if let Some(parent) = &sharp_parent
+                        && is_union_for_a_class_bound(context.codebase, &replaced_template_type, &extended_type)
+                    {
+                        let written: Vec<String> = parent_metadata
+                            .template_types
+                            .keys()
+                            .filter_map(|name| {
+                                let written = if name == template_name {
+                                    &replaced_template_type
+                                } else {
+                                    extended_parameters.get(name)?
+                                };
+
+                                Some(display_type(context, written))
+                            })
+                            .collect();
+                        report_union_for_a_class_bound(
+                            context,
+                            *template_name,
+                            (&extended_type, &replaced_template_type),
+                            &format!("{parent}<{}>", written.join(", ")),
+                            (primary_annotation_span, parent_definition_span),
+                        );
+                    }
                     previous_extended_types
                         .entry(*template_name)
                         .or_default()

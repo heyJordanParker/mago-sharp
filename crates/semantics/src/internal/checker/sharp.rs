@@ -5384,10 +5384,10 @@ fn check_self_type(keyword: &Keyword, place: Place, context: &mut Context<'_, '_
 }
 
 /// Decides `new` on a class written by its short name, on `Self`, or on PHP's `self` or `static`. `new Self(…)` needs
-/// the class's constructor marked `required`, spec section 25, because `Self` can be any subclass, and names no type
-/// arguments, spec section 11, because `Self` is the class with its own type parameters, which a static member of a
-/// generic class can't name. PHP's `self` and `static`, and `Self` in such a static member, are reported at the
-/// keyword, so the arguments are still checked. `new` of a type parameter creates its type argument while the code
+/// the class's constructor marked `required`, spec section 25, because `Self` can be any subclass, unless no class
+/// extends the class. It names no type arguments, spec section 11, because `Self` is the class with its own type
+/// parameters, which a static member of a generic class can't name. PHP's `self` and `static`, and `Self` in such a
+/// static member, are reported at the keyword, so the arguments are still checked. `new` of a type parameter creates its type argument while the code
 /// runs, which carries its own type arguments, so it names none.
 fn check_instantiation(instantiation: &Instantiation, context: &mut Context<'_, '_, '_>) -> Option<Place> {
     match instantiation.class {
@@ -5453,10 +5453,12 @@ fn check_instantiation(instantiation: &Instantiation, context: &mut Context<'_, 
         return None;
     }
 
-    // `new Self.fromJson(…)` needs `fromJson` to be `required`, which the analyzer checks where it is declared.
+    // `new Self.fromJson(…)` needs `fromJson` to be `required`, which the analyzer checks where it is declared. In a
+    // class no class extends, `Self` is that class, as in Swift, so `new Self(…)` calls its constructor.
     if matches!(instantiation.class, Expression::Self_(_))
         && instantiation.constructor.is_none()
         && let Some(class) = enclosing_class(context.program, instantiation.span())
+        && !class.is_final
         && !has_required_constructor(&class)
     {
         let name = BytesDisplay(class.name.value);
@@ -5998,8 +6000,10 @@ fn broken_rule(node: Node<'_, '_>, place: Place, context: &Context<'_, '_, '_>) 
             BytesDisplay(law.name.value)
         ))
         .with_note(supported(place)),
-        (Node::ClassLikeMember(ClassLikeMember::EnumCase(case)), Place::Class) => {
-            error(format!("A class has no cases: declare `{}` in an enum.", BytesDisplay(case.item.name().value)))
+        (Node::ClassLikeMember(ClassLikeMember::EnumCase(case)), Place::Class | Place::Interface) => {
+            let owner = if place == Place::Class { "A class" } else { "An interface" };
+
+            error(format!("{owner} has no cases: declare `{}` in an enum.", BytesDisplay(case.item.name().value)))
                 .with_note(supported(place))
         }
         (Node::Expression(Expression::Self_(keyword)), Place::Body | Place::Constant) if is_sharp_self(keyword) => {
@@ -6740,6 +6744,9 @@ struct ClassLike<'ast, 'arena> {
     members: &'ast Sequence<'arena, ClassLikeMember<'arena>>,
     is_static: bool,
     is_foreign: bool,
+    /// Whether no class can extend it: a `final` class, spec section 22, a struct, which is never inherited, spec
+    /// section 10, or an enum.
+    is_final: bool,
 }
 
 impl<'ast, 'arena> ClassLike<'ast, 'arena> {
@@ -6751,6 +6758,7 @@ impl<'ast, 'arena> ClassLike<'ast, 'arena> {
             members: &class.members,
             is_static: class.modifiers.contains_static(),
             is_foreign: class.modifiers.iter().any(|modifier| matches!(modifier, Modifier::Foreign(_))),
+            is_final: class.modifiers.contains_final(),
         }
     }
 
@@ -6762,6 +6770,7 @@ impl<'ast, 'arena> ClassLike<'ast, 'arena> {
             members: &r#struct.members,
             is_static: false,
             is_foreign: false,
+            is_final: true,
         }
     }
 }
@@ -6796,6 +6805,7 @@ impl<'ast, 'arena> Declarations<'ast, 'arena> {
                     members: &r#enum.members,
                     is_static: false,
                     is_foreign: false,
+                    is_final: true,
                 });
             }
             Statement::Interface(interface) => self.types.push(&interface.name),

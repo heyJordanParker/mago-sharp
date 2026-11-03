@@ -72,7 +72,6 @@ use mago_syntax::cst::PropertyAccess;
 use mago_syntax::cst::RestPattern;
 use mago_syntax::cst::Statement;
 use mago_syntax::cst::TypePattern;
-use mago_syntax::cst::UnaryPrefixOperator;
 use mago_syntax::utils::pattern::PatternNames;
 use mago_syntax::utils::pattern::PhpShape;
 use mago_syntax::utils::pattern::called_functions;
@@ -941,26 +940,31 @@ where
     let (assertions, _) =
         find_satisfying_assignments(&saturate_clauses(clauses.iter(), &thresholds), None, &mut WordSet::default());
 
-    let left = if assertions.is_empty() {
-        value_type.clone()
-    } else {
-        let mut unhandled_context = block_context.clone();
-        reconcile_keyed_types(
-            context,
-            &assertions,
-            IndexMap::new(),
-            &mut unhandled_context,
-            &mut WordSet::default(),
-            &WordSet::default(),
-            &pattern_match.span(),
-            false,
-            false,
-        );
+    // A `match` with an arm tests a variable, the local it names or the hidden variable its PHP assigns first, and the
+    // value no arm handles is that variable once each test is false. A `match` whose tests assert nothing leaves it all.
+    let left = match tested_variable(pattern_match, first_hidden, context) {
+        Some(tested) if !assertions.is_empty() => {
+            let mut unhandled_context = block_context.clone();
+            // The hidden variable that holds a value no local names, as a call's result, is assigned in the arms' PHP,
+            // so the `match`'s own context holds it as the value it tests.
+            unhandled_context.locals.entry(tested).or_insert_with(|| Rc::new(value_type.clone()));
+            reconcile_keyed_types(
+                context,
+                &assertions,
+                IndexMap::new(),
+                &mut unhandled_context,
+                &mut WordSet::default(),
+                &WordSet::default(),
+                &pattern_match.span(),
+                false,
+                false,
+            );
 
-        // Only the tested value is left to handle: the PHP of a pattern narrows the hidden variables of its items too.
-        tested_variable(pattern_match, first_hidden, context)
-            .and_then(|variable| unhandled_context.locals.get(&variable))
-            .map_or_else(|| value_type.clone(), |left| (**left).clone())
+            // Only the tested value is left to handle: the PHP of a pattern narrows the hidden variables of its items
+            // too.
+            unhandled_context.locals.get(&tested).map_or_else(|| value_type.clone(), |left| (**left).clone())
+        }
+        _ => value_type.clone(),
     };
 
     let atomics = || left.types.iter();
@@ -2546,17 +2550,15 @@ pub(crate) fn with_type_arguments(
     inferred_type_replacer::replace(declared, &template_result, codebase)
 }
 
-/// Whether an error already refuses `expression`. `check_slice` refuses it when it failed to parse, it is `!x is T`, or
-/// it tests or converts a value to a type with no [type test](mago_syntax::utils::pattern::has_type_test) in `is`, `as`
-/// or a `match` arm. Its type is the error type in PHP# and `never` in PHP, a variable its `is` pattern names holds the
-/// type written beside it, and it adds no other issue.
+/// Whether an error already refuses `expression`. `check_slice` refuses it when it failed to parse, or it tests or
+/// converts a value to a type with no [type test](mago_syntax::utils::pattern::has_type_test) in `is`, `as` or a
+/// `match` arm. Its type is the error type in PHP# and `never` in PHP, a variable its `is` pattern names holds the type
+/// written beside it, and it adds no other issue. A refused `!x is T` is not one of these: `php_shape` gives it the
+/// PHP of the `x is not T` its error asks for, which adds no issue of its own.
 pub(crate) fn is_refused(expression: &Expression<'_>) -> bool {
     match expression {
         Expression::Error(_) => true,
-        Expression::Is(is) => {
-            matches!(is.value, Expression::UnaryPrefix(prefix) if matches!(prefix.operator, UnaryPrefixOperator::Not(_)))
-                || type_pattern_hints(is.pattern).into_iter().any(|hint| !has_type_test(hint))
-        }
+        Expression::Is(is) => type_pattern_hints(is.pattern).into_iter().any(|hint| !has_type_test(hint)),
         Expression::As(r#as) => !has_type_test(r#as.hint),
         Expression::PatternMatch(pattern_match) => is_refused_match(pattern_match),
         _ => false,

@@ -641,11 +641,12 @@ where
     }
 
     fn read_property(&mut self, object: &Expression<'arena>, property: &ClassLikeMemberSelector<'arena>, span: Span) {
-        // A member named at run time, as `payments.{name}`, still reaches the object.
-        let member = match property {
-            ClassLikeMemberSelector::Identifier(name) => word(name.value),
-            _ => empty_word(),
+        // A member named by an expression, as `payments.{"fee"}`, is a parse refusal, so its read has no effect a
+        // caller reaches.
+        let ClassLikeMemberSelector::Identifier(name) = property else {
+            return;
         };
+        let member = word(name.value);
         let codebase = self.codebase();
         for class in self.object_classes(object) {
             if let Some(effect) = foreign_class(codebase, class) {
@@ -661,7 +662,6 @@ where
 
         if let Expression::ConstantAccess(class) = object.unparenthesized()
             && self.context.resolved_names.binding(&class.name) == Some(Binding::Class)
-            && let ClassLikeMemberSelector::Identifier(name) = property
         {
             self.use_statics(word(self.context.resolved_names.get(&class.name)), name.value, span);
         }

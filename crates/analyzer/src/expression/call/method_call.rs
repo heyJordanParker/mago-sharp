@@ -77,6 +77,7 @@ use crate::invocation::template_result::seed_method_type_arguments;
 use crate::plugin::ExpressionHookResult;
 use crate::plugin::context::HookContext;
 use crate::plugin::hook::StaticCall;
+use crate::resolver::extension::own_member_classes;
 use crate::resolver::method::CalledProperty;
 use crate::resolver::method::UndocumentedMethod;
 use crate::resolver::method::UnresolvedMethod;
@@ -394,11 +395,13 @@ where
 
     // Each kind of collection among the receiver's parts runs the standard library's member of that kind, analyzed on
     // those parts, and its objects run their own methods below, spec section 12, as `held.contains("tea")` on a
-    // `List<string>|Set<string>|Box` runs the member or the method of the kind the value holds.
+    // `List<string>|Set<string>|Box` runs the member or the method of the kind the value holds. The parts that declare
+    // no member of the name run an extension of it the same way, spec section 26, as `label()` on an `Order|string`
+    // runs the extension on a `string` and `Order`'s own method on an `Order`.
     // A member that changes its receiver runs on each part of the kind alone, so each part fixes its own type arguments
     // and an `add` on a value that may be a `List<int>` or a `List<string>` takes only what both take, as a union of
     // collections allows only what each of them allows.
-    let members: Vec<_> = std::mem::take(&mut method_resolution.collection_members)
+    let members: Vec<_> = std::mem::take(&mut method_resolution.part_members)
         .into_iter()
         .flat_map(|(member, parts)| {
             if changes_receiver(context, &member) {
@@ -408,6 +411,16 @@ where
             }
         })
         .collect();
+    // The lowering tells the parts that run their own member apart by their class.
+    if !members.is_empty()
+        && let ClassLikeMemberSelector::Identifier(name) = selector
+        && let Some(receiver) = artifacts.get_expression_type(object)
+    {
+        let classes = own_member_classes(context.codebase, receiver, name.value);
+        if !classes.is_empty() {
+            artifacts.record_own_member_classes(span, classes);
+        }
+    }
     // A call one kind of the receiver lacks the member for is refused once, so its place is not checked too.
     let changes =
         !method_resolution.has_invalid_target && members.iter().any(|(member, _)| changes_receiver(context, member));
@@ -447,7 +460,7 @@ where
             is_null_safe,
             |context, block_context, artifacts| {
                 let runs_one_of = members.len() > 1;
-                analyze_collection_members(
+                analyze_part_members(
                     context,
                     block_context,
                     artifacts,
@@ -464,7 +477,7 @@ where
         );
     }
     let collection_copy = changes.then(|| check_changed_collection(context, block_context, artifacts, object));
-    let collection_result = analyze_collection_members(
+    let collection_result = analyze_part_members(
         context,
         block_context,
         artifacts,
@@ -667,15 +680,16 @@ where
     Ok(())
 }
 
-/// Analyzes the call of each of `members`, a kind's member with the receiver's parts of that kind, or with one of them
-/// for a member that changes its receiver, on those parts of `object`, types the call `span` as the join of what each
-/// call gives, and gives that join, or None for no member.
+/// Analyzes the call of each of `members`, a member with the receiver's parts it runs on, a kind's member with the
+/// parts of that kind or an extension with the parts that declare no member of its name, or with one part for a member
+/// that changes its receiver, on those parts of `object`, types the call `span` as the join of what each call gives,
+/// and gives that join, or None for no member.
 /// Where the call runs one of several, a member or an object's own method, each member's type arguments and type are
 /// recorded apart, as [`AnalysisArtifacts::get_member_call`] reads them, and the call's own are the last member's.
 /// What every member compares is reported together once it is all known, so an argument each kind's member searches
 /// or orders by is reported once for the call.
 #[allow(clippy::too_many_arguments)]
-fn analyze_collection_members<'ctx, 'ast, 'arena, A>(
+fn analyze_part_members<'ctx, 'ast, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
     block_context: &mut BlockContext<'ctx>,
     artifacts: &mut AnalysisArtifacts,
@@ -720,14 +734,21 @@ where
         joined = Some(given);
     }
     // The receiver has its written type again, every part of it, which the help of a search reads.
-    report_comparisons(context, object, artifacts.get_expression_type(object), &comparisons, is_null_safe);
+    report_comparisons(
+        context,
+        block_context,
+        object,
+        artifacts.get_expression_type(object),
+        &comparisons,
+        is_null_safe,
+    );
 
     Ok(joined)
 }
 
 /// Runs `analyze` with the receiver `object` typed `receiver_type`, as an extension member's call takes it, and types
 /// `object` as before afterwards.
-fn with_receiver_type<T>(
+pub(crate) fn with_receiver_type<T>(
     artifacts: &mut AnalysisArtifacts,
     object: &Expression<'_>,
     receiver_type: TUnion,

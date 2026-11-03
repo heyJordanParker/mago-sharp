@@ -388,18 +388,23 @@ where
         })
         .unwrap_or_default();
     if classes.is_empty() || classes.iter().any(|class| class.fqcn.is_none()) {
-        let written = BytesDisplay(name.value());
         context.collector.report_with_code(
             IssueCode::InvalidClassStringExpression,
-            Issue::error(format!("`{written}` can stand for a type that is not a class."))
-                .with_annotation(Annotation::primary(name.span()).with_message("Used as a class here."))
-                .with_help(format!("Bound `{written}` by a class, as in `<{written} : Order>`.")),
+            type_parameter_of_no_class(BytesDisplay(name.value()), name.span()),
         );
 
         return vec![ResolvedClassname::invalid()];
     }
 
     classes
+}
+
+/// The issue of the type parameter `parameter`, written at `span` as a class or as its class value, whose bound holds
+/// a type that is no class, so it has no statics and creates no objects, spec section 25.
+pub(crate) fn type_parameter_of_no_class(parameter: impl std::fmt::Display, span: Span) -> Issue {
+    Issue::error(format!("`{parameter}` can stand for a type that is not a class."))
+        .with_annotation(Annotation::primary(span).with_message("Used as a class here."))
+        .with_help(format!("Bound `{parameter}` by a class, as in `<{parameter} : Order>`."))
 }
 
 /// The classes a value of `class_value_type` holds when it is a PHP# class value, spec section 25, leaving out `null`,
@@ -422,18 +427,21 @@ pub(crate) fn class_value_classes(class_value_type: &TUnion) -> Option<Vec<Word>
     (!classes.is_empty()).then_some(classes)
 }
 
-/// Whether `class_value_type` holds a PHP# class value of a type that is no class, as a `Class<int>` or a
-/// `Class<int|string>`, spec section 25. Only a class's `Class` creates objects and has statics.
+/// Whether `class_value_type` holds a PHP# class value of a type that is no class, as a `Class<int>`, a
+/// `Class<int|string>` or the `typeof(TAny)` of a type parameter whose bound is no class, spec section 25. Only a
+/// class's `Class` creates objects and has statics.
 pub(crate) fn holds_no_class(class_value_type: &TUnion) -> bool {
     class_value_type.types.iter().any(|atomic| {
-        matches!(atomic, TAtomic::Scalar(TScalar::ClassLikeString(class_value @ TClassLikeString::OfType { .. }))
-            if !matches!(class_value.constraint(), Some(TAtomic::Object(_) | TAtomic::GenericParameter(_))))
+        matches!(atomic, TAtomic::Scalar(TScalar::ClassLikeString(
+            class_value @ (TClassLikeString::OfType { .. } | TClassLikeString::Generic { .. })
+        )) if !matches!(class_value.constraint(), Some(TAtomic::Object(_) | TAtomic::GenericParameter(_))))
     })
 }
 
 /// Reports `value`, of the type `value_type` that [`holds_no_class`], where only a class's `Class` does what `does`
 /// says: "creates objects" for `new (value)()`, and "has statics" for a static member read, written or called through
-/// it. The caller types the refused expression `TAtomic::Error`, so nothing reports again on it.
+/// it. The class value of a type parameter is reported as the type parameter is where it is written as a class. The
+/// caller types the refused expression `TAtomic::Error`, so nothing reports again on it.
 pub(crate) fn report_class_value_of_no_class<A>(
     context: &mut Context<'_, '_, A>,
     value: &Expression<'_>,
@@ -443,16 +451,26 @@ pub(crate) fn report_class_value_of_no_class<A>(
 ) where
     A: Arena,
 {
-    let written = String::from_utf8_lossy(&context.source_file.contents[value.span().to_range_usize()]);
-    context.collector.report_with_code(
-        IssueCode::InvalidClassStringExpression,
-        Issue::error(format!(
-            "`{written}` is a `{}`, and only a class's `Class` {does}.",
-            display_type(context, value_type)
-        ))
-        .with_annotation(Annotation::primary(value.span()).with_message("Used as a class value here."))
-        .with_help(help.to_owned()),
-    );
+    let parameter = value_type.types.iter().find_map(|atomic| match atomic {
+        TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::Generic { parameter_name, .. })) => {
+            Some(parameter_name)
+        }
+        _ => None,
+    });
+    let issue = match parameter {
+        Some(parameter) => type_parameter_of_no_class(parameter, value.span()),
+        None => {
+            let written = String::from_utf8_lossy(&context.source_file.contents[value.span().to_range_usize()]);
+
+            Issue::error(format!(
+                "`{written}` is a `{}`, and only a class's `Class` {does}.",
+                display_type(context, value_type)
+            ))
+            .with_annotation(Annotation::primary(value.span()).with_message("Used as a class value here."))
+            .with_help(help.to_owned())
+        }
+    };
+    context.collector.report_with_code(IssueCode::InvalidClassStringExpression, issue);
 }
 
 /// The class with type arguments a PHP# class value holds, as `Counter<Order>` for a `Class<Counter<Order>>`, spec

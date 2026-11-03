@@ -260,14 +260,26 @@ impl<'arena, A> Shape<'_, 'arena, A>
 where
     A: Arena,
 {
+    /// The slice refuses `!x is T` for the `x is not T` its error asks for, and the PHP is that form's, so the analyzer
+    /// narrows `x` as the user means it and the refusal shows alone.
     fn is(&mut self, is: &Is<'arena>) -> Option<&'arena Expression<'arena>> {
+        let (value, refused_not) = match is.value {
+            Expression::UnaryPrefix(UnaryPrefix { operator: UnaryPrefixOperator::Not(not), operand }) => {
+                (*operand, Some(*not))
+            }
+            value => (value, None),
+        };
         let named = match is.pattern {
             Pattern::Not(not) => is_named(not.pattern),
             pattern => is_named(pattern),
         };
         let mut subject =
-            if named { Subject { first: Some(self.tested(is.value)), variable: None } } else { self.subject(is.value) };
-        let test = self.test(is.pattern, is.is.span, &mut subject)?;
+            if named { Subject { first: Some(self.tested(value)), variable: None } } else { self.subject(value) };
+        let mut test = self.test(is.pattern, is.is.span, &mut subject)?;
+        if let Some(not) = refused_not {
+            test = self
+                .alloc(Expression::UnaryPrefix(UnaryPrefix { operator: UnaryPrefixOperator::Not(not), operand: test }));
+        }
         self.tests.push((is.pattern.span(), test));
 
         Some(test)

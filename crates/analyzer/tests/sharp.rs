@@ -1455,6 +1455,17 @@ fn a_promoted_member_is_the_promoted_php_property() {
     assert_eq!(caller_of_sharp, caller_of_php);
 }
 
+/// Spec section 9: a parameter with an access modifier declares a member, whether the constructor's body is a block or
+/// an expression, as in C#.
+#[test]
+fn an_expression_bodied_constructor_declares_a_member_on_a_parameter() {
+    let block = "namespace Demo;\n\npublic class Report\n{\n    private int count = 0;\n\n    public Report(private int start, int unused)\n    {\n        this.count = start + unused;\n    }\n\n    public int total() => this.count + this.start;\n}\n";
+    let expression = "namespace Demo;\n\npublic class Report\n{\n    private int count = 0;\n\n    public Report(private int start, int unused) => this.count = start + unused;\n\n    public int total() => this.count + this.start;\n}\n";
+
+    assert_eq!(reported(("src/Demo/Report.sharp", block), &[]), Vec::<String>::new());
+    assert_eq!(reported(("src/Demo/Report.sharp", expression), &[]), Vec::<String>::new());
+}
+
 #[test]
 fn an_initial_value_that_is_not_constant_is_checked_against_the_member_type() {
     let sharp = "namespace Demo;\n\nclass Report\n{\n    private Clock clock = new Clock();\n    public int ticks { get; private set; } = new Clock().tick();\n    private string label = new Clock();\n\n    public string read()\n    {\n        return this.label;\n    }\n\n    public Clock now()\n    {\n        return this.clock;\n    }\n}\n";
@@ -4505,11 +4516,14 @@ fn a_condition_that_is_not_bool_is_an_invalid_operand_everywhere() {
 }
 
 /// `check_slice` refuses `!entity is HasDesign` and writes `entity is not HasDesign`, and the refusal shows alone, while
-/// `!` on any other value that is not `bool` keeps its report.
+/// `!` on any other value that is not `bool` keeps its report. The refused test is analyzed as the `x is not T` its
+/// error asks for, so a line after a branch that leaves on it reads the value, and the name it binds, as `T`, and a
+/// method that returns it adds no issue.
 #[test]
 fn not_before_is_adds_no_issue_and_not_of_a_value_that_is_not_bool_keeps_its_report() {
-    let design = "<?php\n\nnamespace Demo;\n\ninterface HasDesign\n{\n}\n";
+    let design = "<?php\n\nnamespace Demo;\n\ninterface HasDesign\n{\n    public function ready(): bool;\n}\n";
     let sharp = "namespace Demo;\n\nclass Report\n{\n    public static bool run(Any entity, int done)\n    {\n        if (!entity is HasDesign) {\n            return true;\n        }\n        if (!done) {\n            return false;\n        }\n        return true;\n    }\n}\n";
+    let bound = "namespace Demo;\n\nclass Report\n{\n    public static bool run(Any entity)\n    {\n        if (!entity is HasDesign design) {\n            return false;\n        }\n        return design.ready();\n    }\n}\n";
 
     assert_eq!(
         reported(("src/Demo/Report.sharp", sharp), &[("src/Demo/HasDesign.php", design)]),
@@ -4517,6 +4531,21 @@ fn not_before_is_adds_no_issue_and_not_of_a_value_that_is_not_bool_keeps_its_rep
             "7:13 semantics Write `entity is not HasDesign`: `!` applies to `entity` before `is` tests it.",
             "10:14 invalid-operand `!` takes a `bool`, but this is `int`.",
         ]
+    );
+    assert_eq!(
+        reported(("src/Demo/Report.sharp", bound), &[("src/Demo/HasDesign.php", design)]),
+        ["7:13 semantics Write `entity is not HasDesign design`: `!` applies to `entity` before `is` tests it."]
+    );
+    let narrowed = "namespace Demo;\n\nclass Report\n{\n    public static bool run(Any entity)\n    {\n        if (!entity is HasDesign) {\n            return false;\n        }\n        return entity.ready();\n    }\n}\n";
+    assert_eq!(
+        reported(("src/Demo/Report.sharp", narrowed), &[("src/Demo/HasDesign.php", design)]),
+        ["7:13 semantics Write `entity is not HasDesign`: `!` applies to `entity` before `is` tests it."]
+    );
+    let value =
+        "namespace Demo;\n\nclass Report\n{\n    public static bool run(Any entity) => !entity is HasDesign;\n}\n";
+    assert_eq!(
+        reported(("src/Demo/Report.sharp", value), &[("src/Demo/HasDesign.php", design)]),
+        ["5:43 semantics Write `entity is not HasDesign`: `!` applies to `entity` before `is` tests it."]
     );
 }
 
@@ -7568,19 +7597,15 @@ fn a_match_over_a_closed_set_needs_no_default() {
     );
 }
 
-/// A case written in a class is the semantic check's error. No class runs as it, so the analyzer adds nothing.
+/// A case written in a class is the semantic check's error, once per case, in PHP#'s words, which name where the case
+/// goes. No class runs as it, so the analyzer adds nothing.
 #[test]
 fn a_case_written_in_a_class_is_left_to_the_semantic_check() {
     let code = "namespace App;\n\nclass Shop\n{\n    case Open;\n    case Paid(string id);\n}\n";
 
     assert_eq!(
         messages(("src/App/Shop.sharp", code), &[]),
-        [
-            "Class `Shop` cannot contain enum cases.",
-            "Class `Shop` cannot contain enum cases.",
-            "A class has no cases: declare `Open` in an enum.",
-            "A class has no cases: declare `Paid` in an enum.",
-        ]
+        ["A class has no cases: declare `Open` in an enum.", "A class has no cases: declare `Paid` in an enum."]
     );
 }
 
@@ -7591,11 +7616,13 @@ fn a_class_named_as_a_case_is_an_error_that_names_the_case() {
         analyze(&PLUGIN_REGISTRY, settings(), analyzed, others).into_iter().map(|issue| issue.message).collect()
     };
 
-    let case = "The case `PaymentResult.Paid` runs as a class of that name, which another file declares.";
+    let case =
+        "The case `PaymentResult.Paid` runs as a class of that name, which is already defined in `app/Paid.sharp`.";
     let class = "Class `Paid` clashes with the case `PaymentResult.Paid`, which runs as a class of that name.";
-    // The codebase keeps one declaration of a name, chosen by where each is written, and the other one is reported.
+    // The codebase keeps the declaration whose file's path sorts first, and the other one is reported: the enum's
+    // `src/App/PaymentResult.sharp` sorts before `src/App/PaymentResult/Paid.sharp` and after `app/Paid.sharp`.
     for (path, in_class, in_enum) in
-        [("src/App/PaymentResult/Paid.sharp", None, Some(case)), ("app/Paid.sharp", Some(class), None)]
+        [("src/App/PaymentResult/Paid.sharp", Some(class), None), ("app/Paid.sharp", None, Some(case))]
     {
         let declared = (path, "namespace App.PaymentResult;\n\nclass Paid { }\n");
 
@@ -8196,6 +8223,39 @@ fn a_match_without_default_over_a_sharp_enum_names_the_cases_it_misses() {
     );
 }
 
+/// Spec section 21: a missed case is a compile error whatever value the `match` tests, a call's result as a parameter,
+/// and the arms of a `match` on a call that handle every case leave none. A `match` whose arms name no case, as one
+/// that handles only `null`, names the import the cases it misses need.
+#[test]
+fn a_match_on_a_call_names_the_enum_cases_it_misses() {
+    let stage = (
+        "src/Demo/Stage.sharp",
+        "namespace Demo;\n\npublic enum Stage\n{\n    case Open;\n    case Paid;\n    case Closed;\n}\n",
+    );
+    let ticket = (
+        "src/Demo/Ticket.sharp",
+        "namespace Demo;\n\npublic class Ticket\n{\n    public Ticket() { }\n\n    public Stage stage() => Stage.Open;\n\n    public Stage? next() => null;\n\n    public static string named(Stage stage) => match (stage) {\n        Stage.Open => \"open\",\n    };\n\n    public string called() => match (this.stage()) {\n        Stage.Open => \"open\",\n    };\n\n    public string every() => match (this.stage()) {\n        Stage.Open => \"open\",\n        Stage.Paid or Stage.Closed => \"done\",\n    };\n}\n",
+    );
+    let desk = (
+        "src/Front/Desk.sharp",
+        "namespace Front;\n\nimport Demo.Ticket;\n\npublic class Desk\n{\n    public static string next(Ticket ticket) => match (ticket.next()) {\n        null => \"none\",\n    };\n}\n",
+    );
+
+    assert_eq!(
+        written_errors(ticket.1, &analyze(&PLUGIN_REGISTRY, settings(), ticket, &[stage])),
+        [
+            "match match-not-exhaustive This `match` misses `Stage.Paid` and `Stage.Closed`.",
+            "match match-not-exhaustive This `match` misses `Stage.Paid` and `Stage.Closed`.",
+        ]
+    );
+    assert_eq!(
+        written_errors(desk.1, &analyze(&PLUGIN_REGISTRY, settings(), desk, &[stage, ticket])),
+        [
+            "match match-not-exhaustive This `match` misses `Stage.Open`, `Stage.Paid` and `Stage.Closed`. Add `import Demo.Stage;` to the file."
+        ]
+    );
+}
+
 /// Only the last arm of a `match` takes what the arms before it leave, as `default` does. An arm before it that is
 /// always true leaves nothing for the arms after it.
 #[test]
@@ -8742,6 +8802,38 @@ fn self_and_a_required_constructor_are_checked_as_static_and_a_consistent_constr
 
     assert_eq!(sharp_issues, ["14:45 invalid-return-statement", "8:12 incompatible-parameter-count"]);
     assert_eq!(codes(&sharp_issues), codes(&php_issues), "{php_issues:?}");
+}
+
+/// Spec section 25: `new Self(…)` needs a `required` constructor because `Self` can be any subclass. A `final` class
+/// has no subclass, spec section 22, and a struct is never inherited, spec section 10, so `Self` is the class itself,
+/// as in Swift, and `new Self(…)` calls its constructor. An open class still needs `required`.
+#[test]
+fn new_self_in_a_class_with_no_subclass_needs_no_required_constructor() {
+    let sharp = [
+        (
+            "src/Demo/Ticket.sharp",
+            "namespace Demo;\n\npublic final class Ticket\n{\n    public Ticket(public int serial { get; }) { }\n\n    public static Self make() => new Self(1);\n}\n",
+        ),
+        (
+            "src/Demo/Spot.sharp",
+            "namespace Demo;\n\npublic struct Spot\n{\n    public Spot(public int x { get; }) { }\n\n    public static Self origin() => new Self(0);\n}\n",
+        ),
+        (
+            "src/Demo/Order.sharp",
+            "namespace Demo;\n\npublic class Order\n{\n    public Order(public int id { get; }) { }\n\n    public static Self make() => new Self(1);\n}\n",
+        ),
+    ];
+
+    assert_eq!(
+        each_file(reported, &sharp, &[]),
+        [
+            vec![],
+            vec![],
+            vec![
+                "7:34 semantics `new Self(…)` needs a `required` constructor: `Self` can be any subclass, so every subclass must keep a constructor that `new Self(…)` can call.",
+            ],
+        ]
+    );
 }
 
 /// `Self` can be any descendant, so a grandchild's constructor is compared with the `required` constructor above it as
@@ -9698,6 +9790,272 @@ fn an_extension_named_like_a_real_member_of_its_type_is_an_error() {
     );
 }
 
+/// Spec section 26: on a union receiver, as `Order|string`, an extension member is an error only when every type of the
+/// union declares the member, "because otherwise the extension runs on the rest". So `label()` runs the extension on a
+/// `string`, `Order.label()` on an `Order`, and on an `Order|string` each part's: the call records both. `badge()`,
+/// which `Order` lacks, runs the extension on the whole union. A member each part declares is still refused where the
+/// extension declares it.
+#[test]
+fn an_extension_on_a_union_runs_on_the_parts_that_lack_a_member_of_its_name() {
+    let order = "namespace App.Billing;\n\npublic class Order\n{\n    public Order() { }\n\n    public string label() => \"order\";\n}\n";
+    let ticket = "namespace App.Billing;\n\npublic class Ticket\n{\n    public Ticket() { }\n\n    public string label() => \"ticket\";\n}\n";
+    let labels = "namespace App.Billing;\n\npublic static class UnionLabels\n{\n    extension(Order|string value)\n    {\n        public string label() => \"text\";\n        public string badge() => \"badge\";\n    }\n}\n";
+    let pairs = "namespace App.Billing;\n\npublic static class PairLabels\n{\n    extension(Order|Ticket either)\n    {\n        public string label() => \"either\";\n    }\n}\n";
+    let calls = "namespace App.Billing;\n\npublic class Labels\n{\n    public string text(string text) => text.label();\n    public string order(Order order) => order.label();\n    public string mixed(Order|string mixed) => mixed.label();\n    public string badge(Order|string value) => value.badge();\n}\n";
+    let others = [
+        ("src/App/Billing/Order.sharp", order),
+        ("src/App/Billing/Ticket.sharp", ticket),
+        ("src/App/Billing/UnionLabels.sharp", labels),
+        ("src/App/Billing/PairLabels.sharp", pairs),
+    ];
+
+    assert_messages(("src/App/Billing/UnionLabels.sharp", labels), &others[..2], &[]);
+    assert_messages(
+        ("src/App/Billing/PairLabels.sharp", pairs),
+        &others[..2],
+        &[
+            "7:23 duplicate-definition: `Order` and `Ticket` already declare `label()`, so this extension member never runs.",
+        ],
+    );
+    assert_messages(("src/App/Billing/Labels.sharp", calls), &others, &[]);
+    let extension = |member: &str| {
+        format!(
+            r#"FunctionLike {{ callee: Method("app\\billing\\unionlabels", "{member}"), class: Some("app\\billing\\unionlabels") }}"#
+        )
+    };
+    let own = r#"FunctionLike { callee: Method("App\\Billing\\Order", "label"), class: Some("app\\billing\\order") }"#
+        .to_owned();
+    assert_eq!(
+        recorded_callees(
+            ("src/App/Billing/Labels.sharp", calls),
+            &others,
+            &["text.label()", "order.label()", "mixed.label()", "value.badge()"]
+        ),
+        [vec![extension("label")], vec![own.clone()], vec![extension("label"), own], vec![extension("badge")],]
+    );
+}
+
+/// Spec section 26: on a union receiver, an extension member is read on the parts that declare no member of its name,
+/// and a part's own member on that part, a computed property as a method's value, so a read of either on an
+/// `Order|string` has the type of each and no error, and the read records the classes that read their own.
+#[test]
+fn an_extension_read_on_a_union_reads_each_parts_member() {
+    let order = "namespace App.Billing;\n\npublic class Order\n{\n    public Order() { }\n\n    public string caption => \"order\";\n\n    public string label() => \"order\";\n}\n";
+    let captions = "namespace App.Billing;\n\npublic static class Captions\n{\n    extension(Order|string value)\n    {\n        public string caption => \"text\";\n\n        public string label() => \"text\";\n    }\n}\n";
+    let reads = "namespace App.Billing;\n\npublic class Reads\n{\n    public string caption(Order|string value) => value.caption;\n\n    public Function<string()> labeler(Order|string label) => label.label;\n}\n";
+    let others = [("src/App/Billing/Order.sharp", order), ("src/App/Billing/Captions.sharp", captions)];
+    let analyzed = ("src/App/Billing/Reads.sharp", reads);
+
+    assert_messages(analyzed, &others, &[]);
+    let (_, artifacts) = analyze_with_artifacts(&PLUGIN_REGISTRY, settings(), analyzed, &others);
+    let own = |read: &str| {
+        let start = reads.find(read).unwrap() as u32;
+
+        artifacts.get_own_member_classes(&Span::dummy(start, start + read.len() as u32)).map(<[Word]>::to_vec)
+    };
+    assert_eq!(own("value.caption"), Some(vec![word("App\\Billing\\Order")]));
+    assert_eq!(own("label.label"), Some(vec![word("App\\Billing\\Order")]));
+}
+
+/// The classes of the union shapes an extension member runs beside: two classes, a nullable union through `?.`, an
+/// interface, a plain PHP class and a type parameter by its bound, whose calls and reads compile with no issue.
+fn union_shape_files() -> [(&'static str, &'static str); 7] {
+    [
+        (
+            "src/App/Billing/Order.sharp",
+            "namespace App.Billing;\n\npublic class Order\n{\n    public Order() { }\n\n    public string caption => \"order caption\";\n\n    public string label() => \"order\";\n}\n",
+        ),
+        (
+            "src/App/Billing/Ticket.sharp",
+            "namespace App.Billing;\n\npublic class Ticket\n{\n    public Ticket() { }\n\n    public string label() => \"ticket\";\n}\n",
+        ),
+        (
+            "src/App/Billing/Labeled.sharp",
+            "namespace App.Billing;\n\npublic interface Labeled\n{\n    string label();\n}\n",
+        ),
+        (
+            "src/App/Billing/PlainOrder.php",
+            "<?php\n\nnamespace App\\Billing;\n\nclass PlainOrder\n{\n    public function label(): string\n    {\n        return 'plain order';\n    }\n}\n",
+        ),
+        (
+            "src/App/Billing/HasLabel.php",
+            "<?php\n\nnamespace App\\Billing;\n\ntrait HasLabel\n{\n    public function label(): string\n    {\n        return 'trait';\n    }\n}\n",
+        ),
+        (
+            "src/App/Billing/PhpOrder.php",
+            "<?php\n\nnamespace App\\Billing;\n\nclass PhpOrder\n{\n    use HasLabel;\n}\n",
+        ),
+        (
+            "src/App/Billing/Labels.sharp",
+            "namespace App.Billing;\n\npublic static class Labels\n{\n    extension(Order|string value)\n    {\n        public string caption => \"caption\";\n\n        public string label() => \"text\";\n    }\n}\n",
+        ),
+    ]
+}
+
+/// The calls and reads of each union shape [`union_shape_files`] declares.
+const UNION_SHAPES: &str = "namespace App.Billing;\n\npublic class Shapes\n{\n    public string three(Order|Ticket|string value) => value.label();\n\n    public string? maybe((Order|string)? value) => value?.label();\n\n    public string? maybeCaption((Order|string)? value) => value?.caption;\n\n    public string named(Labeled|string value) => value.label();\n\n    public string plain(PlainOrder|string value) => value.label();\n\n    public string traited(PhpOrder|string value) => value.label();\n\n    public string bounded<T : Order>(T|string value) => value.label();\n\n    public string picked() => this.pick().label();\n\n    public Order|string pick() => \"picked\";\n}\n";
+
+/// Spec section 26: an extension member runs beside the own member of every union shape, so each call and read
+/// compiles with no issue, and records the classes of the parts that run their own: both of three parts, the union's
+/// through `?.`, an interface, a plain PHP class, one whose member a trait gives, and a type parameter's bound. A
+/// receiver that is no local records the same.
+#[test]
+fn an_extension_member_runs_beside_the_own_member_of_every_union_shape() {
+    let others = union_shape_files();
+    let analyzed = ("src/App/Billing/Shapes.sharp", UNION_SHAPES);
+
+    assert_messages(analyzed, &others, &[]);
+    let (_, artifacts) = analyze_with_artifacts(&PLUGIN_REGISTRY, settings(), analyzed, &others);
+    let own = |method: &str, access: &str| {
+        let after = UNION_SHAPES.find(&format!(" {method}")).unwrap();
+        let start = (after + UNION_SHAPES[after..].find(access).unwrap()) as u32;
+        let classes = artifacts.get_own_member_classes(&Span::dummy(start, start + access.len() as u32));
+
+        classes.map(|classes| classes.iter().map(Word::to_string).collect::<Vec<_>>())
+    };
+    let order = || Some(vec!["App\\Billing\\Order".to_owned()]);
+    assert_eq!(
+        own("three", "value.label()"),
+        Some(vec!["App\\Billing\\Order".to_owned(), "App\\Billing\\Ticket".to_owned()])
+    );
+    assert_eq!(own("maybe", "value?.label()"), order());
+    assert_eq!(own("maybeCaption", "value?.caption"), order());
+    assert_eq!(own("named", "value.label()"), Some(vec!["App\\Billing\\Labeled".to_owned()]));
+    assert_eq!(own("plain", "value.label()"), Some(vec!["App\\Billing\\PlainOrder".to_owned()]));
+    assert_eq!(own("traited", "value.label()"), Some(vec!["App\\Billing\\PhpOrder".to_owned()]));
+    assert_eq!(own("bounded", "value.label()"), order());
+    assert_eq!(own("picked", "this.pick().label()"), order());
+}
+
+/// A part's own member may come from a trait, which no value is an instance of, so a call and a read on a union record
+/// the part's own class, which a test of the value's class finds, never the trait that declares the member.
+#[test]
+fn a_member_a_part_takes_from_a_trait_is_recorded_under_the_parts_own_class() {
+    let has_label = "<?php\n\nnamespace App\\Billing;\n\ntrait HasLabel\n{\n    public function label(): string\n    {\n        return 'php';\n    }\n}\n";
+    let php_order = "<?php\n\nnamespace App\\Billing;\n\nclass PhpOrder\n{\n    use HasLabel;\n}\n";
+    let labels = "namespace App.Billing;\n\npublic static class Labels\n{\n    extension(PhpOrder|string value)\n    {\n        public string label() => \"text\";\n    }\n}\n";
+    let calls = "namespace App.Billing;\n\npublic class Calls\n{\n    public string called(PhpOrder|string value) => value.label();\n\n    public Function<string()> read(PhpOrder|string label) => label.label;\n}\n";
+    let others = [
+        ("src/App/Billing/HasLabel.php", has_label),
+        ("src/App/Billing/PhpOrder.php", php_order),
+        ("src/App/Billing/Labels.sharp", labels),
+    ];
+    let analyzed = ("src/App/Billing/Calls.sharp", calls);
+
+    assert_messages(analyzed, &others, &[]);
+    let (_, artifacts) = analyze_with_artifacts(&PLUGIN_REGISTRY, settings(), analyzed, &others);
+    let own = |access: &str| {
+        let start = calls.find(access).unwrap() as u32;
+
+        artifacts.get_own_member_classes(&Span::dummy(start, start + access.len() as u32)).map(<[Word]>::to_vec)
+    };
+    assert_eq!(own("value.label()"), Some(vec![word("App\\Billing\\PhpOrder")]));
+    assert_eq!(own("label.label"), Some(vec![word("App\\Billing\\PhpOrder")]));
+}
+
+/// Two parts of one generic class, as `Box<int>|Box<string>`, are instances of that one class, so a call and a read on
+/// a union that holds both record the class once, and the value is tested against it once.
+#[test]
+fn two_parts_of_one_generic_class_are_recorded_under_the_class_once() {
+    let boxed = "namespace App.Billing;\n\npublic class Box<T>\n{\n    public Box(public T item { get; }) { }\n\n    public string label() => \"box\";\n}\n";
+    let labels = "namespace App.Billing;\n\npublic static class Labels\n{\n    extension(string value)\n    {\n        public string label() => \"text\";\n    }\n}\n";
+    let calls = "namespace App.Billing;\n\npublic class Calls\n{\n    public string called(Box<int>|Box<string>|string value) => value.label();\n\n    public Function<string()> read(Box<int>|Box<string>|string label) => label.label;\n}\n";
+    let others = [("src/App/Billing/Box.sharp", boxed), ("src/App/Billing/Labels.sharp", labels)];
+    let analyzed = ("src/App/Billing/Calls.sharp", calls);
+
+    assert_messages(analyzed, &others, &[]);
+    let (_, artifacts) = analyze_with_artifacts(&PLUGIN_REGISTRY, settings(), analyzed, &others);
+    let own = |access: &str| {
+        let start = calls.find(access).unwrap() as u32;
+
+        artifacts.get_own_member_classes(&Span::dummy(start, start + access.len() as u32)).map(<[Word]>::to_vec)
+    };
+    assert_eq!(own("value.label()"), Some(vec![word("App\\Billing\\Box")]));
+    assert_eq!(own("label.label"), Some(vec![word("App\\Billing\\Box")]));
+}
+
+/// A call of a member that is an extension's computed property on the parts that lack it, as `value.label()` on an
+/// `Order|string` whose extension gives a `string` the property `label`, is refused once, as a call of the property on
+/// those parts alone is, and adds no error for the part that runs its own method.
+#[test]
+fn a_call_of_an_extension_property_beside_a_parts_own_method_is_one_error() {
+    let order = "namespace App.Billing;\n\npublic class Order\n{\n    public string label() => \"order\";\n}\n";
+    let labels = "namespace App.Billing;\n\npublic static class Labels\n{\n    extension(string value)\n    {\n        public string label => \"text\";\n    }\n}\n";
+    let calls = "namespace App.Billing;\n\npublic class Calls\n{\n    public string text(string value) => value.label();\n\n    public string called(Order|string value) => value.label();\n}\n";
+    let others = [("src/App/Billing/Order.sharp", order), ("src/App/Billing/Labels.sharp", labels)];
+
+    let refused = |at: &str| {
+        format!(
+            "{at} non-existent-method: `label` is a computed property of `string`, not a method: read it without `(…)`."
+        )
+    };
+
+    assert_messages(("src/App/Billing/Calls.sharp", calls), &others, &[&refused("5:47"), &refused("7:55")]);
+}
+
+/// Spec section 25: `new (typeof(TItem))()` creates an object only when `TItem`'s bound is a class, and a bound that is
+/// another type parameter is that parameter's bound. So `TItem : TBase` creates one when `TBase : Maker`, and is refused
+/// when `TBase` has no bound, since it can stand for `int`.
+#[test]
+fn new_of_the_class_value_of_a_type_parameter_bounded_by_another_reads_that_bound() {
+    let sharp = "namespace Demo;\n\npublic class Builder<TBase, TItem : TBase>\n{\n    public TItem make() => new (typeof(TItem))();\n}\n";
+    let maker =
+        ("src/Demo/Maker.sharp", "namespace Demo;\n\npublic class Maker\n{\n    public required Maker() { }\n}\n");
+    let bounded = "namespace Demo;\n\npublic class Builder<TBase : Maker, TItem : TBase>\n{\n    public TItem make() => new (typeof(TItem))();\n}\n";
+
+    assert_messages(
+        ("src/Demo/Builder.sharp", sharp),
+        &[],
+        &["5:33 invalid-class-string-expression: `TItem` can stand for a type that is not a class."],
+    );
+    assert_messages(("src/Demo/Builder.sharp", bounded), &[maker], &[]);
+}
+
+/// Spec section 26: the receiver's type picks the extension, so an extension of `string` and one of `int` add nothing to
+/// a `string|int`, and one of `string` nothing to a `Box|string`. The call gets one error, on the receiver's type, whose
+/// help names each part that has the member, so no error says a `string` lacks a member its help lists.
+#[test]
+fn a_member_an_extension_gives_one_part_of_a_union_is_missing_on_the_union() {
+    let names = "namespace App.Billing;\n\npublic static class Names\n{\n    extension(string value)\n    {\n        public string label() => value;\n    }\n}\n";
+    let calls = "namespace App.Billing;\n\npublic class Labels\n{\n    public string either(string|int value) => value.label();\n    public string boxed(Box|string value) => value.label();\n}\n";
+    let counts = "namespace App.Billing;\n\npublic static class Counts\n{\n    extension(int value)\n    {\n        public string label() => \"count\";\n    }\n}\n";
+    let others = [
+        ("src/App/Billing/Names.sharp", names),
+        ("src/App/Billing/Counts.sharp", counts),
+        ("src/App/Billing/Box.sharp", "namespace App.Billing;\n\npublic class Box\n{\n}\n"),
+    ];
+
+    assert_eq!(
+        worded(("src/App/Billing/Labels.sharp", calls), &others),
+        [
+            "5:53 non-existent-method Method `label` does not exist on `int|string`. | This method selection is invalid | This expression has type `int|string` | Only an `int` and a `string` have the extension member `label`: test the value with `is` first, and call `label` there.",
+            "6:52 non-existent-method Method `label` does not exist on `string|Box`. | This method selection is invalid | This expression has type `string|Box` | Only a `string` has the extension member `label`: test the value with `is` first, and call `label` there.",
+        ]
+    );
+}
+
+/// Spec section 26: an extension of an object part, as `extension(Crate value)` on a `Crate|int`, gives the union no
+/// member either, and the call gets the union's one error, never a second "does not exist" for the part the extension
+/// takes.
+#[test]
+fn a_member_an_extension_gives_an_object_part_of_a_union_is_one_error() {
+    let crate_ = ("src/App/Billing/Crate.sharp", "namespace App.Billing;\n\npublic class Crate\n{\n}\n");
+    let tags = (
+        "src/App/Billing/CrateTags.sharp",
+        "namespace App.Billing;\n\npublic static class CrateTags\n{\n    extension(Crate value)\n    {\n        public string tag() => \"crate\";\n    }\n}\n",
+    );
+    let calls = "namespace App.Billing;\n\npublic class Tags\n{\n    public string either(Crate|int value) => value.tag();\n\n    public string missing(Missing|int value) => value.tag();\n}\n";
+
+    // A part of a type no file declares is refused where the type is written, and the call adds nothing.
+    assert_eq!(
+        worded(("src/App/Billing/Tags.sharp", calls), &[crate_, tags]),
+        [
+            "5:52 non-existent-method Method `tag` does not exist on `int|Crate`. | This method selection is invalid | This expression has type `int|Crate` | Only a `Crate` has the extension member `tag`: test the value with `is` first, and call `tag` there.",
+            "7:27 non-existent-class-like Cannot find type `App.Billing.Missing`. | No type of this name is declared. | Check the name's spelling, and import the type with `import` when another namespace declares it.",
+        ]
+    );
+}
+
 /// Spec section 26: an extension member's body reads its receiver as a parameter of the receiver's type.
 #[test]
 fn an_extension_member_reads_its_receiver_as_a_parameter_of_its_type() {
@@ -9744,16 +10102,17 @@ fn an_extension_block_infers_its_type_parameters_from_the_receiver() {
             "Too many type arguments for `List.blank`: expected 1, but found 2.",
             "Nothing fixes the type argument `TOut` of the call to `List.blank`.",
             "`string` is outside `T`'s bound `Order`, so `List<string>` has no `saved`.",
-            "Method `Pair.swapped` does not exist.",
+            "Method `swapped` does not exist on `Pair<int, Order>|Pair<string, Order>`.",
         ]
     );
 }
 
 /// Spec section 26: an extension holds methods and computed properties. Semantics refuses any other member and a
-/// member declared twice, and the refusals of the constant and the second `label` show alone on their lines.
+/// member declared twice, and the refusals of the constant and the second `label` show alone: the analysis skips the
+/// second `label`'s body, so the member it calls on a later line, which `string` lacks, adds no issue.
 #[test]
 fn an_extension_member_semantics_refuses_shows_its_refusal_alone() {
-    let sharp = "namespace App.Shared.Text;\n\npublic static class TextExtensions\n{\n    extension(string value)\n    {\n        public const int LIMIT = 1;\n        public string label() => value;\n        public int label() => value;\n    }\n}\n";
+    let sharp = "namespace App.Shared.Text;\n\npublic static class TextExtensions\n{\n    extension(string value)\n    {\n        public const int LIMIT = 1;\n        public string label() => value;\n        public int label()\n        {\n            return value.missing();\n        }\n    }\n}\n";
 
     assert_eq!(issues(("src/App/Shared/Text/TextExtensions.sharp", sharp), &[]), ["9:20 semantics", "7:9 semantics"]);
 }
@@ -12417,6 +12776,27 @@ fn a_place_declared_a_list_or_a_set_refuses_an_empty_map() {
     );
 }
 
+/// A local whose first value is a `List` or a `Set` holds either for its whole life, so a literal written to it later
+/// is checked against each, as one written where both are declared is: `[1]` is either, and `[:]` neither.
+#[test]
+fn a_literal_written_to_a_local_holding_a_list_or_a_set_is_checked_against_each() {
+    let sharp = "namespace Demo;\n\nclass Tags\n{\n    public int count(List<int> list, Set<int> set, bool flag)\n    {\n        let ids = flag ? list : set;\n        ids = [1];\n        ids = [:];\n        return ids.count();\n    }\n}\n";
+
+    assert_eq!(
+        reported(("src/Demo/Tags.sharp", sharp), &[]),
+        ["9:15 invalid-array-element `[:]` is an empty Map. An empty List is written `[]`."]
+    );
+}
+
+/// A local whose first value is one of two lists of functions holds either, so a lambda in a literal written to it
+/// takes each list's parameter type, and nothing refuses its untyped parameter.
+#[test]
+fn a_lambda_written_to_a_local_holding_either_list_of_functions_takes_each_parameter_type() {
+    let sharp = "namespace Demo;\n\nclass Steps\n{\n    public int count(List<Function<int(int)>> ints, List<Function<int(float)>> floats, bool flag)\n    {\n        let steps = flag ? ints : floats;\n        steps = [n => 1];\n        return steps.count();\n    }\n}\n";
+
+    assert_eq!(reported(("src/Demo/Steps.sharp", sharp), &[]), Vec::<String>::new());
+}
+
 /// A `Set` takes a `List` literal, so a place declared a `Map` or a `Set` takes `[1]` as the `Set`. PHP has one kind of
 /// array, and its array of either takes `[1]`.
 #[test]
@@ -13396,10 +13776,11 @@ fn collection_methods_take_and_give_the_types_of_their_elements() {
 /// and an `Any?` element compared with an `Any?` or an instance, while an `Iterable` element is refused, as `==` on an
 /// `Iterable` is. An element `==` compares, a class that declares `operator ==`, nullable or not, a string,
 /// an `int|float` given an int and an `Any?` given a string, searches with no issue, as does the help's `any` with
-/// `===`, whose lambda names an element by its class's initial unless the call already uses that name, and which keeps
-/// a null-safe call's `?.`. A struct element compares by value, so one with a property `==` can't compare is refused
-/// with that property, and so is a list element whose own elements `==` can't compare. A struct equals only the same
-/// struct, so a search of a struct beside another type, a number or a struct, is refused as `==` refuses it.
+/// `===`, whose lambda names an element by its class's initial unless a local in scope has that name, as the parameter
+/// `l` does here, and which keeps a null-safe call's `?.`. A struct element compares by value, so one with a property
+/// `==` can't compare is refused with that property, and so is a list element whose own elements `==` can't compare. A
+/// struct equals only the same struct, so a search of a struct beside another type, a number or a struct, is refused as
+/// `==` refuses it.
 #[test]
 fn a_search_needs_equality_on_the_element_type() {
     let sharp = "namespace Demo;\n\nclass Shelf\n{\n    public int search(List<Line> lines, Line line, List<List<int>> rows, List<Money> prices, Money price, List<string> tags, List<int|float> amounts, List<Coin> coins, Coin coin, List<Line> ls, Line l, List<Any?> loose, Any? value, List<Line>? held, List<Money|Line> goods, List<Money|int> tallies, List<Money|Ticket> tickets, List<Coin|Line> pocket, List<Money?> wallet, List<Order> orders, Order order, List<List<Line>> shelves, List<Spot|int> spots, List<Address|Spot> places, Spot spot)\n    {\n        bool kept = lines.contains(line);\n        int? at = lines.indexOf(line);\n        bool row = rows.contains([1]);\n        bool found = prices.contains(price) && tags.contains(\"vip\") && amounts.contains(1);\n        int? priced = prices.indexOf(price);\n        bool same = lines.any(each => each === line);\n        bool minted = coins.contains(coin);\n        bool named = ls.contains(l) || ls.any(element => element === l);\n        bool any = loose.contains(value) || loose.any(x => x == value);\n        bool maybe = held?.contains(line) ?? held?.contains(value: line) ?? false;\n        bool fixed = held?.any(each => each === line) ?? false;\n        bool dropped = lines.remove(line);\n        bool vip = loose.contains(\"vip\") && loose.any(x => x == \"vip\");\n        bool equal = lines.any(x => x == line);\n        bool either = goods.contains(price) || goods.any(x => x == price);\n        bool paid = loose.contains(price);\n        int? counted = tallies.indexOf(price);\n        bool spent = tickets.remove(price);\n        bool pocketed = pocket.contains(coin);\n        bool saved = wallet.contains(price) && wallet.any(x => x == price);\n        bool ordered = orders.contains(order);\n        bool shelved = shelves.contains(lines);\n        bool spotted = spots.contains(spot) || places.contains(spot);\n        return (kept || row || found || same || minted || named || any || maybe || fixed || dropped || vip || equal || either || paid || spent || pocketed || saved || ordered || shelved || spotted ? 1 : 0) + (at ?? 0) + (priced ?? 0) + (counted ?? 0);\n    }\n}\n";
@@ -13432,16 +13813,16 @@ fn a_search_needs_equality_on_the_element_type() {
     assert_eq!(
         refusals(("src/Demo/Shelf.sharp", sharp), &declared),
         [
-            "7:36 invalid-argument `contains` compares elements with `==`, and `Line` declares no `operator ==`. | Declare `operator ==` and `hash()` in `Line`, or test for the same object with `lines.any(l => l === line)`.",
-            "8:33 invalid-argument `indexOf` compares elements with `==`, and `Line` declares no `operator ==`. | Declare `operator ==` and `hash()` in `Line`, or test for the same object with `lines.any(l => l === line)`.",
+            "7:36 invalid-argument `contains` compares elements with `==`, and `Line` declares no `operator ==`. | Declare `operator ==` and `hash()` in `Line`, or test for the same object with `lines.any(element => element === line)`.",
+            "8:33 invalid-argument `indexOf` compares elements with `==`, and `Line` declares no `operator ==`. | Declare `operator ==` and `hash()` in `Line`, or test for the same object with `lines.any(element => element === line)`.",
             "13:38 invalid-argument `contains` compares elements with `==`, and the `operator ==` of `Coin` does not take `Coin` and `Coin`. | Make the `operator ==` of `Coin` take `Coin` and `Coin`.",
             "14:34 invalid-argument `contains` compares elements with `==`, and `Line` declares no `operator ==`. | Declare `operator ==` and `hash()` in `Line`, or test for the same object with `ls.any(element => element === l)`.",
             "15:35 mixed-operand Each element of `loose` is `Any?`, which compares by value only with a string, a number, a `bool`, an enum case, a struct or a collection. | Check the value with `is` or `match` first, as in `if (value is int n)`, and compare `n`.",
             "15:60 mixed-operand Left operand of `==` is `Any?`, which compares by value only with a string, a number, a `bool`, an enum case, a struct or a collection. | Check the value with `is` or `match` first, as in `if (value is int n)`, and compare `n`.",
             "15:65 mixed-operand Right operand of `==` is `Any?`, which compares by value only with a string, a number, a `bool`, an enum case, a struct or a collection. | Check the value with `is` or `match` first, as in `if (value is int n)`, and compare `n`.",
-            "16:37 invalid-argument `contains` compares elements with `==`, and `Line` declares no `operator ==`. | Declare `operator ==` and `hash()` in `Line`, or test for the same object with `held?.any(l => l === line)`.",
-            "16:68 invalid-argument `contains` compares elements with `==`, and `Line` declares no `operator ==`. | Declare `operator ==` and `hash()` in `Line`, or test for the same object with `held?.any(l => l === line)`.",
-            "18:37 invalid-argument `remove` compares elements with `==`, and `Line` declares no `operator ==`. | Declare `operator ==` and `hash()` in `Line`, or test for the same object with `lines.any(l => l === line)`.",
+            "16:37 invalid-argument `contains` compares elements with `==`, and `Line` declares no `operator ==`. | Declare `operator ==` and `hash()` in `Line`, or test for the same object with `held?.any(element => element === line)`.",
+            "16:68 invalid-argument `contains` compares elements with `==`, and `Line` declares no `operator ==`. | Declare `operator ==` and `hash()` in `Line`, or test for the same object with `held?.any(element => element === line)`.",
+            "18:37 invalid-argument `remove` compares elements with `==`, and `Line` declares no `operator ==`. | Declare `operator ==` and `hash()` in `Line`, or test for the same object with `lines.any(element => element === line)`.",
             "20:37 invalid-operand `==` cannot compare `Line` with `Line`: `Line` declares no `operator ==`. | Use `===` to test whether both sides are the same object.",
             "21:38 invalid-argument `contains` compares elements with `==`, and the `operator ==` of `Money` does not take `Line|Money` and `Money`. | Make the `operator ==` of `Money` take `Line|Money` and `Money`.",
             "21:63 possibly-invalid-argument Possible argument type mismatch for argument #1 of `Money.op_Equality`: expected `Money`, but possibly received `Line|Money`. | Ensure the argument always has the expected type using checks or assertions.",
@@ -13453,6 +13834,26 @@ fn a_search_needs_equality_on_the_element_type() {
             "28:41 invalid-argument `contains` compares elements with `==`, and `Line` declares no `operator ==`. | ",
             "29:39 invalid-argument `contains` compares elements with `==`, which cannot compare `int|Spot` with `Spot`. | Search a list of one struct type.",
             "29:64 invalid-argument `contains` compares elements with `==`, which cannot compare `Address|Spot` with `Spot`. | Search a list of one struct type.",
+        ]
+    );
+}
+
+/// Spec section 3: a lambda's parameter can't reuse a name in scope where the lambda is written, as C#'s CS0136 refuses,
+/// so the help's `any` names an element with a name no local or parameter in scope has: the class's initial, then
+/// `element`, then `element` numbered. A lambda the help writes in a lambda skips that lambda's names too, and the
+/// names around the lambda, which it doesn't capture.
+#[test]
+fn a_search_help_names_its_lambda_parameter_with_no_name_in_scope() {
+    let line = ("src/Demo/Line.sharp", "namespace Demo;\n\npublic class Line\n{\n}\n");
+    let shelf = "namespace Demo;\n\npublic class Shelf\n{\n    public bool initial(List<Line> lines, Line line, Line l) => lines.contains(line);\n\n    public bool both(List<Line> lines, Line line, Line l, Line element) => lines.contains(line);\n\n    public bool nested(List<List<Line>> shelves, Line line) => shelves.any(l => l.contains(line));\n\n    public bool outer(List<List<Line>> shelves, Line line, Line l) => shelves.any(row => row.contains(line));\n}\n";
+
+    assert_eq!(
+        refusals(("src/Demo/Shelf.sharp", shelf), &[line]),
+        [
+            "5:80 invalid-argument `contains` compares elements with `==`, and `Line` declares no `operator ==`. | Declare `operator ==` and `hash()` in `Line`, or test for the same object with `lines.any(element => element === line)`.",
+            "7:91 invalid-argument `contains` compares elements with `==`, and `Line` declares no `operator ==`. | Declare `operator ==` and `hash()` in `Line`, or test for the same object with `lines.any(element1 => element1 === line)`.",
+            "9:92 invalid-argument `contains` compares elements with `==`, and `Line` declares no `operator ==`. | Declare `operator ==` and `hash()` in `Line`, or test for the same object with `l.any(element => element === line)`.",
+            "11:103 invalid-argument `contains` compares elements with `==`, and `Line` declares no `operator ==`. | Declare `operator ==` and `hash()` in `Line`, or test for the same object with `row.any(element => element === line)`.",
         ]
     );
 }
@@ -14520,27 +14921,23 @@ fn a_struct_never_changes() {
     assert_eq!(each_file(reported, &fixed, &[]), vec![Vec::<String>::new(); 2]);
 }
 
-/// Asserts that of two files that declare one full name, each analyzed beside the other and `others`, exactly one gets
-/// its "already defined elsewhere" message, the first's or the second's. The declaration whose span sorts first keeps
-/// the name, and a span sorts by its `FileId`, which std's `DefaultHasher` gives from the file's name and Rust keeps
-/// stable across no release, so either file may be the duplicate.
-fn assert_one_duplicate(
-    first: ((&'static str, &'static str), &str),
-    second: ((&'static str, &'static str), &str),
+/// Asserts that of two files that declare one full name, each analyzed beside the other and `others`, `kept` keeps the
+/// name with no message, and `lost` gets `message`, which names `kept`'s file.
+fn assert_keeps_name(
+    kept: (&'static str, &'static str),
+    (lost, message): ((&'static str, &'static str), &str),
     others: &[(&'static str, &'static str)],
 ) {
     let beside = |file| others.iter().copied().chain([file]).collect::<Vec<_>>();
-    let found = [messages(first.0, &beside(second.0)), messages(second.0, &beside(first.0))];
-    let first_lost = [vec![first.1.to_owned()], Vec::new()];
-    let second_lost = [Vec::new(), vec![second.1.to_owned()]];
 
-    assert!(found == first_lost || found == second_lost, "{found:?}");
+    assert_eq!(messages(kept, &beside(lost)), Vec::<String>::new(), "{} keeps the name", kept.0);
+    assert_eq!(messages(lost, &beside(kept)), [message], "{} loses the name", lost.0);
 }
 
 /// Spec section 10: a struct can't inherit or be inherited, and implements interfaces. A class in a struct's header
 /// and a class that extends a struct are each refused, an interface in the header compiles, and a name that names no
 /// type is refused once, as a type that cannot be found. Of a class and a struct that two files declare under one full
-/// name, exactly one keeps it.
+/// name, the one whose file's path sorts first keeps it.
 #[test]
 fn a_struct_inherits_nothing_implements_interfaces_and_is_declared_once() {
     let sharp = [
@@ -14568,11 +14965,7 @@ fn a_struct_inherits_nothing_implements_interfaces_and_is_declared_once() {
     );
     let class = ("src/Demo/Dup.sharp", "namespace Demo;\n\nclass Dup\n{\n}\n");
     let structure = ("app/Demo/Dup.sharp", "namespace Demo;\n\nstruct Dup\n{\n}\n");
-    assert_one_duplicate(
-        (class, "Class `Dup` is already defined elsewhere."),
-        (structure, "Struct `Dup` is already defined elsewhere."),
-        &[],
-    );
+    assert_keeps_name(structure, (class, "Class `Dup` is already defined in `app/Demo/Dup.sharp`."), &[]);
 }
 
 /// Spec section 10: `==` on a struct compares each property with its own `==`, so a struct with a property `==` can't
@@ -15254,15 +15647,15 @@ fn a_declare_body_runs_as_written_in_a_sharp_file() {
 }
 
 /// The semantic checks refuse `TRUE`, `False` and `NULL` as a keyword written in another case, and the refusal shows
-/// alone on its line.
+/// alone: the value keeps the keyword's type, so a later line that reads it adds no issue.
 #[test]
 fn true_false_or_null_in_another_case_shows_its_refusal_alone() {
     for (returns, value) in [("bool", "TRUE"), ("bool", "False"), ("int?", "NULL")] {
         let code = Box::leak(
-            format!("namespace Demo;\n\nclass Report\n{{\n    public {returns} run()\n    {{\n        return {value};\n    }}\n}}\n")
+            format!("namespace Demo;\n\nclass Report\n{{\n    public {returns} run()\n    {{\n        let flag = {value};\n        return flag;\n    }}\n}}\n")
                 .into_boxed_str(),
         );
-        assert_eq!(issues(("src/Demo/Report.sharp", code), &[]), ["7:16 semantics"], "{value}");
+        assert_eq!(issues(("src/Demo/Report.sharp", code), &[]), ["7:20 semantics"], "{value}");
     }
 }
 
@@ -16724,6 +17117,9 @@ fn a_type_parameter_joined_in_a_bound_gives_one_error() {
     );
     assert_eq!(compile_errors(("src/Demo/Pair.sharp", pair), &PAGING), [joined]);
     assert_eq!(issues(("src/Demo/Pair.sharp", pair), &PAGING), ["3:34 semantics"]);
+    // The unused warning would name the class on its own line, which the refusal of the bound below leaves alone.
+    let split = "namespace Demo;\n\npublic class Pair<\n    TItem,\n    TPart : TItem & Shareable>\n{\n    public TPart? part { get; set; } = null;\n}\n";
+    assert_eq!(issues(("src/Demo/Pair.sharp", split), &PAGING), ["5:13 semantics"]);
     assert_eq!(
         compile_errors(
             ("src/Demo/Parted.sharp", uses),
@@ -17368,15 +17764,15 @@ fn a_type_parameter_before_a_dot_reads_its_bounds_static_members_with_no_issue()
 
 /// `TItem.member` reads the member of the type argument's class, which its bound declares, so a missing member is
 /// reported on the bound, and a static method read without a call is its function value. A type parameter that can
-/// stand for a type that is not a class has no members to read, so a property read on it reports that once and reads
-/// nothing.
+/// stand for a type that is not a class has no members to read, so a call or a property read on it, or on its
+/// `typeof`, reports that once and reads nothing.
 #[test]
 fn a_static_member_of_a_type_parameter_is_its_bounds() {
     let maker = (
         "src/Demo/Maker.sharp",
         "namespace Demo;\n\npublic abstract class Maker\n{\n    public static int make() => 1;\n}\n",
     );
-    let sharp = "namespace Demo;\n\npublic abstract class Builder<TItem : Maker, TAny>\n{\n    public int build() => TItem.make();\n\n    public int missing() => TItem.unknown();\n\n    public int open() => TAny.make();\n\n    public int read() => TAny.size;\n\n    public int maker() => TItem.make;\n\n    public abstract TItem made(TAny value);\n}\n";
+    let sharp = "namespace Demo;\n\npublic abstract class Builder<TItem : Maker, TAny>\n{\n    public int build() => TItem.make();\n\n    public int missing() => TItem.unknown();\n\n    public int open() => TAny.make();\n\n    public int read() => TAny.size;\n\n    public int typed() => typeof(TAny).make();\n\n    public int typedRead() => typeof(TAny).size;\n\n    public int maker() => TItem.make;\n\n    public abstract TItem made(TAny value);\n}\n";
 
     assert_eq!(messages(maker, &[]), Vec::<String>::new());
     assert_eq!(
@@ -17385,8 +17781,139 @@ fn a_static_member_of_a_type_parameter_is_its_bounds() {
             "Method `Maker.unknown` does not exist.",
             "`TAny` can stand for a type that is not a class.",
             "`TAny` can stand for a type that is not a class.",
+            "`TAny` can stand for a type that is not a class.",
+            "`TAny` can stand for a type that is not a class.",
             "Invalid return type for method `Builder.maker`: expected `int`, but found `Function<int()>`.",
         ]
+    );
+}
+
+/// Spec section 11: a type parameter bounded by a class takes one class, since its code reaches the type argument's
+/// statics, which a union of classes has none of. So `Fancy|Plain` is refused where a call, a type, a method call or a
+/// class header writes it for `TItem : Maker`, and the error names the type to write. A type parameter bounded by an
+/// interface or by no type keeps taking a union, as `List<int|string>` does.
+#[test]
+fn a_type_parameter_bounded_by_a_class_takes_one_class() {
+    let others = [
+        ("src/Demo/Maker.sharp", "namespace Demo;\n\npublic class Maker\n{\n    public static int make() => 1;\n}\n"),
+        ("src/Demo/Labeled.sharp", "namespace Demo;\n\npublic interface Labeled\n{\n}\n"),
+        ("src/Demo/Fancy.sharp", "namespace Demo;\n\npublic class Fancy : Maker, Labeled\n{\n}\n"),
+        ("src/Demo/Plain.sharp", "namespace Demo;\n\npublic class Plain : Maker, Labeled\n{\n}\n"),
+        (
+            "src/Demo/Builder.sharp",
+            "namespace Demo;\n\npublic class Builder<TItem : Maker>\n{\n    public int build() => TItem.make();\n}\n",
+        ),
+        ("src/Demo/Pair.sharp", "namespace Demo;\n\npublic class Pair<TFirst, TItem : Maker>\n{\n}\n"),
+        ("src/Demo/Tagged.sharp", "namespace Demo;\n\npublic class Tagged<TItem : Labeled>\n{\n}\n"),
+    ];
+    let builds = "namespace Demo;\n\npublic class Builds\n{\n    public static int made<TItem : Maker>() => TItem.make();\n\n    public int union() => new Builder<Fancy|Plain>().build();\n\n    public int hinted(Builder<Fancy|Plain> builder) => builder.build();\n\n    public int method() => Builds.made<Fancy|Plain>();\n\n    public Pair<int, Fancy|Plain>? paired() => null;\n\n    public int one() => new Builder<Fancy>().build();\n\n    public Tagged<Fancy|Plain>? tagged() => null;\n\n    public List<int|string> values() => [];\n}\n";
+    let header = "namespace Demo;\n\npublic class Fancies : Builder<Fancy|Plain>\n{\n}\n";
+
+    let refused = |at: &str, written: &str| {
+        format!(
+            "{at} template-constraint-violation: `TItem`'s bound is a class, so its type argument is one class. Write `{written}`."
+        )
+    };
+
+    assert_messages(
+        ("src/Demo/Builds.sharp", builds),
+        &others,
+        &[
+            &refused("7:38", "Builder<Maker>"),
+            &refused("9:23", "Builder<Maker>"),
+            &refused("11:39", "Builds.made<Maker>"),
+            &refused("13:12", "Pair<int, Maker>"),
+        ],
+    );
+    assert_messages(("src/Demo/Fancies.sharp", header), &others, &[&refused("3:24", "Builder<Maker>")]);
+    // The error writes each other type argument of the header as the header writes it.
+    let pairs = "namespace Demo;\n\npublic class Pairs : Pair<int, Fancy|Plain>\n{\n}\n";
+    assert_messages(("src/Demo/Pairs.sharp", pairs), &others, &[&refused("3:22", "Pair<int, Maker>")]);
+}
+
+/// Spec section 11: a type parameter bounded by an interface takes a union, because an interface declares no static
+/// member its code could reach through the type argument. A static method, a static property and a constructor are each
+/// refused where the interface declares one, so `TItem.make()` on a `TItem : Labeled` reads `Labeled`'s members, which
+/// have no `make`, and is refused as a missing method alone, and `Tagged<Fancy|Plain>` compiles. An interface's operator
+/// is its own, which the code runs on its trait, never through the type argument. `new TItem()` and
+/// `new (typeof(TItem))()` are refused in PHP#'s words, since an interface has no objects. A plain PHP interface may
+/// declare a static method, which a type argument that is the interface itself lacks, so a call of it keeps its warning.
+#[test]
+fn an_interface_declares_no_static_member_a_type_parameter_reaches_through_its_type_argument() {
+    let declared = |member: &str| format!("namespace Demo;\n\npublic interface Labeled\n{{\n    {member}\n}}\n");
+    let refused = |member: &'static str| {
+        let code: &'static str = declared(member).leak();
+
+        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Labeled.sharp", code), &[])
+            .iter()
+            .map(|issue| format!("{}: {}", located(code, issue), issue.message))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        refused("static string make();"),
+        ["5:5 semantics: An interface method takes no modifier but `override`: every interface method is public."]
+    );
+    assert_eq!(refused("static string tag { get; }"), ["5:12 parse: Unexpected `string`"]);
+    assert_eq!(
+        refused("required Labeled();"),
+        [
+            "5:14 semantics: An interface method needs a return type in PHP#.",
+            "5:5 semantics: An interface method takes no modifier but `override`: every interface method is public.",
+        ]
+    );
+    assert_eq!(
+        refused("required Labeled.fromJson(string json);"),
+        ["5:22 semantics: An interface has no constructor: a named constructor creates an object of its own class."]
+    );
+
+    let others = [
+        ("src/Demo/Labeled.sharp", "namespace Demo;\n\npublic interface Labeled\n{\n}\n"),
+        (
+            "src/Demo/Fancy.sharp",
+            "namespace Demo;\n\npublic class Fancy : Labeled\n{\n    public static string make() => \"fancy\";\n}\n",
+        ),
+        (
+            "src/Demo/Plain.sharp",
+            "namespace Demo;\n\npublic class Plain : Labeled\n{\n    public static string make() => \"plain\";\n}\n",
+        ),
+    ];
+    let tagged = "namespace Demo;\n\npublic class Tagged<TItem : Labeled>\n{\n    public string made(TItem item) => TItem.make();\n}\n";
+    let calls = "namespace Demo;\n\npublic class Calls\n{\n    public Tagged<Fancy|Plain> union() => new Tagged<Fancy|Plain>();\n}\n";
+
+    assert_messages(
+        ("src/Demo/Tagged.sharp", tagged),
+        &others,
+        &["5:45 non-existent-method: Method `Labeled.make` does not exist."],
+    );
+
+    // An interface has no objects, so `new` of a type parameter bounded by one is refused in PHP#'s words.
+    let created = "namespace Demo;\n\npublic class Created<TItem : Labeled>\n{\n    public TItem made() => new TItem();\n\n    public TItem valued() => new (typeof(TItem))();\n}\n";
+    let refused_new = |at: &str| {
+        format!(
+            "{at} unsafe-instantiation: `TItem`'s bound `Labeled` is an interface, so `new` of it creates no object. Bound `TItem` by a class."
+        )
+    };
+    assert_messages(("src/Demo/Created.sharp", created), &others, &[&refused_new("5:32"), &refused_new("7:34")]);
+
+    // A plain PHP interface may declare a static method, which a type argument that is the interface itself lacks.
+    let php_labeled =
+        "<?php\n\nnamespace Demo;\n\ninterface Labeled\n{\n    public static function make(): string;\n}\n";
+    assert_messages(
+        ("src/Demo/Tagged.sharp", tagged),
+        &[("src/Demo/Labeled.php", php_labeled), others[1], others[2]],
+        &[
+            "5:39 possibly-static-access-on-interface: Potential static method call on interface `Labeled` via `class-string`.",
+        ],
+    );
+    assert_messages(
+        ("src/Demo/Calls.sharp", calls),
+        &[
+            others[0],
+            others[1],
+            others[2],
+            ("src/Demo/Tagged.sharp", "namespace Demo;\n\npublic class Tagged<TItem : Labeled>\n{\n}\n"),
+        ],
+        &[],
     );
 }
 
@@ -18709,21 +19236,21 @@ fn a_missing_class_with_type_arguments_is_reported() {
     assert_eq!(each_file(issues, &declared, &[]), vec![Vec::<String>::new(); 2]);
 }
 
-/// A nullable type pattern is refused, and the refusal shows alone on the line that tests the value and uses the name
-/// the pattern binds.
+/// A nullable type pattern is refused, and the refusal shows alone: the pattern still declares the name it binds, typed
+/// as written, so a later line that reads it adds no issue.
 #[test]
 fn a_refused_type_test_shows_its_refusal_alone() {
     let r#box = (
         "src/Demo/Box.sharp",
         "namespace Demo;\n\npublic class Box<TItem>\n{\n    public TItem? first() => null;\n}\n",
     );
-    let sharp = "namespace Demo;\n\npublic class Report\n{\n    public static Any? kind(Any value) => value is Class<Box<int>>|null type ? type : null;\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Report\n{\n    public static Any? kind(Any value)\n    {\n        if (value is Class<Box<int>>|null type) {\n            return type;\n        }\n        return null;\n    }\n}\n";
 
     assert_eq!(explained(r#box, &[]), Vec::<String>::new());
     assert_eq!(
         explained(("src/Demo/Report.sharp", sharp), &[r#box]),
         [
-            "5:52 semantics A type pattern is never nullable: null never matches a type. Test for null with `x == null`, or join both with `or`, as in `x is int or null`."
+            "7:22 semantics A type pattern is never nullable: null never matches a type. Test for null with `x == null`, or join both with `or`, as in `x is int or null`."
         ]
     );
 }
@@ -22503,7 +23030,10 @@ fn only_the_module_of_module_sharp_is_analyzed_and_a_class_holding_its_name_make
 
     assert_eq!(issues(("app/Shop/Module.sharp", code), &[]), ["5:24 invalid-return-statement"]);
     assert_eq!(issues(("app/Shop/Checkout.sharp", code), &[]), ["3:1 semantics"]);
-    assert_eq!(messages(("app/Shop/Module.sharp", code), &[class]), ["Module `Module` is already defined elsewhere."]);
+    assert_eq!(
+        messages(("app/Shop/Module.sharp", code), &[class]),
+        ["Module `Module` is already defined in `app/Shop/Module.php`."]
+    );
 }
 
 /// Outside `uses`, an effect's name is an ordinary class name, spec section 23: a plain PHP class or a PHP# class the
@@ -27241,6 +27771,15 @@ fn a_getter_reaching_through_a_foreign_object_has_the_effect_of_its_class() {
         assert_eq!(effect_issues(&[form, payments]), [refused], "{}", form.1);
     }
 
+    // A member named by an expression, as `this.payments.{"fee"}`, is a parse refusal, so the getter's summary reads no
+    // member of the class through it, and the refusal shows alone. The orchestrator's
+    // `test_a_member_named_by_an_expression_gives_a_law_no_effect` shows a law that reaches the getter adds nothing.
+    let named = (
+        "app/Shop/Checkout.sharp",
+        "namespace App.Shop;\n\nimport App.Billing.Payments;\n\npublic class Checkout\n{\n    public Checkout(private Payments payments) { }\n\n    public int total => this.payments.{\"fee\"};\n}\n",
+    );
+    assert_eq!(reported(named, &[payments]), ["9:39 parse Unexpected `{`"]);
+
     // A subclass of a `foreign` class is that class's object, so it has that class's effect.
     let gateway = (
         "app/Billing/Gateway.sharp",
@@ -28494,8 +29033,9 @@ fn an_event_is_a_final_class_whose_parameters_are_get_only_properties() {
 }
 
 /// Spec section 15: no event extends another, so an event's header names interfaces only, and a type names an event
-/// only once: of an event and an interface, a class or another event that two files declare under one full name,
-/// exactly one keeps it.
+/// only once: of an event and an interface, a class or another event that two files declare under one full name, the
+/// one whose file's path sorts first keeps it, whichever file id sorts first. `app/Shop/Moved.sharp`'s id sorts before
+/// `src/Shop/Moved.sharp`'s, but `src/Shop/Cart.sharp`'s before `app/Shop/Cart.sharp`'s, and `app/` keeps both names.
 #[test]
 fn an_event_header_names_interfaces_and_an_event_is_declared_once() {
     let base = ("app/Shop/Base.sharp", "namespace App.Shop;\n\npublic class Base\n{\n}\n");
@@ -28506,15 +29046,13 @@ fn an_event_header_names_interfaces_and_an_event_is_declared_once() {
     let interface = ("app/Shop/Moved.sharp", "namespace App.Shop;\n\npublic interface Moved { }\n");
     let class = ("src/Shop/Cart.sharp", "namespace App.Shop;\n\npublic class Cart\n{\n}\n");
     let with_base: Vec<_> = ORDER_EVENTS.iter().copied().chain([base]).collect();
-    let moved_twice = "Event `Moved` is already defined elsewhere.";
+    let moved_twice = "Event `Moved` is already defined in `app/Shop/Moved.sharp`.";
 
-    assert_one_duplicate((moved, moved_twice), (interface, "Interface `Moved` is already defined elsewhere."), &[]);
-    assert_one_duplicate(
-        (cart, "Event `Cart` is already defined elsewhere."),
-        (class, "Class `Cart` is already defined elsewhere."),
-        &[],
-    );
-    assert_one_duplicate((moved, moved_twice), (twice, moved_twice), &ORDER_EVENTS);
+    assert!(FileId::new(interface.0.as_bytes()) < FileId::new(moved.0.as_bytes()));
+    assert!(FileId::new(class.0.as_bytes()) < FileId::new(cart.0.as_bytes()));
+    assert_keeps_name(interface, (moved, moved_twice), &[]);
+    assert_keeps_name(cart, (class, "Class `Cart` is already defined in `app/Shop/Cart.sharp`."), &[]);
+    assert_keeps_name(twice, (moved, moved_twice), &ORDER_EVENTS);
     assert_eq!(
         worded(based, &with_base),
         [

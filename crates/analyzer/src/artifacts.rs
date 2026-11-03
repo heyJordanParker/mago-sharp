@@ -133,6 +133,10 @@ pub struct AnalysisArtifacts {
     /// arguments are the last method's, and its type is the union of every method's. Read through
     /// [`Self::get_member_call`].
     pub(crate) member_calls: HashMap<((u32, u32), FunctionLikeIdentifier), MemberCall>,
+    /// The classes of the receiver's parts whose own member each PHP# call or read runs, beside an extension or a
+    /// collection's member it runs on the other parts, spec sections 12 and 26, keyed by the call's or the read's span.
+    /// Read through [`Self::get_own_member_classes`].
+    pub(crate) own_member_classes: HashMap<(u32, u32), Vec<Word>>,
     /// The type each argument of a PHP# call to plain PHP arrives as, where it is not the argument's own type, as a
     /// `Map` a parameter that takes `array` receives as its PHP array, spec section 12, keyed by the call's span and
     /// then the argument's. The call's analysis writes its entry anew each time it checks the call, for the target it
@@ -213,6 +217,7 @@ impl AnalysisArtifacts {
             call_targets: HashMap::default(),
             null_safe_void_calls: HashSet::default(),
             member_calls: HashMap::default(),
+            own_member_classes: HashMap::default(),
             received_argument_types: HashMap::default(),
             tested_types: HashMap::default(),
             declared_types: HashMap::default(),
@@ -471,6 +476,20 @@ impl AnalysisArtifacts {
             self.inferred_type_arguments.insert(range, own.clone());
         }
         self.member_calls.insert((range, callee), MemberCall { type_arguments, result });
+    }
+
+    /// The classes of the receiver's parts whose own member the PHP# call or read `access` runs, beside an extension or a
+    /// collection's member on the other parts, spec sections 12 and 26. None for an access that runs one member.
+    pub fn get_own_member_classes<T>(&self, access: &T) -> Option<&[Word]>
+    where
+        T: HasSpan,
+    {
+        self.own_member_classes.get(&get_expression_range(access)).map(Vec::as_slice)
+    }
+
+    /// Records that the PHP# call or read at `span` runs the own member of the receiver's parts of `classes`.
+    pub(crate) fn record_own_member_classes(&mut self, span: Span, classes: Vec<Word>) {
+        self.own_member_classes.insert((span.start.offset, span.end.offset), classes);
     }
 
     /// Records that the PHP# test or `typeof` that writes the type `hint` reads `tested` while the code runs.

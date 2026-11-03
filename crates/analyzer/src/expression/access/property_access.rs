@@ -29,6 +29,7 @@ use crate::expression::access::analyze_class_value_member;
 use crate::expression::access::analyze_through_value;
 use crate::expression::access::refuse_statics_of_no_class;
 use crate::expression::call::analyze_extension_access;
+use crate::expression::call::method_call::with_receiver_type;
 use crate::expression::is_refused_type;
 use crate::resolver::class_name::class_value_classes;
 use crate::resolver::property::resolve_instance_properties;
@@ -130,8 +131,30 @@ where
         is_null_safe,
         false, // `for_assignment`
     )?;
-    // A read the analysis records what it runs for, a method value the lowering writes from that, spec section 14.3, is
-    // resolved again at each read, so no later read takes its type from this one.
+    // The receiver's parts that declare no member of the name read the extension's computed property, spec section 26,
+    // whose type joins the other parts' below.
+    let extension_type = match resolution_result.part_extension.clone() {
+        Some((extension, rest)) => {
+            with_receiver_type(artifacts, object, rest, |artifacts| {
+                analyze_extension_access(
+                    context,
+                    block_context,
+                    artifacts,
+                    extension,
+                    object,
+                    None,
+                    None,
+                    is_null_safe,
+                    span,
+                )
+            })?;
+
+            artifacts.get_expression_type(&span).cloned()
+        }
+        None => None,
+    };
+    // A read the analysis records what it runs for, a method value the lowering writes from that, spec section 14.3, or
+    // an extension's, is resolved again at each read, so no later read takes its type from this one.
     let property_access_id = property_access_id.filter(|_| artifacts.get_callees(&span).next().is_none());
 
     if let Some(extension) = resolution_result.extension {
@@ -248,6 +271,9 @@ where
         && ((is_null_safe && resolution_result.encountered_null) || object_has_nullsafe_null)
     {
         resulting_type.set_nullsafe_null(true);
+    }
+    if let Some(extension_type) = extension_type {
+        resulting_type = add_optional_union_type(extension_type, Some(&resulting_type), context.codebase);
     }
 
     expand_union(

@@ -235,7 +235,8 @@ where
 /// captures the variable itself, so a captured local that code writes is captured by reference, as the engine runs
 /// it, and [`merge_captured_references`] carries the lambda's writes back. The lambda runs later, so it keeps the type
 /// a test narrowed such a local to only when no write can run after the lambda is created, as TypeScript 5.4 decides,
-/// and otherwise reads it at its declared type. It assigns it only values of that type.
+/// and otherwise reads it at its declared type. It assigns it only values of that type. Every local around the lambda
+/// stays in scope in it, captured or not.
 pub fn capture_lambda_locals<A>(
     context: &Context<'_, '_, A>,
     lambda: Span,
@@ -244,6 +245,8 @@ pub fn capture_lambda_locals<A>(
 ) where
     A: Arena,
 {
+    lambda_block_context.enclosing_locals =
+        block_context.enclosing_locals.iter().chain(block_context.locals.keys()).copied().collect();
     for (name, local) in context.resolved_names.captures(&lambda) {
         let variable = php_variable_name(name);
         block_context.add_conditionally_referenced_variable(variable.as_bytes());
@@ -740,6 +743,7 @@ where
     parent_artifacts.resolved_method_calls.append(&mut artifacts.resolved_method_calls);
     parent_artifacts.call_targets.extend(std::mem::take(&mut artifacts.call_targets));
     parent_artifacts.member_calls.extend(std::mem::take(&mut artifacts.member_calls));
+    parent_artifacts.own_member_classes.extend(std::mem::take(&mut artifacts.own_member_classes));
     parent_artifacts.received_argument_types.extend(std::mem::take(&mut artifacts.received_argument_types));
     parent_artifacts.tested_types.extend(std::mem::take(&mut artifacts.tested_types));
     parent_artifacts.declared_types.extend(std::mem::take(&mut artifacts.declared_types));
@@ -2445,7 +2449,7 @@ where
 
             format!("{owner}<{}>", names.join(", "))
         }
-        _ => owner,
+        _ => owner.clone(),
     };
 
     // A PHP# bound may name the owner's type parameters, as `TItem : Comparable<TItem>` does, so each holds its argument
@@ -2505,6 +2509,23 @@ where
             false,
             &mut ComparisonResult::for_dialect(context.dialect),
         ) {
+            if is_sharp && is_union_for_a_class_bound(codebase, &constraint, &expanded_argument) {
+                let written: Vec<String> = arguments
+                    .iter()
+                    .zip(templates.keys())
+                    .map(|(other, name)| display_type(context, if name == template_name { &constraint } else { other }))
+                    .collect();
+                let written = format!("{owner}<{}>", written.join(", "));
+                report_union_for_a_class_bound(
+                    context,
+                    *template_name,
+                    (argument, &constraint),
+                    &written,
+                    (span, owner_span),
+                );
+
+                continue;
+            }
             report_plain_named_constructor_argument(context, &generic_owner, *template_name, template, argument, span);
 
             continue;
@@ -2530,6 +2551,50 @@ where
     }
 
     true
+}
+
+/// Whether `argument`, which the bound `bound` holds, is a union where `bound` is a class. Spec section 11: a type
+/// parameter bounded by a class takes one class, as `Builder<Maker>` does, since its code reaches the statics of the
+/// type argument and creates its objects, and a union of classes, as `Fancy|Plain`, is no one class. A type parameter
+/// bounded by an interface or by no type takes a union, as `List<int|string>` does.
+pub(crate) fn is_union_for_a_class_bound(codebase: &CodebaseMetadata, bound: &TUnion, argument: &TUnion) -> bool {
+    argument.types.len() > 1
+        && bound
+            .get_single_named_object()
+            .and_then(|class| codebase.get_class_like(class.name.as_bytes()))
+            .is_some_and(|class| class.kind.is_class())
+}
+
+/// Reports the union `argument` written at `span` for the type parameter `template_name`, declared at `owner_span`,
+/// whose bound `bound` is a class, as [`is_union_for_a_class_bound`] finds it. `written` is the type to write instead:
+/// the owner with `bound` for that type argument, as `Builder<Maker>`.
+pub(crate) fn report_union_for_a_class_bound<A>(
+    context: &mut Context<'_, '_, A>,
+    template_name: Word,
+    (argument, bound): (&TUnion, &TUnion),
+    written: &str,
+    (span, owner_span): (Span, Span),
+) where
+    A: Arena,
+{
+    let argument = display_type(context, argument);
+    let bound = display_type(context, bound);
+    context.collector.report_with_code(
+        IssueCode::TemplateConstraintViolation,
+        Issue::error(format!(
+            "`{template_name}`'s bound is a class, so its type argument is one class. Write `{written}`."
+        ))
+        .with_annotation(
+            Annotation::primary(span).with_message(format!("`{argument}` is supplied for `{template_name}` here...")),
+        )
+        .with_annotation(
+            Annotation::secondary(owner_span)
+                .with_message(format!("...but `{template_name}` is bounded by the class `{bound}`.")),
+        )
+        .with_help(format!(
+            "Supply one class `{bound}` holds: `{template_name}`'s code reaches the statics of that class."
+        )),
+    );
 }
 
 /// Spec section 11: `new TItem.fromJson(…)` runs the type argument's own `fromJson`, which every PHP# class below the

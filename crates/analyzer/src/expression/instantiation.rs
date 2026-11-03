@@ -71,6 +71,7 @@ use crate::resolver::class_name::report_class_value_of_no_class;
 use crate::resolver::class_name::report_missing_class;
 use crate::resolver::class_name::report_non_existent_class_like;
 use crate::resolver::class_name::resolve_classnames_from_expression;
+use crate::resolver::class_name::type_parameter_of_no_class;
 use crate::statement::class_like::requiring_class;
 use crate::statement::function_like::get_this_type;
 use crate::utils::names::article;
@@ -153,11 +154,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Instantiation<'arena> {
             });
             let (issue, created) = match parameter {
                 Some(class_value @ TClassLikeString::Generic { parameter_name, .. }) => (
-                    Issue::error(format!("`{parameter_name}` can stand for a type that is not a class."))
-                        .with_annotation(
-                            Annotation::primary(value.expression.span()).with_message("Used as a class here."),
-                        )
-                        .with_help(format!("Bound `{parameter_name}` by a class, as in `<{parameter_name} : Order>`.")),
+                    type_parameter_of_no_class(parameter_name, value.expression.span()),
                     wrap_atomic(class_value.get_object_type(context.codebase)),
                 ),
                 _ => {
@@ -597,6 +594,25 @@ where
         _ => None,
     };
 
+    // Spec section 25: `new TItem()` and `new (typeof(TItem))()` create the type argument, which a `TItem` bounded by
+    // an interface may be, and an interface has no objects.
+    if context.dialect.is_sharp()
+        && metadata.kind.is_interface()
+        && let ResolutionOrigin::SpecificClassLikeString(TClassLikeString::Generic { parameter_name, .. }) =
+            &classname.origin
+    {
+        context.collector.report_with_code(
+            IssueCode::UnsafeInstantiation,
+            Issue::error(format!(
+                "`{parameter_name}`'s bound `{classname_str}` is an interface, so `new` of it creates no object. Bound `{parameter_name}` by a class."
+            ))
+            .with_annotation(Annotation::primary(class_expression_span).with_message("Created here."))
+            .with_help(format!("Bound `{parameter_name}` by a class that implements `{classname_str}`.")),
+        );
+        argument_list.analyze(context, block_context, artifacts)?;
+
+        return Ok(refused_instantiation(context));
+    }
     if classname.is_from_class_string() && (metadata.kind.is_interface() || metadata.kind.is_trait()) {
         let kind_name = if metadata.kind.is_interface() { "interface" } else { "trait" };
 

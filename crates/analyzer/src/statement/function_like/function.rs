@@ -18,6 +18,7 @@ use crate::error::AnalysisError;
 use crate::plugin::context::HookContext;
 use crate::statement::attributes::AttributeTarget;
 use crate::statement::attributes::analyze_attributes;
+use crate::statement::class_like::defined_in;
 use crate::statement::function_like::FunctionLikeBody;
 use crate::statement::function_like::analyze_function_like;
 use crate::statement::function_like::check_unused_function_template_parameters;
@@ -36,7 +37,7 @@ fn report_duplicate_function_definition<A>(
     let name = mago_bytes::BytesDisplay(name);
     context.collector.report_with_code(
         IssueCode::DuplicateDefinition,
-        Issue::error(format!("Function `{name}` is already defined elsewhere."))
+        Issue::error(format!("Function `{name}` is already defined {}.", defined_in(context, original_span)))
             .with_annotation(Annotation::primary(duplicate_span).with_message("Duplicate function definition here"))
             .with_annotation(Annotation::secondary(original_span).with_message("Original function defined here"))
             .with_note("Each function must have a unique name within the same namespace.")

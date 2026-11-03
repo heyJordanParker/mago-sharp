@@ -3595,6 +3595,20 @@ mod tests {
         assert_matches_full(&service, &db, "Order.price returns 1 again");
     }
 
+    /// A member named by an expression, as `this.payments.{"fee"}`, is a parse refusal, so its read reaches no member of
+    /// the `foreign` class, and a law on a later line that reaches the getter adds nothing beside the refusal.
+    #[test]
+    fn test_a_member_named_by_an_expression_gives_a_law_no_effect() {
+        let payments = "namespace App;\n\npublic foreign class Payments\n{\n    public int fee { get; } = 30;\n}\n";
+        let checkout = "namespace App;\n\npublic class Checkout\n{\n    public Checkout(private Payments payments) { }\n\n    public int total => this.payments.{\"fee\"};\n\n    law totaled(Checkout checkout) => checkout.total > 0;\n}\n";
+        let db = make_database(vec![("src/Payments.sharp", payments), ("src/Checkout.sharp", checkout)]);
+        let mut service = make_watch_service(&db);
+        service.analyze().expect("Initial analysis failed.");
+
+        let codes: Vec<_> = service.collect_all_issues().iter().filter_map(|issue| issue.code.clone()).collect();
+        assert_eq!(codes, ["parse"]);
+    }
+
     /// Spec section 5's too-wide warning reads the uses of every file, so a use another namespace's file adds or drops
     /// changes the warning in the member's file, which the warm run does not analyze again.
     #[test]

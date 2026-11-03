@@ -171,7 +171,16 @@ where
                 return (false, None);
             };
 
-            if !from_instance && !is_relative && defining_class_metadata.kind.is_interface() && !has_magic_static_call {
+            // A PHP# call through a class value of an interface that lacks the method is refused as a missing method
+            // alone, as `TItem.make()` on a `TItem : Labeled` whose `Labeled` declares no `make`.
+            if !from_instance
+                && !is_relative
+                && defining_class_metadata.kind.is_interface()
+                && !has_magic_static_call
+                && (!from_class_string
+                    || !context.dialect.is_sharp()
+                    || context.codebase.get_declaring_method(fq_class_id.as_bytes(), method_name.as_bytes()).is_some())
+            {
                 report_static_call_on_interface(
                     context,
                     defining_class_metadata.original_name,

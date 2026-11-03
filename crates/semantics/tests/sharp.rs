@@ -174,12 +174,13 @@ fn an_event_takes_only_public_or_internal_and_its_parameters_are_its_properties(
     }
 }
 
-/// A case in an interface is a form neither PHP nor PHP# has, so the checker reports it as no PHP# construct.
+/// A case in an interface is a form neither PHP nor PHP# has, so the checker refuses it once, naming where it goes, as
+/// it refuses one in a class.
 #[test]
-fn a_case_in_an_interface_is_no_php_sharp_construct() {
+fn a_case_in_an_interface_is_refused_once_with_the_enum_it_goes_in() {
     let interface = "namespace App.Shop;\n\npublic interface Shape\n{\n    case Open;\n}\n";
 
-    assert_eq!(issues(interface), ["5:5 Interface `Shape` cannot contain enum cases.", "5:5 Unexpected `case`"]);
+    assert_eq!(issues(interface), ["5:5 An interface has no cases: declare `Open` in an enum."]);
 }
 
 /// Spec section 28: a law states a fact about the values of a class or an enum, and an interface has no values.
@@ -3536,11 +3537,13 @@ fn a_promoted_member_outside_the_slice_is_an_error() {
         ]
     );
 
-    let php = "<?php\n\nnamespace App\\Tenant;\n\nclass Report\n{\n    public function __construct(private readonly int $a, private static int $b) {}\n\n    public function run(private int $c): void {}\n}\n";
+    // A method with no return type is checked as one with a return type is.
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nclass Report\n{\n    public function __construct(private readonly int $a, private static int $b) {}\n\n    public function run(private int $c): void {}\n\n    public function stop(private int $d) {}\n}\n";
     assert_eq!(
         issues_in("src/Report.php", php),
         [
             "9:25 Promoted properties are not allowed outside of constructors.",
+            "11:26 Promoted properties are not allowed outside of constructors.",
             "7:66 Parameter `$b` cannot have the `static` modifier.",
         ]
     );
@@ -7034,7 +7037,6 @@ fn a_class_error_names_the_class_as_sharp_writes_it() {
     assert_eq!(
         worded("src/Demo/Order.sharp", code),
         [
-            "Class `Order` cannot contain enum cases. | Enum case found in class. | Class `Order` declared here.",
             "Class `Order` contains an abstract method `total`, so the class must be declared abstract. | Class is missing the `abstract` modifier. | Abstract method `Order.total` declared here.",
             "A class has no cases: declare `Open` in an enum. | Written here.",
         ]

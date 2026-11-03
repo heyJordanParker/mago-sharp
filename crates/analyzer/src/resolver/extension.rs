@@ -306,18 +306,98 @@ where
         .values()
         .flatten()
         .filter_map(|(_, method)| Some((method.get_class_name(), codebase.get_method_by_id(method)?)))
-        .filter(|(class, metadata)| {
-            metadata.flags.contains(MetadataFlags::EXTENSION_METHOD)
-                && (is_imported_or_in_namespace(context, *class) || is_imported_by_default(context, *class, metadata))
-                && fits(context, receiver, *class, metadata)
-                && can_compare_elements(metadata, receiver, codebase)
-        })
+        .filter(|(class, metadata)| is_callable_on(context, receiver, *class, metadata))
         .map(|(_, metadata)| metadata.original_name.to_string())
         .collect();
     names.sort();
     names.dedup();
 
     names.into_iter().map(|name| format!("`{name}`")).collect()
+}
+
+/// Whether [`extension_methods`] names `name`, compared ignoring case, for a value of type `receiver`, through an
+/// extension that is no collection's own member, which a collection's kind reaches apart, spec section 12.
+pub(crate) fn has_extension_method<A>(context: &Context<'_, '_, A>, receiver: &TUnion, name: &[u8]) -> bool
+where
+    A: Arena,
+{
+    let codebase = context.codebase;
+
+    codebase.extensions.get(&ascii_lowercase_word(name)).is_some_and(|members| {
+        members.iter().any(|(_, method)| {
+            codebase.get_method_by_id(method).is_some_and(|metadata| {
+                let class = method.get_class_name();
+
+                !is_collection_member(class, metadata) && is_callable_on(context, receiver, class, metadata)
+            })
+        })
+    })
+}
+
+/// Whether a call on a value of type `receiver` in this file reaches and can call the extension method `metadata` of
+/// the static class `class`, as [`extension_methods`] lists them.
+fn is_callable_on<A>(
+    context: &Context<'_, '_, A>,
+    receiver: &TUnion,
+    class: Word,
+    metadata: &FunctionLikeMetadata,
+) -> bool
+where
+    A: Arena,
+{
+    metadata.flags.contains(MetadataFlags::EXTENSION_METHOD)
+        && (is_imported_or_in_namespace(context, class) || is_imported_by_default(context, class, metadata))
+        && fits(context, receiver, class, metadata)
+        && can_compare_elements(metadata, receiver, context.codebase)
+}
+
+/// Whether `part`, one type of a receiver, is a value that declares no member `name` of its own, so an extension of
+/// that name runs on it, spec section 26: anything but `null` and a class that declares or inherits the member, as
+/// [`CodebaseMetadata::get_classes_hidden_by_extension`] finds it.
+pub(crate) fn lacks_member(codebase: &CodebaseMetadata, part: &TAtomic, name: &[u8]) -> bool {
+    !part.is_null() && codebase.get_classes_hidden_by_extension(&TUnion::from_atomic(part.clone()), name).is_empty()
+}
+
+/// The parts of `receiver` that declare no member `name` of their own, which an extension of that name runs on, spec
+/// section 26, and whether they are the whole receiver, its `null` aside. None when every part declares the member.
+pub(crate) fn parts_without_member(
+    codebase: &CodebaseMetadata,
+    receiver: &TUnion,
+    name: &[u8],
+) -> Option<(TUnion, bool)> {
+    let parts: Vec<TAtomic> =
+        receiver.types.iter().filter(|part| lacks_member(codebase, part, name)).cloned().collect();
+    if parts.is_empty() {
+        return None;
+    }
+    let whole = parts.len() == receiver.types.iter().filter(|part| !part.is_null()).count();
+
+    Some((TUnion::from_vec(parts), whole))
+}
+
+/// The classes of the parts of `receiver` that declare or inherit a member `name` of their own, a type parameter's by
+/// its bound, which a call or read of `name` runs on those parts beside an extension or a collection's member on the
+/// others, spec sections 12 and 26. Each is the part's own class, never the trait or the parent that declares the
+/// member, so a test of the value's class finds it.
+pub(crate) fn own_member_classes(codebase: &CodebaseMetadata, receiver: &TUnion, name: &[u8]) -> Vec<Word> {
+    let mut parts: Vec<&TAtomic> = receiver.types.iter().collect();
+    let mut classes = Vec::new();
+    while let Some(part) = parts.pop() {
+        match part {
+            TAtomic::GenericParameter(parameter) => parts.extend(parameter.constraint.types.iter()),
+            TAtomic::Object(object) if !lacks_member(codebase, part, name) => {
+                if let Some(class) = object.get_name()
+                    && !classes.contains(&class)
+                {
+                    classes.push(class);
+                }
+            }
+            _ => {}
+        }
+    }
+    classes.sort_unstable_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+
+    classes
 }
 
 /// Whether a value of type `receiver` fits the receiver of the extension member `metadata` of the static class `class`,
