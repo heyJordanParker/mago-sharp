@@ -8207,6 +8207,39 @@ fn a_match_without_default_over_a_sharp_enum_names_the_cases_it_misses() {
     );
 }
 
+/// Spec section 21: a missed case is a compile error whatever value the `match` tests, a call's result as a parameter,
+/// and the arms of a `match` on a call that handle every case leave none. A `match` whose arms name no case, as one
+/// that handles only `null`, names the import the cases it misses need.
+#[test]
+fn a_match_on_a_call_names_the_enum_cases_it_misses() {
+    let stage = (
+        "src/Demo/Stage.sharp",
+        "namespace Demo;\n\npublic enum Stage\n{\n    case Open;\n    case Paid;\n    case Closed;\n}\n",
+    );
+    let ticket = (
+        "src/Demo/Ticket.sharp",
+        "namespace Demo;\n\npublic class Ticket\n{\n    public Ticket() { }\n\n    public Stage stage() => Stage.Open;\n\n    public Stage? next() => null;\n\n    public static string named(Stage stage) => match (stage) {\n        Stage.Open => \"open\",\n    };\n\n    public string called() => match (this.stage()) {\n        Stage.Open => \"open\",\n    };\n\n    public string every() => match (this.stage()) {\n        Stage.Open => \"open\",\n        Stage.Paid or Stage.Closed => \"done\",\n    };\n}\n",
+    );
+    let desk = (
+        "src/Front/Desk.sharp",
+        "namespace Front;\n\nimport Demo.Ticket;\n\npublic class Desk\n{\n    public static string next(Ticket ticket) => match (ticket.next()) {\n        null => \"none\",\n    };\n}\n",
+    );
+
+    assert_eq!(
+        written_errors(ticket.1, &analyze(&PLUGIN_REGISTRY, settings(), ticket, &[stage])),
+        [
+            "match match-not-exhaustive This `match` misses `Stage.Paid` and `Stage.Closed`.",
+            "match match-not-exhaustive This `match` misses `Stage.Paid` and `Stage.Closed`.",
+        ]
+    );
+    assert_eq!(
+        written_errors(desk.1, &analyze(&PLUGIN_REGISTRY, settings(), desk, &[stage, ticket])),
+        [
+            "match match-not-exhaustive This `match` misses `Stage.Open`, `Stage.Paid` and `Stage.Closed`. Add `import Demo.Stage;` to the file."
+        ]
+    );
+}
+
 /// Only the last arm of a `match` takes what the arms before it leave, as `default` does. An arm before it that is
 /// always true leaves nothing for the arms after it.
 #[test]

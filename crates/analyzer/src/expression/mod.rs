@@ -941,10 +941,16 @@ where
     let (assertions, _) =
         find_satisfying_assignments(&saturate_clauses(clauses.iter(), &thresholds), None, &mut WordSet::default());
 
+    let tested = tested_variable(pattern_match, first_hidden, context);
     let left = if assertions.is_empty() {
         value_type.clone()
     } else {
         let mut unhandled_context = block_context.clone();
+        // The hidden variable that holds a value no local names, as a call's result, is assigned in the arms' PHP, so
+        // the `match`'s own context holds it as the value it tests.
+        if let Some(variable) = tested {
+            unhandled_context.locals.entry(variable).or_insert_with(|| Rc::new(value_type.clone()));
+        }
         reconcile_keyed_types(
             context,
             &assertions,
@@ -958,7 +964,7 @@ where
         );
 
         // Only the tested value is left to handle: the PHP of a pattern narrows the hidden variables of its items too.
-        tested_variable(pattern_match, first_hidden, context)
+        tested
             .and_then(|variable| unhandled_context.locals.get(&variable))
             .map_or_else(|| value_type.clone(), |left| (**left).clone())
     };
