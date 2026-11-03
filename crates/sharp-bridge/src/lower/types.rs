@@ -114,7 +114,8 @@ pub(crate) struct MembersByKind<'analysis> {
     /// Each kind's standard library member, in [`CollectionKind`]'s order, or the one extension the parts that declare
     /// no member of its name run, as the analysis resolved them.
     pub(crate) members: Vec<KindMember<'analysis>>,
-    /// The classes whose method of that name an object the value may hold runs, its own, none when it holds no object.
+    /// The classes of the objects the value may hold that run their own member of that name, each the object's own
+    /// class, none when it holds no such object.
     pub(crate) objects: Vec<Word>,
 }
 
@@ -1407,11 +1408,12 @@ impl<'analysis> Types<'analysis> {
         })
     }
 
-    /// The classes whose own member the read `read` of an extension member reads on the parts of its receiver of those
-    /// classes, spec section 26, as the analysis resolved them, each by the name its declaration writes. None for a read
-    /// that reads the extension's member on its whole receiver.
-    pub(crate) fn own_member_reads(&self, read: &Expression) -> Option<Vec<Word>> {
-        let classes = self.artifacts.get_own_member_reads(read)?;
+    /// The classes of the receiver's parts whose own member the call or read `access` runs, beside an extension or a
+    /// collection's member on the other parts, spec sections 12 and 26, as the analysis resolved them, each by the name
+    /// its declaration writes. Each is the part's own class, so a test of the value's class finds it. None for an access
+    /// that runs one member.
+    pub(crate) fn own_member_classes(&self, access: &Expression) -> Option<Vec<Word>> {
+        let classes = self.artifacts.get_own_member_classes(access)?;
 
         Some(classes.iter().map(|class| self.class_declaration(class.as_bytes()).name).collect())
     }
@@ -1440,23 +1442,19 @@ impl<'analysis> Types<'analysis> {
     /// collection or an object, spec section 12, or an object and a value an extension takes, spec section 26, as the
     /// analysis resolved them. None for a call that runs one member, or no extension's.
     pub(crate) fn members_by_kind(&self, call: &Expression) -> Option<MembersByKind<'_>> {
-        let (mut extensions, mut objects) = (Vec::new(), Vec::new());
+        // Every other target is a part's own member, a method or a property that holds a function, which the objects
+        // below run.
+        let mut extensions = Vec::new();
         for callee in self.artifacts.get_callees(call) {
-            let CallTarget::FunctionLike { callee: callee @ FunctionLikeIdentifier::Method(class, method), .. } =
+            if let CallTarget::FunctionLike { callee: callee @ FunctionLikeIdentifier::Method(class, method), .. } =
                 callee
-            else {
-                return None;
-            };
-            let metadata = self.codebase.get_method(class.as_bytes(), method.as_bytes())?;
-            if metadata.flags.is_extension_method() {
+                && let Some(metadata) = self.codebase.get_method(class.as_bytes(), method.as_bytes())
+                && metadata.flags.is_extension_method()
+            {
                 extensions.push((callee, *class, metadata));
-            } else {
-                let class = self.class_declaration(class.as_bytes()).name;
-                if !objects.contains(&class) {
-                    objects.push(class);
-                }
             }
         }
+        let objects = self.own_member_classes(call).unwrap_or_default();
         if extensions.is_empty() || extensions.len() + usize::from(!objects.is_empty()) < 2 {
             return None;
         }

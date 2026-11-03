@@ -77,6 +77,7 @@ use crate::invocation::template_result::seed_method_type_arguments;
 use crate::plugin::ExpressionHookResult;
 use crate::plugin::context::HookContext;
 use crate::plugin::hook::StaticCall;
+use crate::resolver::extension::own_member_classes;
 use crate::resolver::method::CalledProperty;
 use crate::resolver::method::UndocumentedMethod;
 use crate::resolver::method::UnresolvedMethod;
@@ -410,6 +411,16 @@ where
             }
         })
         .collect();
+    // The lowering tells the parts that run their own member apart by their class.
+    if !members.is_empty()
+        && let ClassLikeMemberSelector::Identifier(name) = selector
+        && let Some(receiver) = artifacts.get_expression_type(object)
+    {
+        let classes = own_member_classes(context.codebase, receiver, name.value);
+        if !classes.is_empty() {
+            artifacts.record_own_member_classes(span, classes);
+        }
+    }
     // A call one kind of the receiver lacks the member for is refused once, so its place is not checked too.
     let changes =
         !method_resolution.has_invalid_target && members.iter().any(|(member, _)| changes_receiver(context, member));

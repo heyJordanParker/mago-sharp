@@ -78,6 +78,7 @@ use crate::resolver::class_name::report_non_existent_class_like;
 use crate::resolver::extension::Extension;
 use crate::resolver::extension::is_collection_member;
 use crate::resolver::extension::lacks_member;
+use crate::resolver::extension::own_member_classes;
 use crate::resolver::extension::receiver_type_arguments;
 use crate::resolver::extension::resolve_extension;
 use crate::resolver::method::check_call_through_readonly;
@@ -279,8 +280,8 @@ where
             Extension::Refused => result.has_error_path = true,
         }
         if partial && !for_assignment && !matches!(extension, Extension::Refused) {
-            let classes = context.codebase.get_classes_hidden_by_extension(&receiver, name.value);
-            artifacts.record_own_member_reads(object_expression.span().join(name.span()), classes);
+            let classes = own_member_classes(context.codebase, &receiver, name.value);
+            artifacts.record_own_member_classes(object_expression.span().join(name.span()), classes);
             rest_resolved = true;
         } else {
             if object_type.is_nullable() && !is_null_safe && !object_type.has_nullsafe_null() {

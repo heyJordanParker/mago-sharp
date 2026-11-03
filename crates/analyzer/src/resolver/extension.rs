@@ -358,6 +358,31 @@ pub(crate) fn lacks_member(codebase: &CodebaseMetadata, part: &TAtomic, name: &[
     !part.is_null() && codebase.get_classes_hidden_by_extension(&TUnion::from_atomic(part.clone()), name).is_empty()
 }
 
+/// The classes of the parts of `receiver` that declare or inherit a member `name` of their own, a type parameter's by
+/// its bound, which a call or read of `name` runs on those parts beside an extension or a collection's member on the
+/// others, spec sections 12 and 26. Each is the part's own class, never the trait or the parent that declares the
+/// member, so a test of the value's class finds it.
+pub(crate) fn own_member_classes(codebase: &CodebaseMetadata, receiver: &TUnion, name: &[u8]) -> Vec<Word> {
+    let mut parts: Vec<&TAtomic> = receiver.types.iter().collect();
+    let mut classes = Vec::new();
+    while let Some(part) = parts.pop() {
+        match part {
+            TAtomic::GenericParameter(parameter) => parts.extend(parameter.constraint.types.iter()),
+            TAtomic::Object(object) if !lacks_member(codebase, part, name) => {
+                if let Some(class) = object.get_name()
+                    && !classes.contains(&class)
+                {
+                    classes.push(class);
+                }
+            }
+            _ => {}
+        }
+    }
+    classes.sort_unstable_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+
+    classes
+}
+
 /// Whether a value of type `receiver` fits the receiver of the extension member `metadata` of the static class `class`,
 /// its first parameter, as [`fit`] decides it.
 fn fits<A>(context: &Context<'_, '_, A>, receiver: &TUnion, class: Word, metadata: &FunctionLikeMetadata) -> bool

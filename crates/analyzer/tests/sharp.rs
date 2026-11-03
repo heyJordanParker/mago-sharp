@@ -9838,10 +9838,36 @@ fn an_extension_read_on_a_union_reads_each_parts_member() {
     let own = |read: &str| {
         let start = reads.find(read).unwrap() as u32;
 
-        artifacts.get_own_member_reads(&Span::dummy(start, start + read.len() as u32)).map(<[Word]>::to_vec)
+        artifacts.get_own_member_classes(&Span::dummy(start, start + read.len() as u32)).map(<[Word]>::to_vec)
     };
-    assert_eq!(own("value.caption"), Some(vec![word("app\\billing\\order")]));
-    assert_eq!(own("label.label"), Some(vec![word("app\\billing\\order")]));
+    assert_eq!(own("value.caption"), Some(vec![word("App\\Billing\\Order")]));
+    assert_eq!(own("label.label"), Some(vec![word("App\\Billing\\Order")]));
+}
+
+/// A part's own member may come from a trait, which no value is an instance of, so a call and a read on a union record
+/// the part's own class, which a test of the value's class finds, never the trait that declares the member.
+#[test]
+fn a_member_a_part_takes_from_a_trait_is_recorded_under_the_parts_own_class() {
+    let has_label = "<?php\n\nnamespace App\\Billing;\n\ntrait HasLabel\n{\n    public function label(): string\n    {\n        return 'php';\n    }\n}\n";
+    let php_order = "<?php\n\nnamespace App\\Billing;\n\nclass PhpOrder\n{\n    use HasLabel;\n}\n";
+    let labels = "namespace App.Billing;\n\npublic static class Labels\n{\n    extension(PhpOrder|string value)\n    {\n        public string label() => \"text\";\n    }\n}\n";
+    let calls = "namespace App.Billing;\n\npublic class Calls\n{\n    public string called(PhpOrder|string value) => value.label();\n\n    public Function<string()> read(PhpOrder|string label) => label.label;\n}\n";
+    let others = [
+        ("src/App/Billing/HasLabel.php", has_label),
+        ("src/App/Billing/PhpOrder.php", php_order),
+        ("src/App/Billing/Labels.sharp", labels),
+    ];
+    let analyzed = ("src/App/Billing/Calls.sharp", calls);
+
+    assert_messages(analyzed, &others, &[]);
+    let (_, artifacts) = analyze_with_artifacts(&PLUGIN_REGISTRY, settings(), analyzed, &others);
+    let own = |access: &str| {
+        let start = calls.find(access).unwrap() as u32;
+
+        artifacts.get_own_member_classes(&Span::dummy(start, start + access.len() as u32)).map(<[Word]>::to_vec)
+    };
+    assert_eq!(own("value.label()"), Some(vec![word("App\\Billing\\PhpOrder")]));
+    assert_eq!(own("label.label"), Some(vec![word("App\\Billing\\PhpOrder")]));
 }
 
 /// Spec section 26: the receiver's type picks the extension, so an extension of `string` and one of `int` add nothing to

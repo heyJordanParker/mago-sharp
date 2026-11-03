@@ -8224,7 +8224,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         arguments: Option<&ArgumentList>,
     ) -> u32 {
         if arguments.is_none()
-            && let Some(classes) = self.types.own_member_reads(access)
+            && let Some(classes) = self.types.own_member_classes(access)
         {
             return self.read_by_class(access, extension, receiver, &classes);
         }

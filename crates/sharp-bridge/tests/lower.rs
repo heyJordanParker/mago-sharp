@@ -7551,6 +7551,104 @@ fn an_extension_on_a_union_runs_on_the_parts_without_its_member_beside_the_objec
 }
 
 /// ```php
+/// return $value instanceof \App\Billing\PhpOrder ? $value->label() : \App\Billing\Labels::label($value);
+/// ```
+///
+/// A part's own member may come from a trait, which no value is an instance of, so a call and a read on a union test
+/// the part's own class, never the trait that declares the member.
+#[test]
+fn a_member_a_part_takes_from_a_trait_runs_on_an_instance_of_the_parts_class() {
+    let has_label = "<?php\n\nnamespace App\\Billing;\n\ntrait HasLabel\n{\n    public function label(): string\n    {\n        return 'php';\n    }\n}\n";
+    let php_order = "<?php\n\nnamespace App\\Billing;\n\nclass PhpOrder\n{\n    use HasLabel;\n}\n";
+    let files = lowered_each(
+        &[
+            (
+                "src/App/Billing/Labels.sharp",
+                "namespace App.Billing;\n\npublic static class Labels\n{\n    extension(PhpOrder|string value)\n    {\n        public string label() => \"text\";\n    }\n}\n",
+            ),
+            (
+                "src/App/Billing/Calls.sharp",
+                "namespace App.Billing;\n\npublic class Calls\n{\n    public string called(PhpOrder|string value) => value.label();\n\n    public Function<string()> read(PhpOrder|string value) => value.label;\n}\n",
+            ),
+        ],
+        &[("src/App/Billing/HasLabel.php", has_label), ("src/App/Billing/PhpOrder.php", php_order)],
+    );
+
+    assert_eq!(
+        files[1].body_of("called"),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                CONDITIONAL [1]
+                  INSTANCEOF
+                    VAR
+                      ZVAL "value"
+                    ZVAL "App\\Billing\\PhpOrder"
+                  METHOD_CALL
+                    VAR
+                      ZVAL "value"
+                    ZVAL "label"
+                    ARG_LIST
+                  STATIC_CALL
+                    ZVAL "App\\Billing\\Labels"
+                    ZVAL "label"
+                    ARG_LIST
+                      VAR
+                        ZVAL "value"
+        "#}
+    );
+    assert_eq!(
+        files[1].body_of("read"),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                CONDITIONAL [1]
+                  INSTANCEOF
+                    VAR
+                      ZVAL "value"
+                    ZVAL "App\\Billing\\PhpOrder"
+                  METHOD_CALL
+                    VAR
+                      ZVAL "value"
+                    ZVAL "label"
+                    CALLABLE_CONVERT
+                  CALL
+                    CLOSURE "" @7-7
+                      PARAM_LIST
+                        PARAM
+                          null
+                          ZVAL "receiver"
+                          null
+                          null
+                          null
+                          null
+                      null
+                      STMT_LIST
+                        RETURN
+                          CLOSURE "" @7-7
+                            PARAM_LIST
+                            CLOSURE_USES
+                              ZVAL "receiver"
+                            STMT_LIST
+                              RETURN
+                                STATIC_CALL
+                                  ZVAL "App\\Billing\\Labels"
+                                  ZVAL "label"
+                                  ARG_LIST
+                                    VAR
+                                      ZVAL "receiver"
+                            null
+                            null
+                      null
+                      null
+                    ARG_LIST
+                      VAR
+                        ZVAL "value"
+        "#}
+    );
+}
+
+/// ```php
 /// return $value instanceof \App\Billing\Order ? $value->caption : \App\Billing\Captions::caption($value);
 /// return [$receiver#1 = $this->pick(), $receiver#1 instanceof \App\Billing\Order ? $receiver#1->label(...)
 ///     : (function ($receiver) { return function () use ($receiver) {
@@ -7771,9 +7869,9 @@ fn a_member_of_a_value_that_may_be_a_list_or_an_iterable_runs_the_iterable_s_las
     );
 }
 
-/// An object that runs its own method beside an `Iterable`'s member is told apart by each class that declares the
-/// method, once each, as `$held instanceof \App\Shelf || $held instanceof \App\Crate`, since `Low` and `High` inherit
-/// `Shelf`'s.
+/// An object that runs its own method beside an `Iterable`'s member is told apart by its own class, once each, as
+/// `$held instanceof \App\Crate || $held instanceof \App\High || $held instanceof \App\Low`, though `Low` and `High`
+/// inherit `Shelf`'s, since a trait may declare the method too, and no value is an instance of a trait.
 #[test]
 fn an_object_of_several_classes_beside_an_iterable_is_told_apart_by_each_class_once() {
     let code = "namespace App;\n\nclass Report\n{\n    public int run(int pick, Low low, High high, Crate crate, Iterable<int> names) => (pick == 0 ? low : (pick == 1 ? high : (pick == 2 ? crate : names))).toList().count();\n}\n";
@@ -7785,9 +7883,12 @@ fn an_object_of_several_classes_beside_an_iterable_is_told_apart_by_each_class_o
     ];
     let body = Lowered::with(code, &classes).body_of("run");
 
-    assert_eq!(body.matches("INSTANCEOF").count(), 2, "{body}");
-    assert!(body.contains("OR\n"), "{body}");
-    assert!(body.contains(r#"ZVAL "App\\Shelf""#) && body.contains(r#"ZVAL "App\\Crate""#), "{body}");
+    assert_eq!(body.matches("INSTANCEOF").count(), 3, "{body}");
+    assert_eq!(body.matches("OR\n").count(), 2, "{body}");
+    for class in [r#"ZVAL "App\\Crate""#, r#"ZVAL "App\\High""#, r#"ZVAL "App\\Low""#] {
+        assert!(body.contains(class), "{class} in {body}");
+    }
+    assert!(!body.contains(r#"ZVAL "App\\Shelf""#), "{body}");
 }
 
 /// ```php
