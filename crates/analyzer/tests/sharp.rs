@@ -14708,17 +14708,36 @@ fn a_generic_struct_takes_its_type_arguments_for_equality_keys_and_parse() {
 /// still can't read a function.
 #[test]
 fn a_struct_that_declares_equality_compares_and_keys_by_it() {
-    let sharp = "namespace Demo;\n\nstruct Rule\n{\n    public Rule(public string name { get; }, public Function<bool(int)> check { get; }) { }\n\n    public static bool operator ==(Rule a, Rule b) => a.name == b.name;\n\n    public int hash() => 7;\n}\n\nstruct Hook\n{\n    public Hook(public string name { get; }, public Function<bool(int)> check { get; }) { }\n}\n\nstruct Step\n{\n    public Step(public int at { get; }, public Rule rule { get; }) { }\n}\n\nclass Rules\n{\n    public Set<Rule> seen = [];\n    public Map<Rule, int> counts = [:];\n    public Map<Step, int> steps = [:];\n    public Set<Hook> hooks = [];\n    public Map<Hook, int> hooked = [:];\n\n    public bool same(Rule a, Rule b) => a == b;\n\n    public bool other(Rule a, Rule b) => a != b;\n\n    public bool hookSame(Hook a, Hook b) => a == b;\n\n    public bool identical(Rule a, Rule b) => a === b;\n\n    public int count(Rule rule)\n    {\n        this.counts[rule] = 1;\n        return this.counts[rule] ?? 0;\n    }\n\n    public bool has(List<Rule> rules, Rule rule) => rules.contains(rule);\n\n    public bool hasHook(List<Hook> hooks, Hook hook) => hooks.contains(hook);\n\n    public void group(List<Rule> rules)\n    {\n        const byRule = rules.groupBy(rule => rule);\n    }\n\n    public Rule read(Map<string, Any?> input) => Rule.parse(input);\n}\n\nstruct Cents\n{\n    public Cents(public int amount { get; }) { }\n\n    public static bool operator ==(Cents a, int amount) => a.amount == amount;\n\n    public int hash() => this.amount;\n\n    public bool costs(int amount) => this == amount;\n}\n";
+    let declared = [
+        (
+            "src/Demo/Rule.sharp",
+            "namespace Demo;\n\nstruct Rule\n{\n    public Rule(public string name { get; }, public Function<bool(int)> check { get; }) { }\n\n    public static bool operator ==(Rule a, Rule b) => a.name == b.name;\n\n    public int hash() => 7;\n}\n",
+        ),
+        (
+            "src/Demo/Hook.sharp",
+            "namespace Demo;\n\nstruct Hook\n{\n    public Hook(public string name { get; }, public Function<bool(int)> check { get; }) { }\n}\n",
+        ),
+        (
+            "src/Demo/Step.sharp",
+            "namespace Demo;\n\nstruct Step\n{\n    public Step(public int at { get; }, public Rule rule { get; }) { }\n}\n",
+        ),
+        (
+            "src/Demo/Cents.sharp",
+            "namespace Demo;\n\nstruct Cents\n{\n    public Cents(public int amount { get; }) { }\n\n    public static bool operator ==(Cents a, int amount) => a.amount == amount;\n\n    public int hash() => this.amount;\n\n    public bool costs(int amount) => this == amount;\n}\n",
+        ),
+    ];
+    let sharp = "namespace Demo;\n\nclass Rules\n{\n    protected Set<Rule> seen = [];\n    protected Map<Rule, int> counts = [:];\n    protected Map<Step, int> steps = [:];\n    protected Set<Hook> hooks = [];\n    protected Map<Hook, int> hooked = [:];\n\n    public bool same(Rule a, Rule b) => a == b;\n\n    public bool other(Rule a, Rule b) => a != b;\n\n    public bool hookSame(Hook a, Hook b) => a == b;\n\n    public bool identical(Rule a, Rule b) => a === b;\n\n    public int count(Rule rule)\n    {\n        this.counts[rule] = 1;\n        return this.counts[rule] ?? 0;\n    }\n\n    public bool has(List<Rule> rules, Rule rule) => rules.contains(rule);\n\n    public bool hasHook(List<Hook> hooks, Hook hook) => hooks.contains(hook);\n\n    public void group(List<Rule> rules)\n    {\n        const byRule = rules.groupBy(rule => rule);\n    }\n\n    public Rule read(Map<string, Any?> input) => Rule.parse(input);\n}\n";
 
+    assert_eq!(each_file(issues, &declared, &[]), vec![Vec::<String>::new(); 4]);
     assert_eq!(
-        written(sharp, &analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Rules.sharp", sharp), &[])),
+        written(sharp, &analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Rules.sharp", sharp), &declared)),
         [
-            "27:12 template-constraint-violation `Hook` can't be in a `Set`: `check` is a function.",
-            "28:12 template-constraint-violation `Hook` can't key a `Map`: `check` is a function.",
-            "34:45 invalid-operand `Hook` can't be compared: `check` is a function.",
-            "36:46 invalid-operand `===` tests for the same object, and `Rule` is a struct: write `==`.",
-            "46:72 invalid-argument `contains` compares elements with `==`, and `Hook` can't be compared: `check` is a function.",
-            "53:50 invalid-struct `Rule.parse` can't read `check`: `Function<bool(int)>` is a function.",
+            "8:15 template-constraint-violation `Hook` can't be in a `Set`: `check` is a function.",
+            "9:15 template-constraint-violation `Hook` can't key a `Map`: `check` is a function.",
+            "15:45 invalid-operand `Hook` can't be compared: `check` is a function.",
+            "17:46 invalid-operand `===` tests for the same object, and `Rule` is a struct: write `==`.",
+            "27:72 invalid-argument `contains` compares elements with `==`, and `Hook` can't be compared: `check` is a function.",
+            "34:50 invalid-struct `Rule.parse` can't read `check`: `Function<bool(int)>` is a function.",
         ]
     );
 }
@@ -14734,18 +14753,38 @@ fn json_decode_gives_its_type_argument_the_struct_parse_check() {
         "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Encoding/Json.sharp",
         include_str!("../../../../composer/library/Sharp/Encoding/Json.sharp"),
     );
-    let sharp = "namespace Demo;\n\nimport Sharp.Encoding.Json;\n\nstruct Point\n{\n    public Point(public int x { get; }) { }\n}\n\nstruct Rule\n{\n    public Rule(public Function<bool(int)> check { get; }) { }\n}\n\nstruct Box<T>\n{\n    public Box(public T value { get; }) { }\n}\n\nclass Reader\n{\n    public Point point(string json) => Json.decode<Point>(json);\n\n    public Rule rule(string json) => Json.decode<Rule>(json);\n\n    public int number(string json) => Json.decode<int>(json);\n\n    public Box<int> box(string json) => Json.decode<Box<int>>(json);\n\n    public Missing missing(string json) => Json.decode<Missing>(json);\n\n    public TRead read<TRead>(string json) => Json.decode<TRead>(json);\n}\n";
+    let declared = [
+        (
+            "src/Demo/Point.sharp",
+            "namespace Demo;\n\nstruct Point\n{\n    public Point(public int x { get; }) { }\n}\n",
+        ),
+        (
+            "src/Demo/Rule.sharp",
+            "namespace Demo;\n\nstruct Rule\n{\n    public Rule(public Function<bool(int)> check { get; }) { }\n}\n",
+        ),
+        ("src/Demo/Box.sharp", "namespace Demo;\n\nstruct Box<T>\n{\n    public Box(public T value { get; }) { }\n}\n"),
+    ];
+    let sharp = "namespace Demo;\n\nimport Sharp.Encoding.Json;\n\nclass Reader\n{\n    public Point point(string json) => Json.decode<Point>(json);\n\n    public Rule rule(string json) => Json.decode<Rule>(json);\n\n    public int number(string json) => Json.decode<int>(json);\n\n    public Box<int> box(string json) => Json.decode<Box<int>>(json);\n\n    public Missing missing(string json) => Json.decode<Missing>(json);\n\n    public TRead read<TRead>(string json) => Json.decode<TRead>(json);\n}\n";
 
     assert_eq!(
-        written(sharp, &analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Reader.sharp", sharp), &[json])),
+        written(
+            sharp,
+            &analyze(
+                &PLUGIN_REGISTRY,
+                settings(),
+                ("src/Demo/Reader.sharp", sharp),
+                &[json, declared[0], declared[1], declared[2]]
+            )
+        ),
         [
-            "24:38 invalid-struct `Rule.parse` can't read `check`: `Function<bool(int)>` is a function.",
-            "26:39 invalid-struct `Json.decode` parses its type argument with the type's `parse`, and `int` has none.",
-            "28:41 invalid-struct `Json.decode` can't read `Box<int>`: its `parse` takes the type arguments of a generic type, which the call through its type argument does not pass.",
-            "30:12 non-existent-class-like Cannot find type `Demo.Missing`.",
-            "30:56 non-existent-class-like Cannot find type `Demo.Missing`.",
+            "9:38 invalid-struct `Rule.parse` can't read `check`: `Function<bool(int)>` is a function.",
+            "11:39 invalid-struct `Json.decode` parses its type argument with the type's `parse`, and `int` has none.",
+            "13:41 invalid-struct `Json.decode` can't read `Box<int>`: its `parse` takes the type arguments of a generic type, which the call through its type argument does not pass.",
+            "15:12 non-existent-class-like Cannot find type `Demo.Missing`.",
+            "15:56 non-existent-class-like Cannot find type `Demo.Missing`.",
         ]
     );
+    assert_eq!(each_file(issues, &declared, &[]), vec![Vec::<String>::new(); 3]);
 }
 
 /// Spec section 16: `with` and an object initializer set only a property with `init` or `set`, each once, and the help
@@ -14753,7 +14792,13 @@ fn json_decode_gives_its_type_argument_the_struct_parse_check() {
 /// help, since its class isn't PHP#'s. `with` copies a struct or a class, so an enum and an event are refused.
 #[test]
 fn with_and_an_object_initializer_set_init_and_set_properties() {
-    let sharp = "namespace Demo;\n\nimport Lib.Stamp;\n\nstruct Size\n{\n    public int width { get; init; }\n    public int depth { get; }\n\n    public Size() { this.depth = 1; }\n}\n\nclass Note\n{\n    public string text { get; set; } = \"\";\n}\n\nclass Copies\n{\n    public Size wider(Size size) => size with { width: 2, depth: 3 };\n\n    public Size twice() => new Size { width: 1, width: 2 };\n\n    public Note note(Note note) => note with { text: \"b\" };\n\n    public Stamp stamp(Stamp stamp) => stamp with { at: 2 };\n\n    public Any? loose(Any? value) => value with { width: 2 };\n\n    public Plan plan(Plan plan) => plan with { label: \"b\" };\n\n    public Moved moved(Moved moved) => moved with { x: 2 };\n}\n";
+    let size = (
+        "src/Demo/Size.sharp",
+        "namespace Demo;\n\nstruct Size\n{\n    public int width { get; init; }\n    public int depth { get; }\n\n    public Size() { this.depth = 1; }\n}\n",
+    );
+    let note =
+        ("src/Demo/Note.sharp", "namespace Demo;\n\nclass Note\n{\n    public string text { get; set; } = \"\";\n}\n");
+    let sharp = "namespace Demo;\n\nimport Lib.Stamp;\n\nclass Copies\n{\n    public Size wider(Size size) => size with { width: 2, depth: 3 };\n\n    public Size twice() => new Size { width: 1, width: 2 };\n\n    public Note note(Note note) => note with { text: \"b\" };\n\n    public Stamp stamp(Stamp stamp) => stamp with { at: 2 };\n\n    public Any? loose(Any? value) => value with { width: 2 };\n\n    public Plan plan(Plan plan) => plan with { label: \"b\" };\n\n    public Moved moved(Moved moved) => moved with { x: 2 };\n}\n";
     let php = "<?php namespace Lib; final class Stamp { public function __construct(public readonly int $at) {} }";
     let plan = (
         "src/Demo/Plan.sharp",
@@ -14765,8 +14810,9 @@ fn with_and_an_object_initializer_set_init_and_set_properties() {
         &PLUGIN_REGISTRY,
         settings(),
         ("src/Demo/Copies.sharp", sharp),
-        &[("src/Lib/Stamp.php", php), plan, moved],
+        &[("src/Lib/Stamp.php", php), plan, moved, size, note],
     );
+    assert_eq!(each_file(issues, &[size, note], &[]), vec![Vec::<String>::new(); 2]);
     assert_eq!(
         analyzed
             .iter()
@@ -14793,25 +14839,92 @@ fn with_and_an_object_initializer_set_init_and_set_properties() {
 /// holds itself parses. A struct that declares its own `parse` reads no key, so none is read twice.
 #[test]
 fn every_struct_parses() {
-    let sharp = "namespace Demo;\n\nenum Mood\n{\n    case Calm;\n}\n\nstruct Address\n{\n    public Address(public string city { get; }) { }\n}\n\nstruct Ticket\n{\n    public Ticket([Key(\"ticket_id\")] public int id { get; }, public Address address { get; }) { }\n}\n\nstruct Twice\n{\n    public Twice([Key(\"code\")] public string plan { get; }, public string code { get; }) { }\n}\n\nstruct Feeling\n{\n    public Feeling(public List<Mood> moods { get; }) { }\n\n    public static Feeling calm() => new Feeling([]);\n}\n\nstruct Rule\n{\n    public Rule(public Function<bool(int)> check { get; }) { }\n}\n\nstruct Mind\n{\n    public Mind(public Feeling feeling { get; }) { }\n}\n\nstruct Chain\n{\n    public Chain(public int link { get; }, public Chain? next { get; }) { }\n}\n\nstruct Temp\n{\n    public Temp(int celsius) { this.celsius = celsius; }\n\n    public int celsius { get; init; }\n}\n\nstruct Gauge\n{\n    public Gauge(int c) { this.celsius = c; }\n\n    public int celsius { get; init; }\n}\n\nclass Reads\n{\n    public Ticket ticket(Map<string, Any?> input) => Ticket.parse(input);\n\n    public Ticket? maybe(Map<string, Any?> input) => Ticket.tryParse(input);\n\n    public Feeling feeling(Map<string, Any?> input) => Feeling.parse(input);\n\n    public Feeling? mood(Map<string, Any?> input) => Feeling.tryParse(input);\n\n    public Rule rule(Map<string, Any?> input) => Rule.parse(input);\n\n    public Mind mind(Map<string, Any?> input) => Mind.parse(input);\n\n    public Chain chain(Map<string, Any?> input) => Chain.parse(input);\n\n    public Feeling calm() => Feeling.calm();\n\n    public Temp temp(Map<string, Any?> input) => Temp.parse(input);\n\n    public Gauge gauge(Map<string, Any?> input) => Gauge.parse(input);\n}\n\nstruct Clash\n{\n    public Clash([Key(\"y\")] public int x { get; }) { }\n\n    public int y { get; init; }\n}\n\nstruct Split\n{\n    public Split(int celsius) { this.reading = celsius; }\n\n    public int celsius { get; init; }\n\n    public int reading { get; init; }\n}\n\nstruct Renamed\n{\n    public Renamed([Key(\"x_key\")] public int x { get; }) { }\n\n    public int y { get; init; }\n}\n\nstruct Mended\n{\n    public Mended([Key(\"temp\")] int celsius) { this.reading = celsius; }\n\n    public int celsius { get; init; }\n\n    public int reading { get; init; }\n}\n\nstruct Reading\n{\n    public Reading(int celsius) { this.reading = celsius; }\n\n    public int celsius { get; init; }\n\n    public int reading { get; init; }\n\n    public static Reading? parse(string text) => null;\n}\n";
+    let sharp = [
+        ("src/Demo/Mood.sharp", "namespace Demo;\n\nenum Mood\n{\n    case Calm;\n}\n"),
+        (
+            "src/Demo/Address.sharp",
+            "namespace Demo;\n\nstruct Address\n{\n    public Address(public string city { get; }) { }\n}\n",
+        ),
+        (
+            "src/Demo/Ticket.sharp",
+            "namespace Demo;\n\nstruct Ticket\n{\n    public Ticket([Key(\"ticket_id\")] public int id { get; }, public Address address { get; }) { }\n}\n",
+        ),
+        (
+            "src/Demo/Twice.sharp",
+            "namespace Demo;\n\nstruct Twice\n{\n    public Twice([Key(\"code\")] public string plan { get; }, public string code { get; }) { }\n}\n",
+        ),
+        (
+            "src/Demo/Feeling.sharp",
+            "namespace Demo;\n\nstruct Feeling\n{\n    public Feeling(public List<Mood> moods { get; }) { }\n\n    public static Feeling calm() => new Feeling([]);\n}\n",
+        ),
+        (
+            "src/Demo/Rule.sharp",
+            "namespace Demo;\n\nstruct Rule\n{\n    public Rule(public Function<bool(int)> check { get; }) { }\n}\n",
+        ),
+        (
+            "src/Demo/Mind.sharp",
+            "namespace Demo;\n\nstruct Mind\n{\n    public Mind(public Feeling feeling { get; }) { }\n}\n",
+        ),
+        (
+            "src/Demo/Chain.sharp",
+            "namespace Demo;\n\nstruct Chain\n{\n    public Chain(public int link { get; }, public Chain? next { get; }) { }\n}\n",
+        ),
+        (
+            "src/Demo/Temp.sharp",
+            "namespace Demo;\n\nstruct Temp\n{\n    public Temp(int celsius) { this.celsius = celsius; }\n\n    public int celsius { get; init; }\n}\n",
+        ),
+        (
+            "src/Demo/Gauge.sharp",
+            "namespace Demo;\n\nstruct Gauge\n{\n    public Gauge(int c) { this.celsius = c; }\n\n    public int celsius { get; init; }\n}\n",
+        ),
+        (
+            "src/Demo/Reads.sharp",
+            "namespace Demo;\n\nclass Reads\n{\n    public Ticket ticket(Map<string, Any?> input) => Ticket.parse(input);\n\n    public Ticket? maybe(Map<string, Any?> input) => Ticket.tryParse(input);\n\n    public Feeling feeling(Map<string, Any?> input) => Feeling.parse(input);\n\n    public Feeling? mood(Map<string, Any?> input) => Feeling.tryParse(input);\n\n    public Rule rule(Map<string, Any?> input) => Rule.parse(input);\n\n    public Mind mind(Map<string, Any?> input) => Mind.parse(input);\n\n    public Chain chain(Map<string, Any?> input) => Chain.parse(input);\n\n    public Feeling calm() => Feeling.calm();\n\n    public Temp temp(Map<string, Any?> input) => Temp.parse(input);\n\n    public Gauge gauge(Map<string, Any?> input) => Gauge.parse(input);\n}\n",
+        ),
+        (
+            "src/Demo/Clash.sharp",
+            "namespace Demo;\n\nstruct Clash\n{\n    public Clash([Key(\"y\")] public int x { get; }) { }\n\n    public int y { get; init; }\n}\n",
+        ),
+        (
+            "src/Demo/Split.sharp",
+            "namespace Demo;\n\nstruct Split\n{\n    public Split(int celsius) { this.reading = celsius; }\n\n    public int celsius { get; init; }\n\n    public int reading { get; init; }\n}\n",
+        ),
+        (
+            "src/Demo/Renamed.sharp",
+            "namespace Demo;\n\nstruct Renamed\n{\n    public Renamed([Key(\"x_key\")] public int x { get; }) { }\n\n    public int y { get; init; }\n}\n",
+        ),
+        (
+            "src/Demo/Mended.sharp",
+            "namespace Demo;\n\nstruct Mended\n{\n    public Mended([Key(\"temp\")] int celsius) { this.reading = celsius; }\n\n    public int celsius { get; init; }\n\n    public int reading { get; init; }\n}\n",
+        ),
+        (
+            "src/Demo/Reading.sharp",
+            "namespace Demo;\n\nstruct Reading\n{\n    public Reading(int celsius) { this.reading = celsius; }\n\n    public int celsius { get; init; }\n\n    public int reading { get; init; }\n\n    public static Reading? parse(string text) => null;\n}\n",
+        ),
+    ];
     let key = "namespace Sharp;\n\nimport Attribute;\n\n[Attribute(Attribute.TARGET_PARAMETER | Attribute.TARGET_PROPERTY)]\npublic class Key\n{\n    public Key(public string name { get; }) { }\n}\n";
+    let others = [("src/Sharp/Key.sharp", key)];
+    let wrote = |analyzed: (&'static str, &'static str), others: &[(&'static str, &'static str)]| -> Vec<String> {
+        written(analyzed.1, &analyze(&PLUGIN_REGISTRY, settings(), analyzed, others))
+    };
+    let helped = |analyzed: (&'static str, &'static str), others: &[(&'static str, &'static str)]| -> Vec<String> {
+        analyze(&PLUGIN_REGISTRY, settings(), analyzed, others).into_iter().filter_map(|issue| issue.help).collect()
+    };
 
-    let issues =
-        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Reads.sharp", sharp), &[("src/Sharp/Key.sharp", key)]);
     assert_eq!(
-        written(sharp, &issues),
+        each_file(wrote, &sharp, &others).concat(),
         [
-            "20:75 invalid-struct `code` is read twice: by the main constructor parameter `plan` and the main constructor parameter `code`.",
-            "65:56 invalid-struct `Feeling.parse` can't read `moods`: `Mood` has no backing value.",
-            "67:54 invalid-struct `Feeling.tryParse` can't read `moods`: `Mood` has no backing value.",
-            "69:50 invalid-struct `Rule.parse` can't read `check`: `Function<bool(int)>` is a function.",
-            "71:50 invalid-struct `Mind.parse` can't read `feeling`: `Mood` has no backing value.",
-            "86:16 invalid-struct `y` is read twice: by the main constructor parameter `x` and the property `y`.",
-            "93:16 invalid-struct `celsius` is read twice: by the main constructor parameter `celsius` and the property `celsius`.",
+            "5:75 invalid-struct `code` is read twice: by the main constructor parameter `plan` and the main constructor parameter `code`.",
+            "9:56 invalid-struct `Feeling.parse` can't read `moods`: `Mood` has no backing value.",
+            "11:54 invalid-struct `Feeling.tryParse` can't read `moods`: `Mood` has no backing value.",
+            "13:50 invalid-struct `Rule.parse` can't read `check`: `Function<bool(int)>` is a function.",
+            "15:50 invalid-struct `Mind.parse` can't read `feeling`: `Mood` has no backing value.",
+            "7:16 invalid-struct `y` is read twice: by the main constructor parameter `x` and the property `y`.",
+            "7:16 invalid-struct `celsius` is read twice: by the main constructor parameter `celsius` and the property `celsius`.",
         ]
     );
     assert_eq!(
-        issues.iter().filter_map(|issue| issue.help.as_deref()).collect::<Vec<_>>(),
+        each_file(helped, &sharp, &others).concat(),
         [
             "Give `plan` another key with `[Key(\"…\")]`.",
             "Give `x` another key with `[Key(\"…\")]`.",
@@ -14830,36 +14943,88 @@ fn every_struct_parses() {
 /// plain PHP class, a class whose `parse` reads no value, or a type such as `Object` that names no type to build.
 #[test]
 fn a_class_parses_as_a_struct_does() {
-    let sharp = "namespace Demo;\n\nimport Lib.Clock;\nimport Lib.Stamp;\n\nabstract class Shape\n{\n    public Shape([Key(\"corners\")] public int sides { get; }) { }\n\n    public int corners { get; set; } = 0;\n}\n\ninterface Named\n{\n}\n\nclass Note\n{\n    public Note([Key(\"body\")] public string text { get; }) { }\n\n    public string author { get; set; } = \"\";\n}\n\nclass Letter\n{\n    public Letter(public Note note { get; init; }, public List<Note> copies { get; }) { }\n}\n\nclass Bill\n{\n    public Bill([Key(\"total\")] public int amount { get; }) { }\n\n    public int total { get; set; } = 0;\n}\n\nclass Money\n{\n    public Money(public int cents { get; }) { }\n\n    public static Money parse(string text) => new Money(1);\n}\n\nclass Hook\n{\n    public Hook(public Function<bool(int)> check { get; }) { }\n}\n\nclass Drawing\n{\n    public Drawing(public Shape shape { get; }) { }\n}\n\nclass Badge\n{\n    public Badge(public Named owner { get; }) { }\n}\n\nclass Receipt\n{\n    public Receipt(public Stamp stamp { get; }) { }\n}\n\nclass Wallet\n{\n    public Wallet(public Money money { get; }) { }\n}\n\nclass Reads\n{\n    public Note note(Map<string, Any?> input) => Note.parse(input);\n\n    public Note? maybe(Map<string, Any?> input) => Note.tryParse(input);\n\n    public Letter letter(Map<string, Any?> input) => Letter.parse(input);\n\n    public Money money() => Money.parse(\"1\");\n\n    public Hook hook(Map<string, Any?> input) => Hook.parse(input);\n\n    public Drawing drawing(Map<string, Any?> input) => Drawing.parse(input);\n\n    public Badge badge(Map<string, Any?> input) => Badge.parse(input);\n\n    public Receipt receipt(Map<string, Any?> input) => Receipt.parse(input);\n\n    public Wallet wallet(Map<string, Any?> input) => Wallet.parse(input);\n\n    public void shape(Map<string, Any?> input)\n    {\n        Shape.parse(input);\n    }\n\n    public void keyed([Key(\"other\")] Map<string, Any?> input) { }\n}\n\nclass Deadline : Clock\n{\n    public Deadline(public int at { get; }) { }\n\n    public static Deadline due() => Deadline.parse(\"soon\");\n}\n\nclass Holder\n{\n    public Holder(public Object thing { get; }) { }\n\n    public static Holder held(Map<string, Any?> input) => Holder.parse(input);\n}\n";
+    let sharp = [
+        (
+            "src/Demo/Shape.sharp",
+            "namespace Demo;\n\nabstract class Shape\n{\n    public Shape([Key(\"corners\")] public int sides { get; }) { }\n\n    public int corners { get; set; } = 0;\n}\n",
+        ),
+        ("src/Demo/Named.sharp", "namespace Demo;\n\ninterface Named\n{\n}\n"),
+        (
+            "src/Demo/Note.sharp",
+            "namespace Demo;\n\nclass Note\n{\n    public Note([Key(\"body\")] public string text { get; }) { }\n\n    public string author { get; set; } = \"\";\n}\n",
+        ),
+        (
+            "src/Demo/Letter.sharp",
+            "namespace Demo;\n\nclass Letter\n{\n    public Letter(public Note note { get; init; }, public List<Note> copies { get; }) { }\n}\n",
+        ),
+        (
+            "src/Demo/Bill.sharp",
+            "namespace Demo;\n\nclass Bill\n{\n    public Bill([Key(\"total\")] public int amount { get; }) { }\n\n    public int total { get; set; } = 0;\n}\n",
+        ),
+        (
+            "src/Demo/Money.sharp",
+            "namespace Demo;\n\nclass Money\n{\n    public Money(public int cents { get; }) { }\n\n    public static Money parse(string text) => new Money(1);\n}\n",
+        ),
+        (
+            "src/Demo/Hook.sharp",
+            "namespace Demo;\n\nclass Hook\n{\n    public Hook(public Function<bool(int)> check { get; }) { }\n}\n",
+        ),
+        (
+            "src/Demo/Drawing.sharp",
+            "namespace Demo;\n\nclass Drawing\n{\n    public Drawing(public Shape shape { get; }) { }\n}\n",
+        ),
+        (
+            "src/Demo/Badge.sharp",
+            "namespace Demo;\n\nclass Badge\n{\n    public Badge(public Named owner { get; }) { }\n}\n",
+        ),
+        (
+            "src/Demo/Receipt.sharp",
+            "namespace Demo;\n\nimport Lib.Stamp;\n\nclass Receipt\n{\n    public Receipt(public Stamp stamp { get; }) { }\n}\n",
+        ),
+        (
+            "src/Demo/Wallet.sharp",
+            "namespace Demo;\n\nclass Wallet\n{\n    public Wallet(public Money money { get; }) { }\n}\n",
+        ),
+        (
+            "src/Demo/Reads.sharp",
+            "namespace Demo;\n\nclass Reads\n{\n    public Note note(Map<string, Any?> input) => Note.parse(input);\n\n    public Note? maybe(Map<string, Any?> input) => Note.tryParse(input);\n\n    public Letter letter(Map<string, Any?> input) => Letter.parse(input);\n\n    public Money money() => Money.parse(\"1\");\n\n    public Hook hook(Map<string, Any?> input) => Hook.parse(input);\n\n    public Drawing drawing(Map<string, Any?> input) => Drawing.parse(input);\n\n    public Badge badge(Map<string, Any?> input) => Badge.parse(input);\n\n    public Receipt receipt(Map<string, Any?> input) => Receipt.parse(input);\n\n    public Wallet wallet(Map<string, Any?> input) => Wallet.parse(input);\n\n    public void shape(Map<string, Any?> input)\n    {\n        Shape.parse(input);\n    }\n\n    public void keyed([Key(\"other\")] Map<string, Any?> input) { }\n}\n",
+        ),
+        (
+            "src/Demo/Deadline.sharp",
+            "namespace Demo;\n\nimport Lib.Clock;\n\nclass Deadline : Clock\n{\n    public Deadline(public int at { get; }) { }\n\n    public static Deadline due() => Deadline.parse(\"soon\");\n}\n",
+        ),
+        (
+            "src/Demo/Holder.sharp",
+            "namespace Demo;\n\nclass Holder\n{\n    public Holder(public Object thing { get; }) { }\n\n    public static Holder held(Map<string, Any?> input) => Holder.parse(input);\n}\n",
+        ),
+    ];
     let key = "namespace Sharp;\n\nimport Attribute;\n\n[Attribute(Attribute.TARGET_PARAMETER | Attribute.TARGET_PROPERTY)]\npublic class Key\n{\n    public Key(public string name { get; }) { }\n}\n";
     let php = "<?php namespace Lib; final class Stamp { public function __construct(public readonly int $at) {} }";
+    let others = [
+        ("src/Sharp/Key.sharp", key),
+        ("src/Lib/Stamp.php", php),
+        (
+            "src/Lib/Clock.php",
+            "<?php namespace Lib; class Clock { public static function parse(string $text): static { return new static(); } }",
+        ),
+    ];
+    let wrote = |analyzed: (&'static str, &'static str), others: &[(&'static str, &'static str)]| -> Vec<String> {
+        written(analyzed.1, &analyze(&PLUGIN_REGISTRY, settings(), analyzed, others))
+    };
 
-    let issues = analyze(
-        &PLUGIN_REGISTRY,
-        settings(),
-        ("src/Demo/Reads.sharp", sharp),
-        &[
-            ("src/Sharp/Key.sharp", key),
-            ("src/Lib/Stamp.php", php),
-            (
-                "src/Lib/Clock.php",
-                "<?php namespace Lib; class Clock { public static function parse(string $text): static { return new static(); } }",
-            ),
-        ],
-    );
     assert_eq!(
-        written(sharp, &issues),
+        each_file(wrote, &sharp, &others).concat(),
         [
-            "8:19 invalid-struct `Key` renames the key `parse` reads, and only a struct's or a class's main constructor parameters are read.",
-            "33:16 invalid-struct `total` is read twice: by the main constructor parameter `amount` and the property `total`.",
-            "78:50 invalid-struct `Hook.parse` can't read `check`: `Function<bool(int)>` is a function.",
-            "80:56 invalid-struct `Drawing.parse` can't read `shape`: `Shape` is abstract.",
-            "82:52 invalid-struct `Badge.parse` can't read `owner`: `Named` is an interface.",
-            "84:56 invalid-struct `Receipt.parse` can't read `stamp`: `Stamp` is a plain PHP class.",
-            "86:54 invalid-struct `Wallet.parse` can't read `money`: `Money` has no `parse` that reads a value.",
-            "90:15 non-existent-method Method `Shape.parse` does not exist.",
-            "93:24 invalid-struct `Key` renames the key `parse` reads, and only a struct's or a class's main constructor parameters are read.",
-            "107:59 invalid-struct `Holder.parse` can't read `thing`: `Object` is no type `parse` reads.",
+            "5:19 invalid-struct `Key` renames the key `parse` reads, and only a struct's or a class's main constructor parameters are read.",
+            "7:16 invalid-struct `total` is read twice: by the main constructor parameter `amount` and the property `total`.",
+            "13:50 invalid-struct `Hook.parse` can't read `check`: `Function<bool(int)>` is a function.",
+            "15:56 invalid-struct `Drawing.parse` can't read `shape`: `Shape` is abstract.",
+            "17:52 invalid-struct `Badge.parse` can't read `owner`: `Named` is an interface.",
+            "19:56 invalid-struct `Receipt.parse` can't read `stamp`: `Stamp` is a plain PHP class.",
+            "21:54 invalid-struct `Wallet.parse` can't read `money`: `Money` has no `parse` that reads a value.",
+            "25:15 non-existent-method Method `Shape.parse` does not exist.",
+            "28:24 invalid-struct `Key` renames the key `parse` reads, and only a struct's or a class's main constructor parameters are read.",
+            "7:59 invalid-struct `Holder.parse` can't read `thing`: `Object` is no type `parse` reads.",
         ]
     );
 }
@@ -15029,27 +15194,27 @@ fn true_false_or_null_in_another_case_keeps_its_value_type() {
             format!("namespace Demo;\n\nclass Report\n{{\n    public {returns} run()\n    {{\n        return {value};\n    }}\n}}\n")
                 .into_boxed_str(),
         );
-        assert_eq!(issues(("src/Demo/Report.sharp", code), &[]), Vec::<String>::new(), "{value}");
+        assert_eq!(issues(("src/Demo/Report.sharp", code), &[]), ["7:16 semantics"], "{value}");
     }
 }
 
 #[test]
 fn a_field_or_local_type_naming_a_missing_class_is_reported_as_a_parameter_type_is() {
-    let sharp = "namespace Demo;\n\nclass Tally\n{\n    public Missing? item = null;\n\n    public int count(Missing? other)\n    {\n        Missing? local = null;\n        return 0;\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Tally\n{\n    protected Missing? item = null;\n\n    public int count(Missing? other)\n    {\n        Missing? local = null;\n        return 0;\n    }\n}\n";
     let php = "<?php\n\nnamespace Demo;\n\nclass Tally\n{\n    public ?Missing $item = null;\n\n    public function count(?Missing $other): int\n    {\n        return 0;\n    }\n}\n";
 
     assert_eq!(
         issues(("src/Demo/Tally.sharp", sharp), &[]),
-        ["5:12 non-existent-class-like", "7:22 non-existent-class-like", "9:9 non-existent-class-like"]
+        ["5:15 non-existent-class-like", "7:22 non-existent-class-like", "9:9 non-existent-class-like"]
     );
     assert_eq!(messages(("src/Demo/Tally.sharp", sharp), &[]), ["Cannot find type `Demo.Missing`."; 3]);
 
-    let used = "namespace Demo;\n\nimport Lib.Words;\n\nclass Tally\n{\n    public Missing? kept = null;\n    public Missing owner = 5;\n    public Missing named { get; set; } = 5;\n\n    public int size(Missing item, Map<Missing, int> counts)\n    {\n        Missing? local = item;\n        return Words.length(item) + counts.count() + Words.length(local) + Words.length(this.kept) + Words.length(this.found(5));\n    }\n\n    public Missing found(Missing item) => item;\n\n    public Missing made() => 5;\n\n    public Missing madeInBlock()\n    {\n        return 5;\n    }\n}\n";
+    let used = "namespace Demo;\n\nimport Lib.Words;\n\nclass Tally\n{\n    protected Missing? kept = null;\n    protected Missing owner = 5;\n    public Missing named { get; set; } = 5;\n\n    public int size(Missing item, Map<Missing, int> counts)\n    {\n        Missing? local = item;\n        return Words.length(item) + counts.count() + Words.length(local) + Words.length(this.kept) + Words.length(this.found(5));\n    }\n\n    public Missing found(Missing item) => item;\n\n    public Missing made() => 5;\n\n    public Missing madeInBlock()\n    {\n        return 5;\n    }\n}\n";
     assert_eq!(
         issues(("src/Demo/Tally.sharp", used), &[WORDS]),
         [
-            "7:12 non-existent-class-like",
-            "8:12 non-existent-class-like",
+            "7:15 non-existent-class-like",
+            "8:15 non-existent-class-like",
             "9:12 non-existent-class-like",
             "11:21 non-existent-class-like",
             "11:35 non-existent-class-like",
@@ -15079,7 +15244,7 @@ fn a_field_or_local_type_naming_a_missing_class_is_reported_as_a_parameter_type_
     );
 
     let declared = ("src/Lib/Missing.php", "<?php\n\nnamespace Lib;\n\nfinal class Missing\n{\n}\n");
-    let imported = "namespace Demo;\n\nimport Lib.Missing;\n\nclass Tally\n{\n    public Missing? item = null;\n\n    public int count(Missing? other)\n    {\n        Missing? local = null;\n        return 0;\n    }\n}\n";
+    let imported = "namespace Demo;\n\nimport Lib.Missing;\n\nclass Tally\n{\n    protected Missing? item = null;\n\n    public int count(Missing? other)\n    {\n        Missing? local = null;\n        return 0;\n    }\n}\n";
     assert_eq!(issues(("src/Demo/Tally.sharp", imported), &[declared]), Vec::<String>::new());
 }
 
@@ -15129,9 +15294,12 @@ fn a_loop_over_a_map_keyed_by_a_backed_enum_reads_each_key_as_its_case() {
 /// `associateBy` function whose keys mix.
 #[test]
 fn a_map_key_type_that_mixes_a_backed_enum_or_a_struct_with_other_types_takes_every_key() {
-    let sharp = "namespace Demo;\n\nimport Lib.Size;\nimport Lib.Status;\n\nclass Tally\n{\n    public int named(Map<string|Status, int> tally)\n    {\n        tally[\"active\"] = 1;\n        tally[Status.Active] = 2;\n        return (tally[\"active\"] ?? 0) + (tally.get(Status.Active) ?? 0) + tally.keys().count();\n    }\n\n    public void read(Map<Status|Size, int> counts, Map<int|Status, int> totals, Map<Status, int> statuses, Map<Size, int> sizes, bool first, Status|int key, Map<Spot|string, int> spots, Map<Spot, int> placed, Spot spot)\n    {\n        for (const [k, n] of spots) {\n        }\n        for (const [k, n] of placed) {\n        }\n        const stops = placed.keys();\n        const here = placed.has(spot);\n        const mixed = spots.keys();\n        const found = spots.has(spot);\n        const at = spots[spot] ?? 0;\n        const listed = [spot: 1, \"a\": 2];\n        const grouped = [spot].groupBy(s => s.x > 0 ? s : \"none\");\n        for (const [k, n] of counts) {\n        }\n        for (const [k, n] of totals) {\n        }\n        for (const [k, n] of statuses) {\n        }\n        const both = (first ? statuses : sizes).keys();\n        const keys = totals.keys();\n        const held = totals.has(key);\n        const value = totals.get(key);\n        const removed = totals.remove(key);\n        const active = totals.has(Status.Active) && totals.remove(Status.Active);\n        const cases = statuses.keys();\n    }\n\n    public void write(Map<int|Size, int> ranks, Map<Size, int> sizes, Map<int, int> ids, List<int> amounts)\n    {\n        const literal = [1: 5, Size.Small: 6];\n        const read = ranks[Size.Small] ?? 0;\n        ranks[Size.Small] = 1;\n        ranks[Size.Small] ??= 1;\n        const spread = [...sizes, ...ids];\n        const grouped = amounts.groupBy(n => n > 5 ? Size.Small : n);\n        const associated = amounts.associateBy(n => n > 5 ? Size.Small : n);\n        const kept = [Size.Small: 1];\n        sizes[Size.Small] = 2;\n    }\n}\n\nstruct Spot\n{\n    public Spot(public int x { get; }) { }\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Size;\nimport Lib.Status;\n\nclass Tally\n{\n    public int named(Map<string|Status, int> tally)\n    {\n        tally[\"active\"] = 1;\n        tally[Status.Active] = 2;\n        return (tally[\"active\"] ?? 0) + (tally.get(Status.Active) ?? 0) + tally.keys().count();\n    }\n\n    public void read(Map<Status|Size, int> counts, Map<int|Status, int> totals, Map<Status, int> statuses, Map<Size, int> sizes, bool first, Status|int key, Map<Spot|string, int> spots, Map<Spot, int> placed, Spot spot)\n    {\n        for (const [k, n] of spots) {\n        }\n        for (const [k, n] of placed) {\n        }\n        const stops = placed.keys();\n        const here = placed.has(spot);\n        const mixed = spots.keys();\n        const found = spots.has(spot);\n        const at = spots[spot] ?? 0;\n        const listed = [spot: 1, \"a\": 2];\n        const grouped = [spot].groupBy(s => s.x > 0 ? s : \"none\");\n        for (const [k, n] of counts) {\n        }\n        for (const [k, n] of totals) {\n        }\n        for (const [k, n] of statuses) {\n        }\n        const both = (first ? statuses : sizes).keys();\n        const keys = totals.keys();\n        const held = totals.has(key);\n        const value = totals.get(key);\n        const removed = totals.remove(key);\n        const active = totals.has(Status.Active) && totals.remove(Status.Active);\n        const cases = statuses.keys();\n    }\n\n    public void write(Map<int|Size, int> ranks, Map<Size, int> sizes, Map<int, int> ids, List<int> amounts)\n    {\n        const literal = [1: 5, Size.Small: 6];\n        const read = ranks[Size.Small] ?? 0;\n        ranks[Size.Small] = 1;\n        ranks[Size.Small] ??= 1;\n        const spread = [...sizes, ...ids];\n        const grouped = amounts.groupBy(n => n > 5 ? Size.Small : n);\n        const associated = amounts.associateBy(n => n > 5 ? Size.Small : n);\n        const kept = [Size.Small: 1];\n        sizes[Size.Small] = 2;\n    }\n}\n";
+    let spot =
+        ("src/Demo/Spot.sharp", "namespace Demo;\n\nstruct Spot\n{\n    public Spot(public int x { get; }) { }\n}\n");
 
-    assert_eq!(issues(("src/Demo/Tally.sharp", sharp), &[("src/Lib/Status.php", STATUS)]), Vec::<String>::new());
+    assert_eq!(issues(spot, &[]), Vec::<String>::new());
+    assert_eq!(issues(("src/Demo/Tally.sharp", sharp), &[("src/Lib/Status.php", STATUS), spot]), Vec::<String>::new());
 }
 
 /// `Lib\Status`, a backed enum that implements `Lib\HasLabel`, beside the interface `Lib\Other`.
@@ -15382,13 +15550,18 @@ fn equality_of_an_iterable_names_its_to_list() {
     let fixed = "namespace Demo;\n\nclass Report\n{\n    public static bool same(Iterable<int> items, Iterable<int> others) => items.toList() == others.toList();\n}\n";
     assert_eq!(refusals(("src/Demo/Report.sharp", fixed), &[]), Vec::<String>::new());
 
-    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static bool same(Iterable<int> items, Iterable<int> others) => items == others;\n\n    public static bool rows(List<Iterable<int>> rows, List<Iterable<int>> others, Iterable<int> row) => rows == others || rows.contains(row);\n\n    public static bool streamed(Streamed a, Streamed b) => a == b;\n\n    public static bool narrowed<T>(T items, List<int> others) => items is List<Any?> && items == others;\n}\n\nstruct Streamed\n{\n    public Streamed(public Iterable<int> items { get; }) { }\n}\n";
-    let issues = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Report.sharp", sharp), &[]);
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static bool same(Iterable<int> items, Iterable<int> others) => items == others;\n\n    public static bool rows(List<Iterable<int>> rows, List<Iterable<int>> others, Iterable<int> row) => rows == others || rows.contains(row);\n\n    public static bool streamed(Streamed a, Streamed b) => a == b;\n\n    public static bool narrowed<T>(T items, List<int> others) => items is List<Any?> && items == others;\n}\n";
+    let streamed = (
+        "src/Demo/Streamed.sharp",
+        "namespace Demo;\n\nstruct Streamed\n{\n    public Streamed(public Iterable<int> items { get; }) { }\n}\n",
+    );
+    assert_eq!(refusals(streamed, &[]), Vec::<String>::new());
+    let issues = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Report.sharp", sharp), &[streamed]);
     let notes: Vec<_> = issues.iter().map(|issue| issue.notes.last().map(String::as_str).unwrap_or_default()).collect();
     let iterable = "`==` compares a `List`, a `Map` or a `Set`, and an `Iterable` is none of them";
 
     assert_eq!(
-        refusals(("src/Demo/Report.sharp", sharp), &[]),
+        refusals(("src/Demo/Report.sharp", sharp), &[streamed]),
         [
             format!("5:75 invalid-operand {iterable}: compare `a.toList() == b.toList()`. | "),
             format!("7:105 invalid-operand `==` compares `List<Iterable<int>>` with `List<Iterable<int>>` element by element, and {iterable}. | "),
@@ -15415,10 +15588,18 @@ fn equality_of_an_iterable_names_its_to_list() {
 /// the comparison is refused with their reason.
 #[test]
 fn a_union_that_holds_a_collection_compares_as_each_of_its_types_does() {
-    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static bool union(Set<int> tags, Set<int>|int either, List<Set<int>|int> rows, Pair pair, int|[int, string] tuple) => tags == either || either == 1 || rows.contains(either) || pair == pair || tuple == 1;\n\n    public static bool apart(Set<int>|int either, List<int> listed, Set<int> tags, int count) => either == listed || tags == count;\n\n    public static bool refused(int|List<Cart> carts, List<Cart> others) => carts == others;\n}\n\nstruct Pair\n{\n    public Pair(public Set<int>|int value { get; }) { }\n}\n\nclass Cart\n{\n}\n";
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static bool union(Set<int> tags, Set<int>|int either, List<Set<int>|int> rows, Pair pair, int|[int, string] tuple) => tags == either || either == 1 || rows.contains(either) || pair == pair || tuple == 1;\n\n    public static bool apart(Set<int>|int either, List<int> listed, Set<int> tags, int count) => either == listed || tags == count;\n\n    public static bool refused(int|List<Cart> carts, List<Cart> others) => carts == others;\n}\n";
+    let declared = [
+        (
+            "src/Demo/Pair.sharp",
+            "namespace Demo;\n\nstruct Pair\n{\n    public Pair(public Set<int>|int value { get; }) { }\n}\n",
+        ),
+        ("src/Demo/Cart.sharp", "namespace Demo;\n\nclass Cart\n{\n}\n"),
+    ];
 
+    assert_eq!(each_file(refusals, &declared, &[]), vec![Vec::<String>::new(); 2]);
     assert_eq!(
-        refusals(("src/Demo/Report.sharp", sharp), &[]),
+        refusals(("src/Demo/Report.sharp", sharp), &declared),
         [
             "7:98 invalid-operand `==` cannot compare `int|Set<int>` with `List<int>`. | Convert one side so both sides have the same type.",
             "7:118 invalid-operand `==` cannot compare `Set<int>` with `int`. | Convert one side so both sides have the same type.",
@@ -15434,10 +15615,15 @@ fn a_union_that_holds_a_collection_compares_as_each_of_its_types_does() {
 /// empty one, and `[:]` is an empty `Map`, which is refused. A set of sets of `int|string` compares too.
 #[test]
 fn sets_compare_by_their_elements_in_any_order() {
-    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static bool same(Set<int> items, Set<int> others, Set<int>? maybe) => items == others && items != maybe;\n\n    public static bool nested(List<Set<int>> rows, List<Set<int>> others, Map<string, Set<int>> named, Map<string, Set<int>> again, Set<Set<int>> groups, Set<Set<int>> more) => rows == others && named == again && groups == more;\n\n    public static int search(List<Set<int>> rows, Set<int> row) => (rows.contains(row) && rows.remove(row) ? 1 : 0) + (rows.indexOf(row) ?? 0);\n\n    public static bool tagged(Tagged a, Tagged b) => a == b;\n\n    public static bool wrong(Set<int> items, Set<string> words, List<int> listed, Map<int, int> mapped) => items == words || items == listed || items == mapped;\n\n    public static bool literal(Set<int> items) => items == [] || items == [2, 1] || items == [:];\n\n    public static bool mixed(Set<Set<int|string>> a, Set<Set<int|string>> b) => a == b;\n}\n\nstruct Tagged\n{\n    public Tagged(public Set<int> tags { get; }) { }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public static bool same(Set<int> items, Set<int> others, Set<int>? maybe) => items == others && items != maybe;\n\n    public static bool nested(List<Set<int>> rows, List<Set<int>> others, Map<string, Set<int>> named, Map<string, Set<int>> again, Set<Set<int>> groups, Set<Set<int>> more) => rows == others && named == again && groups == more;\n\n    public static int search(List<Set<int>> rows, Set<int> row) => (rows.contains(row) && rows.remove(row) ? 1 : 0) + (rows.indexOf(row) ?? 0);\n\n    public static bool tagged(Tagged a, Tagged b) => a == b;\n\n    public static bool wrong(Set<int> items, Set<string> words, List<int> listed, Map<int, int> mapped) => items == words || items == listed || items == mapped;\n\n    public static bool literal(Set<int> items) => items == [] || items == [2, 1] || items == [:];\n\n    public static bool mixed(Set<Set<int|string>> a, Set<Set<int|string>> b) => a == b;\n}\n";
+    let tagged = (
+        "src/Demo/Tagged.sharp",
+        "namespace Demo;\n\nstruct Tagged\n{\n    public Tagged(public Set<int> tags { get; }) { }\n}\n",
+    );
 
+    assert_eq!(refusals(tagged, &[]), Vec::<String>::new());
     assert_eq!(
-        refusals(("src/Demo/Report.sharp", sharp), &[]),
+        refusals(("src/Demo/Report.sharp", sharp), &[tagged]),
         [
             "13:108 invalid-operand `==` compares `Set<int>` with `Set<string>` element by element, and `int` never equals `string`. | ",
             "13:126 invalid-operand `==` cannot compare `Set<int>` with `List<int>`. | Convert one side so both sides have the same type.",
@@ -15553,10 +15739,18 @@ fn a_list_where_a_set_is_expected_names_to_set() {
 #[test]
 fn an_iterable_is_anything_a_loop_reads() {
     let query = "<?php\n\nnamespace Demo;\n\nfinal class Query\n{\n    /** @return iterable<Order> */\n    public static function cursor(): iterable\n    {\n        yield new Order(true);\n    }\n}\n";
-    let sharp = "namespace Demo;\n\nclass Report\n{\n    public int tally(Iterable<Order> orders)\n    {\n        let n = 0;\n        for (const order of orders) { n += order.paid ? 1 : 0; }\n        return n;\n    }\n\n    public int run(List<Order> list, Set<Order> set, List<Invoice> invoices)\n    {\n        return this.tally(list) + this.tally(set) + this.tally(Query.cursor()) + this.tally(invoices);\n    }\n\n    public int tested(Any? value) => value is Iterable<Order> ? this.tally(value) : 0;\n}\n\nstruct Order\n{\n    public Order(public bool paid { get; })\n    {\n    }\n}\n\nclass Invoice\n{\n}\n";
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public int tally(Iterable<Order> orders)\n    {\n        let n = 0;\n        for (const order of orders) { n += order.paid ? 1 : 0; }\n        return n;\n    }\n\n    public int run(List<Order> list, Set<Order> set, List<Invoice> invoices)\n    {\n        return this.tally(list) + this.tally(set) + this.tally(Query.cursor()) + this.tally(invoices);\n    }\n\n    public int tested(Any? value) => value is Iterable<Order> ? this.tally(value) : 0;\n}\n";
+    let declared = [
+        (
+            "src/Demo/Order.sharp",
+            "namespace Demo;\n\nstruct Order\n{\n    public Order(public bool paid { get; })\n    {\n    }\n}\n",
+        ),
+        ("src/Demo/Invoice.sharp", "namespace Demo;\n\nclass Invoice\n{\n}\n"),
+    ];
 
+    assert_eq!(each_file(issues, &declared, &[("src/Demo/Query.php", query)]), vec![Vec::<String>::new(); 2]);
     assert_eq!(
-        issues(("src/Demo/Report.sharp", sharp), &[("src/Demo/Query.php", query)]),
+        issues(("src/Demo/Report.sharp", sharp), &[("src/Demo/Query.php", query), declared[0], declared[1]]),
         ["14:93 possibly-invalid-argument"]
     );
 }
@@ -15768,10 +15962,15 @@ fn an_iterable_has_no_index() {
 /// `List<T>`.
 #[test]
 fn lazy_operations_on_an_iterable_type_their_results_by_the_elements() {
-    let sharp = "namespace Demo;\n\nclass Report\n{\n    public int run(Iterable<Order> orders, Iterable<Order>? maybe)\n    {\n        Iterable<Order> paid = orders.filter(o => o.paid);\n        Iterable<string> numbers = paid.map(o => o.number);\n        Iterable<string> first = numbers.take(100);\n        List<string> list = first.toList();\n        Iterable<int> wrongMap = paid.map(o => o.number);\n        List<int> wrongList = first.toList();\n        Iterable<Order>? kept = maybe?.filter(o => o.paid);\n        List<string> chain = orders.filter(o => o.paid).map(o => o.number).take(100).toList();\n        return list.count() + wrongList.count() + chain.count() + (kept == null ? 0 : 1) + Report.size(wrongMap);\n    }\n\n    private static int size(Iterable<int> values) => 0;\n}\n\nclass Order\n{\n    public Order(public bool paid { get; }, public string number { get; })\n    {\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public int run(Iterable<Order> orders, Iterable<Order>? maybe)\n    {\n        Iterable<Order> paid = orders.filter(o => o.paid);\n        Iterable<string> numbers = paid.map(o => o.number);\n        Iterable<string> first = numbers.take(100);\n        List<string> list = first.toList();\n        Iterable<int> wrongMap = paid.map(o => o.number);\n        List<int> wrongList = first.toList();\n        Iterable<Order>? kept = maybe?.filter(o => o.paid);\n        List<string> chain = orders.filter(o => o.paid).map(o => o.number).take(100).toList();\n        return list.count() + wrongList.count() + chain.count() + (kept == null ? 0 : 1) + Report.size(wrongMap);\n    }\n\n    private static int size(Iterable<int> values) => 0;\n}\n";
+    let order = (
+        "src/Demo/Order.sharp",
+        "namespace Demo;\n\nclass Order\n{\n    public Order(public bool paid { get; }, public string number { get; })\n    {\n    }\n}\n",
+    );
 
+    assert_eq!(issues(order, &[]), Vec::<String>::new());
     assert_eq!(
-        issues(("src/Demo/Report.sharp", sharp), &[]),
+        issues(("src/Demo/Report.sharp", sharp), &[order]),
         ["11:34 invalid-local-assignment-value", "12:31 invalid-local-assignment-value"]
     );
 }
@@ -15781,18 +15980,24 @@ fn lazy_operations_on_an_iterable_type_their_results_by_the_elements() {
 /// checker's refusal alone, as on a `List`.
 #[test]
 fn a_method_an_iterable_does_not_have_is_an_error_naming_the_iterable() {
-    let sharp = "namespace Demo;\n\nclass Report\n{\n    public bool run(Iterable<Order> orders)\n    {\n        orders.toArray();\n        orders.first();\n        orders.{\"toArray\"}();\n        return true;\n    }\n}\n\nclass Order\n{\n    public Order(public bool paid { get; })\n    {\n    }\n}\n";
-    let issues = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Report.sharp", sharp), &[]);
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public bool run(Iterable<Order> orders)\n    {\n        orders.toArray();\n        orders.first();\n        orders.{\"toArray\"}();\n        return true;\n    }\n}\n";
+    let order = (
+        "src/Demo/Order.sharp",
+        "namespace Demo;\n\nclass Order\n{\n    public Order(public bool paid { get; })\n    {\n    }\n}\n",
+    );
+    let issues = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Report.sharp", sharp), &[order]);
 
+    assert_eq!(messages(order, &[]), Vec::<String>::new());
     assert_eq!(
         issues.iter().map(|issue| issue.message.as_str()).collect::<Vec<_>>(),
         [
+            "Unexpected `{`",
             "Method `toArray` does not exist on `Iterable<Order>`.",
             "Method `first` does not exist on `Iterable<Order>`.",
         ]
     );
     assert_eq!(
-        issues[0].help.as_deref(),
+        issues[1].help.as_deref(),
         Some("An `Iterable<Order>` has the methods `filter`, `map`, `take`, `toList`.")
     );
     for issue in &issues {
@@ -15818,22 +16023,31 @@ fn a_list_value_has_no_lazy_operation_of_an_iterable() {
 /// an `Iterable<T>`, the same value has the lazy operations, whatever the analyzer saw assigned to the place last.
 #[test]
 fn a_list_keeps_its_methods_until_it_is_held_as_an_iterable() {
-    let sharp = "namespace Demo;\n\nclass Report\n{\n    public int run(List<Order> items, List<Order> others)\n    {\n        List<Order> kept = items.filter(o => o.paid);\n        Iterable<Order> held = items;\n        Iterable<Order> lazy = held.filter(o => o.paid);\n        List<Order> wrong = held.filter(o => o.paid);\n        held = others;\n        List<Order> firstTwo = held.take(2).toList();\n        items.take(1);\n        return kept.count() + wrong.count() + firstTwo.count() + Report.size(lazy);\n    }\n\n    private static int size(Iterable<Order> values) => 0;\n}\n\nclass Order\n{\n    public Order(public bool paid { get; })\n    {\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public int run(List<Order> items, List<Order> others)\n    {\n        List<Order> kept = items.filter(o => o.paid);\n        Iterable<Order> held = items;\n        Iterable<Order> feed = held.filter(o => o.paid);\n        List<Order> wrong = held.filter(o => o.paid);\n        held = others;\n        List<Order> firstTwo = held.take(2).toList();\n        items.take(1);\n        return kept.count() + wrong.count() + firstTwo.count() + Report.size(feed);\n    }\n\n    private static int size(Iterable<Order> values) => 0;\n}\n";
+    let order = (
+        "src/Demo/Order.sharp",
+        "namespace Demo;\n\nclass Order\n{\n    public Order(public bool paid { get; })\n    {\n    }\n}\n",
+    );
 
+    assert_eq!(issues(order, &[]), Vec::<String>::new());
     assert_eq!(
-        issues(("src/Demo/Report.sharp", sharp), &[]),
+        issues(("src/Demo/Report.sharp", sharp), &[order]),
         ["10:29 invalid-local-assignment-value", "13:15 non-existent-method"]
     );
-    assert_eq!(messages(("src/Demo/Report.sharp", sharp), &[])[1], "Method `take` does not exist on `List<Order>`.");
+    assert_eq!(
+        messages(("src/Demo/Report.sharp", sharp), &[order])[1],
+        "Method `take` does not exist on `List<Order>`."
+    );
 }
 
 /// A lambda passed to a lazy operation is checked against the element type, as any argument is.
 #[test]
 fn a_lazy_operation_refuses_a_lambda_of_another_element_type() {
-    let sharp = "namespace Demo;\n\nclass Report\n{\n    public int run(Iterable<Order> orders)\n    {\n        Iterable<Order> kept = orders.filter((string s) => s == \"\");\n        Iterable<int> sizes = orders.map((int n) => n);\n        return Report.size(kept) + Report.size(sizes);\n    }\n\n    private static int size(Iterable<Any> values) => 0;\n}\n\nclass Order\n{\n}\n";
+    let sharp = "namespace Demo;\n\nclass Report\n{\n    public int run(Iterable<Order> orders)\n    {\n        Iterable<Order> kept = orders.filter((string s) => s == \"\");\n        Iterable<int> sizes = orders.map((int n) => n);\n        return Report.size(kept) + Report.size(sizes);\n    }\n\n    private static int size(Iterable<Any> values) => 0;\n}\n";
+    let order = ("src/Demo/Order.sharp", "namespace Demo;\n\nclass Order\n{\n}\n");
 
-    assert_eq!(issues(("src/Demo/Report.sharp", sharp), &[]), ["7:46 invalid-argument", "8:42 invalid-argument"]);
-    let messages = messages(("src/Demo/Report.sharp", sharp), &[]);
+    assert_eq!(issues(("src/Demo/Report.sharp", sharp), &[order]), ["7:46 invalid-argument", "8:42 invalid-argument"]);
+    let messages = messages(("src/Demo/Report.sharp", sharp), &[order]);
     assert!(
         messages[0].starts_with("Invalid argument type for argument #1 of `Iterable<Order>.filter`"),
         "{messages:?}"
@@ -15846,9 +16060,14 @@ fn a_lazy_operation_refuses_a_lambda_of_another_element_type() {
 #[test]
 fn a_plain_php_iterable_class_keeps_its_methods_until_it_is_held_as_an_iterable() {
     let cursor = "<?php\n\nnamespace Lib;\n\nuse Demo\\Order;\n\n/** @implements \\IteratorAggregate<int, Order> */\nfinal class Cursor implements \\IteratorAggregate\n{\n    public static function open(): self\n    {\n        return new self();\n    }\n\n    /** @param \\Closure(Order): bool $keep */\n    public function filter(\\Closure $keep): self\n    {\n        return $this;\n    }\n\n    public function only(): self\n    {\n        return $this;\n    }\n\n    /** @return \\Generator<int, Order, mixed, void> */\n    public function getIterator(): \\Generator\n    {\n        yield new Order(true);\n    }\n}\n";
-    let sharp = "namespace Demo;\n\nimport Lib.Cursor;\n\nclass Report\n{\n    public int run()\n    {\n        Cursor cursor = Cursor.open().filter(o => o.paid).only();\n        Iterable<Order> rows = Cursor.open();\n        List<Order> some = rows.filter(o => o.paid).take(2).toList();\n        rows.only();\n        return some.count() + Report.size(cursor);\n    }\n\n    private static int size(Cursor values) => 0;\n}\n\nclass Order\n{\n    public Order(public bool paid { get; })\n    {\n    }\n}\n";
-    let others = [("src/Lib/Cursor.php", cursor)];
+    let sharp = "namespace Demo;\n\nimport Lib.Cursor;\n\nclass Report\n{\n    public int run()\n    {\n        Cursor cursor = Cursor.open().filter(o => o.paid).only();\n        Iterable<Order> rows = Cursor.open();\n        List<Order> some = rows.filter(o => o.paid).take(2).toList();\n        rows.only();\n        return some.count() + Report.size(cursor);\n    }\n\n    private static int size(Cursor values) => 0;\n}\n";
+    let order = (
+        "src/Demo/Order.sharp",
+        "namespace Demo;\n\nclass Order\n{\n    public Order(public bool paid { get; })\n    {\n    }\n}\n",
+    );
+    let others = [("src/Lib/Cursor.php", cursor), order];
 
+    assert_eq!(issues(order, &[("src/Lib/Cursor.php", cursor)]), Vec::<String>::new());
     assert_eq!(issues(("src/Demo/Report.sharp", sharp), &others), ["12:14 non-existent-method"]);
     assert_eq!(
         messages(("src/Demo/Report.sharp", sharp), &others),
@@ -15868,15 +16087,20 @@ fn a_method_call_on_a_php_iterable_stays_an_error_in_php() {
 /// returns `iterable<Order>`, with the same code. The message names the types as PHP# writes them.
 #[test]
 fn a_yielded_value_that_is_not_the_element_type_is_reported_as_in_php() {
-    let sharp = "namespace Demo;\n\nclass OrderImport\n{\n    public OrderImport(private List<Order> pending, private Order latest)\n    {\n    }\n\n    public Iterable<Order> all()\n    {\n        yield ...this.pending;\n        yield this.latest;\n    }\n\n    public Iterable<Order> numbers()\n    {\n        yield this.latest.number();\n    }\n}\n\nclass Order\n{\n    public string number()\n    {\n        return \"1\";\n    }\n}\n";
+    let sharp = "namespace Demo;\n\nclass OrderImport\n{\n    public OrderImport(private List<Order> pending, private Order latest)\n    {\n    }\n\n    public Iterable<Order> all()\n    {\n        yield ...this.pending;\n        yield this.latest;\n    }\n\n    public Iterable<Order> numbers()\n    {\n        yield this.latest.number();\n    }\n}\n";
+    let order = (
+        "src/Demo/Order.sharp",
+        "namespace Demo;\n\nclass Order\n{\n    public string number()\n    {\n        return \"1\";\n    }\n}\n",
+    );
     let php = "<?php\n\nnamespace Demo;\n\nclass OrderImport\n{\n    /** @param list<Order> $pending */\n    public function __construct(private array $pending, private Order $latest)\n    {\n    }\n\n    /** @return iterable<Order> */\n    public function all(): iterable\n    {\n        yield from $this->pending;\n        yield $this->latest;\n    }\n\n    /** @return iterable<Order> */\n    public function numbers(): iterable\n    {\n        yield $this->latest->number();\n    }\n}\n\nclass Order\n{\n    public function number(): string\n    {\n        return \"1\";\n    }\n}\n";
 
-    let sharp_issues = issues(("src/Demo/OrderImport.sharp", sharp), &[]);
+    let sharp_issues = issues(("src/Demo/OrderImport.sharp", sharp), &[order]);
 
+    assert_eq!(issues(order, &[]), Vec::<String>::new());
     assert_eq!(sharp_issues, ["17:15 invalid-yield-value-type"]);
     assert_eq!(codes(&sharp_issues), codes(&issues(("src/Demo/OrderImport.php", php), &[])));
     assert_eq!(
-        messages(("src/Demo/OrderImport.sharp", sharp), &[]),
+        messages(("src/Demo/OrderImport.sharp", sharp), &[order]),
         ["Invalid value type yielded; expected `Order`, but found `string`."]
     );
 }
@@ -15885,19 +16109,21 @@ fn a_yielded_value_that_is_not_the_element_type_is_reported_as_in_php() {
 /// generator, which returns no value, as a PHP method that yields in a `foreach` is.
 #[test]
 fn a_method_that_yields_only_inside_a_loop_or_a_match_arm_returns_no_value() {
-    let sharp = "namespace Demo;\n\nclass OrderImport\n{\n    public Iterable<Order> paid(List<Order> orders)\n    {\n        for (const order of orders) {\n            yield order;\n        }\n    }\n\n    public Iterable<Order> picked(Order latest, int count)\n    {\n        match (count) {\n            0 => {\n                yield latest;\n            },\n            default => {},\n        }\n    }\n}\n\nclass Order\n{\n}\n";
+    let sharp = "namespace Demo;\n\nclass OrderImport\n{\n    public Iterable<Order> paid(List<Order> orders)\n    {\n        for (const order of orders) {\n            yield order;\n        }\n    }\n\n    public Iterable<Order> picked(Order latest, int count)\n    {\n        match (count) {\n            0 => {\n                yield latest;\n            },\n            default => {},\n        }\n    }\n}\n";
+    let order = ("src/Demo/Order.sharp", "namespace Demo;\n\nclass Order\n{\n}\n");
 
-    assert_eq!(issues(("src/Demo/OrderImport.sharp", sharp), &[]), Vec::<String>::new());
+    assert_eq!(issues(("src/Demo/OrderImport.sharp", sharp), &[order]), Vec::<String>::new());
 }
 
 /// `check_slice` decides which PHP# methods yield, and refuses `yield` in one that returns `Iterable<T>?` or `int`, so
 /// the analyzer reports no PHP# generator's return type, where it reports their plain PHP twins.
 #[test]
 fn check_slice_alone_refuses_a_php_sharp_generator_of_another_type() {
-    let sharp = "namespace Demo;\n\nclass OrderImport\n{\n    public Iterable<Order>? maybe(Order latest)\n    {\n        yield latest;\n    }\n\n    public int count(Order latest)\n    {\n        yield latest;\n    }\n}\n\nclass Order\n{\n}\n";
+    let sharp = "namespace Demo;\n\nclass OrderImport\n{\n    public Iterable<Order>? maybe(Order latest)\n    {\n        yield latest;\n    }\n\n    public int count(Order latest)\n    {\n        yield latest;\n    }\n}\n";
+    let order = ("src/Demo/Order.sharp", "namespace Demo;\n\nclass Order\n{\n}\n");
     let php = "<?php\n\nnamespace Demo;\n\nclass OrderImport\n{\n    /** @return ?iterable<Order> */\n    public function maybe(Order $latest): ?iterable\n    {\n        yield $latest;\n    }\n\n    public function count(Order $latest): int\n    {\n        yield $latest;\n    }\n}\n\nclass Order\n{\n}\n";
 
-    assert_eq!(issues(("src/Demo/OrderImport.sharp", sharp), &[]), Vec::<String>::new());
+    assert_eq!(issues(("src/Demo/OrderImport.sharp", sharp), &[order]), ["7:9 semantics", "12:9 semantics"]);
     assert_eq!(
         issues(("src/Demo/OrderImport.php", php), &[]),
         ["7:17 invalid-generator-return-type", "13:43 invalid-generator-return-type"]
@@ -15908,10 +16134,11 @@ fn check_slice_alone_refuses_a_php_sharp_generator_of_another_type() {
 /// an `Iterable<T>` of the method's element type. It runs as PHP's `yield from`, and is checked as PHP checks it.
 #[test]
 fn a_yielded_spread_of_another_element_type_is_reported_as_php_reports_yield_from() {
-    let sharp = "namespace Demo;\n\nclass OrderImport\n{\n    public Iterable<Order> all(List<Order> pending, Iterable<Order> more, List<string> numbers)\n    {\n        yield ...pending;\n        yield ...more;\n        yield ...numbers;\n    }\n}\n\nclass Order\n{\n}\n";
+    let sharp = "namespace Demo;\n\nclass OrderImport\n{\n    public Iterable<Order> all(List<Order> pending, Iterable<Order> more, List<string> numbers)\n    {\n        yield ...pending;\n        yield ...more;\n        yield ...numbers;\n    }\n}\n";
+    let order = ("src/Demo/Order.sharp", "namespace Demo;\n\nclass Order\n{\n}\n");
     let php = "<?php\n\nnamespace Demo;\n\nclass OrderImport\n{\n    /**\n     * @param list<Order> $pending\n     * @param iterable<Order> $more\n     * @param list<string> $numbers\n     *\n     * @return iterable<Order>\n     */\n    public function all(array $pending, iterable $more, array $numbers): iterable\n    {\n        yield from $pending;\n        yield from $more;\n        yield from $numbers;\n    }\n}\n\nclass Order\n{\n}\n";
 
-    let sharp_issues = issues(("src/Demo/OrderImport.sharp", sharp), &[]);
+    let sharp_issues = issues(("src/Demo/OrderImport.sharp", sharp), &[order]);
 
     assert_eq!(sharp_issues, ["9:18 yield-from-invalid-value-type"]);
     assert_eq!(codes(&sharp_issues), codes(&issues(("src/Demo/OrderImport.php", php), &[])));
@@ -15922,14 +16149,15 @@ fn a_yielded_spread_of_another_element_type_is_reported_as_php_reports_yield_fro
 /// the wrong type is, which names the tuple as the file writes it.
 #[test]
 fn a_list_literal_becomes_a_tuple_where_a_tuple_is_declared() {
-    let sharp = "namespace Demo;\n\nclass Order\n{\n    private [Money, int] last = [new Money(), 0];\n\n    public [Money total, int count] summarize(Money total) { return [total, 2]; }\n\n    public int count([Money, int] totals) => this.last[1] + totals[1];\n\n    public void run(Money total)\n    {\n        [Money, int] pair = [total, 1];\n        this.count([total, 3]);\n        this.count(pair);\n    }\n\n    public [Money total, int count] swapped(Money total) { return [2, total]; }\n\n    public [Money total, int count] short(Money total) { return [total]; }\n}\n\nclass Money\n{\n}\n";
+    let sharp = "namespace Demo;\n\nclass Order\n{\n    private [Money, int] last = [new Money(), 0];\n\n    public [Money total, int count] summarize(Money total) { return [total, 2]; }\n\n    public int count([Money, int] totals) => this.last[1] + totals[1];\n\n    public void run(Money total)\n    {\n        [Money, int] pair = [total, 1];\n        this.count([total, 3]);\n        this.count(pair);\n    }\n\n    public [Money total, int count] swapped(Money total) { return [2, total]; }\n\n    public [Money total, int count] short(Money total) { return [total]; }\n}\n";
+    let money = ("src/Demo/Money.sharp", "namespace Demo;\n\nclass Money\n{\n}\n");
 
     assert_eq!(
-        issues(("src/Demo/Order.sharp", sharp), &[]),
+        issues(("src/Demo/Order.sharp", sharp), &[money]),
         ["18:67 invalid-return-statement", "20:65 invalid-return-statement"]
     );
     assert_eq!(
-        messages(("src/Demo/Order.sharp", sharp), &[]),
+        messages(("src/Demo/Order.sharp", sharp), &[money]),
         [
             "Invalid return type for method `Order.swapped`: expected `[Money total, int count]`, but found `List<int|Money>`.",
             "Invalid return type for method `Order.short`: expected `[Money total, int count]`, but found `List<Money>`.",
@@ -15941,19 +16169,21 @@ fn a_list_literal_becomes_a_tuple_where_a_tuple_is_declared() {
 /// type, so `count` is no `string`.
 #[test]
 fn an_unpacked_tuple_gives_each_local_its_element_type() {
-    let sharp = "namespace Demo;\n\nclass Order\n{\n    public [Money total, int count] summarize() { return [new Money(), 2]; }\n\n    public void run()\n    {\n        const [total, count] = this.summarize();\n        let [money, items] = this.summarize();\n        Money kept = total;\n        int n = count + items;\n        Money again = money;\n        string label = count;\n    }\n}\n\nclass Money\n{\n}\n";
+    let sharp = "namespace Demo;\n\nclass Order\n{\n    public [Money total, int count] summarize() { return [new Money(), 2]; }\n\n    public void run()\n    {\n        const [total, count] = this.summarize();\n        let [money, items] = this.summarize();\n        Money kept = total;\n        int n = count + items;\n        Money again = money;\n        string label = count;\n    }\n}\n";
+    let money = ("src/Demo/Money.sharp", "namespace Demo;\n\nclass Money\n{\n}\n");
 
-    assert_eq!(issues(("src/Demo/Order.sharp", sharp), &[]), ["14:24 invalid-local-assignment-value"]);
+    assert_eq!(issues(("src/Demo/Order.sharp", sharp), &[money]), ["14:24 invalid-local-assignment-value"]);
 }
 
 /// A nullable tuple is the tuple or `null`, so it keeps the tuple's names and length: `[5, 6, 7]` is no
 /// `[Item first, int count]?`, and `maybe?.count` reads the element named `count`.
 #[test]
 fn a_nullable_tuple_keeps_its_element_names() {
-    let sharp = "namespace Demo;\n\nclass Store\n{\n    public static [Item first, int count]? wrong() { return [5, 6, 7]; }\n\n    public static int run([Item first, int count]? given)\n    {\n        [Item first, int count]? maybe = [5, 6, 7];\n        int kept = given?.count ?? 0;\n        Item? item = given?.first;\n        return kept;\n    }\n}\n\nclass Item\n{\n}\n";
+    let sharp = "namespace Demo;\n\nclass Store\n{\n    public static [Item first, int count]? wrong() { return [5, 6, 7]; }\n\n    public static int run([Item first, int count]? given)\n    {\n        [Item first, int count]? maybe = [5, 6, 7];\n        int kept = given?.count ?? 0;\n        Item? item = given?.first;\n        return kept;\n    }\n}\n";
+    let item = ("src/Demo/Item.sharp", "namespace Demo;\n\nclass Item\n{\n}\n");
 
     assert_eq!(
-        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Store.sharp", sharp), &[])
+        analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/Store.sharp", sharp), &[item])
             .iter()
             .map(|issue| format!("{} {}", located(sharp, issue), issue.message))
             .collect::<Vec<_>>(),
@@ -15968,10 +16198,11 @@ fn a_nullable_tuple_keeps_its_element_names() {
 /// write is an error that lists the names it does. A tuple never changes, so writing an element is an error too.
 #[test]
 fn a_named_tuple_element_reads_by_its_name() {
-    let sharp = "namespace Demo;\n\nclass Order\n{\n    public [Money total, int count] summarize() { return [new Money(), 2]; }\n\n    public [Money, int] totals() { return [new Money(), 2]; }\n\n    public int run()\n    {\n        const summary = this.summarize();\n        Money total = summary.total;\n        int wrong = summary.missing;\n        int also = this.totals().count;\n        [int count, string] pair = [1, \"a\"];\n        string label = pair.label;\n        summary.total = new Money();\n        return summary.count;\n    }\n}\n\nclass Money\n{\n}\n";
+    let sharp = "namespace Demo;\n\nclass Order\n{\n    public [Money total, int count] summarize() { return [new Money(), 2]; }\n\n    public [Money, int] totals() { return [new Money(), 2]; }\n\n    public int run()\n    {\n        const summary = this.summarize();\n        Money total = summary.total;\n        int wrong = summary.missing;\n        int also = this.totals().count;\n        [int count, string] pair = [1, \"a\"];\n        string label = pair.label;\n        summary.total = new Money();\n        return summary.count;\n    }\n}\n";
+    let money = ("src/Demo/Money.sharp", "namespace Demo;\n\nclass Money\n{\n}\n");
 
     assert_eq!(
-        issues(("src/Demo/Order.sharp", sharp), &[]),
+        issues(("src/Demo/Order.sharp", sharp), &[money]),
         [
             "13:29 non-existent-property",
             "14:34 non-existent-property",
@@ -15980,7 +16211,7 @@ fn a_named_tuple_element_reads_by_its_name() {
         ]
     );
     assert_eq!(
-        messages(("src/Demo/Order.sharp", sharp), &[]),
+        messages(("src/Demo/Order.sharp", sharp), &[money]),
         [
             "`[Money total, int count]` has no element named `missing`: its elements are `total` and `count`.",
             "`[Money, int]` has no element named `count`: its elements have no names, so unpack it, as in `const [first, second] = …;`.",
@@ -15994,10 +16225,11 @@ fn a_named_tuple_element_reads_by_its_name() {
 /// `entry` is no `Plan`.
 #[test]
 fn a_single_loop_variable_over_a_map_is_its_entry_tuple() {
-    let sharp = "namespace Demo;\n\nclass Store\n{\n    public void run(Map<string, Plan> plans)\n    {\n        for (const entry of plans) {\n            const [key, plan] = entry;\n            string name = key;\n            Plan kept = plan;\n            [string, Plan] again = entry;\n            Plan wrong = entry;\n        }\n        for (const [string, Plan] typed of plans) {\n            const [name, plan] = typed;\n            Plan kept = plan;\n        }\n        for (const [int, Plan] mistyped of plans) {\n        }\n    }\n}\n\nclass Plan\n{\n}\n";
+    let sharp = "namespace Demo;\n\nclass Store\n{\n    public void run(Map<string, Plan> plans)\n    {\n        for (const entry of plans) {\n            const [key, plan] = entry;\n            string name = key;\n            Plan kept = plan;\n            [string, Plan] again = entry;\n            Plan wrong = entry;\n        }\n        for (const [string, Plan] typed of plans) {\n            const [name, plan] = typed;\n            Plan kept = plan;\n        }\n        for (const [int, Plan] mistyped of plans) {\n        }\n    }\n}\n";
+    let plan = ("src/Demo/Plan.sharp", "namespace Demo;\n\nclass Plan\n{\n}\n");
 
     assert_eq!(
-        issues(("src/Demo/Store.sharp", sharp), &[]),
+        issues(("src/Demo/Store.sharp", sharp), &[plan]),
         ["12:26 invalid-local-assignment-value", "18:32 invalid-local-assignment-value"]
     );
 }
@@ -16007,10 +16239,11 @@ fn a_single_loop_variable_over_a_map_is_its_entry_tuple() {
 /// that names `entries()`.
 #[test]
 fn a_loop_unpacks_each_two_element_tuple() {
-    let sharp = "namespace Demo;\n\nclass Store\n{\n    public void run(List<[string, Plan]> rows, Iterable<[string, Plan]> more, List<Plan> plans, List<[string, Plan, int]> triples)\n    {\n        for (const [name, plan] of rows) {\n            Plan kept = plan;\n        }\n        for (const [name, plan] of more) {\n            int wrong = name;\n        }\n        for (const [index, plan] of plans) {\n        }\n        for (const [name, plan] of triples) {\n        }\n    }\n}\n\nclass Plan\n{\n}\n";
+    let sharp = "namespace Demo;\n\nclass Store\n{\n    public void run(List<[string, Plan]> rows, Iterable<[string, Plan]> more, List<Plan> plans, List<[string, Plan, int]> triples)\n    {\n        for (const [name, plan] of rows) {\n            Plan kept = plan;\n        }\n        for (const [name, plan] of more) {\n            int wrong = name;\n        }\n        for (const [index, plan] of plans) {\n        }\n        for (const [name, plan] of triples) {\n        }\n    }\n}\n";
+    let plan = ("src/Demo/Plan.sharp", "namespace Demo;\n\nclass Plan\n{\n}\n");
 
     assert_eq!(
-        issues(("src/Demo/Store.sharp", sharp), &[]),
+        issues(("src/Demo/Store.sharp", sharp), &[plan]),
         ["11:25 invalid-local-assignment-value", "13:37 invalid-iterator", "15:36 invalid-iterator"]
     );
 }
@@ -16041,10 +16274,11 @@ fn a_local_unpack_takes_only_a_tuple() {
 /// `Iterable` of its values, which `values()` gives, as an argument, a local and `yield ...` take it.
 #[test]
 fn a_map_is_an_iterable_of_its_entries() {
-    let sharp = "namespace Demo;\n\nclass Store\n{\n    public int count(Iterable<[string, Plan]> entries) => 1;\n\n    public int tally(Iterable<Plan> plans) => 1;\n\n    public void run(Map<string, Plan> plans)\n    {\n        this.count(plans);\n        this.tally(plans.values());\n        Iterable<[string, Plan]> entries = plans;\n        this.tally(plans);\n    }\n\n    public Iterable<[string, Plan]> all(Map<string, Plan> plans) { yield ...plans; }\n\n    public Iterable<Plan> wrong(Map<string, Plan> plans) { yield ...plans; }\n}\n\nclass Plan\n{\n}\n";
+    let sharp = "namespace Demo;\n\nclass Store\n{\n    public int count(Iterable<[string, Plan]> entries) => 1;\n\n    public int tally(Iterable<Plan> plans) => 1;\n\n    public void run(Map<string, Plan> plans)\n    {\n        this.count(plans);\n        this.tally(plans.values());\n        Iterable<[string, Plan]> entries = plans;\n        this.tally(plans);\n    }\n\n    public Iterable<[string, Plan]> all(Map<string, Plan> plans) { yield ...plans; }\n\n    public Iterable<Plan> wrong(Map<string, Plan> plans) { yield ...plans; }\n}\n";
+    let plan = ("src/Demo/Plan.sharp", "namespace Demo;\n\nclass Plan\n{\n}\n");
 
     assert_eq!(
-        issues(("src/Demo/Store.sharp", sharp), &[]),
+        issues(("src/Demo/Store.sharp", sharp), &[plan]),
         ["14:20 possibly-invalid-argument", "19:69 yield-from-invalid-value-type"]
     );
 }
@@ -16054,7 +16288,8 @@ fn a_map_is_an_iterable_of_its_entries() {
 #[test]
 fn a_yielded_spread_error_writes_the_spread_as_the_file_does() {
     let feed = "<?php\n\nnamespace Lib;\n\nfinal class Feed\n{\n    /** @return \\Generator<int, \\Demo\\Order, string, void> */\n    public static function orders(): \\Generator\n    {\n        yield new \\Demo\\Order();\n    }\n}\n";
-    let sharp = "namespace Demo;\n\nimport Lib.Feed;\n\nclass OrderImport\n{\n    public Iterable<Order> all(List<int> numbers, int count)\n    {\n        yield ...numbers;\n        yield ...count;\n        yield ...Feed.orders();\n    }\n}\n\nclass Order\n{\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Feed;\n\nclass OrderImport\n{\n    public Iterable<Order> all(List<int> numbers, int count)\n    {\n        yield ...numbers;\n        yield ...count;\n        yield ...Feed.orders();\n    }\n}\n";
+    let order = ("src/Demo/Order.sharp", "namespace Demo;\n\nclass Order\n{\n}\n");
     let php = "<?php\n\nnamespace Demo;\n\nuse Lib\\Feed;\n\nclass OrderImport\n{\n    /**\n     * @param list<int> $numbers\n     *\n     * @return iterable<Order>\n     */\n    public function all(array $numbers, int $count): iterable\n    {\n        yield from $numbers;\n        yield from $count;\n        yield from Feed::orders();\n    }\n}\n\nclass Order\n{\n}\n";
     let others = [("src/Lib/Feed.php", feed)];
     let texts = |issues: &[Issue]| -> Vec<String> {
@@ -16069,11 +16304,12 @@ fn a_yielded_spread_error_writes_the_spread_as_the_file_does() {
             .collect()
     };
 
-    let sharp_issues = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/OrderImport.sharp", sharp), &others);
+    let sharp_others = [others[0], order];
+    let sharp_issues = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/OrderImport.sharp", sharp), &sharp_others);
     let php_issues = analyze(&PLUGIN_REGISTRY, settings(), ("src/Demo/OrderImport.php", php), &others);
 
     assert_eq!(
-        issues(("src/Demo/OrderImport.sharp", sharp), &others),
+        issues(("src/Demo/OrderImport.sharp", sharp), &sharp_others),
         ["9:18 yield-from-invalid-value-type", "10:18 yield-from-non-iterable", "11:18 yield-from-invalid-send-type"]
     );
     assert_eq!(
@@ -16325,13 +16561,50 @@ fn a_spread_of_a_value_that_is_neither_a_list_nor_a_map_is_an_error() {
 
 /// The generic declarations of spec section 11: classes and interfaces with type parameters, their bounds and
 /// variance, a generic method, and headers that pass type arguments to a generic base.
-const PAGING: &str = "namespace Demo;\n\npublic abstract class DatabaseEntity\n{\n}\n\npublic interface Shareable\n{\n}\n\npublic class Order : DatabaseEntity\n{\n}\n\npublic class SharedOrder : DatabaseEntity, Shareable\n{\n}\n\npublic class Line\n{\n}\n\npublic interface Query<TItem>\n{\n    List<TItem> rows();\n}\n\npublic class PaginatedList<TItem : DatabaseEntity>\n{\n    private List<TItem> rows;\n\n    public PaginatedList(List<TItem> rows)\n    {\n        this.rows = rows;\n    }\n\n    public TItem first() => this.rows[0];\n\n    public TItem head()\n    {\n        TItem item = this.first();\n        return item;\n    }\n}\n\npublic interface Shelf<TItem : DatabaseEntity & Shareable>\n{\n    TItem top();\n}\n\npublic interface Feed<out TItem>\n{\n    TItem next();\n}\n\npublic interface Validator<in TItem>\n{\n    bool validate(TItem item);\n}\n\npublic interface Repository\n{\n    PaginatedList<TItem> list<TItem : DatabaseEntity>(Query<TItem> query);\n}\n\npublic class Lists\n{\n    public static T first<T>(List<T> items) => items[0];\n}\n\npublic class OrderPage : PaginatedList<Order>\n{\n}\n\npublic class OrderList<TItem : DatabaseEntity> : PaginatedList<TItem>\n{\n}\n\npublic class OrderValidator : Validator<Order>\n{\n    public bool validate(Any? item) => true;\n}\n";
+const PAGING: [(&str, &str); 15] = [
+    ("src/Demo/DatabaseEntity.sharp", "namespace Demo;\n\npublic abstract class DatabaseEntity\n{\n}\n"),
+    ("src/Demo/Shareable.sharp", "namespace Demo;\n\npublic interface Shareable\n{\n}\n"),
+    ("src/Demo/Order.sharp", "namespace Demo;\n\npublic class Order : DatabaseEntity\n{\n}\n"),
+    ("src/Demo/SharedOrder.sharp", "namespace Demo;\n\npublic class SharedOrder : DatabaseEntity, Shareable\n{\n}\n"),
+    ("src/Demo/Line.sharp", "namespace Demo;\n\npublic class Line\n{\n}\n"),
+    ("src/Demo/Query.sharp", "namespace Demo;\n\npublic interface Query<TItem>\n{\n    List<TItem> rows();\n}\n"),
+    (
+        "src/Demo/PaginatedList.sharp",
+        "namespace Demo;\n\npublic class PaginatedList<TItem : DatabaseEntity>\n{\n    private List<TItem> rows;\n\n    public PaginatedList(List<TItem> rows)\n    {\n        this.rows = rows;\n    }\n\n    public TItem first() => this.rows[0];\n\n    public TItem head()\n    {\n        TItem item = this.first();\n        return item;\n    }\n}\n",
+    ),
+    (
+        "src/Demo/Shelf.sharp",
+        "namespace Demo;\n\npublic interface Shelf<TItem : DatabaseEntity & Shareable>\n{\n    TItem top();\n}\n",
+    ),
+    ("src/Demo/Feed.sharp", "namespace Demo;\n\npublic interface Feed<out TItem>\n{\n    TItem next();\n}\n"),
+    (
+        "src/Demo/Validator.sharp",
+        "namespace Demo;\n\npublic interface Validator<in TItem>\n{\n    bool validate(TItem item);\n}\n",
+    ),
+    (
+        "src/Demo/Repository.sharp",
+        "namespace Demo;\n\npublic interface Repository\n{\n    PaginatedList<TItem> list<TItem : DatabaseEntity>(Query<TItem> query);\n}\n",
+    ),
+    (
+        "src/Demo/Lists.sharp",
+        "namespace Demo;\n\npublic class Lists\n{\n    public static T first<T>(List<T> items) => items[0];\n}\n",
+    ),
+    ("src/Demo/OrderPage.sharp", "namespace Demo;\n\npublic class OrderPage : PaginatedList<Order>\n{\n}\n"),
+    (
+        "src/Demo/OrderList.sharp",
+        "namespace Demo;\n\npublic class OrderList<TItem : DatabaseEntity> : PaginatedList<TItem>\n{\n}\n",
+    ),
+    (
+        "src/Demo/OrderValidator.sharp",
+        "namespace Demo;\n\npublic class OrderValidator : Validator<Order>\n{\n    public bool validate(Any? item) => true;\n}\n",
+    ),
+];
 
 /// The generic declarations read as Mago's templates, so a type parameter, a type argument, a bound and a typed local
 /// inside a generic class add no issue.
 #[test]
 fn generic_declarations_add_no_issue() {
-    assert_eq!(issues(("src/Demo/Paging.sharp", PAGING), &[]), Vec::<String>::new());
+    assert_eq!(each_file(issues, &PAGING, &[]), vec![Vec::<String>::new(); 15]);
 }
 
 /// A generic class's method returns its type parameter as the type argument the class is used with.
@@ -16339,10 +16612,7 @@ fn generic_declarations_add_no_issue() {
 fn a_generic_class_types_its_methods_with_the_type_argument_of_its_use() {
     let sharp = "namespace Demo;\n\npublic class Report\n{\n    public static Order keepOrder(Order order) => order;\n\n    public static int keepInt(int number) => number;\n\n    public static Order pageOrder(PaginatedList<Order> page) => Report.keepOrder(page.first());\n\n    public static int pageNumber(PaginatedList<Order> page) => Report.keepInt(page.first());\n}\n";
 
-    assert_eq!(
-        issues(("src/Demo/Report.sharp", sharp), &[("src/Demo/Paging.sharp", PAGING)]),
-        ["11:79 invalid-argument"]
-    );
+    assert_eq!(issues(("src/Demo/Report.sharp", sharp), &PAGING), ["11:79 invalid-argument"]);
 }
 
 /// A generic method infers its type parameter from the arguments it receives, spec section 11.
@@ -16350,10 +16620,7 @@ fn a_generic_class_types_its_methods_with_the_type_argument_of_its_use() {
 fn a_generic_method_infers_its_type_parameter_from_its_arguments() {
     let sharp = "namespace Demo;\n\npublic class Report\n{\n    public static Order keepOrder(Order order) => order;\n\n    public static int keepInt(int number) => number;\n\n    public static Order firstOrder(List<Order> orders) => Report.keepOrder(Lists.first(orders));\n\n    public static int firstNumber(List<Order> orders) => Report.keepInt(Lists.first(orders));\n}\n";
 
-    assert_eq!(
-        issues(("src/Demo/Report.sharp", sharp), &[("src/Demo/Paging.sharp", PAGING)]),
-        ["11:73 invalid-argument"]
-    );
+    assert_eq!(issues(("src/Demo/Report.sharp", sharp), &PAGING), ["11:73 invalid-argument"]);
 }
 
 /// Spec section 11's `list<TItem : DatabaseEntity>(Query<TItem> query)` called with a `Query<Order>` returns a
@@ -16362,7 +16629,7 @@ fn a_generic_method_infers_its_type_parameter_from_its_arguments() {
 fn a_generic_method_returns_a_generic_class_of_its_inferred_type_argument() {
     let sharp = "namespace Demo;\n\npublic class Report\n{\n    public static PaginatedList<Order> keepPage(PaginatedList<Order> page) => page;\n\n    public static int keepInt(int number) => number;\n\n    public static PaginatedList<Order> orders(Repository repository, Query<Order> query) => Report.keepPage(repository.list(query));\n\n    public static int count(Repository repository, Query<Order> query) => Report.keepInt(repository.list(query));\n}\n";
     let analyzed = ("src/Demo/Report.sharp", sharp);
-    let others = [("src/Demo/Paging.sharp", PAGING)];
+    let others = PAGING;
 
     assert_eq!(issues(analyzed, &others), ["11:90 invalid-argument"]);
     assert!(messages(analyzed, &others)[0].contains("`PaginatedList<Order>`"), "{:?}", messages(analyzed, &others));
@@ -16380,7 +16647,7 @@ fn a_written_or_inferred_type_argument_outside_its_bound_is_reported() {
     assert_eq!(
         issues(
             ("src/Demo/Report.sharp", sharp),
-            &[("src/Demo/Paging.sharp", PAGING), ("src/Demo/Either.sharp", either)]
+            &PAGING.iter().copied().chain([("src/Demo/Either.sharp", either)]).collect::<Vec<_>>()
         ),
         ["5:90 template-constraint-violation", "9:29 template-constraint-violation"]
     );
@@ -16399,15 +16666,15 @@ fn a_type_parameter_joined_in_a_bound_gives_one_error() {
     let joined = "A type parameter is a bound alone, as in `<TSub : T>`: it joins no other bound with `&`.";
 
     assert_eq!(
-        compile_errors(("src/Demo/Parts.sharp", sharp), &[("src/Demo/Paging.sharp", PAGING)]),
+        compile_errors(("src/Demo/Parts.sharp", sharp), &PAGING),
         [joined, "Invalid return type for method `Parts.count`: expected `int`, but found `string`."]
     );
-    assert_eq!(compile_errors(("src/Demo/Pair.sharp", pair), &[("src/Demo/Paging.sharp", PAGING)]), [joined]);
-    assert_eq!(issues(("src/Demo/Pair.sharp", pair), &[("src/Demo/Paging.sharp", PAGING)]), ["3:34 semantics"]);
+    assert_eq!(compile_errors(("src/Demo/Pair.sharp", pair), &PAGING), [joined]);
+    assert_eq!(issues(("src/Demo/Pair.sharp", pair), &PAGING), ["3:34 semantics"]);
     assert_eq!(
         compile_errors(
             ("src/Demo/Parted.sharp", uses),
-            &[("src/Demo/Pair.sharp", pair), ("src/Demo/Paging.sharp", PAGING)]
+            &PAGING.iter().copied().chain([("src/Demo/Pair.sharp", pair)]).collect::<Vec<_>>()
         ),
         Vec::<String>::new()
     );
@@ -16428,10 +16695,7 @@ fn each_refused_bound_gives_one_error() {
             "namespace Demo;\n\npublic static class Bounded\n{{\n    public static T held<{parameters}>(T value, TOther other) => value;\n\n    public static bool same<{parameters}>(T value, T other, TOther third) => value === other;\n\n    public static Any? written() => Bounded.held<{argument}, Line>({value}, new Line());\n\n    public static Any? inferred() => Bounded.held({value}, new Line());\n}}\n"
         );
 
-        compile_errors(
-            ("src/Demo/Bounded.sharp", Box::leak(code.into_boxed_str())),
-            &[("src/Demo/Paging.sharp", PAGING)],
-        )
+        compile_errors(("src/Demo/Bounded.sharp", Box::leak(code.into_boxed_str())), &PAGING)
     };
     let other = "A bound is `Object`, `Equatable`, a class, an interface or a type parameter, as in `<TItem : DatabaseEntity>`.";
     let mut wrong = Vec::new();
@@ -16471,10 +16735,7 @@ fn each_refused_bound_gives_one_error() {
             "namespace Demo;\n\npublic static class Bounded\n{{\n    public static T held<{parameters}>(T value) => value;\n\n    public static Any? called() => Bounded.held(1);\n\n    public static Any? written() => Bounded.held<int, int>(1);\n\n    public static Function<int(int)> valued() => Bounded.held;\n}}\n"
         );
 
-        compile_errors(
-            ("src/Demo/Bounded.sharp", Box::leak(code.into_boxed_str())),
-            &[("src/Demo/Paging.sharp", PAGING)],
-        )
+        compile_errors(("src/Demo/Bounded.sharp", Box::leak(code.into_boxed_str())), &PAGING)
     };
     let joined = "A type parameter is a bound alone, as in `<TSub : T>`: it joins no other bound with `&`.";
     let looped =
@@ -16495,16 +16756,16 @@ fn each_refused_bound_gives_one_error() {
     // still unfixed, as `<T>` is.
     let unused = "namespace Demo;\n\npublic static class Bounded\n{\n    public static T held<\n        TUnused,\n        T : TOther & Shareable,\n        TOther\n    >(T value) => value;\n\n    public static Any? called() => Bounded.held(1);\n\n    public static Any? written() => Bounded.held<int, int, int>(1);\n}\n";
     assert_eq!(
-        compile_errors(("src/Demo/Bounded.sharp", unused), &[("src/Demo/Paging.sharp", PAGING)]),
+        compile_errors(("src/Demo/Bounded.sharp", unused), &PAGING),
         [joined, "Nothing fixes the type argument `TUnused` of the call to `Bounded.held`."]
     );
     assert_eq!(
-        issues(("src/Demo/Bounded.sharp", unused), &[("src/Demo/Paging.sharp", PAGING)]),
+        issues(("src/Demo/Bounded.sharp", unused), &PAGING),
         ["7:13 semantics", "5:21 unused-template-parameter", "11:36 missing-template-parameter"]
     );
     let own = "namespace Demo;\n\npublic static class Bounded\n{\n    public static T looped<T : T>(T value) => value;\n\n    public static void free<T : T>()\n    {\n    }\n\n    public static void listed<T : List<T>>()\n    {\n    }\n\n    public static Any called() => Bounded.looped(1);\n\n    public static void unfixed()\n    {\n        Bounded.free();\n        Bounded.listed();\n    }\n\n    public static void written()\n    {\n        Bounded.listed<int>();\n    }\n}\n";
     assert_eq!(
-        compile_errors(("src/Demo/Bounded.sharp", own), &[("src/Demo/Paging.sharp", PAGING)]),
+        compile_errors(("src/Demo/Bounded.sharp", own), &PAGING),
         [
             looped("T"),
             looped("T"),
@@ -16522,10 +16783,7 @@ fn each_refused_bound_gives_one_error() {
             "namespace Demo;\n\npublic static class Bounded\n{{\n    public static void held<T : {bound}>()\n    {{\n        try {{\n        }} catch (T error) {{\n        }}\n    }}\n}}\n"
         );
 
-        compile_errors(
-            ("src/Demo/Bounded.sharp", Box::leak(code.into_boxed_str())),
-            &[("src/Demo/Paging.sharp", PAGING)],
-        )
+        compile_errors(("src/Demo/Bounded.sharp", Box::leak(code.into_boxed_str())), &PAGING)
     };
     assert_eq!(caught("int"), [other]);
     assert_eq!(caught("Missing"), ["Cannot find type `Demo.Missing`."]);
@@ -16534,7 +16792,7 @@ fn each_refused_bound_gives_one_error() {
     // An error the refused bound has no part in, in the generic method's own body, still appears.
     let body = "namespace Demo;\n\npublic static class Bounded\n{\n    public static T held<T : int>(T value)\n    {\n        int count = \"x\";\n        return value;\n    }\n\n    public static Any? written() => Bounded.held<string>(\"x\");\n}\n";
     assert_eq!(
-        compile_errors(("src/Demo/Bounded.sharp", body), &[("src/Demo/Paging.sharp", PAGING)]),
+        compile_errors(("src/Demo/Bounded.sharp", body), &PAGING),
         [other, "Invalid assignment to `count`: it is declared as `int`."]
     );
 
@@ -16561,7 +16819,7 @@ fn a_bound_that_names_a_missing_type_gives_one_error() {
         let code: &'static str =
             Box::leak(format!("namespace Demo;\n\npublic static class Bounded\n{{\n{members}}}\n").into_boxed_str());
 
-        compile_errors(("src/Demo/Bounded.sharp", code), &[("src/Demo/Paging.sharp", PAGING)])
+        compile_errors(("src/Demo/Bounded.sharp", code), &PAGING)
     };
     let mut wrong = Vec::new();
     for members in [
@@ -16584,10 +16842,7 @@ fn a_bound_that_names_a_missing_type_gives_one_error() {
 
     // The bound is the error's place, never a use of the type parameter.
     let held = "namespace Demo;\n\npublic static class Bounded\n{\n    public static T held<T : Missing>(T value) => value;\n}\n";
-    assert_eq!(
-        issues(("src/Demo/Bounded.sharp", held), &[("src/Demo/Paging.sharp", PAGING)]),
-        ["5:30 non-existent-class-like"]
-    );
+    assert_eq!(issues(("src/Demo/Bounded.sharp", held), &PAGING), ["5:30 non-existent-class-like"]);
     // A type parameter nothing fixes is unfixed, as an unbounded one is, and an error in the body still appears.
     assert_eq!(
         errors(
@@ -16606,11 +16861,11 @@ fn a_bound_that_names_a_missing_type_gives_one_error() {
     // its type argument.
     let boxed = "namespace Demo;\n\npublic class Boxed<T : Missing>\n{\n    public static Boxed<T> of(T value) => new Boxed<T>();\n}\n";
     let user = "namespace Demo;\n\npublic class User\n{\n    public static Any made() => Boxed.of(1);\n\n    public static Any typed(Boxed<int> boxed) => boxed;\n}\n";
-    assert_eq!(compile_errors(("src/Demo/Boxed.sharp", boxed), &[("src/Demo/Paging.sharp", PAGING)]), [missing]);
+    assert_eq!(compile_errors(("src/Demo/Boxed.sharp", boxed), &PAGING), [missing]);
     assert_eq!(
         compile_errors(
             ("src/Demo/User.sharp", user),
-            &[("src/Demo/Boxed.sharp", boxed), ("src/Demo/Paging.sharp", PAGING)]
+            &PAGING.iter().copied().chain([("src/Demo/Boxed.sharp", boxed)]).collect::<Vec<_>>()
         ),
         Vec::<String>::new()
     );
@@ -16619,20 +16874,29 @@ fn a_bound_that_names_a_missing_type_gives_one_error() {
     let headed =
         "namespace Demo;\n\npublic class Table<T : Missing> : Query<T>\n{\n    public List<T> rows() => [];\n}\n";
     let user = "namespace Demo;\n\npublic static class Reader\n{\n    public static List<int> read(Table<int> rows) => rows.rows();\n\n    public static List<int> queried(Query<int> query) => query.rows();\n\n    public static List<int> passed(Table<int> rows) => Reader.queried(rows);\n}\n";
-    assert_eq!(compile_errors(("src/Demo/Table.sharp", headed), &[("src/Demo/Paging.sharp", PAGING)]), [missing]);
+    assert_eq!(compile_errors(("src/Demo/Table.sharp", headed), &PAGING), [missing]);
     assert_eq!(
         compile_errors(
             ("src/Demo/Reader.sharp", user),
-            &[("src/Demo/Table.sharp", headed), ("src/Demo/Paging.sharp", PAGING)]
+            &PAGING.iter().copied().chain([("src/Demo/Table.sharp", headed)]).collect::<Vec<_>>()
         ),
         Vec::<String>::new()
     );
 
     // A method without a body, of an interface or abstract, reports its bound's missing type too.
-    let bodiless = "namespace Demo;\n\npublic interface Keeper\n{\n    T kept<T : Missing>(T value);\n}\n\npublic abstract class Store\n{\n    public abstract T stored<T : Missing>(T value);\n}\n";
+    let bodiless = [
+        (
+            "src/Demo/Keeper.sharp",
+            "namespace Demo;\n\npublic interface Keeper\n{\n    T kept<T : Missing>(T value);\n}\n",
+        ),
+        (
+            "src/Demo/Store.sharp",
+            "namespace Demo;\n\npublic abstract class Store\n{\n    public abstract T stored<T : Missing>(T value);\n}\n",
+        ),
+    ];
     assert_eq!(
-        issues(("src/Demo/Keeper.sharp", bodiless), &[("src/Demo/Paging.sharp", PAGING)]),
-        ["5:16 non-existent-class-like", "10:34 non-existent-class-like"]
+        each_file(issues, &bodiless, &PAGING),
+        [["5:16 non-existent-class-like"], ["5:34 non-existent-class-like"]]
     );
 
     // An interface's default bodies keep its refused bound in the class that implements it.
@@ -16645,10 +16909,12 @@ fn a_bound_that_names_a_missing_type_gives_one_error() {
         "src/Demo/Counter.sharp",
         "namespace Demo;\n\npublic static class Counter\n{\n    public static int count(Rack rack) => rack.kind(1);\n}\n",
     );
-    let paging = ("src/Demo/Paging.sharp", PAGING);
-    assert_eq!(compile_errors(shelved, &[rack, counter, paging]), [missing]);
-    assert_eq!(compile_errors(rack, &[shelved, counter, paging]), Vec::<String>::new());
-    assert_eq!(compile_errors(counter, &[shelved, rack, paging]), Vec::<String>::new());
+    let with_paging = |files: [(&'static str, &'static str); 2]| -> Vec<(&'static str, &'static str)> {
+        files.into_iter().chain(PAGING).collect()
+    };
+    assert_eq!(compile_errors(shelved, &with_paging([rack, counter])), [missing]);
+    assert_eq!(compile_errors(rack, &with_paging([shelved, counter])), Vec::<String>::new());
+    assert_eq!(compile_errors(counter, &with_paging([shelved, rack])), Vec::<String>::new());
 
     // Once the type exists, the bound is the bound it writes, and a type argument outside it is an error again.
     let declared = "namespace Demo;\n\npublic interface Missing\n{\n}\n";
@@ -16656,7 +16922,7 @@ fn a_bound_that_names_a_missing_type_gives_one_error() {
     assert_eq!(
         compile_errors(
             ("src/Demo/Bounded.sharp", written),
-            &[("src/Demo/Missing.sharp", declared), ("src/Demo/Paging.sharp", PAGING)]
+            &PAGING.iter().copied().chain([("src/Demo/Missing.sharp", declared)]).collect::<Vec<_>>()
         ),
         ["Type argument `int` does not satisfy `Bounded.held<T>`'s `T`."]
     );
@@ -16735,7 +17001,7 @@ fn a_type_in_parentheses_gives_one_error_that_names_the_type_to_write() {
     ] {
         let code: &'static str =
             Box::leak(format!("namespace Demo;\n\npublic class Grouped\n{{\n    {members}\n}}\n").into_boxed_str());
-        let errors = compile_errors(("src/Demo/Grouped.sharp", code), &[("src/Demo/Paging.sharp", PAGING)]);
+        let errors = compile_errors(("src/Demo/Grouped.sharp", code), &PAGING);
         if errors != [parentheses(written)] {
             wrong.push(format!("{members}: {errors:#?}"));
         }
@@ -16748,7 +17014,7 @@ fn a_type_in_parentheses_gives_one_error_that_names_the_type_to_write() {
         let code: &'static str =
             Box::leak(format!("namespace Demo;\n\npublic class Grouped\n{{\n    {members}\n}}\n").into_boxed_str());
 
-        compile_errors(("src/Demo/Grouped.sharp", code), &[("src/Demo/Paging.sharp", PAGING)])
+        compile_errors(("src/Demo/Grouped.sharp", code), &PAGING)
     };
     assert_eq!(
         refused("public static T held<T : (Line|Order)>(T value) => value;"),
@@ -16777,15 +17043,20 @@ fn an_extension_whose_receiver_bound_is_refused_is_the_least_specific() {
         "namespace Demo;\n\npublic static class Counts\n{\n    extension(List<int> items)\n    {\n        public int shared() => 2;\n    }\n}\n",
     );
     let calls = "namespace Demo;\n\npublic static class Calls\n{\n    public static int listed(List<int> xs) => xs.shared();\n\n    public static int ordered(SharedOrder order) => order.shared();\n\n    public static int texted() => \"x\".shared();\n}\n";
-    let paging = ("src/Demo/Paging.sharp", PAGING);
 
     assert_eq!(
-        compile_errors(refused, &[paging]),
+        compile_errors(refused, &PAGING),
         [
             "A bound is `Object`, `Equatable`, a class, an interface or a type parameter, as in `<TItem : DatabaseEntity>`."
         ]
     );
-    assert_eq!(compile_errors(("src/Demo/Calls.sharp", calls), &[refused, counts, paging]), Vec::<String>::new());
+    assert_eq!(
+        compile_errors(
+            ("src/Demo/Calls.sharp", calls),
+            &PAGING.iter().copied().chain([refused, counts]).collect::<Vec<_>>()
+        ),
+        Vec::<String>::new()
+    );
 }
 
 /// A bound may name a type parameter of its own list, its own or a later one, as C#'s `T : IComparable<T>` does:
@@ -16815,9 +17086,13 @@ fn a_bound_names_a_type_parameter_of_its_own_list() {
 /// twin keeps Mago's text about template arguments. A function value a property holds is never generic.
 #[test]
 fn a_type_argument_report_names_type_arguments_and_short_class_names() {
-    let sharp = "namespace Demo;\n\npublic class Report\n{\n    public static Any numbers(PaginatedList<int> page) => page;\n\n    public static Any pairs(PaginatedList<Order, Order> page) => page;\n\n    public static int counted(Store store) => store.count<int>();\n\n    public static TFirst pair<TFirst, TSecond>(TFirst first, TSecond second) => first;\n\n    public static int paired() => Report.pair<int>(1, 2);\n}\n\npublic class Doubler\n{\n    public Doubler(public Function<int(int)> twice { get; })\n    {\n    }\n\n    public int run() => this.twice<int>(2);\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Report\n{\n    public static Any numbers(PaginatedList<int> page) => page;\n\n    public static Any pairs(PaginatedList<Order, Order> page) => page;\n\n    public static int counted(Store store) => store.count<int>();\n\n    public static TFirst pair<TFirst, TSecond>(TFirst first, TSecond second) => first;\n\n    public static int paired() => Report.pair<int>(1, 2);\n}\n";
+    let doubler = (
+        "src/Demo/Doubler.sharp",
+        "namespace Demo;\n\npublic class Doubler\n{\n    public Doubler(public Function<int(int)> twice { get; })\n    {\n    }\n\n    public int run() => this.twice<int>(2);\n}\n",
+    );
     let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    /** @param PaginatedList<int> $page */\n    public static function numbers(PaginatedList $page): mixed\n    {\n        return $page;\n    }\n\n    /** @param PaginatedList<Order, Order> $page */\n    public static function pairs(PaginatedList $page): mixed\n    {\n        return $page;\n    }\n}\n";
-    let others = [("src/Demo/Paging.sharp", PAGING), ("src/Demo/Store.sharp", GENERIC_STORE)];
+    let others: Vec<_> = PAGING.iter().chain(&GENERIC_STORE).copied().collect();
 
     assert_eq!(
         worded(("src/Demo/Report.php", php), &others),
@@ -16827,13 +17102,13 @@ fn a_type_argument_report_names_type_arguments_and_short_class_names() {
         ]
     );
     assert_eq!(
-        worded(("src/Demo/Report.sharp", sharp), &others),
+        each_file(worded, &[("src/Demo/Report.sharp", sharp), doubler], &others).concat(),
         [
             "5:31 template-constraint-violation Type argument `int` does not satisfy `PaginatedList`'s `TItem`. | `int` is supplied for `TItem` here... | ...but `TItem` is bounded by `DatabaseEntity`. | Supply a type contained by `DatabaseEntity`.",
             "7:29 excess-template-parameter Too many type arguments for `PaginatedList`: expected 1, but found 2. | `PaginatedList` is applied here. | `PaginatedList` declares 1 type parameter.",
             "9:58 excess-template-parameter Too many type arguments for `Store.count`: expected 0, but found 1. | `Store.count` is applied here. | `Store.count` declares 0 type parameters.",
             "13:46 missing-template-parameter Too few type arguments for `Report.pair`: expected at least 2, but found 1. | `Report.pair` is applied here. | `Report.pair` declares 2 type parameters.",
-            "22:35 excess-template-parameter Too many type arguments for `this.twice`: expected 0, but found 1. | `this.twice` is applied here. | `this.twice` declares 0 type parameters.",
+            "9:35 excess-template-parameter Too many type arguments for `this.twice`: expected 0, but found 1. | `this.twice` is applied here. | `this.twice` declares 0 type parameters.",
         ]
     );
 }
@@ -16846,7 +17121,7 @@ fn variance_decides_which_type_arguments_substitute() {
     let sharp = "namespace Demo;\n\npublic class Report\n{\n    public static Any feed(Feed<DatabaseEntity> feed) => feed;\n\n    public static Any page(PaginatedList<DatabaseEntity> page) => page;\n\n    public static Any check(Validator<Order> validator) => validator;\n\n    public static Any covariant(Feed<Order> feed) => Report.feed(feed);\n\n    public static Any invariant(PaginatedList<Order> page) => Report.page(page);\n\n    public static Any contravariant(Validator<DatabaseEntity> validator) => Report.check(validator);\n\n    public static Any ordered(Feed<Order> feed) => feed;\n\n    public static Any narrowed(Feed<DatabaseEntity> feed) => Report.ordered(feed);\n}\n";
 
     assert_eq!(
-        issues(("src/Demo/Report.sharp", sharp), &[("src/Demo/Paging.sharp", PAGING)]),
+        issues(("src/Demo/Report.sharp", sharp), &PAGING),
         ["13:75 invalid-argument", "19:77 less-specific-argument"]
     );
 }
@@ -16859,7 +17134,7 @@ fn a_header_passes_its_type_arguments_to_the_generic_base() {
     let sharp = "namespace Demo;\n\npublic class Report\n{\n    public static Order keepOrder(Order order) => order;\n\n    public static int keepInt(int number) => number;\n\n    public static Any validated(Validator<Order> validator) => validator;\n\n    public static Any lined(Validator<Line> validator) => validator;\n\n    public static Order pageOrder(OrderPage page) => Report.keepOrder(page.first());\n\n    public static int pageNumber(OrderPage page) => Report.keepInt(page.first());\n\n    public static Order listOrder(OrderList<Order> orders) => Report.keepOrder(orders.first());\n\n    public static int listNumber(OrderList<Order> orders) => Report.keepInt(orders.first());\n\n    public static Any orderValidated(OrderValidator validator) => Report.validated(validator);\n\n    public static Any lineValidated(OrderValidator validator) => Report.lined(validator);\n}\n";
 
     assert_eq!(
-        issues(("src/Demo/Report.sharp", sharp), &[("src/Demo/Paging.sharp", PAGING)]),
+        issues(("src/Demo/Report.sharp", sharp), &PAGING),
         ["15:68 invalid-argument", "19:77 invalid-argument", "23:79 possibly-invalid-argument"]
     );
 }
@@ -16900,7 +17175,7 @@ fn a_header_with_the_wrong_number_of_type_arguments_names_the_header_form() {
         ]
     );
     assert_eq!(
-        worded(("src/Demo/Pages.sharp", sharp), &[("src/Demo/Paging.sharp", PAGING)]),
+        worded(("src/Demo/Pages.sharp", sharp), &PAGING),
         [
             "3:26 missing-template-parameter Too few type arguments for `PaginatedList`: expected at least 1, but found 0. | Too few type arguments here | Declaration of `EntryPage` is here | `PaginatedList` declares 1 type parameter | Write a type for `TItem` in the header, as in `: PaginatedList<…>`.",
             "7:26 excess-template-parameter Too many type arguments for `PaginatedList`: expected 1, but found 2. | Too many type arguments here | Declaration of `EntryPair` is here | `PaginatedList` declares 1 type parameter | Write only a type for `TItem` in the header, as in `: PaginatedList<…>`.",
@@ -16913,10 +17188,7 @@ fn a_header_with_the_wrong_number_of_type_arguments_names_the_header_form() {
 fn a_typed_local_of_a_generic_class_type_keeps_its_type_argument() {
     let sharp = "namespace Demo;\n\npublic class Report\n{\n    public static Order keepOrder(Order order) => order;\n\n    public static int keepInt(int number) => number;\n\n    public static Order pageOrder(List<Order> orders)\n    {\n        PaginatedList<Order> page = new PaginatedList<Order>(orders);\n        return Report.keepOrder(page.first());\n    }\n\n    public static int pageNumber(List<Order> orders)\n    {\n        PaginatedList<Order> page = new PaginatedList<Order>(orders);\n        return Report.keepInt(page.first());\n    }\n}\n";
 
-    assert_eq!(
-        issues(("src/Demo/Report.sharp", sharp), &[("src/Demo/Paging.sharp", PAGING)]),
-        ["18:31 invalid-argument"]
-    );
+    assert_eq!(issues(("src/Demo/Report.sharp", sharp), &PAGING), ["18:31 invalid-argument"]);
 }
 
 /// `Class<T>` is PHP's `class-string<T>`, spec section 25: it takes `typeof` of `T` or a subclass, refuses `typeof` of
@@ -17167,10 +17439,7 @@ fn a_pattern_or_as_of_a_type_parameter_is_checked_with_the_other_arms() {
 fn a_parameter_that_takes_the_type_argument_is_widened() {
     let sharp = "namespace Demo;\n\npublic class StrictValidator : Validator<Order>\n{\n    public bool validate(Order item) => true;\n}\n";
 
-    assert_eq!(
-        widened(("src/Demo/StrictValidator.sharp", sharp), &[("src/Demo/Paging.sharp", PAGING)]),
-        (Vec::new(), vec!["5:32 item".to_owned()])
-    );
+    assert_eq!(widened(("src/Demo/StrictValidator.sharp", sharp), &PAGING), (Vec::new(), vec!["5:32 item".to_owned()]));
 }
 
 /// PHP refuses a return type wider than the one it overrides, and a return type that would erase wider than the
@@ -17541,7 +17810,7 @@ fn generic_declarations_infer_what_their_php_template_twins_infer() {
     let php = "<?php\n\nnamespace Demo;\n\nclass Report\n{\n    public static function keepInt(int $number): int\n    {\n        return $number;\n    }\n\n    /** @param PaginatedList<Order> $page */\n    public static function paged(PaginatedList $page): int\n    {\n        return Report::keepInt($page->first());\n    }\n\n    /** @param Query<Order> $query */\n    public static function listed(Repository $repository, Query $query): int\n    {\n        return Report::keepInt($repository->list($query));\n    }\n\n    /** @param list<Order> $orders */\n    public static function picked(array $orders): int\n    {\n        return Report::keepInt(Lists::first($orders));\n    }\n\n    public static function headed(OrderPage $page): int\n    {\n        return Report::keepInt($page->first());\n    }\n\n    /** @param PaginatedList<DatabaseEntity> $page */\n    public static function wide(PaginatedList $page): mixed\n    {\n        return $page;\n    }\n\n    /** @param PaginatedList<Order> $page */\n    public static function narrowed(PaginatedList $page): mixed\n    {\n        return Report::wide($page);\n    }\n\n    /** @param Validator<Line> $validator */\n    public static function lined(Validator $validator): mixed\n    {\n        return $validator;\n    }\n\n    public static function validated(OrderValidator $validator): mixed\n    {\n        return Report::lined($validator);\n    }\n\n    /** @param Query<Line> $query */\n    public static function lines(Repository $repository, Query $query): mixed\n    {\n        return $repository->list($query);\n    }\n}\n";
     let paging = "<?php\n\nnamespace Demo;\n\nabstract class DatabaseEntity\n{\n}\n\nclass Order extends DatabaseEntity\n{\n}\n\nclass Line\n{\n}\n\n/**\n * @template TItem\n */\ninterface Query\n{\n    /** @return list<TItem> */\n    public function rows(): array;\n}\n\n/**\n * @template TItem of DatabaseEntity\n */\nclass PaginatedList\n{\n    /** @var list<TItem> */\n    private array $rows;\n\n    /** @param list<TItem> $rows */\n    public function __construct(array $rows)\n    {\n        $this->rows = $rows;\n    }\n\n    /** @return TItem */\n    public function first(): DatabaseEntity\n    {\n        return $this->rows[0];\n    }\n}\n\n/**\n * @template-contravariant TItem\n */\ninterface Validator\n{\n    /** @param TItem $item */\n    public function validate(mixed $item): bool;\n}\n\ninterface Repository\n{\n    /**\n     * @template TItem of DatabaseEntity\n     * @param Query<TItem> $query\n     * @return PaginatedList<TItem>\n     */\n    public function list(Query $query): PaginatedList;\n}\n\nclass Lists\n{\n    /**\n     * @template T\n     * @param list<T> $items\n     * @return T\n     */\n    public static function first(array $items): mixed\n    {\n        return $items[0];\n    }\n}\n\n/** @extends PaginatedList<Order> */\nclass OrderPage extends PaginatedList\n{\n}\n\n/** @implements Validator<Order> */\nclass OrderValidator implements Validator\n{\n    public function validate(mixed $item): bool\n    {\n        return true;\n    }\n}\n";
 
-    let mut sharp_messages = messages(("src/Demo/Report.sharp", sharp), &[("src/Demo/Paging.sharp", PAGING)]);
+    let mut sharp_messages = messages(("src/Demo/Report.sharp", sharp), &PAGING);
     let mut php_messages = messages(("src/Demo/Report.php", php), &[("src/Demo/Paging.php", paging)]);
 
     assert_eq!(sharp_messages.len(), 7, "{sharp_messages:#?}");
@@ -17614,7 +17883,7 @@ fn the_type_arguments_of_new_fix_the_type_parameters_of_the_class() {
     let sharp = "namespace Demo;\n\npublic class Box<TItem>\n{\n    public TItem? item { get; set; } = null;\n}\n\npublic class Report\n{\n    public static PaginatedList<Order> keepPage(PaginatedList<Order> page) => page;\n\n    public static Box<Order> keepBox(Box<Order> box) => box;\n\n    public static Box<Line> keepLineBox(Box<Line> box) => box;\n\n    public static Any lined(List<Line> lines) => new PaginatedList<Order>(lines);\n\n    public static PaginatedList<Order> ordered(List<Order> orders) => Report.keepPage(new PaginatedList<Order>(orders));\n\n    public static Any numbered(List<int> numbers) => new PaginatedList<int>(numbers);\n\n    public static Any paired(List<Order> orders) => new PaginatedList<Order, Order>(orders);\n\n    public static Box<Order> boxed() => Report.keepBox(new Box<Order>());\n\n    public static Box<Line> misboxed() => Report.keepLineBox(new Box<Order>());\n\n    public static PaginatedList<TItem> wrapped<TItem : DatabaseEntity>(List<TItem> items) => new PaginatedList<TItem>(items);\n}\n";
 
     assert_eq!(
-        issues(("src/Demo/Report.sharp", sharp), &[("src/Demo/Paging.sharp", PAGING)]),
+        issues(("src/Demo/Report.sharp", sharp), &PAGING),
         [
             "16:75 invalid-argument",
             "20:71 template-constraint-violation",
@@ -17637,7 +17906,10 @@ fn an_inherited_constructor_and_method_take_the_type_arguments_of_the_header() {
     let constructed = "Invalid argument type for argument #1 of `PaginatedList.__construct`: expected `List<Order>`, but found `List<Invoice>`.";
 
     assert_eq!(
-        messages(("src/Demo/Report.sharp", sharp), &[("src/Demo/Paging.sharp", PAGING), ("src/Demo/Tray.sharp", tray)]),
+        messages(
+            ("src/Demo/Report.sharp", sharp),
+            &PAGING.iter().copied().chain([("src/Demo/Tray.sharp", tray)]).collect::<Vec<_>>()
+        ),
         [
             constructed,
             constructed,
@@ -17789,7 +18061,17 @@ fn a_type_parameter_passes_as_the_bound_that_names_it() {
 }
 
 /// A class, a static method and a method of `Store` with type parameters of their own.
-const GENERIC_STORE: &str = "namespace Demo;\n\npublic class WebhookPayload\n{\n}\n\npublic class Json\n{\n    public static T decode<T>(string body) => null;\n}\n\npublic class Store\n{\n    public TItem first<TItem : DatabaseEntity>(List<TItem> items) => items[0];\n\n    public int count() => 0;\n}\n";
+const GENERIC_STORE: [(&str, &str); 3] = [
+    ("src/Demo/WebhookPayload.sharp", "namespace Demo;\n\npublic class WebhookPayload\n{\n}\n"),
+    (
+        "src/Demo/Json.sharp",
+        "namespace Demo;\n\npublic class Json\n{\n    public static T decode<T>(string body) => null;\n}\n",
+    ),
+    (
+        "src/Demo/Store.sharp",
+        "namespace Demo;\n\npublic class Store\n{\n    public TItem first<TItem : DatabaseEntity>(List<TItem> items) => items[0];\n\n    public int count() => 0;\n}\n",
+    ),
+];
 
 /// The type arguments of a method call fix the method's own type parameters, whether the call is static, on an
 /// object or null-safe, and they may be the caller's own type parameter. A method without type parameters takes none.
@@ -17798,10 +18080,7 @@ fn the_type_arguments_of_a_method_call_fix_its_type_parameters() {
     let sharp = "namespace Demo;\n\npublic class Report\n{\n    public static WebhookPayload keepPayload(WebhookPayload payload) => payload;\n\n    public static int keepInt(int number) => number;\n\n    public static WebhookPayload payload(string body) => Report.keepPayload(Json.decode<WebhookPayload>(body));\n\n    public static int number(string body) => Report.keepInt(Json.decode<WebhookPayload>(body));\n\n    public static Any lined(Store store, List<Line> lines) => store.first<Order>(lines);\n\n    public static Order ordered(Store store, List<Order> orders) => store.first<Order>(orders);\n\n    public static Order? maybe(Store? store, List<Order> orders) => store?.first<Order>(orders);\n\n    public static int counted(Store store) => store.count<int>();\n\n    public static TItem forwarded<TItem : DatabaseEntity>(Store store, List<TItem> items) => store.first<TItem>(items);\n}\n";
 
     assert_eq!(
-        issues(
-            ("src/Demo/Report.sharp", sharp),
-            &[("src/Demo/Paging.sharp", PAGING), ("src/Demo/Store.sharp", GENERIC_STORE)]
-        ),
+        issues(("src/Demo/Report.sharp", sharp), &PAGING.iter().chain(&GENERIC_STORE).copied().collect::<Vec<_>>()),
         ["11:61 invalid-argument", "13:82 invalid-argument", "19:58 excess-template-parameter"]
     );
 }
@@ -17814,7 +18093,10 @@ fn the_type_arguments_written_from_sharp_fix_a_php_template() {
     let sharp = "namespace Demo;\n\nimport Lib.Holder;\n\npublic class Report\n{\n    public static Any held(Line line) => new Holder<Order>(line);\n\n    public static Any inferred(Line line) => new Holder(line);\n\n    public static Any first(List<Line> lines) => Holder.first<Order>(lines);\n}\n";
 
     assert_eq!(
-        issues(("src/Demo/Report.sharp", sharp), &[("src/Demo/Paging.sharp", PAGING), ("src/Lib/Holder.php", holder)]),
+        issues(
+            ("src/Demo/Report.sharp", sharp),
+            &PAGING.iter().copied().chain([("src/Lib/Holder.php", holder)]).collect::<Vec<_>>()
+        ),
         ["7:60 invalid-argument", "9:50 missing-template-parameter", "11:70 invalid-argument"]
     );
 }
@@ -18228,7 +18510,7 @@ fn is_and_as_of_a_generic_class_narrow_to_its_type_arguments() {
     let sharp = "namespace Demo;\n\npublic class Report\n{\n    public static int tested(Any? item)\n    {\n        if (item is PaginatedList<Order>) {\n            return item;\n        }\n        return 0;\n    }\n\n    public static int named(Any? item)\n    {\n        if (item is PaginatedList<Order> page) {\n            return page;\n        }\n        return 0;\n    }\n\n    public static int cast(Any? item) => item as PaginatedList<Order>;\n}\n";
 
     assert_eq!(
-        messages(("src/Demo/Report.sharp", sharp), &[("src/Demo/Paging.sharp", PAGING)]),
+        messages(("src/Demo/Report.sharp", sharp), &PAGING),
         [
             "Invalid return type for method `Report.tested`: expected `int`, but found `PaginatedList<Order>`.",
             "Invalid return type for method `Report.named`: expected `int`, but found `PaginatedList<Order>`.",
@@ -18245,7 +18527,7 @@ fn each_match_arm_of_a_generic_class_narrows_to_its_own_type_arguments() {
     let sharp = "namespace Demo;\n\npublic class Report\n{\n    public static int take(int count) => count;\n\n    public static int arms(Any? item) => match (item) {\n        PaginatedList<Order> orders => Report.take(orders),\n        PaginatedList<SharedOrder> shared => Report.take(shared),\n        default => 0,\n    };\n}\n";
 
     assert_eq!(
-        messages(("src/Demo/Report.sharp", sharp), &[("src/Demo/Paging.sharp", PAGING)]),
+        messages(("src/Demo/Report.sharp", sharp), &PAGING),
         [
             "Invalid argument type for argument #1 of `Report.take`: expected `int`, but found `PaginatedList<Order>`.",
             "Invalid argument type for argument #1 of `Report.take`: expected `int`, but found `PaginatedList<SharedOrder>`.",
@@ -18275,7 +18557,7 @@ fn typeof_of_a_type_parameter_is_the_class_of_the_type_parameter() {
     let sharp = "namespace Demo;\n\npublic class Kinds\n{\n    public static int named<TItem : DatabaseEntity>(List<TItem> items) => typeof(TItem);\n}\n";
 
     assert_eq!(
-        messages(("src/Demo/Kinds.sharp", sharp), &[("src/Demo/Paging.sharp", PAGING)]),
+        messages(("src/Demo/Kinds.sharp", sharp), &PAGING),
         ["Invalid return type for method `Kinds.named`: expected `int`, but found `Class<TItem>`."]
     );
 }
@@ -18381,7 +18663,7 @@ fn a_type_new_a_type_test_and_a_static_member_name_the_type_arguments_of_a_gener
 
     assert_eq!(explained(("src/Demo/Report.php", php_types), &[]), Vec::<String>::new());
     assert_eq!(
-        worded(("src/Demo/Report.sharp", types), &[("src/Demo/Paging.sharp", PAGING)]),
+        worded(("src/Demo/Report.sharp", types), &PAGING),
         [
             format!("10:12 missing-template-parameter {}", one("PaginatedList")),
             format!("12:26 missing-template-parameter {}", one("PaginatedList")),
@@ -18498,7 +18780,16 @@ fn a_static_member_of_a_class_with_type_arguments_has_its_type_arguments_for_its
 }
 
 /// Invariant type parameters of `Checks`: `Validator` only takes `TItem` in, and `Slot` takes it in and returns it.
-const CHECKS: &str = "namespace Checks;\n\npublic interface Validator<TItem>\n{\n    bool validate(TItem item);\n}\n\npublic interface Slot<TItem>\n{\n    TItem get();\n\n    void put(TItem item);\n}\n";
+const CHECKS: [(&str, &str); 2] = [
+    (
+        "src/Checks/Validator.sharp",
+        "namespace Checks;\n\npublic interface Validator<TItem>\n{\n    bool validate(TItem item);\n}\n",
+    ),
+    (
+        "src/Checks/Slot.sharp",
+        "namespace Checks;\n\npublic interface Slot<TItem>\n{\n    TItem get();\n\n    void put(TItem item);\n}\n",
+    ),
+];
 
 /// A substitution that only a missing `out` or `in` blocks is worded as spec section 11.1 words it, and its help names
 /// the marker to add by where the class uses the type parameter: as an argument, a returned value, a typed local and a
@@ -18507,7 +18798,7 @@ const CHECKS: &str = "namespace Checks;\n\npublic interface Validator<TItem>\n{\
 #[test]
 fn a_substitution_a_missing_marker_blocks_names_the_marker() {
     let sharp = "namespace App;\n\nimport Checks.Slot;\nimport Checks.Validator;\nimport Demo.DatabaseEntity;\nimport Demo.Order;\nimport Demo.PaginatedList;\n\npublic class Report\n{\n    public PaginatedList<DatabaseEntity>? shelf { get; set; } = null;\n\n    public static Any wide(PaginatedList<DatabaseEntity> page) => page;\n\n    public static Any narrow(Validator<Order> validator) => validator;\n\n    public static Any slot(Slot<DatabaseEntity> slot) => slot;\n\n    public static Any passed(PaginatedList<Order> page) => Report.wide(page);\n\n    public static Any checked(Validator<DatabaseEntity> validator) => Report.narrow(validator);\n\n    public static Any slotted(Slot<Order> slot) => Report.slot(slot);\n\n    public static PaginatedList<DatabaseEntity> returned(PaginatedList<Order> page) => page;\n\n    public static PaginatedList<DatabaseEntity> assigned(PaginatedList<Order> page)\n    {\n        PaginatedList<DatabaseEntity> wide = page;\n        return wide;\n    }\n\n    public void kept(PaginatedList<Order> page)\n    {\n        this.shelf = page;\n    }\n}\n";
-    let others = [("src/Demo/Paging.sharp", PAGING), ("src/Checks/Checks.sharp", CHECKS)];
+    let others: Vec<_> = PAGING.iter().chain(&CHECKS).copied().collect();
     let wide = "PaginatedList<Order> cannot be used as PaginatedList<DatabaseEntity>.";
 
     assert_eq!(
@@ -18587,7 +18878,7 @@ fn every_invariant_mismatch_is_worded_as_a_blocked_substitution() {
     let sharp = "namespace Demo;\n\npublic class Pair<TFirst, TSecond>\n{\n    public TFirst? first() => null;\n\n    public TSecond? second() => null;\n}\n\npublic class Holder<TItem>\n{\n    public TItem? item() => null;\n\n    public bool same(Self other) => true;\n}\n\npublic class Report\n{\n    public static Any pair(Pair<DatabaseEntity, int> pair) => pair;\n\n    public static Any held(Holder<DatabaseEntity> holder) => holder;\n\n    public static Any one(Pair<Order, int> pair) => Report.pair(pair);\n\n    public static Any two(Pair<Order, string> pair) => Report.pair(pair);\n\n    public static Any counted(Holder<Order, int> holder) => Report.held(holder);\n\n    public static bool kept(Holder<Order> holder, Holder<Order> other) => holder.same(other);\n\n    public static Any paired(Pair<DatabaseEntity, DatabaseEntity> pair) => pair;\n\n    public static Any both(Pair<Order, Order> pair) => Report.paired(pair);\n\n    public static Any either(Holder<DatabaseEntity>|Pair<DatabaseEntity, int> value) => value;\n\n    public static Any chosen(Pair<Order, int> pair) => Report.either(pair);\n}\n";
 
     assert_eq!(
-        messages(("src/Demo/Report.sharp", sharp), &[("src/Demo/Paging.sharp", PAGING)]),
+        messages(("src/Demo/Report.sharp", sharp), &PAGING),
         [
             "Pair<Order, int> cannot be used as Pair<DatabaseEntity, int>.",
             "Pair<Order, string> cannot be used as Pair<DatabaseEntity, int>.",
@@ -18605,7 +18896,7 @@ fn a_typed_local_of_a_generic_type_outside_its_bound_is_reported() {
     let sharp = "namespace Demo;\n\npublic class Report\n{\n    public static Any numbers(PaginatedList<int> given)\n    {\n        PaginatedList<int> page = given;\n        return page;\n    }\n}\n";
 
     assert_eq!(
-        issues(("src/Demo/Report.sharp", sharp), &[("src/Demo/Paging.sharp", PAGING)]),
+        issues(("src/Demo/Report.sharp", sharp), &PAGING),
         ["5:31 template-constraint-violation", "7:9 template-constraint-violation"]
     );
 }
