@@ -8588,6 +8588,38 @@ fn self_and_a_required_constructor_are_checked_as_static_and_a_consistent_constr
     assert_eq!(codes(&sharp_issues), codes(&php_issues), "{php_issues:?}");
 }
 
+/// Spec section 25: `new Self(…)` needs a `required` constructor because `Self` can be any subclass. A `final` class
+/// has no subclass, spec section 22, and a struct is never inherited, spec section 10, so `Self` is the class itself,
+/// as in Swift, and `new Self(…)` calls its constructor. An open class still needs `required`.
+#[test]
+fn new_self_in_a_class_with_no_subclass_needs_no_required_constructor() {
+    let sharp = [
+        (
+            "src/Demo/Ticket.sharp",
+            "namespace Demo;\n\npublic final class Ticket\n{\n    public Ticket(public int serial { get; }) { }\n\n    public static Self make() => new Self(1);\n}\n",
+        ),
+        (
+            "src/Demo/Spot.sharp",
+            "namespace Demo;\n\npublic struct Spot\n{\n    public Spot(public int x { get; }) { }\n\n    public static Self origin() => new Self(0);\n}\n",
+        ),
+        (
+            "src/Demo/Order.sharp",
+            "namespace Demo;\n\npublic class Order\n{\n    public Order(public int id { get; }) { }\n\n    public static Self make() => new Self(1);\n}\n",
+        ),
+    ];
+
+    assert_eq!(
+        each_file(reported, &sharp, &[]),
+        [
+            vec![],
+            vec![],
+            vec![
+                "7:34 semantics `new Self(…)` needs a `required` constructor: `Self` can be any subclass, so every subclass must keep a constructor that `new Self(…)` can call.",
+            ],
+        ]
+    );
+}
+
 /// `Self` can be any descendant, so a grandchild's constructor is compared with the `required` constructor above it as
 /// a child's is, spec section 25.
 #[test]
