@@ -259,9 +259,9 @@ public class Report
     {
         int|bool flag = true;
         (int|string)? found = null;
-        const made = new Calc(first, ...values);
+        const made = new Calc(first, 1, ...values);
         made.add(...values);
-        return label == null ? null : Report.part(2, ...values) + Lib.largest(1, ...values);
+        return label == null ? null : Report.part(2, ...[3]) + Lib.largest(1, ...values);
     }
 
     [Entity(["a", "b"], ["x": 1])]

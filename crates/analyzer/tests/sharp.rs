@@ -8483,6 +8483,202 @@ fn a_variadic_parameter_is_a_list_that_spreads_into_methods_and_php_functions_wi
     assert_eq!(issues(("src/Demo/Report.sharp", sharp), &[math]), Vec::<String>::new());
 }
 
+/// The issues of `analyzed` as `line:column code`, and the type of the first expression in it written as each of
+/// `expressions`, from one analysis.
+fn issues_and_types(
+    analyzed: (&'static str, &'static str),
+    expressions: &[&str],
+) -> (Vec<String>, Vec<Option<String>>) {
+    let (issues, artifacts) = analyze_with_artifacts(&PLUGIN_REGISTRY, settings(), analyzed, &[]);
+    let type_at = |expression: &&str| {
+        let start = analyzed.1.find(expression).unwrap() as u32;
+        artifacts
+            .expression_types
+            .get(&(start, start + expression.len() as u32))
+            .map(|r#type| r#type.get_id().to_string())
+    };
+
+    (issues.iter().map(|issue| located(analyzed.1, issue)).collect(), expressions.iter().map(type_at).collect())
+}
+
+/// Spec sections 7 and 11: a spread's elements are arguments the call receives, so each fixes the type arguments of the
+/// parameter its position fills, a variadic parameter's from each element from its own position on, beside a named
+/// argument and through a union of lists.
+#[test]
+fn a_spread_into_a_generic_method_s_parameters_fixes_its_type_arguments() {
+    let sharp = "namespace Demo;\n\nclass Pairs\n{\n    public static List<T> pair<T>(T a, T b) => [a, b];\n\n    public static TSecond last<TFirst, TSecond>(TFirst first, TSecond second) => second;\n\n    public static List<TRest> rest<TFirst, TRest>(TFirst first, TRest ...rest) => rest;\n\n    public static int count(bool flag)\n    {\n        const spread = Pairs.pair(...[1, 2]);\n        const rest = Pairs.rest(...[1, \"tea\", \"cup\"]);\n        const either = Pairs.pair(...(flag ? [1, 2] : [\"a\", \"b\"]));\n        return spread.count() + rest.count() + either.count();\n    }\n\n    public static string name()\n    {\n        const last = Pairs.last(...[1, \"tea\"]);\n        return last;\n    }\n\n    public static string named()\n    {\n        const named = Pairs.last(...[1], second: \"tea\");\n        return named;\n    }\n}\n";
+    let expressions = [
+        "Pairs.pair(...[1, 2])",
+        "Pairs.rest(...[1, \"tea\", \"cup\"])",
+        "Pairs.pair(...(flag ? [1, 2] : [\"a\", \"b\"]))",
+        "Pairs.last(...[1, \"tea\"])",
+        "Pairs.last(...[1], second: \"tea\")",
+    ];
+
+    assert_eq!(
+        issues_and_types(("src/Demo/Pairs.sharp", sharp), &expressions),
+        (
+            vec![],
+            ["list<int>", "list<string>", "list<int|string>", "string", "string"]
+                .map(|r#type| Some(r#type.to_owned()))
+                .to_vec()
+        )
+    );
+}
+
+/// Spec section 7: a spread works the same into plain PHP, so a plain PHP spread fixes a `@template` as the arguments it
+/// spreads would. A `mixed` spread's elements are `mixed`, so it fixes and breaks a bound as a `mixed` argument does,
+/// and its own issue says the value may not be iterable.
+#[test]
+fn a_plain_php_spread_into_a_template_function_s_parameters_fixes_its_template() {
+    let php = "<?php\n\nnamespace Demo;\n\n/**\n * @template T\n *\n * @param T $a\n * @param T $b\n *\n * @return list<T>\n */\nfunction pair(mixed $a, mixed $b): array\n{\n    return [$a, $b];\n}\n\n/** @return list<1|2> */\nfunction spread(): array\n{\n    return pair(...[1, 2]);\n}\n";
+    let mixed = "<?php\n\nnamespace Demo;\n\n/**\n * @template T of int\n *\n * @param T ...$values\n *\n * @return list<T>\n */\nfunction many(int ...$values): array\n{\n    return array_values($values);\n}\n\nfunction spread(mixed $values): mixed\n{\n    return many(...$values);\n}\n\nfunction passed(mixed $value): mixed\n{\n    return many($value);\n}\n";
+
+    assert_eq!(
+        issues_and_types(("src/Demo/pair.php", php), &["pair(...[1, 2])"]),
+        (vec![], vec![Some("list<int(1)|int(2)>".to_owned())])
+    );
+    assert_eq!(
+        issues_and_types(("src/Demo/many.php", mixed), &["many(...$values)", "many($value)"]),
+        (
+            [
+                "19:20 mixed-argument",
+                "19:20 template-constraint-violation",
+                "19:20 mixed-argument",
+                "24:17 template-constraint-violation",
+                "24:17 mixed-argument",
+            ]
+            .map(str::to_owned)
+            .to_vec(),
+            vec![Some("list<int>".to_owned()), Some("list<int>".to_owned())]
+        )
+    );
+}
+
+/// A type argument the call writes is fixed before any argument, so a spread's element outside it is the invalid
+/// argument alone, never a type argument outside its bound, into a parameter and into a variadic one.
+#[test]
+fn a_spread_element_outside_a_written_type_argument_is_refused() {
+    let sharp = [
+        (
+            "src/Demo/Pairs.sharp",
+            "namespace Demo;\n\nclass Pairs\n{\n    public static List<T> pair<T : Shareable>(T a, T b) => [a, b];\n\n    public static List<T> many<T>(T ...values) => values;\n\n    public static int count()\n    {\n        const paired = Pairs.pair<Shareable>(...[1, 2]);\n        const listed = Pairs.many<int>(...[1, \"tea\"]);\n        return paired.count() + listed.count();\n    }\n}\n",
+        ),
+        ("src/Demo/Shareable.sharp", "namespace Demo;\n\npublic interface Shareable\n{\n}\n"),
+    ];
+
+    assert_eq!(
+        each_file(issues, &sharp, &[]),
+        [vec!["11:49 invalid-argument", "11:49 invalid-argument", "12:43 possibly-invalid-argument"], vec![]]
+    );
+}
+
+/// Spec section 7: a spread of unknown length fills only a `...` parameter, as in Kotlin and TypeScript, into a PHP#
+/// method and into plain PHP alike. Anywhere else, a parameter with a default included, it is refused once, with the
+/// parameters it may not fill, which leave out one a named argument fills, in place of too few arguments or a type
+/// argument nothing fixes. After the arguments that fill every parameter, with no `...` one, it is refused as one that
+/// may fill none. A spread of a list literal fills parameters as its elements written out do.
+#[test]
+fn a_spread_of_unknown_length_fills_only_a_variadic_parameter() {
+    let spreads = "namespace Demo;\n\nimport Lib.Pair;\nimport Vendor.Math;\n\nclass Spreads\n{\n    public static int run(List<int> numbers, List<Position> extra, List<string> tags, List<int> prices)\n    {\n        return Pairs.pair(...numbers).count()\n            + Reports.logSlow(\"slow\", ...extra)\n            + Tags.tagged(...tags)\n            + Tags.tagged(1, ...tags)\n            + Money.sum(...numbers)\n            + Math.max(0, ...prices)\n            + Pair.of(...numbers)\n            + Pairs.scale(...numbers, factor: 2)\n            + Pairs.pair(1, 2, ...numbers).count()\n            + Pairs.pair(...[1, 2]).count();\n    }\n}\n";
+    let others = [
+        (
+            "src/Demo/Pairs.sharp",
+            "namespace Demo;\n\nclass Pairs\n{\n    public static List<T> pair<T>(T a, T b) => [a, b];\n\n    public static int scale(int first, int second = 0, int factor = 1) => (first + second) * factor;\n}\n",
+        ),
+        (
+            "src/Demo/Reports.sharp",
+            "namespace Demo;\n\nclass Reports\n{\n    public static int logSlow(string message, Position caller = Position.current()) => caller.line;\n}\n",
+        ),
+        (
+            "src/Demo/Tags.sharp",
+            "namespace Demo;\n\nclass Tags\n{\n    public static int tagged(int count, string ...tags) => count + tags.count();\n}\n",
+        ),
+        (
+            "src/Demo/Money.sharp",
+            "namespace Demo;\n\nclass Money\n{\n    public static int sum(int ...values) => values.count();\n}\n",
+        ),
+        (
+            "src/Lib/Pair.php",
+            "<?php\n\nnamespace Lib;\n\nfinal class Pair\n{\n    public static function of(int $a, int $b): int\n    {\n        return $a + $b;\n    }\n}\n",
+        ),
+        (
+            "src/Vendor/Math/functions.php",
+            "<?php\n\nnamespace Vendor\\Math;\n\nfunction max(int $value, int ...$values): int\n{\n    return \\max($value, ...$values);\n}\n",
+        ),
+    ];
+    let refused = |at: &str, spread: &str, parameters: &str| {
+        format!(
+            "{at} invalid-argument `{spread}` may not fill {parameters}. A spread of unknown length fills only a ... parameter. | Pass each value as an argument of its own, or spread a list literal, whose length is known."
+        )
+    };
+
+    assert_eq!(
+        refusals(("src/Demo/Spreads.sharp", spreads), &others),
+        [
+            refused("10:30", "numbers", "`a` and `b`"),
+            refused("11:42", "extra", "`caller`"),
+            refused("12:30", "tags", "`count`"),
+            refused("16:26", "numbers", "`a` and `b`"),
+            refused("17:30", "numbers", "`first` and `second`"),
+            "18:35 invalid-argument `numbers` may fill no parameter of `Pairs.pair`. A spread of unknown length fills only a ... parameter. | Pass each value as an argument of its own, or spread a list literal, whose length is known.".to_owned(),
+        ]
+    );
+}
+
+/// Plain PHP spreads a list of any length into any parameter. After a spread of unknown length, a later spread may
+/// start at any later parameter, so each of its elements fixes and is checked against each parameter it may fill.
+#[test]
+fn a_plain_php_spread_after_one_of_unknown_length_may_fill_any_later_parameter() {
+    let php = "<?php\n\nnamespace Demo;\n\n/**\n * @template TFirst\n * @template TSecond\n *\n * @param TFirst $first\n * @param TSecond $second\n *\n * @return TSecond\n */\nfunction last(mixed $first, mixed $second): mixed\n{\n    return $second;\n}\n\nfunction label(string $name, int $count): string\n{\n    return $name;\n}\n\n/** @param list<int> $numbers */\nfunction first(array $numbers): mixed\n{\n    return last(...$numbers, ...['tea', 1]);\n}\n\n/** @param list<string> $names */\nfunction named(array $names): string\n{\n    return label(...$names, ...['cup', 2]);\n}\n";
+
+    assert_eq!(
+        issues_and_types(("src/Demo/spreads.php", php), &["last(...$numbers, ...['tea', 1])"]),
+        (
+            ["33:21 invalid-argument", "33:32 possibly-invalid-argument", "33:32 possibly-invalid-argument"]
+                .map(str::to_owned)
+                .to_vec(),
+            vec![Some("int|string('tea')".to_owned())]
+        )
+    );
+}
+
+/// Spec section 7: a spread into a method with a variadic parameter fills its parameters by position, so each element
+/// is checked against the parameter it lands in, the variadic one included.
+#[test]
+fn a_spread_into_a_variadic_method_is_checked_by_position() {
+    let sharp = "namespace Demo;\n\nclass Tags\n{\n    public static int tagged(int count, string ...tags) => count;\n\n    public static int run()\n    {\n        return Tags.tagged(...[1, \"tea\"]) + Tags.tagged(...[\"tea\", \"cup\"]);\n    }\n}\n";
+
+    assert_eq!(issues(("src/Demo/Tags.sharp", sharp), &[]), ["9:60 invalid-argument"]);
+}
+
+/// A type argument a spread puts outside its parameter's bound is reported once, by the issue that names the bound, as
+/// a direct argument's is, an `Equatable` bound's too.
+#[test]
+fn a_spread_outside_a_type_parameter_s_bound_is_reported_once_by_the_bound() {
+    let sharp = [
+        (
+            "src/Demo/Pairs.sharp",
+            "namespace Demo;\n\nclass Pairs\n{\n    public static List<T> shared<T : Shareable>(T a, T b) => [a, b];\n\n    public static bool same<T : Equatable>(T a, T b) => a == b;\n\n    public static int run()\n    {\n        const shared = Pairs.shared(...[1, 2]);\n        return shared.count();\n    }\n\n    public static bool both(Cart first, Cart second) => Pairs.same(...[first, second]) && Pairs.same(first, second);\n}\n",
+        ),
+        ("src/Demo/Shareable.sharp", "namespace Demo;\n\npublic interface Shareable\n{\n}\n"),
+        ("src/Demo/Cart.sharp", "namespace Demo;\n\npublic class Cart\n{\n}\n"),
+    ];
+
+    assert_eq!(
+        each_file(issues, &sharp, &[]),
+        [
+            vec![
+                "11:40 template-constraint-violation",
+                "15:57 template-constraint-violation",
+                "15:91 template-constraint-violation"
+            ],
+            vec![],
+            vec![]
+        ]
+    );
+}
+
 #[test]
 fn a_union_type_is_checked_as_php_checks_its_twin() {
     let sharp = "namespace Demo;\n\nimport Lib.Calc;\n\nclass Report\n{\n    private int|string key = 1;\n\n    public int|string find(int|Calc id)\n    {\n        int|string found = this.key;\n        if (found == 1) {\n            return 1.5;\n        }\n        return id;\n    }\n}\n";
@@ -14137,19 +14333,17 @@ fn a_map_keyed_by_a_type_parameter_is_refused_where_plain_php_takes_an_array() {
 /// Spec section 12: a value that may be one of several collections reaches an `array` parameter as the PHP array of
 /// the one it holds, so a `Map` keyed by an object anywhere in it is refused, as `Map<string, int>|List<Map<Spot, int>>`
 /// is for its `List`'s `Map<Spot, int>`. A spread into plain PHP parameters that are not variadic is refused as each
-/// `Map` it passes would be, by the parameter it starts at, and a `List` of no known length fills too few of them. A
-/// spread of `Map`s keyed by a backed enum passes each as its PHP array.
+/// `Map` it passes would be, by the parameter it starts at. A spread of `Map`s keyed by a backed enum passes each as its
+/// PHP array.
 #[test]
 fn every_map_a_value_can_hold_is_refused_where_its_keys_have_no_php_array() {
-    let sharp = "namespace Demo;\n\nimport Lib.Sink;\nimport Lib.Spot;\nimport Lib.Status;\n\nclass Tally\n{\n    public static int either(Map<string, int> plain, List<Map<Spot, int>> nested, bool flag) => Sink.plain(flag ? plain : nested);\n\n    public static int spread(List<Map<Spot, int>> many) => Sink.pair(...many);\n\n    public static int crossed(List<Map<Status, int>> many) => Sink.pair(...many);\n}\n";
+    let sharp = "namespace Demo;\n\nimport Lib.Sink;\nimport Lib.Spot;\nimport Lib.Status;\n\nclass Tally\n{\n    public static int either(Map<string, int> plain, List<Map<Spot, int>> nested, bool flag) => Sink.plain(flag ? plain : nested);\n\n    public static int spread(Map<Spot, int> a, Map<Spot, int> b) => Sink.pair(...[a, b]);\n\n    public static int crossed(Map<Status, int> a, Map<Status, int> b) => Sink.pair(...[a, b]);\n}\n";
 
     assert_eq!(
         array_sink_issues(sharp),
         [
             "9:108 invalid-argument `List<Map<Spot, int>>|Map<string, int>` can't be passed to the parameter `counts` of method `Sink.plain`, which takes a PHP array: a PHP array's keys are `int` or `string`, and this `Map`'s keys are `Spot`.",
-            "11:73 invalid-argument `Map<Spot, int>` can't be passed to the parameter `first` of method `Sink.pair`, which takes a PHP array: a PHP array's keys are `int` or `string`, and this `Map`'s keys are `Spot`.",
-            "11:69 too-few-arguments Too few arguments provided for method `Sink.pair`.",
-            "13:72 too-few-arguments Too few arguments provided for method `Sink.pair`.",
+            "11:82 invalid-argument `Map<Spot, int>` can't be passed to the parameter `first` of method `Sink.pair`, which takes a PHP array: a PHP array's keys are `int` or `string`, and this `Map`'s keys are `Spot`.",
         ]
     );
 }
