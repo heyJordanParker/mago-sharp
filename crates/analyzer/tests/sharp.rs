@@ -4516,11 +4516,13 @@ fn a_condition_that_is_not_bool_is_an_invalid_operand_everywhere() {
 }
 
 /// `check_slice` refuses `!entity is HasDesign` and writes `entity is not HasDesign`, and the refusal shows alone, while
-/// `!` on any other value that is not `bool` keeps its report.
+/// `!` on any other value that is not `bool` keeps its report. The name a refused test binds is typed as written, so
+/// a later line that reads it adds no issue.
 #[test]
 fn not_before_is_adds_no_issue_and_not_of_a_value_that_is_not_bool_keeps_its_report() {
-    let design = "<?php\n\nnamespace Demo;\n\ninterface HasDesign\n{\n}\n";
+    let design = "<?php\n\nnamespace Demo;\n\ninterface HasDesign\n{\n    public function ready(): bool;\n}\n";
     let sharp = "namespace Demo;\n\nclass Report\n{\n    public static bool run(Any entity, int done)\n    {\n        if (!entity is HasDesign) {\n            return true;\n        }\n        if (!done) {\n            return false;\n        }\n        return true;\n    }\n}\n";
+    let bound = "namespace Demo;\n\nclass Report\n{\n    public static bool run(Any entity)\n    {\n        if (!entity is HasDesign design) {\n            return design.ready();\n        }\n        return false;\n    }\n}\n";
 
     assert_eq!(
         reported(("src/Demo/Report.sharp", sharp), &[("src/Demo/HasDesign.php", design)]),
@@ -4528,6 +4530,10 @@ fn not_before_is_adds_no_issue_and_not_of_a_value_that_is_not_bool_keeps_its_rep
             "7:13 semantics Write `entity is not HasDesign`: `!` applies to `entity` before `is` tests it.",
             "10:14 invalid-operand `!` takes a `bool`, but this is `int`.",
         ]
+    );
+    assert_eq!(
+        reported(("src/Demo/Report.sharp", bound), &[("src/Demo/HasDesign.php", design)]),
+        ["7:13 semantics Write `entity is not HasDesign design`: `!` applies to `entity` before `is` tests it."]
     );
 }
 
@@ -9717,10 +9723,11 @@ fn an_extension_block_infers_its_type_parameters_from_the_receiver() {
 }
 
 /// Spec section 26: an extension holds methods and computed properties. Semantics refuses any other member and a
-/// member declared twice, and the refusals of the constant and the second `label` show alone on their lines.
+/// member declared twice, and the refusals of the constant and the second `label` show alone: the analysis skips the
+/// second `label`'s body, so the member it calls on a later line, which `string` lacks, adds no issue.
 #[test]
 fn an_extension_member_semantics_refuses_shows_its_refusal_alone() {
-    let sharp = "namespace App.Shared.Text;\n\npublic static class TextExtensions\n{\n    extension(string value)\n    {\n        public const int LIMIT = 1;\n        public string label() => value;\n        public int label() => value;\n    }\n}\n";
+    let sharp = "namespace App.Shared.Text;\n\npublic static class TextExtensions\n{\n    extension(string value)\n    {\n        public const int LIMIT = 1;\n        public string label() => value;\n        public int label()\n        {\n            return value.missing();\n        }\n    }\n}\n";
 
     assert_eq!(issues(("src/App/Shared/Text/TextExtensions.sharp", sharp), &[]), ["9:20 semantics", "7:9 semantics"]);
 }
@@ -12382,6 +12389,27 @@ fn a_place_declared_a_list_or_a_set_refuses_an_empty_map() {
             "7:16 invalid-array-element `[:]` is an empty Map. An empty List is written `[]`.",
         ]
     );
+}
+
+/// A local whose first value is a `List` or a `Set` holds either for its whole life, so a literal written to it later
+/// is checked against each, as one written where both are declared is: `[1]` is either, and `[:]` neither.
+#[test]
+fn a_literal_written_to_a_local_holding_a_list_or_a_set_is_checked_against_each() {
+    let sharp = "namespace Demo;\n\nclass Tags\n{\n    public int count(List<int> list, Set<int> set, bool flag)\n    {\n        let ids = flag ? list : set;\n        ids = [1];\n        ids = [:];\n        return ids.count();\n    }\n}\n";
+
+    assert_eq!(
+        reported(("src/Demo/Tags.sharp", sharp), &[]),
+        ["9:15 invalid-array-element `[:]` is an empty Map. An empty List is written `[]`."]
+    );
+}
+
+/// A local whose first value is one of two lists of functions holds either, so a lambda in a literal written to it
+/// takes each list's parameter type, and nothing refuses its untyped parameter.
+#[test]
+fn a_lambda_written_to_a_local_holding_either_list_of_functions_takes_each_parameter_type() {
+    let sharp = "namespace Demo;\n\nclass Steps\n{\n    public int count(List<Function<int(int)>> ints, List<Function<int(float)>> floats, bool flag)\n    {\n        let steps = flag ? ints : floats;\n        steps = [n => 1];\n        return steps.count();\n    }\n}\n";
+
+    assert_eq!(reported(("src/Demo/Steps.sharp", sharp), &[]), Vec::<String>::new());
 }
 
 /// A `Set` takes a `List` literal, so a place declared a `Map` or a `Set` takes `[1]` as the `Set`. PHP has one kind of
@@ -15236,15 +15264,15 @@ fn a_declare_body_runs_as_written_in_a_sharp_file() {
 }
 
 /// The semantic checks refuse `TRUE`, `False` and `NULL` as a keyword written in another case, and the refusal shows
-/// alone on its line.
+/// alone: the value keeps the keyword's type, so a later line that reads it adds no issue.
 #[test]
 fn true_false_or_null_in_another_case_shows_its_refusal_alone() {
     for (returns, value) in [("bool", "TRUE"), ("bool", "False"), ("int?", "NULL")] {
         let code = Box::leak(
-            format!("namespace Demo;\n\nclass Report\n{{\n    public {returns} run()\n    {{\n        return {value};\n    }}\n}}\n")
+            format!("namespace Demo;\n\nclass Report\n{{\n    public {returns} run()\n    {{\n        let flag = {value};\n        return flag;\n    }}\n}}\n")
                 .into_boxed_str(),
         );
-        assert_eq!(issues(("src/Demo/Report.sharp", code), &[]), ["7:16 semantics"], "{value}");
+        assert_eq!(issues(("src/Demo/Report.sharp", code), &[]), ["7:20 semantics"], "{value}");
     }
 }
 
@@ -16706,6 +16734,9 @@ fn a_type_parameter_joined_in_a_bound_gives_one_error() {
     );
     assert_eq!(compile_errors(("src/Demo/Pair.sharp", pair), &PAGING), [joined]);
     assert_eq!(issues(("src/Demo/Pair.sharp", pair), &PAGING), ["3:34 semantics"]);
+    // The unused warning would name the class on its own line, which the refusal of the bound below leaves alone.
+    let split = "namespace Demo;\n\npublic class Pair<\n    TItem,\n    TPart : TItem & Shareable>\n{\n    public TPart? part { get; set; } = null;\n}\n";
+    assert_eq!(issues(("src/Demo/Pair.sharp", split), &PAGING), ["5:13 semantics"]);
     assert_eq!(
         compile_errors(
             ("src/Demo/Parted.sharp", uses),
@@ -18691,21 +18722,21 @@ fn a_missing_class_with_type_arguments_is_reported() {
     assert_eq!(each_file(issues, &declared, &[]), vec![Vec::<String>::new(); 2]);
 }
 
-/// A nullable type pattern is refused, and the refusal shows alone on the line that tests the value and uses the name
-/// the pattern binds.
+/// A nullable type pattern is refused, and the refusal shows alone: the pattern still declares the name it binds, typed
+/// as written, so a later line that reads it adds no issue.
 #[test]
 fn a_refused_type_test_shows_its_refusal_alone() {
     let r#box = (
         "src/Demo/Box.sharp",
         "namespace Demo;\n\npublic class Box<TItem>\n{\n    public TItem? first() => null;\n}\n",
     );
-    let sharp = "namespace Demo;\n\npublic class Report\n{\n    public static Any? kind(Any value) => value is Class<Box<int>>|null type ? type : null;\n}\n";
+    let sharp = "namespace Demo;\n\npublic class Report\n{\n    public static Any? kind(Any value)\n    {\n        if (value is Class<Box<int>>|null type) {\n            return type;\n        }\n        return null;\n    }\n}\n";
 
     assert_eq!(explained(r#box, &[]), Vec::<String>::new());
     assert_eq!(
         explained(("src/Demo/Report.sharp", sharp), &[r#box]),
         [
-            "5:52 semantics A type pattern is never nullable: null never matches a type. Test for null with `x == null`, or join both with `or`, as in `x is int or null`."
+            "7:22 semantics A type pattern is never nullable: null never matches a type. Test for null with `x == null`, or join both with `or`, as in `x is int or null`."
         ]
     );
 }
