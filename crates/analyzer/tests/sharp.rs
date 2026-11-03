@@ -13334,10 +13334,11 @@ fn collection_methods_take_and_give_the_types_of_their_elements() {
 /// and an `Any?` element compared with an `Any?` or an instance, while an `Iterable` element is refused, as `==` on an
 /// `Iterable` is. An element `==` compares, a class that declares `operator ==`, nullable or not, a string,
 /// an `int|float` given an int and an `Any?` given a string, searches with no issue, as does the help's `any` with
-/// `===`, whose lambda names an element by its class's initial unless the call already uses that name, and which keeps
-/// a null-safe call's `?.`. A struct element compares by value, so one with a property `==` can't compare is refused
-/// with that property, and so is a list element whose own elements `==` can't compare. A struct equals only the same
-/// struct, so a search of a struct beside another type, a number or a struct, is refused as `==` refuses it.
+/// `===`, whose lambda names an element by its class's initial unless a local in scope has that name, as the parameter
+/// `l` does here, and which keeps a null-safe call's `?.`. A struct element compares by value, so one with a property
+/// `==` can't compare is refused with that property, and so is a list element whose own elements `==` can't compare. A
+/// struct equals only the same struct, so a search of a struct beside another type, a number or a struct, is refused as
+/// `==` refuses it.
 #[test]
 fn a_search_needs_equality_on_the_element_type() {
     let sharp = "namespace Demo;\n\nclass Shelf\n{\n    public int search(List<Line> lines, Line line, List<List<int>> rows, List<Money> prices, Money price, List<string> tags, List<int|float> amounts, List<Coin> coins, Coin coin, List<Line> ls, Line l, List<Any?> loose, Any? value, List<Line>? held, List<Money|Line> goods, List<Money|int> tallies, List<Money|Ticket> tickets, List<Coin|Line> pocket, List<Money?> wallet, List<Order> orders, Order order, List<List<Line>> shelves, List<Spot|int> spots, List<Address|Spot> places, Spot spot)\n    {\n        bool kept = lines.contains(line);\n        int? at = lines.indexOf(line);\n        bool row = rows.contains([1]);\n        bool found = prices.contains(price) && tags.contains(\"vip\") && amounts.contains(1);\n        int? priced = prices.indexOf(price);\n        bool same = lines.any(each => each === line);\n        bool minted = coins.contains(coin);\n        bool named = ls.contains(l) || ls.any(element => element === l);\n        bool any = loose.contains(value) || loose.any(x => x == value);\n        bool maybe = held?.contains(line) ?? held?.contains(value: line) ?? false;\n        bool fixed = held?.any(each => each === line) ?? false;\n        bool dropped = lines.remove(line);\n        bool vip = loose.contains(\"vip\") && loose.any(x => x == \"vip\");\n        bool equal = lines.any(x => x == line);\n        bool either = goods.contains(price) || goods.any(x => x == price);\n        bool paid = loose.contains(price);\n        int? counted = tallies.indexOf(price);\n        bool spent = tickets.remove(price);\n        bool pocketed = pocket.contains(coin);\n        bool saved = wallet.contains(price) && wallet.any(x => x == price);\n        bool ordered = orders.contains(order);\n        bool shelved = shelves.contains(lines);\n        bool spotted = spots.contains(spot) || places.contains(spot);\n        return (kept || row || found || same || minted || named || any || maybe || fixed || dropped || vip || equal || either || paid || spent || pocketed || saved || ordered || shelved || spotted ? 1 : 0) + (at ?? 0) + (priced ?? 0) + (counted ?? 0);\n    }\n}\n";
@@ -13370,16 +13371,16 @@ fn a_search_needs_equality_on_the_element_type() {
     assert_eq!(
         refusals(("src/Demo/Shelf.sharp", sharp), &declared),
         [
-            "7:36 invalid-argument `contains` compares elements with `==`, and `Line` declares no `operator ==`. | Declare `operator ==` and `hash()` in `Line`, or test for the same object with `lines.any(l => l === line)`.",
-            "8:33 invalid-argument `indexOf` compares elements with `==`, and `Line` declares no `operator ==`. | Declare `operator ==` and `hash()` in `Line`, or test for the same object with `lines.any(l => l === line)`.",
+            "7:36 invalid-argument `contains` compares elements with `==`, and `Line` declares no `operator ==`. | Declare `operator ==` and `hash()` in `Line`, or test for the same object with `lines.any(element => element === line)`.",
+            "8:33 invalid-argument `indexOf` compares elements with `==`, and `Line` declares no `operator ==`. | Declare `operator ==` and `hash()` in `Line`, or test for the same object with `lines.any(element => element === line)`.",
             "13:38 invalid-argument `contains` compares elements with `==`, and the `operator ==` of `Coin` does not take `Coin` and `Coin`. | Make the `operator ==` of `Coin` take `Coin` and `Coin`.",
             "14:34 invalid-argument `contains` compares elements with `==`, and `Line` declares no `operator ==`. | Declare `operator ==` and `hash()` in `Line`, or test for the same object with `ls.any(element => element === l)`.",
             "15:35 mixed-operand Each element of `loose` is `Any?`, which compares by value only with a string, a number, a `bool`, an enum case, a struct or a collection. | Check the value with `is` or `match` first, as in `if (value is int n)`, and compare `n`.",
             "15:60 mixed-operand Left operand of `==` is `Any?`, which compares by value only with a string, a number, a `bool`, an enum case, a struct or a collection. | Check the value with `is` or `match` first, as in `if (value is int n)`, and compare `n`.",
             "15:65 mixed-operand Right operand of `==` is `Any?`, which compares by value only with a string, a number, a `bool`, an enum case, a struct or a collection. | Check the value with `is` or `match` first, as in `if (value is int n)`, and compare `n`.",
-            "16:37 invalid-argument `contains` compares elements with `==`, and `Line` declares no `operator ==`. | Declare `operator ==` and `hash()` in `Line`, or test for the same object with `held?.any(l => l === line)`.",
-            "16:68 invalid-argument `contains` compares elements with `==`, and `Line` declares no `operator ==`. | Declare `operator ==` and `hash()` in `Line`, or test for the same object with `held?.any(l => l === line)`.",
-            "18:37 invalid-argument `remove` compares elements with `==`, and `Line` declares no `operator ==`. | Declare `operator ==` and `hash()` in `Line`, or test for the same object with `lines.any(l => l === line)`.",
+            "16:37 invalid-argument `contains` compares elements with `==`, and `Line` declares no `operator ==`. | Declare `operator ==` and `hash()` in `Line`, or test for the same object with `held?.any(element => element === line)`.",
+            "16:68 invalid-argument `contains` compares elements with `==`, and `Line` declares no `operator ==`. | Declare `operator ==` and `hash()` in `Line`, or test for the same object with `held?.any(element => element === line)`.",
+            "18:37 invalid-argument `remove` compares elements with `==`, and `Line` declares no `operator ==`. | Declare `operator ==` and `hash()` in `Line`, or test for the same object with `lines.any(element => element === line)`.",
             "20:37 invalid-operand `==` cannot compare `Line` with `Line`: `Line` declares no `operator ==`. | Use `===` to test whether both sides are the same object.",
             "21:38 invalid-argument `contains` compares elements with `==`, and the `operator ==` of `Money` does not take `Line|Money` and `Money`. | Make the `operator ==` of `Money` take `Line|Money` and `Money`.",
             "21:63 possibly-invalid-argument Possible argument type mismatch for argument #1 of `Money.op_Equality`: expected `Money`, but possibly received `Line|Money`. | Ensure the argument always has the expected type using checks or assertions.",
@@ -13391,6 +13392,26 @@ fn a_search_needs_equality_on_the_element_type() {
             "28:41 invalid-argument `contains` compares elements with `==`, and `Line` declares no `operator ==`. | ",
             "29:39 invalid-argument `contains` compares elements with `==`, which cannot compare `int|Spot` with `Spot`. | Search a list of one struct type.",
             "29:64 invalid-argument `contains` compares elements with `==`, which cannot compare `Address|Spot` with `Spot`. | Search a list of one struct type.",
+        ]
+    );
+}
+
+/// Spec section 3: a lambda's parameter can't reuse a name in scope where the lambda is written, as C#'s CS0136 refuses,
+/// so the help's `any` names an element with a name no local or parameter in scope has: the class's initial, then
+/// `element`, then `element` numbered. A lambda the help writes in a lambda skips that lambda's names too, and the
+/// names around the lambda, which it doesn't capture.
+#[test]
+fn a_search_help_names_its_lambda_parameter_with_no_name_in_scope() {
+    let line = ("src/Demo/Line.sharp", "namespace Demo;\n\npublic class Line\n{\n}\n");
+    let shelf = "namespace Demo;\n\npublic class Shelf\n{\n    public bool initial(List<Line> lines, Line line, Line l) => lines.contains(line);\n\n    public bool both(List<Line> lines, Line line, Line l, Line element) => lines.contains(line);\n\n    public bool nested(List<List<Line>> shelves, Line line) => shelves.any(l => l.contains(line));\n\n    public bool outer(List<List<Line>> shelves, Line line, Line l) => shelves.any(row => row.contains(line));\n}\n";
+
+    assert_eq!(
+        refusals(("src/Demo/Shelf.sharp", shelf), &[line]),
+        [
+            "5:80 invalid-argument `contains` compares elements with `==`, and `Line` declares no `operator ==`. | Declare `operator ==` and `hash()` in `Line`, or test for the same object with `lines.any(element => element === line)`.",
+            "7:91 invalid-argument `contains` compares elements with `==`, and `Line` declares no `operator ==`. | Declare `operator ==` and `hash()` in `Line`, or test for the same object with `lines.any(element1 => element1 === line)`.",
+            "9:92 invalid-argument `contains` compares elements with `==`, and `Line` declares no `operator ==`. | Declare `operator ==` and `hash()` in `Line`, or test for the same object with `l.any(element => element === line)`.",
+            "11:103 invalid-argument `contains` compares elements with `==`, and `Line` declares no `operator ==`. | Declare `operator ==` and `hash()` in `Line`, or test for the same object with `row.any(element => element === line)`.",
         ]
     );
 }

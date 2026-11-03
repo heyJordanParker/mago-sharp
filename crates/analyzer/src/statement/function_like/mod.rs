@@ -235,7 +235,8 @@ where
 /// captures the variable itself, so a captured local that code writes is captured by reference, as the engine runs
 /// it, and [`merge_captured_references`] carries the lambda's writes back. The lambda runs later, so it keeps the type
 /// a test narrowed such a local to only when no write can run after the lambda is created, as TypeScript 5.4 decides,
-/// and otherwise reads it at its declared type. It assigns it only values of that type.
+/// and otherwise reads it at its declared type. It assigns it only values of that type. Every local around the lambda
+/// stays in scope in it, captured or not.
 pub fn capture_lambda_locals<A>(
     context: &Context<'_, '_, A>,
     lambda: Span,
@@ -244,6 +245,8 @@ pub fn capture_lambda_locals<A>(
 ) where
     A: Arena,
 {
+    lambda_block_context.enclosing_locals =
+        block_context.enclosing_locals.iter().chain(block_context.locals.keys()).copied().collect();
     for (name, local) in context.resolved_names.captures(&lambda) {
         let variable = php_variable_name(name);
         block_context.add_conditionally_referenced_variable(variable.as_bytes());

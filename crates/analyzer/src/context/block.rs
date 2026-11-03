@@ -93,6 +93,10 @@ pub struct BlockContext<'ctx> {
     /// type. Every value assigned to the local must have this type.
     pub local_types: WordMap<(Rc<TUnion>, Span)>,
 
+    /// The PHP variable of each local of the scopes around a PHP# lambda, which its `locals` hold only where the lambda
+    /// captures one. Spec section 3: a name the lambda declares can't reuse one of them.
+    pub enclosing_locals: WordSet,
+
     /// Bitflags for various context states (inside_conditional, inside_isset, etc.)
     pub flags: BlockContextFlags,
 
@@ -233,6 +237,7 @@ impl<'ctx> BlockContext<'ctx> {
             references_possibly_from_confusing_scope: WordSet::default(),
             by_reference_constraints: WordMap::default(),
             local_types: WordMap::default(),
+            enclosing_locals: WordSet::default(),
             flags: BlockContextFlags::new(),
             clauses: Vec::new(),
             reconciled_expression_clauses: Vec::new(),
@@ -268,6 +273,12 @@ impl<'ctx> BlockContext<'ctx> {
 
     pub fn is_global_scope(&self) -> bool {
         self.scope.is_global()
+    }
+
+    /// Whether the PHP variable `variable` is a local in scope here, spec section 3: one of `locals`, or one of the
+    /// scopes around a PHP# lambda.
+    pub fn is_local_in_scope(&self, variable: &Word) -> bool {
+        self.locals.contains_key(variable) || self.enclosing_locals.contains(variable)
     }
 
     /// The type the local `variable_id` is declared with: its written type, or the general type of its first value

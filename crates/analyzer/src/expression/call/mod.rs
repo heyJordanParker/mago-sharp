@@ -533,7 +533,7 @@ where
         is_null_safe,
         span,
     )
-    .map(|comparisons| report_comparisons(context, receiver, None, &comparisons, is_null_safe))
+    .map(|comparisons| report_comparisons(context, block_context, receiver, None, &comparisons, is_null_safe))
 }
 
 /// An argument a collection member's call compares with, spec section 12, which is checked once every kind of the
@@ -803,9 +803,10 @@ fn searched_element_type(receiver_type: &TUnion, codebase: &CodebaseMetadata) ->
 /// `List<Status>|Map<string, Cart>` reports its `Status` keys and its `Cart` keys. A search's help tests for the same
 /// object only through a member every part of the receiver's written type reaches its elements with. A call that ran
 /// on its parts of one kind at a time gives that type as `written_receiver`, and a call that ran on the whole receiver
-/// gives None, since each search read it whole.
+/// gives None, since each search read it whole. `block_context` holds the locals in scope at the call.
 pub(crate) fn report_comparisons<A>(
     context: &mut Context<'_, '_, A>,
+    block_context: &BlockContext<'_>,
     receiver: &Expression<'_>,
     written_receiver: Option<&TUnion>,
     comparisons: &[Comparison<'_, '_>],
@@ -830,6 +831,7 @@ pub(crate) fn report_comparisons<A>(
 
                 check_element_equality(
                     context,
+                    block_context,
                     &method.as_str_lossy(),
                     receiver,
                     value,
