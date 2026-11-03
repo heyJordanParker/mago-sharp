@@ -56,6 +56,7 @@ use crate::effects::ReadonlyCall;
 use crate::error::AnalysisError;
 use crate::expression::constant_access::field_storage;
 use crate::expression::instantiation::bare_generic_class;
+use crate::expression::is_refused_type;
 use crate::resolver::class_name::class_value_classes;
 use crate::resolver::class_name::holds_no_class;
 use crate::resolver::class_name::report_non_existent_class_like;
@@ -300,13 +301,17 @@ where
                 return Ok(result);
             }
             Some(Extension::Value(_)) => unreachable!("a call reaches an extension member, never its value"),
+            // A part of a type the checker refused, as one no file declares, reported itself, so the call reports
+            // nothing again.
+            None if is_refused_type(&rest) => {
+                result.has_invalid_target = true;
+                rest_resolved = true;
+            }
             None => {
-                // An extension that fits a `string`, a number, a `bool` or a collection alone gives the receiver no
-                // member, so the call is refused once, on the parts the extension would run on, and no error says the
-                // part lacks a member its help lists, as the error of each such part lists the extensions it has.
+                // An extension that fits one part alone gives the receiver no member, so the call is refused once, on
+                // the parts the extension would run on, and no error says a part lacks a member an extension gives it.
                 let given: Vec<TAtomic> = parts
                     .iter()
-                    .filter(|part| scalar_name(part).is_some() || CollectionKind::of(part).is_some())
                     .filter(|part| has_extension_method(context, &TUnion::from_atomic((*part).clone()), name.value))
                     .cloned()
                     .collect();

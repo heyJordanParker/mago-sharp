@@ -9893,6 +9893,28 @@ fn a_member_an_extension_gives_one_part_of_a_union_is_missing_on_the_union() {
     );
 }
 
+/// Spec section 26: an extension of an object part, as `extension(Crate value)` on a `Crate|int`, gives the union no
+/// member either, and the call gets the union's one error, never a second "does not exist" for the part the extension
+/// takes.
+#[test]
+fn a_member_an_extension_gives_an_object_part_of_a_union_is_one_error() {
+    let crate_ = ("src/App/Billing/Crate.sharp", "namespace App.Billing;\n\npublic class Crate\n{\n}\n");
+    let tags = (
+        "src/App/Billing/CrateTags.sharp",
+        "namespace App.Billing;\n\npublic static class CrateTags\n{\n    extension(Crate value)\n    {\n        public string tag() => \"crate\";\n    }\n}\n",
+    );
+    let calls = "namespace App.Billing;\n\npublic class Tags\n{\n    public string either(Crate|int value) => value.tag();\n\n    public string missing(Missing|int value) => value.tag();\n}\n";
+
+    // A part of a type no file declares is refused where the type is written, and the call adds nothing.
+    assert_eq!(
+        worded(("src/App/Billing/Tags.sharp", calls), &[crate_, tags]),
+        [
+            "5:52 non-existent-method Method `tag` does not exist on `int|Crate`. | This method selection is invalid | This expression has type `int|Crate` | Only a `Crate` has the extension member `tag`: test the value with `is` first, and call `tag` there.",
+            "7:27 non-existent-class-like Cannot find type `App.Billing.Missing`. | No type of this name is declared. | Check the name's spelling, and import the type with `import` when another namespace declares it.",
+        ]
+    );
+}
+
 /// Spec section 26: an extension member's body reads its receiver as a parameter of the receiver's type.
 #[test]
 fn an_extension_member_reads_its_receiver_as_a_parameter_of_its_type() {
@@ -9939,7 +9961,7 @@ fn an_extension_block_infers_its_type_parameters_from_the_receiver() {
             "Too many type arguments for `List.blank`: expected 1, but found 2.",
             "Nothing fixes the type argument `TOut` of the call to `List.blank`.",
             "`string` is outside `T`'s bound `Order`, so `List<string>` has no `saved`.",
-            "Method `Pair.swapped` does not exist.",
+            "Method `swapped` does not exist on `Pair<int, Order>|Pair<string, Order>`.",
         ]
     );
 }
