@@ -7600,9 +7600,10 @@ fn a_class_named_as_a_case_is_an_error_that_names_the_case() {
 
     let case = "The case `PaymentResult.Paid` runs as a class of that name, which another file declares.";
     let class = "Class `Paid` clashes with the case `PaymentResult.Paid`, which runs as a class of that name.";
-    // The codebase keeps one declaration of a name, chosen by where each is written, and the other one is reported.
+    // The codebase keeps the declaration whose file's path sorts first, and the other one is reported: the enum's
+    // `src/App/PaymentResult.sharp` sorts before `src/App/PaymentResult/Paid.sharp` and after `app/Paid.sharp`.
     for (path, in_class, in_enum) in
-        [("src/App/PaymentResult/Paid.sharp", None, Some(case)), ("app/Paid.sharp", Some(class), None)]
+        [("src/App/PaymentResult/Paid.sharp", Some(class), None), ("app/Paid.sharp", None, Some(case))]
     {
         let declared = (path, "namespace App.PaymentResult;\n\nclass Paid { }\n");
 
@@ -14509,27 +14510,23 @@ fn a_struct_never_changes() {
     assert_eq!(each_file(reported, &fixed, &[]), vec![Vec::<String>::new(); 2]);
 }
 
-/// Asserts that of two files that declare one full name, each analyzed beside the other and `others`, exactly one gets
-/// its "already defined elsewhere" message, the first's or the second's. The declaration whose span sorts first keeps
-/// the name, and a span sorts by its `FileId`, which std's `DefaultHasher` gives from the file's name and Rust keeps
-/// stable across no release, so either file may be the duplicate.
-fn assert_one_duplicate(
-    first: ((&'static str, &'static str), &str),
-    second: ((&'static str, &'static str), &str),
+/// Asserts that of two files that declare one full name, each analyzed beside the other and `others`, `kept` keeps the
+/// name with no message, and `lost` gets `message`, which names `kept`'s file.
+fn assert_keeps_name(
+    kept: (&'static str, &'static str),
+    (lost, message): ((&'static str, &'static str), &str),
     others: &[(&'static str, &'static str)],
 ) {
     let beside = |file| others.iter().copied().chain([file]).collect::<Vec<_>>();
-    let found = [messages(first.0, &beside(second.0)), messages(second.0, &beside(first.0))];
-    let first_lost = [vec![first.1.to_owned()], Vec::new()];
-    let second_lost = [Vec::new(), vec![second.1.to_owned()]];
 
-    assert!(found == first_lost || found == second_lost, "{found:?}");
+    assert_eq!(messages(kept, &beside(lost)), Vec::<String>::new(), "{} keeps the name", kept.0);
+    assert_eq!(messages(lost, &beside(kept)), [message], "{} loses the name", lost.0);
 }
 
 /// Spec section 10: a struct can't inherit or be inherited, and implements interfaces. A class in a struct's header
 /// and a class that extends a struct are each refused, an interface in the header compiles, and a name that names no
 /// type is refused once, as a type that cannot be found. Of a class and a struct that two files declare under one full
-/// name, exactly one keeps it.
+/// name, the one whose file's path sorts first keeps it.
 #[test]
 fn a_struct_inherits_nothing_implements_interfaces_and_is_declared_once() {
     let sharp = [
@@ -14557,11 +14554,7 @@ fn a_struct_inherits_nothing_implements_interfaces_and_is_declared_once() {
     );
     let class = ("src/Demo/Dup.sharp", "namespace Demo;\n\nclass Dup\n{\n}\n");
     let structure = ("app/Demo/Dup.sharp", "namespace Demo;\n\nstruct Dup\n{\n}\n");
-    assert_one_duplicate(
-        (class, "Class `Dup` is already defined elsewhere."),
-        (structure, "Struct `Dup` is already defined elsewhere."),
-        &[],
-    );
+    assert_keeps_name(structure, (class, "Class `Dup` is already defined in `app/Demo/Dup.sharp`."), &[]);
 }
 
 /// Spec section 10: `==` on a struct compares each property with its own `==`, so a struct with a property `==` can't
@@ -22492,7 +22485,10 @@ fn only_the_module_of_module_sharp_is_analyzed_and_a_class_holding_its_name_make
 
     assert_eq!(issues(("app/Shop/Module.sharp", code), &[]), ["5:24 invalid-return-statement"]);
     assert_eq!(issues(("app/Shop/Checkout.sharp", code), &[]), ["3:1 semantics"]);
-    assert_eq!(messages(("app/Shop/Module.sharp", code), &[class]), ["Module `Module` is already defined elsewhere."]);
+    assert_eq!(
+        messages(("app/Shop/Module.sharp", code), &[class]),
+        ["Module `Module` is already defined in `app/Shop/Module.php`."]
+    );
 }
 
 /// Outside `uses`, an effect's name is an ordinary class name, spec section 23: a plain PHP class or a PHP# class the
@@ -28483,8 +28479,9 @@ fn an_event_is_a_final_class_whose_parameters_are_get_only_properties() {
 }
 
 /// Spec section 15: no event extends another, so an event's header names interfaces only, and a type names an event
-/// only once: of an event and an interface, a class or another event that two files declare under one full name,
-/// exactly one keeps it.
+/// only once: of an event and an interface, a class or another event that two files declare under one full name, the
+/// one whose file's path sorts first keeps it, whichever file id sorts first. `app/Shop/Moved.sharp`'s id sorts before
+/// `src/Shop/Moved.sharp`'s, but `src/Shop/Cart.sharp`'s before `app/Shop/Cart.sharp`'s, and `app/` keeps both names.
 #[test]
 fn an_event_header_names_interfaces_and_an_event_is_declared_once() {
     let base = ("app/Shop/Base.sharp", "namespace App.Shop;\n\npublic class Base\n{\n}\n");
@@ -28495,15 +28492,13 @@ fn an_event_header_names_interfaces_and_an_event_is_declared_once() {
     let interface = ("app/Shop/Moved.sharp", "namespace App.Shop;\n\npublic interface Moved { }\n");
     let class = ("src/Shop/Cart.sharp", "namespace App.Shop;\n\npublic class Cart\n{\n}\n");
     let with_base: Vec<_> = ORDER_EVENTS.iter().copied().chain([base]).collect();
-    let moved_twice = "Event `Moved` is already defined elsewhere.";
+    let moved_twice = "Event `Moved` is already defined in `app/Shop/Moved.sharp`.";
 
-    assert_one_duplicate((moved, moved_twice), (interface, "Interface `Moved` is already defined elsewhere."), &[]);
-    assert_one_duplicate(
-        (cart, "Event `Cart` is already defined elsewhere."),
-        (class, "Class `Cart` is already defined elsewhere."),
-        &[],
-    );
-    assert_one_duplicate((moved, moved_twice), (twice, moved_twice), &ORDER_EVENTS);
+    assert!(FileId::new(interface.0.as_bytes()) < FileId::new(moved.0.as_bytes()));
+    assert!(FileId::new(class.0.as_bytes()) < FileId::new(cart.0.as_bytes()));
+    assert_keeps_name(interface, (moved, moved_twice), &[]);
+    assert_keeps_name(cart, (class, "Class `Cart` is already defined in `app/Shop/Cart.sharp`."), &[]);
+    assert_keeps_name(twice, (moved, moved_twice), &ORDER_EVENTS);
     assert_eq!(
         worded(based, &with_base),
         [

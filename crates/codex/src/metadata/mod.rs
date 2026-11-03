@@ -146,12 +146,13 @@ pub struct CodebaseMetadata {
     pub patch_function_likes: HashMap<(Word, Word), FunctionLikeMetadata>,
     /// Per-patch constant metadata, keyed by FQN.
     pub patch_constants: WordMap<ConstantMetadata>,
-    /// The folder of each host or vendored file the scan read, keyed by the file. Spec section 23: a function or
-    /// constant a plain PHP library declares in PHP's root namespace belongs to the namespace of the class-likes in its
-    /// folder.
+    /// The name of each host or vendored file the scan read, its path from the workspace, keyed by the file. Spec
+    /// section 23: a function or constant a plain PHP library declares in PHP's root namespace belongs to the namespace
+    /// of the class-likes in its folder. Of two declarations of one name, the one whose file's name sorts first keeps
+    /// it, and the duplicate's error names that file.
     #[cfg_attr(feature = "serde", serde(default))]
-    folders: HashMap<FileId, Word>,
-    /// The namespaces of the class-likes in each folder of `folders`, sorted, which the populator gathers.
+    file_names: HashMap<FileId, Word>,
+    /// The namespaces of the class-likes in each folder of `file_names`, sorted, which the populator gathers.
     #[cfg_attr(feature = "serde", serde(default))]
     folder_namespaces: HashMap<Word, Vec<Word>>,
     /// The files of the standard library, the PHP# Composer package, the only code that reaches PHP's root namespace
@@ -171,7 +172,7 @@ impl CodebaseMetadata {
     pub(crate) fn add_class_like_alias(&mut self, alias: Word, target: Word, span: Span, flags: MetadataFlags) {
         let replace =
             self.class_like_alias_declarations.get(&alias).is_none_or(|(_, existing_span, existing_flags)| {
-                should_replace_metadata(*existing_flags, *existing_span, flags, span)
+                should_replace_metadata(&self.file_names, (*existing_flags, *existing_span), (flags, span))
             });
 
         if replace {
@@ -647,24 +648,32 @@ impl CodebaseMetadata {
         self.get_constant(name).map(|meta| meta.span)
     }
 
-    /// Records the folder of the scanned file `file`, when it is a host or a vendored file, and whether the standard
+    /// Records the name of the scanned file `file`, when it is a host or a vendored file, and whether the standard
     /// library holds it.
     pub(crate) fn add_file(&mut self, file: &File) {
         if matches!(file.file_type, FileType::Host | FileType::Vendored) {
-            let name = file.name.as_ref();
-            let folder = name.iter().rposition(|byte| *byte == b'/').map_or(&name[..0], |separator| &name[..separator]);
-            self.folders.insert(file.id, word(folder));
+            self.file_names.insert(file.id, word(&file.name));
         }
         if file.is_standard_library {
             self.standard_library_files.insert(file.id);
         }
     }
 
+    /// The name of the host or vendored file `file_id`, its path from the workspace, as `app/Shop/Cart.sharp`.
+    #[inline]
+    #[must_use]
+    pub fn file_name(&self, file_id: FileId) -> Option<Word> {
+        self.file_names.get(&file_id).copied()
+    }
+
     /// The folder of the host or vendored file `file_id`, as [`Self::folder_namespaces`] groups files.
     #[inline]
     #[must_use]
     pub fn folder(&self, file_id: FileId) -> Option<Word> {
-        self.folders.get(&file_id).copied()
+        let name = self.file_name(file_id)?;
+        let name = name.as_bytes();
+
+        Some(word(name.iter().rposition(|byte| *byte == b'/').map_or(&name[..0], |separator| &name[..separator])))
     }
 
     /// Whether the standard library, the PHP# Composer package, holds the file `file_id`.
@@ -680,7 +689,7 @@ impl CodebaseMetadata {
     /// file of PHP's built-ins.
     #[must_use]
     pub fn folder_namespaces(&self, span: Span) -> &[Word] {
-        self.folders.get(&span.file_id).and_then(|folder| self.folder_namespaces.get(folder)).map_or(&[], Vec::as_slice)
+        self.folder(span.file_id).and_then(|folder| self.folder_namespaces.get(&folder)).map_or(&[], Vec::as_slice)
     }
 
     /// Whether a class-like in `folder` gives the folder's functions and constants of PHP's root namespace a namespace,
@@ -1399,14 +1408,19 @@ impl CodebaseMetadata {
 
     /// Merges information from another `CodebaseMetadata` into this one.
     ///
-    /// When both metadata have the same priority, the one with the smaller span is kept
-    /// for deterministic results regardless of scan order.
+    /// When both metadata have the same priority, the one whose file's name sorts first is kept, as
+    /// [`should_replace_metadata`] decides, for the same result whatever order the files are scanned in.
     pub fn extend(&mut self, other: CodebaseMetadata) {
+        self.file_names.extend(other.file_names);
         let class_likes_changed = !other.class_likes.is_empty();
         for (k, mut v) in other.class_likes {
             match self.class_likes.entry(k) {
                 Entry::Occupied(mut entry) => {
-                    if should_replace_metadata(entry.get().flags, entry.get().span, v.flags, v.span) {
+                    if should_replace_metadata(
+                        &self.file_names,
+                        (entry.get().flags, entry.get().span),
+                        (v.flags, v.span),
+                    ) {
                         v.version_constraint.merge(entry.get().version_constraint.clone());
                         entry.insert(v);
                     } else {
@@ -1428,7 +1442,11 @@ impl CodebaseMetadata {
         for (k, mut v) in other.function_likes {
             match self.function_likes.entry(k) {
                 Entry::Occupied(mut entry) => {
-                    if should_replace_metadata(entry.get().flags, entry.get().span, v.flags, v.span) {
+                    if should_replace_metadata(
+                        &self.file_names,
+                        (entry.get().flags, entry.get().span),
+                        (v.flags, v.span),
+                    ) {
                         v.version_constraint.merge(entry.get().version_constraint.clone());
                         entry.insert(v);
                     } else {
@@ -1444,7 +1462,11 @@ impl CodebaseMetadata {
         for (k, mut v) in other.constants {
             match self.constants.entry(k) {
                 Entry::Occupied(mut entry) => {
-                    if should_replace_metadata(entry.get().flags, entry.get().span, v.flags, v.span) {
+                    if should_replace_metadata(
+                        &self.file_names,
+                        (entry.get().flags, entry.get().span),
+                        (v.flags, v.span),
+                    ) {
                         v.version_constraint.merge(entry.get().version_constraint.clone());
                         entry.insert(v);
                     } else {
@@ -1471,7 +1493,6 @@ impl CodebaseMetadata {
         }
 
         self.file_signatures.extend(other.file_signatures);
-        self.folders.extend(other.folders);
         self.standard_library_files.extend(other.standard_library_files);
         self.safe_symbols.extend(other.safe_symbols);
         self.safe_symbol_members.extend(other.safe_symbol_members);
@@ -1487,11 +1508,16 @@ impl CodebaseMetadata {
     /// a full clone of the source metadata's outer HashMap/WordMap structures. Only
     /// individual entries that need insertion are cloned.
     pub fn extend_ref(&mut self, other: &CodebaseMetadata) {
+        self.file_names.extend(other.file_names.iter().map(|(file, name)| (*file, *name)));
         let class_likes_changed = !other.class_likes.is_empty();
         for (k, v) in &other.class_likes {
             match self.class_likes.entry(*k) {
                 Entry::Occupied(mut entry) => {
-                    if should_replace_metadata(entry.get().flags, entry.get().span, v.flags, v.span) {
+                    if should_replace_metadata(
+                        &self.file_names,
+                        (entry.get().flags, entry.get().span),
+                        (v.flags, v.span),
+                    ) {
                         let mut new = v.clone();
                         new.version_constraint.merge(entry.get().version_constraint.clone());
                         entry.insert(new);
@@ -1516,7 +1542,11 @@ impl CodebaseMetadata {
         for (k, v) in &other.function_likes {
             match self.function_likes.entry(*k) {
                 Entry::Occupied(mut entry) => {
-                    if should_replace_metadata(entry.get().flags, entry.get().span, v.flags, v.span) {
+                    if should_replace_metadata(
+                        &self.file_names,
+                        (entry.get().flags, entry.get().span),
+                        (v.flags, v.span),
+                    ) {
                         let mut new = v.clone();
                         new.version_constraint.merge(entry.get().version_constraint.clone());
                         entry.insert(new);
@@ -1533,7 +1563,11 @@ impl CodebaseMetadata {
         for (k, v) in &other.constants {
             match self.constants.entry(*k) {
                 Entry::Occupied(mut entry) => {
-                    if should_replace_metadata(entry.get().flags, entry.get().span, v.flags, v.span) {
+                    if should_replace_metadata(
+                        &self.file_names,
+                        (entry.get().flags, entry.get().span),
+                        (v.flags, v.span),
+                    ) {
                         let mut new = v.clone();
                         new.version_constraint.merge(entry.get().version_constraint.clone());
                         entry.insert(new);
@@ -1563,7 +1597,6 @@ impl CodebaseMetadata {
         for (k, v) in &other.file_signatures {
             self.file_signatures.insert(*k, v.clone());
         }
-        self.folders.extend(other.folders.iter().map(|(file, folder)| (*file, *folder)));
         self.standard_library_files.extend(other.standard_library_files.iter().copied());
         self.safe_symbols.extend(other.safe_symbols.iter().copied());
         self.safe_symbol_members.extend(other.safe_symbol_members.iter().copied());
@@ -1837,7 +1870,7 @@ impl CodebaseMetadata {
             .collect();
 
         // A file signature and a folder are always owned by their file (there is at most one of each per file).
-        let mut file_ids: Vec<FileId> = self.file_signatures.keys().chain(self.folders.keys()).copied().collect();
+        let mut file_ids: Vec<FileId> = self.file_signatures.keys().chain(self.file_names.keys()).copied().collect();
         file_ids.sort_unstable();
         file_ids.dedup();
 
@@ -1873,7 +1906,7 @@ impl CodebaseMetadata {
 
         for k in &keys.file_ids {
             self.file_signatures.remove(k);
-            self.folders.remove(k);
+            self.file_names.remove(k);
             self.standard_library_files.remove(k);
         }
 
@@ -2043,14 +2076,17 @@ fn orphan_patch_constant_diagnostic(meta: &ConstantMetadata) -> Issue {
 ///   3. non-polyfill > polyfill — tools like rector/phpstan/psalm ship
 ///      skeleton stubs gated by `if (!class_exists('X'))` that should never
 ///      shadow a concrete definition.
-///   4. smaller span wins as a deterministic tie-breaker.
+///   4. the declaration whose file's name in `file_names` sorts first, as
+///      `app/Shop/Cart.sharp` before `src/Shop/Cart.sharp`, and in one file
+///      the earlier one, so the user can tell which file keeps the name. A
+///      file `file_names` doesn't name, a built-in's, sorts first, and two of
+///      them by their spans.
 ///
 /// Returns `true` if the new value should replace the existing one.
 fn should_replace_metadata(
-    existing_flags: MetadataFlags,
-    existing_span: Span,
-    new_flags: MetadataFlags,
-    new_span: Span,
+    file_names: &HashMap<FileId, Word>,
+    (existing_flags, existing_span): (MetadataFlags, Span),
+    (new_flags, new_span): (MetadataFlags, Span),
 ) -> bool {
     if new_flags.is_module() && !existing_flags.is_sharp() {
         return false;
@@ -2095,66 +2131,91 @@ fn should_replace_metadata(
         return !new_is_polyfill;
     }
 
-    new_span < existing_span
+    let declared_at = |span: Span| (file_names.get(&span.file_id), span);
+
+    declared_at(new_span) < declared_at(existing_span)
 }
 
 #[cfg(test)]
 mod should_replace_metadata_tests {
     use super::*;
 
+    /// [`should_replace_metadata`] on two declarations of files that no name is known for.
+    fn replaces(existing_flags: MetadataFlags, existing_span: Span, new_flags: MetadataFlags, new_span: Span) -> bool {
+        should_replace_metadata(&HashMap::default(), (existing_flags, existing_span), (new_flags, new_span))
+    }
+
+    /// Of two declarations with the same priority, the one whose file's name sorts first is kept, whichever file id
+    /// sorts first and whichever is merged first, and in one file the earlier one.
+    #[test]
+    fn the_file_whose_name_sorts_first_keeps_the_name() {
+        let flags = MetadataFlags::USER_DEFINED;
+        let (app, src) = (FileId::new(b"app/Shop/Cart.sharp"), FileId::new(b"src/Shop/Cart.sharp"));
+        let file_names: HashMap<FileId, Word> =
+            [(app, word("app/Shop/Cart.sharp")), (src, word("src/Shop/Cart.sharp"))].into_iter().collect();
+        let (in_app, in_src) = (Span::new(app, 40.into(), 60.into()), Span::new(src, 0.into(), 20.into()));
+
+        assert!(src < app, "the file ids sort the other way from the names");
+        assert!(should_replace_metadata(&file_names, (flags, in_src), (flags, in_app)));
+        assert!(!should_replace_metadata(&file_names, (flags, in_app), (flags, in_src)));
+
+        let earlier = Span::new(app, 0.into(), 20.into());
+        assert!(should_replace_metadata(&file_names, (flags, in_app), (flags, earlier)));
+    }
+
     #[test]
     fn non_polyfill_replaces_polyfill() {
         let polyfill = MetadataFlags::POLYFILL;
         let real = MetadataFlags::empty();
-        assert!(should_replace_metadata(polyfill, Span::dummy(0, 100), real, Span::dummy(0, 100)));
-        assert!(!should_replace_metadata(real, Span::dummy(0, 100), polyfill, Span::dummy(0, 100)));
+        assert!(replaces(polyfill, Span::dummy(0, 100), real, Span::dummy(0, 100)));
+        assert!(!replaces(real, Span::dummy(0, 100), polyfill, Span::dummy(0, 100)));
     }
 
     #[test]
     fn polyfill_does_not_replace_non_polyfill_even_with_smaller_span() {
         let real = MetadataFlags::empty();
         let polyfill = MetadataFlags::POLYFILL;
-        assert!(!should_replace_metadata(real, Span::dummy(500, 600), polyfill, Span::dummy(0, 10)));
+        assert!(!replaces(real, Span::dummy(500, 600), polyfill, Span::dummy(0, 10)));
     }
 
     #[test]
     fn user_defined_beats_polyfill_flag() {
         let polyfill_user = MetadataFlags::POLYFILL | MetadataFlags::USER_DEFINED;
         let plain = MetadataFlags::empty();
-        assert!(!should_replace_metadata(polyfill_user, Span::dummy(0, 10), plain, Span::dummy(0, 10)));
-        assert!(should_replace_metadata(plain, Span::dummy(0, 10), polyfill_user, Span::dummy(0, 10)));
+        assert!(!replaces(polyfill_user, Span::dummy(0, 10), plain, Span::dummy(0, 10)));
+        assert!(replaces(plain, Span::dummy(0, 10), polyfill_user, Span::dummy(0, 10)));
     }
 
     #[test]
     fn two_user_defined_fall_through_to_polyfill_check() {
         let a = MetadataFlags::POLYFILL | MetadataFlags::USER_DEFINED;
         let b = MetadataFlags::USER_DEFINED;
-        assert!(should_replace_metadata(a, Span::dummy(0, 10), b, Span::dummy(0, 10)));
-        assert!(!should_replace_metadata(b, Span::dummy(0, 10), a, Span::dummy(0, 10)));
+        assert!(replaces(a, Span::dummy(0, 10), b, Span::dummy(0, 10)));
+        assert!(!replaces(b, Span::dummy(0, 10), a, Span::dummy(0, 10)));
     }
 
     #[test]
     fn two_non_polyfills_fall_through_to_priority_rules() {
         let user = MetadataFlags::USER_DEFINED;
         let builtin = MetadataFlags::BUILTIN;
-        assert!(!should_replace_metadata(user, Span::dummy(0, 10), builtin, Span::dummy(0, 10)));
-        assert!(should_replace_metadata(builtin, Span::dummy(0, 10), user, Span::dummy(0, 10)));
+        assert!(!replaces(user, Span::dummy(0, 10), builtin, Span::dummy(0, 10)));
+        assert!(replaces(builtin, Span::dummy(0, 10), user, Span::dummy(0, 10)));
     }
 
     #[test]
     fn patch_beats_vendored() {
         let vendored = MetadataFlags::empty();
         let patch = MetadataFlags::PATCH;
-        assert!(should_replace_metadata(vendored, Span::dummy(0, 100), patch, Span::dummy(0, 100)));
-        assert!(!should_replace_metadata(patch, Span::dummy(0, 100), vendored, Span::dummy(0, 100)));
+        assert!(replaces(vendored, Span::dummy(0, 100), patch, Span::dummy(0, 100)));
+        assert!(!replaces(patch, Span::dummy(0, 100), vendored, Span::dummy(0, 100)));
     }
 
     #[test]
     fn patch_beats_builtin() {
         let builtin = MetadataFlags::BUILTIN;
         let patch = MetadataFlags::PATCH;
-        assert!(should_replace_metadata(builtin, Span::dummy(0, 100), patch, Span::dummy(0, 100)));
-        assert!(!should_replace_metadata(patch, Span::dummy(0, 100), builtin, Span::dummy(0, 100)));
+        assert!(replaces(builtin, Span::dummy(0, 100), patch, Span::dummy(0, 100)));
+        assert!(!replaces(patch, Span::dummy(0, 100), builtin, Span::dummy(0, 100)));
     }
 
     #[test]
@@ -2163,10 +2224,10 @@ mod should_replace_metadata_tests {
         let builtin = MetadataFlags::BUILTIN;
         let vendored = MetadataFlags::empty();
 
-        assert!(should_replace_metadata(builtin, Span::dummy(0, 100), external, Span::dummy(500, 600)));
-        assert!(!should_replace_metadata(external, Span::dummy(500, 600), builtin, Span::dummy(0, 100)));
-        assert!(should_replace_metadata(vendored, Span::dummy(0, 100), external, Span::dummy(500, 600)));
-        assert!(!should_replace_metadata(external, Span::dummy(500, 600), vendored, Span::dummy(0, 100)));
+        assert!(replaces(builtin, Span::dummy(0, 100), external, Span::dummy(500, 600)));
+        assert!(!replaces(external, Span::dummy(500, 600), builtin, Span::dummy(0, 100)));
+        assert!(replaces(vendored, Span::dummy(0, 100), external, Span::dummy(500, 600)));
+        assert!(!replaces(external, Span::dummy(500, 600), vendored, Span::dummy(0, 100)));
     }
 
     #[test]
@@ -2175,25 +2236,25 @@ mod should_replace_metadata_tests {
         let patch = MetadataFlags::PATCH;
         let user = MetadataFlags::USER_DEFINED;
 
-        assert!(should_replace_metadata(external, Span::dummy(0, 100), patch, Span::dummy(500, 600)));
-        assert!(!should_replace_metadata(patch, Span::dummy(500, 600), external, Span::dummy(0, 100)));
-        assert!(should_replace_metadata(external, Span::dummy(0, 100), user, Span::dummy(500, 600)));
-        assert!(!should_replace_metadata(user, Span::dummy(500, 600), external, Span::dummy(0, 100)));
+        assert!(replaces(external, Span::dummy(0, 100), patch, Span::dummy(500, 600)));
+        assert!(!replaces(patch, Span::dummy(500, 600), external, Span::dummy(0, 100)));
+        assert!(replaces(external, Span::dummy(0, 100), user, Span::dummy(500, 600)));
+        assert!(!replaces(user, Span::dummy(500, 600), external, Span::dummy(0, 100)));
     }
 
     #[test]
     fn user_defined_beats_patch() {
         let user = MetadataFlags::USER_DEFINED;
         let patch = MetadataFlags::PATCH;
-        assert!(!should_replace_metadata(user, Span::dummy(0, 100), patch, Span::dummy(0, 100)));
-        assert!(should_replace_metadata(patch, Span::dummy(0, 100), user, Span::dummy(0, 100)));
+        assert!(!replaces(user, Span::dummy(0, 100), patch, Span::dummy(0, 100)));
+        assert!(replaces(patch, Span::dummy(0, 100), user, Span::dummy(0, 100)));
     }
 
     #[test]
     fn patch_does_not_beat_user_defined_even_with_smaller_span() {
         let user = MetadataFlags::USER_DEFINED;
         let patch = MetadataFlags::PATCH;
-        assert!(!should_replace_metadata(user, Span::dummy(500, 600), patch, Span::dummy(0, 10)));
+        assert!(!replaces(user, Span::dummy(500, 600), patch, Span::dummy(0, 10)));
     }
 
     #[test]

@@ -167,7 +167,7 @@ fn report_duplicate_definition<A>(
     };
     context.collector.report_with_code(
         IssueCode::DuplicateDefinition,
-        Issue::error(format!("{title} `{name}` is already defined elsewhere."))
+        Issue::error(format!("{title} `{name}` is already defined {}.", defined_in(context, original_span)))
             .with_annotation(
                 Annotation::primary(duplicate_span).with_message(format!("Duplicate {kind} definition here")),
             )
@@ -178,6 +178,19 @@ fn report_duplicate_definition<A>(
                 "Consider using namespaces to avoid naming conflicts, or remove one of the duplicate definitions.",
             ),
     );
+}
+
+/// Where the declaration at `original_span` that keeps a duplicated name is, as a duplicate's error says it: in the
+/// file the codebase names, the one whose name sorts first, as "in `app/Shop/Cart.sharp`", or "elsewhere" in a file
+/// it names none for, a built-in's.
+pub(crate) fn defined_in<A>(context: &Context<'_, '_, A>, original_span: Span) -> String
+where
+    A: Arena,
+{
+    context
+        .codebase
+        .file_name(original_span.file_id)
+        .map_or_else(|| "elsewhere".to_owned(), |file| format!("in `{file}`"))
 }
 
 /// Refuses a class-like whose full name is also a namespace, as `App\Tenant\Store` is beside a class in
