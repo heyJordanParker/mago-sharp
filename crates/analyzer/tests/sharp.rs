@@ -17826,6 +17826,9 @@ fn a_type_parameter_bounded_by_a_class_takes_one_class() {
         ],
     );
     assert_messages(("src/Demo/Fancies.sharp", header), &others, &[&refused("3:24", "Builder<Maker>")]);
+    // The error writes each other type argument of the header as the header writes it.
+    let pairs = "namespace Demo;\n\npublic class Pairs : Pair<int, Fancy|Plain>\n{\n}\n";
+    assert_messages(("src/Demo/Pairs.sharp", pairs), &others, &[&refused("3:22", "Pair<int, Maker>")]);
 }
 
 /// Spec section 11: a type parameter bounded by an interface takes a union, because an interface declares no static
