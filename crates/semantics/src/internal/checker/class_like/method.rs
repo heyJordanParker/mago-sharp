@@ -1,6 +1,7 @@
 #![allow(clippy::too_many_arguments)]
 
 use mago_bytes::BytesDisplay;
+use mago_names::binding::php_method_name;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_span::HasSpan;
@@ -371,13 +372,10 @@ pub fn check_method<'ast, 'arena>(
             }
 
             // A PHP# expression body has no `return` statement to check.
-            if let MethodBody::Concrete(body) = &method.body {
-                let hint = if let Some(return_hint) = &method.return_type_hint {
-                    &return_hint.hint
-                } else {
-                    return;
-                };
-
+            if let MethodBody::Concrete(body) = &method.body
+                && let Some(return_hint) = &method.return_type_hint
+            {
+                let hint = &return_hint.hint;
                 let returns = mago_syntax::utils::find_returns_in_block(body);
 
                 match &hint {
@@ -447,7 +445,9 @@ pub fn check_method<'ast, 'arena>(
         }
     }
 
-    if !method_name_bytes.eq_ignore_ascii_case(b"__construct") {
+    // A PHP# constructor is written with its class's name, and runs as PHP's `__construct`, its body a block or an
+    // expression alike.
+    if !php_method_name(method).eq_ignore_ascii_case(b"__construct") {
         check_for_promoted_properties_outside_constructor(&method.parameter_list, context);
     } else if is_abstract {
         for parameter in &method.parameter_list.parameters {

@@ -3536,11 +3536,13 @@ fn a_promoted_member_outside_the_slice_is_an_error() {
         ]
     );
 
-    let php = "<?php\n\nnamespace App\\Tenant;\n\nclass Report\n{\n    public function __construct(private readonly int $a, private static int $b) {}\n\n    public function run(private int $c): void {}\n}\n";
+    // A method with no return type is checked as one with a return type is.
+    let php = "<?php\n\nnamespace App\\Tenant;\n\nclass Report\n{\n    public function __construct(private readonly int $a, private static int $b) {}\n\n    public function run(private int $c): void {}\n\n    public function stop(private int $d) {}\n}\n";
     assert_eq!(
         issues_in("src/Report.php", php),
         [
             "9:25 Promoted properties are not allowed outside of constructors.",
+            "11:26 Promoted properties are not allowed outside of constructors.",
             "7:66 Parameter `$b` cannot have the `static` modifier.",
         ]
     );

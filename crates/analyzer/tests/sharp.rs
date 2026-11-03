@@ -1455,6 +1455,17 @@ fn a_promoted_member_is_the_promoted_php_property() {
     assert_eq!(caller_of_sharp, caller_of_php);
 }
 
+/// Spec section 9: a parameter with an access modifier declares a member, whether the constructor's body is a block or
+/// an expression, as in C#.
+#[test]
+fn an_expression_bodied_constructor_declares_a_member_on_a_parameter() {
+    let block = "namespace Demo;\n\npublic class Report\n{\n    private int count = 0;\n\n    public Report(private int start, int unused)\n    {\n        this.count = start + unused;\n    }\n\n    public int total() => this.count + this.start;\n}\n";
+    let expression = "namespace Demo;\n\npublic class Report\n{\n    private int count = 0;\n\n    public Report(private int start, int unused) => this.count = start + unused;\n\n    public int total() => this.count + this.start;\n}\n";
+
+    assert_eq!(reported(("src/Demo/Report.sharp", block), &[]), Vec::<String>::new());
+    assert_eq!(reported(("src/Demo/Report.sharp", expression), &[]), Vec::<String>::new());
+}
+
 #[test]
 fn an_initial_value_that_is_not_constant_is_checked_against_the_member_type() {
     let sharp = "namespace Demo;\n\nclass Report\n{\n    private Clock clock = new Clock();\n    public int ticks { get; private set; } = new Clock().tick();\n    private string label = new Clock();\n\n    public string read()\n    {\n        return this.label;\n    }\n\n    public Clock now()\n    {\n        return this.clock;\n    }\n}\n";
