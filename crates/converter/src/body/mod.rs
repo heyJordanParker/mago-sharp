@@ -251,6 +251,11 @@ impl<'input> Converter<'input, '_> {
 
     /// Whether the analysis gives `expression` a type whose every value is one of `allowed`.
     fn is(&self, expression: &Expression<'_>, allowed: &[Kind]) -> bool {
+        if let Expression::Variable(Variable::Direct(variable)) = expression
+            && self.method.as_ref().and_then(|method| method.variadic.as_deref()) == Some(variable.name)
+        {
+            return allowed.contains(&Kind::List);
+        }
         self.type_of(expression).is_some_and(|union| {
             let kinds = kinds(union);
             !kinds.is_empty() && kinds.iter().all(|kind| allowed.contains(kind))

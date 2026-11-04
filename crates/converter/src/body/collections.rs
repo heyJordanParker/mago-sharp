@@ -1,6 +1,8 @@
 //! Array literals as `List` and `Map` (spec section 12).
 
 use mago_codex::ttype::TType;
+use mago_codex::ttype::atomic::TAtomic;
+use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::union::TUnion;
 use mago_span::HasSpan;
 use mago_syntax::cst::ArrayElement;
@@ -34,11 +36,28 @@ impl Converter<'_, '_> {
             match element {
                 ArrayElement::KeyValue(element) => {
                     self.expression(element.key, None);
-                    self.edits.replace(element.double_arrow, ":");
+                    self.edits.replace_range(element.key.span().end.offset, element.double_arrow.end.offset, ":");
                     self.expression(element.value, None);
                 }
                 ArrayElement::Value(element) => self.expression(element.value, None),
-                ArrayElement::Variadic(_) => self.refuse(element.span(), "a spread is not converted yet"),
+                // A `List` spread appends as PHP's does. A `Map` spread keeps each key where PHP's renumbers an `int`
+                // key, so only one keyed by `string` keeps PHP's meaning (spec section 12).
+                ArrayElement::Variadic(spread) => {
+                    self.expression(spread.value, None);
+                    let keyed_by_string = self.type_of(spread.value).is_some_and(|union| {
+                        union.types.iter().all(|atomic| {
+                            matches!(atomic, TAtomic::Array(TArray::Keyed(keyed))
+                                if keyed.parameters.as_ref().is_some_and(|(key, _)| key.is_string()))
+                        })
+                    });
+                    if !self.is(spread.value, &[Kind::List]) && !keyed_by_string {
+                        let shown = self.shown(spread.value);
+                        self.refuse(
+                            element.span(),
+                            format!("a spread of `{shown}` has no PHP# form: a `List` spread appends, and a `Map` spread keeps an `int` key PHP renumbers (spec section 12)"),
+                        );
+                    }
+                }
                 ArrayElement::Missing(_) => self.refuse(element.span(), "a skipped element has no PHP# form"),
             }
         }

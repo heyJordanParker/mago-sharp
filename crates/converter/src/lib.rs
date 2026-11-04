@@ -128,6 +128,9 @@ struct Method {
     resolution: TypeResolutionContext,
     /// The method's parameters, by their PHP names, which are never locals.
     parameters: Vec<Vec<u8>>,
+    /// The method's `...` parameter, by its PHP name, which PHP# gives as a `List` where PHP gives an array (spec
+    /// section 7).
+    variadic: Option<Vec<u8>>,
     locals: Locals,
     /// The `parent::__construct(…)` statement a subclass's constructor starts with, which its `: super(…)` runs, so
     /// the body leaves it (spec section 9).

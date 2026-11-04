@@ -87,6 +87,11 @@ impl Converter<'_, '_> {
             returning: returning.clone(),
             resolution,
             parameters: parameters.parameters.iter().map(|parameter| parameter.variable.name.to_vec()).collect(),
+            variadic: parameters
+                .parameters
+                .iter()
+                .find(|parameter| parameter.ellipsis.is_some())
+                .map(|parameter| parameter.variable.name.to_vec()),
             locals: Locals::default(),
             super_call: None,
             storage: None,

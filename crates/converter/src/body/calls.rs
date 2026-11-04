@@ -5,6 +5,7 @@ use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::ttype::TType;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::object::TObject;
+use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::comparator::ComparisonResult;
 use mago_codex::ttype::comparator::union_comparator::is_contained_by;
 use mago_codex::ttype::union::TUnion;
@@ -20,6 +21,7 @@ use mago_syntax::cst::FunctionCall;
 use mago_syntax::cst::Identifier;
 use mago_syntax::cst::Instantiation;
 
+use super::Kind;
 use crate::Converter;
 use crate::library::type_test;
 use crate::types::type_text;
@@ -93,15 +95,29 @@ impl<'input> Converter<'input, '_> {
                     let name = [b"$".as_slice(), argument.name.value].concat();
                     callee.parameters.iter().find(|parameter| parameter.get_name().0.as_bytes() == name)
                 }
-                Argument::Positional(_) => callee.parameters.get(index),
+                // Each argument past the `...` parameter lands in it.
+                Argument::Positional(_) => callee
+                    .parameters
+                    .get(index)
+                    .or_else(|| callee.parameters.last().filter(|parameter| parameter.flags.is_variadic())),
             });
             let declared = parameter
                 .and_then(|parameter| parameter.get_type_metadata())
                 .map(|declared| &declared.type_union)
                 .filter(|declared| !declared.types.iter().any(TAtomic::is_mixed));
             let value = match argument {
+                // Only a `List` spreads into a call, and one of unknown length fills only a `...` parameter (spec
+                // section 7). PHP spreads a string key as a named argument.
                 Argument::Positional(argument) if argument.ellipsis.is_some() => {
-                    self.refuse(argument.span(), "a spread argument is not converted yet");
+                    self.expression(argument.value, None);
+                    let fills_variadic = parameter.is_some_and(|parameter| parameter.flags.is_variadic());
+                    if !self.is(argument.value, &[Kind::List]) || !fills_variadic {
+                        let shown = self.shown(argument.value);
+                        self.refuse(
+                            argument.span(),
+                            format!("a spread of `{shown}` here has no PHP# form: only a `List` spreads into a call, and only into a `...` parameter (spec section 7)"),
+                        );
+                    }
                     continue;
                 }
                 Argument::Positional(argument) => argument.value,
@@ -347,7 +363,29 @@ impl<'input> Converter<'input, '_> {
                 let name = self.class.as_ref().map(|class| class.name.clone()).unwrap_or_default();
                 self.edits.replace(keyword.span, format!("{name}{parentheses}"));
             }
-            _ => return self.refuse(expression.span(), "`new` of a class value is not converted yet"),
+            Expression::Static(_) => {
+                return self.refuse(
+                    expression.span(),
+                    "`new static(…)` is `new Self(…)`, which needs a `required` constructor (spec section 25), and the converter writes none",
+                );
+            }
+            // `new $class(…)` of a class value is `new (type)(…)`, whose parentheses mark the class value (spec
+            // section 25).
+            class => {
+                let is_class_value = self.type_of(class).is_some_and(|union| {
+                    union.types.iter().all(|atomic| matches!(atomic, TAtomic::Scalar(TScalar::ClassLikeString(_))))
+                });
+                if !is_class_value {
+                    let shown = self.shown(class);
+                    return self.refuse(
+                        expression.span(),
+                        format!("`new` of `{shown}` has no PHP# form: PHP# makes an object of a class value only (spec section 25)"),
+                    );
+                }
+                self.expression(class, None);
+                let written = self.render(class);
+                self.edits.replace(class.span(), format!("({written}){parentheses}"));
+            }
         }
         if let Some(arguments) = &instantiation.argument_list {
             self.arguments(arguments, None);

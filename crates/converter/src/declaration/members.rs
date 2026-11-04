@@ -190,6 +190,7 @@ impl Converter<'_, '_> {
             returning: (!is_set).then(|| union.clone()),
             resolution: TypeResolutionContext::default(),
             parameters: if is_set { vec![b"$value".to_vec()] } else { Vec::new() },
+            variadic: None,
             locals: Locals::default(),
             super_call: None,
             storage: Some(variable.name[1..].to_vec()),
@@ -504,6 +505,12 @@ impl Converter<'_, '_> {
 
         let parameters: Vec<Vec<u8>> =
             method.parameter_list.parameters.iter().map(|parameter| parameter.variable.name.to_vec()).collect();
+        let variadic = method
+            .parameter_list
+            .parameters
+            .iter()
+            .find(|parameter| parameter.ellipsis.is_some())
+            .map(|parameter| parameter.variable.name.to_vec());
         for (index, parameter) in method.parameter_list.parameters.iter().enumerate() {
             let metadata = declared.parameters.get(index).and_then(|parameter| parameter.type_metadata.as_ref());
             self.parameter(parameter, metadata.map(|metadata| metadata.type_union.clone()));
@@ -519,6 +526,7 @@ impl Converter<'_, '_> {
                     returning,
                     resolution,
                     parameters,
+                    variadic,
                     locals: Locals::default(),
                     super_call: None,
                     storage: None,

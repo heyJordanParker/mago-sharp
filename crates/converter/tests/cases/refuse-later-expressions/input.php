@@ -4,8 +4,8 @@ declare(strict_types=1);
 
 namespace App;
 
-// Destructuring, interpolation, magic constants, `print`, `new` of a class value, spreads and generators wait for
-// later families, while the lambda, the `match` and the `clone` beside them convert.
+// Destructuring, interpolation, magic constants, `print`, `new` of a string and generators wait for later families or
+// have no form, while the lambda, the `match`, the `clone` and the spreads beside them convert.
 final class Later
 {
     public function run(string $name, Later $other, int $count): mixed

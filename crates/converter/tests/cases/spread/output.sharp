@@ -1,0 +1,24 @@
+namespace App;
+
+// A `List` spreads into a `...` parameter and into a literal, and a `Map` keyed by `string` into a literal (spec
+// sections 7 and 12).
+public final class Prices
+{
+    public int sum(int ...amounts)
+    {
+        let total = 0;
+        for (const amount of amounts) {
+            total += amount;
+        }
+
+        return total;
+    }
+
+    public Map<string, int> join(List<int> first, List<int> second, Map<string, int> named, Map<string, int> more)
+    {
+        const all = [...first, ...second];
+        const count = this.sum(...all);
+
+        return [...named, ...more, 'count': count];
+    }
+}

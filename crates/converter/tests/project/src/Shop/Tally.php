@@ -45,4 +45,29 @@ final class Tally
     {
         return $rule($amount);
     }
+
+    // Spreads into a `...` parameter and into a literal, and `new` of a class value.
+    public function count(int ...$amounts): int
+    {
+        $total = 0;
+        foreach ($amounts as $amount) {
+            $total += $amount;
+        }
+
+        return $total;
+    }
+
+    /** @param list<int> $more */
+    public function counted(array $more): int
+    {
+        $all = [...$more, 4];
+
+        return $this->count(...[1, 2], ...$all);
+    }
+
+    /** @param class-string<Pair> $type */
+    public function made(string $type): string
+    {
+        return (new $type())->both();
+    }
 }
