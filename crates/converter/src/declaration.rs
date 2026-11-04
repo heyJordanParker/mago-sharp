@@ -305,10 +305,24 @@ impl Converter<'_, '_> {
                 }
             };
             let name = Self::variable_name(variable.name);
-            let accessors = accessors(visibility == "public", is_readonly);
+            // A method the class declares is refused where it is declared, and one it inherits clashes here.
+            let method = ascii_lowercase_word(&variable.name[1..]);
+            if metadata.appearing_method_ids.contains_key(&method) && !metadata.methods.contains(&method) {
+                self.refuse(
+                    variable.span,
+                    format!("`{name}` names a property and a method, and a PHP# class has one member of each name (spec section 14)"),
+                );
+                continue;
+            }
+            // A property that redeclares its parent's, as one that changes its initial value does, replaces it, which
+            // only a property with accessors marked `override` does: a field replaces nothing (spec section 22).
+            let overrides =
+                metadata.overridden_property_ids.get(&word(variable.name)).is_some_and(|parents| !parents.is_empty());
+            let accessors = accessors(visibility == "public" || overrides, is_readonly);
+            let opening = if overrides { "override " } else { "" };
             // A property's accessors end it, unless an initial value follows them (spec section 6).
             let end = if accessors.is_empty() || !value.is_empty() { ";" } else { "" };
-            declarations.push(format!("{attributes}{visibility} {written} {name}{accessors}{value}{end}"));
+            declarations.push(format!("{attributes}{visibility} {opening}{written} {name}{accessors}{value}{end}"));
         }
 
         let indentation = self.indentation(span.start.offset);
@@ -352,7 +366,8 @@ impl Converter<'_, '_> {
         }
         // PHP# reads a name as a property or a method by where it is written, so a class has one member of each name
         // (spec section 14).
-        if metadata.properties.contains_key(&word([b"$", name].concat())) {
+        // A property the class inherits clashes as one it declares does.
+        if metadata.appearing_property_ids.contains_key(&word([b"$", name].concat())) {
             self.refuse(
                 method.name.span,
                 format!("`{shown}` names a property and a method, and a PHP# class has one member of each name (spec section 14)"),

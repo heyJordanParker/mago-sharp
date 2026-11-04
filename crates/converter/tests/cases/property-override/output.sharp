@@ -1,0 +1,10 @@
+namespace App;
+
+// A property that redeclares its parent's to change its initial value replaces it, which PHP# writes as a property
+// with accessors marked `override`, even where PHP's is protected (spec section 22).
+public final class SlowJob : Job
+{
+    public override int timeout { get; set; } = 300;
+
+    protected override string queue { get; set; } = 'slow';
+}

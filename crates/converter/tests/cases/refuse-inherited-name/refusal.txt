@@ -1,0 +1,2 @@
+11:19: `label` names a property and a method, and a PHP# class has one member of each name (spec section 14)
+13:21: `title` names a property and a method, and a PHP# class has one member of each name (spec section 14)
