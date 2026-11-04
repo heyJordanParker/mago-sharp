@@ -1,0 +1,15 @@
+namespace App;
+
+// PHP finds a method whatever case a call writes, and PHP# by the case its class declares (spec section 25).
+public final class Greeter
+{
+    public string greetAll()
+    {
+        return this.greet('all');
+    }
+
+    public string greet(string name)
+    {
+        return 'hi ' + name;
+    }
+}

@@ -11,6 +11,7 @@ use mago_codex::reference::SymbolReferences;
 use mago_codex::ttype::SharpType;
 use mago_codex::ttype::TType;
 use mago_codex::ttype::atomic::TAtomic;
+use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::builder::get_union_from_type;
 use mago_codex::ttype::expander::TypeExpansionOptions;
 use mago_codex::ttype::expander::expand_union;
@@ -488,8 +489,8 @@ impl<'input> Converter<'input, '_> {
                 self.elements(array.elements.iter());
             }
             Expression::ArrayAccess(access) => {
-                self.expression(access.array, None);
-                self.expression(access.index, None);
+                self.untyped(access.array, "an index");
+                self.untyped(access.index, "a key");
             }
             Expression::Conditional(conditional) => {
                 let Some(then) = conditional.then else {
@@ -645,12 +646,12 @@ impl<'input> Converter<'input, '_> {
     fn access(&mut self, expression: &Expression<'_>, access: &Access<'_>) {
         match access {
             Access::Property(access) => {
-                self.expression(access.object, None);
+                self.untyped(access.object, "a property access");
                 self.edits.replace(access.arrow, ".");
                 self.member(&access.property);
             }
             Access::NullSafeProperty(access) => {
-                self.expression(access.object, None);
+                self.untyped(access.object, "a property access");
                 self.edits.replace(access.question_mark_arrow, "?.");
                 self.member(&access.property);
             }
@@ -687,11 +688,71 @@ impl<'input> Converter<'input, '_> {
         }
     }
 
-    fn arguments(&mut self, arguments: &ArgumentList<'_>) {
-        for argument in &arguments.arguments {
+    /// Refuses `expression` when the analysis gives it `mixed`, which PHP lets reach `operation` and PHP# lets reach it
+    /// only from a known type, and gives whether it did. Its own parts convert either way.
+    fn untyped(&mut self, expression: &Expression<'_>, operation: &str) -> bool {
+        self.expression(expression, None);
+        if !self.type_of(expression).is_some_and(|union| union.types.iter().any(TAtomic::is_mixed)) {
+            return false;
+        }
+        let shown = self.shown(expression);
+        self.refuse(
+            expression.span(),
+            format!("`{shown}` reaches {operation}, which PHP# allows only from a known type: narrow it with `is`, or declare its type (spec section 24)"),
+        );
+
+        true
+    }
+
+    /// The method `selector` names on a value of type `object`, when the analysis knows the value's class.
+    fn method_of(
+        &self,
+        object: Option<&TUnion>,
+        selector: &ClassLikeMemberSelector<'_>,
+    ) -> Option<&'input FunctionLikeMetadata> {
+        let ClassLikeMemberSelector::Identifier(name) = selector else {
+            return None;
+        };
+        let [TAtomic::Object(TObject::Named(class))] = object?.types.as_ref() else {
+            return None;
+        };
+
+        self.input.codebase.get_declaring_method(class.name.as_bytes(), name.value)
+    }
+
+    /// The method `selector` names, written as its class declares it: PHP finds a method in any case, and PHP# only in
+    /// its own (spec section 25).
+    fn method_name(&mut self, selector: &ClassLikeMemberSelector<'_>, method: Option<&FunctionLikeMetadata>) {
+        if let (ClassLikeMemberSelector::Identifier(name), Some(method)) = (selector, method)
+            && name.value != method.original_name.as_bytes()
+        {
+            self.edits.replace(name.span, method.original_name.as_str_lossy().into_owned());
+        }
+    }
+
+    /// The arguments of a call of `callee`, when the analysis knows it. An argument the analysis gives `mixed` reaches
+    /// a parameter of a known type only in PHP.
+    fn arguments(&mut self, arguments: &ArgumentList<'_>, callee: Option<&FunctionLikeMetadata>) {
+        for (index, argument) in arguments.arguments.iter().enumerate() {
+            let parameter = callee.and_then(|callee| match argument {
+                Argument::Named(argument) => {
+                    let name = [b"$".as_slice(), argument.name.value].concat();
+                    callee.parameters.iter().find(|parameter| parameter.get_name().0.as_bytes() == name)
+                }
+                Argument::Positional(_) => callee.parameters.get(index),
+            });
+            let typed = parameter
+                .and_then(|parameter| parameter.get_type_metadata())
+                .is_some_and(|declared| !declared.type_union.types.iter().any(TAtomic::is_mixed));
             match argument {
                 Argument::Positional(argument) if argument.ellipsis.is_some() => {
                     self.refuse(argument.span(), "a spread argument is not converted yet");
+                }
+                Argument::Positional(argument) if typed => {
+                    self.untyped(argument.value, "a parameter of a known type");
+                }
+                Argument::Named(argument) if typed => {
+                    self.untyped(argument.value, "a parameter of a known type");
                 }
                 Argument::Positional(argument) => self.expression(argument.value, None),
                 Argument::Named(argument) => self.expression(argument.value, None),
@@ -702,22 +763,26 @@ impl<'input> Converter<'input, '_> {
     fn call(&mut self, call: &Call<'_>) {
         match call {
             Call::Method(call) => {
-                self.expression(call.object, None);
+                self.untyped(call.object, "a method call");
                 self.edits.replace(call.arrow, ".");
                 self.member(&call.method);
-                self.arguments(&call.argument_list);
+                let method = self.method_of(self.type_of(call.object), &call.method);
+                self.method_name(&call.method, method);
+                self.arguments(&call.argument_list, method);
             }
             Call::NullSafeMethod(call) => {
-                self.expression(call.object, None);
+                self.untyped(call.object, "a method call");
                 self.edits.replace(call.question_mark_arrow, "?.");
                 self.member(&call.method);
-                self.arguments(&call.argument_list);
+                let method = self.method_of(self.type_of(call.object), &call.method);
+                self.method_name(&call.method, method);
+                self.arguments(&call.argument_list, method);
             }
             Call::StaticMethod(call) => {
                 self.expression(call.class, None);
                 self.edits.replace(call.double_colon, ".");
                 self.member(&call.method);
-                self.arguments(&call.argument_list);
+                self.arguments(&call.argument_list, None);
             }
             Call::Function(call) => self.function_call(call),
             Call::NullSafeFunction(_) => self.refuse(call.span(), "`?.(…)` on a function has no PHP# form"),
@@ -750,7 +815,7 @@ impl<'input> Converter<'input, '_> {
             let Some(callee) = self.through_namespace(span, &name, function.span) else {
                 return;
             };
-            self.arguments(&call.argument_list);
+            self.arguments(&call.argument_list, Some(function));
             let list = call.argument_list.span();
             let arguments = self.edits.render(self.source, list.start.offset, list.end.offset);
             return self.edits.replace(span, format!("{callee}{arguments}"));
@@ -878,7 +943,7 @@ impl<'input> Converter<'input, '_> {
             _ => return self.refuse(expression.span(), "`new` of a class value is not converted yet"),
         }
         if let Some(arguments) = &instantiation.argument_list {
-            self.arguments(arguments);
+            self.arguments(arguments, None);
         }
     }
 
@@ -923,14 +988,27 @@ impl<'input> Converter<'input, '_> {
                 return self.refuse(expression.span(), "this cast has no PHP# form (spec section 24)");
             }
             // PHP's cast aliases are its `(int)`, `(float)` and `(string)` (spec section 24).
-            UnaryPrefixOperator::IntegerCast(span, _) => self.edits.replace(*span, "(int)"),
+            UnaryPrefixOperator::IntegerCast(span, _) => {
+                self.edits.replace(*span, "(int)");
+                self.untyped(operand, "a cast");
+                return;
+            }
             UnaryPrefixOperator::DoubleCast(span, _) | UnaryPrefixOperator::RealCast(span, _) => {
                 self.edits.replace(*span, "(float)");
+                self.untyped(operand, "a cast");
+                return;
             }
-            UnaryPrefixOperator::BinaryCast(span, _) => self.edits.replace(*span, "(string)"),
+            UnaryPrefixOperator::BinaryCast(span, _) => {
+                self.edits.replace(*span, "(string)");
+                self.untyped(operand, "a cast");
+                return;
+            }
             UnaryPrefixOperator::IntCast(..)
             | UnaryPrefixOperator::FloatCast(..)
-            | UnaryPrefixOperator::StringCast(..) => {}
+            | UnaryPrefixOperator::StringCast(..) => {
+                self.untyped(operand, "a cast");
+                return;
+            }
             UnaryPrefixOperator::Not(_) => {
                 if !self.is(operand, &[Kind::Bool]) {
                     let shown = self.shown(operand);
@@ -1297,6 +1375,14 @@ fn identity(lhs: Option<&TUnion>, rhs: Option<&TUnion>) -> Result<bool, String> 
     // `x == null` is PHP#'s null check, which runs no code of `x`'s type (spec section 19).
     if left == [Kind::Null] || right == [Kind::Null] {
         return Ok(true);
+    }
+    // PHP#'s `===` compares two objects only, and a value of no known type may hold anything.
+    if [lhs, rhs].iter().any(|union| union.types.iter().any(TAtomic::is_mixed)) {
+        return Err(format!(
+            "`===` between `{}` and `{}` is not converted yet: PHP#'s `===` compares two objects, so narrow the value with `is` first (spec section 19)",
+            lhs.get_id(),
+            rhs.get_id()
+        ));
     }
     if left.contains(&Kind::Object) || right.contains(&Kind::Object) {
         return Ok(false);

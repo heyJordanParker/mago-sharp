@@ -1,0 +1,6 @@
+16:16: `mixed` reaches a property access, which PHP# allows only from a known type: narrow it with `is`, or declare its type (spec section 24)
+21:16: `mixed` reaches a method call, which PHP# allows only from a known type: narrow it with `is`, or declare its type (spec section 24)
+26:25: `mixed` reaches a cast, which PHP# allows only from a known type: narrow it with `is`, or declare its type (spec section 24)
+31:16: `===` between `mixed` and `string('yes')` is not converted yet: PHP#'s `===` compares two objects, so narrow the value with `is` first (spec section 19)
+36:30: `mixed` reaches a key, which PHP# allows only from a known type: narrow it with `is`, or declare its type (spec section 24)
+41:29: `mixed` reaches a parameter of a known type, which PHP# allows only from a known type: narrow it with `is`, or declare its type (spec section 24)
