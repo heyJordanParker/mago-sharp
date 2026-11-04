@@ -1,0 +1,12 @@
+namespace App;
+
+/**
+ * A parent's type arguments, and a trait's, join the header (spec section 11).
+ */
+public final class Shelf<T> : Box<List<T>>, Holds<List<T>>, Counts<T>
+{
+    public List<T> held()
+    {
+        return this.item;
+    }
+}

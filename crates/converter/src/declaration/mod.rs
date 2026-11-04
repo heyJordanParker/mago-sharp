@@ -19,13 +19,19 @@ use mago_syntax::cst::Sequence;
 use crate::Converter;
 
 /// The PHPDoc tags whose types the converter writes in the declaration, which leave its docblock.
-const WRITTEN_TAGS: [&str; 10] = [
+const WRITTEN_TAGS: [&str; 16] = [
     "@var",
     "@param",
     "@return",
     "@template",
     "@template-covariant",
     "@template-contravariant",
+    "@extends",
+    "@implements",
+    "@use",
+    "@template-extends",
+    "@template-implements",
+    "@template-use",
     "@psalm-template",
     "@psalm-var",
     "@psalm-param",

@@ -6,12 +6,14 @@ use mago_span::HasSpan;
 use mago_syntax::cst::ClassLikeMember;
 use mago_syntax::cst::EnumCaseItem;
 use mago_syntax::cst::Extends;
+use mago_syntax::cst::Identifier;
 use mago_syntax::cst::Implements;
 use mago_syntax::cst::LocalIdentifier;
 use mago_syntax::cst::Modifier;
 use mago_syntax::cst::Property;
 use mago_syntax::cst::Sequence;
 use mago_syntax::cst::TraitUseSpecification;
+use mago_word::ascii_lowercase_word;
 
 use crate::Class;
 use crate::Converter;
@@ -28,9 +30,6 @@ impl<'input> Converter<'input, '_> {
         if let Some(span) = has(&class.modifiers, |modifier| matches!(modifier, Modifier::Readonly(_))) {
             self.edits.delete(span.start.offset, self.skip_whitespace(span.end.offset));
         }
-        if !metadata.template_type_extends_count.is_empty() || !metadata.template_type_implements_count.is_empty() {
-            self.refuse(class.name.span, "`@extends` and `@implements` with type arguments are not converted yet");
-        }
 
         self.attributes(&class.attribute_lists);
         let header_start = class.modifiers.first().map_or(class.class.span, HasSpan::span).start.offset;
@@ -44,9 +43,9 @@ impl<'input> Converter<'input, '_> {
                 self.refuse(extends.extends.span, format!("`{shown}` is deprecated, and the PHP# checker warns on a class that extends it (spec section 27)"));
             }
         }
-        self.parents(None, class.extends.as_ref(), class.implements.as_ref());
+        self.parents(metadata, None, class.extends.as_ref(), class.implements.as_ref());
         // A plain PHP trait the class uses joins the header, after the base class and the interfaces (spec section 22).
-        let traits = self.traits(&class.members);
+        let traits = self.traits(metadata, &class.members);
         if !traits.is_empty() {
             let last = class
                 .implements
@@ -72,7 +71,7 @@ impl<'input> Converter<'input, '_> {
         };
         self.attributes(&interface.attribute_lists);
         self.header(interface.interface.span.start.offset, metadata, &interface.name);
-        self.parents(None, interface.extends.as_ref(), None);
+        self.parents(metadata, None, interface.extends.as_ref(), None);
         self.docblock(interface.span());
         self.members(metadata, &interface.name, false, Vec::new(), &interface.members);
     }
@@ -86,7 +85,7 @@ impl<'input> Converter<'input, '_> {
         self.attributes(&enumeration.attribute_lists);
         self.header(enumeration.r#enum.span.start.offset, metadata, &enumeration.name);
         let backing = enumeration.backing_type_hint.as_ref().map(|backing| backing.hint.span().end.offset);
-        self.parents(backing, None, enumeration.implements.as_ref());
+        self.parents(metadata, backing, None, enumeration.implements.as_ref());
         self.docblock(enumeration.span());
         self.members(metadata, &enumeration.name, true, Vec::new(), &enumeration.members);
     }
@@ -112,14 +111,21 @@ impl<'input> Converter<'input, '_> {
         }
     }
 
-    /// `extends A implements B, C` as the header's `: A, B, C` (spec section 22). An enum's backing type, which ends
-    /// at `backing`, comes first.
-    fn parents(&mut self, backing: Option<u32>, extends: Option<&Extends<'_>>, implements: Option<&Implements<'_>>) {
+    /// `extends A implements B, C` as the header's `: A, B, C` (spec section 22), each parent with the type arguments
+    /// `@extends` or `@implements` gives it, as `: A<int>`. An enum's backing type, which ends at `backing`, comes
+    /// first.
+    fn parents(
+        &mut self,
+        metadata: &ClassLikeMetadata,
+        backing: Option<u32>,
+        extends: Option<&Extends<'_>>,
+        implements: Option<&Implements<'_>>,
+    ) {
         let mut last = backing;
         if let Some(extends) = extends {
             self.edits.replace(extends.extends.span, ":");
             for parent in extends.types.iter() {
-                self.rename_class(parent);
+                self.parent(metadata, parent);
                 last = Some(parent.span().end.offset);
             }
         }
@@ -129,14 +135,31 @@ impl<'input> Converter<'input, '_> {
                 None => self.edits.replace(implements.implements.span, ":"),
             }
             for parent in implements.types.iter() {
-                self.rename_class(parent);
+                self.parent(metadata, parent);
             }
         }
     }
 
-    /// The name of each trait `members` uses, as the header writes it, each `use` line leaving the body. A `use` with
-    /// `insteadof` or `as` has no PHP# form.
-    fn traits(&mut self, members: &Sequence<'_, ClassLikeMember<'_>>) -> Vec<String> {
+    /// The parent `identifier` names, by the name this file reaches it by, with its type arguments.
+    fn parent(&mut self, metadata: &ClassLikeMetadata, identifier: &Identifier<'_>) {
+        let Some(name) = self.class_name(identifier) else {
+            return;
+        };
+        let resolved = ascii_lowercase_word(self.input.names.get(identifier));
+        let arguments = metadata.template_extended_offsets.get(&resolved).map_or_else(
+            || Some(Vec::new()),
+            |arguments| arguments.iter().map(|argument| self.type_text(argument, identifier.span())).collect(),
+        );
+        let Some(arguments) = arguments else {
+            return;
+        };
+        let written = if arguments.is_empty() { name } else { format!("{name}<{}>", arguments.join(", ")) };
+        self.edits.replace(identifier.span(), written);
+    }
+
+    /// Each trait `members` uses, with the type arguments `@use` gives it, as the header writes it, each `use` line
+    /// leaving the body. A `use` with `insteadof` or `as` has no PHP# form.
+    fn traits(&mut self, metadata: &ClassLikeMetadata, members: &Sequence<'_, ClassLikeMember<'_>>) -> Vec<String> {
         let mut traits = Vec::new();
         for member in members {
             let ClassLikeMember::TraitUse(trait_use) = member else {
@@ -147,11 +170,13 @@ impl<'input> Converter<'input, '_> {
                 continue;
             }
             for name in trait_use.trait_names.iter() {
-                self.rename_class(name);
+                self.parent(metadata, name);
                 let span = name.span();
                 traits.push(self.edits.render(self.source, span.start.offset, span.end.offset));
             }
-            self.delete_lines(member.span());
+            // Its docblock, which holds the `@use` the header now writes, goes with it.
+            let docblock = self.docblock_before(member.span()).map(|(span, _)| span);
+            self.delete_lines(docblock.map_or(member.span(), |docblock| docblock.join(member.span())));
         }
 
         traits

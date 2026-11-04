@@ -7,6 +7,8 @@ namespace App;
 /**
  * @template T
  */
-class Box
+interface Holds
 {
+    /** @return T */
+    public function held();
 }
