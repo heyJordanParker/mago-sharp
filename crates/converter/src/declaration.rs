@@ -4,6 +4,7 @@
 //! wherever PHP leaves the visibility out. PHP's methods are open unless `final`, and PHP#'s are closed unless
 //! `virtual` (spec section 22), so an open PHP method is `virtual`, and one that replaces its parent's is `override`.
 
+use mago_codex::ttype::TType;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::union::TUnion;
 use mago_span::HasSpan;
@@ -92,6 +93,13 @@ impl Converter<'_, '_> {
         if let Some(extends) = &class.extends {
             self.edits.replace(extends.extends.span, ":");
             parents.extend(extends.types.iter());
+            // The checker warns on a deprecated parent, and a `.sharp` file holds no warning (spec section 27).
+            let deprecated =
+                metadata.direct_parent_class.and_then(|parent| self.input.codebase.get_class_like(parent.as_bytes()));
+            if let Some(parent) = deprecated.filter(|parent| parent.flags.is_deprecated()) {
+                let shown = parent.original_name.as_str_lossy().into_owned();
+                self.refuse(extends.extends.span, format!("`{shown}` is deprecated, and the PHP# checker warns on a class that extends it (spec section 27)"));
+            }
         }
         if let Some(implements) = &class.implements {
             match parents.last() {
@@ -408,6 +416,35 @@ impl Converter<'_, '_> {
                         .is_some_and(|parent| !parent.kind.is_interface())
                 })
             });
+            // An override takes at least what each method it replaces takes (spec section 22). PHP lets it take less,
+            // as a typed parameter in place of an untyped one, and a parameter's type here is the one it declares.
+            let replaced =
+                metadata.overridden_method_ids.get(&ascii_lowercase_word(name)).into_iter().flat_map(|parents| {
+                    parents.keys().filter_map(|parent| self.input.codebase.get_method(parent.as_bytes(), name))
+                });
+            let type_id = |parameter: Option<&mago_codex::metadata::parameter::FunctionLikeParameterMetadata>| {
+                parameter.map(|parameter| {
+                    parameter
+                        .get_type_metadata()
+                        .map_or_else(get_mixed, |declared| declared.type_union.clone())
+                        .get_id()
+                })
+            };
+            let narrower = replaced.flat_map(|parent| {
+                declared.parameters.iter().enumerate().filter(move |(index, parameter)| {
+                    let theirs = type_id(parent.parameters.get(*index));
+                    theirs.is_some() && theirs != type_id(Some(parameter))
+                })
+            });
+            if let Some((index, _)) = narrower.into_iter().next() {
+                let parameter = &method.parameter_list.parameters.as_slice()[index];
+                let shown = String::from_utf8_lossy(parameter.variable.name);
+                self.refuse(
+                    parameter.variable.span,
+                    format!("`{shown}` takes another type than the parameter of the method this one replaces, and a PHP# override takes at least what it replaces takes (spec section 22)"),
+                );
+                return;
+            }
             let opening = if overrides {
                 "override "
             } else if !class_is_final && !is_private && is_final.is_none() {

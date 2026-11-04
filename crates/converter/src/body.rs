@@ -721,12 +721,41 @@ impl<'input> Converter<'input, '_> {
     }
 
     /// The method `selector` names, written as its class declares it: PHP finds a method in any case, and PHP# only in
-    /// its own (spec section 25).
-    fn method_name(&mut self, selector: &ClassLikeMemberSelector<'_>, method: Option<&FunctionLikeMetadata>) {
-        if let (ClassLikeMemberSelector::Identifier(name), Some(method)) = (selector, method)
-            && name.value != method.original_name.as_bytes()
-        {
-            self.edits.replace(name.span, method.original_name.as_str_lossy().into_owned());
+    /// its own (spec section 25). A call of a method the object's class doesn't have, which PHP reaches through an
+    /// implementation or `__call`, is refused.
+    fn method_name(
+        &mut self,
+        object: &Expression<'_>,
+        selector: &ClassLikeMemberSelector<'_>,
+        method: Option<&FunctionLikeMetadata>,
+    ) {
+        let ClassLikeMemberSelector::Identifier(name) = selector else {
+            return;
+        };
+        match method {
+            Some(method) if name.value != method.original_name.as_bytes() => {
+                self.edits.replace(name.span, method.original_name.as_str_lossy().into_owned());
+            }
+            Some(_) => {}
+            None => {
+                let Some([TAtomic::Object(TObject::Named(class))]) =
+                    self.type_of(object).map(|union| union.types.as_ref())
+                else {
+                    return;
+                };
+                let codebase = self.input.codebase;
+                if codebase.get_class_like(class.name.as_bytes()).is_some()
+                    && codebase.get_declaring_method(class.name.as_bytes(), b"__call").is_none()
+                {
+                    let (method, class) = (String::from_utf8_lossy(name.value), class.name.as_str_lossy());
+                    self.refuse(
+                        name.span,
+                        format!(
+                            "`{class}` declares no method `{method}`, which PHP# calls only on a class that has it"
+                        ),
+                    );
+                }
+            }
         }
     }
 
@@ -767,7 +796,7 @@ impl<'input> Converter<'input, '_> {
                 self.edits.replace(call.arrow, ".");
                 self.member(&call.method);
                 let method = self.method_of(self.type_of(call.object), &call.method);
-                self.method_name(&call.method, method);
+                self.method_name(call.object, &call.method, method);
                 self.arguments(&call.argument_list, method);
             }
             Call::NullSafeMethod(call) => {
@@ -775,7 +804,7 @@ impl<'input> Converter<'input, '_> {
                 self.edits.replace(call.question_mark_arrow, "?.");
                 self.member(&call.method);
                 let method = self.method_of(self.type_of(call.object), &call.method);
-                self.method_name(&call.method, method);
+                self.method_name(call.object, &call.method, method);
                 self.arguments(&call.argument_list, method);
             }
             Call::StaticMethod(call) => {
