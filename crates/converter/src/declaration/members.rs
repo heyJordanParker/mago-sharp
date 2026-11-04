@@ -3,7 +3,9 @@
 
 use mago_codex::ttype::TType;
 use mago_codex::ttype::get_mixed;
+use mago_codex::ttype::union::TUnion;
 use mago_span::HasSpan;
+use mago_syntax::cst::ClassLikeConstant;
 use mago_syntax::cst::Method as MethodDeclaration;
 use mago_syntax::cst::MethodBody;
 use mago_syntax::cst::Modifier;
@@ -28,14 +30,7 @@ impl Converter<'_, '_> {
             return;
         };
         let metadata = class.metadata;
-        if let Some(span) = has(&property.modifiers, |modifier| matches!(modifier, Modifier::Static(_))) {
-            self.refuse(span, "a static property is not converted yet");
-            return;
-        }
-        if let Some(span) = has(&property.modifiers, |modifier| modifier.is_write_visibility()) {
-            self.refuse(span, "a property with a visibility of its own for `set` is not converted yet");
-            return;
-        }
+        let is_static = has(&property.modifiers, |modifier| matches!(modifier, Modifier::Static(_))).is_some();
         let visibility = match property.modifiers.iter().find(|modifier| modifier.is_read_visibility()) {
             Some(Modifier::Protected(_)) => "protected",
             Some(Modifier::Private(_)) => "private",
@@ -75,6 +70,15 @@ impl Converter<'_, '_> {
                 // PHP gives an untyped property null, which PHP# writes, since a member has no implicit value (spec
                 // section 6).
                 PropertyItem::Abstract(_) if property.hint.is_none() => " = null".to_owned(),
+                // A static holds a value of its type before any code reads it (spec section 6).
+                PropertyItem::Abstract(_) if is_static => {
+                    let name = String::from_utf8_lossy(variable.name);
+                    self.refuse(
+                        variable.span,
+                        format!("`{name}` is static and has no initial value: a PHP# static holds a value of its type before any code reads it (spec section 6)"),
+                    );
+                    continue;
+                }
                 PropertyItem::Abstract(_)
                     if self.class.as_ref().is_some_and(|class| {
                         class.set_by_constructor.iter().any(|set| set.as_slice() == variable.name)
@@ -109,11 +113,63 @@ impl Converter<'_, '_> {
             // only a property with accessors marked `override` does: a field replaces nothing (spec section 22).
             let overrides =
                 metadata.overridden_property_ids.get(&word(variable.name)).is_some_and(|parents| !parents.is_empty());
-            let accessors = accessors(visibility == "public" || overrides, is_readonly);
-            let opening = if overrides { "override " } else { "" };
+            let accessors = accessors(visibility == "public" || overrides, is_readonly, &property.modifiers);
+            let opening = match (is_static, overrides) {
+                (true, true) => "static override ",
+                (true, false) => "static ",
+                (false, true) => "override ",
+                (false, false) => "",
+            };
             // A property's accessors end it, unless an initial value follows them (spec section 6).
             let end = if accessors.is_empty() || !value.is_empty() { ";" } else { "" };
             declarations.push(format!("{attributes}{visibility} {opening}{written} {name}{accessors}{value}{end}"));
+        }
+
+        let indentation = self.indentation(span.start.offset);
+        self.edits.replace(span, declarations.join(&format!("\n{indentation}")));
+        self.docblock(span);
+    }
+
+    /// A class constant as `public const int LIMIT = 3;`, one declaration per name, with the type its declaration
+    /// writes or its value has (spec section 2). PHP's `final` goes, since a PHP# subclass declares no constant of its
+    /// parent's.
+    pub(super) fn class_constant(&mut self, constant: &ClassLikeConstant<'_>) {
+        let Some(class) = self.class.as_ref() else {
+            return;
+        };
+        let metadata = class.metadata;
+        let visibility = match constant.modifiers.iter().find(|modifier| modifier.is_read_visibility()) {
+            Some(Modifier::Protected(_)) => "protected",
+            Some(Modifier::Private(_)) => "private",
+            _ => "public",
+        };
+
+        self.attributes(&constant.attribute_lists);
+        let span = constant.span();
+        let start = constant.modifiers.first().map_or(constant.r#const.span, HasSpan::span).start.offset;
+        let attributes = self.edits.render(self.source, span.start.offset, start);
+        let mut declarations = Vec::new();
+        for item in constant.items.iter() {
+            let name = String::from_utf8_lossy(item.name.value).into_owned();
+            let declared = metadata.constants.get(&word(item.name.value));
+            let union = declared.and_then(|declared| {
+                declared
+                    .type_metadata
+                    .as_ref()
+                    .map(|metadata| metadata.type_union.clone())
+                    .or_else(|| declared.inferred_type.clone().map(TUnion::from_atomic))
+            });
+            let Some(mut union) = union else {
+                self.refuse(item.name.span, format!("the analysis gives the constant `{name}` no type"));
+                continue;
+            };
+            union.widen_literals();
+            let Some(written) = self.type_text(&union, item.name.span) else {
+                continue;
+            };
+            self.expression(item.value, Some(&union));
+            let value = self.render(item.value);
+            declarations.push(format!("{attributes}{visibility} const {written} {name} = {value};"));
         }
 
         let indentation = self.indentation(span.start.offset);
@@ -139,10 +195,8 @@ impl Converter<'_, '_> {
             self.refuse(ampersand, "a method that returns by reference has no PHP# form: PHP# has no references");
             return;
         }
-        if let Some(span) = has(&method.modifiers, |modifier| matches!(modifier, Modifier::Static(_))) {
-            self.refuse(span, "a static method is not converted yet");
-            return;
-        }
+        // A static method keeps `static`, and a subclass replaces it as it does an instance method, so it takes
+        // `virtual` and `override` after it (spec section 11).
         let is_constructor = name.eq_ignore_ascii_case(b"__construct");
         if name.starts_with(b"__") && !is_constructor {
             self.refuse(method.name.span, format!("the magic method `{shown}` is not converted yet"));

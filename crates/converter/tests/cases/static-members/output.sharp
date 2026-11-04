@@ -1,0 +1,33 @@
+namespace App;
+
+// Static methods and properties keep `static`, a class constant writes its type, and PHP's `private(set)` is the
+// `set` accessor's own visibility (spec sections 2, 6 and 11).
+public class Counter
+{
+    public const int LIMIT = 10;
+
+    private const string PREFIX = 'count';
+
+    private static int count = 0;
+
+    public int value { get; private set; } = 0;
+
+    public Counter(public string label { get; private set; })
+    {
+        Counter.count++;
+    }
+
+    public static virtual int made()
+    {
+        return Counter.count;
+    }
+
+    public virtual string step()
+    {
+        if (this.value < Counter.LIMIT) {
+            this.value++;
+        }
+
+        return Counter.PREFIX + ' ' + this.label;
+    }
+}

@@ -4,16 +4,16 @@ declare(strict_types=1);
 
 namespace App;
 
-// A later slice converts class constants, statics, a trait in the header, property hooks and a `set` of its own
-// visibility. `__invoke` waits for the language, and a property and a method of one name have no PHP# form (spec
-// section 14).
+// A later family converts a trait in the header and property hooks. A static needs an initial value, a constant's type
+// must be one PHP# writes, `__invoke` waits for the language, and a property and a method of one name have no PHP#
+// form (spec sections 6 and 14).
 final class Members
 {
     use Greets;
 
-    public const int LIMIT = 3;
+    public const LIMITS = ['low' => 3];
 
-    public static int $total = 0;
+    public static int $total;
 
     public string $label {
         get => 'label';

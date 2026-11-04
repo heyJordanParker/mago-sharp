@@ -1,8 +1,6 @@
 12:5: a trait a class uses is not converted yet: it joins the class's header
-14:5: a class constant is not converted yet
-16:12: a static property is not converted yet
+14:18: PHP# has no type `array{'low': int}`
+16:23: `$total` is static and has no initial value: a PHP# static holds a value of its type before any code reads it (spec section 6)
 18:5: a property with hooks is not converted yet: its hooks become accessors
-22:12: a property with a visibility of its own for `set` is not converted yet
-26:12: a static method is not converted yet
 31:21: the magic method `__invoke` is not converted yet
 36:21: `name` names a property and a method, and a PHP# class has one member of each name (spec section 14)

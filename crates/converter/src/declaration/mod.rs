@@ -32,13 +32,17 @@ const WRITTEN_TAGS: [&str; 10] = [
     "@psalm-return",
 ];
 
-/// The accessors PHP# writes after a property's name: none for a field, which is storage, and `get` alone for a
-/// `readonly` one (spec sections 6 and 13).
-fn accessors(is_public: bool, is_readonly: bool) -> &'static str {
-    match (is_public, is_readonly) {
-        (_, true) => " { get; }",
-        (true, false) => " { get; set; }",
-        (false, false) => "",
+/// The accessors PHP# writes after a property's name: none for a field, which is storage, `get` alone for a
+/// `readonly` one, and a `set` with the narrower visibility PHP's `private(set)` or `protected(set)` gives (spec
+/// sections 6 and 13).
+fn accessors(is_public: bool, is_readonly: bool, modifiers: &Sequence<'_, Modifier<'_>>) -> &'static str {
+    let set = modifiers.iter().find(|modifier| modifier.is_write_visibility());
+    match (is_public, is_readonly, set) {
+        (_, true, _) => " { get; }",
+        (_, false, Some(Modifier::PrivateSet(_))) => " { get; private set; }",
+        (_, false, Some(Modifier::ProtectedSet(_))) => " { get; protected set; }",
+        (true, false, _) => " { get; set; }",
+        (false, false, _) => "",
     }
 }
 

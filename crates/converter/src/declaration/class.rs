@@ -78,7 +78,7 @@ impl Converter<'_, '_> {
                         "a property with hooks is not converted yet: its hooks become accessors",
                     );
                 }
-                ClassLikeMember::Constant(_) => self.refuse(member.span(), "a class constant is not converted yet"),
+                ClassLikeMember::Constant(constant) => self.class_constant(constant),
                 ClassLikeMember::TraitUse(_) => {
                     self.refuse(
                         member.span(),

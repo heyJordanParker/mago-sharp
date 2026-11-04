@@ -65,9 +65,9 @@ impl Converter<'_, '_> {
         self.edits.replace(parameter.variable.span, Self::variable_name(parameter.variable.name));
 
         if promoted {
+            // PHP's `private(set)` is the `set` accessor's own visibility in PHP# (spec section 6).
             if let Some(span) = has(&parameter.modifiers, |modifier| modifier.is_write_visibility()) {
-                self.refuse(span, "a property with a visibility of its own for `set` is not converted yet");
-                return;
+                self.edits.delete(span.start.offset, self.skip_whitespace(span.end.offset));
             }
             let readonly = has(&parameter.modifiers, |modifier| matches!(modifier, Modifier::Readonly(_)));
             if let Some(readonly) = readonly {
@@ -81,7 +81,7 @@ impl Converter<'_, '_> {
                 self.edits.insert(first.span().start.offset, "public ");
             }
             let is_public = visibility.is_none_or(|modifier| matches!(modifier, Modifier::Public(_)));
-            let accessors = accessors(is_public, readonly.is_some());
+            let accessors = accessors(is_public, readonly.is_some(), &parameter.modifiers);
             if !accessors.is_empty() {
                 self.edits.insert(parameter.variable.span.end.offset, accessors);
             }
