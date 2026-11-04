@@ -1,0 +1,16 @@
+13:18: PHP's loose `==` is not converted yet
+14:9: `and` is removed: PHP# writes `&&` and `||` (spec section 21)
+15:18: `+` between `string` and `int` turns them into numbers PHP's way, which PHP# does only between numbers
+16:20: PHP's `/` of two `int`s gives a `float` when it doesn't divide evenly, and PHP#'s truncates (spec section 24)
+17:19: `%` between `float` and `int(2)` has PHP's meaning in PHP# only between `int`s (spec section 19)
+18:19: `&` between `bool` and `bool` has PHP's meaning in PHP# only between `int`s (spec section 19)
+19:18: `**` between `int` and `int` has PHP's meaning in PHP# only with a `float`, or an `int` power written as a number (spec section 24)
+20:19: `<` between `string` and `string('b')` compares PHP's way, which PHP# does only between numbers (spec section 19)
+21:28: `.` of `bool` shows it PHP's way, and a template shows only `int`, `float` and `string` that way (spec section 18)
+22:9: `.=` between `string` and `int` shows a value PHP's way, which is not converted yet: PHP# joins only strings with `+=`
+23:9: `++` and `--` on `non-empty-string` step PHP's way, which PHP# does only for a number
+24:21: a sign on `float|int|string` turns it into a number PHP's way, which PHP# does only for a number
+25:21: `~` on `float` has no PHP# form: `~` takes an `int`
+26:17: PHP's `1 === 1.0` is false, and PHP# compares an `int` with a `float` by value (spec section 12)
+27:18: PHP's `===` on arrays compares keys, order and types, and PHP#'s `==` on collections compares their elements (spec section 19)
+28:18: `===` between `float|int|string` and `int` is not converted yet

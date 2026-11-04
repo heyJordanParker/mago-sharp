@@ -24,3 +24,13 @@ mago-syntax = { workspace = true }
 mago-text-edit = { workspace = true }
 mago-word = { workspace = true }
 foldhash = { workspace = true }
+
+[dev-dependencies]
+libtest-mimic = { workspace = true }
+mago-prelude = { workspace = true, features = ["build"] }
+mago-server = { workspace = true }
+
+# Each fixture pair of tests/cases is a test of its own, named after its folder.
+[[test]]
+name = "cases"
+harness = false

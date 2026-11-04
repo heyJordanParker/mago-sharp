@@ -1,0 +1,1 @@
+12:1: a file-level statement or function has no PHP# form: a .sharp file declares one type (spec section 27)

@@ -1,0 +1,1 @@
+12:9: a `static` local is not converted yet: its PHP# form is a private static field (spec section 6)

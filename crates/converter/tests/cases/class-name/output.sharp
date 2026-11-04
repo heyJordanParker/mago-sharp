@@ -1,0 +1,35 @@
+namespace App;
+
+import Lib.Pdf as Doc;
+import Lib.Mail.Message;
+import Lib.Chat.Message as ChatMessage;
+
+// A class prints by the name the file reaches it by: its import, its short name in the file's namespace, bare as a
+// root class of `Builtins.sharp`, or a new import, renamed when its short name is taken (spec section 23).
+public final class Mailer
+{
+    public Doc document()
+    {
+        return new Doc();
+    }
+
+    public Message message()
+    {
+        return new Message();
+    }
+
+    public ChatMessage chat()
+    {
+        return new ChatMessage();
+    }
+
+    public Draft draft()
+    {
+        return new Draft();
+    }
+
+    public RuntimeException failure()
+    {
+        return new UnexpectedValueException('no');
+    }
+}

@@ -1,0 +1,1 @@
+8:1: a trait has no PHP# form: PHP# declares no traits (spec section 22)

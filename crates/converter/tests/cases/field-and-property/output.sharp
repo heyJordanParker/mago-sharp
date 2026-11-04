@@ -1,0 +1,25 @@
+namespace App;
+
+// A private or protected property is a field, and a public one a property with accessors (spec section 6).
+public final class Account
+{
+    private int count = 0;
+
+    protected string label = 'none';
+
+    public string name { get; set; } = '';
+
+    public int id { get; }
+
+    private Any? loose = null;
+
+    public int first { get; set; } = 1;
+    public int second { get; set; } = 2;
+
+    private float rate = 1.0;
+
+    public Account(int id)
+    {
+        this.id = id;
+    }
+}

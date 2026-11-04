@@ -1,0 +1,2 @@
+8:1: an abstract class is not converted yet
+8:10: a `readonly` class is not converted yet: each of its properties becomes `{ get; }`

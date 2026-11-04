@@ -1,0 +1,4 @@
+13:13: a condition of `string` reads PHP's truthiness, which is not converted yet: a PHP# condition is a `bool`
+22:16: a condition of `string` reads PHP's truthiness, which is not converted yet: a PHP# condition is a `bool`
+27:16: `&&` between `bool` and `App\Truthy|null` reads PHP's truthiness, which is not converted yet
+32:16: `!` on `int` reads PHP's truthiness, which is not converted yet: `!` takes a `bool`
