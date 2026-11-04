@@ -351,18 +351,8 @@ impl<'input> Converter<'input, '_> {
             Expression::Match(r#match) => self.match_expression(r#match, false),
             Expression::Clone(clone) => self.clone(expression, clone.object),
             Expression::List(_) => self.refuse(expression.span(), "destructuring is not converted yet"),
-            Expression::CompositeString(_) => {
-                self.refuse(
-                    expression.span(),
-                    "an interpolated string or a heredoc is not converted yet: it becomes a template",
-                );
-            }
-            Expression::MagicConstant(_) => {
-                self.refuse(
-                    expression.span(),
-                    "a magic constant is not converted yet: `Position` replaces it (spec section 27)",
-                );
-            }
+            Expression::CompositeString(string) => self.template(expression, string),
+            Expression::MagicConstant(constant) => self.magic_constant(constant),
             Expression::AnonymousClass(_) => {
                 self.refuse(expression.span(), "an anonymous class has no PHP# form: no type nests in another");
             }

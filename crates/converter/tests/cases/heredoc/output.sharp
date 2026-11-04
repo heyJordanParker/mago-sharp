@@ -1,0 +1,14 @@
+namespace App;
+
+// A heredoc and a nowdoc are templates, without the closing label's indentation and the line break before it (spec
+// section 18).
+public final class Page
+{
+    public string render(string title)
+    {
+        const raw = `cost: \$5 \`code\``;
+
+        return `<h1>${title}</h1>
+  <p>${raw}</p>`;
+    }
+}

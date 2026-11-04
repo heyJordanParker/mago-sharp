@@ -1,0 +1,13 @@
+namespace App;
+
+// An interpolated string is a template, which shows an `int`, a `float` and a `string` as PHP does (spec section 18).
+public final class Greeter
+{
+    public string greet(string name, int count, float share)
+    {
+        const first = `Hi ${name}, you have ${count} items`;
+        const second = `Share ${share} of \$5`;
+
+        return first + second;
+    }
+}

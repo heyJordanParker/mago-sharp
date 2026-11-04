@@ -7,6 +7,7 @@ namespace Runner;
 use Proof\Box;
 use Proof\Factory;
 use Proof\Shop\Crate;
+use Proof\Shop\Label;
 use Proof\Shop\Note;
 use Proof\Shop\Order;
 use Proof\Shop\Pair;
@@ -63,6 +64,9 @@ $tally = new Tally();
 $plusThree = $tally->adder(3);
 echo $tally->sum(2, 5, 10), ' ', $plusThree(4), ' ', $tally->halved(10), "\n";
 echo $tally->counted([3]), ' ', $tally->made(Pair::class), ' ', $tally->priced(['price' => 4, 'count' => 3]), "\n";
+
+$label = new Label();
+echo $label->render('shelf', 3), "\n", $label->folder(), "\n";
 
 $cat = new Cat('tom');
 $bird = new Bird('tweety');

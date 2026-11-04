@@ -8,6 +8,7 @@ use mago_syntax::cst::ClassLikeConstantSelector;
 use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::ConstantAccess;
 use mago_syntax::cst::Expression;
+use mago_syntax::cst::MagicConstant;
 use mago_syntax::cst::Variable;
 
 use crate::Converter;
@@ -35,6 +36,24 @@ impl Converter<'_, '_> {
             return;
         };
         self.edits.replace(expression.span(), text);
+    }
+
+    /// `__DIR__`, `__FILE__` and `__LINE__` as what `Position.current()` gives (spec section 27). PHP's other magic
+    /// constants name a function, a class or a namespace PHP's way, which `Position` doesn't.
+    pub(super) fn magic_constant(&mut self, constant: &MagicConstant<'_>) {
+        let member = match constant {
+            MagicConstant::Directory(_) => "directory",
+            MagicConstant::File(_) => "file",
+            MagicConstant::Line(_) => "line",
+            _ => {
+                let shown = String::from_utf8_lossy(self.text(constant.span())).into_owned();
+                return self.refuse(
+                    constant.span(),
+                    format!("`{shown}` has no PHP# form: `Position` gives a file, a directory, a line, a column and a dotted function name (spec section 27)"),
+                );
+            }
+        };
+        self.edits.replace(constant.span(), format!("Position.current().{member}"));
     }
 
     /// `name`, a library's function or constant declared at `declared`, read through its namespace: its own, or the
