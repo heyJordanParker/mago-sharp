@@ -7,12 +7,14 @@ mod builtins;
 mod calls;
 mod collections;
 mod conditions;
+mod lambdas;
 mod locals;
 mod loops;
 mod matching;
 mod operators;
 mod strings;
 
+pub(crate) use locals::Captures;
 pub(crate) use locals::Locals;
 
 use mago_codex::ttype::SharpType;
@@ -332,7 +334,8 @@ impl<'input> Converter<'input, '_> {
                 self.expression(conditional.r#else, expected);
             }
             Expression::Throw(throw) => self.expression(throw.exception, None),
-            Expression::Closure(_) | Expression::ArrowFunction(_) | Expression::PartialApplication(_) => {
+            Expression::Closure(_) | Expression::ArrowFunction(_) => self.lambda(expression),
+            Expression::PartialApplication(_) => {
                 self.refuse(expression.span(), "a function as a value is not converted yet");
             }
             Expression::Match(r#match) => self.match_expression(r#match, false),

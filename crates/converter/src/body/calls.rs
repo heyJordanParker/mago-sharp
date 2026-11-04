@@ -185,12 +185,33 @@ impl<'input> Converter<'input, '_> {
         })
     }
 
+    /// A call of a function value, `f(x)`, as PHP writes it (spec section 14.1). PHP also calls a string or an array
+    /// that names a function, which PHP# doesn't.
+    fn value_call(&mut self, call: &FunctionCall<'_>) {
+        let is_function = self.type_of(call.function).is_some_and(|union| {
+            union.types.iter().all(|atomic| match atomic {
+                TAtomic::Callable(_) => true,
+                TAtomic::Object(TObject::Named(object)) => object.name.as_bytes().eq_ignore_ascii_case(b"closure"),
+                _ => false,
+            })
+        });
+        if !is_function {
+            let shown = self.shown(call.function);
+            return self.refuse(
+                call.span(),
+                format!("a call of `{shown}` has no PHP# form: PHP# calls a function value only (spec section 14.1)"),
+            );
+        }
+        self.expression(call.function, None);
+        self.arguments(&call.argument_list, None);
+    }
+
     /// A bare PHP function call: a library's function through its namespace, a type test as `is`, or a refusal that
     /// names the function.
     fn function_call(&mut self, call: &FunctionCall<'_>) {
         let span = call.span();
         let Expression::Identifier(identifier) = call.function else {
-            return self.refuse(span, "a call of a value is not converted yet");
+            return self.value_call(call);
         };
         let Some(function) = self.function_of(identifier) else {
             return self.refuse(span, "the analysis holds no function this call runs");

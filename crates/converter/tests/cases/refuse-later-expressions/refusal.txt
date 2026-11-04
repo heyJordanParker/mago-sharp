@@ -1,4 +1,3 @@
-13:19: a function as a value is not converted yet
 19:9: destructuring is not converted yet
 20:21: an interpolated string or a heredoc is not converted yet: it becomes a template
 21:17: a magic constant is not converted yet: `Position` replaces it (spec section 27)

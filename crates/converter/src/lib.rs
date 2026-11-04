@@ -27,6 +27,7 @@ use mago_syntax::cst::UseItem;
 use mago_syntax::cst::UseItems;
 use mago_syntax::token::is_sharp_keyword;
 
+use crate::body::Captures;
 use crate::body::Locals;
 use crate::edits::Edits;
 use crate::types::Imports;
@@ -78,6 +79,8 @@ pub fn convert(input: &Input<'_, '_>) -> Result<Vec<u8>, Vec<Refusal>> {
     };
     converter.program();
     if !converter.refusals.is_empty() {
+        // A method's locals and captures are refused once its body is read, so the refusals go in the file's order.
+        converter.refusals.sort_by_key(|refusal| refusal.span.start.offset);
         return Err(converter.refusals);
     }
 
@@ -132,6 +135,8 @@ struct Method {
     /// The name, without `$`, of the property whose accessor this is, whose `$this->name` is the accessor's hidden
     /// storage `field` (spec section 6).
     storage: Option<Vec<u8>>,
+    /// What the lambda whose body this is captures, or `None` in a method or an accessor (spec section 14.2).
+    captures: Option<Captures>,
 }
 
 struct Converter<'input, 'arena> {

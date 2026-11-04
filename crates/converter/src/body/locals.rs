@@ -41,6 +41,35 @@ pub(crate) struct Locals {
     pub(super) blocks: Vec<Span>,
     /// Every block in braces the body has, where a local read after the block that assigns it is declared.
     pub(super) scopes: Vec<Span>,
+    /// Each variable a lambda captures by value, with where. PHP's lambda keeps the value the variable had, and a
+    /// PHP# lambda reads the variable itself, so nothing may write it after its declaration (spec section 14.2).
+    copied: Vec<(Vec<u8>, Span)>,
+    /// Each parameter the body writes.
+    written_parameters: Vec<Vec<u8>>,
+}
+
+/// What a lambda captures from the body around it (spec section 14.2).
+#[derive(Debug)]
+pub(crate) struct Captures {
+    /// Whether the lambda captures each name it reads that isn't its parameter, as an arrow function does, or only
+    /// the names its `use` lists.
+    pub(super) every_name: bool,
+    pub(super) names: Vec<Capture>,
+}
+
+#[derive(Debug)]
+pub(super) struct Capture {
+    /// The variable's PHP name.
+    pub(super) name: Vec<u8>,
+    /// Where the lambda names it first.
+    pub(super) at: Span,
+    pub(super) by_reference: bool,
+    /// Whether the lambda writes it.
+    pub(super) written: bool,
+    /// Whether a lambda inside this one captures it by value.
+    pub(super) copied: bool,
+    /// The analysis's type of it where the lambda names it.
+    pub(super) union: Option<TUnion>,
 }
 
 #[derive(Debug)]
@@ -213,23 +242,70 @@ impl Converter<'_, '_> {
         true
     }
 
-    /// Whether `name` is a local of the method being converted: no parameter, no `catch` variable and not `$this`.
+    /// Whether `name` is a local of the method being converted: no parameter, no `catch` variable, no variable a
+    /// lambda captures and not `$this`.
     fn is_local(&self, name: &[u8]) -> bool {
         name != b"$this"
-            && self.method.as_ref().is_some_and(|method| !method.parameters.iter().any(|parameter| parameter == name))
+            && self.method.as_ref().is_some_and(|method| {
+                !method.parameters.iter().any(|parameter| parameter == name)
+                    && method.captures.as_ref().is_none_or(|captures| {
+                        !captures.every_name && !captures.names.iter().any(|capture| capture.name == name)
+                    })
+            })
     }
 
     /// Records that the body names the local `variable` here, writing it when `write` says so.
     fn local(&mut self, variable: &DirectVariable<'_>, write: bool) {
-        if !self.is_local(variable.name) {
+        let artifacts = self.input.artifacts;
+        self.named(variable.name, variable.span, write, false, || artifacts.get_expression_type(variable).cloned());
+    }
+
+    /// Records a variable a lambda captures, `capture`, in the body around the lambda, where the lambda is made.
+    pub(super) fn captured(&mut self, capture: Capture) {
+        let copied = !capture.by_reference || capture.copied;
+        self.named(&capture.name, capture.at, capture.written, copied, || capture.union);
+    }
+
+    /// Records that the body names the variable `name` at `span`, writing it when `write` says so, and that a lambda
+    /// captures it by value when `copied` says so. `union` gives the analysis's type of it there.
+    fn named(&mut self, name: &[u8], span: Span, write: bool, copied: bool, union: impl FnOnce() -> Option<TUnion>) {
+        if name == b"$this" {
             return;
         }
-        let span = variable.span;
-        let artifacts = self.input.artifacts;
         let Some(method) = self.method.as_mut() else {
             return;
         };
-        match method.locals.entries.iter_mut().rev().find(|(name, _)| name.as_slice() == variable.name) {
+        let is_parameter = method.parameters.iter().any(|parameter| parameter == name);
+        if let Some(captures) = method.captures.as_mut()
+            && !is_parameter
+        {
+            if let Some(capture) = captures.names.iter_mut().find(|capture| capture.name == name) {
+                capture.written |= write;
+                capture.copied |= copied;
+                return;
+            }
+            if captures.every_name {
+                captures.names.push(Capture {
+                    name: name.to_vec(),
+                    at: span,
+                    by_reference: false,
+                    written: write,
+                    copied,
+                    union: union(),
+                });
+                return;
+            }
+        }
+        if copied {
+            method.locals.copied.push((name.to_vec(), span));
+        }
+        if is_parameter {
+            if write {
+                method.locals.written_parameters.push(name.to_vec());
+            }
+            return;
+        }
+        match method.locals.entries.iter_mut().rev().find(|(local, _)| local.as_slice() == name) {
             Some((_, local)) => {
                 local.rewritten |= write;
                 local.last = span;
@@ -238,11 +314,11 @@ impl Converter<'_, '_> {
                     && !(declaration.block.start.offset <= span.start.offset
                         && span.end.offset <= declaration.block.end.offset)
                 {
-                    local.escapes = Some((span, artifacts.get_expression_type(variable).cloned()));
+                    local.escapes = Some((span, union()));
                 }
             }
             None => method.locals.entries.push((
-                variable.name.to_vec(),
+                name.to_vec(),
                 Local { first: span, last: span, declaration: None, rewritten: write, escapes: None },
             )),
         }
@@ -260,6 +336,19 @@ impl Converter<'_, '_> {
         };
         let locals = std::mem::take(&mut method.locals.entries);
         let scopes = std::mem::take(&mut method.locals.scopes);
+        let copied = std::mem::take(&mut method.locals.copied);
+        let written_parameters = std::mem::take(&mut method.locals.written_parameters);
+        for (name, at) in copied {
+            let rewritten = written_parameters.contains(&name)
+                || locals.iter().any(|(local, entry)| *local == name && entry.rewritten);
+            if rewritten {
+                let shown = String::from_utf8_lossy(&name);
+                self.refuse(
+                    at,
+                    format!("`{shown}` is captured by value and written after its declaration: PHP's lambda keeps the value it had, and a PHP# lambda reads the variable itself (spec section 14.2)"),
+                );
+            }
+        }
         let mut hoisted: Vec<(Vec<u8>, Span)> = Vec::new();
         for (name, local) in &locals {
             let (Some(declaration), Some((span, Some(escaping)))) = (&local.declaration, &local.escapes) else {

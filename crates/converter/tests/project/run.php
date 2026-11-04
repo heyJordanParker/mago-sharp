@@ -12,6 +12,7 @@ use Proof\Shop\Order;
 use Proof\Shop\Pair;
 use Proof\Shop\Shelf;
 use Proof\Shop\Tagged;
+use Proof\Shop\Tally;
 use Proof\Spec;
 use Proof\Special;
 use Proof\Zoo\Bird;
@@ -57,6 +58,10 @@ echo $note->describe('hi'), ' / ', $note->describe(5), "\n";
 
 echo (new Factory())->make()->get()->label(), "\n";
 echo (new Pair())->both(), "\n";
+
+$tally = new Tally();
+$plusThree = $tally->adder(3);
+echo $tally->sum(2, 5, 10), ' ', $plusThree(4), "\n";
 
 $cat = new Cat('tom');
 $bird = new Bird('tweety');

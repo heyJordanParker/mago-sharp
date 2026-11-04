@@ -193,6 +193,7 @@ impl Converter<'_, '_> {
             locals: Locals::default(),
             super_call: None,
             storage: Some(variable.name[1..].to_vec()),
+            captures: None,
         });
         match body {
             PropertyHookConcreteBody::Block(block) => self.block(block),
@@ -521,6 +522,7 @@ impl Converter<'_, '_> {
                     locals: Locals::default(),
                     super_call: None,
                     storage: None,
+                    captures: None,
                 });
                 if is_constructor && let Some(parent) = metadata.direct_parent_class {
                     self.super_call(method, block, parent.as_bytes());

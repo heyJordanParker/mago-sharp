@@ -2,4 +2,4 @@
 16:25: PHP# has no type `array-key`
 20:21: PHP# has no type `array-key`, which `array<array-key, mixed>` holds
 25:49: the intersection type `Countable&Stringable` is not converted yet
-29:35: the type `(callable(...mixed=): mixed)` is not converted yet
+29:35: `(callable(...mixed=): mixed)` takes a parameter by reference, a variadic one or an optional one, and a PHP# function type lists plain parameters (spec section 14.1)

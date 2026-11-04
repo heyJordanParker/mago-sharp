@@ -183,9 +183,44 @@ fn atomic_text(atomic: &TAtomic, codebase: &CodebaseMetadata, imports: &mut Impo
         SharpType::ClassValue(TClassLikeString::OfType { constraint, .. }) => {
             format!("Class<{}>", held(constraint, atomic, codebase, imports)?)
         }
-        SharpType::ClassValue(_) | SharpType::Tuple(_) | SharpType::Function(_) => {
-            return Err(format!("the type `{}` is not converted yet", atomic.get_id()));
+        // `Function<R(P)>` (spec section 14.1), whose parameters are plain: PHP# passes every argument by value.
+        SharpType::Function(signature) => {
+            let parameters = signature.get_parameters();
+            if parameters
+                .iter()
+                .any(|parameter| parameter.is_by_reference() || parameter.is_variadic() || parameter.has_default())
+            {
+                return Err(format!(
+                    "`{}` takes a parameter by reference, a variadic one or an optional one, and a PHP# function type lists plain parameters (spec section 14.1)",
+                    atomic.get_id()
+                ));
+            }
+            let mut written = Vec::with_capacity(parameters.len());
+            for parameter in parameters {
+                written.push(match parameter.get_type_signature() {
+                    Some(declared) => held(declared, atomic, codebase, imports)?,
+                    None => "Any?".to_owned(),
+                });
+            }
+            let returned = match signature.get_return_type() {
+                Some(returned) => held(returned, atomic, codebase, imports)?,
+                None => "Any?".to_owned(),
+            };
+            format!("Function<{returned}({})>", written.join(", "))
         }
+        // `[Money total, int count]`, each element's name optional (spec section 30).
+        SharpType::Tuple(list) => {
+            let mut written = Vec::new();
+            for (element, name) in list.tuple_elements().unwrap_or_default() {
+                let text = held(element, atomic, codebase, imports)?;
+                written.push(match name {
+                    Some(name) => format!("{text} {name}"),
+                    None => text,
+                });
+            }
+            format!("[{}]", written.join(", "))
+        }
+        SharpType::ClassValue(_) => return Err(format!("the type `{}` is not converted yet", atomic.get_id())),
     })
 }
 
