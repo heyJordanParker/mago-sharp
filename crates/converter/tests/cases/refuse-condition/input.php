@@ -4,31 +4,32 @@ declare(strict_types=1);
 
 namespace App;
 
-// A condition that is no `bool` reads PHP's truthiness, which a later slice writes as the comparison its type gives
-// (spec section 21).
-final class Truthy
+// PHP's truthiness has no PHP# test for an object that is never null or a value of no known type, and a test of
+// several parts is written only for a local, which reads one value (spec section 21).
+final class Untested
 {
-    public function named(string $name): string
-    {
-        if ($name) {
-            return $name;
-        }
+    private string $name = '';
 
-        return 'blank';
+    /** @var list<int> */
+    private array $counts = [];
+
+    public function always(Untested $other): bool
+    {
+        return !$other;
     }
 
-    public function shown(string $name): string
+    public function unknown(mixed $value): bool
     {
-        return $name ? 'named' : 'blank';
+        return $value ? true : false;
     }
 
-    public function both(?Truthy $other, bool $flag): bool
+    public function twice(): bool
     {
-        return $flag && $other;
+        return $this->name && true;
     }
 
-    public function none(int $count): bool
+    public function index(): bool
     {
-        return !$count;
+        return isset($this->counts[0]);
     }
 }

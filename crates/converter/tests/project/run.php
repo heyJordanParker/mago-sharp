@@ -36,6 +36,7 @@ echo $shelf->size(), ' ', count($shelf->all()), ' ', implode(',', array_keys($sh
 foreach ($shelf->all() as $item) {
     echo $item->label(), "\n";
 }
+echo $shelf->report(), "\n";
 
 $order = new Order($spec, 'R-1');
 $order->add(2);

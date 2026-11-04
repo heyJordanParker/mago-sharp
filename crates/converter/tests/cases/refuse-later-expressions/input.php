@@ -4,8 +4,8 @@ declare(strict_types=1);
 
 namespace App;
 
-// Functions as values, `match`, `clone`, destructuring, interpolation, magic constants, `isset` and `empty`, `new` of a
-// class value, spreads and generators wait for later slices.
+// Functions as values, `clone`, destructuring, interpolation, magic constants, `print`, `new` of a class value,
+// spreads and generators wait for later families, while the `match` beside them converts.
 final class Later
 {
     public function run(string $name, Later $other, int $count): mixed
@@ -19,12 +19,12 @@ final class Later
         [$first, $second] = [1, 2];
         $greeting = "Hello $name";
         $file = __FILE__;
-        $known = isset($this->missing);
+        $printed = print $name;
         $made = new $name();
         $joined = $this->join(...[$name]);
         $all = [...[$name]];
 
-        return [$double, $size, $copy, $first, $second, $greeting, $file, $known, $made, $joined, $all];
+        return [$double, $size, $copy, $first, $second, $greeting, $file, $printed, $made, $joined, $all];
     }
 
     public function join(string ...$names): string

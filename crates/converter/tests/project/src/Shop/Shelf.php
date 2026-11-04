@@ -58,4 +58,31 @@ class Shelf
     {
         return $this->count;
     }
+
+    /**
+     * Conditions, loops, `isset`, `match` and a local read after the block that assigns it.
+     *
+     * @return string
+     */
+    public function report()
+    {
+        $lines = 0;
+        $text = '';
+        foreach ($this->byNumber as $number => $item) {
+            if (!isset($this->byNumber[$number + 1])) $text = $text . $item->label() . ';';
+            $lines++;
+        }
+        if ($lines > 1) {
+            $kind = 'many';
+        } else {
+            $kind = 'few';
+        }
+        $size = match ($this->count) {
+            0 => 'empty',
+            1, 2 => 'small',
+            default => 'large',
+        };
+
+        return $text . ' ' . $kind . ' ' . $size . ($this->items ? ' stocked' : ' bare');
+    }
 }

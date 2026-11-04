@@ -334,9 +334,8 @@ impl<'input> Converter<'input, '_> {
             return;
         };
         let reason = match construct {
-            mago_syntax::cst::Construct::Isset(_) | mago_syntax::cst::Construct::Empty(_) => {
-                "`isset` and `empty` are not converted yet"
-            }
+            mago_syntax::cst::Construct::Isset(isset) => return self.isset(expression, isset, false),
+            mago_syntax::cst::Construct::Empty(empty) => return self.empty(expression, empty, false),
             mago_syntax::cst::Construct::Print(_) => {
                 "`print` is removed: output goes through `Console`, which a class receives through its constructor (spec section 8)"
             }

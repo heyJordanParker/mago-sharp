@@ -1,0 +1,29 @@
+namespace App;
+
+// A local assigned in a block and read after it is declared before the block, as `T? name = null;`, and each
+// assignment of it writes it (spec section 3).
+public final class Pricing
+{
+    public int price(bool member)
+    {
+        int? price = null;
+        if (member) {
+            price = 10;
+        } else {
+            price = 20;
+        }
+
+        return price;
+    }
+
+    public string label(int count)
+    {
+        let suffix = '';
+        if (count > 1) {
+            const plural = 's';
+            suffix = plural;
+        }
+
+        return 'item' + suffix;
+    }
+}

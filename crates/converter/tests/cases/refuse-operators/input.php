@@ -10,8 +10,8 @@ final class Operators
     /** @param list<int> $list */
     public function run(string $text, int $count, float $rate, bool $flag, array $list): void
     {
-        $loose = $text == 'a';
-        $low = $flag and $flag;
+        $loose = $text == '1';
+        $low = ($count xor $flag);
         $added = $text + $count;
         $divided = $count / 2;
         $modulo = $rate % 2;

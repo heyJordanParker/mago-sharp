@@ -36,20 +36,24 @@ const SUPERGLOBALS: [&[u8]; 9] =
 #[derive(Debug, Default)]
 pub(crate) struct Locals {
     /// Each local, in the order the body first names it, by its PHP name.
-    locals: Vec<(Vec<u8>, Local)>,
+    entries: Vec<(Vec<u8>, Local)>,
     /// The block the conversion is in, innermost last.
     pub(super) blocks: Vec<Span>,
+    /// Every block in braces the body has, where a local read after the block that assigns it is declared.
+    pub(super) scopes: Vec<Span>,
 }
 
 #[derive(Debug)]
 struct Local {
     /// The first place the body names it.
     first: Span,
+    /// The last place the body names it.
+    last: Span,
     declaration: Option<Declaration>,
     /// Whether something writes it after its declaration.
     rewritten: bool,
-    /// A place that names it outside the block that declares it.
-    escapes: Option<Span>,
+    /// A place that names it outside the block that declares it, and the analysis's type of it there.
+    escapes: Option<(Span, Option<TUnion>)>,
 }
 
 #[derive(Debug)]
@@ -60,6 +64,9 @@ struct Declaration {
     block: Span,
     /// The type a `@var` tag declares for it.
     written: Option<String>,
+    /// Whether an assignment statement declares it, which can become a plain write of a local declared earlier. A
+    /// loop's variable can't.
+    hoistable: bool,
 }
 
 impl Converter<'_, '_> {
@@ -77,10 +84,7 @@ impl Converter<'_, '_> {
         if !operator.is_assign() || !self.is_local(variable.name) {
             return false;
         }
-        let Some(method) = self.method.as_ref() else {
-            return false;
-        };
-        if method.locals.locals.iter().any(|(name, _)| name.as_slice() == variable.name) {
+        if self.method.is_none() || self.in_scope(variable.name, variable.span.start.offset) {
             return false;
         }
 
@@ -116,10 +120,17 @@ impl Converter<'_, '_> {
             at: variable.span.start.offset,
             block: block.unwrap_or(statement.span()),
             written: written.as_ref().map(|(text, _)| text.clone()),
+            hoistable: matches!(statement, Statement::Expression(_)),
         };
-        method.locals.locals.push((
+        method.locals.entries.push((
             variable.name.to_vec(),
-            Local { first: variable.span, declaration: Some(declaration), rewritten: false, escapes: None },
+            Local {
+                first: variable.span,
+                last: variable.span,
+                declaration: Some(declaration),
+                rewritten: false,
+                escapes: None,
+            },
         ));
         self.edits.replace(variable.span, Self::variable_name(variable.name));
         let expected = written.map(|(_, union)| union);
@@ -159,6 +170,49 @@ impl Converter<'_, '_> {
         })
     }
 
+    /// Whether a local named `name` is in scope at `offset`: declared by a block around it, or named with no
+    /// declaration. A write to one out of scope declares it again, as a later loop's variable of the same name does.
+    fn in_scope(&self, name: &[u8], offset: u32) -> bool {
+        self.method.as_ref().is_some_and(|method| {
+            method.locals.entries.iter().rev().find(|(local, _)| local.as_slice() == name).is_some_and(|(_, local)| {
+                local.declaration.as_ref().is_none_or(|declaration| {
+                    declaration.block.start.offset <= offset && offset <= declaration.block.end.offset
+                })
+            })
+        })
+    }
+
+    /// Declares `variable`, a loop's own, at `at` and scoped to `scope`, the loop, and gives whether it could. A PHP#
+    /// loop declares its variables, so one a block around the loop already names is refused (spec section 17).
+    pub(super) fn loop_local(&mut self, variable: &DirectVariable<'_>, at: u32, scope: Span) -> bool {
+        if !self.is_local(variable.name) || self.in_scope(variable.name, variable.span.start.offset) {
+            let name = String::from_utf8_lossy(variable.name);
+            self.refuse(
+                variable.span,
+                format!(
+                    "`{name}` is named before the loop, and a PHP# loop declares its own variables (spec section 17)"
+                ),
+            );
+            return false;
+        }
+        let Some(method) = self.method.as_mut() else {
+            return false;
+        };
+        let declaration = Declaration { at, block: scope, written: None, hoistable: false };
+        method.locals.entries.push((
+            variable.name.to_vec(),
+            Local {
+                first: variable.span,
+                last: variable.span,
+                declaration: Some(declaration),
+                rewritten: false,
+                escapes: None,
+            },
+        ));
+
+        true
+    }
+
     /// Whether `name` is a local of the method being converted: no parameter, no `catch` variable and not `$this`.
     fn is_local(&self, name: &[u8]) -> bool {
         name != b"$this"
@@ -171,47 +225,91 @@ impl Converter<'_, '_> {
             return;
         }
         let span = variable.span;
+        let artifacts = self.input.artifacts;
         let Some(method) = self.method.as_mut() else {
             return;
         };
-        match method.locals.locals.iter_mut().find(|(name, _)| name.as_slice() == variable.name) {
+        match method.locals.entries.iter_mut().rev().find(|(name, _)| name.as_slice() == variable.name) {
             Some((_, local)) => {
                 local.rewritten |= write;
+                local.last = span;
                 if let Some(declaration) = &local.declaration
                     && local.escapes.is_none()
                     && !(declaration.block.start.offset <= span.start.offset
                         && span.end.offset <= declaration.block.end.offset)
                 {
-                    local.escapes = Some(span);
+                    local.escapes = Some((span, artifacts.get_expression_type(variable).cloned()));
                 }
             }
-            None => method.locals.locals.push((
+            None => method.locals.entries.push((
                 variable.name.to_vec(),
-                Local { first: span, declaration: None, rewritten: write, escapes: None },
+                Local { first: span, last: span, declaration: None, rewritten: write, escapes: None },
             )),
         }
     }
 
     /// Writes each local's declaration at its first assignment, once the method's body is converted and every write
-    /// to it is known.
+    /// to it is known. A loop declares its key and value at one place, which takes `let` when either is written.
+    ///
+    /// A local read after the block that assigns it is declared first in the innermost block around both, as `T? name
+    /// = null;`, with the analysis's type of it where it escapes (spec section 3). PHP has one variable of a name in a
+    /// method, so each assignment of the name in that block then writes it.
     pub(crate) fn declare_locals(&mut self) {
         let Some(method) = self.method.as_mut() else {
             return;
         };
-        let locals = std::mem::take(&mut method.locals.locals);
+        let locals = std::mem::take(&mut method.locals.entries);
+        let scopes = std::mem::take(&mut method.locals.scopes);
+        let mut hoisted: Vec<(Vec<u8>, Span)> = Vec::new();
+        for (name, local) in &locals {
+            let (Some(declaration), Some((span, Some(escaping)))) = (&local.declaration, &local.escapes) else {
+                continue;
+            };
+            let container = scopes
+                .iter()
+                .filter(|scope| scope.start.offset < declaration.at && local.last.end.offset <= scope.end.offset)
+                .min_by_key(|scope| scope.end.offset - scope.start.offset);
+            let Some(&container) = container.filter(|_| declaration.hoistable) else {
+                continue;
+            };
+            if hoisted.iter().any(|(hoisted, scope)| hoisted == name && *scope == container) {
+                continue;
+            }
+            let mut union = escaping.clone();
+            union.widen_scalars();
+            let Some(written) = self.type_text(&union.as_nullable(), *span) else {
+                continue;
+            };
+            let first = self.skip_whitespace(container.start.offset + 1);
+            let indentation = self.indentation(first);
+            self.edits.insert(first, format!("{written} {} = null;\n{indentation}", Self::variable_name(name)));
+            hoisted.push((name.clone(), container));
+        }
+
+        let mut keywords: std::collections::BTreeMap<u32, String> = std::collections::BTreeMap::new();
         for (name, local) in locals {
-            let name = String::from_utf8_lossy(&name);
+            let shown = String::from_utf8_lossy(&name);
             let Some(declaration) = local.declaration else {
                 self.refuse(
                     local.first,
-                    format!("`{name}` is first named here, outside an assignment of its own, which is not converted yet: a PHP# local is declared where it is first assigned"),
+                    format!("`{shown}` is first named here, outside an assignment of its own, which is not converted yet: a PHP# local is declared where it is first assigned"),
                 );
                 continue;
             };
-            if let Some(span) = local.escapes {
+            let within = |scope: &Span| scope.start.offset < declaration.at && declaration.at < scope.end.offset;
+            if hoisted.iter().any(|(hoisted, scope)| *hoisted == name && within(scope)) {
+                if !declaration.hoistable {
+                    self.refuse(
+                        local.first,
+                        format!("`{shown}` is a loop's variable and a local read after a block, and a PHP# loop declares its own variables (spec section 17)"),
+                    );
+                }
+                continue;
+            }
+            if let Some((span, _)) = local.escapes {
                 self.refuse(
                     span,
-                    format!("`{name}` is named here, after the block it is first assigned in, which is not converted yet: PHP# scopes a local to its block (spec section 3)"),
+                    format!("`{shown}` is named here, after the block it is first assigned in, which is not converted yet: PHP# scopes a local to its block (spec section 3)"),
                 );
                 continue;
             }
@@ -220,7 +318,17 @@ impl Converter<'_, '_> {
                 None if local.rewritten => "let".to_owned(),
                 None => "const".to_owned(),
             };
-            self.edits.insert(declaration.at, format!("{keyword} "));
+            keywords
+                .entry(declaration.at)
+                .and_modify(|shared| {
+                    if keyword == "let" {
+                        shared.clone_from(&keyword);
+                    }
+                })
+                .or_insert(keyword);
+        }
+        for (at, keyword) in keywords {
+            self.edits.insert(at, format!("{keyword} "));
         }
     }
 

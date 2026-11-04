@@ -1,0 +1,54 @@
+namespace App;
+
+// `foreach` is `for … of`, over a `Map`'s entries or values and a `List`'s entries, and `for`, `while` and
+// `do … while` keep their form. Each body is in braces, and a `Map` key is unset with `remove` (spec sections 12 and
+// 17).
+public final class Tally
+{
+    private List<int> counts = [];
+
+    private Map<string, int> prices = [:];
+
+    public int total()
+    {
+        let total = 0;
+        for (const count of this.counts) {
+            total += count;
+        }
+        for (const price of this.prices.values()) {
+            total += price;
+        }
+        for (const [name, price] of this.prices) {
+            if (name == 'free') { continue; }
+            total += price;
+        }
+        for (let [index, count] of this.counts.entries()) {
+            count += index;
+            total += count;
+        }
+
+        return total;
+    }
+
+    public int countdown(int from)
+    {
+        let steps = 0;
+        for (let i = from; i > 0; i--) {
+            steps++;
+        }
+        while (steps > 10) { steps -= 10; }
+        do {
+            steps++;
+            if (steps > 5) {
+                break;
+            }
+        } while (steps < from);
+
+        return steps;
+    }
+
+    public void drop(string name)
+    {
+        this.prices.remove(name);
+    }
+}

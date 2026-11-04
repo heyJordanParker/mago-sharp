@@ -1,5 +1,5 @@
-13:18: PHP's loose `==` is not converted yet
-14:9: `and` is removed: PHP# writes `&&` and `||` (spec section 21)
+13:18: `==` between `string` and `string('1')` compares PHP's loose way, which PHP#'s `==` gives only between numbers, `bool`s, enums, or strings one of which PHP never reads as a number (spec section 19)
+14:17: `xor` between `int` and `bool` has no PHP# form: `xor` is removed, and `!=` gives it between two `bool`s (spec section 21)
 15:18: `+` between `string` and `int` turns them into numbers PHP's way, which PHP# does only between numbers
 16:20: PHP's `/` of two `int`s gives a `float` when it doesn't divide evenly, and PHP#'s truncates (spec section 24)
 17:19: `%` between `float` and `int(2)` has PHP's meaning in PHP# only between `int`s (spec section 19)

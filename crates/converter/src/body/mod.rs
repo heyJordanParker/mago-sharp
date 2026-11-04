@@ -5,7 +5,10 @@
 mod access;
 mod calls;
 mod collections;
+mod conditions;
 mod locals;
+mod loops;
+mod matching;
 mod operators;
 mod strings;
 
@@ -46,6 +49,22 @@ enum Kind {
     Other,
 }
 
+/// Whether `expression` binds tighter than any operator, so text built around it, as `x.isEmpty()` or `x != 0`, needs
+/// no parentheses around it.
+fn is_primary(expression: &Expression<'_>) -> bool {
+    matches!(
+        expression,
+        Expression::Variable(_)
+            | Expression::Parenthesized(_)
+            | Expression::Literal(_)
+            | Expression::Access(_)
+            | Expression::Call(_)
+            | Expression::ArrayAccess(_)
+            | Expression::Identifier(_)
+            | Expression::ConstantAccess(_)
+    )
+}
+
 /// Each kind of value `union` holds, sorted, once each.
 fn kinds(union: &TUnion) -> Vec<Kind> {
     let mut kinds: Vec<Kind> = union
@@ -82,6 +101,7 @@ impl<'input> Converter<'input, '_> {
     pub(crate) fn block(&mut self, block: &Block<'_>) {
         if let Some(locals) = self.locals() {
             locals.blocks.push(block.span());
+            locals.scopes.push(block.span());
         }
         for statement in &block.statements {
             self.statement(statement);
@@ -94,6 +114,12 @@ impl<'input> Converter<'input, '_> {
     pub(crate) fn statement(&mut self, statement: &Statement<'_>) {
         match statement {
             Statement::Expression(expression) => {
+                // A `match` statement ends at its `}` (spec section 21).
+                if let Expression::Match(r#match) = expression.expression {
+                    let terminator = expression.terminator.span();
+                    self.edits.delete(r#match.right_brace.end.offset, terminator.end.offset);
+                    return self.match_expression(r#match, true);
+                }
                 if !self.declaration(statement, expression.expression) {
                     self.expression(expression.expression, None);
                 }
@@ -124,7 +150,7 @@ impl<'input> Converter<'input, '_> {
             }
             Statement::Block(block) => self.block(block),
             Statement::If(r#if) => {
-                self.condition(r#if.condition);
+                self.condition(r#if.condition, true);
                 let IfBody::Statement(body) = &r#if.body else {
                     self.refuse(r#if.span(), "an `if` with `:` and `endif` has no PHP# form: write its body in braces");
                     return;
@@ -132,7 +158,7 @@ impl<'input> Converter<'input, '_> {
                 self.braced(body.statement);
                 for clause in &body.else_if_clauses {
                     self.edits.replace(clause.elseif.span, "else if");
-                    self.condition(clause.condition);
+                    self.condition(clause.condition, true);
                     self.braced(clause.statement);
                 }
                 if let Some(clause) = &body.else_clause {
@@ -144,11 +170,14 @@ impl<'input> Converter<'input, '_> {
             }
             Statement::Try(r#try) => self.try_statement(r#try),
             Statement::Noop(_) => {}
-            Statement::Foreach(_) | Statement::For(_) | Statement::While(_) | Statement::DoWhile(_) => {
-                self.refuse(statement.span(), "a loop is not converted yet");
-            }
+            Statement::Foreach(foreach) => self.foreach(statement, foreach),
+            Statement::For(r#for) => self.for_loop(statement, r#for),
+            Statement::While(r#while) => self.while_loop(statement, r#while),
+            Statement::DoWhile(r#do) => self.do_while(r#do),
+            Statement::Break(r#break) => self.leave(r#break.level),
+            Statement::Continue(r#continue) => self.leave(r#continue.level),
             Statement::Switch(_) => self.refuse(statement.span(), "a `switch` is not converted yet: it becomes a `match`"),
-            Statement::Unset(_) => self.refuse(statement.span(), "`unset` is not converted yet: a `Map` removes a key"),
+            Statement::Unset(unset) => self.unset(unset),
             Statement::Echo(_) | Statement::EchoTag(_) => self.refuse(
                 statement.span(),
                 "`echo` is removed: output goes through `Console`, which a class receives through its constructor (spec section 8)",
@@ -170,11 +199,21 @@ impl<'input> Converter<'input, '_> {
         }
     }
 
-    /// The body of an `if` or an `else`, which PHP# writes in braces (spec section 17).
+    /// The body of an `if`, an `else` or a loop, which PHP# writes in braces (spec section 17). A body without them gets
+    /// them, and scopes its locals as a block does.
     fn braced(&mut self, statement: &Statement<'_>) {
-        match statement {
-            Statement::Block(block) => self.block(block),
-            _ => self.refuse(statement.span(), "a body without braces is not converted yet"),
+        if let Statement::Block(block) = statement {
+            return self.block(block);
+        }
+        let span = statement.span();
+        self.edits.insert(span.start.offset, "{ ");
+        self.edits.insert(span.end.offset, " }");
+        if let Some(locals) = self.locals() {
+            locals.blocks.push(span);
+        }
+        self.statement(statement);
+        if let Some(locals) = self.locals() {
+            locals.blocks.pop();
         }
     }
 
@@ -197,20 +236,6 @@ impl<'input> Converter<'input, '_> {
         if let Some(clause) = &r#try.finally_clause {
             self.block(&clause.block);
         }
-    }
-
-    /// A condition, which PHP# takes only as a `bool` (spec section 21).
-    fn condition(&mut self, condition: &Expression<'_>) {
-        if !self.is(condition, &[Kind::Bool]) {
-            let shown = self.shown(condition);
-            self.refuse(
-                condition.span(),
-                format!("a condition of `{shown}` reads PHP's truthiness, which is not converted yet: a PHP# condition is a `bool`"),
-            );
-            return;
-        }
-
-        self.expression(condition, None);
     }
 
     fn type_of(&self, expression: &Expression<'_>) -> Option<&'input TUnion> {
@@ -298,7 +323,7 @@ impl<'input> Converter<'input, '_> {
                 let Some(then) = conditional.then else {
                     return self.refuse(expression.span(), "`?:` has no PHP# form: `??` covers null (spec section 14)");
                 };
-                self.condition(conditional.condition);
+                self.condition(conditional.condition, false);
                 self.expression(then, expected);
                 self.expression(conditional.r#else, expected);
             }
@@ -306,7 +331,7 @@ impl<'input> Converter<'input, '_> {
             Expression::Closure(_) | Expression::ArrowFunction(_) | Expression::PartialApplication(_) => {
                 self.refuse(expression.span(), "a function as a value is not converted yet");
             }
-            Expression::Match(_) => self.refuse(expression.span(), "a `match` is not converted yet"),
+            Expression::Match(r#match) => self.match_expression(r#match, false),
             Expression::Clone(_) => {
                 self.refuse(expression.span(), "`clone` is not converted yet: it becomes `with { }`")
             }

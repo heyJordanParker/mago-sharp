@@ -1,10 +1,9 @@
 13:19: a function as a value is not converted yet
-14:17: a `match` is not converted yet
 18:17: `clone` is not converted yet: it becomes `with { }`
 19:9: destructuring is not converted yet
 20:21: an interpolated string or a heredoc is not converted yet: it becomes a template
 21:17: a magic constant is not converted yet: `Position` replaces it (spec section 27)
-22:18: `isset` and `empty` are not converted yet
+22:20: `print` is removed: output goes through `Console`, which a class receives through its constructor (spec section 8)
 23:17: `new` of a class value is not converted yet
 24:31: a spread argument is not converted yet
 25:17: a spread is not converted yet
