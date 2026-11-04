@@ -1,16 +1,24 @@
 //! Properties as fields or properties with accessors (spec section 6), and methods with their return types, `virtual`
 //! and `override` (spec sections 7 and 22).
 
+use mago_codex::metadata::property::PropertyMetadata;
 use mago_codex::ttype::TType;
 use mago_codex::ttype::get_mixed;
+use mago_codex::ttype::resolution::TypeResolutionContext;
 use mago_codex::ttype::union::TUnion;
 use mago_span::HasSpan;
 use mago_syntax::cst::ClassLikeConstant;
+use mago_syntax::cst::DirectVariable;
+use mago_syntax::cst::HookedProperty;
 use mago_syntax::cst::Method as MethodDeclaration;
 use mago_syntax::cst::MethodBody;
 use mago_syntax::cst::Modifier;
 use mago_syntax::cst::PlainProperty;
+use mago_syntax::cst::PropertyHook;
+use mago_syntax::cst::PropertyHookBody;
+use mago_syntax::cst::PropertyHookConcreteBody;
 use mago_syntax::cst::PropertyItem;
+use mago_syntax::cst::Sequence;
 use mago_word::ascii_lowercase_word;
 use mago_word::word;
 
@@ -29,15 +37,9 @@ impl Converter<'_, '_> {
         let Some(class) = self.class.as_ref() else {
             return;
         };
-        let metadata = class.metadata;
         let is_static = has(&property.modifiers, |modifier| matches!(modifier, Modifier::Static(_))).is_some();
-        let visibility = match property.modifiers.iter().find(|modifier| modifier.is_read_visibility()) {
-            Some(Modifier::Protected(_)) => "protected",
-            Some(Modifier::Private(_)) => "private",
-            _ => "public",
-        };
         let is_readonly = has(&property.modifiers, |modifier| matches!(modifier, Modifier::Readonly(_))).is_some()
-            || metadata.flags.is_readonly();
+            || class.metadata.flags.is_readonly();
 
         self.attributes(&property.attribute_lists);
         let span = property.span();
@@ -52,83 +54,259 @@ impl Converter<'_, '_> {
 
         let mut declarations = Vec::new();
         for item in property.items.iter() {
-            let variable = item.variable();
-            // A type the codex marks `inferred` here is inherited: declared in the parent, which the override rules
-            // need.
-            let Some(declared) = metadata.properties.get(&word(variable.name)) else {
-                self.refuse(variable.span, "the analysis holds no property of this name");
+            let Some((head, union, has_accessors)) = self.property_head(&property.modifiers, item.variable()) else {
                 continue;
             };
-            let union = declared.type_metadata.as_ref().map_or_else(get_mixed, |metadata| metadata.type_union.clone());
-            let Some(written) = self.type_text(&union, variable.span) else {
+            let Some(value) = self.initial_value(item, &union, property.hint.is_none(), is_static) else {
                 continue;
             };
-            let value = match item {
-                PropertyItem::Concrete(concrete) => {
-                    self.expression(concrete.value, Some(&union));
-                    format!(" = {}", self.render(concrete.value))
-                }
-                // PHP gives an untyped property null, which PHP# writes, since a member has no implicit value (spec
-                // section 6).
-                PropertyItem::Abstract(_) if property.hint.is_none() => " = null".to_owned(),
-                // A static holds a value of its type before any code reads it (spec section 6).
-                PropertyItem::Abstract(_) if is_static => {
-                    let name = String::from_utf8_lossy(variable.name);
-                    self.refuse(
-                        variable.span,
-                        format!("`{name}` is static and has no initial value: a PHP# static holds a value of its type before any code reads it (spec section 6)"),
-                    );
-                    continue;
-                }
-                PropertyItem::Abstract(_)
-                    if self.class.as_ref().is_some_and(|class| {
-                        class.set_by_constructor.iter().any(|set| set.as_slice() == variable.name)
-                    }) =>
-                {
-                    String::new()
-                }
-                // PHP leaves a typed property unset until code outside the class sets it, where PHP# sets every
-                // property before the object is used.
-                PropertyItem::Abstract(_) => {
-                    let name = String::from_utf8_lossy(variable.name);
-                    self.refuse(
-                        variable.span,
-                        format!(
-                            "`{name}` has no initial value, and the constructor doesn't set it: a PHP# property is set before the object is used (spec section 6)"
-                        ),
-                    );
-                    continue;
-                }
-            };
-            let name = Self::variable_name(variable.name);
-            // A method the class declares is refused where it is declared, and one it inherits clashes here.
-            let method = ascii_lowercase_word(&variable.name[1..]);
-            if metadata.appearing_method_ids.contains_key(&method) && !metadata.methods.contains(&method) {
-                self.refuse(
-                    variable.span,
-                    format!("`{name}` names a property and a method, and a PHP# class has one member of each name (spec section 14)"),
-                );
-                continue;
-            }
-            // A property that redeclares its parent's, as one that changes its initial value does, replaces it, which
-            // only a property with accessors marked `override` does: a field replaces nothing (spec section 22).
-            let overrides =
-                metadata.overridden_property_ids.get(&word(variable.name)).is_some_and(|parents| !parents.is_empty());
-            let accessors = accessors(visibility == "public" || overrides, is_readonly, &property.modifiers);
-            let opening = match (is_static, overrides) {
-                (true, true) => "static override ",
-                (true, false) => "static ",
-                (false, true) => "override ",
-                (false, false) => "",
-            };
+            let accessors = accessors(has_accessors, is_readonly, &property.modifiers);
             // A property's accessors end it, unless an initial value follows them (spec section 6).
             let end = if accessors.is_empty() || !value.is_empty() { ";" } else { "" };
-            declarations.push(format!("{attributes}{visibility} {opening}{written} {name}{accessors}{value}{end}"));
+            declarations.push(format!("{attributes}{head}{accessors}{value}{end}"));
         }
 
         let indentation = self.indentation(span.start.offset);
         self.edits.replace(span, declarations.join(&format!("\n{indentation}")));
         self.docblock(span);
+    }
+
+    /// A property with hooks, as a property whose accessors are its hooks (spec section 6). Each keeps its body, where
+    /// PHP's `$this->name` is the storage `field` and `$value` is `value`, and a short `set => expr` stores `expr`. A
+    /// property with storage gains the accessor PHP gives it where it declares no hook, and its initial value follows
+    /// the accessors.
+    pub(super) fn hooked_property(&mut self, property: &HookedProperty<'_>) {
+        let Some(class) = self.class.as_ref() else {
+            return;
+        };
+        let metadata = class.metadata;
+        let variable = property.item.variable();
+        self.attributes(&property.attribute_lists);
+        let Some((head, union, _)) = self.property_head(&property.modifiers, variable) else {
+            return;
+        };
+        let Some(declared) = metadata.properties.get(&word(variable.name)) else {
+            return;
+        };
+        let is_abstract = metadata.kind.is_interface()
+            || has(&property.modifiers, |modifier| matches!(modifier, Modifier::Abstract(_))).is_some();
+        let has_storage = !is_abstract && !declared.flags.is_virtual_property();
+        let value = if has_storage {
+            let Some(value) = self.initial_value(&property.item, &union, property.hint.is_none(), false) else {
+                return;
+            };
+            value
+        } else {
+            String::new()
+        };
+        let start = property
+            .modifiers
+            .first()
+            .map(HasSpan::span)
+            .or(property.var.as_ref().map(HasSpan::span))
+            .or(property.hint.as_ref().map(HasSpan::span))
+            .unwrap_or(variable.span)
+            .start
+            .offset;
+        self.edits.replace_range(start, property.item.span().end.offset, head);
+
+        // PHP's `private(set)` and `protected(set)` are the `set` accessor's own access level.
+        let set_access = match property.modifiers.iter().find(|modifier| modifier.is_write_visibility()) {
+            Some(Modifier::PrivateSet(_)) => "private ",
+            Some(Modifier::ProtectedSet(_)) => "protected ",
+            _ => "",
+        };
+        let hooks = &property.hook_list.hooks;
+        let has_get = hooks.iter().any(|hook| hook.name.value == b"get");
+        let has_set = hooks.iter().any(|hook| hook.name.value == b"set");
+        if has_storage && let (Some(first), Some(last)) = (hooks.first(), hooks.last()) {
+            if !has_get {
+                self.edits.insert(first.span().start.offset, "get; ");
+            }
+            if !has_set {
+                self.edits.insert(last.span().end.offset, format!(" {set_access}set;"));
+            }
+        } else if has_set && !has_get {
+            self.refuse(
+                property.hook_list.left_brace,
+                "a property with a `set` hook, no `get` hook and no storage has no PHP# form: a PHP# property needs a `get` accessor (spec section 6)",
+            );
+        }
+        for hook in hooks.iter() {
+            let is_set = hook.name.value == b"set";
+            self.hook(hook, is_set, &union, declared, variable);
+            if is_set && !set_access.is_empty() {
+                self.edits.insert(hook.name.span.start.offset, set_access);
+            }
+        }
+        if !value.is_empty() {
+            self.edits.insert(property.hook_list.right_brace.end.offset, format!("{value};"));
+        }
+        self.docblock(property.span());
+    }
+
+    /// A hook as an accessor, `get` or `set` by `is_set`, of the property `variable` names, whose type is `union`.
+    fn hook(
+        &mut self,
+        hook: &PropertyHook<'_>,
+        is_set: bool,
+        union: &TUnion,
+        declared: &PropertyMetadata,
+        variable: &DirectVariable<'_>,
+    ) {
+        self.attributes(&hook.attribute_lists);
+        if let Some(ampersand) = hook.ampersand {
+            self.refuse(ampersand, "a `get` hook that returns by reference has no PHP# form: PHP# has no references");
+            return;
+        }
+        // A `final` hook stops a subclass replacing it, and PHP# replaces a property whole or not at all.
+        for modifier in hook.modifiers.iter() {
+            let span = modifier.span();
+            self.edits.delete(span.start.offset, self.skip_whitespace(span.end.offset));
+        }
+        // A `set` accessor's `value` has the property's type (spec section 6), as a `set` hook's `$value` has when
+        // the hook declares no parameter.
+        if let Some(list) = &hook.parameter_list {
+            let parameter = declared.hooks.get(&word(b"set")).and_then(|hook| hook.parameter.as_ref());
+            let fits = list.parameters.len() == 1
+                && list.parameters.first().is_some_and(|parameter| parameter.variable.name == b"$value")
+                && parameter.is_some_and(|parameter| {
+                    parameter.get_type_metadata().is_none_or(|declared| declared.type_union.get_id() == union.get_id())
+                });
+            if !fits {
+                self.refuse(
+                    list.span(),
+                    "a `set` hook whose parameter is other than `$value` of the property's type has no PHP# form: a `set` accessor's `value` has the property's type (spec section 6)",
+                );
+                return;
+            }
+            self.edits.delete(hook.name.span.end.offset, list.span().end.offset);
+        }
+        let PropertyHookBody::Concrete(body) = &hook.body else {
+            return;
+        };
+
+        self.method = Some(Method {
+            returning: (!is_set).then(|| union.clone()),
+            resolution: TypeResolutionContext::default(),
+            parameters: if is_set { vec![b"$value".to_vec()] } else { Vec::new() },
+            locals: Locals::default(),
+            super_call: None,
+            storage: Some(variable.name[1..].to_vec()),
+        });
+        match body {
+            PropertyHookConcreteBody::Block(block) => self.block(block),
+            PropertyHookConcreteBody::Expression(body) => {
+                self.expression(body.expression, Some(union));
+                // A short `set => expr` stores `expr`.
+                if is_set {
+                    self.edits.insert(body.expression.span().start.offset, "field = ");
+                }
+            }
+        }
+        self.declare_locals();
+        self.method = None;
+    }
+
+    /// `public override string name`, which the declaration of the property `variable` names starts with, its type,
+    /// and whether it is a property with accessors rather than a field: a public one, or one that replaces its
+    /// parent's (spec sections 6 and 22). An interface's property takes no access modifier (spec section 5).
+    fn property_head(
+        &mut self,
+        modifiers: &Sequence<'_, Modifier<'_>>,
+        variable: &DirectVariable<'_>,
+    ) -> Option<(String, TUnion, bool)> {
+        let metadata = self.class.as_ref()?.metadata;
+        // A type the codex marks `inferred` here is inherited: declared in the parent, which the override rules need.
+        let Some(declared) = metadata.properties.get(&word(variable.name)) else {
+            self.refuse(variable.span, "the analysis holds no property of this name");
+            return None;
+        };
+        let union = declared.type_metadata.as_ref().map_or_else(get_mixed, |metadata| metadata.type_union.clone());
+        let written = self.type_text(&union, variable.span)?;
+        let name = Self::variable_name(variable.name);
+        // A method the class declares is refused where it is declared, and one it inherits clashes here.
+        let method = ascii_lowercase_word(&variable.name[1..]);
+        if metadata.appearing_method_ids.contains_key(&method) && !metadata.methods.contains(&method) {
+            self.refuse(
+                variable.span,
+                format!("`{name}` names a property and a method, and a PHP# class has one member of each name (spec section 14)"),
+            );
+            return None;
+        }
+
+        let visibility = match modifiers.iter().find(|modifier| modifier.is_read_visibility()) {
+            Some(Modifier::Protected(_)) => "protected ",
+            Some(Modifier::Private(_)) => "private ",
+            _ if metadata.kind.is_interface() => "",
+            _ => "public ",
+        };
+        // A property that redeclares its parent's, as one that changes its initial value does, replaces it, which
+        // only a property with accessors marked `override` does: a field replaces nothing (spec section 22).
+        let overrides =
+            metadata.overridden_property_ids.get(&word(variable.name)).is_some_and(|parents| !parents.is_empty());
+        let mut opening = String::new();
+        if has(modifiers, |modifier| matches!(modifier, Modifier::Static(_))).is_some() {
+            opening.push_str("static ");
+        }
+        if has(modifiers, |modifier| matches!(modifier, Modifier::Abstract(_))).is_some() {
+            opening.push_str("abstract ");
+        }
+        if overrides {
+            opening.push_str("override ");
+        }
+
+        let is_public = !matches!(visibility, "private " | "protected ");
+
+        Some((format!("{visibility}{opening}{written} {name}"), union, is_public || overrides))
+    }
+
+    /// ` = value`, which the property `item` declares ends with, or nothing when the constructor sets it, or a
+    /// refusal. A property of no type, `untyped`, starts as PHP's `null`.
+    fn initial_value(
+        &mut self,
+        item: &PropertyItem<'_>,
+        union: &TUnion,
+        untyped: bool,
+        is_static: bool,
+    ) -> Option<String> {
+        let variable = item.variable();
+        let name = String::from_utf8_lossy(variable.name);
+        match item {
+            PropertyItem::Concrete(concrete) => {
+                self.expression(concrete.value, Some(union));
+                Some(format!(" = {}", self.render(concrete.value)))
+            }
+            // PHP gives an untyped property null, which PHP# writes, since a member has no implicit value (spec
+            // section 6).
+            PropertyItem::Abstract(_) if untyped => Some(" = null".to_owned()),
+            // A static holds a value of its type before any code reads it (spec section 6).
+            PropertyItem::Abstract(_) if is_static => {
+                self.refuse(
+                    variable.span,
+                    format!("`{name}` is static and has no initial value: a PHP# static holds a value of its type before any code reads it (spec section 6)"),
+                );
+                None
+            }
+            PropertyItem::Abstract(_)
+                if self.class.as_ref().is_some_and(|class| {
+                    class.set_by_constructor.iter().any(|set| set.as_slice() == variable.name)
+                }) =>
+            {
+                Some(String::new())
+            }
+            // PHP leaves a typed property unset until code outside the class sets it, where PHP# sets every property
+            // before the object is used.
+            PropertyItem::Abstract(_) => {
+                self.refuse(
+                    variable.span,
+                    format!(
+                        "`{name}` has no initial value, and the constructor doesn't set it: a PHP# property is set before the object is used (spec section 6)"
+                    ),
+                );
+                None
+            }
+        }
     }
 
     /// A class constant as `public const int LIMIT = 3;`, one declaration per name, with the type its declaration
@@ -323,8 +501,14 @@ impl Converter<'_, '_> {
         match &method.body {
             MethodBody::Concrete(block) => {
                 let resolution = declared.type_resolution_context.clone().unwrap_or_default();
-                self.method =
-                    Some(Method { returning, resolution, parameters, locals: Locals::default(), super_call: None });
+                self.method = Some(Method {
+                    returning,
+                    resolution,
+                    parameters,
+                    locals: Locals::default(),
+                    super_call: None,
+                    storage: None,
+                });
                 if is_constructor && let Some(parent) = metadata.direct_parent_class {
                     self.super_call(method, block, parent.as_bytes());
                 }

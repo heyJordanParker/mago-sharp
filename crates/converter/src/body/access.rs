@@ -60,6 +60,14 @@ impl Converter<'_, '_> {
 
     pub(super) fn access(&mut self, expression: &Expression<'_>, access: &Access<'_>) {
         match access {
+            // PHP's `$this->name` in the accessor of `name` is its storage, PHP#'s `field` (spec section 6).
+            Access::Property(access)
+                if matches!(access.object, Expression::Variable(Variable::Direct(this)) if this.name == b"$this")
+                    && matches!(&access.property, ClassLikeMemberSelector::Identifier(name)
+                        if self.method.as_ref().and_then(|method| method.storage.as_deref()) == Some(name.value)) =>
+            {
+                self.edits.replace(expression.span(), "field");
+            }
             Access::Property(access) => {
                 self.untyped(access.object, "a property access");
                 self.edits.replace(access.arrow, ".");

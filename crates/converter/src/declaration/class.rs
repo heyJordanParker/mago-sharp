@@ -197,12 +197,7 @@ impl<'input> Converter<'input, '_> {
             match member {
                 ClassLikeMember::Method(method) => self.method(method),
                 ClassLikeMember::Property(Property::Plain(property)) => self.property(property),
-                ClassLikeMember::Property(_) => {
-                    self.refuse(
-                        member.span(),
-                        "a property with hooks is not converted yet: its hooks become accessors",
-                    );
-                }
+                ClassLikeMember::Property(Property::Hooked(property)) => self.hooked_property(property),
                 ClassLikeMember::Constant(_) if metadata.kind.is_interface() => {
                     self.refuse(member.span(), "a constant of an interface is not converted yet");
                 }

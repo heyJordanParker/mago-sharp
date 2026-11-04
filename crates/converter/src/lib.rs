@@ -117,9 +117,9 @@ struct Class<'input> {
     set_by_constructor: Vec<Vec<u8>>,
 }
 
-/// The method whose body is converted.
+/// The method or the property accessor whose body is converted.
 struct Method {
-    /// The declared return, which a returned value lands in, or `None` in a constructor.
+    /// The declared return, which a returned value lands in, or `None` in a constructor and a `set` accessor.
     returning: Option<TUnion>,
     /// The type parameters a `@var` tag in the body reads, the class's and the method's.
     resolution: TypeResolutionContext,
@@ -129,6 +129,9 @@ struct Method {
     /// The `parent::__construct(…)` statement a subclass's constructor starts with, which its `: super(…)` runs, so
     /// the body leaves it (spec section 9).
     super_call: Option<Span>,
+    /// The name, without `$`, of the property whose accessor this is, whose `$this->name` is the accessor's hidden
+    /// storage `field` (spec section 6).
+    storage: Option<Vec<u8>>,
 }
 
 struct Converter<'input, 'arena> {
