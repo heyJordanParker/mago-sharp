@@ -17,6 +17,8 @@ use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeString;
 use mago_codex::ttype::get_sharp_type;
 use mago_codex::ttype::union::TUnion;
 use mago_names::EQUATABLE;
+
+use crate::library::short;
 use mago_names::STANDARD_ROOT_CLASSES;
 use mago_word::Word;
 
@@ -108,11 +110,6 @@ impl Imports {
 /// `Equatable`, its built-in bound (spec section 11). PHP reserves every other type name itself.
 fn reserved(name: &str) -> bool {
     ["Any", EQUATABLE].iter().any(|reserved| reserved.eq_ignore_ascii_case(name))
-}
-
-/// The last part of a full PHP name.
-fn short(name: &str) -> &str {
-    name.rsplit('\\').next().unwrap_or(name)
 }
 
 /// `union` in PHP#'s spelling, or the reason PHP# can't write it.

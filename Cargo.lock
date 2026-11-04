@@ -1609,6 +1609,7 @@ dependencies = [
  "mago-prelude",
  "mago-reporting",
  "mago-server",
+ "mago-sharp-bridge",
  "mago-span",
  "mago-syntax",
  "mago-text-edit",

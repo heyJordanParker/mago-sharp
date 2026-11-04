@@ -207,10 +207,7 @@ impl<'input> Converter<'input, '_> {
             return self.refuse(span, format!("`{name}` is removed (spec section 2)"));
         }
         let Some(target) = type_test(function) else {
-            return self.refuse(
-                span,
-                format!("`{name}` is a PHP built-in, which is not converted yet: the standard library runs it"),
-            );
+            return self.built_in(call, function, &name);
         };
         let [Argument::Positional(value)] = call.argument_list.arguments.as_slice() else {
             return self.refuse(span, format!("`{name}` with a named or spread argument has no PHP# form"));

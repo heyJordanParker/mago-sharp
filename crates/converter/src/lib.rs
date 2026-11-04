@@ -36,6 +36,8 @@ mod body;
 mod declaration;
 mod edits;
 mod library;
+
+pub use library::Library;
 mod types;
 
 /// What the conversion of one file reads: the file and its syntax tree, and the project's analysis of it.
@@ -45,6 +47,8 @@ pub struct Input<'input, 'arena> {
     pub names: &'input ResolvedNames<'arena>,
     pub codebase: &'input CodebaseMetadata,
     pub artifacts: &'input AnalysisArtifacts,
+    /// The standard library's members that run a PHP function, which a bare call of a built-in becomes.
+    pub library: &'input Library,
 }
 
 /// A construct the converter does not convert, at `span`, and why.

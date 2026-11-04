@@ -60,7 +60,7 @@ class Shelf
     }
 
     /**
-     * Conditions, loops, `isset`, `match` and a local read after the block that assigns it.
+     * Conditions, loops, `isset`, `match`, a built-in's call and a local read after the block that assigns it.
      *
      * @return string
      */
@@ -77,7 +77,7 @@ class Shelf
         } else {
             $kind = 'few';
         }
-        $size = match ($this->count) {
+        $size = match (count($this->items)) {
             0 => 'empty',
             1, 2 => 'small',
             default => 'large',

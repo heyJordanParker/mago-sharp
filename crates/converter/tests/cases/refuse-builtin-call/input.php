@@ -4,8 +4,9 @@ declare(strict_types=1);
 
 namespace App;
 
-// A PHP built-in reaches PHP# through the standard library, which a later slice writes, and `compact` and `extract`
-// are removed (spec sections 2 and 8).
+// A built-in that no standard library member runs with PHP's meaning keeps the file plain PHP, with the difference
+// named, a type test of a type PHP# can't write does too, and `compact` and `extract` are removed (spec sections 2 and
+// 21, decision 083).
 final class Text
 {
     public function clean(string $text): string
@@ -13,10 +14,9 @@ final class Text
         return trim($text);
     }
 
-    /** @param list<string> $items */
-    public function size(array $items): int
+    public function lower(string $text): string
     {
-        return count($items);
+        return mb_strtolower($text);
     }
 
     /** @return array<string, string> */

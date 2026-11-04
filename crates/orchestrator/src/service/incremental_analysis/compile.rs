@@ -268,19 +268,8 @@ impl IncrementalAnalysisService {
         let reach = Reach::new(&self.codebase, &self.native_symbol_references);
         let effects = self.effects();
 
-        let lowered_library = self.lower_all(
-            &library,
-            &InlineForms::default(),
-            (&errors, &unrefused),
-            &reach,
-            &effects,
-            session.as_ref(),
-        )?;
-        let forms: InlineForms = lowered_library
-            .iter()
-            .filter_map(|lowered| lowered.as_ref().ok())
-            .flat_map(|(_, forms, _)| forms.iter().cloned())
-            .collect();
+        let (lowered_library, forms) =
+            self.lower_library(&library, (&errors, &unrefused), &reach, &effects, session.as_ref())?;
         let lowered_rest = self.lower_all(&rest, &forms, (&errors, &unrefused), &reach, &effects, session.as_ref())?;
         // Lowering analyzes each PHP# file again against the codebase its last analysis saw, so it sends the provider
         // requests that analysis sent, and every read their answers rest on is one the analysis already holds.
@@ -709,6 +698,54 @@ impl IncrementalAnalysisService {
             summaries.into_iter().flat_map(|(_, summaries)| summaries.iter().cloned()).collect();
 
         Effects::solve(&self.codebase, &summaries)
+    }
+
+    /// The standard library's inline forms, as [`Self::compile`] lowers every other PHP# file with them, which `mago
+    /// convert` reads to find the library member that runs a PHP function.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OrchestratorError`] when no analysis ran yet, or when re-analyzing a library file fails.
+    pub fn standard_library_forms(&mut self) -> Result<InlineForms, OrchestratorError> {
+        if !self.initialized {
+            return Err(OrchestratorError::General(
+                "analyze() must be called before standard_library_forms()".to_string(),
+            ));
+        }
+
+        // The library's files are the project's own to `mago compile`, which loads them as such, and `vendor/`'s to
+        // the analysis, so either way they are its forms.
+        let mut library: Vec<Arc<File>> =
+            self.database.files().filter(|file| file.is_standard_library && Dialect::of(file).is_sharp()).collect();
+        library.sort_unstable_by(|a, b| a.name.cmp(&b.name));
+        let library: Vec<&Arc<File>> = library.iter().collect();
+        let session = self.plugin_registry.create_external_analysis_session(self.database.files());
+        let reach = Reach::new(&self.codebase, &self.native_symbol_references);
+        let effects = self.effects();
+        let none = HashMap::default();
+        let (_, forms) = self.lower_library(&library, (&none, &none), &reach, &effects, session.as_ref())?;
+
+        Ok(forms)
+    }
+
+    /// Lowers the standard library's files, `library`, as [`Self::lower_all`] does, and gives their inline forms, which
+    /// every other file's lowering inlines. A library form inlines none of the others.
+    fn lower_library(
+        &self,
+        library: &[&Arc<File>],
+        refusals: (&HashMap<FileId, IssueCollection>, &HashMap<FileId, IssueCollection>),
+        reach: &Reach,
+        effects: &Effects,
+        session: Option<&ExternalAnalysisSession>,
+    ) -> Result<(Vec<Lowered>, InlineForms), OrchestratorError> {
+        let lowered = self.lower_all(library, &InlineForms::default(), refusals, reach, effects, session)?;
+        let forms = lowered
+            .iter()
+            .filter_map(|lowered| lowered.as_ref().ok())
+            .flat_map(|(_, forms, _)| forms.iter().cloned())
+            .collect();
+
+        Ok((lowered, forms))
     }
 
     /// Lowers each of `files` with `forms` to inline, and translates it to Lean as far as `reach` asks, the files with

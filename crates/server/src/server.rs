@@ -20,6 +20,7 @@ use mago_orchestrator::service::incremental_analysis::compile::DispatcherModule;
 use mago_orchestrator::service::incremental_analysis::compile::Listener;
 use mago_reporting::Issue;
 use mago_reporting::IssueCollection;
+use mago_sharp_bridge::InlineForms;
 use mago_sharp_bridge::unit::Input;
 use mago_sharp_bridge::unit::Library;
 use mago_sharp_lean::Translation;
@@ -144,6 +145,16 @@ impl Server {
         refusing: impl FnOnce(IssueCollection) -> IssueCollection,
     ) -> Result<Vec<(FileId, Compilation)>, ServerError> {
         self.service.compile(stamp, check, standard_library, refusing).map_err(ServerError::from)
+    }
+
+    /// The standard library's inline forms, which `mago convert` reads to find the library member that runs a PHP
+    /// function.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError`] when no analysis ran yet, or when re-analyzing a library file fails.
+    pub fn standard_library_forms(&mut self) -> Result<InlineForms, ServerError> {
+        self.service.standard_library_forms().map_err(ServerError::from)
     }
 
     /// Every PHP# listener of the last analysis, in the order the engine runs them.

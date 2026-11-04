@@ -19,6 +19,7 @@ mago-codex = { workspace = true }
 mago-database = { workspace = true }
 mago-names = { workspace = true }
 mago-phpdoc-syntax = { workspace = true }
+mago-sharp-bridge = { workspace = true }
 mago-span = { workspace = true }
 mago-syntax = { workspace = true }
 mago-text-edit = { workspace = true }

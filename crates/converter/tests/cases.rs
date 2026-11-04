@@ -29,6 +29,7 @@ use mago_analyzer::settings::Settings as AnalyzerSettings;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::reference::SymbolReferences;
 use mago_converter::Input;
+use mago_converter::Library;
 use mago_converter::convert;
 use mago_database::Database;
 use mago_database::DatabaseConfiguration;
@@ -157,7 +158,9 @@ fn checked(folder: &Path, text: &str) -> String {
 
 /// What the converter gives for the case at `folder`: the PHP# text, or each refusal as `line:column: reason`.
 fn converted(folder: &Path) -> Result<String, String> {
-    let server = analyzed(folder, None);
+    let mut server = analyzed(folder, None);
+    let forms = server.standard_library_forms().expect("the standard library lowers");
+    let library = Library::new(&forms, server.codebase());
     let input = FileId::new(b"input.php");
     assert!(server.database().get(&input).is_ok(), "{} holds no input.php", folder.display());
     let file = server.database().get(&input).unwrap();
@@ -165,7 +168,14 @@ fn converted(folder: &Path) -> Result<String, String> {
     let arena = LocalArena::new();
     let program = parse_file(&arena, &file);
     let names = NameResolver::new(&arena).resolve(program);
-    let input = Input { file: &file, program, names: &names, codebase: server.codebase(), artifacts: &artifacts };
+    let input = Input {
+        file: &file,
+        program,
+        names: &names,
+        codebase: server.codebase(),
+        artifacts: &artifacts,
+        library: &library,
+    };
 
     convert(&input).map(|text| String::from_utf8(text).unwrap()).map_err(|refusals| {
         refusals

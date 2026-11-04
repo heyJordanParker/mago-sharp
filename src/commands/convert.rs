@@ -28,6 +28,7 @@ use mago_allocator::LocalArena;
 use mago_composer::AutoloadPsr4value;
 use mago_composer::ComposerPackage;
 use mago_converter::Input;
+use mago_converter::Library;
 use mago_converter::Refusal;
 use mago_converter::convert;
 use mago_database::Database;
@@ -193,6 +194,8 @@ impl ConvertCommand {
             return Ok(ExitCode::FAILURE.into());
         };
         let plain = session.proof(&prover)?;
+        let forms = session.server.standard_library_forms()?;
+        let library = Library::new(&forms, session.server.codebase());
 
         let mut outcome = Outcome::default();
         let mut reached: HashSet<&PathBuf> = HashSet::new();
@@ -213,7 +216,7 @@ impl ConvertCommand {
                 outcome.refused.entry(name).or_default().push(format!("{}: {reason}", display(&file.name)));
                 continue;
             }
-            match session.convert(&file) {
+            match session.convert(&file, &library) {
                 Ok(text) => {
                     candidates.push(Candidate { name, path: file.path.clone(), original: file.contents.to_vec(), text })
                 }
@@ -391,15 +394,17 @@ impl<'configuration> Session<'configuration> {
         Ok(Proof { issues, refused })
     }
 
-    /// The PHP# text of `file`, or each construct that keeps it plain PHP, by its place.
-    fn convert(&self, file: &File) -> Result<Vec<u8>, Vec<String>> {
+    /// The PHP# text of `file`, or each construct that keeps it plain PHP, by its place. A built-in's call becomes the
+    /// member of `library` that runs it.
+    fn convert(&self, file: &File, library: &Library) -> Result<Vec<u8>, Vec<String>> {
         let arena = LocalArena::new();
         let program = parse_file(&arena, file);
         let names = NameResolver::new(&arena).resolve(program);
         let Some((_, artifacts)) = self.server.analyze_file_with_artifacts(file.id) else {
             return Err(vec![format!("{}: the analysis holds no such file", display(&file.name))]);
         };
-        let input = Input { file, program, names: &names, codebase: self.server.codebase(), artifacts: &artifacts };
+        let input =
+            Input { file, program, names: &names, codebase: self.server.codebase(), artifacts: &artifacts, library };
 
         convert(&input).map_err(|refusals| refusals.iter().map(|refusal| place(file, refusal)).collect())
     }

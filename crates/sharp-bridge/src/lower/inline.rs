@@ -26,6 +26,7 @@ use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::FunctionLikeParameter;
 use mago_syntax::cst::Hint;
+use mago_syntax::cst::Literal;
 use mago_syntax::cst::Method;
 use mago_syntax::cst::MethodBody;
 use mago_syntax::cst::MethodCall;
@@ -36,6 +37,7 @@ use mago_syntax::cst::Return;
 use mago_syntax::cst::Statement;
 use mago_syntax::cst::UnaryPrefix;
 use mago_syntax::cst::UnaryPrefixOperator;
+use mago_word::Word;
 
 use super::Lines;
 use super::Lowering;
@@ -83,6 +85,47 @@ pub struct InlineForm {
     result_type: Option<u32>,
     /// The node the `operator <=>` of the keys the inlined call orders by replaces, [`KEY_ORDER_SLOT`].
     key_order: Option<u32>,
+    /// The plain PHP function the body calls, when the body is that one call.
+    php_call: Option<PhpCall>,
+}
+
+/// The plain PHP function a form's body is one call of, as `count` is for a `List`'s `count()`, whose body is
+/// `global.count(items)`, and what the body passes it, in the function's order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PhpCall {
+    /// The function's name as its declaration writes it.
+    pub function: Word,
+    pub arguments: Vec<PhpCallArgument>,
+}
+
+/// What a form's body passes the PHP function it calls, in one of the function's parameters.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PhpCallArgument {
+    /// The value of the form's slot at this index: the receiver first for an instance or extension member, then each
+    /// parameter in declaration order.
+    Slot(usize),
+    /// A literal, as its token's text: `true`, `512`, and a string as its value in double quotes, its escapes read.
+    Literal(Vec<u8>),
+    /// A plain PHP constant, by its name.
+    Constant(Word),
+}
+
+impl PhpCallArgument {
+    /// `literal` as a form passes it, so a PHP call's own literal and a form's compare equal when PHP reads them as one
+    /// value: an integer by its value, a string by its bytes once its escapes are read, and a keyword in lowercase.
+    #[must_use]
+    pub fn literal(literal: &Literal<'_>) -> Self {
+        Self::Literal(match literal {
+            Literal::String(string) => [b"\"".as_slice(), string.value.unwrap_or(string.raw), b"\""].concat(),
+            Literal::Integer(integer) => {
+                integer.value.map_or_else(|| integer.raw.to_vec(), |value| value.to_string().into_bytes())
+            }
+            Literal::Float(float) => float.value.to_string().into_bytes(),
+            Literal::True(_) => b"true".to_vec(),
+            Literal::False(_) => b"false".to_vec(),
+            Literal::Null(_) => b"null".to_vec(),
+        })
+    }
 }
 
 /// The value an inline form's slot takes.
@@ -100,6 +143,19 @@ impl InlineForm {
     pub fn fingerprint(&self) -> u64 {
         form_fingerprint(&self.nodes, &self.children, &self.texts)
     }
+
+    /// The plain PHP function the form's body is one call of, and what it passes it.
+    #[must_use]
+    pub const fn php_call(&self) -> Option<&PhpCall> {
+        self.php_call.as_ref()
+    }
+
+    /// How many slots the form reads in declaration order, the receiver first, before its first call. A value in a
+    /// later slot runs out of the order the call writes it in.
+    #[must_use]
+    pub const fn in_order(&self) -> usize {
+        self.in_order
+    }
 }
 
 /// The inline forms a file's lowering may inline, by the name [`key`] gives the method each runs.
@@ -109,6 +165,15 @@ pub struct InlineForms(HashMap<Vec<u8>, InlineForm>);
 impl InlineForms {
     pub(crate) fn get(&self, name: &[u8]) -> Option<&InlineForm> {
         self.0.get(name)
+    }
+
+    /// Each form, with the class and the member it runs, both lowercase.
+    pub fn iter(&self) -> impl Iterator<Item = (&[u8], &[u8], &InlineForm)> {
+        self.0.iter().filter_map(|(name, form)| {
+            let separator = name.windows(2).position(|pair| pair == b"::")?;
+
+            Some((&name[..separator], &name[separator + 2..], form))
+        })
     }
 }
 
@@ -283,6 +348,10 @@ impl Lowering<'_, '_> {
             .into_iter()
             .chain(parameters.iter().map(|parameter| parameter.variable.name))
             .collect();
+        let php_call = match body {
+            Body::Expression(expression) => self.php_call(expression, &names),
+            Body::Native(_) => None,
+        };
         let (root, in_order) = match body {
             Body::Expression(expression) => {
                 let mut steps = Vec::new();
@@ -339,7 +408,41 @@ impl Lowering<'_, '_> {
             in_order,
             result_type,
             key_order,
+            php_call,
         })
+    }
+
+    /// The plain PHP function `expression` is one call of, through its namespace as `global.count(items)` calls it,
+    /// and what it passes it: a slot `names` names, a literal, or a plain PHP constant read through its namespace.
+    fn php_call(&self, expression: &Expression, names: &[&[u8]]) -> Option<PhpCall> {
+        let Expression::Call(Call::Method(call)) = expression else {
+            return None;
+        };
+        let function = self.types.namespace_function(expression)?;
+        let arguments = call
+            .argument_list
+            .arguments
+            .iter()
+            .map(|argument| {
+                let Argument::Positional(argument) = argument else {
+                    return None;
+                };
+                if argument.ellipsis.is_some() {
+                    return None;
+                }
+                match argument.value {
+                    Expression::ConstantAccess(name)
+                        if matches!(self.names.binding(&name.name), Some(Binding::Local(_) | Binding::This)) =>
+                    {
+                        names.iter().position(|slot| *slot == name.name.value()).map(PhpCallArgument::Slot)
+                    }
+                    Expression::Literal(literal) => Some(PhpCallArgument::literal(literal)),
+                    value => self.types.namespace_constant(value).map(PhpCallArgument::Constant),
+                }
+            })
+            .collect::<Option<Vec<_>>>()?;
+
+        Some(PhpCall { function, arguments })
     }
 
     /// Appends what `expression` runs to `steps`, and whether the inlining rule takes all of it: a literal, a read of
