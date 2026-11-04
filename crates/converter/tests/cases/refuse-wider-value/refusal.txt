@@ -1,4 +1,5 @@
 17:16: `class-string` is wider than `class-string<App\Shape>`, the type the method declares it returns, which PHP returns and PHP# refuses (spec section 7)
 22:30: `App\Shape` is wider than `App\Square`, the type of the parameter it reaches, which PHP passes and PHP# refuses (spec section 7)
-27:16: a `Map` read at a key it may lack is not converted yet: PHP gives `null` for a missing key, and PHP# reads one only behind `??` (spec section 12)
-31:22: the type `class-string` is not converted yet
+27:33: `App\Shape` is wider than `App\Square`, the type of the parameter it reaches, which PHP passes and PHP# refuses (spec section 7)
+32:16: a `Map` read at a key it may lack is not converted yet: PHP gives `null` for a missing key, and PHP# reads one only behind `??` (spec section 12)
+36:22: the type `class-string` is not converted yet

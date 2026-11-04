@@ -858,7 +858,18 @@ impl<'input> Converter<'input, '_> {
                 self.expression(call.class, None);
                 self.edits.replace(call.double_colon, ".");
                 self.member(&call.method);
-                self.arguments(&call.argument_list, None);
+                // A class the call names, or `self`, `static` and `parent`, which the analysis types as the class.
+                let class = match call.class {
+                    Expression::Identifier(identifier) => Some(self.input.names.get(identifier).to_vec()),
+                    _ => self.class.as_ref().map(|class| class.metadata.name.as_bytes().to_vec()),
+                };
+                let method = match (&call.method, class) {
+                    (ClassLikeMemberSelector::Identifier(name), Some(class)) => {
+                        self.input.codebase.get_declaring_method(&class, name.value)
+                    }
+                    _ => None,
+                };
+                self.arguments(&call.argument_list, method);
             }
             Call::Function(call) => self.function_call(call),
             Call::NullSafeFunction(_) => self.refuse(call.span(), "`?.(…)` on a function has no PHP# form"),

@@ -22,6 +22,11 @@ final class Drawing
         return $this->square($shape);
     }
 
+    public function describe(Shape $shape): string
+    {
+        return Square::describe($shape);
+    }
+
     public function size(string $name): int
     {
         return $this->sizes[$name];
