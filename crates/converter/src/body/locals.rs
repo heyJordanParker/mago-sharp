@@ -14,6 +14,7 @@ use mago_phpdoc_syntax::cst::TagValue;
 use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::Access;
+use mago_syntax::cst::ArrayElement;
 use mago_syntax::cst::Assignment;
 use mago_syntax::cst::AssignmentOperator;
 use mago_syntax::cst::ClassLikeMemberSelector;
@@ -21,6 +22,7 @@ use mago_syntax::cst::DirectVariable;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::Literal;
 use mago_syntax::cst::Statement;
+use mago_syntax::cst::TokenSeparatedSequence;
 use mago_syntax::cst::Variable;
 
 use super::Kind;
@@ -105,6 +107,13 @@ impl Converter<'_, '_> {
 
     /// Declares a local at `statement` when its expression is the local's first assignment, and gives whether it did.
     pub(super) fn declaration(&mut self, statement: &Statement<'_>, expression: &Expression<'_>) -> bool {
+        if let Expression::Assignment(assignment) = expression
+            && assignment.operator.is_assign()
+            && let Some(elements) = destructured(assignment.lhs)
+        {
+            self.destructure(statement, assignment, elements);
+            return true;
+        }
         let Expression::Assignment(Assignment { lhs: Expression::Variable(Variable::Direct(variable)), operator, rhs }) =
             expression
         else {
@@ -141,14 +150,23 @@ impl Converter<'_, '_> {
             );
         }
 
+        self.declare(statement, variable, written.as_ref().map(|(text, _)| text.clone()));
+        let expected = written.map(|(_, union)| union);
+        self.expression(rhs, expected.as_ref());
+
+        true
+    }
+
+    /// Declares the local `variable` at its first assignment, in `statement`, with the type `written` gives.
+    fn declare(&mut self, statement: &Statement<'_>, variable: &DirectVariable<'_>, written: Option<String>) {
         let block = self.method.as_ref().and_then(|method| method.locals.blocks.last().copied());
         let Some(method) = self.method.as_mut() else {
-            return true;
+            return;
         };
         let declaration = Declaration {
             at: variable.span.start.offset,
             block: block.unwrap_or(statement.span()),
-            written: written.as_ref().map(|(text, _)| text.clone()),
+            written,
             hoistable: matches!(statement, Statement::Expression(_)),
         };
         method.locals.entries.push((
@@ -162,10 +180,85 @@ impl Converter<'_, '_> {
             },
         ));
         self.edits.replace(variable.span, Self::variable_name(variable.name));
-        let expected = written.map(|(_, union)| union);
-        self.expression(rhs, expected.as_ref());
+    }
 
-        true
+    /// `['id' => $id, 'name' => $name] = $row;` of a `Map` as one read per key, `const id = row.get('id');`, each a
+    /// `TValue?` as PHP gives `null` for a missing key (spec section 12). The `Map` is read once per key, so it must be
+    /// a variable.
+    fn destructure(&mut self, statement: &Statement<'_>, assignment: &Assignment<'_>, elements: Elements<'_, '_>) {
+        let source = assignment.rhs;
+        let mut targets = Vec::new();
+        for element in elements.iter() {
+            match element {
+                ArrayElement::KeyValue(element)
+                    if matches!(element.key, Expression::Literal(Literal::String(_) | Literal::Integer(_))) =>
+                {
+                    let Expression::Variable(Variable::Direct(variable)) = element.value else {
+                        self.refuse(
+                            element.value.span(),
+                            "destructuring into a place that is no variable has no PHP# form: read each key into a local",
+                        );
+                        return self.unassigned(elements);
+                    };
+                    targets.push((element.key, variable));
+                }
+                _ => {
+                    self.refuse(
+                        assignment.lhs.span(),
+                        "destructuring by position, or by a key that is no literal, has no PHP# form: PHP# destructures a tuple, and reads a `Map` key by key (spec sections 12 and 30)",
+                    );
+                    return self.unassigned(elements);
+                }
+            }
+        }
+        if targets.is_empty()
+            || !matches!(source, Expression::Variable(Variable::Direct(_)))
+            || !self.is(source, &[Kind::Map])
+        {
+            let shown = self.shown(source);
+            self.refuse(
+                source.span(),
+                format!("destructuring `{shown}` by key converts for a `Map` variable only, which PHP# reads once per key (spec section 12)"),
+            );
+            return self.unassigned(elements);
+        }
+
+        self.expression(source, None);
+        let read = self.render(source);
+        let indentation = self.indentation(statement.span().start.offset);
+        let mut start = assignment.lhs.span().start.offset;
+        let last = targets.len() - 1;
+        for (index, (key, variable)) in targets.into_iter().enumerate() {
+            self.expression(key, None);
+            let key = self.render(key);
+            self.edits.delete(start, variable.span.start.offset);
+            if !self.is_local(variable.name) || self.in_scope(variable.name, variable.span.start.offset) {
+                self.variable(variable, true);
+            } else {
+                self.declare(statement, variable, None);
+            }
+            let end = variable.span.end.offset;
+            if index == last {
+                self.edits.insert(end, format!(" = {read}.get({key})"));
+                self.edits.delete(end, assignment.rhs.span().end.offset);
+            } else {
+                self.edits.insert(end, format!(" = {read}.get({key});\n{indentation}"));
+            }
+            start = end;
+        }
+    }
+
+    /// Takes the variables a refused destructuring assigns as given, so the refusal covers each later read of them,
+    /// which has no declaration to point at.
+    fn unassigned(&mut self, elements: Elements<'_, '_>) {
+        let Some(method) = self.method.as_mut() else {
+            return;
+        };
+        for element in elements.iter() {
+            if let Some(Expression::Variable(Variable::Direct(variable))) = element.get_value() {
+                method.parameters.push(variable.name.to_vec());
+            }
+        }
     }
 
     /// The type a `@var` tag right before `statement` declares for `variable`, read as the analysis reads the tag: by
@@ -447,23 +540,12 @@ impl Converter<'_, '_> {
         expected: Option<&TUnion>,
     ) {
         let (lhs, rhs) = (assignment.lhs, assignment.rhs);
-        let destructured = match lhs {
-            Expression::Array(array) => Some(&array.elements),
-            Expression::LegacyArray(array) => Some(&array.elements),
-            Expression::List(list) => Some(&list.elements),
-            _ => None,
-        };
-        if let Some(elements) = destructured {
-            self.refuse(expression.span(), "destructuring is not converted yet");
-            // The refusal covers each later read of the locals it assigns, which have no declaration to point at.
-            if let Some(method) = self.method.as_mut() {
-                for element in elements.iter() {
-                    if let Some(Expression::Variable(Variable::Direct(variable))) = element.get_value() {
-                        method.parameters.push(variable.name.to_vec());
-                    }
-                }
-            }
-            return;
+        if let Some(elements) = destructured(lhs) {
+            self.refuse(
+                expression.span(),
+                "destructuring inside another expression has no PHP# form: write it as a statement of its own",
+            );
+            return self.unassigned(elements);
         }
         if let Expression::ArrayAppend(append) = lhs {
             if !assignment.operator.is_assign() {
@@ -570,6 +652,19 @@ impl Converter<'_, '_> {
         let metadata = self.class.as_ref()?.metadata.properties.get(&mago_word::word(&property))?;
 
         Some(metadata.type_metadata.as_ref()?.type_union.clone())
+    }
+}
+
+/// The elements of a destructuring's place.
+type Elements<'ast, 'arena> = &'ast TokenSeparatedSequence<'arena, ArrayElement<'arena>>;
+
+/// The elements `place` destructures into, when the place of a write is a destructuring.
+fn destructured<'ast, 'arena>(place: &'ast Expression<'arena>) -> Option<Elements<'ast, 'arena>> {
+    match place {
+        Expression::Array(array) => Some(&array.elements),
+        Expression::LegacyArray(array) => Some(&array.elements),
+        Expression::List(list) => Some(&list.elements),
+        _ => None,
     }
 }
 

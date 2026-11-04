@@ -62,7 +62,7 @@ echo (new Pair())->both(), "\n";
 $tally = new Tally();
 $plusThree = $tally->adder(3);
 echo $tally->sum(2, 5, 10), ' ', $plusThree(4), ' ', $tally->halved(10), "\n";
-echo $tally->counted([3]), ' ', $tally->made(Pair::class), "\n";
+echo $tally->counted([3]), ' ', $tally->made(Pair::class), ' ', $tally->priced(['price' => 4, 'count' => 3]), "\n";
 
 $cat = new Cat('tom');
 $bird = new Bird('tweety');

@@ -1,4 +1,4 @@
-19:9: destructuring is not converted yet
+19:9: destructuring by position, or by a key that is no literal, has no PHP# form: PHP# destructures a tuple, and reads a `Map` key by key (spec sections 12 and 30)
 20:21: an interpolated string or a heredoc is not converted yet: it becomes a template
 21:17: a magic constant is not converted yet: `Position` replaces it (spec section 27)
 22:20: `print` is removed: output goes through `Console`, which a class receives through its constructor (spec section 8)

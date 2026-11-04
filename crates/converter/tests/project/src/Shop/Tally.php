@@ -65,6 +65,14 @@ final class Tally
         return $this->count(...[1, 2], ...$all);
     }
 
+    /** @param array<string, int> $row */
+    public function priced(array $row): int
+    {
+        ['price' => $price, 'count' => $count] = $row;
+
+        return ($price ?? 0) * ($count ?? 1);
+    }
+
     /** @param class-string<Pair> $type */
     public function made(string $type): string
     {
