@@ -26,7 +26,7 @@ use crate::types::type_text;
 
 impl<'input> Converter<'input, '_> {
     /// The method `selector` names on a value of type `object`, when the analysis knows the value's class.
-    fn method_of(
+    pub(super) fn method_of(
         &self,
         object: Option<&TUnion>,
         selector: &ClassLikeMemberSelector<'_>,
@@ -44,7 +44,7 @@ impl<'input> Converter<'input, '_> {
     /// The method `selector` names, written as its class declares it: PHP finds a method in any case, and PHP# only in
     /// its own (spec section 25). A call of a method the object's class doesn't have, which PHP reaches through an
     /// implementation or `__call`, is refused.
-    fn method_name(
+    pub(super) fn method_name(
         &mut self,
         object: &Expression<'_>,
         selector: &ClassLikeMemberSelector<'_>,
@@ -111,7 +111,10 @@ impl<'input> Converter<'input, '_> {
                 self.expression(value, None);
                 continue;
             };
-            if self.untyped(value, "a parameter of a known type") || declared.has_template_types() {
+            // The parameter's type decides a literal's form, as `[:]` for a `Map` and `this.name` for a function.
+            let expected = (!declared.has_template_types()).then_some(declared);
+            self.expression(value, expected);
+            if self.mixed(value, "a parameter of a known type") || declared.has_template_types() {
                 continue;
             }
             // PHP passes a value its parameter's type may not hold, and PHP# refuses it (spec section 7).
@@ -177,7 +180,7 @@ impl<'input> Converter<'input, '_> {
 
     /// The function a bare call runs: the one its resolved name names, or PHP's own of the name it writes, as PHP falls
     /// back to a function of the root namespace.
-    fn function_of(&self, identifier: &Identifier<'_>) -> Option<&'input FunctionLikeMetadata> {
+    pub(super) fn function_of(&self, identifier: &Identifier<'_>) -> Option<&'input FunctionLikeMetadata> {
         let codebase = self.input.codebase;
 
         codebase.get_function(self.input.names.get(identifier)).or_else(|| {

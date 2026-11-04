@@ -28,6 +28,7 @@ use mago_span::HasSpan;
 use mago_syntax::cst::Block;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::IfBody;
+use mago_syntax::cst::Literal;
 use mago_syntax::cst::Statement;
 use mago_syntax::cst::Try;
 use mago_syntax::cst::Variable;
@@ -270,6 +271,12 @@ impl<'input> Converter<'input, '_> {
     /// decides the PHP# form of a literal, as `[]` is an empty `Map`, `[:]`, where a `Map` is declared (spec section
     /// 12).
     pub(crate) fn expression(&mut self, expression: &Expression<'_>, expected: Option<&TUnion>) {
+        if let Some(expected) = expected
+            && matches!(expression, Expression::Array(_) | Expression::Literal(Literal::String(_)))
+            && self.callable_literal(expression, expected)
+        {
+            return;
+        }
         match expression {
             Expression::Variable(Variable::Direct(variable)) => self.variable(variable, false),
             Expression::Variable(_) => {
@@ -335,9 +342,7 @@ impl<'input> Converter<'input, '_> {
             }
             Expression::Throw(throw) => self.expression(throw.exception, None),
             Expression::Closure(_) | Expression::ArrowFunction(_) => self.lambda(expression),
-            Expression::PartialApplication(_) => {
-                self.refuse(expression.span(), "a function as a value is not converted yet");
-            }
+            Expression::PartialApplication(application) => self.method_value(expression, application),
             Expression::Match(r#match) => self.match_expression(r#match, false),
             Expression::Clone(clone) => self.clone(expression, clone.object),
             Expression::List(_) => self.refuse(expression.span(), "destructuring is not converted yet"),
@@ -406,6 +411,11 @@ impl<'input> Converter<'input, '_> {
     /// only from a known type, and gives whether it did. Its own parts convert either way.
     fn untyped(&mut self, expression: &Expression<'_>, operation: &str) -> bool {
         self.expression(expression, None);
+        self.mixed(expression, operation)
+    }
+
+    /// Refuses `expression`, converted already, when the analysis gives it `mixed`, as [`Converter::untyped`] does.
+    fn mixed(&mut self, expression: &Expression<'_>, operation: &str) -> bool {
         if !self.type_of(expression).is_some_and(|union| union.types.iter().any(TAtomic::is_mixed)) {
             return false;
         }

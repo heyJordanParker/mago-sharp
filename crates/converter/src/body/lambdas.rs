@@ -1,13 +1,21 @@
-//! Lambdas: PHP's `fn` and `function` as PHP#'s bare arrow, `(int n) => …`, which captures each variable it uses with
-//! no `use` list (spec section 14.2).
+//! Functions as values: PHP's `fn` and `function` as PHP#'s bare arrow, `(int n) => …`, which captures each variable
+//! it uses with no `use` list, and a method named as a value, `this.name` (spec sections 14.2 and 14.3).
 
+use mago_codex::ttype::atomic::TAtomic;
+use mago_codex::ttype::atomic::object::TObject;
+use mago_codex::ttype::union::TUnion;
 use mago_span::HasSpan;
 use mago_span::Span;
+use mago_syntax::cst::Access;
+use mago_syntax::cst::ArrayElement;
 use mago_syntax::cst::AttributeList;
 use mago_syntax::cst::Block;
+use mago_syntax::cst::ClassLikeConstantSelector;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::FunctionLikeParameterList;
 use mago_syntax::cst::Keyword;
+use mago_syntax::cst::Literal;
+use mago_syntax::cst::PartialApplication;
 use mago_syntax::cst::Sequence;
 
 use super::Locals;
@@ -157,4 +165,156 @@ impl Converter<'_, '_> {
         }
         self.edits.replace_range(parameters.right_parenthesis.end.offset, body.start.offset, " => ");
     }
+
+    /// `$object->name(...)`, `Class::name(...)` and `name(...)` as the method value PHP# names without parentheses,
+    /// `object.name` (spec section 14.3).
+    pub(super) fn method_value(&mut self, expression: &Expression<'_>, application: &PartialApplication<'_>) {
+        if !application.is_first_class_callable() {
+            return self.refuse(
+                expression.span(),
+                "a partial application with placeholders has no PHP# form: write a lambda that calls it",
+            );
+        }
+        let arguments = application.get_argument_list().span();
+        match application {
+            PartialApplication::Method(value) => {
+                if self.untyped(value.object, "a method value") {
+                    return;
+                }
+                self.edits.replace(value.arrow, ".");
+                self.member(&value.method);
+                let method = self.method_of(self.type_of(value.object), &value.method);
+                self.method_name(value.object, &value.method, method);
+            }
+            PartialApplication::StaticMethod(value) => {
+                self.expression(value.class, None);
+                self.edits.replace(value.double_colon, ".");
+                self.member(&value.method);
+            }
+            // A function value, `$f(...)`, is the value itself.
+            PartialApplication::Function(value) => {
+                let Expression::Identifier(identifier) = value.function else {
+                    self.expression(value.function, None);
+                    return self.edits.delete(arguments.start.offset, arguments.end.offset);
+                };
+                let Some(function) = self.function_of(identifier) else {
+                    return self.refuse(expression.span(), "the analysis holds no function this value names");
+                };
+                let name = function.original_name.as_str_lossy().into_owned();
+                if function.flags.is_built_in() {
+                    return self.refuse(
+                        expression.span(),
+                        format!("`{name}` is PHP's own function, which PHP# reaches through the standard library member that runs it, and the converter writes that member for a call only"),
+                    );
+                }
+                let Some(text) = self.through_namespace(expression.span(), &name, function.span) else {
+                    return;
+                };
+                self.edits.replace(value.function.span(), text);
+            }
+        }
+        self.edits.delete(arguments.start.offset, arguments.end.offset);
+    }
+
+    /// `[$object, 'name']`, `[Class::class, 'name']` and `'Class::name'`, which PHP calls as a function where a
+    /// function type, `expected`, is declared, as the method value `object.name` (spec section 14.3). Gives whether
+    /// `expression` is one.
+    pub(super) fn callable_literal(&mut self, expression: &Expression<'_>, expected: &TUnion) -> bool {
+        let is_function = expected.types.iter().all(|atomic| match atomic {
+            TAtomic::Callable(_) => true,
+            TAtomic::Object(TObject::Named(object)) => object.name.as_bytes().eq_ignore_ascii_case(b"closure"),
+            _ => atomic.is_null(),
+        });
+        if !is_function {
+            return false;
+        }
+        let (holder, name) = match expression {
+            Expression::Array(array) => {
+                let mut elements = array.elements.iter();
+                match (elements.next(), elements.next(), elements.next()) {
+                    (Some(ArrayElement::Value(holder)), Some(ArrayElement::Value(name)), None) => {
+                        let Expression::Literal(Literal::String(string)) = name.value else {
+                            return false;
+                        };
+                        let Some(name) = string.value else {
+                            return false;
+                        };
+                        (Holder::Expression(holder.value), name.to_vec())
+                    }
+                    _ => return false,
+                }
+            }
+            Expression::Literal(Literal::String(string)) => {
+                let Some((class, name)) = string.value.and_then(|value| {
+                    let text = std::str::from_utf8(value).ok()?;
+                    text.split_once("::")
+                }) else {
+                    return false;
+                };
+                (Holder::Class(class.trim_start_matches('\\').as_bytes().to_vec()), name.as_bytes().to_vec())
+            }
+            _ => return false,
+        };
+
+        // The class the method is found on, and the object it is a value of, when it is no class's static method.
+        let (class, object) = match &holder {
+            Holder::Class(class) => (Some(class.clone()), None),
+            Holder::Expression(Expression::Literal(Literal::String(string))) => {
+                (string.value.map(|value| value.strip_prefix(b"\\").unwrap_or(value).to_vec()), None)
+            }
+            Holder::Expression(Expression::Access(Access::ClassConstant(access)))
+                if matches!(&access.constant, ClassLikeConstantSelector::Identifier(constant)
+                    if constant.value.eq_ignore_ascii_case(b"class")) =>
+            {
+                let class = match access.class {
+                    Expression::Identifier(identifier) => Some(self.input.names.get(identifier).to_vec()),
+                    _ => self.class.as_ref().map(|class| class.metadata.name.as_bytes().to_vec()),
+                };
+                (class, None)
+            }
+            Holder::Expression(object) => match self.type_of(object).map(|union| union.types.as_ref()) {
+                Some([TAtomic::Object(TObject::Named(named))]) => (Some(named.name.as_bytes().to_vec()), Some(*object)),
+                _ => (None, Some(*object)),
+            },
+        };
+        let method = class.as_ref().and_then(|class| self.input.codebase.get_declaring_method(class, &name));
+        let (Some(class), Some(method)) = (class, method) else {
+            self.refuse(
+                expression.span(),
+                "a callable array or string whose method the analysis can't find has no PHP# form: PHP# names a method value on its class or object (spec section 14.3)",
+            );
+            return true;
+        };
+        let written = match object {
+            Some(object) => {
+                self.expression(object, None);
+                let rendered = self.render(object);
+                if super::is_primary(object) { rendered } else { format!("({rendered})") }
+            }
+            None => {
+                let declared = self.input.codebase.get_class_like(&class).map(|class| class.original_name);
+                let Some(declared) = declared else {
+                    return false;
+                };
+                match self.imports.name_of(&declared.as_str_lossy()) {
+                    Ok(name) => name,
+                    Err(reason) => {
+                        self.refuse(expression.span(), reason);
+                        return true;
+                    }
+                }
+            }
+        };
+        self.edits.replace(expression.span(), format!("{written}.{}", method.original_name.as_str_lossy()));
+
+        true
+    }
+}
+
+/// What a callable array or string names its method on.
+enum Holder<'ast, 'arena> {
+    /// A class by its name.
+    Class(Vec<u8>),
+    /// The array's first element: an object, a class value or a class name.
+    Expression(&'ast Expression<'arena>),
 }

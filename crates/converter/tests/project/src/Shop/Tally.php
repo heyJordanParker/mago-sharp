@@ -26,4 +26,23 @@ final class Tally
     {
         return static fn(int $value): int => $value + $step;
     }
+
+    // Method values: `name(...)` and `[$this, 'name']` where a function is declared.
+    public function halved(int $amount): int
+    {
+        $less = $this->less(...);
+
+        return $this->apply([$this, 'less'], $less($amount));
+    }
+
+    public function less(int $amount): int
+    {
+        return $amount - 2;
+    }
+
+    /** @param callable(int): int $rule */
+    private function apply(callable $rule, int $amount): int
+    {
+        return $rule($amount);
+    }
 }

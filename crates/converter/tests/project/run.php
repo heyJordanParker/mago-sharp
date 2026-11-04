@@ -61,7 +61,7 @@ echo (new Pair())->both(), "\n";
 
 $tally = new Tally();
 $plusThree = $tally->adder(3);
-echo $tally->sum(2, 5, 10), ' ', $plusThree(4), "\n";
+echo $tally->sum(2, 5, 10), ' ', $plusThree(4), ' ', $tally->halved(10), "\n";
 
 $cat = new Cat('tom');
 $bird = new Bird('tweety');
