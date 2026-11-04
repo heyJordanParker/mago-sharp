@@ -336,9 +336,7 @@ impl<'input> Converter<'input, '_> {
                 self.refuse(expression.span(), "a function as a value is not converted yet");
             }
             Expression::Match(r#match) => self.match_expression(r#match, false),
-            Expression::Clone(_) => {
-                self.refuse(expression.span(), "`clone` is not converted yet: it becomes `with { }`")
-            }
+            Expression::Clone(clone) => self.clone(expression, clone.object),
             Expression::List(_) => self.refuse(expression.span(), "destructuring is not converted yet"),
             Expression::CompositeString(_) => {
                 self.refuse(
@@ -359,6 +357,46 @@ impl<'input> Converter<'input, '_> {
             Expression::Yield(_) => self.refuse(expression.span(), "a generator is not converted yet"),
             _ => self.refuse(expression.span(), "this expression has no PHP# form"),
         }
+    }
+
+    /// `clone $x` as `x with { }`, a copy with no property set (spec section 10). PHP runs a class's `__clone` on the
+    /// copy, which `with` doesn't, so a class that declares one keeps the file plain PHP.
+    fn clone(&mut self, expression: &Expression<'_>, object: &Expression<'_>) {
+        let codebase = self.input.codebase;
+        let classes: Vec<String> = self
+            .type_of(object)
+            .map(|union| {
+                union
+                    .types
+                    .iter()
+                    .filter_map(|atomic| match atomic {
+                        TAtomic::Object(mago_codex::ttype::atomic::object::TObject::Named(named)) => {
+                            Some(named.name.as_str_lossy().into_owned())
+                        }
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if classes.is_empty() {
+            let shown = self.shown(object);
+            return self.refuse(
+                expression.span(),
+                format!("`clone` of `{shown}` is not converted yet: `with` copies a value of a known class"),
+            );
+        }
+        if let Some(class) =
+            classes.iter().find(|class| codebase.get_declaring_method(class.as_bytes(), b"__clone").is_some())
+        {
+            return self.refuse(
+                expression.span(),
+                format!("`{class}` declares `__clone`, which PHP runs on a copy and `with` doesn't (spec section 10)"),
+            );
+        }
+        self.expression(object, None);
+        let copied = self.render(object);
+        let copied = if is_primary(object) { copied } else { format!("({copied})") };
+        self.edits.replace(expression.span(), format!("{copied} with {{ }}"));
     }
 
     /// Refuses `expression` when the analysis gives it `mixed`, which PHP lets reach `operation` and PHP# lets reach it

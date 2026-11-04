@@ -1,0 +1,20 @@
+namespace App;
+
+// PHP's `__toString()` is PHP#'s `string toString()`, and `clone $x` is `x with { }`, a copy with no property set
+// (spec sections 10 and 18).
+public class Sku
+{
+    public Sku(public string code { get; set; })
+    {
+    }
+
+    public virtual string toString()
+    {
+        return 'SKU ' + this.code;
+    }
+
+    public virtual Sku copy()
+    {
+        return this with { };
+    }
+}

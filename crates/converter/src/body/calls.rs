@@ -54,6 +54,10 @@ impl<'input> Converter<'input, '_> {
             return;
         };
         match method {
+            // PHP's `__toString()` is PHP#'s `toString()` (spec section 18).
+            Some(method) if method.original_name.as_bytes().eq_ignore_ascii_case(b"__tostring") => {
+                self.edits.replace(name.span, "toString");
+            }
             Some(method) if name.value != method.original_name.as_bytes() => {
                 self.edits.replace(name.span, method.original_name.as_str_lossy().into_owned());
             }

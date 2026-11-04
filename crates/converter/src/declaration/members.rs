@@ -199,7 +199,11 @@ impl Converter<'_, '_> {
         // A static method keeps `static`, and a subclass replaces it as it does an instance method, so it takes
         // `virtual` and `override` after it (spec section 11).
         let is_constructor = name.eq_ignore_ascii_case(b"__construct");
-        if name.starts_with(b"__") && !is_constructor {
+        // PHP's `__toString()` is PHP#'s `string toString()`, which every conversion to text calls (spec section 18).
+        let is_text = name.eq_ignore_ascii_case(b"__tostring");
+        if is_text {
+            self.edits.replace(method.name.span, "toString");
+        } else if name.starts_with(b"__") && !is_constructor {
             self.refuse(method.name.span, format!("the magic method `{shown}` is not converted yet"));
             return;
         }

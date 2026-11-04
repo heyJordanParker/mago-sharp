@@ -4,8 +4,8 @@ declare(strict_types=1);
 
 namespace App;
 
-// Functions as values, `clone`, destructuring, interpolation, magic constants, `print`, `new` of a class value,
-// spreads and generators wait for later families, while the `match` beside them converts.
+// Functions as values, destructuring, interpolation, magic constants, `print`, `new` of a class value, spreads and
+// generators wait for later families, while the `match` and the `clone` beside them convert.
 final class Later
 {
     public function run(string $name, Later $other, int $count): mixed
