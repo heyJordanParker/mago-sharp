@@ -1,0 +1,11 @@
+php-version = "8.5"
+
+[source]
+paths = ["src", "run.php", "vendor/heyjordanparker/php-sharp-composer/library"]
+includes = ["vendor"]
+extensions = ["php", "sharp"]
+
+# The neutral refinement worker refines each class of src/ marked #[Proof\Refined], as a framework adapter would.
+[extension-hosts.proof]
+workers = 1
+command = ["php", "../../../../composer/tests/Sdk/Fixtures/analyzer-refinement-worker.php"]
