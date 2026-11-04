@@ -1,0 +1,13 @@
+namespace App;
+
+// An abstract class keeps `abstract`, and its abstract methods take no `virtual`, since a subclass replaces them by
+// definition (spec section 22).
+public abstract class Shape
+{
+    abstract public float area();
+
+    public virtual string describe()
+    {
+        return `area ${this.area()}`;
+    }
+}

@@ -36,7 +36,8 @@ impl Converter<'_, '_> {
             Some(Modifier::Private(_)) => "private",
             _ => "public",
         };
-        let is_readonly = has(&property.modifiers, |modifier| matches!(modifier, Modifier::Readonly(_))).is_some();
+        let is_readonly = has(&property.modifiers, |modifier| matches!(modifier, Modifier::Readonly(_))).is_some()
+            || metadata.flags.is_readonly();
 
         self.attributes(&property.attribute_lists);
         let span = property.span();
@@ -214,9 +215,17 @@ impl Converter<'_, '_> {
         }
 
         self.attributes(&method.attribute_lists);
-        if let Some(at) = Self::missing_visibility(&method.modifiers, function.span) {
+        // An interface member is as visible as its interface, so it takes no access modifier (spec section 5).
+        let is_interface = metadata.kind.is_interface();
+        if is_interface {
+            for modifier in method.modifiers.iter().filter(|modifier| modifier.is_read_visibility()) {
+                let span = modifier.span();
+                self.edits.delete(span.start.offset, self.skip_whitespace(span.end.offset));
+            }
+        } else if let Some(at) = Self::missing_visibility(&method.modifiers, function.span) {
             self.edits.insert(at, "public ");
         }
+        let is_abstract = has(&method.modifiers, |modifier| matches!(modifier, Modifier::Abstract(_))).is_some();
 
         if is_constructor {
             self.edits.replace_range(function.span.start.offset, method.name.span.end.offset, class_name);
@@ -275,7 +284,10 @@ impl Converter<'_, '_> {
                 );
                 return;
             }
-            let opening = if overrides {
+            // An interface's member and an abstract method are replaced by definition, so they take neither marker.
+            let opening = if is_interface || is_abstract {
+                ""
+            } else if overrides {
                 "override "
             } else if !class_is_final && !is_private && is_final.is_none() {
                 "virtual "

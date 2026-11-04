@@ -296,8 +296,8 @@ impl<'input> Converter<'input, '_> {
             }
             Statement::Use(r#use) => self.use_line(r#use),
             Statement::Class(class) => self.class(class),
-            Statement::Interface(_) => self.refuse(statement.span(), "an interface is not converted yet"),
-            Statement::Enum(_) => self.refuse(statement.span(), "an enum is not converted yet"),
+            Statement::Interface(interface) => self.interface(interface),
+            Statement::Enum(enumeration) => self.enumeration(enumeration),
             Statement::Trait(_) => {
                 self.refuse(statement.span(), "a trait has no PHP# form: PHP# declares no traits (spec section 22)");
             }

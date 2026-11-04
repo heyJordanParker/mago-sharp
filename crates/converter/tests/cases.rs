@@ -80,10 +80,14 @@ fn declared(folder: &Path) -> String {
 
     statements
         .find_map(|statement| match statement {
-            Statement::Class(class) => Some(String::from_utf8_lossy(class.name.value).into_owned()),
+            Statement::Class(class) => Some(class.name.value),
+            Statement::Interface(interface) => Some(interface.name.value),
+            Statement::Enum(enumeration) => Some(enumeration.name.value),
+            Statement::Trait(r#trait) => Some(r#trait.name.value),
             _ => None,
         })
-        .unwrap_or_else(|| panic!("{} declares no class", folder.display()))
+        .map(|name| String::from_utf8_lossy(name).into_owned())
+        .unwrap_or_else(|| panic!("{} declares no type", folder.display()))
 }
 
 /// The project of the case at `folder`, analyzed: its `.php` files, with `converted` in place of `input.php`, under its

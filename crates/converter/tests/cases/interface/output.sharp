@@ -1,0 +1,7 @@
+namespace App;
+
+// An interface's members take no access modifier, and its parents follow `:` (spec sections 5 and 22).
+public interface Priced : Named
+{
+    float price(int quantity);
+}

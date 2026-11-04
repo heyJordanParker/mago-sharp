@@ -84,7 +84,8 @@ impl Converter<'_, '_> {
                 self.edits.insert(first.span().start.offset, "public ");
             }
             let is_public = visibility.is_none_or(|modifier| matches!(modifier, Modifier::Public(_)));
-            let accessors = accessors(is_public, readonly.is_some(), &parameter.modifiers);
+            let in_readonly_class = self.class.as_ref().is_some_and(|class| class.metadata.flags.is_readonly());
+            let accessors = accessors(is_public, readonly.is_some() || in_readonly_class, &parameter.modifiers);
             if !accessors.is_empty() {
                 self.edits.insert(parameter.variable.span.end.offset, accessors);
             }
