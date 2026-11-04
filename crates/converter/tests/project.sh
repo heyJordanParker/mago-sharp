@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-# The whole-project proof of mago convert. Copies the fixture project into the empty folder $1, installs it, commits it
-# to a fresh git repository and converts the files below, then checks that:
+# The whole-project proof of mago convert, which sharp/bin/test runs after the PHP# suite. Copies the fixture project
+# into the empty folder $1, installs it, commits it to a fresh git repository and converts the files below, then checks
+# that:
 # - `--dry-run` changes no file
-# - each file the slices so far can't convert stays plain PHP, and every other file converts
+# - each file mago convert refuses stays plain PHP, and every other file converts
 # - the index holds each conversion as a rename alone, `R100`, and `git log --follow` reaches the plain PHP file
 # - `mago compile` accepts every file, the plain PHP subclasses of converted classes included
 # - `mago analyze` has no new error, and only the warnings decision 9 expects
 # - run.php prints the same output on the engine before and after
 # Needs the engine and mago built by sharp/bin/build and sharp/bin/build-mago, and Composer and a php on PATH for the
-# refinement worker. Exits 1 at the first check that fails.
+# refinement worker. Writes each step's output beside $1. Exits 1 at the first check that fails.
 root="$(cd "$(dirname "$0")/../../../../.." && pwd)"
 build="$root/sharp/build/$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m)"
 engine="$build/sapi/cli/php"
@@ -27,8 +28,10 @@ commit() { git -c user.name=proof -c user.email=proof@localhost commit --quiet "
 
 cp -R "$(dirname "$0")/project/." "$project"
 cd "$project" || exit 1
-sed -i '' "s|\"../../../../../composer\"|\"$root/sharp/composer\"|" composer.json
-sed -i '' "s|\"../../../../composer/|\"$root/sharp/mago/composer/|" mago.toml
+# BSD and GNU sed both take -i with a suffix joined to it.
+sed -i.plain "s|\"../../../../../composer\"|\"$root/sharp/composer\"|" composer.json
+sed -i.plain "s|\"../../../../composer/|\"$root/sharp/mago/composer/|" mago.toml
+rm composer.json.plain mago.toml.plain
 composer install --quiet --no-interaction || fail "composer install"
 git init --quiet
 git add --all
