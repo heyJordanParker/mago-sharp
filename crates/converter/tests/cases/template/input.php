@@ -45,4 +45,10 @@ class Shelf
     {
         return $this->byNumber;
     }
+
+    /** @return list<TLabel> */
+    public function labels(): array
+    {
+        return [];
+    }
 }

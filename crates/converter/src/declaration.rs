@@ -8,8 +8,11 @@ use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::union::TUnion;
 use mago_span::HasSpan;
 use mago_span::Span;
+use mago_syntax::cst::Access;
 use mago_syntax::cst::AttributeList;
 use mago_syntax::cst::ClassLikeMember;
+use mago_syntax::cst::ClassLikeMemberSelector;
+use mago_syntax::cst::Expression;
 use mago_syntax::cst::FunctionLikeParameter;
 use mago_syntax::cst::Identifier;
 use mago_syntax::cst::Method as MethodDeclaration;
@@ -20,6 +23,8 @@ use mago_syntax::cst::PlainProperty;
 use mago_syntax::cst::Property;
 use mago_syntax::cst::PropertyItem;
 use mago_syntax::cst::Sequence;
+use mago_syntax::cst::Statement;
+use mago_syntax::cst::Variable;
 use mago_word::ascii_lowercase_word;
 use mago_word::word;
 
@@ -103,7 +108,8 @@ impl Converter<'_, '_> {
         self.docblock(class.span());
 
         let is_final = has(&class.modifiers, |modifier| matches!(modifier, Modifier::Final(_))).is_some();
-        self.class = Some(Class { name, metadata, is_final });
+        let set_by_constructor = set_by_constructor(class);
+        self.class = Some(Class { name, metadata, is_final, set_by_constructor });
         for member in &class.members {
             match member {
                 ClassLikeMember::Method(method) => self.method(method),
@@ -278,7 +284,25 @@ impl Converter<'_, '_> {
                 // PHP gives an untyped property null, which PHP# writes, since a member has no implicit value (spec
                 // section 6).
                 PropertyItem::Abstract(_) if property.hint.is_none() => " = null".to_owned(),
-                PropertyItem::Abstract(_) => String::new(),
+                PropertyItem::Abstract(_)
+                    if self.class.as_ref().is_some_and(|class| {
+                        class.set_by_constructor.iter().any(|set| set.as_slice() == variable.name)
+                    }) =>
+                {
+                    String::new()
+                }
+                // PHP leaves a typed property unset until code outside the class sets it, where PHP# sets every
+                // property before the object is used.
+                PropertyItem::Abstract(_) => {
+                    let name = String::from_utf8_lossy(variable.name);
+                    self.refuse(
+                        variable.span,
+                        format!(
+                            "`{name}` has no initial value, and the constructor doesn't set it: a PHP# property is set before the object is used (spec section 6)"
+                        ),
+                    );
+                    continue;
+                }
             };
             let name = Self::variable_name(variable.name);
             let accessors = accessors(visibility == "public", is_readonly);
@@ -483,6 +507,42 @@ impl Converter<'_, '_> {
             self.expression(default.value, Some(&union));
         }
     }
+}
+
+/// Each property, as `$name`, that `class`'s constructor sets with `$this->name = …` in a statement of its own body,
+/// which runs on every path through it.
+fn set_by_constructor(class: &mago_syntax::cst::Class<'_>) -> Vec<Vec<u8>> {
+    let constructor = class.members.iter().find_map(|member| match member {
+        ClassLikeMember::Method(method) if method.name.value.eq_ignore_ascii_case(b"__construct") => Some(method),
+        _ => None,
+    });
+    let Some(MethodBody::Concrete(block)) = constructor.map(|method| &method.body) else {
+        return Vec::new();
+    };
+
+    block
+        .statements
+        .iter()
+        .filter_map(|statement| {
+            let Statement::Expression(statement) = statement else {
+                return None;
+            };
+            let Expression::Assignment(assignment) = statement.expression else {
+                return None;
+            };
+            let Expression::Access(Access::Property(access)) = assignment.lhs else {
+                return None;
+            };
+            match (access.object, &access.property) {
+                (Expression::Variable(Variable::Direct(object)), ClassLikeMemberSelector::Identifier(name))
+                    if object.name == b"$this" && assignment.operator.is_assign() =>
+                {
+                    Some([b"$".as_slice(), name.value].concat())
+                }
+                _ => None,
+            }
+        })
+        .collect()
 }
 
 /// Whether a docblock line starts a tag or closes the docblock, which ends the text of the tag before it.

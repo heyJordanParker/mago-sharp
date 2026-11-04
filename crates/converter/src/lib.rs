@@ -109,6 +109,8 @@ struct Class<'input> {
     name: String,
     metadata: &'input ClassLikeMetadata,
     is_final: bool,
+    /// Each property, as `$name`, the class's constructor sets in a statement of its own body, which runs on every path.
+    set_by_constructor: Vec<Vec<u8>>,
 }
 
 /// The method whose body is converted.

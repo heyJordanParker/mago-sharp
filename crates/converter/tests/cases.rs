@@ -34,11 +34,15 @@ use mago_database::Database;
 use mago_database::DatabaseConfiguration;
 use mago_database::DatabaseReader;
 use mago_database::file::File;
+use mago_database::file::FileId;
 use mago_database::file::FileType;
+use mago_database::loader::mark_sharp_file;
 use mago_names::resolver::NameResolver;
 use mago_prelude::Prelude;
+use mago_reporting::Level;
 use mago_server::Server;
 use mago_server::Settings;
+use mago_syntax::cst::Statement;
 use mago_syntax::parser::parse_file;
 use mago_syntax::settings::ParserSettings;
 
@@ -50,35 +54,72 @@ fn prelude() -> (CodebaseMetadata, SymbolReferences) {
     (metadata, symbol_references)
 }
 
-/// Each `.php` file under `folder`, its subfolders included.
-fn php_files(folder: &Path, files: &mut Vec<PathBuf>) {
+/// Each file under `folder` with the extension `extension`, its subfolders included.
+fn files_of(folder: &Path, extension: &str, files: &mut Vec<PathBuf>) {
     for entry in std::fs::read_dir(folder).unwrap() {
         let path = entry.unwrap().path();
         if path.is_dir() {
-            php_files(&path, files);
-        } else if path.extension().is_some_and(|extension| extension == "php") {
+            files_of(&path, extension, files);
+        } else if path.extension().is_some_and(|found| found == extension) {
             files.push(path);
         }
     }
 }
 
-/// What the converter gives for the case at `folder`: the PHP# text, or each refusal as `line:column: reason`.
-fn converted(folder: &Path) -> Result<String, String> {
+/// The name of the class `input.php` declares, which its `.sharp` file takes (spec section 27).
+fn declared(folder: &Path) -> String {
+    let path = folder.join("input.php");
+    let file = File::new(Cow::Borrowed(b"input.php"), FileType::Host, None, Cow::Owned(std::fs::read(path).unwrap()));
+    let arena = LocalArena::new();
+    let program = parse_file(&arena, &file);
+    let mut statements = program.statements.iter().flat_map(|statement| match statement {
+        Statement::Namespace(namespace) => namespace.statements().iter().collect::<Vec<_>>(),
+        statement => vec![statement],
+    });
+
+    statements
+        .find_map(|statement| match statement {
+            Statement::Class(class) => Some(String::from_utf8_lossy(class.name.value).into_owned()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("{} declares no class", folder.display()))
+}
+
+/// The project of the case at `folder`, analyzed: its `.php` files, with `converted` in place of `input.php`, under its
+/// class's `.sharp` name, when it is given.
+fn analyzed(folder: &Path, converted: Option<&str>) -> Server {
     let mut database = Database::new(DatabaseConfiguration::new(folder, vec![], vec![], vec![], vec![]));
+    // The PHP# standard library, as a project's `vendor/` holds it, gives `List`, `Map` and the rest their members.
+    let library = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../composer/library").canonicalize().unwrap();
+    let mut sources = Vec::new();
+    files_of(&library, "sharp", &mut sources);
+    for path in sources {
+        let name = Cow::Owned(path.to_string_lossy().into_owned().into_bytes());
+        let contents = Cow::Owned(std::fs::read(&path).unwrap());
+        let mut file = File::new(name, FileType::Vendored, Some(path), contents);
+        mark_sharp_file(&mut file, folder);
+        database.add(file);
+    }
+
     let mut paths = Vec::new();
-    php_files(folder, &mut paths);
+    files_of(folder, "php", &mut paths);
     paths.sort();
-    let mut input = None;
     for path in paths {
         let name = path.strip_prefix(folder).unwrap().to_string_lossy().into_owned();
         let contents = std::fs::read(&path).unwrap();
-        let file = File::new(Cow::Owned(name.clone().into_bytes()), FileType::Host, Some(path), Cow::Owned(contents));
-        let id = database.add(file);
-        if name == "input.php" {
-            input = Some(id);
-        }
+        let file = match (name.as_str(), converted) {
+            ("input.php", Some(text)) => {
+                let name = format!("{}.sharp", declared(folder));
+                let path = folder.join(&name);
+                let name = Cow::Owned(name.into_bytes());
+                let mut file = File::new(name, FileType::Host, Some(path), Cow::Owned(text.as_bytes().to_vec()));
+                mark_sharp_file(&mut file, folder);
+                file
+            }
+            _ => File::new(Cow::Owned(name.into_bytes()), FileType::Host, Some(path), Cow::Owned(contents)),
+        };
+        database.add(file);
     }
-    let input = input.unwrap_or_else(|| panic!("{} holds no input.php", folder.display()));
 
     let settings = Settings {
         parser: ParserSettings::default(),
@@ -88,6 +129,37 @@ fn converted(folder: &Path) -> Result<String, String> {
     };
     let mut server = Server::new(database.into_static(), prelude, settings);
     server.analyze().expect("the analysis runs");
+
+    server
+}
+
+/// Each issue the PHP# checker finds in `text`, the conversion of the case at `folder`, as `line: level code:
+/// message`, but the warnings decision 9 expects.
+fn checked(folder: &Path, text: &str) -> String {
+    let server = analyzed(folder, Some(text));
+    let input = FileId::new(format!("{}.sharp", declared(folder)).as_bytes());
+    let file = server.database().get(&input).unwrap();
+
+    server
+        .analyze_file_with_artifacts(input)
+        .expect("the analysis holds the converted file")
+        .0
+        .iter()
+        .filter(|issue| issue.level >= Level::Warning)
+        .filter(|issue| !matches!(issue.code.as_deref(), Some("too-wide-member" | "redundant-docblock-type")))
+        .map(|issue| {
+            let line = issue.primary_span().map_or(0, |span| file.line_number(span.start.offset) + 1);
+            format!("{line}: {} {}: {}\n", issue.level, issue.code.as_deref().unwrap_or_default(), issue.message)
+        })
+        .collect::<Vec<_>>()
+        .concat()
+}
+
+/// What the converter gives for the case at `folder`: the PHP# text, or each refusal as `line:column: reason`.
+fn converted(folder: &Path) -> Result<String, String> {
+    let server = analyzed(folder, None);
+    let input = FileId::new(b"input.php");
+    assert!(server.database().get(&input).is_ok(), "{} holds no input.php", folder.display());
     let file = server.database().get(&input).unwrap();
     let (_, artifacts) = server.analyze_file_with_artifacts(input).expect("the analysis holds input.php");
     let arena = LocalArena::new();
@@ -120,7 +192,13 @@ fn run(folder: &Path) -> Result<(), Failed> {
         Err(refusals) => (refusals, false),
     };
     if actual_ok == expected_ok && actual == expected {
-        return Ok(());
+        // A pair holds the text the PHP# checker accepts, so a conversion that compares equal but fails it fails.
+        let issues = if actual_ok { checked(folder, &actual) } else { String::new() };
+        if issues.is_empty() {
+            return Ok(());
+        }
+
+        return Err(format!("{} converts to text the PHP# checker refuses:\n{issues}", folder.display()).into());
     }
 
     let kind = if actual_ok { "converted to" } else { "refused with" };

@@ -27,4 +27,9 @@ public class Shelf<T : Spec, out TLabel>
     {
         return this.byNumber;
     }
+
+    public virtual List<TLabel> labels()
+    {
+        return [];
+    }
 }

@@ -28,6 +28,7 @@ foldhash = { workspace = true }
 [dev-dependencies]
 libtest-mimic = { workspace = true }
 mago-prelude = { workspace = true, features = ["build"] }
+mago-reporting = { workspace = true }
 mago-server = { workspace = true }
 
 # Each fixture pair of tests/cases is a test of its own, named after its folder.
