@@ -13,6 +13,8 @@ use mago_codex::ttype::TType;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::builder::get_union_from_type;
+use mago_codex::ttype::comparator::ComparisonResult;
+use mago_codex::ttype::comparator::union_comparator::is_contained_by;
 use mago_codex::ttype::expander::TypeExpansionOptions;
 use mago_codex::ttype::expander::expand_union;
 use mago_codex::ttype::get_sharp_type;
@@ -167,6 +169,24 @@ impl<'input> Converter<'input, '_> {
                 if let Some(value) = r#return.value {
                     let returning = self.method.as_ref().and_then(|method| method.returning.clone());
                     self.expression(value, returning.as_ref());
+                    // PHP returns a value its declared type doesn't hold, and PHP# refuses it (spec section 7).
+                    if let (Some(returning), Some(returned)) = (&returning, self.type_of(value))
+                        && !is_contained_by(
+                            self.input.codebase,
+                            returned,
+                            returning,
+                            false,
+                            false,
+                            false,
+                            &mut ComparisonResult::new(),
+                        )
+                    {
+                        let (returned, returning) = (returned.get_id(), returning.get_id());
+                        self.refuse(
+                            value.span(),
+                            format!("`{returned}` is wider than `{returning}`, the type the method declares it returns, which PHP returns and PHP# refuses (spec section 7)"),
+                        );
+                    }
                 }
             }
             Statement::Block(block) => self.block(block),
@@ -491,6 +511,12 @@ impl<'input> Converter<'input, '_> {
             Expression::ArrayAccess(access) => {
                 self.untyped(access.array, "an index");
                 self.untyped(access.index, "a key");
+                if self.is(access.array, &[Kind::Map]) {
+                    self.refuse(
+                        expression.span(),
+                        "a `Map` read at a key it may lack is not converted yet: PHP gives `null` for a missing key, and PHP# reads one only behind `??` (spec section 12)",
+                    );
+                }
             }
             Expression::Conditional(conditional) => {
                 let Some(then) = conditional.then else {
@@ -770,21 +796,42 @@ impl<'input> Converter<'input, '_> {
                 }
                 Argument::Positional(_) => callee.parameters.get(index),
             });
-            let typed = parameter
+            let declared = parameter
                 .and_then(|parameter| parameter.get_type_metadata())
-                .is_some_and(|declared| !declared.type_union.types.iter().any(TAtomic::is_mixed));
-            match argument {
+                .map(|declared| &declared.type_union)
+                .filter(|declared| !declared.types.iter().any(TAtomic::is_mixed));
+            let value = match argument {
                 Argument::Positional(argument) if argument.ellipsis.is_some() => {
                     self.refuse(argument.span(), "a spread argument is not converted yet");
+                    continue;
                 }
-                Argument::Positional(argument) if typed => {
-                    self.untyped(argument.value, "a parameter of a known type");
-                }
-                Argument::Named(argument) if typed => {
-                    self.untyped(argument.value, "a parameter of a known type");
-                }
-                Argument::Positional(argument) => self.expression(argument.value, None),
-                Argument::Named(argument) => self.expression(argument.value, None),
+                Argument::Positional(argument) => argument.value,
+                Argument::Named(argument) => argument.value,
+            };
+            let Some(declared) = declared else {
+                self.expression(value, None);
+                continue;
+            };
+            if self.untyped(value, "a parameter of a known type") || declared.has_template_types() {
+                continue;
+            }
+            // PHP passes a value its parameter's type may not hold, and PHP# refuses it (spec section 7).
+            if let Some(passed) = self.type_of(value)
+                && !is_contained_by(
+                    self.input.codebase,
+                    passed,
+                    declared,
+                    false,
+                    false,
+                    false,
+                    &mut ComparisonResult::new(),
+                )
+            {
+                let (passed, declared) = (passed.get_id(), declared.get_id());
+                self.refuse(
+                    value.span(),
+                    format!("`{passed}` is wider than `{declared}`, the type of the parameter it reaches, which PHP passes and PHP# refuses (spec section 7)"),
+                );
             }
         }
     }
@@ -1114,6 +1161,12 @@ impl<'input> Converter<'input, '_> {
             BinaryOperator::And(_) | BinaryOperator::Or(_) => (!self.is(lhs, &[Kind::Bool])
                 || !self.is(rhs, &[Kind::Bool]))
             .then(|| self.operands(&operator, lhs, rhs, "reads PHP's truthiness, which is not converted yet")),
+            // A key that may be missing is read behind `??`, which PHP# allows on a `Map` (spec section 12).
+            BinaryOperator::NullCoalesce(_) if let Expression::ArrayAccess(access) = lhs => {
+                self.untyped(access.array, "an index");
+                self.untyped(access.index, "a key");
+                return self.expression(rhs, None);
+            }
             BinaryOperator::NullCoalesce(_) => None,
             BinaryOperator::Addition(_) | BinaryOperator::Subtraction(_) | BinaryOperator::Multiplication(_) => {
                 (!self.is(lhs, &numbers) || !self.is(rhs, &numbers)).then(|| {
