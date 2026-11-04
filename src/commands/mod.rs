@@ -61,6 +61,7 @@ use mago_php_version::PHPVersion;
 use crate::commands::analyze::AnalyzeCommand;
 use crate::commands::compile::CompileCommand;
 use crate::commands::config::ConfigCommand;
+use crate::commands::convert::ConvertCommand;
 use crate::commands::cst::CstCommand;
 use crate::commands::extension::ExtensionCommand;
 use crate::commands::fix::FixCommand;
@@ -79,6 +80,7 @@ mod args;
 pub mod analyze;
 pub mod compile;
 pub mod config;
+pub mod convert;
 pub mod cst;
 pub mod extension;
 pub mod fix;
@@ -221,6 +223,17 @@ pub enum MagoCommand {
     /// **Usage**: `mago compile`
     #[command(name = "compile")]
     Compile(CompileCommand),
+
+    /// Raise plain PHP class files into PHP#, in place.
+    ///
+    /// Takes the types from the project's analysis, proves each converted file
+    /// against the whole project before it writes it, writes `Foo.sharp` in place
+    /// of `Foo.php` for each file that converts, and names each construct that
+    /// keeps a file plain PHP.
+    ///
+    /// **Usage**: `mago convert <PATHS>... [--dry-run]`
+    #[command(name = "convert")]
+    Convert(ConvertCommand),
 
     /// Enforce architectural rules and layer dependencies.
     ///

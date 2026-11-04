@@ -157,6 +157,25 @@ where
     Ok(())
 }
 
+/// Moves the file `from` to `to`, both relative to `workspace`, with `git mv` when git tracks `from`. The index then
+/// holds the rename with the old contents, so the next commit is the rename alone, which `git log --follow` follows,
+/// and a change written to `to` afterwards shows as unstaged. Returns `false`, and moves nothing, when git does not
+/// track `from`.
+pub fn move_tracked(workspace: &Path, from: &Path, to: &Path) -> Result<bool, Error> {
+    let tracked = is_git_repository(workspace)
+        && Command::new("git")
+            .args(["ls-files", "--error-unmatch", "--"])
+            .arg(from)
+            .current_dir(workspace)
+            .output()
+            .is_ok_and(|output| output.status.success());
+    if tracked {
+        run_git("mv", Command::new("git").args(["mv", "--"]).arg(from).arg(to).current_dir(workspace))?;
+    }
+
+    Ok(tracked)
+}
+
 /// Keeps `paths`, each a file under `workspace`, out of git: the ones no `.gitignore` already ignores become the block
 /// of the repository's `info/exclude` that `owner` holds for `workspace`. A workspace git ignores, as a build folder,
 /// has no block, and neither has one whose paths are all ignored. Every other line of the file stays as it is, except
@@ -487,4 +506,41 @@ fn succeeded(command: &'static str, output: Output) -> Result<Output, Error> {
     let reason = String::from_utf8_lossy(&output.stderr).lines().next().unwrap_or_default().trim().to_string();
 
     Err(Error::GitFailed { command, status: output.status, reason })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn git(workspace: &Path, arguments: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(["-c", "user.name=test", "-c", "user.email=test@localhost"])
+            .args(arguments)
+            .current_dir(workspace)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    }
+
+    /// A tracked file moves with `git mv`, so the index holds the rename alone, and an untracked one is left for the
+    /// caller to move on disk.
+    #[test]
+    fn a_tracked_file_moves_as_a_rename_and_an_untracked_one_stays() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        std::fs::write(root.join("Order.php"), "<?php\n").unwrap();
+        git(root, &["init", "--quiet"]);
+        git(root, &["add", "Order.php"]);
+        git(root, &["commit", "--quiet", "-m", "plain PHP"]);
+        std::fs::write(root.join("Draft.php"), "<?php\n").unwrap();
+
+        assert!(move_tracked(root, Path::new("Order.php"), Path::new("Order.sharp")).unwrap());
+        assert!(!move_tracked(root, Path::new("Draft.php"), Path::new("Draft.sharp")).unwrap());
+
+        assert_eq!(git(root, &["diff", "--cached", "-M", "--name-status"]), "R100\tOrder.php\tOrder.sharp\n");
+        assert!(root.join("Draft.php").exists());
+        assert!(!root.join("Draft.sharp").exists());
+    }
 }

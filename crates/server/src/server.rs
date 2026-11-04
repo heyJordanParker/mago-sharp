@@ -5,6 +5,7 @@ use foldhash::HashMap;
 use foldhash::HashSet;
 
 use mago_analyzer::analysis_result::AnalysisResult;
+use mago_analyzer::artifacts::AnalysisArtifacts;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::reference::SymbolReferences;
 use mago_database::Database;
@@ -79,6 +80,19 @@ impl Server {
     #[must_use]
     pub fn database(&self) -> &Database<'static> {
         &self.database
+    }
+
+    /// The codebase of the last analysis, which stays empty until the first one.
+    #[must_use]
+    pub fn codebase(&self) -> &CodebaseMetadata {
+        self.service.codebase()
+    }
+
+    /// The issues of `file_id` and what its analysis found in it, as the type of each expression, against the last
+    /// analysis's codebase. `None` when the file is not in the database.
+    #[must_use]
+    pub fn analyze_file_with_artifacts(&self, file_id: FileId) -> Option<(IssueCollection, AnalysisArtifacts)> {
+        self.service.analyze_file_with_artifacts(file_id)
     }
 
     /// Mutably borrow the workspace file database (to add / update / delete

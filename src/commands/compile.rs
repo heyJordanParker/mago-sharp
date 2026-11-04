@@ -587,7 +587,7 @@ const STANDARD_LIBRARY_PACKAGE: &str = "heyjordanparker/php-sharp-composer";
 ///
 /// Fails when the package's `native.php` gives no fingerprint, so no compiled file names a library it was not checked
 /// against.
-fn standard_library(root: &Path, database: &impl DatabaseReader) -> Result<unit::Library, String> {
+pub(crate) fn standard_library(root: &Path, database: &impl DatabaseReader) -> Result<unit::Library, String> {
     let Some(file) = database.files().find(|file| file.is_standard_library) else {
         return Ok(unit::Library::default());
     };

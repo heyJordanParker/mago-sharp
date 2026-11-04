@@ -1426,6 +1426,7 @@ dependencies = [
  "mago-bytes",
  "mago-codex",
  "mago-composer",
+ "mago-converter",
  "mago-database",
  "mago-extension",
  "mago-formatter",
@@ -1591,6 +1592,23 @@ dependencies = [
  "foldhash",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "mago-converter"
+version = "0.6.2"
+dependencies = [
+ "foldhash",
+ "mago-allocator",
+ "mago-analyzer",
+ "mago-codex",
+ "mago-database",
+ "mago-names",
+ "mago-phpdoc-syntax",
+ "mago-span",
+ "mago-syntax",
+ "mago-text-edit",
+ "mago-word",
 ]
 
 [[package]]
