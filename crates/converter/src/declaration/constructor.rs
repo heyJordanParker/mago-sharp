@@ -4,10 +4,13 @@ use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::union::TUnion;
 use mago_span::HasSpan;
 use mago_syntax::cst::Access;
+use mago_syntax::cst::Block;
+use mago_syntax::cst::Call;
 use mago_syntax::cst::ClassLikeMember;
 use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::FunctionLikeParameter;
+use mago_syntax::cst::Method as MethodDeclaration;
 use mago_syntax::cst::MethodBody;
 use mago_syntax::cst::Modifier;
 use mago_syntax::cst::Statement;
@@ -90,6 +93,48 @@ impl Converter<'_, '_> {
         if let Some(default) = &parameter.default_value {
             self.expression(default.value, Some(&union));
         }
+    }
+}
+
+impl Converter<'_, '_> {
+    /// The `: super(…)` of a subclass's constructor, which runs the parent's first (spec section 9): the arguments of
+    /// the `parent::__construct(…)` its body starts with, which leaves the body, or none when no ancestor of `parent`
+    /// declares a constructor. A parent's constructor that runs after other statements, or never, has no PHP# form.
+    pub(super) fn super_call(&mut self, method: &MethodDeclaration<'_>, block: &Block<'_>, parent: &[u8]) {
+        let first = block.statements.first().and_then(|statement| match statement {
+            Statement::Expression(expression) => match expression.expression {
+                Expression::Call(Call::StaticMethod(call))
+                    if matches!(call.class, Expression::Parent(_))
+                        && matches!(&call.method, ClassLikeMemberSelector::Identifier(name)
+                            if name.value.eq_ignore_ascii_case(b"__construct")) =>
+                {
+                    Some((statement, call))
+                }
+                _ => None,
+            },
+            _ => None,
+        });
+        let constructor = self.input.codebase.get_declaring_method(parent, b"__construct");
+        let arguments = match (first, constructor) {
+            (Some((statement, call)), Some(constructor)) => {
+                self.arguments(&call.argument_list, Some(constructor));
+                let list = call.argument_list.span();
+                let arguments = self.edits.render(self.source, list.start.offset, list.end.offset);
+                self.delete_lines(statement.span());
+                if let Some(method) = self.method.as_mut() {
+                    method.super_call = Some(statement.span());
+                }
+                arguments
+            }
+            (None, None) => "()".to_owned(),
+            _ => {
+                return self.refuse(
+                    method.name.span,
+                    "a subclass's constructor that runs its parent's after other statements, or never where an ancestor declares one, has no PHP# form: `: super(…)` runs it first (spec section 9)",
+                );
+            }
+        };
+        self.edits.insert(method.parameter_list.right_parenthesis.end.offset, format!(" : super{arguments}"));
     }
 }
 

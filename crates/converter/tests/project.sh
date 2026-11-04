@@ -17,8 +17,9 @@ build="$root/sharp/build/$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m)"
 engine="$build/sapi/cli/php"
 mago=("$build/mago/test-run/mago" --no-version-check --colors never)
 project="$1"
-converted=(src/Box.php src/Spec.php src/Shop/Crate.php src/Shop/Note.php src/Shop/Order.php src/Shop/Shelf.php)
-plain=(src/Factory.php src/Shop/Counter.php src/Shop/Pair.php src/Shop/Tagged.php)
+converted=(src/Box.php src/Spec.php src/Shop/Crate.php src/Shop/Note.php src/Shop/Order.php src/Shop/Shelf.php
+    src/Shop/Tagged.php)
+plain=(src/Factory.php src/Shop/Counter.php src/Shop/Pair.php)
 expected_warnings='too-wide-member|redundant-docblock-type'
 
 # Prints the command on stderr, so a file its output is saved in holds the output alone.

@@ -113,6 +113,9 @@ impl<'input> Converter<'input, '_> {
     }
 
     pub(crate) fn statement(&mut self, statement: &Statement<'_>) {
+        if self.method.as_ref().is_some_and(|method| method.super_call == Some(statement.span())) {
+            return;
+        }
         match statement {
             Statement::Expression(expression) => {
                 // A `match` statement ends at its `}` (spec section 21).

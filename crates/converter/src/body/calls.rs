@@ -82,7 +82,7 @@ impl<'input> Converter<'input, '_> {
 
     /// The arguments of a call of `callee`, when the analysis knows it. An argument the analysis gives `mixed` reaches
     /// a parameter of a known type only in PHP.
-    fn arguments(&mut self, arguments: &ArgumentList<'_>, callee: Option<&FunctionLikeMetadata>) {
+    pub(crate) fn arguments(&mut self, arguments: &ArgumentList<'_>, callee: Option<&FunctionLikeMetadata>) {
         for (index, argument) in arguments.arguments.iter().enumerate() {
             let parameter = callee.and_then(|callee| match argument {
                 Argument::Named(argument) => {

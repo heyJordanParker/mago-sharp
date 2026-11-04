@@ -202,13 +202,6 @@ impl Converter<'_, '_> {
             self.refuse(method.name.span, format!("the magic method `{shown}` is not converted yet"));
             return;
         }
-        if is_constructor && metadata.direct_parent_class.is_some() {
-            self.refuse(
-                method.name.span,
-                "a subclass's constructor is not converted yet: it calls its parent's with `: super(…)` (spec section 9)",
-            );
-            return;
-        }
         // PHP# reads a name as a property or a method by where it is written, so a class has one member of each name
         // (spec section 14).
         // A property the class inherits clashes as one it declares does.
@@ -314,7 +307,11 @@ impl Converter<'_, '_> {
         match &method.body {
             MethodBody::Concrete(block) => {
                 let resolution = declared.type_resolution_context.clone().unwrap_or_default();
-                self.method = Some(Method { returning, resolution, parameters, locals: Locals::default() });
+                self.method =
+                    Some(Method { returning, resolution, parameters, locals: Locals::default(), super_call: None });
+                if is_constructor && let Some(parent) = metadata.direct_parent_class {
+                    self.super_call(method, block, parent.as_bytes());
+                }
                 self.block(block);
                 self.declare_locals();
                 self.method = None;

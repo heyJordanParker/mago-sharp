@@ -126,6 +126,9 @@ struct Method {
     /// The method's parameters, by their PHP names, which are never locals.
     parameters: Vec<Vec<u8>>,
     locals: Locals,
+    /// The `parent::__construct(…)` statement a subclass's constructor starts with, which its `: super(…)` runs, so
+    /// the body leaves it (spec section 9).
+    super_call: Option<Span>,
 }
 
 struct Converter<'input, 'arena> {
