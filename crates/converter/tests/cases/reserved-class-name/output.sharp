@@ -1,0 +1,14 @@
+namespace App;
+
+import Lib.Routing.Any as RoutingAny;
+
+// PHP# reserves `Any` for a type, so a library's class of that name is imported under its namespace's last part before
+// it (spec section 11).
+public final class Controller
+{
+    [RoutingAny('/ping')]
+    public string ping()
+    {
+        return 'pong';
+    }
+}

@@ -16,6 +16,7 @@ use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeString;
 use mago_codex::ttype::get_sharp_type;
 use mago_codex::ttype::union::TUnion;
+use mago_names::EQUATABLE;
 use mago_names::STANDARD_ROOT_CLASSES;
 use mago_word::Word;
 
@@ -35,9 +36,15 @@ impl Imports {
         Self { namespace: namespace.trim_matches('\\').to_owned(), taken: HashMap::default(), added: BTreeMap::new() }
     }
 
-    /// Records that the file names `name`, a full PHP name, as `alias`.
+    /// Records that the file names `name`, a full PHP name, as `alias`, or, when PHP# reserves `alias` for a type, as
+    /// its namespace's last part before it, as `AttributesAny` for `Attributes\Any`.
     pub fn add_use(&mut self, alias: &str, name: &str) {
-        self.taken.insert(alias.to_ascii_lowercase(), (alias.to_owned(), name.trim_start_matches('\\').to_owned()));
+        let name = name.trim_start_matches('\\');
+        let alias = match name.rsplit('\\').nth(1) {
+            Some(namespace) if reserved(alias) => format!("{namespace}{alias}"),
+            _ => alias.to_owned(),
+        };
+        self.taken.insert(alias.to_ascii_lowercase(), (alias, name.to_owned()));
     }
 
     /// Whether `class`, a full PHP name, is one a `.sharp` file names bare with no import: a root class of
@@ -60,7 +67,7 @@ impl Imports {
     pub fn name_of(&mut self, class: &str) -> Result<String, String> {
         let class = class.trim_start_matches('\\');
         let (namespace, short) = class.rsplit_once('\\').unwrap_or(("", class));
-        let free = !self.taken.contains_key(&short.to_ascii_lowercase());
+        let free = !self.taken.contains_key(&short.to_ascii_lowercase()) && !reserved(short);
         if let Some((alias, _)) = self.taken.values().find(|(_, taken)| taken.eq_ignore_ascii_case(class)) {
             return Ok(alias.clone());
         }
@@ -86,7 +93,7 @@ impl Imports {
         let parts: Vec<&str> = name.split('\\').collect();
         let mut alias = short(name).to_owned();
         let mut prefix = parts.len().saturating_sub(1);
-        while prefix > 0 && self.taken.contains_key(&alias.to_ascii_lowercase()) {
+        while prefix > 0 && (self.taken.contains_key(&alias.to_ascii_lowercase()) || reserved(&alias)) {
             prefix -= 1;
             alias = format!("{}{alias}", parts[prefix]);
         }
@@ -95,6 +102,12 @@ impl Imports {
 
         alias
     }
+}
+
+/// Whether PHP# reserves `name` for a type where a plain PHP class may take it: `Any`, PHP#'s `mixed`, and
+/// `Equatable`, its built-in bound (spec section 11). PHP reserves every other type name itself.
+fn reserved(name: &str) -> bool {
+    ["Any", EQUATABLE].iter().any(|reserved| reserved.eq_ignore_ascii_case(name))
 }
 
 /// The last part of a full PHP name.

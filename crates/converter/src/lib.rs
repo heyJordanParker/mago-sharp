@@ -338,6 +338,8 @@ impl<'input> Converter<'input, '_> {
                 continue;
             }
             self.imports.add_use(&alias, &name);
+            // A name PHP# reserves for a type is imported under another (spec section 11).
+            let alias = self.imports.name_of(&name).unwrap_or(alias);
             let dotted = name.replace('\\', ".");
             lines.push(if alias == short {
                 format!("import {dotted};")
