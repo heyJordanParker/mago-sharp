@@ -24,4 +24,20 @@ final class Label
     {
         return __DIR__ === '' ? 'nowhere' : 'somewhere';
     }
+
+    // A `switch` as a `match` statement.
+    public function status(int $code): string
+    {
+        $status = 'other';
+        switch ($code) {
+            case 200:
+            case 201:
+                $status = 'ok';
+                break;
+            case 404:
+                return 'missing';
+        }
+
+        return $status;
+    }
 }

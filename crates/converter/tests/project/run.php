@@ -67,6 +67,7 @@ echo $tally->counted([3]), ' ', $tally->made(Pair::class), ' ', $tally->priced([
 
 $label = new Label();
 echo $label->render('shelf', 3), "\n", $label->folder(), "\n";
+echo $label->status(201), ' ', $label->status(404), ' ', $label->status(500), "\n";
 
 $cat = new Cat('tom');
 $bird = new Bird('tweety');

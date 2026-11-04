@@ -183,7 +183,7 @@ impl<'input> Converter<'input, '_> {
             Statement::DoWhile(r#do) => self.do_while(r#do),
             Statement::Break(r#break) => self.leave(r#break.level),
             Statement::Continue(r#continue) => self.leave(r#continue.level),
-            Statement::Switch(_) => self.refuse(statement.span(), "a `switch` is not converted yet: it becomes a `match`"),
+            Statement::Switch(switch) => self.switch_statement(statement, switch),
             Statement::Unset(unset) => self.unset(unset),
             Statement::Echo(_) | Statement::EchoTag(_) => self.refuse(
                 statement.span(),

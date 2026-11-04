@@ -1,0 +1,3 @@
+15:19: a `case` whose statements run on into the next case has no PHP# form: a `match` arm never falls through (spec section 21)
+24:21: a `break` or `continue` that leaves the `switch` before its case ends has no PHP# form: a `match` arm leaves at its end (spec section 21)
+30:18: a `case` of a numeric string or `null` compares by PHP's `==`, which no PHP# pattern does (spec section 19)

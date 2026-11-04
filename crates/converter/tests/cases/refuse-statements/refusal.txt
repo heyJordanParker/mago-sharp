@@ -2,7 +2,6 @@
 16:18: `foreach` over `int` is not converted yet: PHP# loops over a `List`, a `Map`, a `Set` or an `Iterable`, and gives a key only from a `List` or a `Map` (spec section 17)
 20:23: a count of loops to leave is not converted yet: a PHP# `break` or `continue` names the loop it leaves (spec section 17)
 24:28: `$name` is named before the loop, and a PHP# loop declares its own variables (spec section 17)
-30:9: a `switch` is not converted yet: it becomes a `match`
 38:15: `unset` of a variable or a property has no PHP# form: a PHP# value is never unset
 39:9: `echo` is removed: output goes through `Console`, which a class receives through its constructor (spec section 8)
 44:9: an `if` with `:` and `endif` has no PHP# form: write its body in braces
