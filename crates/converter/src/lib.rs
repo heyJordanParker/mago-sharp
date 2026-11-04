@@ -201,7 +201,11 @@ impl<'input> Converter<'input, '_> {
             Some((run_start, run_end)) if run_end == start => run_start,
             _ => start,
         };
-        if self.source[..run_start as usize].ends_with(b"\n\n") && self.source.get(end as usize) == Some(&b'\n') {
+        // A blank line after the deleted ones goes too when a blank line or a block's `{` comes before them.
+        let before = &self.source[..run_start as usize];
+        if (before.ends_with(b"\n\n") || before.trim_ascii_end().ends_with(b"{"))
+            && self.source.get(end as usize) == Some(&b'\n')
+        {
             end += 1;
         }
         self.edits.delete(start, end);

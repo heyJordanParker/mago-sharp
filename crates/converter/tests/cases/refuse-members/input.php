@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace App;
 
-// A later family converts a trait in the header and property hooks. A static needs an initial value, a constant's type
+// A later family converts property hooks. A static needs an initial value, a constant's type
 // must be one PHP# writes, `__invoke` waits for the language, and a property and a method of one name have no PHP#
 // form (spec sections 6 and 14).
 final class Members
