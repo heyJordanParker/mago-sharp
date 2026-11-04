@@ -39,6 +39,7 @@ nav_section = "参考"
 - `mago format`:格式化器。
 - `mago guard`:强制执行架构分层规则。
 - `mago compile`:为 PHP# 引擎编译 PHP# 文件。
+- `mago convert <paths>`:把路径指向的每个纯 PHP 类文件转换为 PHP#,或指出让它保持纯 PHP 的原因。每个转换后的文件在写入前都会与整个项目一起检查,git 将其视为重命名。`--dry-run` 只打印改动,不写入任何文件。
 
 `mago fix` 会反复应用 guard、分析器、linter 和格式化器的修复,直到它们都不再产生变化。
 
