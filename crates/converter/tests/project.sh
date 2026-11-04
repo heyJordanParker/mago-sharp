@@ -10,6 +10,7 @@ set -uo pipefail
 # - `mago compile` accepts every file, the plain PHP subclasses of converted classes included
 # - `mago analyze` has no new error, and only the warnings decision 9 expects
 # - run.php prints the same output on the engine before and after
+# - a class hierarchy converts in either order, and compiles and runs the same after each file
 # Needs the engine and mago built by sharp/bin/build and sharp/bin/build-mago, and Composer and a php on PATH for the
 # refinement worker. Writes each step's output beside $1. Exits 1 at the first check that fails.
 root="$(cd "$(dirname "$0")/../../../../.." && pwd)"
@@ -87,5 +88,15 @@ done || exit 1
 
 step "$engine" -n run.php | tee ../run.after || fail "run.php after"
 step diff ../run.before ../run.after || fail "run.php prints another output"
+
+# A class hierarchy converts in either order: a subclass before its parent, then the parent under a converted and a
+# plain subclass, then the plain subclass under its converted parent. Each step compiles and runs as before.
+for file in src/Zoo/Cat.php src/Zoo/Animal.php src/Zoo/Bird.php; do
+    step "${mago[@]}" convert "$file" || fail "mago convert $file"
+    [ -f "${file%.php}.sharp" ] || fail "$file did not convert"
+    step "${mago[@]}" compile || fail "mago compile refuses a file after $file converts"
+    step "$engine" -n run.php > ../run.hierarchy || fail "run.php after $file converts"
+    step diff ../run.before ../run.hierarchy || fail "run.php prints another output after $file converts"
+done
 
 printf '\nThe whole-project proof passes.\n'

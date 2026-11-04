@@ -14,6 +14,8 @@ use Proof\Shop\Shelf;
 use Proof\Shop\Tagged;
 use Proof\Spec;
 use Proof\Special;
+use Proof\Zoo\Bird;
+use Proof\Zoo\Cat;
 
 require __DIR__ . '/vendor/autoload.php';
 
@@ -55,3 +57,10 @@ echo $note->describe('hi'), ' / ', $note->describe(5), "\n";
 
 echo (new Factory())->make()->get()->label(), "\n";
 echo (new Pair())->both(), "\n";
+
+$cat = new Cat('tom');
+$bird = new Bird('tweety');
+echo $cat->describe(), "\n", $bird->describe(), "\n";
+$bird->sound = 'chirp';
+$bird->name = 'polly';
+echo $bird->describe(), "\n";

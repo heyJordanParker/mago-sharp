@@ -10,7 +10,7 @@ public class Counter
 
     private static int count = 0;
 
-    public int value { get; private set; } = 0;
+    public virtual int value { get; private set; } = 0;
 
     public Counter(public string label { get; private set; })
     {

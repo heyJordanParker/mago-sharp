@@ -245,18 +245,31 @@ impl Converter<'_, '_> {
         // only a property with accessors marked `override` does: a field replaces nothing (spec section 22).
         let overrides =
             metadata.overridden_property_ids.get(&word(variable.name)).is_some_and(|parents| !parents.is_empty());
+        let is_static = has(modifiers, |modifier| matches!(modifier, Modifier::Static(_))).is_some();
+        let is_abstract = has(modifiers, |modifier| matches!(modifier, Modifier::Abstract(_))).is_some();
+        let is_public = !matches!(visibility, "private " | "protected ");
+        // A PHP# property is closed unless it is `virtual` (spec section 6.1), so one a subclass may replace takes it,
+        // as an open method does.
+        let is_open = is_public
+            && !overrides
+            && !is_static
+            && !is_abstract
+            && !metadata.kind.is_interface()
+            && !self.class.as_ref().is_some_and(|class| class.is_final)
+            && has(modifiers, |modifier| matches!(modifier, Modifier::Final(_))).is_none();
         let mut opening = String::new();
-        if has(modifiers, |modifier| matches!(modifier, Modifier::Static(_))).is_some() {
+        if is_static {
             opening.push_str("static ");
         }
-        if has(modifiers, |modifier| matches!(modifier, Modifier::Abstract(_))).is_some() {
+        if is_abstract {
             opening.push_str("abstract ");
         }
         if overrides {
             opening.push_str("override ");
         }
-
-        let is_public = !matches!(visibility, "private " | "protected ");
+        if is_open {
+            opening.push_str("virtual ");
+        }
 
         Some((format!("{visibility}{opening}{written} {name}"), union, is_public || overrides))
     }
