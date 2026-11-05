@@ -563,6 +563,12 @@ struct Psr4Folder {
     is_test: bool,
 }
 
+/// Marks a `.sharp` file a caller makes itself, as the loader marks each one it reads, so a file converted into PHP#
+/// in memory is checked as the same file on disk would be.
+pub fn mark_sharp_file(file: &mut File, workspace: &Path) {
+    mark_package(file, workspace, &mut Manifests::default());
+}
+
 /// Marks a `.sharp` file from its nearest `composer.json`: whether it is a PHP# source of the standard library, which
 /// names the standard library's package, vendored or in the package's own repository, whether its package is a
 /// project, and what its PSR-4 folders say about its namespace, from the folder that holds it most closely.
@@ -1354,5 +1360,35 @@ mod tests {
                 ("tests/Tenant/OrderTest.sharp".to_owned(), Some(FolderNamespace::Test)),
             ]
         );
+    }
+
+    /// A `.sharp` file made in memory, as `mago convert` makes one before it writes it, is marked as the loader marks
+    /// the same file on disk, and a `.php` file is left alone.
+    #[test]
+    fn a_sharp_file_made_in_memory_is_marked_as_one_on_disk() {
+        let temp_dir = TempDir::new().unwrap();
+        create_test_file(
+            &temp_dir,
+            "composer.json",
+            r#"{"type": "project", "autoload": {"psr-4": {"App\\": "app/"}}}"#,
+        );
+        let made = |name: &str| {
+            let mut file = File::new(
+                Cow::Owned(name.as_bytes().to_vec()),
+                FileType::Host,
+                Some(temp_dir.path().join(name)),
+                Cow::Borrowed(b""),
+            );
+            mark_sharp_file(&mut file, temp_dir.path());
+            file
+        };
+
+        let sharp = made("app/Tenant/Order.sharp");
+        assert_eq!(sharp.folder_namespace, Some(FolderNamespace::Namespace("App.Tenant".into())));
+        assert!(sharp.is_project);
+        assert!(!sharp.is_standard_library);
+        let php = made("app/Tenant/Order.php");
+        assert_eq!(php.folder_namespace, None);
+        assert!(!php.is_project);
     }
 }

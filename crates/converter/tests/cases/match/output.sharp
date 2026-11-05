@@ -1,0 +1,25 @@
+namespace App;
+
+// `match` keeps its form: an arm's constants become patterns joined by `or`, and a `match` that stands as a statement
+// takes block arms (spec section 21).
+public final class Router
+{
+    private int hits = 0;
+
+    public string size(int code)
+    {
+        return match (code) {
+            200 or 201 => 'ok',
+            404 => 'missing',
+            default => 'other',
+        };
+    }
+
+    public void count(string method)
+    {
+        match (method) {
+            'GET' => { this.hits++; },
+            default => { this.hits += 2; },
+        }
+    }
+}

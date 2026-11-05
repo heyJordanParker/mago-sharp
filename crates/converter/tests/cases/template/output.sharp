@@ -1,0 +1,35 @@
+namespace App;
+
+/**
+ * Every type is in PHPDoc, which PHP# writes in the declarations (spec sections 11 and 12).
+ */
+public class Shelf<T : Spec, out TLabel>
+{
+    private List<T> items = [];
+
+    private Map<int, T> byNumber = [:];
+
+    /**
+     * Adds an item under its number.
+     */
+    public virtual void add(T item, int number)
+    {
+        this.items.add(item);
+        this.byNumber[number] = item;
+    }
+
+    public virtual List<T> all()
+    {
+        return this.items;
+    }
+
+    public virtual Map<int, T> numbered()
+    {
+        return this.byNumber;
+    }
+
+    public virtual List<TLabel> labels()
+    {
+        return [];
+    }
+}

@@ -1,0 +1,8 @@
+15:19: an anonymous class has no PHP# form: no type nests in another
+17:18: the `@` silence operator has no PHP# form: `@` marks a keyword used as a name (spec section 2)
+18:9: `print` is removed: output goes through `Console`, which a class receives through its constructor (spec section 8)
+19:9: `include`, `require` and `eval` have no PHP# form: a .sharp file declares one type (spec section 27)
+20:24: a member named by a variable has no PHP# form (spec section 25)
+21:19: a call of `string` has no PHP# form: PHP# calls a function value only (spec section 14.1)
+22:19: `?:` has no PHP# form: `??` covers null (spec section 14)
+23:9: `exit` and `die` are removed: `Process` exits, which a class receives through its constructor (spec section 8)

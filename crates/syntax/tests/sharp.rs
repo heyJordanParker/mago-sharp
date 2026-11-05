@@ -2365,6 +2365,31 @@ fn brackets_before_the_class_name_and_a_parenthesis_are_the_constructor_attribut
     assert_eq!(forms, [("Report", 1, None), ("Report", 1, None), ("Totals", 0, Some("[Money, int]"))]);
 }
 
+/// Before a modifier and `(`, the brackets are a parameter's attributes, and the parenthesized union after the modifier
+/// is its type, as in `[Field(label: "Value")] public (int|string)? value`. No member is named like a modifier.
+#[test]
+fn brackets_before_a_modifier_and_a_parenthesis_are_the_parameter_attributes() {
+    const CODE: &str = "class Entry\n{\n    Entry(\n        [Field(label: \"Key\")]\n        public string key { get; set; },\n        [Field(label: \"Value\")]\n        public (int|string)? value { get; set; } = null,\n    ) { }\n}\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/Entry.sharp", CODE);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    let [ClassLikeMember::Method(constructor)] = class_members(program).as_slice() else {
+        panic!("expected one constructor");
+    };
+    let parameters: Vec<(&str, usize, Option<&str>)> = constructor
+        .parameter_list
+        .parameters
+        .iter()
+        .map(|parameter| {
+            let hint = parameter.hint.as_ref().map(|hint| source(CODE, hint));
+
+            (source(CODE, &parameter.variable), parameter.attribute_lists.len(), hint)
+        })
+        .collect();
+    assert_eq!(parameters, [("key", 1, Some("string")), ("value", 1, Some("(int|string)?"))]);
+}
+
 /// Spec section 30: `const [total, count] = summary;` unpacks a tuple into one local per element, with `let` or
 /// `const`, as TypeScript writes it.
 #[test]

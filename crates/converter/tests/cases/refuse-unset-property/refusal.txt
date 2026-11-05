@@ -1,0 +1,2 @@
+11:19: `$title` has no initial value, and the constructor doesn't set it: a PHP# property is set before the object is used (spec section 6)
+13:17: `$count` has no initial value, and the constructor doesn't set it: a PHP# property is set before the object is used (spec section 6)

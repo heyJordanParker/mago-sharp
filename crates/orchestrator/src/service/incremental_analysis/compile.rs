@@ -191,6 +191,15 @@ impl IncrementalAnalysisService {
             .map(|module| DispatcherModule { file: module.file, namespace })
     }
 
+    /// For each of `files`, the source files other than it whose signature edit makes the warm path re-analyze it, as
+    /// the cascade over the last analysis's references finds them.
+    #[must_use]
+    pub fn files_reaching(&self, files: &[FileId]) -> Vec<HashSet<FileId>> {
+        let dependencies = Dependencies::new(self);
+
+        files.iter().map(|file_id| dependencies.reached_by(*file_id)).collect()
+    }
+
     /// Compiles each `.sharp` file of the last analysis, in file name order, then refuses each plain PHP file whose
     /// class the engine would refuse to link, as [`Self::unlinkable_plain_php_classes`] finds them.
     ///
@@ -240,47 +249,16 @@ impl IncrementalAnalysisService {
             return Err(OrchestratorError::General("analyze() must be called before compile()".to_string()));
         }
 
-        let mut files: Vec<Arc<File>> = self
-            .database
-            .files()
-            .filter(|file| file.file_type == FileType::Host && Dialect::of(file).is_sharp())
-            .collect();
-        files.sort_unstable_by(|a, b| a.name.cmp(&b.name));
-
-        let by_file = |issues: IssueCollection| {
-            let mut by_file: HashMap<FileId, IssueCollection> = HashMap::default();
-            for issue in issues {
-                if let Some(span) = issue.primary_span() {
-                    by_file.entry(span.file_id).or_default().push(issue);
-                }
-            }
-
-            by_file
-        };
-        let reported: IssueCollection =
-            self.collect_all_issues().into_iter().filter(|issue| issue.level == Level::Error).collect();
-        let errors = by_file(refusing(reported.clone()));
-        let mut unrefused = by_file(reported);
-        unrefused.retain(|file_id, _| !errors.contains_key(file_id));
+        let files = self.sharp_files();
+        let (errors, unrefused) = self.errors(refusing);
 
         let session = self.plugin_registry.create_external_analysis_session(self.database.files());
         let (library, rest): (Vec<_>, Vec<_>) = files.iter().partition(|file| file.is_standard_library);
         let reach = Reach::new(&self.codebase, &self.native_symbol_references);
         let effects = self.effects();
 
-        let lowered_library = self.lower_all(
-            &library,
-            &InlineForms::default(),
-            (&errors, &unrefused),
-            &reach,
-            &effects,
-            session.as_ref(),
-        )?;
-        let forms: InlineForms = lowered_library
-            .iter()
-            .filter_map(|lowered| lowered.as_ref().ok())
-            .flat_map(|(_, forms, _)| forms.iter().cloned())
-            .collect();
+        let (lowered_library, forms) =
+            self.lower_library(&library, (&errors, &unrefused), &reach, &effects, session.as_ref())?;
         let lowered_rest = self.lower_all(&rest, &forms, (&errors, &unrefused), &reach, &effects, session.as_ref())?;
         // Lowering analyzes each PHP# file again against the codebase its last analysis saw, so it sends the provider
         // requests that analysis sent, and every read their answers rest on is one the analysis already holds.
@@ -709,6 +687,92 @@ impl IncrementalAnalysisService {
             summaries.into_iter().flat_map(|(_, summaries)| summaries.iter().cloned()).collect();
 
         Effects::solve(&self.codebase, &summaries)
+    }
+
+    /// The standard library's inline forms, as [`Self::compile`] lowers every other PHP# file with them, which `mago
+    /// convert` reads to find the library member that runs a PHP function. The library's files are those `compile`
+    /// lowers first, and `refusing` keeps the errors that refuse one, as it does for `compile`, so no form comes from a
+    /// file `compile` refuses.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OrchestratorError`] when no analysis ran yet, or when re-analyzing a library file fails.
+    pub fn standard_library_forms(
+        &mut self,
+        refusing: impl FnOnce(IssueCollection) -> IssueCollection,
+    ) -> Result<InlineForms, OrchestratorError> {
+        if !self.initialized {
+            return Err(OrchestratorError::General(
+                "analyze() must be called before standard_library_forms()".to_string(),
+            ));
+        }
+
+        let files = self.sharp_files();
+        let library: Vec<&Arc<File>> = files.iter().filter(|file| file.is_standard_library).collect();
+        let (errors, unrefused) = self.errors(refusing);
+        let session = self.plugin_registry.create_external_analysis_session(self.database.files());
+        let reach = Reach::new(&self.codebase, &self.native_symbol_references);
+        let effects = self.effects();
+        let (_, forms) = self.lower_library(&library, (&errors, &unrefused), &reach, &effects, session.as_ref())?;
+
+        Ok(forms)
+    }
+
+    /// The PHP# files [`Self::compile`] lowers, the workspace's own, in file name order.
+    fn sharp_files(&self) -> Vec<Arc<File>> {
+        let mut files: Vec<Arc<File>> = self
+            .database
+            .files()
+            .filter(|file| file.file_type == FileType::Host && Dialect::of(file).is_sharp())
+            .collect();
+        files.sort_unstable_by(|a, b| a.name.cmp(&b.name));
+
+        files
+    }
+
+    /// The last analysis's errors, by file: those that refuse their file, as `refusing` keeps them, and those of each
+    /// other file, which refuse nothing.
+    fn errors(
+        &self,
+        refusing: impl FnOnce(IssueCollection) -> IssueCollection,
+    ) -> (HashMap<FileId, IssueCollection>, HashMap<FileId, IssueCollection>) {
+        let by_file = |issues: IssueCollection| {
+            let mut by_file: HashMap<FileId, IssueCollection> = HashMap::default();
+            for issue in issues {
+                if let Some(span) = issue.primary_span() {
+                    by_file.entry(span.file_id).or_default().push(issue);
+                }
+            }
+
+            by_file
+        };
+        let reported: IssueCollection =
+            self.collect_all_issues().into_iter().filter(|issue| issue.level == Level::Error).collect();
+        let errors = by_file(refusing(reported.clone()));
+        let mut unrefused = by_file(reported);
+        unrefused.retain(|file_id, _| !errors.contains_key(file_id));
+
+        (errors, unrefused)
+    }
+
+    /// Lowers the standard library's files, `library`, as [`Self::lower_all`] does, and gives their inline forms, which
+    /// every other file's lowering inlines. A library form inlines none of the others.
+    fn lower_library(
+        &self,
+        library: &[&Arc<File>],
+        refusals: (&HashMap<FileId, IssueCollection>, &HashMap<FileId, IssueCollection>),
+        reach: &Reach,
+        effects: &Effects,
+        session: Option<&ExternalAnalysisSession>,
+    ) -> Result<(Vec<Lowered>, InlineForms), OrchestratorError> {
+        let lowered = self.lower_all(library, &InlineForms::default(), refusals, reach, effects, session)?;
+        let forms = lowered
+            .iter()
+            .filter_map(|lowered| lowered.as_ref().ok())
+            .flat_map(|(_, forms, _)| forms.iter().cloned())
+            .collect();
+
+        Ok((lowered, forms))
     }
 
     /// Lowers each of `files` with `forms` to inline, and translates it to Lean as far as `reach` asks, the files with
@@ -1212,6 +1276,24 @@ mod tests {
         assert!(errors.iter().all(|issue| issue.level == Level::Error), "{errors:?}");
     }
 
+    /// Spec section 11: a type parameter's bound is a class or an interface, so `Any?` is a refused bound, which bounds
+    /// nothing, and its one error is its own file's. A file that creates the class has none, and compiles.
+    #[test]
+    fn a_file_that_creates_a_class_whose_bound_is_refused_compiles_and_the_class_s_file_is_refused() {
+        let boxed = "namespace App;\n\npublic class Box<T : Any?>\n{\n    public Box(public T item { get; })\n    {\n    }\n}\n";
+        let packer = "namespace App;\n\npublic class Packer\n{\n    public Box<int> pack()\n    {\n        return new Box<int>(1);\n    }\n}\n";
+        let database = project(&[("app/Box.sharp", boxed), ("app/Packer.sharp", packer)]);
+        let mut service = analyzed(&database);
+
+        let compiled = compile(&mut service, empty_stamp);
+
+        accepted(&compiled, "app/Packer.sharp");
+        let Some(Compilation::Refused(errors)) = compiled.get("app/Box.sharp") else {
+            panic!("app/Box.sharp is not refused: {compiled:?}");
+        };
+        assert!(!errors.is_empty());
+    }
+
     const MONEY: &str = "namespace App;\n\npublic class Money\n{\n    public const int CENTS = 100;\n\n    public int amount()\n    {\n        return 1;\n    }\n}\n";
     const ORDER_OF_MONEY: &str = "namespace App;\n\nimport Acme.Tax;\nimport Lib.Rate;\n\npublic class Order\n{\n    public int total(Money money)\n    {\n        return money.amount() + Rate.percent() + Tax.rate();\n    }\n}\n";
     const CASH: &str = "namespace App;\n\npublic class Cash : Money\n{\n}\n";
@@ -1549,6 +1631,45 @@ mod tests {
         assert!(title.windows(b"ucfirst".len()).any(|window| window == b"ucfirst"), "the form is inlined");
         accepted(&before, TEXT_PATH);
         assert_ne!(compiled_key(title), compiled_key(accepted(&after, "app/Title.sharp")));
+    }
+
+    /// Decision 13: the standard library's forms come from the library files `compile` lowers and accepts, so neither a
+    /// library file it refuses for an error nor one the database holds as a package's, which it doesn't lower, gives
+    /// one.
+    #[test]
+    fn the_library_forms_come_only_from_the_library_files_the_compile_accepts() {
+        let words = "namespace Sharp;\n\npublic class Words\n{\n    public static string loud(string text) => global.ucfirst(text);\n\n    public int wrong() => \"one\";\n}\n";
+        let quiet = "namespace Sharp;\n\npublic class Quiet\n{\n    public static string low(string text) => global.lcfirst(text);\n}\n";
+        let mut database = project(&[
+            (TEXT_PATH, TEXT),
+            ("vendor/heyjordanparker/php-sharp-composer/library/Sharp/Words.sharp", words),
+        ]);
+        let name = "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Quiet.sharp";
+        let mut packaged = File::new(
+            Cow::Borrowed(name.as_bytes()),
+            FileType::Vendored,
+            Some(Path::new("/project").join(name)),
+            Cow::Borrowed(quiet.as_bytes()),
+        );
+        packaged.is_standard_library = true;
+        database.add(packaged);
+        let mut service = analyzed(&database);
+
+        let forms = service.standard_library_forms(|issues| issues).expect("the library lowers");
+        let compiled = compile(&mut service, empty_stamp);
+
+        let members: Vec<String> = forms
+            .iter()
+            .map(|(class, member, _)| {
+                format!("{}::{}", String::from_utf8_lossy(class), String::from_utf8_lossy(member))
+            })
+            .collect();
+        assert_eq!(members, ["sharp\\text::capitalized"]);
+        assert!(matches!(
+            compiled["vendor/heyjordanparker/php-sharp-composer/library/Sharp/Words.sharp"],
+            Compilation::Refused(_)
+        ));
+        assert!(!compiled.contains_key(name));
     }
 
     /// A function several polyfill files declare, each its own way, is read as the declaration the codebase keeps,

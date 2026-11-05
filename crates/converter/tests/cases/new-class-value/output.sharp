@@ -1,0 +1,10 @@
+namespace App;
+
+// `new $type(…)` of a class value is `new (type)(…)` (spec section 25).
+public final class Maker
+{
+    public Widget make(Class<Widget> type, string name)
+    {
+        return new (type)(name);
+    }
+}

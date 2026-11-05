@@ -1,0 +1,31 @@
+namespace Proof.Shop;
+
+import Proof.Box;
+import Proof.Spec;
+import Proof.Special;
+
+// Each `new Box` takes the type arguments of the declared type its value goes into, or Box's bound.
+public final class Crate
+{
+    private Box<Spec> box;
+
+    public Crate(Spec spec)
+    {
+        this.box = new Box<Spec>(spec);
+    }
+
+    public Spec open()
+    {
+        return this.box.get();
+    }
+
+    public Box<Special> special()
+    {
+        return new Box<Special>(new Special('crated'));
+    }
+
+    public Object loose()
+    {
+        return new Box<Spec>(new Spec('loose'));
+    }
+}

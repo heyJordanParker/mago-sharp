@@ -1,0 +1,1 @@
+11:29: `[]` lands in `array<string, int>|list<int>`, which holds a `List` or a `Map`, and PHP# writes an empty one as `[]` or `[:]` (spec section 12)

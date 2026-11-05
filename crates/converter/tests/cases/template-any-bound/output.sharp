@@ -1,0 +1,11 @@
+namespace App;
+
+/**
+ * A bound of any value, `null` included, bounds nothing, which PHP# writes with no bound (spec section 11).
+ */
+public final class Pair<TFirst, TSecond>
+{
+    public Pair(public TFirst first { get; }, public TSecond second { get; })
+    {
+    }
+}

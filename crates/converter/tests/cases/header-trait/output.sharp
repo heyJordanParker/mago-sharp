@@ -1,0 +1,10 @@
+namespace App;
+
+// A plain PHP trait the class uses joins its header (spec section 22).
+public final class Host : Greets
+{
+    public string welcome()
+    {
+        return this.greet() + '!';
+    }
+}

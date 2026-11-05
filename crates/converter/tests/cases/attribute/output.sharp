@@ -1,0 +1,13 @@
+namespace App;
+
+import Lib.Route;
+
+[Attribute(Attribute.TARGET_CLASS)]
+public final class Endpoint
+{
+    [Route('/orders', name: 'orders')]
+    public int orders([Route('/one')] int one)
+    {
+        return one;
+    }
+}

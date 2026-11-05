@@ -1,0 +1,3 @@
+9:19: `App\Base` is deprecated, and the PHP# checker warns on a class that extends it (spec section 27)
+11:33: `$path` takes another type than the parameter of the method this one replaces, and a PHP# override takes at least what it replaces takes (spec section 22)
+18:25: `App\Source` declares no method `lookup`, which PHP# calls only on a class that has it

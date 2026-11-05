@@ -22,6 +22,8 @@ pub use lower::checked::Refusal;
 pub use lower::checked::check;
 pub use lower::inline::InlineForm;
 pub use lower::inline::InlineForms;
+pub use lower::inline::PhpCall;
+pub use lower::inline::PhpCallArgument;
 pub use lower::inline::inline_forms;
 pub use lower::lower;
 pub use lower::types::Declaration;

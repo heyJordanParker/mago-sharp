@@ -1,0 +1,27 @@
+namespace App;
+
+// `.` between strings is `+`, and with a number it is a template, which shows the number as PHP does (spec section 18).
+public final class Label
+{
+    private string text = 'a';
+
+    public string joined(string other)
+    {
+        return this.text + ' and ' + other;
+    }
+
+    public string counted(int count)
+    {
+        return `count ${count} of ${this.text}`;
+    }
+
+    public string priced(float price)
+    {
+        return `price ${price}`;
+    }
+
+    public void grow(string more)
+    {
+        this.text += more;
+    }
+}

@@ -1,0 +1,3 @@
+12:16: a variable named by a variable is removed (spec section 2)
+17:9: `global` is removed (spec section 2)
+22:16: `$_SERVER` is removed (spec sections 2 and 29)

@@ -1,0 +1,71 @@
+namespace App;
+
+// A local assigned in a block and read after it is declared first in its method's body, as `T? name = null;`, and
+// each assignment of it writes it (spec section 3).
+public final class Pricing
+{
+    public int price(bool member)
+    {
+        int? price = null;
+        if (member) {
+            price = 10;
+        } else {
+            price = 20;
+        }
+
+        return price;
+    }
+
+    public string label(int count)
+    {
+        let suffix = '';
+        if (count > 1) {
+            const plural = 's';
+            suffix = plural;
+        }
+
+        return 'item' + suffix;
+    }
+
+    // A PHP local lives for the whole method, so one a loop's pass assigns keeps its value into the next pass, and
+    // its declaration goes first in the method's body.
+    public int carried(List<int> values)
+    {
+        int? last = null;
+        let sum = 0;
+        for (const value of values) {
+            if (value > 0) {
+                last = value;
+            }
+            sum += last ?? 0;
+        }
+
+        return sum;
+    }
+
+    // The local's type joins those of the values assigned to it, which a declaration or a literal gives.
+    public int chosen(bool wide)
+    {
+        int? size = null;
+        if (wide) {
+            size = this.price(wide);
+        } else {
+            size = 1;
+        }
+
+        return size;
+    }
+
+    // A `@var` tag on any assignment of the local declares its type, which every value assigned to it has.
+    public int tagged(bool wide, int count)
+    {
+        int? size = null;
+        if (wide) {
+            size = count * 2;
+        } else {
+            size = 1;
+        }
+
+        return size;
+    }
+}

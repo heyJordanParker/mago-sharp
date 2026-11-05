@@ -1,0 +1,3 @@
+18:9: destructuring by position, or by a key that is no literal, has no PHP# form: PHP# destructures a tuple, and reads a `Map` key by key (spec sections 12 and 30)
+19:29: destructuring `array<string, int>` by key converts for a `Map` variable only, which PHP# reads once per key (spec section 12)
+20:16: destructuring inside another expression has no PHP# form: write it as a statement of its own

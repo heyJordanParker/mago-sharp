@@ -1,0 +1,4 @@
+14:16: `trim` has no PHP# form: no standard library member runs `trim` with PHP's meaning (decision 083)
+19:16: `mb_strtolower` has no PHP# form here: `StringMembers.lowercase` passes 2 arguments, where this call passes 1
+25:16: `compact` is removed (spec section 2)
+30:16: `is_array` tests a type PHP# can't write: PHP# has no type `array-key`, which `array<array-key, mixed>` holds

@@ -1,0 +1,42 @@
+{
+    "name": "heyjordanparker/php-sharp-converter-fixture",
+    "description": "A plain PHP project that mago convert moves to PHP#, with the neutral refinement worker as its extension host.",
+    "type": "project",
+    "license": "PHP-3.01",
+    "require": {
+        "acme/format": "*@dev",
+        "heyjordanparker/php-sharp-composer": "*@dev"
+    },
+    "repositories": [
+        {
+            "type": "path",
+            "url": "packages/format",
+            "options": {
+                "symlink": false,
+                "versions": {
+                    "acme/format": "dev-master"
+                }
+            }
+        },
+        {
+            "type": "path",
+            "url": "../../../../../composer",
+            "options": {
+                "symlink": false,
+                "versions": {
+                    "heyjordanparker/php-sharp-composer": "dev-master"
+                }
+            }
+        }
+    ],
+    "autoload": {
+        "psr-4": {
+            "Proof\\": "src/"
+        }
+    },
+    "config": {
+        "allow-plugins": {
+            "heyjordanparker/php-sharp-composer": true
+        }
+    }
+}

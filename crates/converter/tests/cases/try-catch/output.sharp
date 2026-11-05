@@ -1,0 +1,18 @@
+namespace App;
+
+// `try`, `catch` and `finally` stay, and the caught value is named without `$` (spec section 24).
+public final class Guarded
+{
+    public string run(Task task)
+    {
+        try {
+            const result = task.run();
+
+            return result;
+        } catch (RuntimeException e) {
+            return e.getMessage();
+        } finally {
+            task.close();
+        }
+    }
+}

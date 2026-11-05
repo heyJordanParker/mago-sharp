@@ -13527,6 +13527,34 @@ fn a_bound_writes_a_type_parameter_of_its_own_class_as_any() {
     );
 }
 
+/// Spec section 11: a bound is a class or an interface, so `Any?` is a bound the checker refuses in its own file, which
+/// bounds nothing. A file that creates the class has no error of its own, and lowers its `new` with its type argument.
+#[test]
+fn a_new_of_a_class_whose_bound_is_refused_lowers() {
+    let r#box = (
+        "src/App/Box.sharp",
+        "namespace App;\n\npublic class Box<T : Any?>\n{\n    public Box(public T item { get; }) { }\n}\n",
+    );
+    let lowered = Lowered::with(
+        "namespace App;\n\npublic class Packer\n{\n    public Box<int> pack() => new Box<int>(1);\n}\n",
+        &[r#box],
+    );
+
+    assert_eq!(
+        lowered.body_of("pack"),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                SHARP_TYPE_ARGS
+                  NEW
+                    ZVAL "App\\Box"
+                    ARG_LIST
+                      ZVAL 1
+                  ZVAL "int"
+        "#}
+    );
+}
+
 /// A call of a generic method carries the type arguments the checker found, written or inferred, as the last child of
 /// its argument list: a `SHARP_TYPE_ARGS` without a `new`. A type parameter of the class the call is in is `$` and its
 /// index, and one of the method the call is in is `#` and its index, which the engine reads from the method's own
@@ -29293,6 +29321,54 @@ fn form_names((path, code): (&str, &str)) -> Vec<String> {
         .into_iter()
         .map(|(name, _)| String::from_utf8_lossy(&name).into_owned())
         .collect()
+}
+
+/// A standard library class whose methods each make one call of a plain PHP function, with a float, `true` and
+/// `false`, a named argument, and a spread.
+const CALLS: (&str, &str) = (
+    "vendor/heyjordanparker/php-sharp-composer/library/Sharp/Calls.sharp",
+    "namespace Sharp;\n\npublic class Calls\n{\n    public static float remainder(float value) => global.fmod(value, 1.5);\n\n    public static string broken(string text) => global.nl2br(text, true);\n\n    public static string plain(string text) => global.nl2br(text, false);\n\n    public static string named(string text) => global.nl2br(text, use_xhtml: false);\n\n    public static string formatted(string format, List<int> values) => global.sprintf(format, ...values);\n}\n",
+);
+
+/// A form whose body is one call of a plain PHP function gives that call, which the converter compares a PHP call
+/// with: each argument a slot, or a literal as PHP reads it. A named argument passes no plain value, so the
+/// form gives no call, and a spread no form at all. `InlineForms::iter` names each form's class and member.
+#[test]
+fn an_inline_form_gives_the_plain_php_call_its_body_makes() {
+    use mago_sharp_bridge::PhpCallArgument;
+
+    let forms: InlineForms = common::checked(CALLS.0, CALLS.1, &[], inline_forms)
+        .expect("the library file is checked")
+        .into_iter()
+        .collect();
+    let mut calls: Vec<(String, String, Option<Vec<PhpCallArgument>>, usize)> = forms
+        .iter()
+        .map(|(class, member, form)| {
+            (
+                String::from_utf8_lossy(class).into_owned(),
+                String::from_utf8_lossy(member).into_owned(),
+                form.php_call().map(|call| call.arguments.clone()),
+                form.in_order(),
+            )
+        })
+        .collect();
+    calls.sort_by(|a, b| a.1.cmp(&b.1));
+
+    let literal = |text: &str| PhpCallArgument::Literal(text.as_bytes().to_vec());
+    assert_eq!(
+        calls,
+        [
+            ("sharp\\calls".to_owned(), "broken".to_owned(), Some(vec![PhpCallArgument::Slot(0), literal("true")]), 1),
+            ("sharp\\calls".to_owned(), "named".to_owned(), None, 1),
+            ("sharp\\calls".to_owned(), "plain".to_owned(), Some(vec![PhpCallArgument::Slot(0), literal("false")]), 1),
+            (
+                "sharp\\calls".to_owned(),
+                "remainder".to_owned(),
+                Some(vec![PhpCallArgument::Slot(0), literal("1.5")]),
+                1
+            ),
+        ]
+    );
 }
 
 /// A public method gives an inline form when it returns the value of one expression built only from calls of public

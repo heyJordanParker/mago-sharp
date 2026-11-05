@@ -1,0 +1,54 @@
+namespace App;
+
+// A condition that is no `bool` reads PHP's truthiness, which PHP# writes as the comparison its type gives (spec
+// section 21).
+public final class Truthy
+{
+    private List<string> lines = [];
+
+    private Map<string, int> stock = [:];
+
+    public bool missing(string sku)
+    {
+        return this.stock.get(sku) == null || !this.lines.isEmpty();
+    }
+
+    public string named(string name)
+    {
+        if (name != "" && name != "0") {
+            return name;
+        }
+
+        return 'blank';
+    }
+
+    public string shown(string name)
+    {
+        return (name != "" && name != "0") ? 'named' : 'blank';
+    }
+
+    public bool both(Truthy? other, bool flag)
+    {
+        return flag && other != null;
+    }
+
+    public bool none(int count)
+    {
+        return count == 0;
+    }
+
+    public bool some()
+    {
+        return !this.lines.isEmpty() && !this.lines.isEmpty();
+    }
+
+    public bool given(int? count, float ratio)
+    {
+        return (count != null && count != 0) || ratio == 0.0;
+    }
+
+    public bool filled(string? name)
+    {
+        return name != null || name == null;
+    }
+}

@@ -1,0 +1,36 @@
+namespace App;
+
+// `mixed` is `Any?`, `?T` is `T?` and `object` is `Object`. `(int)`, `(float)` and `(string)` stay, and PHP's aliases
+// become them (spec section 24).
+public final class Convert
+{
+    public Any? any(Any? value)
+    {
+        return value;
+    }
+
+    public int? maybe(int? value)
+    {
+        return value;
+    }
+
+    public Object thing(Object value)
+    {
+        return value;
+    }
+
+    public int whole(float value)
+    {
+        return (int) value + (int) value;
+    }
+
+    public float real(int value)
+    {
+        return (float) value * 1.5;
+    }
+
+    public string text(int value)
+    {
+        return (string) value;
+    }
+}

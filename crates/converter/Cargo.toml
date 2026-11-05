@@ -1,0 +1,38 @@
+[package]
+name = "mago-converter"
+description = "Raises a plain PHP class file into PHP#, from the analysis's types, as edits on its own text."
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+mago-allocator = { workspace = true }
+mago-analyzer = { workspace = true }
+mago-codex = { workspace = true }
+mago-database = { workspace = true }
+mago-names = { workspace = true }
+mago-phpdoc-syntax = { workspace = true }
+mago-sharp-bridge = { workspace = true }
+mago-span = { workspace = true }
+mago-syntax = { workspace = true }
+mago-text-edit = { workspace = true }
+mago-word = { workspace = true }
+foldhash = { workspace = true }
+
+[dev-dependencies]
+libtest-mimic = { workspace = true }
+mago-prelude = { workspace = true, features = ["build"] }
+mago-reporting = { workspace = true }
+mago-server = { workspace = true }
+
+# Each fixture pair of tests/cases is a test of its own, named after its folder.
+[[test]]
+name = "cases"
+harness = false

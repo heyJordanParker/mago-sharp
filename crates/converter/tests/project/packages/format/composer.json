@@ -1,0 +1,12 @@
+{
+    "name": "acme/format",
+    "description": "A plain PHP library with a function in PHP's root namespace beside its classes.",
+    "type": "library",
+    "license": "PHP-3.01",
+    "autoload": {
+        "psr-4": {
+            "Acme\\Format\\": "src/"
+        },
+        "files": ["src/helpers.php"]
+    }
+}

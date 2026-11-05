@@ -1,0 +1,26 @@
+namespace App;
+
+// An open method is `virtual`, one that replaces a parent class's is `override`, and a `final` or private one is
+// neither (spec section 22).
+public class SalesReport : Report, Titled, Countable
+{
+    public override string title()
+    {
+        return this.heading(text: 'Sales');
+    }
+
+    public virtual int count()
+    {
+        return 1;
+    }
+
+    public int total()
+    {
+        return 2;
+    }
+
+    private string heading(string text)
+    {
+        return text;
+    }
+}

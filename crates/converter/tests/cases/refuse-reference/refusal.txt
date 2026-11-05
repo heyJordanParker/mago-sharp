@@ -1,0 +1,3 @@
+12:26: a PHP# parameter is never taken by reference, so `$count` can't be: return the new value instead
+17:21: a method that returns by reference has no PHP# form: PHP# has no references
+24:18: a reference has no PHP# form: PHP# passes every value as it is

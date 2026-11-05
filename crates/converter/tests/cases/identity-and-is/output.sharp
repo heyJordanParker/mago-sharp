@@ -1,0 +1,51 @@
+namespace App;
+
+// `===` is `==` where both sides have one scalar type or a side is null, and stays where a side may hold an object
+// (spec section 19). `instanceof` and the type tests are `is` and `is not` (spec section 21).
+public final class Check
+{
+    public bool same(string a, string b)
+    {
+        return a == b;
+    }
+
+    public bool differ(int a, int b)
+    {
+        return a != b;
+    }
+
+    public bool missing(Spec? spec)
+    {
+        return spec == null;
+    }
+
+    public bool exactly(Spec a, Spec b)
+    {
+        return a === b;
+    }
+
+    public bool special(Spec spec)
+    {
+        return spec is Special;
+    }
+
+    public bool plain(Spec spec)
+    {
+        return spec is not Special;
+    }
+
+    public bool text(Any? value)
+    {
+        return value is string;
+    }
+
+    public bool notText(Any? value)
+    {
+        return value is not string;
+    }
+
+    public bool nothing(Any? value)
+    {
+        return value == null;
+    }
+}

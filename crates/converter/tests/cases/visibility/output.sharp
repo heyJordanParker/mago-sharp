@@ -1,0 +1,22 @@
+namespace App;
+
+// PHP reaches every class and every member written without a visibility, so PHP# writes `public` (spec section 5).
+public class Legacy
+{
+    public virtual Any? note { get; set; } = null;
+
+    public virtual string describe()
+    {
+        return 'legacy';
+    }
+
+    protected virtual int hidden()
+    {
+        return 1;
+    }
+
+    private int own()
+    {
+        return 2;
+    }
+}

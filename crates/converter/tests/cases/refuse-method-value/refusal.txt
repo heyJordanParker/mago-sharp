@@ -1,0 +1,3 @@
+19:19: `strlen` is PHP's own function, which PHP# reaches through the standard library member that runs it, and the converter writes that member for a call only
+21:27: a callable array or string whose method the analysis can't find has no PHP# form: PHP# names a method value on its class or object (spec section 14.3)
+21:27: `list{$this(App\Values), string('missing')}` is wider than `(callable(string): int)`, the type of the parameter it reaches, which PHP passes and PHP# refuses (spec section 7)

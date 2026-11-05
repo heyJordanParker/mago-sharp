@@ -1,0 +1,1 @@
+11:21: a subclass's constructor that runs its parent's after other statements, or never where an ancestor declares one, has no PHP# form: `: super(…)` runs it first (spec section 9)

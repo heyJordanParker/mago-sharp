@@ -2529,6 +2529,11 @@ fn text(r#type: &TUnion, codebase: &CodebaseMetadata, parameter: Parameter) -> S
     if let Some(TAtomic::Mixed(mixed)) = r#type.types.iter().find(|atomic| atomic.is_mixed()) {
         return if mixed.is_non_null() { "Any" } else { "Any?" }.to_owned();
     }
+    // A bound the checker refused, spec section 11, bounds nothing, and its one error is its own file's, so a file that
+    // creates its class or names its type parameter has none and writes it as no bound.
+    if !r#type.types.is_empty() && r#type.types.iter().all(|atomic| matches!(atomic, TAtomic::Error)) {
+        return "Any?".to_owned();
+    }
 
     let mut members: Vec<(String, bool)> = r#type
         .types

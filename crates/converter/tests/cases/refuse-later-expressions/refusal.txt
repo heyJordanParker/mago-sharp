@@ -1,0 +1,4 @@
+19:9: destructuring by position, or by a key that is no literal, has no PHP# form: PHP# destructures a tuple, and reads a `Map` key by key (spec sections 12 and 30)
+22:20: `print` is removed: output goes through `Console`, which a class receives through its constructor (spec section 8)
+23:17: `new` of `string` has no PHP# form: PHP# makes an object of a class value only (spec section 25)
+37:9: a generator is not converted yet

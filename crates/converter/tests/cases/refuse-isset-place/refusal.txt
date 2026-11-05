@@ -1,0 +1,4 @@
+27:19: `isset` of `$plain->name` reads a property that may hold no value, which PHP gives as unset and PHP# reads: it converts for a property with a default or a promoted one
+30:19: `empty` of `$this->total` reads a property that may hold no value, which PHP gives as unset and PHP# reads: it converts for a property with a default or a promoted one
+36:19: `empty` at an index of `list<int>` reads past a `List`'s end, which PHP gives as unset and PHP# refuses: it converts for a `Map` key
+39:19: `isset` of `$magic->value` reads a property `App\Magic`'s `__isset` or `__get` may answer for, which PHP asks and PHP# never does

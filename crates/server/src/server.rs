@@ -5,6 +5,7 @@ use foldhash::HashMap;
 use foldhash::HashSet;
 
 use mago_analyzer::analysis_result::AnalysisResult;
+use mago_analyzer::artifacts::AnalysisArtifacts;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::reference::SymbolReferences;
 use mago_database::Database;
@@ -19,6 +20,7 @@ use mago_orchestrator::service::incremental_analysis::compile::DispatcherModule;
 use mago_orchestrator::service::incremental_analysis::compile::Listener;
 use mago_reporting::Issue;
 use mago_reporting::IssueCollection;
+use mago_sharp_bridge::InlineForms;
 use mago_sharp_bridge::unit::Input;
 use mago_sharp_bridge::unit::Library;
 use mago_sharp_lean::Translation;
@@ -81,6 +83,19 @@ impl Server {
         &self.database
     }
 
+    /// The codebase of the last analysis, which stays empty until the first one.
+    #[must_use]
+    pub fn codebase(&self) -> &CodebaseMetadata {
+        self.service.codebase()
+    }
+
+    /// The issues of `file_id` and what its analysis found in it, as the type of each expression, against the last
+    /// analysis's codebase. `None` when the file is not in the database.
+    #[must_use]
+    pub fn analyze_file_with_artifacts(&self, file_id: FileId) -> Option<(IssueCollection, AnalysisArtifacts)> {
+        self.service.analyze_file_with_artifacts(file_id)
+    }
+
     /// Mutably borrow the workspace file database (to add / update / delete
     /// files as the workspace changes).
     pub fn database_mut(&mut self) -> &mut Database<'static> {
@@ -132,6 +147,20 @@ impl Server {
         self.service.compile(stamp, check, standard_library, refusing).map_err(ServerError::from)
     }
 
+    /// The standard library's inline forms, which `mago convert` reads to find the library member that runs a PHP
+    /// function: those of the library files [`Self::compile`] lowers and doesn't refuse, by `refusing` as `compile`
+    /// takes it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError`] when no analysis ran yet, or when re-analyzing a library file fails.
+    pub fn standard_library_forms(
+        &mut self,
+        refusing: impl FnOnce(IssueCollection) -> IssueCollection,
+    ) -> Result<InlineForms, ServerError> {
+        self.service.standard_library_forms(refusing).map_err(ServerError::from)
+    }
+
     /// Every PHP# listener of the last analysis, in the order the engine runs them.
     #[must_use]
     pub fn listeners(&self) -> Vec<Listener> {
@@ -142,6 +171,13 @@ impl Server {
     #[must_use]
     pub fn dispatcher_module(&self) -> Option<DispatcherModule> {
         self.service.dispatcher_module()
+    }
+
+    /// For each of `files`, the source files other than it whose signature edit makes the last analysis's warm path
+    /// re-analyze it, which `mago convert` reads to find the converted files an issue in another file can come from.
+    #[must_use]
+    pub fn files_reaching(&self, files: &[FileId]) -> Vec<HashSet<FileId>> {
+        self.service.files_reaching(files)
     }
 
     /// Run one analysis pass with the node-analysis hooks only in the scope's files, and report

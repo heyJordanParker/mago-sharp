@@ -1,0 +1,28 @@
+namespace App;
+
+// A local whose first value says nothing of what it holds takes the type its `@var` tag declares.
+public final class Tally
+{
+    public List<string> names()
+    {
+        List<string> names = [];
+        names.add('a');
+
+        return names;
+    }
+
+    public Map<string, int> counts()
+    {
+        Map<string, int> counts = [:];
+        counts['a'] = 1;
+
+        return counts;
+    }
+
+    public string? first()
+    {
+        string? first = null;
+
+        return first;
+    }
+}

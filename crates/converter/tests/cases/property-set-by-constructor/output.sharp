@@ -1,0 +1,17 @@
+namespace App;
+
+// A typed property with no initial value converts when the constructor sets it on every path.
+public final class Ticket
+{
+    private string code;
+
+    public Ticket(string prefix)
+    {
+        this.code = prefix + '-1';
+    }
+
+    public string label()
+    {
+        return this.code;
+    }
+}

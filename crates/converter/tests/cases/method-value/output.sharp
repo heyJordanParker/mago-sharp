@@ -1,0 +1,35 @@
+namespace App;
+
+// A method named as a value, `name(...)`, `[$this, 'name']` or `'Class::name'` where a function is declared, is
+// PHP#'s method value `this.name` (spec section 14.3).
+public final class Pricing
+{
+    public int apply(Function<int(int)> rule, int amount)
+    {
+        return rule(amount);
+    }
+
+    public int run(Function<int(int)> rule, int amount)
+    {
+        return rule(amount);
+    }
+
+    public int discounted(int amount)
+    {
+        return amount - 1;
+    }
+
+    public static int doubled(int amount)
+    {
+        return amount * 2;
+    }
+
+    public int total(int amount)
+    {
+        const first = this.apply(this.discounted, amount);
+        const second = this.apply(Pricing.doubled, first);
+        const third = this.run(this.discounted, second);
+
+        return this.run(Pricing.doubled, third);
+    }
+}

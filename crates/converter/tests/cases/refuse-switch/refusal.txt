@@ -1,0 +1,6 @@
+15:19: a `case` whose statements run on into the next case has no PHP# form: a `match` arm never falls through (spec section 21)
+24:21: a `break` or `continue` that leaves the `switch` before its case ends has no PHP# form: a `match` arm leaves at its end (spec section 21)
+30:18: a `case` of a numeric string or `null` compares by PHP's `==`, which no PHP# pattern does (spec section 19)
+45:18: a `case` of `''` runs for `null` too, since PHP's `null == ''` holds, and its pattern doesn't match `null` (spec sections 19 and 21)
+49:18: a `case` of `0` runs for `null` too, since PHP's `null == 0` holds, and its pattern doesn't match `null` (spec sections 19 and 21)
+53:18: a `case` of a numeric string or `null` compares by PHP's `==`, which no PHP# pattern does (spec section 19)

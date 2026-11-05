@@ -1,0 +1,12 @@
+namespace App;
+
+// `__DIR__` and `__FILE__` are what `Position.current()` gives (spec section 27).
+public final class Paths
+{
+    public string stubs()
+    {
+        const file = Position.current().file;
+
+        return Position.current().directory + '/stubs:' + file;
+    }
+}

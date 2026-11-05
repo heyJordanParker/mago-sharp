@@ -39,6 +39,7 @@ One binary runs:
 - `mago format`, the formatter.
 - `mago guard`, which enforces architectural layer rules.
 - `mago compile`, which compiles PHP# files for the PHP# engine.
+- `mago convert <paths>`, which turns each plain PHP class file the paths name into PHP#, or names what keeps it plain PHP. Each converted file is checked with the whole project before it is written, and git sees it as a rename. `--dry-run` prints the changes and writes nothing.
 
 `mago fix` applies fixes from the guard, analyzer, linter, and formatter until none of them changes anything.
 

@@ -1,0 +1,7 @@
+15:9: `$items` starts as `[]`, which says nothing of what it holds: declare its type with a `@var` tag
+22:14: `$found` is first named here, outside an assignment of its own, which is not converted yet: a PHP# local is declared where it is first assigned
+35:16: `mixed` is wider than `int`, the type the method declares it returns, which PHP returns and PHP# refuses (spec section 7)
+35:16: `$item` is named here, after the block it is first assigned in, which is not converted yet: PHP# scopes a local to its block (spec section 3)
+43:21: `$size` is read after the block that assigns it, so PHP# declares it first in the body with a type, and no declaration gives the type of `$count * 2`, which it is assigned: declare its type with a `@var` tag (decision 2)
+55:21: `$copy` is read after the block that assigns it, so PHP# declares it first in the body with a type, and no declaration gives the type of `$size`, which it is assigned: declare its type with a `@var` tag (decision 2)
+60:16: `mixed` is wider than `int`, the type the method declares it returns, which PHP returns and PHP# refuses (spec section 7)

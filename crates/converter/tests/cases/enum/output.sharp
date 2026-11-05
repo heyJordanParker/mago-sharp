@@ -1,0 +1,14 @@
+namespace App;
+
+// An enum's header lists its backing type and its interfaces after `:`, its cases keep their form, and no method of
+// it is `virtual` (spec section 20).
+public enum Status: string, Labeled
+{
+    case Open = 'open';
+    case Closed = 'closed';
+
+    public string label()
+    {
+        return this == Status.Open ? 'Open' : 'Closed';
+    }
+}

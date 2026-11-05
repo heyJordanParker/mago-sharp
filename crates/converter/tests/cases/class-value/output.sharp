@@ -1,0 +1,20 @@
+namespace App;
+
+// `X::class` is the class value `typeof(X)`, `static` is `Self`, and `self` is the class's name (spec section 25).
+public final class Registry
+{
+    public Class<Spec> kind()
+    {
+        return typeof(Spec);
+    }
+
+    public Registry fresh()
+    {
+        return new Registry();
+    }
+
+    public Self same()
+    {
+        return this;
+    }
+}

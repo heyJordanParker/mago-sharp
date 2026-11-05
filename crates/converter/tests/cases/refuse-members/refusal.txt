@@ -1,0 +1,6 @@
+14:18: PHP# has no type `array{'low': int}`
+16:23: `$total` is static and has no initial value: a PHP# static holds a value of its type before any code reads it (spec section 6)
+19:12: a `set` hook whose parameter is other than `$value` of the property's type has no PHP# form: a `set` accessor's `value` has the property's type (spec section 6)
+22:25: a property with a `set` hook, no `get` hook and no storage has no PHP# form: a PHP# property needs a `get` accessor (spec section 6)
+37:21: the magic method `__invoke` is not converted yet
+42:21: `name` names a property and a method, and a PHP# class has one member of each name (spec section 14)

@@ -255,7 +255,7 @@ fn host_compiled_path(root: &Path, folder: &Path, source: &Path) -> Result<Optio
 
 /// The project's database: every file the analyzer loads with the prelude, and each `.sharp` file of a package as a
 /// file of the project, which the compile checks too. Also gives the names of those packaged files.
-fn project_database(
+pub(crate) fn project_database(
     orchestrator: &Orchestrator<'_>,
     workspace: &Path,
 ) -> Result<(Database<'static>, HashSet<Vec<u8>>), Error> {
@@ -587,7 +587,7 @@ const STANDARD_LIBRARY_PACKAGE: &str = "heyjordanparker/php-sharp-composer";
 ///
 /// Fails when the package's `native.php` gives no fingerprint, so no compiled file names a library it was not checked
 /// against.
-fn standard_library(root: &Path, database: &impl DatabaseReader) -> Result<unit::Library, String> {
+pub(crate) fn standard_library(root: &Path, database: &impl DatabaseReader) -> Result<unit::Library, String> {
     let Some(file) = database.files().find(|file| file.is_standard_library) else {
         return Ok(unit::Library::default());
     };

@@ -1,0 +1,35 @@
+namespace App;
+
+import Sharp.Security.Hash;
+
+// A PHP built-in becomes the standard library member whose body runs it with PHP's meaning: an extension member on
+// its receiver, or a static member through its class (decision 4).
+public final class Words
+{
+    private List<string> names = [];
+
+    public int size()
+    {
+        return this.names.count();
+    }
+
+    public string joined()
+    {
+        return this.names.join(', ');
+    }
+
+    public bool prefixed(string text)
+    {
+        return text.startsWith('a');
+    }
+
+    public string digest(string data)
+    {
+        return Hash.md5(data);
+    }
+
+    public float rounded(float value)
+    {
+        return value.round(2);
+    }
+}

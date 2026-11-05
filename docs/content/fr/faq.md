@@ -39,6 +39,7 @@ Un seul binaire fournit :
 - `mago format`, le formateur.
 - `mago guard`, qui fait respecter les règles d'architecture entre couches.
 - `mago compile`, qui compile les fichiers PHP# pour le moteur PHP#.
+- `mago convert <chemins>`, qui convertit en PHP# chaque fichier de classe en PHP simple que nomment les chemins, ou nomme ce qui le garde en PHP simple. Chaque fichier converti est vérifié avec tout le projet avant d'être écrit, et git le voit comme un renommage. `--dry-run` affiche les changements sans rien écrire.
 
 `mago fix` applique les corrections du guard, de l'analyseur, du linter et du formateur jusqu'à ce qu'aucun d'eux ne change plus rien.
 
