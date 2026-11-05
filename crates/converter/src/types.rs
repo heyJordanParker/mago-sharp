@@ -106,10 +106,11 @@ impl Imports {
     }
 }
 
-/// Whether PHP# reserves `name` for a type where a plain PHP class may take it: `Any`, PHP#'s `mixed`, and
-/// `Equatable`, its built-in bound (spec section 11). PHP reserves every other type name itself.
+/// Whether PHP# reserves `name` for a type where a plain PHP class may take it: `Any`, PHP#'s `mixed`, `Equatable`,
+/// its built-in bound (spec section 11), and `Error`, its interface of every failure, which a `.sharp` file's `Error`
+/// always names (spec section 31). PHP reserves every other type name itself.
 fn reserved(name: &str) -> bool {
-    ["Any", EQUATABLE].iter().any(|reserved| reserved.eq_ignore_ascii_case(name))
+    ["Any", EQUATABLE, "Error"].iter().any(|reserved| reserved.eq_ignore_ascii_case(name))
 }
 
 /// `union` in PHP#'s spelling, or the reason PHP# can't write it.
