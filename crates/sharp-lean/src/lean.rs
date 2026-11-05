@@ -189,7 +189,7 @@ impl Lean {
         }
 
         let toolchain = package.toolchain()?;
-        if !matches!(toolchain, Toolchain::Ready) {
+        let Toolchain::Ready(version) = &toolchain else {
             if let Toolchain::Failed(failure) = &toolchain {
                 tracing::debug!("The law checker could not be installed: {failure}");
             }
@@ -203,9 +203,9 @@ impl Lean {
                 report(&mut issues, translation, issue);
             }
             return Ok(issues);
-        }
+        };
 
-        let library = library::build(&package.lake)?;
+        let library = library::build(&package.lake, version)?;
         let modules = program.modules(&work.iter().map(|translation| translation.file).collect::<Vec<_>>());
         package.write(&library, &modules)?;
         let receivers: HashMap<String, bool> =

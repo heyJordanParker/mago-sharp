@@ -408,7 +408,8 @@ pub(crate) enum Refusal {
 
 /// What `lake` answered when asked its version.
 pub(crate) enum Toolchain {
-    Ready,
+    /// With the version it printed, which names the Lean version that builds the runtime library.
+    Ready(String),
     /// No `lake` is on the `PATH`, and the Mago build pins no elan for its target.
     Unsupported,
     /// Mago could not install Lean where no `lake` is on the `PATH`, or `lake` could not install the pinned Lean
@@ -451,7 +452,7 @@ impl Package {
         };
 
         Ok(if output.status.success() {
-            Toolchain::Ready
+            Toolchain::Ready(String::from_utf8_lossy(&output.stdout).trim().to_owned())
         } else {
             Toolchain::Failed(
                 format!("{}{}", String::from_utf8_lossy(&output.stderr), String::from_utf8_lossy(&output.stdout))

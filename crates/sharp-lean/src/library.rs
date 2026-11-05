@@ -1,5 +1,6 @@
-//! The Lean runtime library and the `sharp-lean` runner, built once per Mago build in Mago's cache folder, and the
-//! `lake` that builds them: the one on the `PATH`, else the one of the elan Mago installs in its cache folder.
+//! The Lean runtime library and the `sharp-lean` runner, built in Mago's cache folder once per library source and Lean
+//! version, and the `lake` that builds them: the one on the `PATH`, else the one of the elan Mago installs in its cache
+//! folder.
 
 use std::fmt::Write;
 use std::fs;
@@ -26,7 +27,6 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
-use mago_build_id::BUILD_ID;
 use mago_database::error::DatabaseError;
 use mago_database::error::IOAction;
 use sha2::Digest;
@@ -413,14 +413,27 @@ fn unbuilt(failure: impl std::fmt::Display) -> io::Error {
     )
 }
 
-/// Writes the library's package to `lean/<build id>.staging` in Mago's cache folder, builds it with `lake` and renames
-/// it to `lean/<build id>`, once per build ID. Builds take turns under an exclusive lock on `lean/build.lock`, across
-/// threads and processes alike. A build that lost its runner or a package file, as a cache cleaner leaves it, is
-/// deleted and built again. A finished build deletes every other folder in `lean/`: older builds and any staging
-/// folder a dead build left.
-pub(crate) fn build(lake: &Lake) -> io::Result<PathBuf> {
+/// The name of the library's build by the Lean whose `lake` printed `version`: a hash of `version` and each file of
+/// `package`, the whole of what the build reads, so a build is used only by the Lean that built it from those files.
+fn key(version: &str, package: &[(&str, &str)]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(format!("{}\0{version}\0", version.len()));
+    for (path, source) in package {
+        hasher.update(format!("{path}\0{}\0", source.len()));
+        hasher.update(source);
+    }
+
+    sha256_hex(&hasher.finalize())[..32].to_owned()
+}
+
+/// Writes the library's package to `lean/<key>.staging` in Mago's cache folder, builds it with `lake` and renames it
+/// to `lean/<key>`, once per Lean `version` and library source, which `key` names. Builds take turns under an exclusive
+/// lock on `lean/build.lock`, across threads and processes alike. A build that lost its runner or a package file, as a
+/// cache cleaner leaves it, is deleted and built again. A finished build deletes every other folder in `lean/`: older
+/// builds and any staging folder a dead build left.
+pub(crate) fn build(lake: &Lake, version: &str) -> io::Result<PathBuf> {
     let builds = cache_root()?.join("lean");
-    let library = builds.join(format!("{BUILD_ID:032x}"));
+    let library = builds.join(key(version, &PACKAGE));
     fs::create_dir_all(&builds).map_err(|error| DatabaseError::io(IOAction::CreateFolder, &builds, error))?;
     let lock_file = builds.join("build.lock");
     let _lock = fs::File::options()
@@ -679,6 +692,24 @@ mod tests {
         assert_eq!(String::from_utf8_lossy(&output.stdout), "120\n0\n");
 
         Ok(())
+    }
+
+    /// A build is named by the Lean version and every file of the library's package, so a build of another Lean or of
+    /// other sources is never used, and nothing else, such as Mago's own Rust code, names another build.
+    #[test]
+    fn the_library_build_is_named_by_its_lean_version_and_each_file_of_its_package() {
+        let version = "Lake version 5.0.0-src+5045d00 (Lean version 4.34.1)";
+        let base = key(version, &PACKAGE);
+        assert_eq!(base, key(version, &PACKAGE));
+        assert_eq!(base.len(), 32);
+        assert_ne!(base, key("Lake version 5.0.0-src+0000000 (Lean version 4.35.0)", &PACKAGE));
+
+        for (index, &(path, source)) in PACKAGE.iter().enumerate() {
+            let edited = format!("{source}\n");
+            let mut package: [(&str, &str); 8] = PACKAGE;
+            package[index] = (path, edited.as_str());
+            assert_ne!(base, key(version, &package), "{path}");
+        }
     }
 
     /// Linux ends a process whose soft limit meets its hard limit with `SIGKILL`, which Mago can't tell from the

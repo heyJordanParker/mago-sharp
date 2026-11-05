@@ -1935,7 +1935,6 @@ dependencies = [
  "foldhash",
  "libc",
  "mago-analyzer",
- "mago-build-id",
  "mago-codex",
  "mago-database",
  "mago-extension",
