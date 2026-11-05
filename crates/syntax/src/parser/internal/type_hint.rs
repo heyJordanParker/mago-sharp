@@ -279,13 +279,14 @@ where
     /// Whether a PHP# tuple type starts here, which PHP# writes in the brackets that also open an attribute list and a
     /// list: a `[` whose closing `]`, and an optional `?` written right after it, are followed by a name and then by
     /// `(`, `,`, `)`, `=`, `;` or `{`, as in `[Money, int] totals()` or `[Money, int] pair = …`. After an attribute list,
-    /// a type and a name follow, as in `[Searchable] string name`, or the class's own name and `(`, as in
-    /// `[Deprecated] Report(…)`, its constructor. After a list an operator or `.` follows.
+    /// a type and a name follow, as in `[Searchable] string name`, the class's own name and `(`, as in
+    /// `[Deprecated] Report(…)`, its constructor, or a modifier, as in `[Field] public (int|string)? key`, whose type
+    /// starts with `(`. After a list an operator or `.` follows.
     pub(crate) fn is_at_tuple_hint(&self) -> Result<bool, ParseError<'arena>> {
         let Some((name, after)) = self.peek_after_tuple_hint()? else {
             return Ok(false);
         };
-        if after.kind == T!["("] && self.state.members_name == Some(name.value) {
+        if after.kind == T!["("] && (self.state.members_name == Some(name.value) || name.kind.is_modifier()) {
             return Ok(false);
         }
 
