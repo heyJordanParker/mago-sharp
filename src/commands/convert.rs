@@ -208,7 +208,9 @@ impl ConvertCommand {
             return Ok((ExitCode::FAILURE, Outcome::default()));
         };
         let plain = session.proof(&prover)?;
-        let forms = session.server.standard_library_forms()?;
+        // The forms come from the library files the proof's compile accepts, so a converted call runs what it does.
+        let database = session.server.database().read_only();
+        let forms = session.server.standard_library_forms(|issues| prover.hidden.shown(issues, &database))?;
         let library = Library::new(&forms, session.server.codebase());
 
         let mut outcome = Outcome::default();

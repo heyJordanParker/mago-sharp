@@ -148,13 +148,17 @@ impl Server {
     }
 
     /// The standard library's inline forms, which `mago convert` reads to find the library member that runs a PHP
-    /// function.
+    /// function: those of the library files [`Self::compile`] lowers and doesn't refuse, by `refusing` as `compile`
+    /// takes it.
     ///
     /// # Errors
     ///
     /// Returns [`ServerError`] when no analysis ran yet, or when re-analyzing a library file fails.
-    pub fn standard_library_forms(&mut self) -> Result<InlineForms, ServerError> {
-        self.service.standard_library_forms().map_err(ServerError::from)
+    pub fn standard_library_forms(
+        &mut self,
+        refusing: impl FnOnce(IssueCollection) -> IssueCollection,
+    ) -> Result<InlineForms, ServerError> {
+        self.service.standard_library_forms(refusing).map_err(ServerError::from)
     }
 
     /// Every PHP# listener of the last analysis, in the order the engine runs them.

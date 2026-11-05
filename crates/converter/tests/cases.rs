@@ -94,14 +94,15 @@ fn declared(folder: &Path) -> String {
 /// class's `.sharp` name, when it is given.
 fn analyzed(folder: &Path, converted: Option<&str>) -> Server {
     let mut database = Database::new(DatabaseConfiguration::new(folder, vec![], vec![], vec![], vec![]));
-    // The PHP# standard library, as a project's `vendor/` holds it, gives `List`, `Map` and the rest their members.
+    // The PHP# standard library gives `List`, `Map` and the rest their members, and its files are the project's own, as
+    // `mago compile` loads a package's PHP# files, so its forms come from the files the compile accepts.
     let library = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../composer/library").canonicalize().unwrap();
     let mut sources = Vec::new();
     files_of(&library, "sharp", &mut sources);
     for path in sources {
         let name = Cow::Owned(path.to_string_lossy().into_owned().into_bytes());
         let contents = Cow::Owned(std::fs::read(&path).unwrap());
-        let mut file = File::new(name, FileType::Vendored, Some(path), contents);
+        let mut file = File::new(name, FileType::Host, Some(path), contents);
         mark_sharp_file(&mut file, folder);
         database.add(file);
     }
@@ -163,7 +164,7 @@ fn checked(folder: &Path, text: &str) -> String {
 /// What the converter gives for the case at `folder`: the PHP# text, or each refusal as `line:column: reason`.
 fn converted(folder: &Path) -> Result<String, String> {
     let mut server = analyzed(folder, None);
-    let forms = server.standard_library_forms().expect("the standard library lowers");
+    let forms = server.standard_library_forms(|issues| issues).expect("the standard library lowers");
     let library = Library::new(&forms, server.codebase());
     let input = FileId::new(b"input.php");
     assert!(server.database().get(&input).is_ok(), "{} holds no input.php", folder.display());
