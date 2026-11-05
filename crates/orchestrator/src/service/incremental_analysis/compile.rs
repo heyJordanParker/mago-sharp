@@ -1249,6 +1249,24 @@ mod tests {
         assert!(errors.iter().all(|issue| issue.level == Level::Error), "{errors:?}");
     }
 
+    /// Spec section 11: a type parameter's bound is a class or an interface, so `Any?` is a refused bound, which bounds
+    /// nothing, and its one error is its own file's. A file that creates the class has none, and compiles.
+    #[test]
+    fn a_file_that_creates_a_class_whose_bound_is_refused_compiles_and_the_class_s_file_is_refused() {
+        let boxed = "namespace App;\n\npublic class Box<T : Any?>\n{\n    public Box(public T item { get; })\n    {\n    }\n}\n";
+        let packer = "namespace App;\n\npublic class Packer\n{\n    public Box<int> pack()\n    {\n        return new Box<int>(1);\n    }\n}\n";
+        let database = project(&[("app/Box.sharp", boxed), ("app/Packer.sharp", packer)]);
+        let mut service = analyzed(&database);
+
+        let compiled = compile(&mut service, empty_stamp);
+
+        accepted(&compiled, "app/Packer.sharp");
+        let Some(Compilation::Refused(errors)) = compiled.get("app/Box.sharp") else {
+            panic!("app/Box.sharp is not refused: {compiled:?}");
+        };
+        assert!(!errors.is_empty());
+    }
+
     const MONEY: &str = "namespace App;\n\npublic class Money\n{\n    public const int CENTS = 100;\n\n    public int amount()\n    {\n        return 1;\n    }\n}\n";
     const ORDER_OF_MONEY: &str = "namespace App;\n\nimport Acme.Tax;\nimport Lib.Rate;\n\npublic class Order\n{\n    public int total(Money money)\n    {\n        return money.amount() + Rate.percent() + Tax.rate();\n    }\n}\n";
     const CASH: &str = "namespace App;\n\npublic class Cash : Money\n{\n}\n";
