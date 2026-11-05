@@ -25,12 +25,13 @@ impl Converter<'_, '_> {
             Literal::True(keyword) => self.edits.replace(keyword.span, "true"),
             Literal::False(keyword) => self.edits.replace(keyword.span, "false"),
             Literal::Null(keyword) => self.edits.replace(keyword.span, "null"),
-            // PHP turns an `int` that lands in a `float` into a `float`, and PHP# writes the `float` (spec section 24).
-            Literal::Integer(integer)
-                if integer.raw.iter().all(u8::is_ascii_digit)
-                    && expected.is_some_and(|union| kinds(union) == [Kind::Float]) =>
-            {
-                self.edits.replace(integer.span, format!("{}.0", String::from_utf8_lossy(integer.raw)));
+            // PHP turns an `int` that lands in a `float` into a `float`, and PHP# writes the `float` (spec section 24): the
+            // value the literal writes, which `017` writes in octal and `0x1F` in hex.
+            Literal::Integer(integer) if expected.is_some_and(|union| kinds(union) == [Kind::Float]) => {
+                match integer.value {
+                    Some(value) => self.edits.replace(integer.span, format!("{value}.0")),
+                    None => self.refuse(integer.span, "an integer literal wider than 64 bits is not converted yet"),
+                }
             }
             Literal::String(_) | Literal::Integer(_) | Literal::Float(_) => {}
         }

@@ -7,6 +7,6 @@ public final class Paths
     {
         const file = Position.current().file;
 
-        return `${Position.current().directory}/stubs:${file}`;
+        return Position.current().directory + '/stubs:' + file;
     }
 }

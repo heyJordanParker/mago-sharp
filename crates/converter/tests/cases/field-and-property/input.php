@@ -21,6 +21,11 @@ final class Account
 
     private float $rate = 1;
 
+    // PHP reads `017` as octal and `0x1F` as hex, so a `float` takes the value each writes.
+    private float $mask = 017;
+
+    private float $flags = 0x1F;
+
     public function __construct(int $id)
     {
         $this->id = $id;
