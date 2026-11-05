@@ -116,3 +116,60 @@ enabled = false
 `command` is replaced rather than appended to, because it is an argv: a layer that declares its own command gets exactly that command, and a layer that does not keeps the inherited one. Every other key in the host table merges as usual.
 
 See [Configuration](/guide/configuration/) for path resolution and merge precedence.
+
+## Build-time scans without dev dependencies
+
+An app whose own analyzer extension writes a file the app reads at boot runs `mago analyze --scan-only` in its production build. That build usually installs with `composer install --no-dev`, so a worker that loads a `require-dev` package dies at startup there. Mago doesn't skip a host whose worker dies: the whole run fails with exit code 2.
+
+Give each extension its own host, so the app's extension never shares a worker with a `require-dev` one:
+
+```toml
+# mago.toml
+[extension-hosts.app]
+command = ["php", ".mago/app-worker.php"]
+
+[extension-hosts.dev]
+command = ["php", ".mago/dev-worker.php"]
+```
+
+Beside `mago.toml`, add a scan configuration that extends it and turns the `require-dev` host off:
+
+```toml
+# mago.scan.toml
+extends = "mago.toml"
+
+[extension-hosts.dev]
+enabled = false
+```
+
+The production build runs the scan with that file:
+
+```sh
+composer install --no-dev
+vendor/bin/mago --config mago.scan.toml analyze --scan-only
+```
+
+Host entries merge by name, so the scan configuration changes only `enabled`: `dev` keeps its inherited command, and `app` runs as `mago.toml` declares it. Mago never starts a disabled host. `vendor/bin/mago` and the SDK the app's worker loads both come from `heyjordanparker/mago-sharp`, so that package belongs in `require`, not `require-dev`.
+
+Don't use `--no-extensions` for this. It turns every host off, the app's own too, so the scan exits 0 and writes nothing.
+
+### Where paths resolve
+
+Keep `mago.scan.toml` in the same directory as `mago.toml`. Mago resolves every host from the directory of the configuration file it loaded. Under `--config` that is the scan configuration's directory, for the hosts it inherits too:
+
+- A program with a directory part, such as `./vendor/bin/extension-host`, resolves from that directory. A bare name such as `php` resolves through `PATH`.
+- A host without `working-directory` starts its workers in that directory. Mago never resolves `command` arguments, so `php` reads `.mago/app-worker.php` from there.
+
+`[source] paths` resolve against the workspace instead, which is the current directory unless `--workspace` or `[source] workspace` names another. Run the scan from the project root.
+
+A scan configuration can't narrow what Mago scans. Arrays concatenate through `extends`, so its `[source] paths` add to the paths of `mago.toml`.
+
+### What the scan runs
+
+`--scan-only` builds the codebase and analyzes no file. It runs the hooks of every enabled host in this order:
+
+1. initialization hooks, where `addStub()` declares synthetic classes
+2. codebase-scan hooks
+3. before-analysis hooks
+
+After-file and after-analysis hooks don't run. When `[source] paths` match no file, Mago warns `No files found to analyze.` and exits 0 after the initialization hooks. The codebase-scan and before-analysis hooks never run, so an extension that writes its file there writes nothing.
