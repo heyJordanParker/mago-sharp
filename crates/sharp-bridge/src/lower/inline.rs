@@ -348,10 +348,6 @@ impl Lowering<'_, '_> {
             .into_iter()
             .chain(parameters.iter().map(|parameter| parameter.variable.name))
             .collect();
-        let php_call = match body {
-            Body::Expression(expression) => self.php_call(expression, &names),
-            Body::Native(_) => None,
-        };
         let (root, in_order) = match body {
             Body::Expression(expression) => {
                 let mut steps = Vec::new();
@@ -376,6 +372,10 @@ impl Lowering<'_, '_> {
             }
             // The native call reads each parameter once, in order, and then calls.
             Body::Native(method) => (self.native_call(method, class), names.len()),
+        };
+        let php_call = match body {
+            Body::Expression(expression) => self.php_call(expression, &names),
+            Body::Native(_) => None,
         };
         let mut slots = vec![NULL; names.len()];
         let (mut result_type, mut key_order) = (None, None);
@@ -413,7 +413,8 @@ impl Lowering<'_, '_> {
     }
 
     /// The plain PHP function `expression` is one call of, through its namespace as `global.count(items)` calls it,
-    /// and what it passes it: a slot `names` names, a literal, or a plain PHP constant read through its namespace.
+    /// and what it passes it: a slot `names` names, a literal, or a plain PHP constant read through its namespace. The
+    /// inlining rule took `expression`, so no argument spreads, and a named argument passes no plain value.
     fn php_call(&self, expression: &Expression, names: &[&[u8]]) -> Option<PhpCall> {
         let Expression::Call(Call::Method(call)) = expression else {
             return None;
@@ -427,9 +428,6 @@ impl Lowering<'_, '_> {
                 let Argument::Positional(argument) = argument else {
                     return None;
                 };
-                if argument.ellipsis.is_some() {
-                    return None;
-                }
                 match argument.value {
                     Expression::ConstantAccess(name)
                         if matches!(self.names.binding(&name.name), Some(Binding::Local(_) | Binding::This)) =>
