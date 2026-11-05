@@ -1,0 +1,18 @@
+namespace App;
+
+// `static fn` and `static function` are lambdas too. A static closure's body names no `$this`, so each call of the
+// lambda gives the result PHP's gives (spec section 14.2).
+public final class Pricing
+{
+    public Function<int(int)> taxed(int rate)
+    {
+        return (int amount) => amount + amount * rate;
+    }
+
+    public Function<int(int)> discounted(int off)
+    {
+        return (int amount) => {
+            return amount - off;
+        };
+    }
+}
