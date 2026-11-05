@@ -2063,7 +2063,24 @@ fn compile_proves_a_law_from_its_sharp_file_alone_and_writes_the_compiled_file()
     assert_eq!(source_lean_files(root), Vec::<PathBuf>::new());
     assert!(compiled(root, "app/Shared/Money.sharp").exists());
     assert!(root.join(".sharp").join(PACKAGE_FOLDER).is_dir(), "the compile keeps the Lake package's folder");
-    assert!(root.join(".sharp/.lean/Code/App/Shared/Money.lean").exists(), "the Lake package stays in .sharp/.lean/");
+    assert!(!root.join(".sharp/.lean/Code").exists(), "the runner's request holds the generated code, so no file does");
+}
+
+/// An earlier `mago` wrote the generated code to `.sharp/.lean/Code/` and built it there with Lake. The runner reads the
+/// code from its request, so the compile deletes both, and a file in them cannot reach a proof.
+#[test]
+fn compile_deletes_the_generated_code_and_the_lake_build_an_earlier_mago_left_and_proves_its_law() {
+    let directory = lawful_project(&[("app/Shared/Money.sharp", LAWFUL_MONEY)]);
+    let root = directory.path();
+    write(root, ".sharp/.lean/Code/App/Shared/Money.lean", "this is not Lean\n");
+    write(root, ".sharp/.lean/.lake/build/lib/lean/Code/App/Shared/Money.olean", "this is not a build\n");
+
+    let output = compile(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(compiled(root, "app/Shared/Money.sharp").exists());
+    assert!(!root.join(".sharp/.lean/Code").exists());
+    assert!(!root.join(".sharp/.lean/.lake/build").exists());
 }
 
 #[test]
@@ -2290,7 +2307,7 @@ fn compile_proves_two_stale_law_files_and_refuses_each_one_whose_method_breaks_i
 }
 
 /// Puts a `lake` first on the `PATH` that runs the real one, and leaves a file in `started` in `folder` for each
-/// `sharp-lean` runner it starts.
+/// `sharp-lean` runner it starts, which holds the runner's request.
 #[cfg(unix)]
 fn counting_lake(folder: &Path) -> std::ffi::OsString {
     use std::os::unix::fs::PermissionsExt;
@@ -2301,7 +2318,7 @@ fn counting_lake(folder: &Path) -> std::ffi::OsString {
     let started = folder.join("started");
     std::fs::create_dir_all(&started).unwrap();
     let script = format!(
-        "#!/bin/sh\ncase \"$2\" in\n  */sharp-lean)\n    touch '{started}/'$$\n    ;;\nesac\nexec '{real}' \"$@\"\n",
+        "#!/bin/sh\ncase \"$2\" in\n  */sharp-lean)\n    tee '{started}/'$$ | '{real}' \"$@\"\n    exit $?\n    ;;\nesac\nexec '{real}' \"$@\"\n",
         started = started.display(),
         real = real.display(),
     );
@@ -2310,6 +2327,37 @@ fn counting_lake(folder: &Path) -> std::ffi::OsString {
     std::fs::set_permissions(&lake, std::fs::Permissions::from_mode(0o755)).unwrap();
 
     std::env::join_paths(std::iter::once(folder.join("bin")).chain(std::env::split_paths(&path))).unwrap()
+}
+
+/// The generated Lean module of `name` in the request of the one runner `counting_lake` started in `folder`: the
+/// request's header, the modules an earlier runner stopped in, then each generated module's name and source.
+#[cfg(unix)]
+fn generated_module(folder: &Path, name: &str) -> String {
+    let mut started = std::fs::read_dir(folder.join("started")).unwrap();
+    let request = std::fs::read(started.next().unwrap().unwrap().path()).unwrap();
+    assert!(started.next().is_none(), "one runner started");
+    let mut at = 12;
+    let length = |at: &mut usize| {
+        let length = u32::from_be_bytes(request[*at..*at + 4].try_into().unwrap());
+        *at += 4;
+        usize::try_from(length).unwrap()
+    };
+    let string = |at: &mut usize| {
+        let bytes = length(at);
+        *at += bytes;
+        String::from_utf8(request[*at - bytes..*at].to_vec()).unwrap()
+    };
+    for _ in 0..length(&mut at) {
+        string(&mut at);
+    }
+    for _ in 0..length(&mut at) {
+        let (module, text) = (string(&mut at), string(&mut at));
+        if module == name {
+            return text;
+        }
+    }
+
+    panic!("the request holds no module {name}")
 }
 
 /// One runner proves the laws of every stale file of a compile, so the compile imports Lean once.
@@ -2545,6 +2593,7 @@ fn compile_proves_a_law_an_edit_adds_from_the_sharp_file_alone() {
     assert_eq!(source_lean_files(root), Vec::<PathBuf>::new());
 }
 
+#[cfg(unix)]
 #[test]
 fn compile_proves_a_law_whose_calls_go_from_one_file_to_another_and_back_with_no_import_cycle() {
     let directory = lawful_project(&[
@@ -2558,20 +2607,22 @@ fn compile_proves_a_law_whose_calls_go_from_one_file_to_another_and_back_with_no
         ),
     ]);
     let root = directory.path();
+    let lake = tempfile::tempdir().unwrap();
 
-    let output = compile(root);
+    let output = command(root, "never").env("PATH", counting_lake(lake.path())).output().unwrap();
 
     assert!(output.status.success(), "{}", printed(&output));
     assert!(compiled(root, "app/Shared/Alpha.sharp").exists());
     assert_eq!(
-        read(root, ".sharp/.lean/Code/App/Shared/Beta.lean"),
+        generated_module(lake.path(), "Code.App.Shared.Beta"),
         "-- Generated by mago compile. Do not edit.\nimport Code.App.Shared.Alpha\n"
     );
-    assert!(!read(root, ".sharp/.lean/Code/App/Shared/Alpha.lean").contains("import Code."));
+    assert!(!generated_module(lake.path(), "Code.App.Shared.Alpha").contains("import Code."));
 }
 
 /// A call through the class, as `ShapeMath.doubled(s)`, is that static call already, as in C#, so it compiles and its
 /// law is proved the same way.
+#[cfg(unix)]
 #[test]
 fn compile_proves_a_law_through_an_extension_member_as_the_static_call_it_runs_as() {
     let directory = lawful_project(&[
@@ -2585,11 +2636,12 @@ fn compile_proves_a_law_through_an_extension_member_as_the_static_call_it_runs_a
         ),
     ]);
     let root = directory.path();
+    let lake = tempfile::tempdir().unwrap();
 
-    let output = compile(root);
+    let output = command(root, "never").env("PATH", counting_lake(lake.path())).output().unwrap();
 
     assert!(output.status.success(), "{}", printed(&output));
-    let laws = read(root, ".sharp/.lean/Code/App/Shared/Shape.lean");
+    let laws = generated_module(lake.path(), "Code.App.Shared.Shape");
     for call in [
         "App.Shared.ShapeMath.doubled s",
         "App.Shared.ShapeMath.isFlat s",

@@ -117,12 +117,6 @@ impl Lake {
     /// A command that runs this `lake`. On Unix it may use `processor_seconds()`, as may each Lean process it starts,
     /// which inherits the limit.
     pub(crate) fn command(&self) -> Command {
-        self.command_within(processor_seconds())
-    }
-
-    /// A command that runs this `lake`, which on Unix may use `seconds` of processor time, as may each Lean process it
-    /// starts, which inherits the limit.
-    pub(crate) fn command_within(&self, seconds: u64) -> Command {
         let mut command = Command::new(&self.program);
         if let Some(home) = &self.home {
             command.env("ELAN_HOME", home);
@@ -131,11 +125,10 @@ impl Lake {
         {
             use std::os::unix::process::CommandExt;
 
+            let seconds = processor_seconds();
             // SAFETY: `getrlimit` and `setrlimit` are async-signal-safe, and the closure allocates nothing.
             unsafe { command.pre_exec(move || limit_processor_time(seconds)) };
         }
-        #[cfg(not(unix))]
-        let _ = seconds;
 
         command
     }
@@ -173,7 +166,7 @@ fn below_hard(limit: &libc::rlimit) -> u64 {
 /// Sets the soft processor-time limit of the process about to start to `seconds`, kept under its hard limit, and its
 /// core-file limit to none, so a Lean stopped that way leaves no core file of gigabytes in the project.
 #[cfg(unix)]
-fn limit_processor_time(seconds: u64) -> io::Result<()> {
+pub(crate) fn limit_processor_time(seconds: u64) -> io::Result<()> {
     for (resource, soft) in [(libc::RLIMIT_CPU, seconds), (libc::RLIMIT_CORE, 0)] {
         let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
         // SAFETY: `limit` is a valid `rlimit` for `getrlimit` to fill and `setrlimit` to read.
@@ -207,7 +200,7 @@ pub(crate) fn stopped(status: ExitStatus) -> bool {
 }
 
 /// Whether `code` is the exit status Lean reports for a process `SIGXCPU` ended: 128 plus the signal.
-pub(crate) fn stopped_code(code: i32) -> bool {
+fn stopped_code(code: i32) -> bool {
     #[cfg(unix)]
     {
         code == 128 + libc::SIGXCPU
@@ -438,15 +431,24 @@ fn key(version: &str, package: &[(&str, &str)]) -> String {
     sha256_hex(&hasher.finalize())[..32].to_owned()
 }
 
-/// Writes the library's package to `lean/<key>.staging` in Mago's cache folder, builds it with `lake` and renames it
-/// to `lean/<key>`, once per Lean `version` and library source, which `key` names. Builds take turns under an exclusive
-/// lock on `lean/build.lock`, across threads and processes alike. A build that lost its runner or a package file, as a
-/// cache cleaner leaves it, is deleted and built again. A finished build deletes every other folder in `lean/`: older
-/// builds and any staging folder a dead build left.
-pub(crate) fn build(lake: &Lake, version: &str) -> io::Result<PathBuf> {
-    let builds = cache_root()?.join("lean");
-    let library = builds.join(key(version, &PACKAGE));
-    fs::create_dir_all(&builds).map_err(|error| DatabaseError::io(IOAction::CreateFolder, &builds, error))?;
+/// What `output`'s process wrote to its standard output and its standard error.
+fn printed(output: &Output) -> String {
+    format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr))
+}
+
+/// Builds the library in `lean/` in Mago's cache folder, as `build_in` does.
+pub(crate) fn build(lake: &Lake) -> io::Result<PathBuf> {
+    build_in(&cache_root()?.join("lean"), lake)
+}
+
+/// Writes the library's package to `<key>.staging` in `builds`, builds it with `lake` and renames it to `<key>`, once
+/// per Lean version and library source, which `key` names. The version is what `lake` prints in `builds`, which pins the
+/// library's Lean as the staging folder in it does, so it names the Lean that builds the library. Builds take turns
+/// under an exclusive lock on `build.lock` in `builds`, across threads and processes alike. A build that lost its runner
+/// or a package file, as a cache cleaner leaves it, is deleted and built again. A finished build deletes every other
+/// folder in `builds`: older builds and any staging folder a dead build left.
+pub(crate) fn build_in(builds: &Path, lake: &Lake) -> io::Result<PathBuf> {
+    fs::create_dir_all(builds).map_err(|error| DatabaseError::io(IOAction::CreateFolder, builds, error))?;
     let lock_file = builds.join("build.lock");
     let _lock = fs::File::options()
         .create(true)
@@ -455,6 +457,15 @@ pub(crate) fn build(lake: &Lake, version: &str) -> io::Result<PathBuf> {
         .open(&lock_file)
         .and_then(|lock| lock.lock().map(|()| lock))
         .map_err(|error| DatabaseError::io(IOAction::WriteFile, &lock_file, error))?;
+    let toolchain = builds.join("lean-toolchain");
+    if !fs::read(&toolchain).is_ok_and(|bytes| bytes == TOOLCHAIN.as_bytes()) {
+        fs::write(&toolchain, TOOLCHAIN).map_err(|error| DatabaseError::io(IOAction::WriteFile, &toolchain, error))?;
+    }
+    let version = lake.command().arg("--version").current_dir(builds).output()?;
+    if !version.status.success() {
+        return Err(unbuilt(format!("lake --version in {} printed:\n{}", builds.display(), printed(&version))));
+    }
+    let library = builds.join(key(String::from_utf8_lossy(&version.stdout).trim(), &PACKAGE));
     if is_built(&library) {
         return Ok(library);
     }
@@ -472,14 +483,13 @@ pub(crate) fn build(lake: &Lake, version: &str) -> io::Result<PathBuf> {
 
     let output = lake.command().arg("build").current_dir(&staging).output()?;
     if !output.status.success() {
-        let printed = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
-        return Err(unbuilt(format!("lake build in {} printed:\n{printed}", staging.display())));
+        return Err(unbuilt(format!("lake build in {} printed:\n{}", staging.display(), printed(&output))));
     }
 
     fs::rename(&staging, &library).map_err(unbuilt)?;
 
-    for entry in fs::read_dir(&builds).map_err(|error| DatabaseError::io(IOAction::OpenFolder, &builds, error))? {
-        let old = entry.map_err(|error| DatabaseError::io(IOAction::WalkFolder, &builds, error))?.path();
+    for entry in fs::read_dir(builds).map_err(|error| DatabaseError::io(IOAction::OpenFolder, builds, error))? {
+        let old = entry.map_err(|error| DatabaseError::io(IOAction::WalkFolder, builds, error))?.path();
         if old.is_dir() && old != library {
             fs::remove_dir_all(&old).map_err(|error| DatabaseError::io(IOAction::DeleteFolder, &old, error))?;
         }

@@ -20,6 +20,7 @@ use crate::goal;
 use crate::goal::Names;
 use crate::issues;
 use crate::library;
+use crate::library::Stop;
 use crate::package;
 use crate::package::Package;
 use crate::package::Program;
@@ -190,7 +191,7 @@ impl Lean {
         }
 
         let toolchain = package.toolchain()?;
-        let Toolchain::Ready(version) = &toolchain else {
+        if !matches!(toolchain, Toolchain::Ready) {
             if let Toolchain::Failed(failure) = &toolchain {
                 tracing::debug!("The law checker could not be installed: {failure}");
             }
@@ -204,11 +205,11 @@ impl Lean {
                 report(&mut issues, translation, issue);
             }
             return Ok(issues);
-        };
+        }
 
-        let library = library::build(&package.lake, version)?;
+        let library = library::build(&package.lake)?;
         let modules = program.modules(&work.iter().map(|translation| translation.file).collect::<Vec<_>>());
-        package.write(&library, &modules)?;
+        package.write(&library)?;
         let receivers: HashMap<String, bool> =
             translations.iter().flat_map(|translation| translation.receivers.iter().cloned()).collect();
         let declared: HashSet<String> = translations
@@ -273,51 +274,84 @@ impl Proofs<'_> {
 
     /// Proves the laws of `work` and reports each law not proven. Each file's laws are elaborated with the theorem of
     /// each law they call, transitively, before them. A law that calls a law that cannot be proven is not proven. A
-    /// generated module the file's check reaches that Lean does not elaborate refuses each of its laws.
+    /// generated module Lean does not elaborate refuses each law of the check that reaches it, and the next runner
+    /// checks the file's other laws without it.
     fn prove(&self, work: Vec<&Translation>, issues: &mut HashMap<FileId, IssueCollection>) -> io::Result<()> {
-        // One runner answers the check of every file, so Lean and the runtime library are imported once per compile.
-        let (judgments, checks): (Vec<_>, Vec<_>) =
-            work.iter().copied().map(|translation| self.check(translation)).unzip();
-        let answers = runner::check(self.library, self.package, &checks)?;
-        for (((translation, check), mut judgments), answer) in work.into_iter().zip(&checks).zip(judgments).zip(answers)
-        {
-            match answer {
-                Answer::Judged(answered) => {
-                    let order = check.theorems.iter().filter(|theorem| theorem.judged).map(|theorem| theorem.statement);
-                    for (statement, judgment) in order.zip(answered) {
-                        if let Some(law) = translation.laws.iter().find(|law| law.statement == statement) {
-                            judgments.push((law, judgment));
+        let mut stopped: Vec<(String, Stop)> = Vec::new();
+        let mut pending: Vec<(&Translation, Vec<&Law>)> =
+            work.into_iter().map(|translation| (translation, translation.laws.iter().collect())).collect();
+        while !pending.is_empty() {
+            // One runner answers the check of every file, so Lean and the runtime library are imported once per compile.
+            let (judgments, checks): (Vec<_>, Vec<_>) =
+                pending.iter().map(|(translation, laws)| self.check(translation, laws)).unzip();
+            let answers = runner::check(self.library, self.package, self.modules, &checks, &mut stopped)?;
+            let mut left = Vec::new();
+            for ((((translation, laws), check), mut judgments), answer) in
+                pending.into_iter().zip(&checks).zip(judgments).zip(answers)
+            {
+                match answer {
+                    Answer::Judged(answered) => {
+                        let order =
+                            check.theorems.iter().filter(|theorem| theorem.judged).map(|theorem| theorem.statement);
+                        for (statement, judgment) in order.zip(answered) {
+                            if let Some(law) = laws.iter().find(|law| law.statement == statement) {
+                                judgments.push((law, judgment));
+                            }
+                        }
+                        for (law, judgment) in judgments {
+                            for issue in judged(law, judgment, &self.receivers, &self.declared) {
+                                report(issues, translation, issue);
+                            }
                         }
                     }
-                    for (law, judgment) in judgments {
-                        for issue in judged(law, judgment, &self.receivers, &self.declared) {
-                            report(issues, translation, issue);
+                    Answer::Refused(module, refusal) => {
+                        let (mut refused, mut kept): (Vec<&Law>, Vec<&Law>) =
+                            laws.iter().partition(|law| self.reaches(law, &module));
+                        // The check reaches only modules its laws reach, so some law reaches `module`; each runner then
+                        // gets fewer laws, and the loop ends.
+                        if refused.is_empty() {
+                            refused = std::mem::take(&mut kept);
                         }
-                    }
-                }
-                Answer::Refused(module, refusal) => {
-                    for law in &translation.laws {
-                        report(issues, translation, issues::generated_module_refused(law, &module, &refusal));
+                        for law in refused {
+                            report(issues, translation, issues::generated_module_refused(law, &module, &refusal));
+                        }
+                        if !kept.is_empty() {
+                            left.push((translation, kept));
+                        }
                     }
                 }
             }
+            pending = left;
         }
 
         Ok(())
     }
 
-    /// How `translation`'s laws are judged without the runner, each through a law it calls that cannot be proven, and
-    /// the check the runner judges the others with. The check reaches the file's own generated module even when no
+    /// Whether `law` reaches the generated `module`: the module of the law, or of a law it calls, transitively, is that
+    /// module or imports it, transitively.
+    fn reaches(&self, law: &Law, module: &str) -> bool {
+        let hosts =
+            self.laws.closure(law).into_iter().map(|position| self.host_of(self.laws.ordered[position].0)).collect();
+
+        imports_reach(hosts, self.modules, module)
+    }
+
+    /// How `laws`, of `translation`, are judged without the runner, each through a law it calls that cannot be proven,
+    /// and the check the runner judges the others with. The check reaches the file's own generated module even when no
     /// theorem is left to elaborate, so a module Lean rejects refuses the file's laws.
-    fn check<'law>(&'law self, translation: &'law Translation) -> (Vec<(&'law Law, Judgment)>, Check<'law>) {
-        let laws = self.laws;
+    fn check<'law>(
+        &'law self,
+        translation: &'law Translation,
+        laws: &[&'law Law],
+    ) -> (Vec<(&'law Law, Judgment)>, Check<'law>) {
+        let ordered = self.laws;
         let mut theorems: Vec<usize> = Vec::new();
         let mut judgments: Vec<(&Law, Judgment)> = Vec::new();
-        for law in &translation.laws {
-            let closure = laws.closure(law);
-            let unproven = closure.iter().map(|position| laws.ordered[*position].1).find(|called| {
+        for &law in laws {
+            let closure = ordered.closure(law);
+            let unproven = closure.iter().map(|position| ordered.ordered[*position].1).find(|called| {
                 called.statement != law.statement
-                    && (laws.cyclic.contains(called.statement.as_str())
+                    && (ordered.cyclic.contains(called.statement.as_str())
                         || !self.program.problems(&called.statement).is_empty())
             });
             match unproven {
@@ -328,14 +362,14 @@ impl Proofs<'_> {
         theorems.sort_unstable();
         theorems.dedup();
 
-        let judged: Vec<&Law> = translation
-            .laws
+        let judged: Vec<&Law> = laws
             .iter()
+            .copied()
             .filter(|law| !judgments.iter().any(|(blocked, _)| blocked.statement == law.statement))
             .collect();
         let mut modules: Vec<String> = theorems
             .iter()
-            .map(|position| self.host_of(laws.ordered[*position].0))
+            .map(|position| self.host_of(ordered.ordered[*position].0))
             .chain(std::iter::once(self.host_of(translation)))
             .collect();
         modules.sort();
@@ -344,7 +378,7 @@ impl Proofs<'_> {
         let theorems: Vec<Theorem<'_>> = theorems
             .iter()
             .map(|position| {
-                let law = laws.ordered[*position].1;
+                let law = ordered.ordered[*position].1;
                 Theorem {
                     statement: &law.statement,
                     text: &law.proof.text,
@@ -394,6 +428,23 @@ fn report(issues: &mut HashMap<FileId, IssueCollection>, translation: &Translati
     issues.entry(translation.file).or_default().push(issue);
 }
 
+/// Whether one of the generated modules `from` is `module`, or imports it, transitively, through the imports `modules`
+/// hold.
+fn imports_reach(mut from: Vec<String>, modules: &[package::Module], module: &str) -> bool {
+    let mut seen: HashSet<String> = HashSet::default();
+    while let Some(next) = from.pop() {
+        if next == module {
+            return true;
+        }
+        if let Some(found) = modules.iter().find(|candidate| candidate.name == next) {
+            from.extend(found.imports.iter().filter(|imported| !seen.contains(*imported)).cloned());
+        }
+        seen.insert(next);
+    }
+
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use mago_span::Span;
@@ -432,5 +483,31 @@ mod tests {
             refused.message,
             "Law addKeepsCurrency is not proven: the checker translated the code it reaches wrongly. This is a bug in the PHP# checker; report it to its maintainers."
         );
+    }
+
+    /// A refused module refuses a law whose modules are it or import it, through any chain of imports, and no law whose
+    /// modules do not.
+    #[test]
+    fn a_law_reaches_a_module_its_own_modules_are_or_import_transitively() {
+        let module = |name: &str, imports: &[&str]| package::Module {
+            name: name.to_owned(),
+            host: name.to_owned(),
+            imports: imports.iter().map(|imported| (*imported).to_owned()).collect(),
+            text: String::new(),
+        };
+        let modules = [
+            module("Code.App.Money", &[]),
+            module("Code.App.Wallet", &["Code.App.Money"]),
+            module("Code.App.Bank", &["Code.App.Wallet"]),
+            module("Code.App.Clock", &[]),
+        ];
+        let reaches = |from: &[&str]| {
+            imports_reach(from.iter().map(|host| (*host).to_owned()).collect(), &modules, "Code.App.Money")
+        };
+
+        assert!(reaches(&["Code.App.Money"]));
+        assert!(reaches(&["Code.App.Clock", "Code.App.Bank"]));
+        assert!(!reaches(&["Code.App.Clock"]));
+        assert!(!reaches(&[]));
     }
 }
