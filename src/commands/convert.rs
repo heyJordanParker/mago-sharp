@@ -852,6 +852,43 @@ mod tests {
         ]
     }
 
+    /// An interface `Named{index}` whose PHPDoc gives `name()` a `non-empty-string`, which PHP# writes `string`, and its
+    /// plain PHP caller `Greeter{index}`, which passes the name where a `non-empty-string` goes. Once the interface
+    /// converts, the caller gains an issue that points into no converted file.
+    fn named(index: usize) -> [(String, String); 2] {
+        [
+            (
+                format!("Contracts/Named{index}.php"),
+                format!(
+                    "<?php\n\nnamespace Generated\\Contracts;\n\ninterface Named{index}\n{{\n    /** @return non-empty-string */\n    public function name(): string;\n}}\n"
+                ),
+            ),
+            (
+                format!("Plain/Greeter{index}.php"),
+                format!(
+                    "<?php\n\nnamespace Generated\\Plain;\n\nuse Generated\\Contracts\\Named{index};\n\nfinal class Greeter{index}\n{{\n    public function greet(Named{index} $named): string\n    {{\n        return $this->hello($named->name());\n    }}\n\n    /** @param non-empty-string $name */\n    private function hello(string $name): string\n    {{\n        return 'hello ' . $name;\n    }}\n}}\n"
+                ),
+            ),
+        ]
+    }
+
+    /// One of thirteen interfaces gives its plain PHP caller an issue that points into no converted file. Only that
+    /// interface's edit makes the analysis re-analyze the caller, so the first proof sets it apart, and the second
+    /// accepts the other twelve: two proofs. Halving the whole set took eight.
+    #[test]
+    fn an_issue_that_points_into_no_converted_file_sets_apart_the_file_whose_edit_reaches_it() {
+        let mut files: Vec<(String, String)> = (0..12).map(clean).collect();
+        files.extend(named(0));
+
+        let (exit_code, outcome) = convert_contracts(&files);
+
+        assert_eq!(exit_code, ExitCode::FAILURE);
+        let refused: Vec<String> = outcome.refused.keys().map(|name| display(name)).collect();
+        assert_eq!(refused, ["src/Contracts/Named0.php"], "{:#?}", outcome.refused);
+        assert_eq!(outcome.converted.len(), 12);
+        assert_eq!(outcome.proofs, 2);
+    }
+
     /// Three of eight interfaces take a `Map` once converted, which their plain PHP implementers no longer fit, so each
     /// adds an issue in another file only that interface can bring. Each split sets one of them apart, so the five
     /// clean interfaces are proven together once, the last one set apart stays plain PHP for the issue the proof before
@@ -876,13 +913,20 @@ mod tests {
         assert_eq!(outcome.proofs, 6);
     }
 
-    /// One of thirteen interfaces adds an issue in its plain PHP implementer, which points into the interface. The first
-    /// proof finds it and sets that interface apart, and the second accepts the other twelve, so the first proof's issue
-    /// keeps the one set apart plain PHP: two proofs. Halving the whole set took eight.
+    /// One of thirteen interfaces adds an issue in its plain PHP implementer, which points into the interface. The
+    /// implementer also names the other twelve, so an edit of any of them makes the analysis re-analyze it, and only
+    /// the file the issue points into tells the interface apart. The first proof finds the issue and sets the interface
+    /// apart, and the second accepts the other twelve, so the first proof's issue keeps the one set apart plain PHP: two
+    /// proofs. Halving the whole set took eight.
     #[test]
     fn an_issue_in_another_file_sets_apart_the_file_it_points_into() {
         let mut files: Vec<(String, String)> = (0..12).map(clean).collect();
-        files.extend(sink(0));
+        let [interface, (drain, code)] = sink(0);
+        let named: Vec<String> =
+            (0..12).map(|index| format!("\\Generated\\Contracts\\Clean{index} $clean{index}")).collect();
+        let uses =
+            format!("    public function uses({}): void\n    {{\n    }}\n\n    /** @param array", named.join(", "));
+        files.extend([interface, (drain, code.replacen("    /** @param array", &uses, 1))]);
 
         let (exit_code, outcome) = convert_contracts(&files);
 
