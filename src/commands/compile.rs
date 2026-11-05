@@ -255,7 +255,7 @@ fn host_compiled_path(root: &Path, folder: &Path, source: &Path) -> Result<Optio
 
 /// The project's database: every file the analyzer loads with the prelude, and each `.sharp` file of a package as a
 /// file of the project, which the compile checks too. Also gives the names of those packaged files.
-fn project_database(
+pub(crate) fn project_database(
     orchestrator: &Orchestrator<'_>,
     workspace: &Path,
 ) -> Result<(Database<'static>, HashSet<Vec<u8>>), Error> {

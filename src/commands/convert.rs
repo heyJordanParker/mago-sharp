@@ -44,7 +44,6 @@ use mago_database::loader::mark_sharp_file;
 use mago_names::resolver::NameResolver;
 use mago_orchestrator::Orchestrator;
 use mago_orchestrator::service::incremental_analysis::compile::Compilation;
-use mago_prelude::Prelude;
 use mago_reporting::CompiledIgnoreSet;
 use mago_reporting::IssueCollection;
 use mago_reporting::Level;
@@ -59,10 +58,10 @@ use crate::commands::analyze::analyze_the_whole_workspace_without_paths;
 use crate::commands::analyze::decode_prelude;
 use crate::commands::analyze::server_settings;
 use crate::commands::compile::compile_for_hosts;
+use crate::commands::compile::project_database;
 use crate::commands::compile::standard_library;
 use crate::commands::outcome::CommandOutcome;
 use crate::config::Configuration;
-use crate::consts::PRELUDE_BYTES;
 use crate::error::Error;
 use crate::extensions::start_external_analyzer;
 use crate::utils::create_orchestrator;
@@ -503,7 +502,8 @@ impl<'configuration> Session<'configuration> {
 }
 
 /// A fresh orchestrator with the project's extension hosts started, as `mago analyze` starts them, and the project's
-/// database.
+/// database as `mago compile` builds it, the standard library's and each package's PHP# files included, so the proof
+/// lowers each converted file with the library's inline forms, as `mago compile` does.
 fn load(
     configuration: &Configuration,
     color_choice: ColorChoice,
@@ -520,9 +520,7 @@ fn load(
     ) {
         orchestrator.set_external_analyzer_handle(external_analyzer);
     }
-    let mut database = orchestrator.load_database(&configuration.source.workspace, true, None, None)?;
-    database.merge_base(Prelude::decode_database(PRELUDE_BYTES).expect("Failed to decode embedded prelude"));
-    let database = database.into_static();
+    let (database, _) = project_database(&orchestrator, &configuration.source.workspace)?;
 
     Ok((orchestrator, database))
 }
@@ -908,5 +906,73 @@ mod tests {
         assert!(root.join("src/Step199.sharp").exists() && !root.join("src/Step199.php").exists());
         assert_eq!(outcome.converted.len(), 200);
         assert_eq!(outcome.proofs, 1);
+    }
+
+    /// Copies each file under `from` to the same place under `to`.
+    fn copy_tree(from: &Path, to: &Path) {
+        std::fs::create_dir_all(to).unwrap();
+        for entry in std::fs::read_dir(from).unwrap() {
+            let entry = entry.unwrap();
+            let target = to.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                copy_tree(&entry.path(), &target);
+            } else {
+                std::fs::copy(entry.path(), target).unwrap();
+            }
+        }
+    }
+
+    /// A project holds the standard library in `vendor/`, where the analysis loads its PHP# files as a package's. The
+    /// proof builds the project's database as `mago compile` does, so those files are the project's and its compile
+    /// lowers a converted call of `mb_strtoupper`, `text.uppercase()`, with the library's inline form, as `mago
+    /// compile` lowers it.
+    #[test]
+    fn the_proof_lowers_with_the_standard_library_mago_compile_lowers_with() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        std::fs::write(
+            root.join("mago.toml"),
+            "php-version = \"8.5\"\n\n[source]\npaths = [\"src\"]\nincludes = [\"vendor\"]\nextensions = [\"php\", \"sharp\"]\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("composer.json"), r#"{"autoload": {"psr-4": {"Generated\\": "src/"}}}"#).unwrap();
+        let library = Path::new(env!("CARGO_MANIFEST_DIR")).join("../composer");
+        let package = root.join("vendor/heyjordanparker/php-sharp-composer");
+        copy_tree(&library.join("library"), &package.join("library"));
+        for file in ["composer.json", "native.php"] {
+            std::fs::copy(library.join(file), package.join(file)).unwrap();
+        }
+        std::fs::create_dir(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/Upper.php"),
+            "<?php\n\nnamespace Generated;\n\nfinal class Upper\n{\n    public function loud(string $text): string\n    {\n        return mb_strtoupper($text, 'UTF-8');\n    }\n}\n",
+        )
+        .unwrap();
+        let configuration = Configuration::load(CliOverrides {
+            workspace: Some(root.clone()),
+            config: Some(root.join("mago.toml")),
+            no_version_check: true,
+            ..Default::default()
+        })
+        .unwrap();
+
+        let (prover, _) = Prover::new(&configuration, ColorChoice::Never, root.clone()).unwrap().unwrap();
+        let session = prover.open(&[]).unwrap();
+        let library: Vec<String> = session
+            .server
+            .database()
+            .files()
+            .filter(|file| file.is_standard_library && file.file_type == FileType::Host)
+            .map(|file| display(&file.name))
+            .collect();
+        drop(session);
+        let (exit_code, outcome) = ConvertCommand { paths: vec![root.join("src")], dry_run: true }
+            .run(configuration.clone(), ColorChoice::Never)
+            .unwrap();
+
+        assert!(library.iter().any(|name| name.ends_with("Text/StringMembers.sharp")), "{library:#?}");
+        assert_eq!(exit_code, ExitCode::SUCCESS, "{:#?}", outcome.refused);
+        let text: Vec<String> = outcome.converted.iter().map(|(_, _, text)| display(text)).collect();
+        assert!(text[0].contains("return text.uppercase();"), "{text:#?}");
     }
 }
