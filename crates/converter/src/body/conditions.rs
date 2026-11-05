@@ -3,7 +3,11 @@
 //! `order != null` for an object that may be null. `isset` and `empty` become the same comparisons.
 
 use mago_codex::ttype::TType;
+use mago_codex::ttype::atomic::TAtomic;
+use mago_codex::ttype::atomic::object::TObject;
 use mago_span::HasSpan;
+use mago_syntax::cst::Access;
+use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::EmptyConstruct;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::IssetConstruct;
@@ -97,6 +101,9 @@ impl Converter<'_, '_> {
         for value in &isset.values {
             let test = match value {
                 Expression::ArrayAccess(access) if self.is(access.array, &[Kind::Map]) => {
+                    if self.unread(access.array, "isset") {
+                        return;
+                    }
                     self.untyped(access.array, "an index");
                     self.untyped(access.index, "a key");
                     let map = self.render(access.array);
@@ -111,6 +118,9 @@ impl Converter<'_, '_> {
                     );
                 }
                 Expression::Variable(Variable::Direct(_)) | Expression::Access(_) => {
+                    if self.unread(value, "isset") {
+                        return;
+                    }
                     self.expression(value, None);
                     let rendered = self.render(value);
                     format!("{rendered} {compared} null")
@@ -126,8 +136,95 @@ impl Converter<'_, '_> {
     /// `empty($x)` as the test of PHP's falsiness of `x`, as `items.isEmpty()` (spec section 21), and `!empty($x)`,
     /// which `negated` writes in place of `expression`, as the test of its truthiness.
     pub(super) fn empty(&mut self, expression: &Expression<'_>, empty: &EmptyConstruct<'_>, negated: bool) {
+        if self.unread(empty.value, "empty") {
+            return;
+        }
         if let Some(test) = self.truthiness(empty.value, !negated, false) {
             self.edits.replace(expression.span(), test);
         }
+    }
+
+    /// Refuses `place`, which `construct`, `isset` or `empty`, reads, and gives whether it did, where PHP reads a place
+    /// that holds no value without an error and PHP# reads the place itself. PHP gives a typed property that holds no
+    /// value as unset, asks `__isset` or `__get` of a class that declares them, and reads past a `List`'s end. So each
+    /// property along `place` converts only when it always holds a value, as one with a default or a promoted one does,
+    /// and no class its object may be declares `__isset` or `__get`, and an index converts for a `Map` key only.
+    fn unread(&mut self, place: &Expression<'_>, construct: &str) -> bool {
+        let shown = String::from_utf8_lossy(self.text(place.span())).into_owned();
+        let mut current = place;
+        loop {
+            let (object, property) = match current {
+                Expression::Access(Access::Property(access)) => (access.object, &access.property),
+                Expression::Access(Access::NullSafeProperty(access)) => (access.object, &access.property),
+                Expression::ArrayAccess(access) if self.is(access.array, &[Kind::Map]) => {
+                    current = access.array;
+                    continue;
+                }
+                Expression::ArrayAccess(access) => {
+                    let indexed = self.shown(access.array);
+                    self.refuse(
+                        place.span(),
+                        format!("`{construct}` at an index of `{indexed}` reads past a `List`'s end, which PHP gives as unset and PHP# refuses: it converts for a `Map` key"),
+                    );
+                    return true;
+                }
+                _ => return false,
+            };
+            if let Some(reason) = self.unset_property(object, property) {
+                self.refuse(place.span(), format!("`{construct}` of `{shown}` {reason}"));
+                return true;
+            }
+            current = object;
+        }
+    }
+
+    /// Why PHP may read `property` of `object` as holding no value, where PHP# reads it: no default and no promotion,
+    /// or a class `object` may be that declares `__isset` or `__get`.
+    fn unset_property(&self, object: &Expression<'_>, property: &ClassLikeMemberSelector<'_>) -> Option<String> {
+        let ClassLikeMemberSelector::Identifier(name) = property else {
+            return Some("reads a property named by a variable".to_owned());
+        };
+        let codebase = self.input.codebase;
+        let Some(union) = self.type_of(object) else {
+            return Some("reads a property of a value the analysis gives no type".to_owned());
+        };
+        let mut classes = Vec::new();
+        for atomic in union.types.iter().filter(|atomic| !atomic.is_null()) {
+            let TAtomic::Object(TObject::Named(named)) = atomic else {
+                return Some(format!(
+                    "reads a property of `{}`, whose class the analysis doesn't know",
+                    union.get_id()
+                ));
+            };
+            classes.push(named.name);
+        }
+        let property = [b"$".as_slice(), name.value].concat();
+        for class in classes {
+            let class = class.as_bytes();
+            let valued = codebase.get_declaring_property(class, &property).is_some_and(|metadata| {
+                metadata.flags.has_default()
+                    || metadata.flags.is_promoted_property()
+                    || metadata.type_declaration_metadata.is_none()
+            });
+            if !valued {
+                return Some("reads a property that may hold no value, which PHP gives as unset and PHP# reads: it converts for a property with a default or a promoted one".to_owned());
+            }
+            let descendants = codebase.get_all_descendants(class);
+            let magic = std::iter::once(class).chain(descendants.iter().map(|descendant| descendant.as_bytes())).find(
+                |class| {
+                    [b"__isset".as_slice(), b"__get"]
+                        .iter()
+                        .any(|method| codebase.get_declaring_method(class, method).is_some())
+                },
+            );
+            if let Some(magic) = magic {
+                let magic = String::from_utf8_lossy(magic);
+                return Some(format!(
+                    "reads a property `{magic}`'s `__isset` or `__get` may answer for, which PHP asks and PHP# never does"
+                ));
+            }
+        }
+
+        None
     }
 }
