@@ -10,6 +10,7 @@ use mago_codex::ttype::comparator::ComparisonResult;
 use mago_codex::ttype::comparator::union_comparator::is_contained_by;
 use mago_codex::ttype::union::TUnion;
 use mago_span::HasSpan;
+use mago_span::Span;
 use mago_syntax::cst::Argument;
 use mago_syntax::cst::ArgumentList;
 use mago_syntax::cst::Binary;
@@ -173,6 +174,9 @@ impl<'input> Converter<'input, '_> {
                 self.arguments(&call.argument_list, method);
             }
             Call::StaticMethod(call) => {
+                if self.forwards_called_class(call.span(), call.class, &call.method) {
+                    return;
+                }
                 self.expression(call.class, None);
                 self.edits.replace(call.double_colon, ".");
                 self.member(&call.method);
@@ -192,6 +196,34 @@ impl<'input> Converter<'input, '_> {
             Call::Function(call) => self.function_call(call),
             Call::NullSafeFunction(_) => self.refuse(call.span(), "`?.(…)` on a function has no PHP# form"),
         }
+    }
+
+    /// Refuses `self::m()`, or its method value `self::m(...)`, at `span` in a class a subclass can extend, and gives
+    /// whether it did. PHP's call through `self` forwards the class PHP called, which late static binding in `m` reads,
+    /// and a call through the class's name doesn't, so only a `final` class or an enum keeps that meaning.
+    pub(super) fn forwards_called_class(
+        &mut self,
+        span: Span,
+        class: &Expression<'_>,
+        method: &ClassLikeMemberSelector<'_>,
+    ) -> bool {
+        let Some(current) = self.class.as_ref() else {
+            return false;
+        };
+        if !matches!(class, Expression::Self_(_))
+            || current.metadata.flags.is_final()
+            || current.metadata.kind.is_enum()
+        {
+            return false;
+        }
+        let method = String::from_utf8_lossy(self.text(method.span())).into_owned();
+        let named = current.name.clone();
+        self.refuse(
+            span,
+            format!("`self::{method}` forwards the class PHP called, which late static binding reads, and `{named}.{method}` doesn't, so a static call through `self` converts only in a `final` class"),
+        );
+
+        true
     }
 
     /// The function a bare call runs: the one its resolved name names, or PHP's own of the name it writes, as PHP falls

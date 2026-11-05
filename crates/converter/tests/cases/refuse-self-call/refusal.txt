@@ -1,0 +1,2 @@
+16:16: `self::label` forwards the class PHP called, which late static binding reads, and `Shape.label` doesn't, so a static call through `self` converts only in a `final` class
+22:16: `self::label` forwards the class PHP called, which late static binding reads, and `Shape.label` doesn't, so a static call through `self` converts only in a `final` class

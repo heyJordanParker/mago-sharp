@@ -192,6 +192,9 @@ impl Converter<'_, '_> {
                 self.method_name(value.object, &value.method, method);
             }
             PartialApplication::StaticMethod(value) => {
+                if self.forwards_called_class(expression.span(), value.class, &value.method) {
+                    return;
+                }
                 self.expression(value.class, None);
                 self.edits.replace(value.double_colon, ".");
                 self.member(&value.method);
