@@ -36,4 +36,15 @@ final class Router
 
         return 0;
     }
+
+    // PHP's `null == 'get'` doesn't hold, so a `null` subject meets no case, as it matches no pattern.
+    public function verb(?string $method): int
+    {
+        switch ($method) {
+            case 'get':
+                return 1;
+        }
+
+        return 0;
+    }
 }

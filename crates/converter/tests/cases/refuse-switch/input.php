@@ -34,4 +34,26 @@ final class Branches
 
         return $total;
     }
+
+    // PHP's `null == ''` and `null == 0` hold, so a case a `null` subject meets runs, where a pattern doesn't match
+    // `null`. A constant's value counts as a literal's does.
+    public const string CODE = '7';
+
+    public function nullable(?string $text, ?int $count): int
+    {
+        switch ($text) {
+            case '':
+                return 1;
+        }
+        switch ($count) {
+            case 0:
+                return 2;
+        }
+        switch ($text) {
+            case self::CODE:
+                return 3;
+        }
+
+        return 0;
+    }
 }

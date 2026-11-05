@@ -2,6 +2,8 @@
 //! constants only, so an arm's constants become patterns joined by `or`, each passing the `===` rule of section 19. A
 //! `switch` is a `match` statement with block arms.
 
+use mago_codex::ttype::TType;
+use mago_codex::ttype::union::TUnion;
 use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::Access;
@@ -23,6 +25,7 @@ use mago_syntax::cst::While;
 use mago_syntax::walker::MutWalker;
 
 use super::Kind;
+use super::kinds;
 use super::operators::identity;
 use crate::Converter;
 
@@ -56,14 +59,8 @@ impl Converter<'_, '_> {
             let indentation = self.indentation(case.span().start.offset);
             let (separator, statements) = match case {
                 SwitchCase::Expression(case) => {
-                    let numeric = matches!(case.expression, Expression::Literal(Literal::String(string))
-                        if string.value.and_then(|value| std::str::from_utf8(value).ok())
-                            .is_some_and(|value| value.trim().parse::<f64>().is_ok()));
-                    if numeric || matches!(case.expression, Expression::Literal(Literal::Null(_))) {
-                        return self.refuse(
-                            case.expression.span(),
-                            "a `case` of a numeric string or `null` compares by PHP's `==`, which no PHP# pattern does (spec section 19)",
-                        );
+                    if let Err(reason) = self.loose_case(subject, case.expression) {
+                        return self.refuse(case.expression.span(), reason);
                     }
                     constants.push(case.expression);
                     match joined.take() {
@@ -102,6 +99,52 @@ impl Converter<'_, '_> {
             let line = body.right_brace.start.offset - u32::try_from(indentation.len()).unwrap_or(0);
             self.edits.insert(line, format!("{indentation}    default => {{}},\n"));
         }
+    }
+
+    /// Whether PHP's `==` between the `switch`'s `subject` and a case's constant `case` holds just where its pattern
+    /// matches, by the constant's value, a literal's or a named constant's alike. `==` compares a numeric string as a
+    /// number, and `null` equals each value PHP reads as `false`: `false`, `0`, `0.0` and `''` (spec section 19). The
+    /// reason it doesn't, otherwise.
+    fn loose_case(&self, subject: &Expression<'_>, case: &Expression<'_>) -> Result<(), String> {
+        let value = self.type_of(case);
+        let numeric = value
+            .and_then(TUnion::get_single_literal_string_value)
+            .and_then(|value| std::str::from_utf8(value).ok())
+            .is_some_and(|value| value.trim().parse::<f64>().is_ok());
+        if numeric || value.is_some_and(TUnion::is_null) {
+            return Err("a `case` of a numeric string or `null` compares by PHP's `==`, which no PHP# pattern does (spec section 19)".to_owned());
+        }
+        if !self.type_of(subject).is_some_and(TUnion::is_nullable) {
+            return Ok(());
+        }
+        let shown = String::from_utf8_lossy(self.text(case.span()));
+        let Some(value) = value else {
+            return Err(format!(
+                "the analysis gives the `case` of `{shown}` no value, so PHP's `null == {shown}` may hold for the `null` the `switch`'s value holds"
+            ));
+        };
+        let truthy = value.is_true()
+            || value.get_single_literal_int_value().is_some_and(|value| value != 0)
+            || value.get_single_literal_float_value().is_some_and(|value| value != 0.0)
+            || value.get_single_literal_string_value().is_some_and(|value| !value.is_empty())
+            || kinds(value) == [Kind::Enum];
+        if truthy {
+            return Ok(());
+        }
+        if value.is_false()
+            || value.get_single_literal_int_value() == Some(0)
+            || value.get_single_literal_float_value() == Some(0.0)
+            || value.get_single_literal_string_value() == Some(b"")
+        {
+            return Err(format!(
+                "a `case` of `{shown}` runs for `null` too, since PHP's `null == {shown}` holds, and its pattern doesn't match `null` (spec sections 19 and 21)"
+            ));
+        }
+
+        Err(format!(
+            "a `case` of `{}` may run for `null` too, since PHP's `null == {shown}` holds for each value PHP reads as `false`, and its pattern doesn't match `null` (spec sections 19 and 21)",
+            value.get_id()
+        ))
     }
 
     /// A case's `statements` as a block arm, `=> { … },`, after its `separator`. Its `break` leaves, and any other
