@@ -4,13 +4,21 @@
 Mago writes one `Check` request to standard input and reads the answer from standard output. The request holds a check
 for each `.sharp` file whose laws one `mago compile` proves: the generated modules of its code and the theorems of its
 laws, after the theorems of each law they call. The runner imports the runtime library once, then for each check
-elaborates its generated modules from their sources in the package, which Lake built, on top of that one import,
-elaborates each theorem with the steps of `Sharp.Lean.Proof`, and answers for each law of the file: proven, each case
-and condition its proof left open with the goal, the law not proven it holds through, or Lean's error.
+elaborates its generated modules from their sources in the package on top of that one import, elaborates each theorem
+with the steps of `Sharp.Lean.Proof`, and answers for each law of the file: proven, each case and condition its proof
+left open with the goal, the law not proven it holds through, or Lean's error. A generated module Lean rejects refuses
+its check, with the line of its first error. This elaboration is the only one a generated module gets: nothing builds
+the package.
 
 One runner answers every check of a compile because Lean cannot free an imported environment while the tasks that
 elaborated a theorem may still hold parts of it, so a runner imports once. A check's modules are elaborated rather than
 imported, so each check sees its own modules alone, as it would have imported them, and drops them when it ends.
+
+The runner writes each check's answer as soon as it has it, and says on standard error what it starts: `module <check>
+<module>` before it elaborates a generated module, and `theorems <check>` before it elaborates a check's theorems. So
+when Mago stops a runner at its processor-time limit or its deadline, it keeps the answers written, and knows the module
+that stopped it. Mago then runs a runner for the checks after it, with that module among the request's stopped ones,
+which refuse each check that reaches them without elaborating them again.
 -/
 import Lean
 import Sharp.Lean.Law
@@ -78,13 +86,13 @@ def kind : Decode UInt16 := do
   set 4
   let major ← u16
   let minor ← u16
-  unless major == 2 do throw s!"unsupported law protocol version {major}.{minor}"
+  unless major == 3 do throw s!"unsupported law protocol version {major}.{minor}"
   let kind ← u16
   let _reserved ← u16
   return kind
 
 def header (kind : UInt16) : ByteArray :=
-  lawMagic |>.push 0 |>.push 2 |>.push 0 |>.push 0 |>.push (kind >>> 8).toUInt8 |>.push kind.toUInt8
+  lawMagic |>.push 0 |>.push 3 |>.push 0 |>.push 0 |>.push (kind >>> 8).toUInt8 |>.push kind.toUInt8
     |>.push 0 |>.push 0
 
 /-! The `Check` request and its answer. -/
@@ -219,42 +227,67 @@ partial def libraryOf (modules : Array Name) (seen : NameSet := {}) (library : A
     (seen, library) ← libraryOf ((Elab.headerToImports header (includeInit := false)).map (·.module)) seen library
   return (seen, library)
 
-/-- `env` with the generated `module` elaborated from its source, after each generated module it imports, as Lake
-built it: as the main module, with no options. `done` holds the modules `env` already has. Lake built every module a
-check names, so a module that does not elaborate ends the runner. -/
-partial def elaborate (module : Name) (env : Environment) (done : NameSet) : IO (Environment × NameSet) := do
+/-- Why a check's generated module gave it no environment. -/
+inductive Refusal where
+  /-- Lean rejected the module, at the line of its first error. -/
+  | rejected (module : Name) (line : Nat)
+  /-- The module stopped an earlier runner of the compile, so it would only stop this one again. -/
+  | stopped (module : Name)
+
+/-- Writes `line` to standard error at once, so Mago has it even when it ends the runner right after. -/
+def progress (line : String) : IO Unit := do
+  let stderr ← IO.getStderr
+  stderr.putStrLn line
+  stderr.flush
+
+/-- `env` with the generated `module` elaborated from its source, after each generated module it imports: as the main
+module, with no options, as Lean elaborates a module it compiles. `done` holds the modules `env` already has, and
+`stopped` the modules no runner of the compile may elaborate again. -/
+partial def elaborate (stopped : NameSet) (check : Nat) (module : Name) (env : Environment) (done : NameSet) :
+    ExceptT Refusal IO (Environment × NameSet) := do
   if done.contains module then return (env, done)
+  if stopped.contains module then throwThe Refusal (.stopped module)
   let (input, header, parserState, messages) ← source module
   let mut (env, done) := (env, done.insert module)
   for imported in Elab.headerToImports header (includeInit := false) do
     if isGenerated imported.module then
-      (env, done) ← elaborate imported.module env done
+      (env, done) ← elaborate stopped check imported.module env done
+  progress s!"module {check} {module.toString (escape := false)}"
   let main := env.mainModule
   let state ← IO.processCommands input parserState (Command.mkState (env.setMainModule module) messages {})
-  if state.commandState.messages.hasErrors then
-    throw <| IO.userError s!"the generated module {module}, which Lake built, does not elaborate"
+  if let some error := state.commandState.messages.toList.find? (·.severity == .error) then
+    throwThe Refusal (.rejected module error.pos.line)
   return (state.commandState.env.setMainModule main, done)
 
 /-- Reads the request to the end of standard input, imports the runtime library its checks import, and writes the
-answer of each check, in order, to standard output. Any failure ends the runner with its message on standard error. -/
+answer of each check, in order, to standard output, each as soon as it has it: `0` and the judgments of its theorems,
+`1`, a generated module Lean rejected and the line of its first error, or `2` and a stopped module the check reaches.
+Any other failure ends the runner with its message on standard error. -/
 def respond : IO Unit := do
   let bytes ← readAll (← IO.getStdin)
   let decode {α : Type} (body : Decode α) : IO α :=
     IO.ofExcept <| (((do let _ ← kind; body).run' 0).run bytes).mapError IO.userError
   let requested ← decode kind
   unless requested == checkRequest do throw <| IO.userError s!"unknown law request kind {requested}"
-  let checks ← decode (many check)
+  let (stopped, checks) ← decode (do return (← many string, ← many check))
+  let stopped := stopped.foldl (fun stopped module => stopped.insert module.toName) ({} : NameSet)
   let (_, library) ← libraryOf (checks.flatMap (·.modules))
   let env ← importModules (library.map ({ module := · })) {} (loadExts := true)
-  let mut b := putU32 (header checkedResponse) checks.size.toUInt32
-  for request in checks do
-    let mut (checked, done) := (env, ({} : NameSet))
-    for module in request.modules.filter isGenerated do
-      (checked, done) ← elaborate module checked done
-    b ← answer checked request b
   let stdout ← IO.getStdout
-  stdout.write b
+  stdout.write (putU32 (header checkedResponse) checks.size.toUInt32)
   stdout.flush
+  for request in checks, index in [0:checks.size] do
+    let elaborated ← (request.modules.filter isGenerated).foldlM
+      (fun (checked, done) module => elaborate stopped index module checked done) (env, ({} : NameSet)) |>.run
+    let b ← match elaborated with
+      | .ok (checked, _) => do
+        progress s!"theorems {index}"
+        answer checked request (putU8 .empty 0)
+      | .error (.rejected module line) =>
+        pure <| putU32 (putString (putU8 .empty 1) (module.toString (escape := false))) line.toUInt32
+      | .error (.stopped module) => pure <| putString (putU8 .empty 2) (module.toString (escape := false))
+    stdout.write b
+    stdout.flush
 
 end Sharp.Runner
 

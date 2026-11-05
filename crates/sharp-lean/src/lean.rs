@@ -26,6 +26,7 @@ use crate::package::Program;
 use crate::package::Toolchain;
 use crate::package::place_of;
 use crate::runner;
+use crate::runner::Answer;
 use crate::runner::Check;
 use crate::runner::Judgment;
 use crate::runner::Theorem;
@@ -249,8 +250,8 @@ impl Lean {
     }
 }
 
-/// What proving the laws of the stale files reads: the package Lake builds, the runtime library, every declaration and
-/// law of the workspace, the generated modules, and how PHP# calls each member a goal names.
+/// What proving the laws of the stale files reads: the package the runner runs in, the runtime library, every
+/// declaration and law of the workspace, the generated modules, and how PHP# calls each member a goal names.
 struct Proofs<'proofs> {
     package: &'proofs Package,
     library: &'proofs Path,
@@ -271,55 +272,33 @@ impl Proofs<'_> {
     }
 
     /// Proves the laws of `work` and reports each law not proven. Each file's laws are elaborated with the theorem of
-    /// each law they call, transitively, before them. A law that calls a law that cannot be proven is not proven.
-    fn prove(&self, mut work: Vec<&Translation>, issues: &mut HashMap<FileId, IssueCollection>) -> io::Result<()> {
-        let called = work
-            .iter()
-            .flat_map(|translation| &translation.laws)
-            .flat_map(|law| self.laws.closure(law))
-            .map(|position| self.laws.ordered[position].0);
-        let mut hosts: Vec<String> =
-            work.iter().copied().chain(called).map(|translation| self.host_of(translation)).collect();
-        hosts.sort();
-        hosts.dedup();
-        let failed = self.package.build(&hosts)?;
-        for host in &failed.modules {
-            let refusal = self.package.refusal(host, &failed)?;
-            for translation in work.iter().filter(|translation| self.host_of(translation) == *host) {
-                for law in &translation.laws {
-                    report(issues, translation, issues::generated_module_refused(law, host, &refusal));
-                }
-            }
-        }
-        work.retain(|translation| !failed.modules.contains(&self.host_of(translation)));
-
+    /// each law they call, transitively, before them. A law that calls a law that cannot be proven is not proven. A
+    /// generated module the file's check reaches that Lean does not elaborate refuses each of its laws.
+    fn prove(&self, work: Vec<&Translation>, issues: &mut HashMap<FileId, IssueCollection>) -> io::Result<()> {
         // One runner answers the check of every file, so Lean and the runtime library are imported once per compile.
-        let mut answers: Vec<Vec<(&Law, Judgment)>> = Vec::with_capacity(work.len());
-        let mut checked: Vec<usize> = Vec::new();
-        let mut checks: Vec<Check<'_>> = Vec::new();
-        for (index, translation) in work.iter().enumerate() {
-            let (judgments, check) = self.check(translation);
-            answers.push(judgments);
-            if let Some(check) = check {
-                checked.push(index);
-                checks.push(check);
-            }
-        }
-        if !checks.is_empty() {
-            let answered = runner::check(self.library, self.package, &checks)?;
-            for ((index, check), answered) in checked.into_iter().zip(&checks).zip(answered) {
-                let order = check.theorems.iter().filter(|theorem| theorem.judged).map(|theorem| theorem.statement);
-                for (statement, judgment) in order.zip(answered) {
-                    if let Some(law) = work[index].laws.iter().find(|law| law.statement == statement) {
-                        answers[index].push((law, judgment));
+        let (judgments, checks): (Vec<_>, Vec<_>) =
+            work.iter().copied().map(|translation| self.check(translation)).unzip();
+        let answers = runner::check(self.library, self.package, &checks)?;
+        for (((translation, check), mut judgments), answer) in work.into_iter().zip(&checks).zip(judgments).zip(answers)
+        {
+            match answer {
+                Answer::Judged(answered) => {
+                    let order = check.theorems.iter().filter(|theorem| theorem.judged).map(|theorem| theorem.statement);
+                    for (statement, judgment) in order.zip(answered) {
+                        if let Some(law) = translation.laws.iter().find(|law| law.statement == statement) {
+                            judgments.push((law, judgment));
+                        }
+                    }
+                    for (law, judgment) in judgments {
+                        for issue in judged(law, judgment, &self.receivers, &self.declared) {
+                            report(issues, translation, issue);
+                        }
                     }
                 }
-            }
-        }
-        for (translation, answers) in work.into_iter().zip(answers) {
-            for (law, judgment) in answers {
-                for issue in judged(law, judgment, &self.receivers, &self.declared) {
-                    report(issues, translation, issue);
+                Answer::Refused(module, refusal) => {
+                    for law in &translation.laws {
+                        report(issues, translation, issues::generated_module_refused(law, &module, &refusal));
+                    }
                 }
             }
         }
@@ -328,8 +307,9 @@ impl Proofs<'_> {
     }
 
     /// How `translation`'s laws are judged without the runner, each through a law it calls that cannot be proven, and
-    /// the check the runner judges the others with, unless no theorem is left to elaborate.
-    fn check<'law>(&'law self, translation: &'law Translation) -> (Vec<(&'law Law, Judgment)>, Option<Check<'law>>) {
+    /// the check the runner judges the others with. The check reaches the file's own generated module even when no
+    /// theorem is left to elaborate, so a module Lean rejects refuses the file's laws.
+    fn check<'law>(&'law self, translation: &'law Translation) -> (Vec<(&'law Law, Judgment)>, Check<'law>) {
         let laws = self.laws;
         let mut theorems: Vec<usize> = Vec::new();
         let mut judgments: Vec<(&Law, Judgment)> = Vec::new();
@@ -347,17 +327,17 @@ impl Proofs<'_> {
         }
         theorems.sort_unstable();
         theorems.dedup();
-        if theorems.is_empty() {
-            return (judgments, None);
-        }
 
         let judged: Vec<&Law> = translation
             .laws
             .iter()
             .filter(|law| !judgments.iter().any(|(blocked, _)| blocked.statement == law.statement))
             .collect();
-        let mut modules: Vec<String> =
-            theorems.iter().map(|position| self.host_of(laws.ordered[*position].0)).collect();
+        let mut modules: Vec<String> = theorems
+            .iter()
+            .map(|position| self.host_of(laws.ordered[*position].0))
+            .chain(std::iter::once(self.host_of(translation)))
+            .collect();
         modules.sort();
         modules.dedup();
         modules.push(PROOF_STEPS.to_owned());
@@ -373,7 +353,7 @@ impl Proofs<'_> {
             })
             .collect();
 
-        (judgments, Some(Check { modules, theorems }))
+        (judgments, Check { modules, theorems })
     }
 }
 

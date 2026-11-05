@@ -6,6 +6,7 @@ use std::fmt::Write;
 use std::fs;
 use std::io;
 use std::io::Read;
+use std::io::Write as _;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Child;
@@ -251,12 +252,14 @@ static PENDING: AtomicI32 = AtomicI32::new(0);
 #[cfg(unix)]
 static ONE_GROUP: Mutex<()> = Mutex::new(());
 
-/// Runs `command` in a process group of its own and returns how it exited and what it wrote, and whether it wrote
-/// nothing for `deadline()`, so Mago ended the group. The deadline counts from the last thing it wrote, so a
-/// `lake build` that reports each module it builds never reaches it however many modules it builds, while a Lean that
-/// waits does. A signal that ends Mago ends the group too, as it did while the group was Mago's own.
-pub(crate) fn output_before_deadline(command: &mut Command) -> io::Result<(Output, bool)> {
-    command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+/// Runs `command` in a process group of its own with `input` on its standard input, and returns how it exited and what
+/// it wrote, and whether it wrote nothing for `deadline()`, so Mago ended the group. The deadline counts from the last
+/// thing it wrote, so a runner that reports each module and check it starts never reaches it however many it checks,
+/// while a Lean that waits does. A signal that ends Mago ends the group too, as it did while the group was Mago's own.
+/// An error writing `input` counts only when the command succeeded, since one that fails before it reads its input is
+/// reported by how it exited.
+pub(crate) fn output_before_deadline(command: &mut Command, input: &[u8]) -> io::Result<(Output, bool)> {
+    command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     #[cfg(unix)]
     let _one = {
         std::os::unix::process::CommandExt::process_group(command, 0);
@@ -278,11 +281,20 @@ pub(crate) fn output_before_deadline(command: &mut Command) -> io::Result<(Outpu
         }
     }
     let mut child = spawned?;
+    // A thread writes the input, so a command that never reads it cannot keep Mago from its deadline.
+    let mut stdin = child.stdin.take().ok_or_else(|| io::Error::other("a law checker process has no input stream"))?;
+    let input = input.to_vec();
+    let writer = thread::spawn(move || stdin.write_all(&input));
     let output = wait_before_deadline(&mut child);
     #[cfg(unix)]
     WAITED_ON.store(0, Ordering::SeqCst);
+    let written = writer.join().map_err(|_| io::Error::other("a writer of a law checker process panicked"))?;
+    let output = output?;
+    if output.0.status.success() {
+        written?;
+    }
 
-    output
+    Ok(output)
 }
 
 /// On each signal that ends Mago from a terminal or `kill`, which Mago does not ignore, ends the group `WAITED_ON`

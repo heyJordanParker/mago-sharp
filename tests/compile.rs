@@ -2991,10 +2991,10 @@ fn compile_lines_within(root: &Path, seconds: u64, path: &std::ffi::OsStr) -> (O
     )
 }
 
-/// Puts a `lake` first on the `PATH` that runs the real one, except in a project's `.sharp/.lean` package: there a build
-/// fails at once, and `lake env lean`, which elaborates a module that did not build, leaves `stalled` in `folder` and
-/// runs the shell commands `work`, which stand in for Lean work that never ends. Its own path, `bin/lake` in `folder`,
-/// names each process it runs `work` in.
+/// Puts a `lake` first on the `PATH` that runs the real one, except in a project's `.sharp/.lean` package: there the
+/// runner it runs reads the request, reports that it elaborates the generated module of `app/Shared/Money.sharp`, as
+/// the runner does, leaves `stalled` in `folder` and runs the shell commands `work`, which stand in for Lean work in
+/// that module that never ends. Its own path, `bin/lake` in `folder`, names each process it runs `work` in.
 #[cfg(unix)]
 fn stalling_lake(folder: &Path, work: &str) -> std::ffi::OsString {
     use std::os::unix::fs::PermissionsExt;
@@ -3003,7 +3003,7 @@ fn stalling_lake(folder: &Path, work: &str) -> std::ffi::OsString {
     let real =
         std::env::split_paths(&path).map(|directory| directory.join("lake")).find(|lake| lake.is_file()).unwrap();
     let script = format!(
-        "#!/bin/sh\ncase \"$PWD\" in\n  */.sharp/.lean)\n    case \"$1 $2\" in\n      \"build \"*) exit 1 ;;\n      \"env lean\")\n        touch '{stalled}'\n        {work}\n        ;;\n    esac\n    ;;\nesac\nexec '{real}' \"$@\"\n",
+        "#!/bin/sh\ncase \"$PWD\" in\n  */.sharp/.lean)\n    case \"$1 $2\" in\n      \"env \"*/sharp-lean)\n        cat > /dev/null\n        echo 'module 0 Code.App.Shared.Money' >&2\n        touch '{stalled}'\n        {work}\n        ;;\n    esac\n    ;;\nesac\nexec '{real}' \"$@\"\n",
         stalled = folder.join("stalled").display(),
         real = real.display(),
     );
@@ -3018,8 +3018,8 @@ fn stalling_lake(folder: &Path, work: &str) -> std::ffi::OsString {
 /// the compile, and refuses the law whose code it was checking with what stopped it. Each row runs after a compile that
 /// built the runtime library. Work that never ends runs under a limit of 2 seconds, and costs the compile less than two
 /// limits, which leaves room for the rest of the compile on a slow machine. It writes a line every million steps, as
-/// `lake build` reports each module it builds, so the deadline, which counts from the last thing written, never stops
-/// it: on a machine busy enough to give it less than a quarter of a core, it would reach the deadline of 8 seconds
+/// the runner reports each module and check it starts, so the deadline, which counts from the last thing written, never
+/// stops it: on a machine busy enough to give it less than a quarter of a core, it would reach the deadline of 8 seconds
 /// before its 2 processor seconds. Work that waits runs under a limit of 2 seconds, so its deadline is 8 seconds. It
 /// uses almost no processor time, so it runs on its own thread meanwhile. Each limit holds the whole compile too, so it
 /// stays above the processor seconds the compile itself uses.
