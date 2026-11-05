@@ -38,13 +38,19 @@ impl Converter<'_, '_> {
         self.edits.replace(expression.span(), text);
     }
 
-    /// `__DIR__`, `__FILE__` and `__LINE__` as what `Position.current()` gives (spec section 27). PHP's other magic
-    /// constants name a function, a class or a namespace PHP's way, which `Position` doesn't.
+    /// `__DIR__` and `__FILE__` as what `Position.current()` gives (spec section 27). `__LINE__` gives the line of the
+    /// PHP file, which the conversion moves. PHP's other magic constants name a function, a class or a namespace PHP's
+    /// way, which `Position` doesn't.
     pub(super) fn magic_constant(&mut self, constant: &MagicConstant<'_>) {
         let member = match constant {
             MagicConstant::Directory(_) => "directory",
             MagicConstant::File(_) => "file",
-            MagicConstant::Line(_) => "line",
+            MagicConstant::Line(_) => {
+                return self.refuse(
+                    constant.span(),
+                    "`__LINE__` gives the line of the PHP file, and the conversion moves lines, so `Position.current().line` would give another one",
+                );
+            }
             _ => {
                 let shown = String::from_utf8_lossy(self.text(constant.span())).into_owned();
                 return self.refuse(
