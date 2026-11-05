@@ -366,9 +366,10 @@ impl<'input> Converter<'input, '_> {
     /// class's `__clone` runs on the copy as it does in PHP.
     fn clone(&mut self, expression: &Expression<'_>, object: &Expression<'_>) {
         let known = self.type_of(object).is_some_and(|union| {
-            union.types.iter().any(|atomic| {
-                matches!(atomic, TAtomic::Object(mago_codex::ttype::atomic::object::TObject::Named(_)))
-            })
+            union
+                .types
+                .iter()
+                .any(|atomic| matches!(atomic, TAtomic::Object(mago_codex::ttype::atomic::object::TObject::Named(_))))
         });
         if !known {
             let shown = self.shown(object);
