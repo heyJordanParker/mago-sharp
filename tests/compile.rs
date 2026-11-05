@@ -3016,12 +3016,13 @@ fn stalling_lake(folder: &Path, work: &str) -> std::ffi::OsString {
 
 /// Lean work that runs past the processor-time limit, or waits until the deadline, stops there once instead of holding
 /// the compile, and refuses the law whose code it was checking with what stopped it. Each row runs after a compile that
-/// built the runtime library. Work that never ends runs under a limit of 30 seconds, and costs the compile less than two
+/// built the runtime library. Work that never ends runs under a limit of 2 seconds, and costs the compile less than two
 /// limits, which leaves room for the rest of the compile on a slow machine. It writes a line every million steps, as
 /// `lake build` reports each module it builds, so the deadline, which counts from the last thing written, never stops
-/// it: on a machine busy enough to give it less than a quarter of a core, it would reach the deadline of 120 seconds
-/// before its 30 processor seconds. Work that waits runs under a limit of 10 seconds, so its deadline is 40 seconds. It
-/// uses almost no processor time, so it runs on its own thread meanwhile.
+/// it: on a machine busy enough to give it less than a quarter of a core, it would reach the deadline of 8 seconds
+/// before its 2 processor seconds. Work that waits runs under a limit of 2 seconds, so its deadline is 8 seconds. It
+/// uses almost no processor time, so it runs on its own thread meanwhile. Each limit holds the whole compile too, so it
+/// stays above the processor seconds the compile itself uses.
 #[cfg(unix)]
 #[test]
 fn lean_work_that_never_ends_stops_once_at_its_limit_or_deadline() {
@@ -3044,11 +3045,11 @@ fn lean_work_that_never_ends_stops_once_at_its_limit_or_deadline() {
     };
 
     std::thread::scope(|scope| {
-        let waits = scope.spawn(|| stops(10, "sleep 4000", &refused("it did not finish within 40 seconds")));
+        let waits = scope.spawn(|| stops(2, "sleep 4000", &refused("it did not finish within 8 seconds")));
         stops(
-            30,
+            2,
             "exec awk 'BEGIN { while (1) if (++step % 1000000 == 0) { print step; fflush() } }'",
-            &refused("it ran past 30 processor seconds, the limit the checker sets on each check"),
+            &refused("it ran past 2 processor seconds, the limit the checker sets on each check"),
         );
         waits.join().unwrap();
     });
