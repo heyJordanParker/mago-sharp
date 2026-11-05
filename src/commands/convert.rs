@@ -13,6 +13,7 @@
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::Path;
@@ -90,8 +91,8 @@ const EXPECTED_WARNINGS: [&str; 2] = ["too-wide-member", "redundant-docblock-typ
 /// An issue as a later analysis finds it again: its file, level, code, message and line.
 type IssueKey = (Vec<u8>, Level, Option<String>, String, u32);
 
-/// Each issue of an analysis, with how many times it is reported.
-type Issues = HashMap<IssueKey, usize>;
+/// Each issue of an analysis, with how many times it is reported and the files its annotations point into.
+type Issues = HashMap<IssueKey, (usize, BTreeSet<Vec<u8>>)>;
 
 /// What the project's configuration hides of an extension host rule's issues, as `mago compile` and `mago analyze`
 /// hide it, and never of the language's own (spec section 27).
@@ -150,9 +151,16 @@ struct Proof {
 /// files' issues, and the warnings decision 9 expects.
 #[derive(Default)]
 struct Judgement {
-    own: BTreeMap<Vec<u8>, Vec<String>>,
-    others: Vec<String>,
+    own: BTreeMap<Vec<u8>, Vec<Found>>,
+    others: Vec<Found>,
     expected: Vec<String>,
+}
+
+/// An issue a proof found, as the summary shows it, with the files it points into: the files of its annotations, or
+/// the file `mago compile` refuses.
+struct Found {
+    shown: String,
+    files: BTreeSet<Vec<u8>>,
 }
 
 /// What every proof of one command shares: the project's configuration, what it hides of a host rule's issues, and
@@ -181,17 +189,24 @@ struct Outcome {
     converted: Vec<(Vec<u8>, Vec<u8>, Vec<u8>)>,
     /// The warnings decision 9 expects, each as the summary lists it.
     expected: Vec<String>,
+    /// How many analyses proved the converted files, each a whole project's with fresh extension hosts.
+    proofs: usize,
 }
 
 impl ConvertCommand {
-    pub fn execute(self, mut configuration: Configuration, color_choice: ColorChoice) -> Result<CommandOutcome, Error> {
+    pub fn execute(self, configuration: Configuration, color_choice: ColorChoice) -> Result<CommandOutcome, Error> {
+        Ok(self.run(configuration, color_choice)?.0.into())
+    }
+
+    /// Converts the files the paths name and reports it, with the exit code and what the run found.
+    fn run(self, mut configuration: Configuration, color_choice: ColorChoice) -> Result<(ExitCode, Outcome), Error> {
         configuration.extension_hosts = compile_for_hosts(&configuration)?.0;
         let workspace = configuration.source.workspace.clone();
         let root = workspace.canonicalize().map_err(|error| Error::CanonicalizingPath(workspace.clone(), error))?;
         let roots = psr4_roots(&workspace)?;
         let named: Vec<PathBuf> = self.paths.iter().map(|path| relative(&workspace, path)).collect();
         let Some((prover, mut session)) = Prover::new(&configuration, color_choice, root)? else {
-            return Ok(ExitCode::FAILURE.into());
+            return Ok((ExitCode::FAILURE, Outcome::default()));
         };
         let plain = session.proof(&prover)?;
         let forms = session.server.standard_library_forms()?;
@@ -244,19 +259,19 @@ impl ConvertCommand {
                 tracing::info!("The extension hosts load the converted files, so fresh hosts prove the project again.");
                 let proof = prover.open(&[])?.proof(&prover)?;
                 let judgement = judge(&plain, &proof, &accepted);
-                for (name, reasons) in &judgement.own {
+                for (name, found) in &judgement.own {
                     unproven = true;
                     let name = display(&sharp_name(name));
                     tracing::error!(
                         "{name} adds issues once the extension hosts load it, and git holds its plain PHP:"
                     );
-                    for reason in reasons {
-                        tracing::error!("  {reason}");
+                    for found in found {
+                        tracing::error!("  {}", found.shown);
                     }
                 }
-                for reason in &judgement.others {
+                for found in &judgement.others {
                     unproven = true;
-                    tracing::error!("The converted files add an issue with the hosts that load them: {reason}");
+                    tracing::error!("The converted files add an issue with the hosts that load them: {}", found.shown);
                 }
             }
         }
@@ -269,7 +284,7 @@ impl ConvertCommand {
         outcome.report(self.dry_run, color_choice);
 
         let failed = !outcome.refused.is_empty() || !unreached.is_empty() || unproven;
-        Ok(if failed { ExitCode::FAILURE } else { ExitCode::SUCCESS }.into())
+        Ok((if failed { ExitCode::FAILURE } else { ExitCode::SUCCESS }, outcome))
     }
 }
 
@@ -316,8 +331,13 @@ impl<'configuration> Prover<'configuration> {
 
     /// Proves `set`, indexes of `candidates`, with the ones `accepted` already holds, and adds each that keeps the
     /// project as it was to `accepted`. One proof runs for them all. A file with issues of its own stays plain PHP, and
-    /// the rest are proven again. An issue in another file names no converted file, so the set is proven in halves, each
-    /// on top of what is accepted, until one file is left to keep plain PHP.
+    /// the rest are proven again. An issue in another file sends the set to be proven in two parts, each on top of what
+    /// is accepted, until one file is left to keep plain PHP. The second part is the second half of the fewest files
+    /// one issue can come from, as [`Session::reached`] finds them, and the first part is the rest of the set. When no
+    /// file of the set can bring an issue, the parts are the set's halves. When the first part is accepted whole and
+    /// the second is one file, the proof that split them was that file on top of what is accepted, so its issues keep
+    /// the file plain PHP with no proof more. Every proof is a whole analysis with fresh hosts, so each split costs a
+    /// proof.
     fn prove(
         &self,
         plain: &Proof,
@@ -328,16 +348,28 @@ impl<'configuration> Prover<'configuration> {
     ) -> Result<(), Error> {
         while !set.is_empty() {
             let swaps: Vec<&Candidate> = accepted.iter().chain(&set).map(|&index| &candidates[index]).collect();
-            let mut judgement = judge(plain, &self.open(&swaps)?.proof(self)?, &swaps);
+            let start = Instant::now();
+            let mut session = self.open(&swaps)?;
+            let mut judgement = judge(plain, &session.proof(self)?, &swaps);
+            outcome.proofs += 1;
+            tracing::debug!(
+                "Proof {} of {} files on {} accepted ran in {:?}: {} files with issues of their own, {} issues in others.",
+                outcome.proofs,
+                set.len(),
+                accepted.len(),
+                start.elapsed(),
+                judgement.own.len(),
+                judgement.others.len(),
+            );
             let before = set.len();
-            for (name, reasons) in std::mem::take(&mut judgement.own) {
+            for (name, found) in std::mem::take(&mut judgement.own) {
                 match set.iter().position(|&index| candidates[index].name == name) {
                     Some(position) => {
                         set.remove(position);
-                        outcome.refused.entry(name).or_default().extend(reasons);
+                        outcome.refused.entry(name).or_default().extend(found.into_iter().map(|found| found.shown));
                     }
                     // A file proven before gains an issue only with the files this proof adds.
-                    None => judgement.others.extend(reasons),
+                    None => judgement.others.extend(found),
                 }
             }
             if set.len() < before {
@@ -349,13 +381,33 @@ impl<'configuration> Prover<'configuration> {
                 return Ok(());
             }
             if let [index] = set[..] {
-                let reasons = judgement.others.into_iter().map(|reason| format!("{reason}, which converting it adds"));
-                outcome.refused.entry(candidates[index].name.clone()).or_default().extend(reasons);
+                outcome.adds(&candidates[index].name, judgement.others);
                 return Ok(());
             }
 
-            let second = set.split_off(set.len() / 2);
+            let narrowest = session
+                .reached(&judgement.others, candidates, &set)
+                .into_iter()
+                .filter(|reached| !reached.is_empty())
+                .min_by_key(Vec::len);
+            let second = match narrowest {
+                Some(mut suspects) => {
+                    let second = suspects.split_off(suspects.len() / 2);
+                    set.retain(|index| !second.contains(index));
+                    second
+                }
+                None => set.split_off(set.len() / 2),
+            };
+            let (first, before) = (set.len(), accepted.len());
             self.prove(plain, candidates, accepted, set, outcome)?;
+            // With the first part accepted whole, this proof was the one file of the second on top of what is
+            // accepted, so its issues keep that file plain PHP with no proof more.
+            if let [index] = second[..]
+                && accepted.len() == before + first
+            {
+                outcome.adds(&candidates[index].name, judgement.others);
+                return Ok(());
+            }
             return self.prove(plain, candidates, accepted, second, outcome);
         }
 
@@ -392,6 +444,46 @@ impl<'configuration> Session<'configuration> {
         tracing::trace!("The project's proof ran in {:?}.", start.elapsed());
 
         Ok(Proof { issues, refused })
+    }
+
+    /// For each of `found`, issues in files outside `set`, the files of `set`, as indexes of `candidates`, it comes
+    /// from: each whose converted file the issue points into, as an override's issue points at the method it
+    /// overrides, or when it points into none, each whose edit makes the analysis's warm path re-analyze a file the
+    /// issue points into, as an edit of a parent does a plain class that extends it, or an edit of a callee its caller.
+    fn reached(&self, found: &[Found], candidates: &[Candidate], set: &[usize]) -> Vec<Vec<usize>> {
+        let files: Vec<FileId> = found
+            .iter()
+            .flat_map(|found| &found.files)
+            .map(|name| FileId::new(name))
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        let reaching: HashMap<FileId, _> = files.iter().copied().zip(self.server.files_reaching(&files)).collect();
+        let converted: Vec<(usize, FileId)> =
+            set.iter().map(|&index| (index, FileId::new(&sharp_name(&candidates[index].name)))).collect();
+
+        found
+            .iter()
+            .map(|found| {
+                let files: Vec<FileId> = found.files.iter().map(|name| FileId::new(name)).collect();
+                let pointed: Vec<usize> = converted
+                    .iter()
+                    .filter(|(_, converted)| files.contains(converted))
+                    .map(|(index, _)| *index)
+                    .collect();
+                if !pointed.is_empty() {
+                    return pointed;
+                }
+
+                converted
+                    .iter()
+                    .filter(|(_, converted)| {
+                        files.iter().any(|file| reaching.get(file).is_some_and(|files| files.contains(converted)))
+                    })
+                    .map(|(index, _)| *index)
+                    .collect()
+            })
+            .collect()
     }
 
     /// The PHP# text of `file`, or each construct that keeps it plain PHP, by its place. A built-in's call becomes the
@@ -441,26 +533,29 @@ fn load(
 fn judge(plain: &Proof, proof: &Proof, swaps: &[&Candidate]) -> Judgement {
     let owner = |file: &[u8]| swaps.iter().find(|candidate| sharp_name(&candidate.name) == file);
     let mut judgement = Judgement::default();
-    for (key, count) in &proof.issues {
+    for (key, (count, files)) in &proof.issues {
         let (file, level, code, message, line) = key;
-        if count.saturating_sub(plain.issues.get(key).copied().unwrap_or(0)) == 0 || *level < Level::Warning {
+        let before = plain.issues.get(key).map_or(0, |(count, _)| *count);
+        if count.saturating_sub(before) == 0 || *level < Level::Warning {
             continue;
         }
         let code = code.clone().unwrap_or_default();
         let shown = format!("{}:{line}: {level} {code}: {message}", display(file));
+        let found = Found { shown, files: files.clone() };
         if *level == Level::Warning && EXPECTED_WARNINGS.contains(&code.as_str()) {
-            judgement.expected.push(shown);
+            judgement.expected.push(found.shown);
         } else if let Some(candidate) = owner(file) {
-            judgement.own.entry(candidate.name.clone()).or_default().push(shown);
+            judgement.own.entry(candidate.name.clone()).or_default().push(found);
         } else {
-            judgement.others.push(shown);
+            judgement.others.push(found);
         }
     }
     for file in proof.refused.difference(&plain.refused) {
         let shown = format!("{}: mago compile would refuse it", display(file));
+        let found = Found { shown, files: BTreeSet::from([file.clone()]) };
         match owner(file) {
-            Some(candidate) => judgement.own.entry(candidate.name.clone()).or_default().push(shown),
-            None => judgement.others.push(shown),
+            Some(candidate) => judgement.own.entry(candidate.name.clone()).or_default().push(found),
+            None => judgement.others.push(found),
         }
     }
 
@@ -468,6 +563,12 @@ fn judge(plain: &Proof, proof: &Proof, swaps: &[&Candidate]) -> Judgement {
 }
 
 impl Outcome {
+    /// Keeps the plain PHP file `name` plain for `others`, the issues converting it adds to other files.
+    fn adds(&mut self, name: &[u8], others: Vec<Found>) {
+        let reasons = others.into_iter().map(|found| format!("{}, which converting it adds", found.shown));
+        self.refused.entry(name.to_vec()).or_default().extend(reasons);
+    }
+
     fn report(&self, dry_run: bool, color_choice: ColorChoice) {
         for (name, reasons) in &self.refused {
             let name = display(name);
@@ -523,7 +624,8 @@ fn write(workspace: &Path, name: &[u8], text: &[u8]) -> Result<(), Error> {
     Ok(())
 }
 
-/// Each issue of `issues` by its file, level, code, message and line, with how many times it is reported.
+/// Each issue of `issues` by its file, level, code, message and line, with how many times it is reported and the files
+/// its annotations point into.
 fn keys(server: &Server, issues: IssueCollection) -> Issues {
     let mut keys = Issues::default();
     for issue in issues.iter() {
@@ -534,7 +636,16 @@ fn keys(server: &Server, issues: IssueCollection) -> Issues {
                 Some((file.name.to_vec(), file.line_number(span.start.offset) + 1))
             })
             .unwrap_or_default();
-        *keys.entry((file, issue.level, issue.code.clone(), issue.message.clone(), line)).or_default() += 1;
+        let (count, files) =
+            keys.entry((file, issue.level, issue.code.clone(), issue.message.clone(), line)).or_default();
+        *count += 1;
+        files.extend(
+            issue
+                .annotations
+                .iter()
+                .filter_map(|annotation| server.database().get(&annotation.span.file_id).ok())
+                .map(|file| file.name.to_vec()),
+        );
     }
 
     keys
@@ -661,9 +772,103 @@ mod tests {
         assert_eq!(codes, [Some("mixed-argument")]);
     }
 
+    /// A dry run of `src/Contracts` in a project of `files`, each a path under `src/` and its code, with `src/` the
+    /// PSR-4 folder of `Generated\`.
+    fn convert_contracts(files: &[(String, String)]) -> (ExitCode, Outcome) {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        std::fs::write(root.join("mago.toml"), "php-version = \"8.5\"\n\n[source]\npaths = [\"src\"]\n").unwrap();
+        std::fs::write(root.join("composer.json"), r#"{"autoload": {"psr-4": {"Generated\\": "src/"}}}"#).unwrap();
+        std::fs::create_dir_all(root.join("src/Contracts")).unwrap();
+        std::fs::create_dir_all(root.join("src/Plain")).unwrap();
+        for (path, code) in files {
+            std::fs::write(root.join("src").join(path), code).unwrap();
+        }
+        let configuration = Configuration::load(CliOverrides {
+            workspace: Some(root.clone()),
+            config: Some(root.join("mago.toml")),
+            no_version_check: true,
+            ..Default::default()
+        })
+        .unwrap();
+
+        ConvertCommand { paths: vec![root.join("src/Contracts")], dry_run: true }
+            .run(configuration, ColorChoice::Never)
+            .unwrap()
+    }
+
+    /// An interface `Clean{index}` that converts with no issue anywhere.
+    fn clean(index: usize) -> (String, String) {
+        (
+            format!("Contracts/Clean{index}.php"),
+            format!(
+                "<?php\n\nnamespace Generated\\Contracts;\n\ninterface Clean{index}\n{{\n    public function id(): int;\n}}\n"
+            ),
+        )
+    }
+
+    /// An interface `Sink{index}` that takes a `Map` once converted, and its plain PHP implementer `Drain{index}`, which
+    /// no longer fits it.
+    fn sink(index: usize) -> [(String, String); 2] {
+        [
+            (
+                format!("Contracts/Sink{index}.php"),
+                format!(
+                    "<?php\n\nnamespace Generated\\Contracts;\n\ninterface Sink{index}\n{{\n    /** @param array<string, int> $items */\n    public function take(array $items): void;\n}}\n"
+                ),
+            ),
+            (
+                format!("Plain/Drain{index}.php"),
+                format!(
+                    "<?php\n\nnamespace Generated\\Plain;\n\nuse Generated\\Contracts\\Sink{index};\n\nfinal class Drain{index} implements Sink{index}\n{{\n    /** @param array<string, int> $items */\n    public function take(array $items): void\n    {{\n    }}\n}}\n"
+                ),
+            ),
+        ]
+    }
+
+    /// Three of eight interfaces take a `Map` once converted, which their plain PHP implementers no longer fit, so each
+    /// adds an issue in another file only that interface can bring. Each split sets one of them apart, so the five
+    /// clean interfaces are proven together once, the last one set apart stays plain PHP for the issue the proof before
+    /// found, and the other two are proven alone: six proofs, each a whole analysis of the project. Halving the set
+    /// took eight.
+    #[test]
+    fn the_files_that_can_bring_an_issue_in_another_file_are_proven_apart_from_the_rest() {
+        let mut files: Vec<(String, String)> = (0..5).map(clean).collect();
+        files.extend((0..3).flat_map(sink));
+
+        let (exit_code, outcome) = convert_contracts(&files);
+
+        assert_eq!(exit_code, ExitCode::FAILURE);
+        let refused: Vec<String> = outcome.refused.keys().map(|name| display(name)).collect();
+        assert_eq!(refused, ["src/Contracts/Sink0.php", "src/Contracts/Sink1.php", "src/Contracts/Sink2.php"]);
+        assert!(
+            outcome.refused.values().flatten().all(|reason| reason.ends_with(", which converting it adds")),
+            "{:#?}",
+            outcome.refused
+        );
+        assert_eq!(outcome.converted.len(), 5);
+        assert_eq!(outcome.proofs, 6);
+    }
+
+    /// One of thirteen interfaces adds an issue in its plain PHP implementer, which points into the interface. The first
+    /// proof finds it and sets that interface apart, and the second accepts the other twelve, so the first proof's issue
+    /// keeps the one set apart plain PHP: two proofs. Halving the whole set took eight.
+    #[test]
+    fn an_issue_in_another_file_sets_apart_the_file_it_points_into() {
+        let mut files: Vec<(String, String)> = (0..12).map(clean).collect();
+        files.extend(sink(0));
+
+        let (exit_code, outcome) = convert_contracts(&files);
+
+        assert_eq!(exit_code, ExitCode::FAILURE);
+        let refused: Vec<String> = outcome.refused.keys().map(|name| display(name)).collect();
+        assert_eq!(refused, ["src/Contracts/Sink0.php"]);
+        assert_eq!(outcome.converted.len(), 12);
+        assert_eq!(outcome.proofs, 2);
+    }
+
     /// A folder of 200 classes, each calling the one before it, converts in one proof of them all, so the proof's cost
-    /// stays one analysis of the project, never one per file. The bound is a multiple of a run that converts nothing,
-    /// which analyzes and compiles the same project, so a busy machine slows both alike.
+    /// stays one analysis of the project, never one per file.
     #[test]
     fn two_hundred_classes_convert_in_one_proof_of_them_all() {
         let directory = tempfile::tempdir().unwrap();
@@ -687,34 +892,21 @@ mod tests {
             )
             .unwrap();
         }
-        let convert = |path: &str| {
-            let configuration = Configuration::load(CliOverrides {
-                workspace: Some(root.clone()),
-                config: Some(root.join("mago.toml")),
-                no_version_check: true,
-                ..Default::default()
-            })
+        let configuration = Configuration::load(CliOverrides {
+            workspace: Some(root.clone()),
+            config: Some(root.join("mago.toml")),
+            no_version_check: true,
+            ..Default::default()
+        })
+        .unwrap();
+
+        let (exit_code, outcome) = ConvertCommand { paths: vec![root.join("src")], dry_run: false }
+            .run(configuration, ColorChoice::Never)
             .unwrap();
-            let start = Instant::now();
-            let outcome = ConvertCommand { paths: vec![root.join(path)], dry_run: false }
-                .execute(configuration, ColorChoice::Never)
-                .unwrap();
-
-            (outcome.exit_code, start.elapsed())
-        };
-
-        // A path that names no file: the project's analysis and compile, with nothing to prove.
-        let (_, nothing) = convert("src/Missing.php");
-        let (exit_code, all) = convert("src");
 
         assert_eq!(exit_code, ExitCode::SUCCESS);
         assert!(root.join("src/Step199.sharp").exists() && !root.join("src/Step199.php").exists());
-        // Measured on a 12-core Apple Silicon Mac at a load average of 25: in this debug test the run that converts
-        // nothing took 1.6 s and the 200 classes 14.6 s, the converter's unoptimized work on each file the most of it.
-        // The release binary took 0.18 s and 0.29 s. Proving each file alone runs 200 proofs, past the bound.
-        assert!(
-            all < nothing * 20,
-            "200 classes took {all:?}, past 20 times the {nothing:?} of a run that converts nothing"
-        );
+        assert_eq!(outcome.converted.len(), 200);
+        assert_eq!(outcome.proofs, 1);
     }
 }

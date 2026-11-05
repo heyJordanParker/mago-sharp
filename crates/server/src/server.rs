@@ -169,6 +169,13 @@ impl Server {
         self.service.dispatcher_module()
     }
 
+    /// For each of `files`, the source files other than it whose signature edit makes the last analysis's warm path
+    /// re-analyze it, which `mago convert` reads to find the converted files an issue in another file can come from.
+    #[must_use]
+    pub fn files_reaching(&self, files: &[FileId]) -> Vec<HashSet<FileId>> {
+        self.service.files_reaching(files)
+    }
+
     /// Run one analysis pass with the node-analysis hooks only in the scope's files, and report
     /// only their issues. A failed pass resets the service.
     fn pass(

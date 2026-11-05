@@ -191,6 +191,15 @@ impl IncrementalAnalysisService {
             .map(|module| DispatcherModule { file: module.file, namespace })
     }
 
+    /// For each of `files`, the source files other than it whose signature edit makes the warm path re-analyze it, as
+    /// the cascade over the last analysis's references finds them.
+    #[must_use]
+    pub fn files_reaching(&self, files: &[FileId]) -> Vec<HashSet<FileId>> {
+        let dependencies = Dependencies::new(self);
+
+        files.iter().map(|file_id| dependencies.reached_by(*file_id)).collect()
+    }
+
     /// Compiles each `.sharp` file of the last analysis, in file name order, then refuses each plain PHP file whose
     /// class the engine would refuse to link, as [`Self::unlinkable_plain_php_classes`] finds them.
     ///
