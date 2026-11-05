@@ -82,6 +82,8 @@ For PHP projects:
 composer require --dev "heyjordanparker/mago-sharp:^0.6.2"
 ```
 
+A project with `.sharp` files runs `mago compile` when it deploys, and `composer install --no-dev` installs no `require-dev` package. So such a project requires the package without `--dev`, or its release has no `vendor/bin/mago`.
+
 The Composer package is a thin wrapper. The first call to `vendor/bin/mago` downloads the matching pre-built binary from the GitHub release and caches it. Subsequent calls reuse the cache and make no network requests. Each package version ships the SHA-256 of every archive its release built, and the wrapper refuses to unpack a download whose SHA-256 differs, so the version you require pins the exact binary.
 
 If GitHub's anonymous rate limit blocks the first download (common on shared CI runners) set `GITHUB_TOKEN` or `GH_TOKEN` for that one invocation. In GitHub Actions the token is not exported automatically, so pass it explicitly:
