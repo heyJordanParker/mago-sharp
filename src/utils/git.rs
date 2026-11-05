@@ -157,23 +157,63 @@ where
     Ok(())
 }
 
-/// Moves the file `from` to `to`, both relative to `workspace`, with `git mv` when git tracks `from`. The index then
-/// holds the rename with the old contents, so the next commit is the rename alone, which `git log --follow` follows,
-/// and a change written to `to` afterwards shows as unstaged. Returns `false`, and moves nothing, when git does not
-/// track `from`.
-pub fn move_tracked(workspace: &Path, from: &Path, to: &Path) -> Result<bool, Error> {
-    let tracked = is_git_repository(workspace)
-        && Command::new("git")
-            .args(["ls-files", "--error-unmatch", "--"])
-            .arg(from)
-            .current_dir(workspace)
-            .output()
-            .is_ok_and(|output| output.status.success());
-    if tracked {
-        run_git("mv", Command::new("git").args(["mv", "--"]).arg(from).arg(to).current_dir(workspace))?;
+/// The files under `workspace` git holds as they are, each relative to `workspace`: in the last commit, with no change
+/// since, staged or not. None outside a git repository, or in one with no commit.
+pub fn committed_files(workspace: &Path) -> Result<HashSet<PathBuf>, Error> {
+    if !is_git_repository(workspace) {
+        return Ok(HashSet::new());
     }
+    let paths = |output: Output| -> HashSet<PathBuf> {
+        output
+            .stdout
+            .split(|byte| *byte == 0)
+            .filter(|path| !path.is_empty())
+            .map(|path| PathBuf::from(String::from_utf8_lossy(path).as_ref()))
+            .collect()
+    };
+    // A repository with no commit has no `HEAD` to list.
+    let listed = Command::new("git")
+        .args(["ls-tree", "-r", "-z", "--name-only", "HEAD"])
+        .current_dir(workspace)
+        .output()
+        .ok()
+        .filter(|output| output.status.success());
+    let Some(listed) = listed else {
+        return Ok(HashSet::new());
+    };
+    let changed = run_git(
+        "diff",
+        Command::new("git").args(["diff", "-z", "--name-only", "--relative", "HEAD"]).current_dir(workspace),
+    )?;
+    let changed = paths(changed);
 
-    Ok(tracked)
+    Ok(paths(listed).into_iter().filter(|path| !changed.contains(path)).collect())
+}
+
+/// Records in the index the rename of the tracked file `from` to `to`, both relative to `workspace`, with `from`'s
+/// contents in the index, as `git mv` records it, and leaves both files on disk as they are. The next commit is then
+/// the rename alone, which `git log --follow` follows, and what the caller writes to `to` shows as unstaged.
+pub fn stage_rename(workspace: &Path, from: &Path, to: &Path) -> Result<(), Error> {
+    let listed = run_git(
+        "ls-files",
+        Command::new("git")
+            .args(["ls-files", "--format=%(objectmode),%(objectname)", "--"])
+            .arg(from)
+            .current_dir(workspace),
+    )?;
+    let mut cacheinfo = OsString::from(String::from_utf8_lossy(&listed.stdout).trim());
+    cacheinfo.push(",");
+    cacheinfo.push(to.as_os_str());
+    run_git(
+        "update-index",
+        Command::new("git").args(["update-index", "--add", "--cacheinfo"]).arg(cacheinfo).current_dir(workspace),
+    )?;
+    run_git(
+        "update-index",
+        Command::new("git").args(["update-index", "--force-remove", "--"]).arg(from).current_dir(workspace),
+    )?;
+
+    Ok(())
 }
 
 /// Keeps `paths`, each a file under `workspace`, out of git: the ones no `.gitignore` already ignores become the block
@@ -524,23 +564,45 @@ mod tests {
         String::from_utf8_lossy(&output.stdout).into_owned()
     }
 
-    /// A tracked file moves with `git mv`, so the index holds the rename alone, and an untracked one is left for the
-    /// caller to move on disk.
+    /// Git holds a file of the last commit that has no change since, and neither an untracked file, a staged one nor
+    /// one changed on disk.
     #[test]
-    fn a_tracked_file_moves_as_a_rename_and_an_untracked_one_stays() {
+    fn the_committed_files_are_those_of_the_last_commit_with_no_change_since() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path();
-        std::fs::write(root.join("Order.php"), "<?php\n").unwrap();
+        assert!(committed_files(root).unwrap().is_empty());
+        for name in ["Order.php", "Changed.php", "Staged.php"] {
+            std::fs::write(root.join(name), "<?php\n").unwrap();
+        }
+        git(root, &["init", "--quiet"]);
+        assert!(committed_files(root).unwrap().is_empty());
+        git(root, &["add", "--all"]);
+        git(root, &["commit", "--quiet", "-m", "plain PHP"]);
+        std::fs::write(root.join("Changed.php"), "<?php\n// changed\n").unwrap();
+        std::fs::write(root.join("Staged.php"), "<?php\n// staged\n").unwrap();
+        git(root, &["add", "Staged.php"]);
+        std::fs::write(root.join("Draft.php"), "<?php\n").unwrap();
+
+        assert_eq!(committed_files(root).unwrap(), HashSet::from([PathBuf::from("Order.php")]));
+    }
+
+    /// The index records a rename of the plain file's contents, so it holds the rename alone, while the file written
+    /// at the new name shows as an unstaged change.
+    #[test]
+    fn a_staged_rename_holds_the_old_contents_and_the_written_file_is_unstaged() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        std::fs::write(root.join("Order.php"), "<?php\n\nfinal class Order {}\n").unwrap();
         git(root, &["init", "--quiet"]);
         git(root, &["add", "Order.php"]);
         git(root, &["commit", "--quiet", "-m", "plain PHP"]);
-        std::fs::write(root.join("Draft.php"), "<?php\n").unwrap();
+        std::fs::write(root.join("Order.sharp"), "public final class Order { }\n").unwrap();
 
-        assert!(move_tracked(root, Path::new("Order.php"), Path::new("Order.sharp")).unwrap());
-        assert!(!move_tracked(root, Path::new("Draft.php"), Path::new("Draft.sharp")).unwrap());
+        stage_rename(root, Path::new("Order.php"), Path::new("Order.sharp")).unwrap();
+        std::fs::remove_file(root.join("Order.php")).unwrap();
 
         assert_eq!(git(root, &["diff", "--cached", "-M", "--name-status"]), "R100\tOrder.php\tOrder.sharp\n");
-        assert!(root.join("Draft.php").exists());
-        assert!(!root.join("Draft.sharp").exists());
+        assert_eq!(git(root, &["diff", "--name-only"]), "Order.sharp\n");
+        assert_eq!(git(root, &["status", "--porcelain"]), "RM Order.php -> Order.sharp\n");
     }
 }

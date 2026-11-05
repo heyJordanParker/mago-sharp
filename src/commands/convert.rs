@@ -7,9 +7,9 @@
 //! the compile refuses a file it accepted before. The project's `ignore` entries and baseline hide an extension host
 //! rule's issue there, as `mago compile` hides it, and never one of the language's (spec section 27). The extension
 //! hosts load the project's classes, so each file it writes that their compile takes in starts the analysis again. Git
-//! is the undo: the command moves each tracked file with `git mv`, so the index holds the rename alone, git's history
-//! follows the file through it, and the `.php` file `mago compile` later writes at the old path is never the tracked
-//! one.
+//! is the undo: a file converts only as the last commit holds it, and the command records each rename in the index as
+//! `git mv` does, so the index holds the rename alone, git's history follows the file through it, and the `.php` file
+//! `mago compile` later writes at the old path is never the tracked one.
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -223,10 +223,19 @@ impl ConvertCommand {
             }
         }
         files.sort_by(|a, b| a.name.cmp(&b.name));
+        // Git is the undo, so a file converts only as git holds it.
+        let committed = git::committed_files(&workspace)?;
         let mut candidates = Vec::new();
         for file in files {
             let name = file.name.to_vec();
-            if let Err(reason) = shape(&file, &roots) {
+            let reason = shape(&file, &roots).and_then(|()| {
+                if committed.contains(Path::new(&display(&file.name))) {
+                    Ok(())
+                } else {
+                    Err("git holds no commit of it as it is: commit it first, so git holds its plain PHP".to_owned())
+                }
+            });
+            if let Err(reason) = reason {
                 outcome.refused.entry(name).or_default().push(format!("{}: {reason}", display(&file.name)));
                 continue;
             }
@@ -610,14 +619,14 @@ impl Outcome {
     }
 }
 
-/// Moves the plain PHP file `name` to its `.sharp` name, with `git mv` when git tracks it, then writes `text` there.
+/// Writes `text` at the `.sharp` name of the committed plain PHP file `name`, then records the rename in git's index,
+/// as `git mv` would, and only then removes the plain file, so a write that fails leaves it where it was.
 fn write(workspace: &Path, name: &[u8], text: &[u8]) -> Result<(), Error> {
     let (source, target) = (PathBuf::from(display(name)), PathBuf::from(display(&sharp_name(name))));
-    if !git::move_tracked(workspace, &source, &target)? {
-        let source = workspace.join(&source);
-        std::fs::remove_file(&source).map_err(|error| DatabaseError::io(IOAction::DeleteFile, &source, error))?;
-    }
     write_by_rename(&workspace.join(&target), text)?;
+    git::stage_rename(workspace, &source, &target)?;
+    let source = workspace.join(&source);
+    std::fs::remove_file(&source).map_err(|error| DatabaseError::io(IOAction::DeleteFile, &source, error))?;
 
     Ok(())
 }
@@ -775,24 +784,41 @@ mod tests {
     fn convert_contracts(files: &[(String, String)]) -> (ExitCode, Outcome) {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().canonicalize().unwrap();
-        std::fs::write(root.join("mago.toml"), "php-version = \"8.5\"\n\n[source]\npaths = [\"src\"]\n").unwrap();
-        std::fs::write(root.join("composer.json"), r#"{"autoload": {"psr-4": {"Generated\\": "src/"}}}"#).unwrap();
-        std::fs::create_dir_all(root.join("src/Contracts")).unwrap();
-        std::fs::create_dir_all(root.join("src/Plain")).unwrap();
-        for (path, code) in files {
-            std::fs::write(root.join("src").join(path), code).unwrap();
-        }
-        let configuration = Configuration::load(CliOverrides {
-            workspace: Some(root.clone()),
-            config: Some(root.join("mago.toml")),
-            no_version_check: true,
-            ..Default::default()
-        })
-        .unwrap();
+        let configuration = project(&root, files);
 
         ConvertCommand { paths: vec![root.join("src/Contracts")], dry_run: true }
             .run(configuration, ColorChoice::Never)
             .unwrap()
+    }
+
+    /// Commits every file under `root` to a fresh git repository, which holds the plain PHP a conversion replaces.
+    fn commit_all(root: &Path) {
+        let commit = ["-c", "user.name=test", "-c", "user.email=test@localhost", "commit", "--quiet", "-m", "plain"];
+        for arguments in [&["init", "--quiet"][..], &["add", "--all"], &commit] {
+            let output = std::process::Command::new("git").args(arguments).current_dir(root).output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        }
+    }
+
+    /// The configuration of a project at `root` of `files`, each a path under `src/` and its code, with `src/` the
+    /// PSR-4 folder of `Generated\`, all committed to git.
+    fn project(root: &Path, files: &[(String, String)]) -> Configuration {
+        std::fs::write(root.join("mago.toml"), "php-version = \"8.5\"\n\n[source]\npaths = [\"src\"]\n").unwrap();
+        std::fs::write(root.join("composer.json"), r#"{"autoload": {"psr-4": {"Generated\\": "src/"}}}"#).unwrap();
+        for (path, code) in files {
+            let path = root.join("src").join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, code).unwrap();
+        }
+        commit_all(root);
+
+        Configuration::load(CliOverrides {
+            workspace: Some(root.to_path_buf()),
+            config: Some(root.join("mago.toml")),
+            no_version_check: true,
+            ..Default::default()
+        })
+        .unwrap()
     }
 
     /// An interface `Clean{index}` that converts with no issue anywhere.
@@ -871,32 +897,24 @@ mod tests {
     fn two_hundred_classes_convert_in_one_proof_of_them_all() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().canonicalize().unwrap();
-        std::fs::write(root.join("mago.toml"), "php-version = \"8.5\"\n\n[source]\npaths = [\"src\"]\n").unwrap();
-        std::fs::write(root.join("composer.json"), r#"{"autoload": {"psr-4": {"Generated\\": "src/"}}}"#).unwrap();
-        std::fs::create_dir(root.join("src")).unwrap();
-        for index in 0..200 {
-            let previous = match index {
-                0 => String::new(),
-                _ => format!(
-                    "\n    public function previous(): Step{0}\n    {{\n        return new Step{0}();\n    }}\n",
-                    index - 1
-                ),
-            };
-            std::fs::write(
-                root.join(format!("src/Step{index}.php")),
-                format!(
-                    "<?php\n\nnamespace Generated;\n\nfinal class Step{index}\n{{\n    public function index(): int\n    {{\n        return {index};\n    }}\n{previous}}}\n"
-                ),
-            )
-            .unwrap();
-        }
-        let configuration = Configuration::load(CliOverrides {
-            workspace: Some(root.clone()),
-            config: Some(root.join("mago.toml")),
-            no_version_check: true,
-            ..Default::default()
-        })
-        .unwrap();
+        let files: Vec<(String, String)> = (0..200)
+            .map(|index| {
+                let previous = match index {
+                    0 => String::new(),
+                    _ => format!(
+                        "\n    public function previous(): Step{0}\n    {{\n        return new Step{0}();\n    }}\n",
+                        index - 1
+                    ),
+                };
+                (
+                    format!("Step{index}.php"),
+                    format!(
+                        "<?php\n\nnamespace Generated;\n\nfinal class Step{index}\n{{\n    public function index(): int\n    {{\n        return {index};\n    }}\n{previous}}}\n"
+                    ),
+                )
+            })
+            .collect();
+        let configuration = project(&root, &files);
 
         let (exit_code, outcome) = ConvertCommand { paths: vec![root.join("src")], dry_run: false }
             .run(configuration, ColorChoice::Never)
@@ -906,6 +924,46 @@ mod tests {
         assert!(root.join("src/Step199.sharp").exists() && !root.join("src/Step199.php").exists());
         assert_eq!(outcome.converted.len(), 200);
         assert_eq!(outcome.proofs, 1);
+    }
+
+    /// Git is the undo, so a file git holds no commit of as it is, untracked or changed since, stays plain PHP.
+    #[test]
+    fn a_file_git_holds_no_commit_of_as_it_is_stays_plain_php() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let configuration = project(&root, &[clean(0), clean(1)]);
+        let draft = clean(2);
+        std::fs::write(root.join("src").join(&draft.0), &draft.1).unwrap();
+        std::fs::write(root.join("src/Contracts/Clean1.php"), clean(1).1.replace("id()", "key()")).unwrap();
+
+        let (_, outcome) = ConvertCommand { paths: vec![root.join("src/Contracts")], dry_run: true }
+            .run(configuration, ColorChoice::Never)
+            .unwrap();
+
+        let refused: Vec<String> = outcome.refused.values().flatten().cloned().collect();
+        assert_eq!(
+            refused,
+            [
+                "src/Contracts/Clean1.php: git holds no commit of it as it is: commit it first, so git holds its plain PHP",
+                "src/Contracts/Clean2.php: git holds no commit of it as it is: commit it first, so git holds its plain PHP",
+            ]
+        );
+        assert_eq!(outcome.converted.len(), 1);
+    }
+
+    /// A converted file is written at its `.sharp` name before its plain file leaves, so a write that fails, here at a
+    /// folder of that name, leaves the plain file where it was, where moving it first would have taken it away.
+    #[test]
+    fn a_write_that_fails_leaves_the_plain_file_where_it_was() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        project(&root, &[clean(0)]);
+        std::fs::create_dir_all(root.join("src/Contracts/Clean0.sharp/kept")).unwrap();
+
+        let written = write(&root, b"src/Contracts/Clean0.php", b"public interface Clean0 { }\n");
+
+        assert!(written.is_err());
+        assert_eq!(std::fs::read_to_string(root.join("src/Contracts/Clean0.php")).unwrap(), clean(0).1);
     }
 
     /// Copies each file under `from` to the same place under `to`.
@@ -948,6 +1006,7 @@ mod tests {
             "<?php\n\nnamespace Generated;\n\nfinal class Upper\n{\n    public function loud(string $text): string\n    {\n        return mb_strtoupper($text, 'UTF-8');\n    }\n}\n",
         )
         .unwrap();
+        commit_all(&root);
         let configuration = Configuration::load(CliOverrides {
             workspace: Some(root.clone()),
             config: Some(root.join("mago.toml")),
