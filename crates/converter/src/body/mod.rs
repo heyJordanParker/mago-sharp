@@ -105,7 +105,7 @@ impl<'input> Converter<'input, '_> {
     pub(crate) fn block(&mut self, block: &Block<'_>) {
         if let Some(locals) = self.locals() {
             locals.blocks.push(block.span());
-            locals.scopes.push(block.span());
+            locals.body.get_or_insert(block.span());
         }
         for statement in &block.statements {
             self.statement(statement);

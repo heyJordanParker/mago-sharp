@@ -64,6 +64,7 @@ $tally = new Tally();
 $plusThree = $tally->adder(3);
 echo $tally->sum(2, 5, 10), ' ', $plusThree(4), ' ', $tally->halved(10), "\n";
 echo $tally->counted([3]), ' ', $tally->made(Pair::class), ' ', $tally->priced(['price' => 4, 'count' => 3]), "\n";
+echo $tally->carried([3, -1, 4, -2]), "\n";
 
 $label = new Label();
 echo $label->render('shelf', 3), "\n", $label->folder(), "\n";

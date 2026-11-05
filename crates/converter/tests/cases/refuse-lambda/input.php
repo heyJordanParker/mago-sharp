@@ -22,4 +22,18 @@ final class Counters
 
         return $limit + ($check(1) ? 1 : 0) + $bump();
     }
+
+    // A local read after its block is declared first in the method, so each of its assignments writes it after its
+    // declaration.
+    public function hoisted(bool $flag): int
+    {
+        if ($flag) {
+            $base = 2;
+        } else {
+            $base = 5;
+        }
+        $scale = fn(int $value): int => $value * $base;
+
+        return $scale(3);
+    }
 }

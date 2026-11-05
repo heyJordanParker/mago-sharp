@@ -41,8 +41,9 @@ pub(crate) struct Locals {
     entries: Vec<(Vec<u8>, Local)>,
     /// The block the conversion is in, innermost last.
     pub(super) blocks: Vec<Span>,
-    /// Every block in braces the body has, where a local read after the block that assigns it is declared.
-    pub(super) scopes: Vec<Span>,
+    /// The body of the method or lambda, its first block in braces, where a local read after the block that assigns it
+    /// is declared.
+    pub(super) body: Option<Span>,
     /// Each variable a lambda captures by value, with where. PHP's lambda keeps the value the variable had, and a
     /// PHP# lambda reads the variable itself, so nothing may write it after its declaration (spec section 14.2).
     copied: Vec<(Vec<u8>, Span)>,
@@ -420,19 +421,45 @@ impl Converter<'_, '_> {
     /// Writes each local's declaration at its first assignment, once the method's body is converted and every write
     /// to it is known. A loop declares its key and value at one place, which takes `let` when either is written.
     ///
-    /// A local read after the block that assigns it is declared first in the innermost block around both, as `T? name
+    /// A local read after the block that assigns it is declared first in the body of its method or lambda, as `T? name
     /// = null;`, with the analysis's type of it where it escapes (spec section 3). PHP has one variable of a name in a
-    /// method, so each assignment of the name in that block then writes it.
+    /// function, which keeps its value from one pass of a loop to the next, so each assignment of the name then writes
+    /// it.
     pub(crate) fn declare_locals(&mut self) {
         let Some(method) = self.method.as_mut() else {
             return;
         };
         let locals = std::mem::take(&mut method.locals.entries);
-        let scopes = std::mem::take(&mut method.locals.scopes);
+        let body = method.locals.body.take();
         let copied = std::mem::take(&mut method.locals.copied);
         let written_parameters = std::mem::take(&mut method.locals.written_parameters);
+        // A PHP local lives for the whole function, so one read after the block that assigns it is declared first in
+        // the body of the method or lambda it belongs to, where no pass of a loop declares it again.
+        let mut hoisted: Vec<Vec<u8>> = Vec::new();
+        for (name, local) in &locals {
+            let (Some(declaration), Some((span, Some(escaping)))) = (&local.declaration, &local.escapes) else {
+                continue;
+            };
+            let Some(body) = body.filter(|_| declaration.hoistable) else {
+                continue;
+            };
+            if hoisted.contains(name) {
+                continue;
+            }
+            let mut union = escaping.clone();
+            union.widen_scalars();
+            let Some(written) = self.type_text(&union.as_nullable(), *span) else {
+                continue;
+            };
+            let first = self.skip_whitespace(body.start.offset + 1);
+            let indentation = self.indentation(first);
+            self.edits.insert(first, format!("{written} {} = null;\n{indentation}", Self::variable_name(name)));
+            hoisted.push(name.clone());
+        }
+        // Each assignment of a hoisted local writes it after its declaration.
         for (name, at) in copied {
             let rewritten = written_parameters.contains(&name)
+                || hoisted.contains(&name)
                 || locals.iter().any(|(local, entry)| *local == name && entry.rewritten);
             if rewritten {
                 let shown = String::from_utf8_lossy(&name);
@@ -441,31 +468,6 @@ impl Converter<'_, '_> {
                     format!("`{shown}` is captured by value and written after its declaration: PHP's lambda keeps the value it had, and a PHP# lambda reads the variable itself (spec section 14.2)"),
                 );
             }
-        }
-        let mut hoisted: Vec<(Vec<u8>, Span)> = Vec::new();
-        for (name, local) in &locals {
-            let (Some(declaration), Some((span, Some(escaping)))) = (&local.declaration, &local.escapes) else {
-                continue;
-            };
-            let container = scopes
-                .iter()
-                .filter(|scope| scope.start.offset < declaration.at && local.last.end.offset <= scope.end.offset)
-                .min_by_key(|scope| scope.end.offset - scope.start.offset);
-            let Some(&container) = container.filter(|_| declaration.hoistable) else {
-                continue;
-            };
-            if hoisted.iter().any(|(hoisted, scope)| hoisted == name && *scope == container) {
-                continue;
-            }
-            let mut union = escaping.clone();
-            union.widen_scalars();
-            let Some(written) = self.type_text(&union.as_nullable(), *span) else {
-                continue;
-            };
-            let first = self.skip_whitespace(container.start.offset + 1);
-            let indentation = self.indentation(first);
-            self.edits.insert(first, format!("{written} {} = null;\n{indentation}", Self::variable_name(name)));
-            hoisted.push((name.clone(), container));
         }
 
         let mut keywords: std::collections::BTreeMap<u32, String> = std::collections::BTreeMap::new();
@@ -478,8 +480,7 @@ impl Converter<'_, '_> {
                 );
                 continue;
             };
-            let within = |scope: &Span| scope.start.offset < declaration.at && declaration.at < scope.end.offset;
-            if hoisted.iter().any(|(hoisted, scope)| *hoisted == name && within(scope)) {
+            if hoisted.contains(&name) {
                 if !declaration.hoistable {
                     self.refuse(
                         local.first,
