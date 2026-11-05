@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Proof\Shop;
 
+use Acme\Format\Stamp;
+
 // Lambdas: a capture by reference shares the variable, and one by value reads a variable nothing writes again.
 final class Tally
 {
@@ -92,5 +94,13 @@ final class Tally
     public function made(string $type): string
     {
         return (new $type())->both();
+    }
+
+    // `with` runs as PHP's `clone`, so the copy's `__clone` runs.
+    public function stamped(Stamp $stamp): int
+    {
+        $copy = clone $stamp;
+
+        return $copy->copies;
     }
 }

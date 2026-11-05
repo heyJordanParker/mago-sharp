@@ -362,38 +362,19 @@ impl<'input> Converter<'input, '_> {
         }
     }
 
-    /// `clone $x` as `x with { }`, a copy with no property set (spec section 10). PHP runs a class's `__clone` on the
-    /// copy, which `with` doesn't, so a class that declares one keeps the file plain PHP.
+    /// `clone $x` as `x with { }`, a copy with no property set (spec section 10). `with` runs as PHP's `clone`, so a
+    /// class's `__clone` runs on the copy as it does in PHP.
     fn clone(&mut self, expression: &Expression<'_>, object: &Expression<'_>) {
-        let codebase = self.input.codebase;
-        let classes: Vec<String> = self
-            .type_of(object)
-            .map(|union| {
-                union
-                    .types
-                    .iter()
-                    .filter_map(|atomic| match atomic {
-                        TAtomic::Object(mago_codex::ttype::atomic::object::TObject::Named(named)) => {
-                            Some(named.name.as_str_lossy().into_owned())
-                        }
-                        _ => None,
-                    })
-                    .collect()
+        let known = self.type_of(object).is_some_and(|union| {
+            union.types.iter().any(|atomic| {
+                matches!(atomic, TAtomic::Object(mago_codex::ttype::atomic::object::TObject::Named(_)))
             })
-            .unwrap_or_default();
-        if classes.is_empty() {
+        });
+        if !known {
             let shown = self.shown(object);
             return self.refuse(
                 expression.span(),
                 format!("`clone` of `{shown}` is not converted yet: `with` copies a value of a known class"),
-            );
-        }
-        if let Some(class) =
-            classes.iter().find(|class| codebase.get_declaring_method(class.as_bytes(), b"__clone").is_some())
-        {
-            return self.refuse(
-                expression.span(),
-                format!("`{class}` declares `__clone`, which PHP runs on a copy and `with` doesn't (spec section 10)"),
             );
         }
         self.expression(object, None);
