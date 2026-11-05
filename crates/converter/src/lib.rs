@@ -388,12 +388,25 @@ impl<'input> Converter<'input, '_> {
 
         let mut written = Vec::new();
         for (index, (name, template)) in class.template_types.iter().enumerate() {
+            // Spec section 11: `T`, or `T` and a capital letter. Another name would need each use renamed, those a
+            // refinement reads from the class's own attributes among them.
+            let named = name.as_bytes();
+            if named.first() != Some(&b'T') || named.get(1).is_some_and(|second| !second.is_ascii_uppercase()) {
+                self.refuse(
+                    span,
+                    format!(
+                        "the type parameter `{name}` has no PHP# name: PHP# names one `T`, or `T` and a capital letter, as in `TItem` (spec section 11)"
+                    ),
+                );
+                return None;
+            }
             let variance = match class.template_variance.get(index) {
                 Some(Variance::Covariant) => "out ",
                 Some(Variance::Contravariant) => "in ",
                 _ => "",
             };
-            if template.constraint.is_mixed() {
+            // A bound that holds any value, `null` among them, bounds nothing, which no bound says (spec section 11).
+            if template.constraint.has_mixed() {
                 written.push(format!("{variance}{name}"));
             } else {
                 let bound = self.type_text(&template.constraint, span)?;
