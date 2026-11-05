@@ -2,8 +2,13 @@
 //! first assigned.
 
 use mago_allocator::LocalArena;
+use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::reference::SymbolReferences;
+use mago_codex::ttype::atomic::TAtomic;
+use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::builder::get_union_from_type;
+use mago_codex::ttype::combine_union_types;
+use mago_codex::ttype::combiner::CombinerOptions;
 use mago_codex::ttype::expander::TypeExpansionOptions;
 use mago_codex::ttype::expander::expand_union;
 use mago_codex::ttype::union::TUnion;
@@ -17,12 +22,16 @@ use mago_syntax::cst::Access;
 use mago_syntax::cst::ArrayElement;
 use mago_syntax::cst::Assignment;
 use mago_syntax::cst::AssignmentOperator;
+use mago_syntax::cst::Call;
 use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::DirectVariable;
 use mago_syntax::cst::Expression;
+use mago_syntax::cst::FunctionCall;
+use mago_syntax::cst::Instantiation;
 use mago_syntax::cst::Literal;
 use mago_syntax::cst::Statement;
 use mago_syntax::cst::TokenSeparatedSequence;
+use mago_syntax::cst::UnaryPrefixOperator;
 use mago_syntax::cst::Variable;
 
 use super::Kind;
@@ -84,8 +93,33 @@ struct Local {
     declaration: Option<Declaration>,
     /// Whether something writes it after its declaration.
     rewritten: bool,
-    /// A place that names it outside the block that declares it, and the analysis's type of it there.
-    escapes: Option<(Span, Option<TUnion>)>,
+    /// A place that names it outside the block that declares it.
+    escapes: Option<Span>,
+    /// Each value written to it, which the type of a local declared first in the body is made of.
+    writes: Vec<Write>,
+}
+
+/// A value an assignment writes to a local.
+#[derive(Debug)]
+struct Write {
+    /// Where the value is.
+    at: Span,
+    /// The analysis's type of what the write leaves in the local.
+    union: Option<TUnion>,
+    source: Source,
+}
+
+/// Where the type of a value written to a local comes from (decision 2).
+#[derive(Debug, Clone, Copy)]
+enum Source {
+    /// A `@var` tag on the assignment, which declares the type of the local itself, so every value written to it has it.
+    Tagged,
+    /// A literal, or a declaration, a PHPDoc tag, an extension host's refinement or a type inherited from the parent.
+    Declared,
+    /// The variable of the local at this index of [`Locals::entries`], whose writes give its type.
+    Local(usize),
+    /// Nothing declares it, so only the analysis's inference gives its type.
+    Inferred,
 }
 
 #[derive(Debug)]
@@ -153,9 +187,106 @@ impl Converter<'_, '_> {
 
         self.declare(statement, variable, written.as_ref().map(|(text, _)| text.clone()));
         let expected = written.map(|(_, union)| union);
+        match &expected {
+            Some(tagged) => self.wrote(variable.name, rhs.span(), Some(tagged.clone()), Source::Tagged),
+            None => self.wrote(variable.name, rhs.span(), self.type_of(rhs).cloned(), self.source(rhs)),
+        }
         self.expression(rhs, expected.as_ref());
 
         true
+    }
+
+    /// Records that a write gives the local `name` the value at `at`, of type `union`, whose type comes from `source`.
+    fn wrote(&mut self, name: &[u8], at: Span, union: Option<TUnion>, source: Source) {
+        let Some(method) = self.method.as_mut() else {
+            return;
+        };
+        if let Some((_, local)) = method.locals.entries.iter_mut().rev().find(|(local, _)| local.as_slice() == name) {
+            local.writes.push(Write { at, union, source });
+        }
+    }
+
+    /// Where the type of `value`, written to a local, comes from: a literal, a parameter, a property, the return of a
+    /// call or a `new` of a class with no type parameters, whose declarations give it, or another local, whose writes
+    /// do. Any other value's type is the analysis's inference, which the converter never writes (decision 2).
+    fn source(&self, value: &Expression<'_>) -> Source {
+        let declared = |declared: bool| if declared { Source::Declared } else { Source::Inferred };
+        let returns =
+            |function: Option<&FunctionLikeMetadata>| {
+                declared(function.is_some_and(|function| {
+                    function.return_from_body.is_none() && function.return_type_metadata.is_some()
+                }))
+            };
+        match value {
+            Expression::Parenthesized(parenthesized) => self.source(parenthesized.expression),
+            Expression::Literal(_) => Source::Declared,
+            Expression::UnaryPrefix(unary)
+                if matches!(unary.operator, UnaryPrefixOperator::Negation(_) | UnaryPrefixOperator::Plus(_))
+                    && matches!(unary.operand, Expression::Literal(_)) =>
+            {
+                Source::Declared
+            }
+            Expression::Variable(Variable::Direct(variable)) => {
+                let Some(method) = self.method.as_ref() else {
+                    return Source::Inferred;
+                };
+                if variable.name == b"$this" || method.parameters.iter().any(|parameter| parameter == variable.name) {
+                    return Source::Declared;
+                }
+                // A lambda's capture is the variable of the body around it, whose writes this body doesn't see.
+                if !self.is_local(variable.name) {
+                    return Source::Inferred;
+                }
+                method
+                    .locals
+                    .entries
+                    .iter()
+                    .rposition(|(local, _)| local.as_slice() == variable.name)
+                    .map_or(Source::Inferred, Source::Local)
+            }
+            Expression::Access(Access::Property(access)) => {
+                declared(self.declared_property(access.object, &access.property))
+            }
+            Expression::Access(Access::NullSafeProperty(access)) => {
+                declared(self.declared_property(access.object, &access.property))
+            }
+            Expression::Call(Call::Method(call)) => returns(self.method_of(self.type_of(call.object), &call.method)),
+            Expression::Call(Call::NullSafeMethod(call)) => {
+                returns(self.method_of(self.type_of(call.object), &call.method))
+            }
+            Expression::Call(Call::StaticMethod(call)) => returns(self.static_method_of(call)),
+            Expression::Call(Call::Function(FunctionCall { function: Expression::Identifier(identifier), .. })) => {
+                returns(self.function_of(identifier))
+            }
+            Expression::Instantiation(Instantiation { class: Expression::Identifier(identifier), .. }) => declared(
+                self.input
+                    .codebase
+                    .get_class_like(self.input.names.get(identifier))
+                    .is_some_and(|class| class.template_types.is_empty()),
+            ),
+            _ => Source::Inferred,
+        }
+    }
+
+    /// Whether the class of `object` declares a type for its property `property`: natively, in PHPDoc, by an extension
+    /// host's refinement, or by inheriting it.
+    fn declared_property(&self, object: &Expression<'_>, property: &ClassLikeMemberSelector<'_>) -> bool {
+        let ClassLikeMemberSelector::Identifier(name) = property else {
+            return false;
+        };
+        let Some(union) = self.type_of(object) else {
+            return false;
+        };
+        let classes: Vec<&TAtomic> = union.types.iter().filter(|atomic| !atomic.is_null()).collect();
+        let [TAtomic::Object(TObject::Named(class))] = classes.as_slice() else {
+            return false;
+        };
+        let property = [b"$".as_slice(), name.value].concat();
+
+        self.input
+            .codebase
+            .get_declaring_property(class.name.as_bytes(), &property)
+            .is_some_and(|metadata| metadata.type_metadata.is_some())
     }
 
     /// Declares the local `variable` at its first assignment, in `statement`, with the type `written` gives.
@@ -178,6 +309,7 @@ impl Converter<'_, '_> {
                 declaration: Some(declaration),
                 rewritten: false,
                 escapes: None,
+                writes: Vec::new(),
             },
         ));
         self.edits.replace(variable.span, Self::variable_name(variable.name));
@@ -238,6 +370,8 @@ impl Converter<'_, '_> {
             } else {
                 self.declare(statement, variable, None);
             }
+            let union = self.input.artifacts.get_expression_type(variable).cloned();
+            self.wrote(variable.name, variable.span, union, self.source(source));
             let end = variable.span.end.offset;
             if index == last {
                 self.edits.insert(end, format!(" = {read}.get({key})"));
@@ -305,9 +439,16 @@ impl Converter<'_, '_> {
         })
     }
 
-    /// Declares `variable`, a loop's own, at `at` and scoped to `scope`, the loop, and gives whether it could. A PHP#
-    /// loop declares its variables, so one a block around the loop already names is refused (spec section 17).
-    pub(super) fn loop_local(&mut self, variable: &DirectVariable<'_>, at: u32, scope: Span) -> bool {
+    /// Declares `variable`, a loop's own over `iterable`, at `at` and scoped to `scope`, the loop, and gives whether it
+    /// could. A PHP# loop declares its variables, so one a block around the loop already names is refused (spec
+    /// section 17).
+    pub(super) fn loop_local(
+        &mut self,
+        variable: &DirectVariable<'_>,
+        iterable: &Expression<'_>,
+        at: u32,
+        scope: Span,
+    ) -> bool {
         if !self.is_local(variable.name) || self.in_scope(variable.name, variable.span.start.offset) {
             let name = String::from_utf8_lossy(variable.name);
             self.refuse(
@@ -318,6 +459,12 @@ impl Converter<'_, '_> {
             );
             return false;
         }
+        // Each pass writes the loop's variable an element of what it loops over, whose type that value's source gives.
+        let write = Write {
+            at: variable.span,
+            union: self.input.artifacts.get_expression_type(variable).cloned(),
+            source: self.source(iterable),
+        };
         let Some(method) = self.method.as_mut() else {
             return false;
         };
@@ -330,6 +477,7 @@ impl Converter<'_, '_> {
                 declaration: Some(declaration),
                 rewritten: false,
                 escapes: None,
+                writes: vec![write],
             },
         ));
 
@@ -408,12 +556,19 @@ impl Converter<'_, '_> {
                     && !(declaration.block.start.offset <= span.start.offset
                         && span.end.offset <= declaration.block.end.offset)
                 {
-                    local.escapes = Some((span, union()));
+                    local.escapes = Some(span);
                 }
             }
             None => method.locals.entries.push((
                 name.to_vec(),
-                Local { first: span, last: span, declaration: None, rewritten: write, escapes: None },
+                Local {
+                    first: span,
+                    last: span,
+                    declaration: None,
+                    rewritten: write,
+                    escapes: None,
+                    writes: Vec::new(),
+                },
             )),
         }
     }
@@ -422,9 +577,9 @@ impl Converter<'_, '_> {
     /// to it is known. A loop declares its key and value at one place, which takes `let` when either is written.
     ///
     /// A local read after the block that assigns it is declared first in the body of its method or lambda, as `T? name
-    /// = null;`, with the analysis's type of it where it escapes (spec section 3). PHP has one variable of a name in a
-    /// function, which keeps its value from one pass of a loop to the next, so each assignment of the name then writes
-    /// it.
+    /// = null;` (spec section 3). PHP has one variable of a name in a function, which keeps its value from one pass of a
+    /// loop to the next, so each assignment of the name then writes it. `T` joins the types of the values assigned to
+    /// it, and is written only when a declaration gives each of them (decision 2).
     pub(crate) fn declare_locals(&mut self) {
         let Some(method) = self.method.as_mut() else {
             return;
@@ -437,7 +592,7 @@ impl Converter<'_, '_> {
         // the body of the method or lambda it belongs to, where no pass of a loop declares it again.
         let mut hoisted: Vec<Vec<u8>> = Vec::new();
         for (name, local) in &locals {
-            let (Some(declaration), Some((span, Some(escaping)))) = (&local.declaration, &local.escapes) else {
+            let (Some(declaration), Some(span)) = (&local.declaration, &local.escapes) else {
                 continue;
             };
             let Some(body) = body.filter(|_| declaration.hoistable) else {
@@ -446,7 +601,32 @@ impl Converter<'_, '_> {
             if hoisted.contains(name) {
                 continue;
             }
-            let mut union = escaping.clone();
+            if let Some(at) = inferred_write(&locals, name, &mut Vec::new()) {
+                let (shown, value) = (String::from_utf8_lossy(name), String::from_utf8_lossy(self.text(at)));
+                self.refuse(
+                    at,
+                    format!("`{shown}` is read after the block that assigns it, so PHP# declares it first in the body with a type, and no declaration gives the type of `{value}`, which it is assigned: declare its type with a `@var` tag (decision 2)"),
+                );
+                hoisted.push(name.clone());
+                continue;
+            }
+            let codebase = self.input.codebase;
+            let tagged = writes(&locals, name).find(|write| matches!(write.source, Source::Tagged));
+            let joined = match tagged {
+                Some(tagged) => tagged.union.clone(),
+                None => writes(&locals, name)
+                    .try_fold(None, |joined: Option<TUnion>, write| {
+                        let union = write.union.as_ref()?;
+                        Some(Some(match joined {
+                            Some(joined) => combine_union_types(&joined, union, codebase, CombinerOptions::default()),
+                            None => union.clone(),
+                        }))
+                    })
+                    .flatten(),
+            };
+            let Some(mut union) = joined else {
+                continue;
+            };
             union.widen_scalars();
             let Some(written) = self.type_text(&union.as_nullable(), *span) else {
                 continue;
@@ -489,7 +669,7 @@ impl Converter<'_, '_> {
                 }
                 continue;
             }
-            if let Some((span, _)) = local.escapes {
+            if let Some(span) = local.escapes {
                 self.refuse(
                     span,
                     format!("`{shown}` is named here, after the block it is first assigned in, which is not converted yet: PHP# scopes a local to its block (spec section 3)"),
@@ -632,6 +812,11 @@ impl Converter<'_, '_> {
 
         let declared = self.declared_type(lhs).or_else(|| expected.cloned());
         self.written(lhs);
+        if let Expression::Variable(Variable::Direct(variable)) = lhs {
+            // A compound write leaves what its operator gives, as `$sum += 0.5` makes an `int` sum a `float`.
+            let left = if assignment.operator.is_assign() { rhs } else { expression };
+            self.wrote(variable.name, rhs.span(), self.type_of(left).cloned(), self.source(rhs));
+        }
         self.expression(rhs, declared.as_ref());
     }
 
@@ -667,6 +852,30 @@ fn destructured<'ast, 'arena>(place: &'ast Expression<'arena>) -> Option<Element
         Expression::List(list) => Some(&list.elements),
         _ => None,
     }
+}
+
+/// The values written to the variable `name`, which PHP has one of in a function, whichever of `locals` declares it.
+fn writes<'locals>(locals: &'locals [(Vec<u8>, Local)], name: &'locals [u8]) -> impl Iterator<Item = &'locals Write> {
+    locals.iter().filter(move |(local, _)| local.as_slice() == name).flat_map(|(_, local)| &local.writes)
+}
+
+/// Where a value is written to the variable `name` whose type no declaration gives, directly or through the writes of
+/// the local it is read from. `seen` holds the variables already followed, as one read from itself.
+fn inferred_write<'locals>(
+    locals: &'locals [(Vec<u8>, Local)],
+    name: &'locals [u8],
+    seen: &mut Vec<&'locals [u8]>,
+) -> Option<Span> {
+    if seen.contains(&name) || writes(locals, name).any(|write| matches!(write.source, Source::Tagged)) {
+        return None;
+    }
+    seen.push(name);
+
+    writes(locals, name).find_map(|write| match write.source {
+        Source::Tagged | Source::Declared => None,
+        Source::Inferred => Some(write.at),
+        Source::Local(local) => inferred_write(locals, &locals[local].0, seen).map(|_| write.at),
+    })
 }
 
 /// Whether `value` says nothing of what a local holds: `null`, or an empty array.

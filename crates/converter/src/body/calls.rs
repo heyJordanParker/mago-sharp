@@ -21,6 +21,7 @@ use mago_syntax::cst::Expression;
 use mago_syntax::cst::FunctionCall;
 use mago_syntax::cst::Identifier;
 use mago_syntax::cst::Instantiation;
+use mago_syntax::cst::StaticMethodCall;
 
 use super::Kind;
 use crate::Converter;
@@ -180,22 +181,26 @@ impl<'input> Converter<'input, '_> {
                 self.expression(call.class, None);
                 self.edits.replace(call.double_colon, ".");
                 self.member(&call.method);
-                // A class the call names, or `self`, `static` and `parent`, which the analysis types as the class.
-                let class = match call.class {
-                    Expression::Identifier(identifier) => Some(self.input.names.get(identifier).to_vec()),
-                    _ => self.class.as_ref().map(|class| class.metadata.name.as_bytes().to_vec()),
-                };
-                let method = match (&call.method, class) {
-                    (ClassLikeMemberSelector::Identifier(name), Some(class)) => {
-                        self.input.codebase.get_declaring_method(&class, name.value)
-                    }
-                    _ => None,
-                };
+                let method = self.static_method_of(call);
                 self.arguments(&call.argument_list, method);
             }
             Call::Function(call) => self.function_call(call),
             Call::NullSafeFunction(_) => self.refuse(call.span(), "`?.(…)` on a function has no PHP# form"),
         }
+    }
+
+    /// The method a static call runs, of the class it names, or of the class being converted for `self`, `static` and
+    /// `parent`, which the analysis types as the class.
+    pub(super) fn static_method_of(&self, call: &StaticMethodCall<'_>) -> Option<&'input FunctionLikeMetadata> {
+        let ClassLikeMemberSelector::Identifier(name) = &call.method else {
+            return None;
+        };
+        let class = match call.class {
+            Expression::Identifier(identifier) => self.input.names.get(identifier),
+            _ => self.class.as_ref()?.metadata.name.as_bytes(),
+        };
+
+        self.input.codebase.get_declaring_method(class, name.value)
     }
 
     /// Refuses `self::m()`, or its method value `self::m(...)`, at `span` in a class a subclass can extend, and gives

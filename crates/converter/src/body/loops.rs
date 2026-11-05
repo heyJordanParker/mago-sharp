@@ -69,7 +69,7 @@ impl Converter<'_, '_> {
         // The loop declares its variables right after its `(`, where `const` or `let` goes.
         let at = foreach.left_parenthesis.end.offset;
         for variable in &variables {
-            if !self.loop_local(variable, at, statement.span()) {
+            if !self.loop_local(variable, iterable, at, statement.span()) {
                 return;
             }
         }

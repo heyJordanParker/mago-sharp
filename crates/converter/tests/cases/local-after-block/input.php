@@ -45,4 +45,29 @@ final class Pricing
 
         return $sum;
     }
+
+    // The local's type joins those of the values assigned to it, which a declaration or a literal gives.
+    public function chosen(bool $wide): int
+    {
+        if ($wide) {
+            $size = $this->price($wide);
+        } else {
+            $size = 1;
+        }
+
+        return $size;
+    }
+
+    // A `@var` tag on any assignment of the local declares its type, which every value assigned to it has.
+    public function tagged(bool $wide, int $count): int
+    {
+        if ($wide) {
+            $size = $count * 2;
+        } else {
+            /** @var int $size */
+            $size = 1;
+        }
+
+        return $size;
+    }
 }
