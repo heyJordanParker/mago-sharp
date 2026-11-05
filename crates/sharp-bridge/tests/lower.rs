@@ -13537,6 +13537,34 @@ fn a_bound_writes_a_type_parameter_of_its_own_class_as_any() {
 /// own type parameters and a type text list with each parameter's type, `Any?` for one the engine never checks. Plain
 /// PHP's generics are erased, so a parameter of a plain PHP class with type arguments is never checked, and a call from
 /// plain PHP gives a method's own type parameters none, so a parameter of one is never checked either.
+/// Spec section 11: a bound is a class or an interface, so `Any?` is a bound the checker refuses in its own file, which
+/// bounds nothing. A file that creates the class has no error of its own, and lowers its `new` with its type argument.
+#[test]
+fn a_new_of_a_class_whose_bound_is_refused_lowers() {
+    let r#box = (
+        "src/App/Box.sharp",
+        "namespace App;\n\npublic class Box<T : Any?>\n{\n    public Box(public T item { get; }) { }\n}\n",
+    );
+    let lowered = Lowered::with(
+        "namespace App;\n\npublic class Packer\n{\n    public Box<int> pack() => new Box<int>(1);\n}\n",
+        &[r#box],
+    );
+
+    assert_eq!(
+        lowered.body_of("pack"),
+        indoc! {r#"
+            STMT_LIST
+              RETURN
+                SHARP_TYPE_ARGS
+                  NEW
+                    ZVAL "App\\Box"
+                    ARG_LIST
+                      ZVAL 1
+                  ZVAL "int"
+        "#}
+    );
+}
+
 #[test]
 fn a_generic_call_carries_its_type_arguments_and_a_generic_method_its_metadata() {
     let entities = (
