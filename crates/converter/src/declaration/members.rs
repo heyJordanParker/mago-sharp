@@ -326,7 +326,8 @@ impl Converter<'_, '_> {
 
     /// A class constant as `public const int LIMIT = 3;`, one declaration per name, with the type its declaration
     /// writes or its value has (spec section 2). PHP's `final` goes, since a PHP# subclass declares no constant of its
-    /// parent's.
+    /// parent's. A constant with no PHP type converts only where no subclass declares it again, since PHP makes a
+    /// subclass's constant keep a type its parent's declares.
     pub(super) fn class_constant(&mut self, constant: &ClassLikeConstant<'_>) {
         let Some(class) = self.class.as_ref() else {
             return;
@@ -342,9 +343,21 @@ impl Converter<'_, '_> {
         let span = constant.span();
         let start = constant.modifiers.first().map_or(constant.r#const.span, HasSpan::span).start.offset;
         let attributes = self.edits.render(self.source, span.start.offset, start);
+        // The lowering writes the type into the constant's PHP, which a subclass's constant of the name must then keep.
+        let overridable = constant.hint.is_none()
+            && visibility != "private"
+            && !metadata.flags.is_final()
+            && !metadata.kind.is_enum();
         let mut declarations = Vec::new();
         for item in constant.items.iter() {
             let name = String::from_utf8_lossy(item.name.value).into_owned();
+            if overridable {
+                self.refuse(
+                    item.name.span,
+                    format!("the constant `{name}` has no type in PHP, and the type PHP# gives it would bind a subclass's `{name}` to a compatible one: a constant with no type converts only in a `final` class or as `private`"),
+                );
+                continue;
+            }
             let declared = metadata.constants.get(&word(item.name.value));
             let union = declared.and_then(|declared| {
                 declared
