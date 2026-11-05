@@ -662,9 +662,10 @@ mod tests {
     }
 
     /// A folder of 200 classes, each calling the one before it, converts in one proof of them all, so the proof's cost
-    /// stays one analysis of the project, never one per file.
+    /// stays one analysis of the project, never one per file. The bound is a multiple of a run that converts nothing,
+    /// which analyzes and compiles the same project, so a busy machine slows both alike.
     #[test]
-    fn two_hundred_classes_convert_within_fifteen_seconds() {
+    fn two_hundred_classes_convert_in_one_proof_of_them_all() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().canonicalize().unwrap();
         std::fs::write(root.join("mago.toml"), "php-version = \"8.5\"\n\n[source]\npaths = [\"src\"]\n").unwrap();
@@ -686,23 +687,34 @@ mod tests {
             )
             .unwrap();
         }
-        let configuration = Configuration::load(CliOverrides {
-            workspace: Some(root.clone()),
-            config: Some(root.join("mago.toml")),
-            no_version_check: true,
-            ..Default::default()
-        })
-        .unwrap();
-
-        let start = Instant::now();
-        let outcome = ConvertCommand { paths: vec![root.join("src")], dry_run: false }
-            .execute(configuration, ColorChoice::Never)
+        let convert = |path: &str| {
+            let configuration = Configuration::load(CliOverrides {
+                workspace: Some(root.clone()),
+                config: Some(root.join("mago.toml")),
+                no_version_check: true,
+                ..Default::default()
+            })
             .unwrap();
+            let start = Instant::now();
+            let outcome = ConvertCommand { paths: vec![root.join(path)], dry_run: false }
+                .execute(configuration, ColorChoice::Never)
+                .unwrap();
 
-        assert_eq!(outcome.exit_code, ExitCode::SUCCESS);
+            (outcome.exit_code, start.elapsed())
+        };
+
+        // A path that names no file: the project's analysis and compile, with nothing to prove.
+        let (_, nothing) = convert("src/Missing.php");
+        let (exit_code, all) = convert("src");
+
+        assert_eq!(exit_code, ExitCode::SUCCESS);
         assert!(root.join("src/Step199.sharp").exists() && !root.join("src/Step199.php").exists());
-        // Measured on an Apple Silicon Mac: 3.8 s in this debug test. In release builds, the 200 classes took 1.6 s,
-        // where proving each file alone took 7.1 s, and 20 s a file on a 1,200-file project with extension hosts.
-        assert!(start.elapsed().as_secs() < 15, "200 classes took {:?}, past the 15 s bound", start.elapsed());
+        // Measured on a 12-core Apple Silicon Mac at a load average of 25: in this debug test the run that converts
+        // nothing took 1.6 s and the 200 classes 14.6 s, the converter's unoptimized work on each file the most of it.
+        // The release binary took 0.18 s and 0.29 s. Proving each file alone runs 200 proofs, past the bound.
+        assert!(
+            all < nothing * 20,
+            "200 classes took {all:?}, past 20 times the {nothing:?} of a run that converts nothing"
+        );
     }
 }
