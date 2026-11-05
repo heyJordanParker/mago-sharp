@@ -1,14 +1,16 @@
 /-
 `sharp-lean`: the program Mago runs to prove PHP# laws.
 
-Mago writes one `Check` request to standard input and reads the answer from standard output. The request names the
-generated modules of one `.sharp` file's code and the theorems of its laws, after the theorems of each law they call. The
-runner imports the modules, as `lake exe runLinter` imports a module, elaborates each theorem with the steps of
-`Sharp.Lean.Proof`, and answers for each law of the file: proven, each case and condition its proof left open with the
-goal, the law not proven it holds through, or Lean's error.
+Mago writes one `Check` request to standard input and reads the answer from standard output. The request holds a check
+for each `.sharp` file whose laws one `mago compile` proves: the generated modules of its code and the theorems of its
+laws, after the theorems of each law they call. The runner imports the runtime library once, then for each check
+elaborates its generated modules from their sources in the package, which Lake built, on top of that one import,
+elaborates each theorem with the steps of `Sharp.Lean.Proof`, and answers for each law of the file: proven, each case
+and condition its proof left open with the goal, the law not proven it holds through, or Lean's error.
 
-One runner answers one request because Lean cannot free an imported environment while the tasks that elaborated a
-theorem may still hold parts of it. Lean's own server likewise restarts a file's worker to import anew.
+One runner answers every check of a compile because Lean cannot free an imported environment while the tasks that
+elaborated a theorem may still hold parts of it, so a runner imports once. A check's modules are elaborated rather than
+imported, so each check sees its own modules alone, as it would have imported them, and drops them when it ends.
 -/
 import Lean
 import Sharp.Lean.Law
@@ -76,13 +78,13 @@ def kind : Decode UInt16 := do
   set 4
   let major ← u16
   let minor ← u16
-  unless major == 1 do throw s!"unsupported law protocol version {major}.{minor}"
+  unless major == 2 do throw s!"unsupported law protocol version {major}.{minor}"
   let kind ← u16
   let _reserved ← u16
   return kind
 
 def header (kind : UInt16) : ByteArray :=
-  lawMagic |>.push 0 |>.push 1 |>.push 0 |>.push 0 |>.push (kind >>> 8).toUInt8 |>.push kind.toUInt8
+  lawMagic |>.push 0 |>.push 2 |>.push 0 |>.push 0 |>.push (kind >>> 8).toUInt8 |>.push kind.toUInt8
     |>.push 0 |>.push 0
 
 /-! The `Check` request and its answer. -/
@@ -93,7 +95,7 @@ structure Theorem where
   text : String
   judged : Bool
 
-/-- A request: the modules to import, and the theorems, each after every theorem it uses. -/
+/-- One check of a request: the modules its theorems import, and the theorems, each after every theorem it uses. -/
 structure Check where
   modules : Array Name
   theorems : Array Theorem
@@ -143,14 +145,14 @@ def reachedOf (env : Environment) (name : Name) (targets : Array Name) : Option 
       pending := pending.push used
   return none
 
-/-- Elaborates each theorem in order, each with the theorems before it in scope, and answers for each judged one: `0`
-when it is proven; `1` and each step whose goal stays open, as its kind, its index and its goal; `2` and the statement
-of the law not proven that it holds through; or `3` and Lean's first error, when Lean rejected the theorem, or the
-axioms it rests on, when it has a gap no law it holds through explains. -/
-def answer (env : Environment) (request : Check) : IO ByteArray := do
+/-- Elaborates each theorem in order, each with the theorems before it in scope, and appends to `b` the count of judged
+ones and the answer for each: `0` when it is proven; `1` and each step whose goal stays open, as its kind, its index and
+its goal; `2` and the statement of the law not proven that it holds through; or `3` and Lean's first error, when Lean
+rejected the theorem, or the axioms it rests on, when it has a gap no law it holds through explains. -/
+def answer (env : Environment) (request : Check) (b : ByteArray) : IO ByteArray := do
   let mut env := env
   let mut gaps : Array Name := #[]
-  let mut b := putU32 (header checkedResponse) (request.theorems.filter (·.judged)).size.toUInt32
+  let mut b := putU32 b (request.theorems.filter (·.judged)).size.toUInt32
   for item in request.theorems do
     let input := Parser.mkInputContext s!"open Sharp\n{item.text}" "<law>"
     let state ← IO.processCommands input {} (Command.mkState env {} {})
@@ -189,17 +191,69 @@ partial def readAll (stream : IO.FS.Stream) (bytes : ByteArray := .empty) : IO B
   let chunk ← stream.read 65536
   if chunk.isEmpty then return bytes else readAll stream (bytes ++ chunk)
 
-/-- Reads the request to the end of standard input and writes its answer to standard output. Any failure ends the
-runner with its message on standard error. -/
+/-! The generated modules, under the root `Code`, which a check elaborates from their sources in the package, and the
+runtime library they import, which the runner imports once. -/
+
+def isGenerated (module : Name) : Bool := module.getRoot == `Code
+
+/-- The source of the generated `module` and its header, as Lake reads them in the package: `Code/App/Money.lean` of
+`Code.App.Money`. -/
+def source (module : Name) : IO (Parser.InputContext × Elab.HeaderSyntax × Parser.ModuleParserState × MessageLog) := do
+  let path := System.mkFilePath (module.components.map (·.toString (escape := false))) |>.addExtension "lean"
+  let input := Parser.mkInputContext (← IO.FS.readFile path) path.toString
+  let (header, parserState, messages) ← Parser.parseHeader input
+  return (input, header, parserState, messages)
+
+/-- Each module of the runtime library that `modules`, or a generated module they import, imports: the modules every
+check imports, so the runner imports them once. -/
+partial def libraryOf (modules : Array Name) (seen : NameSet := {}) (library : Array Name := #[]) :
+    IO (NameSet × Array Name) := do
+  let mut (seen, library) := (seen, library)
+  for module in modules do
+    if seen.contains module then continue
+    seen := seen.insert module
+    if !isGenerated module then
+      library := library.push module
+      continue
+    let (_, header, _, _) ← source module
+    (seen, library) ← libraryOf ((Elab.headerToImports header (includeInit := false)).map (·.module)) seen library
+  return (seen, library)
+
+/-- `env` with the generated `module` elaborated from its source, after each generated module it imports, as Lake
+built it: as the main module, with no options. `done` holds the modules `env` already has. Lake built every module a
+check names, so a module that does not elaborate ends the runner. -/
+partial def elaborate (module : Name) (env : Environment) (done : NameSet) : IO (Environment × NameSet) := do
+  if done.contains module then return (env, done)
+  let (input, header, parserState, messages) ← source module
+  let mut (env, done) := (env, done.insert module)
+  for imported in Elab.headerToImports header (includeInit := false) do
+    if isGenerated imported.module then
+      (env, done) ← elaborate imported.module env done
+  let main := env.mainModule
+  let state ← IO.processCommands input parserState (Command.mkState (env.setMainModule module) messages {})
+  if state.commandState.messages.hasErrors then
+    throw <| IO.userError s!"the generated module {module}, which Lake built, does not elaborate"
+  return (state.commandState.env.setMainModule main, done)
+
+/-- Reads the request to the end of standard input, imports the runtime library its checks import, and writes the
+answer of each check, in order, to standard output. Any failure ends the runner with its message on standard error. -/
 def respond : IO Unit := do
   let bytes ← readAll (← IO.getStdin)
   let decode {α : Type} (body : Decode α) : IO α :=
     IO.ofExcept <| (((do let _ ← kind; body).run' 0).run bytes).mapError IO.userError
   let requested ← decode kind
   unless requested == checkRequest do throw <| IO.userError s!"unknown law request kind {requested}"
-  let request ← decode check
+  let checks ← decode (many check)
+  let (_, library) ← libraryOf (checks.flatMap (·.modules))
+  let env ← importModules (library.map ({ module := · })) {} (loadExts := true)
+  let mut b := putU32 (header checkedResponse) checks.size.toUInt32
+  for request in checks do
+    let mut (checked, done) := (env, ({} : NameSet))
+    for module in request.modules.filter isGenerated do
+      (checked, done) ← elaborate module checked done
+    b ← answer checked request b
   let stdout ← IO.getStdout
-  stdout.write (← answer (← importModules (request.modules.map ({ module := · })) {} (loadExts := true)) request)
+  stdout.write b
   stdout.flush
 
 end Sharp.Runner

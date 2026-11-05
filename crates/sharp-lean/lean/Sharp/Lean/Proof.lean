@@ -105,11 +105,14 @@ partial def tree (e : Expr) : MetaM Json := do
     return node "app" (#[.str (written name)] ++ explicit)
   | _ => return node "?" #[]
 
-/-- Whether a generated module of the project's code, under the root `Code`, declares `name`. -/
+/-- Whether a generated module of the project's code, under the root `Code`, declares `name`: a module the environment
+imports, or one `sharp-lean` elaborated on top of the runtime library, whose declarations belong to no imported module.
+The only other declarations without a module are the theorems `sharp-lean` elaborates, which name no definition of their
+own that a goal reaches. -/
 private def isCode (env : Environment) (name : Name) : Bool :=
   match env.getModuleIdxFor? name with
   | some index => env.header.moduleNames[index.toNat]!.getRoot == `Code
-  | none => false
+  | none => true
 
 /-- Each definition of the project's code that `e` names, apart from a structure's fields and a law's statement. -/
 private def definitionsIn (e : Expr) : MetaM (Array Name) := do

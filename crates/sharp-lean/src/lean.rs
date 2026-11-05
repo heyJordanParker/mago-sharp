@@ -15,7 +15,6 @@ use mago_database::file::FileId;
 use mago_reporting::Issue;
 use mago_reporting::IssueCollection;
 use mago_sharp_bridge::unit;
-use rayon::prelude::*;
 
 use crate::goal;
 use crate::goal::Names;
@@ -27,6 +26,7 @@ use crate::package::Program;
 use crate::package::Toolchain;
 use crate::package::place_of;
 use crate::runner;
+use crate::runner::Check;
 use crate::runner::Judgment;
 use crate::runner::Theorem;
 use crate::translate::Law;
@@ -293,11 +293,31 @@ impl Proofs<'_> {
         }
         work.retain(|translation| !failed.modules.contains(&self.host_of(translation)));
 
-        // One runner per file, run on Mago's thread pool, so `threads` caps how many run at once.
-        let answers: Vec<io::Result<Vec<(&Law, Judgment)>>> =
-            work.par_iter().map(|translation| self.judge(translation)).collect();
+        // One runner answers the check of every file, so Lean and the runtime library are imported once per compile.
+        let mut answers: Vec<Vec<(&Law, Judgment)>> = Vec::with_capacity(work.len());
+        let mut checked: Vec<usize> = Vec::new();
+        let mut checks: Vec<Check<'_>> = Vec::new();
+        for (index, translation) in work.iter().enumerate() {
+            let (judgments, check) = self.check(translation);
+            answers.push(judgments);
+            if let Some(check) = check {
+                checked.push(index);
+                checks.push(check);
+            }
+        }
+        if !checks.is_empty() {
+            let answered = runner::check(self.library, self.package, &checks)?;
+            for ((index, check), answered) in checked.into_iter().zip(&checks).zip(answered) {
+                let order = check.theorems.iter().filter(|theorem| theorem.judged).map(|theorem| theorem.statement);
+                for (statement, judgment) in order.zip(answered) {
+                    if let Some(law) = work[index].laws.iter().find(|law| law.statement == statement) {
+                        answers[index].push((law, judgment));
+                    }
+                }
+            }
+        }
         for (translation, answers) in work.into_iter().zip(answers) {
-            for (law, judgment) in answers? {
+            for (law, judgment) in answers {
                 for issue in judged(law, judgment, &self.receivers, &self.declared) {
                     report(issues, translation, issue);
                 }
@@ -307,8 +327,9 @@ impl Proofs<'_> {
         Ok(())
     }
 
-    /// How the runner judges each law of `translation`.
-    fn judge<'law>(&self, translation: &'law Translation) -> io::Result<Vec<(&'law Law, Judgment)>> {
+    /// How `translation`'s laws are judged without the runner, each through a law it calls that cannot be proven, and
+    /// the check the runner judges the others with, unless no theorem is left to elaborate.
+    fn check<'law>(&'law self, translation: &'law Translation) -> (Vec<(&'law Law, Judgment)>, Option<Check<'law>>) {
         let laws = self.laws;
         let mut theorems: Vec<usize> = Vec::new();
         let mut judgments: Vec<(&Law, Judgment)> = Vec::new();
@@ -327,7 +348,7 @@ impl Proofs<'_> {
         theorems.sort_unstable();
         theorems.dedup();
         if theorems.is_empty() {
-            return Ok(judgments);
+            return (judgments, None);
         }
 
         let judged: Vec<&Law> = translation
@@ -335,7 +356,12 @@ impl Proofs<'_> {
             .iter()
             .filter(|law| !judgments.iter().any(|(blocked, _)| blocked.statement == law.statement))
             .collect();
-        let request: Vec<Theorem<'_>> = theorems
+        let mut modules: Vec<String> =
+            theorems.iter().map(|position| self.host_of(laws.ordered[*position].0)).collect();
+        modules.sort();
+        modules.dedup();
+        modules.push(PROOF_STEPS.to_owned());
+        let theorems: Vec<Theorem<'_>> = theorems
             .iter()
             .map(|position| {
                 let law = laws.ordered[*position].1;
@@ -346,22 +372,8 @@ impl Proofs<'_> {
                 }
             })
             .collect();
-        let mut imports: Vec<String> =
-            theorems.iter().map(|position| self.host_of(laws.ordered[*position].0)).collect();
-        imports.sort();
-        imports.dedup();
-        imports.push(PROOF_STEPS.to_owned());
-        let imports: Vec<&str> = imports.iter().map(String::as_str).collect();
 
-        let answered = runner::check(self.library, self.package, &imports, &request)?;
-        let order = request.iter().filter(|theorem| theorem.judged).map(|theorem| theorem.statement);
-        for (statement, judgment) in order.zip(answered) {
-            if let Some(law) = judged.iter().find(|law| law.statement == statement) {
-                judgments.push((law, judgment));
-            }
-        }
-
-        Ok(judgments)
+        (judgments, Some(Check { modules, theorems }))
     }
 }
 

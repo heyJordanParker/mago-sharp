@@ -2289,10 +2289,10 @@ fn compile_proves_two_stale_law_files_and_refuses_each_one_whose_method_breaks_i
     }
 }
 
-/// Puts a `lake` first on the `PATH` that runs the real one, except that each `sharp-lean` runner it starts first
-/// waits up to 30 seconds for a second runner to start. A runner that waited in vain leaves `alone` in `folder`.
+/// Puts a `lake` first on the `PATH` that runs the real one, and leaves a file in `started` in `folder` for each
+/// `sharp-lean` runner it starts.
 #[cfg(unix)]
-fn rendezvous_lake(folder: &Path) -> std::ffi::OsString {
+fn counting_lake(folder: &Path) -> std::ffi::OsString {
     use std::os::unix::fs::PermissionsExt;
 
     let path = std::env::var_os("PATH").unwrap();
@@ -2301,9 +2301,8 @@ fn rendezvous_lake(folder: &Path) -> std::ffi::OsString {
     let started = folder.join("started");
     std::fs::create_dir_all(&started).unwrap();
     let script = format!(
-        "#!/bin/sh\ncase \"$2\" in\n  */sharp-lean)\n    touch '{started}/'$$\n    for _ in $(seq 300); do\n      [ \"$(ls '{started}' | wc -l)\" -ge 2 ] && break\n      sleep 0.1\n    done\n    [ \"$(ls '{started}' | wc -l)\" -ge 2 ] || touch '{alone}'\n    ;;\nesac\nexec '{real}' \"$@\"\n",
+        "#!/bin/sh\ncase \"$2\" in\n  */sharp-lean)\n    touch '{started}/'$$\n    ;;\nesac\nexec '{real}' \"$@\"\n",
         started = started.display(),
-        alone = folder.join("alone").display(),
         real = real.display(),
     );
     let lake = folder.join("bin/lake");
@@ -2313,18 +2312,19 @@ fn rendezvous_lake(folder: &Path) -> std::ffi::OsString {
     std::env::join_paths(std::iter::once(folder.join("bin")).chain(std::env::split_paths(&path))).unwrap()
 }
 
+/// One runner proves the laws of every stale file of a compile, so the compile imports Lean once.
 #[cfg(unix)]
 #[test]
-fn compile_runs_the_runners_of_two_stale_law_files_at_the_same_time() {
+fn compile_proves_the_laws_of_two_stale_files_with_one_runner() {
     let directory = money_and_wallet();
     let root = directory.path();
     let lake = tempfile::tempdir().unwrap();
 
-    let output =
-        command(root, "never").env("PATH", rendezvous_lake(lake.path())).env("MAGO_THREADS", "2").output().unwrap();
+    let output = command(root, "never").env("PATH", counting_lake(lake.path())).output().unwrap();
 
     assert!(output.status.success(), "{}", printed(&output));
-    assert!(!lake.path().join("alone").exists(), "the second runner started only after the first one ended");
+    assert_eq!(std::fs::read_dir(lake.path().join("started")).unwrap().count(), 1, "one runner started");
+    assert!(compiled(root, "app/Shared/Money.sharp").exists());
     assert!(compiled(root, "app/Shared/Wallet.sharp").exists());
 }
 

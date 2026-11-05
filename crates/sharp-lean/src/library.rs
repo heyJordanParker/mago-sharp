@@ -116,6 +116,12 @@ impl Lake {
     /// A command that runs this `lake`. On Unix it may use `processor_seconds()`, as may each Lean process it starts,
     /// which inherits the limit.
     pub(crate) fn command(&self) -> Command {
+        self.command_within(processor_seconds())
+    }
+
+    /// A command that runs this `lake`, which on Unix may use `seconds` of processor time, as may each Lean process it
+    /// starts, which inherits the limit.
+    pub(crate) fn command_within(&self, seconds: u64) -> Command {
         let mut command = Command::new(&self.program);
         if let Some(home) = &self.home {
             command.env("ELAN_HOME", home);
@@ -124,10 +130,11 @@ impl Lake {
         {
             use std::os::unix::process::CommandExt;
 
-            let seconds = processor_seconds();
             // SAFETY: `getrlimit` and `setrlimit` are async-signal-safe, and the closure allocates nothing.
             unsafe { command.pre_exec(move || limit_processor_time(seconds)) };
         }
+        #[cfg(not(unix))]
+        let _ = seconds;
 
         command
     }
