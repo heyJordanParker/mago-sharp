@@ -158,14 +158,19 @@ where
             Some(class) => ConstantExpression::ClassConstant(class, word(constant.value)),
             None => unsupported(),
         },
-        // PHP# `Type.String` is PHP's `Type::String`, and `typeof(Order)` is `Order::class`, spec section 25. A type
-        // parameter's class is known only while the code runs.
+        // PHP# `Type.String` reads a member of the class or the namespace `Type` names, which the scan of one file can't
+        // tell apart, and `typeof(Order)` is `Order::class`, spec sections 23 and 25. A type parameter's class is known
+        // only while the code runs.
         Expression::Access(Access::Property(
             access @ PropertyAccess { property: ClassLikeMemberSelector::Identifier(member), .. },
         )) if let Some(class) = context.resolved_names.static_property_class(access)
             && !context.resolved_names.is_type_parameter(&class.name) =>
         {
-            ConstantExpression::ClassConstant(word(context.resolved_names.get(&class.name)), word(member.value))
+            ConstantExpression::MemberRead(
+                word(context.resolved_names.get(&class.name)),
+                word(member.value),
+                expression.span(),
+            )
         }
         Expression::TypeOf(TypeOf { r#type: Hint::Identifier(class), .. })
             if !context.resolved_names.is_type_parameter(class) =>
@@ -256,11 +261,13 @@ mod tests {
     use mago_allocator::LocalArena;
     use mago_database::file::File;
     use mago_names::resolver::NameResolver;
+    use mago_span::Span;
     use mago_syntax::parser::parse_file;
     use mago_word::ascii_lowercase_word;
     use mago_word::word;
     use ordered_float::OrderedFloat;
 
+    use crate::metadata::attribute::AttributeArgumentMetadata;
     use crate::metadata::attribute::AttributeMetadata;
     use crate::metadata::attribute::ConstantExpression;
     use crate::scanner::scan_program;
@@ -324,8 +331,9 @@ final class Holder {}
         );
     }
 
-    /// `Type.String`, `Plan.Starter` and `typeof(Order)` in a PHP# attribute are PHP's `Type::String`, `Plan::Starter`
-    /// and `Order::class`, so each argument gets the value and the type its PHP twin gets.
+    /// `typeof(Order)` in a PHP# attribute is PHP's `Order::class`, so it gets the value and the type its PHP twin gets.
+    /// `Type.String` and `Plan.Starter` get the type `Type::String` and `Plan::Starter` get, and stay member reads with
+    /// their spans: only the whole codebase tells a class constant from an enum's case object or a namespace's constant.
     #[test]
     fn a_sharp_attribute_argument_evaluates_as_its_php_twin() {
         let php = r"<?php
@@ -347,14 +355,46 @@ import Lib.Type;
 [Type(Type.String, plan: Plan.Starter, of: typeof(Order), keys: [1, 2], map: ["a": 1], item: new Type(typeof(Order)))]
 class Holder {}
 "#;
-        let arguments = |name, code| {
-            holder_attributes(name, code)[0]
-                .arguments
+        let arguments = |name, code| holder_attributes(name, code).swap_remove(0).arguments;
+        let (php_arguments, sharp_arguments) = (arguments("code.php", php), arguments("code.sharp", sharp));
+        let values = |arguments: &[AttributeArgumentMetadata]| {
+            arguments
                 .iter()
-                .map(|argument| (argument.name, argument.value_type.clone(), argument.value.clone()))
+                .map(|argument| argument.value.clone().expect("each argument has a value"))
                 .collect::<Vec<_>>()
         };
+        let names_and_types = |arguments: &[AttributeArgumentMetadata]| {
+            arguments.iter().map(|argument| (argument.name, argument.value_type.clone())).collect::<Vec<_>>()
+        };
+        let order = ConstantExpression::ClassName(word("Lib\\Order"));
+        let shared = [
+            order.clone(),
+            ConstantExpression::Array(vec![(None, ConstantExpression::Int(1)), (None, ConstantExpression::Int(2))]),
+            ConstantExpression::Array(vec![(Some(ConstantExpression::String(word("a"))), ConstantExpression::Int(1))]),
+            ConstantExpression::New(word("Lib\\Type"), vec![(None, order)]),
+        ];
 
-        assert_eq!(arguments("code.sharp", sharp), arguments("code.php", php));
+        assert_eq!(names_and_types(&sharp_arguments), names_and_types(&php_arguments));
+        assert_eq!(
+            values(&php_arguments)[..2],
+            [
+                ConstantExpression::ClassConstant(word("Lib\\Type"), word("String")),
+                ConstantExpression::ClassConstant(word("Lib\\Plan"), word("Starter")),
+            ]
+        );
+        assert_eq!(values(&php_arguments)[2..], shared);
+        let sharp_values = values(&sharp_arguments);
+        let [
+            ConstantExpression::MemberRead(type_class, string, type_span),
+            ConstantExpression::MemberRead(plan_class, starter, plan_span),
+            rest @ ..,
+        ] = &*sharp_values
+        else {
+            panic!("`Type.String` and `Plan.Starter` stay member reads: {sharp_values:?}");
+        };
+        let written = |span: &Span| &sharp[span.start.offset as usize..span.end.offset as usize];
+        assert_eq!((type_class, string, written(type_span)), (&word("Lib\\Type"), &word("String"), "Type.String"));
+        assert_eq!((plan_class, starter, written(plan_span)), (&word("Lib\\Plan"), &word("Starter"), "Plan.Starter"));
+        assert_eq!(rest, shared);
     }
 }

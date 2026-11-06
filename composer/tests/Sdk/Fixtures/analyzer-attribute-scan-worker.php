@@ -28,8 +28,8 @@ use const LOCK_EX;
 require_once dirname(__DIR__, 4) . '/vendor/autoload.php';
 
 /**
- * Records each class attribute argument a host receives as its kind and parts, without evaluating it, so a test
- * compares what a PHP# file and its PHP twin send.
+ * Records each class attribute argument a host receives as its name, its type and its value's kind and parts, without
+ * evaluating it, so a test compares what a PHP# file and its PHP twin send.
  *
  * @mago-expect lint:cyclomatic-complexity
  * @mago-expect lint:file-name
@@ -67,6 +67,7 @@ final class AttributeScanProofPlugin implements CodebaseScanHook, Plugin
                     foreach ($attribute->arguments as $argument) {
                         $arguments[] = json_encode([
                             $argument->name,
+                            $argument->valueType?->__toString(),
                             self::parts($argument->value),
                         ], JSON_THROW_ON_ERROR);
                     }
