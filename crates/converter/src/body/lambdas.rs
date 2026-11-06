@@ -60,13 +60,21 @@ impl Converter<'_, '_> {
             return self
                 .refuse(ampersand, "a lambda that returns by reference has no PHP# form: PHP# has no references");
         }
-        // PHP calls a lambda with more arguments than it takes, and a PHP# lambda takes each one its type passes.
+        // PHP calls a lambda with more arguments than it takes, and a PHP# lambda takes each one its function type
+        // passes, as the checker counts them: each parameter with no default and no `...`, so a plain `callable`,
+        // which takes `mixed ...`, passes none.
         let takes = parameters.parameters.len();
         let passed = expected
             .into_iter()
             .flat_map(|union| union.types.iter())
             .filter_map(|atomic| match atomic {
-                TAtomic::Callable(TCallable::Signature(signature)) => Some(signature.get_parameters().len()),
+                TAtomic::Callable(TCallable::Signature(signature)) => Some(
+                    signature
+                        .get_parameters()
+                        .iter()
+                        .filter(|parameter| !parameter.is_variadic() && !parameter.has_default())
+                        .count(),
+                ),
                 _ => None,
             })
             .max();

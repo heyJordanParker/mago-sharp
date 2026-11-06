@@ -202,9 +202,12 @@ fn atomic_text(atomic: &TAtomic, codebase: &CodebaseMetadata, imports: &mut Impo
         }
         SharpType::Iterable(value) => {
             let written = format!("Iterable<{}>", held(value, atomic, codebase, imports)?);
-            // A PHP# `Iterable` reads a value's elements, and its key is no type it names (spec section 12).
+            // A PHP# `Iterable` reads a value's elements, and its key is no type it names (spec section 12). PHP's
+            // `iterable<V>` keys by any `array-key`, which says nothing either.
+            let any_key =
+                |key: &TUnion| key.is_mixed() || matches!(key.types.as_ref(), [TAtomic::Scalar(TScalar::ArrayKey)]);
             if let TAtomic::Iterable(iterable) = atomic
-                && !iterable.key_type.is_mixed()
+                && !any_key(&iterable.key_type)
             {
                 return Err(format!(
                     "PHP's `{}` gives its keys, and a PHP# `{written}` reads values only (spec section 12)",

@@ -1,0 +1,10 @@
+namespace App;
+
+// PHP's `iterable<V>` keys by any `array-key`, which says no more than a PHP# `Iterable<V>`, which reads values only
+// (spec section 12).
+public interface Feed
+{
+    Iterable<string> items();
+
+    Iterable<int> counts();
+}
