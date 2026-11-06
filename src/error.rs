@@ -218,7 +218,7 @@ pub enum Error {
     /// Failed to start the `git` subcommand `command`, as when no `git` is on the `PATH`.
     RunningGit { command: &'static str, source: std::io::Error },
 
-    /// The `git` subcommand `command` ran and exited with `status`. `reason` is the first line git printed to stderr,
+    /// The `git` subcommand `command` ran and exited with `status`. `reason` is git's first `fatal:` or `error:` line,
     /// which says why.
     GitFailed { command: &'static str, status: std::process::ExitStatus, reason: String },
 
@@ -367,6 +367,9 @@ impl std::fmt::Display for Error {
                 write!(f, "Failed to create the baseline file `{}`: {source}", path.display())
             }
             Self::ReadingStdin(error) => write!(f, "Failed to read the standard input: {error}"),
+            Self::RunningGit { command, source } if source.kind() == std::io::ErrorKind::NotFound => {
+                write!(f, "Failed to run `git {command}`: git isn't installed or isn't on PATH")
+            }
             Self::RunningGit { command, source } => write!(f, "Failed to run `git {command}`: {source}"),
             Self::GitFailed { command, status, reason } => write!(f, "`git {command}` failed ({status}): {reason}"),
             Self::Analysis(error) => write!(f, "Failed to analyze the source code: {error}"),

@@ -40,10 +40,12 @@ use mago_database::DatabaseReader;
 use mago_database::ReadDatabase;
 use mago_database::error::DatabaseError;
 use mago_database::error::IOAction;
+use mago_database::file::COMPANION_START;
 use mago_database::file::File;
 use mago_database::file::FileId;
 use mago_database::file::FileType;
 use mago_database::loader::mark_sharp_file;
+use mago_database::matcher::ExclusionMatcher;
 use mago_database::matcher::contains_glob_metacharacters;
 use mago_names::resolver::NameResolver;
 use mago_orchestrator::Orchestrator;
@@ -96,6 +98,9 @@ const EXPECTED_WARNINGS: [&str; 2] = ["too-wide-member", "redundant-docblock-typ
 
 /// An issue as a later analysis finds it again: its file, level, code, message and line.
 type IssueKey = (Vec<u8>, Level, Option<String>, String, u32);
+
+/// Each file shape and git let convert, by its name, with the bytes git checked.
+type Checked = Vec<(Vec<u8>, Vec<u8>)>;
 
 /// Each issue of an analysis, with how many times it is reported, the files its annotations point into, and the
 /// members of a PHP# file it is in, as [`members_of`] names them, the innermost first.
@@ -160,13 +165,15 @@ struct Proof {
 struct Judgement {
     own: BTreeMap<Vec<u8>, Vec<Found>>,
     others: Vec<Found>,
-    expected: Vec<String>,
+    expected: Vec<Found>,
 }
 
 /// An issue a proof found, as the summary shows it, with the files it points into: the files of its annotations, or
-/// the file `mago compile` refuses.
+/// the file `mago compile` refuses. An issue of a converted file shows at its plain file while the converted one is
+/// not written, as in a dry run and in a file that stays plain PHP, and at the `.sharp` file once it is.
 struct Found {
     shown: String,
+    written: String,
     files: BTreeSet<Vec<u8>>,
 }
 
@@ -196,8 +203,8 @@ struct Outcome {
     unreached: Vec<String>,
     refused: BTreeMap<Vec<u8>, Vec<String>>,
     converted: Vec<(Vec<u8>, Vec<u8>, Vec<u8>)>,
-    /// The warnings decision 9 expects, each as the summary lists it.
-    expected: Vec<String>,
+    /// The warnings decision 9 expects.
+    expected: Vec<Found>,
     /// How many analyses proved the converted files, each a whole project's with fresh extension hosts.
     proofs: usize,
 }
@@ -208,60 +215,89 @@ impl ConvertCommand {
     }
 
     /// Converts the files the paths name and reports it, with the exit code and what the run found.
-    fn run(self, mut configuration: Configuration, color_choice: ColorChoice) -> Result<(ExitCode, Outcome), Error> {
-        let workspace = configuration.source.workspace.clone();
-        let root = workspace.canonicalize().map_err(|error| Error::CanonicalizingPath(workspace.clone(), error))?;
-        let roots = psr4_roots(&workspace)?;
-        let named: Vec<PathBuf> = self.paths.iter().map(|path| relative(&workspace, path)).collect();
+    fn run(self, configuration: Configuration, color_choice: ColorChoice) -> Result<(ExitCode, Outcome), Error> {
+        let (outcome, checked) = self.check(&configuration, color_choice)?;
 
-        // Each file's shape and git decide before any analysis, so a run that has nothing to prove starts no host.
+        self.convert_checked(configuration, color_choice, outcome, checked)
+    }
+
+    /// Each plain PHP file the paths name that its shape and git let convert, by its name with the bytes git holds,
+    /// and what keeps the others plain PHP and why a path reaches no file. It runs before any analysis, so a run with
+    /// nothing to prove starts no host. Shape decides first, so a script is named a script without git.
+    fn check(&self, configuration: &Configuration, color_choice: ColorChoice) -> Result<(Outcome, Checked), Error> {
+        let workspace = &configuration.source.workspace;
+        let root = workspace.canonicalize().map_err(|error| Error::CanonicalizingPath(workspace.clone(), error))?;
+        let roots = psr4_roots(workspace)?;
+        let named: Vec<PathBuf> = self.paths.iter().map(|path| relative(workspace, path)).collect();
+        let (database, _) = project_database(&whole_workspace(configuration, color_choice), workspace)?;
+
         let mut outcome = Outcome::default();
-        let mut convertible = Vec::new();
-        {
-            let (database, _) = project_database(&whole_workspace(&configuration, color_choice), &workspace)?;
-            let mut reached: HashSet<&PathBuf> = HashSet::new();
-            let mut files = Vec::new();
-            for file in database.files() {
-                let name = Path::new(std::str::from_utf8(&file.name).unwrap_or_default());
-                let mut naming = named.iter().filter(|path| name.starts_with(path)).peekable();
-                if file.file_type == FileType::Host && file.name.ends_with(b".php") && naming.peek().is_some() {
-                    reached.extend(naming);
-                    files.push(file);
-                }
+        let mut refuse = |name: &[u8], reason: String| {
+            outcome.refused.entry(name.to_vec()).or_default().push(format!("{}: {reason}", display(name)));
+        };
+        let mut reached: HashSet<&PathBuf> = HashSet::new();
+        let mut shaped = Vec::new();
+        for file in database.files() {
+            let name = Path::new(std::str::from_utf8(&file.name).unwrap_or_default());
+            let mut naming = named.iter().filter(|path| name.starts_with(path)).peekable();
+            if file.file_type != FileType::Host || !file.name.ends_with(b".php") || naming.peek().is_none() {
+                continue;
             }
-            files.sort_by(|a, b| a.name.cmp(&b.name));
-            // Git is the undo, so a file converts only as git holds it. Paths that reach no file need no git.
-            let committed = if files.is_empty() { HashSet::new() } else { git::committed_files(&workspace)? };
-            for file in files {
-                let reason = shape(&file, &roots).and_then(|()| {
-                    if committed.contains(Path::new(&display(&file.name))) {
-                        Ok(())
-                    } else {
-                        Err("git holds no commit of it as it is: commit it first, so git holds its plain PHP"
-                            .to_owned())
-                    }
-                });
-                match reason {
-                    Ok(()) => convertible.push(file.name.to_vec()),
-                    Err(reason) => {
-                        let shown = format!("{}: {reason}", display(&file.name));
-                        outcome.refused.entry(file.name.to_vec()).or_default().push(shown);
-                    }
-                }
+            reached.extend(naming);
+            match shape(&file, &roots) {
+                Ok(()) => shaped.push(file),
+                Err(reason) => refuse(&file.name, reason),
             }
-            outcome.unreached = named
-                .iter()
-                .filter(|path| !reached.contains(path))
-                .map(|path| unreached(&configuration, &root, path))
-                .collect();
         }
+        shaped.sort_by(|a, b| a.name.cmp(&b.name));
+
+        // Git is the undo, so a file converts only as git holds it.
+        let mut checked = Vec::new();
+        if !shaped.is_empty() {
+            let committed = git::committed_files(workspace)?;
+            for file in shaped {
+                let name = PathBuf::from(display(&file.name));
+                if let Some(submodule) = committed.submodules.iter().find(|submodule| name.starts_with(submodule)) {
+                    let reason =
+                        format!("it is in the git submodule `{}`: run mago convert there", submodule.display());
+                    refuse(&file.name, reason);
+                } else if committed.files.contains(&name) {
+                    checked.push((file.name.to_vec(), file.contents.to_vec()));
+                } else {
+                    refuse(
+                        &file.name,
+                        "git holds no commit of it as it is: commit it first, so git holds its plain PHP".to_owned(),
+                    );
+                }
+            }
+        }
+        outcome.unreached = named
+            .iter()
+            .filter(|path| !reached.contains(path))
+            .map(|path| unreached(configuration, &root, path))
+            .collect::<Result<_, _>>()?;
+
+        Ok((outcome, checked))
+    }
+
+    /// Proves and converts `checked`, the files [`Self::check`] let convert, each by its name with the bytes git holds,
+    /// and reports `outcome` with what they add to it.
+    fn convert_checked(
+        self,
+        mut configuration: Configuration,
+        color_choice: ColorChoice,
+        mut outcome: Outcome,
+        checked: Checked,
+    ) -> Result<(ExitCode, Outcome), Error> {
         // With no file to convert, a file stays plain PHP or a named path reaches none, since the command line names a
         // path at least, so the run fails.
-        if convertible.is_empty() {
+        if checked.is_empty() {
             outcome.report(self.dry_run, color_choice);
             return Ok((ExitCode::FAILURE, outcome));
         }
 
+        let workspace = configuration.source.workspace.clone();
+        let root = workspace.canonicalize().map_err(|error| Error::CanonicalizingPath(workspace.clone(), error))?;
         configuration.extension_hosts = compile_for_hosts(&configuration)?.0;
         let Some((prover, mut session)) = Prover::new(&configuration, color_choice, root)? else {
             outcome.report(self.dry_run, color_choice);
@@ -274,8 +310,14 @@ impl ConvertCommand {
         let library = Library::new(&forms, session.server.codebase());
 
         let mut candidates = Vec::new();
-        for name in convertible {
-            let file = session.server.database().get_ref(&FileId::new(&name))?;
+        for (name, held) in checked {
+            // A file changed or gone since git was read holds bytes git doesn't, so it is no longer git's to undo.
+            let database = session.server.database();
+            let Some(file) = database.get_ref(&FileId::new(&name)).ok().filter(|file| *file.contents == *held) else {
+                let reason = format!("{}: it changed since mago convert read git: commit it first", display(&name));
+                outcome.refused.entry(name).or_default().push(reason);
+                continue;
+            };
             match session.convert(file, &library) {
                 Ok(text) => {
                     candidates.push(Candidate { name, path: file.path.clone(), original: file.contents.to_vec(), text })
@@ -311,12 +353,15 @@ impl ConvertCommand {
                         "{name} adds issues once the extension hosts load it, and git holds its plain PHP:"
                     );
                     for found in found {
-                        tracing::error!("  {}", found.shown);
+                        tracing::error!("  {}", found.written);
                     }
                 }
                 for found in &judgement.others {
                     unproven = true;
-                    tracing::error!("The converted files add an issue with the hosts that load them: {}", found.shown);
+                    tracing::error!(
+                        "The converted files add an issue with the hosts that load them: {}",
+                        found.written
+                    );
                 }
             }
         }
@@ -590,13 +635,21 @@ fn judge(plain: &Proof, proof: &Proof, swaps: &[&Candidate]) -> Judgement {
         }
         let code = code.clone().unwrap_or_default();
         let owner = owner(file);
-        let place = match owner {
-            Some(candidate) => plain_place(candidate, members),
-            None => format!("{}:{line}", display(file)),
+        let place = format!("{}:{line}", display(file));
+        let (shown, written) = match (owner, members.first()) {
+            (Some(candidate), Some(member)) => {
+                (plain_place(candidate, members, *line), format!("{place}, in {member}"))
+            }
+            (Some(candidate), None) => (plain_place(candidate, members, *line), place),
+            (None, _) => (place.clone(), place),
         };
-        let found = Found { shown: format!("{place}: {level} {code}: {message}"), files: files.clone() };
+        let found = Found {
+            shown: format!("{shown}: {level} {code}: {message}"),
+            written: format!("{written}: {level} {code}: {message}"),
+            files: files.clone(),
+        };
         if *level == Level::Warning && EXPECTED_WARNINGS.contains(&code.as_str()) {
-            judgement.expected.push(found.shown);
+            judgement.expected.push(found);
         } else if let Some(candidate) = owner {
             judgement.own.entry(candidate.name.clone()).or_default().push(found);
         } else {
@@ -604,14 +657,15 @@ fn judge(plain: &Proof, proof: &Proof, swaps: &[&Candidate]) -> Judgement {
         }
     }
     for file in proof.refused.difference(&plain.refused) {
-        let found = |shown: String| Found { shown, files: BTreeSet::from([file.clone()]) };
+        let written = format!("{}: mago compile would refuse it", display(file));
+        let found = |shown: String| Found { shown, written: written.clone(), files: BTreeSet::from([file.clone()]) };
         match owner(file) {
             Some(candidate) => judgement
                 .own
                 .entry(candidate.name.clone())
                 .or_default()
                 .push(found(format!("{}: mago compile would refuse it once converted", display(&candidate.name)))),
-            None => judgement.others.push(found(format!("{}: mago compile would refuse it", display(file)))),
+            None => judgement.others.push(found(written.clone())),
         }
     }
 
@@ -649,6 +703,7 @@ impl Outcome {
             }
         }
         for warning in &self.expected {
+            let warning = if dry_run { &warning.shown } else { &warning.written };
             tracing::info!("Expected after converting, decision 9: {warning}");
         }
 
@@ -813,15 +868,16 @@ fn members_of(codebase: &CodebaseMetadata, file: FileId) -> Vec<(u32, u32, Strin
     members
 }
 
-/// Where an issue of `candidate`'s converted file is in its plain PHP file, the one the user has: the file, and the
-/// line and name of the innermost of `members`, as [`members_of`] names them, that the plain file declares. The line
-/// within the member is not known, since the converter gives its text and not where each part of it came from.
-fn plain_place(candidate: &Candidate, members: &[String]) -> String {
+/// Where an issue at `line` of `candidate`'s converted file is in its plain PHP file, the one the user has: the file,
+/// the line and name of the innermost of `members`, as [`members_of`] names them, that the plain file declares, and
+/// `line`, which a dry run's diff shows. The plain line within the member is not known, since the converter gives its
+/// text and not where each part of it came from.
+fn plain_place(candidate: &Candidate, members: &[String], line: u32) -> String {
     let name = display(&candidate.name);
     let file = File::ephemeral(Cow::Owned(candidate.name.clone()), Cow::Owned(candidate.original.clone()));
     let arena = LocalArena::new();
     let program = parse_file(&arena, &file);
-    let line = |offset: u32| file.line_number(offset) + 1;
+    let line_of = |offset: u32| file.line_number(offset) + 1;
     let lossy = |bytes: &[u8]| String::from_utf8_lossy(bytes).into_owned();
     let mut declared: Vec<(String, u32)> = Vec::new();
     for statement in statements(program) {
@@ -832,16 +888,16 @@ fn plain_place(candidate: &Candidate, members: &[String]) -> String {
             _ => continue,
         };
         let class_name = lossy(class.value);
-        declared.push((class_name.clone(), line(class.span.start.offset)));
+        declared.push((class_name.clone(), line_of(class.span.start.offset)));
         for member in class_members.iter() {
             match member {
                 ClassLikeMember::Method(method) => {
                     let named = format!("{class_name}::{}()", lossy(method.name.value));
-                    declared.push((named, line(method.name.span.start.offset)));
+                    declared.push((named, line_of(method.name.span.start.offset)));
                     for parameter in method.parameter_list.parameters.iter() {
                         if parameter.is_promoted_property() {
                             let named = format!("{class_name}::{}", lossy(parameter.variable.name));
-                            declared.push((named, line(parameter.variable.span.start.offset)));
+                            declared.push((named, line_of(parameter.variable.span.start.offset)));
                         }
                     }
                 }
@@ -849,7 +905,7 @@ fn plain_place(candidate: &Candidate, members: &[String]) -> String {
                     for variable in property.variables() {
                         declared.push((
                             format!("{class_name}::{}", lossy(variable.name)),
-                            line(variable.span.start.offset),
+                            line_of(variable.span.start.offset),
                         ));
                     }
                 }
@@ -857,13 +913,13 @@ fn plain_place(candidate: &Candidate, members: &[String]) -> String {
                     for item in constant.items.iter() {
                         declared.push((
                             format!("{class_name}::{}", lossy(item.name.value)),
-                            line(item.name.span.start.offset),
+                            line_of(item.name.span.start.offset),
                         ));
                     }
                 }
                 ClassLikeMember::EnumCase(case) => {
                     let item = case.item.name();
-                    declared.push((format!("{class_name}::{}", lossy(item.value)), line(item.span.start.offset)));
+                    declared.push((format!("{class_name}::{}", lossy(item.value)), line_of(item.span.start.offset)));
                 }
                 _ => {}
             }
@@ -872,43 +928,58 @@ fn plain_place(candidate: &Candidate, members: &[String]) -> String {
 
     match members.iter().find_map(|member| declared.iter().find(|(declared, _)| declared.eq_ignore_ascii_case(member)))
     {
-        Some((member, line)) => format!("{name}:{line}, in {member}"),
-        None => name,
+        Some((member, declared)) => format!("{name}:{declared}, in {member}, at line {line} of its PHP#"),
+        None => format!("{name}, at line {line} of its PHP#"),
     }
 }
 
 /// Why `path`, a path the command line names, relative to the workspace at `root` unless it is outside it, reaches no
 /// plain PHP file the project's analysis loads.
-fn unreached(configuration: &Configuration, root: &Path, path: &Path) -> String {
-    let shown = path.display();
-    if !root.join(path).exists() {
-        return format!("{shown} doesn't exist.");
+fn unreached(configuration: &Configuration, root: &Path, path: &Path) -> Result<String, Error> {
+    let (shown, on_disk) = (path.display(), root.join(path));
+    if !on_disk.exists() {
+        return Ok(format!("{shown} doesn't exist."));
+    }
+    if path.is_absolute() {
+        return Ok(format!("{shown} is outside the workspace {}.", root.display()));
+    }
+    if std::fs::read(&on_disk).is_ok_and(|contents| contents.starts_with(COMPANION_START.as_bytes())) {
+        let sharp = path.with_extension("sharp");
+        return Ok(format!("{shown} is what mago compile writes for `{}`, which is already PHP#.", sharp.display()));
     }
     let sources = &configuration.source.paths;
-    // A source path's folder is the part of it before its first glob, as the loader reads it.
     let inside = sources.is_empty()
-        || sources.iter().any(|source| {
-            let folder: PathBuf = Path::new(source)
-                .components()
-                .filter(|part| !matches!(part, Component::CurDir))
-                .take_while(|part| !contains_glob_metacharacters(part.as_os_str().to_string_lossy()))
-                .collect();
-            let folder = root.join(folder);
-            let path = root.join(path);
-            path.starts_with(&folder) || folder.starts_with(&path)
-        });
-    if !inside {
+        || if on_disk.is_dir() {
+            // A folder holds the files of a source path when it is in the source path's folder, the part before its
+            // first glob, as the loader walks it, or holds that folder.
+            sources.iter().any(|source| {
+                let folder: PathBuf = Path::new(source)
+                    .components()
+                    .filter(|part| !matches!(part, Component::CurDir))
+                    .take_while(|part| !contains_glob_metacharacters(part.as_os_str().to_string_lossy()))
+                    .collect();
+                path.starts_with(&folder) || folder.starts_with(path)
+            })
+        } else {
+            let matcher = ExclusionMatcher::compile(
+                sources.iter().map(String::as_str),
+                configuration.source.glob.to_database_settings(),
+            )?;
+            matcher.is_match(&path.to_string_lossy())
+        };
+
+    Ok(if !inside {
         format!(
             "{shown} is outside the source paths ({}), so the project's analysis doesn't load it.",
             sources.join(", ")
         )
-    } else if root.join(path).is_dir() {
+    } else if on_disk.is_dir() {
         format!("{shown} holds no plain PHP file the project's analysis loads.")
     } else if path.extension().is_some_and(|extension| extension == "php") {
         format!("{shown} is excluded from the project's analysis.")
     } else {
         format!("{shown} is no plain PHP file.")
-    }
+    })
 }
 
 /// Each PSR-4 folder of `composer.json`'s `autoload`, relative to the workspace. A test under `autoload-dev` stays
@@ -1207,58 +1278,72 @@ mod tests {
         assert_eq!(outcome.converted.len(), 1);
     }
 
-    /// Git that can't read the repository, here a linked worktree whose git folder a container doesn't mount, fails
-    /// the run with git's reason, where every file stayed plain PHP for git holding no commit of it.
-    #[test]
-    fn a_repository_git_cannot_read_fails_the_run_with_gits_reason() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().canonicalize().unwrap();
-        let configuration = project(&root, &[clean(0)]);
-        std::fs::remove_dir_all(root.join(".git")).unwrap();
-        std::fs::write(root.join(".git"), "gitdir: /missing/.git/worktrees/design\n").unwrap();
-
-        let run = ConvertCommand { paths: vec![root.join("src/Contracts")], dry_run: true }
-            .run(configuration, ColorChoice::Never);
-
-        let error = match run {
-            Err(error) => error.to_string(),
-            Ok((_, outcome)) => panic!("the run went on: {:#?}", outcome.refused),
-        };
-        assert!(error.starts_with("`git rev-parse` failed"), "{error}");
-        assert!(error.ends_with(": fatal: not a git repository: /missing/.git/worktrees/design"), "{error}");
-    }
-
     /// A path the command line names that the project's analysis doesn't load gets one message saying why, a file as
     /// a folder, and a run with nothing to prove makes no proof.
     #[test]
     fn each_named_path_the_analysis_does_not_load_says_why() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().canonicalize().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let outside = elsewhere.path().canonicalize().unwrap().join("Outside.php");
+        let class = "<?php\n\nnamespace Generated;\n\nfinal class Made\n{\n}\n";
+        let written = format!("{COMPANION_START}src/Contracts/Order.sharp\n");
         for (path, code) in [
             ("config/app.php", "<?php\n\nreturn ['name' => 'app'];\n"),
-            (
-                "database/seeders/DatabaseSeeder.php",
-                "<?php\n\nnamespace Database\\Seeders;\n\nfinal class DatabaseSeeder\n{\n}\n",
-            ),
+            ("database/seeders/DatabaseSeeder.php", class),
+            ("tools/Helper.php", class),
+            ("src/Generated/Made.php", class),
+            ("src/Notes/readme.md", "notes\n"),
+            ("src/Contracts/notes.txt", "notes\n"),
+            ("src/Contracts/Order.sharp", "namespace Generated.Contracts;\n\npublic interface Order\n{\n}\n"),
+            ("src/Contracts/Order.php", &written),
         ] {
             std::fs::create_dir_all(root.join(path).parent().unwrap()).unwrap();
             std::fs::write(root.join(path), code).unwrap();
         }
-        let configuration = project(&root, &[clean(0)]);
-        let paths = ["config", "database/seeders/DatabaseSeeder.php", "src/Contracts/Missing.php"];
+        std::fs::write(&outside, class).unwrap();
+        project(&root, &[clean(0)]);
+        std::fs::write(
+            root.join("mago.toml"),
+            "php-version = \"8.5\"\n\n[source]\npaths = [\"src\", \"tools/*Rule.php\"]\nexcludes = [\"src/Generated\"]\n",
+        )
+        .unwrap();
+        let configuration = Configuration::load(CliOverrides {
+            workspace: Some(root.clone()),
+            config: Some(root.join("mago.toml")),
+            no_version_check: true,
+            ..Default::default()
+        })
+        .unwrap();
+        let paths = [
+            "config",
+            "database/seeders/DatabaseSeeder.php",
+            "tools/Helper.php",
+            "src/Contracts/Missing.php",
+            "src/Generated/Made.php",
+            "src/Notes",
+            "src/Contracts/notes.txt",
+            "src/Contracts/Order.php",
+        ];
+        let mut named: Vec<PathBuf> = paths.iter().map(|path| root.join(path)).collect();
+        named.push(outside.clone());
 
         let (exit_code, outcome) =
-            ConvertCommand { paths: paths.iter().map(|path| root.join(path)).collect(), dry_run: true }
-                .run(configuration, ColorChoice::Never)
-                .unwrap();
+            ConvertCommand { paths: named, dry_run: true }.run(configuration, ColorChoice::Never).unwrap();
 
         assert_eq!(exit_code, ExitCode::FAILURE);
         assert_eq!(
             outcome.unreached,
             [
-                "config is outside the source paths (src), so the project's analysis doesn't load it.",
-                "database/seeders/DatabaseSeeder.php is outside the source paths (src), so the project's analysis doesn't load it.",
-                "src/Contracts/Missing.php doesn't exist.",
+                "config is outside the source paths (src, tools/*Rule.php), so the project's analysis doesn't load it.".to_owned(),
+                "database/seeders/DatabaseSeeder.php is outside the source paths (src, tools/*Rule.php), so the project's analysis doesn't load it.".to_owned(),
+                "tools/Helper.php is outside the source paths (src, tools/*Rule.php), so the project's analysis doesn't load it.".to_owned(),
+                "src/Contracts/Missing.php doesn't exist.".to_owned(),
+                "src/Generated/Made.php is excluded from the project's analysis.".to_owned(),
+                "src/Notes holds no plain PHP file the project's analysis loads.".to_owned(),
+                "src/Contracts/notes.txt is no plain PHP file.".to_owned(),
+                "src/Contracts/Order.php is what mago compile writes for `src/Contracts/Order.sharp`, which is already PHP#.".to_owned(),
+                format!("{} is outside the workspace {}.", outside.display(), root.display()),
             ]
         );
         assert_eq!(outcome.proofs, 0);
@@ -1300,17 +1385,14 @@ mod tests {
         assert_eq!(outcome.proofs, 0);
     }
 
-    /// An issue in a converted file names the plain file the user has, never the `.sharp` file a dry run doesn't write,
-    /// at the member it is in and that member's line in the plain file.
-    #[test]
-    fn an_issue_in_a_converted_file_names_its_plain_file_and_member() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().canonicalize().unwrap();
+    /// A project at `root` whose class `Box` converts with a public property and a public method nothing outside its
+    /// namespace uses, which warn once converted, as decision 9 expects.
+    fn boxed(root: &Path) -> Configuration {
         let boxed = (
             "Contracts/Box.php".to_owned(),
             "<?php\n\nnamespace Generated\\Contracts;\n\nfinal class Box\n{\n    public function __construct(public int $item)\n    {\n    }\n\n    public function size(): int\n    {\n        return $this->item;\n    }\n}\n".to_owned(),
         );
-        let configuration = project(&root, &[boxed]);
+        let configuration = project(root, &[boxed]);
         // A project's public PHP# members warn when nothing outside their namespace uses them, a library's never.
         std::fs::write(
             root.join("composer.json"),
@@ -1318,19 +1400,156 @@ mod tests {
         )
         .unwrap();
 
+        configuration
+    }
+
+    /// An issue in a converted file a dry run doesn't write names the plain file the user has, at the member it is in
+    /// and that member's line in the plain file, and at its line of the PHP# the diff shows.
+    #[test]
+    fn an_issue_in_a_converted_file_a_dry_run_leaves_names_its_plain_file_and_member() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let configuration = boxed(&root);
+
         let (_, outcome) = ConvertCommand { paths: vec![root.join("src/Contracts")], dry_run: true }
             .run(configuration, ColorChoice::Never)
             .unwrap();
 
         assert_eq!(outcome.converted.len(), 1, "{:#?}", outcome.refused);
-        let mut expected = outcome.expected.clone();
-        expected.sort();
+        let mut expected: Vec<&str> = outcome.expected.iter().map(|found| found.shown.as_str()).collect();
+        expected.sort_unstable();
         assert_eq!(
             expected,
             [
-                "src/Contracts/Box.php:11, in Box::size(): warning too-wide-member: `Box.size` is public, and nothing outside `Generated.Contracts` uses it.",
-                "src/Contracts/Box.php:7, in Box::$item: warning too-wide-member: `Box.item` is public, and nothing outside `Generated.Contracts` uses it.",
+                "src/Contracts/Box.php:11, in Box::size(), at line 9 of its PHP#: warning too-wide-member: `Box.size` is public, and nothing outside `Generated.Contracts` uses it.",
+                "src/Contracts/Box.php:7, in Box::$item, at line 5 of its PHP#: warning too-wide-member: `Box.item` is public, and nothing outside `Generated.Contracts` uses it.",
             ]
+        );
+    }
+
+    /// An issue in a converted file a run writes names the `.sharp` file, at its own line, with the member it is in.
+    #[test]
+    fn an_issue_in_a_converted_file_a_run_writes_names_its_sharp_file_and_member() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let configuration = boxed(&root);
+
+        let (_, outcome) = ConvertCommand { paths: vec![root.join("src/Contracts")], dry_run: false }
+            .run(configuration, ColorChoice::Never)
+            .unwrap();
+
+        let written = std::fs::read_to_string(root.join("src/Contracts/Box.sharp")).unwrap();
+        let lines: Vec<&str> = written.lines().collect();
+        let mut expected: Vec<&str> = outcome.expected.iter().map(|found| found.written.as_str()).collect();
+        expected.sort_unstable();
+        assert_eq!(
+            expected,
+            [
+                "src/Contracts/Box.sharp:5, in Box::$item: warning too-wide-member: `Box.item` is public, and nothing outside `Generated.Contracts` uses it.",
+                "src/Contracts/Box.sharp:9, in Box::size(): warning too-wide-member: `Box.size` is public, and nothing outside `Generated.Contracts` uses it.",
+            ],
+            "{written}"
+        );
+        // Each line the warnings name declares its member in the written file.
+        assert!(lines[4].contains("int item") && lines[8].contains("int size()"), "{written}");
+    }
+
+    /// Two issues of one member with one message stay two, told apart by their line of the PHP#, and an issue outside
+    /// any class-like keeps its line.
+    #[test]
+    fn issues_of_a_converted_file_keep_their_lines() {
+        let candidate = Candidate {
+            name: b"src/Box.php".to_vec(),
+            path: None,
+            original: b"<?php\n\nnamespace App;\n\nfinal class Box\n{\n    public function size(): int\n    {\n        return 1;\n    }\n}\n".to_vec(),
+            text: Vec::new(),
+        };
+        let issue = |line: u32, members: &[&str]| {
+            let key = (b"src/Box.sharp".to_vec(), Level::Error, Some("code".to_owned()), "Wrong.".to_owned(), line);
+            (key, (1, BTreeSet::new(), members.iter().map(|member| (*member).to_owned()).collect()))
+        };
+        let issues =
+            Issues::from([issue(9, &["Box::size()", "Box"]), issue(10, &["Box::size()", "Box"]), issue(3, &[])]);
+        let plain = Proof { issues: Issues::default(), refused: HashSet::new() };
+        let proof = Proof { issues, refused: HashSet::new() };
+
+        let judgement = judge(&plain, &proof, &[&candidate]);
+
+        let shown: BTreeSet<&str> = judgement.own[&candidate.name].iter().map(|found| found.shown.as_str()).collect();
+        assert_eq!(
+            shown,
+            BTreeSet::from([
+                "src/Box.php, at line 3 of its PHP#: error code: Wrong.",
+                "src/Box.php:7, in Box::size(), at line 9 of its PHP#: error code: Wrong.",
+                "src/Box.php:7, in Box::size(), at line 10 of its PHP#: error code: Wrong.",
+            ])
+        );
+        let written: BTreeSet<&str> =
+            judgement.own[&candidate.name].iter().map(|found| found.written.as_str()).collect();
+        assert_eq!(
+            written,
+            BTreeSet::from([
+                "src/Box.sharp:3: error code: Wrong.",
+                "src/Box.sharp:9, in Box::size(): error code: Wrong.",
+                "src/Box.sharp:10, in Box::size(): error code: Wrong.",
+            ])
+        );
+    }
+
+    /// A file that changes between git's check and the proof, or that is gone by then, stays plain PHP, since git no
+    /// longer holds the bytes the proof would convert.
+    #[test]
+    fn a_file_that_changes_after_git_is_read_stays_plain_php() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let configuration = project(&root, &[clean(0), clean(1), clean(2)]);
+        let command = ConvertCommand { paths: vec![root.join("src/Contracts")], dry_run: true };
+
+        let (outcome, checked) = command.check(&configuration, ColorChoice::Never).unwrap();
+        std::fs::write(root.join("src/Contracts/Clean0.php"), clean(0).1.replace("id()", "key()")).unwrap();
+        std::fs::remove_file(root.join("src/Contracts/Clean1.php")).unwrap();
+        let (_, outcome) = command.convert_checked(configuration, ColorChoice::Never, outcome, checked).unwrap();
+
+        let refused: Vec<String> = outcome.refused.values().flatten().cloned().collect();
+        assert_eq!(
+            refused,
+            [
+                "src/Contracts/Clean0.php: it changed since mago convert read git: commit it first",
+                "src/Contracts/Clean1.php: it changed since mago convert read git: commit it first",
+            ]
+        );
+        let converted: Vec<String> = outcome.converted.iter().map(|(name, ..)| display(name)).collect();
+        assert_eq!(converted, ["src/Contracts/Clean2.php"]);
+    }
+
+    /// A file in a git submodule is another repository's, so it stays plain PHP and the run names where to convert it.
+    #[test]
+    fn a_file_in_a_git_submodule_names_the_submodule() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap().join("project");
+        let library = directory.path().canonicalize().unwrap().join("library");
+        std::fs::create_dir_all(library.join("Contracts")).unwrap();
+        std::fs::write(library.join("Contracts/Clean0.php"), clean(0).1).unwrap();
+        commit_all(&library);
+        std::fs::create_dir(&root).unwrap();
+        let configuration = project(&root, &[clean(1)]);
+        let source = library.to_string_lossy().into_owned();
+        for arguments in [
+            &["-c", "protocol.file.allow=always", "submodule", "add", "--quiet", &source, "src/Library"][..],
+            &["-c", "user.name=test", "-c", "user.email=test@localhost", "commit", "--quiet", "-m", "library"],
+        ] {
+            let output = std::process::Command::new("git").args(arguments).current_dir(&root).output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        }
+
+        let (_, outcome) = ConvertCommand { paths: vec![root.join("src/Library")], dry_run: true }
+            .run(configuration, ColorChoice::Never)
+            .unwrap();
+
+        let refused: Vec<String> = outcome.refused.values().flatten().cloned().collect();
+        assert_eq!(
+            refused,
+            ["src/Library/Contracts/Clean0.php: it is in the git submodule `src/Library`: run mago convert there"]
         );
     }
 

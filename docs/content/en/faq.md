@@ -51,9 +51,17 @@ One binary runs:
 ERROR `git rev-parse` failed (exit status: 128): fatal: not a git repository: /home/dev/shop/.git/worktrees/design
 ```
 
-A git worktree's `.git` is a file that names a folder inside the main repository's `.git`, outside the worktree. A container that mounts only the worktree can't reach that folder. Mount the repository's `.git` folder in the container at the path the worktree's `.git` file names. A plain clone has its `.git` folder inside it, so mounting the clone's root is enough.
+A git worktree's `.git` is a file that names a folder inside the main repository's `.git`, outside the worktree. A worktree at `/home/dev/shop-design` holds this `.git` file:
+
+```text
+gitdir: /home/dev/shop/.git/worktrees/design
+```
+
+A container that mounts only the worktree can't reach that folder. Mount the main repository's `.git` at `/home/dev/shop/.git` in the container too, the path the file names. A plain clone has its `.git` folder inside it, so mounting the clone's root is enough.
 
 When git refuses a repository another user owns, its reason starts with `fatal: detected dubious ownership`. Run `git config --global --add safe.directory <path>` in the container for that path.
+
+When the container has no `git`, the run stops with ``Failed to run `git rev-parse`: git isn't installed or isn't on PATH``. Install git in the image, or put it on `PATH`.
 
 ## Will Mago implement a Composer alternative?
 
