@@ -124,8 +124,9 @@ pub enum WorkerError {
     Remote { host: String, worker: usize, request: u64, payload: Vec<u8> },
     /// A worker sent a request but no host-side handler was installed.
     UnexpectedRequest { worker: usize, request: u64 },
-    /// A worker connection stopped before completing the request.
-    Disconnected { worker: usize, message: String },
+    /// A worker connection stopped before completing the request. `host` names the worker's host, and `message` says
+    /// why, followed for a worker that failed by the tail of its stderr, where a worker that died says why it did.
+    Disconnected { host: String, worker: usize, message: String },
     /// A lazily started worker advertised different initialization state.
     InconsistentInitialization { worker: usize },
     /// Terminal state reduction could not complete for a worker.
@@ -172,8 +173,8 @@ impl std::fmt::Display for WorkerError {
             Self::UnexpectedRequest { worker, request } => {
                 write!(formatter, "extension worker {worker} sent unexpected nested request {request}")
             }
-            Self::Disconnected { worker, message } => {
-                write!(formatter, "extension worker {worker} disconnected: {message}")
+            Self::Disconnected { host, worker, message } => {
+                write!(formatter, "extension host `{host}` disconnected (worker {worker}): {message}")
             }
             Self::InconsistentInitialization { worker } => {
                 write!(formatter, "extension worker {worker} returned inconsistent initialization state")

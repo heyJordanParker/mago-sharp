@@ -28,6 +28,8 @@ use const STDERR;
 use const STDOUT;
 
 const VERSIONED_DOCUMENTATION_FILES = [
+    // PHP#'s README, whose runtime image examples name the release's tags.
+    '../README.md',
     'README.md',
     'docs/content/en/extensions/development/packaging-and-compatibility.md',
     'docs/content/en/extensions/getting-started.md',

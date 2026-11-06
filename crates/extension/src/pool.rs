@@ -1336,4 +1336,29 @@ mod tests {
         assert_eq!(pool.request(b"ping".to_vec(), None).expect("request should succeed"), b"pong");
         pool.shutdown();
     }
+
+    /// A worker that dies at startup, as one whose require-dev package `composer install --no-dev` left out does, fails
+    /// the first request with its host's name and what it wrote to stderr. Why Mago learns it stopped depends on when it
+    /// dies: before the request reaches it, while Mago writes the request, or after, so only the reason varies.
+    #[cfg(unix)]
+    #[test]
+    fn a_worker_that_dies_at_startup_names_its_host_and_its_stderr() {
+        const WORKER: &str = r#"echo 'PHP Fatal error:  Uncaught Error: Class "ReportPlugin" not found' >&2; exit 255"#;
+
+        let pool = WorkerPool::spawn(
+            WorkerCommand::new("sh").with_arguments(["-c", WORKER]),
+            NonZeroUsize::MIN,
+            WorkerPoolOptions { host: "acme".to_owned(), ..WorkerPoolOptions::default() },
+        )
+        .expect("worker process should start");
+
+        let error = pool.broadcast(b"describe").expect_err("the dead worker should fail the request").to_string();
+
+        assert!(error.starts_with("extension host `acme` disconnected (worker 0): "), "{error}");
+        assert!(
+            error.ends_with(r#"; stderr: PHP Fatal error:  Uncaught Error: Class "ReportPlugin" not found"#),
+            "{error}"
+        );
+        pool.shutdown();
+    }
 }

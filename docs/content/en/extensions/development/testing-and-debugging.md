@@ -137,7 +137,7 @@ Enable trace output:
 MAGO_LOG=trace mago analyze --reporting-format count
 ```
 
-Mago continuously retains the configured tail of worker standard error. A non-empty tail is appended when the worker failure or disconnect path captures it, but startup failures, request timeouts, and remote callback errors can be reported without that tail. Log concise context to `STDERR`; never write application output, a byte-order mark, or debug dumps to `STDOUT`.
+Mago continuously retains the configured tail of worker standard error. The error for a worker that dies or disconnects, including one that dies at startup, names its host and holds that tail, as ``extension host `reports` disconnected (worker 0): worker closed stdout; stderr: PHP Fatal error: ...``. Request timeouts and remote callback errors are reported without the tail. Log concise context to `STDERR`; never write application output, a byte-order mark, or debug dumps to `STDOUT`.
 
 Useful isolation switches are:
 
@@ -149,7 +149,7 @@ Useful isolation switches are:
 
 ## Timeouts and cancellation
 
-The host's `request-timeout-ms` is the longest one unit of a request may run. It counts from when the worker starts a request, not while the request waits behind earlier ones, and starts again each time the worker starts one of the request's units: a file's hooks in an after-file batch, one plugin's initialization, before-analysis or after-analysis hooks, a codebase-scan hook, or an extension's worker reducer. It does not start again at the nested metadata or comparison requests a hook makes. When a hook runs past it, the error names the unit that made no progress, such as the after-analysis hooks of plugin `dead-routes`. When Mago cancels work, `CancellationTokenInterface` becomes cancelled and `throwIfCancelled()` raises `CancelledException`.
+The host's `request-timeout-ms` is the longest one unit of a request may run. It counts from when the worker starts a request, not while the request waits behind earlier ones, and starts again each time the worker starts one of the request's units: a file's hooks in an after-file batch, one plugin's initialization, before-analysis or after-analysis hooks, a codebase-scan hook, or an extension's worker reducer. It does not start again at the nested metadata or comparison requests a hook makes. When a hook runs past it, the error names the unit that made no progress, such as the after-analysis hooks of plugin `dead-routes`. A worker that stops reading its standard input, as one held at a debugger breakpoint does, fails at the same deadline. On macOS and Linux, a worker that fails ends with every process it started on the host, as [Worker processes](/extensions/configuration/#worker-processes) describes. When Mago cancels work, `CancellationTokenInterface` becomes cancelled and `throwIfCancelled()` raises `CancelledException`.
 
 Check cancellation in long scans and aggregation loops. `subscribe()` integrates cancellation with asynchronous work; always `unsubscribe()` a retained subscription after completion.
 
