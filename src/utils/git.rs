@@ -157,37 +157,72 @@ where
     Ok(())
 }
 
-/// The files under `workspace` git holds as they are, each relative to `workspace`: in the last commit, with no change
-/// since, staged or not. None outside a git repository, or in one with no commit.
-pub fn committed_files(workspace: &Path) -> Result<HashSet<PathBuf>, Error> {
-    if !is_git_repository(workspace) {
-        return Ok(HashSet::new());
+/// What git's last commit holds under a workspace, each path relative to it.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Committed {
+    /// The files the last commit holds with no change since, staged or not. A file git is told to assume unchanged, or
+    /// to skip in the worktree, is left out, since git shows none of its changes.
+    pub files: HashSet<PathBuf>,
+    /// The submodules the last commit holds, whose files another repository holds.
+    pub submodules: Vec<PathBuf>,
+}
+
+/// What git's last commit holds under `workspace`. Nothing in a repository with no commit.
+///
+/// # Errors
+///
+/// Returns [`Error::RunningGit`] when git can't start, and [`Error::GitFailed`] with git's reason when it can't read
+/// the repository: outside one, or in a linked worktree whose git folder isn't there, as in a container that mounts
+/// the worktree alone.
+pub fn committed_files(workspace: &Path) -> Result<Committed, Error> {
+    let head = Command::new("git")
+        .args(["rev-parse", "--verify", "--quiet", "HEAD"])
+        .current_dir(workspace)
+        .output()
+        .map_err(|source| Error::RunningGit { command: "rev-parse", source })?;
+    // `--verify --quiet` exits 1 when `HEAD` names no commit, and git exits 128 when it can't read the repository.
+    if head.status.code() == Some(1) {
+        return Ok(Committed::default());
     }
-    let paths = |output: Output| -> HashSet<PathBuf> {
+    succeeded("rev-parse", head)?;
+    let entries = |output: Output| -> Vec<String> {
         output
             .stdout
             .split(|byte| *byte == 0)
-            .filter(|path| !path.is_empty())
-            .map(|path| PathBuf::from(String::from_utf8_lossy(path).as_ref()))
+            .filter(|entry| !entry.is_empty())
+            .map(|entry| String::from_utf8_lossy(entry).into_owned())
             .collect()
     };
-    // A repository with no commit has no `HEAD` to list.
-    let listed = Command::new("git")
-        .args(["ls-tree", "-r", "-z", "--name-only", "HEAD"])
-        .current_dir(workspace)
-        .output()
-        .ok()
-        .filter(|output| output.status.success());
-    let Some(listed) = listed else {
-        return Ok(HashSet::new());
-    };
+    let listed = run_git("ls-tree", Command::new("git").args(["ls-tree", "-r", "-z", "HEAD"]).current_dir(workspace))?;
     let changed = run_git(
         "diff",
         Command::new("git").args(["diff", "-z", "--name-only", "--relative", "HEAD"]).current_dir(workspace),
     )?;
-    let changed = paths(changed);
+    let tagged = run_git("ls-files", Command::new("git").args(["ls-files", "-v", "-z"]).current_dir(workspace))?;
+    // `ls-files -v` tags a file git assumes unchanged with a lowercase letter, and one it skips in the worktree with `S`.
+    let mut unchecked: HashSet<String> = entries(tagged)
+        .into_iter()
+        .filter_map(|entry| {
+            let (tag, path) = entry.split_once(' ')?;
+            tag.chars().any(|tag| tag.is_ascii_lowercase() || tag == 'S').then(|| path.to_owned())
+        })
+        .collect();
+    unchecked.extend(entries(changed));
 
-    Ok(paths(listed).into_iter().filter(|path| !changed.contains(path)).collect())
+    let mut committed = Committed::default();
+    // Each entry of `ls-tree` is `<mode> <type> <object>`, a tab, and the path.
+    for entry in entries(listed) {
+        let Some((object, path)) = entry.split_once('\t') else {
+            continue;
+        };
+        if object.starts_with("160000 ") {
+            committed.submodules.push(PathBuf::from(path));
+        } else if !unchecked.contains(path) {
+            committed.files.insert(PathBuf::from(path));
+        }
+    }
+
+    Ok(committed)
 }
 
 /// Records in the index the rename of the tracked file `from` to `to`, both relative to `workspace`, with `from`'s
@@ -380,8 +415,7 @@ fn ignored_by_gitignore(workspace: &Path) -> Vec<PathBuf> {
                 .map(|entry| PathBuf::from(String::from_utf8_lossy(entry).as_ref()))
                 .collect();
         }
-        // Git's first line is its reason, and the lines after it are advice for its own command line.
-        Ok(output) => String::from_utf8_lossy(&output.stderr).lines().next().unwrap_or_default().trim().to_string(),
+        Ok(output) => reason(&output.stderr),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
         Err(error) => error.to_string(),
     };
@@ -497,7 +531,9 @@ fn create_blob(workspace: &Path, path: &Path, content: Vec<u8>) -> Result<String
 
     let mut stdin = child.stdin.take().expect("failed to get stdin");
     std::thread::spawn(move || {
-        stdin.write_all(&content).expect("failed to write to stdin");
+        mago_extension::process_group::block_sigpipe(&stdin);
+        // A git that exits before it reads the content closes the pipe, and its exit status reports why.
+        let _result = stdin.write_all(&content);
     });
 
     let output = child.wait_with_output().map_err(|source| Error::RunningGit { command: "hash-object", source })?;
@@ -536,16 +572,24 @@ fn run_git(command: &'static str, git: &mut Command) -> Result<Output, Error> {
     succeeded(command, output)
 }
 
-/// The `output` of the `git` subcommand `command`, or [`Error::GitFailed`] with the first line git printed to stderr
-/// when it exited with an error, as `ignored_by_gitignore` reads git's reason.
+/// The `output` of the `git` subcommand `command`, or [`Error::GitFailed`] with git's [`reason`] when it exited with an
+/// error.
 fn succeeded(command: &'static str, output: Output) -> Result<Output, Error> {
     if output.status.success() {
         return Ok(output);
     }
 
-    let reason = String::from_utf8_lossy(&output.stderr).lines().next().unwrap_or_default().trim().to_string();
+    Err(Error::GitFailed { command, status: output.status, reason: reason(&output.stderr) })
+}
 
-    Err(Error::GitFailed { command, status: output.status, reason })
+/// Why git failed, from what it printed to `stderr`: its first `fatal:` or `error:` line, past the lines `GIT_TRACE`
+/// adds, or its first line when it printed neither. The lines after its reason are advice for its own command line.
+fn reason(stderr: &[u8]) -> String {
+    let stderr = String::from_utf8_lossy(stderr);
+    let mut lines = stderr.lines().map(str::trim);
+    let first = lines.clone().next().unwrap_or_default();
+
+    lines.find(|line| line.starts_with("fatal:") || line.starts_with("error:")).unwrap_or(first).to_owned()
 }
 
 #[cfg(test)]
@@ -564,26 +608,76 @@ mod tests {
         String::from_utf8_lossy(&output.stdout).into_owned()
     }
 
-    /// Git holds a file of the last commit that has no change since, and neither an untracked file, a staged one nor
-    /// one changed on disk.
+    /// Git holds a file of the last commit that has no change since, and neither an untracked file, a staged one, one
+    /// changed on disk, nor one git is told to assume unchanged or to skip, whose changes it never shows.
     #[test]
     fn the_committed_files_are_those_of_the_last_commit_with_no_change_since() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path();
-        assert!(committed_files(root).unwrap().is_empty());
-        for name in ["Order.php", "Changed.php", "Staged.php"] {
+        for name in ["Order.php", "Changed.php", "Staged.php", "Assumed.php", "Skipped.php"] {
             std::fs::write(root.join(name), "<?php\n").unwrap();
         }
         git(root, &["init", "--quiet"]);
-        assert!(committed_files(root).unwrap().is_empty());
+        assert_eq!(committed_files(root).unwrap(), Committed::default());
         git(root, &["add", "--all"]);
         git(root, &["commit", "--quiet", "-m", "plain PHP"]);
         std::fs::write(root.join("Changed.php"), "<?php\n// changed\n").unwrap();
         std::fs::write(root.join("Staged.php"), "<?php\n// staged\n").unwrap();
         git(root, &["add", "Staged.php"]);
         std::fs::write(root.join("Draft.php"), "<?php\n").unwrap();
+        git(root, &["update-index", "--assume-unchanged", "Assumed.php"]);
+        git(root, &["update-index", "--skip-worktree", "Skipped.php"]);
+        std::fs::write(root.join("Assumed.php"), "<?php\n// hidden from git\n").unwrap();
+        std::fs::write(root.join("Skipped.php"), "<?php\n// hidden from git\n").unwrap();
 
-        assert_eq!(committed_files(root).unwrap(), HashSet::from([PathBuf::from("Order.php")]));
+        assert_eq!(committed_files(root).unwrap().files, HashSet::from([PathBuf::from("Order.php")]));
+    }
+
+    /// A submodule's files are another repository's, so the last commit holds the submodule and none of its files.
+    #[test]
+    fn a_submodule_is_held_as_a_submodule_and_none_of_its_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let (library, root) = (directory.path().join("library"), directory.path().join("project"));
+        for folder in [&library, &root] {
+            std::fs::create_dir(folder).unwrap();
+            std::fs::write(folder.join("Order.php"), "<?php\n").unwrap();
+            git(folder, &["init", "--quiet"]);
+            git(folder, &["add", "--all"]);
+            git(folder, &["commit", "--quiet", "-m", "plain PHP"]);
+        }
+        let source = library.to_string_lossy().into_owned();
+        git(&root, &["-c", "protocol.file.allow=always", "submodule", "add", "--quiet", &source, "vendor/library"]);
+        git(&root, &["commit", "--quiet", "-m", "the library"]);
+
+        let committed = committed_files(&root).unwrap();
+
+        assert_eq!(committed.submodules, [PathBuf::from("vendor/library")]);
+        assert_eq!(committed.files, HashSet::from([PathBuf::from("Order.php"), PathBuf::from(".gitmodules")]));
+    }
+
+    /// Git's reason is its first `fatal:` or `error:` line, past the trace `GIT_TRACE` prints before it.
+    #[test]
+    fn gits_reason_is_its_fatal_line_past_its_trace() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        std::fs::write(root.join(".git"), "gitdir: /missing/.git/worktrees/design\n").unwrap();
+        let rev_parse = |trace: &str| {
+            Command::new("git")
+                .args(["rev-parse", "--verify", "--quiet", "HEAD"])
+                .env("GIT_TRACE", trace)
+                .current_dir(root)
+                .output()
+                .unwrap()
+        };
+        // Git words its reason by its version, as `not a git repository` or `gitfile does not point to a valid
+        // repository`, so the reason is the `fatal:` line git prints with no trace.
+        let untraced = rev_parse("0");
+        let untraced = String::from_utf8_lossy(&untraced.stderr);
+        let alone = untraced.lines().find(|line| line.starts_with("fatal: ")).expect(&untraced);
+        let traced = rev_parse("1");
+        assert!(String::from_utf8_lossy(&traced.stderr).starts_with(|first: char| first.is_ascii_digit()));
+
+        assert_eq!(reason(&traced.stderr), alone);
     }
 
     /// The index records a rename of the plain file's contents, so it holds the rename alone, while the file written

@@ -149,7 +149,7 @@ Useful isolation switches are:
 
 ## Timeouts and cancellation
 
-The host's `request-timeout-ms` is the longest one unit of a request may run. It counts from when the worker starts a request, not while the request waits behind earlier ones, and starts again each time the worker starts one of the request's units: a file's hooks in an after-file batch, one plugin's initialization, before-analysis or after-analysis hooks, a codebase-scan hook, or an extension's worker reducer. It does not start again at the nested metadata or comparison requests a hook makes. When a hook runs past it, the error names the unit that made no progress, such as the after-analysis hooks of plugin `dead-routes`. When Mago cancels work, `CancellationTokenInterface` becomes cancelled and `throwIfCancelled()` raises `CancelledException`.
+The host's `request-timeout-ms` is the longest one unit of a request may run. It counts from when the worker starts a request, not while the request waits behind earlier ones, and starts again each time the worker starts one of the request's units: a file's hooks in an after-file batch, one plugin's initialization, before-analysis or after-analysis hooks, a codebase-scan hook, or an extension's worker reducer. It does not start again at the nested metadata or comparison requests a hook makes. When a hook runs past it, the error names the unit that made no progress, such as the after-analysis hooks of plugin `dead-routes`. A worker that stops reading its standard input, as one held at a debugger breakpoint does, fails at the same deadline. On macOS and Linux, a worker that fails ends with every process it started on the host, as [Worker processes](/extensions/configuration/#worker-processes) describes. When Mago cancels work, `CancellationTokenInterface` becomes cancelled and `throwIfCancelled()` raises `CancelledException`.
 
 Check cancellation in long scans and aggregation loops. `subscribe()` integrates cancellation with asynchronous work; always `unsubscribe()` a retained subscription after completion.
 
@@ -176,3 +176,18 @@ Workers can serve repeated analysis generations during one command. Tests should
 - after-file references are replaced, not duplicated;
 - reducer state represents one intended worker lifetime;
 - exact in-memory source is used instead of rereading changed files from disk.
+
+## Read source through the SDK
+
+A host reads a file's source through the SDK, never from disk. The file a hook sees may exist only in memory: `mago convert` proves each `.sharp` file before it writes it, and `--dry-run` never writes it, so a hook that runs `file_get_contents()` on `app/Billing/Invoice.sharp` during that proof fails. The SDK gives every hook that inspects a file that file's `SourceFile`, whose `contents` are the exact bytes Mago analyzes:
+
+- an after-file hook calls `FileAnalysis::getSourceFile()`
+- a node-analysis hook reads `NodeAnalysisContext::$source`
+- a lint rule reads `LintContext::$file`
+
+```php
+$source = $analysis->getSourceFile();
+$lines = explode("\n", $source->contents);
+```
+
+`SourceFile::$path` names the file for an issue. Never open it.
