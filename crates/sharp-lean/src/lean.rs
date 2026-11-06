@@ -239,7 +239,7 @@ impl Lean {
         };
 
         match fs::read(&compiled) {
-            Ok(bytes) => Ok(unit::is_stale(&self.root, &bytes)?),
+            Ok(bytes) => Ok(unit::is_stale(&bytes, |path| unit::stamp(&self.root, path))?),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(true),
             Err(error) => Err(DatabaseError::io(IOAction::ReadFile, &compiled, error).into()),
         }

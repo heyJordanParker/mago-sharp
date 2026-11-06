@@ -285,6 +285,7 @@ mago-sharp-bridge = { workspace = true }
 mago-converter = { workspace = true }
 mago-sharp-lean = { workspace = true }
 mago-extension = { workspace = true }
+mago-build-id = { workspace = true }
 serde = { workspace = true }
 clap = { workspace = true }
 clap_complete = { workspace = true }

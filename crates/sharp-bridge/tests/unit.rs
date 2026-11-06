@@ -473,6 +473,11 @@ fn compiled_with_inputs(root: &Path, names: &[&str]) -> Vec<u8> {
     encode(&lowered(SOURCE), SOURCE.as_bytes(), KEY, &inputs, &library())
 }
 
+/// Whether the compiled file `bytes` is stale, each input stamped under `root`.
+fn stale(root: &Path, bytes: &[u8]) -> bool {
+    is_stale(bytes, |path| stamp(root, path)).unwrap()
+}
+
 #[test]
 fn a_compiled_file_is_current_until_one_of_its_inputs_changes() {
     let directory = tempfile::tempdir().unwrap();
@@ -482,20 +487,20 @@ fn a_compiled_file_is_current_until_one_of_its_inputs_changes() {
     write(root, "app/Money.sharp", money);
     let bytes = compiled_with_inputs(root, &["app/Report.sharp", "app/Money.sharp", "app/Absent.sharp"]);
 
-    assert!(!is_stale(root, &bytes).unwrap(), "every input is as it was stamped");
+    assert!(!stale(root, &bytes), "every input is as it was stamped");
 
     write(root, "app/Money.sharp", "namespace App;\n\npublic class Money\n{\n    public int amount = 0;\n}\n");
-    assert!(is_stale(root, &bytes).unwrap(), "an input's bytes changed");
+    assert!(stale(root, &bytes), "an input's bytes changed");
 
     write(root, "app/Money.sharp", money);
-    assert!(!is_stale(root, &bytes).unwrap(), "rewriting the same bytes keeps it current");
+    assert!(!stale(root, &bytes), "rewriting the same bytes keeps it current");
 
     write(root, "app/Absent.sharp", "namespace App;\n\npublic class Absent\n{\n}\n");
-    assert!(is_stale(root, &bytes).unwrap(), "a file appeared where an input was absent");
+    assert!(stale(root, &bytes), "a file appeared where an input was absent");
 
     fs::remove_file(root.join("app/Absent.sharp")).unwrap();
     fs::remove_file(root.join("app/Money.sharp")).unwrap();
-    assert!(is_stale(root, &bytes).unwrap(), "an input that was there is gone");
+    assert!(stale(root, &bytes), "an input that was there is gone");
 }
 
 #[test]
@@ -509,10 +514,10 @@ fn a_compiled_file_another_checker_build_wrote_whose_sections_changed_or_that_is
     let mut damaged = bytes.clone();
     *damaged.last_mut().unwrap() ^= 1;
 
-    assert!(!is_stale(root, &bytes).unwrap());
-    assert!(is_stale(root, &other_build).unwrap());
-    assert!(is_stale(root, &damaged).unwrap());
-    assert!(is_stale(root, b"not a compiled file").unwrap());
+    assert!(!stale(root, &bytes));
+    assert!(stale(root, &other_build));
+    assert!(stale(root, &damaged));
+    assert!(stale(root, b"not a compiled file"));
 }
 
 fn read(name: &str, fingerprint: u64) -> Read {

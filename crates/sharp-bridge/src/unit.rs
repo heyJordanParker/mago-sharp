@@ -467,14 +467,17 @@ pub fn compiled_path(root: &Path, source: &Path) -> Result<Option<PathBuf>, Data
 
 /// Returns `true` when the compiled file `bytes` cannot stand for its source any more.
 ///
-/// That is when it is no compiled file this bridge reads, another checker build wrote it, or one of its inputs under
-/// `root` differs from its stamp. An input differs when its size or hash changed, when it is gone, or when a file
-/// appeared where it was absent.
+/// That is when it is no compiled file this bridge reads, another checker build wrote it, or one of its inputs differs
+/// from its stamp. `stamp` gives each input's current stamp, as [`stamp`] does under the workspace root. An input
+/// differs when its size or hash changed, when it is gone, or when a file appeared where it was absent.
 ///
 /// # Errors
 ///
-/// Returns the error of reading an input.
-pub fn is_stale(root: &Path, bytes: &[u8]) -> Result<bool, DatabaseError> {
+/// Returns the error `stamp` gives.
+pub fn is_stale(
+    bytes: &[u8],
+    mut stamp: impl FnMut(&[u8]) -> Result<Option<Input>, DatabaseError>,
+) -> Result<bool, DatabaseError> {
     let Ok(header) = header(bytes) else {
         return Ok(true);
     };
@@ -501,7 +504,7 @@ pub fn is_stale(root: &Path, bytes: &[u8]) -> Result<bool, DatabaseError> {
         size.copy_from_slice(&bytes[input + offset_of!(sharp_input, size)..][..8]);
         let hash = &bytes[input + offset_of!(sharp_input, hash)..][..16];
 
-        let current = match stamp(root, path)? {
+        let current = match stamp(path)? {
             Some(stamped) => (stamped.size, stamped.hash),
             None => (0, [0; 16]),
         };
