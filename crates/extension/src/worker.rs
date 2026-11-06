@@ -16,8 +16,11 @@ use std::process::ChildStderr;
 #[cfg(not(windows))]
 use std::process::ChildStdin;
 use std::sync::Arc;
+use std::sync::Condvar;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
+use std::sync::OnceLock;
+use std::sync::PoisonError;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU8;
 use std::sync::atomic::AtomicU64;
@@ -29,6 +32,7 @@ use std::time::Duration;
 use std::time::Instant;
 
 use crate::command::WorkerCommand;
+use crate::error::ProtocolError;
 use crate::error::WorkerError;
 use crate::pool::WorkerPoolOptions;
 use crate::protocol::Frame;
@@ -42,6 +46,10 @@ const STATE_FAILED: u8 = 3;
 const IO_THREAD_STACK_SIZE: usize = 256 * 1024;
 const INITIAL_SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_micros(50);
 const MAXIMUM_SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(1);
+/// The longest a failed worker's error waits for the stderr reader to read the rest of the worker's stderr. A dead
+/// worker's stderr ends when it exits, so only a process it started that still holds its stderr reaches this. Eight PHP
+/// workers that died at startup on a loaded Mac waited from 5 µs to 179 µs.
+const STDERR_END_TIMEOUT: Duration = Duration::from_secs(1);
 #[cfg(windows)]
 const INPUT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 #[cfg(any(windows, test))]
@@ -130,17 +138,20 @@ impl Write for WorkerStdin {
 enum PendingEvent {
     Frame(Frame),
     Started,
-    Failure(String),
+    /// The worker failed or shut down, so it will never answer.
+    Stopped,
 }
 
 struct StderrTail {
     bytes: VecDeque<u8>,
     capacity: usize,
+    /// Whether the stderr reader has read the worker's stderr to its end, so the tail holds all the worker wrote.
+    ended: bool,
 }
 
 impl StderrTail {
     fn new(capacity: usize) -> Self {
-        Self { bytes: VecDeque::with_capacity(capacity.min(4096)), capacity }
+        Self { bytes: VecDeque::with_capacity(capacity.min(4096)), capacity, ended: false }
     }
 
     fn extend(&mut self, bytes: &[u8]) {
@@ -167,6 +178,8 @@ impl StderrTail {
 
 struct WorkerInner {
     id: usize,
+    /// The worker's host in the configuration, which every error of the worker names.
+    host: String,
     state: AtomicU8,
     next_request_id: AtomicU64,
     in_flight: AtomicUsize,
@@ -175,6 +188,10 @@ struct WorkerInner {
     child: Mutex<Option<Child>>,
     pending: Mutex<BTreeMap<u64, mpsc::Sender<PendingEvent>>>,
     stderr: Mutex<StderrTail>,
+    /// Notified when the stderr reader reaches the end of the worker's stderr.
+    stderr_ended: Condvar,
+    /// Why the worker failed, with the tail of its stderr. `fail` sets it once, after the worker's state turns failed.
+    failure: OnceLock<String>,
     trace_enabled: bool,
     trace_summary_emitted: AtomicBool,
     telemetry: WorkerTelemetry,
@@ -266,8 +283,14 @@ impl WorkerInner {
 
     fn finish_write(&self, frame: &Frame, written: Result<(), WorkerError>) -> Result<(), WorkerError> {
         if let Err(error) = written {
-            if matches!(error, WorkerError::Protocol { .. }) {
-                self.fail(error.to_string());
+            match &error {
+                // A worker that exited closed the pipe Mago writes its requests to.
+                WorkerError::Protocol { source: ProtocolError::Io(source), .. } => {
+                    self.fail(format!("failed to write to the worker: {source}"));
+                    return Err(self.disconnected("worker is not running"));
+                }
+                WorkerError::Protocol { .. } => self.fail(error.to_string()),
+                _ => {}
             }
 
             return Err(error);
@@ -324,6 +347,8 @@ impl WorkerInner {
         }
     }
 
+    /// Stops the worker for `reason`, and records the reason with the tail of the worker's stderr as its failure, which
+    /// every request the worker fails from then on reads.
     fn fail(&self, reason: impl Into<String>) {
         if self.state.compare_exchange(STATE_RUNNING, STATE_FAILED, Ordering::AcqRel, Ordering::Acquire).is_err() {
             return;
@@ -333,28 +358,60 @@ impl WorkerInner {
             self.telemetry.failures.fetch_add(1, Ordering::Relaxed);
         }
 
-        lock(&self.writer).take();
         if let Some(child) = lock(&self.child).as_mut() {
             let _result = child.kill();
         }
 
-        let mut message = reason.into();
-        let stderr = lock(&self.stderr).display();
+        let mut failure = reason.into();
+        let stderr_wait_start = Instant::now();
+        let (stderr, ended) = self.stderr_tail();
+        let stderr_wait = stderr_wait_start.elapsed();
         if !stderr.is_empty() {
-            message.push_str("; stderr: ");
-            message.push_str(&stderr);
+            failure.push_str("; stderr: ");
+            failure.push_str(&stderr);
+        }
+        if !ended {
+            failure =
+                format!("{failure}; its stderr was still open {} ms after it stopped", STDERR_END_TIMEOUT.as_millis());
         }
 
-        let failure = message;
-        tracing::trace!(worker = self.id, reason = %failure, "Extension worker failed.");
+        tracing::trace!(worker = self.id, reason = %failure, ?stderr_wait, "Extension worker failed.");
+        // Recorded before the writer is taken, as a request that found the worker failed may wait for it holding the
+        // writer.
+        let _result = self.failure.set(failure);
+        lock(&self.writer).take();
         let pending = std::mem::take(&mut *lock(&self.pending));
         for sender in pending.into_values() {
-            let _result = sender.send(PendingEvent::Failure(failure.clone()));
+            let _result = sender.send(PendingEvent::Stopped);
         }
     }
 
+    /// The tail of the worker's stderr, and whether it holds all the worker wrote. A worker that dies writes why just
+    /// before it exits, and the stdout reader can see it exit before the stderr reader has read that, so this waits up
+    /// to `STDERR_END_TIMEOUT` for the stderr reader to reach the end.
+    fn stderr_tail(&self) -> (String, bool) {
+        let (tail, _) = self
+            .stderr_ended
+            .wait_timeout_while(lock(&self.stderr), STDERR_END_TIMEOUT, |tail| !tail.ended)
+            .unwrap_or_else(PoisonError::into_inner);
+
+        (tail.display(), tail.ended)
+    }
+
+    /// The error for a request the worker can't serve. A worker that failed says why it failed, which `fail` records
+    /// just after the worker's state turns failed. A worker that Mago stopped says `message`.
     fn disconnected(&self, message: impl Into<String>) -> WorkerError {
-        WorkerError::Disconnected { worker: self.id, message: message.into() }
+        let failure = if self.state.load(Ordering::Acquire) == STATE_FAILED {
+            Some(self.failure.wait())
+        } else {
+            self.failure.get()
+        };
+
+        WorkerError::Disconnected {
+            host: self.host.clone(),
+            worker: self.id,
+            message: failure.map_or_else(|| message.into(), Clone::clone),
+        }
     }
 
     fn emit_trace_summary(&self) {
@@ -414,7 +471,6 @@ impl Drop for WorkerRequestTrace<'_> {
 
 pub(crate) struct Worker {
     inner: Arc<WorkerInner>,
-    host: String,
     request_timeout: Duration,
     shutdown_timeout: Duration,
     reader_thread: Mutex<Option<JoinHandle<()>>>,
@@ -465,6 +521,7 @@ impl Worker {
 
         let inner = Arc::new(WorkerInner {
             id,
+            host: options.host.clone(),
             state: AtomicU8::new(STATE_RUNNING),
             next_request_id: AtomicU64::new(1),
             in_flight: AtomicUsize::new(0),
@@ -473,6 +530,8 @@ impl Worker {
             child: Mutex::new(Some(child)),
             pending: Mutex::new(BTreeMap::new()),
             stderr: Mutex::new(StderrTail::new(options.stderr_tail_size)),
+            stderr_ended: Condvar::new(),
+            failure: OnceLock::new(),
             trace_enabled,
             trace_summary_emitted: AtomicBool::new(false),
             telemetry: WorkerTelemetry::default(),
@@ -509,7 +568,6 @@ impl Worker {
 
         let worker = Arc::new(Self {
             inner,
-            host: options.host.clone(),
             request_timeout: options.request_timeout,
             shutdown_timeout: options.shutdown_timeout,
             reader_thread: Mutex::new(Some(reader_thread)),
@@ -601,7 +659,7 @@ impl Worker {
                                 self.inner.telemetry.remote_errors.fetch_add(1, Ordering::Relaxed);
                             }
                             return Err(WorkerError::Remote {
-                                host: self.host.clone(),
+                                host: self.inner.host.clone(),
                                 worker: self.id(),
                                 request: request_id,
                                 payload: frame.payload,
@@ -658,8 +716,8 @@ impl Worker {
                         self.inner.fail("worker requested shutdown");
                     }
                 },
-                Ok(PendingEvent::Failure(failure)) => {
-                    return Err(self.inner.disconnected(failure));
+                Ok(PendingEvent::Stopped) => {
+                    return Err(self.inner.disconnected("worker shut down"));
                 }
                 // The worker may have made progress on another request in the meantime, which the next pass reads.
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -684,7 +742,12 @@ impl Worker {
         let _result = self.inner.send(&Frame::cancel(request_id));
         self.inner.fail(format!("request {request_id} timed out"));
 
-        WorkerError::Timeout { host: self.host.clone(), worker: self.id(), running, duration: self.request_timeout }
+        WorkerError::Timeout {
+            host: self.inner.host.clone(),
+            worker: self.id(),
+            running,
+            duration: self.request_timeout,
+        }
     }
 
     pub fn reserve(self: &Arc<Self>) -> WorkerReservation {
@@ -702,6 +765,10 @@ impl Worker {
         loop {
             match state {
                 STATE_RUNNING | STATE_FAILED => {
+                    // A failed worker records why before it stops, so a request it fails while it stops reads why.
+                    if state == STATE_FAILED {
+                        self.inner.failure.wait();
+                    }
                     match self.inner.state.compare_exchange(state, STATE_STOPPING, Ordering::AcqRel, Ordering::Acquire)
                     {
                         Ok(_) => break,
@@ -768,10 +835,9 @@ impl Worker {
         }
 
         self.inner.state.store(STATE_STOPPED, Ordering::Release);
-        let failure = String::from("worker shut down");
         let pending = std::mem::take(&mut *lock(&self.inner.pending));
         for sender in pending.into_values() {
-            let _result = sender.send(PendingEvent::Failure(failure.clone()));
+            let _result = sender.send(PendingEvent::Stopped);
         }
 
         self.join_threads();
@@ -795,6 +861,7 @@ impl Worker {
     ) -> Arc<Self> {
         let inner = Arc::new(WorkerInner {
             id,
+            host: options.host.clone(),
             state: AtomicU8::new(STATE_RUNNING),
             next_request_id: AtomicU64::new(1),
             in_flight: AtomicUsize::new(0),
@@ -802,7 +869,10 @@ impl Worker {
             writer: Mutex::new(Some(BufWriter::new(WorkerStdin::Test(writer)))),
             child: Mutex::new(None),
             pending: Mutex::new(BTreeMap::new()),
-            stderr: Mutex::new(StderrTail::new(options.stderr_tail_size)),
+            // A peer on streams has no stderr.
+            stderr: Mutex::new(StderrTail { ended: true, ..StderrTail::new(options.stderr_tail_size) }),
+            stderr_ended: Condvar::new(),
+            failure: OnceLock::new(),
             trace_enabled: tracing::enabled!(tracing::Level::TRACE),
             trace_summary_emitted: AtomicBool::new(false),
             telemetry: WorkerTelemetry::default(),
@@ -814,7 +884,6 @@ impl Worker {
 
         Arc::new(Self {
             inner,
-            host: options.host.clone(),
             request_timeout: options.request_timeout,
             shutdown_timeout: options.shutdown_timeout,
             reader_thread: Mutex::new(Some(reader_thread)),
@@ -970,11 +1039,11 @@ fn read_worker_stderr(inner: &WorkerInner, stderr: ChildStderr) {
         match reader.read(&mut buffer) {
             Ok(0) => {
                 tracing::trace!(worker = inner.id, "Extension worker stderr reader reached EOF.");
-                return;
+                break;
             }
             Err(error) => {
                 tracing::trace!(worker = inner.id, error = %error, "Extension worker stderr reader failed.");
-                return;
+                break;
             }
             Ok(read) => {
                 if inner.trace_enabled {
@@ -984,6 +1053,9 @@ fn read_worker_stderr(inner: &WorkerInner, stderr: ChildStderr) {
             }
         }
     }
+
+    lock(&inner.stderr).ended = true;
+    inner.stderr_ended.notify_all();
 }
 
 fn reap_child(inner: &WorkerInner) {
@@ -1428,6 +1500,33 @@ mod tests {
 
         worker.shutdown();
         peer.join().expect("peer thread should join");
+    }
+
+    /// A pool restarts its dead workers one after another before it sends them a request, so a worker that dies at
+    /// startup, as one whose require-dev package `composer install --no-dev` left out does, has died again when the
+    /// request reaches it. The error still names its host and says why it died.
+    #[cfg(unix)]
+    #[test]
+    fn a_request_to_a_worker_that_died_at_startup_names_its_host_and_its_stderr() {
+        const WORKER: &str = r#"echo 'PHP Fatal error:  Uncaught Error: Class "ReportPlugin" not found' >&2; exit 255"#;
+        const TIMEOUT: Duration = Duration::from_secs(10);
+
+        let command = WorkerCommand::new("sh").with_arguments(["-c", WORKER]);
+        let options = WorkerPoolOptions { host: "acme".to_owned(), ..WorkerPoolOptions::default() };
+        let worker = Worker::spawn(0, &command, &options).expect("worker process should start");
+        let deadline = Instant::now() + TIMEOUT;
+        while worker.is_running() {
+            assert!(Instant::now() < deadline, "the worker still ran after {TIMEOUT:?}");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+
+        let error = worker.request(b"describe".to_vec(), None).expect_err("the dead worker should fail the request");
+
+        assert_eq!(
+            error.to_string(),
+            r#"extension host `acme` disconnected (worker 0): worker closed stdout; stderr: PHP Fatal error:  Uncaught Error: Class "ReportPlugin" not found"#
+        );
+        worker.shutdown();
     }
 
     fn send_at_once<const N: usize>(worker: &Arc<Worker>) -> [Result<Vec<u8>, WorkerError>; N] {

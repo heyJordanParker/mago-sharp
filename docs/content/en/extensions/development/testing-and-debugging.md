@@ -137,7 +137,7 @@ Enable trace output:
 MAGO_LOG=trace mago analyze --reporting-format count
 ```
 
-Mago continuously retains the configured tail of worker standard error. A non-empty tail is appended when the worker failure or disconnect path captures it, but startup failures, request timeouts, and remote callback errors can be reported without that tail. Log concise context to `STDERR`; never write application output, a byte-order mark, or debug dumps to `STDOUT`.
+Mago continuously retains the configured tail of worker standard error. The error for a worker that dies or disconnects, including one that dies at startup, names its host and ends with that tail, as ``extension host `reports` disconnected (worker 0): worker closed stdout; stderr: PHP Fatal error: ...``. Request timeouts and remote callback errors are reported without the tail. Log concise context to `STDERR`; never write application output, a byte-order mark, or debug dumps to `STDOUT`.
 
 Useful isolation switches are:
 
