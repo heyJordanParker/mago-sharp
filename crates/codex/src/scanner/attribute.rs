@@ -8,12 +8,16 @@ use mago_syntax::cst::ArrayElement;
 use mago_syntax::cst::AttributeList;
 use mago_syntax::cst::ClassConstantAccess;
 use mago_syntax::cst::ClassLikeConstantSelector;
+use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Expression;
+use mago_syntax::cst::Hint;
 use mago_syntax::cst::Instantiation;
 use mago_syntax::cst::LegacyArray;
 use mago_syntax::cst::Literal;
 use mago_syntax::cst::PartialArgument;
+use mago_syntax::cst::PropertyAccess;
 use mago_syntax::cst::Sequence;
+use mago_syntax::cst::TypeOf;
 use mago_syntax::cst::UnaryPrefix;
 use mago_syntax::cst::UnaryPrefixOperator;
 use mago_syntax_core::stack::ensure_sufficient_stack;
@@ -154,6 +158,20 @@ where
             Some(class) => ConstantExpression::ClassConstant(class, word(constant.value)),
             None => unsupported(),
         },
+        // PHP# `Type.String` is PHP's `Type::String`, and `typeof(Order)` is `Order::class`, spec section 25. A type
+        // parameter's class is known only while the code runs.
+        Expression::Access(Access::Property(
+            access @ PropertyAccess { property: ClassLikeMemberSelector::Identifier(member), .. },
+        )) if let Some(class) = context.resolved_names.static_property_class(access)
+            && !context.resolved_names.is_type_parameter(&class.name) =>
+        {
+            ConstantExpression::ClassConstant(word(context.resolved_names.get(&class.name)), word(member.value))
+        }
+        Expression::TypeOf(TypeOf { r#type: Hint::Identifier(class), .. })
+            if !context.resolved_names.is_type_parameter(class) =>
+        {
+            ConstantExpression::ClassName(word(context.resolved_names.get(class)))
+        }
         Expression::Instantiation(Instantiation { class, argument_list, .. }) => {
             let Some(class) = class_name(class) else {
                 return unsupported();
@@ -243,8 +261,21 @@ mod tests {
     use mago_word::word;
     use ordered_float::OrderedFloat;
 
+    use crate::metadata::attribute::AttributeMetadata;
     use crate::metadata::attribute::ConstantExpression;
     use crate::scanner::scan_program;
+
+    /// The attributes of `App\Holder`, scanned from `code` in the file `name`, whose extension picks PHP or PHP#.
+    fn holder_attributes(name: &'static str, code: &'static str) -> Vec<AttributeMetadata> {
+        let file = File::ephemeral(Cow::Borrowed(name.as_bytes()), Cow::Borrowed(code.as_bytes()));
+        let arena = LocalArena::new();
+        let program = parse_file(&arena, &file);
+        assert!(!program.has_errors(), "the fixture parses: {:?}", program.errors);
+        let resolved_names = NameResolver::new(&arena).resolve(program);
+        let codebase = scan_program(&arena, &file, program, &resolved_names, mago_php_version::PHPVersion::LATEST);
+
+        codebase.class_likes.get(&ascii_lowercase_word(b"App\\Holder")).expect("Holder is scanned").attributes.clone()
+    }
 
     #[test]
     fn attribute_arguments_evaluate_to_constant_expressions() {
@@ -257,15 +288,9 @@ use Other\Type;
 #[Type([-2, 1.5, 'key' => null, true], self::class, strlen('x'))]
 final class Holder {}
 ";
-        let file = File::ephemeral(Cow::Borrowed(b"code.php"), Cow::Borrowed(code.as_bytes()));
-        let arena = LocalArena::new();
-        let program = parse_file(&arena, &file);
-        assert!(!program.has_errors(), "the fixture parses: {:?}", program.errors);
-        let resolved_names = NameResolver::new(&arena).resolve(program);
-        let codebase = scan_program(&arena, &file, program, &resolved_names, mago_php_version::PHPVersion::LATEST);
-        let holder = codebase.class_likes.get(&ascii_lowercase_word(b"App\\Holder")).expect("Holder is scanned");
+        let attributes = holder_attributes("code.php", code);
         let values = |index: usize| {
-            holder.attributes[index].arguments.iter().map(|argument| argument.value.clone()).collect::<Vec<_>>()
+            attributes[index].arguments.iter().map(|argument| argument.value.clone()).collect::<Vec<_>>()
         };
 
         assert_eq!(
@@ -297,5 +322,39 @@ final class Holder {}
                 Some(ConstantExpression::ClassName(word("App\\Holder"))),
             ]
         );
+    }
+
+    /// `Type.String`, `Plan.Starter` and `typeof(Order)` in a PHP# attribute are PHP's `Type::String`, `Plan::Starter`
+    /// and `Order::class`, so each argument gets the value and the type its PHP twin gets.
+    #[test]
+    fn a_sharp_attribute_argument_evaluates_as_its_php_twin() {
+        let php = r"<?php
+namespace App;
+
+use Lib\Order;
+use Lib\Plan;
+use Lib\Type;
+
+#[Type(Type::String, plan: Plan::Starter, of: Order::class, keys: [1, 2], map: ['a' => 1], item: new Type(Order::class))]
+final class Holder {}
+";
+        let sharp = r#"namespace App;
+
+import Lib.Order;
+import Lib.Plan;
+import Lib.Type;
+
+[Type(Type.String, plan: Plan.Starter, of: typeof(Order), keys: [1, 2], map: ["a": 1], item: new Type(typeof(Order)))]
+class Holder {}
+"#;
+        let arguments = |name, code| {
+            holder_attributes(name, code)[0]
+                .arguments
+                .iter()
+                .map(|argument| (argument.name, argument.value_type.clone(), argument.value.clone()))
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(arguments("code.sharp", sharp), arguments("code.php", php));
     }
 }

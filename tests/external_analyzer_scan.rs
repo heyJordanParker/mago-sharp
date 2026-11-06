@@ -124,3 +124,49 @@ fn selected_declarations_refresh_every_worker_incrementally() {
     service.analyze_incremental(Some(&[ignored_id])).expect("an unrelated source change should remain analyzable");
     assert_eq!(audit(&audit_log).len(), 6, "unmatched changes must not cross the worker boundary");
 }
+
+/// A host types an entity by its attributes, so `[Type(Type.String, …)]` in a PHP# file reaches it as
+/// `#[Type(Type::String, …)]` does in PHP: each argument with the same kind and the same parts, and none `Unsupported`.
+#[test]
+fn a_sharp_attribute_argument_reaches_a_host_as_its_php_twin() {
+    const PHP: &str = "<?php\n\nnamespace App\\Php;\n\nuse Lib\\Order;\nuse Lib\\Plan;\nuse Lib\\Type;\n\n#[Type(Type::String, plan: Plan::Starter, of: Order::class, keys: [1, 2], map: ['a' => 1], item: new Type(Order::class))]\nfinal class Entity {}\n";
+    const SHARP: &str = "namespace App.Sharp;\n\nimport Lib.Order;\nimport Lib.Plan;\nimport Lib.Type;\n\n[Type(Type.String, plan: Plan.Starter, of: typeof(Order), keys: [1, 2], map: [\"a\": 1], item: new Type(typeof(Order)))]\nclass Entity {}\n";
+
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if !common::php_sdk_is_available(repository, "the external analyzer scan test") {
+        return;
+    }
+
+    let temporary = tempfile::tempdir().expect("temporary scan directory should be created");
+    let audit_log = temporary.path().join("audit.jsonl");
+    std::fs::write(&audit_log, []).expect("scan audit should be initialized");
+    let command = WorkerCommand::new("php")
+        .with_argument(repository.join("composer/tests/Sdk/Fixtures/analyzer-attribute-scan-worker.php"))
+        .with_current_directory(repository)
+        .with_environment("MAGO_SCAN_AUDIT_LOG", &audit_log);
+    let pool = WorkerPool::spawn(command, NonZeroUsize::MIN, WorkerPoolOptions::default())
+        .expect("scan worker pool should start");
+    let analyzer = ExternalAnalyzer::initialize([Arc::new(pool)], PHPVersion::PHP85, &[], false)
+        .expect("scan analyzer should initialize");
+    let mut registry = PluginRegistry::with_library_providers();
+    registry.set_external_analyzer(Arc::new(ExternalAnalyzerHandle::ready(analyzer)));
+
+    let mut database = Database::new(common::database_configuration("/scan-proof", vec![Cow::Borrowed(b".")]));
+    for (name, code) in [("src/Php/Entity.php", PHP), ("src/Sharp/Entity.sharp", SHARP)] {
+        database.add(File::new(Cow::Borrowed(name.as_bytes()), FileType::Host, None, Cow::Borrowed(code.as_bytes())));
+    }
+    let mut service = IncrementalAnalysisService::new(
+        database.read_only(),
+        Default::default,
+        Settings::new(PHPVersion::PHP85),
+        ParserSettings::default(),
+        Arc::new(registry),
+    );
+    service.analyze().expect("the analysis should scan both twins");
+
+    let [(_, files)] = &audit(&audit_log)[..] else { panic!("the one worker records one scan") };
+    let php = &files["src/Php/Entity.php"];
+    assert_eq!(php.len(), 6, "{php:?}");
+    assert!(php.iter().all(|argument| !argument.contains("Unsupported")), "{php:?}");
+    assert_eq!(files["src/Sharp/Entity.sharp"], *php);
+}
