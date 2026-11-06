@@ -1,34 +1,25 @@
-//! The Lean runtime library and the `sharp-lean` runner, built once per Mago build in Mago's cache folder, and the
-//! `lake` that builds them: the one on the `PATH`, else the one of the elan Mago installs in its cache folder.
+//! The Lean runtime library and the `sharp-lean` runner, built in Mago's cache folder once per library source and Lean
+//! version, and the `lake` that builds them: the one on the `PATH`, else the one of the elan Mago installs in its cache
+//! folder.
 
 use std::fmt::Write;
 use std::fs;
 use std::io;
 use std::io::Read;
+use std::io::Write as _;
 use std::path::Path;
 use std::path::PathBuf;
-use std::process::Child;
 use std::process::Command;
 use std::process::ExitStatus;
 use std::process::Output;
 use std::process::Stdio;
-#[cfg(unix)]
-use std::sync::Mutex;
-#[cfg(unix)]
-use std::sync::Once;
-#[cfg(unix)]
-use std::sync::PoisonError;
-#[cfg(unix)]
-use std::sync::atomic::AtomicI32;
-#[cfg(unix)]
-use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
-use mago_build_id::BUILD_ID;
 use mago_database::error::DatabaseError;
 use mago_database::error::IOAction;
+use mago_extension::ProcessGroup;
 use sha2::Digest;
 use sha2::Sha256;
 
@@ -165,7 +156,7 @@ fn below_hard(limit: &libc::rlimit) -> u64 {
 /// Sets the soft processor-time limit of the process about to start to `seconds`, kept under its hard limit, and its
 /// core-file limit to none, so a Lean stopped that way leaves no core file of gigabytes in the project.
 #[cfg(unix)]
-fn limit_processor_time(seconds: u64) -> io::Result<()> {
+pub(crate) fn limit_processor_time(seconds: u64) -> io::Result<()> {
     for (resource, soft) in [(libc::RLIMIT_CPU, seconds), (libc::RLIMIT_CORE, 0)] {
         let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
         // SAFETY: `limit` is a valid `rlimit` for `getrlimit` to fill and `setrlimit` to read.
@@ -199,7 +190,7 @@ pub(crate) fn stopped(status: ExitStatus) -> bool {
 }
 
 /// Whether `code` is the exit status Lean reports for a process `SIGXCPU` ended: 128 plus the signal.
-pub(crate) fn stopped_code(code: i32) -> bool {
+fn stopped_code(code: i32) -> bool {
     #[cfg(unix)]
     {
         code == 128 + libc::SIGXCPU
@@ -226,108 +217,38 @@ pub(crate) fn deadline() -> Duration {
     Duration::from_secs(processor_seconds().saturating_mul(4))
 }
 
-/// The process group `output_before_deadline` waits on, or 0. It is not Mago's own group, so a terminal's Ctrl-C reaches
-/// it only through `forward`.
-#[cfg(unix)]
-static WAITED_ON: AtomicI32 = AtomicI32::new(0);
-
-/// What `WAITED_ON` holds while `command.spawn()` starts the group.
-#[cfg(unix)]
-const STARTING: libc::pid_t = -1;
-
-/// The signal `forward` received, which `output_before_deadline` passes back to it once the group it started is known:
-/// a signal can reach any of Mago's threads while one of them spawns.
-#[cfg(unix)]
-static PENDING: AtomicI32 = AtomicI32::new(0);
-
-/// Keeps `output_before_deadline` to one group at a time, the one `WAITED_ON` holds.
-#[cfg(unix)]
-static ONE_GROUP: Mutex<()> = Mutex::new(());
-
-/// Runs `command` in a process group of its own and returns how it exited and what it wrote, and whether it wrote
-/// nothing for `deadline()`, so Mago ended the group. The deadline counts from the last thing it wrote, so a
-/// `lake build` that reports each module it builds never reaches it however many modules it builds, while a Lean that
-/// waits does. A signal that ends Mago ends the group too, as it did while the group was Mago's own.
-pub(crate) fn output_before_deadline(command: &mut Command) -> io::Result<(Output, bool)> {
-    command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    #[cfg(unix)]
-    let _one = {
-        std::os::unix::process::CommandExt::process_group(command, 0);
-        forward_signals();
-        ONE_GROUP.lock().unwrap_or_else(PoisonError::into_inner)
-    };
-    #[cfg(unix)]
-    WAITED_ON.store(STARTING, Ordering::SeqCst);
-    let spawned = command.spawn();
-    // `forward` writes `PENDING` before it reads `WAITED_ON`, and this thread writes `WAITED_ON` before it reads
-    // `PENDING`, so at least one of them ends the group for a signal that arrived during the spawn.
-    #[cfg(unix)]
-    {
-        let group = spawned.as_ref().ok().and_then(|child| libc::pid_t::try_from(child.id()).ok()).unwrap_or(0);
-        WAITED_ON.store(group, Ordering::SeqCst);
-        let signal = PENDING.load(Ordering::SeqCst);
-        if signal != 0 {
-            forward(signal);
-        }
-    }
-    let mut child = spawned?;
-    let output = wait_before_deadline(&mut child);
-    #[cfg(unix)]
-    WAITED_ON.store(0, Ordering::SeqCst);
-
-    output
-}
-
-/// On each signal that ends Mago from a terminal or `kill`, which Mago does not ignore, ends the group `WAITED_ON`
-/// holds, then ends Mago with it as before.
-#[cfg(unix)]
-fn forward_signals() {
-    static FORWARDING: Once = Once::new();
-    FORWARDING.call_once(|| {
-        for signal in [libc::SIGINT, libc::SIGQUIT, libc::SIGHUP, libc::SIGTERM] {
-            // SAFETY: `sigaction` is plain data, which zeroes make valid.
-            let mut previous: libc::sigaction = unsafe { std::mem::zeroed() };
-            // SAFETY: `sigaction` only reads the handler of `signal` into `previous`.
-            if unsafe { libc::sigaction(signal, std::ptr::null(), &raw mut previous) } != 0
-                || previous.sa_sigaction != libc::SIG_DFL
-            {
-                continue;
-            }
-            // SAFETY: as for `previous`.
-            let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
-            // `sigaction` takes the handler as its address.
-            #[allow(clippy::fn_to_numeric_cast_any)]
-            let handler = forward as extern "C" fn(libc::c_int) as libc::sighandler_t;
-            action.sa_sigaction = handler;
-            action.sa_flags = libc::SA_RESETHAND;
-            // SAFETY: `action` is a valid `sigaction`, and `forward` is async-signal-safe.
-            unsafe { libc::sigaction(signal, &raw const action, std::ptr::null_mut()) };
-        }
+/// Runs `command` in a process group of its own with `input` on its standard input, and returns how it exited and what
+/// it wrote, and whether it wrote nothing for `deadline()`, so Mago ended the group. The deadline counts from the last
+/// thing it wrote, so a runner that reports each module and check it starts never reaches it however many it checks,
+/// while a Lean that waits does. A signal that ends Mago ends the group too, as it did while the group was Mago's own.
+/// An error writing `input` counts only when the command succeeded, since one that fails before it reads its input is
+/// reported by how it exited.
+pub(crate) fn output_before_deadline(command: &mut Command, input: &[u8]) -> io::Result<(Output, bool)> {
+    command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut group = ProcessGroup::spawn(command)?;
+    // A thread writes the input, so a command that never reads it cannot keep Mago from its deadline.
+    let mut stdin =
+        group.leader().stdin.take().ok_or_else(|| io::Error::other("a law checker process has no input stream"))?;
+    let input = input.to_vec();
+    let writer = thread::spawn(move || {
+        mago_extension::process_group::block_sigpipe(&stdin);
+        stdin.write_all(&input)
     });
+    let output = wait_before_deadline(&mut group);
+    let written = writer.join().map_err(|_| io::Error::other("a writer of a law checker process panicked"))?;
+    let output = output?;
+    if output.0.status.success() {
+        written?;
+    }
+
+    Ok(output)
 }
 
-/// Ends the group `WAITED_ON` holds with `SIGKILL`, as `end_group` does, so no Lean of it dumps a core on `SIGQUIT`,
-/// then raises `signal` again, which `SA_RESETHAND` made end Mago. While the group starts, it only records `signal` in
-/// `PENDING`, for the spawning thread to send on.
-#[cfg(unix)]
-extern "C" fn forward(signal: libc::c_int) {
-    PENDING.store(signal, Ordering::SeqCst);
-    let group = WAITED_ON.load(Ordering::SeqCst);
-    if group == STARTING {
-        return;
-    }
-    if group != 0 {
-        // SAFETY: `kill` is async-signal-safe.
-        unsafe { libc::kill(-group, libc::SIGKILL) };
-    }
-    // SAFETY: `raise` is async-signal-safe.
-    unsafe { libc::raise(signal) };
-}
-
-/// What `child` wrote and how it exited, and whether Mago ended its group at `deadline()`.
-fn wait_before_deadline(child: &mut Child) -> io::Result<(Output, bool)> {
+/// What `group`'s leader wrote and how it exited, and whether Mago ended the group at `deadline()`.
+fn wait_before_deadline(group: &mut ProcessGroup) -> io::Result<(Output, bool)> {
     let missing = || io::Error::other("a law checker process has no output stream");
-    let (stdout, stderr) = (child.stdout.take().ok_or_else(missing)?, child.stderr.take().ok_or_else(missing)?);
+    let leader = group.leader();
+    let (stdout, stderr) = (leader.stdout.take().ok_or_else(missing)?, leader.stderr.take().ok_or_else(missing)?);
     let (wrote, written) = mpsc::channel();
     let stdout = read_all(stdout, wrote.clone());
     let stderr = read_all(stderr, wrote);
@@ -336,15 +257,12 @@ fn wait_before_deadline(child: &mut Child) -> io::Result<(Output, bool)> {
             Ok(()) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => break false,
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                #[cfg(unix)]
-                end_group(child)?;
-                #[cfg(not(unix))]
-                child.kill()?;
+                group.end()?;
                 break true;
             }
         }
     };
-    let status = child.wait()?;
+    let status = group.leader().wait()?;
     let joined = |reader: thread::JoinHandle<io::Result<Vec<u8>>>| {
         reader.join().map_err(|_| io::Error::other("a reader of a law checker process panicked"))?
     };
@@ -371,18 +289,6 @@ fn read_all(
     })
 }
 
-/// Ends `child` and every process of its group, such as each `lean` a `lake` started.
-#[cfg(unix)]
-fn end_group(child: &Child) -> io::Result<()> {
-    let group = libc::pid_t::try_from(child.id()).map_err(io::Error::other)?;
-    // SAFETY: `killpg` only sends a signal, to the group `child` leads since it started with `process_group(0)`.
-    if unsafe { libc::killpg(group, libc::SIGKILL) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
-
-    Ok(())
-}
-
 /// The runner executable in the library's build.
 pub(crate) fn runner(library: &Path) -> PathBuf {
     library.join(".lake/build/bin").join(format!("sharp-lean{}", std::env::consts::EXE_SUFFIX))
@@ -406,15 +312,37 @@ fn unbuilt(failure: impl std::fmt::Display) -> io::Error {
     )
 }
 
-/// Writes the library's package to `lean/<build id>.staging` in Mago's cache folder, builds it with `lake` and renames
-/// it to `lean/<build id>`, once per build ID. Builds take turns under an exclusive lock on `lean/build.lock`, across
-/// threads and processes alike. A build that lost its runner or a package file, as a cache cleaner leaves it, is
-/// deleted and built again. A finished build deletes every other folder in `lean/`: older builds and any staging
-/// folder a dead build left.
+/// The name of the library's build by the Lean whose `lake` printed `version`: a hash of `version` and each file of
+/// `package`, the whole of what the build reads, so a build is used only by the Lean that built it from those files.
+fn key(version: &str, package: &[(&str, &str)]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(format!("{}\0{version}\0", version.len()));
+    for (path, source) in package {
+        hasher.update(format!("{path}\0{}\0", source.len()));
+        hasher.update(source);
+    }
+
+    sha256_hex(&hasher.finalize())[..32].to_owned()
+}
+
+/// What `output`'s process wrote to its standard output and its standard error.
+fn printed(output: &Output) -> String {
+    format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr))
+}
+
+/// Builds the library in `lean/` in Mago's cache folder, as `build_in` does.
 pub(crate) fn build(lake: &Lake) -> io::Result<PathBuf> {
-    let builds = cache_root()?.join("lean");
-    let library = builds.join(format!("{BUILD_ID:032x}"));
-    fs::create_dir_all(&builds).map_err(|error| DatabaseError::io(IOAction::CreateFolder, &builds, error))?;
+    build_in(&cache_root()?.join("lean"), lake)
+}
+
+/// Writes the library's package to `<key>.staging` in `builds`, builds it with `lake` and renames it to `<key>`, once
+/// per Lean version and library source, which `key` names. The version is what `lake` prints in `builds`, which pins the
+/// library's Lean as the staging folder in it does, so it names the Lean that builds the library. Builds take turns
+/// under an exclusive lock on `build.lock` in `builds`, across threads and processes alike. A build that lost its runner
+/// or a package file, as a cache cleaner leaves it, is deleted and built again. A finished build deletes every other
+/// folder in `builds`: older builds and any staging folder a dead build left.
+pub(crate) fn build_in(builds: &Path, lake: &Lake) -> io::Result<PathBuf> {
+    fs::create_dir_all(builds).map_err(|error| DatabaseError::io(IOAction::CreateFolder, builds, error))?;
     let lock_file = builds.join("build.lock");
     let _lock = fs::File::options()
         .create(true)
@@ -423,6 +351,15 @@ pub(crate) fn build(lake: &Lake) -> io::Result<PathBuf> {
         .open(&lock_file)
         .and_then(|lock| lock.lock().map(|()| lock))
         .map_err(|error| DatabaseError::io(IOAction::WriteFile, &lock_file, error))?;
+    let toolchain = builds.join("lean-toolchain");
+    if !fs::read(&toolchain).is_ok_and(|bytes| bytes == TOOLCHAIN.as_bytes()) {
+        fs::write(&toolchain, TOOLCHAIN).map_err(|error| DatabaseError::io(IOAction::WriteFile, &toolchain, error))?;
+    }
+    let version = lake.command().arg("--version").current_dir(builds).output()?;
+    if !version.status.success() {
+        return Err(unbuilt(format!("lake --version in {} printed:\n{}", builds.display(), printed(&version))));
+    }
+    let library = builds.join(key(String::from_utf8_lossy(&version.stdout).trim(), &PACKAGE));
     if is_built(&library) {
         return Ok(library);
     }
@@ -440,14 +377,13 @@ pub(crate) fn build(lake: &Lake) -> io::Result<PathBuf> {
 
     let output = lake.command().arg("build").current_dir(&staging).output()?;
     if !output.status.success() {
-        let printed = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
-        return Err(unbuilt(format!("lake build in {} printed:\n{printed}", staging.display())));
+        return Err(unbuilt(format!("lake build in {} printed:\n{}", staging.display(), printed(&output))));
     }
 
     fs::rename(&staging, &library).map_err(unbuilt)?;
 
-    for entry in fs::read_dir(&builds).map_err(|error| DatabaseError::io(IOAction::OpenFolder, &builds, error))? {
-        let old = entry.map_err(|error| DatabaseError::io(IOAction::WalkFolder, &builds, error))?.path();
+    for entry in fs::read_dir(builds).map_err(|error| DatabaseError::io(IOAction::OpenFolder, builds, error))? {
+        let old = entry.map_err(|error| DatabaseError::io(IOAction::WalkFolder, builds, error))?.path();
         if old.is_dir() && old != library {
             fs::remove_dir_all(&old).map_err(|error| DatabaseError::io(IOAction::DeleteFolder, &old, error))?;
         }
@@ -672,6 +608,24 @@ mod tests {
         assert_eq!(String::from_utf8_lossy(&output.stdout), "120\n0\n");
 
         Ok(())
+    }
+
+    /// A build is named by the Lean version and every file of the library's package, so a build of another Lean or of
+    /// other sources is never used, and nothing else, such as Mago's own Rust code, names another build.
+    #[test]
+    fn the_library_build_is_named_by_its_lean_version_and_each_file_of_its_package() {
+        let version = "Lake version 5.0.0-src+5045d00 (Lean version 4.34.1)";
+        let base = key(version, &PACKAGE);
+        assert_eq!(base, key(version, &PACKAGE));
+        assert_eq!(base.len(), 32);
+        assert_ne!(base, key("Lake version 5.0.0-src+0000000 (Lean version 4.35.0)", &PACKAGE));
+
+        for (index, &(path, source)) in PACKAGE.iter().enumerate() {
+            let edited = format!("{source}\n");
+            let mut package: [(&str, &str); 8] = PACKAGE;
+            package[index] = (path, edited.as_str());
+            assert_ne!(base, key(version, &package), "{path}");
+        }
     }
 
     /// Linux ends a process whose soft limit meets its hard limit with `SIGKILL`, which Mago can't tell from the
