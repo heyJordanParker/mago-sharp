@@ -340,7 +340,11 @@ fn populate_codebase_inner(
         }
 
         for (parent_name, children) in &direct_classlike_descendants {
-            if let Some(parent_metadata) = codebase.class_likes.get_mut(parent_name) {
+            // A parent whose children are unchanged is left as it is, so a codebase that shares it copies it only when
+            // its children change.
+            if let Some(parent_metadata) = codebase.class_likes.get_mut(parent_name)
+                && parent_metadata.child_class_likes.as_ref() != Some(children)
+            {
                 parent_metadata.child_class_likes = Some(children.clone());
             }
         }
@@ -448,7 +452,7 @@ fn refuse_missing_bounds(codebase: &mut CodebaseMetadata) {
     }
 
     let read = |union: &mut TUnion| refuse_type_parameters(union, &refused);
-    for class in class_likes.values_mut().filter(|class| class.flags.is_sharp()) {
+    for class in class_likes.values_mut().filter(|class| class.flags.is_sharp()).map(|class| &mut **class) {
         for template in class.template_types.values_mut() {
             read_template(template, &read);
         }
@@ -467,7 +471,9 @@ fn refuse_missing_bounds(codebase: &mut CodebaseMetadata) {
             read(parameter);
         }
     }
-    for function in function_likes.values_mut().filter(|function| function.flags.is_sharp()) {
+    for function in
+        function_likes.values_mut().filter(|function| function.flags.is_sharp()).map(|function| &mut **function)
+    {
         for template in function.template_types.values_mut() {
             read_template(template, &read);
         }

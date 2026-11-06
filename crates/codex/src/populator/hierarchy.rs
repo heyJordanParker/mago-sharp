@@ -148,9 +148,10 @@ pub fn populate_class_like_metadata_iterative(
         return; // Already done, exit early
     }
 
-    let Some(mut metadata) = codebase.class_likes.remove(&classlike_name) else {
+    let Some(mut entry) = codebase.class_likes.remove(&classlike_name) else {
         return;
     };
+    let metadata: &mut ClassLikeMetadata = &mut entry;
 
     for attribute_metadata in &metadata.attributes {
         symbol_references.add_symbol_reference_to_symbol(
@@ -199,10 +200,9 @@ pub fn populate_class_like_metadata_iterative(
             }
         }
 
-        let defaults: Vec<Word> =
-            codebase.get_defaults_traits(&metadata).iter().map(|defaults| defaults.name).collect();
+        let defaults: Vec<Word> = codebase.get_defaults_traits(metadata).iter().map(|defaults| defaults.name).collect();
         for defaults_trait in &defaults {
-            if let Some(offsets) = defaults_type_arguments(&metadata, codebase, *defaults_trait) {
+            if let Some(offsets) = defaults_type_arguments(metadata, codebase, *defaults_trait) {
                 metadata.template_type_uses_count.insert(*defaults_trait, offsets.len());
                 metadata.template_extended_offsets.insert(*defaults_trait, offsets);
             }
@@ -211,30 +211,25 @@ pub fn populate_class_like_metadata_iterative(
     }
 
     for trait_name in sorted_atoms(metadata.used_traits.iter().copied()) {
-        merge_metadata_from_trait(&mut metadata, codebase, trait_name, symbol_references);
+        merge_metadata_from_trait(metadata, codebase, trait_name, symbol_references);
     }
 
     if let Some(parent_classname) = metadata.direct_parent_class {
-        merge_metadata_from_parent_class_like(&mut metadata, codebase, parent_classname, symbol_references);
-        inherit_declared_parse(&mut metadata, codebase, parent_classname);
+        merge_metadata_from_parent_class_like(metadata, codebase, parent_classname, symbol_references);
+        inherit_declared_parse(metadata, codebase, parent_classname);
     }
 
     let direct_parent_interfaces = sorted_atoms(metadata.direct_parent_interfaces.iter().copied());
     for direct_parent_interface in direct_parent_interfaces {
-        merge_interface_metadata_from_parent_interface(
-            &mut metadata,
-            codebase,
-            direct_parent_interface,
-            symbol_references,
-        );
+        merge_interface_metadata_from_parent_interface(metadata, codebase, direct_parent_interface, symbol_references);
     }
 
     for required_class in sorted_atoms(metadata.require_extends.iter().copied()) {
-        merge_metadata_from_required_class_like(&mut metadata, codebase, required_class, symbol_references);
+        merge_metadata_from_required_class_like(metadata, codebase, required_class, symbol_references);
     }
 
     for required_interface in sorted_atoms(metadata.require_implements.iter().copied()) {
-        merge_metadata_from_required_interface(&mut metadata, codebase, required_interface, symbol_references);
+        merge_metadata_from_required_interface(metadata, codebase, required_interface, symbol_references);
     }
 
     if metadata.flags.is_readonly() {
@@ -320,7 +315,7 @@ pub fn populate_class_like_metadata_iterative(
     }
 
     metadata.mark_as_populated();
-    codebase.class_likes.insert(classlike_name, metadata);
+    codebase.class_likes.insert(classlike_name, entry);
 }
 
 /// Gives the `parse` and `tryParse` the scanner gives a PHP# class, spec section 10, up to the pair its parent class

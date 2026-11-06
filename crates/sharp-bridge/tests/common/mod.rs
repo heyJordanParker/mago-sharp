@@ -37,7 +37,6 @@ use mago_syntax::dialect::Dialect;
 use mago_syntax::parser::parse_file;
 use mago_syntax::parser::parse_file_with_dialect;
 use mago_syntax::settings::ParserSettings;
-use mago_word::WordSet;
 
 #[path = "../../../../tests/support/sharp_files.rs"]
 pub mod sharp_files;
@@ -235,7 +234,9 @@ pub fn checked_file<R>(
     let semantic_issues = SemanticsChecker::new(PHPVersion::ENGINE).check(file, program, &names);
 
     metadata.extend(scan_program(&arena, file, program, &names, settings.version));
-    populate_codebase(&mut metadata, &mut symbol_references, WordSet::default(), HashSet::default());
+    // The prelude was populated once, when it was built, and its symbols are safe, so only the files are populated.
+    let prelude_symbols = std::mem::take(&mut metadata.safe_symbols);
+    populate_codebase(&mut metadata, &mut symbol_references, prelude_symbols, HashSet::default());
     let mut result = AnalysisResult::new(symbol_references);
     let artifacts = Analyzer::new(&arena, file, &names, &metadata, &PLUGIN_REGISTRY, settings)
         .analyze_with_artifacts(program, &mut result)

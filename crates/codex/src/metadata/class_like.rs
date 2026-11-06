@@ -19,6 +19,7 @@ use crate::metadata::enum_case::EnumCaseMetadata;
 use crate::metadata::flags::MetadataFlags;
 use crate::metadata::function_like::FunctionLikeMetadata;
 use crate::metadata::property::PropertyMetadata;
+use crate::metadata::shared::Shared;
 use crate::metadata::ttype::TypeMetadata;
 use crate::metadata::version_constraint::VersionConstraint;
 use crate::misc::GenericParent;
@@ -991,7 +992,10 @@ impl ClassLikeMetadata {
 ///
 /// Does not include methods defined directly on `class_meta` itself.
 #[must_use]
-pub fn collect_ancestor_methods(class_meta: &ClassLikeMetadata, class_likes: &WordMap<ClassLikeMetadata>) -> WordSet {
+pub fn collect_ancestor_methods(
+    class_meta: &ClassLikeMetadata,
+    class_likes: &WordMap<Shared<ClassLikeMetadata>>,
+) -> WordSet {
     let mut visited = WordSet::default();
     let mut methods = WordSet::default();
     collect_ancestor_methods_inner(class_meta, class_likes, &mut visited, &mut methods);
@@ -1000,7 +1004,7 @@ pub fn collect_ancestor_methods(class_meta: &ClassLikeMetadata, class_likes: &Wo
 
 fn collect_ancestor_methods_inner(
     class_meta: &ClassLikeMetadata,
-    class_likes: &WordMap<ClassLikeMetadata>,
+    class_likes: &WordMap<Shared<ClassLikeMetadata>>,
     visited: &mut WordSet,
     methods: &mut WordSet,
 ) {

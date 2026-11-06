@@ -77,7 +77,6 @@ use mago_syntax::cst::Program;
 use mago_syntax::dialect::Dialect;
 use mago_syntax::parser::parse_file;
 use mago_word::Word;
-use mago_word::WordSet;
 use mago_word::ascii_lowercase_word;
 use mago_word::empty_word;
 use mago_word::word;
@@ -259,7 +258,9 @@ fn analyze_with_references(
         programs.push((file, program, names));
     }
 
-    populate_codebase(&mut metadata, &mut symbol_references, WordSet::default(), HashSet::default());
+    // The prelude was populated once, when it was built, and its symbols are safe, so only the files are populated.
+    let prelude_symbols = std::mem::take(&mut metadata.safe_symbols);
+    populate_codebase(&mut metadata, &mut symbol_references, prelude_symbols, HashSet::default());
 
     let (file, program, names) = &programs[0];
     let semantic_issues = SemanticsChecker::new(settings.version).check(file, program, names);
@@ -331,7 +332,9 @@ fn too_wide(files: &[(&'static str, &'static str)]) -> Vec<String> {
         metadata.extend(scan_program(&arena, file, program, &names, settings().version));
         programs.push((file, program, names));
     }
-    populate_codebase(&mut metadata, &mut symbol_references, WordSet::default(), HashSet::default());
+    // The prelude was populated once, when it was built, and its symbols are safe, so only the files are populated.
+    let prelude_symbols = std::mem::take(&mut metadata.safe_symbols);
+    populate_codebase(&mut metadata, &mut symbol_references, prelude_symbols, HashSet::default());
 
     for (file, program, names) in programs.iter().filter(|(file, _, _)| file.is_project) {
         let mut result = AnalysisResult::new(mago_codex::reference::SymbolReferences::new());
@@ -500,7 +503,9 @@ fn the_analyzer_reads_the_dialect_from_the_program_not_the_file_name() {
     let program = parse_file(&arena, &sharp_file);
     let names = NameResolver::new(&arena).resolve(program);
     metadata.extend(scan_program(&arena, &sharp_file, program, &names, settings.version));
-    populate_codebase(&mut metadata, &mut symbol_references, WordSet::default(), HashSet::default());
+    // The prelude was populated once, when it was built, and its symbols are safe, so only the files are populated.
+    let prelude_symbols = std::mem::take(&mut metadata.safe_symbols);
+    populate_codebase(&mut metadata, &mut symbol_references, prelude_symbols, HashSet::default());
 
     let mut result = AnalysisResult::new(symbol_references);
     Analyzer::new(&arena, &php_named_file, &names, &metadata, &PLUGIN_REGISTRY, settings)
@@ -25054,7 +25059,9 @@ fn summarized(files: &[(&'static str, &'static str)]) -> (CodebaseMetadata, Vec<
         programs.push((file, program, names));
     }
 
-    populate_codebase(&mut metadata, &mut symbol_references, WordSet::default(), HashSet::default());
+    // The prelude was populated once, when it was built, and its symbols are safe, so only the files are populated.
+    let prelude_symbols = std::mem::take(&mut metadata.safe_symbols);
+    populate_codebase(&mut metadata, &mut symbol_references, prelude_symbols, HashSet::default());
 
     let mut summaries = Vec::new();
     for (file, program, names) in &programs[..files.len()] {

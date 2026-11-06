@@ -20,7 +20,6 @@ use mago_database::file::File;
 use mago_names::resolver::NameResolver;
 use mago_prelude::Prelude;
 use mago_syntax::parser::parse_file;
-use mago_word::WordSet;
 use mago_word::ascii_lowercase_word;
 use mago_word::word;
 
@@ -136,7 +135,9 @@ fn run_test_case_inner(config: TestCase) {
 
     metadata.extend(scan_program(&arena, source_file, program, &resolved_names, settings.version));
 
-    populate_codebase(&mut metadata, &mut symbol_references, WordSet::default(), HashSet::default());
+    // The prelude was populated once, when it was built, and its symbols are safe, so only the fixture is populated.
+    let prelude_symbols = std::mem::take(&mut metadata.safe_symbols);
+    populate_codebase(&mut metadata, &mut symbol_references, prelude_symbols, HashSet::default());
 
     let mut analysis_result = AnalysisResult::new(symbol_references);
     let analyzer = Analyzer::new(&arena, source_file, &resolved_names, &metadata, &PLUGIN_REGISTRY, settings);

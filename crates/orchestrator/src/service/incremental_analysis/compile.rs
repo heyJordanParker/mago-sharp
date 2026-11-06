@@ -633,7 +633,7 @@ impl IncrementalAnalysisService {
         let read = dependencies.files.get(&mago_word::word(file.name.as_ref())).into_iter().flatten();
         let read = read.filter_map(|(class, _)| self.codebase.get_class_like(class.as_bytes()));
         let tested = modules.iter().filter(|module| module.kind == ModuleKind::Test).flat_map(|module| {
-            self.codebase.class_likes.values().filter(|class| {
+            self.codebase.class_likes.values().map(|class| &**class).filter(|class| {
                 let name = class.name.as_bytes();
                 let namespace = name.iter().rposition(|byte| *byte == b'\\').map_or(&name[..0], |end| &name[..end]);
 

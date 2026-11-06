@@ -37,6 +37,7 @@ use crate::metadata::flags::MetadataFlags;
 use crate::metadata::function_like::FunctionLikeMetadata;
 use crate::metadata::module::ModuleMetadata;
 use crate::metadata::property::PropertyMetadata;
+use crate::metadata::shared::Shared;
 use crate::metadata::ttype::TypeMetadata;
 use crate::reference::SymbolReferences;
 use crate::signature::FileSignature;
@@ -60,6 +61,7 @@ pub mod module;
 pub mod parameter;
 pub mod property;
 pub mod property_hook;
+pub mod shared;
 pub mod ttype;
 pub mod version_constraint;
 
@@ -93,8 +95,9 @@ pub struct CodebaseEntryKeys {
 pub struct CodebaseMetadata {
     /// Configuration flag: Should types be inferred based on usage patterns?
     pub infer_types_from_usage: bool,
-    /// Map from class-like FQCN (`Word`) to its detailed metadata (`ClassLikeMetadata`).
-    pub class_likes: WordMap<ClassLikeMetadata>,
+    /// Map from class-like FQCN (`Word`) to its detailed metadata (`ClassLikeMetadata`), which each copy of the
+    /// codebase shares until it changes the entry.
+    pub class_likes: WordMap<Shared<ClassLikeMetadata>>,
     #[cfg_attr(feature = "serde", serde(default))]
     pub class_like_aliases: WordMap<Word>,
     #[cfg_attr(feature = "serde", serde(default))]
@@ -102,8 +105,9 @@ pub struct CodebaseMetadata {
     #[cfg_attr(feature = "serde", serde(skip, default))]
     class_like_aliases_dirty: bool,
     /// Map from a function/method identifier tuple `(scope_id, function_id)` to its metadata (`FunctionLikeMetadata`).
-    /// `scope_id` is the FQCN for methods or often `Word::empty()` for global functions.
-    pub function_likes: HashMap<(Word, Word), FunctionLikeMetadata>,
+    /// `scope_id` is the FQCN for methods or often `Word::empty()` for global functions. Each copy of the codebase
+    /// shares an entry until it changes it.
+    pub function_likes: HashMap<(Word, Word), Shared<FunctionLikeMetadata>>,
     /// Stores the kind (Class, Interface, etc.) for every known symbol FQCN.
     pub symbols: Symbols,
     /// Map from global constant FQN (`Word`) to its metadata (`ConstantMetadata`).
@@ -201,7 +205,9 @@ impl CodebaseMetadata {
         }
 
         for metadata in self.class_likes.values_mut() {
-            metadata.aliases.clear();
+            if !metadata.aliases.is_empty() {
+                metadata.aliases.clear();
+            }
         }
 
         let mut aliases = WordMap::default();
@@ -275,7 +281,7 @@ impl CodebaseMetadata {
             return None;
         }
 
-        self.class_like_aliases.get(&name).and_then(|actual| self.class_likes.get(actual))
+        self.class_like_aliases.get(&name).and_then(|actual| self.class_likes.get(actual)).map(|metadata| &**metadata)
     }
 
     #[inline]
@@ -289,7 +295,7 @@ impl CodebaseMetadata {
         }
 
         let actual = self.class_like_aliases.get(&class)?;
-        self.function_likes.get(&(*actual, method))
+        self.function_likes.get(&(*actual, method)).map(|metadata| &**metadata)
     }
 
     /// Checks if a class exists in the codebase (case-insensitive).
@@ -483,7 +489,7 @@ impl CodebaseMetadata {
     pub fn get_function(&self, name: &[u8]) -> Option<&FunctionLikeMetadata> {
         let lowercase_name = ascii_lowercase_word(name);
         let identifier = (empty_word(), lowercase_name);
-        self.function_likes.get(&identifier)
+        self.function_likes.get(&identifier).map(|metadata| &**metadata)
     }
 
     /// Retrieves metadata for a method (case-insensitive for both class and method names).
@@ -500,7 +506,7 @@ impl CodebaseMetadata {
     #[inline]
     #[must_use]
     pub fn get_closure(&self, synthetic_name: &Word) -> Option<&FunctionLikeMetadata> {
-        self.function_likes.get(&(empty_word(), *synthetic_name))
+        self.function_likes.get(&(empty_word(), *synthetic_name)).map(|metadata| &**metadata)
     }
 
     /// Retrieves metadata for a closure declared at the given file and span.
@@ -1424,7 +1430,7 @@ impl CodebaseMetadata {
                         v.version_constraint.merge(entry.get().version_constraint.clone());
                         entry.insert(v);
                     } else {
-                        entry.get_mut().version_constraint.merge(v.version_constraint);
+                        entry.get_mut().version_constraint.merge(v.version_constraint.clone());
                     }
                 }
                 Entry::Vacant(entry) => {
@@ -1450,7 +1456,7 @@ impl CodebaseMetadata {
                         v.version_constraint.merge(entry.get().version_constraint.clone());
                         entry.insert(v);
                     } else {
-                        entry.get_mut().version_constraint.merge(v.version_constraint);
+                        entry.get_mut().version_constraint.merge(v.version_constraint.clone());
                     }
                 }
                 Entry::Vacant(entry) => {
@@ -1707,11 +1713,11 @@ impl CodebaseMetadata {
     /// which `apply_patches_pass` will diagnose later).
     pub fn convert_partial_to_patch(&mut self) {
         for (k, v) in std::mem::take(&mut self.class_likes) {
-            self.patch_class_likes.insert(k, v);
+            self.patch_class_likes.insert(k, v.into_inner());
         }
 
         for (k, v) in std::mem::take(&mut self.function_likes) {
-            self.patch_function_likes.insert(k, v);
+            self.patch_function_likes.insert(k, v.into_inner());
         }
 
         for (k, v) in std::mem::take(&mut self.constants) {
@@ -1776,7 +1782,7 @@ impl CodebaseMetadata {
                     // class loop has already pointed the declaring/appearing ids at this slot.
                     if let Some(p) = self.patch_function_likes.get(&key) {
                         let materialized = p.clone();
-                        self.function_likes.insert(key, materialized);
+                        self.function_likes.insert(key, materialized.into());
                     }
                     continue;
                 }
@@ -1931,15 +1937,16 @@ impl CodebaseMetadata {
     pub fn take_issues(&mut self, user_defined: bool) -> IssueCollection {
         let mut issues = IssueCollection::new();
 
+        // An entry without issues is left as it is, so no copy of the codebase copies an entry it shares to take none.
         for meta in self.class_likes.values_mut() {
-            if user_defined && !meta.flags.is_user_defined() {
+            if (user_defined && !meta.flags.is_user_defined()) || meta.issues.is_empty() {
                 continue;
             }
             issues.extend(meta.take_issues());
         }
 
         for meta in self.function_likes.values_mut() {
-            if user_defined && !meta.flags.is_user_defined() {
+            if (user_defined && !meta.flags.is_user_defined()) || meta.issues.is_empty() {
                 continue;
             }
             issues.extend(meta.take_issues());
@@ -1986,7 +1993,7 @@ impl CodebaseMetadata {
 fn collect_inherited_patch_methods(
     target: &ClassLikeMetadata,
     patch: &ClassLikeMetadata,
-    class_likes: &WordMap<ClassLikeMetadata>,
+    class_likes: &WordMap<Shared<ClassLikeMetadata>>,
 ) -> WordSet {
     if patch.methods.is_empty() {
         return WordSet::default();
@@ -2274,7 +2281,7 @@ mod should_replace_metadata_tests {
         let vendor =
             FunctionLikeMetadata::new(FunctionLikeKind::Function, name, name, vendor_span, MetadataFlags::empty());
         let mut codebase = CodebaseMetadata::new();
-        codebase.function_likes.insert(key, vendor);
+        codebase.function_likes.insert(key, vendor.into());
 
         let patch = FunctionLikeMetadata::new(FunctionLikeKind::Function, name, name, patch_span, MetadataFlags::PATCH);
         codebase.patch_function_likes.insert(key, patch);
@@ -2296,7 +2303,7 @@ mod should_replace_metadata_tests {
         user_class.methods.insert(method_existing);
 
         let mut codebase = CodebaseMetadata::new();
-        codebase.class_likes.insert(class_name, user_class);
+        codebase.class_likes.insert(class_name, user_class.into());
 
         let mut patch_class =
             ClassLikeMetadata::new(class_name, class_name, Span::dummy(0, 50), None, MetadataFlags::PATCH);

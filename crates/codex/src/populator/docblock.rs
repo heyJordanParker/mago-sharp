@@ -240,7 +240,7 @@ pub fn inherit_method_docblocks(
 fn collect_inheritance_work(
     class_name: Word,
     class_metadata: &crate::metadata::class_like::ClassLikeMetadata,
-    class_likes: &WordMap<crate::metadata::class_like::ClassLikeMetadata>,
+    class_likes: &WordMap<crate::metadata::shared::Shared<crate::metadata::class_like::ClassLikeMetadata>>,
     inheritance_work: &mut Vec<(Word, Word, Word, Word)>,
 ) {
     for (method_name, method_ids) in &class_metadata.overridden_method_ids {
@@ -623,7 +623,7 @@ pub fn inherit_property_docblocks(
 fn collect_property_inheritance_work(
     class_name: Word,
     class_metadata: &crate::metadata::class_like::ClassLikeMetadata,
-    class_likes: &WordMap<crate::metadata::class_like::ClassLikeMetadata>,
+    class_likes: &WordMap<crate::metadata::shared::Shared<crate::metadata::class_like::ClassLikeMetadata>>,
     inheritance_work: &mut Vec<(Word, Word, Word)>,
 ) {
     for (property_name, parent_ids) in &class_metadata.overridden_property_ids {

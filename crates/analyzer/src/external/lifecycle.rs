@@ -2115,12 +2115,13 @@ mod tests {
                 Span::dummy(0, 10),
                 None,
                 MetadataFlags::empty(),
-            ),
+            )
+            .into(),
         );
         let mut child_metadata =
             ClassLikeMetadata::new(child, word(b"ApplicationTest"), Span::dummy(11, 20), None, MetadataFlags::empty());
         child_metadata.all_parent_classes.insert(ancestor);
-        codebase.class_likes.insert(child, child_metadata);
+        codebase.class_likes.insert(child, child_metadata.into());
 
         let hook = ClassLikeAnalysisHookRegistration {
             plugin: 0,

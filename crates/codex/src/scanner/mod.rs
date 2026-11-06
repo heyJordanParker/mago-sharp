@@ -439,7 +439,7 @@ impl Scanner {
         );
 
         self.codebase.class_likes.entry(current_class).or_insert(class_like_metadata);
-        self.codebase.function_likes.entry(method_id).or_insert(function_like_metadata);
+        self.codebase.function_likes.entry(method_id).or_insert(function_like_metadata.into());
     }
 
     /// Registers the trait that holds a PHP# interface's default bodies, spec section 22, named by
@@ -535,7 +535,7 @@ impl Scanner {
             interface.members.iter().any(|member| matches!(member, ClassLikeMember::Property(Property::Computed(_))));
         if !defaults.methods.is_empty() || gives_property {
             self.codebase.symbols.add_symbol_name(name, SymbolKind::Trait);
-            self.codebase.class_likes.insert(name, defaults);
+            self.codebase.class_likes.insert(name, defaults.into());
         }
     }
 
@@ -721,7 +721,7 @@ where
             metadata.flags |= MetadataFlags::POLYFILL;
         }
 
-        self.codebase.function_likes.entry(identifier).or_insert(metadata);
+        self.codebase.function_likes.entry(identifier).or_insert(metadata.into());
     }
 
     #[inline]
@@ -753,7 +753,7 @@ where
         self.template_constraints
             .push(metadata.template_types.iter().map(|(name, constraints)| (*name, constraints.clone())).collect());
 
-        self.codebase.function_likes.entry(identifier).or_insert(metadata);
+        self.codebase.function_likes.entry(identifier).or_insert(metadata.into());
     }
 
     #[inline]
@@ -789,7 +789,7 @@ where
 
         self.template_constraints
             .push(metadata.template_types.iter().map(|(name, constraints)| (*name, constraints.clone())).collect());
-        self.codebase.function_likes.entry(identifier).or_insert(metadata);
+        self.codebase.function_likes.entry(identifier).or_insert(metadata.into());
     }
 
     #[inline]
@@ -1210,7 +1210,7 @@ where
             class_like_metadata.methods.insert(constructor.name);
             class_like_metadata.add_declaring_method_id(constructor.name, method_identifier);
             class_like_metadata.inheritable_method_ids.insert(constructor.name, method_identifier);
-            self.codebase.function_likes.insert((class_like_metadata.name, constructor.name), constructor);
+            self.codebase.function_likes.insert((class_like_metadata.name, constructor.name), constructor.into());
             self.has_constructor = true;
         }
 
@@ -1297,7 +1297,8 @@ where
                 constructor_name,
                 class_like_metadata.span,
                 flags,
-            ),
+            )
+            .into(),
         );
     }
 

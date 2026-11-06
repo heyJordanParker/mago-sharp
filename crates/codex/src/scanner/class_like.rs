@@ -434,7 +434,7 @@ fn register_case_classes<'arena, A>(
             add_method(codebase, case_name.value, enum_metadata, factory);
         }
 
-        codebase.class_likes.insert(name, case_metadata);
+        codebase.class_likes.insert(name, case_metadata.into());
     }
 }
 
@@ -612,7 +612,7 @@ where
         }
     }
 
-    codebase.class_likes.insert(name, metadata);
+    codebase.class_likes.insert(name, metadata.into());
 
     Some(name)
 }
@@ -640,7 +640,7 @@ where
         BindingValue::Expression(_) => {
             let name = build_synthetic_name("closure", context.file, binding.span());
             let lambda = scan_binding_expression(name, binding, service.clone(), context, scope);
-            codebase.function_likes.entry((empty_word(), name)).or_insert(lambda);
+            codebase.function_likes.entry((empty_word(), name)).or_insert(lambda.into());
             BindingValueMetadata::Expression(name)
         }
     };
@@ -676,7 +676,7 @@ fn finish_registration(
         .map(|(local_name, (source_class, original_name, _span))| (*local_name, (*source_class, *original_name)))
         .collect::<WordMap<(Word, Word)>>();
 
-    codebase.class_likes.insert(name, class_like_metadata);
+    codebase.class_likes.insert(name, class_like_metadata.into());
 
     Some((name, template_resolution_context, type_aliases, imported_aliases))
 }
@@ -1489,7 +1489,7 @@ where
                 get_type_metadata_from_type(return_type, Some(original_name), &type_context, scope).ok()
             });
 
-            codebase.function_likes.insert(method_id, function_like_metadata);
+            codebase.function_likes.insert(method_id, function_like_metadata.into());
         }
 
         for tag in document.tags() {
@@ -1982,7 +1982,7 @@ fn add_method(
     class_like_metadata.methods.insert(name);
     class_like_metadata.add_declaring_method_id(name, method_identifier);
     class_like_metadata.inheritable_method_ids.insert(name, method_identifier);
-    codebase.function_likes.insert(method_id, function_like_metadata);
+    codebase.function_likes.insert(method_id, function_like_metadata.into());
 }
 
 /// Marks each public `init` property of a struct written without an initial value as required, spec section 10: a
