@@ -1628,7 +1628,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_failure_says_when_the_stderr_was_still_open_at_the_end_of_the_wait() {
-        let worker = dead_shell_worker("( exec >&-; sleep 2 ) & exit 255");
+        let worker = dead_shell_worker(&format!("( exec >&-; {SLEEP_UNTIL_ENDED} ) & exit 255"));
 
         let error = worker.request(b"describe".to_vec(), None).expect_err("the dead worker should fail the request");
 
@@ -1645,7 +1645,7 @@ mod tests {
     fn a_request_written_to_a_worker_that_closed_its_stdin_holds_the_write_error_and_the_stderr() {
         const TIMEOUT: Duration = Duration::from_secs(10);
 
-        let worker = shell_worker(&format!("exec 0<&-; echo '{FATAL_ERROR}' >&2; exec sleep 10"));
+        let worker = shell_worker(&format!("exec 0<&-; echo '{FATAL_ERROR}' >&2; exec {SLEEP_UNTIL_ENDED}"));
         let deadline = Instant::now() + TIMEOUT;
         while lock(&worker.inner.stderr).display().is_empty() {
             assert!(Instant::now() < deadline, "the worker wrote no stderr within {TIMEOUT:?}");
@@ -1690,7 +1690,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_request_to_a_worker_that_stopped_reading_its_stdin_fails_at_the_deadline() {
-        let worker = shell_worker_within("exec sleep 20", STUCK_DEADLINE);
+        let worker = shell_worker_within(&format!("exec {SLEEP_UNTIL_ENDED}"), STUCK_DEADLINE);
 
         let (error, elapsed) = request_larger_than_a_pipe_and_shut_down(worker);
 
@@ -1709,7 +1709,7 @@ mod tests {
         let (wrapper, stuck) = (started.join("wrapper"), started.join("worker"));
         let worker = shell_worker_within(
             &format!(
-                "echo $$ > '{}'; exec 3<&0; sh -c 'echo $$ > \"$0\"; exec sleep 20' '{}' 0<&3 3<&- & exec 3<&-; wait",
+                "echo $$ > '{}'; exec 3<&0; sh -c 'echo $$ > \"$0\"; exec {SLEEP_UNTIL_ENDED}' '{}' 0<&3 3<&- & exec 3<&-; wait",
                 wrapper.display(),
                 stuck.display(),
             ),
@@ -1745,7 +1745,7 @@ mod tests {
         std::fs::create_dir_all(&started).expect("the folder of process ids should be created");
         let left = started.join("left");
         let worker = shell_worker(&format!(
-            "sh -c 'echo $$ > \"$0\"; exec sleep 20' '{}' </dev/null & while [ ! -s '{}' ]; do sleep 0.01; done; exit 0",
+            "sh -c 'echo $$ > \"$0\"; exec {SLEEP_UNTIL_ENDED}' '{}' </dev/null & while [ ! -s '{}' ]; do sleep 0.01; done; exit 0",
             left.display(),
             left.display(),
         ));
@@ -1821,6 +1821,12 @@ mod tests {
     /// What a PHP worker writes to stderr when it loads a class its missing require-dev package declares.
     #[cfg(unix)]
     const FATAL_ERROR: &str = r#"PHP Fatal error:  Uncaught Error: Class "ReportPlugin" not found"#;
+
+    /// A shell command that runs until the test ends it, as the worker's failure or shutdown does. It sleeps for the
+    /// most seconds a signed 32-bit number holds, since a shorter sleep can end while a loaded machine still runs the
+    /// test.
+    #[cfg(unix)]
+    const SLEEP_UNTIL_ENDED: &str = "sleep 2147483647";
 
     /// A worker of the host `acme` that runs `script` in `sh`.
     #[cfg(unix)]
