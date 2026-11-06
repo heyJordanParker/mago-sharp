@@ -464,9 +464,10 @@ fn read_listed_file(workspace: &Path, path: &Path, file_type: FileType) -> Optio
     }
 }
 
-/// The folders a walk of the workspace skips, as [`DatabaseLoader::load`] skips them: each one an `excludes` path names,
-/// and each one an `excludes` pattern names before a trailing `/**/*`, `/**` or `/*`. Built once from a
-/// [`DatabaseConfiguration`]; cheap to query per folder.
+/// The folders a walk of the workspace skips, as [`DatabaseLoader::load`] skips them.
+///
+/// Each one an `excludes` path names, and each one an `excludes` pattern names before a trailing `/**/*`, `/**` or
+/// `/*`. Built once from a [`DatabaseConfiguration`]; cheap to query per folder.
 #[derive(Debug, Clone)]
 pub struct ExcludedFolders {
     /// The canonical workspace, which a pattern is matched against relative to.
@@ -515,7 +516,7 @@ impl ExcludedFolders {
                 }
             }
         }
-        let globs = build_glob_set(patterns.into_iter(), configuration.glob)?;
+        let globs = build_glob_set(patterns, configuration.glob)?;
 
         Ok(Self { workspace, paths, globs })
     }
