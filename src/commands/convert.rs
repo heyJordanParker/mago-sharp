@@ -205,7 +205,7 @@ struct Outcome {
     converted: Vec<(Vec<u8>, Vec<u8>, Vec<u8>)>,
     /// The warnings decision 9 expects.
     expected: Vec<Found>,
-    /// How many analyses proved the converted files, each a whole project's with fresh extension hosts.
+    /// How many proofs of the converted files ran, each a whole analysis of the project with fresh extension hosts.
     proofs: usize,
 }
 
@@ -307,6 +307,7 @@ impl ConvertCommand {
         // The forms come from the library files the proof's compile accepts, so a converted call runs what it does.
         let database = session.server.database().read_only();
         let forms = session.server.standard_library_forms(|issues| prover.hidden.shown(issues, &database))?;
+        drop(database);
         let library = Library::new(&forms, session.server.codebase());
 
         let mut candidates = Vec::new();
@@ -328,7 +329,7 @@ impl ConvertCommand {
         drop(session);
 
         let mut accepted = Vec::new();
-        prover.prove(&plain, &candidates, &mut accepted, (0..candidates.len()).collect(), &mut outcome)?;
+        prover.prove(&plain, &candidates, &mut accepted, (0..candidates.len()).collect(), &mut outcome);
         let accepted: Vec<&Candidate> = accepted.into_iter().map(|index| &candidates[index]).collect();
         outcome.converted = accepted
             .iter()
@@ -337,32 +338,21 @@ impl ConvertCommand {
 
         let mut unproven = false;
         if !self.dry_run && !accepted.is_empty() {
+            let mut written = 0;
             for candidate in &accepted {
-                write(&workspace, &candidate.name, &candidate.text)?;
+                if let Err(error) = write(&workspace, &candidate.name, &candidate.text) {
+                    unproven = true;
+                    let name = display(&sharp_name(&candidate.name));
+                    tracing::error!(
+                        "{name} could not be written, so it and the files after it stay plain PHP: {error}"
+                    );
+                    break;
+                }
+                written += 1;
             }
-            // The extension hosts load the project's own classes, so when they load a converted one, hosts that see it
-            // prove the project again (spec section 27).
-            if compile_for_hosts(&configuration)?.1 {
-                tracing::info!("The extension hosts load the converted files, so fresh hosts prove the project again.");
-                let proof = prover.open(&[])?.proof(&prover)?;
-                let judgement = judge(&plain, &proof, &accepted);
-                for (name, found) in &judgement.own {
-                    unproven = true;
-                    let name = display(&sharp_name(name));
-                    tracing::error!(
-                        "{name} adds issues once the extension hosts load it, and git holds its plain PHP:"
-                    );
-                    for found in found {
-                        tracing::error!("  {}", found.written);
-                    }
-                }
-                for found in &judgement.others {
-                    unproven = true;
-                    tracing::error!(
-                        "The converted files add an issue with the hosts that load them: {}",
-                        found.written
-                    );
-                }
+            outcome.converted.truncate(written);
+            if written > 0 && !prover.prove_written(&plain, &accepted[..written]) {
+                unproven = true;
             }
         }
 
@@ -422,7 +412,8 @@ impl<'configuration> Prover<'configuration> {
     /// file of the set can bring an issue, the parts are the set's halves. When the first part is accepted whole and
     /// the second is one file, the proof that split them was that file on top of what is accepted, so its issues keep
     /// the file plain PHP with no proof more. Every proof is a whole analysis with fresh hosts, so each split costs a
-    /// proof.
+    /// proof, and each stops its hosts before the parts start theirs. A proof that can't finish, as when a host's hook
+    /// makes no progress, logs its error once and keeps the files of its set plain PHP, each naming the proof.
     fn prove(
         &self,
         plain: &Proof,
@@ -430,51 +421,70 @@ impl<'configuration> Prover<'configuration> {
         accepted: &mut Vec<usize>,
         mut set: Vec<usize>,
         outcome: &mut Outcome,
-    ) -> Result<(), Error> {
+    ) {
         while !set.is_empty() {
             let swaps: Vec<&Candidate> = accepted.iter().chain(&set).map(|&index| &candidates[index]).collect();
             let start = Instant::now();
-            let mut session = self.open(&swaps)?;
-            let mut judgement = judge(plain, &session.proof(self)?, &swaps);
             outcome.proofs += 1;
+            let proven = self.open(&swaps).and_then(|mut session| session.proof(self).map(|proof| (session, proof)));
+            let (session, proof) = match proven {
+                Ok(proven) => proven,
+                Err(error) => {
+                    // The error once, as a host's carries up to 64 KiB of its stderr, and each file names the proof.
+                    let proof = outcome.proofs;
+                    tracing::error!("Proof {proof} could not finish, so the files it proves stay plain PHP: {error}");
+                    for &index in &set {
+                        let name = &candidates[index].name;
+                        let reason = format!("{}: proof {proof} could not finish", display(name));
+                        outcome.refused.entry(name.clone()).or_default().push(reason);
+                    }
+                    return;
+                }
+            };
+            let Judgement { own, mut others, expected } = judge(plain, &proof, &swaps);
+            drop(proof);
             tracing::debug!(
                 "Proof {} of {} files on {} accepted ran in {:?}: {} files with issues of their own, {} issues in others.",
                 outcome.proofs,
                 set.len(),
                 accepted.len(),
                 start.elapsed(),
-                judgement.own.len(),
-                judgement.others.len(),
+                own.len(),
+                others.len(),
             );
             let before = set.len();
-            for (name, found) in std::mem::take(&mut judgement.own) {
+            for (name, found) in own {
                 match set.iter().position(|&index| candidates[index].name == name) {
                     Some(position) => {
                         set.remove(position);
                         outcome.refused.entry(name).or_default().extend(found.into_iter().map(|found| found.shown));
                     }
                     // A file proven before gains an issue only with the files this proof adds.
-                    None => judgement.others.extend(found),
+                    None => others.extend(found),
                 }
             }
             if set.len() < before {
                 continue;
             }
-            if judgement.others.is_empty() {
+            if others.is_empty() {
                 accepted.append(&mut set);
-                outcome.expected = judgement.expected;
-                return Ok(());
+                outcome.expected = expected;
+                return;
             }
             if let [index] = set[..] {
-                outcome.adds(&candidates[index].name, judgement.others);
-                return Ok(());
+                outcome.adds(&candidates[index].name, others);
+                return;
             }
 
             let narrowest = session
-                .reached(&judgement.others, candidates, &set)
+                .reached(&others, candidates, &set)
                 .into_iter()
                 .filter(|reached| !reached.is_empty())
                 .min_by_key(Vec::len);
+            // Each part's proof starts hosts of its own, so this proof's hosts and analysis stop first, and only the
+            // issues that can keep the second part's one file plain stay.
+            drop(session);
+            drop(expected);
             let second = match narrowest {
                 Some(mut suspects) => {
                     let second = suspects.split_off(suspects.len() / 2);
@@ -484,19 +494,56 @@ impl<'configuration> Prover<'configuration> {
                 None => set.split_off(set.len() / 2),
             };
             let (first, before) = (set.len(), accepted.len());
-            self.prove(plain, candidates, accepted, set, outcome)?;
+            self.prove(plain, candidates, accepted, set, outcome);
             // With the first part accepted whole, this proof was the one file of the second on top of what is
             // accepted, so its issues keep that file plain PHP with no proof more.
             if let [index] = second[..]
                 && accepted.len() == before + first
             {
-                outcome.adds(&candidates[index].name, judgement.others);
-                return Ok(());
+                outcome.adds(&candidates[index].name, others);
+                return;
             }
             return self.prove(plain, candidates, accepted, second, outcome);
         }
+    }
 
-        Ok(())
+    /// Whether `written`, the converted files a run wrote, keep the project as `plain` found it with hosts that load
+    /// them. The extension hosts load the project's own classes, so once their compile takes the written files in,
+    /// fresh hosts prove the project again (spec section 27). A compile or proof that fails, and each issue the written
+    /// files add, is logged as an error, as git holds their plain PHP.
+    fn prove_written(&self, plain: &Proof, written: &[&Candidate]) -> bool {
+        match compile_for_hosts(self.configuration) {
+            Ok((_, false)) => return true,
+            Ok((_, true)) => {}
+            Err(error) => {
+                tracing::error!(
+                    "The converted files could not be compiled for the extension hosts, so no hosts that load them proved the project, and git holds their plain PHP: {error}"
+                );
+                return false;
+            }
+        }
+        tracing::info!("The extension hosts load the converted files, so fresh hosts prove the project again.");
+        let judgement = match self.open(&[]).and_then(|mut session| session.proof(self)) {
+            Ok(proof) => judge(plain, &proof, written),
+            Err(error) => {
+                tracing::error!(
+                    "Fresh hosts that load the converted files could not prove the project, and git holds its plain PHP: {error}"
+                );
+                return false;
+            }
+        };
+        for (name, found) in &judgement.own {
+            let name = display(&sharp_name(name));
+            tracing::error!("{name} adds issues once the extension hosts load it, and git holds its plain PHP:");
+            for found in found {
+                tracing::error!("  {}", found.written);
+            }
+        }
+        for found in &judgement.others {
+            tracing::error!("The converted files add an issue with the hosts that load them: {}", found.written);
+        }
+
+        judgement.own.is_empty() && judgement.others.is_empty()
     }
 }
 
@@ -690,16 +737,15 @@ impl Outcome {
                 tracing::warn!("  {reason}");
             }
         }
-        if dry_run {
-            let mut formatter = PatchFormatter::new();
-            if should_use_colors(color_choice) {
-                formatter = formatter.with_color();
-            }
-            for (name, original, text) in &self.converted {
+        let mut formatter = PatchFormatter::new();
+        if should_use_colors(color_choice) {
+            formatter = formatter.with_color();
+        }
+        for (name, original, text) in &self.converted {
+            println!("{} -> {}", display(name), display(&sharp_name(name)));
+            if dry_run {
                 let (original, text) = (String::from_utf8_lossy(original), String::from_utf8_lossy(text));
-                let patch = diffy::create_patch(&original, &text);
-                println!("{} -> {}", display(name), display(&sharp_name(name)));
-                println!("{}", formatter.fmt_patch(&patch));
+                println!("{}", formatter.fmt_patch(&diffy::create_patch(&original, &text)));
             }
         }
         for warning in &self.expected {
@@ -1192,6 +1238,301 @@ mod tests {
         );
         assert_eq!(outcome.converted.len(), 5);
         assert_eq!(outcome.proofs, 6);
+    }
+
+    /// An extension host whose one plugin appends to the log its second argument names: `start` and the worker's
+    /// process id as the worker starts, `exit` and the id as it exits, and `proof` and how many workers the log names
+    /// alive as each analysis starts. Its after-analysis hooks never finish, and log `hang`, in the proof its third
+    /// argument names: `the second proof of one sink`, logging `one sink` and the sink of each analysis that converts one,
+    /// or `the proof of the written files`, the first whose converted files are on disk.
+    const HOST_COUNTING_ITS_WORKERS: &str = r#"<?php
+
+declare(strict_types=1);
+
+use Mago\Sdk\Analyzer\AfterAnalysisContext;
+use Mago\Sdk\Analyzer\AfterAnalysisHook;
+use Mago\Sdk\Analyzer\BeforeAnalysisContext;
+use Mago\Sdk\Analyzer\BeforeAnalysisHook;
+use Mago\Sdk\Analyzer\Plugin;
+use Mago\Sdk\Analyzer\PluginDefinition;
+use Mago\Sdk\Analyzer\PluginRegistry;
+use Mago\Sdk\Extension;
+use Mago\Sdk\Worker;
+
+require $argv[1];
+
+$log = $argv[2];
+$worker = getmypid();
+file_put_contents($log, "start {$worker}\n", FILE_APPEND | LOCK_EX);
+register_shutdown_function(static fn() => file_put_contents($log, "exit {$worker}\n", FILE_APPEND | LOCK_EX));
+
+final class CountsWorkers implements Plugin, BeforeAnalysisHook, AfterAnalysisHook
+{
+    public function __construct(
+        private readonly string $log,
+        private readonly ?string $hangsIn,
+    ) {}
+
+    public function getDefinition(): PluginDefinition
+    {
+        return new PluginDefinition('counts-workers', 'Counts workers', 'Logs the workers alive as each analysis starts.');
+    }
+
+    public function register(PluginRegistry $registry): void
+    {
+        $registry->registerBeforeAnalysisHook($this);
+        $registry->registerAfterAnalysisHook($this);
+    }
+
+    public function beforeAnalysis(BeforeAnalysisContext $context): void
+    {
+        $alive = 0;
+        foreach (file($this->log, FILE_IGNORE_NEW_LINES) as $line) {
+            $alive += match (explode(' ', $line)[0]) {
+                'start' => 1,
+                'exit' => -1,
+                default => 0,
+            };
+        }
+        file_put_contents($this->log, "proof {$alive}\n", FILE_APPEND | LOCK_EX);
+    }
+
+    public function afterAnalysis(AfterAnalysisContext $context): void
+    {
+        $converted = [];
+        foreach ($context->analysis->files as $file) {
+            if (str_ends_with($file->file, '.sharp')) {
+                $converted[] = $file->file;
+            }
+        }
+        $hung = match ($this->hangsIn) {
+            'the second proof of one sink' => $this->secondProofOfOneSink($converted),
+            'the proof of the written files' => $converted !== [] && is_file($converted[0]) ? 'written' : null,
+            default => null,
+        };
+        if ($hung === null) {
+            return;
+        }
+
+        file_put_contents($this->log, "hang {$hung}\n", FILE_APPEND | LOCK_EX);
+        while (true) {
+            sleep(1);
+        }
+    }
+
+    /**
+     * Logs the sink of an analysis that converts one, and returns it in the second such analysis.
+     *
+     * @param list<string> $converted
+     */
+    private function secondProofOfOneSink(array $converted): ?string
+    {
+        $sinks = array_values(array_filter($converted, static fn(string $file): bool => str_contains($file, '/Sink')));
+        if (count($sinks) !== 1) {
+            return null;
+        }
+
+        $before = substr_count((string) file_get_contents($this->log), 'one sink ');
+        file_put_contents($this->log, "one sink {$sinks[0]}\n", FILE_APPEND | LOCK_EX);
+
+        return $before === 1 ? $sinks[0] : null;
+    }
+}
+
+(new Worker(new Extension('counts-workers', 'Counts workers', '0.0.0', analyzerPlugins: [
+    new CountsWorkers($log, $argv[3] ?? null),
+])))->run();
+"#;
+
+    /// The PHP SDK's autoloader, or `None` when PHP or the SDK's Composer dependencies are missing and
+    /// `MAGO_REQUIRE_PHP_SDK_TESTS` doesn't require them.
+    fn php_sdk() -> Option<PathBuf> {
+        let autoload = Path::new(env!("CARGO_MANIFEST_DIR")).join("vendor/autoload.php");
+        let available = autoload.is_file()
+            && std::process::Command::new("php").arg("--version").output().is_ok_and(|output| output.status.success());
+        assert!(
+            available || std::env::var_os("MAGO_REQUIRE_PHP_SDK_TESTS").is_none(),
+            "PHP and vendor dependencies are required for the extension host tests"
+        );
+        available.then_some(autoload)
+    }
+
+    /// The configuration of a project at `root` of `files`, as [`project`] builds it, with an extension host `counter` of
+    /// one worker that runs [`HOST_COUNTING_ITS_WORKERS`] with a deadline of 3 s, logs to `host.log`, and never finishes
+    /// the after-analysis hooks of the proof `hangs_in` names. Its workers have 30 s to exit once stopped, so one that
+    /// exits slowly on a loaded machine still logs its exit rather than being killed and counted alive.
+    fn hosted(root: &Path, autoload: &Path, files: &[(String, String)], hangs_in: Option<&str>) -> Configuration {
+        project(root, files);
+        std::fs::create_dir_all(root.join("tools")).unwrap();
+        std::fs::write(root.join("tools/host.php"), HOST_COUNTING_ITS_WORKERS).unwrap();
+        let mut toml = std::fs::read_to_string(root.join("mago.toml")).unwrap();
+        toml.push_str(&format!(
+            "\n[extension-hosts.counter]\nworkers = 1\nrequest-timeout-ms = 3000\nshutdown-timeout-ms = 30000\ncommand = [\"php\", \"tools/host.php\", {:?}, {:?}{}]\n",
+            autoload.display().to_string(),
+            root.join("host.log").display().to_string(),
+            hangs_in.map(|proof| format!(", {proof:?}")).unwrap_or_default(),
+        ));
+        std::fs::write(root.join("mago.toml"), toml).unwrap();
+
+        Configuration::load(CliOverrides {
+            workspace: Some(root.to_path_buf()),
+            config: Some(root.join("mago.toml")),
+            no_version_check: true,
+            ..Default::default()
+        })
+        .unwrap()
+    }
+
+    /// What `run` logs at `info` and above on this thread, after what it returns.
+    fn logged<T>(run: impl FnOnce() -> T) -> (T, String) {
+        let log = tempfile::NamedTempFile::new().unwrap();
+        let path = log.path().to_path_buf();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(move || std::fs::OpenOptions::new().append(true).open(&path).unwrap())
+            .finish();
+        let value = tracing::subscriber::with_default(subscriber, run);
+
+        (value, std::fs::read_to_string(log.path()).unwrap())
+    }
+
+    /// Each proof stops its extension hosts before the next proof starts its own, so a split keeps none of the hosts of
+    /// the proofs it runs under. With one worker a host, one worker is alive as each analysis starts, where the six
+    /// proofs of three sinks, each split kept with its hosts while it proved its parts, had 1, 2, 3, 4, 3 and 2.
+    #[test]
+    fn each_proof_stops_its_hosts_before_the_next_proof_starts_its_own() {
+        let Some(autoload) = php_sdk() else {
+            return;
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let mut files: Vec<(String, String)> = (0..5).map(clean).collect();
+        files.extend((0..3).flat_map(sink));
+        let configuration = hosted(&root, &autoload, &files, None);
+
+        let (_, outcome) = ConvertCommand { paths: vec![root.join("src/Contracts")], dry_run: true }
+            .run(configuration, ColorChoice::Never)
+            .unwrap();
+
+        let log = std::fs::read_to_string(root.join("host.log")).unwrap();
+        let alive: Vec<&str> = log.lines().filter_map(|line| line.strip_prefix("proof ")).collect();
+        assert_eq!(outcome.proofs, 6);
+        assert_eq!(alive, ["1"; 7], "{log}");
+    }
+
+    /// A proof that can't finish keeps the files it proves plain PHP with the error as their reason, and the run still
+    /// reports what every other proof found. The three sinks split as in the test above, so the fifth proof is one sink
+    /// on top of the five clean interfaces accepted, and the host's after-analysis hooks make no progress there.
+    #[test]
+    fn a_proof_that_cannot_finish_keeps_its_files_plain_php_and_the_run_reports_the_rest() {
+        let Some(autoload) = php_sdk() else {
+            return;
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let mut files: Vec<(String, String)> = (0..5).map(clean).collect();
+        files.extend((0..3).flat_map(sink));
+        let configuration = hosted(&root, &autoload, &files, Some("the second proof of one sink"));
+
+        let ((exit_code, outcome), logged) = logged(|| {
+            ConvertCommand { paths: vec![root.join("src/Contracts")], dry_run: true }
+                .run(configuration, ColorChoice::Never)
+                .unwrap()
+        });
+
+        let log = std::fs::read_to_string(root.join("host.log")).unwrap();
+        let hung = log.lines().find_map(|line| line.strip_prefix("hang ")).expect(&log).replace(".sharp", ".php");
+        assert_eq!(exit_code, ExitCode::FAILURE);
+        assert_eq!(outcome.converted.len(), 5);
+        assert_eq!(outcome.proofs, 6);
+        let refused: Vec<String> = outcome.refused.keys().map(|name| display(name)).collect();
+        assert_eq!(refused, ["src/Contracts/Sink0.php", "src/Contracts/Sink1.php", "src/Contracts/Sink2.php"]);
+        for (name, reasons) in &outcome.refused {
+            if *name == hung.as_bytes() {
+                assert_eq!(reasons, &[format!("{hung}: proof 5 could not finish")]);
+            } else {
+                assert!(reasons.iter().all(|reason| reason.ends_with(", which converting it adds")), "{reasons:#?}");
+            }
+        }
+        assert_eq!(logged.matches(TIMEOUT).count(), 1, "{logged}");
+        assert!(
+            logged.contains(&format!("Proof 5 could not finish, so the files it proves stay plain PHP: {TIMEOUT}")),
+            "{logged}"
+        );
+    }
+
+    /// The error the host of [`hosted`] gives when its after-analysis hooks make no progress.
+    const TIMEOUT: &str = "Orchestrator error: Analysis error: Plugin Error: External plugin error: external analyzer worker failed: extension host `counter` made no progress for 3000 ms on the after-analysis hooks of plugin `counts-workers` (worker 0): raise its `request-timeout-ms` for hooks that run that long";
+
+    /// Once a run writes its files, fresh hosts that load them prove the project again. When that proof can't finish,
+    /// the files are written and git holds their plain PHP, so the run still names them, logs the error, and fails as
+    /// when those hosts find an issue.
+    #[test]
+    fn a_proof_of_the_written_files_that_cannot_finish_still_reports_them_and_fails() {
+        let Some(autoload) = php_sdk() else {
+            return;
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let configuration = hosted(&root, &autoload, &[clean(0), clean(1)], Some("the proof of the written files"));
+
+        let ((exit_code, outcome), logged) = logged(|| {
+            ConvertCommand { paths: vec![root.join("src/Contracts")], dry_run: false }
+                .run(configuration, ColorChoice::Never)
+                .unwrap()
+        });
+
+        let log = std::fs::read_to_string(root.join("host.log")).unwrap();
+        assert!(log.contains("hang written"), "{log}");
+        assert_eq!(exit_code, ExitCode::FAILURE);
+        assert!(outcome.refused.is_empty(), "{:#?}", outcome.refused);
+        let converted: Vec<String> = outcome.converted.iter().map(|(name, _, _)| display(name)).collect();
+        assert_eq!(converted, ["src/Contracts/Clean0.php", "src/Contracts/Clean1.php"]);
+        assert!(root.join("src/Contracts/Clean1.sharp").exists() && !root.join("src/Contracts/Clean1.php").exists());
+        assert!(
+            logged.contains(&format!(
+                "Fresh hosts that load the converted files could not prove the project, and git holds its plain PHP: {TIMEOUT}"
+            )),
+            "{logged}"
+        );
+    }
+
+    /// Once a run writes its files, the project is compiled for the extension hosts so they load them. When that
+    /// compile fails, here because the hosts' folder in Mago's cache is a file, no hosts prove the written files, so
+    /// the run still names them, logs the error, and fails as when those hosts find an issue.
+    #[test]
+    fn a_compile_of_the_written_files_for_the_hosts_that_fails_still_reports_them_and_fails() {
+        let Some(autoload) = php_sdk() else {
+            return;
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let configuration = hosted(&root, &autoload, &[clean(0), clean(1)], None);
+        let project: String =
+            unit::source_hash(root.as_os_str().as_encoded_bytes()).iter().map(|byte| format!("{byte:02x}")).collect();
+        let folder = mago_sharp_lean::cache_root().unwrap().join("hosts").join(project);
+        std::fs::create_dir_all(folder.parent().unwrap()).unwrap();
+        std::fs::write(&folder, "").unwrap();
+
+        let (ran, logged) = logged(|| {
+            ConvertCommand { paths: vec![root.join("src/Contracts")], dry_run: false }
+                .run(configuration, ColorChoice::Never)
+        });
+        std::fs::remove_file(&folder).unwrap();
+
+        let (exit_code, outcome) = ran.unwrap();
+        assert_eq!(exit_code, ExitCode::FAILURE);
+        assert!(outcome.refused.is_empty(), "{:#?}", outcome.refused);
+        let converted: Vec<String> = outcome.converted.iter().map(|(name, _, _)| display(name)).collect();
+        assert_eq!(converted, ["src/Contracts/Clean0.php", "src/Contracts/Clean1.php"]);
+        assert!(root.join("src/Contracts/Clean1.sharp").exists() && !root.join("src/Contracts/Clean1.php").exists());
+        assert!(
+            logged.contains(
+                "The converted files could not be compiled for the extension hosts, so no hosts that load them proved the project, and git holds their plain PHP: "
+            ),
+            "{logged}"
+        );
     }
 
     /// One of thirteen interfaces adds an issue in its plain PHP implementer, which points into the interface. The
