@@ -2063,7 +2063,24 @@ fn compile_proves_a_law_from_its_sharp_file_alone_and_writes_the_compiled_file()
     assert_eq!(source_lean_files(root), Vec::<PathBuf>::new());
     assert!(compiled(root, "app/Shared/Money.sharp").exists());
     assert!(root.join(".sharp").join(PACKAGE_FOLDER).is_dir(), "the compile keeps the Lake package's folder");
-    assert!(root.join(".sharp/.lean/Code/App/Shared/Money.lean").exists(), "the Lake package stays in .sharp/.lean/");
+    assert!(!root.join(".sharp/.lean/Code").exists(), "the runner's request holds the generated code, so no file does");
+}
+
+/// An earlier `mago` wrote the generated code to `.sharp/.lean/Code/` and built it there with Lake. The runner reads the
+/// code from its request, so the compile deletes both, and a file in them cannot reach a proof.
+#[test]
+fn compile_deletes_the_generated_code_and_the_lake_build_an_earlier_mago_left_and_proves_its_law() {
+    let directory = lawful_project(&[("app/Shared/Money.sharp", LAWFUL_MONEY)]);
+    let root = directory.path();
+    write(root, ".sharp/.lean/Code/App/Shared/Money.lean", "this is not Lean\n");
+    write(root, ".sharp/.lean/.lake/build/lib/lean/Code/App/Shared/Money.olean", "this is not a build\n");
+
+    let output = compile(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(compiled(root, "app/Shared/Money.sharp").exists());
+    assert!(!root.join(".sharp/.lean/Code").exists());
+    assert!(!root.join(".sharp/.lean/.lake/build").exists());
 }
 
 #[test]
@@ -2289,10 +2306,10 @@ fn compile_proves_two_stale_law_files_and_refuses_each_one_whose_method_breaks_i
     }
 }
 
-/// Puts a `lake` first on the `PATH` that runs the real one, except that each `sharp-lean` runner it starts first
-/// waits up to 30 seconds for a second runner to start. A runner that waited in vain leaves `alone` in `folder`.
+/// Puts a `lake` first on the `PATH` that runs the real one, and leaves a file in `started` in `folder` for each
+/// `sharp-lean` runner it starts, which holds the runner's request.
 #[cfg(unix)]
-fn rendezvous_lake(folder: &Path) -> std::ffi::OsString {
+fn counting_lake(folder: &Path) -> std::ffi::OsString {
     use std::os::unix::fs::PermissionsExt;
 
     let path = std::env::var_os("PATH").unwrap();
@@ -2301,9 +2318,8 @@ fn rendezvous_lake(folder: &Path) -> std::ffi::OsString {
     let started = folder.join("started");
     std::fs::create_dir_all(&started).unwrap();
     let script = format!(
-        "#!/bin/sh\ncase \"$2\" in\n  */sharp-lean)\n    touch '{started}/'$$\n    for _ in $(seq 300); do\n      [ \"$(ls '{started}' | wc -l)\" -ge 2 ] && break\n      sleep 0.1\n    done\n    [ \"$(ls '{started}' | wc -l)\" -ge 2 ] || touch '{alone}'\n    ;;\nesac\nexec '{real}' \"$@\"\n",
+        "#!/bin/sh\ncase \"$2\" in\n  */sharp-lean)\n    tee '{started}/'$$ | '{real}' \"$@\"\n    exit $?\n    ;;\nesac\nexec '{real}' \"$@\"\n",
         started = started.display(),
-        alone = folder.join("alone").display(),
         real = real.display(),
     );
     let lake = folder.join("bin/lake");
@@ -2313,18 +2329,50 @@ fn rendezvous_lake(folder: &Path) -> std::ffi::OsString {
     std::env::join_paths(std::iter::once(folder.join("bin")).chain(std::env::split_paths(&path))).unwrap()
 }
 
+/// The generated Lean module of `name` in the request of the one runner `counting_lake` started in `folder`: the
+/// request's header, the modules an earlier runner stopped in, then each generated module's name and source.
+#[cfg(unix)]
+fn generated_module(folder: &Path, name: &str) -> String {
+    let mut started = std::fs::read_dir(folder.join("started")).unwrap();
+    let request = std::fs::read(started.next().unwrap().unwrap().path()).unwrap();
+    assert!(started.next().is_none(), "one runner started");
+    let mut at = 12;
+    let length = |at: &mut usize| {
+        let length = u32::from_be_bytes(request[*at..*at + 4].try_into().unwrap());
+        *at += 4;
+        usize::try_from(length).unwrap()
+    };
+    let string = |at: &mut usize| {
+        let bytes = length(at);
+        *at += bytes;
+        String::from_utf8(request[*at - bytes..*at].to_vec()).unwrap()
+    };
+    for _ in 0..length(&mut at) {
+        string(&mut at);
+    }
+    for _ in 0..length(&mut at) {
+        let (module, text) = (string(&mut at), string(&mut at));
+        if module == name {
+            return text;
+        }
+    }
+
+    panic!("the request holds no module {name}")
+}
+
+/// One runner proves the laws of every stale file of a compile, so the compile imports Lean once.
 #[cfg(unix)]
 #[test]
-fn compile_runs_the_runners_of_two_stale_law_files_at_the_same_time() {
+fn compile_proves_the_laws_of_two_stale_files_with_one_runner() {
     let directory = money_and_wallet();
     let root = directory.path();
     let lake = tempfile::tempdir().unwrap();
 
-    let output =
-        command(root, "never").env("PATH", rendezvous_lake(lake.path())).env("MAGO_THREADS", "2").output().unwrap();
+    let output = command(root, "never").env("PATH", counting_lake(lake.path())).output().unwrap();
 
     assert!(output.status.success(), "{}", printed(&output));
-    assert!(!lake.path().join("alone").exists(), "the second runner started only after the first one ended");
+    assert_eq!(std::fs::read_dir(lake.path().join("started")).unwrap().count(), 1, "one runner started");
+    assert!(compiled(root, "app/Shared/Money.sharp").exists());
     assert!(compiled(root, "app/Shared/Wallet.sharp").exists());
 }
 
@@ -2545,6 +2593,7 @@ fn compile_proves_a_law_an_edit_adds_from_the_sharp_file_alone() {
     assert_eq!(source_lean_files(root), Vec::<PathBuf>::new());
 }
 
+#[cfg(unix)]
 #[test]
 fn compile_proves_a_law_whose_calls_go_from_one_file_to_another_and_back_with_no_import_cycle() {
     let directory = lawful_project(&[
@@ -2558,20 +2607,22 @@ fn compile_proves_a_law_whose_calls_go_from_one_file_to_another_and_back_with_no
         ),
     ]);
     let root = directory.path();
+    let lake = tempfile::tempdir().unwrap();
 
-    let output = compile(root);
+    let output = command(root, "never").env("PATH", counting_lake(lake.path())).output().unwrap();
 
     assert!(output.status.success(), "{}", printed(&output));
     assert!(compiled(root, "app/Shared/Alpha.sharp").exists());
     assert_eq!(
-        read(root, ".sharp/.lean/Code/App/Shared/Beta.lean"),
+        generated_module(lake.path(), "Code.App.Shared.Beta"),
         "-- Generated by mago compile. Do not edit.\nimport Code.App.Shared.Alpha\n"
     );
-    assert!(!read(root, ".sharp/.lean/Code/App/Shared/Alpha.lean").contains("import Code."));
+    assert!(!generated_module(lake.path(), "Code.App.Shared.Alpha").contains("import Code."));
 }
 
 /// A call through the class, as `ShapeMath.doubled(s)`, is that static call already, as in C#, so it compiles and its
 /// law is proved the same way.
+#[cfg(unix)]
 #[test]
 fn compile_proves_a_law_through_an_extension_member_as_the_static_call_it_runs_as() {
     let directory = lawful_project(&[
@@ -2585,11 +2636,12 @@ fn compile_proves_a_law_through_an_extension_member_as_the_static_call_it_runs_a
         ),
     ]);
     let root = directory.path();
+    let lake = tempfile::tempdir().unwrap();
 
-    let output = compile(root);
+    let output = command(root, "never").env("PATH", counting_lake(lake.path())).output().unwrap();
 
     assert!(output.status.success(), "{}", printed(&output));
-    let laws = read(root, ".sharp/.lean/Code/App/Shared/Shape.lean");
+    let laws = generated_module(lake.path(), "Code.App.Shared.Shape");
     for call in [
         "App.Shared.ShapeMath.doubled s",
         "App.Shared.ShapeMath.isFlat s",
@@ -2991,10 +3043,10 @@ fn compile_lines_within(root: &Path, seconds: u64, path: &std::ffi::OsStr) -> (O
     )
 }
 
-/// Puts a `lake` first on the `PATH` that runs the real one, except in a project's `.sharp/.lean` package: there a build
-/// fails at once, and `lake env lean`, which elaborates a module that did not build, leaves `stalled` in `folder` and
-/// runs the shell commands `work`, which stand in for Lean work that never ends. Its own path, `bin/lake` in `folder`,
-/// names each process it runs `work` in.
+/// Puts a `lake` first on the `PATH` that runs the real one, except in a project's `.sharp/.lean` package: there the
+/// runner it runs reads the request, reports that it elaborates the generated module of `app/Shared/Money.sharp`, as
+/// the runner does, leaves `stalled` in `folder` and runs the shell commands `work`, which stand in for Lean work in
+/// that module that never ends. Its own path, `bin/lake` in `folder`, names each process it runs `work` in.
 #[cfg(unix)]
 fn stalling_lake(folder: &Path, work: &str) -> std::ffi::OsString {
     use std::os::unix::fs::PermissionsExt;
@@ -3003,7 +3055,7 @@ fn stalling_lake(folder: &Path, work: &str) -> std::ffi::OsString {
     let real =
         std::env::split_paths(&path).map(|directory| directory.join("lake")).find(|lake| lake.is_file()).unwrap();
     let script = format!(
-        "#!/bin/sh\ncase \"$PWD\" in\n  */.sharp/.lean)\n    case \"$1 $2\" in\n      \"build \"*) exit 1 ;;\n      \"env lean\")\n        touch '{stalled}'\n        {work}\n        ;;\n    esac\n    ;;\nesac\nexec '{real}' \"$@\"\n",
+        "#!/bin/sh\ncase \"$PWD\" in\n  */.sharp/.lean)\n    case \"$1 $2\" in\n      \"env \"*/sharp-lean)\n        cat > /dev/null\n        echo 'module 0 Code.App.Shared.Money' >&2\n        touch '{stalled}'\n        {work}\n        ;;\n    esac\n    ;;\nesac\nexec '{real}' \"$@\"\n",
         stalled = folder.join("stalled").display(),
         real = real.display(),
     );
@@ -3016,12 +3068,13 @@ fn stalling_lake(folder: &Path, work: &str) -> std::ffi::OsString {
 
 /// Lean work that runs past the processor-time limit, or waits until the deadline, stops there once instead of holding
 /// the compile, and refuses the law whose code it was checking with what stopped it. Each row runs after a compile that
-/// built the runtime library. Work that never ends runs under a limit of 30 seconds, and costs the compile less than two
+/// built the runtime library. Work that never ends runs under a limit of 2 seconds, and costs the compile less than two
 /// limits, which leaves room for the rest of the compile on a slow machine. It writes a line every million steps, as
-/// `lake build` reports each module it builds, so the deadline, which counts from the last thing written, never stops
-/// it: on a machine busy enough to give it less than a quarter of a core, it would reach the deadline of 120 seconds
-/// before its 30 processor seconds. Work that waits runs under a limit of 10 seconds, so its deadline is 40 seconds. It
-/// uses almost no processor time, so it runs on its own thread meanwhile.
+/// the runner reports each module and check it starts, so the deadline, which counts from the last thing written, never
+/// stops it: on a machine busy enough to give it less than a quarter of a core, it would reach the deadline of 8 seconds
+/// before its 2 processor seconds. Work that waits runs under a limit of 2 seconds, so its deadline is 8 seconds. It
+/// uses almost no processor time, so it runs on its own thread meanwhile. Each limit holds the whole compile too, so it
+/// stays above the processor seconds the compile itself uses.
 #[cfg(unix)]
 #[test]
 fn lean_work_that_never_ends_stops_once_at_its_limit_or_deadline() {
@@ -3044,11 +3097,11 @@ fn lean_work_that_never_ends_stops_once_at_its_limit_or_deadline() {
     };
 
     std::thread::scope(|scope| {
-        let waits = scope.spawn(|| stops(10, "sleep 4000", &refused("it did not finish within 40 seconds")));
+        let waits = scope.spawn(|| stops(2, "sleep 4000", &refused("it did not finish within 8 seconds")));
         stops(
-            30,
+            2,
             "exec awk 'BEGIN { while (1) if (++step % 1000000 == 0) { print step; fflush() } }'",
-            &refused("it ran past 30 processor seconds, the limit the checker sets on each check"),
+            &refused("it ran past 2 processor seconds, the limit the checker sets on each check"),
         );
         waits.join().unwrap();
     });
