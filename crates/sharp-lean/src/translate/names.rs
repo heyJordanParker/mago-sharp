@@ -1,6 +1,8 @@
 //! PHP# names as Lean writes them.
 
-/// Lean's keywords. A PHP# name that is one is written in `«»`, which keeps the name.
+/// Lean's keywords, and the proof steps `Sharp.Lean.Proof` declares, which are keywords wherever it is imported, as it is
+/// in each law's theorem and in the runner that elaborates the generated modules. A PHP# name that is one is written in
+/// `«»`, which keeps the name.
 const KEYWORDS: &[&str] = &[
     "abbrev",
     "at",
@@ -44,6 +46,9 @@ const KEYWORDS: &[&str] = &[
     "return",
     "section",
     "set_option",
+    "sharp_close",
+    "sharp_condition",
+    "sharp_prove",
     "show",
     "structure",
     "suffices",
@@ -99,6 +104,7 @@ mod tests {
     #[test]
     fn a_keyword_is_escaped_and_any_other_name_is_kept() {
         assert_eq!(identifier(b"end"), "«end»");
+        assert_eq!(identifier(b"sharp_close"), "«sharp_close»");
         assert_eq!(identifier(b"currency"), "currency");
         assert_eq!(full_name(br"\App\Shared\Money"), "App.Shared.Money");
         assert_eq!(full_name(br"App\match\Score"), "App.«match».Score");

@@ -168,8 +168,9 @@ pub(crate) fn rejected_proof(law: &Law) -> Issue {
     )
 }
 
-/// A law whose generated module Lean did not build: it stopped at the checker's limit, or Lean rejected it, which is a
-/// bug in the checker's translation, never in the project. The debug log names the module and the line.
+/// A law whose check reaches a generated module Lean did not elaborate: it stopped at the checker's limit, or Lean
+/// rejected it, which is a bug in the checker's translation, never in the project. The debug log names the module and
+/// the line.
 pub(crate) fn generated_module_refused(law: &Law, module: &str, refusal: &Refusal) -> Issue {
     let reason = match refusal {
         Refusal::Stopped(stop) => format!("{}.", stopped(*stop, "the code it reaches")),
