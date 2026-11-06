@@ -63,7 +63,6 @@
           OPENSSL_NO_VENDOR = 1;
           RUSTFLAGS = "-C debuginfo=1";
           CARGO_TERM_COLOR = "always";
-          CARGO_INCREMENTAL = "1";
 
           shellHook = ''
             if ! rustup toolchain list | grep -q "^${toolchain}-"; then
