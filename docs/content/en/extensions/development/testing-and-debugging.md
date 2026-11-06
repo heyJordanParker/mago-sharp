@@ -176,3 +176,18 @@ Workers can serve repeated analysis generations during one command. Tests should
 - after-file references are replaced, not duplicated;
 - reducer state represents one intended worker lifetime;
 - exact in-memory source is used instead of rereading changed files from disk.
+
+## Read source through the SDK
+
+A host reads a file's source through the SDK, never from disk. The file a hook sees may exist only in memory: `mago convert` proves each `.sharp` file before it writes it, and `--dry-run` never writes it, so a hook that runs `file_get_contents()` on `app/Billing/Invoice.sharp` during that proof fails. The SDK gives every hook that inspects a file that file's `SourceFile`, whose `contents` are the exact bytes Mago analyzes:
+
+- an after-file hook calls `FileAnalysis::getSourceFile()`
+- a node-analysis hook reads `NodeAnalysisContext::$source`
+- a lint rule reads `LintContext::$file`
+
+```php
+$source = $analysis->getSourceFile();
+$lines = explode("\n", $source->contents);
+```
+
+`SourceFile::$path` names the file for an issue. Never open it.
