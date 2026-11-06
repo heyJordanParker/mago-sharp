@@ -497,7 +497,9 @@ fn create_blob(workspace: &Path, path: &Path, content: Vec<u8>) -> Result<String
 
     let mut stdin = child.stdin.take().expect("failed to get stdin");
     std::thread::spawn(move || {
-        stdin.write_all(&content).expect("failed to write to stdin");
+        mago_extension::process_group::block_sigpipe(&stdin);
+        // A git that exits before it reads the content closes the pipe, and its exit status reports why.
+        let _result = stdin.write_all(&content);
     });
 
     let output = child.wait_with_output().map_err(|source| Error::RunningGit { command: "hash-object", source })?;

@@ -526,9 +526,9 @@ impl Worker {
         let mut group = ProcessGroup::spawn(&mut process)
             .map_err(|source| WorkerError::Spawn { program: command.program().to_owned(), source })?;
 
-        let process_stdin = take_pipe(id, "stdin", group.leader().stdin.take(), &mut group)?;
-        let stdout = take_pipe(id, "stdout", group.leader().stdout.take(), &mut group)?;
-        let stderr = take_pipe(id, "stderr", group.leader().stderr.take(), &mut group)?;
+        let process_stdin = take_pipe(id, "stdin", group.leader().stdin.take())?;
+        let stdout = take_pipe(id, "stdout", group.leader().stdout.take())?;
+        let stderr = take_pipe(id, "stderr", group.leader().stderr.take())?;
         let process_id = group.leader().id();
         #[cfg(windows)]
         let stdin = match accept_windows_input(&input_listener, &input_token, group.leader()) {
@@ -536,11 +536,7 @@ impl Worker {
                 drop(process_stdin);
                 WorkerStdin::Socket(stream)
             }
-            Err(source) => {
-                let _result = group.end();
-                let _result = group.leader().wait();
-                return Err(WorkerError::Spawn { program: command.program().to_owned(), source });
-            }
+            Err(source) => return Err(WorkerError::Spawn { program: command.program().to_owned(), source }),
         };
         #[cfg(not(windows))]
         let stdin = WorkerStdin::Process(process_stdin);
@@ -777,8 +773,8 @@ impl Worker {
     }
 
     /// Fails request `request_id`, which made no progress within the deadline. The error names the unit the worker
-    /// last said the request started, or else what Mago named the request, `running`. The request's number is
-    /// protocol detail, so only the trace log names it.
+    /// last said the request started, or else what Mago named the request, `running`, and so does the failure every
+    /// other request of the worker reads. The request's number is protocol detail, so only the trace log names it.
     fn timeout(&self, request_id: u64, running: Option<&dyn Display>) -> WorkerError {
         if self.inner.trace_enabled {
             self.inner.telemetry.timeouts.fetch_add(1, Ordering::Relaxed);
@@ -787,7 +783,12 @@ impl Worker {
         tracing::trace!(worker = self.id(), request = request_id, running, timeout = ?self.request_timeout, "Extension worker request timed out.");
         self.inner.take_pending(request_id);
         let _result = self.inner.send(&Frame::cancel(request_id));
-        self.inner.fail(format!("request {request_id} timed out"));
+        let mut reason = format!("made no progress for {} ms", self.request_timeout.as_millis());
+        if let Some(running) = &running {
+            reason.push_str(" on ");
+            reason.push_str(running);
+        }
+        self.inner.fail(reason);
 
         WorkerError::Timeout {
             host: self.inner.host.clone(),
@@ -849,13 +850,7 @@ impl Worker {
         let trace_start = self.inner.trace_enabled.then(Instant::now);
         let mut poll_interval = INITIAL_SHUTDOWN_POLL_INTERVAL;
         let exited_gracefully = loop {
-            let exited = {
-                let mut child = lock(&self.inner.child);
-                match child.as_mut() {
-                    Some(group) => group.leader().try_wait().ok().flatten().is_some(),
-                    None => true,
-                }
-            };
+            let exited = lock(&self.inner.child).as_ref().is_none_or(ProcessGroup::leader_exited);
             let elapsed = started_at.elapsed();
             if exited || elapsed >= timeout {
                 break exited;
@@ -866,15 +861,16 @@ impl Worker {
         };
 
         let child = lock(&self.inner.child).take();
-        if let Some(mut group) = child {
-            if group.leader().try_wait().ok().flatten().is_none() {
+        if let Some(group) = child {
+            if !group.leader_exited() {
                 if self.inner.trace_enabled {
                     self.inner.telemetry.forced_shutdowns.fetch_add(1, Ordering::Relaxed);
                 }
                 tracing::trace!(worker = self.id(), "Killing extension worker after shutdown grace period.");
-                let _result = group.end();
             }
-            let _result = group.leader().wait();
+            // Dropping the group ends it, whether its leader still runs past the grace period or exited and left a
+            // process it started running, which would keep the worker's pipes open, and then reaps the leader.
+            drop(group);
         }
 
         self.inner.state.store(STATE_STOPPED, Ordering::Release);
@@ -926,8 +922,13 @@ impl Worker {
         let reader_inner = Arc::clone(&inner);
         let reader_thread = std::thread::spawn(move || read_worker_stream(&reader_inner, reader));
         let writer_inner = Arc::clone(&inner);
-        let writer_thread =
-            std::thread::spawn(move || write_worker_stdin(&writer_inner, WorkerStdin::Test(writer), queued));
+        let writer_thread = std::thread::spawn(move || {
+            let stdin = writer.try_clone().expect("the peer's stream should clone");
+            write_worker_stdin(&writer_inner, WorkerStdin::Test(stdin), queued);
+            // The stdout reader holds a handle of the same stream, so the peer sees its stdin end, as a worker sees
+            // its pipe close, only once Mago shuts down the stream's writing half.
+            let _result = writer.shutdown(std::net::Shutdown::Write);
+        });
 
         Arc::new(Self {
             inner,
@@ -1045,20 +1046,31 @@ fn authenticate_windows_input(stream: &mut TcpStream, token: &str) -> std::io::R
     Ok(received == token.as_bytes())
 }
 
-fn take_pipe<T>(id: usize, name: &'static str, pipe: Option<T>, group: &mut ProcessGroup) -> Result<T, WorkerError> {
-    pipe.ok_or_else(|| {
-        let _result = group.end();
-        let _result = group.leader().wait();
-        WorkerError::MissingPipe { worker: id, pipe: name }
-    })
+/// The pipe `name` of worker `id`. A missing pipe fails the spawn, which drops the worker's group and so ends the
+/// worker.
+fn take_pipe<T>(id: usize, name: &'static str, pipe: Option<T>) -> Result<T, WorkerError> {
+    pipe.ok_or(WorkerError::MissingPipe { worker: id, pipe: name })
 }
 
 /// Writes each frame `queued` holds to the worker's stdin, in order, on a thread of its own: a worker that stops reading
-/// its stdin holds this thread, not the request that queued the frame, so the request still fails at its deadline. Stdin
-/// closes once Mago stops queueing frames and those queued before are written, or once a write fails.
+/// its stdin holds this thread, not the request that queued the frame, so the request still fails at its deadline. A
+/// worker that failed gets none of the frames still queued, as a timed-out request's cancellation, since `fail` ends
+/// it. Stdin closes once Mago stops queueing frames and those queued before are written, once the worker fails, or
+/// once a write fails, which fails the worker.
 fn write_worker_stdin(inner: &WorkerInner, mut stdin: WorkerStdin, queued: mpsc::Receiver<Vec<u8>>) {
+    match &stdin {
+        #[cfg(not(windows))]
+        WorkerStdin::Process(pipe) => crate::process_group::block_sigpipe(pipe),
+        #[cfg(windows)]
+        WorkerStdin::Socket(_) => {}
+        #[cfg(test)]
+        WorkerStdin::Test(_) => {}
+    }
     tracing::trace!(worker = inner.id, "Extension worker stdin writer started.");
     for frame in queued {
+        if inner.state.load(Ordering::Acquire) == STATE_FAILED {
+            break;
+        }
         if let Err(error) = stdin.write_all(&frame).and_then(|()| stdin.flush()) {
             tracing::trace!(worker = inner.id, error = %error, "Extension worker stdin writer failed.");
             // A worker that exited closed the pipe Mago writes its requests to.
@@ -1124,11 +1136,9 @@ fn read_worker_stderr(inner: &WorkerInner, stderr: ChildStderr) {
 
 fn reap_child(inner: &WorkerInner) {
     tracing::trace!(worker = inner.id, "Reaping failed extension worker process.");
+    // Dropping the group ends it and reaps its leader.
     let child = lock(&inner.child).take();
-    if let Some(mut group) = child {
-        let _result = group.end();
-        let _result = group.leader().wait();
-    }
+    drop(child);
 }
 
 pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -1296,13 +1306,10 @@ mod tests {
     fn a_timed_out_request_stops_the_worker() {
         let (worker, mut peer_reader, peer_writer) = connected_worker(Duration::from_millis(20));
         let peer = std::thread::spawn(move || {
-            let _request = Frame::read_from(&mut peer_reader, 1024)
+            let request = Frame::read_from(&mut peer_reader, 1024)
                 .expect("request should decode")
                 .expect("request should be present");
-            let cancel = Frame::read_from(&mut peer_reader, 1024)
-                .expect("cancellation should decode")
-                .expect("cancellation should be present");
-            assert_eq!(cancel.kind, FrameKind::Cancel);
+            read_to_the_end_after_a_timeout(&mut peer_reader, request.id);
         });
 
         let error =
@@ -1353,20 +1360,17 @@ mod tests {
             let first = Frame::read_from(&mut peer_reader, 1024)
                 .expect("first request should decode")
                 .expect("first request should be present");
-            for _ in 0..2 {
+            let [hung, _] = [0, 1].map(|_| {
                 Frame::read_from(&mut peer_reader, 1024)
                     .expect("request should decode")
-                    .expect("request should be present");
-            }
+                    .expect("request should be present")
+            });
             Frame::response(first.id, 0, first.payload)
                 .write_to(&mut peer_writer, 1024)
                 .expect("response should encode");
             peer_writer.flush().expect("response should flush");
 
-            let cancel = Frame::read_from(&mut peer_reader, 1024)
-                .expect("cancellation should decode")
-                .expect("cancellation should be present");
-            assert_eq!(cancel.kind, FrameKind::Cancel);
+            read_to_the_end_after_a_timeout(&mut peer_reader, hung.id);
         });
 
         let started_at = Instant::now();
@@ -1385,6 +1389,14 @@ mod tests {
         worker.shutdown();
     }
 
+    /// Reads what Mago writes once request `request` timed out: at most the request's cancellation, which the worker
+    /// fails before it may get, then the end of the stream, as Mago closes it.
+    fn read_to_the_end_after_a_timeout(peer_reader: &mut TcpStream, request: u64) {
+        while let Some(frame) = Frame::read_from(peer_reader, 1024).expect("a frame should decode") {
+            assert_eq!((frame.kind, frame.id), (FrameKind::Cancel, request));
+        }
+    }
+
     /// A frame of `kind` the worker sends under request `parent_id`.
     fn from_worker(kind: FrameKind, id: u64, parent_id: u64, payload: Vec<u8>) -> Frame {
         Frame { version: crate::protocol::PROTOCOL_VERSION, kind, flags: FrameFlags::empty(), id, parent_id, payload }
@@ -1392,7 +1404,7 @@ mod tests {
 
     /// A peer that runs six files' hooks for request `outer`, each for `per_file`. Before each file's hooks it sends a
     /// progress frame naming them when `progress` holds, and each hook asks Mago for metadata. It answers the request
-    /// unless Mago cancels it.
+    /// unless Mago cancels it, or closes the stream as it does once the request times out.
     fn run_six_files(
         mut peer_reader: TcpStream,
         mut peer_writer: TcpStream,
@@ -1415,10 +1427,8 @@ mod tests {
                     .write_to(&mut peer_writer, 1024)
                     .expect("nested request should encode");
                 peer_writer.flush().expect("nested request should flush");
-                let answer = Frame::read_from(&mut peer_reader, 1024)
-                    .expect("nested response should decode")
-                    .expect("nested response should be present");
-                if answer.kind == FrameKind::Cancel {
+                let answer = Frame::read_from(&mut peer_reader, 1024).expect("nested response should decode");
+                if answer.is_none_or(|answer| answer.kind == FrameKind::Cancel) {
                     return;
                 }
             }
@@ -1483,10 +1493,7 @@ mod tests {
                 .write_to(&mut peer_writer, 1024)
                 .expect("progress should encode");
             peer_writer.flush().expect("progress should flush");
-            let cancel = Frame::read_from(&mut peer_reader, 1024)
-                .expect("cancellation should decode")
-                .expect("cancellation should be present");
-            assert_eq!(cancel.kind, FrameKind::Cancel);
+            read_to_the_end_after_a_timeout(&mut peer_reader, outer.id);
         });
 
         let error = worker.request(Vec::new(), None).expect_err("request should time out");
@@ -1520,10 +1527,7 @@ mod tests {
                 .write_to(&mut peer_writer, 1024)
                 .expect("response should encode");
             peer_writer.flush().expect("progress and response should flush");
-            let cancel = Frame::read_from(&mut peer_reader, 1024)
-                .expect("cancellation should decode")
-                .expect("cancellation should be present");
-            assert_eq!((cancel.kind, cancel.id), (FrameKind::Cancel, second.id));
+            read_to_the_end_after_a_timeout(&mut peer_reader, second.id);
         });
 
         let started_at = Instant::now();
@@ -1729,25 +1733,60 @@ mod tests {
     #[cfg(unix)]
     const STUCK_TIMEOUT: &str = "extension host `acme` made no progress for 1000 ms (worker 0): raise its `request-timeout-ms` for hooks that run that long";
 
+    /// A worker that exits within the shutdown's grace period may leave a process it started running, here one that
+    /// ignores its stdin and holds the worker's stdout and stderr. The shutdown ends it, rather than wait for the end
+    /// of the pipes it holds.
+    #[cfg(unix)]
+    #[test]
+    fn a_shutdown_ends_what_a_worker_that_exited_left_running() {
+        let started = std::env::temp_dir().join(format!("mago-extension-exited-leader-{}", std::process::id()));
+        std::fs::create_dir_all(&started).expect("the folder of process ids should be created");
+        let left = started.join("left");
+        let worker = shell_worker(&format!(
+            "sh -c 'echo $$ > \"$0\"; exec sleep 20' '{}' </dev/null & while [ ! -s '{}' ]; do sleep 0.01; done; exit 0",
+            left.display(),
+            left.display(),
+        ));
+        let id = within_outer_timeout(move || loop {
+            match std::fs::read_to_string(&left) {
+                Ok(id) if !id.trim().is_empty() => break id,
+                _ => std::thread::sleep(Duration::from_millis(10)),
+            }
+        });
+
+        within_outer_timeout(move || worker.shutdown());
+
+        wait_until_ended(id.trim());
+        std::fs::remove_dir_all(&started).expect("the folder of process ids should be removed");
+    }
+
     /// Sends `worker` a request of 1 MiB, past the 64 KiB a pipe buffers on macOS and Linux, then shuts the worker down,
-    /// and returns the request's error and how long the request took. Both run on a thread of their own, so a request or
-    /// a shutdown that never ends fails the test after `OUTER_TIMEOUT` rather than hang the test run.
+    /// and returns the request's error and how long the request took, within `within_outer_timeout`.
     #[cfg(unix)]
     fn request_larger_than_a_pipe_and_shut_down(worker: Arc<Worker>) -> (WorkerError, Duration) {
-        const OUTER_TIMEOUT: Duration = Duration::from_secs(10);
-
-        let (answered, answer) = mpsc::channel();
-        std::thread::spawn(move || {
+        let (response, elapsed) = within_outer_timeout(move || {
             let started_at = Instant::now();
             let response = worker.request(vec![0; 1024 * 1024], None);
             let elapsed = started_at.elapsed();
             worker.shutdown();
-            let _result = answered.send((response, elapsed));
+            (response, elapsed)
         });
-        let (response, elapsed) =
-            answer.recv_timeout(OUTER_TIMEOUT).expect("the request and the shutdown should end within 10 s");
 
         (response.expect_err("the stuck worker should fail the request"), elapsed)
+    }
+
+    /// Runs `work` on a thread of its own and returns what it returns, and fails the test when it has not ended within
+    /// 10 s, so work that never ends fails the test rather than hang the test run.
+    #[cfg(unix)]
+    fn within_outer_timeout<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
+        const OUTER_TIMEOUT: Duration = Duration::from_secs(10);
+
+        let (finished, result) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _result = finished.send(work());
+        });
+
+        result.recv_timeout(OUTER_TIMEOUT).expect("the work should end within 10 s")
     }
 
     /// Waits until the process `id` no longer runs. A process that ended and that nothing reaped yet, as an orphan is

@@ -230,7 +230,10 @@ pub(crate) fn output_before_deadline(command: &mut Command, input: &[u8]) -> io:
     let mut stdin =
         group.leader().stdin.take().ok_or_else(|| io::Error::other("a law checker process has no input stream"))?;
     let input = input.to_vec();
-    let writer = thread::spawn(move || stdin.write_all(&input));
+    let writer = thread::spawn(move || {
+        mago_extension::process_group::block_sigpipe(&stdin);
+        stdin.write_all(&input)
+    });
     let output = wait_before_deadline(&mut group);
     let written = writer.join().map_err(|_| io::Error::other("a writer of a law checker process panicked"))?;
     let output = output?;

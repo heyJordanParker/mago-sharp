@@ -2,10 +2,12 @@
 //!
 //! Such a process is the worker a wrapper like `docker compose exec` forks, or each `lean` a `lake` starts. The group
 //! is not Mago's own, so a terminal's Ctrl-C reaches it only through `forward`, which ends every such group on each
-//! signal that ends Mago, as the signal ended them while they ran in Mago's group.
+//! signal that ends Mago, as the signal ended them while they ran in Mago's group. Groups exist on macOS and Linux, the
+//! platforms PHP# runs on.
 
 use std::io;
 use std::process::Child;
+use std::process::ChildStdin;
 use std::process::Command;
 #[cfg(unix)]
 use std::sync::Once;
@@ -16,8 +18,9 @@ use std::sync::atomic::AtomicPtr;
 #[cfg(unix)]
 use std::sync::atomic::Ordering;
 
-/// A child process that leads a process group of its own. Windows has no process groups, so there it is the child
-/// alone.
+/// A child process that leads a process group of its own. Dropping it ends the group and reaps the leader, unless Mago
+/// already waited for the leader, as tokio's `kill_on_drop` does, so a group Mago stops tracking, as a panic stops it,
+/// leaves nothing running.
 #[derive(Debug)]
 pub struct ProcessGroup {
     leader: Child,
@@ -31,13 +34,21 @@ impl ProcessGroup {
     ///
     /// # Errors
     ///
-    /// Returns an error if the process cannot be started.
+    /// Returns an error if the process cannot be started, or if a signal is ending Mago.
     pub fn spawn(command: &mut Command) -> io::Result<Self> {
         #[cfg(unix)]
         {
             std::os::unix::process::CommandExt::process_group(command, 0);
             forward_signals();
             let slot = Slot::take();
+            // A signal that arrived before the slot held `STARTING` waited for no group, so it is ending Mago. Starting
+            // a process now would only leave one behind.
+            let signal = PENDING.load(Ordering::SeqCst);
+            if signal != 0 {
+                slot.group.store(0, Ordering::SeqCst);
+                forward(signal);
+                return Err(io::Error::other("a signal is ending Mago"));
+            }
             let spawned = command.spawn();
             // `forward` writes `PENDING` before it reads the slots, and this thread writes its slot before it reads
             // `PENDING`, so at least one of them ends the group for a signal that arrived during the spawn.
@@ -61,9 +72,15 @@ impl ProcessGroup {
         &mut self.leader
     }
 
+    /// Whether the leader has exited, which, unlike `Child::try_wait`, leaves it to be waited for: its id names the
+    /// group until then, so `end` stays safe after it.
+    pub fn leader_exited(&self) -> bool {
+        !matches!(self.leader_state(), Ok(false))
+    }
+
     /// Ends the leader and every process of its group with `SIGKILL`, such as the worker a wrapper forked. The leader's
-    /// id names the group until Mago waits for the leader, so Mago ends the group before it waits. Windows has no
-    /// groups, so there it kills the leader alone.
+    /// id names the group until Mago waits for the leader, so Mago ends the group before it waits. Elsewhere than macOS
+    /// and Linux, it kills the leader alone.
     ///
     /// # Errors
     ///
@@ -84,14 +101,77 @@ impl ProcessGroup {
             self.leader.kill()
         }
     }
+
+    /// Whether the leader has exited, without waiting for it: an error once Mago waited for it.
+    #[cfg(unix)]
+    fn leader_state(&self) -> io::Result<bool> {
+        // SAFETY: `siginfo_t` is plain data, which zeroes make valid.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        // SAFETY: `waitid` only fills `info`, and `WNOWAIT` leaves the leader to be waited for.
+        if unsafe {
+            libc::waitid(
+                libc::P_PID,
+                self.leader.id(),
+                &raw mut info,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            )
+        } != 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+
+        // SAFETY: `waitid` filled `info`, whose process id stays 0 while the leader runs.
+        Ok(unsafe { info.si_pid() } != 0)
+    }
+
+    #[cfg(not(unix))]
+    fn leader_state(&self) -> io::Result<bool> {
+        Ok(true)
+    }
 }
 
 #[cfg(unix)]
 impl Drop for ProcessGroup {
-    /// Frees the group's slot, so a signal no longer ends the group: once the group ends, its id may name another.
+    /// Ends the group and reaps the leader unless Mago already waited for it, then frees the group's slot, so a signal
+    /// no longer ends the group: once the group ends, its id may name another.
     fn drop(&mut self) {
+        if self.leader_state().is_ok() {
+            let _result = self.end();
+            let _result = self.leader.wait();
+        }
         self.slot.group.store(0, Ordering::SeqCst);
     }
+}
+
+/// Makes the calling thread's writes to `stdin`, a child's standard input, fail with `ErrorKind::BrokenPipe` once the
+/// child has ended, rather than raise SIGPIPE. Mago takes SIGPIPE's default action, which ends it, so `mago … | head`
+/// ends quietly, and a write to a child that ended would end Mago with it. Each thread that writes a child's stdin calls
+/// this before its first write. Linux raises SIGPIPE on the thread that wrote, so there this blocks SIGPIPE on the
+/// calling thread. macOS raises it on the whole process unless the pipe says otherwise, so there this marks the pipe.
+pub fn block_sigpipe(stdin: &ChildStdin) {
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::fd::AsRawFd;
+
+        /// `F_SETNOSIGPIPE` of macOS's `<sys/fcntl.h>`, which `libc` does not define.
+        const F_SETNOSIGPIPE: libc::c_int = 73;
+        // SAFETY: `fcntl` only sets a flag of the pipe `stdin` holds open.
+        unsafe { libc::fcntl(stdin.as_raw_fd(), F_SETNOSIGPIPE, 1) };
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let _ = stdin;
+        // SAFETY: `sigset_t` is plain data, which zeroes make valid.
+        let mut signals: libc::sigset_t = unsafe { std::mem::zeroed() };
+        // SAFETY: `sigemptyset` only writes the set it is given.
+        unsafe { libc::sigemptyset(&raw mut signals) };
+        // SAFETY: `sigaddset` only writes the set it is given.
+        unsafe { libc::sigaddset(&raw mut signals, libc::SIGPIPE) };
+        // SAFETY: `pthread_sigmask` only adds `signals` to the calling thread's mask.
+        unsafe { libc::pthread_sigmask(libc::SIG_BLOCK, &raw const signals, std::ptr::null_mut()) };
+    }
+    #[cfg(not(unix))]
+    let _ = stdin;
 }
 
 /// What a slot holds while its group's leader starts, before its id is known.
