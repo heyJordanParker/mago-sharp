@@ -300,6 +300,13 @@ impl IncrementalAnalysisService {
 
         let inputs_start = std::time::Instant::now();
         let dependencies = Dependencies::new(self);
+        let listening: HashSet<FileId> = self
+            .codebase
+            .function_likes
+            .values()
+            .filter(|method| !method.listens.is_empty())
+            .map(|method| method.span.file_id)
+            .collect();
         let mut folder_files: HashMap<&[u8], Vec<&[u8]>> = HashMap::default();
         for file in &files {
             folder_files.entry(folder_of(&file.name)).or_default().push(&file.name);
@@ -362,7 +369,7 @@ impl IncrementalAnalysisService {
                 .chain(lists)
                 .chain(namespace_class_files)
                 .chain(namespace_files)
-                .chain(self.module_inputs(file, &dependencies))
+                .chain(self.module_inputs(file, &dependencies, &listening))
                 .chain(std::iter::once(COMPOSER_LOCK.to_vec()))
                 .collect();
             paths.sort_unstable();
@@ -617,16 +624,12 @@ impl IncrementalAnalysisService {
     /// above it. So a file that declares a module or a listener names the `Module.sharp` of each of those folders, for
     /// its own folder, each class its check read and each class of a test module's namespace. An environment module
     /// also names its environment's `Module.<Environment>.sharp` of each, since its check reads them all. An edit, an
-    /// addition or a deletion of one makes the compiled file stale.
-    fn module_inputs(&self, file: &File, dependencies: &Dependencies<'_>) -> Vec<Vec<u8>> {
+    /// addition or a deletion of one makes the compiled file stale. `listening` holds each file that declares a
+    /// listener.
+    fn module_inputs(&self, file: &File, dependencies: &Dependencies<'_>, listening: &HashSet<FileId>) -> Vec<Vec<u8>> {
         let modules: Vec<&ModuleMetadata> =
             self.codebase.modules.iter().filter(|module| module.file.as_bytes() == file.name.as_ref()).collect();
-        let listens = self
-            .codebase
-            .function_likes
-            .values()
-            .any(|method| !method.listens.is_empty() && method.span.file_id == file.id);
-        if modules.is_empty() && !listens {
+        if modules.is_empty() && !listening.contains(&file.id) {
             return Vec::new();
         }
 
