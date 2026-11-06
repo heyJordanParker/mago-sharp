@@ -107,19 +107,7 @@ impl<'config> DatabaseLoader<'config> {
             .collect();
 
         let glob_excludes = build_glob_set(glob_exclude_patterns.iter().copied(), self.configuration.glob)?;
-        let dir_prune_patterns: Vec<&str> = glob_exclude_patterns
-            .iter()
-            .filter_map(|pat| {
-                let stripped =
-                    pat.strip_suffix("/**/*").or_else(|| pat.strip_suffix("/**")).or_else(|| pat.strip_suffix("/*"))?;
-                if stripped.is_empty() || stripped == "*" || stripped == "**" {
-                    return None;
-                }
-                Some(stripped)
-            })
-            .collect();
-
-        let dir_prune_globs = build_glob_set(dir_prune_patterns.iter().copied(), self.configuration.glob)?;
+        let excluded_folders = ExcludedFolders::from_configuration(&self.configuration)?;
 
         let path_excludes: HashSet<_> = self
             .configuration
@@ -138,8 +126,7 @@ impl<'config> DatabaseLoader<'config> {
                     FileType::Host,
                     &extensions_set,
                     &glob_excludes,
-                    &dir_prune_globs,
-                    &path_excludes,
+                    &excluded_folders,
                 )
             },
             || {
@@ -150,8 +137,7 @@ impl<'config> DatabaseLoader<'config> {
                             FileType::Vendored,
                             &extensions_set,
                             &glob_excludes,
-                            &dir_prune_globs,
-                            &path_excludes,
+                            &excluded_folders,
                         )
                     },
                     || {
@@ -160,8 +146,7 @@ impl<'config> DatabaseLoader<'config> {
                             FileType::Patch,
                             &extensions_set,
                             &glob_excludes,
-                            &dir_prune_globs,
-                            &path_excludes,
+                            &excluded_folders,
                         )
                     },
                 )
@@ -272,30 +257,13 @@ impl<'config> DatabaseLoader<'config> {
         file_type: FileType,
         extensions: &HashSet<OsString>,
         glob_excludes: &GlobSet,
-        dir_prune_globs: &GlobSet,
-        path_excludes: &HashSet<&Cow<'config, Path>>,
+        excluded_folders: &ExcludedFolders,
     ) -> Result<Vec<FileWithSpecificity>, DatabaseError> {
         // Canonicalize the workspace once.  All WalkDir roots are canonicalized
         // before traversal so their paths inherit the canonical prefix without
         // any per-file syscalls.
-        let canonical_workspace =
-            self.configuration.workspace.canonicalize().unwrap_or_else(|_| self.configuration.workspace.to_path_buf());
-
-        // Pre-canonicalize path excludes once as strings.  A plain byte-string
-        // prefix check is then sufficient in the parallel section, replacing the
-        // per-file canonicalize() + Path::starts_with (Components iteration).
-        let canonical_excludes: Vec<String> = path_excludes
-            .iter()
-            .filter_map(|ex| {
-                let p = if Path::new(ex.as_ref()).is_absolute() {
-                    ex.as_ref().to_path_buf()
-                } else {
-                    self.configuration.workspace.join(ex.as_ref())
-                };
-
-                p.canonicalize().ok()?.into_os_string().into_string().ok()
-            })
-            .collect();
+        let canonical_workspace = &excluded_folders.workspace;
+        let canonical_excludes = &excluded_folders.paths;
 
         // The bool flags a path that was named exactly (a literal file on disk) rather than
         // discovered by walking a configured directory. Such paths bypass the extension filter.
@@ -369,12 +337,7 @@ impl<'config> DatabaseLoader<'config> {
                             }
 
                             if entry.file_type().is_dir() {
-                                if !is_pruned_directory(
-                                    entry.path(),
-                                    canonical_workspace.as_path(),
-                                    &canonical_excludes,
-                                    dir_prune_globs,
-                                ) {
+                                if !excluded_folders.contains(entry.path()) {
                                     directory_roots.push((entry.into_path(), specificity));
                                 }
                             } else {
@@ -450,12 +413,7 @@ impl<'config> DatabaseLoader<'config> {
                         let walker = WalkDir::new(&root).follow_links(true).into_iter().filter_entry(|entry| {
                             entry.depth() == 0
                                 || !entry.file_type().is_dir()
-                                || !is_pruned_directory(
-                                    entry.path(),
-                                    canonical_workspace.as_path(),
-                                    &canonical_excludes,
-                                    dir_prune_globs,
-                                )
+                                || !excluded_folders.contains(entry.path())
                         });
 
                         let mut files = Vec::new();
@@ -506,23 +464,77 @@ fn read_listed_file(workspace: &Path, path: &Path, file_type: FileType) -> Optio
     }
 }
 
-fn is_pruned_directory(
-    path: &Path,
-    workspace: &Path,
-    canonical_excludes: &[String],
-    dir_prune_globs: &GlobSet,
-) -> bool {
-    if let Some(path) = path.to_str()
-        && canonical_excludes.iter().any(|excluded| {
-            path.starts_with(excluded.as_str())
-                && matches!(path.as_bytes().get(excluded.len()), None | Some(&b'/' | &b'\\'))
-        })
-    {
-        return true;
+/// The folders a walk of the workspace skips, as [`DatabaseLoader::load`] skips them: each one an `excludes` path names,
+/// and each one an `excludes` pattern names before a trailing `/**/*`, `/**` or `/*`. Built once from a
+/// [`DatabaseConfiguration`]; cheap to query per folder.
+#[derive(Debug, Clone)]
+pub struct ExcludedFolders {
+    /// The canonical workspace, which a pattern is matched against relative to.
+    workspace: PathBuf,
+    /// The canonical path of each `excludes` path that exists, as a string, so a plain byte prefix check matches it.
+    paths: Vec<String>,
+    /// The `excludes` patterns that name a folder's contents, each without its trailing wildcard.
+    globs: GlobSet,
+}
+
+impl ExcludedFolders {
+    /// Builds the folders a walk skips from a database configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`DatabaseError`] if an exclude glob pattern fails to compile.
+    pub fn from_configuration(configuration: &DatabaseConfiguration<'_>) -> Result<Self, DatabaseError> {
+        let workspace =
+            configuration.workspace.canonicalize().unwrap_or_else(|_| configuration.workspace.to_path_buf());
+        let mut paths = Vec::new();
+        let mut patterns = Vec::new();
+        for exclusion in &configuration.excludes {
+            match exclusion {
+                Exclusion::Path(path) => {
+                    let path = if path.is_absolute() {
+                        path.as_ref().to_path_buf()
+                    } else {
+                        configuration.workspace.join(path.as_ref())
+                    };
+                    if let Some(path) =
+                        path.canonicalize().ok().and_then(|path| path.into_os_string().into_string().ok())
+                    {
+                        paths.push(path);
+                    }
+                }
+                Exclusion::Pattern(pattern) => {
+                    let folder = pattern
+                        .strip_suffix("/**/*")
+                        .or_else(|| pattern.strip_suffix("/**"))
+                        .or_else(|| pattern.strip_suffix("/*"));
+                    if let Some(folder) =
+                        folder.filter(|folder| !folder.is_empty() && *folder != "*" && *folder != "**")
+                    {
+                        patterns.push(folder);
+                    }
+                }
+            }
+        }
+        let globs = build_glob_set(patterns.into_iter(), configuration.glob)?;
+
+        Ok(Self { workspace, paths, globs })
     }
 
-    !dir_prune_globs.is_empty()
-        && (dir_prune_globs.is_match(path) || dir_prune_globs.is_match(workspace_relative_string(path, workspace)))
+    /// Returns `true` if a walk of the workspace skips the folder `path`, which is canonical, and everything in it.
+    #[must_use]
+    pub fn contains(&self, path: &Path) -> bool {
+        if let Some(path) = path.to_str()
+            && self.paths.iter().any(|excluded| {
+                path.starts_with(excluded.as_str())
+                    && matches!(path.as_bytes().get(excluded.len()), None | Some(&b'/' | &b'\\'))
+            })
+        {
+            return true;
+        }
+
+        !self.globs.is_empty()
+            && (self.globs.is_match(path) || self.globs.is_match(workspace_relative_string(path, &self.workspace)))
+    }
 }
 
 fn warn_walk_error(error: &walkdir::Error, fallback: &Path) {

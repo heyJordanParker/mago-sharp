@@ -1721,6 +1721,31 @@ fn compile_deletes_its_gitignore_once_the_folder_holds_no_php_file_it_wrote() {
     assert_eq!(files_under(&root.join("app")), [Path::new("Legacy.php")]);
 }
 
+/// The compile's walk for its `.gitignore` files skips each folder the analysis's walk skips, so a folder the
+/// `excludes` name, by a path or by a pattern, is never visited: its `.gitignore` and the PHP file it lists stay as they
+/// are.
+#[test]
+fn compile_never_visits_a_folder_the_excludes_name() {
+    let directory = project(ORDER, MONEY);
+    let root = directory.path();
+    write(
+        root,
+        "mago.toml",
+        "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\nexcludes = [\"app/Cache\", \"app/Logs/**\"]\n",
+    );
+    for folder in ["app/Cache", "app/Logs"] {
+        write(root, &format!("{folder}/.gitignore"), &gitignore("/Order.php\n"));
+        write(root, &format!("{folder}/Order.php"), ORDER_PHP);
+    }
+
+    compile_succeeds(root);
+
+    for folder in ["app/Cache", "app/Logs"] {
+        assert_eq!(files_under(&root.join(folder)), [Path::new(".gitignore"), Path::new("Order.php")], "{folder}");
+        assert_eq!(std::fs::read_to_string(root.join(folder).join(".gitignore")).unwrap(), gitignore("/Order.php\n"));
+    }
+}
+
 /// A compile that can't run git, as in a runtime image that ships none, keeps the PHP files out of git all the same, in
 /// a clone and in a linked worktree, because the `.gitignore` it writes needs no git.
 #[test]

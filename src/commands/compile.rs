@@ -36,6 +36,7 @@ use mago_database::file::COMPANION_START;
 use mago_database::file::File;
 use mago_database::file::FileType;
 use mago_database::file::FolderNamespace;
+use mago_database::loader::ExcludedFolders;
 use mago_database::membership::WorkspaceMatcher;
 use mago_orchestrator::Orchestrator;
 use mago_orchestrator::OrchestratorError;
@@ -390,7 +391,7 @@ fn compile(configuration: &Configuration, color_choice: ColorChoice) -> Result<C
     // the last compile, or holds the compile's `.gitignore`, as the folder of a refused source does.
     let compiled_folder = root.join(unit::COMPILED_FOLDER);
     source_folders(&root, &compiled_folder, &compiled_folder, &mut folders)?;
-    gitignore_folders(&root, &configuration.source.paths, &configuration.source.includes, &mut folders);
+    gitignore_folders(&root, &orchestrator.database_configuration(workspace, false), &mut folders)?;
     for folder in folders {
         let written = written_beside.remove(&folder).unwrap_or_default();
         for name in file_names(&folder)? {
@@ -874,26 +875,37 @@ fn lists(contents: &[u8], name: &str) -> bool {
 
 /// Adds to `folders` each folder under the project's own source `paths` that holds a `.gitignore` the compile wrote, so
 /// the compile comes back to a folder whose every source is gone even when none of them was compiled, as a refused one
-/// isn't. A path that holds a wildcard is walked from its folder before the wildcard, and no path walks the workspace.
-/// The walk skips `vendor/`, the `includes`, and a path inside either, where the compile writes no PHP file, the
-/// `.sharp` folder, each `.git` folder, and every link, which the compile never writes through. A folder it can't open
-/// is skipped, as the analysis's own walk skips it with a warning.
-fn gitignore_folders(root: &Path, paths: &[String], includes: &[String], folders: &mut BTreeSet<PathBuf>) {
-    // The folder a configured path names, before any wildcard, with its `.` parts gone.
-    let folder_of = |path: &String| -> PathBuf {
-        let literal = match path.find(['*', '?', '[', '{']) {
-            Some(wildcard) => &path[..path[..wildcard].rfind('/').unwrap_or(0)],
-            None => path.as_str(),
-        };
-        root.join(literal).components().collect()
-    };
-    let mut skipped: HashSet<PathBuf> = includes.iter().map(folder_of).collect();
-    skipped.insert(root.join("vendor"));
-    skipped.insert(root.join(unit::COMPILED_FOLDER));
-    let mut pending: Vec<PathBuf> = if paths.is_empty() {
+/// isn't. `configuration` is the one the analysis walks the project's own files by. A path that holds a wildcard is
+/// walked from its folder before the wildcard, and no path walks the workspace. The walk skips each folder that walk
+/// skips, as [`ExcludedFolders`] tells it: the `excludes`, the `includes` and the `.sharp` folder. It skips `vendor/`
+/// too, and a path inside a skipped folder, where the compile writes no PHP file, each `.git` folder, and every link,
+/// which the compile never writes through. A folder it can't open is skipped, as the analysis's own walk skips it with
+/// a warning.
+fn gitignore_folders(
+    root: &Path,
+    configuration: &DatabaseConfiguration<'_>,
+    folders: &mut BTreeSet<PathBuf>,
+) -> Result<(), DatabaseError> {
+    let excluded = ExcludedFolders::from_configuration(configuration)?;
+    let vendor = root.join("vendor");
+    let skipped = |folder: &Path| folder.starts_with(&vendor) || excluded.contains(folder);
+    let mut pending: Vec<PathBuf> = if configuration.paths.is_empty() {
         vec![root.to_path_buf()]
     } else {
-        paths.iter().map(folder_of).filter(|folder| !skipped.iter().any(|skip| folder.starts_with(skip))).collect()
+        configuration
+            .paths
+            .iter()
+            .map(|path| {
+                // The folder a configured path names, before any wildcard, with its `.` parts gone.
+                let path = String::from_utf8_lossy(path);
+                let literal = match path.find(['*', '?', '[', '{']) {
+                    Some(wildcard) => &path[..path[..wildcard].rfind('/').unwrap_or(0)],
+                    None => path.as_ref(),
+                };
+                root.join(literal).components().collect::<PathBuf>()
+            })
+            .filter(|folder| !skipped(folder))
+            .collect()
     };
     while let Some(folder) = pending.pop() {
         let Ok(entries) = std::fs::read_dir(&folder) else {
@@ -905,7 +917,7 @@ fn gitignore_folders(root: &Path, paths: &[String], includes: &[String], folders
             };
             let path = entry.path();
             if file_type.is_dir() {
-                if entry.file_name() != ".git" && !skipped.contains(&path) {
+                if entry.file_name() != ".git" && !skipped(&path) {
                     pending.push(path);
                 }
             } else if file_type.is_file()
@@ -916,6 +928,8 @@ fn gitignore_folders(root: &Path, paths: &[String], includes: &[String], folders
             }
         }
     }
+
+    Ok(())
 }
 
 /// The type a PHP# source declares named like its file, spec section 27.
