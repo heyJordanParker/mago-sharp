@@ -357,8 +357,8 @@ inherits = 'release'
 debug = true
 strip = 'none'
 
-# The mago three CI jobs build and check as the one users get: mago.yml's checks and release-build, whose binaries
-# plain-php runs, and the standard library check in sharp.yml's LINUX. No local script builds it, and none may: a
+# The mago two CI jobs build and check as the one users get: mago.yml's checks, which also analyzes the standard
+# library with it, and release-build. plain-php runs both jobs' binaries. No local script builds it, and none may: a
 # worktree keeps the one dev build below, and a second profile compiles every crate a second time. It is release with
 # thin local LTO, which `lto = false` means, in place of release's fat LTO, and with incremental builds. Release sets 1
 # codegen unit, and an incremental build reuses work per unit, so it sets Cargo's incremental default of 256. It keeps
