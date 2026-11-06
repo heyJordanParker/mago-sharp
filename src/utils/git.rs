@@ -661,15 +661,23 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path();
         std::fs::write(root.join(".git"), "gitdir: /missing/.git/worktrees/design\n").unwrap();
-        let output = Command::new("git")
-            .args(["rev-parse", "--verify", "--quiet", "HEAD"])
-            .env("GIT_TRACE", "1")
-            .current_dir(root)
-            .output()
-            .unwrap();
-        assert!(String::from_utf8_lossy(&output.stderr).starts_with(|first: char| first.is_ascii_digit()));
+        let rev_parse = |trace: &str| {
+            Command::new("git")
+                .args(["rev-parse", "--verify", "--quiet", "HEAD"])
+                .env("GIT_TRACE", trace)
+                .current_dir(root)
+                .output()
+                .unwrap()
+        };
+        // Git words its reason by its version, as `not a git repository` or `gitfile does not point to a valid
+        // repository`, so the reason is the `fatal:` line git prints with no trace.
+        let untraced = rev_parse("0");
+        let untraced = String::from_utf8_lossy(&untraced.stderr);
+        let alone = untraced.lines().find(|line| line.starts_with("fatal: ")).expect(&untraced);
+        let traced = rev_parse("1");
+        assert!(String::from_utf8_lossy(&traced.stderr).starts_with(|first: char| first.is_ascii_digit()));
 
-        assert_eq!(reason(&output.stderr), "fatal: not a git repository: /missing/.git/worktrees/design");
+        assert_eq!(reason(&traced.stderr), alone);
     }
 
     /// The index records a rename of the plain file's contents, so it holds the rename alone, while the file written

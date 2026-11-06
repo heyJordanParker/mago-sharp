@@ -50,13 +50,17 @@ fn a_repository_git_cannot_read_stops_the_run_with_gits_reason() {
     let root = directory.path();
     project(root, &[("Clean.php", CLASS)]);
     std::fs::write(root.join(".git"), "gitdir: /missing/.git/worktrees/design\n").unwrap();
+    // Git words its reason by its version, as `not a git repository` or `gitfile does not point to a valid repository`.
+    let git =
+        Command::new("git").args(["rev-parse", "--verify", "--quiet", "HEAD"]).current_dir(root).output().unwrap();
+    let printed_by_git = String::from_utf8_lossy(&git.stderr);
+    let fatal = printed_by_git.lines().find(|line| line.starts_with("fatal: ")).expect(&printed_by_git);
 
     let output = convert(root, &[("GIT_TRACE", "1")]);
 
     assert_eq!(output.status.code(), Some(2), "{}", printed(&output));
-    let reason =
-        "`git rev-parse` failed (exit status: 128): fatal: not a git repository: /missing/.git/worktrees/design";
-    assert!(logged(&output, "ERROR", reason), "{}", printed(&output));
+    let reason = format!("`git rev-parse` failed (exit status: 128): {fatal}");
+    assert!(logged(&output, "ERROR", &reason), "{}", printed(&output));
 }
 
 /// A repository with no commit holds no file, which `git rev-parse` tells by its exit code 1 whatever it prints, so
