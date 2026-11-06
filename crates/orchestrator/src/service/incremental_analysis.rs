@@ -2229,15 +2229,15 @@ pub(crate) fn resolve_member_reads<'files>(
     files: impl IntoIterator<Item = &'files mut CodebaseScanFile>,
     merged_scan: impl FnOnce() -> CodebaseMetadata,
 ) -> Result<bool, ExternalAnalyzerError> {
-    let mut files = files.into_iter().filter(|file| file.holds_member_reads()).peekable();
-    if files.peek().is_none() {
+    let files: Vec<&mut CodebaseScanFile> = files.into_iter().collect();
+    if !files.iter().any(|file| file.holds_member_reads()) {
         return Ok(false);
     }
 
     let mut scan = merged_scan();
     scan.populate_folder_namespaces();
     let scan = Arc::new(scan);
-    files.try_fold(false, |changed, file| Ok(file.resolve_member_reads(&scan)? || changed))
+    files.into_iter().try_fold(false, |changed, file| Ok(file.resolve_member_reads(&scan)? || changed))
 }
 
 /// The names of the extension members `metadata` declares that take their receiver by `ref`, spec section 26, and so

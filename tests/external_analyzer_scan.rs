@@ -126,10 +126,10 @@ fn selected_declarations_refresh_every_worker_incrementally() {
 }
 
 /// An entity in plain PHP, whose attributes read classes, enums and a library's constants.
-const PHP_ENTITY: &str = "<?php\n\nnamespace App\\Php;\n\nuse App\\Status;\nuse Lib\\Order;\nuse Lib\\Plan;\nuse Lib\\Type;\n\n#[Type(Type::String, plan: Plan::Starter, of: Order::class, keys: [1, 2], map: ['a' => 1], item: new Type(Order::class))]\n#[Read(\\Vendor\\Pdf\\DEFAULT_DPI, \\APP_LIMIT, \\Vendor\\Pdf\\render(...), \\App\\Tier\\Free::instance(), \\App\\Lookup\\Missing::instance(), [Status::Paid->value => 'Paid'])]\nfinal class Entity {}\n";
+const PHP_ENTITY: &str = "<?php\n\nnamespace App\\Php;\n\nuse App\\Status;\nuse Lib\\Order;\nuse Lib\\Plan;\nuse Lib\\Type;\n\n#[Type(Type::String, plan: Plan::Starter, of: Order::class, keys: [1, 2], map: ['a' => 1], item: new Type(Order::class))]\n#[Read(\\Vendor\\Pdf\\DEFAULT_DPI, \\APP_LIMIT, \\Vendor\\Pdf\\render(...), \\App\\Tier\\Free::instance(), \\App\\Lookup\\Missing::instance(), [Status::Paid->value => 'Paid'], Status::Paid)]\nfinal class Entity {}\n";
 
 /// The PHP# twin of [`PHP_ENTITY`], whose every argument is the PHP that means it, spec sections 20, 23 and 25.
-const SHARP_ENTITY: &str = "namespace App.Sharp;\n\nimport App.Lookup;\nimport App.Status;\nimport App.Tier;\nimport Illuminate.Foundation;\nimport Lib.Order;\nimport Lib.Plan;\nimport Lib.Type;\nimport Vendor.Pdf;\n\n[Type(Type.String, plan: Plan.Starter, of: typeof(Order), keys: [1, 2], map: [\"a\": 1], item: new Type(typeof(Order)))]\n[Read(Pdf.DEFAULT_DPI, Foundation.APP_LIMIT, Pdf.render, Tier.Free, Lookup<int>.Missing, [Status.Paid: \"Paid\"])]\nclass Entity {}\n";
+const SHARP_ENTITY: &str = "namespace App.Sharp;\n\nimport App.Lookup;\nimport App.Status;\nimport App.Tier;\nimport Illuminate.Foundation;\nimport Lib.Order;\nimport Lib.Plan;\nimport Lib.Type;\nimport Vendor.Pdf;\n\n[Type(Type.String, plan: Plan.Starter, of: typeof(Order), keys: [1, 2], map: [\"a\": 1], item: new Type(typeof(Order)))]\n[Read(Pdf.DEFAULT_DPI, Foundation.APP_LIMIT, Pdf.render, Tier.Free, Lookup<int>.Missing, [Status.Paid: \"Paid\"], Status.Paid)]\nclass Entity {}\n";
 
 /// The twins and the code their attributes read, where `pdf` declares the library's namespaced constants: a library's
 /// function and constant in a namespace, a constant in PHP's root namespace beside `Illuminate\Foundation`'s classes, a
@@ -213,10 +213,11 @@ fn value(kind: &str, value: serde_json::Value, constant: Option<&str>) -> serde_
 }
 
 /// A host types an entity by its attributes, so each argument of a PHP# attribute reaches it as its PHP twin does, with
-/// the same kind and parts. `Type.String` of a class no file declares is the class constant `Type::String` is, and
-/// `Pdf.DEFAULT_DPI` after `import Vendor.Pdf;` the library's constant `\Vendor\Pdf\DEFAULT_DPI`, spec section 23. A
-/// function read through its namespace, a case of an enum whose cases carry data, which runs as an object, and a backed
-/// enum's case keying a map, which is its value, are no constant expression, in PHP# as in PHP.
+/// the same kind and parts. `Status.Paid` is the enum case `Status::Paid` is, `Type.String` of a class no file declares
+/// the class constant `Type::String` is, and `Pdf.DEFAULT_DPI` after `import Vendor.Pdf;` the library's constant
+/// `\Vendor\Pdf\DEFAULT_DPI`, spec section 23. A function read through its namespace, a case of an enum whose cases carry
+/// data, which runs as an object, and a backed enum's case keying a map, which is its value, are no constant expression,
+/// in PHP# as in PHP.
 #[test]
 fn a_sharp_attribute_argument_reaches_a_host_as_its_php_twin() {
     let temporary = tempfile::tempdir().expect("temporary scan directory should be created");
@@ -247,6 +248,7 @@ fn a_sharp_attribute_argument_reaches_a_host_as_its_php_twin() {
         (None, unsupported()),
         (None, unsupported()),
         (None, array(serde_json::json!([[unsupported(), literal("Paid".into())]]))),
+        (None, value("ClassConstant", "App\\Status".into(), Some("Paid"))),
     ];
     let without_types = |arguments: Vec<serde_json::Value>| {
         arguments
@@ -279,7 +281,8 @@ fn a_sharp_attribute_argument_reaches_a_host_as_its_php_twin() {
             null,
             null,
             null,
-            "array"
+            "array",
+            "App\\Status"
         ])
     );
     assert_eq!(
@@ -296,7 +299,8 @@ fn a_sharp_attribute_argument_reaches_a_host_as_its_php_twin() {
             null,
             null,
             null,
-            "Sharp\\Map"
+            "Sharp\\Map",
+            "App\\Status"
         ])
     );
 }

@@ -1686,6 +1686,37 @@ mod tests {
         }
     }
 
+    /// A hook that reads a PHP# class while Mago analyzes gets each member read in its attributes resolved against the
+    /// whole codebase, as the codebase scan sends it: `Pdf.DEFAULT_DPI` after `import Vendor.Pdf;` is the library's
+    /// constant `\Vendor\Pdf\DEFAULT_DPI`, spec section 23.
+    #[test]
+    fn a_class_read_while_analyzing_sends_a_member_read_as_what_it_reads() {
+        const CRATE: (&str, &str) = (
+            "src/App/Crate.sharp",
+            "namespace App;\n\nimport Vendor.Pdf;\n\n[Tag(Pdf.DEFAULT_DPI)]\npublic class Crate {}\n",
+        );
+        const TAG: (&str, &str) = (
+            "src/App/Tag.php",
+            "<?php\n\nnamespace App;\n\n#[\\Attribute]\nfinal class Tag\n{\n    public function __construct(public int $dpi) {}\n}\n",
+        );
+        const PDF: (&str, &str) =
+            ("src/Vendor/pdf.php", "<?php\n\nnamespace Vendor\\Pdf;\n\nconst DEFAULT_DPI = 300;\n");
+
+        analyzed(&[CRATE, TAG, PDF], |analysis| {
+            let session = ExternalAnalysisSession::from_files(analysis.files.iter().cloned());
+            let mut writer = protocol::message_writer(CODEBASE_QUERY_REQUEST);
+            writer.write_u64(session.generation());
+            writer.write_u8(GET_CLASS_LIKES);
+            writer.write_u8(ANY_CLASS_LIKE);
+            writer.write_u32(1);
+            writer.write_bytes(b"App\\Crate").expect("the name should fit in a frame");
+            let (_, answer) = protocol::handle_nested_request(&writer.finish(), analysis.codebase, &session, |_| None)
+                .expect("the codebase query should succeed");
+
+            assert!(names(&answer, b"Vendor\\Pdf\\DEFAULT_DPI"), "the attribute sends the library's constant");
+        });
+    }
+
     fn session(generation: u64) -> ExternalAnalysisSession {
         ExternalAnalysisSession {
             generation,
