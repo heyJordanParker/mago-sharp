@@ -655,6 +655,12 @@ impl Converter<'_, '_> {
             if self.narrowed_by_docblock(metadata, &tag, parameter.variable.span) {
                 continue;
             }
+            let union = metadata.map(|metadata| &metadata.type_union);
+            if let MethodBody::Concrete(block) = &method.body
+                && self.observes_iterable(parameter, union, |uses| uses.walk_block(block, &mut ()))
+            {
+                continue;
+            }
             self.parameter(parameter, metadata.map(|metadata| metadata.type_union.clone()));
         }
 

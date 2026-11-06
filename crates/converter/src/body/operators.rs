@@ -2,17 +2,27 @@
 //! the types the analysis gives its operands, as `+` between two numbers. Anywhere else the file stays plain PHP, with
 //! the operator and its operands' types named.
 
+use mago_codex::metadata::function_like::FunctionLikeMetadata;
+use mago_codex::metadata::ttype::TypeMetadata;
 use mago_codex::ttype::TType;
 use mago_codex::ttype::atomic::TAtomic;
+use mago_codex::ttype::atomic::object::TObject;
+use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::union::TUnion;
 use mago_span::HasSpan;
 use mago_span::Span;
+use mago_syntax::cst::Access;
 use mago_syntax::cst::Binary;
 use mago_syntax::cst::BinaryOperator;
+use mago_syntax::cst::Call;
+use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Construct;
 use mago_syntax::cst::Expression;
+use mago_syntax::cst::FunctionCall;
 use mago_syntax::cst::Literal;
+use mago_syntax::cst::PropertyAccess;
 use mago_syntax::cst::UnaryPrefixOperator;
+use mago_syntax::cst::Variable;
 
 use super::Kind;
 use super::kinds;
@@ -114,8 +124,18 @@ impl Converter<'_, '_> {
         if self.untyped(operand, "a cast") {
             return;
         }
-        if self.is(operand, &[kind]) {
-            return self.edits.delete(expression.span().start.offset, operand.span().start.offset);
+        // PHP# casts a number, and its `(int)` and `(float)` run PHP's own conversion at runtime, so they stay. A
+        // `(string)` of a string leaves only where a native declaration or a literal makes it one at runtime: a type
+        // only PHPDoc gives, as a framework's `@property`, is no proof of the value.
+        if kind == Kind::String && self.is(operand, &[Kind::String]) {
+            if self.holds_string_at_runtime(operand) {
+                return self.edits.delete(expression.span().start.offset, operand.span().start.offset);
+            }
+            let written = String::from_utf8_lossy(self.text(operand.span())).into_owned();
+            return self.refuse(
+                expression.span(),
+                format!("`(string)` of `{written}` has no PHP# form: a PHP# cast converts a number, and nothing but PHPDoc makes `{written}` a string at runtime (spec section 24)"),
+            );
         }
         if !self.is(operand, &[Kind::Int, Kind::Float]) {
             let shown = self.shown(operand);
@@ -125,6 +145,68 @@ impl Converter<'_, '_> {
             );
         }
         self.edits.replace(span, written);
+    }
+
+    /// Whether `value`, which the analysis gives `string`, is one at runtime: a literal or a text expression, a
+    /// parameter of the method, whose PHP# type the compiled PHP declares, or a property or a call whose native PHP
+    /// declaration, or the converted class's own PHP# one, says `string`.
+    fn holds_string_at_runtime(&self, value: &Expression<'_>) -> bool {
+        let native_string = |metadata: Option<&TypeMetadata>| {
+            metadata.is_some_and(|metadata| {
+                !metadata.from_docblock
+                    && metadata
+                        .type_union
+                        .types
+                        .iter()
+                        .all(|atomic| matches!(atomic, TAtomic::Scalar(TScalar::String(_))))
+            })
+        };
+        let codebase = self.input.codebase;
+        let current = self.class.as_ref().map(|class| class.metadata.name);
+        // A method the converted class declares itself gets its PHP# return type in the PHP it compiles to.
+        let declared_here = |function: &FunctionLikeMetadata| {
+            current
+                .and_then(|class| codebase.get_method(class.as_bytes(), function.name.as_bytes()))
+                .is_some_and(|own| std::ptr::eq(own, function))
+        };
+        let returns = |function: Option<&FunctionLikeMetadata>| {
+            function.is_some_and(|function| {
+                native_string(function.return_type_declaration_metadata.as_ref()) || declared_here(function)
+            })
+        };
+        match value {
+            Expression::Parenthesized(parenthesized) => self.holds_string_at_runtime(parenthesized.expression),
+            Expression::Literal(_) | Expression::CompositeString(_) => true,
+            Expression::Binary(binary) => matches!(binary.operator, BinaryOperator::StringConcat(_)),
+            Expression::Variable(Variable::Direct(variable)) => self
+                .method
+                .as_ref()
+                .is_some_and(|method| method.parameters.iter().any(|parameter| parameter == variable.name)),
+            Expression::Access(Access::Property(PropertyAccess { object, property, .. })) => {
+                let ClassLikeMemberSelector::Identifier(name) = property else {
+                    return false;
+                };
+                let classes: Vec<&TAtomic> = self
+                    .type_of(object)
+                    .map(|union| union.types.iter().filter(|atomic| !atomic.is_null()).collect())
+                    .unwrap_or_default();
+                let [TAtomic::Object(TObject::Named(class))] = classes.as_slice() else {
+                    return false;
+                };
+                let property = [b"$".as_slice(), name.value].concat();
+                let declaring = self.input.codebase.get_declaring_property(class.name.as_bytes(), &property);
+                let own = self.class.as_ref().is_some_and(|own| {
+                    own.metadata.name == class.name && own.metadata.properties.contains_key(&mago_word::word(&property))
+                });
+                own || declaring.is_some_and(|metadata| native_string(metadata.type_declaration_metadata.as_ref()))
+            }
+            Expression::Call(Call::Method(call)) => returns(self.method_of(self.type_of(call.object), &call.method)),
+            Expression::Call(Call::StaticMethod(call)) => returns(self.static_method_of(call)),
+            Expression::Call(Call::Function(FunctionCall { function: Expression::Identifier(identifier), .. })) => {
+                returns(self.function_of(identifier))
+            }
+            _ => false,
+        }
     }
 
     pub(super) fn binary(&mut self, expression: &Expression<'_>, binary: &Binary<'_>) {

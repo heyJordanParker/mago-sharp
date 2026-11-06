@@ -3,6 +3,7 @@
 
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::callable::TCallable;
+use mago_codex::ttype::atomic::callable::TCallableSignature;
 use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::union::TUnion;
 use mago_span::HasSpan;
@@ -18,6 +19,7 @@ use mago_syntax::cst::Keyword;
 use mago_syntax::cst::Literal;
 use mago_syntax::cst::PartialApplication;
 use mago_syntax::cst::Sequence;
+use mago_syntax::walker::MutWalker;
 
 use super::Locals;
 use super::locals::Capture;
@@ -61,30 +63,27 @@ impl Converter<'_, '_> {
                 .refuse(ampersand, "a lambda that returns by reference has no PHP# form: PHP# has no references");
         }
         // PHP calls a lambda with more arguments than it takes, and a PHP# lambda takes each one its function type
-        // passes, as the checker counts them: each parameter with no default and no `...`, so a plain `callable`,
-        // which takes `mixed ...`, passes none.
-        let takes = parameters.parameters.len();
-        let passed = expected
+        // passes, as the checker decides it: the lambda fits where one function type it lands in passes no more.
+        let given = match self.type_of(expression).map(|union| union.types.as_ref()) {
+            Some([TAtomic::Callable(TCallable::Signature(given))]) => Some(given),
+            _ => None,
+        };
+        let declared: Vec<&TCallableSignature> = expected
             .into_iter()
             .flat_map(|union| union.types.iter())
             .filter_map(|atomic| match atomic {
-                TAtomic::Callable(TCallable::Signature(signature)) => Some(
-                    signature
-                        .get_parameters()
-                        .iter()
-                        .filter(|parameter| !parameter.is_variadic() && !parameter.has_default())
-                        .count(),
-                ),
+                TAtomic::Callable(TCallable::Signature(signature)) => Some(signature),
                 _ => None,
             })
-            .max();
-        if let Some(passed) = passed
-            && passed > takes
-            && !parameters.parameters.iter().any(|parameter| parameter.ellipsis.is_some())
+            .collect();
+        if let Some(given) = given
+            && !declared.is_empty()
+            && declared.iter().all(|declared| declared.takes_more_parameters_than(given))
         {
+            let takes = parameters.parameters.len();
             return self.refuse(
                 expression.span(),
-                format!("this lambda takes {takes} parameters where the function type it lands in passes {passed}: a PHP# lambda takes every parameter its function type passes (spec section 14.1)"),
+                format!("this lambda takes {takes} parameters, fewer than the function type it lands in passes: a PHP# lambda takes every parameter its function type passes (spec section 14.1)"),
             );
         }
 
@@ -103,9 +102,19 @@ impl Converter<'_, '_> {
                 });
             }
         }
+        let declared = self.input.codebase.get_closure_at(self.input.file, expression.span());
+        for (index, parameter) in parameters.parameters.iter().enumerate() {
+            let union = declared
+                .and_then(|declared| declared.parameters.get(index))
+                .and_then(|parameter| parameter.get_type_metadata())
+                .map(|metadata| &metadata.type_union);
+            self.observes_iterable(parameter, union, |uses| match &body {
+                Body::Block(block) => uses.walk_block(block, &mut ()),
+                Body::Expression(value) => uses.walk_expression(value, &mut ()),
+            });
+        }
         self.lambda_head(attributes, keywords, parameters, body_start, expression.span());
 
-        let declared = self.input.codebase.get_closure_at(self.input.file, expression.span());
         let returning = declared
             .filter(|declared| declared.return_from_body.is_none())
             .and_then(|declared| declared.return_type_metadata.as_ref())

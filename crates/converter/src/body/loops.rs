@@ -1,7 +1,12 @@
 //! Loops (spec section 17): `foreach` as `for … of`, and `for`, `while` and `do … while`, which keep their form. A
 //! loop's body is written in braces, and its variables are declared by the loop and scoped to it.
 
+use mago_codex::ttype::atomic::TAtomic;
+use mago_codex::ttype::atomic::array::TArray;
+use mago_codex::ttype::atomic::scalar::TScalar;
+use mago_codex::ttype::union::TUnion;
 use mago_span::HasSpan;
+use mago_syntax::cst::DirectVariable;
 use mago_syntax::cst::DoWhile;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::For;
@@ -9,16 +14,43 @@ use mago_syntax::cst::ForBody;
 use mago_syntax::cst::Foreach;
 use mago_syntax::cst::ForeachBody;
 use mago_syntax::cst::ForeachTarget;
+use mago_syntax::cst::FunctionLikeParameter;
 use mago_syntax::cst::Statement;
 use mago_syntax::cst::UnaryPrefixOperator;
 use mago_syntax::cst::Unset;
 use mago_syntax::cst::Variable;
 use mago_syntax::cst::While;
 use mago_syntax::cst::WhileBody;
+use mago_syntax::walker::MutWalker;
 
 use super::Kind;
 use super::is_primary;
 use crate::Converter;
+
+/// Counts the places a body names the variable `name`, and those that are the collection of a loop over its values
+/// alone.
+pub(crate) struct IterableUses<'name> {
+    name: &'name [u8],
+    named: usize,
+    looped: usize,
+}
+
+impl<'ast, 'arena> MutWalker<'ast, 'arena, ()> for IterableUses<'_> {
+    fn walk_in_foreach(&mut self, foreach: &'ast Foreach<'arena>, _: &mut ()) {
+        if let (ForeachTarget::Value(_), Expression::Variable(Variable::Direct(variable))) =
+            (&foreach.target, foreach.expression)
+            && variable.name == self.name
+        {
+            self.looped += 1;
+        }
+    }
+
+    fn walk_in_direct_variable(&mut self, variable: &'ast DirectVariable<'arena>, _: &mut ()) {
+        if variable.name == self.name {
+            self.named += 1;
+        }
+    }
+}
 
 impl Converter<'_, '_> {
     /// `foreach ($items as $item)` as `for (const item of items)`, a `Map`'s key and value as `[key, value]`, its
@@ -62,6 +94,15 @@ impl Converter<'_, '_> {
                 );
             }
         };
+        // PHP turns a numeric string key into an `int`, as `"42"` into 42, and a PHP# `Map` keeps the key it was given,
+        // so a loop reads a `Map`'s keys as PHP's does only where they are `int` (spec section 12).
+        if key.is_some() && map && !self.keyed_by_int(iterable) {
+            let shown = self.shown(iterable);
+            return self.refuse(
+                iterable.span(),
+                format!("a keyed loop over `{shown}` has no PHP# form: PHP turns a numeric string key into an `int`, as `'42'` into 42, and a PHP# `Map` keeps it as written (spec section 12)"),
+            );
+        }
         self.expression(iterable, None);
         let source = self.render(iterable);
         let source = if suffix.is_empty() || is_primary(iterable) { source } else { format!("({source})") };
@@ -78,6 +119,49 @@ impl Converter<'_, '_> {
         self.edits.replace(foreach.foreach.span, "for");
         self.edits.replace_range(at, foreach.right_parenthesis.start.offset, format!("{target} of {source}{suffix}"));
         self.braced(body);
+    }
+
+    /// Refuses `parameter`, of the declared type `union`, when it is an `iterable` the PHP# type `Iterable<V>` takes and
+    /// the body `walk` visits reads it other than by a loop over its values, or a constructor stores it as a property,
+    /// and gives whether it did. A PHP# `Iterable<V>` parameter takes a new sequence of the values it is given,
+    /// numbered from 0, so a keyed loop, a return, a call that passes it on, `instanceof` and a method call see other
+    /// keys and another class than PHP's (spec section 12).
+    pub(crate) fn observes_iterable(
+        &mut self,
+        parameter: &FunctionLikeParameter<'_>,
+        union: Option<&TUnion>,
+        walk: impl FnOnce(&mut IterableUses<'_>),
+    ) -> bool {
+        if !union.is_some_and(|union| union.types.iter().any(TAtomic::is_iterable)) {
+            return false;
+        }
+        let mut uses = IterableUses { name: parameter.variable.name, named: 0, looped: 0 };
+        walk(&mut uses);
+        let read = match (parameter.is_promoted_property(), uses.named == uses.looped) {
+            (true, _) => "the constructor stores as a property",
+            (false, false) => "the body reads other than by a loop over its values",
+            (false, true) => return false,
+        };
+        let shown = String::from_utf8_lossy(parameter.variable.name);
+        self.refuse(
+            parameter.variable.span,
+            format!("`{shown}` is an `iterable` {read}, and a PHP# `Iterable<V>` parameter takes a new sequence of its values, numbered from 0, so its keys and class are another's (spec section 12)"),
+        );
+
+        true
+    }
+
+    /// Whether every key the analysis gives `value`, an array, is an `int`.
+    pub(super) fn keyed_by_int(&self, value: &Expression<'_>) -> bool {
+        self.type_of(value).is_some_and(|union| {
+            union.types.iter().all(|atomic| match atomic {
+                TAtomic::Array(TArray::Keyed(keyed)) => keyed.parameters.as_ref().is_some_and(|(key, _)| {
+                    key.types.iter().all(|key| matches!(key, TAtomic::Scalar(TScalar::Integer(_))))
+                }),
+                TAtomic::Array(TArray::List(_)) => true,
+                _ => false,
+            })
+        })
     }
 
     /// A `for` loop, which keeps its form and declares the local its initialization assigns, scoped to the loop.

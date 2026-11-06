@@ -1,7 +1,8 @@
 namespace App;
 
-// A cast of a value that already has the cast's type changes nothing in PHP, so PHP# writes the value alone, as a PHP#
-// cast converts between numbers only (spec section 24).
+// PHP#'s `(int)` and `(float)` run PHP's own conversion at runtime, so a cast of a number stays, whatever type the
+// analysis gives it. A `(string)` of a string leaves only where a native declaration or a literal makes the value one at
+// runtime, as a PHP# cast converts a number (spec section 24).
 public final class Same
 {
     public string text(string value)
@@ -11,11 +12,11 @@ public final class Same
 
     public int whole(int value)
     {
-        return (value + 1);
+        return (int) (value + 1);
     }
 
     public float real(float value)
     {
-        return value;
+        return (float) value;
     }
 }

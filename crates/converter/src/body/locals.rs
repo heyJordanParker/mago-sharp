@@ -282,12 +282,16 @@ impl Converter<'_, '_> {
     /// do. Any other value's type is the analysis's inference, which the converter never writes (decision 2).
     fn source(&self, value: &Expression<'_>) -> Source {
         let declared = |declared: bool| if declared { Source::Declared } else { Source::Inferred };
-        let returns =
-            |function: Option<&FunctionLikeMetadata>| {
-                declared(function.is_some_and(|function| {
-                    function.return_from_body.is_none() && function.return_type_metadata.is_some()
-                }))
-            };
+        // A return that names a type parameter takes the type the analysis infers for this call (decision 2).
+        let returns = |function: Option<&FunctionLikeMetadata>| {
+            declared(function.is_some_and(|function| {
+                function.return_from_body.is_none()
+                    && function
+                        .return_type_metadata
+                        .as_ref()
+                        .is_some_and(|returned| !returned.type_union.has_template_types())
+            }))
+        };
         match value {
             Expression::Parenthesized(parenthesized) => self.source(parenthesized.expression),
             Expression::Literal(_) => Source::Declared,
