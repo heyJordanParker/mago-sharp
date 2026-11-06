@@ -923,11 +923,13 @@ impl Worker {
         let reader_thread = std::thread::spawn(move || read_worker_stream(&reader_inner, reader));
         let writer_inner = Arc::clone(&inner);
         let writer_thread = std::thread::spawn(move || {
-            let stdin = writer.try_clone().expect("the peer's stream should clone");
-            write_worker_stdin(&writer_inner, WorkerStdin::Test(stdin), queued);
+            let closer = writer.try_clone();
+            write_worker_stdin(&writer_inner, WorkerStdin::Test(writer), queued);
             // The stdout reader holds a handle of the same stream, so the peer sees its stdin end, as a worker sees
             // its pipe close, only once Mago shuts down the stream's writing half.
-            let _result = writer.shutdown(std::net::Shutdown::Write);
+            if let Ok(closer) = closer {
+                let _result = closer.shutdown(std::net::Shutdown::Write);
+            }
         });
 
         Arc::new(Self {
@@ -1747,10 +1749,12 @@ mod tests {
             left.display(),
             left.display(),
         ));
-        let id = within_outer_timeout(move || loop {
-            match std::fs::read_to_string(&left) {
-                Ok(id) if !id.trim().is_empty() => break id,
-                _ => std::thread::sleep(Duration::from_millis(10)),
+        let id = within_outer_timeout(move || {
+            loop {
+                match std::fs::read_to_string(&left) {
+                    Ok(id) if !id.trim().is_empty() => break id,
+                    _ => std::thread::sleep(Duration::from_millis(10)),
+                }
             }
         });
 
@@ -1778,7 +1782,10 @@ mod tests {
     /// Runs `work` on a thread of its own and returns what it returns, and fails the test when it has not ended within
     /// 10 s, so work that never ends fails the test rather than hang the test run.
     #[cfg(unix)]
-    fn within_outer_timeout<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
+    fn within_outer_timeout<T>(work: impl FnOnce() -> T + Send + 'static) -> T
+    where
+        T: Send + 'static,
+    {
         const OUTER_TIMEOUT: Duration = Duration::from_secs(10);
 
         let (finished, result) = mpsc::channel();

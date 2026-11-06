@@ -125,7 +125,8 @@ fn a_host_whose_worker_stops_reading_fails_mago_analyze_at_its_deadline() {
     // The request that timed out says so, and each other request of the worker fails with that failure. Which of them
     // stops the analysis first varies, so either error may be the one `mago` prints.
     assert!(
-        stderr.contains("extension host `acme`") && stderr.contains("made no progress for 3000 ms on the hooks of src/"),
+        stderr.contains("extension host `acme`")
+            && stderr.contains("made no progress for 3000 ms on the hooks of src/"),
         "mago wrote no timeout: {stderr}"
     );
     assert_eq!(survivors, Vec::<String>::new(), "workers outlived mago");

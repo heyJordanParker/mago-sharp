@@ -1,6 +1,7 @@
 //! A process Mago starts in a process group of its own, so Mago can end it with every process it started.
 //!
-//! Such a process is the worker a wrapper like `docker compose exec` forks, or each `lean` a `lake` starts. The group
+//! Such a process is the `docker compose` process a `docker compose exec` wrapper starts on the host, or each `lean` a
+//! `lake` starts. The group
 //! is not Mago's own, so a terminal's Ctrl-C reaches it only through `forward`, which ends every such group on each
 //! signal that ends Mago, as the signal ended them while they ran in Mago's group. Groups exist on macOS and Linux, the
 //! platforms PHP# runs on.
@@ -18,9 +19,10 @@ use std::sync::atomic::AtomicPtr;
 #[cfg(unix)]
 use std::sync::atomic::Ordering;
 
-/// A child process that leads a process group of its own. Dropping it ends the group and reaps the leader, unless Mago
-/// already waited for the leader, as tokio's `kill_on_drop` does, so a group Mago stops tracking, as a panic stops it,
-/// leaves nothing running.
+/// A child process that leads a process group of its own.
+///
+/// Dropping it ends the group and reaps the leader, unless Mago already waited for the leader, as tokio's
+/// `kill_on_drop` does, so a group Mago stops tracking, as a panic stops it, leaves nothing running.
 #[derive(Debug)]
 pub struct ProcessGroup {
     leader: Child,
@@ -74,6 +76,7 @@ impl ProcessGroup {
 
     /// Whether the leader has exited, which, unlike `Child::try_wait`, leaves it to be waited for: its id names the
     /// group until then, so `end` stays safe after it.
+    #[must_use]
     pub fn leader_exited(&self) -> bool {
         !matches!(self.leader_state(), Ok(false))
     }
@@ -109,12 +112,7 @@ impl ProcessGroup {
         let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
         // SAFETY: `waitid` only fills `info`, and `WNOWAIT` leaves the leader to be waited for.
         if unsafe {
-            libc::waitid(
-                libc::P_PID,
-                self.leader.id(),
-                &raw mut info,
-                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
-            )
+            libc::waitid(libc::P_PID, self.leader.id(), &raw mut info, libc::WEXITED | libc::WNOHANG | libc::WNOWAIT)
         } != 0
         {
             return Err(io::Error::last_os_error());
@@ -144,16 +142,19 @@ impl Drop for ProcessGroup {
 }
 
 /// Makes the calling thread's writes to `stdin`, a child's standard input, fail with `ErrorKind::BrokenPipe` once the
-/// child has ended, rather than raise SIGPIPE. Mago takes SIGPIPE's default action, which ends it, so `mago … | head`
-/// ends quietly, and a write to a child that ended would end Mago with it. Each thread that writes a child's stdin calls
-/// this before its first write. Linux raises SIGPIPE on the thread that wrote, so there this blocks SIGPIPE on the
-/// calling thread. macOS raises it on the whole process unless the pipe says otherwise, so there this marks the pipe.
+/// child has ended, rather than raise SIGPIPE.
+///
+/// Mago takes SIGPIPE's default action, which ends it, so `mago … | head` ends quietly, and a write to a child that
+/// ended would end Mago with it. Each thread that writes a child's stdin calls this before its first write. Linux raises
+/// SIGPIPE on the thread that wrote, so there this blocks SIGPIPE on the calling thread. macOS raises it on the whole
+/// process unless the pipe says otherwise, so there this marks the pipe.
 pub fn block_sigpipe(stdin: &ChildStdin) {
     #[cfg(target_os = "macos")]
     {
         use std::os::fd::AsRawFd;
 
-        /// `F_SETNOSIGPIPE` of macOS's `<sys/fcntl.h>`, which `libc` does not define.
+        /// `F_SETNOSIGPIPE`, which `libc` does not define: `#define F_SETNOSIGPIPE 73` in the macOS SDK's
+        /// `usr/include/sys/fcntl.h`.
         const F_SETNOSIGPIPE: libc::c_int = 73;
         // SAFETY: `fcntl` only sets a flag of the pipe `stdin` holds open.
         unsafe { libc::fcntl(stdin.as_raw_fd(), F_SETNOSIGPIPE, 1) };
