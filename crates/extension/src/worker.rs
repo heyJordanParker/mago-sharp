@@ -2,7 +2,6 @@ use std::collections::BTreeMap;
 use std::collections::VecDeque;
 use std::fmt::Display;
 use std::io::BufReader;
-use std::io::BufWriter;
 use std::io::Read;
 use std::io::Write;
 #[cfg(windows)]
@@ -11,6 +10,7 @@ use std::net::Ipv4Addr;
 use std::net::TcpListener;
 #[cfg(any(windows, test))]
 use std::net::TcpStream;
+#[cfg(windows)]
 use std::process::Child;
 use std::process::ChildStderr;
 #[cfg(not(windows))]
@@ -35,6 +35,7 @@ use crate::command::WorkerCommand;
 use crate::error::ProtocolError;
 use crate::error::WorkerError;
 use crate::pool::WorkerPoolOptions;
+use crate::process_group::ProcessGroup;
 use crate::protocol::Frame;
 use crate::protocol::FrameFlags;
 use crate::protocol::FrameKind;
@@ -135,7 +136,7 @@ impl Write for WorkerStdin {
     }
 }
 
-/// Why a frame did not reach the worker.
+/// Why Mago did not queue a frame for the worker.
 enum WriteFailure {
     /// The worker failed or shut down, so Mago no longer writes to it.
     Stopped,
@@ -204,8 +205,11 @@ struct WorkerInner {
     next_request_id: AtomicU64,
     in_flight: AtomicUsize,
     maximum_payload_size: usize,
-    writer: Mutex<Option<BufWriter<WorkerStdin>>>,
-    child: Mutex<Option<Child>>,
+    /// The frames the stdin writer writes to the worker, in the order they are queued. `None` once Mago stops writing
+    /// to the worker.
+    writer: Mutex<Option<mpsc::Sender<Vec<u8>>>>,
+    /// The worker's process, with every process it started.
+    child: Mutex<Option<ProcessGroup>>,
     pending: Mutex<BTreeMap<u64, mpsc::Sender<PendingEvent>>>,
     stderr: Mutex<StderrTail>,
     /// Notified when the stderr reader reaches the end of the worker's stderr.
@@ -239,28 +243,27 @@ impl WorkerInner {
     }
 
     fn send(&self, frame: &Frame) -> Result<(), WorkerError> {
-        let written = self.write(&mut lock(&self.writer), frame);
-        self.finish_write(frame, written)
+        let written = self.write(lock(&self.writer).as_ref(), frame);
+        self.finish_write(written)
     }
 
     /// Sends a top-level request under the next identifier and registers its response channel. Returns the
     /// identifier, and whether the worker starts the request at once: a worker serves requests in the order they
     /// arrive, so a request waits while one sent before it is still pending.
     fn send_request(&self, payload: Vec<u8>, sender: mpsc::Sender<PendingEvent>) -> Result<(u64, bool), WorkerError> {
-        let (request_id, starts, frame, written) = {
-            let mut writer = lock(&self.writer);
+        let (request_id, starts, written) = {
+            let writer = lock(&self.writer);
             let request_id = self.next_request_id();
             let starts = {
                 let mut pending = lock(&self.pending);
                 pending.insert(request_id, sender);
                 pending.len() == 1
             };
-            let frame = Frame::request(request_id, payload);
-            let written = self.write(&mut writer, &frame);
-            (request_id, starts, frame, written)
+            let written = self.write(writer.as_ref(), &Frame::request(request_id, payload));
+            (request_id, starts, written)
         };
 
-        self.finish_write(&frame, written).inspect_err(|_| {
+        self.finish_write(written).inspect_err(|_| {
             self.take_pending(request_id);
         })?;
 
@@ -289,46 +292,32 @@ impl WorkerInner {
         }
     }
 
-    /// Writes `frame` to the worker under the writer's lock. It fails with why the frame did not go out, and
+    /// Queues `frame` for the stdin writer under the writer's lock, so frames reach the worker in the order Mago
+    /// numbered them, and never waits for the worker to read them. It fails with why the frame will not go out, and
     /// `finish_write` turns that into the error once the lock is released, as the error of a failed worker waits for
     /// `fail` to record the failure.
-    fn write(&self, writer: &mut Option<BufWriter<WorkerStdin>>, frame: &Frame) -> Result<(), WriteFailure> {
+    fn write(&self, writer: Option<&mpsc::Sender<Vec<u8>>>, frame: &Frame) -> Result<(), WriteFailure> {
         if self.state.load(Ordering::Acquire) != STATE_RUNNING {
             return Err(WriteFailure::Stopped);
         }
 
-        let writer = writer.as_mut().ok_or(WriteFailure::Stopped)?;
-        frame
-            .write_to(writer, self.maximum_payload_size)
-            .and_then(|()| writer.flush().map_err(Into::into))
-            .map_err(WriteFailure::Protocol)
+        let writer = writer.ok_or(WriteFailure::Stopped)?;
+        let mut bytes = Vec::new();
+        frame.write_to(&mut bytes, self.maximum_payload_size).map_err(WriteFailure::Protocol)?;
+        // The stdin writer stops at a failed write, which fails the worker first.
+        writer.send(bytes).map_err(|_| WriteFailure::Stopped)
     }
 
-    fn finish_write(&self, frame: &Frame, written: Result<(), WriteFailure>) -> Result<(), WorkerError> {
+    fn finish_write(&self, written: Result<(), WriteFailure>) -> Result<(), WorkerError> {
         match written {
-            Ok(()) => {}
-            Err(WriteFailure::Stopped) => return Err(self.disconnected("worker is not running")),
-            // A worker that exited closed the pipe Mago writes its requests to.
-            Err(WriteFailure::Protocol(ProtocolError::Io(source))) => {
-                let reason = format!("failed to write to the worker: {source}");
-                self.fail(reason.clone());
-                return Err(self.disconnected(reason));
-            }
+            Ok(()) => Ok(()),
+            Err(WriteFailure::Stopped) => Err(self.disconnected("worker is not running")),
             Err(WriteFailure::Protocol(source)) => {
                 let error = WorkerError::Protocol { worker: self.id, source };
                 self.fail(error.to_string());
-                return Err(error);
+                Err(error)
             }
         }
-
-        if self.trace_enabled {
-            self.telemetry.frames_sent.fetch_add(1, Ordering::Relaxed);
-            self.telemetry
-                .bytes_sent
-                .fetch_add((crate::protocol::FRAME_HEADER_LENGTH + frame.payload.len()) as u64, Ordering::Relaxed);
-        }
-
-        Ok(())
     }
 
     fn route(&self, frame: Frame) {
@@ -384,15 +373,21 @@ impl WorkerInner {
             self.telemetry.failures.fetch_add(1, Ordering::Relaxed);
         }
 
-        // Closing stdin first lets a process the worker started, which reads stdin to its end, exit and close stderr.
+        // Closing stdin first lets a process the worker started, which reads stdin to its end, exit and close stderr. The
+        // stdin writer closes it once it has written the frames queued before.
         lock(&self.writer).take();
-        if let Some(child) = lock(&self.child).as_mut() {
-            let _result = child.kill();
+        if let Some(group) = lock(&self.child).as_mut() {
+            let _result = group.leader().kill();
         }
 
         let stderr_wait_start = Instant::now();
         let (stderr, ended) = self.stderr_tail();
         let stderr_wait = stderr_wait_start.elapsed();
+        // What the worker started and still runs, such as the worker a wrapper forked, can hold the pipe the stdin
+        // writer is stuck on, and the worker's stdout and stderr, so the failure ends it too.
+        if let Some(group) = lock(&self.child).as_mut() {
+            let _result = group.end();
+        }
         if !ended {
             failure.message =
                 format!("{}; stderr still open after {} ms", failure.message, STDERR_END_TIMEOUT.as_millis());
@@ -505,6 +500,7 @@ pub(crate) struct Worker {
     shutdown_timeout: Duration,
     reader_thread: Mutex<Option<JoinHandle<()>>>,
     stderr_thread: Mutex<Option<JoinHandle<()>>>,
+    writer_thread: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl Worker {
@@ -527,28 +523,29 @@ impl Worker {
             .env(INPUT_ADDRESS_ENVIRONMENT_VARIABLE, input_address)
             .env(INPUT_TOKEN_ENVIRONMENT_VARIABLE, &input_token);
 
-        let mut child =
-            process.spawn().map_err(|source| WorkerError::Spawn { program: command.program().to_owned(), source })?;
+        let mut group = ProcessGroup::spawn(&mut process)
+            .map_err(|source| WorkerError::Spawn { program: command.program().to_owned(), source })?;
 
-        let process_stdin = take_pipe(id, "stdin", child.stdin.take(), &mut child)?;
-        let stdout = take_pipe(id, "stdout", child.stdout.take(), &mut child)?;
-        let stderr = take_pipe(id, "stderr", child.stderr.take(), &mut child)?;
-        let process_id = child.id();
+        let process_stdin = take_pipe(id, "stdin", group.leader().stdin.take(), &mut group)?;
+        let stdout = take_pipe(id, "stdout", group.leader().stdout.take(), &mut group)?;
+        let stderr = take_pipe(id, "stderr", group.leader().stderr.take(), &mut group)?;
+        let process_id = group.leader().id();
         #[cfg(windows)]
-        let stdin = match accept_windows_input(&input_listener, &input_token, &mut child) {
+        let stdin = match accept_windows_input(&input_listener, &input_token, group.leader()) {
             Ok(stream) => {
                 drop(process_stdin);
                 WorkerStdin::Socket(stream)
             }
             Err(source) => {
-                let _result = child.kill();
-                let _result = child.wait();
+                let _result = group.end();
+                let _result = group.leader().wait();
                 return Err(WorkerError::Spawn { program: command.program().to_owned(), source });
             }
         };
         #[cfg(not(windows))]
         let stdin = WorkerStdin::Process(process_stdin);
 
+        let (writer, queued) = mpsc::channel();
         let inner = Arc::new(WorkerInner {
             id,
             host: options.host.clone(),
@@ -556,8 +553,8 @@ impl Worker {
             next_request_id: AtomicU64::new(1),
             in_flight: AtomicUsize::new(0),
             maximum_payload_size: options.maximum_payload_size,
-            writer: Mutex::new(Some(BufWriter::new(stdin))),
-            child: Mutex::new(Some(child)),
+            writer: Mutex::new(Some(writer)),
+            child: Mutex::new(Some(group)),
             pending: Mutex::new(BTreeMap::new()),
             stderr: Mutex::new(StderrTail::new(options.stderr_tail_size)),
             stderr_ended: Condvar::new(),
@@ -599,12 +596,29 @@ impl Worker {
             }
         };
 
+        let writer_inner = Arc::clone(&inner);
+        let writer_thread = match std::thread::Builder::new()
+            .name(format!("mago-extension-worker-{id}-stdin"))
+            .stack_size(IO_THREAD_STACK_SIZE)
+            .spawn(move || write_worker_stdin(&writer_inner, stdin, queued))
+        {
+            Ok(thread) => thread,
+            Err(source) => {
+                inner.fail("failed to start stdin writer thread");
+                reap_child(&inner);
+                let _result = reader_thread.join();
+                let _result = stderr_thread.join();
+                return Err(WorkerError::ThreadSpawn { worker: id, role: "stdin writer", source });
+            }
+        };
+
         let worker = Arc::new(Self {
             inner,
             request_timeout: options.request_timeout,
             shutdown_timeout: options.shutdown_timeout,
             reader_thread: Mutex::new(Some(reader_thread)),
             stderr_thread: Mutex::new(Some(stderr_thread)),
+            writer_thread: Mutex::new(Some(writer_thread)),
         });
         if let Some(start) = started_at {
             tracing::trace!(worker = id, elapsed = ?start.elapsed(), "Extension worker I/O threads started.");
@@ -815,17 +829,13 @@ impl Worker {
 
         tracing::trace!(worker = self.id(), previous_state = state, "Beginning extension worker shutdown.");
 
+        // The stdin writer writes the shutdown frame after the frames queued before it, then closes stdin.
+        if let Some(writer) = lock(&self.inner.writer).take()
+            && state == STATE_RUNNING
         {
-            let mut writer = lock(&self.inner.writer);
-            if state == STATE_RUNNING
-                && let Some(mut writer) = writer.take()
-            {
-                let _result = Frame::shutdown()
-                    .write_to(&mut writer, self.inner.maximum_payload_size)
-                    .and_then(|()| writer.flush().map_err(Into::into));
-            } else {
-                writer.take();
-            }
+            let mut shutdown = Vec::new();
+            let _result = Frame::shutdown().write_to(&mut shutdown, self.inner.maximum_payload_size);
+            let _result = writer.send(shutdown);
         }
     }
 
@@ -842,7 +852,7 @@ impl Worker {
             let exited = {
                 let mut child = lock(&self.inner.child);
                 match child.as_mut() {
-                    Some(child) => child.try_wait().ok().flatten().is_some(),
+                    Some(group) => group.leader().try_wait().ok().flatten().is_some(),
                     None => true,
                 }
             };
@@ -856,15 +866,15 @@ impl Worker {
         };
 
         let child = lock(&self.inner.child).take();
-        if let Some(mut child) = child {
-            if child.try_wait().ok().flatten().is_none() {
+        if let Some(mut group) = child {
+            if group.leader().try_wait().ok().flatten().is_none() {
                 if self.inner.trace_enabled {
                     self.inner.telemetry.forced_shutdowns.fetch_add(1, Ordering::Relaxed);
                 }
                 tracing::trace!(worker = self.id(), "Killing extension worker after shutdown grace period.");
-                let _result = child.kill();
+                let _result = group.end();
             }
-            let _result = child.wait();
+            let _result = group.leader().wait();
         }
 
         self.inner.state.store(STATE_STOPPED, Ordering::Release);
@@ -892,6 +902,7 @@ impl Worker {
         writer: std::net::TcpStream,
         options: &WorkerPoolOptions,
     ) -> Arc<Self> {
+        let (frames, queued) = mpsc::channel();
         let inner = Arc::new(WorkerInner {
             id,
             host: options.host.clone(),
@@ -899,7 +910,7 @@ impl Worker {
             next_request_id: AtomicU64::new(1),
             in_flight: AtomicUsize::new(0),
             maximum_payload_size: options.maximum_payload_size,
-            writer: Mutex::new(Some(BufWriter::new(WorkerStdin::Test(writer)))),
+            writer: Mutex::new(Some(frames)),
             child: Mutex::new(None),
             pending: Mutex::new(BTreeMap::new()),
             // A peer on streams has no stderr.
@@ -914,6 +925,9 @@ impl Worker {
         });
         let reader_inner = Arc::clone(&inner);
         let reader_thread = std::thread::spawn(move || read_worker_stream(&reader_inner, reader));
+        let writer_inner = Arc::clone(&inner);
+        let writer_thread =
+            std::thread::spawn(move || write_worker_stdin(&writer_inner, WorkerStdin::Test(writer), queued));
 
         Arc::new(Self {
             inner,
@@ -921,21 +935,18 @@ impl Worker {
             shutdown_timeout: options.shutdown_timeout,
             reader_thread: Mutex::new(Some(reader_thread)),
             stderr_thread: Mutex::new(None),
+            writer_thread: Mutex::new(Some(writer_thread)),
         })
     }
 
     fn join_threads(&self) {
-        let reader_thread = lock(&self.reader_thread).take();
-        let stderr_thread = lock(&self.stderr_thread).take();
-        if reader_thread.is_none() && stderr_thread.is_none() {
+        let threads = [&self.reader_thread, &self.stderr_thread, &self.writer_thread].map(|thread| lock(thread).take());
+        if threads.iter().all(Option::is_none) {
             return;
         }
 
         tracing::trace!(worker = self.id(), "Joining extension worker I/O threads.");
-        if let Some(thread) = reader_thread {
-            let _result = thread.join();
-        }
-        if let Some(thread) = stderr_thread {
+        for thread in threads.into_iter().flatten() {
             let _result = thread.join();
         }
     }
@@ -1034,12 +1045,33 @@ fn authenticate_windows_input(stream: &mut TcpStream, token: &str) -> std::io::R
     Ok(received == token.as_bytes())
 }
 
-fn take_pipe<T>(id: usize, name: &'static str, pipe: Option<T>, child: &mut Child) -> Result<T, WorkerError> {
+fn take_pipe<T>(id: usize, name: &'static str, pipe: Option<T>, group: &mut ProcessGroup) -> Result<T, WorkerError> {
     pipe.ok_or_else(|| {
-        let _result = child.kill();
-        let _result = child.wait();
+        let _result = group.end();
+        let _result = group.leader().wait();
         WorkerError::MissingPipe { worker: id, pipe: name }
     })
+}
+
+/// Writes each frame `queued` holds to the worker's stdin, in order, on a thread of its own: a worker that stops reading
+/// its stdin holds this thread, not the request that queued the frame, so the request still fails at its deadline. Stdin
+/// closes once Mago stops queueing frames and those queued before are written, or once a write fails.
+fn write_worker_stdin(inner: &WorkerInner, mut stdin: WorkerStdin, queued: mpsc::Receiver<Vec<u8>>) {
+    tracing::trace!(worker = inner.id, "Extension worker stdin writer started.");
+    for frame in queued {
+        if let Err(error) = stdin.write_all(&frame).and_then(|()| stdin.flush()) {
+            tracing::trace!(worker = inner.id, error = %error, "Extension worker stdin writer failed.");
+            // A worker that exited closed the pipe Mago writes its requests to.
+            inner.fail(format!("failed to write to the worker: {error}"));
+            return;
+        }
+        if inner.trace_enabled {
+            inner.telemetry.frames_sent.fetch_add(1, Ordering::Relaxed);
+            inner.telemetry.bytes_sent.fetch_add(frame.len() as u64, Ordering::Relaxed);
+        }
+    }
+
+    tracing::trace!(worker = inner.id, "Extension worker stdin writer closed stdin.");
 }
 
 fn read_worker_stream(inner: &WorkerInner, stream: impl Read) {
@@ -1093,9 +1125,9 @@ fn read_worker_stderr(inner: &WorkerInner, stderr: ChildStderr) {
 fn reap_child(inner: &WorkerInner) {
     tracing::trace!(worker = inner.id, "Reaping failed extension worker process.");
     let child = lock(&inner.child).take();
-    if let Some(mut child) = child {
-        let _result = child.kill();
-        let _result = child.wait();
+    if let Some(mut group) = child {
+        let _result = group.end();
+        let _result = group.leader().wait();
     }
 }
 
@@ -1647,6 +1679,99 @@ mod tests {
         );
     }
 
+    /// A worker that stops reading its stdin, as one held at a debugger breakpoint does, leaves Mago's write of a
+    /// request larger than the pipe's buffer unfinished, and the request still fails at its deadline.
+    #[cfg(unix)]
+    #[test]
+    fn a_request_to_a_worker_that_stopped_reading_its_stdin_fails_at_the_deadline() {
+        let worker = shell_worker_within("exec sleep 20", STUCK_DEADLINE);
+
+        let (error, elapsed) = request_larger_than_a_pipe_and_shut_down(worker);
+
+        assert_eq!(error.to_string(), STUCK_TIMEOUT);
+        assert!(elapsed < STUCK_DEADLINE + STDERR_END_TIMEOUT, "the request failed after {elapsed:?}");
+    }
+
+    /// A wrapper that forks the worker rather than replacing itself with it, as `docker compose exec` does, leaves the
+    /// worker holding the pipe once the wrapper is killed. The request still fails at its deadline, and the failure
+    /// ends the worker as well as the wrapper.
+    #[cfg(unix)]
+    #[test]
+    fn a_request_to_a_stuck_worker_behind_a_forking_wrapper_fails_at_the_deadline_and_ends_both() {
+        let started = std::env::temp_dir().join(format!("mago-extension-forking-wrapper-{}", std::process::id()));
+        std::fs::create_dir_all(&started).expect("the folder of process ids should be created");
+        let (wrapper, stuck) = (started.join("wrapper"), started.join("worker"));
+        let worker = shell_worker_within(
+            &format!(
+                "echo $$ > '{}'; exec 3<&0; sh -c 'echo $$ > \"$0\"; exec sleep 20' '{}' 0<&3 3<&- & exec 3<&-; wait",
+                wrapper.display(),
+                stuck.display(),
+            ),
+            STUCK_DEADLINE,
+        );
+
+        let (error, elapsed) = request_larger_than_a_pipe_and_shut_down(worker);
+
+        assert_eq!(error.to_string(), STUCK_TIMEOUT);
+        assert!(elapsed < STUCK_DEADLINE + STDERR_END_TIMEOUT * 2, "the request failed after {elapsed:?}");
+        for process in [wrapper, stuck] {
+            let id = std::fs::read_to_string(&process).expect("the process should have written its id");
+            wait_until_ended(id.trim());
+        }
+        std::fs::remove_dir_all(&started).expect("the folder of process ids should be removed");
+    }
+
+    /// The deadline of a test whose worker never answers.
+    #[cfg(unix)]
+    const STUCK_DEADLINE: Duration = Duration::from_secs(1);
+
+    /// The error of a request whose worker made no progress for `STUCK_DEADLINE`.
+    #[cfg(unix)]
+    const STUCK_TIMEOUT: &str = "extension host `acme` made no progress for 1000 ms (worker 0): raise its `request-timeout-ms` for hooks that run that long";
+
+    /// Sends `worker` a request of 1 MiB, past the 64 KiB a pipe buffers on macOS and Linux, then shuts the worker down,
+    /// and returns the request's error and how long the request took. Both run on a thread of their own, so a request or
+    /// a shutdown that never ends fails the test after `OUTER_TIMEOUT` rather than hang the test run.
+    #[cfg(unix)]
+    fn request_larger_than_a_pipe_and_shut_down(worker: Arc<Worker>) -> (WorkerError, Duration) {
+        const OUTER_TIMEOUT: Duration = Duration::from_secs(10);
+
+        let (answered, answer) = mpsc::channel();
+        std::thread::spawn(move || {
+            let started_at = Instant::now();
+            let response = worker.request(vec![0; 1024 * 1024], None);
+            let elapsed = started_at.elapsed();
+            worker.shutdown();
+            let _result = answered.send((response, elapsed));
+        });
+        let (response, elapsed) =
+            answer.recv_timeout(OUTER_TIMEOUT).expect("the request and the shutdown should end within 10 s");
+
+        (response.expect_err("the stuck worker should fail the request"), elapsed)
+    }
+
+    /// Waits until the process `id` no longer runs. A process that ended and that nothing reaped yet, as an orphan is
+    /// where no process reaps orphans, counts as ended.
+    #[cfg(unix)]
+    fn wait_until_ended(id: &str) {
+        const TIMEOUT: Duration = Duration::from_secs(10);
+
+        let runs = || {
+            let state = std::process::Command::new("ps")
+                .args(["-o", "stat=", "-p", id])
+                .output()
+                .expect("ps should run")
+                .stdout;
+            let state = state.trim_ascii();
+            !state.is_empty() && !state.starts_with(b"Z")
+        };
+        let deadline = Instant::now() + TIMEOUT;
+        while runs() {
+            assert!(Instant::now() < deadline, "process {id} still ran after {TIMEOUT:?}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     /// What a PHP worker writes to stderr when it loads a class its missing require-dev package declares.
     #[cfg(unix)]
     const FATAL_ERROR: &str = r#"PHP Fatal error:  Uncaught Error: Class "ReportPlugin" not found"#;
@@ -1654,8 +1779,15 @@ mod tests {
     /// A worker of the host `acme` that runs `script` in `sh`.
     #[cfg(unix)]
     fn shell_worker(script: &str) -> Arc<Worker> {
+        shell_worker_within(script, WorkerPoolOptions::default().request_timeout)
+    }
+
+    /// A worker of the host `acme` that runs `script` in `sh`, and fails a request that makes no progress for
+    /// `request_timeout`.
+    #[cfg(unix)]
+    fn shell_worker_within(script: &str, request_timeout: Duration) -> Arc<Worker> {
         let command = WorkerCommand::new("sh").with_arguments(["-c", script]);
-        let options = WorkerPoolOptions { host: "acme".to_owned(), ..WorkerPoolOptions::default() };
+        let options = WorkerPoolOptions { host: "acme".to_owned(), request_timeout, ..WorkerPoolOptions::default() };
 
         Worker::spawn(0, &command, &options).expect("worker process should start")
     }

@@ -1660,6 +1660,7 @@ name = "mago-extension"
 version = "0.6.3"
 dependencies = [
  "foldhash",
+ "libc",
  "mago-names",
  "mago-span",
  "mago-syntax",
