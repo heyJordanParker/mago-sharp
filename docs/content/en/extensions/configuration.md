@@ -34,7 +34,7 @@ stderr-tail-size = 65536
 | `inherit-environment` | boolean | `true` | Whether workers inherit Mago's process environment before `environment` is applied. |
 | `maximum-payload-size` | positive integer | `67108864` | Maximum payload bytes accepted in one protocol frame. The maximum representable value is `4294967295`. |
 | `request-timeout-ms` | positive integer | `30000` | Longest one unit of a request may run, as Jest's `testTimeout` bounds one test. It counts from when the worker starts a request, not while the request waits behind earlier ones, and starts again each time the worker starts one of the request's units: a file's hooks in an after-file batch, one plugin's initialization, before-analysis or after-analysis hooks, a codebase-scan hook, or an extension's worker reducer. So a batch of many files, or the after-analysis hooks of many plugins, lives while each unit finishes in time. A provider, lint, issue-filter or single after-file request is one unit. Nested metadata or type-comparison requests don't start it again, so a hook that never finishes fails, and the error names the host, the unit that made no progress, such as the after-analysis hooks of plugin `dead-routes`, and this option. |
-| `shutdown-timeout-ms` | non-negative integer | `250` | Grace period after shutdown before Mago forcibly terminates a worker. |
+| `shutdown-timeout-ms` | non-negative integer | `250` | Grace period after shutdown before Mago forcibly terminates a worker. On macOS and Linux, it terminates every process the worker started on the host with it, as [worker processes](#worker-processes) describes. |
 | `stderr-tail-size` | non-negative integer | `65536` | Trailing worker standard-error bytes retained for failure diagnostics. |
 
 ## Command resolution
@@ -61,6 +61,18 @@ workers = 2
 ```
 
 A fixed pool does not grow or shrink. Avoid configuring more workers than Mago threads.
+
+## Worker processes
+
+On macOS and Linux, each worker runs in a process group of its own, so Mago can end it with every process it started on the host. A worker fails when it dies, breaks the protocol, or makes no progress for `request-timeout-ms`, as one that stops reading its standard input does. Mago then closes the worker's standard input, kills the worker, and once the worker's standard error ends, or after one second, ends its whole group. A shutdown that runs past `shutdown-timeout-ms`, or whose worker exited and left a process running, ends the group too.
+
+A wrapper such as `docker compose exec … php worker.php` runs the `docker compose` process on the host and the worker in the container. Mago ends the host's processes. The process in the container is Docker's to end.
+
+The group is not the terminal's, which has three effects:
+
+- Ctrl-C, and any SIGINT, SIGQUIT, SIGHUP or SIGTERM that ends Mago, ends each worker's group with SIGKILL before Mago ends, where each worker got the signal itself.
+- A SIGKILL sent to Mago's process group no longer reaches the workers, since Mago runs no code on SIGKILL. A worker that runs `Worker::run()` exits once its standard input closes, which Mago's end closes, so only a worker that stopped reading keeps running.
+- A worker that reads from the terminal, as an interactive debugger prompt does, stops on SIGTTIN. Run such a debugger over its network port instead.
 
 ## Environment isolation
 
