@@ -252,38 +252,47 @@ pub fn stage_rename(workspace: &Path, from: &Path, to: &Path) -> Result<(), Erro
 }
 
 /// Removes from the `info/exclude` file git reads for `workspace` every block `owner` wrote there, whichever folder it
-/// names, and keeps every other line. `owner` kept its files out of git in those blocks, but every checkout of a
-/// repository shares the file, so one checkout's block hid the same paths in every other checkout.
+/// names. `owner` kept its files out of git in those blocks, but every checkout of a repository shares the file, so one
+/// checkout's block hid the same paths in every other checkout. It is for checkouts upgraded from mago 0.6.3 or
+/// earlier, which wrote the blocks.
 ///
-/// [`exclude_file`] names the file, with or without a `git` to run. The file is replaced by rename, so a compile that
-/// reads it while another writes it never reads part of it. A file with no block is left as it is. One that can't be
-/// written keeps its blocks, and the compile warns.
+/// A block is a heading, the lines right after it that start with `/`, and the end line when it comes next, so a block
+/// torn before its end line loses only its own `/` lines. Every other byte stays, a CRLF line end, a byte that is no
+/// UTF-8 and a last line with no line end included. [`exclude_file`] names the file, with or without a `git` to run.
+/// The file is replaced by rename, so a compile that reads it while another writes it never reads part of it. A file
+/// with no block is left as it is. One that can't be written keeps its blocks, and the compile warns.
 pub fn remove_exclude_blocks(workspace: &Path, owner: &str) -> Result<(), Error> {
     let Some(file) = exclude_file(workspace) else {
         return Ok(());
     };
-    let before = match std::fs::read_to_string(&file) {
+    let before = match std::fs::read(&file) {
         Ok(contents) => contents,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(DatabaseError::io(IOAction::ReadFile, &file, error).into()),
     };
     let heading = format!("# {owner}: the files it writes in ");
-    if !before.lines().any(|line| line.starts_with(&heading)) {
+    let end = format!("# {owner}: end");
+    let mut after = Vec::with_capacity(before.len());
+    let mut in_block = false;
+    for line in before.split_inclusive(|byte| *byte == b'\n') {
+        let text = line.strip_suffix(b"\n").unwrap_or(line);
+        let text = text.strip_suffix(b"\r").unwrap_or(text);
+        if in_block && text.starts_with(b"/") {
+            continue;
+        }
+        if in_block && text == end.as_bytes() {
+            in_block = false;
+            continue;
+        }
+        in_block = text.starts_with(heading.as_bytes());
+        if !in_block {
+            after.extend_from_slice(line);
+        }
+    }
+    if after == before {
         return Ok(());
     }
-
-    let end = format!("# {owner}: end");
-    let mut after = String::new();
-    let mut kept = true;
-    for line in before.lines() {
-        kept &= !line.starts_with(&heading);
-        if kept {
-            after.push_str(line);
-            after.push('\n');
-        }
-        kept |= line == end;
-    }
-    if let Err(error) = write_by_rename(&file, after.as_bytes()) {
+    if let Err(error) = write_by_rename(&file, &after) {
         // The new file is written beside the old one and renamed over it, so it is the folder that must be writable,
         // and the error's own path names the temporary file.
         let folder = file.parent().unwrap_or(&file).display();
