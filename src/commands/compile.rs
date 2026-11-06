@@ -719,33 +719,45 @@ fn quoted(table: &mut Vec<u8>, text: &[u8]) {
     table.push(b'\'');
 }
 
-/// The PHP file beside the PHP# source `declared`, spec section 27, in `mago fmt`'s layout. PHP code that lists `*.php`
-/// files and names each class by its path finds the PHP# class through it, and Composer's PSR-4 loads it before the
-/// source. It loads the source through the engine, and on plain PHP it throws before any source can reach the output.
-/// Its last statement states the type's declaration and never runs, so a tool that reads PHP source, as Composer's
-/// class map and Symfony's attribute routing do, finds the type in it, and the engine declares the type once, from the
-/// source. PHP refuses a keyword as a type's name even in a declaration that never runs, so the file of a type named
-/// after one, as `Case`, states none and parses. Once the source is gone it declares nothing, as if it were not there,
-/// until the next compile deletes it.
+/// The PHP file beside the PHP# source `declared`, spec section 27. PHP code that lists `*.php` files and names each
+/// class by its path finds the PHP# class through it, and Composer's PSR-4 loads it before the source. It loads the
+/// source through the engine, and on plain PHP it throws before any source can reach the output. Its last statement
+/// states the type's declaration and never runs, so a tool that reads PHP source, as Composer's class map and
+/// Symfony's attribute routing do, finds the type in it, and the engine declares the type once, from the source. PHP
+/// refuses a keyword as a type's name even in a declaration that never runs, so the file of a type named after one, as
+/// `Case`, states none and parses. Once the source is gone it declares nothing, as if it were not there, until the next
+/// compile deletes it.
+///
+/// A project's formatter passes it as written: `mago fmt`, Pint's `laravel`, `per` and `psr12` presets, and
+/// PHP-CS-Fixer's `@PER-CS2x0`. Pint's `laravel` preset wants each global name a namespace uses imported. PHPCS's
+/// `PSR12` warns of the side effects a generated file has, so the file marks itself `phpcs:ignoreFile`. A type named
+/// `Error` declares the name the file would import, which PHP refuses even in a declaration that never runs, so its
+/// file names `\Error` in full. PHP warns of an import in no namespace, where every global name resolves as written, so
+/// there the file imports none.
 fn beside(declared: &DeclaredType) -> String {
-    let DeclaredType { file, keyword, .. } = declared;
-    let name = file.strip_suffix(".sharp").unwrap_or(file);
-    let (finds, declaration) = match keyword {
-        Some(keyword) => (
-            "lists or reads",
-            format!(
-                "\n// The engine declares {name} from {file}, and this declaration never runs.\nif (false) {{\n    {keyword} {name}\n    {{\n    }}\n}}\n"
-            ),
-        ),
-        None => ("lists", String::new()),
+    let DeclaredType { file, name, keyword } = declared;
+    let stem = file.strip_suffix(".sharp").unwrap_or(file);
+    let (imports, error) = match name.rsplit_once('.') {
+        Some((namespace, _)) => {
+            let namespace = namespace.replace('.', "\\");
+            let functions = "use function function_exists;\nuse function is_file;\nuse function sprintf;\n\n";
+            if stem.eq_ignore_ascii_case("Error") {
+                (format!("namespace {namespace};\n\n{functions}"), "\\Error")
+            } else {
+                (format!("namespace {namespace};\n\nuse Error;\n\n{functions}"), "Error")
+            }
+        }
+        None => (String::new(), "Error"),
     };
-    let namespace = match declared.name.rsplit_once('.') {
-        Some((namespace, _)) => format!("namespace {};\n\n", namespace.replace('.', "\\")),
+    let declaration = match keyword {
+        Some(keyword) => format!(
+            "\nif (false) {{\n    {keyword} {stem}\n    {{\n        // The engine declares {stem} from {file}, and this declaration never runs.\n    }}\n}}\n"
+        ),
         None => String::new(),
     };
 
     format!(
-        "{COMPANION_START}{file}, so PHP code that {finds} *.php files finds its type.\n\ndeclare(strict_types=1);\n\n{namespace}if (!\\is_file(__DIR__ . '/{file}')) {{\n    return;\n}}\n\n\\function_exists('Sharp\\Internal\\requireNative')\n    || throw new \\Error(\n        'This project needs the PHP# engine, and this is plain PHP. Install php-sharp, or run the ghcr.io/heyjordanparker/php-sharp image.',\n    );\n\nrequire_once __DIR__ . '/{file}';\n{declaration}"
+        "{COMPANION_START}{file}, so PHP code that finds *.php files finds its type.\n// phpcs:ignoreFile\n\ndeclare(strict_types=1);\n\n{imports}if (is_file(sprintf('%s/{file}', __DIR__))) {{\n    function_exists('Sharp\\Internal\\requireNative')\n        || throw new {error}(\n            'This project needs the PHP# engine, and this is plain PHP. Install php-sharp, or run the ghcr.io/heyjordanparker/php-sharp image.',\n        );\n\n    require_once sprintf('%s/{file}', __DIR__);\n}}\n{declaration}"
     )
 }
 

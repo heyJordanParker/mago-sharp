@@ -1148,7 +1148,37 @@ fn compile_replaces_a_compiled_file_by_rename_so_no_reader_sees_a_partial_file()
 }
 
 /// The PHP file `mago compile` writes beside `app/Order.sharp`, spec section 27.
-const ORDER_PHP: &str = "<?php\n\n// mago compile writes this file from Order.sharp, so PHP code that lists or reads *.php files finds its type.\n\ndeclare(strict_types=1);\n\nnamespace App;\n\nif (!\\is_file(__DIR__ . '/Order.sharp')) {\n    return;\n}\n\n\\function_exists('Sharp\\Internal\\requireNative')\n    || throw new \\Error(\n        'This project needs the PHP# engine, and this is plain PHP. Install php-sharp, or run the ghcr.io/heyjordanparker/php-sharp image.',\n    );\n\nrequire_once __DIR__ . '/Order.sharp';\n\n// The engine declares Order from Order.sharp, and this declaration never runs.\nif (false) {\n    class Order\n    {\n    }\n}\n";
+const ORDER_PHP: &str = r#"<?php
+
+// mago compile writes this file from Order.sharp, so PHP code that finds *.php files finds its type.
+// phpcs:ignoreFile
+
+declare(strict_types=1);
+
+namespace App;
+
+use Error;
+
+use function function_exists;
+use function is_file;
+use function sprintf;
+
+if (is_file(sprintf('%s/Order.sharp', __DIR__))) {
+    function_exists('Sharp\Internal\requireNative')
+        || throw new Error(
+            'This project needs the PHP# engine, and this is plain PHP. Install php-sharp, or run the ghcr.io/heyjordanparker/php-sharp image.',
+        );
+
+    require_once sprintf('%s/Order.sharp', __DIR__);
+}
+
+if (false) {
+    class Order
+    {
+        // The engine declares Order from Order.sharp, and this declaration never runs.
+    }
+}
+"#;
 
 /// Spec section 27: each of the project's PHP# sources that declares a type gets a PHP file of the type's name beside
 /// it, so PHP code that finds classes by listing `*.php` files finds it. A module's file declares none, and a package
@@ -1179,6 +1209,176 @@ fn compile_writes_a_php_file_beside_each_project_source_that_declares_a_type() {
     );
     assert_eq!(files_under(&root.join("vendor")), vendor, "nothing is written under vendor/");
 }
+
+/// The PHP file states the type's kind, an interface's and an enum's included, and a type named after a PHP keyword
+/// gets none, which PHP would refuse. A type named `Error` declares the name the file would import, so its file names
+/// `\Error` in full instead, and a type in no namespace imports nothing, which PHP would warn of.
+#[test]
+fn compile_writes_the_php_file_of_each_kind_of_type() {
+    let directory = project(ORDER, MONEY);
+    let root = directory.path();
+    let types = [
+        ("Payable", "public interface Payable\n{\n}\n", PAYABLE_PHP),
+        ("Status", "public enum Status\n{\n    case Open;\n    case Paid;\n}\n", STATUS_PHP),
+        ("Match", "public class Match\n{\n}\n", MATCH_PHP),
+        ("Error", "public class Error\n{\n}\n", ERROR_PHP),
+    ];
+    for (name, declaration, _) in types {
+        write(root, &format!("app/Billing/{name}.sharp"), &format!("namespace App.Billing;\n\n{declaration}"));
+    }
+    write(root, "app/Rootless.sharp", "public class Rootless\n{\n}\n");
+
+    compile_succeeds(root);
+
+    assert_eq!(std::fs::read_to_string(root.join("app/Order.php")).unwrap(), ORDER_PHP);
+    for (name, _, php) in types {
+        assert_eq!(std::fs::read_to_string(root.join(format!("app/Billing/{name}.php"))).unwrap(), php, "{name}");
+    }
+    assert_eq!(std::fs::read_to_string(root.join("app/Rootless.php")).unwrap(), ROOTLESS_PHP);
+}
+
+const PAYABLE_PHP: &str = r#"<?php
+
+// mago compile writes this file from Payable.sharp, so PHP code that finds *.php files finds its type.
+// phpcs:ignoreFile
+
+declare(strict_types=1);
+
+namespace App\Billing;
+
+use Error;
+
+use function function_exists;
+use function is_file;
+use function sprintf;
+
+if (is_file(sprintf('%s/Payable.sharp', __DIR__))) {
+    function_exists('Sharp\Internal\requireNative')
+        || throw new Error(
+            'This project needs the PHP# engine, and this is plain PHP. Install php-sharp, or run the ghcr.io/heyjordanparker/php-sharp image.',
+        );
+
+    require_once sprintf('%s/Payable.sharp', __DIR__);
+}
+
+if (false) {
+    interface Payable
+    {
+        // The engine declares Payable from Payable.sharp, and this declaration never runs.
+    }
+}
+"#;
+
+const STATUS_PHP: &str = r#"<?php
+
+// mago compile writes this file from Status.sharp, so PHP code that finds *.php files finds its type.
+// phpcs:ignoreFile
+
+declare(strict_types=1);
+
+namespace App\Billing;
+
+use Error;
+
+use function function_exists;
+use function is_file;
+use function sprintf;
+
+if (is_file(sprintf('%s/Status.sharp', __DIR__))) {
+    function_exists('Sharp\Internal\requireNative')
+        || throw new Error(
+            'This project needs the PHP# engine, and this is plain PHP. Install php-sharp, or run the ghcr.io/heyjordanparker/php-sharp image.',
+        );
+
+    require_once sprintf('%s/Status.sharp', __DIR__);
+}
+
+if (false) {
+    enum Status
+    {
+        // The engine declares Status from Status.sharp, and this declaration never runs.
+    }
+}
+"#;
+
+const MATCH_PHP: &str = r#"<?php
+
+// mago compile writes this file from Match.sharp, so PHP code that finds *.php files finds its type.
+// phpcs:ignoreFile
+
+declare(strict_types=1);
+
+namespace App\Billing;
+
+use Error;
+
+use function function_exists;
+use function is_file;
+use function sprintf;
+
+if (is_file(sprintf('%s/Match.sharp', __DIR__))) {
+    function_exists('Sharp\Internal\requireNative')
+        || throw new Error(
+            'This project needs the PHP# engine, and this is plain PHP. Install php-sharp, or run the ghcr.io/heyjordanparker/php-sharp image.',
+        );
+
+    require_once sprintf('%s/Match.sharp', __DIR__);
+}
+"#;
+
+const ERROR_PHP: &str = r#"<?php
+
+// mago compile writes this file from Error.sharp, so PHP code that finds *.php files finds its type.
+// phpcs:ignoreFile
+
+declare(strict_types=1);
+
+namespace App\Billing;
+
+use function function_exists;
+use function is_file;
+use function sprintf;
+
+if (is_file(sprintf('%s/Error.sharp', __DIR__))) {
+    function_exists('Sharp\Internal\requireNative')
+        || throw new \Error(
+            'This project needs the PHP# engine, and this is plain PHP. Install php-sharp, or run the ghcr.io/heyjordanparker/php-sharp image.',
+        );
+
+    require_once sprintf('%s/Error.sharp', __DIR__);
+}
+
+if (false) {
+    class Error
+    {
+        // The engine declares Error from Error.sharp, and this declaration never runs.
+    }
+}
+"#;
+
+const ROOTLESS_PHP: &str = r#"<?php
+
+// mago compile writes this file from Rootless.sharp, so PHP code that finds *.php files finds its type.
+// phpcs:ignoreFile
+
+declare(strict_types=1);
+
+if (is_file(sprintf('%s/Rootless.sharp', __DIR__))) {
+    function_exists('Sharp\Internal\requireNative')
+        || throw new Error(
+            'This project needs the PHP# engine, and this is plain PHP. Install php-sharp, or run the ghcr.io/heyjordanparker/php-sharp image.',
+        );
+
+    require_once sprintf('%s/Rootless.sharp', __DIR__);
+}
+
+if (false) {
+    class Rootless
+    {
+        // The engine declares Rootless from Rootless.sharp, and this declaration never runs.
+    }
+}
+"#;
 
 /// A source in an `autoload-dev` folder gets no PHP file, so a test class keeps one file: PHPUnit loads a test class
 /// only from the file it lists, and a project lists its PHP# tests with `suffix="Test.sharp"`.
