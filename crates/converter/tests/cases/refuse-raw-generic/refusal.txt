@@ -1,0 +1,1 @@
+10:30: `App\Box` takes type arguments, which PHP leaves out here and a PHP# type names (spec section 11): give them in PHPDoc, as in `Box<…>`

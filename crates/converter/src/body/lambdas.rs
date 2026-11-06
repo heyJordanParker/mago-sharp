@@ -2,6 +2,7 @@
 //! it uses with no `use` list, and a method named as a value, `this.name` (spec sections 14.2 and 14.3).
 
 use mago_codex::ttype::atomic::TAtomic;
+use mago_codex::ttype::atomic::callable::TCallable;
 use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::union::TUnion;
 use mago_span::HasSpan;
@@ -23,6 +24,7 @@ use super::locals::Capture;
 use super::locals::Captures;
 use crate::Converter;
 use crate::Method;
+use crate::declaration::NameCase;
 
 /// A lambda's body: a block, or the expression an arrow function gives.
 enum Body<'ast, 'arena> {
@@ -34,7 +36,7 @@ impl Converter<'_, '_> {
     /// A closure or an arrow function as a lambda. A closure captures the variables its `use` lists, and an arrow
     /// function each it reads, so their capture keeps PHP's meaning only where PHP# shares the variable as PHP does:
     /// by reference, or by value of a variable nothing writes after its declaration.
-    pub(super) fn lambda(&mut self, expression: &Expression<'_>) {
+    pub(super) fn lambda(&mut self, expression: &Expression<'_>, expected: Option<&TUnion>) {
         let (attributes, keywords, ampersand, parameters, body_start, body) = match expression {
             Expression::Closure(closure) => (
                 &closure.attribute_lists,
@@ -57,6 +59,25 @@ impl Converter<'_, '_> {
         if let Some(ampersand) = ampersand {
             return self
                 .refuse(ampersand, "a lambda that returns by reference has no PHP# form: PHP# has no references");
+        }
+        // PHP calls a lambda with more arguments than it takes, and a PHP# lambda takes each one its type passes.
+        let takes = parameters.parameters.len();
+        let passed = expected
+            .into_iter()
+            .flat_map(|union| union.types.iter())
+            .filter_map(|atomic| match atomic {
+                TAtomic::Callable(TCallable::Signature(signature)) => Some(signature.get_parameters().len()),
+                _ => None,
+            })
+            .max();
+        if let Some(passed) = passed
+            && passed > takes
+            && !parameters.parameters.iter().any(|parameter| parameter.ellipsis.is_some())
+        {
+            return self.refuse(
+                expression.span(),
+                format!("this lambda takes {takes} parameters where the function type it lands in passes {passed}: a PHP# lambda takes every parameter its function type passes (spec section 14.1)"),
+            );
         }
 
         let mut captures = Captures { every_name: matches!(body, Body::Expression(_)), names: Vec::new() };
@@ -96,6 +117,7 @@ impl Converter<'_, '_> {
             super_call: None,
             storage: None,
             captures: Some(captures),
+            returned: Vec::new(),
         });
         match body {
             Body::Block(block) => self.block(block),
@@ -142,6 +164,7 @@ impl Converter<'_, '_> {
                 );
                 continue;
             }
+            self.misnamed(&parameter.variable.name[1..], parameter.variable.span, "parameter", NameCase::Camel);
             self.attributes(&parameter.attribute_lists);
             // A parameter PHP declares no type for has none in the lambda, which takes the one its function type gives.
             let union = declared
@@ -183,7 +206,7 @@ impl Converter<'_, '_> {
         let arguments = application.get_argument_list().span();
         match application {
             PartialApplication::Method(value) => {
-                if self.untyped(value.object, "a method value") {
+                if self.member_of(value.object, "a method value") {
                     return;
                 }
                 self.edits.replace(value.arrow, ".");

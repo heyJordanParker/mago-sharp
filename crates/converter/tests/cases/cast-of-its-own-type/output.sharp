@@ -1,0 +1,21 @@
+namespace App;
+
+// A cast of a value that already has the cast's type changes nothing in PHP, so PHP# writes the value alone, as a PHP#
+// cast converts between numbers only (spec section 24).
+public final class Same
+{
+    public string text(string value)
+    {
+        return value + '!';
+    }
+
+    public int whole(int value)
+    {
+        return (value + 1);
+    }
+
+    public float real(float value)
+    {
+        return value;
+    }
+}

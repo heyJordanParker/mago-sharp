@@ -1,0 +1,1 @@
+11:7: `Label` goes on methods and properties, and an enum case is a class constant to PHP, which PHP refuses only once reflection creates the attribute and the PHP# checker refuses where it is written (spec section 1)

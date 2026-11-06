@@ -9,6 +9,7 @@ mod class;
 mod constructor;
 mod members;
 
+use mago_codex::metadata::ttype::TypeMetadata;
 use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::AttributeList;
@@ -17,6 +18,8 @@ use mago_syntax::cst::PartialArgument;
 use mago_syntax::cst::Sequence;
 
 use crate::Converter;
+use crate::types::narrowing;
+use crate::types::type_text;
 
 /// The PHPDoc tags whose types the converter writes in the declaration, which leave its docblock.
 const WRITTEN_TAGS: [&str; 16] = [
@@ -50,6 +53,17 @@ fn accessors(is_public: bool, is_readonly: bool, modifiers: &Sequence<'_, Modifi
         (true, false, _) => " { get; set; }",
         (false, false, _) => "",
     }
+}
+
+/// The case spec section 24 names a kind of declaration in, as TypeScript does.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum NameCase {
+    /// Types and enum cases.
+    Pascal,
+    /// Methods, properties, fields, parameters and locals.
+    Camel,
+    /// Constants.
+    UpperSnake,
 }
 
 fn has(modifiers: &Sequence<'_, Modifier<'_>>, matches: impl Fn(&Modifier<'_>) -> bool) -> Option<Span> {
@@ -142,6 +156,63 @@ impl Converter<'_, '_> {
                     && self.source[trivia.span.end.offset as usize..start as usize].iter().all(u8::is_ascii_whitespace)
             })
             .map(|trivia| (trivia.span, trivia.value))
+    }
+
+    /// Refuses `name`, the name a `kind` of declaration takes at `span`, when it breaks the case spec section 24 gives
+    /// that kind, and gives whether it did. The PHP# checker warns on such a name, and a `.sharp` file holds no
+    /// warning, while renaming it changes the name PHP code reaches it by, so the PHP takes the new name first.
+    pub(crate) fn misnamed(&mut self, name: &[u8], span: Span, kind: &str, case: NameCase) -> bool {
+        let (holds, written, fixed) = match case {
+            NameCase::Pascal => (mago_casing::is_class_case(name), "Pascal case", mago_casing::to_class_case(name)),
+            NameCase::Camel => (mago_casing::is_camel_case(name), "camel case", mago_casing::to_camel_case(name)),
+            NameCase::UpperSnake => {
+                (mago_casing::is_constant_case(name), "upper snake case", mago_casing::to_constant_case(name))
+            }
+        };
+        if holds {
+            return false;
+        }
+        let (shown, fixed) = (String::from_utf8_lossy(name), String::from_utf8_lossy(&fixed));
+        self.refuse(
+            span,
+            format!("the {kind} `{shown}` has no PHP# name: PHP# names a {kind} in {written}, as `{fixed}` (spec section 24)"),
+        );
+
+        true
+    }
+
+    /// Refuses a member whose type `metadata` comes from a PHPDoc `tag` of the file that narrows the PHP# type the
+    /// member is written with, as `@return non-empty-string` narrows `string`, at `span`, and gives whether it did. The
+    /// analysis of a `.sharp` file reads no PHPDoc tag, so the narrowing would leave every check of the member's
+    /// callers.
+    pub(crate) fn narrowed_by_docblock(&mut self, metadata: Option<&TypeMetadata>, tag: &str, span: Span) -> bool {
+        // A tag of this file's own docblocks, which an extension host's refinement and an inherited type are not.
+        let written = |metadata: &&TypeMetadata| {
+            let at = metadata.span;
+            metadata.from_docblock
+                && self.input.program.trivia.iter().any(|trivia| {
+                    trivia.kind.is_docblock()
+                        && trivia.span.file_id == at.file_id
+                        && trivia.span.start.offset <= at.start.offset
+                        && at.end.offset <= trivia.span.end.offset
+                })
+        };
+        let Some(metadata) = metadata.filter(written) else {
+            return false;
+        };
+        let Some(narrower) = narrowing(&metadata.type_union) else {
+            return false;
+        };
+        // A type PHP# can't write refuses where the member writes it.
+        let Ok(general) = type_text(&metadata.type_union, self.input.codebase, &mut self.imports) else {
+            return false;
+        };
+        self.refuse(
+            span,
+            format!("`{tag}` gives `{narrower}`, which narrows the `{general}` PHP# writes, and the analysis of a `.sharp` file reads no PHPDoc, so converting would drop the narrowing"),
+        );
+
+        true
     }
 
     /// The offset `public ` goes at for a member whose modifiers name no visibility, which PHP makes public.

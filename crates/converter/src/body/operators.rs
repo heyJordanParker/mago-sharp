@@ -6,6 +6,7 @@ use mago_codex::ttype::TType;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::union::TUnion;
 use mago_span::HasSpan;
+use mago_span::Span;
 use mago_syntax::cst::Binary;
 use mago_syntax::cst::BinaryOperator;
 use mago_syntax::cst::Construct;
@@ -45,26 +46,14 @@ impl Converter<'_, '_> {
                 return self.refuse(expression.span(), "this cast has no PHP# form (spec section 24)");
             }
             // PHP's cast aliases are its `(int)`, `(float)` and `(string)` (spec section 24).
-            UnaryPrefixOperator::IntegerCast(span, _) => {
-                self.edits.replace(*span, "(int)");
-                self.untyped(operand, "a cast");
-                return;
+            UnaryPrefixOperator::IntCast(span, _) | UnaryPrefixOperator::IntegerCast(span, _) => {
+                return self.cast(expression, *span, operand, Kind::Int);
             }
-            UnaryPrefixOperator::DoubleCast(span, _) | UnaryPrefixOperator::RealCast(span, _) => {
-                self.edits.replace(*span, "(float)");
-                self.untyped(operand, "a cast");
-                return;
-            }
-            UnaryPrefixOperator::BinaryCast(span, _) => {
-                self.edits.replace(*span, "(string)");
-                self.untyped(operand, "a cast");
-                return;
-            }
-            UnaryPrefixOperator::IntCast(..)
-            | UnaryPrefixOperator::FloatCast(..)
-            | UnaryPrefixOperator::StringCast(..) => {
-                self.untyped(operand, "a cast");
-                return;
+            UnaryPrefixOperator::FloatCast(span, _)
+            | UnaryPrefixOperator::DoubleCast(span, _)
+            | UnaryPrefixOperator::RealCast(span, _) => return self.cast(expression, *span, operand, Kind::Float),
+            UnaryPrefixOperator::StringCast(span, _) | UnaryPrefixOperator::BinaryCast(span, _) => {
+                return self.cast(expression, *span, operand, Kind::String);
             }
             UnaryPrefixOperator::Not(_) => {
                 // `!isset(…)` and `!empty(…)` are the tests of the opposite, since `!` binds tighter than `!=`.
@@ -110,6 +99,32 @@ impl Converter<'_, '_> {
             _ => {}
         }
         self.expression(operand, None);
+    }
+
+    /// A cast to `kind`, written at `span`, of `operand`. A PHP# cast converts between `int` and `float`, and `(string)`
+    /// writes a number as text (spec section 24), so a cast of a number keeps its form, a PHP alias of it becoming it,
+    /// and a cast of a value that already has `kind` changes nothing, so the value stands alone. PHP's cast of any
+    /// other value, a string it parses, a `bool` or an array, has no PHP# form.
+    fn cast(&mut self, expression: &Expression<'_>, span: Span, operand: &Expression<'_>, kind: Kind) {
+        let written = match kind {
+            Kind::Int => "(int)",
+            Kind::Float => "(float)",
+            _ => "(string)",
+        };
+        if self.untyped(operand, "a cast") {
+            return;
+        }
+        if self.is(operand, &[kind]) {
+            return self.edits.delete(expression.span().start.offset, operand.span().start.offset);
+        }
+        if !self.is(operand, &[Kind::Int, Kind::Float]) {
+            let shown = self.shown(operand);
+            return self.refuse(
+                expression.span(),
+                format!("`{written}` of `{shown}` has no PHP# form: a PHP# cast converts a number, and `(string)` writes one as text (spec section 24)"),
+            );
+        }
+        self.edits.replace(span, written);
     }
 
     pub(super) fn binary(&mut self, expression: &Expression<'_>, binary: &Binary<'_>) {

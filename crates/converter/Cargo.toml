@@ -15,6 +15,7 @@ workspace = true
 [dependencies]
 mago-allocator = { workspace = true }
 mago-analyzer = { workspace = true }
+mago-casing = { workspace = true }
 mago-codex = { workspace = true }
 mago-database = { workspace = true }
 mago-names = { workspace = true }

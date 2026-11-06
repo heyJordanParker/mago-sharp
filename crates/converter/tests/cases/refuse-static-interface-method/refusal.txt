@@ -1,0 +1,1 @@
+11:28: `limit` is a static method of an interface, which has no PHP# form: a PHP# interface declares instance members (spec section 22)
