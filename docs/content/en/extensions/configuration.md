@@ -27,9 +27,9 @@ stderr-tail-size = 65536
 | Option | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
 | `enabled` | boolean | `true` | Whether Mago starts this host. A disabled host may omit `command`. |
-| `command` | string list | `[]` | Executable followed by literal arguments. No shell parsing is performed. Required when enabled. |
+| `command` | string list | `[]` | Executable followed by literal arguments. No shell parsing is performed. Required when enabled. The program reads a relative argument, such as its script, from `working-directory`, so an inherited host's script resolves from the directory of the file `--config` names, not from the file `extends` names. With `--config /tmp/x.toml` and `extends = "/app/mago.toml"`, the inherited `command = ["php", "tools/mago/worker.php"]` runs in `/tmp` and fails with `Could not open input file: tools/mago/worker.php`. |
 | `workers` | non-negative integer | `0` | `0` selects an adaptive pool with Mago's thread count as its ceiling. A positive value starts exactly that many processes. |
-| `working-directory` | path | config directory | Working directory inherited by every worker process. |
+| `working-directory` | path | config directory | Working directory inherited by every worker process. The default, and a relative path, resolve from the directory of the file `--config` names, for an inherited host too. With `--config /tmp/x.toml` and `extends = "/app/mago.toml"`, the hosts of `/app/mago.toml` run in `/tmp`: give `/tmp/x.toml` its own `working-directory = "/app"` for each host it inherits, or keep it beside `/app/mago.toml`. |
 | `environment` | string map | `{}` | Variables added to, or replacing values in, the worker environment. |
 | `inherit-environment` | boolean | `true` | Whether workers inherit Mago's process environment before `environment` is applied. |
 | `maximum-payload-size` | positive integer | `67108864` | Maximum payload bytes accepted in one protocol frame. The maximum representable value is `4294967295`. |

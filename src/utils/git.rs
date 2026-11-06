@@ -158,11 +158,25 @@ where
 }
 
 /// The files under `workspace` git holds as they are, each relative to `workspace`: in the last commit, with no change
-/// since, staged or not. None outside a git repository, or in one with no commit.
+/// since, staged or not. None in a repository with no commit.
+///
+/// # Errors
+///
+/// Returns [`Error::RunningGit`] when git can't start, and [`Error::GitFailed`] with git's reason when it can't read
+/// the repository: outside one, or in a linked worktree whose git folder isn't there, as in a container that mounts
+/// the worktree alone.
 pub fn committed_files(workspace: &Path) -> Result<HashSet<PathBuf>, Error> {
-    if !is_git_repository(workspace) {
+    // With `--verify --quiet`, a `HEAD` that names no commit fails with nothing printed, and a repository git can't
+    // read fails with git's reason.
+    let head = Command::new("git")
+        .args(["rev-parse", "--verify", "--quiet", "HEAD"])
+        .current_dir(workspace)
+        .output()
+        .map_err(|source| Error::RunningGit { command: "rev-parse", source })?;
+    if !head.status.success() && head.stderr.is_empty() {
         return Ok(HashSet::new());
     }
+    succeeded("rev-parse", head)?;
     let paths = |output: Output| -> HashSet<PathBuf> {
         output
             .stdout
@@ -171,16 +185,10 @@ pub fn committed_files(workspace: &Path) -> Result<HashSet<PathBuf>, Error> {
             .map(|path| PathBuf::from(String::from_utf8_lossy(path).as_ref()))
             .collect()
     };
-    // A repository with no commit has no `HEAD` to list.
-    let listed = Command::new("git")
-        .args(["ls-tree", "-r", "-z", "--name-only", "HEAD"])
-        .current_dir(workspace)
-        .output()
-        .ok()
-        .filter(|output| output.status.success());
-    let Some(listed) = listed else {
-        return Ok(HashSet::new());
-    };
+    let listed = run_git(
+        "ls-tree",
+        Command::new("git").args(["ls-tree", "-r", "-z", "--name-only", "HEAD"]).current_dir(workspace),
+    )?;
     let changed = run_git(
         "diff",
         Command::new("git").args(["diff", "-z", "--name-only", "--relative", "HEAD"]).current_dir(workspace),
@@ -570,7 +578,6 @@ mod tests {
     fn the_committed_files_are_those_of_the_last_commit_with_no_change_since() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path();
-        assert!(committed_files(root).unwrap().is_empty());
         for name in ["Order.php", "Changed.php", "Staged.php"] {
             std::fs::write(root.join(name), "<?php\n").unwrap();
         }
