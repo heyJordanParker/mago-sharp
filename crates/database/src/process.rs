@@ -32,8 +32,10 @@ pub fn spawn(command: &mut Command) -> io::Result<Child> {
     command.spawn()
 }
 
-/// Runs `command` to its end and returns what it wrote, as `Command::output` does: its stdin is empty, and its stdout
-/// and stderr are captured.
+/// Runs `command` to its end and returns what it wrote, as `Command::output` does.
+///
+/// Its stdin is empty, and its stdout and stderr are captured, even where `command` set them otherwise, which
+/// `Command::output` would keep.
 ///
 /// # Errors
 ///
