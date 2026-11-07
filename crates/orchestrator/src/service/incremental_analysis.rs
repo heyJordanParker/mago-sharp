@@ -576,6 +576,15 @@ impl IncrementalAnalysisService {
             .iter_mut()
             .filter_map(|(file, _, _, codebase_scan, _)| codebase_scan.take().map(|scan| (file.id, scan)))
             .collect();
+        resolve_member_reads(self.codebase_scan_files.values_mut(), || {
+            let mut scan = merged_codebase.clone();
+            for (_, _, metadata, _, _) in &per_file_results {
+                scan.extend(metadata.clone());
+            }
+
+            scan
+        })
+        .map_err(mago_analyzer::error::AnalysisError::from)?;
         let refinements = self
             .plugin_registry
             .run_external_codebase_scan(self.codebase_scan_files.values().cloned().collect())
@@ -876,10 +885,28 @@ impl IncrementalAnalysisService {
             }
             new_file_scans.push((file_id, metadata));
         }
-        if scan_state_changed {
-            // Every selected file is rescanned so workers keep complete state, but refinements are
-            // installed only into files that changed: an unchanged file's refinement is already part
-            // of the merged codebase, and a refinement reads nothing outside its own file.
+        // Every selected file is rescanned so workers keep complete state, but refinements are installed only into files
+        // that changed: an unchanged file's refinement is already part of the merged codebase, a refinement reads nothing
+        // outside its own file, and a PHP# member read in an attribute resolves against the whole scan. So an unchanged
+        // file's payload stays as it was, unless its attributes hold a member read: that one is resolved again against
+        // the codebase with the changed files' scans in place of what they declared, and a payload it changes is a
+        // change of the scan's state too.
+        let changed: HashSet<FileId> = new_file_scans.iter().map(|(file_id, _)| *file_id).collect();
+        let member_reads_changed = resolve_member_reads(self.codebase_scan_files.values_mut(), || {
+            let mut scan = self.codebase.clone();
+            for (file_id, state) in &self.file_states {
+                if changed.contains(file_id) || !current_file_ids.contains(file_id) {
+                    scan.remove_entries_by_keys(&state.entry_keys);
+                }
+            }
+            for (_, metadata) in &new_file_scans {
+                scan.extend(metadata.clone());
+            }
+
+            scan
+        })
+        .map_err(mago_analyzer::error::AnalysisError::from)?;
+        if scan_state_changed || member_reads_changed {
             let refinements = self
                 .plugin_registry
                 .run_external_codebase_scan(self.codebase_scan_files.values().cloned().collect())
@@ -2193,6 +2220,24 @@ fn scan_file(
     let codebase_scan = plan.map(|plan| plan.capture(file, &metadata)).transpose()?.flatten();
 
     Ok((metadata, codebase_scan, resolved_names.namespace_classes().map(mago_word::word).collect()))
+}
+
+/// Writes again the payload of each selected file whose attributes hold a PHP# member read, against the merged scan of
+/// every file, which `merged_scan` builds only when one of them does: only the whole scan tells a class constant from a
+/// namespace's constant or an enum's case object, spec section 23. Returns whether a payload changed.
+pub(crate) fn resolve_member_reads<'files>(
+    files: impl IntoIterator<Item = &'files mut CodebaseScanFile>,
+    merged_scan: impl FnOnce() -> CodebaseMetadata,
+) -> Result<bool, ExternalAnalyzerError> {
+    let files: Vec<&mut CodebaseScanFile> = files.into_iter().collect();
+    if !files.iter().any(|file| file.holds_member_reads()) {
+        return Ok(false);
+    }
+
+    let mut scan = merged_scan();
+    scan.populate_folder_namespaces();
+    let scan = Arc::new(scan);
+    files.into_iter().try_fold(false, |changed, file| Ok(file.resolve_member_reads(&scan)? || changed))
 }
 
 /// The names of the extension members `metadata` declares that take their receiver by `ref`, spec section 26, and so

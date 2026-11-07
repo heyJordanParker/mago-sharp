@@ -35,6 +35,7 @@ use mago_word::WordSet;
 use crate::error::OrchestratorError;
 use crate::service::body_return::resolve_body_returns;
 use crate::service::incremental_analysis::receiver_changing_members;
+use crate::service::incremental_analysis::resolve_member_reads;
 use crate::service::issue_reconciliation::DeferredIssueReconciler;
 
 pub struct AnalysisService {
@@ -118,7 +119,7 @@ impl AnalysisService {
         issues.extend(semantic_issues.iter().cloned());
 
         let mut user_codebase = scan_program(&arena, &file, program, &resolved_names, self.settings.version);
-        let codebase_scan = self
+        let mut codebase_scan = self
             .plugin_registry
             .external_codebase_scan_plan()
             .map_err(AnalysisError::from)?
@@ -126,6 +127,13 @@ impl AnalysisService {
             .transpose()
             .map_err(AnalysisError::from)?
             .flatten();
+        resolve_member_reads(codebase_scan.as_mut(), || {
+            let mut scan = self.codebase.clone();
+            scan.extend(user_codebase.clone());
+
+            scan
+        })
+        .map_err(AnalysisError::from)?;
 
         self.plugin_registry.prepare_external_analyzer().map_err(AnalysisError::from)?;
         let refinements = self

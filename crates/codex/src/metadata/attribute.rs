@@ -31,6 +31,9 @@ pub enum ConstantExpression {
     ClassConstant(Word, Word),
     Constant(Word),
     New(Word, Vec<(Option<Word>, ConstantExpression)>),
+    /// A PHP# `X.member` with the full name `X` resolves to, at its span: a class constant, an enum case, a case object
+    /// or a namespace's constant, which only the whole codebase tells apart, spec section 23.
+    MemberRead(Word, Word, Span),
     Unsupported(Span),
 }
 

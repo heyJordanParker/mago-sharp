@@ -713,8 +713,9 @@ impl CodebaseMetadata {
         Some((self.folder(class_like.span.file_id)?, word(&name[..separator])))
     }
 
-    /// Gathers the namespaces of the class-likes in each folder [`Self::folder_namespaces`] answers for.
-    pub(crate) fn populate_folder_namespaces(&mut self) {
+    /// Gathers the namespaces of the class-likes in each folder [`Self::folder_namespaces`] answers for. Population
+    /// gathers them, and so does a reader of the merged scan before it, as a PHP# member read's resolution does.
+    pub fn populate_folder_namespaces(&mut self) {
         let mut folder_namespaces: HashMap<Word, Vec<Word>> = HashMap::default();
         for (folder, namespace) in self.class_likes.values().filter_map(|class_like| self.folder_namespace(class_like))
         {
