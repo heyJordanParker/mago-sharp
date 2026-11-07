@@ -29,6 +29,7 @@ use mago_syntax::token::is_sharp_keyword;
 
 use crate::body::Captures;
 use crate::body::Locals;
+use crate::declaration::NameCase;
 use crate::edits::Edits;
 use crate::types::Imports;
 use crate::types::type_text;
@@ -140,6 +141,8 @@ struct Method {
     storage: Option<Vec<u8>>,
     /// What the lambda whose body this is captures, or `None` in a method or an accessor (spec section 14.2).
     captures: Option<Captures>,
+    /// The analysis's type of each value the body returns, `None` for a `return` with no value or of no known type.
+    returned: Vec<Option<TUnion>>,
 }
 
 struct Converter<'input, 'arena> {
@@ -299,6 +302,9 @@ impl<'input> Converter<'input, '_> {
                     return;
                 };
                 if let Some(name) = &namespace.name {
+                    for part in name.value().split(|byte| *byte == b'\\') {
+                        self.misnamed(part, name.span(), "namespace", NameCase::Pascal);
+                    }
                     let written = String::from_utf8_lossy(name.value()).into_owned();
                     self.edits.replace(name.span(), written.replace('\\', "."));
                     self.imports = Imports::new(&written);

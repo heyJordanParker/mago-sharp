@@ -12,7 +12,7 @@ final class Tally
     /** @var list<int> */
     private array $counts = [];
 
-    /** @var array<string, int> */
+    /** @var array<int, int> */
     private array $prices = [];
 
     public function total(): int
@@ -24,8 +24,8 @@ final class Tally
         foreach ($this->prices as $price) {
             $total += $price;
         }
-        foreach ($this->prices as $name => $price) {
-            if ($name === 'free') continue;
+        foreach ($this->prices as $id => $price) {
+            if ($id === 0) continue;
             $total += $price;
         }
         foreach ($this->counts as $index => $count) {
@@ -53,8 +53,8 @@ final class Tally
         return $steps;
     }
 
-    public function drop(string $name): void
+    public function drop(int $id): void
     {
-        unset($this->prices[$name]);
+        unset($this->prices[$id]);
     }
 }

@@ -1,0 +1,16 @@
+namespace App;
+
+// `$order::class` is the class of the object, which PHP# writes `Class.of(order)`, since `typeof` takes a type only
+// (spec section 25). The engine gives both the same class name.
+public final class Ledger
+{
+    public string kind(Order order)
+    {
+        return Class.of(order);
+    }
+
+    public string own()
+    {
+        return typeof(Ledger);
+    }
+}

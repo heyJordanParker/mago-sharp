@@ -168,8 +168,6 @@ mago-composer = { path = "crates/composer", version = "0.6.3" }
 mago-text-edit = { path = "crates/text-edit", version = "0.6.3" }
 mago-formatter = { path = "crates/formatter", version = "0.6.3" }
 mago-fingerprint = { path = "crates/fingerprint", version = "0.6.3" }
-mago-flags = { path = "crates/flags", version = "0.6.3" }
-mago-hir = { path = "crates/hir", version = "0.6.3" }
 mago-word = { path = "crates/word", version = "0.6.3" }
 mago-bytes = { path = "crates/bytes", version = "0.6.3" }
 mago-linter = { path = "crates/linter", version = "0.6.3" }
@@ -285,6 +283,7 @@ mago-sharp-bridge = { workspace = true }
 mago-converter = { workspace = true }
 mago-sharp-lean = { workspace = true }
 mago-extension = { workspace = true }
+mago-build-id = { workspace = true }
 serde = { workspace = true }
 clap = { workspace = true }
 clap_complete = { workspace = true }

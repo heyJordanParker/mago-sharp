@@ -33,23 +33,33 @@ pub mod version;
 pub(crate) fn write_by_rename(path: &Path, bytes: &[u8]) -> Result<(), DatabaseError> {
     let folder = path.parent().unwrap_or(path);
     std::fs::create_dir_all(folder).map_err(|error| DatabaseError::io(IOAction::CreateFolder, folder, error))?;
-    let failed = |error: std::io::Error| DatabaseError::io(IOAction::WriteFile, path, error);
+
+    temp_file_in(folder)
+        .and_then(|file| rename_into(path, file, bytes))
+        .map_err(|error| DatabaseError::io(IOAction::WriteFile, path, error))
+}
+
+/// A new temp file in `folder`, with the mode any new file gets, for [`rename_into`].
+pub(crate) fn temp_file_in(folder: &Path) -> std::io::Result<tempfile::NamedTempFile> {
     let mut builder = tempfile::Builder::new();
     #[cfg(unix)]
     builder.permissions(std::os::unix::fs::PermissionsExt::from_mode(0o666));
-    let mut file = builder.tempfile_in(folder).map_err(failed)?;
-    file.write_all(bytes).map_err(failed)?;
-    let (file, written) = file.keep().map_err(|error| failed(error.error))?;
+
+    builder.tempfile_in(folder)
+}
+
+/// Writes `bytes` to `file`, a temp file in `path`'s folder, and renames it over `path`, as [`write_by_rename`] says.
+pub(crate) fn rename_into(path: &Path, mut file: tempfile::NamedTempFile, bytes: &[u8]) -> std::io::Result<()> {
+    file.write_all(bytes)?;
+    let (file, written) = file.keep().map_err(|error| error.error)?;
     drop(file);
 
     // `NamedTempFile::persist` renames with `MoveFileExW` alone, which fails on Windows while a reader holds the old
     // file open. `std::fs::rename` then falls back to a POSIX rename, which replaces it when every reader opened it with
     // `FILE_SHARE_DELETE`, as Rust's `File::open` does, and leaves each reader the old file.
-    std::fs::rename(&written, path)
-        .inspect_err(|_| {
-            let _ = std::fs::remove_file(&written);
-        })
-        .map_err(failed)
+    std::fs::rename(&written, path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&written);
+    })
 }
 
 /// Determines whether colors should be used on stdout, by the rule [`ReportingColorChoice::should_use_colors`] holds.

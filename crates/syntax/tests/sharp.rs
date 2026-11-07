@@ -1491,6 +1491,47 @@ fn an_intersection_binds_tighter_than_a_union() {
     assert_eq!(type_grouping(PHP, hint.expect("a type")), "(A & (B | C))");
 }
 
+/// The shape of the type of each method's or function's first parameter in `code`, in source order.
+fn parameter_type_groupings(name: &'static str, code: &'static str) -> Vec<String> {
+    let arena = LocalArena::new();
+    let program = parse(&arena, name, code);
+
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+    Node::Program(program)
+        .filter_map(|node| match node {
+            Node::Method(method) => method.parameter_list.parameters.first(),
+            Node::Function(function) => function.parameter_list.parameters.first(),
+            _ => None,
+        })
+        .into_iter()
+        .map(|parameter| type_grouping(code, parameter.hint.as_ref().expect("a type")))
+        .collect()
+}
+
+/// A chain that mixes `|` and `&` nests each intersection inside the union in PHP#, wherever in the chain it stands,
+/// and nests every type to the right of an `&` inside the intersection in PHP.
+#[test]
+fn a_chain_of_unions_and_intersections_nests_each_intersection_inside_the_union() {
+    const CODE: &str = "public class Types\n{\n    public void a(A | B & C | D value) { }\n    public void b(A & B | C & D | E value) { }\n}\n";
+    const PHP: &str = "<?php\n\nfunction a(A|B&C|D $value) {}\n\nfunction b(A&B|C&D|E $value) {}\n";
+
+    assert_eq!(parameter_type_groupings("src/Types.sharp", CODE), ["(A | ((B & C) | D))", "((A & B) | ((C & D) | E))"]);
+    assert_eq!(parameter_type_groupings("src/types.php", PHP), ["(A | (B & (C | D)))", "(A & (B | (C & (D | E))))"]);
+}
+
+/// A union in parentheses stays one type of the intersection around it, on either side of the `&` and before a `|`.
+#[test]
+fn an_intersection_keeps_a_union_in_parentheses_whole() {
+    const CODE: &str = "public class Types\n{\n    public void a((A | B) & C value) { }\n    public void b(C & (A | B) value) { }\n    public void c((A | B) & C | D value) { }\n}\n";
+    const PHP: &str = "<?php\n\nfunction a((A|B)&C $value) {}\n\nfunction b(C&(A|B) $value) {}\n";
+
+    assert_eq!(
+        parameter_type_groupings("src/Types.sharp", CODE),
+        ["([(A | B)] & C)", "(C & [(A | B)])", "(([(A | B)] & C) | D)"]
+    );
+    assert_eq!(parameter_type_groupings("src/types.php", PHP), ["([(A | B)] & C)", "(C & [(A | B)])"]);
+}
+
 /// Spec section 11 writes a method's type parameters after its name, as C# does.
 #[test]
 fn a_method_declares_type_parameters_after_its_name() {
@@ -3891,6 +3932,35 @@ fn a_php_chain_of_10_000_terms_has_a_span_and_a_constness_on_a_small_stack() {
         .expect("the spans and constness are computed");
 
     assert_eq!(values, [(sum_span, true), (chain_span, false)]);
+}
+
+/// PHP has no limit on the types of a union, so a PHP file keeps a union of 100,000 types, and a search of the whole
+/// tree reaches every one of them.
+#[test]
+fn a_php_file_keeps_a_union_of_100_000_types() {
+    let union = (0..100_000).map(|index| format!("A{index}")).collect::<Vec<_>>().join("|");
+    let code = format!("<?php\nnamespace App;\n\nfunction run({union} $value): void {{}}\n");
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/report.php", Box::leak(code.into_boxed_str()));
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+
+    let unions = Node::Program(program).filter_map(|node| matches!(node, Node::UnionHint(_)).then_some(()));
+    assert_eq!(unions.len(), 99_999);
+}
+
+/// A search of a tree yields each node after the nodes below it, and the children of a node in source order.
+#[test]
+fn a_search_yields_children_before_their_parent_and_siblings_in_order() {
+    const CODE: &str = "<?php\n\n$a + $b * $c;\n$d;\n";
+    let arena = LocalArena::new();
+    let program = parse(&arena, "src/order.php", CODE);
+    assert!(program.errors.is_empty(), "{:#?}", program.errors);
+
+    let expressions: Vec<&str> = Node::Program(program).filter_map(|node| match node {
+        Node::Expression(expression) => Some(source(CODE, *expression)),
+        _ => None,
+    });
+    assert_eq!(expressions, ["$a", "$b", "$c", "$b * $c", "$a + $b * $c", "$d"]);
 }
 
 /// The source of every attribute list under `node`, in source order.

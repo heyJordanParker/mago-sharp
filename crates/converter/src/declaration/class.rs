@@ -3,6 +3,7 @@
 
 use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_span::HasSpan;
+use mago_syntax::cst::AttributeList;
 use mago_syntax::cst::ClassLikeMember;
 use mago_syntax::cst::EnumCaseItem;
 use mago_syntax::cst::Extends;
@@ -18,6 +19,7 @@ use mago_word::ascii_lowercase_word;
 use crate::Class;
 use crate::Converter;
 
+use super::NameCase;
 use super::constructor::set_by_constructor;
 use super::has;
 
@@ -96,6 +98,14 @@ impl<'input> Converter<'input, '_> {
         if metadata.is_none() {
             self.refuse(name.span, "the analysis holds no class of this name");
         }
+        // A `.sharp` file is named after its type (spec section 27), and `Module.sharp` holds a folder's module.
+        if name.value == b"Module" {
+            self.refuse(
+                name.span,
+                "a class named `Module` would be `Module.sharp`, which holds only its folder's module (spec section 32)",
+            );
+        }
+        self.misnamed(name.value, name.span, "type", NameCase::Pascal);
 
         metadata
     }
@@ -182,6 +192,28 @@ impl<'input> Converter<'input, '_> {
         traits
     }
 
+    /// Refuses each attribute in `lists`, on an enum case, whose class doesn't target a class constant, which PHP reads
+    /// an enum case as. PHP refuses one only when reflection creates the attribute, and the PHP# checker refuses it where
+    /// it is written (spec section 1).
+    fn case_attributes(&mut self, lists: &Sequence<'_, AttributeList<'_>>) {
+        for attribute in lists.iter().flat_map(|list| list.attributes.iter()) {
+            let class = self.input.codebase.get_class_like(self.input.names.get(&attribute.name));
+            let Some(flags) =
+                class.and_then(|class| class.attribute_flags).filter(|flags| !flags.targets_class_constant())
+            else {
+                continue;
+            };
+            let shown = String::from_utf8_lossy(attribute.name.value()).into_owned();
+            self.refuse(
+                attribute.name.span(),
+                format!(
+                    "`{shown}` goes on {}, and an enum case is a class constant to PHP, which PHP refuses only once reflection creates the attribute and the PHP# checker refuses where it is written (spec section 1)",
+                    flags.get_target_names().join(" and ")
+                ),
+            );
+        }
+    }
+
     /// Each member of the class-like `metadata`, named `name`.
     fn members(
         &mut self,
@@ -203,6 +235,9 @@ impl<'input> Converter<'input, '_> {
                 }
                 ClassLikeMember::Constant(constant) => self.class_constant(constant),
                 ClassLikeMember::EnumCase(case) => {
+                    let name = case.item.name();
+                    self.misnamed(name.value, name.span, "enum case", NameCase::Pascal);
+                    self.case_attributes(&case.attribute_lists);
                     self.attributes(&case.attribute_lists);
                     if let EnumCaseItem::Backed(item) = &case.item {
                         self.expression(item.value, None);

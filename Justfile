@@ -104,8 +104,6 @@ publish:
     cargo publish -p mago-syntax-core
     cargo publish -p mago-syntax
     cargo publish -p mago-phpdoc-syntax
-    cargo publish -p mago-flags
-    cargo publish -p mago-hir
     cargo publish -p mago-collector
     cargo publish -p mago-composer
     cargo publish -p mago-formatter

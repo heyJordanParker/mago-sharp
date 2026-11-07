@@ -1,0 +1,49 @@
+namespace App;
+
+// A local that starts as `[]` or `null` takes its type from the declared types of the values written to it later:
+// `List<V>` when the body only appends to it, `Map<K, V>` when it only writes it by key, and `T?` after `null`. PHP#
+// declares it first in the body (spec sections 2, 3 and 12, decision 2).
+public final class Basket
+{
+    public int upper(List<string> names)
+    {
+        List<string> found = [];
+        for (const name of names) {
+            found.add(name);
+        }
+
+        return found.count();
+    }
+
+    public Map<string, int> prices(string sku, int price)
+    {
+        Map<string, int> prices = [:];
+        prices[sku] = price;
+
+        return prices;
+    }
+
+    public string last(bool wide, string name)
+    {
+        string? chosen = null;
+        if (wide) {
+            chosen = name;
+        }
+
+        return chosen ?? '';
+    }
+
+    // One first assigned inside a block is declared first in the body, where each pass of the loop assigns it.
+    public int longest(List<string> names)
+    {
+        List<string> letters = [];
+        let most = 0;
+        for (const name of names) {
+            letters = [];
+            letters.add(name);
+            most = letters.count();
+        }
+
+        return most;
+    }
+}

@@ -1,9 +1,11 @@
 //! Runs `mago compile` on a project that mixes PHP# and PHP files, with a PHP# package in `vendor/`.
 
+use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 use std::process::Output;
+use std::process::Stdio;
 
 use mago_database::process;
 use mago_sharp_bridge::unit::Library;
@@ -105,7 +107,12 @@ fn compile_writes_each_accepted_file_into_the_sharp_folder_at_its_source_path() 
     assert!(output.status.success(), "{}", printed(&output));
     assert_eq!(
         files_under(&root.join(".sharp")),
-        [Path::new("app/Order.sharpc"), Path::new("listeners.php"), Path::new("vendor/acme/money/src/Money.sharpc")]
+        [
+            Path::new("app/Order.sharpc"),
+            Path::new("inputs.json"),
+            Path::new("listeners.php"),
+            Path::new("vendor/acme/money/src/Money.sharpc")
+        ]
     );
     for (name, source) in [("app/Order.sharp", ORDER), (MONEY_PATH, MONEY)] {
         let bytes = std::fs::read(compiled(root, name)).unwrap();
@@ -508,6 +515,37 @@ fn a_host_sees_each_php_sharp_file_compiled_from_its_current_source() {
     assert!(analyzed.status.success(), "{}", printed(&analyzed));
     assert_eq!(std::fs::read_to_string(root.join("host.log")).unwrap(), "first\nsecond\n");
     assert_eq!(std::fs::read(compiled(root, "app/Word.sharp")).unwrap(), compiled_by_compile);
+}
+
+/// A host names none of what it reads, so a compile with a host enabled runs every time.
+#[test]
+fn a_compile_with_a_host_enabled_runs_every_time() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if !common::php_sdk_is_available(repository, "the compile with a host test") {
+        return;
+    }
+    let directory = project(ORDER, MONEY);
+    let root = directory.path();
+    write(
+        root,
+        "app/Word.sharp",
+        "namespace App;\n\npublic class Word\n{\n    public static string text() => \"first\";\n}\n",
+    );
+    write(root, "tools/host.php", HOST_READING_THE_COMPILED_FILE);
+    write(
+        root,
+        "mago.toml",
+        &format!(
+            "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[extension-hosts.reader]\nworkers = 1\ncommand = [\"php\", \"tools/host.php\", {:?}]\n",
+            repository.join("vendor/autoload.php").display().to_string()
+        ),
+    );
+    compile_succeeds(root);
+    let written = compiled_at(root, "app/Order.sharp");
+
+    compile_succeeds(root);
+
+    assert_ne!(compiled_at(root, "app/Order.sharp"), written);
 }
 
 /// An extension host whose linter rule appends the word the compiled `app/Word.sharp` holds to `host.log` as it lints
@@ -1058,7 +1096,7 @@ fn compile_deletes_the_compiled_file_of_a_renamed_or_removed_source() {
     compile_succeeds(root);
     assert_eq!(
         files_under(&root.join(".sharp")),
-        [Path::new("listeners.php"), Path::new("vendor/acme/money/src/Money.sharpc")]
+        [Path::new("inputs.json"), Path::new("listeners.php"), Path::new("vendor/acme/money/src/Money.sharpc")]
     );
 }
 
@@ -1669,6 +1707,346 @@ fn a_compiled_file_goes_stale_only_when_a_file_it_reads_changes() {
     }
 }
 
+/// The modification time of the compiled file of `name`, which every compile that runs writes anew.
+fn compiled_at(root: &Path, name: &str) -> std::time::SystemTime {
+    std::fs::metadata(compiled(root, name)).unwrap().modified().unwrap()
+}
+
+/// A compile with nothing to do analyzes nothing and writes nothing, and exits and prints as the compile before it did.
+#[test]
+fn a_compile_with_nothing_to_do_writes_nothing_and_prints_what_the_last_compile_printed() {
+    let directory = project(ORDER, MONEY);
+    let root = directory.path();
+    let full = compile(root);
+    assert!(full.status.success(), "{}", printed(&full));
+    let written = compiled_at(root, "app/Order.sharp");
+
+    let nothing_to_do = compile(root);
+
+    assert_eq!(nothing_to_do.status.code(), full.status.code());
+    assert_eq!(nothing_to_do.stdout, full.stdout);
+    assert_eq!(logged(&nothing_to_do), logged(&full));
+    assert_eq!(compiled_at(root, "app/Order.sharp"), written, "the compile wrote nothing");
+}
+
+/// Each message `output` logged, without the time, level, thread and module a debug build's log puts before it.
+fn logged(output: &Output) -> Vec<String> {
+    String::from_utf8_lossy(&output.stderr)
+        .lines()
+        .map(|line| line.split_once(": ").map_or(line, |(_, message)| message).to_owned())
+        .collect()
+}
+
+/// `Acme\Rate` in `vendor/`, whose `percent()` returns `returned`.
+fn rate(returned: &str) -> String {
+    format!(
+        "<?php\n\nnamespace Acme;\n\nfinal class Rate\n{{\n    public static function percent(): {returned}\n    {{\n        return 5;\n    }}\n}}\n"
+    )
+}
+
+/// A `vendor/` file is no input of the compiled file of a PHP# file that calls it, since `composer.lock` stands for
+/// it, so the compiled file stays current after an edit of it the PHP# file no longer compiles against.
+#[test]
+fn compile_refuses_a_php_sharp_file_after_an_edit_of_the_vendor_file_it_calls() {
+    let directory = project(ORDER, MONEY);
+    let root = directory.path();
+    write(root, "vendor/acme/rate/src/Rate.php", &rate("int"));
+    write(
+        root,
+        "app/Paced.sharp",
+        "namespace App;\n\nimport Acme.Rate;\n\npublic class Paced\n{\n    public int percent() => Rate.percent();\n}\n",
+    );
+    compile_succeeds(root);
+
+    write(root, "vendor/acme/rate/src/Rate.php", &rate("string"));
+    let output = compile(root);
+
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    assert!(printed(&output).contains("app/Paced.sharp"), "{}", printed(&output));
+    assert!(!compiled(root, "app/Paced.sharp").exists());
+}
+
+/// A plain PHP class that implements a PHP# interface is no input of any compiled file, so every compiled file stays
+/// current when the class changes or a new one appears, though the compile refuses it.
+#[test]
+fn compile_refuses_a_plain_php_class_that_changed_or_appeared_since_the_last_compile() {
+    let directory = project(ORDER, MONEY);
+    let root = directory.path();
+    let bare = |returned: &str| {
+        format!(
+            "<?php\n\nnamespace App;\n\nclass Bare implements Keyed\n{{\n    use Keyed\\Defaults;\n\n    public function getKey(): {returned}\n    {{\n        return 7;\n    }}\n}}\n"
+        )
+    };
+    write(root, "app/Keyed.sharp", KEYED);
+    write(root, "app/Bare.php", &bare("int"));
+    compile_succeeds(root);
+
+    write(root, "app/Bare.php", &bare("int|string|null"));
+    let changed = compile(root);
+    write(root, "app/Bare.php", &bare("int"));
+    compile_succeeds(root);
+    write(root, "app/Other.php", "<?php\n\nnamespace App;\n\nclass Other implements Keyed\n{\n}\n");
+    let appeared = compile(root);
+
+    assert_eq!(changed.status.code(), Some(1), "{}", printed(&changed));
+    assert!(printed(&changed).contains("1 plain PHP file was refused"), "{}", printed(&changed));
+    assert_eq!(appeared.status.code(), Some(1), "{}", printed(&appeared));
+    assert!(
+        printed(&appeared).contains("`App\\Other` implements `App\\Keyed` without its default bodies"),
+        "{}",
+        printed(&appeared)
+    );
+}
+
+/// A `Module.sharp` at the root, outside the configured paths, is an input of each compiled file, which the engine
+/// reads, so one that appears makes the compile write each compiled file again.
+#[test]
+fn compile_writes_each_compiled_file_again_once_a_module_file_appears_at_the_root() {
+    let directory = project(ORDER, MONEY);
+    let root = directory.path();
+    compile_succeeds(root);
+    let written = compiled_at(root, "app/Order.sharp");
+
+    write(root, "Module.sharp", "module\n{\n}\n");
+    compile_succeeds(root);
+
+    assert_ne!(compiled_at(root, "app/Order.sharp"), written, "the compile ran");
+}
+
+/// The loader reads which folder `autoload-dev` maps from `composer.json`, so moving a folder there drops the PHP file
+/// beside each of its sources.
+#[test]
+fn compile_deletes_the_php_file_of_a_source_whose_folder_moved_to_autoload_dev() {
+    let directory = project(ORDER, MONEY);
+    let root = directory.path();
+    write(root, "composer.json", "{\"autoload\": {\"psr-4\": {\"App\\\\\": \"app/\"}}}\n");
+    compile_succeeds(root);
+    assert!(root.join("app/Order.php").exists());
+
+    write(root, "composer.json", "{\"autoload-dev\": {\"psr-4\": {\"App\\\\\": \"app/\"}}}\n");
+    compile_succeeds(root);
+
+    assert!(!root.join("app/Order.php").exists());
+}
+
+/// The deprecated `perform-heuristic-checks`, which serde never writes back, changes the analysis, so a change of it
+/// makes the compile run.
+#[test]
+fn compile_runs_again_after_a_change_of_perform_heuristic_checks() {
+    let directory = project(ORDER, MONEY);
+    let root = directory.path();
+    let configured = |checks: bool| {
+        format!(
+            "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n\n[analyzer]\nperform-heuristic-checks = {checks}\n"
+        )
+    };
+    write(root, "mago.toml", &configured(true));
+    compile_succeeds(root);
+    let written = compiled_at(root, "app/Order.sharp");
+
+    write(root, "mago.toml", &configured(false));
+    compile_succeeds(root);
+
+    assert_ne!(compiled_at(root, "app/Order.sharp"), written);
+}
+
+/// Another build of the checker lowers to other code, so a record another build wrote makes the compile run.
+#[test]
+fn compile_runs_again_after_another_build_of_the_checker_compiled() {
+    let directory = project(ORDER, MONEY);
+    let root = directory.path();
+    compile_succeeds(root);
+    let written = compiled_at(root, "app/Order.sharp");
+    let record = root.join(".sharp/inputs.json");
+    let mut inputs: serde_json::Value = serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
+    inputs["build"][0] = serde_json::json!(inputs["build"][0].as_u64().unwrap() ^ 1);
+    std::fs::write(&record, serde_json::to_vec(&inputs).unwrap()).unwrap();
+
+    compile_succeeds(root);
+
+    assert_ne!(compiled_at(root, "app/Order.sharp"), written);
+}
+
+#[test]
+fn compile_writes_a_deleted_compiled_file_again() {
+    let directory = project(ORDER, MONEY);
+    let root = directory.path();
+    compile_succeeds(root);
+
+    std::fs::remove_file(compiled(root, "app/Order.sharp")).unwrap();
+    compile_succeeds(root);
+
+    assert!(compiled(root, "app/Order.sharp").exists());
+}
+
+#[test]
+fn compile_reports_a_sharp_folder_that_appeared_inside_a_package() {
+    let directory = project(ORDER, MONEY);
+    let root = directory.path();
+    compile_succeeds(root);
+
+    std::fs::create_dir_all(root.join("vendor/acme/money/.sharp")).unwrap();
+    let output = compile(root);
+
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    assert!(printed(&output).contains("Delete vendor/acme/money/.sharp."), "{}", printed(&output));
+}
+
+/// A rewrite of the same size whose modification time is set back, as `touch -d` sets it, still changes the file's
+/// status change time, so the compile reads the new source.
+#[test]
+fn compile_reads_a_source_rewritten_at_the_same_size_with_its_modification_time_set_back() {
+    let directory = project(ORDER, MONEY);
+    let root = directory.path();
+    compile_succeeds(root);
+    let source = root.join("app/Order.sharp");
+    let modified = std::fs::metadata(&source).unwrap().modified().unwrap();
+    let rewritten = ORDER.replace("extra + 1", "extra + 2");
+    assert_eq!(rewritten.len(), ORDER.len());
+
+    write(root, "app/Order.sharp", &rewritten);
+    std::fs::File::options().write(true).open(&source).unwrap().set_modified(modified).unwrap();
+    assert_eq!(std::fs::metadata(&source).unwrap().modified().unwrap(), modified);
+    compile_succeeds(root);
+
+    let header = header(&std::fs::read(compiled(root, "app/Order.sharp")).unwrap()).unwrap();
+    assert_eq!(header.source_hash, source_hash(rewritten.as_bytes()));
+}
+
+/// A refused compile keeps no record, so the next compile refuses the file again.
+#[test]
+fn compile_refuses_a_file_again_after_a_refused_compile() {
+    let directory = project(BROKEN_ORDER, MONEY);
+    let root = directory.path();
+    let first = compile(root);
+    assert_eq!(first.status.code(), Some(1), "{}", printed(&first));
+    assert!(!root.join(".sharp/inputs.json").exists());
+
+    let second = compile(root);
+
+    assert_eq!(second.status.code(), Some(1), "{}", printed(&second));
+    assert!(printed(&second).contains("1 PHP# file was refused"), "{}", printed(&second));
+}
+
+/// A file someone writes over one the compile wrote, while the compile still runs, makes the compile keep no record,
+/// as a compile that ran at once does, so the next compile sees the file. `composer.lock` is a named pipe here, which
+/// holds the compile at its read of it, after it wrote `app/Order.php`, until the test wrote its own `app/Order.php`.
+#[cfg(unix)]
+#[test]
+fn compile_refuses_a_php_file_someone_wrote_over_its_own_while_it_ran() {
+    let directory = project(ORDER, MONEY);
+    let root = directory.path();
+    let lock = root.join("composer.lock");
+    std::fs::remove_file(&lock).unwrap();
+    assert!(process::status(Command::new("mkfifo").arg(&lock)).unwrap().success());
+    let running = process::spawn(command(root, "never").stdout(Stdio::piped()).stderr(Stdio::piped())).unwrap();
+
+    // The pipe opens once the compile opens it to read it.
+    let mut pipe = std::fs::OpenOptions::new().write(true).open(&lock).unwrap();
+    assert!(written_by_compile(&root.join("app/Order.php")));
+    write(root, "app/Order.php", "<?php\n\nnamespace App;\n\nfinal class Order {}\n");
+    pipe.write_all(b"{}\n").unwrap();
+    drop(pipe);
+    let swapped = running.wait_with_output().unwrap();
+    assert!(swapped.status.success(), "{}", printed(&swapped));
+    assert!(!root.join(".sharp/inputs.json").exists(), "the compile kept no record");
+    std::fs::remove_file(&lock).unwrap();
+    write(root, "composer.lock", "{}\n");
+
+    let output = compile(root);
+
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    assert!(
+        printed(&output).contains("app/Order.php and app/Order.sharp both name App.Order."),
+        "{}",
+        printed(&output)
+    );
+}
+
+/// Whether the PHP file at `path` is one the compile wrote, which loads its `.sharp` file through the engine.
+fn written_by_compile(path: &Path) -> bool {
+    std::fs::read_to_string(path).is_ok_and(|contents| contents.contains("needs the PHP# engine"))
+}
+
+/// The `.gitignore` the compile writes beside its PHP files is one of its outputs, so a compile writes it again once
+/// it is gone.
+#[test]
+fn compile_writes_its_gitignore_again_once_it_is_gone() {
+    let directory = project(ORDER, MONEY);
+    let root = directory.path();
+    compile_succeeds(root);
+    let gitignore = std::fs::read_to_string(root.join("app/.gitignore")).unwrap();
+
+    std::fs::remove_file(root.join("app/.gitignore")).unwrap();
+    compile_succeeds(root);
+
+    assert_eq!(std::fs::read_to_string(root.join("app/.gitignore")).unwrap(), gitignore);
+}
+
+/// A `.gitignore` someone else wrote beside the compile's PHP files is an input of the compile, so one that stops
+/// listing a PHP file makes the compile run and warn of it.
+#[test]
+fn compile_warns_once_a_gitignore_someone_else_wrote_stops_listing_its_php_file() {
+    let directory = project(ORDER, MONEY);
+    let root = directory.path();
+    write(root, "app/.gitignore", "/Order.php\n");
+    let listed = compile(root);
+    assert!(listed.status.success() && !printed(&listed).contains("doesn't list"), "{}", printed(&listed));
+
+    write(root, "app/.gitignore", "/Other.php\n");
+    let output = compile(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(printed(&output).contains("app/.gitignore doesn't list /Order.php"), "{}", printed(&output));
+}
+
+/// The walk follows a link as the loader does, and the compile writes the compiled file at the source's real path, so
+/// a link someone points at an identical copy elsewhere, as `ln -sfn` does, makes the compile run, though no file's
+/// bytes changed. A module file declares no type, so no PHP file the compile wrote sits behind the link.
+#[cfg(unix)]
+#[test]
+fn compile_writes_the_compiled_file_at_the_new_target_of_a_link_to_an_identical_copy() {
+    let directory = project(ORDER, MONEY);
+    let root = std::fs::canonicalize(directory.path()).unwrap();
+    write(&root, "shared/one/Module.sharp", "module\n{\n}\n");
+    write(&root, "shared/two/Module.sharp", "module\n{\n}\n");
+    let link = |target: &str| {
+        let linked =
+            process::status(Command::new("ln").args(["-sfn", target, "app/Shared"]).current_dir(&root)).unwrap();
+        assert!(linked.success());
+    };
+    link("../shared/one");
+    compile_succeeds(&root);
+    assert!(compiled(&root, "shared/one/Module.sharp").exists());
+
+    link("../shared/two");
+    compile_succeeds(&root);
+
+    assert!(compiled(&root, "shared/two/Module.sharp").exists());
+    assert!(!compiled(&root, "shared/one/Module.sharp").exists());
+}
+
+/// A compile that warns keeps no record, so the next compile prints the warning again, until the cause is gone. Here a
+/// link back to its own folder, which the loader warns of and skips.
+#[cfg(unix)]
+#[test]
+fn compile_warns_again_until_the_cause_of_its_warning_is_gone() {
+    let directory = project(ORDER, MONEY);
+    let root = directory.path();
+    std::os::unix::fs::symlink(".", root.join("app/Loop")).unwrap();
+    let first = compile(root);
+    assert!(first.status.success(), "{}", printed(&first));
+    assert!(printed(&first).contains("Skipping symlink loop at"), "{}", printed(&first));
+
+    let second = compile(root);
+
+    assert!(second.status.success(), "{}", printed(&second));
+    assert_eq!(logged(&second), logged(&first));
+    std::fs::remove_file(root.join("app/Loop")).unwrap();
+    compile_succeeds(root);
+    assert!(root.join(".sharp/inputs.json").exists(), "a compile with no warning keeps its record");
+}
+
 /// Runs git in `folder`, and fails the test when git fails.
 fn git(folder: &Path, arguments: &[&str]) -> String {
     let output = process::output(
@@ -1973,7 +2351,7 @@ fn compile_keeps_the_php_files_out_of_git_with_no_git_to_run() {
         assert!(checkout.join("app/Order.php").exists());
         assert_eq!(
             untracked(checkout),
-            "?? .sharp/app/Order.sharpc\n?? .sharp/listeners.php\n?? .sharp/vendor/acme/money/src/Money.sharpc\n",
+            "?? .sharp/app/Order.sharpc\n?? .sharp/inputs.json\n?? .sharp/listeners.php\n?? .sharp/vendor/acme/money/src/Money.sharpc\n",
             "{}",
             checkout.display()
         );

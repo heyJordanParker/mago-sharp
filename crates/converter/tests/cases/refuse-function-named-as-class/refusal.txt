@@ -1,0 +1,1 @@
+13:16: `str` is reached through its namespace as `Text.str`, which names the class `Acme\Text\Str`, since PHP finds a class in any case (spec section 23)

@@ -1,0 +1,27 @@
+namespace App;
+
+// PHP's `iterable<V>` keys by any `array-key`, which says no more than a PHP# `Iterable<V>`. A PHP# `Iterable<V>`
+// parameter takes a new sequence of the values it is given, numbered from 0, so a loop over its values alone reads
+// what PHP's reads (spec section 12).
+public final class Joiner
+{
+    public string joined(Iterable<string> items)
+    {
+        let shown = '';
+        for (const item of items) {
+            shown += item;
+        }
+
+        return shown;
+    }
+
+    public int total(Iterable<int> counts)
+    {
+        let total = 0;
+        for (const count of counts) {
+            total += count;
+        }
+
+        return total;
+    }
+}

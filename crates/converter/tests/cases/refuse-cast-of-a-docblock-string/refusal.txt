@@ -1,0 +1,1 @@
+13:16: `(string)` of `$row->label` has no PHP# form: a PHP# cast converts a number, and nothing but PHPDoc makes `$row->label` a string at runtime (spec section 24)

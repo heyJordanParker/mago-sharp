@@ -1,0 +1,1 @@
+8:16: a class named `Module` would be `Module.sharp`, which holds only its folder's module (spec section 32)

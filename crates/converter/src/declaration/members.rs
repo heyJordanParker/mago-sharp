@@ -1,14 +1,24 @@
 //! Properties as fields or properties with accessors (spec section 6), and methods with their return types, `virtual`
 //! and `override` (spec sections 7 and 22).
 
+use mago_codex::metadata::class_like::ClassLikeMetadata;
+use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::metadata::property::PropertyMetadata;
 use mago_codex::ttype::TType;
+use mago_codex::ttype::comparator::ComparisonResult;
+use mago_codex::ttype::comparator::union_comparator::is_contained_by;
 use mago_codex::ttype::get_mixed;
+use mago_codex::ttype::get_php_declared_type;
 use mago_codex::ttype::resolution::TypeResolutionContext;
 use mago_codex::ttype::union::TUnion;
 use mago_span::HasSpan;
+use mago_span::Span;
+use mago_syntax::cst::Access;
+use mago_syntax::cst::Assignment;
+use mago_syntax::cst::Block;
 use mago_syntax::cst::ClassLikeConstant;
 use mago_syntax::cst::DirectVariable;
+use mago_syntax::cst::Expression;
 use mago_syntax::cst::HookedProperty;
 use mago_syntax::cst::Method as MethodDeclaration;
 use mago_syntax::cst::MethodBody;
@@ -19,6 +29,12 @@ use mago_syntax::cst::PropertyHookBody;
 use mago_syntax::cst::PropertyHookConcreteBody;
 use mago_syntax::cst::PropertyItem;
 use mago_syntax::cst::Sequence;
+use mago_syntax::cst::Statement;
+use mago_syntax::cst::UnaryPostfix;
+use mago_syntax::cst::UnaryPrefix;
+use mago_syntax::cst::UnaryPrefixOperator;
+use mago_syntax::cst::Variable;
+use mago_syntax::walker::MutWalker;
 use mago_word::ascii_lowercase_word;
 use mago_word::word;
 
@@ -26,8 +42,53 @@ use crate::Converter;
 use crate::Method;
 use crate::body::Locals;
 
+use super::NameCase;
 use super::accessors;
 use super::has;
+
+/// Finds the first place of `this` a walked body writes: a property of `$this`, or an element of one, that an
+/// assignment, `++` or `--` writes.
+#[derive(Default)]
+struct ThisWrites {
+    place: Option<Span>,
+}
+
+impl ThisWrites {
+    fn written(&mut self, place: &Expression<'_>) {
+        let mut base = place;
+        loop {
+            base = match base {
+                Expression::ArrayAccess(access) => access.array,
+                Expression::ArrayAppend(append) => append.array,
+                Expression::Access(Access::Property(access)) if matches!(access.object, Expression::Variable(Variable::Direct(this)) if this.name == b"$this") =>
+                {
+                    if self.place.is_none() {
+                        self.place = Some(place.span());
+                    }
+                    return;
+                }
+                Expression::Access(Access::Property(access)) => access.object,
+                _ => return,
+            };
+        }
+    }
+}
+
+impl<'ast, 'arena> MutWalker<'ast, 'arena, ()> for ThisWrites {
+    fn walk_in_assignment(&mut self, assignment: &'ast Assignment<'arena>, _: &mut ()) {
+        self.written(assignment.lhs);
+    }
+
+    fn walk_in_unary_prefix(&mut self, unary: &'ast UnaryPrefix<'arena>, _: &mut ()) {
+        if matches!(unary.operator, UnaryPrefixOperator::PreIncrement(_) | UnaryPrefixOperator::PreDecrement(_)) {
+            self.written(unary.operand);
+        }
+    }
+
+    fn walk_in_unary_postfix(&mut self, unary: &'ast UnaryPostfix<'arena>, _: &mut ()) {
+        self.written(unary.operand);
+    }
+}
 
 impl Converter<'_, '_> {
     /// A property, written again whole, as a field when it is private or protected storage, or a property with
@@ -185,6 +246,22 @@ impl Converter<'_, '_> {
         let PropertyHookBody::Concrete(body) = &hook.body else {
             return;
         };
+        // A PHP `get` hook may keep what it computes in a field, which PHP# makes the language's own work in `lazy`
+        // (spec sections 6.1 and 6.5).
+        if !is_set {
+            let mut writes = ThisWrites::default();
+            match body {
+                PropertyHookConcreteBody::Block(block) => writes.walk_block(block, &mut ()),
+                PropertyHookConcreteBody::Expression(body) => writes.walk_expression(body.expression, &mut ()),
+            }
+            if let Some(place) = writes.place {
+                let shown = String::from_utf8_lossy(self.text(place)).into_owned();
+                return self.refuse(
+                    place,
+                    format!("a `get` hook that writes `{shown}` has no PHP# form: a `get` body never writes `this` (spec section 6.1)"),
+                );
+            }
+        }
 
         self.method = Some(Method {
             returning: (!is_set).then(|| union.clone()),
@@ -195,11 +272,15 @@ impl Converter<'_, '_> {
             super_call: None,
             storage: Some(variable.name[1..].to_vec()),
             captures: None,
+            returned: Vec::new(),
         });
         match body {
             PropertyHookConcreteBody::Block(block) => self.block(block),
             PropertyHookConcreteBody::Expression(body) => {
                 self.expression(body.expression, Some(union));
+                if !is_set {
+                    self.narrowed(body.expression, union);
+                }
                 // A short `set => expr` stores `expr`.
                 if is_set {
                     self.edits.insert(body.expression.span().start.offset, "field = ");
@@ -224,16 +305,13 @@ impl Converter<'_, '_> {
             self.refuse(variable.span, "the analysis holds no property of this name");
             return None;
         };
+        if self.narrowed_by_docblock(declared.type_metadata.as_ref(), "@var", variable.span) {
+            return None;
+        }
         let union = declared.type_metadata.as_ref().map_or_else(get_mixed, |metadata| metadata.type_union.clone());
         let written = self.type_text(&union, variable.span)?;
         let name = Self::variable_name(variable.name);
-        // A method the class declares is refused where it is declared, and one it inherits clashes here.
-        let method = ascii_lowercase_word(&variable.name[1..]);
-        if metadata.appearing_method_ids.contains_key(&method) && !metadata.methods.contains(&method) {
-            self.refuse(
-                variable.span,
-                format!("`{name}` names a property and a method, and a PHP# class has one member of each name (spec section 14)"),
-            );
+        if self.names_inherited_method(variable) {
             return None;
         }
 
@@ -259,6 +337,11 @@ impl Converter<'_, '_> {
             && !metadata.kind.is_interface()
             && !self.class.as_ref().is_some_and(|class| class.is_final)
             && has(modifiers, |modifier| matches!(modifier, Modifier::Final(_))).is_none();
+        // An override keeps the name of what it replaces.
+        let kind = if is_public || overrides { "property" } else { "field" };
+        if !overrides && self.misnamed(&variable.name[1..], variable.span, kind, NameCase::Camel) {
+            return None;
+        }
         let mut opening = String::new();
         if is_static {
             opening.push_str("static ");
@@ -274,6 +357,28 @@ impl Converter<'_, '_> {
         }
 
         Some((format!("{visibility}{opening}{written} {name}"), union, is_public || overrides))
+    }
+
+    /// Refuses the property `variable` names, a declared or a promoted one, when the class inherits a method of its
+    /// name, and gives whether it did. PHP# reads a name as a property or a method by where it is written, so a class
+    /// has one member of each name (spec section 14). A method the class declares is refused where it is declared.
+    pub(super) fn names_inherited_method(&mut self, variable: &DirectVariable<'_>) -> bool {
+        let Some(metadata) = self.class.as_ref().map(|class| class.metadata) else {
+            return false;
+        };
+        let method = ascii_lowercase_word(&variable.name[1..]);
+        if !metadata.appearing_method_ids.contains_key(&method) || metadata.methods.contains(&method) {
+            return false;
+        }
+        let name = Self::variable_name(variable.name);
+        self.refuse(
+            variable.span,
+            format!(
+                "`{name}` names a property and a method, and a PHP# class has one member of each name (spec section 14)"
+            ),
+        );
+
+        true
     }
 
     /// ` = value`, which the property `item` declares ends with, or nothing when the constructor sets it, or a
@@ -351,6 +456,9 @@ impl Converter<'_, '_> {
         let mut declarations = Vec::new();
         for item in constant.items.iter() {
             let name = String::from_utf8_lossy(item.name.value).into_owned();
+            if self.misnamed(item.name.value, item.name.span, "constant", NameCase::UpperSnake) {
+                continue;
+            }
             if overridable {
                 self.refuse(
                     item.name.span,
@@ -413,6 +521,10 @@ impl Converter<'_, '_> {
             self.refuse(method.name.span, format!("the magic method `{shown}` is not converted yet"));
             return;
         }
+        // A method that replaces another keeps the name of what it replaces.
+        if !is_constructor && !is_text && !self.input.codebase.method_is_overriding(metadata.name.as_bytes(), name) {
+            self.misnamed(name, method.name.span, "method", NameCase::Camel);
+        }
         // PHP# reads a name as a property or a method by where it is written, so a class has one member of each name
         // (spec section 14).
         // A property the class inherits clashes as one it declares does.
@@ -424,9 +536,16 @@ impl Converter<'_, '_> {
             return;
         }
 
-        self.attributes(&method.attribute_lists);
         // An interface member is as visible as its interface, so it takes no access modifier (spec section 5).
         let is_interface = metadata.kind.is_interface();
+        if is_interface && has(&method.modifiers, |modifier| matches!(modifier, Modifier::Static(_))).is_some() {
+            self.refuse(
+                method.name.span,
+                format!("`{shown}` is a static method of an interface, which has no PHP# form: a PHP# interface declares instance members (spec section 22)"),
+            );
+            return;
+        }
+        self.attributes(&method.attribute_lists);
         if is_interface {
             for modifier in method.modifiers.iter().filter(|modifier| modifier.is_read_visibility()) {
                 let span = modifier.span();
@@ -447,6 +566,9 @@ impl Converter<'_, '_> {
                     method.name.span,
                     format!("`{shown}`'s return is taken from its body, which the analysis infers, and the converter writes no inferred type"),
                 );
+                return;
+            }
+            if self.narrowed_by_docblock(declared.return_type_metadata.as_ref(), "@return", method.name.span) {
                 return;
             }
             let returned =
@@ -494,6 +616,9 @@ impl Converter<'_, '_> {
                 );
                 return;
             }
+            if self.narrows_linked_parameter(metadata, declared, method) {
+                return;
+            }
             // An interface's member and an abstract method are replaced by definition, so they take neither marker.
             let opening = if is_interface || is_abstract {
                 ""
@@ -526,6 +651,16 @@ impl Converter<'_, '_> {
             .map(|parameter| parameter.variable.name.to_vec());
         for (index, parameter) in method.parameter_list.parameters.iter().enumerate() {
             let metadata = declared.parameters.get(index).and_then(|parameter| parameter.type_metadata.as_ref());
+            let tag = format!("@param {}", String::from_utf8_lossy(parameter.variable.name));
+            if self.narrowed_by_docblock(metadata, &tag, parameter.variable.span) {
+                continue;
+            }
+            let union = metadata.map(|metadata| &metadata.type_union);
+            if let MethodBody::Concrete(block) = &method.body
+                && self.observes_iterable(parameter, union, |uses| uses.walk_block(block, &mut ()))
+            {
+                continue;
+            }
             self.parameter(parameter, metadata.map(|metadata| metadata.type_union.clone()));
         }
 
@@ -544,17 +679,131 @@ impl Converter<'_, '_> {
                     super_call: None,
                     storage: None,
                     captures: None,
+                    returned: Vec::new(),
                 });
                 if is_constructor && let Some(parent) = metadata.direct_parent_class {
                     self.super_call(method, block, parent.as_bytes());
                 }
                 self.block(block);
                 self.declare_locals();
+                let closed = class_is_final
+                    || has(&method.modifiers, |modifier| matches!(modifier, Modifier::Final(_) | Modifier::Private(_)))
+                        .is_some();
+                if closed && !declared.flags.has_yield() {
+                    self.unused_null(method, block);
+                }
                 self.method = None;
             }
             MethodBody::Abstract(_) => {}
             MethodBody::Expression(_) => self.refuse(method.body.span(), "an expression body is PHP# only"),
         }
         self.docblock(method.span());
+    }
+
+    /// Refuses a parameter of `declared`, the method `method` declares in the class `metadata`, that takes less once
+    /// PHP# writes its type in the PHP it compiles to than the PHP declaration of a method it replaces takes, and
+    /// gives whether it did. PHP links an override only when it takes at least that (spec section 22), and an untyped
+    /// parameter takes the type the PHPDoc of the method it replaces gives it, which PHP's own declaration may not.
+    fn narrows_linked_parameter(
+        &mut self,
+        metadata: &ClassLikeMetadata,
+        declared: &FunctionLikeMetadata,
+        method: &MethodDeclaration<'_>,
+    ) -> bool {
+        let codebase = self.input.codebase;
+        let name = ascii_lowercase_word(declared.name.as_bytes());
+        let parents = metadata.overridden_method_ids.get(&name).into_iter().flat_map(|parents| parents.keys());
+        for parent in parents {
+            let (Some(class), Some(replaced)) = (
+                codebase.get_class_like(parent.as_bytes()),
+                codebase.get_method(parent.as_bytes(), declared.name.as_bytes()),
+            ) else {
+                continue;
+            };
+            for (index, (theirs, ours)) in replaced.parameters.iter().zip(&declared.parameters).enumerate() {
+                let linked = |parameter: &mago_codex::metadata::parameter::FunctionLikeParameterMetadata| {
+                    parameter
+                        .type_declaration_metadata
+                        .as_ref()
+                        .map_or_else(get_mixed, |declared| declared.type_union.clone())
+                };
+                let theirs = get_php_declared_type(&linked(theirs), codebase);
+                let written = ours.get_type_metadata().map_or_else(get_mixed, |declared| declared.type_union.clone());
+                let ours = get_php_declared_type(&written, codebase);
+                if is_contained_by(codebase, &theirs, &ours, false, false, false, &mut ComparisonResult::new()) {
+                    continue;
+                }
+                let Some(parameter) = method.parameter_list.parameters.get(index) else {
+                    continue;
+                };
+                let shown = String::from_utf8_lossy(parameter.variable.name);
+                self.refuse(
+                    parameter.variable.span,
+                    format!(
+                        "`{shown}` takes `{}`, which PHP# writes in the PHP it compiles to, and `{}::{}`'s PHP takes `{}` there, which PHP links an override to only when it takes at least that (spec section 22)",
+                        ours.get_id(),
+                        class.original_name.as_str_lossy(),
+                        replaced.original_name.as_str_lossy(),
+                        theirs.get_id(),
+                    ),
+                );
+                return true;
+            }
+        }
+
+        false
+    }
+
+    /// Refuses `method`, which no subclass replaces, when its declared return holds `null` and no `return` of its
+    /// `block` gives one. PHP# refuses such a `?` (spec section 14.4), where PHP keeps it, and writing the narrower type
+    /// would write what the analysis infers (decision 2), so the PHP declares it first.
+    fn unused_null(&mut self, method: &MethodDeclaration<'_>, block: &Block<'_>) {
+        let Some(state) = self.method.as_ref() else {
+            return;
+        };
+        let Some(returning) = state.returning.clone() else {
+            return;
+        };
+        let uninformative =
+            |union: &TUnion| union.has_mixed() || union.is_never() || union.is_void() || union.has_template_types();
+        // A body that runs on past its last statement returns `null`.
+        let ends = match block.statements.last() {
+            Some(Statement::Return(_)) => true,
+            Some(Statement::Expression(statement)) => matches!(statement.expression, Expression::Throw(_)),
+            _ => false,
+        };
+        if !returning.has_null() || uninformative(&returning) || !ends || state.returned.is_empty() {
+            return;
+        }
+        let codebase = self.input.codebase;
+        let fits = state.returned.iter().all(|returned| {
+            returned.as_ref().is_some_and(|returned| {
+                !uninformative(returned)
+                    && !returned.has_null()
+                    && is_contained_by(
+                        codebase,
+                        returned,
+                        &returning,
+                        false,
+                        false,
+                        false,
+                        &mut ComparisonResult::new(),
+                    )
+            })
+        });
+        if !fits {
+            return;
+        }
+        let bare = TUnion::from_vec(returning.types.iter().filter(|atomic| !atomic.is_null()).cloned().collect());
+        let (Some(written), Some(narrower)) =
+            (self.type_text(&returning, method.name.span), self.type_text(&bare, method.name.span))
+        else {
+            return;
+        };
+        let name = String::from_utf8_lossy(method.name.value);
+        self.refuse(
+            method.name.span,
+            format!("`{name}` declares `{written}` and never returns `null`, which PHP# refuses on a method no subclass replaces (spec section 14.4): declare `{narrower}`"),
+        );
     }
 }

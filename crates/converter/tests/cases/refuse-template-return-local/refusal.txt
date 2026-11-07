@@ -1,0 +1,1 @@
+15:22: `$found` starts as `null`, so PHP# declares it first in the body with a type, and no declaration gives the type of `$finder->find(Lookup::class)`, which it is assigned: declare its type with a `@var` tag (decision 2)

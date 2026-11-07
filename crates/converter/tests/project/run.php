@@ -7,11 +7,14 @@ namespace Runner;
 use Proof\Box;
 use Proof\Factory;
 use Proof\Shop\Crate;
+use Proof\Shop\Feed;
 use Proof\Shop\Label;
+use Proof\Shop\Ledger;
 use Proof\Shop\Note;
 use Proof\Shop\Order;
 use Proof\Shop\Pair;
 use Proof\Shop\Shelf;
+use Proof\Shop\Stock;
 use Proof\Shop\Tagged;
 use Proof\Shop\Tally;
 use Proof\Spec;
@@ -20,6 +23,13 @@ use Proof\Zoo\Bird;
 use Proof\Zoo\Cat;
 
 require __DIR__ . '/vendor/autoload.php';
+
+/** @return \Generator<string, string> */
+function keyed(): \Generator
+{
+    yield 'first' => 'a';
+    yield 'second' => 'b';
+}
 
 // Calls each class of the fixture from plain PHP in another namespace, before and after the conversion.
 $spec = new Spec('alpha');
@@ -70,6 +80,16 @@ echo $tally->stamped(new \Acme\Format\Stamp()), "\n";
 $label = new Label();
 echo $label->render('shelf', 3), "\n", $label->folder(), "\n";
 echo $label->status(201), ' ', $label->status(404), ' ', $label->status(500), "\n";
+
+// A PHPDoc `int` that holds `"5"`, a `string` key PHP reads as `int`, and generator keys through a PHP# parameter.
+$stock = new Stock();
+echo var_export($stock->quantity(new \Acme\Format\Record(['quantity' => '5'])), true), ' ', $stock->joined(keyed()), "\n";
+echo (new Ledger())->priceOf(['42' => 1, 'x' => 2], '42'), "\n";
+$through = (new Feed())->through(keyed());
+foreach ($through as $key => $item) {
+    echo var_export($key, true), '=', $item, ' ';
+}
+echo get_debug_type($through), "\n";
 
 $cat = new Cat('tom');
 $bird = new Bird('tweety');

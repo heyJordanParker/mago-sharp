@@ -7,7 +7,6 @@ use strum::EnumString;
 
 use mago_span::HasSpan;
 use mago_span::Span;
-use mago_syntax_core::stack::ensure_sufficient_stack;
 
 use crate::cst::Program;
 use crate::cst::cst::Access;
@@ -925,28 +924,34 @@ pub enum Node<'ast, 'arena> {
 }
 
 impl<'ast, 'arena> Node<'ast, 'arena> {
-    #[inline]
+    /// Applies `f` to this node and every node below it, children before their parent and siblings in order, and
+    /// collects what it returns. It walks with a stack of its own rather than recursion, so a tree as deep as a PHP sum
+    /// of 100,000 terms costs one stack slot per pending node, not one call frame per level.
     pub fn filter_map<F, T>(&self, f: F) -> Vec<T>
     where
         F: Fn(&Node<'ast, 'arena>) -> Option<T>,
         T: 'ast,
     {
         let mut result = vec![];
-        self.filter_map_internal(&f, &mut result);
-        result
-    }
+        // Each node is pushed unvisited, then again as visited below its children, which are pushed in reverse so the
+        // first child is popped first.
+        let mut pending = vec![(*self, false)];
+        while let Some((node, visited)) = pending.pop() {
+            if visited {
+                if let Some(item) = f(&node) {
+                    result.push(item);
+                }
 
-    #[inline]
-    fn filter_map_internal<F, T>(&self, f: &F, result: &mut Vec<T>)
-    where
-        F: Fn(&Node<'ast, 'arena>) -> Option<T>,
-        T: 'ast,
-    {
-        ensure_sufficient_stack(|| self.visit_children(|child| child.filter_map_internal(f, result)));
+                continue;
+            }
 
-        if let Some(item) = f(self) {
-            result.push(item);
+            pending.push((node, true));
+            let first_child = pending.len();
+            node.visit_children(|child| pending.push((child, false)));
+            pending[first_child..].reverse();
         }
+
+        result
     }
 
     #[inline]
