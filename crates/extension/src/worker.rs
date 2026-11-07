@@ -1694,6 +1694,11 @@ mod tests {
                 let worker = shell_worker_within(&script, request_timeout, UNREACHED_STDERR_END_TIMEOUT);
                 wait_until_stderr_arrives(&worker);
 
+                // DIAGNOSTIC, to be removed: who holds the far end of the test's pipes as Mago writes.
+                let leader = lock(&worker.inner.child).as_mut().map(|group| group.leader().id());
+                let (inherited, holders) = pipe_holders(leader);
+                assert!(!inherited, "a process holds a pipe of the test above fd 2 as Mago writes:\n{holders}");
+
                 let error =
                     worker.request(b"describe".to_vec(), None).expect_err("the closed stdin should fail the request");
 
@@ -1701,7 +1706,8 @@ mod tests {
                     error.to_string(),
                     format!(
                         "extension host `acme` disconnected (worker 0): failed to write to the worker: Broken pipe (os error 32); stderr: {FATAL_ERROR}"
-                    )
+                    ),
+                    "{holders}"
                 );
                 worker.shutdown();
             }
@@ -1911,6 +1917,82 @@ mod tests {
         wait_until_stopped(&worker);
 
         worker
+    }
+
+    /// DIAGNOSTIC, to be removed: each process other than the test that holds the far end of one of the test process's
+    /// pipes, looked for first among the test's descendants and then among every process, with its parent, group, start
+    /// and command line, the worker `leader`'s open files, and the test process's threads. Says too whether one such
+    /// holder, other than the runner and this record's own `lsof` and `ps`, holds it above fd 2, as a process that
+    /// inherited it does.
+    #[cfg(unix)]
+    fn pipe_holders(leader: Option<u32>) -> (bool, String) {
+        let run = |program: &str, arguments: &[&str]| {
+            mago_database::process::output(std::process::Command::new(program).args(arguments)).map_or_else(
+                |error| format!("{program} failed: {error}"),
+                |output| String::from_utf8_lossy(&output.stdout).into_owned(),
+            )
+        };
+        let own = std::process::id().to_string();
+        let own_files = run("lsof", &["-n", "-P", "-p", &own]);
+        let processes = run("ps", &["-A", "-o", "pid=,ppid=,pgid=,lstart=,command="]);
+        let mut descendants = vec![own.clone()];
+        let mut grew = true;
+        while grew {
+            grew = false;
+            for line in processes.lines() {
+                let mut fields = line.split_whitespace();
+                if let (Some(pid), Some(parent)) = (fields.next(), fields.next())
+                    && descendants.iter().any(|known| known == parent)
+                    && !descendants.iter().any(|known| known == pid)
+                {
+                    descendants.push(pid.to_owned());
+                    grew = true;
+                }
+            }
+        }
+        let descendant_files = run("lsof", &["-n", "-P", "-p", &descendants.join(",")]);
+        let every_file = run("lsof", &["-n", "-P"]);
+
+        let own_pipes: Vec<&str> = own_files.lines().filter(|line| line.contains("PIPE")).collect();
+        let far_ends: Vec<&str> = own_pipes.iter().filter_map(|line| line.split("->").nth(1)).map(str::trim).collect();
+        let holders_in = |listing: &str| -> Vec<String> {
+            listing
+                .lines()
+                .filter(|line| {
+                    line.split_whitespace().nth(1) != Some(own.as_str())
+                        && line.split_whitespace().any(|field| far_ends.contains(&field))
+                })
+                .map(str::to_owned)
+                .collect()
+        };
+        let near = holders_in(&descendant_files);
+        let far = holders_in(&every_file);
+        let inherited = near.iter().chain(&far).any(|line| {
+            let mut fields = line.split_whitespace();
+            let command = fields.next().unwrap_or_default();
+            let descriptor = fields.nth(2).unwrap_or_default().trim_end_matches(char::is_alphabetic);
+            // The runner's own pipes, and the `lsof` and `ps` this runs, which hold their output pipes as they like.
+            !(command.starts_with("Runner.") || command == "lsof" || command == "ps")
+                && descriptor.parse::<u32>().is_ok_and(|descriptor| descriptor > 2)
+        });
+        let holder_ids: Vec<&str> = near.iter().chain(&far).filter_map(|line| line.split_whitespace().nth(1)).collect();
+        let holder_processes: Vec<&str> = processes
+            .lines()
+            .filter(|line| line.split_whitespace().next().is_some_and(|pid| holder_ids.contains(&pid)))
+            .collect();
+        let leader_files = leader.map(|id| run("lsof", &["-n", "-P", "-p", &id.to_string()])).unwrap_or_default();
+        let threads = run("ps", &["-M", "-p", &own]);
+
+        (
+            inherited,
+            format!(
+                "test pipes:\n{}\nholders among the test's descendants:\n{}\nholders among every process:\n{}\nthe holders (pid ppid pgid start command):\n{}\nworker {leader:?} files:\n{leader_files}\ntest threads:\n{threads}",
+                own_pipes.join("\n"),
+                near.join("\n"),
+                far.join("\n"),
+                holder_processes.join("\n"),
+            ),
+        )
     }
 
     /// Waits until Mago has read what `worker` wrote to its stderr, so a failure after it holds what the worker wrote
