@@ -11,7 +11,11 @@ use std::process::Child;
 use std::process::ChildStdin;
 use std::process::Command;
 #[cfg(unix)]
+use std::sync::Mutex;
+#[cfg(unix)]
 use std::sync::Once;
+#[cfg(unix)]
+use std::sync::PoisonError;
 #[cfg(unix)]
 use std::sync::atomic::AtomicI32;
 #[cfg(unix)]
@@ -51,7 +55,9 @@ impl ProcessGroup {
                 forward(signal);
                 return Err(io::Error::other("a signal is ending Mago"));
             }
+            let spawning = SPAWNING.lock().unwrap_or_else(PoisonError::into_inner);
             let spawned = command.spawn();
+            drop(spawning);
             // `forward` writes `PENDING` before it reads the slots, and this thread writes its slot before it reads
             // `PENDING`, so at least one of them ends the group for a signal that arrived during the spawn.
             let group = spawned.as_ref().ok().and_then(|child| libc::pid_t::try_from(child.id()).ok()).unwrap_or(0);
@@ -197,6 +203,17 @@ static SLOTS: AtomicPtr<Slot> = AtomicPtr::new(std::ptr::null_mut());
 /// signal can reach any of Mago's threads while one of them spawns.
 #[cfg(unix)]
 static PENDING: AtomicI32 = AtomicI32::new(0);
+
+/// Held while `ProcessGroup::spawn` starts a process, so no process starts while another one's pipes are created.
+///
+/// macOS has no `pipe2`, so `Command::spawn` creates each pipe of a process before it marks the pipe close-on-exec. A
+/// process another thread starts in between inherits the pipe and holds it open for as long as it runs. A worker that
+/// closed its stdin then still takes Mago's writes, and the stdout of a worker that died stays open, so its requests
+/// wait for their deadline rather than fail with what the worker wrote. A pool starts its workers at once. On a loaded
+/// Mac, 30 of 300 processes that closed their stdin while another thread kept starting processes still took a write,
+/// and none did under this lock. Go's `syscall.ForkLock` holds the same steps apart.
+#[cfg(unix)]
+static SPAWNING: Mutex<()> = Mutex::new(());
 
 #[cfg(unix)]
 impl Slot {

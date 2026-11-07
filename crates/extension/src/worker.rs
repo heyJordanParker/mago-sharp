@@ -1640,36 +1640,60 @@ mod tests {
     }
 
     /// A worker that closed its stdin refuses the request as Mago writes it, and the error says so with its stderr.
+    /// Other processes keep starting while each worker starts, as a pool starts its workers at once, and none of them
+    /// holds the stdin a worker closed.
     #[cfg(unix)]
     #[test]
     fn a_request_written_to_a_worker_that_closed_its_stdin_holds_the_write_error_and_the_stderr() {
-        const TIMEOUT: Duration = Duration::from_secs(10);
+        /// The most other processes that run at once.
+        const OTHERS: usize = 64;
 
-        let worker = shell_worker(&format!("exec 0<&-; echo '{FATAL_ERROR}' >&2; exec {SLEEP_UNTIL_ENDED}"));
-        let deadline = Instant::now() + TIMEOUT;
-        while lock(&worker.inner.stderr).display().is_empty() {
-            assert!(Instant::now() < deadline, "the worker wrote no stderr within {TIMEOUT:?}");
-            std::thread::sleep(Duration::from_millis(1));
-        }
+        let script = format!("exec 0<&-; echo '{FATAL_ERROR}' >&2; exec {SLEEP_UNTIL_ENDED}");
+        // The test drops `stop` once its workers are done, or as it panics, which stops the other processes starting.
+        let (stop, stopped) = mpsc::channel::<()>();
+        std::thread::scope(|scope| {
+            scope.spawn(move || {
+                let mut others = VecDeque::new();
+                while stopped.try_recv() == Err(mpsc::TryRecvError::Empty) {
+                    let mut other = std::process::Command::new("sh");
+                    other.args(["-c", SLEEP_UNTIL_ENDED]);
+                    others.push_back(ProcessGroup::spawn(&mut other).expect("another process should start"));
+                    // Dropping the oldest group ends its process.
+                    if others.len() > OTHERS {
+                        others.pop_front();
+                    }
+                }
+            });
 
-        let error = worker.request(b"describe".to_vec(), None).expect_err("the closed stdin should fail the request");
+            for _ in 0..8 {
+                let worker = shell_worker(&script);
+                wait_until_stderr_arrives(&worker);
 
-        assert_eq!(
-            error.to_string(),
-            format!(
-                "extension host `acme` disconnected (worker 0): failed to write to the worker: Broken pipe (os error 32); stderr: {FATAL_ERROR}"
-            )
-        );
-        worker.shutdown();
+                let error =
+                    worker.request(b"describe".to_vec(), None).expect_err("the closed stdin should fail the request");
+
+                assert_eq!(
+                    error.to_string(),
+                    format!(
+                        "extension host `acme` disconnected (worker 0): failed to write to the worker: Broken pipe (os error 32); stderr: {FATAL_ERROR}"
+                    )
+                );
+                worker.shutdown();
+            }
+            drop(stop);
+        });
     }
 
-    /// A worker that Mago shuts down while it fails gives the request it served the failure, not a shutdown.
+    /// A worker that Mago shuts down while it fails gives the request it served the failure, not a shutdown. A process
+    /// the worker started holds its stderr open, so the failure waits the whole `STDERR_END_TIMEOUT`, and the shutdown
+    /// begins during that wait.
     #[cfg(unix)]
     #[test]
     fn a_worker_shut_down_while_it_fails_fails_its_request_with_the_failure() {
         let worker = shell_worker(&format!(
-            "head -c 1 >/dev/null; ( exec >&-; sleep 0.5; echo '{FATAL_ERROR}' >&2 ) & exit 255"
+            "echo '{FATAL_ERROR}' >&2; head -c 1 >/dev/null; ( exec >&-; {SLEEP_UNTIL_ENDED} ) & exit 255"
         ));
+        wait_until_stderr_arrives(&worker);
 
         let error = std::thread::scope(|scope| {
             let request = scope.spawn(|| worker.request(b"describe".to_vec(), None));
@@ -1681,7 +1705,9 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            format!("extension host `acme` disconnected (worker 0): worker closed stdout; stderr: {FATAL_ERROR}")
+            format!(
+                "extension host `acme` disconnected (worker 0): worker closed stdout; stderr still open after 1000 ms; stderr: {FATAL_ERROR}"
+            )
         );
     }
 
@@ -1803,11 +1829,19 @@ mod tests {
         const TIMEOUT: Duration = Duration::from_secs(10);
 
         let runs = || {
-            let state = std::process::Command::new("ps")
-                .args(["-o", "stat=", "-p", id])
-                .output()
-                .expect("ps should run")
-                .stdout;
+            let mut ps = std::process::Command::new("ps");
+            ps.args(["-o", "stat=", "-p", id]).stdout(std::process::Stdio::piped());
+            // `ProcessGroup::spawn` starts ps under the lock every worker starts under, so ps never holds the pipes of a
+            // worker another test starts at the same moment.
+            let mut group = ProcessGroup::spawn(&mut ps).expect("ps should run");
+            let mut state = Vec::new();
+            group
+                .leader()
+                .stdout
+                .take()
+                .expect("ps should have a stdout")
+                .read_to_end(&mut state)
+                .expect("ps should print the state");
             let state = state.trim_ascii();
             !state.is_empty() && !state.starts_with(b"Z")
         };
@@ -1851,6 +1885,19 @@ mod tests {
         wait_until_stopped(&worker);
 
         worker
+    }
+
+    /// Waits until Mago has read what `worker` wrote to its stderr, so a failure after it holds what the worker wrote
+    /// however late the stderr reader runs.
+    #[cfg(unix)]
+    fn wait_until_stderr_arrives(worker: &Worker) {
+        const TIMEOUT: Duration = Duration::from_secs(10);
+
+        let deadline = Instant::now() + TIMEOUT;
+        while lock(&worker.inner.stderr).display().is_empty() {
+            assert!(Instant::now() < deadline, "the worker wrote no stderr within {TIMEOUT:?}");
+            std::thread::sleep(Duration::from_millis(1));
+        }
     }
 
     #[cfg(unix)]
