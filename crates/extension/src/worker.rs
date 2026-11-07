@@ -1694,14 +1694,31 @@ mod tests {
                 let worker = shell_worker_within(&script, request_timeout, UNREACHED_STDERR_END_TIMEOUT);
                 wait_until_stderr_arrives(&worker);
 
+                // DIAGNOSTIC, to be removed: what holds the worker's stdin when the request outlives 5 s.
+                let stderr_at_write = lock(&worker.inner.stderr).display();
+                let leader = lock(&worker.inner.child).as_mut().map(|group| group.leader().id());
+                let diagnosis = Arc::new(Mutex::new(String::new()));
+                let (done, waiting) = mpsc::channel::<()>();
+                let probe = {
+                    let diagnosis = Arc::clone(&diagnosis);
+                    scope.spawn(move || {
+                        if waiting.recv_timeout(Duration::from_secs(5)) == Err(mpsc::RecvTimeoutError::Timeout) {
+                            *lock(&diagnosis) = diagnose_stalled_write(leader);
+                        }
+                    })
+                };
                 let error =
                     worker.request(b"describe".to_vec(), None).expect_err("the closed stdin should fail the request");
+                drop(done);
+                probe.join().expect("the probe should finish");
 
                 assert_eq!(
                     error.to_string(),
                     format!(
                         "extension host `acme` disconnected (worker 0): failed to write to the worker: Broken pipe (os error 32); stderr: {FATAL_ERROR}"
-                    )
+                    ),
+                    "stderr when the request was written: {stderr_at_write:?}\n{}",
+                    lock(&diagnosis)
                 );
                 worker.shutdown();
             }
@@ -1911,6 +1928,42 @@ mod tests {
         wait_until_stopped(&worker);
 
         worker
+    }
+
+    /// DIAGNOSTIC, to be removed: the processes of the group `leader` leads, its open files, the test process's pipes,
+    /// and each other process that holds the far end of one of them.
+    #[cfg(unix)]
+    fn diagnose_stalled_write(leader: Option<u32>) -> String {
+        let run = |program: &str, arguments: &[&str]| {
+            mago_database::process::output(std::process::Command::new(program).args(arguments)).map_or_else(
+                |error| format!("{program} failed: {error}"),
+                |output| String::from_utf8_lossy(&output.stdout).into_owned(),
+            )
+        };
+        let own = std::process::id().to_string();
+        let leader = leader.map(|id| id.to_string()).unwrap_or_default();
+        let processes = run("ps", &["-A", "-o", "pid=,ppid=,pgid=,stat=,etime=,command="]);
+        let group: Vec<&str> =
+            processes.lines().filter(|line| line.split_whitespace().nth(2) == Some(leader.as_str())).collect();
+        let leader_files = run("lsof", &["-n", "-P", "-p", &leader]);
+        let own_files = run("lsof", &["-n", "-P", "-p", &own]);
+        let own_pipes: Vec<&str> = own_files.lines().filter(|line| line.contains("PIPE")).collect();
+        let far_ends: Vec<&str> = own_pipes.iter().filter_map(|line| line.split("->").nth(1)).map(str::trim).collect();
+        let every_file = run("lsof", &["-n", "-P"]);
+        let holders: Vec<&str> = every_file
+            .lines()
+            .filter(|line| {
+                line.split_whitespace().nth(1) != Some(own.as_str())
+                    && line.split_whitespace().any(|field| far_ends.contains(&field))
+            })
+            .collect();
+
+        format!(
+            "worker group:\n{}\nworker files:\n{leader_files}\ntest pipes:\n{}\nother holders of their far ends:\n{}",
+            group.join("\n"),
+            own_pipes.join("\n"),
+            holders.join("\n")
+        )
     }
 
     /// Waits until Mago has read what `worker` wrote to its stderr, so a failure after it holds what the worker wrote
