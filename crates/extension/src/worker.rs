@@ -1957,12 +1957,27 @@ mod tests {
                     && line.split_whitespace().any(|field| far_ends.contains(&field))
             })
             .collect();
+        // Where each stdin writer thread is: still waiting for a frame once it wrote this one, or stuck elsewhere.
+        let sampled = run("sample", &[&own, "1", "-mayDie"]);
+        let mut writers = Vec::new();
+        let mut in_writer = false;
+        for line in sampled.lines() {
+            if line.contains("Thread_") {
+                in_writer = line.contains("-stdin");
+            } else if line.starts_with("Total number in stack") || line.starts_with("Binary Images") {
+                in_writer = false;
+            }
+            if in_writer {
+                writers.push(line);
+            }
+        }
 
         format!(
-            "worker group:\n{}\nworker files:\n{leader_files}\ntest pipes:\n{}\nother holders of their far ends:\n{}",
+            "worker group:\n{}\nworker files:\n{leader_files}\ntest pipes:\n{}\nother holders of their far ends:\n{}\nstdin writer threads:\n{}",
             group.join("\n"),
             own_pipes.join("\n"),
-            holders.join("\n")
+            holders.join("\n"),
+            writers.join("\n")
         )
     }
 
