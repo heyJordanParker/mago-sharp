@@ -16,6 +16,7 @@ use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::metadata::module::ModuleKind;
 use mago_codex::metadata::parameter::FunctionLikeParameterMetadata;
 use mago_codex::metadata::property::PropertyMetadata;
+use mago_codex::metadata::ttype::HostRefinement;
 use mago_codex::metadata::ttype::TypeMetadata;
 use mago_codex::misc::GenericParent;
 use mago_codex::reference::ReferenceOrigin;
@@ -100,6 +101,7 @@ use crate::statement::function_like::FunctionLikeBody;
 use crate::statement::function_like::HintPlace;
 use crate::statement::function_like::analyze_function_like;
 use crate::statement::function_like::is_union_for_a_class_bound;
+use crate::statement::function_like::report_host_refinement;
 use crate::statement::function_like::report_invalid_template_arguments;
 use crate::statement::function_like::report_undefined_bound_types;
 use crate::statement::function_like::report_undefined_type_references;
@@ -1674,12 +1676,27 @@ where
                     {
                         report_undefined_type_references(context, type_meta);
                         report_invalid_template_arguments(context, type_meta, HintPlace::Declaration);
+                        if let Some(HostRefinement { host, refused: Some(refused) }) =
+                            type_meta.host_refinement.as_deref()
+                        {
+                            let member = format!(
+                                "`{}`",
+                                display_member(context, class_like_metadata.original_name, property_name)
+                            );
+                            report_host_refinement(context, *host, &member, type_meta, Err(refused));
+                        }
 
                         if type_meta.from_docblock
                             && let Some(type_decl_meta) = &prop_meta.type_declaration_metadata
                         {
                             report_undefined_type_references(context, type_decl_meta);
-                            report_property_type_mismatch(context, class_like_metadata, type_meta, type_decl_meta);
+                            report_property_type_mismatch(
+                                context,
+                                class_like_metadata,
+                                prop_meta,
+                                type_meta,
+                                type_decl_meta,
+                            );
                         }
                     }
                 }
@@ -5045,6 +5062,7 @@ fn report_signature_compatibility_issue<'ctx, A>(
 fn report_property_type_mismatch<A>(
     context: &mut Context<'_, '_, A>,
     class_like_metadata: &ClassLikeMetadata,
+    property: &PropertyMetadata,
     docblock_type: &TypeMetadata,
     native_type: &TypeMetadata,
 ) where
@@ -5066,6 +5084,13 @@ fn report_property_type_mismatch<A>(
         &expanded_native,
         &mut ComparisonResult::default(),
     ) {
+        return;
+    }
+    if context.dialect.is_sharp()
+        && let Some(refinement) = &docblock_type.host_refinement
+    {
+        let member = format!("`{}`", display_member(context, class_like_metadata.original_name, property.name.0));
+        report_host_refinement(context, refinement.host, &member, native_type, Ok(docblock_type));
         return;
     }
 

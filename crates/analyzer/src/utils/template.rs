@@ -555,17 +555,17 @@ fn find_atomic_template_positions(
                 find_template_positions(codebase, argument, owner, argument_position, positions);
             }
         }
+        // A plain PHP `Closure` type may leave out a parameter's type or its return type, which reads as `Any?` and uses
+        // no type parameter.
         TAtomic::Callable(TCallable::Signature(signature)) => {
-            for parameter in signature.get_parameters() {
-                let Some(parameter_type) = parameter.get_type_signature() else {
-                    unreachable!("a PHP# function type writes the type of each parameter");
-                };
+            for parameter_type in
+                signature.get_parameters().iter().filter_map(|parameter| parameter.get_type_signature())
+            {
                 find_template_positions(codebase, parameter_type, owner, position.flip(), positions);
             }
-            let Some(return_type) = signature.get_return_type() else {
-                unreachable!("a PHP# function type writes its return type");
-            };
-            find_template_positions(codebase, return_type, owner, position, positions);
+            if let Some(return_type) = signature.get_return_type() {
+                find_template_positions(codebase, return_type, owner, position, positions);
+            }
         }
         _ => {
             for child in atomic.get_child_nodes() {

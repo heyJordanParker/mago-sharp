@@ -20,6 +20,7 @@ use mago_codex::metadata::class_like::ClassLikeMetadata;
 use mago_codex::metadata::class_like::TemplateTypes;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::metadata::parameter::FunctionLikeParameterMetadata;
+use mago_codex::metadata::ttype::HostRefinement;
 use mago_codex::metadata::ttype::TypeMetadata;
 use mago_codex::misc::GenericParent;
 use mago_codex::ttype::TType;
@@ -111,6 +112,7 @@ use crate::utils::expression::get_variable_id;
 use crate::utils::int_refused_for_float;
 use crate::utils::names::display_atomic;
 use crate::utils::names::display_class_like_name;
+use crate::utils::names::display_member;
 use crate::utils::names::display_nullable_type;
 use crate::utils::names::display_sharp_type;
 use crate::utils::names::display_type;
@@ -575,6 +577,13 @@ where
         }
     }
 
+    if let Some(declared) = &function_like_metadata.return_type_metadata
+        && let Some(HostRefinement { host, refused: Some(refused) }) = declared.host_refinement.as_deref()
+    {
+        let member = format!("the result of `{}`", display_signature(context, block_context, function_like_metadata));
+        report_host_refinement(context, *host, &member, declared, Err(refused));
+    }
+
     if let Some(effective_return) = &function_like_metadata.return_type_metadata
         && effective_return.from_docblock
         && let Some(native_return) = &function_like_metadata.return_type_declaration_metadata
@@ -594,7 +603,14 @@ where
             &mut ComparisonResult::default(),
         );
 
-        if !is_compatible {
+        if !is_compatible
+            && context.dialect.is_sharp()
+            && let Some(refinement) = &effective_return.host_refinement
+        {
+            let member =
+                format!("the result of `{}`", display_signature(context, block_context, function_like_metadata));
+            report_host_refinement(context, refinement.host, &member, native_return, Ok(effective_return));
+        } else if !is_compatible {
             let docblock_type_str = effective_return.type_union.get_id();
             let native_type_str = native_return.type_union.get_id();
 
@@ -900,6 +916,10 @@ where
             {
                 report_undefined_type_references(context, native_type);
             }
+            if let Some(HostRefinement { host, refused: Some(refused) }) = parameter_type.host_refinement.as_deref() {
+                let member = display_parameter(context, block_context, function_like_metadata, parameter_metadata);
+                report_host_refinement(context, *host, &member, parameter_type, Err(refused));
+            }
         }
 
         let declared_parameter_type = if let Some(parameter_type) = parameter_metadata.get_type_metadata() {
@@ -919,7 +939,13 @@ where
                     &mut ComparisonResult::default(),
                 );
 
-                if !is_compatible {
+                if !is_compatible
+                    && context.dialect.is_sharp()
+                    && let Some(refinement) = &parameter_type.host_refinement
+                {
+                    let member = display_parameter(context, block_context, function_like_metadata, parameter_metadata);
+                    report_host_refinement(context, refinement.host, &member, native_type, Ok(parameter_type));
+                } else if !is_compatible {
                     let docblock_type_str = effective_type.get_id();
                     let native_type_str = native_type.type_union.get_id();
                     let param_name = parameter_metadata.name.0;
@@ -2653,13 +2679,12 @@ where
 
     for type_ref in type_union.get_all_child_nodes() {
         let (key_type, in_set) = match type_ref {
-            TypeRef::Atomic(TAtomic::Array(TArray::Keyed(keyed_array))) => {
-                let Some((key_type, _)) = keyed_array.get_generic_parameters() else {
-                    unreachable!("PHP# writes no array shape, so each `Map` type it writes has a key type");
-                };
-
-                (key_type, false)
-            }
+            // An `array{…}` shape keys by its fields' `int` and `string` keys alone. PHP# writes none, and a host's
+            // refinement of a PHP# member to one is refused where it enters the codebase.
+            TypeRef::Atomic(TAtomic::Array(TArray::Keyed(keyed_array))) => match keyed_array.get_generic_parameters() {
+                Some((key_type, _)) => (key_type, false),
+                None => continue,
+            },
             TypeRef::Atomic(TAtomic::Array(TArray::Set(element_type))) => (element_type.as_ref(), true),
             _ => continue,
         };
@@ -2683,6 +2708,75 @@ where
         let error = collection_key_error(context.codebase, key_type, key_id.as_str(), in_set, span);
         context.collector.report_with_code(IssueCode::TemplateConstraintViolation, error);
     }
+}
+
+/// Reports, at `declared`, the type a PHP# member declares, the refinement the extension host `host` gave the member,
+/// which `member` names, as "`Notice.fields`" or "the result of `Notice.merged`": `Err` of a type PHP# can't write,
+/// which the member refused, or `Ok` of one that doesn't fit `declared`.
+pub(crate) fn report_host_refinement<A>(
+    context: &mut Context<'_, '_, A>,
+    host: Word,
+    member: &str,
+    declared: &TypeMetadata,
+    refinement: Result<&TypeMetadata, &TUnion>,
+) where
+    A: Arena,
+{
+    let declared_type = display_sharp_type(context, &declared.type_union);
+    let issue = match refinement {
+        Err(refused) => Issue::error(format!(
+            "The host `{host}` refines {member} to `{}`, which PHP# can't write, so it keeps its declared type `{declared_type}`.",
+            refused.get_id()
+        ))
+        .with_annotation(Annotation::primary(declared.span).with_message(format!("`{declared_type}` is declared here."))),
+        Ok(refined) => {
+            let refined_type = display_sharp_type(context, &refined.type_union);
+            Issue::error(format!(
+                "The host `{host}` refines {member} to `{refined_type}`, which doesn't fit its declared type `{declared_type}`."
+            ))
+            .with_annotation(Annotation::primary(declared.span).with_message(format!("`{declared_type}` is declared here.")))
+            .with_annotation(Annotation::secondary(refined.span).with_message(format!("The host refines it to `{refined_type}` here.")))
+        }
+    };
+
+    context.collector.report_with_code(
+        IssueCode::DocblockTypeMismatch,
+        issue.with_help(
+            "A host refines a PHP# member only to a type PHP# writes that fits the type the member declares.",
+        ),
+    );
+}
+
+/// `function_like` as the analyzed file names it: a method through its class, as `Notice.merged`.
+fn display_signature<A>(
+    context: &Context<'_, '_, A>,
+    block_context: &BlockContext<'_>,
+    function_like: &FunctionLikeMetadata,
+) -> String
+where
+    A: Arena,
+{
+    match block_context.scope.get_class_like_name() {
+        Some(class) if function_like.kind.is_method() => display_member(context, class, function_like.original_name),
+        _ => function_like.original_name.to_string(),
+    }
+}
+
+/// `parameter` of `function_like` as a message names it: "the parameter `extra` of `Notice.merged`".
+fn display_parameter<A>(
+    context: &Context<'_, '_, A>,
+    block_context: &BlockContext<'_>,
+    function_like: &FunctionLikeMetadata,
+    parameter: &FunctionLikeParameterMetadata,
+) -> String
+where
+    A: Arena,
+{
+    format!(
+        "the parameter `{}` of `{}`",
+        display_variable_name(context, parameter.get_name().0),
+        display_signature(context, block_context, function_like)
+    )
 }
 
 /// The error for a PHP# `Map` keyed by, or a `Set` of, `key_type`, written `key_id`, that has no `==` and `hash()`, at

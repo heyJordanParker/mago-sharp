@@ -2158,9 +2158,15 @@ pub enum SharpType<'atomic> {
 
 /// `atomic` as PHP# writes it, or `None` for a type only a PHP docblock writes, such as `array-key`, `scalar`,
 /// `numeric`, `resource` or an `array{…}` shape.
+///
+/// A class named before the codebase resolves it, as a declaration's type is when an extension host refines it, is that
+/// class.
 #[must_use]
 pub fn get_sharp_type(atomic: &TAtomic) -> Option<SharpType<'_>> {
     Some(match atomic {
+        TAtomic::Reference(TReference::Symbol { name, parameters, .. }) => {
+            SharpType::Class(*name, parameters.as_deref().unwrap_or_default())
+        }
         TAtomic::Scalar(TScalar::Integer(_)) => SharpType::Int,
         TAtomic::Scalar(TScalar::Float(_)) => SharpType::Float,
         TAtomic::Scalar(TScalar::Bool(_)) => SharpType::Bool,

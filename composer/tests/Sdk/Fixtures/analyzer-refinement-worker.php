@@ -17,9 +17,13 @@ use Mago\Sdk\Analyzer\Plugin;
 use Mago\Sdk\Analyzer\PluginDefinition;
 use Mago\Sdk\Analyzer\PluginRegistry;
 use Mago\Sdk\Analyzer\Type;
+use Mago\Sdk\Analyzer\Type\ArrayItem;
+use Mago\Sdk\Analyzer\Type\ArrayKey;
+use Mago\Sdk\Analyzer\Type\ArrayKeyKind;
 use Mago\Sdk\Analyzer\Type\GenericParameterType;
 use Mago\Sdk\Analyzer\Type\GenericParent;
 use Mago\Sdk\Analyzer\Type\GenericParentKind;
+use Mago\Sdk\Analyzer\Type\KeyedArrayType;
 use Mago\Sdk\Analyzer\Type\ReferenceType;
 use Mago\Sdk\Analyzer\Type\ReferenceTypeKind;
 use Mago\Sdk\Extension;
@@ -43,7 +47,9 @@ final class DeclarationRefinementProofPlugin implements CodebaseScanHook, Plugin
 
     public function getTargets(): array
     {
-        return ['src/**/*.php'];
+        // The one PHP# file refined is `src/Notice.sharp`: a class `mago convert` turns into PHP# keeps its marker, and
+        // writes the types its refinement gave.
+        return ['src/**/*.php', 'src/Notice.sharp'];
     }
 
     public function getDefinition(): PluginDefinition
@@ -73,6 +79,7 @@ final class DeclarationRefinementProofPlugin implements CodebaseScanHook, Plugin
                         'Proof\Box' => self::box($file, $attribute->location->span),
                         'Proof\Holder' => self::holder($file, $attribute->location->span),
                         'Proof\Factory' => self::factory($file, $attribute->location->span),
+                        'Proof\Notice' => self::notice($file, $attribute->location->span),
                         'Proof\Relay', 'Proof\Outer', 'Proof\Top', 'Proof\Ping', 'Proof\Pong' => self::relay(
                             $file,
                             $classLike->originalName,
@@ -143,6 +150,39 @@ final class DeclarationRefinementProofPlugin implements CodebaseScanHook, Plugin
                 'plain' => new RefinedType(self::symbol('Proof\Box', self::symbol('Proof\Spec')), $span),
             ],
             methods: ['make' => new SignatureRefinement(returnFromBody: true)],
+        );
+    }
+
+    /**
+     * A PHP# class whose `Map` members a host refines to an array shape, which PHP# can't write, and whose two `Spec`
+     * members it refines to `Special`, which fits, and to `Other`, which doesn't.
+     */
+    private static function notice(CodebaseScanFile $file, Span $span): ClassLikeRefinement
+    {
+        $shape = Type::fromAtomic(
+            new KeyedArrayType(
+                [
+                    new ArrayItem(new ArrayKey(ArrayKeyKind::String, 'key'), false, Type::string()),
+                    new ArrayItem(new ArrayKey(ArrayKeyKind::String, 'reason'), false, Type::string()),
+                ],
+                null,
+                null,
+                false,
+            ),
+        );
+
+        return new ClassLikeRefinement(
+            $file->path,
+            'Proof\Notice',
+            properties: [
+                'fields' => new RefinedType($shape, $span),
+                'chosen' => new RefinedType(self::symbol('Proof\Special'), $span),
+                'subject' => new RefinedType(self::symbol('Proof\Other'), $span),
+            ],
+            methods: ['merged' => new SignatureRefinement(
+                parameters: ['extra' => new RefinedType($shape, $span)],
+                return: new RefinedType($shape, $span),
+            )],
         );
     }
 
