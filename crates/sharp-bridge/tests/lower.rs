@@ -16429,6 +16429,30 @@ fn an_override_of_a_plain_php_property_keeps_its_storage() {
 }
 
 /// ```php
+/// #[\Override] public function errors(): array { return \Sharp\Internal\arrayOf(new \Sharp\Map<string, List<string>>(…)); }
+/// public function count(): int { return \Sharp\Internal\count(\is_array($crossing#1 = $this->errors()) ? … : …); }
+/// ```
+///
+/// Spec section 12: an override of a plain PHP method keeps that method's PHP result, as an override of its property
+/// keeps the storage, so the engine links the class: `array`, not the `\Sharp\Map|array` PHP refuses under it. The
+/// method returns the PHP array to every caller, with no result crossing of its own, and a PHP# call of it crosses the
+/// array in, as it crosses a plain PHP call's result.
+#[test]
+fn an_override_of_a_plain_php_method_keeps_its_result() {
+    let lowered = Lowered::with(
+        "final class Form : Checker\n{\n    public override Map<string, List<string>> errors() => [\"name\": [\"required\"]];\n\n    public int count() => this.errors().count();\n}\n",
+        &[("src/Checker.php", "<?php abstract class Checker { public function errors(): array { return []; } }")],
+    );
+    let errors = lowered.render(lowered.method_named("errors"));
+    let count = lowered.body_of("count");
+
+    assert!(errors.contains("SHARP_TYPE_ARGS\n    TYPE [7]\n"), "{errors}");
+    assert!(!errors.contains("Sharp\\\\Map\"\n      TYPE [7]"), "{errors}");
+    assert!(errors.contains("ZVAL \"Sharp\\\\Internal\\\\arrayOf\""), "{errors}");
+    assert!(count.contains("ZVAL \"crossing#1\""), "{count}");
+}
+
+/// ```php
 /// #[\Override] protected null|string $table = 'orders';   // with the type text "string"
 /// #[\Override] public int|float $level = 3;           // with the type text "int"
 /// ```

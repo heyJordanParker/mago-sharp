@@ -564,6 +564,9 @@ struct Lowering<'lowering, 'arena> {
     /// The declared return type of the method being lowered, which a value it returns crosses into. A lambda declares
     /// none.
     returns: Option<TUnion>,
+    /// The PHP result a plain PHP method declares, which the method being lowered overrides and keeps, as
+    /// [`Types::plain_result`] says, so a value it returns is stored as the PHP array that type holds. A lambda has none.
+    plain_result: Option<TUnion>,
     /// The declared type of each typed local lowered so far, by the offset of its declaration, which a reference
     /// parameter's local crosses back into.
     local_types: HashMap<u32, TUnion>,
@@ -615,6 +618,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             inlined: Vec::new(),
             function_types: Vec::new(),
             returns: None,
+            plain_result: None,
             local_types: HashMap::default(),
             promoted_beside: false,
             type_parameters: HashMap::default(),
@@ -2677,13 +2681,17 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                     .return_type_hint
                     .as_ref()
                     .map(|return_type| self.types.declared_type(&return_type.hint).clone());
+                self.plain_result = self.types.plain_result(self.class, php_method_name(method)).cloned();
                 let body = self.method_body(&method.body, method.returns_value(), statements);
                 self.returns = None;
+                self.plain_result = None;
 
                 body
             }
         };
-        let crossing = self.crossing_result(method.return_type_hint.as_ref().map(|return_type| &return_type.hint));
+        // A method that returns plain PHP's array gives every caller that array, so no caller's array is made of it.
+        let crossing = self.crossing_result(method.return_type_hint.as_ref().map(|return_type| &return_type.hint))
+            && self.types.plain_result(self.class, php_method_name(method)).is_none();
         let (start, return_type) = match &method.return_type_hint {
             Some(return_type_hint) => {
                 (return_type_hint.span(), self.return_hint(php_method_name(method), &return_type_hint.hint, crossing))
@@ -2767,8 +2775,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
             MethodBody::Expression(body) => {
                 let line = self.line(body);
                 statements.push(if returns_value {
-                    let returns = self.returns.clone();
-                    let expression = self.crossed_value(body.expression, returns.as_ref());
+                    let expression = self.returned(body.expression);
 
                     self.node(SHARP_AST_RETURN, 0, line, &[expression])
                 } else {
@@ -4627,15 +4634,19 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// The PHP return type of the method `method`, which returns `hint`, or none where PHP's would be `mixed`, as for
     /// `Any`, `Any?` and a type parameter without a bound, so a plain PHP implementation without a return type fits
     /// it. PHP# checks the result itself. An override of a plain PHP method that declares a return type keeps `mixed`,
-    /// which PHP requires of it. A result plain PHP gets the PHP array of, `crossing`, is [`Self::result_hint`]'s.
+    /// which PHP requires of it, and one whose result PHP would declare `\Sharp\Map|array` keeps that method's type, as
+    /// [`Types::plain_result`] says. A result plain PHP gets the PHP array of, `crossing`, is [`Self::result_hint`]'s.
     fn return_hint(&mut self, method: &[u8], hint: &Hint, crossing: bool) -> u32 {
+        if let Some(plain) = self.types.plain_result(self.class, method) {
+            return self.declared_type(plain, self.line(hint));
+        }
         let union = match without_readonly(hint) {
             Hint::Nullable(NullableHint { hint: Hint::Parenthesized(parenthesized), .. }) => parenthesized.hint,
             Hint::Nullable(nullable) => nullable.hint,
             hint => hint,
         };
         if union_members(union).into_iter().any(|member| matches!(self.erase(member), PhpType::Mixed))
-            && !self.types.overrides_typed_result(self.class, method)
+            && self.types.overridden_php_result(self.class, method).is_none()
         {
             return NULL;
         }
@@ -4824,10 +4835,21 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     fn r#return(&mut self, r#return: &Return) -> u32 {
-        let returns = self.returns.clone();
-        let value = r#return.value.map_or(NULL, |value| self.crossed_value(value, returns.as_ref()));
+        let value = r#return.value.map_or(NULL, |value| self.returned(value));
 
         self.node(SHARP_AST_RETURN, 0, self.line(r#return), &[value])
+    }
+
+    /// `value` as the method being lowered returns it: crossed into its declared result, or stored as the PHP array of
+    /// the plain PHP result it keeps, as [`Types::plain_result`] says, spec section 12.
+    fn returned(&mut self, value: &Expression) -> u32 {
+        let line = self.line(value);
+        if let Some(stored) = self.plain_result.clone() {
+            return self.received_value(line, value, takes_array(&stored), None);
+        }
+        let returns = self.returns.clone();
+
+        self.crossed_value(value, returns.as_ref())
     }
 
     /// A `for … of` is the `foreach` of its collection. A loop variable is each element, spec sections 17 and 30, and a
@@ -7271,10 +7293,12 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     fn lambda_body<T>(&mut self, lower: impl FnOnce(&mut Self) -> T) -> (T, bool) {
         let loops = std::mem::take(&mut self.loops);
         let returns = self.returns.take();
+        let plain_result = self.plain_result.take();
         let around = std::mem::take(&mut self.captures_type_arguments);
         let body = lower(self);
         self.loops = loops;
         self.returns = returns;
+        self.plain_result = plain_result;
         let captures_type_arguments = self.captures_type_arguments;
         self.captures_type_arguments |= around;
 
@@ -9195,10 +9219,11 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// Whether plain PHP gives `value` itself, the result of a call of plain PHP or a property plain PHP declares,
-    /// which holds a PHP array where PHP# reads a `Map` or a `Set`.
+    /// which holds a PHP array where PHP# reads a `Map` or a `Set`. A PHP# method that keeps a plain PHP method's result,
+    /// as [`Types::plain_result`] says, gives it too.
     fn plain_value(&self, value: &Expression) -> bool {
         match value.unparenthesized() {
-            Expression::Call(_) => self.types.call_parameters(value).is_some(),
+            Expression::Call(_) => self.types.call_parameters(value).is_some() || self.types.runs_plain_result(value),
             Expression::Access(Access::Property(_)) => self.types.plain_property(value),
             _ => false,
         }

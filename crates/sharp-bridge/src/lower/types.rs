@@ -41,6 +41,7 @@ use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeString;
 use mago_codex::ttype::comparator::ComparisonResult;
 use mago_codex::ttype::comparator::union_comparator;
 use mago_codex::ttype::comparator::union_comparator::can_expression_types_be_identical;
+use mago_codex::ttype::declares_table_or_array;
 use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::get_collection_object;
 use mago_codex::ttype::get_mixed;
@@ -684,10 +685,30 @@ impl<'analysis> Types<'analysis> {
         self.function_type(&function, &parameters, result)
     }
 
-    /// Whether the method `method` of `class` overrides a plain PHP method that declares a return type, as
-    /// [`CodebaseMetadata::overrides_typed_php_method`] tells.
-    pub(crate) fn overrides_typed_result(&self, class: &[u8], method: &[u8]) -> bool {
-        self.codebase.overrides_typed_php_method(self.scanned(class), method)
+    /// The return type a plain PHP method that the method `method` of `class` overrides declares, as
+    /// [`CodebaseMetadata::get_overridden_php_result`] gives it.
+    pub(crate) fn overridden_php_result(&self, class: &[u8], method: &[u8]) -> Option<&'analysis TUnion> {
+        self.codebase.get_overridden_php_result(self.scanned(class), method).map(|declared| &declared.type_union)
+    }
+
+    /// The PHP result the PHP# method `method` of `class` keeps, spec section 12: the type a plain PHP method it
+    /// overrides declares, where PHP would declare its own result `\Sharp\Map|array`, as
+    /// [`declares_table_or_array`] says, which PHP refuses under that method. The method then returns the PHP array to
+    /// every caller, as the plain PHP method does. None for any other method.
+    pub(crate) fn plain_result(&self, class: &[u8], method: &[u8]) -> Option<&'analysis TUnion> {
+        let own = &self.codebase.get_method(class, method)?.return_type_declaration_metadata.as_ref()?.type_union;
+
+        declares_table_or_array(own, self.codebase).then(|| self.overridden_php_result(class, method)).flatten()
+    }
+
+    /// Whether the call `call` runs a PHP# method that returns plain PHP's array, as [`Self::plain_result`] says, which
+    /// PHP# reads as it reads a plain PHP call's result.
+    pub(crate) fn runs_plain_result(&self, call: &Expression) -> bool {
+        self.artifacts.get_callees(call).any(|target| {
+            matches!(target, CallTarget::FunctionLike { callee: FunctionLikeIdentifier::Method(class, method), .. }
+                if self.codebase.get_declaring_method_class(class.as_bytes(), method.as_bytes())
+                    .is_some_and(|declaring| self.plain_result(declaring.as_bytes(), method.as_bytes()).is_some()))
+        })
     }
 
     /// Whether each PHP# call of the method `method` of `class` checks its result, as
