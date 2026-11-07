@@ -8,6 +8,10 @@
 //! pool starts its workers at once. On a loaded Mac, 30 of 300 processes that closed their stdin while another thread
 //! kept starting processes still took a write, and none did under this lock. Go's `syscall.ForkLock` holds the same
 //! steps apart. This crate is the lowest one every crate that starts a process depends on.
+//!
+//! Every process runs with `SHARP_COMPILING=1`, as the PHP# engine runs its `sharp.compile_command`. A PHP# `php` that
+//! has it set never runs that command, so an extension host's worker that loads a file the checker refused, under a
+//! `php.ini` that names the command, gets the refusal instead of starting a compile, whose hosts would start another.
 
 use std::io;
 use std::process::Child;
@@ -21,7 +25,10 @@ use std::sync::PoisonError;
 /// Held while a process starts, so no process starts while another one's pipes are created.
 static SPAWNING: Mutex<()> = Mutex::new(());
 
-/// Starts `command`, as `Command::spawn` does.
+/// The variable every process Mago starts runs with, which the PHP# engine reads.
+const SHARP_COMPILING: &str = "SHARP_COMPILING";
+
+/// Starts `command`, as `Command::spawn` does, with `SHARP_COMPILING=1`.
 ///
 /// # Errors
 ///
@@ -30,7 +37,7 @@ static SPAWNING: Mutex<()> = Mutex::new(());
 pub fn spawn(command: &mut Command) -> io::Result<Child> {
     let _spawning = SPAWNING.lock().unwrap_or_else(PoisonError::into_inner);
 
-    command.spawn()
+    command.env(SHARP_COMPILING, "1").spawn()
 }
 
 /// Runs `command` to its end and returns what it wrote, as `Command::output` does.
@@ -52,4 +59,22 @@ pub fn output(command: &mut Command) -> io::Result<Output> {
 /// Returns the error starting or waiting for the process returns.
 pub fn status(command: &mut Command) -> io::Result<ExitStatus> {
     spawn(command)?.wait()
+}
+
+#[cfg(all(test, unix))]
+#[allow(clippy::expect_used)]
+mod tests {
+    use std::process::Command;
+
+    use super::output;
+
+    /// A process Mago starts runs with `SHARP_COMPILING=1`, even where its command removed the variable.
+    #[test]
+    fn every_process_runs_with_sharp_compiling_set() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "printf %s \"$SHARP_COMPILING\""]).env_remove("SHARP_COMPILING");
+        let printed = output(&mut command).expect("sh should run");
+
+        assert_eq!(String::from_utf8_lossy(&printed.stdout), "1");
+    }
 }
