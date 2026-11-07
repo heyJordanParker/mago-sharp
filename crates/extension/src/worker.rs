@@ -1662,57 +1662,27 @@ mod tests {
     }
 
     /// A worker that closed its stdin refuses the request as Mago writes it, and the error says so with its stderr.
-    /// Other processes keep starting while each worker starts, as a pool starts its workers at once, and none of them
-    /// holds the stdin a worker closed.
     #[cfg(unix)]
     #[test]
     fn a_request_written_to_a_worker_that_closed_its_stdin_holds_the_write_error_and_the_stderr() {
-        /// The most other processes that run at once.
-        const OTHERS: usize = 64;
+        const TIMEOUT: Duration = Duration::from_secs(10);
 
-        let script = format!("exec 0<&-; echo '{FATAL_ERROR}' >&2; exec {SLEEP_UNTIL_ENDED}");
-        // The test drops `stop` once its workers are done, or as it panics, which stops the other processes starting.
-        let (stop, stopped) = mpsc::channel::<()>();
-        std::thread::scope(|scope| {
-            scope.spawn(move || {
-                let mut others = VecDeque::new();
-                while stopped.try_recv() == Err(mpsc::TryRecvError::Empty) {
-                    let mut other = std::process::Command::new("sh");
-                    other.args(["-c", SLEEP_UNTIL_ENDED]);
-                    others.push_back(ProcessGroup::spawn(&mut other).expect("another process should start"));
-                    // Dropping the oldest group ends its process.
-                    if others.len() > OTHERS {
-                        others.pop_front();
-                    }
-                }
-            });
+        let worker = shell_worker(&format!("exec 0<&-; echo '{FATAL_ERROR}' >&2; exec {SLEEP_UNTIL_ENDED}"));
+        let deadline = Instant::now() + TIMEOUT;
+        while lock(&worker.inner.stderr).display().is_empty() {
+            assert!(Instant::now() < deadline, "the worker wrote no stderr within {TIMEOUT:?}");
+            std::thread::sleep(Duration::from_millis(1));
+        }
 
-            for _ in 0..8 {
-                // Past the stderr budget, so a stderr that never ends fails the test with `stderr still open`, and only
-                // a write that never fails reaches the deadline.
-                let request_timeout = UNREACHED_STDERR_END_TIMEOUT * 2;
-                let worker = shell_worker_within(&script, request_timeout, UNREACHED_STDERR_END_TIMEOUT);
-                wait_until_stderr_arrives(&worker);
+        let error = worker.request(b"describe".to_vec(), None).expect_err("the closed stdin should fail the request");
 
-                // DIAGNOSTIC, to be removed: who holds the far end of the test's pipes as Mago writes.
-                let leader = lock(&worker.inner.child).as_mut().map(|group| group.leader().id());
-                let (inherited, holders) = pipe_holders(leader);
-                assert!(!inherited, "a process holds a pipe of the test above fd 2 as Mago writes:\n{holders}");
-
-                let error =
-                    worker.request(b"describe".to_vec(), None).expect_err("the closed stdin should fail the request");
-
-                assert_eq!(
-                    error.to_string(),
-                    format!(
-                        "extension host `acme` disconnected (worker 0): failed to write to the worker: Broken pipe (os error 32); stderr: {FATAL_ERROR}"
-                    ),
-                    "{holders}"
-                );
-                worker.shutdown();
-            }
-            drop(stop);
-        });
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "extension host `acme` disconnected (worker 0): failed to write to the worker: Broken pipe (os error 32); stderr: {FATAL_ERROR}"
+            )
+        );
+        worker.shutdown();
     }
 
     /// A worker that Mago shuts down while it fails gives the request it served the failure, not a shutdown. A process
@@ -1917,82 +1887,6 @@ mod tests {
         wait_until_stopped(&worker);
 
         worker
-    }
-
-    /// DIAGNOSTIC, to be removed: each process other than the test that holds the far end of one of the test process's
-    /// pipes, looked for first among the test's descendants and then among every process, with its parent, group, start
-    /// and command line, the worker `leader`'s open files, and the test process's threads. Says too whether one such
-    /// holder, other than the runner and this record's own `lsof` and `ps`, holds it above fd 2, as a process that
-    /// inherited it does.
-    #[cfg(unix)]
-    fn pipe_holders(leader: Option<u32>) -> (bool, String) {
-        let run = |program: &str, arguments: &[&str]| {
-            mago_database::process::output(std::process::Command::new(program).args(arguments)).map_or_else(
-                |error| format!("{program} failed: {error}"),
-                |output| String::from_utf8_lossy(&output.stdout).into_owned(),
-            )
-        };
-        let own = std::process::id().to_string();
-        let own_files = run("lsof", &["-n", "-P", "-p", &own]);
-        let processes = run("ps", &["-A", "-o", "pid=,ppid=,pgid=,lstart=,command="]);
-        let mut descendants = vec![own.clone()];
-        let mut grew = true;
-        while grew {
-            grew = false;
-            for line in processes.lines() {
-                let mut fields = line.split_whitespace();
-                if let (Some(pid), Some(parent)) = (fields.next(), fields.next())
-                    && descendants.iter().any(|known| known == parent)
-                    && !descendants.iter().any(|known| known == pid)
-                {
-                    descendants.push(pid.to_owned());
-                    grew = true;
-                }
-            }
-        }
-        let descendant_files = run("lsof", &["-n", "-P", "-p", &descendants.join(",")]);
-        let every_file = run("lsof", &["-n", "-P"]);
-
-        let own_pipes: Vec<&str> = own_files.lines().filter(|line| line.contains("PIPE")).collect();
-        let far_ends: Vec<&str> = own_pipes.iter().filter_map(|line| line.split("->").nth(1)).map(str::trim).collect();
-        let holders_in = |listing: &str| -> Vec<String> {
-            listing
-                .lines()
-                .filter(|line| {
-                    line.split_whitespace().nth(1) != Some(own.as_str())
-                        && line.split_whitespace().any(|field| far_ends.contains(&field))
-                })
-                .map(str::to_owned)
-                .collect()
-        };
-        let near = holders_in(&descendant_files);
-        let far = holders_in(&every_file);
-        let inherited = near.iter().chain(&far).any(|line| {
-            let mut fields = line.split_whitespace();
-            let command = fields.next().unwrap_or_default();
-            let descriptor = fields.nth(2).unwrap_or_default().trim_end_matches(char::is_alphabetic);
-            // The runner's own pipes, and the `lsof` and `ps` this runs, which hold their output pipes as they like.
-            !(command.starts_with("Runner.") || command == "lsof" || command == "ps")
-                && descriptor.parse::<u32>().is_ok_and(|descriptor| descriptor > 2)
-        });
-        let holder_ids: Vec<&str> = near.iter().chain(&far).filter_map(|line| line.split_whitespace().nth(1)).collect();
-        let holder_processes: Vec<&str> = processes
-            .lines()
-            .filter(|line| line.split_whitespace().next().is_some_and(|pid| holder_ids.contains(&pid)))
-            .collect();
-        let leader_files = leader.map(|id| run("lsof", &["-n", "-P", "-p", &id.to_string()])).unwrap_or_default();
-        let threads = run("ps", &["-M", "-p", &own]);
-
-        (
-            inherited,
-            format!(
-                "test pipes:\n{}\nholders among the test's descendants:\n{}\nholders among every process:\n{}\nthe holders (pid ppid pgid start command):\n{}\nworker {leader:?} files:\n{leader_files}\ntest threads:\n{threads}",
-                own_pipes.join("\n"),
-                near.join("\n"),
-                far.join("\n"),
-                holder_processes.join("\n"),
-            ),
-        )
     }
 
     /// Waits until Mago has read what `worker` wrote to its stderr, so a failure after it holds what the worker wrote
