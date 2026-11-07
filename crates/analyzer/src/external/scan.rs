@@ -134,11 +134,12 @@ impl CodebaseScanPlan {
         }
 
         let mut writer = PayloadWriter::default();
-        metadata::write_declarations(&mut writer, metadata, file)?;
+        let holds_member_reads = metadata::write_declarations(&mut writer, metadata, None, file)?;
         Ok(Some(CodebaseScanFile {
             file: Arc::clone(file),
             declarations: writer.finish().into(),
             routes: routes.into_boxed_slice(),
+            scan: holds_member_reads.then(|| Arc::new(metadata.clone())),
         }))
     }
 }
@@ -155,6 +156,8 @@ pub struct CodebaseScanFile {
     file: Arc<File>,
     declarations: Arc<[u8]>,
     routes: Box<[CodebaseScanRoute]>,
+    /// The file's own scan, kept while its attributes hold a PHP# member read, which only the merged scan resolves.
+    scan: Option<Arc<CodebaseMetadata>>,
 }
 
 impl CodebaseScanFile {
@@ -162,6 +165,34 @@ impl CodebaseScanFile {
     #[must_use]
     pub fn file_id(&self) -> FileId {
         self.file.id
+    }
+
+    /// Whether the file's attributes hold a PHP# member read, as `Pdf.DEFAULT_DPI`, which only the merged scan of every
+    /// file tells a class constant from a namespace's constant or an enum's case object, spec section 23.
+    #[inline]
+    #[must_use]
+    pub fn holds_member_reads(&self) -> bool {
+        self.scan.is_some()
+    }
+
+    /// Writes the declarations again with each PHP# member read resolved against `scan`, the merged scan of every file,
+    /// and returns whether they changed. A file without one keeps the declarations it has.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the declarations exceed protocol limits.
+    pub fn resolve_member_reads(&mut self, scan: &Arc<CodebaseMetadata>) -> Result<bool, ExternalAnalyzerError> {
+        let Some(metadata) = &self.scan else {
+            return Ok(false);
+        };
+
+        let mut writer = PayloadWriter::default();
+        metadata::write_declarations(&mut writer, metadata, Some(scan), &self.file)?;
+        let declarations = writer.finish();
+        let changed = *self.declarations != *declarations;
+        self.declarations = declarations.into();
+
+        Ok(changed)
     }
 
     fn route(&self, backend: u16) -> Option<&[u16]> {
