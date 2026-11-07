@@ -3380,7 +3380,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// A parameter's default, `value`. Spec section 9: it is any expression, which runs each time a call leaves the
     /// argument out, as [`Self::computed`] makes it.
     fn default_value(&mut self, value: &Expression) -> u32 {
-        let (lowered, _) = self.lambda_body(|lowering| lowering.default_expression(value));
+        let (lowered, _) = self.lambda_body(|lowering| lowering.default_expression(value, None));
 
         self.computed(value, lowered)
     }
@@ -3606,12 +3606,15 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         };
         let name = self.string(0, line, variable.name);
         let type_parameters = self.type_parameter_names();
+        // An override of a property plain PHP declares keeps plain PHP's storage, which holds the PHP array plain PHP
+        // code reads, with no crossing of its own, spec section 12.
+        let stored = self.types.plain_property_type(self.class, &[b"$", variable.name].concat());
         let default = match property.initial_value() {
             Some(value)
                 if !property.initial_value_runs_in_constructor(&type_parameters)
                     && !property.initial_value_runs_after_class(&type_parameters) =>
             {
-                let lowered = self.default_expression(value);
+                let lowered = self.default_expression(value, stored.clone());
 
                 self.computed(value, lowered)
             }
@@ -3625,7 +3628,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         // A member with no access modifier is private, spec section 5.
         let access = if flags & access_flags == 0 { ZEND_ACC_PRIVATE } else { 0 };
         let flags = flags | access;
-        let crossing = self.crossing_attribute(property.hint());
+        let crossing = if stored.is_some() { None } else { self.crossing_attribute(property.hint()) };
         let attributes = self.attributes(attribute_lists, r#override, crossing);
 
         self.node(SHARP_AST_PROP_GROUP, flags, self.line(property), &[hint, declaration, attributes])
@@ -4558,7 +4561,8 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
         let variable = property.first_variable();
         let line = self.line(variable);
         let name = self.string(0, line, variable.name);
-        let value = self.expression(value);
+        let stored = self.types.plain_property_type(self.class, &[b"$", variable.name].concat());
+        let value = self.stored_in_plain_place(line, value, stored).unwrap_or_else(|| self.expression(value));
         let this = self.variable(variable.span, b"this");
         let runs_set_hook = matches!(property, Property::Hooked(hooked) if hooked.behaviors.is_none()
         && hooked.hook_list.hooks.iter().any(|accessor| {
@@ -5669,11 +5673,17 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                                 stored
                             }
                             AssignmentOperator::Assign(_) => {
-                                let declared = self
-                                    .types
-                                    .property_type(assignment.lhs)
-                                    .cloned()
-                                    .or_else(|| self.typed_local(assignment.lhs).map(|(_, declared)| declared));
+                                // A pattern's variable holds the value it tests as that value arrives in PHP#, of the
+                                // type it reads as, spec section 12, so `as`, `is` and `match` test plain PHP's array
+                                // as the `Map` or the `List` a local that holds it is.
+                                let declared = match assignment.lhs {
+                                    Expression::Variable(_) => Some(self.types.expression_type(assignment.rhs).clone()),
+                                    _ => self
+                                        .types
+                                        .property_type(assignment.lhs)
+                                        .cloned()
+                                        .or_else(|| self.typed_local(assignment.lhs).map(|(_, declared)| declared)),
+                                };
 
                                 self.crossed_value(assignment.rhs, declared.as_ref())
                             }
@@ -7405,13 +7415,15 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     /// The default `value` of a property, a static or a parameter, which PHP evaluates as a constant expression. A
     /// `Map` or a `Set` constant's read is the PHP array the constant holds, which the property's crossing and the
     /// parameter's make the object, as [`Self::constant_expression`] lowers it. A read inside another expression is the
-    /// object, as everywhere else.
-    fn default_expression(&mut self, value: &Expression) -> u32 {
+    /// object, as everywhere else. A property whose storage plain PHP declares, of the type `stored`, holds the value as
+    /// that place stores it, as [`Self::stored_in_plain_place`] says.
+    fn default_expression(&mut self, value: &Expression, stored: Option<TUnion>) -> u32 {
         let outer = std::mem::replace(&mut self.in_default, true);
+        let line = self.line(value);
         let lowered = if self.reads_collection_constant(value) {
             self.constant_expression(value)
         } else {
-            self.expression(value)
+            self.stored_in_plain_place(line, value, stored).unwrap_or_else(|| self.expression(value))
         };
         self.in_default = outer;
 
@@ -9160,9 +9172,10 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
     }
 
     /// Whether `value` can be a PHP array PHP# types as a `Map` or a `Set`: what plain PHP gives, a call of it, a call of
-    /// a PHP# interface's member a plain PHP class may implement, or a property it declares, and what a local declared
-    /// without a type holds. A literal, a `new`, any other call of PHP#, a property PHP# declares, a parameter and a
-    /// typed local hold the object, as does an element of any of them.
+    /// a PHP# method a plain PHP class or a test double may implement or override, as
+    /// [`Types::runs_replaceable_member`] says, or a property it declares, and what a local declared without a type
+    /// holds. A literal, a `new`, any other call of PHP#, a property PHP# declares, a parameter and a typed local hold
+    /// the object, as does an element of any of them.
     fn may_be_php_array(&self, value: &Expression) -> bool {
         match value.unparenthesized() {
             Expression::Array(_) | Expression::Instantiation(_) | Expression::Literal(_) => false,
@@ -9171,7 +9184,7 @@ impl<'lowering, 'arena> Lowering<'lowering, 'arena> {
                 self.may_be_php_array(conditional.then.unwrap_or(conditional.condition))
                     || self.may_be_php_array(conditional.r#else)
             }
-            Expression::Call(_) => self.plain_value(value) || self.types.runs_result_checked_member(value),
+            Expression::Call(_) => self.plain_value(value) || self.types.runs_replaceable_member(value),
             Expression::Access(Access::Property(_)) => self.plain_value(value),
             Expression::ConstantAccess(access) => match self.names.binding(&access.name) {
                 Some(Binding::Local(local)) => local.kind != LocalKind::Parameter && self.typed_local(value).is_none(),

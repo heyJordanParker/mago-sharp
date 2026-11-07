@@ -16388,6 +16388,33 @@ fn an_override_of_a_property_with_no_type_has_no_type() {
 }
 
 /// ```php
+/// #[\Override] protected $casts = (static fn() => \Sharp\Internal\arrayOf(new \Sharp\Map<string, string>(…)))();
+/// #[\Override] protected array $formats = …;   // with the type text "Map<string, string>"
+/// return \Sharp\Internal\get(\is_array($crossing#1 = $this->casts) ? new \Sharp\Map<string, string>(…) : …, $key);
+/// $this->formats = \Sharp\Internal\arrayOf(new \Sharp\Map<string, string>(…));
+/// ```
+///
+/// Spec section 12: a property plain PHP declares, on the class or a parent, holds what a parameter of its type takes,
+/// so an override of a plain PHP parent's property, typed or not, keeps the parent's storage, the PHP array the parent's
+/// code reads, as Eloquent's `Model` reads `$casts`. Its initial value and each PHP# write store the PHP array, with no
+/// `#[\Sharp\Crossing]`, and a PHP# read crosses it in, as it reads a plain PHP property it inherits.
+#[test]
+fn an_override_of_a_plain_php_property_keeps_its_storage() {
+    let lowered = Lowered::with(
+        "class Invoice : Model\n{\n    protected override Map<string, string> casts { get; set; } = [\"paid\": \"bool\"];\n    protected override Map<string, string> formats { get; set; } = [\"total\": \"%.2f\"];\n\n    public string? castOf(string key) => this.casts.get(key);\n\n    public void format() { this.formats = [\"total\": \"%.3f\"]; }\n}\n",
+        &[(
+            "src/Model.php",
+            "<?php class Model { /** @var array<string, string> */ protected $casts = []; /** @var array<string, string> */ protected array $formats = []; }",
+        )],
+    );
+    let tree = lowered.tree();
+
+    assert!(!tree.contains("Sharp\\\\Crossing"), "{tree}");
+    assert_eq!(tree.matches("ZVAL \"Sharp\\\\Internal\\\\arrayOf\"").count(), 3, "{tree}");
+    assert!(tree.contains("ZVAL \"crossing#1\""), "{tree}");
+}
+
+/// ```php
 /// #[\Override] protected null|string $table = 'orders';   // with the type text "string"
 /// #[\Override] public int|float $level = 3;           // with the type text "int"
 /// ```
@@ -21835,6 +21862,90 @@ fn a_set_or_a_map_an_interface_member_gives_becomes_the_object() {
     assert_eq!(body.matches("ZVAL \"string\"\n").count(), 2, "{body}");
     assert!(body.contains("ZVAL \"string, int\"\n"), "{body}");
     assert_eq!(body.matches("ZVAL \"Sharp\\\\Internal\\\\arrayOf\"\n").count(), 1, "{body}");
+}
+
+/// ```php
+/// return \Sharp\Internal\get(\is_array($crossing#1 = $source->status()) ? new \Sharp\Map<string, string>(…) : $crossing#1, 'status');
+/// ```
+///
+/// Spec section 22: a plain PHP class may override a PHP# class's method, and PHPUnit's or Mockery's test double of the
+/// class overrides each one, a method that is not `virtual` included, so the `Map` a call gives may be the PHP array it
+/// crosses into, as an interface member's may. A call becomes the object where it lands, as a call of plain PHP does. A
+/// `static` or `private` method, and a method of a `final` class, has no override, so its call holds the object.
+#[test]
+fn a_map_a_class_method_gives_becomes_the_object_where_a_plain_override_may_give_it() {
+    let source = (
+        "src/App/Tenant/Source.sharp",
+        "namespace App.Tenant;\n\npublic class Source\n{\n    public virtual Map<string, string> status() => [\"status\": \"active\"];\n\n    public Map<string, string> closed() => [\"status\": \"closed\"];\n\n    public static Map<string, string> shared() => [\"status\": \"shared\"];\n\n    public string? own() => this.kept().get(\"status\");\n\n    private Map<string, string> kept() => [\"status\": \"kept\"];\n}\n",
+    );
+    let fixed = (
+        "src/App/Tenant/Fixed.sharp",
+        "namespace App.Tenant;\n\npublic final class Fixed\n{\n    public Map<string, string> status() => [\"status\": \"fixed\"];\n}\n",
+    );
+    let crossed = |statements: &str| {
+        let body = body_in("string? run(Source source, Fixed fixed)", statements, &[source, fixed]);
+
+        body.matches("ZVAL \"crossing#").count() > 0
+    };
+
+    assert!(crossed("        return source.status().get(\"status\");\n"));
+    assert!(crossed("        const status = source.status();\n        return status.get(\"status\");\n"));
+    assert!(crossed("        Map<string, string> status = source.closed();\n        return status.get(\"status\");\n"));
+    assert!(!crossed("        return Source.shared().get(\"status\");\n"));
+    assert!(!crossed("        return fixed.status().get(\"status\");\n"));
+    let own = Lowered::with(
+        "namespace App.Tenant;\n\npublic final class Reader\n{\n    public string? run(Source source) => source.own();\n}\n",
+        &[source],
+    )
+    .body();
+    assert!(!own.contains("crossing#"), "{own}");
+}
+
+/// ```php
+/// return (($as#1 = \is_array($crossing#2 = $folder->records) ? \Sharp\Map::from($crossing#2) : $crossing#2) instanceof List<…> ? … : null) != null;
+/// ```
+///
+/// Spec section 12: plain PHP's `?array` arrives as a `Map<int|string, Any?>?`, whatever keys it holds, and one it
+/// declares `list<…>` as a `List`. A pattern's variable holds the value it tests as it arrives, so `as`, `is` and
+/// `match` test the `Map` or the `List` a local holding the value holds, never plain PHP's array.
+#[test]
+fn a_pattern_tests_plain_php_s_array_as_it_arrives() {
+    let folder = (
+        "src/App/Tenant/Folder.php",
+        "<?php namespace App\\Tenant; final class Folder { public ?array $records = null; /** @var list<array<string, ?string>>|null */ public ?array $listed = null; }",
+    );
+    let records = body_in(
+        "bool run(Folder folder)",
+        "        return folder.records as List<Map<string, string?>> != null;\n",
+        &[folder],
+    );
+    let held = body_in(
+        "bool run(Folder folder)",
+        "        return folder.records is Map<int|string, Any?> records && records.has(0);\n",
+        &[folder],
+    );
+    let listed = body_in(
+        "bool run(Folder folder)",
+        "        return folder.listed as List<Map<string, string?>> != null;\n",
+        &[folder],
+    );
+
+    assert!(
+        records
+            .contains("ZVAL \"as#1\"\n            CONDITIONAL\n              CALL\n                ZVAL \"is_array\""),
+        "{records}"
+    );
+    assert!(records.contains("ZVAL \"Sharp\\\\Map\"\n                ZVAL \"from\""), "{records}");
+    assert!(
+        held.contains("ZVAL \"records\"\n          CONDITIONAL\n            CALL\n              ZVAL \"is_array\""),
+        "{held}"
+    );
+    assert!(
+        listed
+            .contains("ZVAL \"as#1\"\n            CONDITIONAL\n              CALL\n                ZVAL \"is_array\""),
+        "{listed}"
+    );
+    assert!(listed.contains("ZVAL \"string, string?\""), "{listed}");
 }
 
 /// ```php

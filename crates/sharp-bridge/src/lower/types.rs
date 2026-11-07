@@ -989,11 +989,27 @@ impl<'analysis> Types<'analysis> {
         (runs_in_engine && takes_function_value).then(|| method.original_name.to_string())
     }
 
-    /// Whether the call `call` runs a member of a PHP# interface, as [`Self::result_checked_member`] finds it, which a
-    /// plain PHP class may implement, so its result may be plain PHP's value: a PHP array for a `Map` or a `Set`.
-    pub(crate) fn runs_result_checked_member(&self, call: &Expression) -> bool {
+    /// Whether the call `call` runs a method of a PHP# class or interface that a plain PHP class may implement or
+    /// override, a test double PHPUnit or Mockery generates included, so its result may be plain PHP's value: a PHP
+    /// array for a `Map` or a `Set`, spec section 22. That is each method neither `static` nor `private`, of a class
+    /// that isn't `final`, whose PHP declares the result `\Sharp\Map|array`. A method that is not `virtual` is one too:
+    /// the checker reads it as final, but the engine runs it as an open PHP method a test double replaces.
+    pub(crate) fn runs_replaceable_member(&self, call: &Expression) -> bool {
         self.artifacts.get_callees(call).any(|target| {
-            matches!(target, CallTarget::FunctionLike { callee, .. } if self.result_checked_member(callee).is_some())
+            let CallTarget::FunctionLike { callee: FunctionLikeIdentifier::Method(class, method), .. } = target else {
+                return false;
+            };
+            let Some(member) = self.codebase.get_method(class.as_bytes(), method.as_bytes()) else {
+                return false;
+            };
+            let class = self.scanned(class.as_bytes());
+
+            class.flags.is_sharp()
+                && !class.flags.is_final()
+                && member
+                    .method_metadata
+                    .as_ref()
+                    .is_some_and(|method| !method.is_static && !method.visibility.is_private())
         })
     }
 
@@ -1941,7 +1957,7 @@ impl<'analysis> Types<'analysis> {
     /// The type plain PHP declares for the property `variable`, `$`-prefixed, that the fully qualified class name
     /// `class` declares or inherits, as [`Self::plain_place_type`] gives it. A write to a name the class has no
     /// property for runs its `__set`, so the place is the value parameter of a `__set` plain PHP declares, as Eloquent's
-    /// `Model` does. None for a property PHP# declares.
+    /// `Model` does. None for a property PHP# declares first. A PHP# override's place is its own type's.
     pub(crate) fn plain_property_type(&self, class: &[u8], variable: &[u8]) -> Option<TUnion> {
         let declared = match self.codebase.get_declaring_property(class, variable) {
             Some(_) if !self.plain_declares(class, variable) => return None,
@@ -1954,12 +1970,15 @@ impl<'analysis> Types<'analysis> {
         Some(declared.cloned().unwrap_or_else(get_mixed))
     }
 
-    /// Whether plain PHP declares the property `variable`, `$`-prefixed, that `class` declares or inherits.
+    /// Whether plain PHP declares the property `variable`, `$`-prefixed, that `class` declares or inherits, spec section
+    /// 12: on the class or a parent, so a PHP# override of a plain PHP parent's property keeps the parent's storage, which
+    /// holds the PHP array plain PHP code reads, as Eloquent's `Model` reads `$casts`.
     fn plain_declares(&self, class: &[u8], variable: &[u8]) -> bool {
-        self.codebase
-            .get_declaring_property_class(class, variable)
-            .and_then(|declaring| self.codebase.get_class_like(declaring.as_bytes()))
-            .is_some_and(|declaring| !declaring.flags.is_sharp())
+        self.codebase.get_declaring_property_class(class, variable).is_some()
+            && self
+                .codebase
+                .get_class_like(self.root_property(class, variable).0.as_bytes())
+                .is_some_and(|root| !root.flags.is_sharp())
     }
 
     /// The class and the `$`-prefixed name of the property `target` reads, `object.property`, `object?.property`, which
