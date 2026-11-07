@@ -1642,6 +1642,7 @@ version = "0.6.3"
 dependencies = [
  "anyhow",
  "clap",
+ "mago-database",
  "mago-linter",
  "mago-php-version",
  "mago-reporting",
@@ -1663,6 +1664,7 @@ version = "0.6.3"
 dependencies = [
  "foldhash",
  "libc",
+ "mago-database",
  "mago-names",
  "mago-span",
  "mago-syntax",

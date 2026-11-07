@@ -18,6 +18,17 @@ use std::sync::atomic::AtomicI32;
 use std::sync::atomic::AtomicPtr;
 #[cfg(unix)]
 use std::sync::atomic::Ordering;
+#[cfg(target_os = "macos")]
+use std::time::Duration;
+
+use mago_database::process;
+
+/// The first and the longest pause before `ProcessGroup::end` signals a group again whose processes still run, as they
+/// do until the kernel has ended them.
+#[cfg(target_os = "macos")]
+const INITIAL_END_POLL_INTERVAL: Duration = Duration::from_micros(50);
+#[cfg(target_os = "macos")]
+const MAXIMUM_END_POLL_INTERVAL: Duration = Duration::from_millis(1);
 
 /// A child process that leads a process group of its own.
 ///
@@ -51,7 +62,7 @@ impl ProcessGroup {
                 forward(signal);
                 return Err(io::Error::other("a signal is ending Mago"));
             }
-            let spawned = command.spawn();
+            let spawned = process::spawn(command);
             // `forward` writes `PENDING` before it reads the slots, and this thread writes its slot before it reads
             // `PENDING`, so at least one of them ends the group for a signal that arrived during the spawn.
             let group = spawned.as_ref().ok().and_then(|child| libc::pid_t::try_from(child.id()).ok()).unwrap_or(0);
@@ -65,7 +76,7 @@ impl ProcessGroup {
         }
         #[cfg(not(unix))]
         {
-            Ok(Self { leader: command.spawn()? })
+            Ok(Self { leader: process::spawn(command)? })
         }
     }
 
@@ -95,6 +106,19 @@ impl ProcessGroup {
             // SAFETY: `killpg` only sends a signal, to the group the leader leads since it started with `process_group(0)`.
             if unsafe { libc::killpg(group, libc::SIGKILL) } != 0 {
                 return Err(io::Error::last_os_error());
+            }
+            // macOS gives a process that a process of the group starts while the signal goes out none of it, so it would
+            // live on with what the group held, as a worker's pipes, and Mago would wait for them to close forever.
+            // Linux hands such a process the signal too. `killpg` succeeds while a process of the group still runs, and
+            // fails once only exited ones are left, so the signal goes out again until then.
+            #[cfg(target_os = "macos")]
+            {
+                let mut poll_interval = INITIAL_END_POLL_INTERVAL;
+                // SAFETY: as for the first `killpg`. The leader is not waited for yet, so its id still names the group.
+                while unsafe { libc::killpg(group, libc::SIGKILL) } == 0 {
+                    std::thread::sleep(poll_interval);
+                    poll_interval = (poll_interval * 2).min(MAXIMUM_END_POLL_INTERVAL);
+                }
             }
 
             Ok(())

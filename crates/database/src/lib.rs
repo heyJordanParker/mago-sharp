@@ -93,6 +93,7 @@ pub mod loader;
 pub mod matcher;
 #[cfg(feature = "loader")]
 pub mod membership;
+pub mod process;
 #[cfg(feature = "watcher")]
 pub mod watcher;
 

@@ -885,18 +885,19 @@ fn every_class_like_directly_in_sharp_is_a_default_name() {
 #[test]
 fn the_default_class_likes_are_generated_from_the_standard_library_and_the_prelude() {
     let mago = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let available =
-        std::process::Command::new("php").arg("--version").output().is_ok_and(|output| output.status.success());
+    let available = mago_database::process::output(std::process::Command::new("php").arg("--version"))
+        .is_ok_and(|output| output.status.success());
     assert!(available || std::env::var_os("MAGO_REQUIRE_PHP_SDK_TESTS").is_none(), "PHP is required to generate");
     if !available {
         return;
     }
 
-    let output = std::process::Command::new("php")
-        .arg(mago.join("scripts/regen-sharp-classes.php"))
-        .arg(mago.join("../composer/library"))
-        .output()
-        .expect("php runs");
+    let output = mago_database::process::output(
+        std::process::Command::new("php")
+            .arg(mago.join("scripts/regen-sharp-classes.php"))
+            .arg(mago.join("../composer/library")),
+    )
+    .expect("php runs");
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),

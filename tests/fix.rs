@@ -2,6 +2,8 @@ use std::path::Path;
 use std::process::Command;
 use std::process::Output;
 
+use mago_database::process;
+
 const BEFORE: &str = include_str!("fixtures/fix/multipass.before.php");
 const AFTER: &str = include_str!("fixtures/fix/multipass.after.php");
 
@@ -14,13 +16,14 @@ fn workspace(code: &str) -> tempfile::TempDir {
 }
 
 fn run(workspace: &Path, command: &str, arguments: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_mago"))
-        .args(["--no-version-check", "--colors", "never", "--threads", "2", command])
-        .args(arguments)
-        .env("MAGO_LOG", "info")
-        .current_dir(workspace)
-        .output()
-        .unwrap()
+    process::output(
+        Command::new(env!("CARGO_BIN_EXE_mago"))
+            .args(["--no-version-check", "--colors", "never", "--threads", "2", command])
+            .args(arguments)
+            .env("MAGO_LOG", "info")
+            .current_dir(workspace),
+    )
+    .unwrap()
 }
 
 fn contents(workspace: &Path) -> String {

@@ -20,6 +20,7 @@ use mago_database::error::DatabaseError;
 use mago_database::error::IOAction;
 use mago_database::file::File;
 use mago_database::file::FileId;
+use mago_database::process;
 
 use crate::error::Error;
 use crate::utils::write_by_rename;
@@ -175,11 +176,9 @@ pub struct Committed {
 /// the repository: outside one, or in a linked worktree whose git folder isn't there, as in a container that mounts
 /// the worktree alone.
 pub fn committed_files(workspace: &Path) -> Result<Committed, Error> {
-    let head = Command::new("git")
-        .args(["rev-parse", "--verify", "--quiet", "HEAD"])
-        .current_dir(workspace)
-        .output()
-        .map_err(|source| Error::RunningGit { command: "rev-parse", source })?;
+    let head =
+        process::output(Command::new("git").args(["rev-parse", "--verify", "--quiet", "HEAD"]).current_dir(workspace))
+            .map_err(|source| Error::RunningGit { command: "rev-parse", source })?;
     // `--verify --quiet` exits 1 when `HEAD` names no commit, and git exits 128 when it can't read the repository.
     if head.status.code() == Some(1) {
         return Ok(Committed::default());
@@ -340,10 +339,7 @@ fn exclude_file(workspace: &Path) -> Option<PathBuf> {
 ///
 /// `true` if the workspace is inside a git repository, `false` otherwise.
 fn is_git_repository(workspace: &Path) -> bool {
-    Command::new("git")
-        .args(["rev-parse", "--git-dir"])
-        .current_dir(workspace)
-        .output()
+    process::output(Command::new("git").args(["rev-parse", "--git-dir"]).current_dir(workspace))
         .map(|o| o.status.success())
         .unwrap_or(false)
 }
@@ -399,15 +395,16 @@ fn get_files_with_unstaged_changes(workspace: &Path) -> Result<HashSet<PathBuf>,
 ///
 /// A string containing the id of the newly created blob
 fn create_blob(workspace: &Path, path: &Path, content: Vec<u8>) -> Result<String, Error> {
-    let mut child = Command::new("git")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .args(["hash-object", "-w", "--stdin", "--path"])
-        .arg(path)
-        .current_dir(workspace)
-        .spawn()
-        .map_err(|source| Error::RunningGit { command: "hash-object", source })?;
+    let mut child = process::spawn(
+        Command::new("git")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .args(["hash-object", "-w", "--stdin", "--path"])
+            .arg(path)
+            .current_dir(workspace),
+    )
+    .map_err(|source| Error::RunningGit { command: "hash-object", source })?;
 
     let mut stdin = child.stdin.take().expect("failed to get stdin");
     std::thread::spawn(move || {
@@ -447,7 +444,7 @@ fn get_mode(workspace: &Path, path: &Path) -> Result<String, Error> {
 ///
 /// Returns [`Error::RunningGit`] when git can't start, and [`Error::GitFailed`] when it exits with an error.
 fn run_git(command: &'static str, git: &mut Command) -> Result<Output, Error> {
-    let output = git.output().map_err(|source| Error::RunningGit { command, source })?;
+    let output = process::output(git).map_err(|source| Error::RunningGit { command, source })?;
 
     succeeded(command, output)
 }
@@ -477,12 +474,13 @@ mod tests {
     use super::*;
 
     fn git(workspace: &Path, arguments: &[&str]) -> String {
-        let output = Command::new("git")
-            .args(["-c", "user.name=test", "-c", "user.email=test@localhost"])
-            .args(arguments)
-            .current_dir(workspace)
-            .output()
-            .unwrap();
+        let output = process::output(
+            Command::new("git")
+                .args(["-c", "user.name=test", "-c", "user.email=test@localhost"])
+                .args(arguments)
+                .current_dir(workspace),
+        )
+        .unwrap();
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
 
         String::from_utf8_lossy(&output.stdout).into_owned()
@@ -542,12 +540,13 @@ mod tests {
         let root = directory.path();
         std::fs::write(root.join(".git"), "gitdir: /missing/.git/worktrees/design\n").unwrap();
         let rev_parse = |trace: &str| {
-            Command::new("git")
-                .args(["rev-parse", "--verify", "--quiet", "HEAD"])
-                .env("GIT_TRACE", trace)
-                .current_dir(root)
-                .output()
-                .unwrap()
+            process::output(
+                Command::new("git")
+                    .args(["rev-parse", "--verify", "--quiet", "HEAD"])
+                    .env("GIT_TRACE", trace)
+                    .current_dir(root),
+            )
+            .unwrap()
         };
         // Git words its reason by its version, as `not a git repository` or `gitfile does not point to a valid
         // repository`, so the reason is the `fatal:` line git prints with no trace.

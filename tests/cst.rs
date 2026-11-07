@@ -2,19 +2,22 @@ use std::path::Path;
 use std::process::Command;
 use std::process::Output;
 
+use mago_database::process;
+
 fn run(file: &str, arguments: &[&str]) -> Output {
     let workspace = tempfile::tempdir().unwrap();
     std::fs::write(workspace.path().join("mago.toml"), "").unwrap();
 
-    Command::new(env!("CARGO_BIN_EXE_mago"))
-        .args(["--no-version-check", "--colors", "never", "cst"])
-        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/cst").join(file))
-        .args(["--reporting-target", "stderr", "--reporting-format", "short"])
-        .args(arguments)
-        .env("MAGO_LOG", "off")
-        .current_dir(workspace.path())
-        .output()
-        .unwrap()
+    process::output(
+        Command::new(env!("CARGO_BIN_EXE_mago"))
+            .args(["--no-version-check", "--colors", "never", "cst"])
+            .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/cst").join(file))
+            .args(["--reporting-target", "stderr", "--reporting-format", "short"])
+            .args(arguments)
+            .env("MAGO_LOG", "off")
+            .current_dir(workspace.path()),
+    )
+    .unwrap()
 }
 
 #[test]

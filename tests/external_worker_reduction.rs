@@ -6,6 +6,7 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
 
+use mago_database::process;
 use mago_extension::WorkerCommand;
 use mago_extension::WorkerPool;
 use mago_extension::WorkerPoolOptions;
@@ -23,7 +24,7 @@ fn worker_reducers_merge_every_process_on_the_last_survivor() -> Result<(), Box<
 
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
     let sdk_available = repository.join("vendor/autoload.php").is_file()
-        && Command::new("php").arg("--version").output().is_ok_and(|output| output.status.success());
+        && process::output(Command::new("php").arg("--version")).is_ok_and(|output| output.status.success());
     assert!(
         sdk_available || std::env::var_os("MAGO_REQUIRE_PHP_SDK_TESTS").is_none(),
         "PHP and vendor dependencies are required for the external worker-reduction test"
@@ -63,7 +64,7 @@ fn worker_reducers_merge_every_process_on_the_last_survivor() -> Result<(), Box<
 fn adaptive_reduction_includes_only_workers_that_were_spawned() -> Result<(), Box<dyn std::error::Error>> {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
     let sdk_available = repository.join("vendor/autoload.php").is_file()
-        && Command::new("php").arg("--version").output().is_ok_and(|output| output.status.success());
+        && process::output(Command::new("php").arg("--version")).is_ok_and(|output| output.status.success());
     assert!(
         sdk_available || std::env::var_os("MAGO_REQUIRE_PHP_SDK_TESTS").is_none(),
         "PHP and vendor dependencies are required for the external worker-reduction test"

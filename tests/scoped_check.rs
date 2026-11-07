@@ -10,6 +10,7 @@ use std::process::Stdio;
 use std::sync::mpsc;
 use std::time::Duration;
 
+use mago_database::process;
 use serde_json::Value;
 
 mod common;
@@ -47,16 +48,14 @@ fn command(workspace: &Path, arguments: &[&str]) -> Command {
 }
 
 fn analyze(workspace: &Path, arguments: &[&str]) -> Output {
-    command(workspace, arguments).output().expect("mago runs")
+    process::output(&mut command(workspace, arguments)).expect("mago runs")
 }
 
 fn analyze_stdin(workspace: &Path, arguments: &[&str], contents: &str) -> Output {
-    let mut child = command(workspace, arguments)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("mago runs");
+    let mut child = process::spawn(
+        command(workspace, arguments).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()),
+    )
+    .expect("mago runs");
     child.stdin.take().expect("stdin").write_all(contents.as_bytes()).expect("stdin accepts the buffer");
     child.wait_with_output().expect("mago finishes")
 }
@@ -64,7 +63,7 @@ fn analyze_stdin(workspace: &Path, arguments: &[&str], contents: &str) -> Output
 /// The first report a `--watch` run prints, taken before the run is stopped.
 fn first_watch_report(workspace: &Path, arguments: &[&str]) -> Vec<Value> {
     let mut child =
-        command(workspace, arguments).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().expect("mago runs");
+        process::spawn(command(workspace, arguments).stdout(Stdio::piped()).stderr(Stdio::null())).expect("mago runs");
     let stdout = child.stdout.take().expect("stdout");
     let (sender, receiver) = mpsc::channel();
     std::thread::spawn(move || {
@@ -181,7 +180,9 @@ fn every_way_of_naming_a_file_checks_it_against_the_whole_project() {
 
     let directory = workspace(repository, SOURCE_PATHS);
     for arguments in [&["init", "--quiet"][..], &["add", "src/Second.php"][..]] {
-        assert!(Command::new("git").args(arguments).current_dir(directory.path()).status().expect("git").success());
+        assert!(
+            process::status(Command::new("git").args(arguments).current_dir(directory.path())).expect("git").success()
+        );
     }
 
     for (entry_point, issues) in [

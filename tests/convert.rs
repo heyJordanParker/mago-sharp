@@ -4,6 +4,8 @@ use std::path::Path;
 use std::process::Command;
 use std::process::Output;
 
+use mago_database::process;
+
 const CLASS: &str = "<?php\n\nnamespace Generated;\n\ninterface Clean\n{\n    public function id(): int;\n}\n";
 
 const SCRIPT: &str = "<?php\n\nfunction helper(): int\n{\n    return 1;\n}\n";
@@ -21,13 +23,14 @@ fn project(root: &Path, files: &[(&str, &str)]) {
 
 /// `mago convert --dry-run src` in `root`, with `environment` added to the environment.
 fn convert(root: &Path, environment: &[(&str, &str)]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_mago"))
-        .args(["--no-version-check", "--colors", "never", "convert", "--dry-run", "src"])
-        .env("MAGO_LOG", "info")
-        .envs(environment.iter().copied())
-        .current_dir(root)
-        .output()
-        .unwrap()
+    process::output(
+        Command::new(env!("CARGO_BIN_EXE_mago"))
+            .args(["--no-version-check", "--colors", "never", "convert", "--dry-run", "src"])
+            .env("MAGO_LOG", "info")
+            .envs(environment.iter().copied())
+            .current_dir(root),
+    )
+    .unwrap()
 }
 
 /// What `output` printed.
@@ -51,8 +54,8 @@ fn a_repository_git_cannot_read_stops_the_run_with_gits_reason() {
     project(root, &[("Clean.php", CLASS)]);
     std::fs::write(root.join(".git"), "gitdir: /missing/.git/worktrees/design\n").unwrap();
     // Git words its reason by its version, as `not a git repository` or `gitfile does not point to a valid repository`.
-    let git =
-        Command::new("git").args(["rev-parse", "--verify", "--quiet", "HEAD"]).current_dir(root).output().unwrap();
+    let git = process::output(Command::new("git").args(["rev-parse", "--verify", "--quiet", "HEAD"]).current_dir(root))
+        .unwrap();
     let printed_by_git = String::from_utf8_lossy(&git.stderr);
     let fatal = printed_by_git.lines().find(|line| line.starts_with("fatal: ")).expect(&printed_by_git);
 
@@ -70,7 +73,7 @@ fn a_repository_with_no_commit_holds_no_file() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
     project(root, &[("Clean.php", CLASS)]);
-    let init = Command::new("git").args(["init", "--quiet"]).current_dir(root).output().unwrap();
+    let init = process::output(Command::new("git").args(["init", "--quiet"]).current_dir(root)).unwrap();
     assert!(init.status.success());
 
     let output = convert(root, &[("GIT_TRACE", "1")]);

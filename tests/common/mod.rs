@@ -6,10 +6,11 @@ use std::process::Command;
 
 use mago_database::DatabaseConfiguration;
 use mago_database::GlobSettings;
+use mago_database::process;
 
 pub fn php_sdk_is_available(repository: &std::path::Path, test: &str) -> bool {
     let available = repository.join("vendor/autoload.php").is_file()
-        && Command::new("php").arg("--version").output().is_ok_and(|output| output.status.success());
+        && process::output(Command::new("php").arg("--version")).is_ok_and(|output| output.status.success());
     assert!(
         available || std::env::var_os("MAGO_REQUIRE_PHP_SDK_TESTS").is_none(),
         "PHP and vendor dependencies are required for {test}"

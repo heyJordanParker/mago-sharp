@@ -1,0 +1,5 @@
+disallowed-methods = [
+    { path = "std::process::Command::spawn", reason = "start processes through mago_database::process, which holds SPAWNING" },
+    { path = "std::process::Command::output", reason = "start processes through mago_database::process, which holds SPAWNING" },
+    { path = "std::process::Command::status", reason = "start processes through mago_database::process, which holds SPAWNING" },
+]

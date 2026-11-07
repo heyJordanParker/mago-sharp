@@ -7,6 +7,7 @@ use std::process::Command;
 use std::process::Output;
 use std::process::Stdio;
 
+use mago_database::process;
 use mago_sharp_bridge::unit::Library;
 use mago_sharp_bridge::unit::header;
 use mago_sharp_bridge::unit::is_stale;
@@ -57,7 +58,7 @@ fn command(root: &Path, colors: &str) -> Command {
 }
 
 fn compile(root: &Path) -> Output {
-    command(root, "never").output().unwrap()
+    process::output(&mut command(root, "never")).unwrap()
 }
 
 /// Compiles `root`, and fails the test with the printed output unless the compile succeeds.
@@ -418,11 +419,12 @@ fn compile_leaves_every_other_error_in_a_plain_php_file_to_mago_analyze() {
         "<?php\n\nnamespace App;\n\nfunction sorted(): array\n{\n    ksort($prices);\n\n    return $prices;\n}\n",
     );
 
-    let analyzed = Command::new(env!("CARGO_BIN_EXE_mago"))
-        .args(["--no-version-check", "--colors", "never", "analyze"])
-        .current_dir(root)
-        .output()
-        .unwrap();
+    let analyzed = process::output(
+        Command::new(env!("CARGO_BIN_EXE_mago"))
+            .args(["--no-version-check", "--colors", "never", "analyze"])
+            .current_dir(root),
+    )
+    .unwrap();
 
     assert_eq!(analyzed.status.code(), Some(1), "{}", printed(&analyzed));
     assert!(printed(&analyzed).contains("app/Sorting.php"), "{}", printed(&analyzed));
@@ -502,12 +504,13 @@ fn a_host_sees_each_php_sharp_file_compiled_from_its_current_source() {
     compile_succeeds(root);
     let compiled_by_compile = std::fs::read(compiled(root, "app/Word.sharp")).unwrap();
     write(root, "app/Word.sharp", &word("second"));
-    let analyzed = Command::new(env!("CARGO_BIN_EXE_mago"))
-        .args(["--no-version-check", "--colors", "never", "analyze"])
-        .env("XDG_CACHE_HOME", Path::new(env!("CARGO_TARGET_TMPDIR")).join("cache"))
-        .current_dir(root)
-        .output()
-        .unwrap();
+    let analyzed = process::output(
+        Command::new(env!("CARGO_BIN_EXE_mago"))
+            .args(["--no-version-check", "--colors", "never", "analyze"])
+            .env("XDG_CACHE_HOME", Path::new(env!("CARGO_TARGET_TMPDIR")).join("cache"))
+            .current_dir(root),
+    )
+    .unwrap();
 
     assert!(analyzed.status.success(), "{}", printed(&analyzed));
     assert_eq!(std::fs::read_to_string(root.join("host.log")).unwrap(), "first\nsecond\n");
@@ -610,12 +613,13 @@ fn a_linter_host_sees_each_php_sharp_file_compiled_on_a_fresh_tree() {
         ),
     );
 
-    let linted = Command::new(env!("CARGO_BIN_EXE_mago"))
-        .args(["--no-version-check", "--colors", "never", "lint"])
-        .env("XDG_CACHE_HOME", Path::new(env!("CARGO_TARGET_TMPDIR")).join("cache"))
-        .current_dir(root)
-        .output()
-        .unwrap();
+    let linted = process::output(
+        Command::new(env!("CARGO_BIN_EXE_mago"))
+            .args(["--no-version-check", "--colors", "never", "lint"])
+            .env("XDG_CACHE_HOME", Path::new(env!("CARGO_TARGET_TMPDIR")).join("cache"))
+            .current_dir(root),
+    )
+    .unwrap();
 
     assert!(linted.status.success(), "{}", printed(&linted));
     let log = std::fs::read_to_string(root.join("host.log")).unwrap_or_default();
@@ -696,15 +700,16 @@ fn a_watch_starts_the_hosts_again_when_a_php_sharp_file_changes() {
 
     // The watch's own log, outside the watched project, so a failure shows what the watch saw.
     let watch_log = tempfile::NamedTempFile::new().unwrap();
-    let mut watch = Command::new(env!("CARGO_BIN_EXE_mago"))
-        .args(["--no-version-check", "--colors", "never", "analyze", "--watch"])
-        .env("MAGO_LOG", "info,mago=debug,mago_database=debug")
-        .env("XDG_CACHE_HOME", Path::new(env!("CARGO_TARGET_TMPDIR")).join("cache"))
-        .current_dir(root)
-        .stdout(std::process::Stdio::null())
-        .stderr(watch_log.reopen().unwrap())
-        .spawn()
-        .unwrap();
+    let mut watch = process::spawn(
+        Command::new(env!("CARGO_BIN_EXE_mago"))
+            .args(["--no-version-check", "--colors", "never", "analyze", "--watch"])
+            .env("MAGO_LOG", "info,mago=debug,mago_database=debug")
+            .env("XDG_CACHE_HOME", Path::new(env!("CARGO_TARGET_TMPDIR")).join("cache"))
+            .current_dir(root)
+            .stdout(std::process::Stdio::null())
+            .stderr(watch_log.reopen().unwrap()),
+    )
+    .unwrap();
     wait_for_lines(1);
     write(root, "app/Word.sharp", &word("second"));
     wait_for_lines(2);
@@ -1098,11 +1103,10 @@ fn compile_deletes_the_compiled_file_of_a_renamed_or_removed_source() {
 #[test]
 fn compile_prints_no_color_under_colors_never_even_when_force_color_is_set() {
     let directory = project(BROKEN_ORDER, MONEY);
-    let output = command(directory.path(), "never")
-        .env("FORCE_COLOR", "1")
-        .env("MAGO_REPORTING_FORMAT", "rich")
-        .output()
-        .unwrap();
+    let output = process::output(
+        command(directory.path(), "never").env("FORCE_COLOR", "1").env("MAGO_REPORTING_FORMAT", "rich"),
+    )
+    .unwrap();
 
     assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
     assert!(printed(&output).contains("app/Order.sharp"), "{}", printed(&output));
@@ -1112,12 +1116,13 @@ fn compile_prints_no_color_under_colors_never_even_when_force_color_is_set() {
 #[test]
 fn compile_prints_color_under_colors_always_even_when_no_color_is_set() {
     let directory = project(BROKEN_ORDER, MONEY);
-    let output = command(directory.path(), "always")
-        .env_remove("FORCE_COLOR")
-        .env("NO_COLOR", "1")
-        .env("MAGO_REPORTING_FORMAT", "rich")
-        .output()
-        .unwrap();
+    let output = process::output(
+        command(directory.path(), "always")
+            .env_remove("FORCE_COLOR")
+            .env("NO_COLOR", "1")
+            .env("MAGO_REPORTING_FORMAT", "rich"),
+    )
+    .unwrap();
 
     assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
     assert!(String::from_utf8_lossy(&output.stdout).contains("\x1b["), "{}", printed(&output));
@@ -1452,13 +1457,14 @@ fn mago_reads_the_source_and_never_the_php_file_beside_it() {
     compile_succeeds(root);
 
     let mago = |arguments: &[&str]| {
-        Command::new(env!("CARGO_BIN_EXE_mago"))
-            .args(["--no-version-check", "--colors", "never"])
-            .args(arguments)
-            .env("XDG_CACHE_HOME", Path::new(env!("CARGO_TARGET_TMPDIR")).join("cache"))
-            .current_dir(root)
-            .output()
-            .unwrap()
+        process::output(
+            Command::new(env!("CARGO_BIN_EXE_mago"))
+                .args(["--no-version-check", "--colors", "never"])
+                .args(arguments)
+                .env("XDG_CACHE_HOME", Path::new(env!("CARGO_TARGET_TMPDIR")).join("cache"))
+                .current_dir(root),
+        )
+        .unwrap()
     };
     let analyzed = mago(&["analyze", "app"]);
     let linted = mago(&["lint", "app/Order.php"]);
@@ -1475,12 +1481,13 @@ fn the_php_file_beside_a_source_passes_fmt_check() {
     let root = directory.path();
     compile_succeeds(root);
 
-    let output = Command::new(env!("CARGO_BIN_EXE_mago"))
-        .args(["--no-version-check", "--colors", "never", "fmt", "--check", "app/Order.php"])
-        .env("XDG_CACHE_HOME", Path::new(env!("CARGO_TARGET_TMPDIR")).join("cache"))
-        .current_dir(root)
-        .output()
-        .unwrap();
+    let output = process::output(
+        Command::new(env!("CARGO_BIN_EXE_mago"))
+            .args(["--no-version-check", "--colors", "never", "fmt", "--check", "app/Order.php"])
+            .env("XDG_CACHE_HOME", Path::new(env!("CARGO_TARGET_TMPDIR")).join("cache"))
+            .current_dir(root),
+    )
+    .unwrap();
 
     assert!(output.status.success(), "{}", printed(&output));
 }
@@ -1931,8 +1938,8 @@ fn compile_refuses_a_php_file_someone_wrote_over_its_own_while_it_ran() {
     let root = directory.path();
     let lock = root.join("composer.lock");
     std::fs::remove_file(&lock).unwrap();
-    assert!(Command::new("mkfifo").arg(&lock).status().unwrap().success());
-    let running = command(root, "never").stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    assert!(process::status(Command::new("mkfifo").arg(&lock)).unwrap().success());
+    let running = process::spawn(command(root, "never").stdout(Stdio::piped()).stderr(Stdio::piped())).unwrap();
 
     // The pipe opens once the compile opens it to read it.
     let mut pipe = std::fs::OpenOptions::new().write(true).open(&lock).unwrap();
@@ -2004,7 +2011,8 @@ fn compile_writes_the_compiled_file_at_the_new_target_of_a_link_to_an_identical_
     write(&root, "shared/one/Module.sharp", "module\n{\n}\n");
     write(&root, "shared/two/Module.sharp", "module\n{\n}\n");
     let link = |target: &str| {
-        let linked = Command::new("ln").args(["-sfn", target, "app/Shared"]).current_dir(&root).status().unwrap();
+        let linked =
+            process::status(Command::new("ln").args(["-sfn", target, "app/Shared"]).current_dir(&root)).unwrap();
         assert!(linked.success());
     };
     link("../shared/one");
@@ -2041,12 +2049,13 @@ fn compile_warns_again_until_the_cause_of_its_warning_is_gone() {
 
 /// Runs git in `folder`, and fails the test when git fails.
 fn git(folder: &Path, arguments: &[&str]) -> String {
-    let output = Command::new("git")
-        .args(["-c", "user.name=PHP#", "-c", "user.email=sharp@example.com", "-c", "init.defaultBranch=main"])
-        .args(arguments)
-        .current_dir(folder)
-        .output()
-        .unwrap();
+    let output = process::output(
+        Command::new("git")
+            .args(["-c", "user.name=PHP#", "-c", "user.email=sharp@example.com", "-c", "init.defaultBranch=main"])
+            .args(arguments)
+            .current_dir(folder),
+    )
+    .unwrap();
     assert!(output.status.success(), "git {arguments:?}: {}", printed(&output));
 
     String::from_utf8_lossy(&output.stdout).into_owned()
@@ -2337,7 +2346,7 @@ fn compile_keeps_the_php_files_out_of_git_with_no_git_to_run() {
     git(&clone, &["worktree", "add", "--quiet", worktree.to_str().unwrap()]);
 
     for checkout in [&clone, &worktree] {
-        let output = command(checkout, "never").env("PATH", "").output().unwrap();
+        let output = process::output(command(checkout, "never").env("PATH", "")).unwrap();
         assert!(output.status.success(), "{}", printed(&output));
         assert!(checkout.join("app/Order.php").exists());
         assert_eq!(
@@ -2759,7 +2768,7 @@ fn lawful_project(files: &[(&str, &str)]) -> tempfile::TempDir {
 
 /// `mago compile` with each issue on one line, as `file:line:column:level - code: message`.
 fn compile_lines(root: &Path) -> Output {
-    command(root, "never").env("MAGO_REPORTING_FORMAT", "emacs").output().unwrap()
+    process::output(command(root, "never").env("MAGO_REPORTING_FORMAT", "emacs")).unwrap()
 }
 
 /// A cache folder whose `mago` is a file, so Mago cannot install Lean into it.
@@ -2773,12 +2782,13 @@ fn unwritable_cache() -> PathBuf {
 /// into.
 fn compile_without_lean(root: &Path) -> Output {
     let empty = tempfile::tempdir().unwrap();
-    command(root, "never")
-        .env("MAGO_REPORTING_FORMAT", "emacs")
-        .env("PATH", empty.path())
-        .env("XDG_CACHE_HOME", unwritable_cache())
-        .output()
-        .unwrap()
+    process::output(
+        command(root, "never")
+            .env("MAGO_REPORTING_FORMAT", "emacs")
+            .env("PATH", empty.path())
+            .env("XDG_CACHE_HOME", unwritable_cache()),
+    )
+    .unwrap()
 }
 
 fn read(root: &Path, name: &str) -> String {
@@ -2831,7 +2841,9 @@ fn compiles_that_start_together_on_an_empty_cache_each_prove_their_law_and_leave
         let compiles: Vec<_> = projects
             .iter()
             .map(|project| {
-                scope.spawn(|| command(project.path(), "never").env("XDG_CACHE_HOME", cache.path()).output().unwrap())
+                scope.spawn(|| {
+                    process::output(command(project.path(), "never").env("XDG_CACHE_HOME", cache.path())).unwrap()
+                })
             })
             .collect();
         compiles.into_iter().map(|compile| compile.join().unwrap()).collect()
@@ -2849,7 +2861,7 @@ fn compile_rebuilds_a_library_build_that_lost_its_lakefile_or_its_runner_and_pro
     for lost in ["lakefile.toml", ".lake/build/bin"] {
         let cache = tempfile::tempdir().unwrap();
         let compile_in_cache = |project: &tempfile::TempDir| {
-            command(project.path(), "never").env("XDG_CACHE_HOME", cache.path()).output().unwrap()
+            process::output(command(project.path(), "never").env("XDG_CACHE_HOME", cache.path())).unwrap()
         };
         let output = compile_in_cache(&lawful_project(&[("app/Shared/Money.sharp", LAWFUL_MONEY)]));
         assert!(output.status.success(), "{}", printed(&output));
@@ -2877,7 +2889,7 @@ fn compile_deletes_the_staging_folder_a_dead_build_left_and_proves_its_law() {
     std::fs::create_dir_all(&stale).unwrap();
     let project = lawful_project(&[("app/Shared/Money.sharp", LAWFUL_MONEY)]);
 
-    let output = command(project.path(), "never").env("XDG_CACHE_HOME", cache.path()).output().unwrap();
+    let output = process::output(command(project.path(), "never").env("XDG_CACHE_HOME", cache.path())).unwrap();
 
     assert!(output.status.success(), "{}", printed(&output));
     assert_eq!(source_lean_files(project.path()), Vec::<PathBuf>::new());
@@ -2889,7 +2901,7 @@ fn compile_deletes_the_staging_folder_a_dead_build_left_and_proves_its_law() {
 fn compiles_that_start_together_on_a_library_build_that_lost_its_lakefile_each_prove_their_law_and_leave_one_build() {
     let cache = tempfile::tempdir().unwrap();
     let compile_in_cache =
-        |project: &Path| command(project, "never").env("XDG_CACHE_HOME", cache.path()).output().unwrap();
+        |project: &Path| process::output(command(project, "never").env("XDG_CACHE_HOME", cache.path())).unwrap();
     let output = compile_in_cache(lawful_project(&[("app/Shared/Money.sharp", LAWFUL_MONEY)]).path());
     assert!(output.status.success(), "{}", printed(&output));
     let library = library_builds(cache.path()).remove(0);
@@ -3107,7 +3119,7 @@ fn compile_proves_the_laws_of_two_stale_files_with_one_runner() {
     let root = directory.path();
     let lake = tempfile::tempdir().unwrap();
 
-    let output = command(root, "never").env("PATH", counting_lake(lake.path())).output().unwrap();
+    let output = process::output(command(root, "never").env("PATH", counting_lake(lake.path()))).unwrap();
 
     assert!(output.status.success(), "{}", printed(&output));
     assert_eq!(std::fs::read_dir(lake.path().join("started")).unwrap().count(), 1, "one runner started");
@@ -3128,12 +3140,13 @@ fn compile_runs_the_lake_on_the_path_and_installs_no_lean() {
     let cache = tempfile::tempdir().unwrap();
 
     // The debug log holds what the failed build printed.
-    let output = command(directory.path(), "never")
-        .env("PATH", lake.path())
-        .env("XDG_CACHE_HOME", cache.path())
-        .env("MAGO_LOG", "debug")
-        .output()
-        .unwrap();
+    let output = process::output(
+        command(directory.path(), "never")
+            .env("PATH", lake.path())
+            .env("XDG_CACHE_HOME", cache.path())
+            .env("MAGO_LOG", "debug"),
+    )
+    .unwrap();
 
     assert!(printed(&output).contains("the lake on the PATH ran build"), "{}", printed(&output));
     assert!(!cache.path().join("mago/elan").exists(), "{}", printed(&output));
@@ -3152,7 +3165,8 @@ fn compile_names_the_cache_folder_the_law_checker_cannot_create() {
     let cache = unwritable_cache();
 
     let output =
-        command(directory.path(), "never").env("PATH", lake.path()).env("XDG_CACHE_HOME", &cache).output().unwrap();
+        process::output(command(directory.path(), "never").env("PATH", lake.path()).env("XDG_CACHE_HOME", &cache))
+            .unwrap();
 
     assert!(!output.status.success(), "{}", printed(&output));
     assert!(
@@ -3203,7 +3217,9 @@ fn compiles_that_start_together_install_the_missing_lean_of_the_lake_on_the_path
     let outputs: Vec<Output> = std::thread::scope(|scope| {
         let compiles: Vec<_> = projects
             .iter()
-            .map(|project| scope.spawn(|| command(project.path(), "never").env("PATH", &path).output().unwrap()))
+            .map(|project| {
+                scope.spawn(|| process::output(command(project.path(), "never").env("PATH", &path)).unwrap())
+            })
             .collect();
         compiles.into_iter().map(|compile| compile.join().unwrap()).collect()
     });
@@ -3348,7 +3364,7 @@ fn compile_proves_a_law_whose_calls_go_from_one_file_to_another_and_back_with_no
     let root = directory.path();
     let lake = tempfile::tempdir().unwrap();
 
-    let output = command(root, "never").env("PATH", counting_lake(lake.path())).output().unwrap();
+    let output = process::output(command(root, "never").env("PATH", counting_lake(lake.path()))).unwrap();
 
     assert!(output.status.success(), "{}", printed(&output));
     assert!(compiled(root, "app/Shared/Alpha.sharp").exists());
@@ -3377,7 +3393,7 @@ fn compile_proves_a_law_through_an_extension_member_as_the_static_call_it_runs_a
     let root = directory.path();
     let lake = tempfile::tempdir().unwrap();
 
-    let output = command(root, "never").env("PATH", counting_lake(lake.path())).output().unwrap();
+    let output = process::output(command(root, "never").env("PATH", counting_lake(lake.path()))).unwrap();
 
     assert!(output.status.success(), "{}", printed(&output));
     let laws = generated_module(lake.path(), "Code.App.Shared.Shape");
@@ -3758,7 +3774,7 @@ fn compile_lines_within(root: &Path, seconds: u64, path: &std::ffi::OsStr) -> (O
         })
     };
 
-    let mut child = command.spawn().unwrap();
+    let mut child = process::spawn(&mut command).unwrap();
     let mut stderr = child.stderr.take().unwrap();
     let stderr = std::thread::spawn(move || {
         let mut bytes = Vec::new();
@@ -3863,7 +3879,8 @@ fn a_signal_that_ends_a_compile_ends_the_lean_it_waits_on() {
         let lake = tempfile::tempdir().unwrap();
         let path = stalling_lake(lake.path(), "while :; do sleep 1; done");
         let script = lake.path().join("bin/lake").display().to_string();
-        let leans = || String::from_utf8(Command::new("pgrep").args(["-f", &script]).output().unwrap().stdout).unwrap();
+        let leans =
+            || String::from_utf8(process::output(Command::new("pgrep").args(["-f", &script])).unwrap().stdout).unwrap();
         let directory = lawful_project(&[("app/Shared/Money.sharp", LAWFUL_MONEY)]);
         let mut compiling = command(directory.path(), "never");
         compiling.env("PATH", &path).stdout(Stdio::null()).stderr(Stdio::null()).process_group(0);
@@ -3878,7 +3895,7 @@ fn a_signal_that_ends_a_compile_ends_the_lean_it_waits_on() {
                 Ok(())
             })
         };
-        let mut compile = compiling.spawn().unwrap();
+        let mut compile = process::spawn(&mut compiling).unwrap();
         let started = Instant::now();
         while !lake.path().join("stalled").exists() {
             assert!(started.elapsed() < Duration::from_secs(300), "{signal}: the stalled Lean never started");
@@ -3895,7 +3912,7 @@ fn a_signal_that_ends_a_compile_ends_the_lean_it_waits_on() {
         }
         let left = leans();
         if !left.is_empty() {
-            Command::new("pkill").args(["-f", &script]).status().unwrap();
+            process::status(Command::new("pkill").args(["-f", &script])).unwrap();
         }
         assert_eq!(left, "", "{signal}: Lean outlived the compile");
     }

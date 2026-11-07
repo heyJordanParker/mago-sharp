@@ -13,6 +13,7 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+mago-database = { workspace = true }
 mago-names = { workspace = true }
 mago-span = { workspace = true }
 mago-syntax = { workspace = true }

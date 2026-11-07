@@ -12,6 +12,8 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::process::Stdio;
 
+use mago_database::process;
+
 fn mago_bin() -> PathBuf {
     // Prefer runtime env (set when cargo runs the test), then compile-time (set when cargo builds the test).
     let path = std::env::var("CARGO_BIN_EXE_mago")
@@ -25,11 +27,7 @@ fn mago_bin() -> PathBuf {
 /// Returns true if the mago binary can actually execute on this host.
 /// This is false when cross-compiling (e.g., building aarch64 on x86_64).
 fn can_run_mago() -> bool {
-    Command::new(mago_bin())
-        .arg("--help")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
+    process::status(Command::new(mago_bin()).arg("--help").stdout(Stdio::null()).stderr(Stdio::null()))
         .is_ok_and(|s| s.success())
 }
 
@@ -71,12 +69,13 @@ if (true) {
 }
 
 fn run_lint(workspace: &Path, extra_args: &[&str]) -> std::process::Output {
-    Command::new(mago_bin())
-        .args(["--colors", "never", "--workspace", workspace.to_str().unwrap(), "lint"])
-        .args(extra_args)
-        .current_dir(workspace)
-        .output()
-        .expect("failed to run mago")
+    process::output(
+        Command::new(mago_bin())
+            .args(["--colors", "never", "--workspace", workspace.to_str().unwrap(), "lint"])
+            .args(extra_args)
+            .current_dir(workspace),
+    )
+    .expect("failed to run mago")
 }
 
 /// Parses `level[code]: count` lines from stats output into (label, count) pairs.

@@ -6,6 +6,8 @@ use std::collections::HashSet;
 use std::mem::ManuallyDrop;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc;
@@ -51,9 +53,10 @@ const STABILITY_CHECK_MS: u64 = 10;
 /// The start of the name of each cookie file [`start_watcher`] writes, so every watcher leaves out every cookie.
 const COOKIE_PREFIX: &str = ".mago-watch-cookie-";
 
-/// How long [`start_watcher`] waits for its cookie's event before it polls instead. FSEvents reported a cookie after
-/// 7.7 seconds at the most, in eight watcher starts of `mago analyze --watch` beside the compile tests, on a Mac at a
-/// load of about 60.
+/// How long [`start_watcher`] waits for its watcher to start and report its cookies before it polls instead. FSEvents
+/// reported a cookie after 7.7 seconds at the most, in eight watcher starts of `mago analyze --watch` beside the compile
+/// tests, on a Mac at a load of about 60. On a Mac whose fseventsd was minutes behind, starting a stream took from 115 s
+/// to more than 240 s.
 const COOKIE_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -275,9 +278,9 @@ impl<'config> DatabaseWatcher<'config> {
     /// Stops watching if currently active.
     #[inline]
     pub fn stop(&mut self) {
-        if let Some(mut watcher) = self.watcher.take() {
+        // Dropping the watcher stops it once, where FSEvents stops and starts its stream again for each path unwatched.
+        if self.watcher.take().is_some() {
             for path in &self.watched_paths {
-                let _ = watcher.unwatch(path);
                 tracing::debug!("Stopped watching: {}", path.display());
             }
         }
@@ -640,10 +643,13 @@ impl Drop for DatabaseWatcher<'_> {
 /// An operating system watcher can start reporting some time after it is asked to: on a busy Mac, FSEvents starts a
 /// stream late and never reports a change made before then. So, as Watchman syncs its clients, the watcher writes and
 /// deletes a cookie file, of a name no other watcher uses, in each watched folder, and returns once it reports every
-/// cookie, since it reports each later change in that folder after it. A folder the cookie cannot be written to, such
-/// as a read-only one, gets a warning that names it and the error. A watcher that reports a written cookie of no
-/// folder within [`COOKIE_TIMEOUT`], as on a volume FSEvents does not cover, gives way to one that checks the files
-/// every `poll_interval`, with a warning that names each such folder.
+/// cookie, since it reports each later change in that folder after it. A busy FSEvents can also report a change made
+/// before the watcher started, as the `composer.lock` a project wrote just before `mago analyze --watch` ran, so
+/// `handler` gets no change the watcher reports in a folder before that folder's cookie. A folder the cookie cannot be
+/// written to, such as a read-only one, gets a warning that names it and the error. A watcher that does not start and
+/// report a written cookie of each folder within [`COOKIE_TIMEOUT`], as on a volume FSEvents does not cover or while
+/// fseventsd is minutes behind, gives way to one that checks the files every `poll_interval`, with a warning that
+/// names each such folder.
 ///
 /// # Errors
 ///
@@ -657,6 +663,40 @@ where
     H: EventHandler + Clone,
 {
     start_watcher_of::<RecommendedWatcher, H>(handler, paths, &unique_cookie(), poll_interval, COOKIE_TIMEOUT)
+}
+
+/// An operating system watcher that stops on a thread of its own when dropped. FSEvents can take minutes to stop a
+/// stream while fseventsd is behind, and notify 8.2's FSEvents watcher can wait forever for a run loop that missed its
+/// stop, so the watch goes on while the watcher stops, as its start does under [`COOKIE_TIMEOUT`].
+struct StopsAside(Option<Box<dyn NotifyWatcher + Send>>);
+
+impl NotifyWatcher for StopsAside {
+    fn new<F>(event_handler: F, config: Config) -> notify::Result<Self>
+    where
+        F: EventHandler,
+    {
+        Ok(Self(Some(Box::new(RecommendedWatcher::new(event_handler, config)?))))
+    }
+
+    fn watch(&mut self, path: &Path, recursive_mode: RecursiveMode) -> notify::Result<()> {
+        self.0.as_mut().map_or(Ok(()), |watcher| watcher.watch(path, recursive_mode))
+    }
+
+    fn unwatch(&mut self, path: &Path) -> notify::Result<()> {
+        self.0.as_mut().map_or(Ok(()), |watcher| watcher.unwatch(path))
+    }
+
+    fn kind() -> notify::WatcherKind {
+        RecommendedWatcher::kind()
+    }
+}
+
+impl Drop for StopsAside {
+    fn drop(&mut self) {
+        if let Some(watcher) = self.0.take() {
+            std::thread::spawn(move || drop(watcher));
+        }
+    }
 }
 
 /// A start of cookie names that no other watcher of any `mago` uses.
@@ -680,10 +720,20 @@ where
     H: EventHandler + Clone,
 {
     let (reported, cookies_reported) = mpsc::channel();
-    let without_cookies = |mut handler: H| {
+    // Whether the watcher returned, from which on `handler` gets every change it reports.
+    let started = Arc::new(AtomicBool::new(false));
+    // `abandoned` says whether the watcher started too late, so that the poller took its place and `handler` gets nothing
+    // more it reports.
+    let without_cookies = |mut handler: H, abandoned: Arc<AtomicBool>| {
         let cookie = cookie.to_owned();
         let reported = reported.clone();
+        let started = Arc::clone(&started);
+        // The folders whose cookie the watcher reported, at the real path it reports them under.
+        let mut synced: Vec<PathBuf> = Vec::new();
         move |result: notify::Result<Event>| {
+            if abandoned.load(Ordering::SeqCst) {
+                return;
+            }
             let Ok(mut event) = result else {
                 return handler.handle_event(result);
             };
@@ -691,62 +741,100 @@ where
             event.paths.retain(|path| {
                 let name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
                 if name.starts_with(&cookie) {
+                    synced.extend(path.parent().map(Path::to_path_buf));
                     let _ = reported.send(name.to_owned());
                 }
 
                 !name.starts_with(COOKIE_PREFIX)
             });
-            if !named_paths || !event.paths.is_empty() {
+            // A change the watcher reports in a folder before that folder's cookie was made before it started.
+            let made_since = started.load(Ordering::SeqCst)
+                || event.need_rescan()
+                || event.paths.iter().all(|path| synced.iter().any(|folder| path.starts_with(folder)));
+            if made_since && (!named_paths || !event.paths.is_empty()) {
                 handler.handle_event(Ok(event));
             }
         }
     };
 
-    let mut watcher =
-        W::new(without_cookies(handler.clone()), Config::default()).map_err(DatabaseError::WatcherInit)?;
-    for (path, recursive_mode) in paths {
-        watcher.watch(path, *recursive_mode).map_err(DatabaseError::WatcherWatch)?;
-    }
+    // FSEvents can take minutes to start a stream while the Mac's fseventsd is behind, so the watcher starts on a thread
+    // of its own and its start counts toward `cookie_timeout`. A watcher that starts too late is dropped on that thread.
+    let starting = Instant::now();
+    let abandoned = Arc::new(AtomicBool::new(false));
+    let (started_watcher, starts) = mpsc::channel();
+    let native_handler = without_cookies(handler.clone(), Arc::clone(&abandoned));
+    let folders_to_watch = paths.to_vec();
+    std::thread::spawn(move || {
+        let watcher =
+            W::new(native_handler, Config::default()).map_err(DatabaseError::WatcherInit).and_then(|mut watcher| {
+                // All paths at once, as FSEvents stops and starts its stream again for each path watched on its own.
+                let mut added = watcher.paths_mut();
+                for (path, recursive_mode) in &folders_to_watch {
+                    added.add(path, *recursive_mode).map_err(DatabaseError::WatcherWatch)?;
+                }
+                added.commit().map_err(DatabaseError::WatcherWatch)?;
+
+                Ok(watcher)
+            });
+        let _ = started_watcher.send(watcher);
+    });
 
     // Each folder's cookie, by its name, as the watcher reports a path under the folder's real path.
-    let started = Instant::now();
-    let mut unreported: Vec<(&Path, String)> = Vec::new();
-    for (index, folder) in paths.iter().map(|(path, _)| path.as_path()).filter(|path| path.is_dir()).enumerate() {
-        let name = format!("{cookie}{index}");
-        let path = folder.join(&name);
-        if let Err(error) = std::fs::write(&path, b"") {
-            tracing::warn!(
-                "Could not write the file watcher's cookie in {}, so a change made there as the watch starts can be missed: {error}",
-                folder.display()
-            );
-            continue;
-        }
-        if let Err(error) = std::fs::remove_file(&path) {
-            tracing::warn!("Could not delete the file watcher's cookie {}: {error}", path.display());
-        }
-        unreported.push((folder, name));
-    }
-    let deadline = started + cookie_timeout;
-    while !unreported.is_empty()
-        && let Ok(name) = cookies_reported.recv_timeout(deadline.saturating_duration_since(Instant::now()))
-    {
-        unreported.retain(|(_, cookie)| *cookie != name);
-    }
-    if unreported.is_empty() {
-        tracing::debug!("The file watcher reported its cookies after {:?}.", started.elapsed());
+    let folders = || paths.iter().map(|(path, _)| path.as_path()).filter(|path| path.is_dir());
+    let unreported: Vec<&Path> = match starts.recv_timeout(cookie_timeout) {
+        Ok(watcher) => {
+            let watcher = StopsAside(Some(Box::new(watcher?)));
+            let mut unreported: Vec<(&Path, String)> = Vec::new();
+            for (index, folder) in folders().enumerate() {
+                let name = format!("{cookie}{index}");
+                let path = folder.join(&name);
+                if let Err(error) = std::fs::write(&path, b"") {
+                    tracing::warn!(
+                        "Could not write the file watcher's cookie in {}, so a change made there as the watch starts can be missed: {error}",
+                        folder.display()
+                    );
+                    continue;
+                }
+                if let Err(error) = std::fs::remove_file(&path) {
+                    tracing::warn!("Could not delete the file watcher's cookie {}: {error}", path.display());
+                }
+                unreported.push((folder, name));
+            }
+            let deadline = starting + cookie_timeout;
+            while !unreported.is_empty()
+                && let Ok(name) = cookies_reported.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            {
+                unreported.retain(|(_, cookie)| *cookie != name);
+            }
+            if unreported.is_empty() {
+                tracing::debug!("The file watcher reported its cookies after {:?}.", starting.elapsed());
+                started.store(true, Ordering::SeqCst);
 
-        return Ok(Box::new(watcher));
-    }
+                return Ok(Box::new(watcher));
+            }
+            abandoned.store(true, Ordering::SeqCst);
+            drop(watcher);
 
-    drop(watcher);
+            unreported.into_iter().map(|(folder, _)| folder).collect()
+        }
+        // The watcher has not started yet, or its thread panicked.
+        Err(_) => {
+            abandoned.store(true, Ordering::SeqCst);
+
+            folders().collect()
+        }
+    };
+
     tracing::warn!(
         "The file watcher reported no change in {} within {cookie_timeout:?}, so this run checks the watched files every {poll_interval:?} instead.",
-        unreported.iter().map(|(folder, _)| folder.display().to_string()).collect::<Vec<_>>().join(", "),
+        unreported.iter().map(|folder| folder.display().to_string()).collect::<Vec<_>>().join(", "),
     );
+    // The poller reports only what changes after its first scan of the files.
+    started.store(true, Ordering::SeqCst);
     // Notify's poller compares write times in whole seconds, so it also compares contents to see a second edit within
     // the same second.
     let mut poller = PollWatcher::new(
-        without_cookies(handler),
+        without_cookies(handler, Arc::new(AtomicBool::new(false))),
         Config::default().with_poll_interval(poll_interval).with_compare_contents(true),
     )
     .map_err(DatabaseError::WatcherInit)?;
@@ -1049,6 +1137,153 @@ mod tests {
         });
 
         log
+    }
+
+    /// A watcher that reports, in each folder it watches, a `composer.lock` written before it started and then the
+    /// folder's cookie, as a busy FSEvents does.
+    struct ReportsAnEarlierChange {
+        handler: Box<dyn EventHandler>,
+        watched: usize,
+    }
+
+    impl NotifyWatcher for ReportsAnEarlierChange {
+        fn new<F>(handler: F, _config: Config) -> notify::Result<Self>
+        where
+            F: EventHandler,
+        {
+            Ok(Self { handler: Box::new(handler), watched: 0 })
+        }
+
+        fn watch(&mut self, path: &Path, _recursive_mode: RecursiveMode) -> notify::Result<()> {
+            for file in [path.join("composer.lock"), path.join(format!("{TEST_COOKIE}{}", self.watched))] {
+                self.handler.handle_event(Ok(Event::new(EventKind::Create(CreateKind::File)).add_path(file)));
+            }
+            self.watched += 1;
+
+            Ok(())
+        }
+
+        fn unwatch(&mut self, _path: &Path) -> notify::Result<()> {
+            Ok(())
+        }
+
+        fn kind() -> WatcherKind {
+            WatcherKind::NullWatcher
+        }
+    }
+
+    /// A change the watcher reports before its cookies, made before it started, reaches no handler, so a watch that
+    /// starts just after a project wrote its `composer.lock` does not restart for it.
+    #[test]
+    fn a_change_reported_before_the_cookies_reaches_no_handler() {
+        let (_directory, root) = project();
+        let folders = [(root.join("app"), RecursiveMode::Recursive), (root.join("vendor"), RecursiveMode::Recursive)];
+        let (events, received) = mpsc::channel();
+
+        let _watcher = start_watcher_of::<ReportsAnEarlierChange, _>(
+            events,
+            &folders,
+            TEST_COOKIE,
+            Duration::from_millis(50),
+            Duration::from_secs(10),
+        )
+        .expect("the watcher should start");
+
+        let reported: Vec<_> = received.try_iter().collect();
+        assert!(reported.is_empty(), "{reported:?}");
+    }
+
+    /// A watcher that never finishes starting, as FSEvents takes minutes to start a stream while fseventsd is behind.
+    struct NeverStarts;
+
+    impl NotifyWatcher for NeverStarts {
+        fn new<F>(_handler: F, _config: Config) -> notify::Result<Self>
+        where
+            F: EventHandler,
+        {
+            // Nothing ever sends on the channel while its sender lives, so the start waits for good.
+            let (_sender, never) = mpsc::channel::<()>();
+            let _ = never.recv();
+
+            Err(notify::Error::generic("the watcher never started"))
+        }
+
+        fn watch(&mut self, _path: &Path, _recursive_mode: RecursiveMode) -> notify::Result<()> {
+            Ok(())
+        }
+
+        fn unwatch(&mut self, _path: &Path) -> notify::Result<()> {
+            Ok(())
+        }
+
+        fn kind() -> WatcherKind {
+            WatcherKind::NullWatcher
+        }
+    }
+
+    /// A watcher that does not start within the cookie timeout gives way to polling, with the warning that names each
+    /// folder, where the watch waited for the start however long it took.
+    #[test]
+    fn a_watcher_that_never_starts_polls_and_says_so() {
+        let (_directory, root) = project();
+        let folders = [(root.join("app"), RecursiveMode::Recursive), (root.join("vendor"), RecursiveMode::Recursive)];
+
+        let log = start_logged::<NeverStarts>(&folders);
+
+        assert!(
+            log.contains(&format!(
+                "The file watcher reported no change in {}, {} within 50ms, so this run checks the watched files every 50ms instead.",
+                root.join("app").display(),
+                root.join("vendor").display()
+            )),
+            "{log}"
+        );
+    }
+
+    /// A watcher that never finishes stopping, as notify's FSEvents watcher waits forever for a run loop that missed its
+    /// stop.
+    struct NeverStops;
+
+    impl Drop for NeverStops {
+        fn drop(&mut self) {
+            // Nothing ever sends on the channel while its sender lives, so the stop waits for good.
+            let (_sender, never) = mpsc::channel::<()>();
+            let _ = never.recv();
+        }
+    }
+
+    impl NotifyWatcher for NeverStops {
+        fn new<F>(_handler: F, _config: Config) -> notify::Result<Self>
+        where
+            F: EventHandler,
+        {
+            Ok(Self)
+        }
+
+        fn watch(&mut self, _path: &Path, _recursive_mode: RecursiveMode) -> notify::Result<()> {
+            Ok(())
+        }
+
+        fn unwatch(&mut self, _path: &Path) -> notify::Result<()> {
+            Ok(())
+        }
+
+        fn kind() -> WatcherKind {
+            WatcherKind::NullWatcher
+        }
+    }
+
+    /// Dropping a watcher that never finishes stopping returns, so a watch restarts while the old watcher stops.
+    #[test]
+    fn dropping_a_watcher_that_never_stops_returns() {
+        let (dropped, returned) = mpsc::channel();
+
+        std::thread::spawn(move || {
+            drop(StopsAside(Some(Box::new(NeverStops))));
+            let _ = dropped.send(());
+        });
+
+        assert!(returned.recv_timeout(Duration::from_mins(1)).is_ok(), "the drop waited for the stop");
     }
 
     /// A watcher that reports the cookie of each folder starts with no warning.
