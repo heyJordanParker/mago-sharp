@@ -7,6 +7,7 @@ use std::process::Output;
 
 use mago_database::ReadDatabase;
 use mago_database::file::File;
+use mago_database::process;
 use mago_linter::settings::Settings;
 use mago_orchestrator::OrchestratorError;
 use mago_orchestrator::service::lint::LintMode;
@@ -41,13 +42,14 @@ fn workspace(report: &str) -> tempfile::TempDir {
 }
 
 fn run(workspace: &Path, command: &str, arguments: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_mago"))
-        .args(["--no-version-check", "--colors", "never", command])
-        .args(arguments)
-        .env("MAGO_LOG", "info")
-        .current_dir(workspace)
-        .output()
-        .unwrap()
+    process::output(
+        Command::new(env!("CARGO_BIN_EXE_mago"))
+            .args(["--no-version-check", "--colors", "never", command])
+            .args(arguments)
+            .env("MAGO_LOG", "info")
+            .current_dir(workspace),
+    )
+    .unwrap()
 }
 
 fn report(workspace: &Path) -> String {
@@ -92,13 +94,14 @@ fn analyze_reports_a_sharp_error_without_an_extensions_setting() {
     )
     .unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_mago"))
-        .args(["--no-version-check", "--colors", "never", "analyze", "--reporting-format", "emacs"])
-        .env("HOME", directory.path())
-        .env("XDG_CONFIG_HOME", directory.path())
-        .current_dir(directory.path())
-        .output()
-        .unwrap();
+    let output = process::output(
+        Command::new(env!("CARGO_BIN_EXE_mago"))
+            .args(["--no-version-check", "--colors", "never", "analyze", "--reporting-format", "emacs"])
+            .env("HOME", directory.path())
+            .env("XDG_CONFIG_HOME", directory.path())
+            .current_dir(directory.path()),
+    )
+    .unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     assert!(!output.status.success(), "{stdout}");
@@ -1017,7 +1020,7 @@ fn fix_formats_the_php_file_and_skips_the_sharp_file() {
 fn lint_and_format_skip_a_staged_sharp_file() {
     let directory = messy_workspace();
     for arguments in [&["init", "--quiet"][..], &["add", "src"][..]] {
-        assert!(Command::new("git").args(arguments).current_dir(directory.path()).status().unwrap().success());
+        assert!(process::status(Command::new("git").args(arguments).current_dir(directory.path())).unwrap().success());
     }
 
     let (output, _) = run_in_messy_workspace(&directory, "lint", &["--staged", "--reporting-format", "emacs"]);
@@ -1037,7 +1040,7 @@ fn lint_and_format_skip_a_staged_sharp_file() {
 fn format_staged_fails_with_git_s_reason_when_git_refuses_to_re_stage() {
     let directory = messy_workspace();
     for arguments in [&["init", "--quiet"][..], &["add", "src"][..]] {
-        assert!(Command::new("git").args(arguments).current_dir(directory.path()).status().unwrap().success());
+        assert!(process::status(Command::new("git").args(arguments).current_dir(directory.path())).unwrap().success());
     }
     std::fs::write(directory.path().join(".git/index.lock"), "").unwrap();
 
@@ -1620,13 +1623,14 @@ fn compile_and_analyze_print_json_under_mago_reporting_format_in_github_actions(
     let directory = suppressed_workspace("Broken.sharp", &broken_sharp(""), "");
 
     for command in ["compile", "analyze"] {
-        let output = Command::new(env!("CARGO_BIN_EXE_mago"))
-            .args(["--no-version-check", "--colors", "never", command])
-            .env("GITHUB_ACTIONS", "true")
-            .env("MAGO_REPORTING_FORMAT", "json")
-            .current_dir(directory.path())
-            .output()
-            .unwrap();
+        let output = process::output(
+            Command::new(env!("CARGO_BIN_EXE_mago"))
+                .args(["--no-version-check", "--colors", "never", command])
+                .env("GITHUB_ACTIONS", "true")
+                .env("MAGO_REPORTING_FORMAT", "json")
+                .current_dir(directory.path()),
+        )
+        .unwrap();
         let stdout = String::from_utf8_lossy(&output.stdout);
         let report: serde_json::Value =
             serde_json::from_str(&stdout).unwrap_or_else(|error| panic!("{command}: {error}: {stdout}"));
@@ -1643,12 +1647,13 @@ fn compile_and_analyze_print_json_under_mago_reporting_format_in_github_actions(
 fn a_reporting_format_flag_wins_over_mago_reporting_format() {
     let directory = suppressed_workspace("Broken.sharp", &broken_sharp(""), "");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_mago"))
-        .args(["--no-version-check", "--colors", "never", "analyze", "--reporting-format", "emacs"])
-        .env("MAGO_REPORTING_FORMAT", "json")
-        .current_dir(directory.path())
-        .output()
-        .unwrap();
+    let output = process::output(
+        Command::new(env!("CARGO_BIN_EXE_mago"))
+            .args(["--no-version-check", "--colors", "never", "analyze", "--reporting-format", "emacs"])
+            .env("MAGO_REPORTING_FORMAT", "json")
+            .current_dir(directory.path()),
+    )
+    .unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     assert!(
@@ -1664,12 +1669,13 @@ fn compile_and_analyze_stop_on_a_mago_reporting_format_that_names_no_format() {
     let directory = suppressed_workspace("Broken.sharp", &broken_sharp(""), "");
 
     for command in ["compile", "analyze"] {
-        let output = Command::new(env!("CARGO_BIN_EXE_mago"))
-            .args(["--no-version-check", "--colors", "never", command])
-            .env("MAGO_REPORTING_FORMAT", "jsno")
-            .current_dir(directory.path())
-            .output()
-            .unwrap();
+        let output = process::output(
+            Command::new(env!("CARGO_BIN_EXE_mago"))
+                .args(["--no-version-check", "--colors", "never", command])
+                .env("MAGO_REPORTING_FORMAT", "jsno")
+                .current_dir(directory.path()),
+        )
+        .unwrap();
         let printed = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
 
         assert!(!output.status.success(), "{command}: {printed}");
@@ -1687,12 +1693,13 @@ fn analyze_refuses_a_pin_to_the_next_major_and_names_the_pin_of_this_binary() {
     let next_major = env!("CARGO_PKG_VERSION_MAJOR").parse::<u64>().unwrap() + 1;
     std::fs::write(directory.path().join("mago.toml"), format!("version = \"{next_major}\"\n")).unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_mago"))
-        .args(["--colors", "never", "analyze"])
-        .env("MAGO_LOG", "info")
-        .current_dir(directory.path())
-        .output()
-        .unwrap();
+    let output = process::output(
+        Command::new(env!("CARGO_BIN_EXE_mago"))
+            .args(["--colors", "never", "analyze"])
+            .env("MAGO_LOG", "info")
+            .current_dir(directory.path()),
+    )
+    .unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr);
     let pin = concat!("version = \"", env!("CARGO_PKG_VERSION_MAJOR"), ".", env!("CARGO_PKG_VERSION_MINOR"), "\"");
 

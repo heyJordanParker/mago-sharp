@@ -13,6 +13,8 @@ use std::process::Stdio;
 use std::time::Duration;
 use std::time::Instant;
 
+use mago_database::process;
+
 mod common;
 
 /// The longest a test waits for `mago` to end: far past each deadline the tests set.
@@ -117,7 +119,7 @@ fn a_host_whose_worker_stops_reading_fails_mago_analyze_at_its_deadline() {
         .expect("source file");
     }
 
-    let analyze = mago(workspace.path()).stderr(Stdio::piped()).spawn().expect("mago runs");
+    let analyze = process::spawn(mago(workspace.path()).stderr(Stdio::piped())).expect("mago runs");
     let (status, stderr) = finish(analyze);
     let survivors = end_survivors(&pids);
 
@@ -175,7 +177,7 @@ fn stuck_workers(count: usize) -> (tempfile::TempDir, Child, Vec<String>) {
     )
     .expect("mago.toml");
 
-    let analyze = mago(workspace.path()).stderr(Stdio::null()).process_group(0).spawn().expect("mago runs");
+    let analyze = process::spawn(mago(workspace.path()).stderr(Stdio::null()).process_group(0)).expect("mago runs");
     let started = Instant::now();
     let workers = loop {
         let workers = process_ids(&pids);
@@ -243,7 +245,7 @@ fn end_survivors(pids: &Path) -> Vec<String> {
         std::thread::sleep(Duration::from_millis(10));
     }
     for pid in &running {
-        let _result = Command::new("kill").args(["-KILL", pid]).status();
+        let _result = process::status(Command::new("kill").args(["-KILL", pid]));
     }
 
     running
@@ -256,7 +258,7 @@ fn process_ids(pids: &Path) -> Vec<String> {
 
 /// Whether process `pid` runs. One that ended and that nothing reaped yet counts as ended.
 fn runs(pid: &str) -> bool {
-    let state = Command::new("ps").args(["-o", "stat=", "-p", pid]).output().expect("ps runs").stdout;
+    let state = process::output(Command::new("ps").args(["-o", "stat=", "-p", pid])).expect("ps runs").stdout;
     let state = state.trim_ascii();
     !state.is_empty() && !state.starts_with(b"Z")
 }

@@ -23,6 +23,7 @@ use std::slice;
 use mago_build_id::BUILD_ID;
 use mago_database::error::DatabaseError;
 use mago_database::error::IOAction;
+use mago_database::process;
 use mago_sharp_bridge::SHARP_UNIT_ABI;
 use mago_sharp_bridge::Unit;
 use mago_sharp_bridge::lower;
@@ -648,11 +649,10 @@ fn the_c_header_lays_out_every_type_as_the_bridge_does() {
     }
     fs::write(check.path().join("check.c"), source).unwrap();
 
-    let output = Command::new("cc")
-        .args(["-std=c11", "-fsyntax-only", "-Werror"])
-        .arg(check.path().join("check.c"))
-        .output()
-        .expect("cc runs");
+    let output = process::output(
+        Command::new("cc").args(["-std=c11", "-fsyntax-only", "-Werror"]).arg(check.path().join("check.c")),
+    )
+    .expect("cc runs");
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
 }
 
@@ -700,7 +700,7 @@ fn repository() -> std::path::PathBuf {
 
 /// Whether `php` runs. `MAGO_REQUIRE_PHP_SDK_TESTS` makes its absence a failure, as in Mago's PHP SDK tests.
 fn php_is_available(test: &str) -> bool {
-    let available = Command::new("php").arg("--version").output().is_ok_and(|output| output.status.success());
+    let available = process::output(Command::new("php").arg("--version")).is_ok_and(|output| output.status.success());
     assert!(available || std::env::var_os("MAGO_REQUIRE_PHP_SDK_TESTS").is_none(), "PHP is required for {test}");
 
     available
@@ -760,7 +760,7 @@ fn generator(zend_ast: &str, edit: Option<(&str, &str, &str)>) -> (tempfile::Tem
 fn generated(zend_ast: &str, zend_language_parser: &str, edit: Option<(&str, &str, &str)>) -> String {
     let (root, mut command) = generator(zend_ast, edit);
     fs::write(root.path().join("zend_language_parser.h"), zend_language_parser).unwrap();
-    let output = command.arg(root.path().join("zend_language_parser.h")).output().unwrap();
+    let output = process::output(command.arg(root.path().join("zend_language_parser.h"))).unwrap();
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
 
     String::from_utf8(output.stdout).unwrap()
@@ -866,7 +866,7 @@ fn the_kind_generator_requires_zend_language_parser_h() {
     }
 
     let (_root, mut command) = generator(ZEND_AST_H, None);
-    let output = command.output().unwrap();
+    let output = process::output(&mut command).unwrap();
 
     assert!(!output.status.success(), "a missing parser header is an error");
     let printed = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
@@ -882,11 +882,10 @@ fn the_kind_generator_takes_only_zend_ast_h_and_zend_language_parser_h() {
 
     let (root, mut command) = generator(ZEND_AST_H, None);
     fs::write(root.path().join("zend_language_parser.h"), ZEND_LANGUAGE_PARSER_H).unwrap();
-    let output = command
-        .arg(root.path().join("zend_language_parser.h"))
-        .arg(root.path().join("zend_language_parser.h"))
-        .output()
-        .unwrap();
+    let output = process::output(
+        command.arg(root.path().join("zend_language_parser.h")).arg(root.path().join("zend_language_parser.h")),
+    )
+    .unwrap();
 
     assert!(!output.status.success(), "a third argument is an error");
     let printed = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
@@ -906,7 +905,7 @@ fn the_kind_generator_refuses_a_parser_header_without_a_token_the_lowering_write
 
     let (root, mut command) = generator(ZEND_AST_H, None);
     fs::write(root.path().join("zend_language_parser.h"), ZEND_LANGUAGE_PARSER_H.replace("T_FILE", "T_PATH")).unwrap();
-    let output = command.arg(root.path().join("zend_language_parser.h")).output().unwrap();
+    let output = process::output(command.arg(root.path().join("zend_language_parser.h"))).unwrap();
 
     assert!(!output.status.success(), "a parser header without T_FILE is an error");
     let printed = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));

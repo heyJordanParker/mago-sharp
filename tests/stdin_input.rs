@@ -9,6 +9,8 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::process::Stdio;
 
+use mago_database::process;
+
 /// Strip leading log lines (e.g. " INFO ...") so the remainder is JSON.
 fn strip_log_prefix(stdout: &str) -> &str {
     let s = stdout.trim();
@@ -51,11 +53,7 @@ fn mago_bin() -> PathBuf {
 /// Returns true if the mago binary can actually execute on this host.
 /// This is false when cross-compiling (e.g., building aarch64 on x86_64).
 fn can_run_mago() -> bool {
-    Command::new(mago_bin())
-        .arg("--help")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
+    process::status(Command::new(mago_bin()).arg("--help").stdout(Stdio::null()).stderr(Stdio::null()))
         .is_ok_and(|s| s.success())
 }
 
@@ -78,13 +76,10 @@ fn run_mago_stdin(
 
     args.extend(extra_args);
 
-    let mut child = Command::new(mago_bin())
-        .args(&args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("failed to spawn mago");
+    let mut child = process::spawn(
+        Command::new(mago_bin()).args(&args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()),
+    )
+    .expect("failed to spawn mago");
 
     child.stdin.as_mut().unwrap().write_all(stdin_content.as_bytes()).unwrap();
     let output = child.wait_with_output().expect("failed to run mago");
@@ -287,11 +282,11 @@ function f($a, $b) {
             cmd.stdin(Stdio::piped());
             cmd.stdout(Stdio::piped());
             cmd.stderr(Stdio::piped());
-            let mut child = cmd.spawn().unwrap();
+            let mut child = process::spawn(&mut cmd).unwrap();
             child.stdin.as_mut().unwrap().write_all(s.as_bytes()).unwrap();
             child.wait_with_output().unwrap()
         } else {
-            cmd.output().unwrap()
+            process::output(&mut cmd).unwrap()
         }
     };
 

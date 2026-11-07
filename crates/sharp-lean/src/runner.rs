@@ -408,7 +408,7 @@ mod tests {
         // SAFETY: `getrlimit` and `setrlimit` are async-signal-safe, and the closure allocates nothing.
         unsafe { stopping.pre_exec(|| library::limit_processor_time(4)) };
 
-        let output = stopping.output()?;
+        let output = mago_database::process::output(&mut stopping)?;
 
         assert!(
             output.status.success(),

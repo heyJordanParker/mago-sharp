@@ -1124,7 +1124,9 @@ mod tests {
     fn commit_all(root: &Path) {
         let commit = ["-c", "user.name=test", "-c", "user.email=test@localhost", "commit", "--quiet", "-m", "plain"];
         for arguments in [&["init", "--quiet"][..], &["add", "--all"], &commit] {
-            let output = std::process::Command::new("git").args(arguments).current_dir(root).output().unwrap();
+            let output =
+                mago_database::process::output(std::process::Command::new("git").args(arguments).current_dir(root))
+                    .unwrap();
             assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
         }
     }
@@ -1349,7 +1351,8 @@ final class CountsWorkers implements Plugin, BeforeAnalysisHook, AfterAnalysisHo
     fn php_sdk() -> Option<PathBuf> {
         let autoload = Path::new(env!("CARGO_MANIFEST_DIR")).join("vendor/autoload.php");
         let available = autoload.is_file()
-            && std::process::Command::new("php").arg("--version").output().is_ok_and(|output| output.status.success());
+            && mago_database::process::output(std::process::Command::new("php").arg("--version"))
+                .is_ok_and(|output| output.status.success());
         assert!(
             available || std::env::var_os("MAGO_REQUIRE_PHP_SDK_TESTS").is_none(),
             "PHP and vendor dependencies are required for the extension host tests"
@@ -1879,7 +1882,9 @@ final class CountsWorkers implements Plugin, BeforeAnalysisHook, AfterAnalysisHo
             &["-c", "protocol.file.allow=always", "submodule", "add", "--quiet", &source, "src/Library"][..],
             &["-c", "user.name=test", "-c", "user.email=test@localhost", "commit", "--quiet", "-m", "library"],
         ] {
-            let output = std::process::Command::new("git").args(arguments).current_dir(&root).output().unwrap();
+            let output =
+                mago_database::process::output(std::process::Command::new("git").args(arguments).current_dir(&root))
+                    .unwrap();
             assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
         }
 

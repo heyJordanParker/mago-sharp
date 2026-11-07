@@ -14,6 +14,7 @@ use std::process::Command;
 
 use libtest_mimic::Failed;
 use libtest_mimic::Trial;
+use mago_database::process;
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -31,12 +32,13 @@ struct ChangeEntry {
 }
 
 fn invoke(bin: &Path, cmd: &str, dir: &Path, name: &str, extra_args: &[&str]) -> std::process::Output {
-    Command::new(bin)
-        .args(["--no-version-check", "--colors", "never", "--threads", "4", cmd])
-        .args(extra_args)
-        .current_dir(dir)
-        .output()
-        .unwrap_or_else(|e| panic!("[{name}] failed to spawn `mago {cmd}`: {e}"))
+    process::output(
+        Command::new(bin)
+            .args(["--no-version-check", "--colors", "never", "--threads", "4", cmd])
+            .args(extra_args)
+            .current_dir(dir),
+    )
+    .unwrap_or_else(|e| panic!("[{name}] failed to spawn `mago {cmd}`: {e}"))
 }
 
 fn generate_baseline(bin: &Path, cmd: &str, dir: &Path, name: &str) {

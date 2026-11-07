@@ -12,6 +12,10 @@ fn main() {
     }
 
     let rustc = std::env::var("RUSTC").expect("cargo sets RUSTC");
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "cargo runs this build script as a process of its own with one thread, so no process starts beside it"
+    )]
     let version = Command::new(&rustc).arg("-vV").output().expect("rustc runs");
     let toolchain = format!(
         "{}\n{}\n{}",

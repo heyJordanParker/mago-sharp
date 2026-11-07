@@ -26,6 +26,7 @@ static SPAWNING: Mutex<()> = Mutex::new(());
 /// # Errors
 ///
 /// Returns the error `Command::spawn` returns.
+#[allow(clippy::disallowed_methods, reason = "the one start every other one goes through, under SPAWNING")]
 pub fn spawn(command: &mut Command) -> io::Result<Child> {
     let _spawning = SPAWNING.lock().unwrap_or_else(PoisonError::into_inner);
 
@@ -34,7 +35,7 @@ pub fn spawn(command: &mut Command) -> io::Result<Child> {
 
 /// Runs `command` to its end and returns what it wrote, as `Command::output` does.
 ///
-/// Its stdin is empty, and its stdout and stderr are captured, even where `command` set them otherwise, which
+/// It always captures stdout and stderr and empties stdin, even where `command` set them otherwise, which
 /// `Command::output` would keep.
 ///
 /// # Errors

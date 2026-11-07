@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use mago_allocator::LocalArena;
 use mago_database::file::File;
+use mago_database::process;
 use mago_extension::WorkerCommand;
 use mago_extension::WorkerPool;
 use mago_extension::WorkerPoolOptions;
@@ -23,7 +24,7 @@ use mago_text_edit::Safety;
 fn external_linter_issue_preserves_suggested_edits() -> Result<(), Box<dyn std::error::Error>> {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
     let sdk_available = repository.join("vendor/autoload.php").is_file()
-        && Command::new("php").arg("--version").output().is_ok_and(|output| output.status.success());
+        && process::output(Command::new("php").arg("--version")).is_ok_and(|output| output.status.success());
     assert!(
         sdk_available || std::env::var_os("MAGO_REQUIRE_PHP_SDK_TESTS").is_none(),
         "PHP and vendor dependencies are required for the external linter SDK test"

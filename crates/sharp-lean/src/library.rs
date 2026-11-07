@@ -604,7 +604,7 @@ mod tests {
     fn each_process_a_lake_starts_runs_under_the_processor_time_limit() -> io::Result<()> {
         let lake = Lake { program: PathBuf::from("/bin/sh"), home: None };
 
-        let output = lake.command().args(["-c", "ulimit -t; ulimit -c"]).output()?;
+        let output = process::output(lake.command().args(["-c", "ulimit -t; ulimit -c"]))?;
 
         assert_eq!(String::from_utf8_lossy(&output.stdout), "120\n0\n");
 

@@ -1688,7 +1688,9 @@ mod tests {
             });
 
             for _ in 0..8 {
-                let request_timeout = WorkerPoolOptions::default().request_timeout;
+                // Past the stderr budget, so a stderr that never ends fails the test with `stderr still open`, and only
+                // a write that never fails reaches the deadline.
+                let request_timeout = UNREACHED_STDERR_END_TIMEOUT * 2;
                 let worker = shell_worker_within(&script, request_timeout, UNREACHED_STDERR_END_TIMEOUT);
                 wait_until_stderr_arrives(&worker);
 

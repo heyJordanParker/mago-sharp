@@ -474,12 +474,13 @@ mod tests {
     use super::*;
 
     fn git(workspace: &Path, arguments: &[&str]) -> String {
-        let output = Command::new("git")
-            .args(["-c", "user.name=test", "-c", "user.email=test@localhost"])
-            .args(arguments)
-            .current_dir(workspace)
-            .output()
-            .unwrap();
+        let output = process::output(
+            Command::new("git")
+                .args(["-c", "user.name=test", "-c", "user.email=test@localhost"])
+                .args(arguments)
+                .current_dir(workspace),
+        )
+        .unwrap();
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
 
         String::from_utf8_lossy(&output.stdout).into_owned()
@@ -539,12 +540,13 @@ mod tests {
         let root = directory.path();
         std::fs::write(root.join(".git"), "gitdir: /missing/.git/worktrees/design\n").unwrap();
         let rev_parse = |trace: &str| {
-            Command::new("git")
-                .args(["rev-parse", "--verify", "--quiet", "HEAD"])
-                .env("GIT_TRACE", trace)
-                .current_dir(root)
-                .output()
-                .unwrap()
+            process::output(
+                Command::new("git")
+                    .args(["rev-parse", "--verify", "--quiet", "HEAD"])
+                    .env("GIT_TRACE", trace)
+                    .current_dir(root),
+            )
+            .unwrap()
         };
         // Git words its reason by its version, as `not a git repository` or `gitfile does not point to a valid
         // repository`, so the reason is the `fatal:` line git prints with no trace.
