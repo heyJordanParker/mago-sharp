@@ -16,7 +16,7 @@ set -uo pipefail
 root="$(cd "$(dirname "$0")/../../../../.." && pwd)"
 build="$root/sharp/build/$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m)"
 engine="$build/sapi/cli/php"
-mago=("$build/mago/test-run/mago" --no-version-check --colors never)
+mago=("$build/mago/debug/mago" --no-version-check --colors never)
 project="$1"
 converted=(src/Box.php src/Spec.php src/Shop/Crate.php src/Shop/Label.php src/Shop/Note.php src/Shop/Order.php
     src/Shop/Shelf.php src/Shop/Tagged.php src/Shop/Tally.php)

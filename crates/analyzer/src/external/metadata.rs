@@ -41,6 +41,8 @@ use crate::external::protocol::decode_function_like_identifier;
 use crate::external::protocol::encode_function_like_identifier;
 use crate::external::protocol::encode_generic_parent;
 use crate::external::protocol::encode_union_snapshot;
+use crate::utils::names::is_member_namespace;
+use crate::utils::names::namespace_member;
 
 pub(super) const CODEBASE_QUERY_REQUEST: u16 = 4;
 pub(super) const CODEBASE_QUERY_RESPONSE: u16 = 0x8004;
@@ -804,12 +806,16 @@ pub(super) fn write_class_like(
     Ok(())
 }
 
+/// Writes the declarations of `file`'s scan, `metadata`, with each PHP# member read its attributes hold resolved against
+/// `scan`, the merged scan of every file. Without one, returns whether it met a member read, which it wrote as
+/// unsupported, so the payload must be written again once the merged scan exists.
 pub(super) fn write_declarations(
     writer: &mut PayloadWriter,
     metadata: &CodebaseMetadata,
+    scan: Option<&Arc<CodebaseMetadata>>,
     file: &Arc<File>,
-) -> Result<(), ExternalAnalyzerError> {
-    let session = ExternalAnalysisSession::from_files([Arc::clone(file)]);
+) -> Result<bool, ExternalAnalyzerError> {
+    let session = ExternalAnalysisSession::for_scan(file, scan);
     let mut class_likes = metadata.class_likes.values().collect::<Vec<_>>();
     class_likes.sort_unstable_by_key(|class_like| class_like.span.start.offset);
     writer.write_u32(class_likes.len() as u32);
@@ -840,7 +846,7 @@ pub(super) fn write_declarations(
         write_function_like(writer, identifier, function_like, metadata, &session)?;
     }
 
-    Ok(())
+    Ok(session.left_member_reads())
 }
 
 fn write_function_like(
@@ -1317,9 +1323,24 @@ fn write_attributes(
             write_location(writer, argument.span, session)?;
             write_optional_location(writer, argument.name_span, session)?;
             write_optional_location(writer, argument.value_span, session)?;
-            write_optional_union(writer, argument.value_type.as_ref(), codebase, session.dialect(argument.span))?;
+            // A member read that is no class member's, as a namespace's constant or a case object, has no type in a
+            // scan, as its PHP twin, a constant or a call, has none.
+            let value_type = match &argument.value {
+                Some(ConstantExpression::MemberRead(class, member, span))
+                    if session.member_reads(codebase).is_some_and(|members| {
+                        !matches!(
+                            member_read(members, *class, *member, *span, false),
+                            ConstantExpression::ClassConstant(..)
+                        )
+                    }) =>
+                {
+                    None
+                }
+                _ => argument.value_type.as_ref(),
+            };
+            write_optional_union(writer, value_type, codebase, session.dialect(argument.span))?;
             write_optional(writer, argument.value.as_ref(), |writer, value| {
-                write_constant_expression(writer, value, session)
+                write_constant_expression(writer, value, false, codebase, session)
             })?;
         }
     }
@@ -1327,9 +1348,46 @@ fn write_attributes(
     Ok(())
 }
 
+/// What a PHP# `class.member` in an attribute argument reads, against `codebase`, the whole codebase, in the order the
+/// lowering finds a member, spec sections 20 and 23. A case of an enum whose cases carry data runs as an object,
+/// `Tier\Free::instance()`, and a backed enum's case `as_key` of a map as its value, `Status::Paid->value`, so neither is
+/// a constant expression. Any other member of a class is `class::member`. Where no class has the name, a namespace's
+/// constant, as `Pdf.DEFAULT_DPI` after `import Vendor.Pdf;`, is that constant, and its function no constant
+/// expression. A name that is neither is `class::member`, as its PHP twin is, whose missing class the analyzer reports.
+fn member_read(codebase: &CodebaseMetadata, class: Word, member: Word, span: Span, as_key: bool) -> ConstantExpression {
+    if let Some(class_like) = codebase.get_class_like(class.as_bytes()) {
+        let case_object = codebase
+            .get_class_like(&[class.as_bytes(), b"\\", member.as_bytes()].concat())
+            .is_some_and(|case| case.flags.is_enum_case_class() && case.direct_parent_class == Some(class_like.name));
+        let backing_value = as_key
+            && class_like.enum_type.is_some()
+            && codebase.get_enum_case(class.as_bytes(), member.as_bytes()).is_some();
+
+        return if case_object || backing_value {
+            ConstantExpression::Unsupported(span)
+        } else {
+            ConstantExpression::ClassConstant(class, member)
+        };
+    }
+
+    if is_member_namespace(codebase, class, member.as_bytes(), false) {
+        let full_name = namespace_member(codebase, class, member.as_bytes());
+
+        return if codebase.constant_exists(full_name.as_bytes()) {
+            ConstantExpression::Constant(full_name)
+        } else {
+            ConstantExpression::Unsupported(span)
+        };
+    }
+
+    ConstantExpression::ClassConstant(class, member)
+}
+
 fn write_constant_expression(
     writer: &mut PayloadWriter,
     expression: &ConstantExpression,
+    as_key: bool,
+    codebase: &CodebaseMetadata,
     session: &ExternalAnalysisSession,
 ) -> Result<(), ExternalAnalyzerError> {
     match expression {
@@ -1354,8 +1412,10 @@ fn write_constant_expression(
             writer.write_u8(6);
             writer.write_u32(entries.len() as u32);
             for (key, value) in entries {
-                write_optional(writer, key.as_ref(), |writer, key| write_constant_expression(writer, key, session))?;
-                write_constant_expression(writer, value, session)?;
+                write_optional(writer, key.as_ref(), |writer, key| {
+                    write_constant_expression(writer, key, true, codebase, session)
+                })?;
+                write_constant_expression(writer, value, false, codebase, session)?;
             }
         }
         ConstantExpression::ClassName(class) => {
@@ -1377,8 +1437,14 @@ fn write_constant_expression(
             writer.write_u32(arguments.len() as u32);
             for (name, argument) in arguments {
                 write_optional_word(writer, *name)?;
-                write_constant_expression(writer, argument, session)?;
+                write_constant_expression(writer, argument, false, codebase, session)?;
             }
+        }
+        ConstantExpression::MemberRead(class, member, span) => {
+            let read = session.member_reads(codebase).map_or(ConstantExpression::Unsupported(*span), |members| {
+                member_read(members, *class, *member, *span, as_key)
+            });
+            write_constant_expression(writer, &read, as_key, codebase, session)?;
         }
         ConstantExpression::Unsupported(span) => {
             writer.write_u8(11);
@@ -1620,11 +1686,43 @@ mod tests {
         }
     }
 
+    /// A hook that reads a PHP# class while Mago analyzes gets each member read in its attributes resolved against the
+    /// whole codebase, as the codebase scan sends it: `Pdf.DEFAULT_DPI` after `import Vendor.Pdf;` is the library's
+    /// constant `\Vendor\Pdf\DEFAULT_DPI`, spec section 23.
+    #[test]
+    fn a_class_read_while_analyzing_sends_a_member_read_as_what_it_reads() {
+        const CRATE: (&str, &str) = (
+            "src/App/Crate.sharp",
+            "namespace App;\n\nimport Vendor.Pdf;\n\n[Tag(Pdf.DEFAULT_DPI)]\npublic class Crate {}\n",
+        );
+        const TAG: (&str, &str) = (
+            "src/App/Tag.php",
+            "<?php\n\nnamespace App;\n\n#[\\Attribute]\nfinal class Tag\n{\n    public function __construct(public int $dpi) {}\n}\n",
+        );
+        const PDF: (&str, &str) =
+            ("src/Vendor/pdf.php", "<?php\n\nnamespace Vendor\\Pdf;\n\nconst DEFAULT_DPI = 300;\n");
+
+        analyzed(&[CRATE, TAG, PDF], |analysis| {
+            let session = ExternalAnalysisSession::from_files(analysis.files.iter().cloned());
+            let mut writer = protocol::message_writer(CODEBASE_QUERY_REQUEST);
+            writer.write_u64(session.generation());
+            writer.write_u8(GET_CLASS_LIKES);
+            writer.write_u8(ANY_CLASS_LIKE);
+            writer.write_u32(1);
+            writer.write_bytes(b"App\\Crate").expect("the name should fit in a frame");
+            let (_, answer) = protocol::handle_nested_request(&writer.finish(), analysis.codebase, &session, |_| None)
+                .expect("the codebase query should succeed");
+
+            assert!(names(&answer, b"Vendor\\Pdf\\DEFAULT_DPI"), "the attribute sends the library's constant");
+        });
+    }
+
     fn session(generation: u64) -> ExternalAnalysisSession {
         ExternalAnalysisSession {
             generation,
             sources: foldhash::HashMap::default(),
             reads: std::sync::Mutex::default(),
+            member_reads: crate::external::MemberReads::Codebase,
         }
     }
 

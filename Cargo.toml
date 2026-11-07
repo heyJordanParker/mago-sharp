@@ -358,12 +358,14 @@ inherits = 'release'
 debug = true
 strip = 'none'
 
-# The mago that sharp/bin/build-mago builds for sharp/bin/test, sharp/bin/hosts, sharp/bin/bench and CI. The
-# tests read only mago's output, and bench counts only the engine's instructions. It is release with thin local LTO,
-# which `lto = false` means, in place of release's fat LTO, and with incremental builds. Release sets 1 codegen unit,
-# and an incremental build reuses work per unit, so it sets Cargo's incremental default of 256. It keeps release's
-# debug-assertions and overflow-checks off, so it prints what release prints: with them on, mago logs at DEBUG and its
-# collector reports a missing-code error that release never prints. Its .sharp output is byte-identical to release's.
+# The mago two CI jobs build and check as the one users get: mago.yml's checks, which also analyzes the standard
+# library with it, and release-build. plain-php runs both jobs' binaries. No local script builds it, and none may: a
+# worktree keeps the one dev build below, and a second profile compiles every crate a second time. It is release with
+# thin local LTO, which `lto = false` means, in place of release's fat LTO, and with incremental builds. Release sets 1
+# codegen unit, and an incremental build reuses work per unit, so it sets Cargo's incremental default of 256. It keeps
+# release's debug-assertions and overflow-checks off, so it prints what release prints: with them on, mago logs at
+# DEBUG and its collector reports a missing-code error that release never prints. Its .sharp output is byte-identical
+# to release's.
 #
 # After a one-line change in crates/analyzer, on an M2 Max at 2 Cargo jobs, each profile's rebuild, then the time of
 # the fixture compile, sharp/bin/spec --self-test and sharp/bin/spec with that mago:
@@ -383,8 +385,18 @@ lto = false
 incremental = true
 codegen-units = 256
 
+# The one profile a worktree builds: sharp/bin/build-mago builds mago and every test binary in it, as `cargo test
+# --workspace` does, and sharp/bin/test, sharp/bin/hosts and sharp/bin/bench run that mago. It keeps debug assertions
+# and overflow checks on, which the tests need.
+#
+# It keeps no incremental state. rustc keeps each crate's session before the last one, so every crate a change rebuilt
+# doubled its state, and on macOS the line tables kept every compilation's object files in deps: a worktree's target
+# folder grew from 12.7 to 17.4 GiB in 8 rounds of edits and tests. Without it, on that M2 Max, a fresh build held
+# 6.0 GiB and stayed within 7.4% of it through 5 rounds of one-line edits in mago-linter, mago-analyzer, mago-codex
+# and mago-syntax, and an edit to mago-analyzer or mago-codex rebuilds in about 140 CPU-seconds more.
 [profile.dev]
 debug = 'line-tables-only'
 opt-level = 0
 lto = 'off'
 panic = 'unwind'
+incremental = false

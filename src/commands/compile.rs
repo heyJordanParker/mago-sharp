@@ -8,11 +8,13 @@
 //! Beside each of the project's own PHP# sources that declares a type, outside `vendor/` and `autoload-dev` folders, it
 //! also writes a PHP file of the type's name that loads the source and states the type's declaration, so PHP code that
 //! finds classes by listing `*.php` files or reading their source finds PHP# classes too, spec section 27. A removed
-//! source loses its PHP file, and git's `info/exclude` keeps the files no `.gitignore` covers out of git.
+//! source loses its PHP file, and a `.gitignore` the compile writes in each folder that holds such files keeps them
+//! out of git in that checkout alone.
 //!
-//! A compile that succeeds keeps a record of everything it read and wrote in the `.sharp` folder, and the next compile
-//! checks it before any analysis: when every input and output is as it was, it prints the same summary and does nothing
-//! else. A project with an extension host enabled compiles every time, since a host names none of what it reads.
+//! A compile that succeeds with no warning keeps a record of everything it read and wrote in the `.sharp` folder, and
+//! the next compile checks it before any analysis: when every input and output is as it was, it prints the same summary
+//! and does nothing else. A project with an extension host enabled compiles every time, since a host names none of what
+//! it reads.
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -42,6 +44,7 @@ use mago_database::file::COMPANION_START;
 use mago_database::file::File;
 use mago_database::file::FileType;
 use mago_database::file::FolderNamespace;
+use mago_database::loader::ExcludedFolders;
 use mago_database::membership::WorkspaceMatcher;
 use mago_orchestrator::Orchestrator;
 use mago_orchestrator::OrchestratorError;
@@ -64,6 +67,7 @@ use mago_sharp_lean::PACKAGE_FOLDER;
 use mago_syntax::cst::Statement;
 use mago_syntax::dialect::Dialect;
 use mago_syntax::parser::parse_file;
+use mago_syntax_core::utils::is_part_of_identifier;
 
 use crate::baseline::unserialize_baseline;
 use crate::commands::analyze::analyze_the_whole_workspace_without_paths;
@@ -78,6 +82,9 @@ use crate::error::Error;
 use crate::extensions::start_external_analyzer;
 use crate::utils::create_orchestrator;
 use crate::utils::git;
+use crate::utils::logger;
+use crate::utils::rename_into;
+use crate::utils::temp_file_in;
 use crate::utils::write_by_rename;
 
 /// The folder Composer installs packages into.
@@ -89,7 +96,8 @@ const LISTENERS: &str = "listeners.php";
 
 /// The record of everything the last compile that succeeded read and wrote, in the `.sharp` folder and in the hosts'
 /// folder, which the next compile checks before any analysis: when every input and output is as it was, the compile has
-/// nothing to do. A refused, failed or interrupted compile leaves none.
+/// nothing to do. A refused, failed, warned or interrupted compile leaves none, and so does one whose output changed
+/// while it ran.
 const INPUTS: &str = "inputs.json";
 
 /// Command that compiles every PHP# file into the `.sharp` folder.
@@ -175,18 +183,18 @@ pub(crate) fn compile_for_hosts(
 /// file in `folder` changed.
 fn compile_into(configuration: &Configuration, root: &Path, folder: &Path) -> Result<bool, Error> {
     let record_path = folder.join(INPUTS);
-    let sources = source_files(configuration, root);
-    let record = Record::start(configuration, root, &sources);
-    let mut orchestrator = create_orchestrator(configuration, ColorChoice::Never, false, false, false);
-    analyze_the_whole_workspace_without_paths(&mut orchestrator);
-    orchestrator.add_exclude_patterns(configuration.analyzer.excludes.iter());
-    let (database, _) = project_database(&orchestrator, &configuration.source.workspace)?;
-    if every_compiled_file_is_current(configuration, root, folder, &sources, &database, |path| unit::stamp(root, path))?
-    {
+    let mut filesystems = Filesystems::new();
+    let sources = source_files(configuration, root, &mut filesystems);
+    if every_compiled_file_is_current(configuration, root, folder, &sources, &mut filesystems) {
         return Ok(false);
     }
     // A record the compile can't delete is in a folder it then fails to write its compiled files to.
     let _ = std::fs::remove_file(&record_path);
+    let mut record = Record::start(configuration, root, &sources, folder, filesystems);
+    let mut orchestrator = create_orchestrator(configuration, ColorChoice::Never, false, false, false);
+    analyze_the_whole_workspace_without_paths(&mut orchestrator);
+    orchestrator.add_exclude_patterns(configuration.analyzer.excludes.iter());
+    let (database, _) = project_database(&orchestrator, &configuration.source.workspace)?;
 
     let library = standard_library(root, &database).unwrap_or_default();
     let mut server = Server::new(database.into_static(), decode_prelude, server_settings(&orchestrator));
@@ -214,6 +222,9 @@ fn compile_into(configuration: &Configuration, root: &Path, folder: &Path) -> Re
         if std::fs::read(path).ok().as_deref() != Some(bytes) {
             write_by_rename(path, bytes)?;
             changed = true;
+        }
+        if let Some(record) = record.as_mut() {
+            record.output(path, bytes);
         }
         Ok(())
     };
@@ -246,6 +257,7 @@ fn compile_into(configuration: &Configuration, root: &Path, folder: &Path) -> Re
         written.insert(table);
     }
 
+    let lowered = refused.is_empty();
     let (target, report) = ReportingTarget::buffer();
     Reporter::new(
         database.read_only(),
@@ -264,10 +276,13 @@ fn compile_into(configuration: &Configuration, root: &Path, folder: &Path) -> Re
     let path = folder.join(HOST_REPORT);
     write(&path, &report)?;
     written.insert(path);
+    // A compile with a file that doesn't lower keeps no record, so the next one tries that file again.
+    let record = record.filter(|_| lowered);
+    written.extend(record.as_ref().and_then(Record::marker_path));
     let deleted = delete_all_but(folder, &written, &folder.join(PACKAGE_FOLDER))?;
     if let Some(record) = record {
         let listed = inputs.iter().map(|input| recorded(&input.path, Some(input)));
-        record.write(&record_path, String::new(), database, stamped.into_iter().chain(listed), written)?;
+        record.write(&record_path, String::new(), database, stamped.into_iter().chain(listed))?;
     }
 
     Ok(changed || deleted > 0)
@@ -338,11 +353,12 @@ fn compile(configuration: &Configuration, color_choice: ColorChoice) -> Result<C
     let root = workspace.canonicalize().map_err(|error| Error::CanonicalizingPath(workspace.to_path_buf(), error))?;
     let compiled_folder = root.join(unit::COMPILED_FOLDER);
     let record_path = compiled_folder.join(INPUTS);
-    let sources = source_files(configuration, &root);
+    let mut filesystems = Filesystems::new();
+    let sources = source_files(configuration, &root, &mut filesystems);
     // A host names none of what it reads, so only a compile without hosts can know it has nothing to do.
     if !configuration.extension_hosts.values().any(|host| host.enabled)
         && let Some(record) = Record::read(&record_path)
-        && every_input_is_current(&record, configuration, &root, &sources)
+        && every_input_is_current(&record, configuration, &root, &sources, &mut filesystems)
     {
         tracing::info!("{}", record.summary);
 
@@ -350,7 +366,12 @@ fn compile(configuration: &Configuration, color_choice: ColorChoice) -> Result<C
     }
     // A record the compile can't delete is in a folder it then fails to write its compiled files to.
     let _ = std::fs::remove_file(&record_path);
-    let record = Record::start(configuration, &root, &sources);
+    // A project with no PHP# file gets no `.sharp` folder to keep a record in.
+    let mut record = sources
+        .keys()
+        .any(|name| name.ends_with(".sharp"))
+        .then(|| Record::start(configuration, &root, &sources, &compiled_folder, filesystems))
+        .flatten();
 
     let mut orchestrator = create_orchestrator(configuration, color_choice, false, true, false);
     analyze_the_whole_workspace_without_paths(&mut orchestrator);
@@ -370,7 +391,7 @@ fn compile(configuration: &Configuration, color_choice: ColorChoice) -> Result<C
     // Written before the compile stamps its inputs, which hold the PHP file a default class's name could name in
     // a file's folder, so a compiled file is current once it is written.
     let mut failed = false;
-    let mut written_beside = BTreeSet::new();
+    let mut written_beside: HashMap<PathBuf, BTreeSet<String>> = HashMap::new();
     let mut folders = BTreeSet::new();
     let mut listings = HashMap::new();
     for file in database.files().filter(|file| {
@@ -426,21 +447,36 @@ fn compile(configuration: &Configuration, color_choice: ColorChoice) -> Result<C
         {
             write_by_rename(&path, contents.as_bytes())?;
         }
-        written_beside.insert(path);
+        if let Some(record) = record.as_mut() {
+            record.output(&path, contents.as_bytes());
+        }
+        written_beside.entry(folder).or_default().insert(php);
     }
-    // A removed source's PHP file is in a folder that holds a source, or held one at the last compile.
+    // A removed source's PHP file, and the `.gitignore` that lists it, are in a folder that holds a source, held one at
+    // the last compile, or holds the compile's `.gitignore`, as the folder of a refused source does.
     source_folders(&root, &compiled_folder, &compiled_folder, &mut folders)?;
+    gitignore_folders(&root, &orchestrator.database_configuration(workspace, false), &mut folders)?;
     for folder in folders {
+        let written = written_beside.remove(&folder).unwrap_or_default();
         for name in file_names(&folder)? {
             let path = folder.join(&name);
-            if name.ends_with(".php") && !written_beside.contains(&path) && written_by_compile(&path)? {
+            if name.ends_with(".php") && !written.contains(&name) && written_by_compile(&path)? {
                 std::fs::remove_file(&path)
                     .or_else(ignore_missing)
                     .map_err(|error| DatabaseError::io(IOAction::DeleteFile, &path, error))?;
             }
         }
+        keep_out_of_git(&root, &folder, &written)?;
+        // The `.gitignore` of a folder of PHP files is the compile's, which it wrote, or someone else's, which it reads.
+        if let Some(record) = record.as_mut().filter(|_| !written.is_empty()) {
+            let gitignore = folder.join(".gitignore");
+            match std::fs::read(&gitignore) {
+                Ok(contents) if gitignore_written_by_compile(&contents) => record.output(&gitignore, &contents),
+                _ => record.input(&gitignore),
+            }
+        }
     }
-    git::exclude(&root, "mago compile", &written_beside.iter().cloned().collect::<Vec<_>>())?;
+    git::remove_exclude_blocks(&root, "mago compile")?;
 
     let library = match standard_library(&root, &database) {
         Ok(library) => library,
@@ -509,6 +545,9 @@ fn compile(configuration: &Configuration, color_choice: ColorChoice) -> Result<C
         match compilation {
             Compilation::Accepted(bytes) => {
                 write_by_rename(&compiled, &bytes)?;
+                if let Some(record) = record.as_mut() {
+                    record.output(&compiled, &bytes);
+                }
                 written.insert(compiled);
                 accepted.insert(file_id);
             }
@@ -534,11 +573,19 @@ fn compile(configuration: &Configuration, color_choice: ColorChoice) -> Result<C
         let accepted: Vec<&Listener> =
             listeners.iter().filter(|listener| accepted.contains(&listener.file_id)).collect();
         let table = compiled_folder.join(LISTENERS);
-        write_by_rename(&table, &listener_table(&inputs, &accepted, server.dispatcher_module().as_ref()))?;
+        let bytes = listener_table(&inputs, &accepted, server.dispatcher_module().as_ref());
+        write_by_rename(&table, &bytes)?;
+        if let Some(record) = record.as_mut() {
+            record.output(&table, &bytes);
+        }
         written.insert(table);
     }
+    // A compile that writes no compiled file leaves no `.sharp` folder to keep a record in.
+    let record = record.filter(|_| !written.is_empty());
     if compiled_folder.is_dir() {
-        delete_all_but(&compiled_folder, &written, &compiled_folder.join(PACKAGE_FOLDER))?;
+        let kept: BTreeSet<PathBuf> =
+            written.iter().cloned().chain(record.as_ref().and_then(Record::marker_path)).collect();
+        delete_all_but(&compiled_folder, &kept, &compiled_folder.join(PACKAGE_FOLDER))?;
     }
 
     for folder in package_compiled_folders(&root, database) {
@@ -594,13 +641,9 @@ fn compile(configuration: &Configuration, color_choice: ColorChoice) -> Result<C
 
         return Ok(ExitCode::FAILURE.into());
     }
-    // A project with no PHP# file has no `.sharp` folder to keep the record in.
-    if let Some(record) = record
-        && !written.is_empty()
-    {
+    if let Some(record) = record {
         let listed = inputs.iter().map(|input| recorded(&input.path, Some(input)));
-        let outputs = written.into_iter().chain(written_beside);
-        record.write(&record_path, summary.clone(), database, stamped.into_iter().chain(listed), outputs)?;
+        record.write(&record_path, summary.clone(), database, stamped.into_iter().chain(listed))?;
     }
     tracing::info!("{summary}");
 
@@ -608,59 +651,23 @@ fn compile(configuration: &Configuration, color_choice: ColorChoice) -> Result<C
 }
 
 /// Whether the hosts' compile in `folder` of the project at `root` has nothing to do: the project has no PHP# file for
-/// the hosts to load, or the record of the compile's last run stands for a compile with `configuration` now, whose
-/// source files are `files`, and each PHP# file the compile checks has a compiled file there the engine runs, one whose
-/// every input is as it was stamped, written by this checker build. A source that is a link outside the project never
-/// has one. `stamp` stamps each input once, however many compiled files name it.
-///
-/// # Errors
-///
-/// Returns the error of reading a compiled file or of stamping one of its inputs.
+/// the hosts to load, or the record of the compile's last run in `folder` stands for a compile with `configuration` now,
+/// whose source files are `sources`, as [`every_input_is_current`] checks it.
 fn every_compiled_file_is_current(
     configuration: &Configuration,
     root: &Path,
     folder: &Path,
-    files: &BTreeMap<String, Status>,
-    database: &impl DatabaseReader,
-    mut stamp: impl FnMut(&[u8]) -> Result<Option<unit::Input>, DatabaseError>,
-) -> Result<bool, Error> {
-    let sources: Vec<_> =
-        database.files().filter(|file| file.file_type == FileType::Host && Dialect::of(file).is_sharp()).collect();
-    if sources.is_empty() {
-        return Ok(true);
-    }
-    if !Record::read(&folder.join(INPUTS))
-        .is_some_and(|record| every_input_is_current(&record, configuration, root, files))
-    {
-        return Ok(false);
-    }
-
-    let mut stamps: HashMap<Vec<u8>, Option<unit::Input>> = HashMap::new();
-    for file in sources {
-        let source = file.path.clone().unwrap_or_else(|| root.join(String::from_utf8_lossy(&file.name).as_ref()));
-        let Some(compiled) = host_compiled_path(root, folder, &source)? else {
-            continue;
-        };
-        let bytes = match std::fs::read(&compiled) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-            Err(error) => return Err(DatabaseError::io(IOAction::ReadFile, &compiled, error).into()),
-        };
-        let stale = unit::is_stale(&bytes, |path| match stamps.entry(path.to_vec()) {
-            Entry::Occupied(stamped) => Ok(stamped.get().clone()),
-            Entry::Vacant(unstamped) => Ok(unstamped.insert(stamp(path)?).clone()),
-        })?;
-        if stale {
-            return Ok(false);
-        }
-    }
-
-    Ok(true)
+    sources: &BTreeMap<String, Found>,
+    filesystems: &mut Filesystems,
+) -> bool {
+    !sources.keys().any(|name| name.ends_with(".sharp"))
+        || Record::read(&folder.join(INPUTS))
+            .is_some_and(|record| every_input_is_current(&record, configuration, root, sources, filesystems))
 }
 
-/// What a compile that succeeded read and wrote, as [`INPUTS`] holds it: the header the compile ran under, the status of
-/// each source file before the compile read it with the hash of the bytes it read, the stamp of each other input, and
-/// the status of each file it wrote or kept once it was done.
+/// What a compile that succeeded read and wrote, as [`INPUTS`] holds it: the header the compile ran under, each source
+/// file as the compile found it before it read it, with the hash of the bytes it read, the stamp of each other input,
+/// and the status of each file it wrote or kept right after, with the hash of its bytes.
 #[derive(Serialize, Deserialize)]
 struct Record {
     /// The build ID of the checker that wrote it.
@@ -671,14 +678,27 @@ struct Record {
     configuration: [u8; 16],
     /// What the compile printed once it was done.
     summary: String,
-    /// The filesystem's time when the compile started, in nanoseconds since the epoch.
+    /// The modification time of the record's own temp file, which the compile created when it started, in nanoseconds
+    /// since the epoch, as the filesystem's clock gave it.
     marker: i64,
     /// Each file [`source_files`] found other than an output, by name.
-    files: BTreeMap<String, (Status, [u8; 16])>,
+    files: BTreeMap<String, (Found, [u8; 16])>,
     /// Each other input, as [`recorded`] holds it.
     inputs: Vec<Stamp>,
     /// Each file the compile wrote or kept, by name.
-    outputs: BTreeMap<String, Status>,
+    outputs: BTreeMap<String, (Status, [u8; 16])>,
+    /// The record's own temp file, whose modification time is the marker, which the compile keeps until it is done.
+    #[serde(skip)]
+    marker_file: Option<tempfile::NamedTempFile>,
+    /// How many warnings the logger had printed when the compile started.
+    #[serde(skip)]
+    warnings: usize,
+    /// Whether an output's status or an input's stamp couldn't be taken, so the record can't stand for the compile.
+    #[serde(skip)]
+    lost: bool,
+    /// Whether each filesystem's change time records writes, for the outputs' statuses.
+    #[serde(skip)]
+    filesystems: Filesystems,
 }
 
 impl Record {
@@ -687,18 +707,28 @@ impl Record {
         serde_json::from_slice(&std::fs::read(path).ok()?).ok()
     }
 
-    /// Starts the record of a compile of the project at `root` with `configuration`, before the compile reads a file:
-    /// takes the filesystem's time, keeps `files`, and stamps each input the loader and the compile read apart from the
-    /// analysis. Those are the `composer.json` of each PHP# source's folder, or of the nearest folder above it that holds
-    /// one, as the loader reads it, each absent one below it, Composer's `installed.json`, the baseline, and the `.sharp`
-    /// folder of each folder that holds a package's PHP# file, absent unless the compile refuses it. Gives none when an
+    /// Starts the record of a compile of the project at `root` with `configuration` in `folder`, before the compile
+    /// reads a file: creates the record's own temp file there and takes its modification time as the marker, keeps
+    /// `sources`, and stamps each input the loader and the compile read apart from the analysis. Those are the
+    /// `composer.json` of each PHP# source's folder, or of the nearest folder above it that holds one, as the loader
+    /// reads it, each absent one below it, Composer's `installed.json`, the baseline, and the `.sharp` folder of each
+    /// folder that holds a package's PHP# file, absent unless the compile refuses it. `filesystems` tells which
+    /// filesystems record every write, for the outputs' statuses. Gives none when the temp file can't be created or an
     /// input can't be stamped, and the compile then keeps no record.
-    fn start(configuration: &Configuration, root: &Path, files: &BTreeMap<String, Status>) -> Option<Self> {
-        let marker = marker(root);
+    fn start(
+        configuration: &Configuration,
+        root: &Path,
+        sources: &BTreeMap<String, Found>,
+        folder: &Path,
+        mut filesystems: Filesystems,
+    ) -> Option<Self> {
+        std::fs::create_dir_all(folder).ok()?;
+        let marker_file = temp_file_in(folder).ok()?;
+        let marker = Status::of(marker_file.path(), &marker_file.as_file().metadata().ok()?, &mut filesystems).1;
         let stamp = |path: &[u8]| unit::stamp(root, path).ok().map(|input| recorded(path, input.as_ref()));
         let mut inputs = Vec::new();
         let mut folders = HashSet::new();
-        for name in files.keys().filter(|name| name.ends_with(".sharp")) {
+        for name in sources.keys().filter(|name| name.ends_with(".sharp")) {
             for folder in root.join(name).ancestors().skip(1) {
                 if !folders.insert(folder.to_path_buf()) {
                     break;
@@ -726,15 +756,48 @@ impl Record {
             configuration: configuration_hash(configuration),
             summary: String::new(),
             marker,
-            files: files.iter().map(|(name, status)| (name.clone(), (*status, [0; 16]))).collect(),
+            files: sources.iter().map(|(name, found)| (name.clone(), (found.clone(), [0; 16]))).collect(),
             inputs,
             outputs: BTreeMap::new(),
+            marker_file: Some(marker_file),
+            warnings: logger::warnings(),
+            lost: false,
+            filesystems,
         })
     }
 
+    /// The path of the record's own temp file, which the compile keeps in its folder until it is done.
+    fn marker_path(&self) -> Option<PathBuf> {
+        self.marker_file.as_ref().map(|file| file.path().to_path_buf())
+    }
+
+    /// Keeps the file at `path`, which the compile just wrote or kept with `bytes`, as an output with its status now.
+    fn output(&mut self, path: &Path, bytes: &[u8]) {
+        match std::fs::metadata(path) {
+            Ok(metadata) => {
+                let name = source_name(&self.root, path);
+                let status = Status::of(path, &metadata, &mut self.filesystems);
+                self.files.remove(&name);
+                self.outputs.insert(name, (status, unit::source_hash(bytes)));
+            }
+            Err(_) => self.lost = true,
+        }
+    }
+
+    /// Keeps the file at `path`, which the compile read, as an input with its stamp now.
+    fn input(&mut self, path: &Path) {
+        let name = source_name(&self.root, path);
+        match unit::stamp(&self.root, name.as_bytes()) {
+            Ok(input) => self.inputs.push(recorded(name.as_bytes(), input.as_ref())),
+            Err(_) => self.lost = true,
+        }
+    }
+
     /// Writes the record to `path` once the compile succeeded and printed `summary`: hashes each source file's bytes as
-    /// `database` read them, or as the file holds them when the database didn't read it, adds `inputs`, the stamps the
-    /// compile took, and takes the status of each of `outputs`, the files it wrote or kept.
+    /// `database` read them, or as the file holds them when the database didn't read it, and adds `inputs`, the stamps
+    /// the compile took. A compile that warned keeps no record, so the next one prints the warning again, and neither
+    /// does one whose output changed since it wrote or kept it, as a file someone swapped in or a compile that ran at
+    /// once changes it.
     ///
     /// # Errors
     ///
@@ -745,17 +808,17 @@ impl Record {
         summary: String,
         database: &impl DatabaseReader,
         inputs: impl IntoIterator<Item = Stamp>,
-        outputs: impl IntoIterator<Item = PathBuf>,
     ) -> Result<(), Error> {
-        for output in outputs {
-            let metadata = std::fs::metadata(&output)
-                .map_err(|error| DatabaseError::io(IOAction::ReadMetadata, &output, error))?;
-            let name = source_name(&self.root, &output);
-            self.files.remove(&name);
-            self.outputs.insert(name, Status::of(&metadata));
+        let changed = self.outputs.iter().any(|(name, (status, _))| {
+            let output = self.root.join(name);
+            std::fs::metadata(&output)
+                .map_or(true, |metadata| Status::of(&output, &metadata, &mut self.filesystems) != *status)
+        });
+        if self.lost || changed || logger::warnings() != self.warnings {
+            return Ok(());
         }
         let mut files = BTreeMap::new();
-        for (name, (status, _)) in std::mem::take(&mut self.files) {
+        for (name, (found, _)) in std::mem::take(&mut self.files) {
             let hash = match database.get_by_name(name.as_bytes()) {
                 Ok(file) => unit::source_hash(&file.contents),
                 Err(_) => match std::fs::read(self.root.join(&name)) {
@@ -767,7 +830,7 @@ impl Record {
                     }
                 },
             };
-            files.insert(name, (status, hash));
+            files.insert(name, (found, hash));
         }
         self.inputs.extend(inputs);
         self.inputs.retain(|(path, ..)| !files.contains_key(path));
@@ -775,33 +838,67 @@ impl Record {
         self.inputs.dedup();
         self.files = files;
         self.summary = summary;
+        let Some(file) = self.marker_file.take() else {
+            return Ok(());
+        };
 
-        Ok(write_by_rename(path, &serde_json::to_vec(&self)?)?)
+        match rename_into(path, file, &serde_json::to_vec(&self)?) {
+            // A compile that ran at once deleted the record's temp file with the other files it didn't write, so the
+            // folder may hold its outputs, and this compile keeps no record.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            written => Ok(written.map_err(|error| DatabaseError::io(IOAction::WriteFile, path, error))?),
+        }
+    }
+}
+
+/// A record that is never written deletes its temp file, and then its folder when that holds nothing else, as the
+/// `.sharp` folder of a project whose first compile refused every file doesn't, so no compile leaves an empty folder.
+impl Drop for Record {
+    fn drop(&mut self) {
+        if let Some(file) = self.marker_file.take() {
+            let folder = file.path().parent().map(Path::to_path_buf);
+            drop(file);
+            if let Some(folder) = folder {
+                // Fails, as it should, while the folder holds a file.
+                let _ = std::fs::remove_dir(folder);
+            }
+        }
     }
 }
 
 /// Whether `record` stands for a compile of the project at `root` with `configuration` now, whose source files are
-/// `files`: its header names this checker build, `root` and `configuration`, it holds the same source files, each
-/// output's status is unchanged, each other input passes `unit::stamp`, and each source file's status is unchanged with
-/// times older than the record's marker, or its bytes hash as the compile's did. A status that changed only makes the
-/// file's bytes hashed, as git hashes a racily clean file of its index, so a write in the same tick as the compile's read
-/// is caught. A record that can't be checked is not current, and the full compile reports what fails.
+/// `sources`: its header names this checker build, `root` and `configuration`, it holds the same source files at the
+/// same real paths, each output is unchanged, each other input passes `unit::stamp`, and each source file is unchanged.
+/// A source file is unchanged when its status is and both its times are older than the record's marker, or else when
+/// its bytes hash as the compile's did. A status that changed only makes the file's bytes hashed, as git hashes a
+/// racily clean file of its index, so a write in the same tick as the compile's read is caught. An output is unchanged
+/// when its status is, on a filesystem whose change time records every write, or else when its bytes hash the same.
+/// `filesystems` tells which filesystems record every write. A record that can't be checked is not current, and the
+/// full compile reports what fails.
 fn every_input_is_current(
     record: &Record,
     configuration: &Configuration,
     root: &Path,
-    files: &BTreeMap<String, Status>,
+    sources: &BTreeMap<String, Found>,
+    filesystems: &mut Filesystems,
 ) -> bool {
-    let sources: Vec<(&String, &Status)> =
-        files.iter().filter(|(name, _)| !record.outputs.contains_key(name.as_str())).collect();
+    let found: Vec<(&String, &Found)> =
+        sources.iter().filter(|(name, _)| !record.outputs.contains_key(name.as_str())).collect();
+    let hashes_as =
+        |path: &Path, hash: &[u8; 16]| std::fs::read(path).is_ok_and(|bytes| unit::source_hash(&bytes) == *hash);
 
     record.build == BUILD_ID.to_be_bytes()
         && record.root == root
         && record.configuration == configuration_hash(configuration)
-        && sources.len() == record.files.len()
-        && sources.iter().zip(&record.files).all(|((name, _), (recorded, _))| *name == recorded)
-        && record.outputs.iter().all(|(name, status)| {
-            std::fs::metadata(root.join(name)).is_ok_and(|metadata| Status::of(&metadata) == *status)
+        && found.len() == record.files.len()
+        && found.iter().zip(&record.files).all(|((name, Found(_, real)), (recorded, (Found(_, recorded_real), _)))| {
+            *name == recorded && real == recorded_real
+        })
+        && record.outputs.iter().all(|(name, (status, hash))| {
+            let output = root.join(name);
+            std::fs::metadata(&output)
+                .is_ok_and(|metadata| status.sees_writes() && Status::of(&output, &metadata, filesystems) == *status)
+                || hashes_as(&output, hash)
         })
         && record.inputs.iter().all(|(path, size, hash)| match unit::stamp(root, path.as_bytes()) {
             Ok(Some(input)) => (input.size, input.hash) == (*size, *hash),
@@ -809,9 +906,8 @@ fn every_input_is_current(
             Ok(None) => (*size, *hash) == (0, [0; 16]) && !root.join(path).exists(),
             Err(_) => false,
         })
-        && sources.iter().zip(record.files.values()).all(|((name, status), (recorded, hash))| {
-            (*status == recorded && status.is_older_than(record.marker))
-                || std::fs::read(root.join(name)).is_ok_and(|bytes| unit::source_hash(&bytes) == *hash)
+        && found.iter().zip(record.files.values()).all(|((name, Found(status, _)), (Found(recorded, _), hash))| {
+            (status == recorded && status.is_older_than(record.marker)) || hashes_as(&root.join(name), hash)
         })
 }
 
@@ -826,32 +922,41 @@ fn recorded(path: &[u8], input: Option<&unit::Input>) -> Stamp {
     }
 }
 
+/// A source file as [`source_files`] finds it: its status, and the name of its real path when that differs from its
+/// own, as a file reached through a link has.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct Found(Status, Option<String>);
+
 /// A file's size, modification time, status change time, inode and device, each time in nanoseconds since the epoch.
-/// Every write changes the status change time, a time `touch` sets back included, so a file whose status is unchanged
-/// and whose times are older than a compile's start holds the bytes the compile read.
+///
+/// Where the filesystem's status change time records every write, as APFS, ext4 and most others do, a write changes it,
+/// a time `touch` sets back included, so a file whose status is unchanged and whose times are older than a compile's
+/// start holds the bytes the compile read. Where it doesn't, as on FAT and exFAT and on every system but macOS and
+/// Linux, where it is not read, the status change time is `i64::MAX`, so the file's bytes are always hashed.
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 struct Status(u64, i64, i64, u64, u64);
 
 impl Status {
+    /// The status of the file at `path` from its `metadata`, its status change time read only when `filesystems` says
+    /// its filesystem records every write in it.
     #[cfg(unix)]
-    fn of(metadata: &std::fs::Metadata) -> Self {
+    fn of(path: &Path, metadata: &std::fs::Metadata, filesystems: &mut Filesystems) -> Self {
         use std::os::unix::fs::MetadataExt;
 
         let nanoseconds = |seconds: i64, fraction: i64| seconds.saturating_mul(1_000_000_000).saturating_add(fraction);
+        let records_writes = *filesystems.entry(metadata.dev()).or_insert_with(|| change_time_records_writes(path));
 
         Self(
             metadata.size(),
             nanoseconds(metadata.mtime(), metadata.mtime_nsec()),
-            nanoseconds(metadata.ctime(), metadata.ctime_nsec()),
+            if records_writes { nanoseconds(metadata.ctime(), metadata.ctime_nsec()) } else { i64::MAX },
             metadata.ino(),
             metadata.dev(),
         )
     }
 
-    /// With no status change time to read, a file's times are never older than a compile's start, so its bytes are
-    /// always hashed.
     #[cfg(not(unix))]
-    fn of(metadata: &std::fs::Metadata) -> Self {
+    fn of(_: &Path, metadata: &std::fs::Metadata, _: &mut Filesystems) -> Self {
         Self(metadata.len(), 0, i64::MAX, 0, 0)
     }
 
@@ -859,12 +964,66 @@ impl Status {
     fn is_older_than(self, marker: i64) -> bool {
         self.1 < marker && self.2 < marker
     }
+
+    /// Whether the file's filesystem records every write in its status change time, so an unchanged status means
+    /// unchanged bytes.
+    fn sees_writes(self) -> bool {
+        self.2 != i64::MAX
+    }
 }
 
-/// The filesystem's time now, as the modification time of a file it creates in `root`, which holds the files a compile
-/// reads, or the earliest time when it can't create one there, so no file is older.
-fn marker(root: &Path) -> i64 {
-    tempfile::tempfile_in(root).and_then(|file| file.metadata()).map_or(i64::MIN, |metadata| Status::of(&metadata).1)
+/// Whether each filesystem, by its device, records every write in a file's status change time.
+type Filesystems = HashMap<u64, bool>;
+
+/// Whether the filesystem that holds `path` records every write in a file's status change time, as `statfs` names
+/// it: every one but FAT and exFAT, which keep no status change time. One `statfs` can't name is taken not to.
+#[cfg(target_os = "macos")]
+fn change_time_records_writes(path: &Path) -> bool {
+    filesystem_of(path).is_some_and(|filesystem| {
+        let name: Vec<u8> =
+            filesystem.f_fstypename.iter().take_while(|byte| **byte != 0).map(|byte| *byte as u8).collect();
+
+        records_writes(&name)
+    })
+}
+
+/// Whether the filesystem macOS names `name` records every write in a file's status change time.
+#[cfg(target_os = "macos")]
+fn records_writes(name: &[u8]) -> bool {
+    !matches!(name, b"msdos" | b"exfat")
+}
+
+#[cfg(target_os = "linux")]
+fn change_time_records_writes(path: &Path) -> bool {
+    filesystem_of(path).is_some_and(|filesystem| records_writes(filesystem.f_type as u64))
+}
+
+/// Whether the filesystem of the Linux magic number `magic` records every write in a file's status change time: every
+/// one but FAT's `MSDOS_SUPER_MAGIC` and exFAT's `EXFAT_SUPER_MAGIC`.
+#[cfg(target_os = "linux")]
+fn records_writes(magic: u64) -> bool {
+    !matches!(magic, 0x4d44 | 0x2011_bab0)
+}
+
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "linux"))))]
+fn change_time_records_writes(_: &Path) -> bool {
+    false
+}
+
+/// The filesystem that holds `path`, as `statfs` gives it.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn filesystem_of(path: &Path) -> Option<libc::statfs> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    let mut filesystem = std::mem::MaybeUninit::<libc::statfs>::uninit();
+    // SAFETY: `path` ends in a NUL byte, and `filesystem` has room for the `statfs` the call fills in.
+    if unsafe { libc::statfs(path.as_ptr(), filesystem.as_mut_ptr()) } != 0 {
+        return None;
+    }
+
+    // SAFETY: the call succeeded, so it filled `filesystem` in.
+    Some(unsafe { filesystem.assume_init() })
 }
 
 /// The hash of `configuration`, from its debug form, which holds every field, the ones serde skips included: the
@@ -874,73 +1033,84 @@ fn configuration_hash(configuration: &Configuration) -> [u8; 16] {
 }
 
 /// Each file the loader could read under the configured `paths`, `includes` and `patches` roots, by the name the
-/// database gives it, with its status: a file a root names, whatever its extension, and each file of a configured
+/// database gives it, as [`Found`] holds it: a file a root names, whatever its extension, and each file of a configured
 /// extension under a root folder or under the folder a glob pattern starts with, following links as the loader does.
 /// The excludes are ignored, which only adds files, and the `.sharp` folder at `root` is left out, as the loader leaves
-/// it out.
-fn source_files(configuration: &Configuration, root: &Path) -> BTreeMap<String, Status> {
+/// it out. `filesystems` tells which filesystems record every write.
+fn source_files(configuration: &Configuration, root: &Path, filesystems: &mut Filesystems) -> BTreeMap<String, Found> {
     let source = &configuration.source;
     let whole_workspace = [".".to_owned()];
     let paths = if source.paths.is_empty() { &whole_workspace[..] } else { &source.paths[..] };
     let is_glob = |text: &str| text.contains(['*', '?', '[', '{']);
-    let mut files = BTreeMap::new();
+    let mut walk = Walk { root, extensions: &source.extensions, filesystems, files: BTreeMap::new() };
     for configured in paths.iter().chain(&source.includes).chain(&source.patches) {
         let path = root.join(configured);
         if path.exists() {
             let path = path.canonicalize().unwrap_or(path);
             match std::fs::metadata(&path) {
-                Ok(metadata) if metadata.is_file() => {
-                    files.insert(source_name(root, &path), Status::of(&metadata));
-                }
-                Ok(_) => walk(root, &source.extensions, &path, &mut vec![path.clone()], false, &mut files),
+                Ok(metadata) if metadata.is_file() => walk.found(&path, &path, &metadata),
+                Ok(_) => walk.folder(&path, &mut vec![path.clone()], false),
                 Err(_) => {}
             }
         } else if is_glob(configured) {
             let start: PathBuf =
                 path.components().take_while(|part| !is_glob(&part.as_os_str().to_string_lossy())).collect();
             let start = start.canonicalize().unwrap_or(start);
-            walk(root, &source.extensions, &start, &mut vec![start.clone()], true, &mut files);
+            walk.folder(&start, &mut vec![start.clone()], true);
         }
     }
 
-    files
+    walk.files
 }
 
-/// Adds to `files` each file of one of `extensions` under `folder`, with its status, by its name, or by the name of its
-/// real path when `by_real_path` is set, as the loader names a file a glob pattern matches. `real` holds the real path
-/// of `folder` and of each folder above it in the walk, and a folder whose real path it holds is a link back to one of
-/// them, which the walk skips as the loader does.
-fn walk(
-    root: &Path,
-    extensions: &[String],
-    folder: &Path,
-    real: &mut Vec<PathBuf>,
-    by_real_path: bool,
-    files: &mut BTreeMap<String, Status>,
-) {
-    let Ok(entries) = std::fs::read_dir(folder) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        // A link whose target is gone is no file, as the loader skips it.
-        let Ok(metadata) = std::fs::metadata(&path) else {
-            continue;
+/// The walk of [`source_files`] under `root`, which keeps each file of one of `extensions` it finds in `files`.
+struct Walk<'walk> {
+    root: &'walk Path,
+    extensions: &'walk [String],
+    filesystems: &'walk mut Filesystems,
+    files: BTreeMap<String, Found>,
+}
+
+impl Walk<'_> {
+    /// Walks `folder`, whose real path is the last of `real`, as the real paths of the folders above it in the walk
+    /// come before it. A folder whose real path `real` holds is a link back to one of them, which the walk skips as the
+    /// loader does. Each file is kept by its name, or by the name of its real path when `by_real_path` is set, as the
+    /// loader names a file a glob pattern matches.
+    fn folder(&mut self, folder: &Path, real: &mut Vec<PathBuf>, by_real_path: bool) {
+        let Ok(entries) = std::fs::read_dir(folder) else {
+            return;
         };
-        if metadata.is_dir() {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            // A link whose target is gone is no file, as the loader skips it.
+            let Ok(metadata) = std::fs::metadata(&path) else {
+                continue;
+            };
             let real_path = match entry.file_type() {
                 Ok(kind) if kind.is_symlink() => path.canonicalize().unwrap_or_else(|_| path.clone()),
                 _ => real.last().map_or_else(|| path.clone(), |parent| parent.join(entry.file_name())),
             };
-            if path != root.join(unit::COMPILED_FOLDER) && !real.contains(&real_path) {
-                real.push(real_path);
-                walk(root, extensions, &path, real, by_real_path, files);
-                real.pop();
+            if metadata.is_dir() {
+                if path != self.root.join(unit::COMPILED_FOLDER) && !real.contains(&real_path) {
+                    real.push(real_path);
+                    self.folder(&path, real, by_real_path);
+                    real.pop();
+                }
+            } else if path
+                .extension()
+                .is_some_and(|extension| self.extensions.iter().any(|known| extension == known.as_str()))
+            {
+                let named = if by_real_path { real_path.clone() } else { path };
+                self.found(&named, &real_path, &metadata);
             }
-        } else if path.extension().is_some_and(|extension| extensions.iter().any(|known| extension == known.as_str())) {
-            let named = if by_real_path { path.canonicalize().unwrap_or(path) } else { path };
-            files.insert(source_name(root, &named), Status::of(&metadata));
         }
+    }
+
+    /// Keeps the file the walk reached at `path`, whose real path is `real`.
+    fn found(&mut self, path: &Path, real: &Path, metadata: &std::fs::Metadata) {
+        let name = source_name(self.root, path);
+        let real = Some(source_name(self.root, real)).filter(|real| *real != name);
+        self.files.insert(name, Found(Status::of(path, metadata, self.filesystems), real));
     }
 }
 
@@ -1084,33 +1254,45 @@ fn quoted(table: &mut Vec<u8>, text: &[u8]) {
     table.push(b'\'');
 }
 
-/// The PHP file beside the PHP# source `declared`, spec section 27, in `mago fmt`'s layout. PHP code that lists `*.php`
-/// files and names each class by its path finds the PHP# class through it, and Composer's PSR-4 loads it before the
-/// source. It loads the source through the engine, and on plain PHP it throws before any source can reach the output.
-/// Its last statement states the type's declaration and never runs, so a tool that reads PHP source, as Composer's
-/// class map and Symfony's attribute routing do, finds the type in it, and the engine declares the type once, from the
-/// source. PHP refuses a keyword as a type's name even in a declaration that never runs, so the file of a type named
-/// after one, as `Case`, states none and parses. Once the source is gone it declares nothing, as if it were not there,
-/// until the next compile deletes it.
+/// The PHP file beside the PHP# source `declared`, spec section 27. PHP code that lists `*.php` files and names each
+/// class by its path finds the PHP# class through it, and Composer's PSR-4 loads it before the source. It loads the
+/// source through the engine, and on plain PHP it throws before any source can reach the output. Its last statement
+/// states the type's declaration and never runs, so a tool that reads PHP source, as Composer's class map and
+/// Symfony's attribute routing do, finds the type in it, and the engine declares the type once, from the source. PHP
+/// refuses a keyword as a type's name even in a declaration that never runs, so the file of a type named after one, as
+/// `Case`, states none and parses. Once the source is gone it declares nothing, as if it were not there, until the next
+/// compile deletes it.
+///
+/// A project's formatter passes it as written: `mago fmt`, Pint's `laravel`, `per` and `psr12` presets, and
+/// PHP-CS-Fixer's `@PER-CS2x0`. Pint's `laravel` preset wants each global name a namespace uses imported. PHPCS's
+/// `PSR12` warns of the side effects a generated file has, so the file marks itself `phpcs:ignoreFile`. A type named
+/// `Error` declares the name the file would import, which PHP refuses even in a declaration that never runs, so its
+/// file names `\Error` in full. PHP warns of an import in no namespace, where every global name resolves as written, so
+/// there the file imports none.
 fn beside(declared: &DeclaredType) -> String {
-    let DeclaredType { file, keyword, .. } = declared;
-    let name = file.strip_suffix(".sharp").unwrap_or(file);
-    let (finds, declaration) = match keyword {
-        Some(keyword) => (
-            "lists or reads",
-            format!(
-                "\n// The engine declares {name} from {file}, and this declaration never runs.\nif (false) {{\n    {keyword} {name}\n    {{\n    }}\n}}\n"
-            ),
-        ),
-        None => ("lists", String::new()),
+    let DeclaredType { file, name, keyword } = declared;
+    let stem = file.strip_suffix(".sharp").unwrap_or(file);
+    let (imports, error) = match name.rsplit_once('.') {
+        Some((namespace, _)) => {
+            let namespace = namespace.replace('.', "\\");
+            let functions = "use function function_exists;\nuse function is_file;\nuse function sprintf;\n\n";
+            if stem.eq_ignore_ascii_case("Error") {
+                (format!("namespace {namespace};\n\n{functions}"), "\\Error")
+            } else {
+                (format!("namespace {namespace};\n\nuse Error;\n\n{functions}"), "Error")
+            }
+        }
+        None => (String::new(), "Error"),
     };
-    let namespace = match declared.name.rsplit_once('.') {
-        Some((namespace, _)) => format!("namespace {};\n\n", namespace.replace('.', "\\")),
+    let declaration = match keyword {
+        Some(keyword) => format!(
+            "\nif (false) {{\n    {keyword} {stem}\n    {{\n        // The engine declares {stem} from {file}, and this declaration never runs.\n    }}\n}}\n"
+        ),
         None => String::new(),
     };
 
     format!(
-        "{COMPANION_START}{file}, so PHP code that {finds} *.php files finds its type.\n\ndeclare(strict_types=1);\n\n{namespace}if (!\\is_file(__DIR__ . '/{file}')) {{\n    return;\n}}\n\n\\function_exists('Sharp\\Internal\\requireNative')\n    || throw new \\Error(\n        'This project needs the PHP# engine, and this is plain PHP. Install php-sharp, or run the ghcr.io/heyjordanparker/php-sharp image.',\n    );\n\nrequire_once __DIR__ . '/{file}';\n{declaration}"
+        "{COMPANION_START}{file}, so PHP code that finds *.php files finds its type.\n// phpcs:ignoreFile\n\ndeclare(strict_types=1);\n\n{imports}if (is_file(sprintf('%s/{file}', __DIR__))) {{\n    function_exists('Sharp\\Internal\\requireNative')\n        || throw new {error}(\n            'This project needs the PHP# engine, and this is plain PHP. Install php-sharp, or run the ghcr.io/heyjordanparker/php-sharp image.',\n        );\n\n    require_once sprintf('%s/{file}', __DIR__);\n}}\n{declaration}"
     )
 }
 
@@ -1124,6 +1306,177 @@ fn written_by_compile(path: &Path) -> Result<bool, DatabaseError> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(DatabaseError::io(IOAction::ReadFile, path, error)),
     }
+}
+
+/// The first line of the `.gitignore` [`keep_out_of_git`] writes, which marks the file as the compile's own.
+const GITIGNORE_START: &str =
+    "# mago compile writes this file and the files it lists. It rewrites it on every compile.\n";
+
+/// Keeps `written`, the names of the PHP files the compile wrote in `folder`, out of git through the folder's
+/// `.gitignore`, which lists itself and each of them. Each checkout of a repository has its own `.gitignore`, so git
+/// ignores the files of this checkout alone, where the `info/exclude` every checkout shares hid them in all of them. A
+/// file's name is a type's name and `.php`, which holds no character a pattern reads as a wildcard.
+///
+/// The compile's own file, as [`gitignore_written_by_compile`] tells it, is rewritten when the list changes, and is
+/// deleted once the folder holds no such file. A `.gitignore` the compile didn't write, tracked or not, is left as it
+/// is, and the compile warns of each file it doesn't list, as [`lists`] reads it, since git may show that file as
+/// untracked. So it does of a `.gitignore` that is a link, which git doesn't read, and of one it can't read, which fails
+/// no compile.
+fn keep_out_of_git(root: &Path, folder: &Path, written: &BTreeSet<String>) -> Result<(), DatabaseError> {
+    let path = folder.join(".gitignore");
+    let relative = folder.strip_prefix(root).unwrap_or(folder);
+    let shown = relative.join(".gitignore");
+    let shown = shown.display();
+    // The files git may show for `names`, and the lines that list them, each joined by commas.
+    let named = |names: &[&String]| -> (String, String) {
+        let files: Vec<String> = names.iter().map(|name| relative.join(name).display().to_string()).collect();
+        let lines: Vec<String> = names.iter().map(|name| format!("/{name}")).collect();
+        (files.join(", "), lines.join(", "))
+    };
+    let all: Vec<&String> = written.iter().collect();
+    if std::fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        if !all.is_empty() {
+            let (files, lines) = named(&all);
+            tracing::warn!(
+                "{shown} is a link, which git doesn't read, so git may show {files} as untracked: make it a file that lists {lines}."
+            );
+        }
+        return Ok(());
+    }
+    let before = match std::fs::read(&path) {
+        Ok(contents) => Some(contents),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            if !all.is_empty() {
+                let (files, _) = named(&all);
+                tracing::warn!(
+                    "{shown} can't be read: {}, so git may show {files} as untracked. Make it a file mago compile can read, and run vendor/bin/mago compile again.",
+                    error.kind()
+                );
+            }
+            return Ok(());
+        }
+    };
+    match before {
+        Some(theirs) if !gitignore_written_by_compile(&theirs) => {
+            let unlisted: Vec<&String> = written.iter().filter(|name| !lists(&theirs, name)).collect();
+            if !unlisted.is_empty() {
+                let (files, lines) = named(&unlisted);
+                tracing::warn!(
+                    "{shown} doesn't list {lines}, so git may show {files} as untracked: add {lines} to it."
+                );
+            }
+        }
+        Some(_) if written.is_empty() => {
+            std::fs::remove_file(&path)
+                .or_else(ignore_missing)
+                .map_err(|error| DatabaseError::io(IOAction::DeleteFile, &path, error))?;
+        }
+        None if written.is_empty() => {}
+        before => {
+            let mut after = format!("{GITIGNORE_START}/.gitignore\n");
+            for name in written {
+                after.push_str(&format!("/{name}\n"));
+            }
+            if before.as_deref() != Some(after.as_bytes()) {
+                write_by_rename(&path, after.as_bytes())?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Whether `contents` is a `.gitignore` [`keep_out_of_git`] wrote: [`GITIGNORE_START`], then lines that each name the
+/// file itself or a PHP file, as `/` and its name. Any other line makes the file someone else's, so the compile never
+/// rewrites or deletes a line someone added.
+fn gitignore_written_by_compile(contents: &[u8]) -> bool {
+    contents.strip_prefix(GITIGNORE_START.as_bytes()).is_some_and(|lines| {
+        lines.split_inclusive(|byte| *byte == b'\n').all(|line| {
+            line.strip_suffix(b"\n").and_then(|line| line.strip_prefix(b"/")).is_some_and(|name| {
+                name == b".gitignore"
+                    || name
+                        .strip_suffix(b".php")
+                        .is_some_and(|stem| !stem.is_empty() && stem.iter().all(is_part_of_identifier))
+            })
+        })
+    })
+}
+
+/// Whether git reads the `.gitignore` `contents`, which someone else wrote, as ignoring the PHP file `name` of its
+/// folder: a line names it as `/` and its name, and no `!` line after that names it again, which git reads as showing
+/// it. A byte order mark before the first line, and the spaces and the carriage return that end a line, are no part of
+/// the line.
+fn lists(contents: &[u8], name: &str) -> bool {
+    let contents = contents.strip_prefix(b"\xef\xbb\xbf").unwrap_or(contents);
+    let mut listed = false;
+    for line in contents.split(|byte| *byte == b'\n').map(<[u8]>::trim_ascii_end) {
+        match line.strip_prefix(b"!") {
+            Some(shown) => listed &= shown.strip_prefix(b"/").unwrap_or(shown) != name.as_bytes(),
+            None => listed |= line.strip_prefix(b"/") == Some(name.as_bytes()),
+        }
+    }
+
+    listed
+}
+
+/// Adds to `folders` each folder under the project's own source `paths` that holds a `.gitignore` the compile wrote, so
+/// the compile comes back to a folder whose every source is gone even when none of them was compiled, as a refused one
+/// isn't. `configuration` is the one the analysis walks the project's own files by. A path that holds a wildcard is
+/// walked from its folder before the wildcard, and no path walks the workspace. The walk skips each folder that walk
+/// skips, as [`ExcludedFolders`] tells it: the `excludes`, the `includes` and the `.sharp` folder. It skips `vendor/`
+/// too, and a path inside a skipped folder, where the compile writes no PHP file, each `.git` folder, and every link,
+/// which the compile never writes through. A folder it can't open is skipped, as the analysis's own walk skips it with
+/// a warning.
+fn gitignore_folders(
+    root: &Path,
+    configuration: &DatabaseConfiguration<'_>,
+    folders: &mut BTreeSet<PathBuf>,
+) -> Result<(), DatabaseError> {
+    let excluded = ExcludedFolders::from_configuration(configuration)?;
+    let vendor = root.join("vendor");
+    let skipped = |folder: &Path| folder.starts_with(&vendor) || excluded.contains(folder);
+    let mut pending: Vec<PathBuf> = if configuration.paths.is_empty() {
+        vec![root.to_path_buf()]
+    } else {
+        configuration
+            .paths
+            .iter()
+            .map(|path| {
+                // The folder a configured path names, before any wildcard, with its `.` parts gone.
+                let path = String::from_utf8_lossy(path);
+                let literal = match path.find(['*', '?', '[', '{']) {
+                    Some(wildcard) => &path[..path[..wildcard].rfind('/').unwrap_or(0)],
+                    None => path.as_ref(),
+                };
+                root.join(literal).components().collect::<PathBuf>()
+            })
+            .filter(|folder| !skipped(folder))
+            .collect()
+    };
+    while let Some(folder) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&folder) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            let path = entry.path();
+            if file_type.is_dir() {
+                if entry.file_name() != ".git" && !skipped(&path) {
+                    pending.push(path);
+                }
+            } else if file_type.is_file()
+                && entry.file_name() == ".gitignore"
+                && std::fs::read(&path).is_ok_and(|contents| gitignore_written_by_compile(&contents))
+            {
+                folders.insert(folder.clone());
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// The type a PHP# source declares named like its file, spec section 27.
@@ -1289,6 +1642,7 @@ fn package_compiled_folders_of(name: &str) -> impl Iterator<Item = String> {
 
 #[cfg(test)]
 mod tests {
+    use mago_database::ReadDatabase;
     use mago_php_version::PHPVersion;
 
     use super::*;
@@ -1308,11 +1662,9 @@ mod tests {
         )
     }
 
-    /// Each input the hosts' compile stamps, which the compiled files of `app/Order.sharp` and `app/Paced.sharp` share,
-    /// as `composer.lock`, is stamped once. A `vendor/` file a PHP# file calls is no input of its compiled file, which
-    /// `composer.lock` stands for, so the record of the compile's source files is what sees an edit of it.
-    #[test]
-    fn the_hosts_check_stamps_each_input_once_and_a_vendor_edit_compiles_again() {
+    /// A project with `app/Order.sharp`, and `app/Paced.sharp`, which calls `Acme\Rate` in `vendor/`, and its
+    /// configuration.
+    fn project() -> (tempfile::TempDir, PathBuf, Configuration) {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().canonicalize().unwrap();
         write(&root, "mago.toml", "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n");
@@ -1331,34 +1683,95 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
+
+        (directory, root, configuration)
+    }
+
+    /// A `vendor/` file a PHP# file calls is no input of its compiled file, which `composer.lock` stands for, so the
+    /// record of the hosts' compile's source files is what sees an edit of it.
+    #[test]
+    fn the_hosts_compile_runs_again_after_an_edit_of_a_vendor_file() {
+        let (_directory, root, configuration) = project();
         let folder = tempfile::tempdir().unwrap();
         assert!(compile_into(&configuration, &root, folder.path()).unwrap(), "a fresh folder is written");
-
-        let mut orchestrator = create_orchestrator(&configuration, ColorChoice::Never, false, false, false);
-        analyze_the_whole_workspace_without_paths(&mut orchestrator);
-        let (database, _) = project_database(&orchestrator, &configuration.source.workspace).unwrap();
-        let mut stamped: BTreeMap<String, usize> = BTreeMap::new();
-        let current = every_compiled_file_is_current(
-            &configuration,
-            &root,
-            folder.path(),
-            &source_files(&configuration, &root),
-            &database,
-            |path| {
-                *stamped.entry(String::from_utf8_lossy(path).into_owned()).or_default() += 1;
-                unit::stamp(&root, path)
-            },
-        )
-        .unwrap();
-
-        assert!(current);
-        assert!(stamped.contains_key("composer.lock"), "{stamped:?}");
-        assert!(stamped.values().all(|count| *count == 1), "{stamped:?}");
+        // A compile that runs writes its record anew, though every compiled file it writes is the same.
+        let recorded = || std::fs::metadata(folder.path().join(INPUTS)).unwrap().modified().unwrap();
+        let written = recorded();
+        assert!(!compile_into(&configuration, &root, folder.path()).unwrap(), "nothing changed");
+        assert_eq!(recorded(), written, "the compile had nothing to do");
 
         write(&root, "vendor/acme/rate/src/Rate.php", &rate("string"));
         let paced = std::fs::read(folder.path().join("app/Paced.sharpc")).unwrap();
+
         assert!(compile_into(&configuration, &root, folder.path()).unwrap(), "the vendor edit compiles again");
         assert_ne!(std::fs::read(folder.path().join("app/Paced.sharpc")).unwrap(), paced);
+    }
+
+    /// Writes `bytes` to the file at `path` and sets its modification time back to `modified`, as `touch -d` does.
+    fn rewrite(path: &Path, bytes: &[u8], modified: std::time::SystemTime) {
+        std::fs::write(path, bytes).unwrap();
+        std::fs::File::options().write(true).open(path).unwrap().set_modified(modified).unwrap();
+    }
+
+    /// On a filesystem whose change time records no write, as FAT's and exFAT's, an unchanged status says nothing of a
+    /// file's bytes, so the check hashes each source file and each output: a rewrite of either that keeps its size and
+    /// sets its modification time back makes the record stale.
+    #[cfg(unix)]
+    #[test]
+    fn the_check_hashes_every_file_on_a_filesystem_whose_change_time_records_no_write() {
+        use std::os::unix::fs::MetadataExt;
+
+        let (_directory, root, configuration) = project();
+        let folder = tempfile::tempdir().unwrap();
+        let folder = folder.path();
+        let output = folder.join("app/Order.sharpc");
+        write(folder, "app/Order.sharpc", "compiled");
+        let an_hour_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        for path in [root.join("app/Order.sharp"), output.clone()] {
+            rewrite(&path, &std::fs::read(&path).unwrap(), an_hour_ago);
+        }
+        let mut forced = Filesystems::new();
+        for path in [&root, folder] {
+            forced.insert(std::fs::metadata(path).unwrap().dev(), false);
+        }
+        let sources = source_files(&configuration, &root, &mut forced);
+        let mut record = Record::start(&configuration, &root, &sources, folder, forced.clone()).unwrap();
+        record.output(&output, b"compiled");
+        record.write(&folder.join(INPUTS), String::new(), &ReadDatabase::empty(), []).unwrap();
+        let mut current = || {
+            let sources = source_files(&configuration, &root, &mut forced);
+            every_compiled_file_is_current(&configuration, &root, folder, &sources, &mut forced)
+        };
+        assert!(current(), "each file hashes as it did");
+
+        for path in [root.join("app/Order.sharp"), output] {
+            let bytes = std::fs::read(&path).unwrap();
+            let mut changed = bytes.clone();
+            *changed.last_mut().unwrap() ^= 1;
+
+            rewrite(&path, &changed, an_hour_ago);
+            assert!(!current(), "{} was rewritten", path.display());
+
+            rewrite(&path, &bytes, an_hour_ago);
+            assert!(current(), "{} holds its bytes again", path.display());
+        }
+    }
+
+    /// `statfs` names FAT and exFAT as the filesystems whose change time records no write.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn statfs_tells_the_filesystems_whose_change_time_records_no_write() {
+        #[cfg(target_os = "macos")]
+        let (fat, exfat, others) =
+            (b"msdos".as_slice(), b"exfat".as_slice(), [b"apfs".as_slice(), b"hfs".as_slice(), b"nfs".as_slice()]);
+        #[cfg(target_os = "linux")]
+        let (fat, exfat, others) = (0x4d44, 0x2011_bab0, [0xef53, 0x9123_683e, 0x0102_1994]);
+
+        assert!(!records_writes(fat));
+        assert!(!records_writes(exfat));
+        assert!(others.into_iter().all(records_writes));
+        let directory = tempfile::tempdir().unwrap();
+        assert!(change_time_records_writes(directory.path()), "the temp folder's filesystem records every write");
     }
 
     /// Every field of the configuration enters the record's header, the ones serde skips included, so a change to any

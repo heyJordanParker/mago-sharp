@@ -1,9 +1,11 @@
 //! Runs `mago compile` on a project that mixes PHP# and PHP files, with a PHP# package in `vendor/`.
 
+use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 use std::process::Output;
+use std::process::Stdio;
 
 use mago_sharp_bridge::unit::Library;
 use mago_sharp_bridge::unit::header;
@@ -26,17 +28,13 @@ const MONEY_PATH: &str = "vendor/acme/money/src/Money.sharp";
 /// A project with `app/Order.sharp`, `app/Legacy.php` and the package file `vendor/acme/money/src/Money.sharp`.
 fn project(order: &str, money: &str) -> tempfile::TempDir {
     let directory = tempfile::tempdir().unwrap();
-    project_in(directory.path(), order, money);
-    directory
-}
-
-/// Writes the files of `project` into `root`.
-fn project_in(root: &Path, order: &str, money: &str) {
+    let root = directory.path();
     write(root, "mago.toml", "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\n");
     write(root, "composer.lock", "{}\n");
     write(root, "app/Order.sharp", order);
     write(root, "app/Legacy.php", LEGACY);
     write(root, MONEY_PATH, money);
+    directory
 }
 
 fn write(root: &Path, name: &str, contents: &str) {
@@ -95,12 +93,6 @@ fn files_under(folder: &Path) -> Vec<PathBuf> {
 
 fn compiled(root: &Path, name: &str) -> PathBuf {
     root.join(".sharp").join(name).with_extension("sharpc")
-}
-
-/// Whether the compiled file of `name` is stale, as the engine checks it.
-fn stale(root: &Path, name: &str) -> bool {
-    let root = std::fs::canonicalize(root).unwrap();
-    is_stale(&std::fs::read(compiled(&root, name)).unwrap(), |path| stamp(&root, path)).unwrap()
 }
 
 #[test]
@@ -1194,7 +1186,37 @@ fn compile_replaces_a_compiled_file_by_rename_so_no_reader_sees_a_partial_file()
 }
 
 /// The PHP file `mago compile` writes beside `app/Order.sharp`, spec section 27.
-const ORDER_PHP: &str = "<?php\n\n// mago compile writes this file from Order.sharp, so PHP code that lists or reads *.php files finds its type.\n\ndeclare(strict_types=1);\n\nnamespace App;\n\nif (!\\is_file(__DIR__ . '/Order.sharp')) {\n    return;\n}\n\n\\function_exists('Sharp\\Internal\\requireNative')\n    || throw new \\Error(\n        'This project needs the PHP# engine, and this is plain PHP. Install php-sharp, or run the ghcr.io/heyjordanparker/php-sharp image.',\n    );\n\nrequire_once __DIR__ . '/Order.sharp';\n\n// The engine declares Order from Order.sharp, and this declaration never runs.\nif (false) {\n    class Order\n    {\n    }\n}\n";
+const ORDER_PHP: &str = r#"<?php
+
+// mago compile writes this file from Order.sharp, so PHP code that finds *.php files finds its type.
+// phpcs:ignoreFile
+
+declare(strict_types=1);
+
+namespace App;
+
+use Error;
+
+use function function_exists;
+use function is_file;
+use function sprintf;
+
+if (is_file(sprintf('%s/Order.sharp', __DIR__))) {
+    function_exists('Sharp\Internal\requireNative')
+        || throw new Error(
+            'This project needs the PHP# engine, and this is plain PHP. Install php-sharp, or run the ghcr.io/heyjordanparker/php-sharp image.',
+        );
+
+    require_once sprintf('%s/Order.sharp', __DIR__);
+}
+
+if (false) {
+    class Order
+    {
+        // The engine declares Order from Order.sharp, and this declaration never runs.
+    }
+}
+"#;
 
 /// Spec section 27: each of the project's PHP# sources that declares a type gets a PHP file of the type's name beside
 /// it, so PHP code that finds classes by listing `*.php` files finds it. A module's file declares none, and a package
@@ -1215,10 +1237,186 @@ fn compile_writes_a_php_file_beside_each_project_source_that_declares_a_type() {
     assert_eq!(std::fs::read_to_string(root.join("app/Order.php")).unwrap(), ORDER_PHP);
     assert_eq!(
         files_under(&root.join("app")),
-        [Path::new("Legacy.php"), Path::new("Order.php"), Path::new("Order.sharp"), Path::new("Shop/Module.sharp")]
+        [
+            Path::new(".gitignore"),
+            Path::new("Legacy.php"),
+            Path::new("Order.php"),
+            Path::new("Order.sharp"),
+            Path::new("Shop/Module.sharp")
+        ]
     );
     assert_eq!(files_under(&root.join("vendor")), vendor, "nothing is written under vendor/");
 }
+
+/// The PHP file states the type's kind, an interface's and an enum's included, and a type named after a PHP keyword
+/// gets none, which PHP would refuse. A type named `Error` declares the name the file would import, so its file names
+/// `\Error` in full instead, and a type in no namespace imports nothing, which PHP would warn of.
+#[test]
+fn compile_writes_the_php_file_of_each_kind_of_type() {
+    let directory = project(ORDER, MONEY);
+    let root = directory.path();
+    let types = [
+        ("Payable", "public interface Payable\n{\n}\n", PAYABLE_PHP),
+        ("Status", "public enum Status\n{\n    case Open;\n    case Paid;\n}\n", STATUS_PHP),
+        ("Match", "public class Match\n{\n}\n", MATCH_PHP),
+        ("Error", "public class Error\n{\n}\n", ERROR_PHP),
+    ];
+    for (name, declaration, _) in types {
+        write(root, &format!("app/Billing/{name}.sharp"), &format!("namespace App.Billing;\n\n{declaration}"));
+    }
+    write(root, "app/Rootless.sharp", "public class Rootless\n{\n}\n");
+
+    compile_succeeds(root);
+
+    assert_eq!(std::fs::read_to_string(root.join("app/Order.php")).unwrap(), ORDER_PHP);
+    for (name, _, php) in types {
+        assert_eq!(std::fs::read_to_string(root.join(format!("app/Billing/{name}.php"))).unwrap(), php, "{name}");
+    }
+    assert_eq!(std::fs::read_to_string(root.join("app/Rootless.php")).unwrap(), ROOTLESS_PHP);
+}
+
+const PAYABLE_PHP: &str = r#"<?php
+
+// mago compile writes this file from Payable.sharp, so PHP code that finds *.php files finds its type.
+// phpcs:ignoreFile
+
+declare(strict_types=1);
+
+namespace App\Billing;
+
+use Error;
+
+use function function_exists;
+use function is_file;
+use function sprintf;
+
+if (is_file(sprintf('%s/Payable.sharp', __DIR__))) {
+    function_exists('Sharp\Internal\requireNative')
+        || throw new Error(
+            'This project needs the PHP# engine, and this is plain PHP. Install php-sharp, or run the ghcr.io/heyjordanparker/php-sharp image.',
+        );
+
+    require_once sprintf('%s/Payable.sharp', __DIR__);
+}
+
+if (false) {
+    interface Payable
+    {
+        // The engine declares Payable from Payable.sharp, and this declaration never runs.
+    }
+}
+"#;
+
+const STATUS_PHP: &str = r#"<?php
+
+// mago compile writes this file from Status.sharp, so PHP code that finds *.php files finds its type.
+// phpcs:ignoreFile
+
+declare(strict_types=1);
+
+namespace App\Billing;
+
+use Error;
+
+use function function_exists;
+use function is_file;
+use function sprintf;
+
+if (is_file(sprintf('%s/Status.sharp', __DIR__))) {
+    function_exists('Sharp\Internal\requireNative')
+        || throw new Error(
+            'This project needs the PHP# engine, and this is plain PHP. Install php-sharp, or run the ghcr.io/heyjordanparker/php-sharp image.',
+        );
+
+    require_once sprintf('%s/Status.sharp', __DIR__);
+}
+
+if (false) {
+    enum Status
+    {
+        // The engine declares Status from Status.sharp, and this declaration never runs.
+    }
+}
+"#;
+
+const MATCH_PHP: &str = r#"<?php
+
+// mago compile writes this file from Match.sharp, so PHP code that finds *.php files finds its type.
+// phpcs:ignoreFile
+
+declare(strict_types=1);
+
+namespace App\Billing;
+
+use Error;
+
+use function function_exists;
+use function is_file;
+use function sprintf;
+
+if (is_file(sprintf('%s/Match.sharp', __DIR__))) {
+    function_exists('Sharp\Internal\requireNative')
+        || throw new Error(
+            'This project needs the PHP# engine, and this is plain PHP. Install php-sharp, or run the ghcr.io/heyjordanparker/php-sharp image.',
+        );
+
+    require_once sprintf('%s/Match.sharp', __DIR__);
+}
+"#;
+
+const ERROR_PHP: &str = r#"<?php
+
+// mago compile writes this file from Error.sharp, so PHP code that finds *.php files finds its type.
+// phpcs:ignoreFile
+
+declare(strict_types=1);
+
+namespace App\Billing;
+
+use function function_exists;
+use function is_file;
+use function sprintf;
+
+if (is_file(sprintf('%s/Error.sharp', __DIR__))) {
+    function_exists('Sharp\Internal\requireNative')
+        || throw new \Error(
+            'This project needs the PHP# engine, and this is plain PHP. Install php-sharp, or run the ghcr.io/heyjordanparker/php-sharp image.',
+        );
+
+    require_once sprintf('%s/Error.sharp', __DIR__);
+}
+
+if (false) {
+    class Error
+    {
+        // The engine declares Error from Error.sharp, and this declaration never runs.
+    }
+}
+"#;
+
+const ROOTLESS_PHP: &str = r#"<?php
+
+// mago compile writes this file from Rootless.sharp, so PHP code that finds *.php files finds its type.
+// phpcs:ignoreFile
+
+declare(strict_types=1);
+
+if (is_file(sprintf('%s/Rootless.sharp', __DIR__))) {
+    function_exists('Sharp\Internal\requireNative')
+        || throw new Error(
+            'This project needs the PHP# engine, and this is plain PHP. Install php-sharp, or run the ghcr.io/heyjordanparker/php-sharp image.',
+        );
+
+    require_once sprintf('%s/Rootless.sharp', __DIR__);
+}
+
+if (false) {
+    class Rootless
+    {
+        // The engine declares Rootless from Rootless.sharp, and this declaration never runs.
+    }
+}
+"#;
 
 /// A source in an `autoload-dev` folder gets no PHP file, so a test class keeps one file: PHPUnit loads a test class
 /// only from the file it lists, and a project lists its PHP# tests with `suffix="Test.sharp"`.
@@ -1315,7 +1513,7 @@ fn compile_deletes_the_php_file_of_a_renamed_or_removed_source() {
     compile_succeeds(root);
     assert_eq!(
         files_under(&root.join("app")),
-        [Path::new("Invoice.php"), Path::new("Invoice.sharp"), Path::new("Legacy.php")]
+        [Path::new(".gitignore"), Path::new("Invoice.php"), Path::new("Invoice.sharp"), Path::new("Legacy.php")]
     );
 
     std::fs::remove_file(root.join("app/Invoice.sharp")).unwrap();
@@ -1432,7 +1630,7 @@ fn compile_names_the_php_file_exactly_like_its_source() {
 
     assert_eq!(
         files_under(&root.join("app")),
-        [Path::new("Legacy.php"), Path::new("Order.php"), Path::new("Order.sharp")]
+        [Path::new(".gitignore"), Path::new("Legacy.php"), Path::new("Order.php"), Path::new("Order.sharp")]
     );
     assert_eq!(std::fs::read_to_string(root.join("app/Order.php")).unwrap(), ORDER_PHP);
 }
@@ -1458,7 +1656,8 @@ fn every_compiled_file_is_current_after_the_php_files_are_written() {
 
     assert!(root.join("app/Environment.php").exists() && root.join("app/Report.php").exists());
     for name in ["app/Environment.sharp", "app/Order.sharp", "app/Report.sharp", MONEY_PATH] {
-        assert!(!stale(root, name), "{name}");
+        let bytes = std::fs::read(compiled(root, name)).unwrap();
+        assert!(!is_stale(&std::fs::canonicalize(root).unwrap(), &bytes).unwrap(), "{name}");
     }
 }
 
@@ -1486,15 +1685,18 @@ fn a_compiled_file_goes_stale_only_when_a_file_it_reads_changes() {
         "app/Paced.sharp",
         "namespace App;\n\nimport Lib.Pace;\n\npublic class Paced\n{\n    public int percent()\n    {\n        return Pace.percent();\n    }\n}\n",
     );
+    let root = std::fs::canonicalize(root).unwrap();
+    let stale = |name: &str| is_stale(&root, &std::fs::read(compiled(&root, name)).unwrap()).unwrap();
+
     for alias_file in ["public/wp/aliases.php", "public/wp/rapid.php"] {
-        compile_succeeds(root);
-        assert!(!stale(root, "app/Order.sharp") && !stale(root, "app/Paced.sharp"));
+        compile_succeeds(&root);
+        assert!(!stale("app/Order.sharp") && !stale("app/Paced.sharp"));
 
         let aliases = std::fs::read_to_string(root.join(alias_file)).unwrap();
-        write(root, alias_file, &format!("{aliases}\n// An edit.\n"));
+        write(&root, alias_file, &format!("{aliases}\n// An edit.\n"));
 
-        assert!(stale(root, "app/Paced.sharp"), "app/Paced.sharp reads the alias {alias_file} declares");
-        assert!(!stale(root, "app/Order.sharp"), "app/Order.sharp reads nothing of {alias_file}");
+        assert!(stale("app/Paced.sharp"), "app/Paced.sharp reads the alias {alias_file} declares");
+        assert!(!stale("app/Order.sharp"), "app/Order.sharp reads nothing of {alias_file}");
     }
 }
 
@@ -1596,11 +1798,12 @@ fn compile_writes_each_compiled_file_again_once_a_module_file_appears_at_the_roo
     let directory = project(ORDER, MONEY);
     let root = directory.path();
     compile_succeeds(root);
+    let written = compiled_at(root, "app/Order.sharp");
 
     write(root, "Module.sharp", "module\n{\n}\n");
     compile_succeeds(root);
 
-    assert!(!stale(root, "app/Order.sharp"));
+    assert_ne!(compiled_at(root, "app/Order.sharp"), written, "the compile ran");
 }
 
 /// The loader reads which folder `autoload-dev` maps from `composer.json`, so moving a folder there drops the PHP file
@@ -1718,6 +1921,124 @@ fn compile_refuses_a_file_again_after_a_refused_compile() {
     assert!(printed(&second).contains("1 PHP# file was refused"), "{}", printed(&second));
 }
 
+/// A file someone writes over one the compile wrote, while the compile still runs, makes the compile keep no record,
+/// as a compile that ran at once does, so the next compile sees the file. `composer.lock` is a named pipe here, which
+/// holds the compile at its read of it, after it wrote `app/Order.php`, until the test wrote its own `app/Order.php`.
+#[cfg(unix)]
+#[test]
+fn compile_refuses_a_php_file_someone_wrote_over_its_own_while_it_ran() {
+    let directory = project(ORDER, MONEY);
+    let root = directory.path();
+    let lock = root.join("composer.lock");
+    std::fs::remove_file(&lock).unwrap();
+    assert!(Command::new("mkfifo").arg(&lock).status().unwrap().success());
+    let running = command(root, "never").stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+
+    // The pipe opens once the compile opens it to read it.
+    let mut pipe = std::fs::OpenOptions::new().write(true).open(&lock).unwrap();
+    assert!(written_by_compile(&root.join("app/Order.php")));
+    write(root, "app/Order.php", "<?php\n\nnamespace App;\n\nfinal class Order {}\n");
+    pipe.write_all(b"{}\n").unwrap();
+    drop(pipe);
+    let swapped = running.wait_with_output().unwrap();
+    assert!(swapped.status.success(), "{}", printed(&swapped));
+    assert!(!root.join(".sharp/inputs.json").exists(), "the compile kept no record");
+    std::fs::remove_file(&lock).unwrap();
+    write(root, "composer.lock", "{}\n");
+
+    let output = compile(root);
+
+    assert_eq!(output.status.code(), Some(1), "{}", printed(&output));
+    assert!(
+        printed(&output).contains("app/Order.php and app/Order.sharp both name App.Order."),
+        "{}",
+        printed(&output)
+    );
+}
+
+/// Whether the PHP file at `path` is one the compile wrote, which loads its `.sharp` file through the engine.
+fn written_by_compile(path: &Path) -> bool {
+    std::fs::read_to_string(path).is_ok_and(|contents| contents.contains("needs the PHP# engine"))
+}
+
+/// The `.gitignore` the compile writes beside its PHP files is one of its outputs, so a compile writes it again once
+/// it is gone.
+#[test]
+fn compile_writes_its_gitignore_again_once_it_is_gone() {
+    let directory = project(ORDER, MONEY);
+    let root = directory.path();
+    compile_succeeds(root);
+    let gitignore = std::fs::read_to_string(root.join("app/.gitignore")).unwrap();
+
+    std::fs::remove_file(root.join("app/.gitignore")).unwrap();
+    compile_succeeds(root);
+
+    assert_eq!(std::fs::read_to_string(root.join("app/.gitignore")).unwrap(), gitignore);
+}
+
+/// A `.gitignore` someone else wrote beside the compile's PHP files is an input of the compile, so one that stops
+/// listing a PHP file makes the compile run and warn of it.
+#[test]
+fn compile_warns_once_a_gitignore_someone_else_wrote_stops_listing_its_php_file() {
+    let directory = project(ORDER, MONEY);
+    let root = directory.path();
+    write(root, "app/.gitignore", "/Order.php\n");
+    let listed = compile(root);
+    assert!(listed.status.success() && !printed(&listed).contains("doesn't list"), "{}", printed(&listed));
+
+    write(root, "app/.gitignore", "/Other.php\n");
+    let output = compile(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(printed(&output).contains("app/.gitignore doesn't list /Order.php"), "{}", printed(&output));
+}
+
+/// The walk follows a link as the loader does, and the compile writes the compiled file at the source's real path, so
+/// a link someone points at an identical copy elsewhere, as `ln -sfn` does, makes the compile run, though no file's
+/// bytes changed. A module file declares no type, so no PHP file the compile wrote sits behind the link.
+#[cfg(unix)]
+#[test]
+fn compile_writes_the_compiled_file_at_the_new_target_of_a_link_to_an_identical_copy() {
+    let directory = project(ORDER, MONEY);
+    let root = std::fs::canonicalize(directory.path()).unwrap();
+    write(&root, "shared/one/Module.sharp", "module\n{\n}\n");
+    write(&root, "shared/two/Module.sharp", "module\n{\n}\n");
+    let link = |target: &str| {
+        let linked = Command::new("ln").args(["-sfn", target, "app/Shared"]).current_dir(&root).status().unwrap();
+        assert!(linked.success());
+    };
+    link("../shared/one");
+    compile_succeeds(&root);
+    assert!(compiled(&root, "shared/one/Module.sharp").exists());
+
+    link("../shared/two");
+    compile_succeeds(&root);
+
+    assert!(compiled(&root, "shared/two/Module.sharp").exists());
+    assert!(!compiled(&root, "shared/one/Module.sharp").exists());
+}
+
+/// A compile that warns keeps no record, so the next compile prints the warning again, until the cause is gone. Here a
+/// link back to its own folder, which the loader warns of and skips.
+#[cfg(unix)]
+#[test]
+fn compile_warns_again_until_the_cause_of_its_warning_is_gone() {
+    let directory = project(ORDER, MONEY);
+    let root = directory.path();
+    std::os::unix::fs::symlink(".", root.join("app/Loop")).unwrap();
+    let first = compile(root);
+    assert!(first.status.success(), "{}", printed(&first));
+    assert!(printed(&first).contains("Skipping symlink loop at"), "{}", printed(&first));
+
+    let second = compile(root);
+
+    assert!(second.status.success(), "{}", printed(&second));
+    assert_eq!(logged(&second), logged(&first));
+    std::fs::remove_file(root.join("app/Loop")).unwrap();
+    compile_succeeds(root);
+    assert!(root.join(".sharp/inputs.json").exists(), "a compile with no warning keeps its record");
+}
+
 /// Runs git in `folder`, and fails the test when git fails.
 fn git(folder: &Path, arguments: &[&str]) -> String {
     let output = Command::new("git")
@@ -1736,62 +2057,274 @@ fn untracked(folder: &Path) -> String {
     git(folder, &["status", "--porcelain", "--untracked-files=all"])
 }
 
-/// In a git repository, the PHP files are kept out of git through the block `mago compile` owns in
-/// `git rev-parse --git-path info/exclude`, the shared file of a worktree included, and every other line stays.
+/// The `.gitignore` `mago compile` writes in a folder where the PHP files it wrote are `files`, one `/<name>` line each.
+fn gitignore(files: &str) -> String {
+    format!(
+        "# mago compile writes this file and the files it lists. It rewrites it on every compile.\n/.gitignore\n{files}"
+    )
+}
+
+/// Each checkout of a repository has its own working tree, so the `.gitignore` a compile writes there hides the PHP
+/// files of that checkout alone. A PHP file someone wrote at the same path in a linked worktree stays where git shows
+/// it, so a branch switch there can't overwrite it unseen, as it could while the compile listed its files in the
+/// `info/exclude` every checkout shares.
 #[test]
-fn compile_keeps_the_php_files_out_of_git_in_a_clone_and_in_a_worktree() {
+fn compile_hides_its_php_files_from_git_in_its_own_checkout_alone() {
     let directory = project(ORDER, MONEY);
     let clone = std::fs::canonicalize(directory.path()).unwrap();
     git(&clone, &["init", "--quiet"]);
-    write(&clone, ".git/info/exclude", "# git ls-files --others --exclude-from=.git/info/exclude\n*.log\n");
     git(&clone, &["add", "--all"]);
     git(&clone, &["commit", "--quiet", "--message", "project"]);
-
-    compile_succeeds(&clone);
-    assert!(clone.join("app/Order.php").exists());
-    assert_eq!(
-        untracked(&clone),
-        "?? .sharp/app/Order.sharpc\n?? .sharp/inputs.json\n?? .sharp/listeners.php\n?? .sharp/vendor/acme/money/src/Money.sharpc\n"
-    );
-    let kept = "# git ls-files --others --exclude-from=.git/info/exclude\n*.log\n";
-    assert_eq!(
-        std::fs::read_to_string(clone.join(".git/info/exclude")).unwrap(),
-        format!("{kept}{}", excluded(&clone, "/app/Order.php\n"))
-    );
-
     let worktrees = tempfile::tempdir().unwrap();
     let worktree = std::fs::canonicalize(worktrees.path()).unwrap().join("feature");
     git(&clone, &["worktree", "add", "--quiet", worktree.to_str().unwrap()]);
-    write(&worktree, "app/Invoice.sharp", &ORDER.replace("class Order", "class Invoice"));
-    compile_succeeds(&worktree);
-    assert!(worktree.join("app/Invoice.php").exists());
-    assert_eq!(
-        untracked(&worktree),
-        "?? .sharp/app/Invoice.sharpc\n?? .sharp/app/Order.sharpc\n?? .sharp/inputs.json\n?? .sharp/listeners.php\n?? .sharp/vendor/acme/money/src/Money.sharpc\n?? app/Invoice.sharp\n"
-    );
+    write(&worktree, "app/Tenant/Publishable.php", "<?php\n\nnamespace App\\Tenant;\n\ninterface Publishable {}\n");
+    write(&clone, "app/Tenant/Publishable.sharp", "namespace App.Tenant;\n\npublic interface Publishable\n{\n}\n");
 
-    assert_eq!(
-        std::fs::read_to_string(clone.join(".git/info/exclude")).unwrap(),
-        format!(
-            "{kept}{}{}",
-            excluded(&clone, "/app/Order.php\n"),
-            excluded(&worktree, "/app/Invoice.php\n/app/Order.php\n")
-        ),
-        "each checkout keeps its own block in the file they share"
-    );
-
-    std::fs::remove_file(clone.join("app/Order.sharp")).unwrap();
     compile_succeeds(&clone);
-    assert!(!clone.join("app/Order.php").exists(), "a PHP file git ignores is still deleted with its source");
-    assert_eq!(
-        std::fs::read_to_string(clone.join(".git/info/exclude")).unwrap(),
-        format!("{kept}{}", excluded(&worktree, "/app/Invoice.php\n/app/Order.php\n")),
-        "a checkout with no PHP file left has no block"
+
+    assert!(clone.join("app/Tenant/Publishable.php").exists());
+    assert_eq!(untracked(&worktree), "?? app/Tenant/Publishable.php\n");
+}
+
+/// The compile writes a `.gitignore` in each folder that holds a PHP file it wrote, listing itself and each such file,
+/// so git shows neither, and still shows a new `.sharp` source as untracked.
+#[test]
+fn compile_writes_a_gitignore_that_lists_itself_and_each_php_file_it_wrote() {
+    let directory = project(ORDER, MONEY);
+    let clone = std::fs::canonicalize(directory.path()).unwrap();
+    write(&clone, ".gitignore", "/.sharp/\n");
+    git(&clone, &["init", "--quiet"]);
+    git(&clone, &["add", "--all"]);
+    git(&clone, &["commit", "--quiet", "--message", "project"]);
+    write(&clone, "app/Refund.sharp", "namespace App;\n\npublic class Refund\n{\n}\n");
+
+    compile_succeeds(&clone);
+
+    assert_eq!(std::fs::read_to_string(clone.join("app/.gitignore")).unwrap(), gitignore("/Order.php\n/Refund.php\n"));
+    assert_eq!(untracked(&clone), "?? app/Refund.sharp\n");
+}
+
+/// A `.gitignore` the compile didn't write, here a tracked one, stays as it is. The compile warns of each PHP file it
+/// doesn't list, which git shows as untracked, and is quiet once the file lists it.
+#[test]
+fn compile_leaves_a_gitignore_it_did_not_write_and_names_each_php_file_it_does_not_list() {
+    let directory = project(ORDER, MONEY);
+    let clone = std::fs::canonicalize(directory.path()).unwrap();
+    write(&clone, ".gitignore", "/.sharp/\n");
+    write(&clone, "app/.gitignore", "*.log\n");
+    git(&clone, &["init", "--quiet"]);
+    git(&clone, &["add", "--all"]);
+    git(&clone, &["commit", "--quiet", "--message", "project"]);
+
+    let output = compile(&clone);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(printed(&output).contains(UNLISTED_ORDER), "{}", printed(&output));
+    assert_eq!(std::fs::read_to_string(clone.join("app/.gitignore")).unwrap(), "*.log\n");
+    assert_eq!(untracked(&clone), "?? app/Order.php\n");
+
+    write(&clone, "app/.gitignore", "*.log\n/Order.php\n");
+    let output = compile(&clone);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(!printed(&output).contains("doesn't list"), "{}", printed(&output));
+    assert_eq!(std::fs::read_to_string(clone.join("app/.gitignore")).unwrap(), "*.log\n/Order.php\n");
+}
+
+/// The warning of a `.gitignore` the compile didn't write and that doesn't list `app/Order.php`.
+const UNLISTED_ORDER: &str =
+    "app/.gitignore doesn't list /Order.php, so git may show app/Order.php as untracked: add /Order.php to it.";
+
+/// A `.gitignore` the compile didn't write lists a PHP file when a line names it as `/` and its name and no `!` line
+/// after that names it again, which git reads as showing the file. A byte order mark before the first line is no part
+/// of that line.
+#[test]
+fn compile_reads_a_gitignore_it_did_not_write_as_git_reads_it() {
+    let directory = project(ORDER, MONEY);
+    let root = directory.path();
+
+    for (contents, listed) in [
+        ("/Order.php\n!/Order.php\n", false),
+        ("/Order.php\n!Order.php\n", false),
+        ("!/Order.php\n/Order.php\n", true),
+        ("\u{feff}/Order.php\n", true),
+        ("/Order.php\r\n", true),
+    ] {
+        write(root, "app/.gitignore", contents);
+
+        let output = compile(root);
+
+        assert!(output.status.success(), "{contents:?}: {}", printed(&output));
+        assert_eq!(printed(&output).contains(UNLISTED_ORDER), !listed, "{contents:?}: {}", printed(&output));
+        assert_eq!(std::fs::read_to_string(root.join("app/.gitignore")).unwrap(), contents);
+    }
+}
+
+/// A `.gitignore` that starts with the compile's first line but holds a line the compile never writes is someone
+/// else's: the compile writes nothing to it, never deletes it, and warns of each PHP file it doesn't list.
+#[test]
+fn compile_leaves_its_gitignore_once_someone_adds_a_line() {
+    let directory = project(ORDER, MONEY);
+    let root = directory.path();
+    compile_succeeds(root);
+    let edited = gitignore("*.log\n");
+    write(root, "app/.gitignore", &edited);
+
+    let output = compile(root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(printed(&output).contains(UNLISTED_ORDER), "{}", printed(&output));
+    assert_eq!(std::fs::read_to_string(root.join("app/.gitignore")).unwrap(), edited);
+
+    std::fs::remove_file(root.join("app/Order.sharp")).unwrap();
+    compile_succeeds(root);
+
+    assert_eq!(std::fs::read_to_string(root.join("app/.gitignore")).unwrap(), edited, "it deletes no file of another");
+}
+
+/// Git reads no `.gitignore` that is a link, so the compile counts one as listing nothing: it warns of each PHP file,
+/// and writes nothing through the link.
+#[cfg(unix)]
+#[test]
+fn compile_warns_of_a_gitignore_that_is_a_link() {
+    let directory = project(ORDER, MONEY);
+    let root = std::fs::canonicalize(directory.path()).unwrap();
+    write(&root, ".gitignore", "/.sharp/\n/ignores\n");
+    write(&root, "ignores", "/Order.php\n");
+    std::os::unix::fs::symlink(root.join("ignores"), root.join("app/.gitignore")).unwrap();
+    git(&root, &["init", "--quiet"]);
+
+    let output = compile(&root);
+
+    assert!(output.status.success(), "{}", printed(&output));
+    assert!(
+        printed(&output).contains(
+            "app/.gitignore is a link, which git doesn't read, so git may show app/Order.php as untracked: make it a file that lists /Order.php."
+        ),
+        "{}",
+        printed(&output)
     );
+    assert!(std::fs::symlink_metadata(root.join("app/.gitignore")).unwrap().file_type().is_symlink());
+    assert_eq!(std::fs::read_to_string(root.join("ignores")).unwrap(), "/Order.php\n");
+    assert!(untracked(&root).contains("?? app/Order.php\n"), "{}", untracked(&root));
+}
+
+/// A `.gitignore` the compile can't read, as a folder of that name or a file of mode 000, fails no compile: the compile
+/// leaves it as it is, and warns which PHP files git may show. Root reads a file of mode 000, so the test has nothing to
+/// show there.
+#[cfg(unix)]
+#[test]
+fn compile_warns_of_a_gitignore_it_cannot_read() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let folder = project(ORDER, MONEY);
+    std::fs::create_dir(folder.path().join("app/.gitignore")).unwrap();
+    let closed = project(ORDER, MONEY);
+    write(closed.path(), "app/.gitignore", "/Order.php\n");
+    let file = closed.path().join("app/.gitignore");
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let mut cases = vec![(folder.path(), "is a directory")];
+    if std::fs::read(&file).is_err() {
+        cases.push((closed.path(), "permission denied"));
+    }
+
+    for (root, reason) in cases {
+        let output = compile(root);
+
+        assert!(output.status.success(), "{}", printed(&output));
+        assert!(
+            printed(&output).contains(&format!(
+                "app/.gitignore can't be read: {reason}, so git may show app/Order.php as untracked. Make it a file mago compile can read, and run vendor/bin/mago compile again."
+            )),
+            "{}",
+            printed(&output)
+        );
+    }
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(folder.path().join("app/.gitignore").is_dir());
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "/Order.php\n");
+}
+
+/// A refused source gets its PHP file and its line in the folder's `.gitignore`, and no compiled file. Once it is
+/// deleted, only that `.gitignore` brings the compile back to a folder that holds no other source. The compile deletes
+/// the PHP file it wrote there, keeps one someone wrote in another's place, and deletes its `.gitignore`, so git shows
+/// that file.
+#[test]
+fn compile_visits_a_folder_its_gitignore_alone_names() {
+    let directory = project(ORDER, MONEY);
+    let clone = std::fs::canonicalize(directory.path()).unwrap();
+    write(&clone, ".gitignore", "/.sharp/\n");
+    git(&clone, &["init", "--quiet"]);
+    git(&clone, &["add", "--all"]);
+    git(&clone, &["commit", "--quiet", "--message", "project"]);
+    let refused = |name: &str| {
+        format!("namespace App.Billing;\n\npublic class {name}\n{{\n    public int owed() => \"one\";\n}}\n")
+    };
+    write(&clone, "app/Billing/Refund.sharp", &refused("Refund"));
+    write(&clone, "app/Billing/Credit.sharp", &refused("Credit"));
+
+    let output = compile(&clone);
+
+    assert!(!output.status.success(), "{}", printed(&output));
+    assert_eq!(
+        std::fs::read_to_string(clone.join("app/Billing/.gitignore")).unwrap(),
+        gitignore("/Credit.php\n/Refund.php\n")
+    );
+    assert!(!compiled(&clone, "app/Billing/Refund.sharp").exists());
+
+    std::fs::remove_file(clone.join("app/Billing/Refund.sharp")).unwrap();
+    std::fs::remove_file(clone.join("app/Billing/Credit.sharp")).unwrap();
+    let written = "<?php\n\nnamespace App\\Billing;\n\nfinal class Refund {}\n";
+    write(&clone, "app/Billing/Refund.php", written);
+    compile_succeeds(&clone);
+
+    assert_eq!(files_under(&clone.join("app/Billing")), [Path::new("Refund.php")]);
+    assert_eq!(std::fs::read_to_string(clone.join("app/Billing/Refund.php")).unwrap(), written);
+    assert_eq!(untracked(&clone), "?? app/Billing/Refund.php\n");
+}
+
+/// The compile deletes its `.gitignore` once the folder holds no PHP file it wrote.
+#[test]
+fn compile_deletes_its_gitignore_once_the_folder_holds_no_php_file_it_wrote() {
+    let directory = project(ORDER, MONEY);
+    let root = std::fs::canonicalize(directory.path()).unwrap();
+    compile_succeeds(&root);
+    assert_eq!(std::fs::read_to_string(root.join("app/.gitignore")).unwrap(), gitignore("/Order.php\n"));
+
+    std::fs::remove_file(root.join("app/Order.sharp")).unwrap();
+    compile_succeeds(&root);
+
+    assert_eq!(files_under(&root.join("app")), [Path::new("Legacy.php")]);
+}
+
+/// The compile's walk for its `.gitignore` files skips each folder the analysis's walk skips, so a folder the
+/// `excludes` name, by a path or by a pattern, is never visited: its `.gitignore` and the PHP file it lists stay as they
+/// are.
+#[test]
+fn compile_never_visits_a_folder_the_excludes_name() {
+    let directory = project(ORDER, MONEY);
+    let root = directory.path();
+    write(
+        root,
+        "mago.toml",
+        "php-version = \"8.4\"\n\n[source]\npaths = [\"app\"]\nincludes = [\"vendor\"]\nexcludes = [\"app/Cache\", \"app/Logs/**\"]\n",
+    );
+    for folder in ["app/Cache", "app/Logs"] {
+        write(root, &format!("{folder}/.gitignore"), &gitignore("/Order.php\n"));
+        write(root, &format!("{folder}/Order.php"), ORDER_PHP);
+    }
+
+    compile_succeeds(root);
+
+    for folder in ["app/Cache", "app/Logs"] {
+        assert_eq!(files_under(&root.join(folder)), [Path::new(".gitignore"), Path::new("Order.php")], "{folder}");
+        assert_eq!(std::fs::read_to_string(root.join(folder).join(".gitignore")).unwrap(), gitignore("/Order.php\n"));
+    }
 }
 
 /// A compile that can't run git, as in a runtime image that ships none, keeps the PHP files out of git all the same, in
-/// a clone and in a linked worktree, because it reads `.git` itself to find the `info/exclude` git reads.
+/// a clone and in a linked worktree, because the `.gitignore` it writes needs no git.
 #[test]
 fn compile_keeps_the_php_files_out_of_git_with_no_git_to_run() {
     let directory = project(ORDER, MONEY);
@@ -1816,42 +2349,90 @@ fn compile_keeps_the_php_files_out_of_git_with_no_git_to_run() {
     }
 }
 
-/// A `.git` file that names a folder this machine doesn't have, as in a container that mounts a linked worktree
-/// without its repository, leaves the PHP files where git shows them, so the compile says so and how to fix it.
+/// The `.gitignore` needs no repository, so a compile writes it where none is reachable: in a folder outside any git
+/// repository, and in a dev container that mounts a linked worktree without the repository its `.git` names. Git reads
+/// it once the checkout is back where the repository is, and the compile warns of nothing.
 #[test]
-fn compile_warns_when_the_repository_of_a_worktree_is_missing() {
-    let directory = project(ORDER, MONEY);
-    let root = std::fs::canonicalize(directory.path()).unwrap();
-    write(&root, ".git", "gitdir: /missing/repository/.git/worktrees/feature\n");
+fn compile_writes_its_gitignore_where_no_git_repository_is_reachable() {
+    let outside = project(ORDER, MONEY);
+    let mounted = project(ORDER, MONEY);
+    write(mounted.path(), ".git", "gitdir: /missing/repository/.git/worktrees/feature\n");
 
-    let output = compile(&root);
+    for root in [outside.path(), mounted.path()] {
+        let output = compile(root);
 
-    assert!(output.status.success(), "{}", printed(&output));
-    assert!(
-        printed(&output).contains(&format!(
-            "{}/.git names /missing/repository/.git/worktrees/feature, which is missing, so git shows app/Order.php as untracked. Make the repository's .git folder reachable here, and run vendor/bin/mago compile again.",
-            root.display()
-        )),
-        "{}",
-        printed(&output)
-    );
+        assert!(output.status.success(), "{}", printed(&output));
+        assert!(!printed(&output).contains("WARN"), "{}", printed(&output));
+        assert_eq!(std::fs::read_to_string(root.join("app/.gitignore")).unwrap(), gitignore("/Order.php\n"));
+    }
 }
 
-/// An `info/exclude` that can't be written, as in a read-only `.git`, leaves the new PHP files where git shows them, so
-/// the compile names them and the folder to make writable, which the file is renamed into, and keeps quiet about the
-/// temporary file and the files the earlier block keeps out of git.
+/// The block of `info/exclude` that an earlier `mago compile` kept for the workspace `place`, listing `paths`.
+fn excluded(place: &Path, paths: &str) -> String {
+    format!("# mago compile: the files it writes in {}\n{paths}# mago compile: end\n", place.display())
+}
+
+/// A compile removes every block an earlier `mago compile` kept in the `info/exclude` every checkout of a repository
+/// shares, whichever checkout it names, here from a linked worktree, and keeps every other line.
+#[test]
+fn compile_removes_the_blocks_it_kept_in_info_exclude() {
+    let directory = project(ORDER, MONEY);
+    let clone = std::fs::canonicalize(directory.path()).unwrap();
+    git(&clone, &["init", "--quiet"]);
+    git(&clone, &["add", "--all"]);
+    git(&clone, &["commit", "--quiet", "--message", "project"]);
+    let worktrees = tempfile::tempdir().unwrap();
+    let worktree = std::fs::canonicalize(worktrees.path()).unwrap().join("feature");
+    git(&clone, &["worktree", "add", "--quiet", worktree.to_str().unwrap()]);
+    let kept = "# git ls-files --others --exclude-from=.git/info/exclude\n*.log\n";
+    write(
+        &clone,
+        ".git/info/exclude",
+        &format!(
+            "{}{kept}{}",
+            excluded(&clone, "/app/Order.php\n"),
+            excluded(&worktrees.path().join("gone"), "/app/Refund.php\n")
+        ),
+    );
+
+    compile_succeeds(&worktree);
+
+    assert_eq!(std::fs::read_to_string(clone.join(".git/info/exclude")).unwrap(), kept);
+}
+
+/// The compile removes its blocks byte for byte: a heading, the `/` lines right after it, and the end line when it
+/// comes next. Every other byte stays, a CRLF line end, a byte that is no UTF-8 and a last line with no line end
+/// included, and a block torn before its end line loses only its own `/` lines.
+#[test]
+fn compile_removes_its_blocks_from_info_exclude_and_keeps_every_other_byte() {
+    let directory = project(ORDER, MONEY);
+    let root = std::fs::canonicalize(directory.path()).unwrap();
+    git(&root, &["init", "--quiet"]);
+    let exclude = root.join(".git/info/exclude");
+    let block = "# mago compile: the files it writes in /gone\r\n/app/Order.php\r\n# mago compile: end\r\n";
+    let torn = "# mago compile: the files it writes in /torn\n/app/Refund.php\n";
+    std::fs::write(&exclude, [b"*.log\r\n", block.as_bytes(), b"\xff\xfe\n", torn.as_bytes(), b"*.tmp"].concat())
+        .unwrap();
+
+    compile_succeeds(&root);
+
+    assert_eq!(std::fs::read(&exclude).unwrap(), b"*.log\r\n\xff\xfe\n*.tmp");
+}
+
+/// An `info/exclude` that can't be written, as in a read-only `.git`, keeps the blocks an earlier `mago compile` kept,
+/// which hide their files in every checkout, so the compile names the folder to make writable, which the file is
+/// renamed into, and keeps quiet about the temporary file.
 #[cfg(unix)]
 #[test]
-fn compile_warns_when_the_exclude_file_cannot_be_written() {
+fn compile_warns_when_its_blocks_in_info_exclude_cannot_be_removed() {
     use std::os::unix::fs::PermissionsExt;
 
     let directory = project(ORDER, MONEY);
     let root = std::fs::canonicalize(directory.path()).unwrap();
     git(&root, &["init", "--quiet"]);
-    compile_succeeds(&root);
+    write(&root, ".git/info/exclude", &excluded(&root, "/app/Order.php\n"));
     let info = root.join(".git/info");
     std::fs::set_permissions(&info, std::fs::Permissions::from_mode(0o555)).unwrap();
-    write(&root, "app/Refund.sharp", "namespace App;\n\npublic class Refund\n{\n}\n");
 
     let output = compile(&root);
     std::fs::set_permissions(&info, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -1859,7 +2440,7 @@ fn compile_warns_when_the_exclude_file_cannot_be_written() {
     assert!(output.status.success(), "{}", printed(&output));
     assert!(
         printed(&output).contains(&format!(
-            "{}/exclude can't be replaced, as {} can't be written: permission denied, so git shows app/Refund.php as untracked. Make {} writable, and run vendor/bin/mago compile again.",
+            "{}/exclude can't be replaced, as {} can't be written: permission denied, so its mago compile blocks still hide their files in every checkout of the repository. Make {} writable, and run vendor/bin/mago compile again.",
             info.display(),
             info.display(),
             info.display()
@@ -1958,106 +2539,6 @@ fn compile_names_the_folder_of_the_sharp_folder_it_cannot_create() {
             .contains(&format!("mago: can't create the folder `{}`: Permission denied (os error 13)", app.display())),
         "{}",
         printed(&output)
-    );
-}
-
-/// A repository git refuses to read, as a checkout another user owns in a container or a CI job, or a broken `.git`,
-/// fails no compile: the block lists every PHP file, as with no git to run, and the compile warns once with git's
-/// reason.
-#[test]
-fn compile_keeps_the_php_files_out_of_git_where_git_refuses_the_repository() {
-    let directory = project(ORDER, MONEY);
-    let owned = std::fs::canonicalize(directory.path()).unwrap();
-    git(&owned, &["init", "--quiet"]);
-    let broken = tempfile::tempdir().unwrap();
-    let broken = std::fs::canonicalize(broken.path()).unwrap();
-    project_in(&broken, ORDER, MONEY);
-    std::fs::create_dir(broken.join(".git")).unwrap();
-
-    for (root, owner) in [(&owned, "1"), (&broken, "0")] {
-        write(root, ".git/info/exclude", "*.log\n");
-        // A CI runner's git config can trust every folder with `safe.directory = *`, so the compile reads none.
-        let output = command(root, "never")
-            .env("GIT_TEST_ASSUME_DIFFERENT_OWNER", owner)
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .output()
-            .unwrap();
-
-        assert!(output.status.success(), "{}: {}", root.display(), printed(&output));
-        assert_eq!(
-            std::fs::read_to_string(root.join(".git/info/exclude")).unwrap(),
-            format!("*.log\n{}", excluded(root, "/app/Order.php\n")),
-            "{}",
-            root.display()
-        );
-        let warning = format!("git can't read the .gitignore files of {}: fatal: ", root.display());
-        assert_eq!(printed(&output).matches(&warning).count(), 1, "{}: {}", root.display(), printed(&output));
-        assert_eq!(printed(&output).matches("fatal: ").count(), 1, "git's own output stays out: {}", printed(&output));
-        assert!(
-            printed(&output).contains(". The repository's info/exclude lists every file mago compile writes there."),
-            "{}",
-            printed(&output)
-        );
-    }
-    assert_eq!(
-        untracked(&owned),
-        "?? .sharp/app/Order.sharpc\n?? .sharp/inputs.json\n?? .sharp/listeners.php\n?? .sharp/vendor/acme/money/src/Money.sharpc\n?? app/Legacy.php\n?? app/Order.sharp\n?? composer.lock\n?? mago.toml\n?? vendor/acme/money/src/Money.sharp\n",
-        "the owner's git reads the block"
-    );
-}
-
-/// The block of `info/exclude` that `mago compile` keeps for the workspace `place`, listing `paths`.
-fn excluded(place: &Path, paths: &str) -> String {
-    format!("# mago compile: the files it writes in {}\n{paths}# mago compile: end\n", place.display())
-}
-
-/// A PHP file a `.gitignore` already ignores needs no line of its own, so a compile in a folder git ignores, as a build
-/// folder, or of PHP files a `.gitignore` pattern covers, writes no block.
-#[test]
-fn compile_writes_no_block_for_the_php_files_git_already_ignores() {
-    let directory = tempfile::tempdir().unwrap();
-    let clone = std::fs::canonicalize(directory.path()).unwrap();
-    git(&clone, &["init", "--quiet"]);
-    write(&clone, ".gitignore", "/build/\n/covered/app/*.php\n");
-    write(&clone, ".git/info/exclude", "*.log\n");
-
-    for folder in ["build/project", "covered"] {
-        let root = clone.join(folder);
-        project_in(&root, ORDER, MONEY);
-        compile_succeeds(&root);
-        assert!(root.join("app/Order.php").exists(), "{folder}");
-    }
-
-    assert_eq!(std::fs::read_to_string(clone.join(".git/info/exclude")).unwrap(), "*.log\n");
-}
-
-/// A block whose folder is gone, or is now ignored, keeps nothing out of git, so the next compile in any checkout of
-/// the repository removes it, and keeps every other line.
-#[test]
-fn compile_removes_the_block_of_a_folder_that_is_gone_or_ignored() {
-    let directory = project(ORDER, MONEY);
-    let clone = std::fs::canonicalize(directory.path()).unwrap();
-    git(&clone, &["init", "--quiet"]);
-    write(&clone, ".gitignore", "/build/\n");
-    let gone = clone.join("old");
-    let ignored = clone.join("build/project");
-    std::fs::create_dir_all(&ignored).unwrap();
-    write(
-        &clone,
-        ".git/info/exclude",
-        &format!(
-            "*.log\n{}{}",
-            excluded(&gone, "/old/app/Order.php\n"),
-            excluded(&ignored, "/build/project/app/Order.php\n")
-        ),
-    );
-
-    compile_succeeds(&clone);
-
-    assert_eq!(
-        std::fs::read_to_string(clone.join(".git/info/exclude")).unwrap(),
-        format!("*.log\n{}", excluded(&clone, "/app/Order.php\n"))
     );
 }
 
@@ -2812,10 +3293,7 @@ fn compile_deletes_the_lean_package_once_no_law_remains() {
 
     assert!(output.status.success(), "{}", printed(&output));
     assert!(!root.join(".sharp/.lean").exists());
-    assert_eq!(
-        files_under(&root.join(".sharp")),
-        [Path::new("app/Order.sharpc"), Path::new("inputs.json"), Path::new("listeners.php")]
-    );
+    assert_eq!(files_under(&root.join(".sharp")), [Path::new("app/Order.sharpc"), Path::new("listeners.php")]);
 }
 
 /// A `Money.lean` a 0.4.2 compile left beside `Money.sharp` is an ordinary unused file: the compile builds none of it,

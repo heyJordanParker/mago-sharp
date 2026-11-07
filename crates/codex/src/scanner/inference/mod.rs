@@ -18,12 +18,14 @@ use mago_syntax::cst::ClassLikeConstantSelector;
 use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Construct;
 use mago_syntax::cst::Expression;
+use mago_syntax::cst::Hint;
 use mago_syntax::cst::Identifier;
 use mago_syntax::cst::LegacyArray;
 use mago_syntax::cst::Literal;
 use mago_syntax::cst::MagicConstant;
 use mago_syntax::cst::PropertyAccess;
 use mago_syntax::cst::StringPart;
+use mago_syntax::cst::TypeOf;
 use mago_syntax::cst::UnaryPrefix;
 use mago_syntax::cst::UnaryPrefixOperator;
 use mago_syntax_core::stack::ensure_sufficient_stack;
@@ -586,6 +588,12 @@ where
             }
 
             Some(TUnion::from_atomic(TAtomic::Derived(TDerived::ValueOf(TValueOf::new(Arc::new(object_type))))))
+        }
+        // `typeof(Order)` is PHP's `Order::class`, spec section 25.
+        Expression::TypeOf(TypeOf { r#type: Hint::Identifier(class), .. })
+            if !context.resolved_names.is_type_parameter(class) =>
+        {
+            Some(infer_class_constant(context.resolved_names.get(class), b"class", enclosing_class, class_constants))
         }
         Expression::Array(Array { elements, .. }) | Expression::LegacyArray(LegacyArray { elements, .. })
             if is_list_array_expression(expression) =>

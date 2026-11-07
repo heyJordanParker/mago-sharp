@@ -1201,13 +1201,22 @@ pub(crate) fn member_namespace(
     }
 
     let namespace = word(resolved_names.get(name));
+
+    is_member_namespace(codebase, namespace, member, resolved_names.is_imported(name)).then_some(namespace)
+}
+
+/// Whether the full name `namespace`, written before `.member` in PHP# code, names a namespace and not a class, spec
+/// section 23: no class has that name, and the file imports it, as `imported` says, or it has a function or a constant
+/// `member`. [`member_namespace`] reads it with the file's names. A reader of scanned metadata, which keeps no names,
+/// passes `imported: false`, so a namespace counts only when it has the member.
+#[must_use]
+pub(crate) fn is_member_namespace(codebase: &CodebaseMetadata, namespace: Word, member: &[u8], imported: bool) -> bool {
     if codebase.class_like_exists(namespace.as_bytes()) {
-        return None;
+        return false;
     }
     let full_name = namespace_member(codebase, namespace, member);
-    let names_member = codebase.function_exists(full_name.as_bytes()) || codebase.constant_exists(full_name.as_bytes());
 
-    (is_imported_namespace(resolved_names, codebase, name, namespace) || names_member).then_some(namespace)
+    imported || codebase.function_exists(full_name.as_bytes()) || codebase.constant_exists(full_name.as_bytes())
 }
 
 /// The plain PHP function a PHP# `Name.member(…)` calls, spec section 23: `Pdf.render(html)` after
