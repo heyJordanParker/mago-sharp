@@ -7,7 +7,7 @@ public final class Tally
 {
     private List<int> counts = [];
 
-    private Map<string, int> prices = [:];
+    private Map<int, int> prices = [:];
 
     public int total()
     {
@@ -18,8 +18,8 @@ public final class Tally
         for (const price of this.prices.values()) {
             total += price;
         }
-        for (const [name, price] of this.prices) {
-            if (name == 'free') { continue; }
+        for (const [id, price] of this.prices) {
+            if (id == 0) { continue; }
             total += price;
         }
         for (let [index, count] of this.counts.entries()) {
@@ -47,8 +47,8 @@ public final class Tally
         return steps;
     }
 
-    public void drop(string name)
+    public void drop(int id)
     {
-        this.prices.remove(name);
+        this.prices.remove(id);
     }
 }

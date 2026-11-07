@@ -1,0 +1,11 @@
+namespace App;
+
+// A lambda goes where one of the function types it may land in passes no more parameters than it takes, as the PHP#
+// checker decides it (spec section 14.1).
+public final class Setup
+{
+    public void run(Hooks hooks)
+    {
+        hooks.add(() => 60);
+    }
+}

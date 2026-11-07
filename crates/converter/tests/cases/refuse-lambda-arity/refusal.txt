@@ -1,0 +1,1 @@
+13:22: this lambda takes 0 parameters, fewer than the function type it lands in passes: a PHP# lambda takes every parameter its function type passes (spec section 14.1)

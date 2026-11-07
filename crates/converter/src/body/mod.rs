@@ -20,12 +20,15 @@ pub(crate) use locals::Locals;
 use mago_codex::ttype::SharpType;
 use mago_codex::ttype::TType;
 use mago_codex::ttype::atomic::TAtomic;
+use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::comparator::ComparisonResult;
 use mago_codex::ttype::comparator::union_comparator::is_contained_by;
 use mago_codex::ttype::get_sharp_type;
 use mago_codex::ttype::union::TUnion;
 use mago_span::HasSpan;
+use mago_syntax::cst::Access;
 use mago_syntax::cst::Block;
+use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::IfBody;
 use mago_syntax::cst::Literal;
@@ -34,6 +37,7 @@ use mago_syntax::cst::Try;
 use mago_syntax::cst::Variable;
 
 use crate::Converter;
+use crate::declaration::NameCase;
 
 /// What a value of an atomic type is to the operators PHP and PHP# share.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -132,9 +136,16 @@ impl<'input> Converter<'input, '_> {
                 }
             }
             Statement::Return(r#return) => {
+                let returned = r#return.value.and_then(|value| self.type_of(value)).cloned();
+                if let Some(method) = self.method.as_mut() {
+                    method.returned.push(returned);
+                }
                 if let Some(value) = r#return.value {
                     let returning = self.method.as_ref().and_then(|method| method.returning.clone());
                     self.expression(value, returning.as_ref());
+                    if let Some(returning) = &returning {
+                        self.narrowed(value, returning);
+                    }
                     // PHP returns a value its declared type doesn't hold, and PHP# refuses it (spec section 7).
                     if let (Some(returning), Some(returned)) = (&returning, self.type_of(value))
                         && !is_contained_by(
@@ -233,6 +244,7 @@ impl<'input> Converter<'input, '_> {
             }
             // A `catch` variable is bound by the clause, never declared by an assignment.
             if let Some(variable) = &clause.variable {
+                self.misnamed(&variable.name[1..], variable.span, "local", NameCase::Camel);
                 self.edits.replace(variable.span, Self::variable_name(variable.name));
                 if let Some(method) = self.method.as_mut() {
                     method.parameters.push(variable.name.to_vec());
@@ -346,7 +358,7 @@ impl<'input> Converter<'input, '_> {
                 self.expression(conditional.r#else, expected);
             }
             Expression::Throw(throw) => self.expression(throw.exception, None),
-            Expression::Closure(_) | Expression::ArrowFunction(_) => self.lambda(expression),
+            Expression::Closure(_) | Expression::ArrowFunction(_) => self.lambda(expression, expected),
             Expression::PartialApplication(application) => self.method_value(expression, application),
             Expression::Match(r#match) => self.match_expression(r#match, false),
             Expression::Clone(clone) => self.clone(expression, clone.object),
@@ -389,6 +401,86 @@ impl<'input> Converter<'input, '_> {
     fn untyped(&mut self, expression: &Expression<'_>, operation: &str) -> bool {
         self.expression(expression, None);
         self.mixed(expression, operation)
+    }
+
+    /// Refuses each property read that `value`, a value that lands in the declared type `place`, as a method returns
+    /// it or a call passes it, gives as itself or as a branch of `?:`, where the analysis narrows the property past
+    /// its declared type and `place` holds only the narrowed one, as `$this->owner` after `$this->owner instanceof
+    /// Page`. PHP# reads a property by its declared type wherever it is read, since it may change between a test and a
+    /// read (spec section 21).
+    pub(crate) fn narrowed(&mut self, value: &Expression<'_>, place: &TUnion) {
+        let (object, property) = match value {
+            Expression::Parenthesized(parenthesized) => return self.narrowed(parenthesized.expression, place),
+            Expression::Conditional(conditional) => {
+                if let Some(then) = conditional.then {
+                    self.narrowed(then, place);
+                }
+                return self.narrowed(conditional.r#else, place);
+            }
+            Expression::Access(Access::Property(access)) => (access.object, &access.property),
+            _ => return,
+        };
+        let (Some(read), ClassLikeMemberSelector::Identifier(name)) = (self.type_of(value), property) else {
+            return;
+        };
+        // An accessor's own storage is its `field`, which no other code writes.
+        if self.method.as_ref().and_then(|method| method.storage.as_deref()) == Some(name.value) {
+            return;
+        }
+        let classes: Vec<&TAtomic> = self
+            .type_of(object)
+            .map(|union| union.types.iter().filter(|atomic| !atomic.is_null()).collect())
+            .unwrap_or_default();
+        let [TAtomic::Object(TObject::Named(class))] = classes.as_slice() else {
+            return;
+        };
+        let property = [b"$".as_slice(), name.value].concat();
+        let codebase = self.input.codebase;
+        let Some(declared) = codebase
+            .get_declaring_property(class.name.as_bytes(), &property)
+            .and_then(|metadata| metadata.type_metadata.as_ref())
+            .map(|metadata| &metadata.type_union)
+            .filter(|declared| !declared.has_template_types() && !declared.types.iter().any(TAtomic::is_mixed))
+        else {
+            return;
+        };
+        let holds = |wider: &TUnion, narrower: &TUnion| {
+            is_contained_by(codebase, narrower, wider, false, false, false, &mut ComparisonResult::new())
+        };
+        if holds(read, declared) || holds(place, declared) {
+            return;
+        }
+        let shown = String::from_utf8_lossy(self.text(value.span())).into_owned();
+        self.refuse(
+            value.span(),
+            format!(
+                "`{shown}` reads as `{}` here, which PHP narrows it to, and PHP# reads a property by its declared type `{}`, since it may change between a test and a read (spec section 21): read it into a local first",
+                read.get_id(),
+                declared.get_id()
+            ),
+        );
+    }
+
+    /// Refuses `object`, whose member `operation` reaches, when the analysis gives it `mixed` or `object`, and gives
+    /// whether it did. PHP# reaches a member only on a known class: an `Object` has none (spec section 24). Its own
+    /// parts convert either way.
+    fn member_of(&mut self, object: &Expression<'_>, operation: &str) -> bool {
+        if self.untyped(object, operation) {
+            return true;
+        }
+        let classless = self
+            .type_of(object)
+            .is_some_and(|union| union.types.iter().any(|atomic| matches!(atomic, TAtomic::Object(TObject::Any))));
+        if !classless {
+            return false;
+        }
+        let shown = self.shown(object);
+        self.refuse(
+            object.span(),
+            format!("`{shown}` reaches {operation}, which PHP# allows only from a known class: narrow it with `is`, or declare its type (spec section 24)"),
+        );
+
+        true
     }
 
     /// Refuses `expression`, converted already, when the analysis gives it `mixed`, as [`Converter::untyped`] does.

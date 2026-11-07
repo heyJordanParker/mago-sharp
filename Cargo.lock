@@ -1603,6 +1603,7 @@ dependencies = [
  "libtest-mimic",
  "mago-allocator",
  "mago-analyzer",
+ "mago-casing",
  "mago-codex",
  "mago-database",
  "mago-names",

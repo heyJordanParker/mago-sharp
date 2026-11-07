@@ -129,9 +129,12 @@ impl<'input> Converter<'input, '_> {
                 self.expression(value, None);
                 continue;
             };
-            // The parameter's type decides a literal's form, as `[:]` for a `Map` and `this.name` for a function.
-            let expected = (!declared.has_template_types()).then_some(declared);
+            // The parameter's type decides a literal's form, as `[:]` for a `Map` and `this.name` for a function, and
+            // a lambda is held to the parameters its function type passes, whatever its type parameters.
+            let is_lambda = matches!(value, Expression::Closure(_) | Expression::ArrowFunction(_));
+            let expected = (is_lambda || !declared.has_template_types()).then_some(declared);
             self.expression(value, expected);
+            self.narrowed(value, declared);
             if self.mixed(value, "a parameter of a known type") || declared.has_template_types() {
                 continue;
             }
@@ -159,7 +162,7 @@ impl<'input> Converter<'input, '_> {
     pub(super) fn call(&mut self, call: &Call<'_>) {
         match call {
             Call::Method(call) => {
-                self.untyped(call.object, "a method call");
+                self.member_of(call.object, "a method call");
                 self.edits.replace(call.arrow, ".");
                 self.member(&call.method);
                 let method = self.method_of(self.type_of(call.object), &call.method);
@@ -167,7 +170,7 @@ impl<'input> Converter<'input, '_> {
                 self.arguments(&call.argument_list, method);
             }
             Call::NullSafeMethod(call) => {
-                self.untyped(call.object, "a method call");
+                self.member_of(call.object, "a method call");
                 self.edits.replace(call.question_mark_arrow, "?.");
                 self.member(&call.method);
                 let method = self.method_of(self.type_of(call.object), &call.method);
@@ -424,8 +427,15 @@ impl<'input> Converter<'input, '_> {
                 self.edits.replace(class.span(), format!("({written}){parentheses}"));
             }
         }
+        // A constructor's parameters take the arguments as a method's do, `[:]` for a `Map` and a known type alike.
+        let class = match instantiation.class {
+            Expression::Identifier(identifier) => Some(self.input.names.get(identifier)),
+            Expression::Self_(_) => self.class.as_ref().map(|class| class.metadata.name.as_bytes()),
+            _ => None,
+        };
+        let constructor = class.and_then(|class| self.input.codebase.get_declaring_method(class, b"__construct"));
         if let Some(arguments) = &instantiation.argument_list {
-            self.arguments(arguments, None);
+            self.arguments(arguments, constructor);
         }
     }
 

@@ -1,0 +1,2 @@
+12:18: `array<string, int>|list<string>` holds two collections, `List<string>` and `Map<string, int>`, and a PHP# type holds one (spec section 12)
+15:21: PHP's `iterable<string, int>` gives its keys, and a PHP# `Iterable<int>` reads values only (spec section 12)

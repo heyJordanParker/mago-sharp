@@ -1,0 +1,1 @@
+12:29: `$request` takes `App\Request`, which PHP# writes in the PHP it compiles to, and `App\Responder::respond`'s PHP takes `mixed` there, which PHP links an override to only when it takes at least that (spec section 22)

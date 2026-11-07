@@ -1,0 +1,1 @@
+12:16: a `get` hook that writes `$this->cached` has no PHP# form: a `get` body never writes `this` (spec section 6.1)

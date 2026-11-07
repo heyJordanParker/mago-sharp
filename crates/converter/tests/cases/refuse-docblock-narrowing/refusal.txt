@@ -1,0 +1,3 @@
+13:19: `@var` gives `non-empty-string`, which narrows the `string` PHP# writes, and the analysis of a `.sharp` file reads no PHPDoc, so converting would drop the narrowing
+16:21: `@return` gives `non-empty-string`, which narrows the `string` PHP# writes, and the analysis of a `.sharp` file reads no PHPDoc, so converting would drop the narrowing
+22:32: `@param $count` gives `positive-int`, which narrows the `int` PHP# writes, and the analysis of a `.sharp` file reads no PHPDoc, so converting would drop the narrowing

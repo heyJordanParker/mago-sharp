@@ -1,0 +1,3 @@
+14:16: `(string)` of `list<string>|string` has no PHP# form: a PHP# cast converts a number, and `(string)` writes one as text (spec section 24)
+19:16: `(string)` of `bool` has no PHP# form: a PHP# cast converts a number, and `(string)` writes one as text (spec section 24)
+24:16: `(int)` of `string` has no PHP# form: a PHP# cast converts a number, and `(string)` writes one as text (spec section 24)
