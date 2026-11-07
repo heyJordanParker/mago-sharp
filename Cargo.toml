@@ -9,6 +9,9 @@ homepage = "https://github.com/heyJordanParker/php-sharp"
 repository = "https://github.com/heyJordanParker/php-sharp"
 rust-version = "1.97.0"
 exclude = ["composer", "scripts"]
+# Every integration test is a module of tests/main.rs, so the crate links one test binary for them, beside the suite's
+# own harness.
+autotests = false
 
 [workspace]
 package.edition = "2024"
@@ -312,6 +315,10 @@ unicode-width = { workspace = true }
 notify = { workspace = true }
 dhat = { workspace = true, optional = true }
 schemars = { workspace = true }
+
+[[test]]
+name = "main"
+path = "tests/main.rs"
 
 [[test]]
 name = "suite"

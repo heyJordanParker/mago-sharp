@@ -245,12 +245,14 @@ mod runner {
     }
 }
 
+// Its tests keep the names they had when this file was a test binary of its own, `parser::…`.
+#[expect(clippy::module_inception)]
 mod parser {
     macro_rules! test_expression {
         ($name:ident, $expression:expr, $expected:expr) => {
             #[test]
             fn $name() {
-                crate::runner::run_expression_test(stringify!($name), $expression, $expected);
+                super::runner::run_expression_test(stringify!($name), $expression, $expected);
             }
         };
     }
@@ -259,7 +261,7 @@ mod parser {
         ($name:ident, $expression:expr) => {
             #[test]
             fn $name() {
-                crate::runner::smoke_test(stringify!($name), $expression);
+                super::runner::smoke_test(stringify!($name), $expression);
             }
         };
     }
@@ -268,7 +270,7 @@ mod parser {
         ($name:ident, $code:expr) => {
             #[test]
             fn $name() {
-                crate::runner::parse_error_test(stringify!($name), $code);
+                super::runner::parse_error_test(stringify!($name), $code);
             }
         };
     }

@@ -1,6 +1,4 @@
-mod comparator_common;
-
-use comparator_common::*;
+use crate::comparator_common::*;
 
 #[test]
 fn smoke_int_int() {

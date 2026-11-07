@@ -1,8 +1,6 @@
 #![allow(clippy::approx_constant)]
 
-mod comparator_common;
-
-use comparator_common::*;
+use crate::comparator_common::*;
 
 #[test]
 fn float_reflexive() {

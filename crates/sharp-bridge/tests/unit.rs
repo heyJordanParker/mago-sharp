@@ -9,7 +9,7 @@
     clippy::little_endian_bytes
 )]
 
-mod common;
+use crate::common;
 
 use std::fmt::Write;
 use std::fs;

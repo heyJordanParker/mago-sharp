@@ -25,7 +25,7 @@ use mago_sharp_bridge::unit::Library;
 use mago_sharp_bridge::unit::header;
 use mago_syntax::settings::ParserSettings;
 
-mod common;
+use crate::common;
 
 const BOX: &str = r"<?php
 

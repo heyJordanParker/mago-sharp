@@ -20,7 +20,7 @@ use mago_php_version::PHPVersion;
 use mago_syntax::settings::ParserSettings;
 use mago_word::word;
 
-mod common;
+use crate::common;
 
 const SOURCE: &str = r"<?php
 

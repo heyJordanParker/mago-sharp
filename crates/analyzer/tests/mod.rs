@@ -6,8 +6,6 @@ use mago_analyzer::code::IssueCode;
 
 use crate::framework::default_test_settings;
 
-mod framework;
-
 /// A macro to automatically generate a test case from a corresponding PHP file.
 ///
 /// # Variants

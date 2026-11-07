@@ -29,7 +29,7 @@ macro_rules! test_parsing {
         #[test]
         fn $name() {
             let content = include_str!(concat!("fixtures/", stringify!($name), ".php"));
-            crate::runner::parse_file_test(stringify!($name), content, $expected_errors);
+            runner::parse_file_test(stringify!($name), content, $expected_errors);
         }
     };
 }

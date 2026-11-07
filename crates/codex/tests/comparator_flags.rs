@@ -1,6 +1,4 @@
-mod comparator_common;
-
-use comparator_common::*;
+use crate::comparator_common::*;
 
 #[test]
 fn mixed_to_int_sets_coerced_and_from_nested() {

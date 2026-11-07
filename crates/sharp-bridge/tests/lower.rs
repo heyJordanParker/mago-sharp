@@ -6,7 +6,7 @@
 
 #![allow(clippy::panic, clippy::expect_used, clippy::use_debug)]
 
-mod common;
+use crate::common;
 
 use std::borrow::Cow;
 use std::collections::HashSet;

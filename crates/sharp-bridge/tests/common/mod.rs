@@ -1,8 +1,15 @@
 //! Runs a PHP# file through the checker as `mago` runs it, then hands the checked program to the test.
 
 // Each test file uses only some of the library declarations. A library file that fails to parse or an analysis that
-// fails is a broken test, so it panics instead of joining the checker's refusal.
-#![allow(dead_code, clippy::panic_in_result_fn, clippy::unwrap_in_result)]
+// fails is a broken test, so it panics instead of joining the checker's refusal, and its message prints what failed.
+#![allow(
+    dead_code,
+    clippy::panic,
+    clippy::expect_used,
+    clippy::use_debug,
+    clippy::panic_in_result_fn,
+    clippy::unwrap_in_result
+)]
 
 use std::borrow::Cow;
 use std::sync::LazyLock;

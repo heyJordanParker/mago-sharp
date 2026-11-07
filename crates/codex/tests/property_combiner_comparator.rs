@@ -5,6 +5,7 @@ use std::sync::Arc;
 use proptest::collection::vec;
 use proptest::prelude::*;
 use proptest::sample::select;
+use proptest::test_runner::FileFailurePersistence;
 
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::ttype::atomic::TAtomic;
@@ -207,7 +208,14 @@ fn arb_subtype_chain() -> impl Strategy<Value = (TUnion, TUnion, TUnion)> {
 fn proptest_config() -> ProptestConfig {
     let cases: u32 = std::env::var("MAGO_PROPTEST_CASES").ok().and_then(|s| s.parse().ok()).unwrap_or(96);
 
-    ProptestConfig { cases, max_shrink_iters: 200, ..ProptestConfig::default() }
+    // The saved failures stay beside this file: proptest's default looks for them in a folder beside the nearest
+    // folder that holds a `main.rs`, which `tests/` does.
+    ProptestConfig {
+        cases,
+        max_shrink_iters: 200,
+        failure_persistence: Some(Box::new(FileFailurePersistence::WithSource("proptest-regressions"))),
+        ..ProptestConfig::default()
+    }
 }
 
 proptest! {

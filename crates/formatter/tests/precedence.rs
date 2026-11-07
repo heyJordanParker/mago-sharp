@@ -47,12 +47,14 @@ mod runner {
     }
 }
 
+// Its tests keep the names they had when this file was a test binary of its own, `precedence::…`.
+#[expect(clippy::module_inception)]
 mod precedence {
     macro_rules! test_expression_format {
         ($name:ident, $input:expr, $expected:expr) => {
             #[test]
             fn $name() {
-                crate::runner::run_format_test(stringify!($name), $input, $expected);
+                super::runner::run_format_test(stringify!($name), $input, $expected);
             }
         };
     }

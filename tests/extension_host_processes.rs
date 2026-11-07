@@ -15,7 +15,7 @@ use std::time::Instant;
 
 use mago_database::process;
 
-mod common;
+use crate::common;
 
 /// The longest a test waits for `mago` to end: far past each deadline the tests set.
 const OUTER_TIMEOUT: Duration = Duration::from_secs(60);

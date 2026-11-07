@@ -10,6 +10,12 @@ repository.workspace = true
 rust-version.workspace = true
 links = "sharp_bridge"
 publish = false
+# Every integration test is a module of tests/main.rs, so the crate links one test binary for them.
+autotests = false
+
+[[test]]
+name = "main"
+path = "tests/main.rs"
 
 [lints]
 workspace = true
