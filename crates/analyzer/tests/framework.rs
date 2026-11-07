@@ -5,15 +5,12 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::sync::LazyLock;
 
-use foldhash::HashSet;
-
 use mago_allocator::LocalArena;
 use mago_analyzer::Analyzer;
 use mago_analyzer::analysis_result::AnalysisResult;
 use mago_analyzer::plugin::PluginRegistry;
 use mago_analyzer::settings::Settings;
 use mago_codex::metadata::CodebaseMetadata;
-use mago_codex::populator::populate_codebase;
 use mago_codex::scanner::scan_program;
 use mago_database::DatabaseReader;
 use mago_database::file::File;
@@ -22,6 +19,11 @@ use mago_prelude::Prelude;
 use mago_syntax::parser::parse_file;
 use mago_word::ascii_lowercase_word;
 use mago_word::word;
+
+#[path = "../../../tests/support/prelude_population.rs"]
+mod prelude_population;
+
+use prelude_population::populate_on_prelude;
 
 static PRELUDE: LazyLock<Prelude> = LazyLock::new(Prelude::build);
 static PLUGIN_REGISTRY: LazyLock<PluginRegistry> = LazyLock::new(PluginRegistry::with_library_providers);
@@ -134,10 +136,7 @@ fn run_test_case_inner(config: TestCase) {
     let settings = config.settings.unwrap_or_else(default_test_settings);
 
     metadata.extend(scan_program(&arena, source_file, program, &resolved_names, settings.version));
-
-    // The prelude was populated once, when it was built, and its symbols are safe, so only the fixture is populated.
-    let prelude_symbols = std::mem::take(&mut metadata.safe_symbols);
-    populate_codebase(&mut metadata, &mut symbol_references, prelude_symbols, HashSet::default());
+    populate_on_prelude(&mut metadata, &mut symbol_references);
 
     let mut analysis_result = AnalysisResult::new(symbol_references);
     let analyzer = Analyzer::new(&arena, source_file, &resolved_names, &metadata, &PLUGIN_REGISTRY, settings);
