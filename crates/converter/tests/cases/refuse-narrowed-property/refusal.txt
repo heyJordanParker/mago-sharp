@@ -1,0 +1,1 @@
+12:49: `$this->shape` reads as `App\Circle` here, which PHP narrows it to, and PHP# reads a property by its declared type `App\Shape|null`, since it may change between a test and a read (spec section 21): read it into a local first

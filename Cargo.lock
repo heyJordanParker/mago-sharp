@@ -1423,6 +1423,7 @@ dependencies = [
  "mago-algebra",
  "mago-allocator",
  "mago-analyzer",
+ "mago-build-id",
  "mago-bytes",
  "mago-codex",
  "mago-composer",
@@ -1602,6 +1603,7 @@ dependencies = [
  "libtest-mimic",
  "mago-allocator",
  "mago-analyzer",
+ "mago-casing",
  "mago-codex",
  "mago-database",
  "mago-names",
@@ -1686,13 +1688,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mago-flags"
-version = "0.6.3"
-dependencies = [
- "serde",
-]
-
-[[package]]
 name = "mago-formatter"
 version = "0.6.3"
 dependencies = [
@@ -1734,26 +1729,6 @@ dependencies = [
  "schemars",
  "serde",
  "toml 1.1.5+spec-1.1.0",
-]
-
-[[package]]
-name = "mago-hir"
-version = "0.6.3"
-dependencies = [
- "itoa",
- "mago-allocator",
- "mago-database",
- "mago-flags",
- "mago-names",
- "mago-php-version",
- "mago-phpdoc-syntax",
- "mago-span",
- "mago-syntax",
- "mago-syntax-core",
- "memchr",
- "ordered-float",
- "paste",
- "serde",
 ]
 
 [[package]]

@@ -11,7 +11,9 @@ use mago_syntax::cst::Expression;
 use mago_syntax::cst::MagicConstant;
 use mago_syntax::cst::Variable;
 
+use super::Kind;
 use crate::Converter;
+use crate::library::short;
 
 impl Converter<'_, '_> {
     /// A constant: a library's, through its namespace as its functions are (spec section 23), or PHP's own, which the
@@ -78,6 +80,15 @@ impl Converter<'_, '_> {
                 }
             },
         };
+        // `Text.str` names the class `Text\Str` where one exists, since a class's name has no case (spec section 23).
+        if let Some(class) = self.input.codebase.get_class_like(format!("{namespace}\\{member}").as_bytes()) {
+            let class = class.original_name.as_str_lossy().into_owned();
+            self.refuse(
+                span,
+                format!("`{name}` is reached through its namespace as `{}.{member}`, which names the class `{class}`, since PHP finds a class in any case (spec section 23)", short(&namespace)),
+            );
+            return None;
+        }
         let alias = self.imports.import(&namespace);
 
         Some(format!("{alias}.{member}"))
@@ -94,12 +105,12 @@ impl Converter<'_, '_> {
                 self.edits.replace(expression.span(), "field");
             }
             Access::Property(access) => {
-                self.untyped(access.object, "a property access");
+                self.member_of(access.object, "a property access");
                 self.edits.replace(access.arrow, ".");
                 self.member(&access.property);
             }
             Access::NullSafeProperty(access) => {
-                self.untyped(access.object, "a property access");
+                self.member_of(access.object, "a property access");
                 self.edits.replace(access.question_mark_arrow, "?.");
                 self.member(&access.property);
             }
@@ -118,6 +129,24 @@ impl Converter<'_, '_> {
                 let ClassLikeConstantSelector::Identifier(constant) = &access.constant else {
                     return self.refuse(expression.span(), "a constant named by an expression has no PHP# form");
                 };
+                let names_class = matches!(
+                    access.class,
+                    Expression::Identifier(_) | Expression::Self_(_) | Expression::Static(_) | Expression::Parent(_)
+                );
+                if constant.value.eq_ignore_ascii_case(b"class") && !names_class {
+                    // `$order::class` is the class of an object, `Class.of(order)`, as `typeof` takes a type only
+                    // (spec section 25). PHP's on `null` throws, and PHP#'s takes an object.
+                    if !self.is(access.class, &[Kind::Object, Kind::Enum]) {
+                        let shown = self.shown(access.class);
+                        return self.refuse(
+                            expression.span(),
+                            format!("`::class` of `{shown}` has no PHP# form: `Class.of` gives the class of an object, and PHP's on `null` throws (spec section 25)"),
+                        );
+                    }
+                    self.untyped(access.class, "`Class.of`");
+                    let object = self.render(access.class);
+                    return self.edits.replace(expression.span(), format!("Class.of({object})"));
+                }
                 self.expression(access.class, None);
                 if constant.value.eq_ignore_ascii_case(b"class") {
                     // `X::class` is the class value `typeof(X)` (spec section 25).

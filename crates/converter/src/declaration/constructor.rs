@@ -19,6 +19,7 @@ use mago_word::word;
 
 use crate::Converter;
 
+use super::NameCase;
 use super::accessors;
 use super::has;
 
@@ -41,6 +42,13 @@ impl Converter<'_, '_> {
 
         self.attributes(&parameter.attribute_lists);
         let promoted = parameter.is_promoted_property();
+        if promoted && self.names_inherited_method(&parameter.variable) {
+            return;
+        }
+        let kind = if promoted { "property" } else { "parameter" };
+        if self.misnamed(&parameter.variable.name[1..], parameter.variable.span, kind, NameCase::Camel) {
+            return;
+        }
         // A promoted parameter declares one type for the parameter and its property, and the analysis keeps the
         // property's, which a refinement may have given.
         let declared = if promoted {

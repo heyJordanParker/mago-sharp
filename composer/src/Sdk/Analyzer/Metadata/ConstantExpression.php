@@ -45,8 +45,9 @@ final class ConstantExpression
             ConstantExpressionKind::Constant => constant((string) $this->value),
             ConstantExpressionKind::Array_ => $this->evaluateArray(),
             ConstantExpressionKind::New_ => new ((string) $this->value)(...self::evaluateArguments($this->arguments)),
+            // The host's issue carries `location`, which Mago prints as `file:line`.
             ConstantExpressionKind::Unsupported => throw new InvalidArgumentException(
-                "The expression at {$this->location?->span->start} in {$this->location?->file} is not a constant expression Mago evaluates.",
+                'The expression is not a constant expression Mago evaluates.',
             ),
         };
     }

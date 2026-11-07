@@ -104,8 +104,28 @@ final class AttributeMetadataTest extends TestCase
             new AttributeArgumentMetadata(null, $location, null, null, null, null),
         ]);
 
-        self::assertThrows($unsupported->getArguments(...), 'at 10 in example.php');
+        self::assertThrows($unsupported->getArguments(...), 'not a constant expression Mago evaluates');
         self::assertThrows($placeholder->getArguments(...), 'is a placeholder');
+    }
+
+    /**
+     * The host's issue carries the argument's location, which Mago prints as `file:line`, so the message names none:
+     * a byte offset reads as a position nobody can find.
+     */
+    public function testAnUnsupportedExpressionSaysSoWithoutItsOffset(): void
+    {
+        $location = new SourceLocation('app/Shop/NotFoundException.sharp', new Span(141, 152));
+        $unsupported = new ConstantExpression(ConstantExpressionKind::Unsupported, location: $location);
+
+        try {
+            $unsupported->evaluate();
+        } catch (InvalidArgumentException $exception) {
+            self::assertSame('The expression is not a constant expression Mago evaluates.', $exception->getMessage());
+
+            return;
+        }
+
+        self::fail('An unsupported expression evaluates to nothing.');
     }
 
     private static function literal(bool|int|float|string|null $value): ConstantExpression

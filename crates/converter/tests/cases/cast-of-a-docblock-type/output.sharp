@@ -1,0 +1,11 @@
+namespace App;
+
+// A type only PHPDoc gives is no proof of the value at runtime: `$row->quantity` may hold `"5"`, so `(int)` of it stays,
+// and PHP#'s `(int)` converts it as PHP's does (spec section 24).
+public final class Totals
+{
+    public int quantity(Row row)
+    {
+        return (int) row.quantity + 1;
+    }
+}

@@ -12,8 +12,12 @@ use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::ttype::SharpType;
 use mago_codex::ttype::TType;
 use mago_codex::ttype::atomic::TAtomic;
+use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::object::TObject;
+use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeString;
+use mago_codex::ttype::atomic::scalar::int::TInteger;
+use mago_codex::ttype::atomic::scalar::string::TStringCasing;
 use mago_codex::ttype::get_sharp_type;
 use mago_codex::ttype::union::TUnion;
 use mago_names::EQUATABLE;
@@ -121,11 +125,22 @@ pub fn type_text(union: &TUnion, codebase: &CodebaseMetadata, imports: &mut Impo
     }
 
     let mut members = Vec::new();
+    let mut collections = Vec::new();
     for atomic in union.types.iter().filter(|atomic| !atomic.is_null()) {
         let text = atomic_text(atomic, codebase, imports)?;
+        if matches!(get_sharp_type(atomic), Some(SharpType::List(_) | SharpType::Set(_) | SharpType::Map(..))) {
+            collections.push(text.clone());
+        }
         if !members.contains(&text) {
             members.push(text);
         }
+    }
+    // A loop reads each collection its own way, so a PHP# type holds one (spec section 12).
+    if let [first, second, ..] = collections.as_slice() {
+        return Err(format!(
+            "`{}` holds two collections, `{first}` and `{second}`, and a PHP# type holds one (spec section 12)",
+            union.get_id()
+        ));
     }
 
     Ok(match (union.has_null(), members.as_slice()) {
@@ -161,6 +176,15 @@ fn atomic_text(atomic: &TAtomic, codebase: &CodebaseMetadata, imports: &mut Impo
         SharpType::Enum(name) => class_name(name, codebase, imports)?,
         SharpType::Class(name, arguments) => {
             let class = class_name(name, codebase, imports)?;
+            // PHP takes a generic class written alone as any of its kind, and a PHP# type names its type arguments
+            // (spec section 11).
+            let declared = codebase.get_class_like(name.as_bytes());
+            if arguments.is_empty() && declared.is_some_and(|declared| !declared.template_types.is_empty()) {
+                let shown = declared.map_or(name, |declared| declared.original_name).as_str_lossy().into_owned();
+                return Err(format!(
+                    "`{shown}` takes type arguments, which PHP leaves out here and a PHP# type names (spec section 11): give them in PHPDoc, as in `{class}<…>`"
+                ));
+            }
             if arguments.is_empty() {
                 class
             } else {
@@ -176,14 +200,33 @@ fn atomic_text(atomic: &TAtomic, codebase: &CodebaseMetadata, imports: &mut Impo
         SharpType::Map(key, value) => {
             format!("Map<{}, {}>", held(key, atomic, codebase, imports)?, held(value, atomic, codebase, imports)?)
         }
-        SharpType::Iterable(value) => format!("Iterable<{}>", held(value, atomic, codebase, imports)?),
+        SharpType::Iterable(value) => {
+            let written = format!("Iterable<{}>", held(value, atomic, codebase, imports)?);
+            // A PHP# `Iterable` reads a value's elements, and its key is no type it names (spec section 12). PHP's
+            // `iterable<V>` keys by any `array-key`, which says nothing either.
+            let any_key =
+                |key: &TUnion| key.is_mixed() || matches!(key.types.as_ref(), [TAtomic::Scalar(TScalar::ArrayKey)]);
+            if let TAtomic::Iterable(iterable) = atomic
+                && !any_key(&iterable.key_type)
+            {
+                return Err(format!(
+                    "PHP's `{}` gives its keys, and a PHP# `{written}` reads values only (spec section 12)",
+                    atomic.get_id()
+                ));
+            }
+            written
+        }
         SharpType::Parameter(parameter) => parameter.parameter_name.to_string(),
         SharpType::ClassValue(TClassLikeString::Literal { value }) => {
             format!("Class<{}>", class_name(*value, codebase, imports)?)
         }
-        SharpType::ClassValue(TClassLikeString::OfType { constraint, .. }) => {
-            format!("Class<{}>", held(constraint, atomic, codebase, imports)?)
-        }
+        // A class type names the class itself, a generic one with no type arguments (spec section 11).
+        SharpType::ClassValue(TClassLikeString::OfType { constraint, .. }) => match constraint.types.as_ref() {
+            [TAtomic::Object(TObject::Named(object))] if object.get_type_parameters().is_none() => {
+                format!("Class<{}>", class_name(object.name, codebase, imports)?)
+            }
+            _ => format!("Class<{}>", held(constraint, atomic, codebase, imports)?),
+        },
         // `Function<R(P)>` (spec section 14.1), whose parameters are plain: PHP# passes every argument by value.
         SharpType::Function(signature) => {
             let parameters = signature.get_parameters();
@@ -222,6 +265,48 @@ fn atomic_text(atomic: &TAtomic, codebase: &CodebaseMetadata, imports: &mut Impo
             format!("[{}]", written.join(", "))
         }
         SharpType::ClassValue(_) => return Err(format!("the type `{}` is not converted yet", atomic.get_id())),
+    })
+}
+
+/// The first type `union` holds, as PHPDoc writes it, that narrows the PHP# type [`type_text`] writes for it, as
+/// `non-empty-string` narrows `string` and `positive-int` narrows `int`, or `None` when PHP# writes `union` whole.
+#[must_use]
+pub fn narrowing(union: &TUnion) -> Option<String> {
+    union.types.iter().find_map(|atomic| {
+        let narrows = match atomic {
+            TAtomic::Scalar(TScalar::String(string)) => {
+                string.literal.is_some()
+                    || string.is_non_empty
+                    || string.is_numeric
+                    || string.is_truthy
+                    || string.is_callable
+                    || string.casing != TStringCasing::Unspecified
+            }
+            TAtomic::Scalar(TScalar::Integer(integer)) => *integer != TInteger::Unspecified,
+            TAtomic::Array(TArray::List(list)) => {
+                if list.non_empty {
+                    true
+                } else {
+                    return narrowing(&list.element_type);
+                }
+            }
+            TAtomic::Array(TArray::Keyed(keyed)) => {
+                if keyed.non_empty {
+                    true
+                } else {
+                    return keyed
+                        .parameters
+                        .as_ref()
+                        .and_then(|(key, value)| narrowing(key).or_else(|| narrowing(value)));
+                }
+            }
+            TAtomic::Object(TObject::Named(object)) => {
+                return object.get_type_parameters().unwrap_or_default().iter().find_map(narrowing);
+            }
+            _ => false,
+        };
+
+        narrows.then(|| atomic.get_id().to_string())
     })
 }
 

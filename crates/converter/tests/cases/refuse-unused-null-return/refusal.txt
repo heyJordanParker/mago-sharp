@@ -1,0 +1,2 @@
+11:27: `kind` declares `string?` and never returns `null`, which PHP# refuses on a method no subclass replaces (spec section 14.4): declare `string`
+21:22: `hidden` declares `int?` and never returns `null`, which PHP# refuses on a method no subclass replaces (spec section 14.4): declare `int`
