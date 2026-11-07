@@ -1110,36 +1110,14 @@ where
         )?;
 
         if let Some(default_value) = parameter_node.default_value.as_ref() {
-            // Spec section 9: a PHP# default is any expression, which runs each time a call leaves the argument out.
-            if context.dialect.is_sharp() {
-                default_value.value.analyze(context, block_context, artifacts)?;
-            } else {
-                block_context.in_constant_expression(|block_context| {
-                    default_value.value.analyze(context, block_context, artifacts)
-                })?;
-            }
-
-            // PHP# writes `mixed` as `Any`, which never holds null, so its default is checked too.
-            if !parameter_metadata.flags.is_variadic()
-                && let Some(parameter_type_metadata) = parameter_metadata.get_type_metadata()
-                && (context.dialect.is_sharp() || !parameter_type_metadata.type_union.is_mixed())
-            {
-                let expected_type = expand_type_metadata(
-                    context,
-                    block_context,
-                    artifacts,
-                    function_like_metadata,
-                    parameter_type_metadata,
-                );
-
-                check_parameter_default_value(
-                    context,
-                    parameter_metadata,
-                    &expected_type,
-                    default_value.value,
-                    artifacts,
-                );
-            }
+            analyze_parameter_default(
+                context,
+                block_context,
+                artifacts,
+                function_like_metadata,
+                parameter_metadata,
+                default_value.value,
+            )?;
         }
 
         // Spec section 7 gives a PHP# variadic parameter its values as a list.
@@ -1166,6 +1144,41 @@ where
                 analyze_behaviors(behaviors, property_name, context, block_context, artifacts);
             }
         }
+    }
+
+    Ok(())
+}
+
+/// Analyzes `default`, the default value of `parameter_metadata`, and checks it against the parameter's type. A method
+/// without a body has its defaults analyzed too, since PHP# lowers each one into the PHP it compiles to, with the type
+/// the analysis gives it.
+pub(crate) fn analyze_parameter_default<'ctx, 'arena, A>(
+    context: &mut Context<'ctx, 'arena, A>,
+    block_context: &mut BlockContext<'ctx>,
+    artifacts: &mut AnalysisArtifacts,
+    function_like_metadata: &'ctx FunctionLikeMetadata,
+    parameter_metadata: &'ctx FunctionLikeParameterMetadata,
+    default: &Expression<'arena>,
+) -> Result<(), AnalysisError>
+where
+    A: Arena,
+{
+    // Spec section 9: a PHP# default is any expression, which runs each time a call leaves the argument out.
+    if context.dialect.is_sharp() {
+        default.analyze(context, block_context, artifacts)?;
+    } else {
+        block_context.in_constant_expression(|block_context| default.analyze(context, block_context, artifacts))?;
+    }
+
+    // PHP# writes `mixed` as `Any`, which never holds null, so its default is checked too.
+    if !parameter_metadata.flags.is_variadic()
+        && let Some(parameter_type_metadata) = parameter_metadata.get_type_metadata()
+        && (context.dialect.is_sharp() || !parameter_type_metadata.type_union.is_mixed())
+    {
+        let expected_type =
+            expand_type_metadata(context, block_context, artifacts, function_like_metadata, parameter_type_metadata);
+
+        check_parameter_default_value(context, parameter_metadata, &expected_type, default, artifacts);
     }
 
     Ok(())

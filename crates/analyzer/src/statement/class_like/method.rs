@@ -55,6 +55,7 @@ use crate::statement::attributes::AttributeTarget;
 use crate::statement::attributes::analyze_attributes;
 use crate::statement::function_like::FunctionLikeBody;
 use crate::statement::function_like::analyze_function_like;
+use crate::statement::function_like::analyze_parameter_default;
 use crate::statement::function_like::check_unused_function_template_parameters;
 use crate::statement::function_like::record_signature_types;
 use crate::statement::function_like::rejected_nullable_parameter;
@@ -386,6 +387,25 @@ where
         // its bounds' missing types.
         record_signature_types(artifacts, method_metadata);
         report_undefined_bound_types(context, &method_metadata.template_types);
+        let mut scope = ScopeContext::new(ReferenceOrigin::Symbol((class_like_metadata.name, method_metadata.name)));
+        scope.set_class_like(Some(class_like_metadata));
+        scope.set_function_like(Some(method_metadata));
+        scope.set_static(method.modifiers.contains_static());
+        let mut defaults_context = BlockContext::new(scope, context.settings.register_super_globals);
+        for (parameter_metadata, parameter) in
+            method_metadata.parameters.iter().zip(method.parameter_list.parameters.iter())
+        {
+            if let Some(default) = &parameter.default_value {
+                analyze_parameter_default(
+                    context,
+                    &mut defaults_context,
+                    artifacts,
+                    method_metadata,
+                    parameter_metadata,
+                    default.value,
+                )?;
+            }
+        }
     }
 
     let body = match method.body {

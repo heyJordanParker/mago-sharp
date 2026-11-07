@@ -10683,6 +10683,20 @@ fn a_null_safe_set_method_tests_its_receiver_first() {
 /// once, so a promoted `Set` parameter is a plain parameter beside the property it declares, `[129]`
 /// `ZEND_ACC_PUBLIC | ZEND_ACC_READONLY`, which the body sets to the `Set`. A method without a body has no
 /// statements.
+/// A method without a body lowers its parameters' defaults as a method with one does, since the analysis types them
+/// both: an interface's `Map` default is the `Map` literal a class's is.
+#[test]
+fn a_default_of_a_method_without_a_body_lowers_as_one_with_a_body() {
+    let interface =
+        Lowered::new("namespace App.Tenant;\n\ninterface Source\n{\n    int read(Map<string, int> limits = [:]);\n}\n");
+    let class = Lowered::new(
+        "namespace App.Tenant;\n\nclass Store\n{\n    public int read(Map<string, int> limits = [:]) => limits.count();\n}\n",
+    );
+    let parameters = |lowered: &Lowered| lowered.render(lowered.child(lowered.method_named("read"), 0));
+
+    assert_eq!(parameters(&interface), parameters(&class));
+}
+
 #[test]
 fn a_set_parameter_becomes_a_set_before_the_body_runs() {
     let interface = Lowered::new("namespace App.Tenant;\n\ninterface Tagged\n{\n    void keep(Set<string> kept);\n}\n");
